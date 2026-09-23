@@ -1,0 +1,74 @@
+name: InterOS Core CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  workspace-check:
+    name: Workspace Check & SDK Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-src
+
+      - name: Cargo Check Workspace
+        run: cargo check --workspace
+
+      - name: Run SDK Tests
+        run: cargo test -p interos-std
+
+  microkernel-targets:
+    name: Multi-Architecture Microkernel Build Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Toolchain with Bare-Metal Targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-none, aarch64-unknown-none, riscv64gc-unknown-none-elf
+          components: rust-src
+
+      - name: Check x86_64 Microkernel Target
+        run: cargo check --manifest-path kernel/Cargo.toml --target x86_64-unknown-none
+
+      - name: Check AArch64 Microkernel Target
+        run: cargo check --manifest-path kernel-aarch64/Cargo.toml --target aarch64-unknown-none
+
+      - name: Check RISC-V 64 Microkernel Target
+        run: cargo check --manifest-path kernel-riscv64/Cargo.toml --target riscv64gc-unknown-none-elf
+
+  studio-validation:
+    name: Developer Studio Runtime Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Verify JavaScript Engine Syntax
+        run: node --check emulator/app.js
+
+      - name: Verify Studio Server Syntax
+        run: python -m py_compile emulator/server.py
