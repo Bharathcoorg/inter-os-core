@@ -544,11 +544,19 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Deactivate all views
-    document.querySelectorAll('.screen-view').forEach(v => v.classList.remove('active'));
+    document.querySelectorAll('.screen-view').forEach(v => {
+      v.classList.remove('active');
+      if (v.id === 'view-bare-metal-vnc') {
+        v.style.display = 'none';
+      }
+    });
 
     const target = document.getElementById(viewId);
     if (target) {
       target.classList.add('active');
+      if (viewId === 'view-bare-metal-vnc') {
+        target.style.display = 'flex';
+      }
       state.currentView = viewId;
     }
 
@@ -1186,7 +1194,12 @@ document.addEventListener('DOMContentLoaded', () => {
     `;
 
     try {
-      const module = await import('./node_modules/@novnc/novnc/core/rfb.js');
+      let module;
+      try {
+        module = await import('./node_modules/@novnc/novnc/core/rfb.js');
+      } catch (e1) {
+        module = await import('/node_modules/@novnc/novnc/core/rfb.js');
+      }
       const RFB = module.default;
       vbeScreenTarget.innerHTML = '';
       

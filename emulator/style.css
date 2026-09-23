@@ -10814,8 +10814,12 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   position: absolute;
   top: 0;
   left: 0;
-  display: flex;
+  display: none;
   flex-direction: column;
+}
+
+#view-bare-metal-vnc.active {
+  display: flex;
 }
 
 .vbe-direct-container {

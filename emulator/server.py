@@ -911,6 +911,19 @@ def verify_and_install_rapp(body, pkg_name):
 class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
     """Extended handler with API endpoints for QEMU control, serial logs, and live telemetry."""
 
+    extensions_map = {
+        '': 'application/octet-stream',
+        '.html': 'text/html; charset=utf-8',
+        '.css': 'text/css; charset=utf-8',
+        '.js': 'application/javascript; charset=utf-8',
+        '.mjs': 'application/javascript; charset=utf-8',
+        '.json': 'application/json',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.svg': 'image/svg+xml',
+        '.wasm': 'application/wasm',
+    }
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=DIRECTORY, **kwargs)
 
@@ -918,6 +931,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
         self.send_header('Pragma', 'no-cache')
         self.send_header('Expires', '0')
+        self.send_header('Access-Control-Allow-Origin', '*')
         super().end_headers()
 
     def do_GET(self):
