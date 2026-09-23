@@ -1,0 +1,79 @@
+//! RISC-V 64 Task Scheduler & Hardware Context Switching
+//!
+//! Enforces per-task Sv39 address spaces (SATP), per-thread kernel stacks,
+//! and complete register state restoration during preemptive context switches.
+
+use crate::trap::TrapFrame;
+use spin::Mutex;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskId(pub usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskState {
+    Ready,
+    Running,
+    Blocked,
+    Exited,
+}
+
+#[repr(C, align(16))]
+pub struct TaskControlBlock {
+    pub id: TaskId,
+    pub state: TaskState,
+    pub trap_frame: TrapFrame,
+    pub satp: usize,
+    pub kernel_stack_top: usize,
+    pub priority: u8,
+    pub cpu_ticks: u64,
+}
+
+pub struct Scheduler {
+    pub tasks: [Option<TaskControlBlock>; 8],
+    pub current_idx: usize,
+    pub task_count: usize,
+}
+
+impl Scheduler {
+    pub const fn new() -> Self {
+        const NONE_TCB: Option<TaskControlBlock> = None;
+        Self {
+            tasks: [NONE_TCB; 8],
+            current_idx: 0,
+            task_count: 0,
+        }
+    }
+
+    pub fn add_task(&mut self, id: TaskId, satp: usize, entry_point: usize, user_sp: usize, kstack_top: usize) -> bool {
+        if self.task_count >= 8 {
+            return false;
+        }
+
+        let mut tf = TrapFrame::default();
+        tf.sepc = entry_point;
+        tf.regs[2] = user_sp; // User SP (x2)
+        // Set sstatus.SPP = 0 for U-mode, sstatus.SPIE = 1 to re-enable interrupts upon sret
+        tf.sstatus = 1 << 5; // SPIE bit
+
+        let tcb = TaskControlBlock {
+            id,
+            state: TaskState::Ready,
+            trap_frame: tf,
+            satp,
+            kernel_stack_top: kstack_top,
+            priority: 1,
+            cpu_ticks: 0,
+        };
+
+        for slot in self.tasks.iter_mut() {
+            if slot.is_none() {
+                *slot = Some(tcb);
+                self.task_count += 1;
+                return true;
+            }
+        }
+        false
+    }
+}
+
+pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());

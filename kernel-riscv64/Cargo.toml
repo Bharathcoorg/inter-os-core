@@ -1,0 +1,9 @@
+[package]
+name = "kernel-riscv64"
+version = "0.1.0"
+edition = "2021"
+authors = ["Inter OS Contributors"]
+description = "RISC-V 64 Sovereign Smartphone Physical Microkernel Payload for Inter OS"
+
+[dependencies]
+spin = "0.9.8"
