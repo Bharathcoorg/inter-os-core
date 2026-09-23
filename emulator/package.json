@@ -10,6 +10,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "@novnc/novnc": "^1.7.0"
+    "@novnc/novnc": "^1.7.0",
+    "lucide": "^1.47.0"
   }
 }

@@ -500,25 +500,24 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // App Catalog Metadata for Multitasking & UI
   const appCatalog = {
-    'view-browser': { name: 'Browser', icon: '🌐', color: '#2563EB' },
-    'view-camera': { name: 'Camera', icon: '📷', color: '#F59E0B' },
-    'view-calculator': { name: 'Calculator', icon: '🧮', color: '#10B981' },
-    'view-sensors': { name: 'Sensors', icon: '⚡', color: '#0D9488' },
-    'view-gallery': { name: 'Gallery', icon: '🖼️', color: '#EC4899' },
-    'view-terminal': { name: 'Terminal', icon: '💻', color: '#64748B' },
-    'view-settings': { name: 'Settings', icon: '⚙️', color: '#4B5563' },
-    'view-helloworld': { name: 'Hello World', icon: '📦', color: '#0284C7' },
-    'view-dialer': { name: 'Phone', icon: '📞', color: '#10B981' },
-    'view-messages': { name: 'Messages', icon: '💬', color: '#06B6D4' },
-    'view-files': { name: 'Files', icon: '📁', color: '#8B5CF6' },
-    'view-clock': { name: 'Clock', icon: '⏰', color: '#6366F1' },
-    'view-music': { name: 'Music', icon: '🎵', color: '#F43F5E' },
-    'view-calendar': { name: 'Calendar', icon: '📅', color: '#0EA5E9' },
-    'view-authenticator': { name: 'Authenticator', icon: '🛡️', color: '#10B981' },
-    'view-health': { name: 'Health Hub', icon: '❤️', color: '#F43F5E' },
-    'view-meshchat': { name: 'Mesh Chat', icon: '📡', color: '#06B6D4' }
+    'view-browser': { name: 'Browser', lucide: 'compass', color: '#2563EB', memory: '42 MB' },
+    'view-camera': { name: 'Camera', lucide: 'camera', color: '#F59E0B', memory: '34 MB' },
+    'view-calculator': { name: 'Calculator', lucide: 'calculator', color: '#10B981', memory: '8 MB' },
+    'view-sensors': { name: 'Sensors', lucide: 'activity', color: '#0D9488', memory: '12 MB' },
+    'view-gallery': { name: 'Gallery', lucide: 'image', color: '#EC4899', memory: '26 MB' },
+    'view-terminal': { name: 'Terminal', lucide: 'terminal', color: '#64748B', memory: '10 MB' },
+    'view-settings': { name: 'Settings', lucide: 'settings', color: '#94A3B8', memory: '16 MB' },
+    'view-helloworld': { name: 'Hello World', lucide: 'package', color: '#0284C7', memory: '6 MB' },
+    'view-dialer': { name: 'Phone', lucide: 'phone', color: '#10B981', memory: '14 MB' },
+    'view-messages': { name: 'Messages', lucide: 'message-square', color: '#06B6D4', memory: '18 MB' },
+    'view-files': { name: 'Files', lucide: 'folder', color: '#8B5CF6', memory: '15 MB' },
+    'view-clock': { name: 'Clock', lucide: 'clock', color: '#6366F1', memory: '9 MB' },
+    'view-music': { name: 'Music', lucide: 'disc', color: '#F43F5E', memory: '22 MB' },
+    'view-calendar': { name: 'Calendar', lucide: 'calendar', color: '#0EA5E9', memory: '11 MB' },
+    'view-authenticator': { name: 'Security', lucide: 'shield-check', color: '#10B981', memory: '12 MB' },
+    'view-health': { name: 'Health Hub', lucide: 'activity', color: '#F43F5E', memory: '13 MB' },
+    'view-meshchat': { name: 'Mesh Chat', lucide: 'radio', color: '#06B6D4', memory: '17 MB' }
   };
-
   state.runningTasks = [];
 
   // =========================================================================
@@ -528,16 +527,17 @@ document.addEventListener('DOMContentLoaded', () => {
     if (state.currentView === viewId) return;
 
     // Record history
-    if (viewId !== 'view-home' && viewId !== 'view-recents') {
+    if (viewId !== 'view-home' && viewId !== 'view-recents' && viewId !== 'view-apps') {
       state.viewHistory.push(viewId);
       // Track in running tasks
       if (!state.runningTasks.find(t => t.id === viewId)) {
-        const meta = appCatalog[viewId] || { name: viewId, icon: '📱', color: '#10B981' };
+        const meta = appCatalog[viewId] || { name: viewId, lucide: 'layers', color: '#10B981', memory: '12 MB' };
         state.runningTasks.unshift({
           id: viewId,
           title: meta.name,
-          icon: meta.icon,
+          lucide: meta.lucide,
           color: meta.color,
+          memory: meta.memory || '12 MB',
           time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         });
       }
@@ -1288,14 +1288,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (!state.runningTasks || state.runningTasks.length === 0) {
       carousel.innerHTML = `
-        <div class="horizon-empty-state" style="text-align: center; padding: 40px 20px; color: #64748B;">
-          <div style="width: 52px; height: 52px; border-radius: 50%; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); display: flex; align-items: center; justify-content: center; margin: 0 auto 12px; font-size: 20px;">
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#64748B" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg>
+        <div class="horizon-empty-state" style="text-align: center; padding: 50px 20px; color: #64748B;">
+          <div style="width: 52px; height: 52px; border-radius: 50%; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); display: flex; align-items: center; justify-content: center; margin: 0 auto 14px; color: #94A3B8;">
+            <i data-lucide="layers" style="width: 22px; height: 22px;"></i>
           </div>
-          <strong style="color: #CBD5E1; font-size: 0.85rem; display: block;">Horizon Clear</strong>
-          <p style="margin: 6px 0 0; font-size: 0.68rem;">Launch any application to place it on the active horizon.</p>
+          <strong style="color: #E2E8F0; font-size: 0.9rem; display: block;">No Recent Tasks</strong>
+          <p style="margin: 6px 0 0; font-size: 0.72rem; color: #64748B;">Open applications from the home screen or app drawer to view active spaces.</p>
         </div>
       `;
+      if (window.lucide && typeof window.lucide.createIcons === 'function') window.lucide.createIcons();
       return;
     }
 
@@ -1306,19 +1307,19 @@ document.addEventListener('DOMContentLoaded', () => {
       lens.innerHTML = `
         <div class="horizon-lens-top">
           <div class="horizon-lens-identity">
-            <div class="horizon-lens-icon" style="background: ${task.color}22; border: 1px solid ${task.color}44;">
-              <span style="font-size: 11px;">${task.icon}</span>
+            <div class="horizon-lens-icon" style="background: ${task.color}22; border: 1px solid ${task.color}44; color: ${task.color};">
+              <i data-lucide="${task.lucide || 'layers'}" style="width: 14px; height: 14px;"></i>
             </div>
             <span class="horizon-lens-name">${task.title}</span>
           </div>
-          <button class="horizon-lens-kill-btn" title="Kill Process Sandbox">&times;</button>
+          <button class="horizon-lens-kill-btn" title="Close Task">&times;</button>
         </div>
         <div class="horizon-lens-glance">
-          <div class="lens-glance-icon" style="background: radial-gradient(circle, ${task.color}33, ${task.color}11); border-color: ${task.color}55;">
-            <span>${task.icon}</span>
+          <div class="lens-glance-icon" style="background: radial-gradient(circle, ${task.color}33, ${task.color}11); border-color: ${task.color}66; color: ${task.color}; box-shadow: 0 0 20px ${task.color}33;">
+            <i data-lucide="${task.lucide || 'layers'}" style="width: 28px; height: 28px;"></i>
           </div>
           <div class="lens-glance-title">${task.title}</div>
-          <div class="lens-glance-status">Active Process</div>
+          <div class="lens-glance-status">Active &bull; ${task.memory || '12 MB'}</div>
         </div>
       `;
 
@@ -1328,35 +1329,31 @@ document.addEventListener('DOMContentLoaded', () => {
         switchView(task.id);
       });
 
-      // Kill button
+      // Close button
       lens.querySelector('.horizon-lens-kill-btn').addEventListener('click', (e) => {
         e.stopPropagation();
         dismissTask(lens, task);
       });
 
-      // Swipe up to kill gesture on touch/mouse
+      // Swipe up gesture
       let startY = 0;
-      let isDraggingY = false;
-
+      let isDragging = false;
       lens.addEventListener('touchstart', (e) => {
         startY = e.touches[0].clientY;
-        isDraggingY = true;
+        isDragging = true;
       }, { passive: true });
-
       lens.addEventListener('touchmove', (e) => {
-        if (!isDraggingY) return;
-        const currentY = e.touches[0].clientY;
-        const deltaY = currentY - startY;
-        if (deltaY < 0) {
-          lens.style.transform = `translateY(${deltaY}px) scale(${1 + deltaY / 600}) rotateX(${10 - deltaY / 20}deg)`;
+        if (!isDragging) return;
+        const delta = e.touches[0].clientY - startY;
+        if (delta < 0) {
+          lens.style.transform = `translateY(${delta}px) scale(${1 + delta / 600})`;
         }
       }, { passive: true });
-
       lens.addEventListener('touchend', (e) => {
-        if (!isDraggingY) return;
-        isDraggingY = false;
-        const deltaY = e.changedTouches[0].clientY - startY;
-        if (deltaY < -60) {
+        if (!isDragging) return;
+        isDragging = false;
+        const delta = e.changedTouches[0].clientY - startY;
+        if (delta < -60) {
           dismissTask(lens, task);
         } else {
           lens.style.transform = '';
@@ -1365,15 +1362,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
       carousel.appendChild(lens);
     });
+
+    if (window.lucide && typeof window.lucide.createIcons === 'function') {
+      window.lucide.createIcons();
+    }
   }
 
   function dismissTask(lensEl, task) {
     lensEl.classList.add('dismissing');
-    playBeep(280, 0.04, 'sawtooth');
+    playBeep(280, 0.03, 'sine');
     setTimeout(() => {
       state.runningTasks = (state.runningTasks || []).filter(t => t.id !== task.id);
       renderRecents();
-      logConsole('info', `[TASK_MGR] Terminated process sandbox for '${task.title}' (${task.id}).`);
+      logConsole('info', `Closed task '${task.title}'.`);
     }, 280);
   }
 
@@ -5310,5 +5311,270 @@ document.addEventListener('DOMContentLoaded', () => {
   // Initial boot greeting
   logConsole('info', 'InterOS Core Microkernel v8.2 Studio initialized.');
   logConsole('ok', 'Universal Rust Mobile Platform: RISC-V 64 / ARM64 / x86_64 targets live.');
+
+  // =========================================================================
+  // PRODUCTION LAUNCHER HOMESCREEN & NIAGARA APPS STREAM
+  // =========================================================================
+
+  function initLauncherHomescreen() {
+    const clockTime = document.getElementById('launcher-clock-time');
+    const dateText = document.getElementById('launcher-date-text');
+    const weatherText = document.getElementById('launcher-weather-text');
+    const searchBar = document.getElementById('launcher-search-bar');
+    const canvas = document.getElementById('launcher-retro-canvas');
+
+    // 1. Live Clock & Date update
+    function updateClock() {
+      const now = new Date();
+      if (clockTime) {
+        clockTime.textContent = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+      }
+      if (dateText) {
+        const options = { weekday: 'long', month: 'long', day: 'numeric' };
+        dateText.textContent = now.toLocaleDateString('en-US', options);
+      }
+    }
+    updateClock();
+    setInterval(updateClock, 1000);
+
+    // 2. Dock Actions
+    document.querySelectorAll('.launcher-dock-icon').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        playBeep(520, 0.02, 'sine');
+        const view = btn.dataset.view;
+        if (view) switchView(view);
+      });
+    });
+
+    // 3. Search Bar triggers Apps view
+    searchBar?.addEventListener('click', () => {
+      playBeep(480, 0.02, 'sine');
+      switchView('view-apps');
+    });
+
+    // 4. Swipe up on home to open Apps Screen
+    const homeContainer = document.getElementById('launcher-home-container');
+    if (homeContainer) {
+      let touchStartY = 0;
+      homeContainer.addEventListener('touchstart', (e) => {
+        touchStartY = e.touches[0].clientY;
+      }, { passive: true });
+      homeContainer.addEventListener('touchend', (e) => {
+        const delta = e.changedTouches[0].clientY - touchStartY;
+        if (delta < -50) {
+          playBeep(560, 0.02, 'sine');
+          switchView('view-apps');
+        }
+      });
+    }
+
+    // 5. Interactive 8-Bit Pixel Runner on Upper Canvas
+    if (canvas) {
+      const ctx = canvas.getContext('2d');
+      let x = 30;
+      let y = 100;
+      let vy = 0;
+      let isJumping = false;
+      let cactusX = 340;
+      let pteroX = 480;
+      let pteroY = 50;
+      let animFrame;
+
+      function jump() {
+        if (!isJumping) {
+          vy = -6.5;
+          isJumping = true;
+          playBeep(700, 0.04, 'square');
+        }
+      }
+
+      canvas.parentElement?.addEventListener('click', jump);
+
+      function draw() {
+        if (!ctx) return;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // Ground line
+        ctx.fillStyle = '#18181B';
+        ctx.fillRect(0, 118, canvas.width, 2);
+
+        // Physics
+        if (isJumping) {
+          y += vy;
+          vy += 0.35;
+          if (y >= 100) {
+            y = 100;
+            vy = 0;
+            isJumping = false;
+          }
+        }
+
+        // Move obstacles
+        cactusX -= 1.8;
+        if (cactusX < -20) cactusX = canvas.width + Math.random() * 80;
+
+        pteroX -= 2.4;
+        if (pteroX < -30) pteroX = canvas.width + 120 + Math.random() * 100;
+
+        // Draw Pixel Dino Silhouette
+        ctx.fillStyle = '#18181B';
+        // Head
+        ctx.fillRect(x + 10, y - 18, 12, 10);
+        ctx.clearRect(x + 13, y - 16, 2, 2); // Eye
+        // Body
+        ctx.fillRect(x + 4, y - 10, 14, 12);
+        // Tail
+        ctx.fillRect(x, y - 12, 4, 6);
+        // Legs
+        const legWalk = Math.floor(Date.now() / 150) % 2;
+        if (legWalk === 0 || isJumping) {
+          ctx.fillRect(x + 6, y + 2, 3, 6);
+          ctx.fillRect(x + 13, y + 2, 3, 6);
+        } else {
+          ctx.fillRect(x + 4, y + 2, 3, 6);
+          ctx.fillRect(x + 15, y + 2, 3, 6);
+        }
+
+        // Draw Cactus
+        ctx.fillRect(cactusX, 94, 6, 24);
+        ctx.fillRect(cactusX - 4, 100, 4, 10);
+        ctx.fillRect(cactusX + 6, 104, 4, 8);
+
+        // Draw Pterodactyl
+        const wingFlap = Math.floor(Date.now() / 200) % 2;
+        ctx.fillRect(pteroX, pteroY, 14, 5);
+        if (wingFlap === 0) {
+          ctx.fillRect(pteroX + 4, pteroY - 6, 6, 6); // Wing up
+        } else {
+          ctx.fillRect(pteroX + 4, pteroY + 5, 6, 6); // Wing down
+        }
+
+        animFrame = requestAnimationFrame(draw);
+      }
+      draw();
+    }
+  }
+
+  function initMinimalStream() {
+    const streamList = document.getElementById('stream-app-list');
+    const dayHeader = document.getElementById('stream-day-header');
+    const alphabetRail = document.getElementById('stream-alphabet-rail');
+    const viewport = document.getElementById('stream-app-viewport');
+    const searchPill = document.getElementById('stream-search-pill');
+    const backBtn = document.getElementById('btn-back-apps');
+    const fabBtn = document.getElementById('stream-fab-btn');
+
+    // Day Header
+    if (dayHeader) {
+      const days = ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'];
+      dayHeader.textContent = days[new Date().getDay()];
+    }
+
+    // Back to Home
+    backBtn?.addEventListener('click', () => switchView('view-home'));
+    fabBtn?.addEventListener('click', () => switchView('view-home'));
+
+    // Populate Apps
+    if (streamList) {
+      streamList.innerHTML = '';
+      const apps = [
+        { id: 'view-dialer', title: 'Phone', lucide: 'phone', badge: 'Telephony' },
+        { id: 'view-messages', title: 'Messages', lucide: 'message-square', badge: 'SMS & Chat' },
+        { id: 'view-browser', title: 'Browser', lucide: 'compass', badge: 'Web' },
+        { id: 'view-camera', title: 'Camera', lucide: 'camera', badge: 'Optical' },
+        { id: 'view-gallery', title: 'Gallery', lucide: 'image', badge: 'Moments' },
+        { id: 'view-files', title: 'Files', lucide: 'folder', badge: 'Storage' },
+        { id: 'view-music', title: 'Music & Synth', lucide: 'disc', badge: 'Hi-Fi Audio' },
+        { id: 'view-calculator', title: 'Calculator', lucide: 'calculator', badge: 'Quick Math' },
+        { id: 'view-calendar', title: 'Calendar', lucide: 'calendar', badge: 'Agenda' },
+        { id: 'view-clock', title: 'Clock & Timers', lucide: 'clock', badge: 'RTC' },
+        { id: 'view-settings', title: 'Settings', lucide: 'settings', badge: 'System' },
+        { id: 'view-authenticator', title: 'Security', lucide: 'shield-check', badge: 'Hardware Enclave' },
+        { id: 'view-health', title: 'Health Hub', lucide: 'activity', badge: 'Digital Twin' },
+        { id: 'view-meshchat', title: 'Mesh Chat', lucide: 'radio', badge: 'P2P LoRa' },
+        { id: 'view-terminal', title: 'Terminal', lucide: 'terminal', badge: 'Microkernel Shell' }
+      ];
+
+      apps.forEach(app => {
+        const item = document.createElement('button');
+        item.className = 'stream-app-item';
+        item.dataset.view = app.id;
+        item.dataset.letter = app.title[0].toUpperCase();
+        item.dataset.name = app.title.toLowerCase();
+        item.innerHTML = `
+          <div class="stream-app-icon-wrap">
+            <i data-lucide="${app.lucide}" style="width: 18px; height: 18px;"></i>
+          </div>
+          <span class="stream-app-label">${app.title}</span>
+          <span class="stream-app-badge">${app.badge}</span>
+        `;
+        item.addEventListener('click', () => {
+          playBeep(480, 0.02, 'sine');
+          switchView(app.id);
+        });
+        streamList.appendChild(item);
+      });
+    }
+
+    // Alphabet Scrubber
+    if (alphabetRail && viewport) {
+      alphabetRail.querySelectorAll('.alpha-node').forEach(node => {
+        node.addEventListener('click', () => {
+          const letter = node.dataset.letter;
+          if (letter === 'top') {
+            viewport.scrollTo({ top: 0, behavior: 'smooth' });
+            return;
+          }
+          if (letter === 'bottom') {
+            viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' });
+            return;
+          }
+          const target = streamList?.querySelector(`[data-letter="${letter}"]`);
+          if (target) {
+            target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }
+        });
+      });
+    }
+
+    // Search filter
+    if (searchPill) {
+      searchPill.addEventListener('click', () => {
+        const existingInput = searchPill.querySelector('.stream-search-input');
+        if (existingInput) return;
+        const placeholder = searchPill.querySelector('.stream-search-placeholder');
+        if (placeholder) placeholder.style.display = 'none';
+        const input = document.createElement('input');
+        input.className = 'stream-search-input';
+        input.placeholder = 'Filter apps...';
+        input.addEventListener('input', (e) => {
+          const q = e.target.value.toLowerCase().trim();
+          streamList?.querySelectorAll('.stream-app-item').forEach(it => {
+            it.style.display = it.dataset.name.includes(q) ? 'flex' : 'none';
+          });
+        });
+        input.addEventListener('blur', () => {
+          if (!input.value) {
+            input.remove();
+            if (placeholder) placeholder.style.display = 'inline';
+            streamList?.querySelectorAll('.stream-app-item').forEach(it => it.style.display = 'flex');
+          }
+        });
+        searchPill.appendChild(input);
+        input.focus();
+      });
+    }
+  }
+
+  // Initialize both experiences on launch
+  initLauncherHomescreen();
+  initMinimalStream();
+
+  // Initialize Lucide icons on boot
+  if (window.lucide && typeof window.lucide.createIcons === 'function') {
+    window.lucide.createIcons();
+  }
+
 });
 

@@ -10368,19 +10368,7 @@ button.bento-dock-btn:active {
    Matching cyberdeck_hud_ui_1790110344489.jpg
    ========================================================================== */
 
-/* Layout Switching between Bento Glass & Cyberdeck HUD */
-body[data-theme="cyberdeck_hud"] #layout-bento-glass {
-  display: none !important;
-}
-body[data-theme="cyberdeck_hud"] #layout-cyberdeck-hud {
-  display: flex !important;
-}
-body:not([data-theme="cyberdeck_hud"]) #layout-bento-glass {
-  display: flex !important;
-}
-body:not([data-theme="cyberdeck_hud"]) #layout-cyberdeck-hud {
-  display: none !important;
-}
+/* Legacy theme switcher cleaned */
 
 /* Cyberdeck HUD Chassis Glow */
 body[data-theme="cyberdeck_hud"] .device-screen {
@@ -10941,8 +10929,724 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   box-shadow: 0 0 10px rgba(0, 242, 254, 0.35);
 }
 
+/* ==========================================================================
+   FLAGSHIP EXPERIENCE: HORIZON MINIMAL STREAM & AMBIENT PRISM
+   Directly inspired by Niagara Launcher and Minimalist Typography
+   ========================================================================== */
+
+.minimal-stream-container {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(180deg, #0e141d 0%, #091a32 55%, #050e1d 100%);
+  padding: 16px 14px 10px 18px;
+  box-sizing: border-box;
+  position: relative;
+  overflow: hidden;
+  user-select: none;
+}
+
+.stream-header-zone {
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.stream-day-header {
+  font-family: var(--font-display, 'Outfit'), -apple-system, sans-serif;
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: #FFFFFF;
+  margin-top: 4px;
+  margin-bottom: 6px;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.6);
+}
+
+.stream-summary-box {
+  max-width: 310px;
+}
+
+.stream-summary-text {
+  margin: 0;
+  font-family: var(--font-main, 'Inter'), sans-serif;
+  font-size: 0.72rem;
+  line-height: 1.48;
+  color: rgba(255, 255, 255, 0.62);
+  letter-spacing: 0.01em;
+}
+
+.stream-search-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 20px;
+  padding: 6px 14px;
+  font-size: 0.74rem;
+  color: rgba(255, 255, 255, 0.75);
+  margin-top: 12px;
+  width: fit-content;
+  cursor: pointer;
+  backdrop-filter: blur(12px);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.stream-search-pill:hover,
+.stream-search-pill:focus-within {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(0, 242, 254, 0.4);
+  box-shadow: 0 4px 16px rgba(0, 242, 254, 0.15);
+  color: #FFFFFF;
+}
+
+.stream-search-input {
+  background: transparent;
+  border: none;
+  outline: none;
+  font-family: var(--font-main, 'Inter');
+  font-size: 0.74rem;
+  color: #FFFFFF;
+  width: 140px;
+}
+
+.stream-app-viewport {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  margin-top: 14px;
+  padding-right: 28px;
+  scroll-behavior: smooth;
+  scrollbar-width: none;
+}
+.stream-app-viewport::-webkit-scrollbar {
+  display: none;
+}
+
+.stream-app-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 70px;
+}
+
+.stream-app-item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 6px 10px;
+  border-radius: 14px;
+  background: transparent;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  color: inherit;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.stream-app-item:hover,
+.stream-app-item:active {
+  background: rgba(255, 255, 255, 0.07);
+  transform: translateX(5px);
+}
+
+.stream-app-icon-wrap {
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #E2E8F0;
+  transition: all 0.2s ease;
+}
+
+.stream-app-item:hover .stream-app-icon-wrap {
+  background: rgba(0, 242, 254, 0.18);
+  border-color: rgba(0, 242, 254, 0.45);
+  color: #00F2FE;
+  box-shadow: 0 0 14px rgba(0, 242, 254, 0.3);
+}
+
+.stream-app-label {
+  font-family: var(--font-main, 'Inter'), sans-serif;
+  font-size: 0.88rem;
+  font-weight: 500;
+  color: #F8FAFC;
+  letter-spacing: 0.01em;
+}
+
+.stream-app-badge {
+  font-size: 0.65rem;
+  color: rgba(255, 255, 255, 0.38);
+  margin-left: auto;
+  font-family: var(--font-mono, monospace);
+  letter-spacing: 0.05em;
+}
+
+.stream-alphabet-rail {
+  position: absolute;
+  right: 6px;
+  top: 130px;
+  bottom: 80px;
+  width: 22px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  z-index: 10;
+  user-select: none;
+}
+
+.alpha-node {
+  font-family: var(--font-display, 'Outfit'), sans-serif;
+  font-size: 9px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.35);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  padding: 1px 4px;
+}
+
+.alpha-node:hover,
+.alpha-node.active {
+  color: #00F2FE;
+  font-size: 11px;
+  font-weight: 700;
+  transform: scale(1.35);
+  text-shadow: 0 0 8px rgba(0, 242, 254, 0.6);
+}
+
+.stream-fab-btn {
+  position: absolute;
+  right: 18px;
+  bottom: 24px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: #1D4ED8;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  box-shadow: 0 8px 24px rgba(29, 78, 216, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #FFFFFF;
+  cursor: pointer;
+  z-index: 15;
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.stream-fab-btn:hover {
+  transform: scale(1.08);
+  background: #2563EB;
+  box-shadow: 0 10px 28px rgba(37, 99, 235, 0.7);
+}
+
+/* Status Bar & Ambient Prism HUD */
+.phone-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 38px;
+  padding: 0 18px;
+  background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  font-family: var(--font-display, 'Outfit'), var(--font-main), sans-serif;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #FFFFFF;
+  z-index: 50;
+  position: relative;
+  box-sizing: border-box;
+}
+
+.phone-status-bar .status-left,
+.phone-status-bar .status-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ambient-prism-hud {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 32px;
+  height: 22px;
+  padding: 0 10px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(20px);
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  cursor: pointer;
+}
+
+.ambient-prism-hud:hover {
+  border-color: rgba(0, 242, 254, 0.4);
+  box-shadow: 0 0 12px rgba(0, 242, 254, 0.2);
+}
+
+.prism-idle-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #00F2FE;
+  box-shadow: 0 0 8px #00F2FE;
+  animation: prismPipPulse 2.5s infinite ease-in-out;
+}
+
+@keyframes prismPipPulse {
+  0%, 100% { transform: scale(0.9); opacity: 0.6; }
+  50% { transform: scale(1.15); opacity: 1; box-shadow: 0 0 12px #00F2FE; }
+}
+
+.prism-eq-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 2.5px;
+  height: 12px;
+}
+
+.peq-bar {
+  width: 2.5px;
+  border-radius: 1px;
+  background: linear-gradient(180deg, #00F2FE 0%, #EC4899 100%);
+  animation: peqBounce 0.8s infinite ease-in-out alternate;
+}
+.peq-bar.b1 { height: 60%; animation-delay: 0s; }
+.peq-bar.b2 { height: 100%; animation-delay: 0.2s; }
+.peq-bar.b3 { height: 40%; animation-delay: 0.4s; }
+
+@keyframes peqBounce {
+  0% { height: 25%; }
+  100% { height: 100%; }
+}
+
+.prism-hud-text {
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: #E2E8F0;
+  white-space: nowrap;
+}
+
+.prism-privacy-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #00E676;
+  box-shadow: 0 0 8px #00E676;
+  animation: prismPipPulse 1.8s infinite;
+}
+
+.status-battery-wrap {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.status-battery-gauge {
+  width: 20px;
+  height: 10px;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  padding: 1px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  position: relative;
+}
+
+.status-battery-gauge::after {
+  content: '';
+  position: absolute;
+  right: -3px;
+  top: 2.5px;
+  width: 2px;
+  height: 3px;
+  border-radius: 0 1px 1px 0;
+  background: rgba(255, 255, 255, 0.65);
+}
+
+.battery-gauge-level {
+  height: 100%;
+  border-radius: 1.5px;
+  background: #00F2FE;
+  transition: width 0.3s ease;
+}
+
+/* 3D Spatial Multitasking Switcher (Recent Tasks) */
+.horizon-stage {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  background: radial-gradient(circle at 50% 25%, #0d203d 0%, #060911 100%);
+  padding: 16px 14px;
+  box-sizing: border-box;
+  perspective: 1100px;
+  overflow: hidden;
+}
+
+.horizon-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.horizon-title-box {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.horizon-title {
+  font-family: var(--font-display, 'Outfit'), sans-serif;
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: #FFFFFF;
+  letter-spacing: 0.02em;
+}
+
+.horizon-badge {
+  font-size: 0.68rem;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(0, 242, 254, 0.15);
+  border: 1px solid rgba(0, 242, 254, 0.3);
+  color: #00F2FE;
+  font-family: var(--font-mono, monospace);
+}
+
+.horizon-chamber {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 24px 12px;
+  gap: 18px;
+  scroll-snap-type: x mandatory;
+  transform-style: preserve-3d;
+  scrollbar-width: none;
+}
+.horizon-chamber::-webkit-scrollbar {
+  display: none;
+}
+
+.horizon-lens {
+  min-width: 220px;
+  max-width: 240px;
+  height: 380px;
+  border-radius: 24px;
+  background: rgba(15, 23, 42, 0.75);
+  backdrop-filter: blur(24px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 20px 45px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.3s ease, opacity 0.3s ease;
+  scroll-snap-align: center;
+  cursor: pointer;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.horizon-lens:hover {
+  transform: translateY(-8px) scale(1.03);
+  border-color: rgba(0, 242, 254, 0.45);
+  box-shadow: 0 25px 50px rgba(0, 242, 254, 0.2), 0 20px 45px rgba(0, 0, 0, 0.65);
+}
+
+.horizon-lens.dismissing {
+  transform: translateY(-340px) scale(0.8) !important;
+  opacity: 0 !important;
+  pointer-events: none;
+}
+
+.horizon-lens-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.horizon-lens-identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.horizon-lens-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 242, 254, 0.15);
+  border: 1px solid rgba(0, 242, 254, 0.3);
+  color: #00F2FE;
+}
+
+.horizon-lens-name {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #FFFFFF;
+}
+
+.horizon-lens-kill-btn {
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 1.1rem;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 6px;
+  transition: all 0.15s ease;
+}
+
+.horizon-lens-kill-btn:hover {
+  color: #FF5252;
+  background: rgba(255, 82, 82, 0.15);
+}
+
+.horizon-lens-glance {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  gap: 12px;
+}
+
+.lens-glance-icon {
+  width: 58px;
+  height: 58px;
+  border-radius: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle, rgba(0, 242, 254, 0.25), rgba(0, 242, 254, 0.05));
+  border: 1px solid rgba(0, 242, 254, 0.4);
+  color: #00F2FE;
+  box-shadow: 0 0 20px rgba(0, 242, 254, 0.2);
+}
+
+.lens-glance-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #FFFFFF;
+}
+
+.lens-glance-status {
+  font-size: 0.68rem;
+  color: rgba(255, 255, 255, 0.5);
+  padding: 3px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.horizon-footer {
+  text-align: center;
+  padding-top: 10px;
+  font-size: 0.7rem;
+  color: rgba(255, 255, 255, 0.45);
+  letter-spacing: 0.02em;
+}
 
 
 
 
 
+
+
+
+/* ==========================================================================
+   PRODUCTION LAUNCHER HOMESCREEN (Inspired by Steve War Minimalist Split)
+   ========================================================================== */
+
+.launcher-home-container {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  background: #000000;
+  user-select: none;
+  overflow: hidden;
+}
+
+/* Upper Half: Off-White Minimalist Canvas Deck */
+.launcher-search-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 48px;
+  background: #E5E5E5;
+  color: #18181B;
+  font-family: var(--font-display, 'Outfit'), sans-serif;
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+  border-bottom: 1px solid #D4D4D8;
+  transition: all 0.2s ease;
+}
+
+.launcher-search-bar:hover {
+  background: #ECECEC;
+  color: #000000;
+}
+
+.launcher-ambient-stage {
+  flex: 1.1;
+  background: #E5E5E5;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 6px;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+
+.launcher-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Lower Half: Pure Pitch Black Deck with Clock, Date & 5-Icon Dock */
+.launcher-bottom-deck {
+  flex: 1;
+  background: #000000;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 24px 20px 20px;
+  box-sizing: border-box;
+}
+
+.launcher-clock-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.launcher-clock-time {
+  font-family: var(--font-display, 'Outfit'), -apple-system, sans-serif;
+  font-size: 3.5rem;
+  font-weight: 600;
+  color: #FFFFFF;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.launcher-date-weather {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-main, 'Inter'), sans-serif;
+  font-size: 0.78rem;
+  color: rgba(255, 255, 255, 0.72);
+  margin-top: 6px;
+}
+
+.ldw-dot {
+  color: rgba(255, 255, 255, 0.35);
+  font-size: 0.8rem;
+}
+
+.weather-sun-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #F59E0B;
+  box-shadow: 0 0 10px #F59E0B;
+  display: inline-block;
+  margin-left: 2px;
+}
+
+.launcher-dock-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.launcher-dock-icon {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  background: transparent;
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #FFFFFF;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.launcher-dock-icon:hover,
+.launcher-dock-icon:active {
+  background: rgba(255, 255, 255, 0.12);
+  transform: scale(1.15);
+}
+
+.launcher-dock-icon.primary {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.launcher-dock-icon.primary:hover {
+  background: rgba(0, 242, 254, 0.2);
+  border-color: rgba(0, 242, 254, 0.5);
+  color: #00F2FE;
+  box-shadow: 0 0 16px rgba(0, 242, 254, 0.35);
+}
+
+.stream-header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.stream-back-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #FFFFFF;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.stream-back-btn:hover {
+  background: rgba(255, 255, 255, 0.18);
+  transform: scale(1.08);
+}
