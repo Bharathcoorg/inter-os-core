@@ -10741,6 +10741,203 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   box-shadow: 0 0 12px #00FFD5, 0 0 20px #00FFD5;
 }
 
+/* =========================================================================
+   SOVEREIGN FLOATING GLASS TOAST CAPSULE
+   ========================================================================= */
+.interos-toast-container {
+  position: absolute;
+  top: 48px;
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  z-index: 99999;
+  pointer-events: none;
+  padding: 0 16px;
+}
+
+.interos-toast-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  background: rgba(12, 12, 16, 0.92);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(0, 242, 254, 0.35);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.65), 0 0 12px rgba(0, 242, 254, 0.2);
+  border-radius: 999px;
+  color: #F3F4F6;
+  font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  opacity: 0;
+  transform: translateY(-10px) scale(0.96);
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: auto;
+  max-width: 90%;
+  text-align: center;
+}
+
+.interos-toast-pill.visible {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+.interos-toast-pill .itp-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #00F2FE;
+  box-shadow: 0 0 8px #00F2FE;
+  flex-shrink: 0;
+}
+
+.interos-toast-pill .itp-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 240px;
+}
+
+/* =========================================================================
+   BARE-METAL VBE DIRECT FRAMEBUFFER VIEW (PORT 5900)
+   ========================================================================= */
+#view-bare-metal-vnc {
+  width: 100%;
+  height: 100%;
+  background: #000000;
+  overflow: hidden;
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.vbe-direct-container {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  background: #000000;
+  position: relative;
+}
+
+.vbe-toolbar {
+  height: 38px;
+  background: rgba(12, 12, 15, 0.95);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  flex-shrink: 0;
+  z-index: 10;
+}
+
+.vbe-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.vbe-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #10B981;
+  box-shadow: 0 0 6px #10B981;
+}
+
+.vbe-label {
+  font-size: 0.65rem;
+  font-family: var(--font-mono, monospace);
+  color: #A1A1AA;
+  letter-spacing: 0.04em;
+}
+
+.vbe-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.vbe-ctrl-btn {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #E2E8F0;
+  border-radius: 4px;
+  font-size: 0.62rem;
+  padding: 3px 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.vbe-ctrl-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.25);
+  color: #FFFFFF;
+}
+
+.vbe-ctrl-btn.exit {
+  background: rgba(244, 63, 94, 0.15);
+  border-color: rgba(244, 63, 94, 0.35);
+  color: #FDA4AF;
+}
+
+.vbe-ctrl-btn.exit:hover {
+  background: rgba(244, 63, 94, 0.3);
+  color: #FFFFFF;
+}
+
+.vbe-screen-target {
+  flex: 1;
+  width: 100%;
+  height: calc(100% - 38px);
+  background: #000000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  position: relative;
+}
+
+.vbe-screen-target canvas {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: contain;
+}
+
+.vbe-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: #71717A;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.75rem;
+  text-align: center;
+  padding: 24px;
+}
+
+.vbe-placeholder svg {
+  stroke: #52525B;
+  opacity: 0.8;
+}
+
+.emu-btn.active-vbe {
+  background: rgba(0, 242, 254, 0.25) !important;
+  color: #00F2FE !important;
+  border-color: rgba(0, 242, 254, 0.5) !important;
+  box-shadow: 0 0 10px rgba(0, 242, 254, 0.35);
+}
+
+
 
 
 

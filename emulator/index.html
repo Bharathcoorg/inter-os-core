@@ -358,6 +358,9 @@
             <!-- Developer FPS Counter Overlay -->
             <div class="phone-fps-overlay" id="phone-fps-overlay">120.0 FPS</div>
 
+            <!-- Screen Overlay: Sovereign Floating Glass Toast Capsule -->
+            <div class="interos-toast-container" id="interos-toast-container" aria-live="polite"></div>
+
             <!-- Phone Viewport & Subviews -->
             <div class="phone-viewport" id="phone-viewport">
               
@@ -2331,6 +2334,25 @@
                 </div>
               </div>
 
+              <!-- SUBVIEW: BARE-METAL VBE DIRECT FRAMEBUFFER VIEW -->
+              <div class="screen-view" id="view-bare-metal-vnc" style="display: none;">
+                <div class="vbe-direct-container" id="vbe-direct-container">
+                  <div class="vbe-toolbar">
+                    <div class="vbe-chip">
+                      <span class="vbe-dot pulse"></span>
+                      <span class="vbe-label" id="vbe-status-label">QEMU VBE Direct (Port 5900)</span>
+                    </div>
+                    <div class="vbe-toolbar-actions">
+                      <button class="vbe-ctrl-btn" id="btn-vbe-reconnect" title="Reconnect Framebuffer">Reconnect</button>
+                      <button class="vbe-ctrl-btn exit" id="btn-vbe-exit" title="Return to Mobile Shell">Exit VBE</button>
+                    </div>
+                  </div>
+                  <div class="vbe-screen-target" id="vbe-screen-target">
+                    <!-- noVNC RFB canvas renders here -->
+                  </div>
+                </div>
+              </div>
+
             </div>
 
             <!-- Bottom Gesture Home Pill -->
@@ -2359,6 +2381,9 @@
           </button>
           <button class="emu-btn" id="emu-btn-reboot" title="Warm Reboot Microkernel">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          </button>
+          <button class="emu-btn" id="emu-btn-vbe-toggle" title="Toggle Bare-Metal VBE Direct Framebuffer (QEMU Port 5900)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
           </button>
 
           <div class="emu-divider"></div>

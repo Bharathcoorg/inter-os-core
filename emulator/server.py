@@ -541,6 +541,66 @@ def init_default_serial_logs():
 init_default_serial_logs()
 scan_packages_dir()
 
+serial_socket_conn = None
+serial_socket_lock = threading.Lock()
+
+def start_websockify_if_needed():
+    """Starts websockify on WS_PORT (6081) bridging to QEMU VNC (5900) if not already listening."""
+    global ws_subproc
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.15)
+            if s.connect_ex(('127.0.0.1', WS_PORT)) == 0:
+                latest_telemetry["websockify_alive"] = True
+                return
+    except Exception:
+        pass
+
+    try:
+        ws_subproc = subprocess.Popen([
+            sys.executable, "-m", "websockify",
+            str(WS_PORT), "127.0.0.1:5900"
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(0.3)
+        latest_telemetry["websockify_alive"] = True
+        print(f"[*] Live Bare-Metal VBE bridge active on ws://127.0.0.1:{WS_PORT} -> VNC :5900")
+    except Exception as e:
+        print(f"[*] Notice: websockify auto-start: {e}")
+        latest_telemetry["websockify_alive"] = False
+
+def serial_stream_worker():
+    """Background worker continuously pulling UART lines from QEMU COM1 TCP port (4201)."""
+    global serial_lines, serial_socket_conn
+    buf = ""
+    while True:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(1.5)
+                s.connect(('127.0.0.1', SERIAL_TCP_PORT))
+                with serial_socket_lock:
+                    serial_socket_conn = s
+                s.settimeout(0.8)
+                while True:
+                    try:
+                        chunk = s.recv(1024)
+                        if not chunk:
+                            break
+                        decoded = chunk.decode('utf-8', errors='replace')
+                        buf += decoded
+                        while '\n' in buf:
+                            line, buf = buf.split('\n', 1)
+                            clean = line.strip('\r').strip()
+                            if clean:
+                                with telemetry_lock:
+                                    serial_lines.append(clean)
+                                    if len(serial_lines) > 3000:
+                                        serial_lines = serial_lines[-2000:]
+                    except socket.timeout:
+                        continue
+        except Exception:
+            with serial_socket_lock:
+                serial_socket_conn = None
+            time.sleep(1.5)
 
 
 def stop_qemu_backend():
@@ -656,9 +716,16 @@ def query_qemu_monitor(host='127.0.0.1', port=44445, timeout=0.35):
                 latest_telemetry["cpu"]["rip"] = rip_val
                 if reg_dict:
                     latest_telemetry["cpu"]["registers"].update(reg_dict)
-                latest_telemetry["cpu"]["raw_registers"] = regs_raw
                 latest_telemetry["block"]["device"] = block_device
                 latest_telemetry["block"]["file"] = block_file
+
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s_ws:
+                        s_ws.settimeout(0.08)
+                        latest_telemetry["websockify_alive"] = (s_ws.connect_ex(('127.0.0.1', WS_PORT)) == 0)
+                except Exception:
+                    latest_telemetry["websockify_alive"] = False
+
                 return latest_telemetry
         except Exception:
             # Fallback: check VNC port 5900
@@ -1619,6 +1686,14 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 data = json.loads(body.decode('utf-8'))
                 cmd = data.get('command', '').strip()
                 if cmd:
+                    # Forward directly to active QEMU UART COM1 socket
+                    with serial_socket_lock:
+                        if serial_socket_conn:
+                            try:
+                                serial_socket_conn.sendall((cmd + '\n').encode('utf-8'))
+                            except Exception:
+                                pass
+
                     serial_lines.append(f"interos@mobile:~$ {cmd}")
                     cmd_lower = cmd.lower()
                     if cmd_lower == "uname -a":
@@ -1767,6 +1842,10 @@ if __name__ == '__main__':
 
     ok, msg = start_qemu_backend()
     print(f"[*] InterOS Studio Backend: {msg}")
+
+    start_websockify_if_needed()
+    serial_thread = threading.Thread(target=serial_stream_worker, daemon=True)
+    serial_thread.start()
 
     try:
         with socketserver.TCPServer(("127.0.0.1", PORT), StudioAPIHandler) as httpd:

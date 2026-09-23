@@ -39,9 +39,45 @@ document.addEventListener('DOMContentLoaded', () => {
     arch: 'x86_64 / aarch64 / riscv64'
   };
 
+  // Universal Sovereign Glass Toast Notification System
+  function escapeHtml(str) {
+    if (!str) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+  window.escapeHtml = escapeHtml;
+
+  window.showToast = function(msg, duration = 2400) {
+    let container = document.getElementById('interos-toast-container');
+    if (!container) {
+      container = document.createElement('div');
+      container.id = 'interos-toast-container';
+      container.className = 'interos-toast-container';
+      const screen = document.getElementById('device-screen') || document.body;
+      screen.appendChild(container);
+    }
+    const toast = document.createElement('div');
+    toast.className = 'interos-toast-pill';
+    toast.innerHTML = `<span class="itp-dot"></span><span class="itp-text">${escapeHtml(msg)}</span>`;
+    container.appendChild(toast);
+    requestAnimationFrame(() => toast.classList.add('visible'));
+    setTimeout(() => {
+      toast.classList.remove('visible');
+      setTimeout(() => {
+        if (toast.parentNode) toast.parentNode.removeChild(toast);
+      }, 300);
+    }, duration);
+  };
+
   const state = {
     screenOn: true,
     locked: false,
+    vbeActive: false,
+    rfbClient: null,
     volume: 70,
     isLandscape: false,
     currentView: 'view-home',
@@ -617,7 +653,18 @@ document.addEventListener('DOMContentLoaded', () => {
   btnBackHelloworld?.addEventListener('click', goHome);
   btnBackDialer?.addEventListener('click', goHome);
   btnBackMessages?.addEventListener('click', goHome);
-  btnBackFiles?.addEventListener('click', goHome);
+  btnBackFiles?.addEventListener('click', () => {
+    if (typeof currentVfsPath !== 'undefined' && currentVfsPath !== '/' && currentVfsPath !== '/data/user') {
+      const parts = currentVfsPath.split('/').filter(Boolean);
+      parts.pop();
+      currentVfsPath = parts.length === 0 ? '/' : '/' + parts.join('/');
+      if (typeof loadVfsPath === 'function') {
+        loadVfsPath();
+        return;
+      }
+    }
+    goHome();
+  });
   btnBackClock?.addEventListener('click', goHome);
   document.getElementById('btn-back-apps')?.addEventListener('click', goHome);
   document.getElementById('apps-bottom-handle')?.addEventListener('click', goHome);
@@ -1115,7 +1162,99 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   emuBtnReboot?.addEventListener('click', triggerReboot);
-  btnRebootKernel?.addEventListener('click', triggerReboot);
+
+  // =========================================================================
+  // BARE-METAL VBE DIRECT FRAMEBUFFER CLIENT (RFB over Websockify :6081 -> :5900)
+  // =========================================================================
+  const emuBtnVbeToggle = document.getElementById('emu-btn-vbe-toggle');
+  const btnVbeExit = document.getElementById('btn-vbe-exit');
+  const btnVbeReconnect = document.getElementById('btn-vbe-reconnect');
+  const vbeScreenTarget = document.getElementById('vbe-screen-target');
+  const vbeStatusLabel = document.getElementById('vbe-status-label');
+
+  async function connectRFB() {
+    if (state.rfbClient) {
+      try { state.rfbClient.disconnect(); } catch (e) {}
+      state.rfbClient = null;
+    }
+    if (!vbeScreenTarget) return;
+    vbeScreenTarget.innerHTML = `
+      <div class="vbe-placeholder">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+        <span>Connecting to QEMU Framebuffer (ws://127.0.0.1:6081)...</span>
+      </div>
+    `;
+
+    try {
+      const module = await import('./node_modules/@novnc/novnc/core/rfb.js');
+      const RFB = module.default;
+      vbeScreenTarget.innerHTML = '';
+      
+      const wsUrl = `ws://${window.location.hostname || '127.0.0.1'}:6081`;
+      const rfb = new RFB(vbeScreenTarget, wsUrl, {
+        shared: true,
+        credentials: { password: '' }
+      });
+      rfb.scaleViewport = true;
+      rfb.resizeSession = false;
+
+      rfb.addEventListener('connect', () => {
+        logConsole('ok', '[VBE_RFB] Connected to QEMU Bare-Metal Framebuffer (1280x720 VBE Scanout).');
+        if (vbeStatusLabel) vbeStatusLabel.textContent = 'QEMU VBE Connected (1280x720)';
+        showToast('Bare-Metal Framebuffer Connected');
+      });
+
+      rfb.addEventListener('disconnect', (e) => {
+        logConsole('warn', `[VBE_RFB] Disconnected from QEMU Framebuffer.`);
+        if (vbeStatusLabel) vbeStatusLabel.textContent = 'VBE Disconnected';
+        if (state.vbeActive && vbeScreenTarget) {
+          vbeScreenTarget.innerHTML = `
+            <div class="vbe-placeholder">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#F43F5E" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+              <span>VBE Framebuffer Disconnected</span>
+              <button class="vbe-ctrl-btn" id="btn-vbe-retry-inner">Retry Connection</button>
+            </div>
+          `;
+          document.getElementById('btn-vbe-retry-inner')?.addEventListener('click', connectRFB);
+        }
+      });
+
+      state.rfbClient = rfb;
+    } catch (err) {
+      logConsole('err', `[VBE_RFB] Failed to initialize RFB client: ${err.message}`);
+      vbeScreenTarget.innerHTML = `
+        <div class="vbe-placeholder">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#F43F5E" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+          <span>Failed to load RFB module: ${err.message}</span>
+        </div>
+      `;
+    }
+  }
+
+  function toggleVBE(enable) {
+    state.vbeActive = typeof enable === 'boolean' ? enable : !state.vbeActive;
+    const vbeView = document.getElementById('view-bare-metal-vnc');
+    if (!vbeView) return;
+
+    if (state.vbeActive) {
+      switchView('view-bare-metal-vnc');
+      emuBtnVbeToggle?.classList.add('active-vbe');
+      connectRFB();
+      logConsole('info', '[DISPLAY_MODE] Switched to Bare-Metal VBE Direct Framebuffer.');
+    } else {
+      emuBtnVbeToggle?.classList.remove('active-vbe');
+      if (state.rfbClient) {
+        try { state.rfbClient.disconnect(); } catch (e) {}
+        state.rfbClient = null;
+      }
+      goHome();
+      logConsole('info', '[DISPLAY_MODE] Returned to Bento Glass Mobile Shell.');
+    }
+  }
+
+  emuBtnVbeToggle?.addEventListener('click', () => toggleVBE());
+  btnVbeExit?.addEventListener('click', () => toggleVBE(false));
+  btnVbeReconnect?.addEventListener('click', () => connectRFB());
 
   // Recents / Multitasking Switcher
   emuBtnRecents?.addEventListener('click', () => {
