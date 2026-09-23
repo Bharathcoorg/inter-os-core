@@ -1,0 +1,13 @@
+//! Virtual Filesystem Subsystem for Inter OS
+//!
+//! Exposes hierarchical file structures, inode management, and zero-trust
+//! capability checks for file reads and writes.
+
+pub mod vfs;
+pub mod devfs;
+
+pub use vfs::{
+    FileDescriptor, FileStat, FileType, FsError, Inode, InodeId, Vfs, VFS,
+    init, MAX_FD_PER_TASK,
+};
+pub use devfs::{DeviceKind, device_read, device_write, resolve_device};

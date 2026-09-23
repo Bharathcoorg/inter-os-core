@@ -1,0 +1,18 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+edition = "2021"
+authors = ["Inter OS Contributors"]
+description = "Core trusted microkernel for Inter OS (x86_64)"
+
+[dependencies]
+bootloader_api = "0.11.17"
+x86_64 = "0.15.5"
+spin = "0.9.8"
+uart_16550 = "0.8.1"
+volatile = "0.4.6"
+pic8259 = "0.11.0"
+linked_list_allocator = "0.10.6"
+pc-keyboard = "0.7.0"
+conquer-once = { version = "0.4.0", default-features = false }
+interos-android-shared = { path = "src/compat/android/shared" }
