@@ -1,9 +1,6 @@
 [workspace]
 members = [
     "apps/test_app",
-    "kernel",
-    "sdk/rust/interos-std",
-    "userspace/init",
     "apps/settings",
     "apps/terminal",
     "apps/dialer",
@@ -18,16 +15,18 @@ members = [
     "apps/sensor_dashboard",
     "apps/camera_preview",
     "apps/calculator",
-    "kernel-aarch64",
-    "kernel-riscv64",
     "apps/authenticator",
     "apps/health",
     "apps/meshchat",
-    "apps/ai_assistant",
-    "kernel/src/compat/android/shared",
+    "sdk/rust/interos-std",
+    "userspace/init",
 ]
 exclude = [
     "boot",
+    "kernel",
+    "kernel-aarch64",
+    "kernel-riscv64",
+    "kernel/src/compat/android/shared",
     "tools/mkbootimg",
 ]
 resolver = "2"
