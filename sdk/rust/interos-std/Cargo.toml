@@ -1,0 +1,7 @@
+[package]
+name = "interos-std"
+version = "0.1.0"
+edition = "2021"
+description = "Inter OS Userspace Standard Library and System Call ABI"
+
+[dependencies]

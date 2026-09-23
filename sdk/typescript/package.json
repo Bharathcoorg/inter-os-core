@@ -1,0 +1,15 @@
+{
+  "name": "@interos/amcp-sdk",
+  "version": "1.0.0",
+  "description": "TypeScript SDK for building and signing Sovereign Micro-Chain Package (SMCP) automations on Inter OS",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test dist/test.js"
+  },
+  "keywords": ["interos", "amcp", "sovereign", "wasm", "automation"],
+  "author": "Inter OS Sovereign Core Team",
+  "license": "Apache-2.0"
+}

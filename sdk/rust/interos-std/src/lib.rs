@@ -1,0 +1,1512 @@
+//! Inter OS Userspace Standard Library (interos-std)
+//!
+//! Provides safe, ergonomic Rust bindings for Inter OS hardware fast system calls
+//! (`syscall` instruction) executing in Ring 3 User Mode.
+
+#![no_std]
+
+/// Well-known system call identifiers matching the Inter OS microkernel.
+#[repr(u64)]
+pub enum SyscallNumber {
+    Yield = 1,
+    Exit = 2,
+    Log = 3,
+    GetTicks = 4,
+    IpcSend = 5,
+    IpcRecv = 6,
+    GetTaskId = 7,
+    FsOpen = 8,
+    FsRead = 9,
+    FsWrite = 10,
+    FsClose = 11,
+    FsStat = 12,
+    BlockRead = 13,
+    VerifyPackage = 14,
+    McpInvoke = 15,
+    WasmExecute = 16,
+    IdentityGetDid = 17,
+    StateCommit = 18,
+    ResourceQuery = 19,
+    LiteVerseStatus = 20,
+    NetSocket = 21,
+    NetSendTo = 22,
+    NetRecvFrom = 23,
+    MarketplaceList = 24,
+    MarketplaceGet = 25,
+    PackageAudit = 26,
+    PackageInstall = 27,
+    HalQueryPlatform = 28,
+    PowerGovernor = 29,
+    TelephonyQuery = 30,
+    GetRandom = 31,
+    AudioControl = 32,
+    KeystoreDerive = 33,
+    SensorRead = 35,
+    BatteryQuery = 36,
+    AndroidBridgeIntent = 37,
+    RtcGetTime = 38,
+    NlParseIntent = 39,
+    ThermalQuery = 40,
+    SecureIpcSession = 41,
+    VectorCosineSimilarity = 42,
+    VaultCrypt = 43,
+    ContextBroker = 44,
+    WirelessQuery = 45,
+    DevFsIo = 46,
+    AgentPlanExecute = 47,
+    RevocationAudit = 48,
+    CapDelegate = 49,
+    PrivacyShieldAudit = 50,
+    SurfacePhysics = 51,
+    ApkInstallAudit = 52,
+    DexVerifyExec = 53,
+    CameraCapture = 54,
+    DexInvokeMethod = 55,
+    AiAssistantQuery = 56,
+    CapRequestConsent = 57,
+    ShareSheetDispatch = 58,
+    ShmPipeCreate = 59,
+    ShmPipeTransfer = 60,
+    ShmPipeReceive = 61,
+    EventPoll = 62,
+}
+
+// -----------------------------------------------------------------------------
+// Low-Level Fast System Call Wrappers (Multi-Architecture: AMD64, AArch64 & RISC-V 64)
+// -----------------------------------------------------------------------------
+
+#[inline(always)]
+pub unsafe fn syscall0(num: SyscallNumber) -> i64 {
+    let ret: i64;
+    #[cfg(target_arch = "x86_64")]
+    core::arch::asm!(
+        "syscall",
+        in("rax") num as u64,
+        lateout("rax") ret,
+        lateout("rcx") _,
+        lateout("r11") _,
+        options(nostack)
+    );
+    #[cfg(target_arch = "aarch64")]
+    core::arch::asm!(
+        "svc #0",
+        in("x8") num as u64,
+        lateout("x0") ret,
+        options(nostack)
+    );
+    #[cfg(target_arch = "riscv64")]
+    core::arch::asm!(
+        "ecall",
+        in("a7") num as u64,
+        lateout("a0") ret,
+        options(nostack)
+    );
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
+    { let _ = num; ret = 0; }
+    ret
+}
+
+#[inline(always)]
+pub unsafe fn syscall1(num: SyscallNumber, a1: u64) -> i64 {
+    let ret: i64;
+    #[cfg(target_arch = "x86_64")]
+    core::arch::asm!(
+        "syscall",
+        in("rax") num as u64,
+        in("rdi") a1,
+        lateout("rax") ret,
+        lateout("rcx") _,
+        lateout("r11") _,
+        options(nostack)
+    );
+    #[cfg(target_arch = "aarch64")]
+    core::arch::asm!(
+        "svc #0",
+        in("x8") num as u64,
+        in("x0") a1,
+        lateout("x0") ret,
+        options(nostack)
+    );
+    #[cfg(target_arch = "riscv64")]
+    core::arch::asm!(
+        "ecall",
+        in("a7") num as u64,
+        in("a0") a1,
+        lateout("a0") ret,
+        options(nostack)
+    );
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
+    { let _ = (num, a1); ret = 0; }
+    ret
+}
+
+#[inline(always)]
+pub unsafe fn syscall2(num: SyscallNumber, a1: u64, a2: u64) -> i64 {
+    let ret: i64;
+    #[cfg(target_arch = "x86_64")]
+    core::arch::asm!(
+        "syscall",
+        in("rax") num as u64,
+        in("rdi") a1,
+        in("rsi") a2,
+        lateout("rax") ret,
+        lateout("rcx") _,
+        lateout("r11") _,
+        options(nostack)
+    );
+    #[cfg(target_arch = "aarch64")]
+    core::arch::asm!(
+        "svc #0",
+        in("x8") num as u64,
+        in("x0") a1,
+        in("x1") a2,
+        lateout("x0") ret,
+        options(nostack)
+    );
+    #[cfg(target_arch = "riscv64")]
+    core::arch::asm!(
+        "ecall",
+        in("a7") num as u64,
+        in("a0") a1,
+        in("a1") a2,
+        lateout("a0") ret,
+        options(nostack)
+    );
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
+    { let _ = (num, a1, a2); ret = 0; }
+    ret
+}
+
+#[inline(always)]
+pub unsafe fn syscall3(num: SyscallNumber, a1: u64, a2: u64, a3: u64) -> i64 {
+    let ret: i64;
+    #[cfg(target_arch = "x86_64")]
+    core::arch::asm!(
+        "syscall",
+        in("rax") num as u64,
+        in("rdi") a1,
+        in("rsi") a2,
+        in("rdx") a3,
+        lateout("rax") ret,
+        lateout("rcx") _,
+        lateout("r11") _,
+        options(nostack)
+    );
+    #[cfg(target_arch = "aarch64")]
+    core::arch::asm!(
+        "svc #0",
+        in("x8") num as u64,
+        in("x0") a1,
+        in("x1") a2,
+        in("x2") a3,
+        lateout("x0") ret,
+        options(nostack)
+    );
+    #[cfg(target_arch = "riscv64")]
+    core::arch::asm!(
+        "ecall",
+        in("a7") num as u64,
+        in("a0") a1,
+        in("a1") a2,
+        in("a2") a3,
+        lateout("a0") ret,
+        options(nostack)
+    );
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
+    { let _ = (num, a1, a2, a3); ret = 0; }
+    ret
+}
+
+#[inline(always)]
+pub unsafe fn syscall4(num: SyscallNumber, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    let ret: i64;
+    #[cfg(target_arch = "x86_64")]
+    core::arch::asm!(
+        "syscall",
+        in("rax") num as u64,
+        in("rdi") a1,
+        in("rsi") a2,
+        in("rdx") a3,
+        in("r10") a4,
+        lateout("rax") ret,
+        lateout("rcx") _,
+        lateout("r11") _,
+        options(nostack)
+    );
+    #[cfg(target_arch = "aarch64")]
+    core::arch::asm!(
+        "svc #0",
+        in("x8") num as u64,
+        in("x0") a1,
+        in("x1") a2,
+        in("x2") a3,
+        in("x3") a4,
+        lateout("x0") ret,
+        options(nostack)
+    );
+    #[cfg(target_arch = "riscv64")]
+    core::arch::asm!(
+        "ecall",
+        in("a7") num as u64,
+        in("a0") a1,
+        in("a1") a2,
+        in("a2") a3,
+        in("a3") a4,
+        lateout("a0") ret,
+        options(nostack)
+    );
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
+    { let _ = (num, a1, a2, a3, a4); ret = 0; }
+    ret
+}
+
+#[inline(always)]
+pub unsafe fn syscall5(num: SyscallNumber, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
+    let ret: i64;
+    #[cfg(target_arch = "x86_64")]
+    core::arch::asm!(
+        "syscall",
+        in("rax") num as u64,
+        in("rdi") a1,
+        in("rsi") a2,
+        in("rdx") a3,
+        in("r10") a4,
+        in("r8") a5,
+        lateout("rax") ret,
+        lateout("rcx") _,
+        lateout("r11") _,
+        options(nostack)
+    );
+    #[cfg(target_arch = "aarch64")]
+    core::arch::asm!(
+        "svc #0",
+        in("x8") num as u64,
+        in("x0") a1,
+        in("x1") a2,
+        in("x2") a3,
+        in("x3") a4,
+        in("x4") a5,
+        lateout("x0") ret,
+        options(nostack)
+    );
+    #[cfg(target_arch = "riscv64")]
+    core::arch::asm!(
+        "ecall",
+        in("a7") num as u64,
+        in("a0") a1,
+        in("a1") a2,
+        in("a2") a3,
+        in("a3") a4,
+        in("a4") a5,
+        lateout("a0") ret,
+        options(nostack)
+    );
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
+    { let _ = (num, a1, a2, a3, a4, a5); ret = 0; }
+    ret
+}
+
+#[inline(always)]
+pub unsafe fn syscall6(num: SyscallNumber, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> i64 {
+    let ret: i64;
+    #[cfg(target_arch = "x86_64")]
+    core::arch::asm!(
+        "syscall",
+        in("rax") num as u64,
+        in("rdi") a1,
+        in("rsi") a2,
+        in("rdx") a3,
+        in("r10") a4,
+        in("r8") a5,
+        in("r9") a6,
+        lateout("rax") ret,
+        lateout("rcx") _,
+        lateout("r11") _,
+        options(nostack)
+    );
+    #[cfg(target_arch = "aarch64")]
+    core::arch::asm!(
+        "svc #0",
+        in("x8") num as u64,
+        in("x0") a1,
+        in("x1") a2,
+        in("x2") a3,
+        in("x3") a4,
+        in("x4") a5,
+        in("x5") a6,
+        lateout("x0") ret,
+        options(nostack)
+    );
+    #[cfg(target_arch = "riscv64")]
+    core::arch::asm!(
+        "ecall",
+        in("a7") num as u64,
+        in("a0") a1,
+        in("a1") a2,
+        in("a2") a3,
+        in("a3") a4,
+        in("a4") a5,
+        in("a5") a6,
+        lateout("a0") ret,
+        options(nostack)
+    );
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
+    { let _ = (num, a1, a2, a3, a4, a5, a6); ret = 0; }
+    ret
+}
+
+
+// -----------------------------------------------------------------------------
+// High-Level Safe Userspace APIs
+// -----------------------------------------------------------------------------
+
+/// Yields the remainder of the task's time slice to the scheduler.
+#[inline(always)]
+pub fn yield_now() {
+    unsafe { syscall0(SyscallNumber::Yield) };
+}
+
+/// Terminates the current userspace task.
+#[inline(always)]
+pub fn exit() -> ! {
+    unsafe { syscall0(SyscallNumber::Exit) };
+    loop {}
+}
+
+/// Emits a diagnostic log string through the kernel serial console.
+/// Requires the caller to hold a `SerialOutput` capability in `cap_slot`.
+pub fn log(cap_slot: usize, msg: &str) -> Result<(), i64> {
+    let ret = unsafe {
+        syscall3(
+            SyscallNumber::Log,
+            cap_slot as u64,
+            msg.as_ptr() as u64,
+            msg.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Queries the hardware timer ticks since boot.
+/// Requires the caller to hold a `TimerTickRead` capability in `cap_slot`.
+pub fn get_ticks(cap_slot: usize) -> Result<u64, i64> {
+    let ret = unsafe { syscall1(SyscallNumber::GetTicks, cap_slot as u64) };
+    if ret >= 0 {
+        Ok(ret as u64)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Queries the task identifier assigned by the kernel scheduler.
+pub fn get_task_id() -> u64 {
+    unsafe { syscall0(SyscallNumber::GetTaskId) as u64 }
+}
+
+/// Transmits a message through zero-trust IPC.
+pub fn ipc_send(cap_slot: usize, target_task_id: u64, msg_type: u32, payload: &[u8]) -> Result<(), i64> {
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::IpcSend,
+            cap_slot as u64,
+            target_task_id,
+            msg_type as u64,
+            payload.as_ptr() as u64,
+            payload.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Receives a message from the task IPC mailbox.
+pub fn ipc_recv(cap_slot: usize, out_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall3(
+            SyscallNumber::IpcRecv,
+            cap_slot as u64,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Ergonomic logging helper module matching application templates.
+pub mod log {
+    pub fn init(_pkg: &str) {}
+    pub fn info(msg: &str) {
+        let _ = crate::log(0, msg);
+    }
+    pub fn warn(msg: &str) {
+        let _ = crate::log(0, msg);
+    }
+    pub fn error(msg: &str) {
+        let _ = crate::log(0, msg);
+    }
+}
+
+/// Ergonomic IPC helper module matching application templates.
+pub mod ipc {
+    pub fn send(target_task_id: u64, msg_type: u32, payload: &[u8]) -> Result<(), i64> {
+        crate::ipc_send(0, target_task_id, msg_type, payload)
+    }
+
+    pub fn receive_any(out_buf: &mut [u8]) -> Result<(u64, u32, usize), i64> {
+        let n = crate::ipc_recv(0, out_buf)?;
+        Ok((0, 0, n))
+    }
+}
+
+/// Creates and binds a UDP socket to a port.
+pub fn net_socket(port: u16) -> Result<u32, i64> {
+    let ret = unsafe { syscall1(SyscallNumber::NetSocket, port as u64) };
+    if ret >= 0 {
+        Ok(ret as u32)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Transmits a UDP packet over the network stack.
+pub fn net_sendto(dst_ip: [u8; 4], dst_port: u16, payload: &[u8]) -> Result<(), i64> {
+    let ip_u32 = u32::from_be_bytes(dst_ip) as u64;
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::NetSendTo,
+            ip_u32,
+            dst_port as u64,
+            payload.as_ptr() as u64,
+            payload.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Receives a packet from a UDP socket.
+pub fn net_recvfrom(sock_id: u32, out_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall3(
+            SyscallNumber::NetRecvFrom,
+            sock_id as u64,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Queries the device's sovereign Decentralized Identifier (DID).
+pub fn identity_get_did(out_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::IdentityGetDid,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Queries hardware battery, thermals, and throttling status.
+pub fn resource_query() -> (u8, u8, bool) {
+    let mut battery = 0u8;
+    let mut temp = 0u8;
+    let mut throttling = false;
+    unsafe {
+        syscall3(
+            SyscallNumber::ResourceQuery,
+            &mut battery as *mut u8 as u64,
+            &mut temp as *mut u8 as u64,
+            &mut throttling as *mut bool as u64,
+        );
+    }
+    (battery, temp, throttling)
+}
+
+/// Queries the list of available marketplace package IDs.
+pub fn marketplace_list(out_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::MarketplaceList,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Performs a zero-trust pre-flight capability audit for a marketplace package.
+/// Returns audit verdict (0 = Approved, 1 = RequiresConsent, 2 = BlockedForbidden, 3 = SignatureInvalid).
+pub fn package_audit(pkg_id: &str) -> Result<u32, i64> {
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::PackageAudit,
+            pkg_id.as_ptr() as u64,
+            pkg_id.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as u32)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Installs a verified marketplace package onto persistent storage.
+/// Requires the caller to hold a `FileSystemWrite` capability in `cap_slot`.
+pub fn package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) -> Result<(), i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::PackageInstall,
+            cap_slot as u64,
+            pkg_id.as_ptr() as u64,
+            pkg_id.len() as u64,
+            user_consent as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Queries active mobile SoC platform parameters into `out_buf` JSON string.
+pub fn hal_query_platform(out_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::HalQueryPlatform,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Queries the active mobile CPU DVFS power governor (0=Perf, 1=Powersave, 2=Interactive, 3=Schedutil).
+pub fn power_get_governor() -> Result<u32, i64> {
+    let ret = unsafe { syscall2(SyscallNumber::PowerGovernor, 0, 0) };
+    if ret >= 0 {
+        Ok(ret as u32)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Changes the active mobile CPU DVFS power governor.
+pub fn power_set_governor(governor_id: u8) -> Result<(), i64> {
+    let ret = unsafe { syscall2(SyscallNumber::PowerGovernor, 1, governor_id as u64) };
+    if ret >= 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Queries the active cellular modem and SIM status into `out_buf` JSON string.
+pub fn telephony_query(out_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::TelephonyQuery,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Fills `out_buf` with cryptographically secure random bytes from the hardware TRNG.
+pub fn get_random(out_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::GetRandom,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Triggers a mobile haptic touch feedback click via PC Speaker.
+pub fn audio_haptic_click() -> Result<(), i64> {
+    let ret = unsafe { syscall2(SyscallNumber::AudioControl, 0, 0) };
+    if ret >= 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Plays a smartphone notification chime.
+pub fn audio_notification_chime() -> Result<(), i64> {
+    let ret = unsafe { syscall2(SyscallNumber::AudioControl, 1, 0) };
+    if ret >= 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Plays a custom frequency audio tone in Hertz.
+pub fn audio_play_tone(freq_hz: u32) -> Result<(), i64> {
+    let ret = unsafe { syscall2(SyscallNumber::AudioControl, 2, freq_hz as u64) };
+    if ret >= 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Stops any active audio tone.
+pub fn audio_silence() -> Result<(), i64> {
+    let ret = unsafe { syscall2(SyscallNumber::AudioControl, 3, 0) };
+    if ret >= 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Derives an application-isolated 32-byte cryptographic key from hardware key slot.
+pub fn keystore_derive(slot_index: u32, out_buf: &mut [u8; 32]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall3(
+            SyscallNumber::KeystoreDerive,
+            slot_index as u64,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Queries mobile hardware sensor telemetry (orientation, 3-axis accel, ambient lux, proximity).
+pub fn sensor_read(out_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::SensorRead,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Queries mobile battery fuel gauge telemetry (voltage, SoC %, capacity, charging status).
+pub fn battery_query(out_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::BatteryQuery,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Dispatches an Android cross-zone intent through the ACR mediator.
+pub fn android_bridge_intent(action: &str, data_uri: &str, out_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::AndroidBridgeIntent,
+            action.as_ptr() as u64,
+            action.len() as u64,
+            data_uri.as_ptr() as u64,
+            data_uri.len() as u64,
+            out_buf.as_mut_ptr() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Queries current real-time clock (RTC / CMOS) wall-clock time into `out_buf` JSON string.
+pub fn rtc_get_time(out_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::RtcGetTime,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Parses a natural language user query into an on-device structured AMCP intent JSON string.
+pub fn nl_parse_intent(query: &str, out_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::NlParseIntent,
+            query.as_ptr() as u64,
+            query.len() as u64,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Queries multi-zone mobile thermal temperatures and cooling policy JSON string.
+pub fn thermal_query(out_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::ThermalQuery,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Establishes a cryptographic secure IPC channel with a peer task.
+pub fn secure_ipc_session(peer_task: u64, out_session_id: &mut u64) -> Result<(), i64> {
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::SecureIpcSession,
+            peer_task,
+            out_session_id as *mut u64 as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Computes on-device fixed-point cosine similarity between two 64-dimensional vectors.
+/// Returns similarity scaled by 10,000 (10000 = 1.0000).
+pub fn vector_cosine_similarity(vec_a: &[i16], vec_b: &[i16]) -> Result<i32, i64> {
+    if vec_a.len() != 64 || vec_b.len() != 64 {
+        return Err(-3); // InvalidArguments
+    }
+    let ret = unsafe {
+        syscall3(
+            SyscallNumber::VectorCosineSimilarity,
+            vec_a.as_ptr() as u64,
+            vec_b.as_ptr() as u64,
+            64,
+        )
+    };
+    Ok(ret as i32)
+}
+
+/// Encrypts a 512-byte sector using the sovereign encrypted storage vault.
+pub fn vault_encrypt_sector(block_index: u64, buf: &mut [u8; 512], iv: &[u8; 16]) -> Result<(), i64> {
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::VaultCrypt,
+            0,
+            block_index,
+            buf.as_mut_ptr() as u64,
+            512,
+            iv.as_ptr() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Decrypts a 512-byte sector using the sovereign encrypted storage vault.
+pub fn vault_decrypt_sector(block_index: u64, buf: &mut [u8; 512], iv: &[u8; 16]) -> Result<(), i64> {
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::VaultCrypt,
+            1,
+            block_index,
+            buf.as_mut_ptr() as u64,
+            512,
+            iv.as_ptr() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Appends an entry to the on-device AI Context Broker working memory ring.
+pub fn context_broker_append(tier: u8, text: &str) -> Result<u64, i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::ContextBroker,
+            0,
+            tier as u64,
+            text.as_ptr() as u64,
+            text.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as u64)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Queries working memory from the on-device AI Context Broker filtered by privacy tier.
+pub fn context_broker_query(tier: u8, out_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::ContextBroker,
+            1,
+            tier as u64,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Queries mobile wireless HAL status (Wi-Fi and BLE beacon) into `out_buf` JSON string.
+pub fn wireless_query(out_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::WirelessQuery,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Reads bytes from a virtual character device node in `/dev/`.
+pub fn devfs_read(path: &str, buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::DevFsIo,
+            0,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Writes bytes to a virtual character device node in `/dev/`.
+pub fn devfs_write(path: &str, buf: &[u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::DevFsIo,
+            1,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            buf.as_ptr() as u64,
+            buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Submits a multi-step system diagnostic task pipeline to the kernel execution engine.
+pub fn agent_plan_submit(name: &str) -> Result<u32, i64> {
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::AgentPlanExecute,
+            0,
+            0,
+            0,
+            name.as_ptr() as u64,
+            name.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as u32)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Advances a system diagnostic task pipeline to the next step, providing user confirmation if required.
+pub fn agent_plan_step(plan_id: u32, consent: bool) -> Result<(u16, u16), i64> {
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::AgentPlanExecute,
+            1,
+            plan_id as u64,
+            if consent { 1 } else { 0 },
+            0,
+            0,
+        )
+    };
+    if ret >= 0 {
+        let step_num = ((ret as usize) >> 16) as u16;
+        let status = (ret as usize & 0xFFFF) as u16;
+        Ok((step_num, status))
+    } else {
+        Err(ret)
+    }
+}
+
+/// Formats the execution status of an autonomous agent plan into JSON.
+pub fn agent_plan_status(plan_id: u32, out_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::AgentPlanExecute,
+            2,
+            plan_id as u64,
+            0,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Triggers immediate manual hardware force-takeover, aborting all active autonomous plans.
+pub fn agent_plan_force_takeover() -> Result<bool, i64> {
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::AgentPlanExecute,
+            3,
+            0,
+            0,
+            0,
+            0,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret != 0)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Checks if a package is revoked on the sovereign Certificate Revocation List (CRL).
+pub fn revocation_is_package_revoked(package_id: &str) -> Result<bool, i64> {
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::RevocationAudit,
+            0,
+            package_id.as_ptr() as u64,
+            package_id.len() as u64,
+            0,
+            0,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret != 0)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Places a malicious or compromised package on the sovereign CRL.
+pub fn revocation_revoke_package(package_id: &str) -> Result<(), i64> {
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::RevocationAudit,
+            1,
+            package_id.as_ptr() as u64,
+            package_id.len() as u64,
+            0,
+            0,
+        )
+    };
+    if ret >= 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Delegates an attenuated capability token to a target task with usage quota and duration.
+pub fn cap_delegate(
+    cap_slot: usize,
+    target_task: u64,
+    requested_rights: u32,
+    max_invocations: u32,
+    duration_ticks: u64,
+) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::CapDelegate,
+            cap_slot as u64,
+            target_task,
+            requested_rights as u64,
+            max_invocations as u64,
+            duration_ticks,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Sanitizes an input prompt/datagram by redacting personal identifiable information (PII).
+pub fn privacy_shield_audit(input: &str, out_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::PrivacyShieldAudit,
+            input.as_ptr() as u64,
+            input.len() as u64,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Interacts with the microkernel fluid inertial physics scroller (0=down, 1=move, 2=up, 3=tick).
+pub fn surface_physics(action: u32, y: i32, viewport_h: i32, content_h: i32) -> Result<i32, i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::SurfacePhysics,
+            action as u64,
+            y as u64,
+            viewport_h as u64,
+            content_h as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as i32)
+    } else {
+        Err(ret)
+    }
+}
+
+pub const FS_READ: u32 = 1;
+pub const FS_WRITE: u32 = 2;
+
+/// Opens a file in the Virtual Filesystem with requested rights.
+pub fn fs_open(cap_slot: usize, path: &str, rights: u32) -> Result<u32, i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::FsOpen,
+            cap_slot as u64,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            rights as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as u32)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Reads data from an open file descriptor.
+pub fn fs_read(cap_slot: usize, fd: u32, buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::FsRead,
+            cap_slot as u64,
+            fd as u64,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Writes data to an open file descriptor.
+pub fn fs_write(cap_slot: usize, fd: u32, buf: &[u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::FsWrite,
+            cap_slot as u64,
+            fd as u64,
+            buf.as_ptr() as u64,
+            buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Closes an open file descriptor.
+pub fn fs_close(fd: u32) -> Result<(), i64> {
+    let ret = unsafe {
+        syscall1(
+            SyscallNumber::FsClose,
+            fd as u64,
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Audits an Android APK package, decodes its binary manifest, and maps permissions to
+/// Inter OS zero-trust capabilities.
+pub fn apk_install_audit(apk_data: &[u8], out_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::ApkInstallAudit,
+            apk_data.as_ptr() as u64,
+            apk_data.len() as u64,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Audits and verifies an Android Dalvik Executable (classes.dex) bytecode payload.
+/// Rejects forbidden reflection, process spawning, or private host filesystem escapes.
+pub fn dex_verify_exec(dex_data: &[u8]) -> Result<u32, i64> {
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::DexVerifyExec,
+            dex_data.as_ptr() as u64,
+            dex_data.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as u32)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Captures a raw preview frame from the mobile camera sensor and runs the ISP & scene classifier.
+/// Returns the number of pixel bytes written to `preview_buf`.
+pub fn camera_capture(preview_buf: &mut [u8], meta_out: &mut [u32; 4]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::CameraCapture,
+            0,
+            preview_buf.as_mut_ptr() as u64,
+            preview_buf.len() as u64,
+            meta_out.as_mut_ptr() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Toggles the mobile camera LED flash torch state.
+pub fn camera_toggle_flash() -> Result<bool, i64> {
+    let mut dummy = [0u8; 1];
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::CameraCapture,
+            3,
+            dummy.as_mut_ptr() as u64,
+            1,
+            0,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret == 1)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Invokes a verified Dalvik method on a parsed DEX binary inside the sandboxed ACR Virtual Machine.
+/// Format: `method_spec` = "Lpackage/Class;->methodName"
+pub fn dex_invoke_method(dex_data: &[u8], method_spec: &str) -> Result<u32, i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::DexInvokeMethod,
+            dex_data.as_ptr() as u64,
+            dex_data.len() as u64,
+            method_spec.as_ptr() as u64,
+            method_spec.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as u32)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Queries the on-device AI model (Qwen2.5-0.5B) for intent synthesis and response generation.
+pub fn ai_assistant_query(prompt: &str, output_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::AiAssistantQuery,
+            prompt.as_ptr() as u64,
+            prompt.len() as u64,
+            output_buf.as_mut_ptr() as u64,
+            output_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Sensitive hardware and system resource categories requiring user capability consent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum SensitivePermission {
+    TelephonyModem = 1,
+    StorageSectorCrypt = 2,
+    NetworkSend = 3,
+    CameraCapture = 4,
+    AudioSynthesis = 5,
+    RtcClock = 6,
+}
+
+/// Requests dynamic capability consent from the kernel Permission Manager and Mobile Shell.
+/// Returns the assigned capability slot index on success.
+pub fn cap_request_consent(
+    perm: SensitivePermission,
+    app_name: &str,
+    auto_approve: bool,
+) -> Result<u32, i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::CapRequestConsent,
+            perm as u64,
+            app_name.as_ptr() as u64,
+            app_name.len() as u64,
+            if auto_approve { 1 } else { 0 },
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as u32)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Dispatches an AMCP share transaction to a recipient app or triggers the interactive share drawer.
+pub fn share_sheet_dispatch(
+    mime_type: &str,
+    uri: &str,
+    target_app: Option<&str>,
+) -> Result<u64, i64> {
+    let mut target_buf = [0u8; 64];
+    let target_ptr = if let Some(target) = target_app {
+        let len = target.len().min(63);
+        target_buf[..len].copy_from_slice(&target.as_bytes()[..len]);
+        target_buf[len] = 0;
+        target_buf.as_ptr() as u64
+    } else {
+        0
+    };
+
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::ShareSheetDispatch,
+            mime_type.as_ptr() as u64,
+            mime_type.len() as u64,
+            uri.as_ptr() as u64,
+            uri.len() as u64,
+            target_ptr,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as u64)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Creates or configures a Zero-Copy Shared Memory DMA Pipe.
+pub fn shm_pipe_create(pipe_id: u32, pages: u32, peer_task: u32) -> Result<u32, i64> {
+    let ret = unsafe {
+        syscall3(
+            SyscallNumber::ShmPipeCreate,
+            pipe_id as u64,
+            pages as u64,
+            peer_task as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as u32)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Streams high-throughput zero-copy data into a Shared Memory DMA Pipe.
+pub fn shm_pipe_transfer(pipe_id: u32, data: &[u8], flags: u32) -> Result<u64, i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::ShmPipeTransfer,
+            pipe_id as u64,
+            data.as_ptr() as u64,
+            data.len() as u64,
+            flags as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as u64)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Receives high-throughput zero-copy data from a Shared Memory Pipe.
+pub fn shm_pipe_receive(pipe_id: u32, out_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall3(
+            SyscallNumber::ShmPipeReceive,
+            pipe_id as u64,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Sovereign Asynchronous Event Reactor Bitmasks & Syscall Wrapper
+// -----------------------------------------------------------------------------
+
+/// Inbound IPC mailbox message available.
+pub const EVENT_IPC_MSG: u32        = 1 << 0; // 0x01
+/// Zero-Copy DMA Shared Memory pipe has data available to consume.
+pub const EVENT_SHM_READABLE: u32   = 1 << 1; // 0x02
+/// Zero-Copy DMA Shared Memory pipe has free slots available to stream.
+pub const EVENT_SHM_WRITABLE: u32   = 1 << 2; // 0x04
+/// Hardware system timer interval tick or deadline elapsed.
+pub const EVENT_TIMER_TICK: u32     = 1 << 3; // 0x08
+/// Capacitive touch digitizer input event frame available.
+pub const EVENT_TOUCH_INPUT: u32    = 1 << 4; // 0x10
+/// Inbound network socket datagram or packet received.
+pub const EVENT_NETWORK_PACKET: u32 = 1 << 5; // 0x20
+/// Cellular baseband modem unsolicited result code (URC) arrived.
+pub const EVENT_MODEM_URC: u32      = 1 << 6; // 0x40
+
+/// Polls for asynchronous system events with cooperative wait-queue blocking.
+pub fn event_poll(interest_mask: u32, timeout_ticks: u32) -> Result<u32, i64> {
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::EventPoll,
+            interest_mask as u64,
+            timeout_ticks as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as u32)
+    } else {
+        Err(ret)
+    }
+}
+
+
+
+
+
+
+
+
+
+
