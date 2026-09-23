@@ -1,0 +1,3 @@
+Processor: 8x Cortex-A53 / x86_64 Compatible
+Features: FPU VFPv4 NEON ASID64 AES SHA2
+Cache: 32KB L1I, 32KB L1D, 512KB L2

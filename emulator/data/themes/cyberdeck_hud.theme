@@ -1,0 +1,34 @@
+{
+  "theme_id": "cyberdeck_hud",
+  "name": "Cyberdeck Sovereign HUD",
+  "version": "2.0.0",
+  "author": "InterOS Design Labs",
+  "description": "Tactical electric cyan & emerald matrix HUD with illuminated telemetry and cyber-glass dock.",
+  "mockup_reference": "cyberdeck_hud_ui_1790110344489.jpg",
+  "tokens": {
+    "--theme-bg": "radial-gradient(circle at 50% 15%, #04181B 0%, #010A0C 100%)",
+    "--glass-surface": "rgba(0, 242, 254, 0.05)",
+    "--glass-surface-hover": "rgba(0, 242, 254, 0.10)",
+    "--glass-border": "rgba(0, 255, 213, 0.35)",
+    "--glass-border-hover": "rgba(0, 255, 213, 0.65)",
+    "--glass-specular": "inset 0 1px 2px 0 rgba(0, 255, 213, 0.6), inset 0 0 12px rgba(0, 242, 254, 0.15)",
+    "--glass-blur": "20px",
+    "--accent-primary": "#00FFD5",
+    "--accent-secondary": "#10B981",
+    "--accent-glow": "rgba(0, 255, 213, 0.5)",
+    "--dock-bg": "rgba(3, 16, 20, 0.92)",
+    "--dock-border": "rgba(0, 255, 213, 0.45)",
+    "--dock-arc-glow": "#00FFD5",
+    "--card-radius": "18px",
+    "--pod-radius": "16px",
+    "--text-primary": "#E0FFF9",
+    "--text-secondary": "#5EEAD4",
+    "--neon-chassis-glow": "0 0 35px rgba(0, 255, 213, 0.45)"
+  },
+  "bootloader": {
+    "immutable_brand": "InterOS",
+    "custom_subtext": "Cyberdeck Enclave • Microkernel Ring 0 Verified",
+    "accent_color": "#00FFD5",
+    "spinner_glow": "rgba(0, 255, 213, 0.85)"
+  }
+}

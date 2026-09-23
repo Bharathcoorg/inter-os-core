@@ -1,0 +1,17 @@
+[
+  {
+    "name": "Alice Vance",
+    "phone": "+1-555-0192",
+    "sim": "SIM 1"
+  },
+  {
+    "name": "Bob Stone",
+    "phone": "+1-555-0184",
+    "sim": "eSIM 2"
+  },
+  {
+    "name": "Core Gateway",
+    "phone": "*#06#",
+    "sim": "SIM 1"
+  }
+]

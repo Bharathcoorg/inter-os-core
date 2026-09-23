@@ -1,0 +1,5 @@
+InterOS Sovereign VFS
+Personal scratchpad and secure notes.
+- Dual-SIM enabled
+- LTPO 120Hz smooth motion
+- StrongBox key 0x4A1F loaded

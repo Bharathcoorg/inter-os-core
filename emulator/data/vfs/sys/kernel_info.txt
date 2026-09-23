@@ -1,0 +1,4 @@
+InterOS v1.3 (x86_64 SMP)
+Pure Rust Microkernel
+dm-verity Merkle Tree: VERIFIED
+Ring 0 / Ring 3 Privilege Separation: ENFORCED
