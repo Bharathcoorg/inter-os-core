@@ -1,0 +1,17 @@
+{
+  "id": "org.interos.meshchat",
+  "name": "Mesh Chat",
+  "version": "1.0.0",
+  "category": "communication",
+  "description": "Sovereign Offline P2P Mesh Messenger for InterOS Core",
+  "icon": "ui/icon.svg",
+  "entrypoint": {
+    "ui": "ui/index.html",
+    "backend": "bin/meshchat.elf"
+  },
+  "permissions": [
+    "CAP_MESH_RADIO",
+    "CAP_P2P_SOCKET"
+  ],
+  "min_sdk_version": "0.8.0"
+}

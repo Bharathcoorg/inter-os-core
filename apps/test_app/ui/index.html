@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Test App</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 20px;
+      background: #0d1117;
+      color: #e6edf3;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    .header { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+    .icon { width: 36px; height: 36px; border-radius: 8px; background: #238636; display: flex; align-items: center; justify-content: center; font-weight: bold; }
+    .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    button { background: #238636; border: none; color: #fff; padding: 10px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; }
+    button:hover { background: #2ea043; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="icon">IO</div>
+    <div>
+      <h2 style="margin: 0;">Test App</h2>
+      <small style="color: #8b949e;">org.interos.test_app v1.0.0</small>
+    </div>
+  </div>
+  <div class="card">
+    <p>Standard #![no_std] Rust mobile app with UI frontend</p>
+    <button id="btn-ipc">Send Syscall IPC</button>
+    <div id="status" style="margin-top: 12px; font-family: monospace; color: #58a6ff;">Ready</div>
+  </div>
+  <script>
+    document.getElementById("btn-ipc").addEventListener("click", async () => {
+      const status = document.getElementById("status");
+      status.textContent = "Dispatching SYS_IPC_SEND...";
+      if (window.InterOS && window.InterOS.ipc) {
+        const res = await window.InterOS.ipc.request("org.interos.test_app", "PING", { timestamp: Date.now() });
+        status.textContent = "IPC Response: " + JSON.stringify(res);
+      } else {
+        status.textContent = "IPC Bridge not available in standalone preview";
+      }
+    });
+  </script>
+</body>
+</html>

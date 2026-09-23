@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sovereign Notes — Inter OS</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="glass-app-container">
+    <!-- Header Bar -->
+    <header class="glass-app-header">
+      <div class="header-left">
+        <span class="app-icon">📝</span>
+        <div>
+          <h1 class="app-title">Sovereign Notes</h1>
+          <span class="app-subtitle" id="battery-indicator">Battery: --%</span>
+        </div>
+      </div>
+      <button class="btn-glass-action" id="btn-save-note">Save to VFS</button>
+    </header>
+
+    <!-- Editor Area -->
+    <main class="glass-editor-main">
+      <input type="text" class="note-title-input" id="note-title" placeholder="Note Title...">
+      <textarea class="note-body-textarea" id="note-body" placeholder="Write thoughts, keys, or logs here... Stored in capability-scoped VFS partition."></textarea>
+    </main>
+
+    <!-- Footer Status -->
+    <footer class="glass-app-footer">
+      <span id="storage-status">Path: /data/user/notes.txt</span>
+      <button class="btn-glass-ghost" id="btn-load-note">Reload</button>
+    </footer>
+  </div>
+
+  <script src="interos.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

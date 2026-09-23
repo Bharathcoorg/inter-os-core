@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Health Hub</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 16px;
+      background: #0d1117;
+      color: #e6edf3;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .vitals-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .vital-card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 12px;
+      padding: 12px;
+    }
+    .vital-title { font-size: 11px; color: #8b949e; margin-bottom: 4px; display: flex; align-items: center; gap: 6px; }
+    .vital-value { font-size: 24px; font-weight: 700; color: #ffffff; }
+    .vital-unit { font-size: 11px; color: #8b949e; font-weight: normal; margin-left: 4px; }
+    .card-ecg {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 12px;
+      padding: 12px;
+      margin-bottom: 16px;
+    }
+    canvas { width: 100%; height: 90px; background: #0b0e14; border-radius: 8px; }
+    .card-gyro {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 12px;
+      padding: 12px;
+    }
+    .gyro-row { display: flex; justify-content: space-between; font-family: monospace; font-size: 12px; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div style="display:flex; align-items:center; gap:8px;">
+      <h3 style="margin:0; font-size:18px;">Health Hub</h3>
+      <span style="font-size:10px; background:rgba(244,63,94,0.2); color:#f43f5e; padding:2px 6px; border-radius:8px;">HAL 60Hz</span>
+    </div>
+    <span style="font-size:12px; color:#8b949e;">Ring 3 Sensor Bus</span>
+  </div>
+
+  <div class="vitals-grid">
+    <div class="vital-card">
+      <div class="vital-title">❤️ HEART RATE</div>
+      <div class="vital-value" id="val-hr">72 <span class="vital-unit">BPM</span></div>
+    </div>
+    <div class="vital-card">
+      <div class="vital-title">👣 STEP GOAL</div>
+      <div class="vital-value" id="val-steps">8,432 <span class="vital-unit">/ 10k</span></div>
+    </div>
+    <div class="vital-card">
+      <div class="vital-title">🔥 ACTIVE CALORIES</div>
+      <div class="vital-value" id="val-cal">412 <span class="vital-unit">kcal</span></div>
+    </div>
+    <div class="vital-card">
+      <div class="vital-title">🩸 BLOOD OXYGEN</div>
+      <div class="vital-value" id="val-spo2">99 <span class="vital-unit">% SpO2</span></div>
+    </div>
+  </div>
+
+  <div class="card-ecg">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+      <span style="font-size:12px; font-weight:600; color:#f43f5e;">REAL-TIME PPG WAVEFORM</span>
+      <span style="font-size:10px; font-family:monospace; color:#8b949e;">SAMPLE RATE: 250 S/s</span>
+    </div>
+    <canvas id="canvas-ecg" width="300" height="90"></canvas>
+  </div>
+
+  <div class="card-gyro">
+    <div style="font-size:12px; font-weight:600; color:#8b949e; margin-bottom:4px;">3-AXIS IMU REGISTERS</div>
+    <div class="gyro-row"><span>AX: +0.04 g</span><span>AY: -0.98 g</span><span>AZ: +0.12 g</span></div>
+    <div class="gyro-row"><span>GX: +0.02 °/s</span><span>GY: +0.01 °/s</span><span>GZ: -0.05 °/s</span></div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById("canvas-ecg");
+    const ctx = canvas.getContext("2d");
+    let points = [];
+    for (let i = 0; i < 300; i++) points.push(45);
+    let step = 0;
+
+    function drawWave() {
+      step++;
+      let y = 45 + Math.sin(step * 0.1) * 4;
+      // Pulse beat
+      if (step % 40 === 0) y = 15;
+      else if (step % 40 === 2) y = 75;
+      else if (step % 40 === 4) y = 30;
+
+      points.shift();
+      points.push(y);
+
+      ctx.clearRect(0, 0, 300, 90);
+      ctx.strokeStyle = "rgba(244, 63, 94, 0.2)";
+      ctx.lineWidth = 1;
+      // Grid lines
+      for (let x = 0; x < 300; x += 30) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, 90); ctx.stroke();
+      }
+      for (let gy = 0; gy < 90; gy += 18) {
+        ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(300, gy); ctx.stroke();
+      }
+
+      ctx.strokeStyle = "#f43f5e";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (let i = 0; i < points.length; i++) {
+        if (i === 0) ctx.moveTo(i, points[i]);
+        else ctx.lineTo(i, points[i]);
+      }
+      ctx.stroke();
+
+      requestAnimationFrame(drawWave);
+    }
+    drawWave();
+
+    setInterval(() => {
+      if (window.InterOS && window.InterOS.ipc) {
+        window.InterOS.ipc.send("org.interos.health", 0x10, { timestamp: Date.now() });
+      }
+    }, 3000);
+  </script>
+</body>
+</html>

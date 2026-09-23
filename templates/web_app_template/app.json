@@ -1,0 +1,22 @@
+{
+  "id": "org.interos.notes",
+  "name": "Sovereign Notes",
+  "version": "1.0.0",
+  "description": "Minimalist encrypted scratchpad built with HTML, CSS & JavaScript for Inter OS",
+  "author": "InterOS Community Developer",
+  "entry": "index.html",
+  "icon": "📝",
+  "permissions": [
+    "vfs.read",
+    "vfs.write",
+    "notifications",
+    "audio.feedback",
+    "telemetry.battery"
+  ],
+  "orientation": "portrait",
+  "display": {
+    "theme": "dark",
+    "statusBar": "translucent",
+    "preferredRefreshRate": 120
+  }
+}

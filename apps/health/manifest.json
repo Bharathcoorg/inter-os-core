@@ -1,0 +1,18 @@
+{
+  "id": "org.interos.health",
+  "name": "Health Hub",
+  "version": "1.0.0",
+  "category": "health",
+  "description": "Sovereign Health & Biometric Telemetry Hub for InterOS Core",
+  "icon": "ui/icon.svg",
+  "entrypoint": {
+    "ui": "ui/index.html",
+    "backend": "bin/health.elf"
+  },
+  "permissions": [
+    "CAP_SENSOR_ACCEL",
+    "CAP_SENSOR_GYRO",
+    "CAP_SENSOR_HR"
+  ],
+  "min_sdk_version": "0.8.0"
+}

@@ -1,0 +1,13 @@
+[package]
+name = "meshchat"
+version = "0.1.0"
+edition = "2021"
+authors = ["InterOS Community <dev@interos.org>"]
+description = "Sovereign Offline P2P Mesh Messenger for InterOS Core"
+
+[dependencies]
+interos-std = { path = "../../sdk/rust/interos-std" }
+
+[[bin]]
+name = "meshchat"
+path = "src/main.rs"
