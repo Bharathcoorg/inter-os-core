@@ -4094,6 +4094,17 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  // Default to Studio Deck if active in markup
+  if (btnShowTelemetry?.classList.contains('active')) {
+    if (studioWorkspace) studioWorkspace.classList.remove('phone-view-active');
+    if (rightPane) rightPane.style.display = 'flex';
+    if (window.innerWidth < 1024) {
+      if (leftPane) leftPane.style.display = 'none';
+    } else {
+      if (leftPane) leftPane.style.display = 'flex';
+    }
+  }
+
   async function handlePackageUpload(file) {
     const sizeMb = (file.size / (1024 * 1024)).toFixed(2);
     logConsole('info', `[SIDELOAD] Ingesting package '${file.name}' (${sizeMb} MB)...`);
