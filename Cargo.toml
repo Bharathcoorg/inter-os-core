@@ -1,0 +1,40 @@
+[workspace]
+members = [
+    "apps/test_app",
+    "kernel",
+    "sdk/rust/interos-std",
+    "userspace/init",
+    "apps/settings",
+    "apps/terminal",
+    "apps/dialer",
+    "apps/vault",
+    "apps/camera",
+    "apps/file_manager",
+    "apps/browser",
+    "apps/messages",
+    "apps/calendar",
+    "apps/music",
+    "apps/hello_world",
+    "apps/sensor_dashboard",
+    "apps/camera_preview",
+    "apps/calculator",
+    "kernel-aarch64",
+    "kernel-riscv64",
+    "apps/authenticator",
+    "apps/health",
+    "apps/meshchat",
+    "apps/ai_assistant",
+    "kernel/src/compat/android/shared",
+]
+exclude = [
+    "boot",
+    "tools/mkbootimg",
+]
+resolver = "2"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true

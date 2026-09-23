@@ -1,0 +1,27 @@
+# Build artifacts
+target/
+**/*.img
+**/*.bin
+**/*.log
+dist/
+
+# IDE & OS files
+.idea/
+.vscode/
+Thumbs.db
+
+# Node dependencies
+node_modules/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Sideloaded uploaded binaries
+emulator/installed_apps/
+emulator/data/apps/*
+!emulator/data/apps/.gitkeep
+
+# Agent & IDE caches
+.kilo/
+
