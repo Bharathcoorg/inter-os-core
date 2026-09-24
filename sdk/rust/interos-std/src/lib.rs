@@ -57,6 +57,8 @@ pub enum SyscallNumber {
     ShmPipeTransfer = 60,
     ShmPipeReceive = 61,
     EventPoll = 62,
+    WaitPid = 63,
+    ExitWithCode = 64,
 }
 
 // -----------------------------------------------------------------------------
@@ -357,8 +359,26 @@ pub fn yield_now() {
 /// Terminates the current userspace task.
 #[inline(always)]
 pub fn exit() -> ! {
-    unsafe { syscall0(SyscallNumber::Exit) };
+    exit_with_code(0);
+}
+
+/// Terminates the current userspace task with a specific exit status code.
+#[inline(always)]
+pub fn exit_with_code(code: i32) -> ! {
+    unsafe { syscall1(SyscallNumber::ExitWithCode, code as u64) };
     loop {}
+}
+
+/// Waits for a child process to terminate and reaps its exit code.
+/// Returns Ok(()) on successful reap, or Err(code) on failure or when child is still running.
+#[inline(always)]
+pub fn waitpid(child_id: u64) -> Result<(), i64> {
+    let ret = unsafe { syscall1(SyscallNumber::WaitPid, child_id) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
 }
 
 /// Emits a diagnostic log string through the kernel serial console.

@@ -72,6 +72,8 @@ pub enum SyscallNumber {
     ShmPipeTransfer = 60,
     ShmPipeReceive = 61,
     EventPoll = 62,
+    WaitPid = 63,
+    ExitWithCode = 64,
 }
 
 /// System call result status codes.
@@ -1148,6 +1150,14 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 Ok(mask) => mask as i64,
                 Err(e) => e as i64,
             }
+        }
+        63 => {
+            // WaitPid: a1 = child_id
+            sys_waitpid(a1) as i64
+        }
+        64 => {
+            // ExitWithCode: a1 = exit_code
+            sys_exit_with_code(a1 as i32);
         }
         _ => SyscallResult::UnknownSyscall as i64,
     }
