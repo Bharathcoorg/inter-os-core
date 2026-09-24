@@ -1312,9 +1312,9 @@ pub fn sys_power_governor(action: u32, governor_id: u8) -> Result<u32, SyscallRe
 }
 
 /// Queries the active cellular modem and SIM status into `out_buf` JSON string.
+/// In standard QEMU / development emulator targets without a physical baseband modem,
+/// this reports honestly that no hardware modem is detected.
 pub fn sys_telephony_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
-    let modem = crate::telephony::CELLULAR_MODEM.lock();
-    let sim = crate::telephony::SOVEREIGN_SIM.lock();
     use core::fmt::Write;
     struct SliceWriter<'a> {
         buf: &'a mut [u8],
@@ -1331,11 +1331,21 @@ pub fn sys_telephony_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
         }
     }
     let mut writer = SliceWriter { buf: out_buf, pos: 0 };
-    let _ = write!(
-        writer,
-        r#"{{"operator":"{}","rssi":{},"state":"{:?}","apn":"{}"}}"#,
-        sim.carrier_operator, modem.signal.rssi, modem.state, modem.apn
-    );
+    // Honest hardware detection: check if modem is actively registered (not PowerDown)
+    let modem = crate::telephony::CELLULAR_MODEM.lock();
+    let modem_present = modem.state != crate::telephony::ModemRadioState::PowerDown;
+    if modem_present {
+        let _ = write!(
+            writer,
+            r#"{{"present":true,"operator":"StandardModem","rssi":{},"state":"{:?}"}}"#,
+            modem.signal.rssi, modem.state
+        );
+    } else {
+        let _ = write!(
+            writer,
+            r#"{{"present":false,"status":"NOT_IMPLEMENTED","error":"No physical cellular modem hardware detected"}}"#
+        );
+    }
     Ok(writer.pos)
 }
 
@@ -1379,9 +1389,8 @@ pub fn sys_keystore_derive(slot_idx: u32, out_buf: &mut [u8; 32]) -> Result<usiz
 }
 
 /// Queries mobile hardware sensor telemetry (orientation, 3-axis accel, ambient lux, proximity).
+/// Reports honestly if hardware sensors are not physically present on the board.
 pub fn sys_sensor_read(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
-    let sm = crate::sensor::SENSOR_MANAGER.lock();
-    let orientation = sm.imu.determine_orientation();
     use core::fmt::Write;
     struct SliceWriter<'a> {
         buf: &'a mut [u8],
@@ -1398,17 +1407,26 @@ pub fn sys_sensor_read(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
         }
     }
     let mut writer = SliceWriter { buf: out_buf, pos: 0 };
-    let _ = write!(
-        writer,
-        r#"{{"orientation":"{:?}","accel":{},"lux":{},"near":{}}}"#,
-        orientation, sm.imu.accel.y, sm.light.lux, sm.proximity.is_near()
-    );
+    let sm = crate::sensor::SENSOR_MANAGER.lock();
+    if sm.is_hardware_present() {
+        let orientation = sm.imu.determine_orientation();
+        let _ = write!(
+            writer,
+            r#"{{"present":true,"orientation":"{:?}","accel":{},"lux":{},"near":{}}}"#,
+            orientation, sm.imu.accel.y, sm.light.lux, sm.proximity.is_near()
+        );
+    } else {
+        let _ = write!(
+            writer,
+            r#"{{"present":false,"status":"NOT_IMPLEMENTED","error":"No physical IMU or ambient sensor detected"}}"#
+        );
+    }
     Ok(writer.pos)
 }
 
 /// Queries battery fuel gauge telemetry (voltage, SoC %, capacity, charging status).
+/// In standard QEMU development targets without an ACPI/I2C fuel gauge, reports honestly.
 pub fn sys_battery_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
-    let bg = crate::resource::BATTERY_GAUGE.lock();
     use core::fmt::Write;
     struct SliceWriter<'a> {
         buf: &'a mut [u8],
@@ -1425,11 +1443,19 @@ pub fn sys_battery_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
         }
     }
     let mut writer = SliceWriter { buf: out_buf, pos: 0 };
-    let _ = write!(
-        writer,
-        r#"{{"voltage_mv":{},"soc":{},"capacity":{},"charging":"{:?}","temp":{}}}"#,
-        bg.voltage_mv, bg.soc_percent, bg.capacity_mah, bg.charging_status, bg.temperature_c
-    );
+    let bg = crate::resource::BATTERY_GAUGE.lock();
+    if bg.is_hardware_present() {
+        let _ = write!(
+            writer,
+            r#"{{"present":true,"voltage_mv":{},"soc":{},"capacity":{},"charging":"{:?}","temp":{}}}"#,
+            bg.voltage_mv, bg.soc_percent, bg.capacity_mah, bg.charging_status, bg.temperature_c
+        );
+    } else {
+        let _ = write!(
+            writer,
+            r#"{{"present":false,"power_source":"LinePower","status":"UNSUPPORTED","error":"No ACPI/I2C battery fuel gauge detected"}}"#
+        );
+    }
     Ok(writer.pos)
 }
 

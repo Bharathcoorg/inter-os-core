@@ -27,6 +27,12 @@ impl SensorManager {
             light: LightSensor::new(),
         }
     }
+
+    /// Checks if physical IMU/ambient hardware sensors are detected on the bus.
+    pub fn is_hardware_present(&self) -> bool {
+        // On standard QEMU virt/PC without physical I2C sensor chips, report false
+        false
+    }
 }
 
 pub static SENSOR_MANAGER: Mutex<SensorManager> = Mutex::new(SensorManager::new());

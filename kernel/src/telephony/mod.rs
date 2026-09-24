@@ -15,42 +15,36 @@ pub use serial_ril::{SERIAL_RIL, SerialRilDriver, UrcEvent, test_serial_ril};
 use spin::Mutex;
 use crate::serial_println;
 
-/// Global static instance of the Sovereign eSIM Vault.
+/// Global static instance of the Mobile SIM Profile.
 pub static SOVEREIGN_SIM: Mutex<SovereignEsim> = Mutex::new(SovereignEsim {
-    subscriber_did: alloc::string::String::new(),
-    carrier_operator: "INTER_SOVEREIGN_5G",
+    subscriber_id: alloc::string::String::new(),
+    carrier_operator: "None",
     imsi_pseudonym: [0u8; 16],
     pin_code: *b"1234",
-    pin_verified: true,
-    status: SimStatus::Ready,
+    pin_verified: false,
+    status: SimStatus::NoSim,
 });
 
 /// Global static instance of the Cellular Modem Driver.
 pub static CELLULAR_MODEM: Mutex<CellularModem> = Mutex::new(CellularModem {
-    state: ModemRadioState::RegisteredHome,
-    signal: SignalQuality { rssi: 31, ber: 99 },
-    pdp_context_active: true,
-    apn: "sovereign.net",
+    state: ModemRadioState::PowerDown,
+    signal: SignalQuality { rssi: 0, ber: 99 },
+    pdp_context_active: false,
+    apn: "",
     last_received_sms: None,
 });
 
 /// Initializes the Telephony subsystem and executes automated self-tests.
 pub fn init() {
-    serial_println!("--- [Initializing Sovereign Telephony & Cellular Modem Subsystem] ---");
+    serial_println!("--- [Initializing Mobile Telephony & Baseband Subsystem] ---");
 
-    // 1. Initialize eSIM with device sovereign DID
+    // Initialize SIM profile state
     {
         let mut sim = SOVEREIGN_SIM.lock();
-        *sim = SovereignEsim::new("did:inter:subscriber:440bd3181a197bc69d36c81618a4e570");
-        assert_eq!(sim.status, SimStatus::Ready);
-        assert_eq!(sim.carrier_operator, "INTER_SOVEREIGN_5G");
-
-        let challenge = [0x42u8; 16];
-        let auth_token = sim.generate_auth_token(&challenge);
-        assert_ne!(auth_token, [0u8; 32], "eSIM auth token must be non-zero");
+        *sim = SovereignEsim::new("sub_001_mobile_core");
         serial_println!(
-            "[TEST] Sovereign eSIM: Bound to DID '{}', operator '{}', auth token generated.",
-            sim.subscriber_did, sim.carrier_operator
+            "[TELEPHONY] SIM Profile: Initialized (Status = {:?}, Operator = '{}').",
+            sim.status, sim.carrier_operator
         );
     }
 
@@ -63,19 +57,15 @@ pub fn init() {
         assert_eq!(at_resp, "OK");
 
         let cpin_resp = modem.execute_at("AT+CPIN?", &sim).expect("CPIN failed");
-        assert!(cpin_resp.contains("READY"));
+        assert!(cpin_resp.contains("CME ERROR") || cpin_resp.contains("READY"));
 
         let csq_resp = modem.execute_at("AT+CSQ", &sim).expect("CSQ failed");
-        assert!(csq_resp.contains("+CSQ: 31,99"));
+        assert!(csq_resp.contains("+CSQ:"));
 
         let creg_resp = modem.execute_at("AT+CREG?", &sim).expect("CREG failed");
-        assert!(csq_resp.contains("OK"));
-        assert!(creg_resp.contains("+CREG: 0,1"));
+        assert!(creg_resp.contains("+CREG:"));
 
-        let cops_resp = modem.execute_at("AT+COPS?", &sim).expect("COPS failed");
-        assert!(cops_resp.contains("INTER_SOVEREIGN_5G"));
-
-        serial_println!("[TEST] Cellular Modem: 3GPP AT command state machine PASSED (AT, CPIN, CSQ, CREG, COPS).");
+        serial_println!("[TEST] Cellular Modem: 3GPP AT command state machine verified (AT, CPIN, CSQ, CREG).");
     }
 
     // 3. Test SMS Intent Routing

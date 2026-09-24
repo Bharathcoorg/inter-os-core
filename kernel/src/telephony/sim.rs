@@ -16,9 +16,9 @@ pub enum SimStatus {
     Blocked,
 }
 
-/// Sovereign eSIM Profile.
+/// Mobile eSIM Profile.
 pub struct SovereignEsim {
-    pub subscriber_did: String,
+    pub subscriber_id: String,
     pub carrier_operator: &'static str,
     pub imsi_pseudonym: [u8; 16],
     pub pin_code: [u8; 4],
@@ -27,18 +27,18 @@ pub struct SovereignEsim {
 }
 
 impl SovereignEsim {
-    pub fn new(subscriber_did: &str) -> Self {
+    pub fn new(subscriber_id: &str) -> Self {
         let mut imsi = [0u8; 16];
-        let hash = Sha256::digest(subscriber_did.as_bytes());
+        let hash = Sha256::digest(subscriber_id.as_bytes());
         imsi.copy_from_slice(&hash[0..16]);
 
         Self {
-            subscriber_did: subscriber_did.to_string(),
-            carrier_operator: "INTER_SOVEREIGN_5G",
+            subscriber_id: subscriber_id.to_string(),
+            carrier_operator: "StandardCellular",
             imsi_pseudonym: imsi,
             pin_code: *b"1234",
-            pin_verified: true, // Auto-attested by hardware vault
-            status: SimStatus::Ready,
+            pin_verified: false,
+            status: SimStatus::NoSim,
         }
     }
 

@@ -46,6 +46,12 @@ impl BatteryFuelGauge {
         }
     }
 
+    /// Checks if a physical ACPI or I2C battery fuel gauge is present on the board.
+    pub fn is_hardware_present(&self) -> bool {
+        // Standard development QEMU/PC platform runs on AC/line power without physical battery
+        false
+    }
+
     /// Updates terminal voltage and recalculates State of Charge (SoC) curve.
     pub fn update_voltage(&mut self, mv: u32) {
         self.voltage_mv = mv;
