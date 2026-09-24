@@ -202,6 +202,31 @@ impl Scheduler {
         }
     }
 
+    /// Reaps a terminated child owned by parent_id, returning its exit code.
+    ///
+    /// Reaping is only allowed for Zombie/Terminated children and never removes
+    /// the currently running task. Dropping the TCB releases its kernel stack,
+    /// page table and capability table.
+    pub fn reap_child(&mut self, parent_id: TaskId, child_id: TaskId) -> Result<i32, &'static str> {
+        if child_id == TaskId(0) || child_id == self.tasks.get(self.current_idx).map(|t| t.id).unwrap_or(TaskId(0)) {
+            return Err("child cannot be reaped");
+        }
+        let index = self.tasks.iter().position(|task| {
+            task.id == child_id
+                && task.parent_id == parent_id
+                && matches!(task.state, TaskState::Zombie | TaskState::Terminated)
+        }).ok_or("child not ready or not owned by caller")?;
+        let exit_code = self.tasks[index].exit_code;
+        self.tasks.remove(index);
+        if index < self.current_idx {
+            self.current_idx -= 1;
+        }
+        if self.current_idx >= self.tasks.len() && !self.tasks.is_empty() {
+            self.current_idx = self.tasks.len() - 1;
+        }
+        Ok(exit_code)
+    }
+
     /// Returns the total count of registered tasks.
     pub fn task_count(&self) -> usize {
         self.tasks.len()
