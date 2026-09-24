@@ -225,7 +225,7 @@ impl Scheduler {
                 "0x0000000000100000"
             };
             crate::serial_println!(
-                "[PROC] pid={} name={} state={} prio={} ticks={} caps={} mem=128 ppid={} cr3={}",
+                "[PROC] pid={} name={} state={} prio={} ticks={} caps={} kstack={} ppid={} cr3={}",
                 task.id.0,
                 task.name,
                 state_str,
