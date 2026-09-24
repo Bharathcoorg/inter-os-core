@@ -359,6 +359,27 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // 31b. Initialize Asynchronous Event Notification Subsystem (Sovereign epoll/kqueue)
     event::init();
 
+    // 31c. Verify .rapp package format round-trip (build → parse → SHA-256 verify)
+    {
+        use package::rapp::{build_rapp, parse_rapp, RappArch};
+        let test_elf = b"\x7fELF_TEST_PAYLOAD_STUB";
+        let rapp_bin = build_rapp("com.test.hello", "interos", (1, 0, 0), RappArch::X86_64, &[1, 2], test_elf);
+        match parse_rapp(&rapp_bin) {
+            Ok(manifest) => {
+                assert_eq!(manifest.package_id, "com.test.hello");
+                assert_eq!(manifest.publisher_id, "interos");
+                assert_eq!(manifest.version, (1, 0, 0));
+                assert_eq!(manifest.arch, RappArch::X86_64);
+                assert_eq!(manifest.capabilities.len(), 2);
+                assert_eq!(manifest.payload_len, test_elf.len());
+                serial_println!("[OK] .rapp package round-trip: build → parse → SHA-256 verify PASSED");
+            }
+            Err(e) => {
+                serial_println!("[FAIL] .rapp package round-trip failed: {:?}", e);
+            }
+        }
+    }
+
     // 32. Initialize Hardware MSR Fast System Call Extensions (SCE, STAR, LSTAR, FMASK)
     syscall::entry::init();
 
