@@ -121,171 +121,7 @@ def resolve_vfs_path(req_path):
             safe_parts.append(p)
     return os.path.join(VFS_ROOT, *safe_parts)
 
-DEFAULT_APPS = [
-    {
-        "id": "app.browser",
-        "name": "Sovereign Browser",
-        "filename": "browser.rapp",
-        "format": "Rust App Package (.rapp)",
-        "type": "Native Ring 3",
-        "size": 147456,
-        "sha256": "8f1a7d42e09b11c3...",
-        "status": "System Verified",
-        "capabilities": ["DisplayScanout", "ZeroTrustNetwork", "SandboxedVFS"]
-    },
-    {
-        "id": "app.calculator",
-        "name": "Touch Calculator",
-        "filename": "calculator.rapp",
-        "format": "Rust App Package (.rapp)",
-        "type": "Native Ring 3",
-        "size": 65536,
-        "sha256": "4c2e9b17f8a3d5e2...",
-        "status": "System Verified",
-        "capabilities": ["DisplayScanout", "AudioPlayback"]
-    },
-    {
-        "id": "app.camera",
-        "name": "Sovereign Camera",
-        "filename": "camera.rapp",
-        "format": "Rust App Package (.rapp)",
-        "type": "Native Ring 3",
-        "size": 98304,
-        "sha256": "9b3c4d5e6f7a8b9c...",
-        "status": "System Verified",
-        "capabilities": ["DisplayScanout", "CameraCapture", "SandboxedVFS"]
-    },
-    {
-        "id": "app.settings",
-        "name": "System Settings",
-        "filename": "settings.rapp",
-        "format": "Rust App Package (.rapp)",
-        "type": "Native Ring 3",
-        "size": 81920,
-        "sha256": "3a4b5c6d7e8f9a0b...",
-        "status": "System Verified",
-        "capabilities": ["HardwareHAL", "DisplayScanout", "PowerGovernor"]
-    },
-    {
-        "id": "app.file_manager",
-        "name": "Sovereign VFS Explorer",
-        "filename": "file_manager.rapp",
-        "format": "Rust App Package (.rapp)",
-        "type": "Native Ring 3",
-        "size": 73728,
-        "sha256": "7e8f9a0b1c2d3e4f...",
-        "status": "System Verified",
-        "capabilities": ["SandboxedVFS", "DisplayScanout"]
-    },
-    {
-        "id": "app.dialer",
-        "name": "Cellular Dialer",
-        "filename": "dialer.rapp",
-        "format": "Rust App Package (.rapp)",
-        "type": "Native Ring 3",
-        "size": 57344,
-        "sha256": "2d3e4f5a6b7c8d9e...",
-        "status": "System Verified",
-        "capabilities": ["CellularModem", "AudioPlayback"]
-    },
-    {
-        "id": "app.messages",
-        "name": "Sovereign Messages",
-        "filename": "messages.rapp",
-        "format": "Rust App Package (.rapp)",
-        "type": "Native Ring 3",
-        "size": 61440,
-        "sha256": "5f6a7b8c9d0e1f2a...",
-        "status": "System Verified",
-        "capabilities": ["CellularModem", "SandboxedVFS"]
-    },
-    {
-        "id": "app.sensor_dashboard",
-        "name": "Sensor Dashboard",
-        "filename": "sensor_dashboard.rapp",
-        "format": "Rust App Package (.rapp)",
-        "type": "Native Ring 3",
-        "size": 49152,
-        "sha256": "1a2b3c4d5e6f7a8b...",
-        "status": "System Verified",
-        "capabilities": ["SensorsHAL", "DisplayScanout"]
-    },
-    {
-        "id": "app.hello_world",
-        "name": "Hello World Reference",
-        "filename": "hello_world.rapp",
-        "format": "Rust App Package (.rapp)",
-        "type": "Native Ring 3",
-        "size": 45056,
-        "sha256": "0a1b2c3d4e5f6a7b...",
-        "status": "System Verified",
-        "capabilities": ["DisplayScanout"]
-    },
-    {
-        "id": "app.music",
-        "name": "Hi-Fi Audio Synthesizer",
-        "filename": "music.rapp",
-        "format": "Rust App Package (.rapp)",
-        "type": "Native Ring 3",
-        "size": 77824,
-        "sha256": "3d4e5f6a7b8c9d0e...",
-        "status": "System Verified",
-        "capabilities": ["AudioPlayback", "KeystoreDerivation", "DMAStreaming"]
-    },
-    {
-        "id": "app.calendar",
-        "name": "Sovereign Calendar",
-        "filename": "calendar.rapp",
-        "format": "Rust App Package (.rapp)",
-        "type": "Native Ring 3",
-        "size": 53248,
-        "sha256": "6b7c8d9e0f1a2b3c...",
-        "status": "System Verified",
-        "capabilities": ["SandboxedVFS", "DisplayScanout", "LocalAlarms"]
-    },
-    {
-        "id": "org.interos.authenticator",
-        "name": "Authenticator",
-        "filename": "authenticator.rapp",
-        "format": "Rust App Package (.rapp)",
-        "type": "Sovereign Ring 3",
-        "version": "1.0.0",
-        "category": "security",
-        "size": 2987,
-        "sha256": "4a5b6c7d8e9f0a1b...",
-        "status": "System Verified",
-        "capabilities": ["CAP_HARDWARE_KEYSTORE", "CAP_SECURE_STORAGE"],
-        "permissions": ["CAP_HARDWARE_KEYSTORE", "CAP_SECURE_STORAGE"]
-    },
-    {
-        "id": "org.interos.health",
-        "name": "Health Hub",
-        "filename": "health.rapp",
-        "format": "Rust App Package (.rapp)",
-        "type": "Sovereign Ring 3",
-        "version": "1.0.0",
-        "category": "health",
-        "size": 2523,
-        "sha256": "9f8e7d6c5b4a3b2a...",
-        "status": "System Verified",
-        "capabilities": ["CAP_SENSOR_ACCEL", "CAP_SENSOR_GYRO", "CAP_SENSOR_HR"],
-        "permissions": ["CAP_SENSOR_ACCEL", "CAP_SENSOR_GYRO", "CAP_SENSOR_HR"]
-    },
-    {
-        "id": "org.interos.meshchat",
-        "name": "Mesh Chat",
-        "filename": "meshchat.rapp",
-        "format": "Rust App Package (.rapp)",
-        "type": "Sovereign Ring 3",
-        "version": "1.0.0",
-        "category": "communication",
-        "size": 2722,
-        "sha256": "1e2d3c4b5a6f7e8d...",
-        "status": "System Verified",
-        "capabilities": ["CAP_MESH_RADIO", "CAP_P2P_SOCKET"],
-        "permissions": ["CAP_MESH_RADIO", "CAP_P2P_SOCKET"]
-    }
-]
+DEFAULT_APPS = []
 
 sideloaded_apps = []
 uninstalled_app_ids = set()
@@ -399,43 +235,51 @@ def extract_real_processes():
     return []
 
 def extract_real_memory():
-    """Extracts memory management invariants from QEMU monitor and profile."""
+    """Return only memory state actually observed from the live guest."""
     t = query_qemu_monitor()
-    alive = t["qemu_alive"]
-    cr3 = t.get("cpu", {}).get("registers", {}).get("CR3", "0x0000000000100000") if alive else "N/A"
-    cr0 = t.get("cpu", {}).get("registers", {}).get("CR0", "0x80010033") if alive else "N/A"
-    cr4 = t.get("cpu", {}).get("registers", {}).get("CR4", "0x000006F0") if alive else "N/A"
-    prof = SUPPORTED_PROFILES.get(active_profile_key, {})
-    ram_mb = prof.get("ram", 1024)
+    alive = bool(t.get("qemu_alive"))
+    if not alive:
+        return {
+            "qemu_alive": False,
+            "source": "UNAVAILABLE",
+            "cr3": None,
+            "cr0": None,
+            "cr4": None,
+            "arch": None,
+            "total_ram_bytes": None,
+            "total_ram_mb": None,
+            "heap_size_bytes": None,
+            "heap_status": "Unavailable",
+            "isolation": "Unavailable",
+            "w_x_enforced": None,
+            "nx_bit_active": None,
+            "guard_pages": "Unavailable",
+        }
+
+    regs = t.get("cpu", {}).get("registers", {})
     return {
-        "qemu_alive": alive,
-        "cr3": cr3,
-        "cr0": cr0,
-        "cr4": cr4,
-        "arch": prof.get("arch", "x86_64"),
-        "total_ram_bytes": ram_mb * 1024 * 1024,
-        "total_ram_mb": ram_mb,
-        "heap_size_bytes": 8 * 1024 * 1024,
-        "heap_status": "ONLINE (8 MiB Dedicated Pool)",
-        "isolation": "4-Level PML4 Hardware Virtual Paging",
-        "w_x_enforced": True,
-        "nx_bit_active": True,
-        "guard_pages": "Active (0xDEADBEEFC0DECAFE Canaries)"
+        "qemu_alive": True,
+        "source": "QMP",
+        "cr3": regs.get("CR3"),
+        "cr0": regs.get("CR0"),
+        "cr4": regs.get("CR4"),
+        "arch": t.get("cpu", {}).get("arch"),
+        "total_ram_bytes": None,
+        "total_ram_mb": None,
+        "heap_size_bytes": None,
+        "heap_status": "Not reported by guest",
+        "isolation": "Not reported by guest",
+        "w_x_enforced": None,
+        "nx_bit_active": None,
+        "guard_pages": "Not reported by guest",
     }
 
 def extract_real_ipc():
-    """Extracts genuine IPC message flow from guest serial log."""
+    """Return IPC events emitted by the live guest only."""
     events = []
     for line in serial_lines:
         if line.startswith("[IPC]") or "[IPC" in line:
             events.append({"raw": line.strip(), "time": time.strftime("%H:%M:%S")})
-    if not events and query_qemu_monitor()["qemu_alive"]:
-        events = [
-            {"endpoint": "0x3F8", "sender": "PID-1 (telemetry)", "receiver": "PID-0 (kernel)", "size": "64B", "time": "00:00:01", "cap": "CAP_SERIAL_OUT", "state": "Delivered"},
-            {"endpoint": "0x3F9", "sender": "PID-3 (device_mgr)", "receiver": "PID-2 (security)", "size": "128B", "time": "00:00:02", "cap": "CAP_IPC_SEND", "state": "Delivered"},
-            {"endpoint": "0x3FA", "sender": "PID-7 (compositor)", "receiver": "PID-2 (security)", "size": "256B", "time": "00:00:03", "cap": "CAP_IPC_SEND", "state": "Delivered"},
-            {"endpoint": "0x3FB", "sender": "PID-11 (telephony)", "receiver": "PID-2 (security)", "size": "96B", "time": "00:00:04", "cap": "CAP_IPC_SEND", "state": "Delivered"}
-        ]
     return events
 
 def extract_real_capabilities():
@@ -648,28 +492,8 @@ latest_telemetry = {
 
 
 def init_default_serial_logs():
-    """Seed initial UART serial logs for the developer console."""
-    logs = [
-        "[   0.000000] InterOS Microkernel v8.1 (x86_64 / AArch64)",
-        "[   0.000012] Target: Bare-Metal x86_64 / AArch64 HAL",
-        "[   0.000028] COM1 16550 UART (0x3F8) initialized at 115200 baud.",
-        "[   0.000045] Memory: 48-bit 4-level paging initialized with CR3=0x01353000.",
-        "[   0.000078] Heap: Locked-list allocator mounted at 0x444444440000 (1024 KiB).",
-        "[   0.000102] Interrupts: Dual 8259 PIC remapped to IRQ 32..47.",
-        "[   0.000140] Display: VBE Linear Framebuffer 1280x720x24bpp mapped at 0xFD000000.",
-        "[   0.000185] SMP: Multi-core scheduler initialized with energy-aware Big.LITTLE logic.",
-        "[   0.000230] HAL: Dual-SIM controller online (Slot 0: Physical, Slot 1: eUICC).",
-        "[   0.000280] Security: Zero Ambient Authority Ring 3 App Sandbox Enforced.",
-        "[   0.000320] Userspace: interos-std Rust App Runtime ready for .app sideloading.",
-        "[   0.000350] Ready. Sideload .app, .rap, .wasm, or .apk packages via Studio UI."
-    ]
-    serial_lines.extend(logs)
-
-init_default_serial_logs()
-scan_packages_dir()
-
-serial_socket_conn = None
-serial_socket_lock = threading.Lock()
+    """Start with an empty UART history; only guest-emitted lines are shown."""
+    return
 
 def start_websockify_if_needed():
     """Starts websockify on WS_PORT (6081) bridging to QEMU VNC (5900) if not already listening."""
