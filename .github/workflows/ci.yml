@@ -35,11 +35,17 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Rust Toolchain with Bare-Metal Targets
+      - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-none, aarch64-unknown-none, riscv64gc-unknown-none-elf
+          toolchain: nightly
           components: rust-src
+
+      - name: Install Bare-Metal Targets for Active Nightly Toolchain
+        run: |
+          rustup target add x86_64-unknown-none --toolchain nightly
+          rustup target add aarch64-unknown-none --toolchain nightly
+          rustup target add riscv64gc-unknown-none-elf --toolchain nightly
 
       - name: Check x86_64 Microkernel Target
         run: cargo check --manifest-path kernel/Cargo.toml --target x86_64-unknown-none
@@ -67,6 +73,11 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 qemu-system-arm qemu-system-misc
+
       - name: Verify JavaScript Engine Syntax
         run: node --check emulator/app.js
 
@@ -75,7 +86,8 @@ jobs:
 
       - name: Install Python Dependencies & Verify CLI
         run: |
-          pip install cryptography
+          python -m pip install --upgrade pip
+          python -m pip install cryptography
           python tools/interos.py doctor
           python tools/interos.py devices
 
