@@ -1578,3 +1578,50 @@ pub fn switch_screen(screen: ActiveScreen) {
         fb.redraw_phone();
     });
 }
+
+// -----------------------------------------------------------------------------
+// DisplayHal Implementation for FramebufferWriter
+// -----------------------------------------------------------------------------
+
+use crate::display_hal::{DisplayHal, DisplayInfo, DisplayPixelFormat};
+
+impl DisplayHal for FramebufferWriter {
+    fn display_info(&self) -> Option<DisplayInfo> {
+        self.info.map(|info| DisplayInfo {
+            width: info.width,
+            height: info.height,
+            stride: info.stride,
+            bytes_per_pixel: info.bytes_per_pixel,
+            pixel_format: match info.pixel_format {
+                PixelFormat::Rgb => DisplayPixelFormat::Rgb888,
+                PixelFormat::Bgr => DisplayPixelFormat::Bgr888,
+                PixelFormat::U8 => DisplayPixelFormat::Grayscale8,
+                _ => DisplayPixelFormat::Bgr888,
+            },
+        })
+    }
+
+    fn set_pixel(&mut self, x: usize, y: usize, r: u8, g: u8, b: u8) {
+        self.set_pixel(x, y, (r, g, b));
+    }
+
+    fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, r: u8, g: u8, b: u8) {
+        self.draw_rect(x, y, w, h, (r, g, b));
+    }
+
+    fn draw_rect_outline(&mut self, x: usize, y: usize, w: usize, h: usize, thickness: usize, r: u8, g: u8, b: u8) {
+        self.draw_rect_outline(x, y, w, h, thickness, (r, g, b));
+    }
+
+    fn clear(&mut self, r: u8, g: u8, b: u8) {
+        self.clear((r, g, b));
+    }
+
+    fn draw_char(&mut self, x: usize, y: usize, ch: char, scale: usize, r: u8, g: u8, b: u8) {
+        self.draw_char_scaled(x, y, ch, scale, (r, g, b), None);
+    }
+
+    fn draw_text(&mut self, x: usize, y: usize, text: &str, scale: usize, r: u8, g: u8, b: u8) {
+        self.draw_string(x, y, text, scale, (r, g, b), None);
+    }
+}

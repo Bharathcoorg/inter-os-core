@@ -18,6 +18,7 @@ pub mod audio;
 pub mod capability;
 pub mod compat;
 pub mod crypto;
+pub mod display_hal;
 pub mod drivers;
 pub mod event;
 pub mod framebuffer;
