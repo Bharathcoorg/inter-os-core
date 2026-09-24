@@ -184,7 +184,8 @@ def extract_real_processes():
                 "priority": int(pdict.get("prio", 0)),
                 "ppid": int(pdict.get("ppid", 0)),
                 "caps": int(pdict.get("caps", 0)),
-                "memory": pdict.get("mem", "Unavailable"),
+                "memory": "Unavailable",
+                "kernel_stack": pdict.get("kstack", "Unavailable"),
                 "cr3": pdict.get("cr3", "Unavailable"),
                 "source": "KERNEL_TELEMETRY",
             })
