@@ -232,6 +232,7 @@ impl Scheduler {
                 task.priority,
                 task.cpu_ticks,
                 task.cap_table.count(),
+                super::TASK_STACK_SIZE / 1024,
                 task.parent_id.0,
                 cr3_str
             );
