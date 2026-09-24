@@ -10,7 +10,7 @@ pub mod share;
 pub mod shm_pipe;
 
 pub use secure_channel::{SecureChannelManager, SecureIpcError, SecureSession, SignedIpcFrame, SECURE_IPC};
-pub use share::{ShareSheetManager, ShareTarget, ShareTransaction, SHARE_SHEET_MANAGER, IPC_MSG_AMCP_SHARE};
+pub use share::{ShareSheetManager, ShareTarget, ShareTransaction, SHARE_SHEET_MANAGER, IPC_MSG_SHARE};
 pub use shm_pipe::{ShmError, ShmPipeManager, ShmRingBuffer, ShmSlot, DmaDescriptor, SHM_PIPE_MANAGER};
 
 use alloc::collections::VecDeque;
@@ -187,7 +187,7 @@ impl IpcRouter {
         Ok(())
     }
 
-    /// Delivers an authenticated system or kernel message directly to the target mailbox (e.g. AMCP Share Sheet bus).
+    /// Delivers an authenticated system or kernel message directly to the target mailbox (e.g. Share Sheet bus).
     pub fn deliver_system_message(&mut self, dest: TaskId, msg: IpcMessage) -> Result<(), IpcError> {
         let mailbox = self
             .mailboxes

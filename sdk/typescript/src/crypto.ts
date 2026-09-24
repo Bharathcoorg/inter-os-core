@@ -1,5 +1,5 @@
 /**
- * Cryptographic helpers for AMCP package signing and integrity attestation.
+ * Cryptographic helpers for .rapp package signing and integrity attestation.
  */
 import { createHash, createHmac } from "node:crypto";
 

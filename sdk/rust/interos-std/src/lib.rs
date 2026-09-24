@@ -59,6 +59,14 @@ pub enum SyscallNumber {
     EventPoll = 62,
     WaitPid = 63,
     ExitWithCode = 64,
+    TelephonyDial = 65,
+    TelephonyHangup = 66,
+    TelephonySendSms = 67,
+    TelephonySetData = 68,
+    SurfaceCreate = 69,
+    SurfaceFlip = 70,
+    TouchPoll = 71,
+    PowerSetProfile = 72,
 }
 
 // -----------------------------------------------------------------------------
@@ -1180,7 +1188,7 @@ pub fn cap_request_consent(
     }
 }
 
-/// Dispatches an AMCP share transaction to a recipient app or triggers the interactive share drawer.
+/// Dispatches a share transaction to a recipient app or triggers the interactive share drawer.
 pub fn share_sheet_dispatch(
     mime_type: &str,
     uri: &str,
@@ -1293,6 +1301,112 @@ pub fn event_poll(interest_mask: u32, timeout_ticks: u32) -> Result<u32, i64> {
             timeout_ticks as u64,
         )
     };
+    if ret >= 0 {
+        Ok(ret as u32)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Initiates an outgoing cellular call (`ATD<number>;`).
+pub fn telephony_dial(number: &str) -> Result<(), i64> {
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::TelephonyDial,
+            number.as_ptr() as u64,
+            number.len() as u64,
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Terminates an active cellular call (`ATH`).
+pub fn telephony_hangup() -> Result<(), i64> {
+    let ret = unsafe { syscall0(SyscallNumber::TelephonyHangup) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Transmits an SMS message to a destination phone number (`AT+CMGS`).
+pub fn telephony_send_sms(destination: &str, body: &str) -> Result<u32, i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::TelephonySendSms,
+            destination.as_ptr() as u64,
+            destination.len() as u64,
+            body.as_ptr() as u64,
+            body.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as u32)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Toggles cellular packet data connection (PDP context attach/detach).
+pub fn telephony_set_data(enabled: bool) -> Result<bool, i64> {
+    let ret = unsafe {
+        syscall1(
+            SyscallNumber::TelephonySetData,
+            if enabled { 1 } else { 0 },
+        )
+    };
+    if ret >= 0 {
+        Ok(ret != 0)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Allocates a new hardware surface in the DRM/KMS compositor.
+pub fn surface_create(width: u32, height: u32, z_order: u32) -> Result<u32, i64> {
+    let ret = unsafe {
+        syscall3(
+            SyscallNumber::SurfaceCreate,
+            width as u64,
+            height as u64,
+            z_order as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as u32)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Swaps the DRM/KMS back buffer to the front scanout buffer (atomic page flip).
+pub fn surface_flip() -> Result<u64, i64> {
+    let ret = unsafe { syscall0(SyscallNumber::SurfaceFlip) };
+    if ret >= 0 {
+        Ok(ret as u64)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Polls recognized gestures from the multi-touch digitizer engine.
+pub fn touch_poll() -> Result<u32, i64> {
+    let ret = unsafe { syscall0(SyscallNumber::TouchPoll) };
+    if ret >= 0 {
+        Ok(ret as u32)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Sets the operational DVFS power performance profile.
+pub fn power_set_profile(profile_idx: u32) -> Result<u32, i64> {
+    let ret = unsafe { syscall1(SyscallNumber::PowerSetProfile, profile_idx as u64) };
     if ret >= 0 {
         Ok(ret as u32)
     } else {

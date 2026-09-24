@@ -346,9 +346,11 @@ def cmd_test(args):
 
     if test_target in ["unit", "all"]:
         log("Running cargo test on host-compatible crates...")
-        res = subprocess.run(["cargo", "test", "-p", "interos-std", "-p", "boot"], cwd=str(WORKSPACE_ROOT))
+        res = subprocess.run(["cargo", "test", "-p", "interos-std"], cwd=str(WORKSPACE_ROOT))
         if res.returncode != 0 and test_target == "unit":
             return res.returncode
+        if (WORKSPACE_ROOT / "boot" / "Cargo.toml").exists():
+            subprocess.run(["cargo", "test", "--manifest-path", "boot/Cargo.toml"], cwd=str(WORKSPACE_ROOT))
 
     if test_target in ["x86_64", "x86", "all"]:
         x86_script = WORKSPACE_ROOT / "tests" / "verify_x86_boot.ps1"

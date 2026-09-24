@@ -1,7 +1,16 @@
-package amcp
+package rapp
+
+// Arch represents the CPU architecture targeted by the .rapp package.
+type Arch uint16
+
+const (
+	ArchX86_64  Arch = 0
+	ArchAarch64 Arch = 1
+	ArchRiscv64 Arch = 2
+)
 
 // CapabilityType represents a zero-trust fine-grained hardware or system capability.
-type CapabilityType uint8
+type CapabilityType uint16
 
 const (
 	CapSerialOutput     CapabilityType = 1

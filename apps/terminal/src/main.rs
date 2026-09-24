@@ -4,13 +4,12 @@
 //! - Comprehensive Command Line Interpreter (CLI) supporting:
 //!   - `help`: Command documentation and syntax guide
 //!   - `status`: Microkernel execution metrics and uptime
-//!   - `intent <text>`: Natural language intent parsing to AMCP action code
-//!   - `plan <title>`: Multi-step autonomous agentic plan submission & consent progression
-//!   - `ai <prompt>`: Local on-device Edge LLM query
-//!   - `privacy <text>`: Privacy Shield PII sanitization (Phone, UPI, Location)
+//!   - `ps`: Active process list and protection domains
+//!   - `mem`: Paging and memory allocation diagnostics
+//!   - `caps`: Capability table inspection
 //!   - `share <mime> <uri> <target>`: Sovereign Share Sheet cross-app bus dispatch
 //!   - `dma <pipe> <payload>`: Zero-Copy DMA shared memory pipe streaming
-//!   - `memory`: AI Context Broker working memory retrieval
+//!   - `ping`: Local loopback diagnostic
 //! - Circular command history ledger
 //! - Asynchronous event reactor loop handling shell intents and touch commands
 

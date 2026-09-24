@@ -3,10 +3,13 @@
 //! Handles verified loading, cryptographic verification, and revocation
 //! of software packages before execution.
 
-pub mod amcp;
 pub mod rapp;
 pub mod revocation;
 
-pub use amcp::{AmcpPackage, CapabilityRisk, PackageError, ResourceLimits, AMCP_MAGIC, AMCP_VERSION};
-pub use rapp::{RappArch, RappError, RappManifest, RAPP_MAGIC, RAPP_FORMAT_VERSION};
-pub use revocation::{RevocationReason, RevocationRecord, RevocationRegistry, KeyRotationProof, REVOCATION_REGISTRY};
+pub use rapp::{
+    build_rapp, parse_rapp, RappArch, RappError, RappManifest, RAPP_FORMAT_VERSION, RAPP_HEADER_SIZE,
+    RAPP_MAGIC,
+};
+pub use revocation::{
+    KeyRotationProof, RevocationReason, RevocationRecord, RevocationRegistry, REVOCATION_REGISTRY,
+};

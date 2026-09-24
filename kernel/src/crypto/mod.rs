@@ -1,7 +1,7 @@
 //! Cryptographic Subsystem for Inter OS
 //!
 //! Provides bare-metal cryptographic primitives for Merkle tree rootfs verification,
-//! `.amcp` package attestation, and sovereign identity state hashing.
+//! `.rapp` package attestation, and sovereign identity state hashing.
 
 pub mod hmac;
 pub mod keystore;

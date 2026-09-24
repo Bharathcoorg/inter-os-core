@@ -187,7 +187,7 @@ pub extern "C" fn _start() -> ! {
         match std::event_poll(interest_mask, 150) {
             Ok(events) => {
                 if events & std::EVENT_IPC_MSG != 0 {
-                    std::log(0, "[CALENDAR APP] Incoming schedule intent parsed from AMCP bus.").ok();
+                    std::log(0, "[CALENDAR APP] Incoming schedule intent parsed from Intent IPC bus.").ok();
                 }
                 if events & std::EVENT_TIMER_TICK != 0 {
                     // Periodic alarm & reminder monitor

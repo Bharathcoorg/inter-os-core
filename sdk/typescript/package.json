@@ -1,7 +1,7 @@
 {
-  "name": "@interos/amcp-sdk",
+  "name": "@interos/rapp-sdk",
   "version": "1.0.0",
-  "description": "TypeScript SDK for building and signing Sovereign Micro-Chain Package (SMCP) automations on Inter OS",
+  "description": "TypeScript SDK for building and signing Sovereign Rust App Package (.rapp) bundles on Inter OS",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "module",
@@ -9,7 +9,7 @@
     "build": "tsc",
     "test": "node --test dist/test.js"
   },
-  "keywords": ["interos", "amcp", "sovereign", "wasm", "automation"],
+  "keywords": ["interos", "rapp", "sovereign", "mobile", "rust"],
   "author": "Inter OS Sovereign Core Team",
   "license": "Apache-2.0"
 }

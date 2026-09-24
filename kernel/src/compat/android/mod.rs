@@ -160,16 +160,16 @@ pub fn init() {
     // 6. Test Cross-Zone Intent Bridge Translation & Security Traps
     let payment_intent = AndroidIntent::new("android.intent.action.VIEW", "upi://pay?pa=blinkit@axis&am=299");
     let mapped_pay = AndroidIntentBridge::translate_intent(&payment_intent);
-    assert_eq!(mapped_pay, Ok("AMCP_PAY"));
+    assert_eq!(mapped_pay, Ok("INTENT_PAY"));
 
     let dial_intent = AndroidIntent::new("android.intent.action.DIAL", "tel:112");
     let mapped_dial = AndroidIntentBridge::translate_intent(&dial_intent);
-    assert_eq!(mapped_dial, Ok("AMCP_TELEPHONY_DIAL"));
+    assert_eq!(mapped_dial, Ok("INTENT_TELEPHONY_DIAL"));
 
     let exploit_intent = AndroidIntent::new("android.intent.action.VIEW", "file:///system/etc/policy.json");
     let exploit_res = AndroidIntentBridge::translate_intent(&exploit_intent);
     assert_eq!(exploit_res, Err(AndroidBridgeError::SecurityViolation), "Host filesystem paths must be blocked");
-    serial_println!("[TEST] Android ACR Intent Bridge: 'android.intent.action.VIEW' -> sovereign AMCP intent mapped, host path exploit BLOCKED.");
+    serial_println!("[TEST] Android ACR Intent Bridge: 'android.intent.action.VIEW' -> sovereign intent mapped, host path exploit BLOCKED.");
 
     // 7. Test PKZip Container & Binary AndroidManifest.xml Parser
     let test_apk_data = create_test_apk("org.whispersystems.signal", &["android.permission.INTERNET", "android.permission.CAMERA"]);

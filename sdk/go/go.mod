@@ -1,3 +1,3 @@
-module github.com/interos-platform/amcp-go-sdk
+module github.com/interos-platform/rapp-go-sdk
 
-go 1.22
+go 1.21

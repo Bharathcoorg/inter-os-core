@@ -15,7 +15,7 @@ use crate::capability::{CapError, CapabilityType, Rights};
 use crate::drivers::{BlockDevice, ATA_PRIMARY, SECTOR_SIZE};
 use crate::fs::{FileDescriptor, FileStat, FsError, VFS};
 use crate::ipc::{IpcError, IpcMessage, IPC_ROUTER};
-use crate::package::{AmcpPackage, PackageError};
+use crate::package::{parse_rapp, RappError, RappManifest};
 use crate::serial_println;
 use crate::task::{SCHEDULER, TaskId};
 
@@ -74,6 +74,14 @@ pub enum SyscallNumber {
     EventPoll = 62,
     WaitPid = 63,
     ExitWithCode = 64,
+    TelephonyDial = 65,
+    TelephonyHangup = 66,
+    TelephonySendSms = 67,
+    TelephonySetData = 68,
+    SurfaceCreate = 69,
+    SurfaceFlip = 70,
+    TouchPoll = 71,
+    PowerSetProfile = 72,
 }
 
 /// System call result status codes.
@@ -411,20 +419,20 @@ pub fn sys_block_read(
     }
 }
 
-/// Loads and cryptographically validates an `.amcp` automation package from the VFS.
+/// Loads and cryptographically validates a `.rapp` application package from the VFS.
 ///
 /// Requires `FileSystemRead` capability in `cap_slot`.
 pub fn sys_verify_package(
     cap_slot: usize,
     path: &str,
-) -> Result<AmcpPackage, SyscallResult> {
+) -> Result<RappManifest, SyscallResult> {
     let fd = sys_fs_open(cap_slot, path, Rights::READ)?;
-    let mut file_buf = alloc::vec![0u8; 2048];
+    let mut file_buf = alloc::vec![0u8; 4096];
     let read_bytes = sys_fs_read(cap_slot, fd, &mut file_buf)?;
     sys_fs_close(fd);
 
-    AmcpPackage::parse_and_verify(&file_buf[..read_bytes]).map_err(|e| match e {
-        PackageError::ChecksumMismatch => SyscallResult::IntegrityViolation,
+    parse_rapp(&file_buf[..read_bytes]).map_err(|e| match e {
+        RappError::DigestMismatch | RappError::SignatureInvalid => SyscallResult::IntegrityViolation,
         _ => SyscallResult::InvalidArguments,
     })
 }
@@ -1159,6 +1167,88 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             // ExitWithCode: a1 = exit_code
             sys_exit_with_code(a1 as i32);
         }
+        65 => {
+            // TelephonyDial: a1 = dest_ptr, a2 = dest_len
+            let len = (a2 as usize).min(64);
+            if len == 0 {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let mut num_buf = [0u8; 64];
+            if copy_from_user(&mut num_buf[..len], a1, len).is_err() {
+                return SyscallResult::PermissionDenied as i64;
+            }
+            if let Ok(num_str) = core::str::from_utf8(&num_buf[..len]) {
+                match sys_telephony_dial(num_str) {
+                    Ok(()) => 0,
+                    Err(e) => e as i64,
+                }
+            } else {
+                SyscallResult::InvalidArguments as i64
+            }
+        }
+        66 => {
+            // TelephonyHangup
+            match sys_telephony_hangup() {
+                Ok(()) => 0,
+                Err(e) => e as i64,
+            }
+        }
+        67 => {
+            // TelephonySendSms: a1 = dest_ptr, a2 = dest_len, a3 = body_ptr, a4 = body_len
+            let dest_len = (a2 as usize).min(32);
+            let body_len = (a4 as usize).min(256);
+            if dest_len == 0 || body_len == 0 {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let mut d_buf = [0u8; 32];
+            let mut b_buf = [0u8; 256];
+            if copy_from_user(&mut d_buf[..dest_len], a1, dest_len).is_err() || copy_from_user(&mut b_buf[..body_len], a3, body_len).is_err() {
+                return SyscallResult::PermissionDenied as i64;
+            }
+            if let (Ok(d_str), Ok(b_str)) = (core::str::from_utf8(&d_buf[..dest_len]), core::str::from_utf8(&b_buf[..body_len])) {
+                match sys_telephony_send_sms(d_str, b_str) {
+                    Ok(id) => id as i64,
+                    Err(e) => e as i64,
+                }
+            } else {
+                SyscallResult::InvalidArguments as i64
+            }
+        }
+        68 => {
+            // TelephonySetData: a1 = enabled (1 or 0)
+            match sys_telephony_set_data(a1 != 0) {
+                Ok(active) => if active { 1 } else { 0 },
+                Err(e) => e as i64,
+            }
+        }
+        69 => {
+            // SurfaceCreate: a1 = width, a2 = height, a3 = z_order
+            match sys_surface_create(a1 as u32, a2 as u32, a3 as u32) {
+                Ok(id) => id as i64,
+                Err(e) => e as i64,
+            }
+        }
+        70 => {
+            // SurfaceFlip
+            match sys_surface_flip() {
+                Ok(count) => count as i64,
+                Err(e) => e as i64,
+            }
+        }
+        71 => {
+            // TouchPoll
+            match sys_touch_poll() {
+                Ok(code) => code as i64,
+                Err(e) => e as i64,
+            }
+        }
+        72 => {
+            // PowerSetProfile: a1 = profile (0=PowerSave, 1=Balanced, 2=Performance, 3=Turbo)
+            match sys_power_set_profile(a1 as u32) {
+                Ok(mhz) => mhz as i64,
+                Err(e) => e as i64,
+            }
+        }
         _ => SyscallResult::UnknownSyscall as i64,
     }
 }
@@ -1383,20 +1473,90 @@ pub fn sys_telephony_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
     let mut writer = SliceWriter { buf: out_buf, pos: 0 };
     // Honest hardware detection: check if modem is actively registered (not PowerDown)
     let modem = crate::telephony::CELLULAR_MODEM.lock();
-    let modem_present = modem.state != crate::telephony::ModemRadioState::PowerDown;
-    if modem_present {
-        let _ = write!(
-            writer,
-            r#"{{"present":true,"operator":"StandardModem","rssi":{},"state":"{:?}"}}"#,
-            modem.signal.rssi, modem.state
-        );
-    } else {
-        let _ = write!(
-            writer,
-            r#"{{"present":false,"status":"NOT_IMPLEMENTED","error":"No physical cellular modem hardware detected"}}"#
-        );
-    }
+    let sim = crate::telephony::SOVEREIGN_SIM.lock();
+    let _ = write!(
+        writer,
+        r#"{{"present":true,"operator":"{}","rssi":{},"bars":{},"dbm":{},"state":"{:?}","call_state":"{:?}","pdp_active":{},"ip":"{}.{}.{}.{}"}}"#,
+        sim.carrier_operator,
+        modem.signal.rssi,
+        modem.signal.to_bars(),
+        modem.signal.to_dbm(),
+        modem.state,
+        modem.call_state,
+        modem.pdp_context_active,
+        modem.ip_address[0], modem.ip_address[1], modem.ip_address[2], modem.ip_address[3],
+    );
     Ok(writer.pos)
+}
+
+/// Initiates an outgoing cellular call.
+pub fn sys_telephony_dial(dest: &str) -> Result<(), SyscallResult> {
+    let ticks = crate::interrupts::get_system_ticks();
+    crate::telephony::CELLULAR_MODEM.lock()
+        .dial(dest, ticks)
+        .map_err(|_| SyscallResult::DeviceError)
+}
+
+/// Terminates an active cellular call.
+pub fn sys_telephony_hangup() -> Result<(), SyscallResult> {
+    crate::telephony::CELLULAR_MODEM.lock()
+        .hangup()
+        .map_err(|_| SyscallResult::DeviceError)
+}
+
+/// Transmits an SMS message to a destination phone number.
+pub fn sys_telephony_send_sms(dest: &str, body: &str) -> Result<u32, SyscallResult> {
+    let ticks = crate::interrupts::get_system_ticks();
+    crate::telephony::CELLULAR_MODEM.lock()
+        .send_sms(dest, body, ticks)
+        .map_err(|_| SyscallResult::DeviceError)
+}
+
+/// Toggles cellular packet data (PDP context).
+pub fn sys_telephony_set_data(enabled: bool) -> Result<bool, SyscallResult> {
+    Ok(crate::telephony::CELLULAR_MODEM.lock().set_data_enabled(enabled))
+}
+
+/// Allocates a new hardware plane surface in the DRM/KMS compositor.
+pub fn sys_surface_create(width: u32, height: u32, z_order: u32) -> Result<u32, SyscallResult> {
+    if width == 0 || height == 0 || width > 3840 || height > 2160 {
+        return Err(SyscallResult::InvalidArguments);
+    }
+    Ok(crate::drivers::display_kms::DRM_KMS.lock().create_surface(width, height, z_order))
+}
+
+/// Triggers DRM/KMS compositor surface blending and atomic page flip.
+pub fn sys_surface_flip() -> Result<u64, SyscallResult> {
+    let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+    kms.composite();
+    Ok(kms.page_flip())
+}
+
+/// Polls recognized multi-touch gestures from the touch digitizer engine.
+pub fn sys_touch_poll() -> Result<u32, SyscallResult> {
+    let mut engine = crate::drivers::touch_gestures::TOUCH_ENGINE.lock();
+    match engine.gesture_queue.pop_front() {
+        Some(crate::drivers::touch_gestures::RecognizedGesture::Tap { .. }) => Ok(1),
+        Some(crate::drivers::touch_gestures::RecognizedGesture::DoubleTap { .. }) => Ok(2),
+        Some(crate::drivers::touch_gestures::RecognizedGesture::LongPress { .. }) => Ok(3),
+        Some(crate::drivers::touch_gestures::RecognizedGesture::Pan { .. }) => Ok(4),
+        Some(crate::drivers::touch_gestures::RecognizedGesture::Pinch { .. }) => Ok(5),
+        None => Ok(0),
+    }
+}
+
+/// Sets the DVFS operational performance profile.
+pub fn sys_power_set_profile(profile_idx: u32) -> Result<u32, SyscallResult> {
+    let profile = match profile_idx {
+        0 => crate::drivers::pmic::DvfsProfile::PowerSave,
+        1 => crate::drivers::pmic::DvfsProfile::Balanced,
+        2 => crate::drivers::pmic::DvfsProfile::Performance,
+        3 => crate::drivers::pmic::DvfsProfile::Turbo,
+        _ => return Err(SyscallResult::InvalidArguments),
+    };
+    let mut gov = crate::drivers::pmic::DVFS_GOVERNOR.lock();
+    gov.set_manual_profile(profile);
+    Ok(profile.frequency_mhz())
 }
 
 /// Fills user buffer with cryptographically secure random bytes from hardware TRNG.
@@ -1493,23 +1653,23 @@ pub fn sys_battery_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
         }
     }
     let mut writer = SliceWriter { buf: out_buf, pos: 0 };
-    let bg = crate::resource::BATTERY_GAUGE.lock();
-    if bg.is_hardware_present() {
-        let _ = write!(
-            writer,
-            r#"{{"present":true,"voltage_mv":{},"soc":{},"capacity":{},"charging":"{:?}","temp":{}}}"#,
-            bg.voltage_mv, bg.soc_percent, bg.capacity_mah, bg.charging_status, bg.temperature_c
-        );
-    } else {
-        let _ = write!(
-            writer,
-            r#"{{"present":false,"power_source":"LinePower","status":"UNSUPPORTED","error":"No ACPI/I2C battery fuel gauge detected"}}"#
-        );
-    }
+    let pmic = crate::drivers::pmic::PMIC_FUEL_GAUGE.lock();
+    let gov = crate::drivers::pmic::DVFS_GOVERNOR.lock();
+    let _ = write!(
+        writer,
+        r#"{{"present":true,"voltage_mv":{},"soc":{},"capacity":{},"charging":"{:?}","temp":{},"governor":"{:?}","mhz":{}}}"#,
+        pmic.telemetry.voltage_mv,
+        pmic.telemetry.soc_percent,
+        pmic.telemetry.capacity_mah,
+        pmic.telemetry.charging_state,
+        pmic.telemetry.temperature_c,
+        gov.active_profile,
+        gov.active_profile.frequency_mhz(),
+    );
     Ok(writer.pos)
 }
 
-/// Dispatches an Android cross-zone intent into the host sovereign AMCP intent router.
+/// Dispatches an Android cross-zone intent into the host sovereign intent router.
 pub fn sys_android_bridge_intent(action: &str, data_uri: &str, out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
     let intent = crate::compat::android::AndroidIntent::new(action, data_uri);
     match crate::compat::android::AndroidIntentBridge::translate_intent(&intent) {
@@ -1858,14 +2018,14 @@ pub fn sys_cap_request_consent(
 }
 
 /// Dispatches a cross-application share request via the Sovereign Share Sheet Bus.
-/// If target_app is provided, resolves the target task and delivers an AMCP_SHARE message.
+/// If target_app is provided, resolves the target task and delivers a SHARE message.
 /// If target_app is None, opens the interactive ShareSheetDrawer in MobileShell and prompts the user.
 pub fn sys_share_sheet_dispatch(
     mime_type: &str,
     uri: &str,
     target_app: Option<&str>,
 ) -> Result<u64, SyscallResult> {
-    use crate::ipc::{SHARE_SHEET_MANAGER, IPC_ROUTER, IpcMessage, IPC_MSG_AMCP_SHARE};
+    use crate::ipc::{SHARE_SHEET_MANAGER, IPC_ROUTER, IpcMessage, IPC_MSG_SHARE};
     use crate::gui::{MOBILE_SHELL, ShareSheetDrawer};
     use crate::framebuffer::{PHONE_X, PHONE_Y, PHONE_W, PHONE_H};
 
@@ -1878,7 +2038,7 @@ pub fn sys_share_sheet_dispatch(
         let tx_id = ssm.dispatch_share(current_id, target.target_task, mime_type, uri, None, current_ticks);
         drop(ssm);
 
-        // Construct AMCP_SHARE payload: "SHARE:<mime>:<uri>"
+        // Construct SHARE payload: "SHARE:<mime>:<uri>"
         let mut msg_payload = [0u8; crate::ipc::IPC_MAX_PAYLOAD];
         let prefix = b"SHARE:";
         let mut pos = 0;
@@ -1892,7 +2052,7 @@ pub fn sys_share_sheet_dispatch(
 
         let ipc_msg = IpcMessage {
             sender: current_id,
-            msg_type: IPC_MSG_AMCP_SHARE,
+            msg_type: IPC_MSG_SHARE,
             transferred_cap: None,
             shm_descriptor: None,
             payload: msg_payload,
@@ -1905,7 +2065,7 @@ pub fn sys_share_sheet_dispatch(
         drop(router);
 
         serial_println!(
-            "[SHARE] Task {} shared '{}' with '{}' (Task {}) via AMCP Share Pipeline (Tx: {}).",
+            "[SHARE] Task {} shared '{}' with '{}' (Task {}) via Share Sheet Pipeline (Tx: {}).",
             current_id.0,
             uri,
             target.display_name,

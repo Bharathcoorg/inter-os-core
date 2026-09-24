@@ -1,7 +1,7 @@
-//! Sovereign Cross-Application Share Sheet & AMCP Capability Exchange Bus
+//! Sovereign Cross-Application Share Sheet & Intent Capability Exchange Bus
 //!
 //! Enables secure, capability-attested data sharing between independent Ring 3 apps:
-//! - Applications exchange typed MIME payloads and content URIs over AMCP IPC.
+//! - Applications exchange typed MIME payloads and content URIs over standard IPC.
 //! - The kernel mediates interactive recipient selection via the Mobile Shell's ShareSheetDrawer.
 //! - Attached resource capabilities are automatically attenuated into single-use or time-bounded
 //!   leases for the recipient, enforcing zero ambient authority.
@@ -16,11 +16,11 @@ use crate::serial_println;
 pub const MIME_TEXT_PLAIN: &str = "text/plain";
 pub const MIME_TEXT_URI: &str = "text/uri-list";
 pub const MIME_VAULT_SECTOR: &str = "image/x-vault-sector";
-pub const MIME_AMCP_INTENT: &str = "application/amcp-intent";
+pub const MIME_APP_INTENT: &str = "application/x-interos-intent";
 pub const MIME_MEDIA_TRACK: &str = "audio/x-sovereign-track";
 
-/// AMCP Share IPC message type constant.
-pub const IPC_MSG_AMCP_SHARE: u32 = 0x50;
+/// Share Sheet IPC message type constant.
+pub const IPC_MSG_SHARE: u32 = 0x50;
 
 /// Registered application target capable of receiving shared payloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,7 +132,7 @@ pub fn init() {
         accent_color: (16, 185, 129), // Emerald Green
     });
 
-    // 2. Terminal (Task 18) - Accepts AMCP intent, plain text, URIs
+    // 2. Terminal (Task 18) - Accepts app intent, plain text, URIs
     ssm.register_target(ShareTarget {
         app_id: "interos.terminal",
         display_name: "Terminal",

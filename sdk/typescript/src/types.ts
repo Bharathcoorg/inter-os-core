@@ -1,6 +1,14 @@
 /**
- * Inter OS AMCP (Agent Model Context Protocol) Type Definitions
+ * Inter OS Sovereign Package (.rapp) Type Definitions
  */
+
+export const RappArch = {
+  X86_64: 0,
+  Aarch64: 1,
+  Riscv64: 2,
+} as const;
+
+export type RappArch = (typeof RappArch)[keyof typeof RappArch];
 
 export const CapabilityType = {
   SerialOutput: 1,
@@ -43,10 +51,11 @@ export interface ResourceLimits {
   maxMemoryBytes: bigint;
 }
 
-export interface AmcpPackageMetadata {
+export interface RappPackageMetadata {
   packageId: string;
-  publisherDid: string;
+  publisherId: string;
   version: [number, number, number];
+  arch: RappArch;
   capabilities: CapabilityType[];
-  limits: ResourceLimits;
+  limits?: ResourceLimits;
 }

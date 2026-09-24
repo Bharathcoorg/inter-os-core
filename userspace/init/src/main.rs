@@ -52,7 +52,7 @@ pub extern "C" fn _start() -> ! {
     if std::package_install(3, "org.interos.browser", true).is_ok() {
         std::log(
             0,
-            "[USER INIT (Ring 3)] Dynamic VFS installation of 'org.interos.browser.amcp' SUCCEEDED via syscall.",
+            "[USER INIT (Ring 3)] Dynamic VFS installation of 'org.interos.browser.rapp' SUCCEEDED via syscall.",
         ).ok();
     }
 
@@ -483,7 +483,7 @@ pub extern "C" fn _start() -> ! {
         ).ok();
     }
 
-    // 41. Cross-Application Sovereign Share Sheet & AMCP Capability Exchange Bus via Fast Syscall
+    // 41. Cross-Application Sovereign Share Sheet & Intent Capability Exchange Bus via Fast Syscall
     let share_photo = std::share_sheet_dispatch(
         "image/x-vault-sector",
         "/vault/sector/201",
@@ -503,7 +503,7 @@ pub extern "C" fn _start() -> ! {
     if share_photo.is_ok() && share_url.is_ok() && share_drawer.is_ok() {
         std::log(
             0,
-            "[USER INIT (Ring 3)] Cross-application sovereign share sheet & AMCP exchange VERIFIED.",
+            "[USER INIT (Ring 3)] Cross-application sovereign share sheet & intent exchange VERIFIED.",
         ).ok();
     }
 

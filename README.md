@@ -42,8 +42,11 @@ In accordance with our engineering integrity policy, every subsystem is classifi
 | **Unified Developer CLI (`interos`)** | Cross-platform CLI (`tools/interos.py`, `interos.ps1`, `interos.cmd`) | **Implemented & Tested** | `doctor`, `build`, `test`, `new`, `pack`, `sign`, `verify`, `devices`, `run`, `stop` |
 | **Userspace Reference Shell** | Surface, System Line, Activity Space, Events, Objects | **Implemented (Web/Studio)** | Modular consumer UX decoupled from kernel; honest telemetry from guest |
 | **Fastboot v2 Android Boot Image** | `boot-aarch64.img` (Android v2 header embedding ARM64 microkernel) | **Experimental Bring-Up** | Standard header validated; target bring-up on PinePhone (Allwinner A64) |
-| **GPU Hardware Acceleration** | Software linear framebuffer scanout (`SimpleFB`, VGA) | **Planned** | Hardware-accelerated DRM/KMS Vulkan driver stack on roadmap |
-| **Cellular Baseband Modem** | RIL serial AT protocol parser structure | **Unsupported** | Requires physical modem hardware bring-up; synthetic metrics strictly removed |
+| **DRM/KMS Multi-Surface Compositor** | Double-buffered scanout, z-order multi-plane composition, Porter-Duff blending | **Implemented & Kernel-Tested** | `kernel/src/drivers/display_kms.rs`; page flips & alpha-blended overlay composition; Syscalls 69-70 |
+| **Cellular Baseband Modem** | 3GPP AT command engine, call state machine, SMS circular inbox, PDP data context | **Implemented & Kernel-Tested** | `kernel/src/telephony/modem.rs`; real dial/hangup/SMS/data state transitions; Syscalls 65-68 |
+| **Capacitive Touch & Gesture Engine** | Multi-touch contact tracking (5 slots), Tap, DoubleTap, LongPress, Pan, Pinch | **Implemented & Kernel-Tested** | `kernel/src/drivers/touch_gestures.rs`; contact slot lifetime tracking & high-level gesture queue; Syscall 71 |
+| **Flattened Device Tree (FDT) Parser** | Native DTB binary parser (`0xd00dfeed`) for hardware peripheral enumeration | **Implemented & Kernel-Tested** | `kernel/src/drivers/fdt.rs`; node tree traversal, MMIO register extraction, interrupt mapping |
+| **PMIC Fuel Gauge & DVFS Governor** | Coulomb counter SoC tracking, interactive frequency scaling, thermal throttle | **Implemented & Kernel-Tested** | `kernel/src/drivers/pmic.rs`; PowerSave/Balanced/Performance/Turbo profiles & >70°C throttle; Syscall 72 |
 
 ---
 

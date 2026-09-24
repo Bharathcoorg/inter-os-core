@@ -53,7 +53,7 @@ use crypto::Sha256;
 use drivers::{BlockDevice, ATA_PRIMARY, SECTOR_SIZE};
 use fs::VFS;
 use ipc::IPC_ROUTER;
-use package::{AmcpPackage, ResourceLimits};
+use package::{build_rapp, parse_rapp, RappArch};
 use storage::{MerkleVerifier, StorageError};
 use task::{SCHEDULER, TaskId};
 use wasm::{opcodes, Value, WasmError, WasmMemory, WasmModule, WasmVm};
@@ -233,6 +233,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         }
     }
 
+    // 9b. Modular Hardware Driver Subsystems (DRM/KMS, FDT, PMIC, Touch)
+    drivers::init_and_test_drivers();
+
     // 10. Virtual Filesystem (VFS) Initialization & Package Runtime
     serial_println!("\n--- [Initializing Virtual Filesystem & Package Runtime] ---");
     fs::init();
@@ -244,20 +247,17 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     wasm_app_code.push(opcodes::RETURN);
     wasm_app_code.push(opcodes::END);
 
-    let amcp_binary = AmcpPackage::build_binary(
+    let rapp_binary = build_rapp(
         "org.interos.calculator",
-        "pubkey:ed25519:interos_official_verified",
+        "interos_official",
         (1, 0, 0),
-        &[CapabilityType::SerialOutput],
-        ResourceLimits {
-            max_cpu_ticks: 2000,
-            max_memory_bytes: 65536,
-        },
+        RappArch::X86_64,
+        &[1], // Cap: SerialOutput
         &wasm_app_code,
     );
 
-    VFS.lock().create_file("/packages/calculator.amcp", &amcp_binary, true);
-    serial_println!("[OK] Root filesystem mounted. Built-in package staged at '/packages/calculator.amcp'.");
+    VFS.lock().create_file("/packages/calculator.rapp", &rapp_binary, true);
+    serial_println!("[OK] Root filesystem mounted. Built-in package staged at '/packages/calculator.rapp'.");
 
     // 11. Zero-Trust Capability Enforcement Self-Tests
     serial_println!("\n--- [Zero-Trust Capability Enforcement Self-Tests] ---");
@@ -874,16 +874,16 @@ extern "C" fn task_security_daemon() -> ! {
 }
 
 /// Task 3: Device & Package Verification Worker
-/// Loads the pre-staged `/packages/calculator.amcp` package from VFS, attests SHA-256 integrity,
+/// Loads the pre-staged `/packages/calculator.rapp` package from VFS, attests SHA-256 integrity,
 /// instantiates the sandboxed WASM VM, verifies fuel quotas, and logs verification status.
 extern "C" fn task_device_manager() -> ! {
     let mut executed = false;
     loop {
         if !executed {
-            syscall::sys_log(1, "[DEVICE MANAGER] Reading package '/packages/calculator.amcp' from VFS...");
+            syscall::sys_log(1, "[DEVICE MANAGER] Reading package '/packages/calculator.rapp' from VFS...");
 
             // Open package file using Slot 2 (FileSystemRead token)
-            match syscall::sys_fs_open(2, "/packages/calculator.amcp", Rights::READ) {
+            match syscall::sys_fs_open(2, "/packages/calculator.rapp", Rights::READ) {
                 Ok(fd) => {
                     let mut buf = [0u8; 1024];
                     if let Ok(bytes_read) = syscall::sys_fs_read(2, fd, &mut buf) {
@@ -891,17 +891,18 @@ extern "C" fn task_device_manager() -> ! {
                         syscall::sys_log(1, "[DEVICE MANAGER] Package binary read successfully. Verifying SHA-256 attestation...");
 
                         // Parse and cryptographically verify package
-                        match AmcpPackage::parse_and_verify(&buf[..bytes_read]) {
+                        match parse_rapp(&buf[..bytes_read]) {
                             Ok(pkg) => {
                                 syscall::sys_log(1, "[DEVICE MANAGER] Package Attestation SUCCESS! Instantiating sandboxed VM...");
 
                                 let mut wasm_module = wasm::WasmModule::new();
                                 wasm_module.add_host_import("host_call", 1, host_package_call);
-                                let func_idx = wasm_module.add_function("main", 0, 0, pkg.payload.clone());
+                                let payload = buf[pkg.payload_offset..pkg.payload_offset + pkg.payload_len].to_vec();
+                                let func_idx = wasm_module.add_function("main", 0, 0, payload);
                                 wasm_module.add_export("main", func_idx);
 
-                                let memory = wasm::WasmMemory::with_byte_limit(pkg.limits.max_memory_bytes as usize, pkg.limits.max_memory_bytes as usize);
-                                let mut vm = wasm::WasmVm::new(wasm_module, memory, pkg.limits.max_cpu_ticks);
+                                let memory = wasm::WasmMemory::with_byte_limit(65536, 65536);
+                                let mut vm = wasm::WasmVm::new(wasm_module, memory, 2000);
 
                                 match vm.invoke_export("main", &[]) {
                                     Ok(Some(wasm::Value::I32(0))) => {

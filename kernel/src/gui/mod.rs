@@ -243,7 +243,7 @@ pub fn init() {
         y: (test_drawer.target1_y + 10) as u32,
     });
     let intent_share = shell.handle_event(share_tap);
-    assert_eq!(intent_share, Some("AMCP_SHARE_MESSAGES"));
+    assert_eq!(intent_share, Some("SHARE_INTENT_MESSAGES"));
     assert!(shell.active_share_drawer.is_none());
 
     // Open drawer again and hit-test outside dismissal

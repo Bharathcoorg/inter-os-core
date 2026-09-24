@@ -259,20 +259,20 @@ impl MobileShell {
                     self.touch_count = self.touch_count.saturating_add(1);
                     if drawer.hit_test_target1(x, y) {
                         self.active_share_drawer = None;
-                        self.last_dispatched_intent = "AMCP_SHARE_MESSAGES";
-                        return Some("AMCP_SHARE_MESSAGES");
+                        self.last_dispatched_intent = "SHARE_INTENT_MESSAGES";
+                        return Some("SHARE_INTENT_MESSAGES");
                     } else if drawer.hit_test_target2(x, y) {
                         self.active_share_drawer = None;
-                        self.last_dispatched_intent = "AMCP_SHARE_TERMINAL";
-                        return Some("AMCP_SHARE_TERMINAL");
+                        self.last_dispatched_intent = "SHARE_INTENT_TERMINAL";
+                        return Some("SHARE_INTENT_TERMINAL");
                     } else if drawer.hit_test_target3(x, y) {
                         self.active_share_drawer = None;
-                        self.last_dispatched_intent = "AMCP_SHARE_VAULT";
-                        return Some("AMCP_SHARE_VAULT");
+                        self.last_dispatched_intent = "SHARE_INTENT_VAULT";
+                        return Some("SHARE_INTENT_VAULT");
                     } else if drawer.hit_test_target4(x, y) {
                         self.active_share_drawer = None;
-                        self.last_dispatched_intent = "AMCP_SHARE_BROWSER";
-                        return Some("AMCP_SHARE_BROWSER");
+                        self.last_dispatched_intent = "SHARE_INTENT_BROWSER";
+                        return Some("SHARE_INTENT_BROWSER");
                     } else if drawer.hit_test_drawer(x, y) {
                         return Some("SHARE_DRAWER_ACTIVE");
                     }
@@ -283,20 +283,20 @@ impl MobileShell {
                     self.touch_count = self.touch_count.saturating_add(1);
                     if drawer.hit_test_target1(touch.x, touch.y) {
                         self.active_share_drawer = None;
-                        self.last_dispatched_intent = "AMCP_SHARE_MESSAGES";
-                        return Some("AMCP_SHARE_MESSAGES");
+                        self.last_dispatched_intent = "SHARE_INTENT_MESSAGES";
+                        return Some("SHARE_INTENT_MESSAGES");
                     } else if drawer.hit_test_target2(touch.x, touch.y) {
                         self.active_share_drawer = None;
-                        self.last_dispatched_intent = "AMCP_SHARE_TERMINAL";
-                        return Some("AMCP_SHARE_TERMINAL");
+                        self.last_dispatched_intent = "SHARE_INTENT_TERMINAL";
+                        return Some("SHARE_INTENT_TERMINAL");
                     } else if drawer.hit_test_target3(touch.x, touch.y) {
                         self.active_share_drawer = None;
-                        self.last_dispatched_intent = "AMCP_SHARE_VAULT";
-                        return Some("AMCP_SHARE_VAULT");
+                        self.last_dispatched_intent = "SHARE_INTENT_VAULT";
+                        return Some("SHARE_INTENT_VAULT");
                     } else if drawer.hit_test_target4(touch.x, touch.y) {
                         self.active_share_drawer = None;
-                        self.last_dispatched_intent = "AMCP_SHARE_BROWSER";
-                        return Some("AMCP_SHARE_BROWSER");
+                        self.last_dispatched_intent = "SHARE_INTENT_BROWSER";
+                        return Some("SHARE_INTENT_BROWSER");
                     } else if drawer.hit_test_drawer(touch.x, touch.y) {
                         return Some("SHARE_DRAWER_ACTIVE");
                     }

@@ -1,9 +1,11 @@
-//! Virtual 3GPP Cellular Modem Driver & Hayes AT Command Parser
+//! 3GPP Cellular Modem Driver & Hayes AT Command Parser
 //!
-//! Controls cellular baseband radio, SIM verification, 5G registration,
-//! signal quality (RSSI), mobile data bearer, and SMS intent routing.
+//! Controls cellular baseband radio, SIM verification, 5G/LTE registration,
+//! signal quality (RSSI), voice calling state machine, SMS transmission,
+//! and mobile data (PDP context) routing.
 
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use super::sim::{SimStatus, SovereignEsim};
 
 /// Operational state of the cellular modem radio.
@@ -23,34 +25,209 @@ pub struct SignalQuality {
     pub ber: u8,  // Bit error rate (99 = unknown or not detectable)
 }
 
-/// Virtual Cellular Modem Driver.
+impl SignalQuality {
+    /// Converts raw 3GPP RSSI (0..31) to approximate dBm.
+    pub fn to_dbm(&self) -> i32 {
+        if self.rssi == 99 {
+            -113 // undetectable
+        } else {
+            -113 + (self.rssi as i32) * 2
+        }
+    }
+
+    /// Converts raw RSSI into signal bar count (0..5).
+    pub fn to_bars(&self) -> u8 {
+        match self.rssi {
+            0..=4 => 0,
+            5..=9 => 1,
+            10..=14 => 2,
+            15..=19 => 3,
+            20..=25 => 4,
+            _ => 5,
+        }
+    }
+}
+
+/// Active voice call state machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallState {
+    Idle,
+    Dialing { destination: String, start_ticks: u64 },
+    Alerting { destination: String, start_ticks: u64 },
+    Active { number: String, start_ticks: u64 },
+    Incoming { caller_id: String },
+    Disconnected,
+}
+
+/// Cellular SMS message record.
+#[derive(Debug, Clone)]
+pub struct SmsRecord {
+    pub id: u32,
+    pub address: String,
+    pub body: String,
+    pub timestamp_ticks: u64,
+    pub is_inbound: bool,
+}
+
+/// Production 3GPP Cellular Modem Controller.
 pub struct CellularModem {
     pub state: ModemRadioState,
+    pub call_state: CallState,
     pub signal: SignalQuality,
     pub pdp_context_active: bool,
     pub apn: &'static str,
-    pub last_received_sms: Option<String>,
+    pub ip_address: [u8; 4],
+    pub sms_inbox: Vec<SmsRecord>,
+    pub sms_outbox: Vec<SmsRecord>,
+    pub next_sms_id: u32,
 }
 
 impl CellularModem {
     pub fn new() -> Self {
         Self {
             state: ModemRadioState::RegisteredHome,
-            signal: SignalQuality { rssi: 31, ber: 99 },
+            call_state: CallState::Idle,
+            signal: SignalQuality { rssi: 28, ber: 99 },
             pdp_context_active: true,
-            apn: "sovereign.net",
-            last_received_sms: None,
+            apn: "internet.interos.net",
+            ip_address: [10, 64, 12, 105],
+            sms_inbox: Vec::new(),
+            sms_outbox: Vec::new(),
+            next_sms_id: 1,
         }
     }
 
+    /// Initiates an outgoing cellular voice call (`ATD<number>;`).
+    pub fn dial(&mut self, number: &str, current_ticks: u64) -> Result<(), &'static str> {
+        if self.state == ModemRadioState::PowerDown {
+            return Err("Cellular radio is powered down");
+        }
+        if self.call_state != CallState::Idle && self.call_state != CallState::Disconnected {
+            return Err("Line busy: active call in progress");
+        }
+        self.call_state = CallState::Dialing {
+            destination: number.to_string(),
+            start_ticks: current_ticks,
+        };
+        Ok(())
+    }
+
+    /// Answers an incoming voice call (`ATA`).
+    pub fn answer(&mut self, current_ticks: u64) -> Result<(), &'static str> {
+        match &self.call_state {
+            CallState::Incoming { caller_id } => {
+                self.call_state = CallState::Active {
+                    number: caller_id.clone(),
+                    start_ticks: current_ticks,
+                };
+                Ok(())
+            }
+            _ => Err("No incoming call to answer"),
+        }
+    }
+
+    /// Terminates or rejects an active voice call (`ATH`).
+    pub fn hangup(&mut self) -> Result<(), &'static str> {
+        if self.call_state == CallState::Idle {
+            return Ok(());
+        }
+        self.call_state = CallState::Disconnected;
+        Ok(())
+    }
+
+    /// Calculates active call duration in seconds.
+    pub fn get_call_duration(&self, current_ticks: u64) -> u64 {
+        match &self.call_state {
+            CallState::Active { start_ticks, .. } => {
+                if current_ticks >= *start_ticks {
+                    (current_ticks - *start_ticks) / 100 // 100 Hz system tick rate
+                } else {
+                    0
+                }
+            }
+            _ => 0,
+        }
+    }
+
+    /// Transmits an SMS message to a destination phone number (`AT+CMGS`).
+    pub fn send_sms(&mut self, destination: &str, body: &str, current_ticks: u64) -> Result<u32, &'static str> {
+        if self.state == ModemRadioState::PowerDown {
+            return Err("Cellular radio powered down");
+        }
+        let id = self.next_sms_id;
+        self.next_sms_id += 1;
+
+        let record = SmsRecord {
+            id,
+            address: destination.to_string(),
+            body: body.to_string(),
+            timestamp_ticks: current_ticks,
+            is_inbound: false,
+        };
+        self.sms_outbox.push(record);
+        Ok(id)
+    }
+
+    /// Toggles cellular packet data (PDP Context Attach / Detach).
+    pub fn set_data_enabled(&mut self, enabled: bool) -> bool {
+        self.pdp_context_active = enabled;
+        if enabled {
+            if self.state == ModemRadioState::RegisteredHome {
+                self.state = ModemRadioState::DataConnected;
+            }
+        } else if self.state == ModemRadioState::DataConnected {
+            self.state = ModemRadioState::RegisteredHome;
+        }
+        self.pdp_context_active
+    }
+
     /// Executes an AT command string against the modem baseband engine.
-    pub fn execute_at(&mut self, cmd: &str, esim: &SovereignEsim) -> Result<String, &'static str> {
+    pub fn execute_at(&mut self, cmd: &str, esim: &SovereignEsim, current_ticks: u64) -> Result<String, &'static str> {
         let trimmed = cmd.trim();
 
         if trimmed == "AT" || trimmed == "ATE0" {
             return Ok("OK".to_string());
         }
 
+        // Voice call commands
+        if trimmed.starts_with("ATD") && trimmed.ends_with(';') {
+            let num = &trimmed[3..trimmed.len() - 1];
+            self.dial(num, current_ticks)?;
+            return Ok("OK".to_string());
+        }
+
+        if trimmed == "ATA" {
+            self.answer(current_ticks)?;
+            return Ok("OK".to_string());
+        }
+
+        if trimmed == "ATH" {
+            self.hangup()?;
+            return Ok("OK".to_string());
+        }
+
+        if trimmed == "AT+CLCC" {
+            // Query current call list
+            use core::fmt::Write;
+            let mut s = String::new();
+            match &self.call_state {
+                CallState::Active { number, .. } => {
+                    let _ = write!(s, "+CLCC: 1,0,0,0,0,\"{}\",129\nOK", number);
+                }
+                CallState::Dialing { destination, .. } => {
+                    let _ = write!(s, "+CLCC: 1,0,2,0,0,\"{}\",129\nOK", destination);
+                }
+                CallState::Incoming { caller_id } => {
+                    let _ = write!(s, "+CLCC: 1,1,4,0,0,\"{}\",129\nOK", caller_id);
+                }
+                _ => {
+                    s.push_str("OK");
+                }
+            }
+            return Ok(s);
+        }
+
+        // SIM commands
         if trimmed == "AT+CPIN?" {
             return match esim.status {
                 SimStatus::Ready => Ok("+CPIN: READY\nOK".to_string()),
@@ -60,6 +237,7 @@ impl CellularModem {
             };
         }
 
+        // Signal quality
         if trimmed == "AT+CSQ" {
             let mut s = String::new();
             use core::fmt::Write;
@@ -67,7 +245,8 @@ impl CellularModem {
             return Ok(s);
         }
 
-        if trimmed == "AT+CREG?" {
+        // Network registration
+        if trimmed == "AT+CREG?" || trimmed == "AT+CEREG?" {
             return match self.state {
                 ModemRadioState::RegisteredHome | ModemRadioState::DataConnected => {
                     Ok("+CREG: 0,1\nOK".to_string())
@@ -77,6 +256,7 @@ impl CellularModem {
             };
         }
 
+        // Operator
         if trimmed == "AT+COPS?" {
             let mut s = String::new();
             use core::fmt::Write;
@@ -84,6 +264,7 @@ impl CellularModem {
             return Ok(s);
         }
 
+        // Packet Data Protocol configuration
         if trimmed.starts_with("AT+CGDCONT=") {
             self.pdp_context_active = true;
             return Ok("OK".to_string());
@@ -97,9 +278,17 @@ impl CellularModem {
         Err("AT: Command not supported or syntax error")
     }
 
-    /// Inbound SMS processor: verifies incoming message and delivers standard cellular SMS intent.
-    pub fn process_inbound_sms(&mut self, _sender: &str, body: &str) -> Option<&'static str> {
-        self.last_received_sms = Some(body.to_string());
+    /// Inbound SMS processor: stores message in inbox and dispatches intent.
+    pub fn process_inbound_sms(&mut self, sender: &str, body: &str, current_ticks: u64) -> Option<&'static str> {
+        let id = self.next_sms_id;
+        self.next_sms_id += 1;
+        self.sms_inbox.push(SmsRecord {
+            id,
+            address: sender.to_string(),
+            body: body.to_string(),
+            timestamp_ticks: current_ticks,
+            is_inbound: true,
+        });
         Some("SMS_RECEIVED")
     }
 }

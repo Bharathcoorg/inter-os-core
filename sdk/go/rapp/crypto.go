@@ -1,4 +1,4 @@
-package amcp
+package rapp
 
 import (
 	"crypto/hmac"

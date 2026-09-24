@@ -1,7 +1,7 @@
 //! Inter OS Mobile Device GUI & Framebuffer Compositor
 //!
 //! Renders a sleek, modern smartphone device viewport, ambient AI dynamic island,
-//! intent search bar, fluid capability cards (Android MicroVM, .amcp Engine),
+//! intent search bar, fluid capability cards (Android MicroVM, .rapp Engine),
 //! system telemetry, and complete native app views directly into the 1280x720 video framebuffer.
 
 use bootloader_api::info::{FrameBuffer, FrameBufferInfo, PixelFormat};
@@ -1120,7 +1120,7 @@ impl FramebufferWriter {
         vy += 20;
         self.draw_string(x + 14, vy, "No third-party tracking scripts permitted.", 1, COLOR_GREEN, Some(COLOR_DARK_SLATE));
         vy += 30;
-        self.draw_string(x + 14, vy, "* Protocol: InterLayer State Sync (AMCP)", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
+        self.draw_string(x + 14, vy, "* Protocol: InterOS IPC Bus", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
         vy += 20;
         self.draw_string(x + 14, vy, "* Content Digest: SHA-256 Validated", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
     }
@@ -1167,7 +1167,7 @@ impl FramebufferWriter {
         ay += 24;
         self.draw_string(x + 14, ay, "* 09:00 UTC - Microkernel Verification & Ring 3", 1, COLOR_WHITE, Some(COLOR_DARK_SLATE));
         ay += 20;
-        self.draw_string(x + 14, ay, "* 14:30 UTC - Autonomous AMCP Package Restock", 1, COLOR_WHITE, Some(COLOR_DARK_SLATE));
+        self.draw_string(x + 14, ay, "* 14:30 UTC - System Package Check", 1, COLOR_WHITE, Some(COLOR_DARK_SLATE));
         ay += 20;
         self.draw_string(x + 14, ay, "* 18:00 UTC - Sovereign P2P Mesh Synchronization", 1, COLOR_WHITE, Some(COLOR_DARK_SLATE));
         ay += 24;

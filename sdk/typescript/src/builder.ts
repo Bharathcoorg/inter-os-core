@@ -1,13 +1,14 @@
 /**
- * Fluent Builder for Sovereign AMCP Automation Packages.
+ * Fluent Builder for Sovereign Rust App Packages (.rapp).
  */
-import { CapabilityType, type ResourceLimits } from "./types.ts";
+import { CapabilityType, RappArch, type ResourceLimits } from "./types.ts";
 import { sha256, computeSignature } from "./crypto.ts";
 
-export class AmcpBuilder {
+export class RappBuilder {
   private packageId = "";
-  private publisherDid = "";
+  private publisherId = "";
   private version: [number, number, number] = [1, 0, 0];
+  private arch: RappArch = RappArch.X86_64;
   private capabilities: CapabilityType[] = [];
   private limits: ResourceLimits = {
     maxCpuTicks: 20000n,
@@ -15,14 +16,19 @@ export class AmcpBuilder {
   };
   private payload: Uint8Array = new Uint8Array(0);
 
-  public static create(packageId: string): AmcpBuilder {
-    const b = new AmcpBuilder();
+  public static create(packageId: string): RappBuilder {
+    const b = new RappBuilder();
     b.packageId = packageId;
     return b;
   }
 
-  public setPublisher(did: string): this {
-    this.publisherDid = did;
+  public setPublisher(pubId: string): this {
+    this.publisherId = pubId;
+    return this;
+  }
+
+  public setArch(arch: RappArch): this {
+    this.arch = arch;
     return this;
   }
 
@@ -43,8 +49,8 @@ export class AmcpBuilder {
     return this;
   }
 
-  public setPayload(wasmOrBytecode: Uint8Array): this {
-    this.payload = wasmOrBytecode;
+  public setPayload(elfPayload: Uint8Array): this {
+    this.payload = elfPayload;
     return this;
   }
 
@@ -57,82 +63,75 @@ export class AmcpBuilder {
   }
 
   /**
-   * Serializes the package into a standard binary `.amcp` format matching the kernel ABI.
+   * Serializes the package into a standard binary `.rapp` format matching the kernel ABI:
+   * 0x00: "RAPP" (4B)
+   * 0x04: Version format (2B LE = 1)
+   * 0x06: Target arch (2B LE: 0=x86_64, 1=aarch64, 2=riscv64)
+   * 0x08: Package ID (32B null-padded)
+   * 0x28: Publisher ID (16B null-padded)
+   * 0x38: Version major (2B LE)
+   * 0x3A: Version minor (2B LE)
+   * 0x3C: Version patch (2B LE)
+   * 0x3E: Capability count (2B LE)
+   * 0x40: SHA-256 digest (32B)
+   * 0x60: Ed25519 signature slot (64B)
+   * 0xA0: Payload length (4B LE)
+   * 0xA4: Capabilities (cap_count * 2B LE)
+   * 0xA4 + caps: Payload bytes
    */
   public buildBinary(): Uint8Array {
     const enc = new TextEncoder();
-    const idBytes = enc.encode(this.packageId);
-    const pubBytes = enc.encode(this.publisherDid);
     const digest = sha256(this.payload);
 
-    // Calculate total buffer size
-    const magicLen = 6;
-    const versionFmtLen = 2;
-    const versionTupleLen = 6;
-    const digestLen = 32;
-    const limitsLen = 16;
-    const capsLen = 1 + this.capabilities.length;
-    const idLen = 1 + idBytes.length;
-    const pubLen = 1 + pubBytes.length;
-    const payloadHeaderLen = 4;
-    const totalLen =
-      magicLen +
-      versionFmtLen +
-      versionTupleLen +
-      digestLen +
-      limitsLen +
-      capsLen +
-      idLen +
-      pubLen +
-      payloadHeaderLen +
-      this.payload.length;
+    const headerSize = 0xA4;
+    const capsSize = this.capabilities.length * 2;
+    const totalLen = headerSize + capsSize + this.payload.length;
 
     const out = new Uint8Array(totalLen);
     const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
 
-    // 1. Magic Header: "AMCP\x01\x00"
-    out.set([0x41, 0x4d, 0x43, 0x50, 0x01, 0x00], 0);
-    let offset = 6;
+    // 1. Magic "RAPP"
+    out.set([0x52, 0x41, 0x50, 0x50], 0x00);
 
     // 2. Format Version (u16 LE = 1)
-    view.setUint16(offset, 1, true);
-    offset += 2;
+    view.setUint16(0x04, 1, true);
 
-    // 3. Version Tuple (3 * u16 LE)
-    view.setUint16(offset, this.version[0], true);
-    view.setUint16(offset + 2, this.version[1], true);
-    view.setUint16(offset + 4, this.version[2], true);
-    offset += 6;
+    // 3. Target Architecture (u16 LE)
+    view.setUint16(0x06, this.arch, true);
 
-    // 4. SHA-256 Digest (32 bytes)
-    out.set(digest, offset);
-    offset += 32;
+    // 4. Package ID (32 bytes null-padded)
+    const pkgBytes = enc.encode(this.packageId);
+    out.set(pkgBytes.subarray(0, 32), 0x08);
 
-    // 5. Resource Limits (2 * u64 LE)
-    view.setBigUint64(offset, this.limits.maxCpuTicks, true);
-    view.setBigUint64(offset + 8, this.limits.maxMemoryBytes, true);
-    offset += 16;
+    // 5. Publisher ID (16 bytes null-padded)
+    const pubBytes = enc.encode(this.publisherId);
+    out.set(pubBytes.subarray(0, 16), 0x28);
 
-    // 6. Declared capabilities
-    out[offset++] = this.capabilities.length;
+    // 6. Version (3 * u16 LE)
+    view.setUint16(0x38, this.version[0], true);
+    view.setUint16(0x3A, this.version[1], true);
+    view.setUint16(0x3C, this.version[2], true);
+
+    // 7. Capability count (u16 LE)
+    view.setUint16(0x3E, this.capabilities.length, true);
+
+    // 8. SHA-256 Digest (32 bytes)
+    out.set(digest, 0x40);
+
+    // 9. Signature (64 bytes zeros)
+    // already 0 initialized
+
+    // 10. Payload length (u32 LE)
+    view.setUint32(0xA0, this.payload.length, true);
+
+    // 11. Capabilities (u16 LE each)
+    let offset = 0xA4;
     for (const cap of this.capabilities) {
-      out[offset++] = cap;
+      view.setUint16(offset, cap, true);
+      offset += 2;
     }
 
-    // 7. Package ID (len + string)
-    out[offset++] = idBytes.length;
-    out.set(idBytes, offset);
-    offset += idBytes.length;
-
-    // 8. Publisher DID (len + string)
-    out[offset++] = pubBytes.length;
-    out.set(pubBytes, offset);
-    offset += pubBytes.length;
-
-    // 9. Payload Length (u32 LE) + payload bytes
-    view.setUint32(offset, this.payload.length, true);
-    offset += 4;
-
+    // 12. Payload bytes
     out.set(this.payload, offset);
 
     return out;

@@ -1,7 +1,7 @@
 //! Android Compatibility Runtime (ACR) Cross-Zone Intent Bridge
 //!
 //! Provides bidirectional intent translation between isolated Android guest workloads
-//! and native Inter OS sovereign AMCP automations while strictly preventing
+//! and native Inter OS sovereign intents while strictly preventing
 //! cross-zone filesystem leakage and ambient capability escalation.
 
 /// Android Intent Representation
@@ -52,20 +52,20 @@ impl AndroidIntentBridge {
         match intent.action {
             "android.intent.action.VIEW" => {
                 if intent.data_uri.starts_with("upi://") || intent.data_uri.contains("pay") {
-                    Ok("AMCP_PAY")
+                    Ok("INTENT_PAY")
                 } else if intent.data_uri.starts_with("http://") || intent.data_uri.starts_with("https://") {
-                    Ok("AMCP_BROWSER_URL")
+                    Ok("INTENT_BROWSER_URL")
                 } else if intent.data_uri.starts_with("geo:") {
-                    Ok("AMCP_MAPS_VIEW")
+                    Ok("INTENT_MAPS_VIEW")
                 } else {
-                    Ok("AMCP_VIEW_DEFAULT")
+                    Ok("INTENT_VIEW_DEFAULT")
                 }
             }
             "android.intent.action.DIAL" | "android.intent.action.CALL" => {
-                Ok("AMCP_TELEPHONY_DIAL")
+                Ok("INTENT_TELEPHONY_DIAL")
             }
             "android.intent.action.SEND" => {
-                Ok("AMCP_SHARE_PAYLOAD")
+                Ok("INTENT_SHARE_PAYLOAD")
             }
             _ => Err(AndroidBridgeError::UnsupportedAction),
         }

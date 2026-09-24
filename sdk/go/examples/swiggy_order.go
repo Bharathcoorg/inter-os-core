@@ -5,30 +5,37 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/interos-platform/amcp-go-sdk/amcp"
+	"github.com/interos-platform/rapp-go-sdk/rapp"
 )
 
 func main() {
 	sovereignDevKey := []byte("INTER_OS_SOVEREIGN_DEV_KEY_2026!")
 
-	wasmPayload := []byte("\x00asm\x01\x00\x00\x00SWIGGY_FOOD_ORDER_INTENT_WASM_V1")
+	// Minimal valid ELF payload
+	elfPayload := []byte{
+		0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x02, 0x00, 0x3e, 0x00, 0x01, 0x00, 0x00, 0x00,
+		0x78, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00,
+	}
 
-	builder := amcp.NewBuilder("swiggy.food_order").
-		SetPublisher("did:inter:publisher:swiggy_verified").
+	builder := rapp.NewBuilder("swiggy.food_order").
+		SetPublisher("swiggy_official").
+		SetArch(rapp.ArchX86_64).
 		SetVersion(1, 0, 4).
-		AddCapability(amcp.CapSerialOutput).
-		AddCapability(amcp.CapIpcSend).
-		AddCapability(amcp.CapNetworkSend).
+		AddCapability(rapp.CapSerialOutput).
+		AddCapability(rapp.CapIpcSend).
+		AddCapability(rapp.CapNetworkSend).
 		SetLimits(20000, 65536).
-		SetPayload(wasmPayload)
+		SetPayload(elfPayload)
 
 	sig := builder.Sign(sovereignDevKey)
 	bin, err := builder.BuildBinary()
 	if err != nil {
-		log.Fatalf("Failed to build AMCP binary: %v", err)
+		log.Fatalf("Failed to build .rapp binary: %v", err)
 	}
 
-	fmt.Printf("Successfully compiled sovereign AMCP package: 'swiggy.food_order'\n")
+	fmt.Printf("Successfully compiled sovereign .rapp package: 'swiggy.food_order'\n")
 	fmt.Printf("Binary Size: %d bytes\n", len(bin))
 	fmt.Printf("Developer Signature: %s\n", hex.EncodeToString(sig[:]))
 }
