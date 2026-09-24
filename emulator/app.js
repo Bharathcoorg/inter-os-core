@@ -1294,7 +1294,7 @@ document.addEventListener('DOMContentLoaded', () => {
       return `
         <div class="mock-browser-bar">
           <i data-lucide="lock" style="width: 10px; height: 10px; color: #10B981;"></i>
-          <span>interlayer.dev/os</span>
+          <span>interos.dev/os</span>
         </div>
         <div class="mock-browser-hero">
           <span style="font-size: 0.58rem; color: #38BDF8; font-weight: 700; text-transform: uppercase;">UNIVERSAL MOBILE PLATFORM</span>
@@ -1338,7 +1338,7 @@ document.addEventListener('DOMContentLoaded', () => {
         </div>
         <div class="mock-settings-tile">
           <span style="display: flex; align-items: center; gap: 6px;"><i data-lucide="wifi" style="width: 11px; height: 11px; color: #3B82F6;"></i> Wi-Fi</span>
-          <span style="color: #10B981; font-weight: 600;">InterLayer-5G</span>
+          <span style="color: #10B981; font-weight: 600;">InterOS-5G</span>
         </div>
         <div class="mock-settings-tile">
           <span style="display: flex; align-items: center; gap: 6px;"><i data-lucide="bluetooth" style="width: 11px; height: 11px; color: #00F2FE;"></i> Bluetooth</span>
@@ -3823,7 +3823,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setToggleWifi?.addEventListener('change', (e) => {
     const isChecked = e.target.checked;
     if (setWifiStatus) {
-      setWifiStatus.textContent = isChecked ? 'Connected: InterLayer-Mesh-5G' : 'Wi-Fi Offline';
+      setWifiStatus.textContent = isChecked ? 'Connected: InterOS-Mesh-5G' : 'Wi-Fi Offline';
     }
     showToast(isChecked ? 'Wi-Fi 6E connected' : 'Wi-Fi turned off');
   });
@@ -4015,7 +4015,7 @@ document.addEventListener('DOMContentLoaded', () => {
     },
 
     updateBootloaderUI(theme) {
-      const subtext = theme?.bootloader?.custom_subtext || theme?.bootloader?.subtext || 'Powered by Interlayer';
+      const subtext = theme?.bootloader?.custom_subtext || theme?.bootloader?.subtext || 'Open-Source Rust Mobile OS';
       const bootSub = document.getElementById('boot-custom-subtitle');
       if (bootSub) bootSub.textContent = subtext;
 
@@ -4205,11 +4205,11 @@ document.addEventListener('DOMContentLoaded', () => {
       const previewSubtext = document.getElementById('bootloader-preview-subtext');
 
       inputSubtext?.addEventListener('input', (e) => {
-        if (previewSubtext) previewSubtext.textContent = e.target.value || 'Powered by Interlayer';
+        if (previewSubtext) previewSubtext.textContent = e.target.value || 'Open-Source Rust Mobile OS';
       });
 
       btnSaveBootloader?.addEventListener('click', async () => {
-        const text = inputSubtext?.value.trim() || 'Powered by Interlayer';
+        const text = inputSubtext?.value.trim() || 'Open-Source Rust Mobile OS';
         try {
           const res = await fetch('/api/themes/bootloader', {
             method: 'POST',
@@ -5495,7 +5495,7 @@ document.addEventListener('DOMContentLoaded', () => {
   btnBackMusic?.addEventListener('click', goHome);
 
   const musicTracks = [
-    { id: 0, title: 'Sovereign Symphony in C', artist: 'InterLayer Ensemble • 120 BPM', duration: 252, format: 'FLAC 24-bit', bpm: 120 },
+    { id: 0, title: 'Sovereign Symphony in C', artist: 'InterOS Ensemble • 120 BPM', duration: 252, format: 'FLAC 24-bit', bpm: 120 },
     { id: 1, title: 'Cybernetic Sunrise', artist: 'Astro Sentinel • 95 BPM', duration: 225, format: 'Opus 48kHz', bpm: 95 },
     { id: 2, title: 'Mesh Harmony', artist: 'Ring 3 Synthesizer • 130 BPM', duration: 302, format: 'FLAC 24-bit', bpm: 130 }
   ];
