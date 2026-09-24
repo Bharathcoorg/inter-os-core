@@ -65,7 +65,11 @@ pub enum TaskState {
     Running,
     /// Blocked awaiting an external event, IPC message, or timer tick.
     Blocked,
-    /// Terminated, awaiting resource reclamation.
+    /// Blocked waiting for a child process to exit (waitpid).
+    WaitPid(u64),
+    /// Terminated but awaiting parent to reap exit status (zombie).
+    Zombie,
+    /// Terminated and fully reaped, awaiting resource reclamation.
     Terminated,
 }
 
@@ -93,6 +97,10 @@ pub struct TaskControlBlock {
     pub user_entry: usize,
     /// Virtual address of userspace stack top (Ring 3 RSP).
     pub user_stack_top: usize,
+    /// Parent task ID (0 = init / no parent).
+    pub parent_id: TaskId,
+    /// Exit code set on termination (only valid in Zombie/Terminated state).
+    pub exit_code: i32,
 }
 
 impl TaskControlBlock {
@@ -133,6 +141,8 @@ impl TaskControlBlock {
             page_table: None,
             user_entry: 0,
             user_stack_top: 0,
+            parent_id: TaskId(0),
+            exit_code: 0,
         }
     }
 
@@ -156,6 +166,8 @@ impl TaskControlBlock {
             page_table: None,
             user_entry: 0,
             user_stack_top: 0,
+            parent_id: TaskId(0),
+            exit_code: 0,
         }
     }
 

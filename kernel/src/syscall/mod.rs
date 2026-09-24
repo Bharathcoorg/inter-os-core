@@ -108,6 +108,8 @@ pub enum SyscallResult {
     PipeNotFound = -27,
     PipeFull = -28,
     PipeEmpty = -29,
+    NotReady = -30,
+    InvalidArgument = -31,
 }
 
 /// Dispatches a cooperative scheduling yield.
@@ -115,9 +117,47 @@ pub fn sys_yield() {
     crate::task::yield_now();
 }
 
-/// Terminates the calling task.
-pub fn sys_exit() -> ! {
+/// Terminates the calling task with an exit code.
+///
+/// The task transitions to `Zombie` state until its parent reaps the exit status
+/// via `sys_waitpid`. If no parent is waiting, the scheduler will eventually reclaim it.
+pub fn sys_exit_with_code(exit_code: i32) -> ! {
+    {
+        let mut sched = SCHEDULER.lock();
+        if let Some(current) = sched.current_task_mut() {
+            current.exit_code = exit_code;
+            current.state = crate::task::TaskState::Zombie;
+        }
+    }
     crate::task::terminate_current();
+}
+
+/// Terminates the calling task (exit code 0).
+pub fn sys_exit() -> ! {
+    sys_exit_with_code(0);
+}
+
+/// Waits for a child task to terminate and reaps its exit status.
+///
+/// Returns `Success` if the child has terminated (exit code logged to serial),
+/// or `NotReady` if the child is still running.
+pub fn sys_waitpid(child_id: u64) -> SyscallResult {
+    let sched = SCHEDULER.lock();
+    let child_tid = crate::task::TaskId(child_id);
+    match sched.get_task(child_tid) {
+        Some(task) => {
+            match task.state {
+                crate::task::TaskState::Zombie | crate::task::TaskState::Terminated => {
+                    let code = task.exit_code;
+                    drop(sched);
+                    serial_println!("[WAITPID] Child {} reaped with exit code {}", child_id, code);
+                    SyscallResult::Success
+                }
+                _ => SyscallResult::NotReady,
+            }
+        }
+        None => SyscallResult::InvalidArgument,
+    }
 }
 
 /// Emits a diagnostic log message to the UART serial COM1.
