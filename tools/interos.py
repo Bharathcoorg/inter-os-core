@@ -374,6 +374,16 @@ def cmd_test(args):
             if res.returncode != 0 and test_target == "riscv64":
                 return res.returncode
 
+    if test_target in ["security", "adversarial", "all"]:
+        sec_script = WORKSPACE_ROOT / "tests" / "test_adversarial_security.py"
+        if sec_script.exists():
+            log("Executing Zero-Trust Adversarial Security Verification Suite...")
+            res = subprocess.run([sys.executable, str(sec_script)])
+            if res.returncode != 0:
+                log_error("Adversarial security test suite failed!")
+                return res.returncode
+            log_success("All adversarial security invariants validated.")
+
     log_success("Test execution finished.")
     return 0
 

@@ -935,36 +935,37 @@ def verify_and_install_rapp(body, pkg_name):
     version = manifest_data.get("version", "1.0.0")
     perms = manifest_data.get("permissions", ["CAP_RING3_USERSPACE"])
 
-    # Verify Ed25519 cryptographic signature if signature.json is present
-    has_sig = "signature.json" in namelist
+    # Mandatory Ed25519 cryptographic signature verification
+    if "signature.json" not in namelist:
+        return False, "Package rejected: missing 'signature.json'. Unsigned packages are strictly forbidden in InterOS sovereign runtime.", None
+
     sig_verified = False
     pub_key_hex = ""
 
-    if has_sig:
-        try:
-            sig_data = json.loads(zf.read("signature.json").decode('utf-8'))
-            pub_key_hex = sig_data.get("public_key", "")
-            sig_hex = sig_data.get("signature", "")
-            signed_payload = sig_data.get("signed_payload", {})
+    try:
+        sig_data = json.loads(zf.read("signature.json").decode('utf-8'))
+        pub_key_hex = sig_data.get("public_key", "")
+        sig_hex = sig_data.get("signature", "")
+        signed_payload = sig_data.get("signed_payload", {})
 
-            from cryptography.hazmat.primitives.asymmetric import ed25519
+        from cryptography.hazmat.primitives.asymmetric import ed25519
 
-            pub_key = ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(pub_key_hex))
-            canonical_payload = json.dumps(signed_payload, sort_keys=True).encode("utf-8")
-            pub_key.verify(bytes.fromhex(sig_hex), canonical_payload)
+        pub_key = ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(pub_key_hex))
+        canonical_payload = json.dumps(signed_payload, sort_keys=True).encode("utf-8")
+        pub_key.verify(bytes.fromhex(sig_hex), canonical_payload)
 
-            expected_files = signed_payload.get("files_sha256", {})
-            for rel_path, expected_hash in expected_files.items():
-                if rel_path not in namelist:
-                    return False, f"Signed file missing from package: '{rel_path}'.", None
-                file_bytes = zf.read(rel_path)
-                actual_hash = hashlib.sha256(file_bytes).hexdigest()
-                if actual_hash != expected_hash:
-                    return False, f"Cryptographic integrity violation: hash mismatch on '{rel_path}'.", None
+        expected_files = signed_payload.get("files_sha256", {})
+        for rel_path, expected_hash in expected_files.items():
+            if rel_path not in namelist:
+                return False, f"Signed file missing from package: '{rel_path}'.", None
+            file_bytes = zf.read(rel_path)
+            actual_hash = hashlib.sha256(file_bytes).hexdigest()
+            if actual_hash != expected_hash:
+                return False, f"Cryptographic integrity violation: hash mismatch on '{rel_path}'.", None
 
-            sig_verified = True
-        except Exception as e:
-            return False, f"Cryptographic signature verification failed: {e}", None
+        sig_verified = True
+    except Exception as e:
+        return False, f"Cryptographic signature verification failed: {e}", None
 
     # Atomic Staging & Installation
     staging_dir = os.path.join(INSTALLED_APPS_DIR, f"_staging_{app_id}_{int(time.time()*1000)}")

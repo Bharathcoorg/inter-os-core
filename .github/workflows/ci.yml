@@ -70,5 +70,18 @@ jobs:
       - name: Verify JavaScript Engine Syntax
         run: node --check emulator/app.js
 
-      - name: Verify Studio Server Syntax
-        run: python -m py_compile emulator/server.py
+      - name: Verify Python Scripts Syntax
+        run: python -m py_compile emulator/server.py tools/interos.py tests/test_adversarial_security.py
+
+      - name: Install Python Dependencies & Verify CLI
+        run: |
+          pip install cryptography
+          python tools/interos.py doctor
+          python tools/interos.py devices
+
+      - name: Run Adversarial Security Tests
+        run: |
+          python emulator/server.py &
+          sleep 3
+          python tests/test_adversarial_security.py
+
