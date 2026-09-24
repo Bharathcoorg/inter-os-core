@@ -841,8 +841,12 @@ extern "C" fn task_telemetry_service() -> ! {
     loop {
         iteration = iteration.wrapping_add(1);
         if iteration == 1 || iteration % 250 == 0 {
-            if let Ok(_ticks) = syscall::sys_get_ticks(0) {
-                syscall::sys_log(1, "[TELEMETRY TASK] Capability-verified telemetry heartbeat: Hardware timer active.");
+            if let Ok(ticks) = syscall::sys_get_ticks(0) {
+                syscall::sys_log(1, "[TELEMETRY TASK] Capability-verified timer telemetry active.");
+                // Refresh the guest process table so Device Studio can observe
+                // live scheduler state rather than a one-time boot snapshot.
+                crate::task::SCHEDULER.lock().dump_process_table();
+                crate::serial_println!("[TELEMETRY] uptime_ticks={}", ticks);
             }
         }
         syscall::sys_yield();
