@@ -12,7 +12,7 @@ fn panic(info: &PanicInfo) -> ! {
     x86_64::instructions::interrupts::disable();
 
     serial_println!("\n========================================================");
-    serial_println!("                 GRAVITY OS KERNEL PANIC                ");
+    serial_println!("                 INTEROS CORE KERNEL PANIC                ");
     serial_println!("========================================================");
     if let Some(location) = info.location() {
         serial_println!("Origin:  {}:{}:{}", location.file(), location.line(), location.column());

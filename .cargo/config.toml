@@ -1,0 +1,11 @@
+[target.aarch64-unknown-none]
+rustflags = [
+    "-C", "link-arg=-Lkernel-aarch64",
+    "-C", "link-arg=-Tlinker.ld",
+]
+
+[target.riscv64gc-unknown-none-elf]
+rustflags = [
+    "-C", "link-arg=-Lkernel-riscv64",
+    "-C", "link-arg=-Tlinker.ld",
+]

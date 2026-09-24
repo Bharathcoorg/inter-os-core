@@ -189,3 +189,73 @@ impl UserSliceMut {
         Ok(to_copy)
     }
 }
+
+/// Copies bytes from userspace memory into a kernel destination slice.
+#[inline]
+pub fn copy_from_user(dst: &mut [u8], src_addr: u64, len: usize) -> Result<usize, UserAccessError> {
+    if len > dst.len() {
+        return Err(UserAccessError::OutOfBounds);
+    }
+    if len == 0 {
+        return Ok(0);
+    }
+    validate_user_buffer(src_addr, len)?;
+    unsafe {
+        core::ptr::copy_nonoverlapping(src_addr as *const u8, dst.as_mut_ptr(), len);
+    }
+    Ok(len)
+}
+
+/// Copies bytes from a kernel source slice into userspace memory.
+#[inline]
+pub fn copy_to_user(dst_addr: u64, src: &[u8]) -> Result<usize, UserAccessError> {
+    let len = src.len();
+    if len == 0 {
+        return Ok(0);
+    }
+    validate_user_buffer(dst_addr, len)?;
+    unsafe {
+        core::ptr::copy_nonoverlapping(src.as_ptr(), dst_addr as *mut u8, len);
+    }
+    Ok(len)
+}
+
+/// Safely reads a `Copy` value from userspace memory into a kernel-owned copy.
+#[inline]
+pub fn read_user_value<T: Copy>(addr: u64) -> Result<T, UserAccessError> {
+    let size = core::mem::size_of::<T>();
+    let align = core::mem::align_of::<T>();
+    if addr % (align as u64) != 0 {
+        return Err(UserAccessError::OutOfBounds);
+    }
+    validate_user_buffer(addr, size)?;
+    unsafe {
+        Ok(core::ptr::read_unaligned(addr as *const T))
+    }
+}
+
+/// Safely writes a `Copy` value into userspace memory.
+#[inline]
+pub fn write_user_value<T: Copy>(dst_addr: u64, val: &T) -> Result<(), UserAccessError> {
+    let size = core::mem::size_of::<T>();
+    let align = core::mem::align_of::<T>();
+    if dst_addr % (align as u64) != 0 {
+        return Err(UserAccessError::OutOfBounds);
+    }
+    validate_user_buffer(dst_addr, size)?;
+    unsafe {
+        core::ptr::write_unaligned(dst_addr as *mut T, *val);
+    }
+    Ok(())
+}
+
+/// Safely copies a string from userspace memory into a kernel buffer, validating UTF-8.
+#[inline]
+pub fn read_user_string<'a>(addr: u64, len: usize, dst: &'a mut [u8]) -> Result<&'a str, UserAccessError> {
+    if len == 0 {
+        return Ok("");
+    }
+    let copied = copy_from_user(dst, addr, len)?;
+    core::str::from_utf8(&dst[..copied]).map_err(|_| UserAccessError::InvalidUtf8)
+}
+

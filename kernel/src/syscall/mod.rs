@@ -6,39 +6,10 @@
 pub mod entry;
 pub mod user_ptr;
 pub use entry::set_current_kernel_rsp;
-pub use user_ptr::{UserPtr, UserSlice, UserSliceMut, UserAccessError, validate_user_buffer};
-
-/// Validates that a user-supplied address range `[addr, addr + len)` is strictly
-/// within user space, non-null, and does not overlap kernel memory.
-#[inline]
-pub fn check_user_slice(addr: u64, len: usize) -> Result<&'static [u8], SyscallResult> {
-    if len == 0 {
-        return Ok(&[]);
-    }
-    if validate_user_buffer(addr, len).is_err() {
-        return Err(SyscallResult::InvalidArguments);
-    }
-    Ok(unsafe { core::slice::from_raw_parts(addr as *const u8, len) })
-}
-
-/// Validates that a user-supplied mutable buffer range is strictly within user space.
-#[inline]
-pub fn check_user_slice_mut(addr: u64, len: usize) -> Result<&'static mut [u8], SyscallResult> {
-    if len == 0 {
-        return Ok(&mut []);
-    }
-    if validate_user_buffer(addr, len).is_err() {
-        return Err(SyscallResult::InvalidArguments);
-    }
-    Ok(unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, len) })
-}
-
-/// Validates that a user-supplied string pointer is in user memory and contains valid UTF-8.
-#[inline]
-pub fn check_user_str(addr: u64, len: usize) -> Result<&'static str, SyscallResult> {
-    let slice = check_user_slice(addr, len)?;
-    core::str::from_utf8(slice).map_err(|_| SyscallResult::InvalidArguments)
-}
+pub use user_ptr::{
+    copy_from_user, copy_to_user, read_user_string, read_user_value, write_user_value,
+    validate_user_buffer, UserAccessError, UserPtr, UserSlice, UserSliceMut,
+};
 
 use crate::capability::{CapError, CapabilityType, Rights};
 use crate::drivers::{BlockDevice, ATA_PRIMARY, SECTOR_SIZE};
@@ -222,6 +193,7 @@ pub fn sys_ipc_send(
         Err(IpcError::TargetNotFound) => SyscallResult::TargetNotFound,
         Err(IpcError::MailboxFull) => SyscallResult::MailboxFull,
         Err(IpcError::MailboxEmpty) => SyscallResult::MailboxEmpty,
+        Err(IpcError::EndpointRevoked) => SyscallResult::PermissionDenied,
     }
 }
 
@@ -431,12 +403,13 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             // Log: a1 = cap_slot, a2 = msg_ptr, a3 = msg_len
             let cap_slot = a1 as usize;
             let msg_len = a3 as usize;
-            if msg_len > 4096 {
+            if msg_len == 0 || msg_len > 1024 {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let s = match check_user_str(a2, msg_len) {
+            let mut log_buf = [0u8; 1024];
+            let s = match read_user_string(a2, msg_len, &mut log_buf) {
                 Ok(valid) => valid,
-                Err(err) => return err as i64,
+                Err(_) => return SyscallResult::InvalidArguments as i64,
             };
             sys_log(cap_slot, s) as i64
         }
@@ -453,24 +426,25 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             let dest = TaskId(a2);
             let msg_type = a3 as u32;
             let data_len = a5 as usize;
-            let data = match check_user_slice(a4, data_len) {
-                Ok(d) => d,
-                Err(err) => return err as i64,
-            };
-            sys_ipc_send(cap_slot, dest, msg_type, data) as i64
+            if data_len > 1024 {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let mut kbuf = [0u8; 1024];
+            if copy_from_user(&mut kbuf[..data_len], a4, data_len).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            sys_ipc_send(cap_slot, dest, msg_type, &kbuf[..data_len]) as i64
         }
         6 => {
             // IpcRecv: a1 = cap_slot, a2 = out_buf_ptr, a3 = out_buf_len
             let cap_slot = a1 as usize;
             let out_len = a3 as usize;
-            let out_buf = match check_user_slice_mut(a2, out_len) {
-                Ok(b) => b,
-                Err(err) => return err as i64,
-            };
             match sys_ipc_recv(cap_slot) {
                 Ok(msg) => {
-                    let copy_len = core::cmp::min(out_buf.len(), msg.payload.len());
-                    out_buf[..copy_len].copy_from_slice(&msg.payload[..copy_len]);
+                    let copy_len = core::cmp::min(out_len, msg.payload.len());
+                    if copy_to_user(a2, &msg.payload[..copy_len]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
                     copy_len as i64
                 }
                 Err(err) => err as i64,
@@ -488,9 +462,10 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             if path_len == 0 || path_len > 512 {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let path = match check_user_str(a2, path_len) {
+            let mut path_buf = [0u8; 512];
+            let path = match read_user_string(a2, path_len, &mut path_buf) {
                 Ok(s) => s,
-                Err(err) => return err as i64,
+                Err(_) => return SyscallResult::InvalidArguments as i64,
             };
             match sys_fs_open(cap_slot, path, rights) {
                 Ok(fd) => fd.0 as i64,
@@ -502,12 +477,17 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             let cap_slot = a1 as usize;
             let fd = FileDescriptor(a2 as u32);
             let buf_len = a4 as usize;
-            let buf = match check_user_slice_mut(a3, buf_len) {
-                Ok(b) => b,
-                Err(err) => return err as i64,
-            };
-            match sys_fs_read(cap_slot, fd, buf) {
-                Ok(bytes) => bytes as i64,
+            if buf_len > 4096 {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let mut kbuf = [0u8; 4096];
+            match sys_fs_read(cap_slot, fd, &mut kbuf[..buf_len]) {
+                Ok(bytes) => {
+                    if copy_to_user(a3, &kbuf[..bytes]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    bytes as i64
+                }
                 Err(e) => e as i64,
             }
         }
@@ -516,11 +496,14 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             let cap_slot = a1 as usize;
             let fd = FileDescriptor(a2 as u32);
             let buf_len = a4 as usize;
-            let buf = match check_user_slice(a3, buf_len) {
-                Ok(b) => b,
-                Err(err) => return err as i64,
-            };
-            match sys_fs_write(cap_slot, fd, buf) {
+            if buf_len > 4096 {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let mut kbuf = [0u8; 4096];
+            if copy_from_user(&mut kbuf[..buf_len], a3, buf_len).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            match sys_fs_write(cap_slot, fd, &kbuf[..buf_len]) {
                 Ok(bytes) => bytes as i64,
                 Err(e) => e as i64,
             }
@@ -534,23 +517,30 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             // BlockRead: a1 = cap_slot, a2 = lba, a3 = buf_ptr
             let cap_slot = a1 as usize;
             let lba = a2 as u32;
-            let buf_ptr = a3 as *mut u8;
-            if buf_ptr.is_null() {
-                return SyscallResult::InvalidArguments as i64;
+            let mut sector_buf = [0u8; SECTOR_SIZE];
+            let res = sys_block_read(cap_slot, lba, &mut sector_buf);
+            if res == SyscallResult::Success {
+                if copy_to_user(a3, &sector_buf).is_err() {
+                    return SyscallResult::InvalidArguments as i64;
+                }
             }
-            let buf = unsafe { &mut *(buf_ptr as *mut [u8; SECTOR_SIZE]) };
-            sys_block_read(cap_slot, lba, buf) as i64
+            res as i64
         }
         19 => {
             // ResourceQuery: a1 = out_battery_ptr, a2 = out_temp_ptr, a3 = out_throttling_ptr
-            let b_ptr = a1 as *mut u8;
-            let t_ptr = a2 as *mut u8;
-            let th_ptr = a3 as *mut bool;
-            if b_ptr.is_null() || t_ptr.is_null() || th_ptr.is_null() {
-                return SyscallResult::InvalidArguments as i64;
+            let mut b: u8 = 0;
+            let mut t: u8 = 0;
+            let mut th: bool = false;
+            let res = sys_resource_query(&mut b, &mut t, &mut th);
+            if res == SyscallResult::Success {
+                if write_user_value(a1, &b).is_err()
+                    || write_user_value(a2, &t).is_err()
+                    || write_user_value(a3, &th).is_err()
+                {
+                    return SyscallResult::InvalidArguments as i64;
+                }
             }
-            let (b, t, th) = unsafe { (&mut *b_ptr, &mut *t_ptr, &mut *th_ptr) };
-            sys_resource_query(b, t, th) as i64
+            res as i64
         }
         21 => {
             // NetSocket: a1 = port
@@ -564,37 +554,42 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             // NetSendTo: a1 = dst_ip_u32, a2 = dst_port, a3 = payload_ptr, a4 = payload_len
             let dst_ip = crate::net::Ipv4Address((a1 as u32).to_be_bytes());
             let dst_port = a2 as u16;
-            let ptr = a3 as *const u8;
             let len = a4 as usize;
-            if ptr.is_null() {
+            if len > 2048 {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let payload = unsafe { core::slice::from_raw_parts(ptr, len) };
-            sys_net_sendto(dst_ip, dst_port, payload) as i64
+            let mut payload = [0u8; 2048];
+            if copy_from_user(&mut payload[..len], a3, len).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            sys_net_sendto(dst_ip, dst_port, &payload[..len]) as i64
         }
         23 => {
             // NetRecvFrom: a1 = sock_id, a2 = out_buf_ptr, a3 = out_buf_len
             let sock_id = crate::net::SocketId(a1 as u32);
-            let ptr = a2 as *mut u8;
             let len = a3 as usize;
-            if ptr.is_null() {
+            if len > 2048 {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let out_buf = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
-            match sys_net_recvfrom(sock_id, out_buf) {
-                Ok(bytes) => bytes as i64,
+            let mut kbuf = [0u8; 2048];
+            match sys_net_recvfrom(sock_id, &mut kbuf[..len]) {
+                Ok(bytes) => {
+                    if copy_to_user(a2, &kbuf[..bytes]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    bytes as i64
+                }
                 Err(e) => e as i64,
             }
         }
         26 => {
             // PackageAudit: a1 = pkg_id_ptr, a2 = pkg_id_len
-            let ptr = a1 as *const u8;
             let len = a2 as usize;
-            if ptr.is_null() || len == 0 || len > 128 {
+            if len == 0 || len > 128 {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
-            let pkg_id = match core::str::from_utf8(slice) {
+            let mut pkg_buf = [0u8; 128];
+            let pkg_id = match read_user_string(a1, len, &mut pkg_buf) {
                 Ok(s) => s,
                 Err(_) => return SyscallResult::InvalidArguments as i64,
             };
@@ -606,14 +601,13 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         27 => {
             // PackageInstall: a1 = cap_slot, a2 = pkg_id_ptr, a3 = pkg_id_len, a4 = user_consent
             let cap_slot = a1 as usize;
-            let ptr = a2 as *const u8;
             let len = a3 as usize;
             let consent = a4 != 0;
-            if ptr.is_null() || len == 0 || len > 128 {
+            if len == 0 || len > 128 {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
-            let pkg_id = match core::str::from_utf8(slice) {
+            let mut pkg_buf = [0u8; 128];
+            let pkg_id = match read_user_string(a2, len, &mut pkg_buf) {
                 Ok(s) => s,
                 Err(_) => return SyscallResult::InvalidArguments as i64,
             };
@@ -624,14 +618,18 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         }
         28 => {
             // HalQueryPlatform: a1 = out_buf_ptr, a2 = out_buf_len
-            let ptr = a1 as *mut u8;
             let len = a2 as usize;
-            if ptr.is_null() {
+            if len > 256 {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let out_buf = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
-            match sys_hal_query_platform(out_buf) {
-                Ok(n) => n as i64,
+            let mut kbuf = [0u8; 256];
+            match sys_hal_query_platform(&mut kbuf[..len]) {
+                Ok(n) => {
+                    if copy_to_user(a1, &kbuf[..n]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    n as i64
+                }
                 Err(e) => e as i64,
             }
         }
@@ -646,27 +644,35 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         }
         30 => {
             // TelephonyQuery: a1 = out_buf_ptr, a2 = out_buf_len
-            let ptr = a1 as *mut u8;
             let len = a2 as usize;
-            if ptr.is_null() {
+            if len > 256 {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let out_buf = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
-            match sys_telephony_query(out_buf) {
-                Ok(n) => n as i64,
+            let mut kbuf = [0u8; 256];
+            match sys_telephony_query(&mut kbuf[..len]) {
+                Ok(n) => {
+                    if copy_to_user(a1, &kbuf[..n]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    n as i64
+                }
                 Err(e) => e as i64,
             }
         }
         31 => {
             // GetRandom: a1 = out_buf_ptr, a2 = out_buf_len
-            let ptr = a1 as *mut u8;
             let len = a2 as usize;
-            if ptr.is_null() || len == 0 || len > 4096 {
+            if len == 0 || len > 4096 {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let out_buf = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
-            match sys_get_random(out_buf) {
-                Ok(n) => n as i64,
+            let mut kbuf = [0u8; 4096];
+            match sys_get_random(&mut kbuf[..len]) {
+                Ok(n) => {
+                    if copy_to_user(a1, &kbuf[..n]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    n as i64
+                }
                 Err(e) => e as i64,
             }
         }
@@ -682,106 +688,125 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         33 => {
             // KeystoreDerive: a1 = slot_index, a2 = out_buf_ptr, a3 = out_buf_len
             let slot_idx = a1 as u32;
-            let ptr = a2 as *mut u8;
             let len = a3 as usize;
-            if ptr.is_null() || len < 32 {
+            if len < 32 {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let out_buf = unsafe { &mut *(ptr as *mut [u8; 32]) };
-            match sys_keystore_derive(slot_idx, out_buf) {
-                Ok(n) => n as i64,
+            let mut kbuf = [0u8; 32];
+            match sys_keystore_derive(slot_idx, &mut kbuf) {
+                Ok(n) => {
+                    if copy_to_user(a2, &kbuf).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    n as i64
+                }
                 Err(e) => e as i64,
             }
         }
         35 => {
             // SensorRead: a1 = out_buf_ptr, a2 = out_buf_len
-            let ptr = a1 as *mut u8;
             let len = a2 as usize;
-            if ptr.is_null() {
+            if len > 256 {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let out_buf = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
-            match sys_sensor_read(out_buf) {
-                Ok(n) => n as i64,
+            let mut kbuf = [0u8; 256];
+            match sys_sensor_read(&mut kbuf[..len]) {
+                Ok(n) => {
+                    if copy_to_user(a1, &kbuf[..n]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    n as i64
+                }
                 Err(e) => e as i64,
             }
         }
         36 => {
             // BatteryQuery: a1 = out_buf_ptr, a2 = out_buf_len
-            let ptr = a1 as *mut u8;
             let len = a2 as usize;
-            if ptr.is_null() {
+            if len > 256 {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let out_buf = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
-            match sys_battery_query(out_buf) {
-                Ok(n) => n as i64,
+            let mut kbuf = [0u8; 256];
+            match sys_battery_query(&mut kbuf[..len]) {
+                Ok(n) => {
+                    if copy_to_user(a1, &kbuf[..n]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    n as i64
+                }
                 Err(e) => e as i64,
             }
         }
         37 => {
             // AndroidBridgeIntent: a1 = act_ptr, a2 = act_len, a3 = uri_ptr, a4 = uri_len, a5 = out_ptr
-            let act_ptr = a1 as *const u8;
             let act_len = a2 as usize;
-            let uri_ptr = a3 as *const u8;
             let uri_len = a4 as usize;
-            let out_ptr = a5 as *mut u8;
-            let out_len = 64;
-            if act_ptr.is_null() || uri_ptr.is_null() || out_ptr.is_null() {
+            if act_len == 0 || act_len > 128 || uri_len == 0 || uri_len > 256 {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let act_slice = unsafe { core::slice::from_raw_parts(act_ptr, act_len) };
-            let uri_slice = unsafe { core::slice::from_raw_parts(uri_ptr, uri_len) };
-            let act_str = match core::str::from_utf8(act_slice) {
+            let mut act_buf = [0u8; 128];
+            let mut uri_buf = [0u8; 256];
+            let act_str = match read_user_string(a1, act_len, &mut act_buf) {
                 Ok(s) => s,
                 Err(_) => return SyscallResult::InvalidArguments as i64,
             };
-            let uri_str = match core::str::from_utf8(uri_slice) {
+            let uri_str = match read_user_string(a3, uri_len, &mut uri_buf) {
                 Ok(s) => s,
                 Err(_) => return SyscallResult::InvalidArguments as i64,
             };
-            let out_buf = unsafe { core::slice::from_raw_parts_mut(out_ptr, out_len) };
-            match sys_android_bridge_intent(act_str, uri_str, out_buf) {
-                Ok(n) => n as i64,
+            let mut out_kbuf = [0u8; 64];
+            match sys_android_bridge_intent(act_str, uri_str, &mut out_kbuf) {
+                Ok(n) => {
+                    if copy_to_user(a5, &out_kbuf[..n]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    n as i64
+                }
                 Err(e) => e as i64,
             }
         }
         38 => {
             // RtcGetTime: a1 = out_buf_ptr, a2 = out_buf_len
-            let ptr = a1 as *mut u8;
             let len = a2 as usize;
-            if ptr.is_null() {
+            if len > 64 {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let out_buf = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
-            match sys_rtc_get_time(out_buf) {
-                Ok(n) => n as i64,
+            let mut kbuf = [0u8; 64];
+            match sys_rtc_get_time(&mut kbuf[..len]) {
+                Ok(n) => {
+                    if copy_to_user(a1, &kbuf[..n]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    n as i64
+                }
                 Err(e) => e as i64,
             }
         }
         40 => {
             // ThermalQuery: a1 = out_buf_ptr, a2 = out_buf_len
-            let ptr = a1 as *mut u8;
             let len = a2 as usize;
-            if ptr.is_null() {
+            if len > 256 {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let out_buf = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
-            match sys_thermal_query(out_buf) {
-                Ok(n) => n as i64,
+            let mut kbuf = [0u8; 256];
+            match sys_thermal_query(&mut kbuf[..len]) {
+                Ok(n) => {
+                    if copy_to_user(a1, &kbuf[..n]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    n as i64
+                }
                 Err(e) => e as i64,
             }
         }
         41 => {
             // SecureIpcSession: a1 = peer_task, a2 = out_session_id_ptr
             let peer = TaskId(a1);
-            let out_ptr = a2 as *mut u64;
-            if out_ptr.is_null() {
-                return SyscallResult::InvalidArguments as i64;
-            }
             match sys_secure_ipc_session(peer) {
                 Ok(sid) => {
-                    unsafe { *out_ptr = sid; }
+                    if write_user_value(a2, &sid).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
                     SyscallResult::Success as i64
                 }
                 Err(e) => e as i64,
@@ -791,70 +816,94 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             // VaultCrypt: a1 = action (0=enc, 1=dec), a2 = block_idx, a3 = buf_ptr, a4 = 512, a5 = iv_ptr
             let action = a1 as u32;
             let block_idx = a2;
-            let buf_ptr = a3 as *mut u8;
             let buf_len = a4 as usize;
-            let iv_ptr = a5 as *const u8;
-            if buf_ptr.is_null() || buf_len != 512 || iv_ptr.is_null() {
+            if buf_len != 512 {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let buf = unsafe { &mut *(buf_ptr as *mut [u8; 512]) };
-            let iv = unsafe { &*(iv_ptr as *const [u8; 16]) };
-            match sys_vault_crypt(action, block_idx, buf, iv) {
-                Ok(()) => SyscallResult::Success as i64,
+            let mut kbuf = [0u8; 512];
+            let mut iv = [0u8; 16];
+            if copy_from_user(&mut kbuf, a3, 512).is_err() || copy_from_user(&mut iv, a5, 16).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            match sys_vault_crypt(action, block_idx, &mut kbuf, &iv) {
+                Ok(()) => {
+                    if copy_to_user(a3, &kbuf).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    SyscallResult::Success as i64
+                }
                 Err(e) => e as i64,
             }
         }
         45 => {
             // WirelessQuery: a1 = out_buf_ptr, a2 = out_buf_len
-            let ptr = a1 as *mut u8;
             let len = a2 as usize;
-            if ptr.is_null() {
+            if len > 256 {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let out_buf = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
-            match sys_wireless_query(out_buf) {
-                Ok(n) => n as i64,
+            let mut kbuf = [0u8; 256];
+            match sys_wireless_query(&mut kbuf[..len]) {
+                Ok(n) => {
+                    if copy_to_user(a1, &kbuf[..n]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    n as i64
+                }
                 Err(e) => e as i64,
             }
         }
         46 => {
             // DevFsIo: a1 = action (0=read, 1=write), a2 = path_ptr, a3 = path_len, a4 = buf_ptr, a5 = buf_len
             let action = a1 as u32;
-            let path_ptr = a2 as *const u8;
             let path_len = a3 as usize;
-            let buf_ptr = a4 as *mut u8;
             let buf_len = a5 as usize;
-            if path_ptr.is_null() || path_len == 0 || path_len > 256 || buf_ptr.is_null() {
+            if path_len == 0 || path_len > 256 || buf_len > 4096 {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let slice = unsafe { core::slice::from_raw_parts(path_ptr, path_len) };
-            let path = match core::str::from_utf8(slice) {
+            let mut path_buf = [0u8; 256];
+            let path = match read_user_string(a2, path_len, &mut path_buf) {
                 Ok(s) => s,
                 Err(_) => return SyscallResult::InvalidArguments as i64,
             };
-            let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr, buf_len) };
-            match sys_devfs_io(action, path, buf) {
-                Ok(n) => n as i64,
+            let mut kbuf = [0u8; 4096];
+            if action == 1 {
+                if copy_from_user(&mut kbuf[..buf_len], a4, buf_len).is_err() {
+                    return SyscallResult::InvalidArguments as i64;
+                }
+            }
+            match sys_devfs_io(action, path, &mut kbuf[..buf_len]) {
+                Ok(n) => {
+                    if action == 0 {
+                        if copy_to_user(a4, &kbuf[..n]).is_err() {
+                            return SyscallResult::InvalidArguments as i64;
+                        }
+                    }
+                    n as i64
+                }
                 Err(e) => e as i64,
             }
         }
         48 => {
             // RevocationAudit: a1 = cmd (0=check_pkg, 1=revoke_pkg), a2 = target_ptr, a3 = target_len, a4 = out_buf_ptr, a5 = out_buf_len
             let cmd = a1 as u32;
-            let target_ptr = a2 as *const u8;
             let target_len = a3 as usize;
-            let out_ptr = a4 as *mut u8;
             let out_len = a5 as usize;
-            if target_ptr.is_null() || target_len == 0 {
+            if target_len == 0 || target_len > 128 || out_len > 256 {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let slice = unsafe { core::slice::from_raw_parts(target_ptr, target_len) };
-            let target = match core::str::from_utf8(slice) {
+            let mut target_buf = [0u8; 128];
+            let target = match read_user_string(a2, target_len, &mut target_buf) {
                 Ok(s) => s,
                 Err(_) => return SyscallResult::InvalidArguments as i64,
             };
-            match sys_revocation_audit(cmd, target, out_ptr, out_len) {
-                Ok(n) => n as i64,
+            let mut out_kbuf = [0u8; 256];
+            match sys_revocation_audit(cmd, target, out_kbuf.as_mut_ptr(), out_len) {
+                Ok(n) => {
+                    if copy_to_user(a4, &out_kbuf[..n]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    n as i64
+                }
                 Err(e) => e as i64,
             }
         }
@@ -883,32 +932,37 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         }
         52 => {
             // ApkInstallAudit: a1 = apk_ptr, a2 = apk_len, a3 = out_ptr, a4 = out_len
-            let apk_ptr = a1 as *const u8;
             let apk_len = a2 as usize;
-            let out_ptr = a3 as *mut u8;
             let out_len = a4 as usize;
-
-            if apk_ptr.is_null() || apk_len == 0 || out_ptr.is_null() || out_len == 0 {
+            if apk_len == 0 || apk_len > 64 * 1024 || out_len == 0 || out_len > 1024 {
                 return SyscallResult::InvalidArguments as i64;
             }
-
-            let apk_slice = unsafe { core::slice::from_raw_parts(apk_ptr, apk_len) };
-            let out_buf = unsafe { core::slice::from_raw_parts_mut(out_ptr, out_len) };
-
-            match sys_apk_install_audit(apk_slice, out_buf) {
-                Ok(n) => n as i64,
+            let mut apk_buf = alloc::vec![0u8; apk_len];
+            if copy_from_user(&mut apk_buf, a1, apk_len).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let mut out_buf = [0u8; 1024];
+            match sys_apk_install_audit(&apk_buf, &mut out_buf[..out_len]) {
+                Ok(n) => {
+                    if copy_to_user(a3, &out_buf[..n]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    n as i64
+                }
                 Err(e) => e as i64,
             }
         }
         53 => {
             // DexVerifyExec: a1 = dex_ptr, a2 = dex_len
-            let dex_ptr = a1 as *const u8;
             let dex_len = a2 as usize;
-            if dex_ptr.is_null() || dex_len == 0 {
+            if dex_len == 0 || dex_len > 64 * 1024 {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let dex_slice = unsafe { core::slice::from_raw_parts(dex_ptr, dex_len) };
-            match sys_dex_verify_exec(dex_slice) {
+            let mut dex_buf = alloc::vec![0u8; dex_len];
+            if copy_from_user(&mut dex_buf, a1, dex_len).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            match sys_dex_verify_exec(&dex_buf) {
                 Ok(n) => n as i64,
                 Err(e) => e as i64,
             }
@@ -916,45 +970,49 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         54 => {
             // CameraCapture: a1 = action, a2 = out_buf_ptr, a3 = out_buf_len, a4 = out_meta_ptr
             let action = a1 as u32;
-            let out_ptr = a2 as *mut u8;
             let out_len = a3 as usize;
-            let meta_ptr = a4 as *mut u32;
-
-            if out_ptr.is_null() || out_len == 0 {
+            if out_len == 0 || out_len > 64 * 1024 {
                 return SyscallResult::InvalidArguments as i64;
             }
-
-            let out_buf = unsafe { core::slice::from_raw_parts_mut(out_ptr, out_len) };
-            let meta_buf = if !meta_ptr.is_null() {
-                Some(unsafe { core::slice::from_raw_parts_mut(meta_ptr, 4) })
-            } else {
-                None
-            };
-
-            match sys_camera_capture(action, out_buf, meta_buf) {
-                Ok(n) => n as i64,
+            let mut kbuf = alloc::vec![0u8; out_len];
+            let mut meta_kbuf = [0u32; 4];
+            let has_meta = a4 != 0;
+            match sys_camera_capture(action, &mut kbuf, if has_meta { Some(&mut meta_kbuf) } else { None }) {
+                Ok(n) => {
+                    if copy_to_user(a2, &kbuf[..n]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    if has_meta {
+                        let mut meta_bytes = [0u8; 16];
+                        for (i, val) in meta_kbuf.iter().enumerate() {
+                            meta_bytes[i * 4..(i + 1) * 4].copy_from_slice(&val.to_le_bytes());
+                        }
+                        if copy_to_user(a4, &meta_bytes).is_err() {
+                            return SyscallResult::InvalidArguments as i64;
+                        }
+                    }
+                    n as i64
+                }
                 Err(e) => e as i64,
             }
         }
         55 => {
             // DexInvokeMethod: a1 = dex_ptr, a2 = dex_len, a3 = spec_ptr, a4 = spec_len
-            let dex_ptr = a1 as *const u8;
             let dex_len = a2 as usize;
-            let spec_ptr = a3 as *const u8;
             let spec_len = a4 as usize;
-
-            if dex_ptr.is_null() || dex_len == 0 || spec_ptr.is_null() || spec_len == 0 {
+            if dex_len == 0 || dex_len > 64 * 1024 || spec_len == 0 || spec_len > 256 {
                 return SyscallResult::InvalidArguments as i64;
             }
-
-            let dex_slice = unsafe { core::slice::from_raw_parts(dex_ptr, dex_len) };
-            let spec_slice = unsafe { core::slice::from_raw_parts(spec_ptr, spec_len) };
-            let spec_str = match core::str::from_utf8(spec_slice) {
+            let mut dex_buf = alloc::vec![0u8; dex_len];
+            if copy_from_user(&mut dex_buf, a1, dex_len).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let mut spec_buf = [0u8; 256];
+            let spec_str = match read_user_string(a3, spec_len, &mut spec_buf) {
                 Ok(s) => s,
                 Err(_) => return SyscallResult::InvalidArguments as i64,
             };
-
-            match sys_dex_invoke_method(dex_slice, spec_str) {
+            match sys_dex_invoke_method(&dex_buf, spec_str) {
                 Ok(n) => n as i64,
                 Err(e) => e as i64,
             }
@@ -962,20 +1020,16 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         57 => {
             // CapRequestConsent: a1 = perm_val, a2 = app_name_ptr, a3 = app_name_len, a4 = auto_approve_flag
             let perm_val = a1 as u32;
-            let app_ptr = a2 as *const u8;
             let app_len = a3 as usize;
             let auto_approve = a4 != 0;
-
-            if app_ptr.is_null() || app_len == 0 {
+            if app_len == 0 || app_len > 128 {
                 return SyscallResult::InvalidArguments as i64;
             }
-
-            let app_slice = unsafe { core::slice::from_raw_parts(app_ptr, app_len) };
-            let app_str = match core::str::from_utf8(app_slice) {
+            let mut app_buf = [0u8; 128];
+            let app_str = match read_user_string(a2, app_len, &mut app_buf) {
                 Ok(s) => s,
                 Err(_) => return SyscallResult::InvalidArguments as i64,
             };
-
             match sys_cap_request_consent(perm_val, app_str, auto_approve) {
                 Ok(slot) => slot as i64,
                 Err(e) => e as i64,
@@ -983,43 +1037,27 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         }
         58 => {
             // ShareSheetDispatch: a1 = mime_ptr, a2 = mime_len, a3 = uri_ptr, a4 = uri_len, a5 = target_ptr
-            let mime_ptr = a1 as *const u8;
             let mime_len = a2 as usize;
-            let uri_ptr = a3 as *const u8;
             let uri_len = a4 as usize;
-            let target_ptr = a5 as *const u8;
-
-            if mime_ptr.is_null() || mime_len == 0 || uri_ptr.is_null() || uri_len == 0 {
+            if mime_len == 0 || mime_len > 128 || uri_len == 0 || uri_len > 256 {
                 return SyscallResult::InvalidArguments as i64;
             }
-
-            let mime_slice = unsafe { core::slice::from_raw_parts(mime_ptr, mime_len) };
-            let mime_str = match core::str::from_utf8(mime_slice) {
+            let mut mime_buf = [0u8; 128];
+            let mime_str = match read_user_string(a1, mime_len, &mut mime_buf) {
                 Ok(s) => s,
                 Err(_) => return SyscallResult::InvalidArguments as i64,
             };
-
-            let uri_slice = unsafe { core::slice::from_raw_parts(uri_ptr, uri_len) };
-            let uri_str = match core::str::from_utf8(uri_slice) {
+            let mut uri_buf = [0u8; 256];
+            let uri_str = match read_user_string(a3, uri_len, &mut uri_buf) {
                 Ok(s) => s,
                 Err(_) => return SyscallResult::InvalidArguments as i64,
             };
-
-            let target_str = if !target_ptr.is_null() {
-                let mut len = 0;
-                while len < 64 && unsafe { *target_ptr.add(len) } != 0 {
-                    len += 1;
-                }
-                if len > 0 {
-                    let target_slice = unsafe { core::slice::from_raw_parts(target_ptr, len) };
-                    core::str::from_utf8(target_slice).ok()
-                } else {
-                    None
-                }
+            let mut target_buf = [0u8; 64];
+            let target_str = if a5 != 0 {
+                read_user_string(a5, 64, &mut target_buf).ok()
             } else {
                 None
             };
-
             match sys_share_sheet_dispatch(mime_str, uri_str, target_str) {
                 Ok(target_id) => target_id as i64,
                 Err(e) => e as i64,
@@ -1034,27 +1072,33 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         }
         60 => {
             // ShmPipeTransfer: a1 = pipe_id, a2 = data_ptr, a3 = data_len, a4 = flags
-            let data_ptr = a2 as *const u8;
             let data_len = a3 as usize;
-            if data_ptr.is_null() || data_len == 0 {
+            if data_len == 0 || data_len > 4096 {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let data = unsafe { core::slice::from_raw_parts(data_ptr, data_len) };
-            match sys_shm_pipe_transfer(a1 as u32, data, a4 as u32) {
+            let mut kbuf = [0u8; 4096];
+            if copy_from_user(&mut kbuf[..data_len], a2, data_len).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            match sys_shm_pipe_transfer(a1 as u32, &kbuf[..data_len], a4 as u32) {
                 Ok(seq) => seq as i64,
                 Err(e) => e as i64,
             }
         }
         61 => {
             // ShmPipeReceive: a1 = pipe_id, a2 = out_buf_ptr, a3 = out_buf_len
-            let out_buf_ptr = a2 as *mut u8;
-            let out_buf_len = a3 as usize;
-            if out_buf_ptr.is_null() || out_buf_len == 0 {
+            let out_len = a3 as usize;
+            if out_len == 0 || out_len > 4096 {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let out_buf = unsafe { core::slice::from_raw_parts_mut(out_buf_ptr, out_buf_len) };
-            match sys_shm_pipe_receive(a1 as u32, out_buf) {
-                Ok(bytes) => bytes as i64,
+            let mut kbuf = [0u8; 4096];
+            match sys_shm_pipe_receive(a1 as u32, &mut kbuf[..out_len]) {
+                Ok(bytes) => {
+                    if copy_to_user(a2, &kbuf[..bytes]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    bytes as i64
+                }
                 Err(e) => e as i64,
             }
         }
@@ -1773,6 +1817,8 @@ pub fn sys_share_sheet_dispatch(
         let ipc_msg = IpcMessage {
             sender: current_id,
             msg_type: IPC_MSG_AMCP_SHARE,
+            transferred_cap: None,
+            shm_descriptor: None,
             payload: msg_payload,
             len: pos,
         };

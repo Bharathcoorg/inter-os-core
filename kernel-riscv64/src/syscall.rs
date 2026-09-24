@@ -36,11 +36,14 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
 
             if msg_ptr < USER_SPACE_MIN || msg_ptr.saturating_add(msg_len) > USER_SPACE_MAX || msg_ptr >= KERNEL_DRAM_START {
                 -14 // -EFAULT (Forbidden kernel DRAM or MMIO)
-            } else if msg_len > 4096 {
+            } else if msg_len > 1024 {
                 -22 // -EINVAL
             } else {
-                let slice = unsafe { core::slice::from_raw_parts(msg_ptr as *const u8, msg_len) };
-                if let Ok(s) = core::str::from_utf8(slice) {
+                let mut kbuf = [0u8; 1024];
+                unsafe {
+                    core::ptr::copy_nonoverlapping(msg_ptr as *const u8, kbuf.as_mut_ptr(), msg_len);
+                }
+                if let Ok(s) = core::str::from_utf8(&kbuf[..msg_len]) {
                     println!("[USER:LOG] {}", s);
                     0
                 } else {
@@ -50,8 +53,11 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
         }
         // 4: GetTicks
         4 => {
-            // Return synthetic hardware ticks
-            1000
+            let ticks: u64;
+            unsafe {
+                core::arch::asm!("rdtime {}", out(reg) ticks);
+            }
+            ticks as i64
         }
         // 5: IpcSend (cap_slot, target_id, msg_type, payload_ptr, payload_len)
         5 => {

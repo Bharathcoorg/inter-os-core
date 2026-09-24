@@ -32,10 +32,10 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, _a4: u6
             0
         }
         SYS_LOG => {
-            let ptr = a0 as *const u8;
+            let addr = a0 as u64;
             let len = (a1 as usize).min(256);
-            if ptr.is_null() || len == 0 {
-                return -1;
+            if addr < 0x1000 || addr >= 0x0000_8000_0000_0000 || len == 0 {
+                return -14; // -EFAULT
             }
 
             let sched = SCHEDULER.lock();
@@ -48,14 +48,16 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, _a4: u6
             }
             drop(sched);
 
+            let mut kbuf = [0u8; 256];
             unsafe {
-                let slice = core::slice::from_raw_parts(ptr, len);
-                if let Ok(s) = core::str::from_utf8(slice) {
-                    crate::kprintln!("[LOG] {}", s);
-                    return 0;
-                }
+                core::ptr::copy_nonoverlapping(addr as *const u8, kbuf.as_mut_ptr(), len);
             }
-            -22 // -EINVAL
+            if let Ok(s) = core::str::from_utf8(&kbuf[..len]) {
+                crate::kprintln!("[LOG] {}", s);
+                0
+            } else {
+                -22 // -EINVAL
+            }
         }
         SYS_GET_TICKS => {
             let sched = SCHEDULER.lock();
@@ -74,7 +76,7 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, _a4: u6
         SYS_IPC_SEND => {
             let recipient = a0 as u32;
             let msg_type = a1 as u32;
-            let ptr = a2 as *const u8;
+            let addr = a2 as u64;
             let len = (a3 as usize).min(IPC_MAX_PAYLOAD);
 
             let sched = SCHEDULER.lock();
@@ -86,20 +88,24 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, _a4: u6
             let caps = sched.tasks[curr_idx].cap_table.clone();
             drop(sched);
 
-            let data = if ptr.is_null() || len == 0 {
-                &[]
-            } else {
-                unsafe { core::slice::from_raw_parts(ptr, len) }
-            };
+            let mut kbuf = [0u8; IPC_MAX_PAYLOAD];
+            if len > 0 {
+                if addr < 0x1000 || addr >= 0x0000_8000_0000_0000 {
+                    return -14; // -EFAULT
+                }
+                unsafe {
+                    core::ptr::copy_nonoverlapping(addr as *const u8, kbuf.as_mut_ptr(), len);
+                }
+            }
 
             let mut router = IPC_ROUTER.lock();
-            match router.send(&caps, sender, recipient, msg_type, data) {
+            match router.send(&caps, sender, recipient, msg_type, &kbuf[..len]) {
                 Ok(()) => 0,
                 Err(_) => -13, // -EACCES
             }
         }
         SYS_IPC_RECV => {
-            let out_buf = a0 as *mut u8;
+            let out_addr = a0 as u64;
             let max_len = a1 as usize;
 
             let sched = SCHEDULER.lock();
@@ -114,10 +120,13 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, _a4: u6
             let mut router = IPC_ROUTER.lock();
             match router.receive(&caps, receiver) {
                 Ok(msg) => {
-                    if !out_buf.is_null() && max_len > 0 {
+                    if max_len > 0 {
+                        if out_addr < 0x1000 || out_addr >= 0x0000_8000_0000_0000 {
+                            return -14; // -EFAULT
+                        }
                         let copy_len = msg.len.min(max_len);
                         unsafe {
-                            core::ptr::copy_nonoverlapping(msg.payload.as_ptr(), out_buf, copy_len);
+                            core::ptr::copy_nonoverlapping(msg.payload.as_ptr(), out_addr as *mut u8, copy_len);
                         }
                     }
                     msg.len as i64

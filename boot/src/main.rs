@@ -1,4 +1,4 @@
-//! Gravity OS Disk Image Packaging Utility
+//! InterOS Core Disk Image Packaging Utility
 //!
 //! Takes the compiled `x86_64-unknown-none` kernel ELF binary and packages it into
 //! a bootable BIOS/MBR disk image using the `bootloader` crate.
@@ -12,7 +12,13 @@ fn main() -> anyhow::Result<()> {
     let kernel_path = if args.len() > 1 {
         PathBuf::from(&args[1])
     } else {
-        PathBuf::from("target/x86_64-unknown-none/debug/kernel")
+        let p1 = PathBuf::from("kernel/target/x86_64-unknown-none/debug/kernel");
+        let p2 = PathBuf::from("target/x86_64-unknown-none/debug/kernel");
+        if p1.exists() {
+            p1
+        } else {
+            p2
+        }
     };
 
     let out_path = if args.len() > 2 {

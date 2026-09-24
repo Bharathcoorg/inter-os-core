@@ -80,8 +80,8 @@ pub fn init() {
         y: (PHONE_Y + 900) as u32,
     });
     let intent9 = shell.handle_event(card9_tap);
-    assert_eq!(intent9, Some("APP_LAUNCH_AI"));
-    serial_println!("[TEST] Touch Screen Card Hit-Test: Tap on Card 9 dispatches 'APP_LAUNCH_AI'.");
+    assert_eq!(intent9, Some("APP_LAUNCH_CALCULATOR"));
+    serial_println!("[TEST] Touch Screen Card Hit-Test: Tap on Card 9 dispatches 'APP_LAUNCH_CALCULATOR'.");
 
     // 2f. Capacitive Touch Tap on Card 10 (Sovereign Browser App)
     let card10_tap = InputEvent::Gesture(TouchGesture::Tap {

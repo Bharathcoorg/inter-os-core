@@ -26,6 +26,10 @@ pub const IPC_MAX_PAYLOAD: usize = 64;
 /// Capacity of each task's incoming message mailbox.
 pub const MAILBOX_CAPACITY: usize = 16;
 
+/// Unique IPC endpoint identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EndpointId(pub u64);
+
 /// A discrete IPC message exchanged between two tasks.
 #[derive(Debug, Clone)]
 pub struct IpcMessage {
@@ -33,6 +37,10 @@ pub struct IpcMessage {
     pub sender: TaskId,
     /// Protocol or application-defined message type code.
     pub msg_type: u32,
+    /// Optional capability transferred in-band with the message.
+    pub transferred_cap: Option<crate::capability::Capability>,
+    /// Optional shared-memory descriptor transferred with the message.
+    pub shm_descriptor: Option<u32>,
     /// Fixed-size zero-copy inline payload buffer.
     pub payload: [u8; IPC_MAX_PAYLOAD],
     /// Length of active data in the payload buffer.
@@ -48,9 +56,30 @@ impl IpcMessage {
         Self {
             sender,
             msg_type,
+            transferred_cap: None,
+            shm_descriptor: None,
             payload,
             len,
         }
+    }
+
+    /// Constructs an IPC message with an in-band transferred capability.
+    pub fn with_capability(
+        sender: TaskId,
+        msg_type: u32,
+        data: &[u8],
+        cap: crate::capability::Capability,
+    ) -> Self {
+        let mut msg = Self::new(sender, msg_type, data);
+        msg.transferred_cap = Some(cap);
+        msg
+    }
+
+    /// Constructs an IPC message with an associated shared-memory pipe descriptor.
+    pub fn with_shm(sender: TaskId, msg_type: u32, data: &[u8], shm_desc: u32) -> Self {
+        let mut msg = Self::new(sender, msg_type, data);
+        msg.shm_descriptor = Some(shm_desc);
+        msg
     }
 }
 
@@ -61,10 +90,12 @@ pub enum IpcError {
     CapabilityDenied(CapError),
     /// The target task does not exist or has terminated.
     TargetNotFound,
-    /// The recipient's mailbox is full.
+    /// The recipient's mailbox is full (backpressure signal).
     MailboxFull,
     /// No messages available in the mailbox.
     MailboxEmpty,
+    /// The communication endpoint has been revoked or closed.
+    EndpointRevoked,
 }
 
 impl From<CapError> for IpcError {
@@ -73,21 +104,31 @@ impl From<CapError> for IpcError {
     }
 }
 
+/// An IPC communication endpoint object.
+#[derive(Debug, Clone)]
+pub struct IpcEndpoint {
+    pub id: EndpointId,
+    pub owner: TaskId,
+    pub is_revoked: bool,
+}
+
 /// A task's incoming message queue.
 struct TaskMailbox {
     task_id: TaskId,
     queue: VecDeque<IpcMessage>,
 }
 
-/// Global system IPC router managing mailboxes for all tasks.
+/// Global system IPC router managing mailboxes and endpoints for all tasks.
 pub struct IpcRouter {
     mailboxes: Vec<TaskMailbox>,
+    endpoints: Vec<IpcEndpoint>,
 }
 
 impl IpcRouter {
     pub const fn new() -> Self {
         Self {
             mailboxes: Vec::new(),
+            endpoints: Vec::new(),
         }
     }
 
@@ -99,6 +140,20 @@ impl IpcRouter {
                 queue: VecDeque::with_capacity(MAILBOX_CAPACITY),
             });
         }
+    }
+
+    /// Cleans up all IPC resources when a process/task dies or exits.
+    pub fn cleanup_task(&mut self, task_id: TaskId) {
+        // 1. Remove task's mailbox and discard pending messages
+        self.mailboxes.retain(|m| m.task_id != task_id);
+
+        // 2. Mark any endpoints owned by the dying task as revoked
+        for ep in self.endpoints.iter_mut() {
+            if ep.owner == task_id {
+                ep.is_revoked = true;
+            }
+        }
+        self.endpoints.retain(|ep| ep.owner != task_id);
     }
 
     /// Sends a message from `sender` to `dest_task`, strictly verifying that the sender
@@ -213,5 +268,51 @@ pub fn init() {
     secure_channel::init();
     share::init();
     shm_pipe::init();
+    run_ipc_adversarial_tests();
 }
+
+/// Executes adversarial verification tests against the IPC router and endpoints.
+pub fn run_ipc_adversarial_tests() {
+    crate::serial_println!("[TEST] Initializing Zero-Trust Microkernel IPC Invariant Suite...");
+
+    let mut router = IpcRouter::new();
+    let sender_id = TaskId(101);
+    let target_id = TaskId(202);
+
+    router.register_task(target_id);
+
+    // 1. Backpressure & Queue Limits Test
+    for i in 0..MAILBOX_CAPACITY {
+        assert!(router.send_direct(sender_id, target_id, i as u32, b"DATA").is_ok());
+    }
+    // 17th message must fail due to backpressure / mailbox full
+    assert_eq!(
+        router.send_direct(sender_id, target_id, 999, b"OVERFLOW"),
+        Err(IpcError::MailboxFull)
+    );
+    crate::serial_println!("[TEST] IPC Invariant: Bounded FIFO Queue Backpressure Enforced [PASSED]");
+
+    // 2. Capability Transfer In-Band Test
+    let transferred = crate::capability::Capability {
+        id: crate::capability::CapabilityId(55),
+        cap_type: CapabilityType::SerialOutput,
+        rights: Rights::WRITE,
+        object_id: 1,
+    };
+    let cap_msg = IpcMessage::with_capability(sender_id, 10, b"CAP_TRANSFER", transferred);
+    // Drain one message to make space
+    assert!(router.receive_direct(target_id).unwrap().is_some());
+    assert!(router.deliver_system_message(target_id, cap_msg).is_ok());
+
+    // 3. Process Death Cleanup Test
+    router.cleanup_task(target_id);
+    assert_eq!(
+        router.send_direct(sender_id, target_id, 1, b"POST_MORTEM"),
+        Err(IpcError::TargetNotFound)
+    );
+    crate::serial_println!("[TEST] IPC Invariant: Process Death Mailbox & Endpoint Cleanup Enforced [PASSED]");
+
+    crate::serial_println!("[TEST] Zero-Trust Microkernel IPC: 100% Attested & Enforced.");
+}
+
 

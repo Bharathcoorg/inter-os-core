@@ -2,8 +2,8 @@
 name = "boot"
 version = "0.1.0"
 edition = "2021"
-authors = ["Gravity OS Contributors"]
-description = "Bootable disk image creator for Gravity OS using bootloader crate"
+authors = ["InterOS Contributors"]
+description = "Bootable disk image creator for InterOS Core using bootloader crate"
 
 [dependencies]
 bootloader = "0.11.17"
