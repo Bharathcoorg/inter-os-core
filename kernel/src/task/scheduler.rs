@@ -67,6 +67,13 @@ impl Scheduler {
         id
     }
 
+    /// Spawns an existing TaskControlBlock (e.g. userspace process with isolated page table).
+    pub fn spawn_task(&mut self, tcb: TaskControlBlock) -> TaskId {
+        let id = tcb.id;
+        self.tasks.push(tcb);
+        id
+    }
+
     /// Returns a reference to the currently running task.
     pub fn current_task(&self) -> Option<&TaskControlBlock> {
         self.tasks.get(self.current_idx)
@@ -159,6 +166,9 @@ impl Scheduler {
         // Switch to incoming task's isolated hardware address space (CR3)
         if let Some(ref pt) = self.tasks[next_idx].page_table {
             pt.switch_to();
+        } else {
+            // Kernel task: switch back to clean kernel PML4
+            crate::memory::switch_to_kernel_page_table();
         }
 
         (Some(prev_ctx_ptr), Some(next_ctx_ptr))
@@ -167,7 +177,9 @@ impl Scheduler {
     /// Prepares context pointers for terminating the current task and switching to the next.
     pub fn prepare_terminate(&mut self) -> (Option<*mut TaskContext>, Option<*const TaskContext>) {
         let current_idx = self.current_idx;
+        let task_id = self.tasks[current_idx].id;
         self.tasks[current_idx].state = TaskState::Terminated;
+        crate::ipc::cleanup_task(task_id);
         self.prepare_switch()
     }
 

@@ -263,6 +263,11 @@ impl IpcRouter {
 /// Global system-wide IPC message router.
 pub static IPC_ROUTER: Mutex<IpcRouter> = Mutex::new(IpcRouter::new());
 
+/// Cleans up IPC mailboxes and channels upon task termination.
+pub fn cleanup_task(task_id: TaskId) {
+    IPC_ROUTER.lock().cleanup_task(task_id);
+}
+
 /// Initializes the IPC subsystem, secure channels, share bus, and zero-copy SHM pipes.
 pub fn init() {
     secure_channel::init();

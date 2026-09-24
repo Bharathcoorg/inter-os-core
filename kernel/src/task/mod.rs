@@ -89,6 +89,10 @@ pub struct TaskControlBlock {
     pub priority: u8,
     /// Dedicated hardware virtual memory address space (CR3 Page Table).
     pub page_table: Option<crate::memory::TaskPageTable>,
+    /// Virtual address of userspace entry point (Ring 3 RIP).
+    pub user_entry: usize,
+    /// Virtual address of userspace stack top (Ring 3 RSP).
+    pub user_stack_top: usize,
 }
 
 impl TaskControlBlock {
@@ -127,6 +131,8 @@ impl TaskControlBlock {
             cpu_ticks: 0,
             priority,
             page_table: None,
+            user_entry: 0,
+            user_stack_top: 0,
         }
     }
 
@@ -148,6 +154,8 @@ impl TaskControlBlock {
             cpu_ticks: 0,
             priority: 0,
             page_table: None,
+            user_entry: 0,
+            user_stack_top: 0,
         }
     }
 

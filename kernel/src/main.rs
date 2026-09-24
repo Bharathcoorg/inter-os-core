@@ -109,6 +109,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         .expect("Kernel heap initialization failed");
     serial_println!("[OK] Kernel 8 MiB dynamic heap allocator online.");
 
+    // Run Hardware MMU & Memory Isolation Adversarial Tests
+    memory::run_mmu_adversarial_tests();
+
     // 8. Run kernel core self-tests
     serial_println!("\n--- [Running Kernel Core Self-Tests] ---");
 

@@ -143,15 +143,15 @@ pub unsafe fn jump_to_ring3(user_entry: usize, user_stack_top: usize) -> ! {
     );
 }
 
-/// Loads a 64-bit ELF binary into user virtual address space with default stack top (0x0080_0000).
-pub fn load_user_elf(elf_data: &[u8]) -> Result<(usize, usize), &'static str> {
-    load_user_elf_with_stack(elf_data, 0x0080_0000)
-}
-
-/// Loads a 64-bit ELF binary into user virtual address space, mapping code & data pages
-/// with `USER_ACCESSIBLE` flags, allocating a dedicated user stack at `stack_top_addr`,
-/// and returning `(entry_point, user_stack_top)`.
-pub fn load_user_elf_with_stack(elf_data: &[u8], stack_top_addr: usize) -> Result<(usize, usize), &'static str> {
+/// Loads and validates a 64-bit ELF binary directly into a dedicated TaskPageTable.
+/// Enforces W^X (no segments both writable and executable), NX on non-code segments,
+/// unmapped stack guard pages, and populates physical frames via kernel higher-half mapping
+/// without polluting the global page table or touching current CR3.
+pub fn load_user_elf_into_page_table(
+    elf_data: &[u8],
+    page_table: &mut crate::memory::TaskPageTable,
+    stack_top_addr: usize,
+) -> Result<(usize, usize), &'static str> {
     if elf_data.len() < 64 {
         return Err("ELF header too small");
     }
@@ -166,6 +166,21 @@ pub fn load_user_elf_with_stack(elf_data: &[u8], stack_top_addr: usize) -> Resul
     if elf_data[5] != 1 {
         return Err("Not little-endian");
     }
+    if elf_data[6] != 1 {
+        return Err("Unsupported ELF version");
+    }
+
+    // Verify machine architecture (0x3E = x86_64)
+    let e_machine = u16::from_le_bytes(elf_data[18..20].try_into().unwrap());
+    if e_machine != 0x3E {
+        return Err("ELF machine is not x86_64");
+    }
+
+    // Verify type: ET_EXEC (2) or ET_DYN (3)
+    let e_type = u16::from_le_bytes(elf_data[16..18].try_into().unwrap());
+    if e_type != 2 && e_type != 3 {
+        return Err("ELF type is not executable or shared object");
+    }
 
     // 2. Extract entry point and program header table offset
     let e_entry = u64::from_le_bytes(elf_data[24..32].try_into().unwrap()) as usize;
@@ -173,21 +188,36 @@ pub fn load_user_elf_with_stack(elf_data: &[u8], stack_top_addr: usize) -> Resul
     let e_phentsize = u16::from_le_bytes(elf_data[54..56].try_into().unwrap()) as usize;
     let e_phnum = u16::from_le_bytes(elf_data[56..58].try_into().unwrap()) as usize;
 
-    let phys_offset = crate::memory::phys_mem_offset();
+    if e_phentsize < 56 || e_phnum == 0 {
+        return Err("Invalid program header table size or count");
+    }
 
-    // 3. Process each program header (PT_LOAD segments)
+    let ph_table_end = e_phoff
+        .checked_add((e_phnum as usize).checked_mul(e_phentsize).ok_or("PH table size overflow")?)
+        .ok_or("PH table offset overflow")?;
+    if ph_table_end > elf_data.len() {
+        return Err("Program header table extends past binary length");
+    }
+
+    let phys_offset = crate::memory::phys_mem_offset();
+    let mut entry_in_executable_segment = false;
+
+    // 3. Process each program header
     for i in 0..e_phnum {
         let ph_start = e_phoff + i * e_phentsize;
-        if ph_start + 56 > elf_data.len() {
-            return Err("Program header out of bounds");
+        let p_type = u32::from_le_bytes(elf_data[ph_start..ph_start + 4].try_into().unwrap());
+
+        // Reject dynamic interpreters (static microkernel binaries only)
+        if p_type == 3 {
+            return Err("PT_INTERP dynamic linkers rejected in static microkernel architecture");
         }
 
-        let p_type = u32::from_le_bytes(elf_data[ph_start..ph_start + 4].try_into().unwrap());
         if p_type != 1 {
-            // Only PT_LOAD segments are loaded into memory
+            // Only PT_LOAD segments are mapped into memory
             continue;
         }
 
+        let p_flags = u32::from_le_bytes(elf_data[ph_start + 4..ph_start + 8].try_into().unwrap());
         let p_offset = u64::from_le_bytes(elf_data[ph_start + 8..ph_start + 16].try_into().unwrap()) as usize;
         let p_vaddr = u64::from_le_bytes(elf_data[ph_start + 16..ph_start + 24].try_into().unwrap()) as usize;
         let p_filesz = u64::from_le_bytes(elf_data[ph_start + 32..ph_start + 40].try_into().unwrap()) as usize;
@@ -197,46 +227,94 @@ pub fn load_user_elf_with_stack(elf_data: &[u8], stack_top_addr: usize) -> Resul
             continue;
         }
 
-        // Calculate virtual page range
-        let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(p_vaddr as u64));
-        let end_page = Page::<Size4KiB>::containing_address(VirtAddr::new((p_vaddr + p_memsz - 1) as u64));
+        // Bounds checks
+        if p_offset.checked_add(p_filesz).ok_or("Segment file size overflow")? > elf_data.len() {
+            return Err("Segment file size exceeds ELF binary length");
+        }
+        if p_filesz > p_memsz {
+            return Err("Segment file size exceeds memory size");
+        }
+        let seg_end_vaddr = p_vaddr.checked_add(p_memsz).ok_or("Segment memory range overflow")?;
+        if seg_end_vaddr >= 0x0000_8000_0000_0000 {
+            return Err("Segment maps into kernel address space (canonical lower-half violation)");
+        }
 
-        let flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE;
+        // W^X Enforcement: Segment cannot be both executable and writable!
+        let is_exec = (p_flags & 0x1) != 0;
+        let is_write = (p_flags & 0x2) != 0;
+        if is_exec && is_write {
+            return Err("W^X security violation: ELF segment requests both write and execute permissions");
+        }
+
+        if is_exec && e_entry >= p_vaddr && e_entry < seg_end_vaddr {
+            entry_in_executable_segment = true;
+        }
+
+        // Configure page table flags based on ELF permissions
+        let mut page_flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+        if is_write {
+            page_flags |= PageTableFlags::WRITABLE;
+        }
+        if !is_exec {
+            page_flags |= PageTableFlags::NO_EXECUTE;
+        }
+
+        // Map pages into this process's page table and populate physical frames
+        let start_page = Page::<Size4KiB>::containing_address(VirtAddr::new(p_vaddr as u64));
+        let end_page = Page::<Size4KiB>::containing_address(VirtAddr::new((seg_end_vaddr - 1) as u64));
 
         for page in Page::range_inclusive(start_page, end_page) {
-            let frame = crate::memory::allocate_frame().ok_or("Out of memory for user segment")?;
-            crate::memory::map_user_page(page, frame, flags)?;
+            let frame = crate::memory::allocate_frame().ok_or("Out of physical memory frames for user segment")?;
+            page_table.map_user_page(page, frame, page_flags)?;
 
-            // Zero physical frame
+            // Zero entire physical frame via kernel physical memory offset
             let virt_frame = phys_offset + frame.start_address().as_u64();
             unsafe {
                 core::ptr::write_bytes(virt_frame.as_mut_ptr::<u8>(), 0, 4096);
             }
-        }
 
-        // Copy segment payload from ELF into user virtual memory
-        if p_filesz > 0 {
-            if p_offset + p_filesz > elf_data.len() {
-                return Err("Segment file size exceeds ELF binary length");
-            }
-            let src = &elf_data[p_offset..p_offset + p_filesz];
-            let dest = p_vaddr as *mut u8;
-            unsafe {
-                core::ptr::copy_nonoverlapping(src.as_ptr(), dest, p_filesz);
+            // Copy file data if this page intersects [p_vaddr, p_vaddr + p_filesz)
+            let page_start_vaddr = page.start_address().as_u64() as usize;
+            let page_end_vaddr = page_start_vaddr + 4096;
+
+            let file_data_end_vaddr = p_vaddr + p_filesz;
+            let overlap_start = core::cmp::max(page_start_vaddr, p_vaddr);
+            let overlap_end = core::cmp::min(page_end_vaddr, file_data_end_vaddr);
+
+            if overlap_start < overlap_end {
+                let in_page_offset = overlap_start - page_start_vaddr;
+                let in_file_offset = p_offset + (overlap_start - p_vaddr);
+                let copy_len = overlap_end - overlap_start;
+
+                let src = &elf_data[in_file_offset..in_file_offset + copy_len];
+                let dest = (virt_frame.as_u64() + in_page_offset as u64) as *mut u8;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(src.as_ptr(), dest, copy_len);
+                }
             }
         }
     }
 
-    // 4. Allocate 16 KiB dedicated user stack
-    let stack_bottom = VirtAddr::new((stack_top_addr.saturating_sub(USER_STACK_SIZE)) as u64);
+    if !entry_in_executable_segment {
+        return Err("ELF entry point is not located within an executable segment");
+    }
+
+    // 4. Allocate 16 KiB dedicated user stack with NX, and leave guard page unmapped
+    if stack_top_addr < USER_STACK_SIZE + 4096 {
+        return Err("Stack top address too low");
+    }
+    let stack_bottom = VirtAddr::new((stack_top_addr - USER_STACK_SIZE) as u64);
     let stack_top_vaddr = VirtAddr::new(stack_top_addr as u64);
+
     let start_stack_page = Page::<Size4KiB>::containing_address(stack_bottom);
     let end_stack_page = Page::<Size4KiB>::containing_address(stack_top_vaddr - 1u64);
 
-    let stack_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+    // Stack is strictly Writable + User + NX (W^X strictly enforced)
+    let stack_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::NO_EXECUTE;
+
     for page in Page::range_inclusive(start_stack_page, end_stack_page) {
         let frame = crate::memory::allocate_frame().ok_or("Out of memory for user stack")?;
-        crate::memory::map_user_page(page, frame, stack_flags)?;
+        page_table.map_user_page(page, frame, stack_flags)?;
 
         let virt_frame = phys_offset + frame.start_address().as_u64();
         unsafe {
@@ -244,30 +322,72 @@ pub fn load_user_elf_with_stack(elf_data: &[u8], stack_top_addr: usize) -> Resul
         }
     }
 
-    // User stack top aligned for 64-bit AMD64 System V ABI (RSP % 16 == 8 on entry)
+    // Stack guard page: [stack_bottom - 4096, stack_bottom) remains UNMAPPED!
+    // Any stack underflow immediately raises a hardware Page Fault.
+
+    // AMD64 System V ABI alignment (RSP % 16 == 8 on function entry)
     let user_stack_top = stack_top_addr - 8;
     Ok((e_entry, user_stack_top))
 }
 
-/// Trampoline function running in Ring 0 that loads the userspace init ELF and drops into Ring 3.
-pub extern "C" fn user_task_trampoline() -> ! {
-    serial_println!("[RING 0] Loading userspace primordial init ELF binary...");
-
-    let (user_entry, user_stack_top) = match load_user_elf(USER_INIT_ELF) {
-        Ok(res) => res,
-        Err(err) => {
-            serial_println!("[FATAL] Failed to load userspace init ELF: {}", err);
-            crate::task::terminate_current();
-        }
+/// Universal entry point for userspace processes launched in Ring 3.
+pub extern "C" fn user_process_entry() -> ! {
+    let (user_entry, user_stack_top) = {
+        let sched = SCHEDULER.lock();
+        let task = sched.current_task().expect("No current task in user_process_entry");
+        (task.user_entry, task.user_stack_top)
     };
 
-    serial_println!("[OK] Userspace init binary mapped at virtual base: {:#010X}", user_entry);
-    serial_println!("[OK] Userspace stack mapped at virtual top:        {:#010X}", user_stack_top);
-    serial_println!("[RING 0] Dropping CPU privilege level from Ring 0 to Ring 3 (User Mode)...");
+    serial_println!("[PROCESS ENTRY] Dropping CPU privilege level to Ring 3 (User Mode)...");
+    serial_println!("                Entry RIP: {:#010X}", user_entry);
+    serial_println!("                User RSP:  {:#010X}", user_stack_top);
 
     unsafe {
         jump_to_ring3(user_entry, user_stack_top);
     }
+}
+
+/// Creates a new isolated userspace process with its own PML4 address space,
+/// loads its ELF binary, configures its capabilities, and registers it in the scheduler.
+pub fn spawn_user_process(
+    name: &'static str,
+    elf_data: &[u8],
+    caps: CapabilityTable,
+    priority: u8,
+) -> Result<TaskId, &'static str> {
+    // 1. Create independent per-process PML4 address space
+    let mut pt = crate::memory::TaskPageTable::create_user_page_table()?;
+
+    // 2. Load ELF into this process's page table with W^X and stack guard page
+    let stack_top = 0x0080_0000;
+    let (user_entry, user_stack_top) = load_user_elf_into_page_table(elf_data, &mut pt, stack_top)?;
+
+    // 3. Create TaskControlBlock
+    let mut tcb = crate::task::TaskControlBlock::new(name, user_process_entry, caps, priority);
+    tcb.page_table = Some(pt);
+    tcb.user_entry = user_entry;
+    tcb.user_stack_top = user_stack_top;
+
+    let id = tcb.id;
+    SCHEDULER.lock().spawn_task(tcb);
+    Ok(id)
+}
+
+/// Loads a 64-bit ELF binary into a new page table with default stack top (0x0080_0000).
+pub fn load_user_elf(elf_data: &[u8]) -> Result<(usize, usize), &'static str> {
+    let mut pt = crate::memory::TaskPageTable::create_user_page_table()?;
+    load_user_elf_into_page_table(elf_data, &mut pt, 0x0080_0000)
+}
+
+/// Compatibility wrapper for loading an ELF with specified stack top.
+pub fn load_user_elf_with_stack(elf_data: &[u8], stack_top_addr: usize) -> Result<(usize, usize), &'static str> {
+    let mut pt = crate::memory::TaskPageTable::create_user_page_table()?;
+    load_user_elf_into_page_table(elf_data, &mut pt, stack_top_addr)
+}
+
+/// Trampoline function running in Ring 0 that loads the userspace init ELF and drops into Ring 3.
+pub extern "C" fn user_task_trampoline() -> ! {
+    user_process_entry()
 }
 
 /// Spawns the primordial userspace task (Task 9: `user_init`) into the scheduler.
@@ -345,32 +465,20 @@ pub fn spawn_user_init(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
-    let id = SCHEDULER.lock().spawn(
+    let id = spawn_user_process(
         "user_init",
-        user_task_trampoline,
+        USER_INIT_ELF,
         user_caps,
         1, // Normal priority
-    );
+    ).expect("Failed to spawn userspace init process");
 
-    serial_println!("[OK] Spawned Task 9: user_init (Ring 3 User Mode, ID: {:?})", id);
+    serial_println!("[OK] Spawned Task 9: user_init (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
 
 /// Trampoline for Sovereign Settings App (Ring 3)
 pub extern "C" fn app_settings_trampoline() -> ! {
-    serial_println!("[RING 0] Loading Sovereign Settings App binary...");
-    let (user_entry, user_stack_top) = match load_user_elf_with_stack(APP_SETTINGS_ELF, 0x0084_0000) {
-        Ok(res) => res,
-        Err(err) => {
-            serial_println!("[FATAL] Failed to load Settings ELF: {}", err);
-            crate::task::terminate_current();
-        }
-    };
-    serial_println!("[OK] Settings app mapped at virtual base: {:#010X}, stack: {:#010X}", user_entry, user_stack_top);
-    serial_println!("[RING 0] Launching Settings App in Ring 3 (User Mode)...");
-    unsafe {
-        jump_to_ring3(user_entry, user_stack_top);
-    }
+    user_process_entry()
 }
 
 /// Spawns the native Sovereign Settings App in Ring 3.
@@ -401,31 +509,19 @@ pub fn spawn_app_settings(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
-    let id = SCHEDULER.lock().spawn(
+    let id = spawn_user_process(
         "app_settings",
-        app_settings_trampoline,
+        APP_SETTINGS_ELF,
         caps,
         1,
-    );
-    serial_println!("[OK] Spawned Task 17: app_settings (Ring 3 User Mode, ID: {:?})", id);
+    ).expect("Failed to spawn Settings app");
+    serial_println!("[OK] Spawned Task 17: app_settings (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
 
 /// Trampoline for Sovereign Intent Terminal App (Ring 3)
 pub extern "C" fn app_terminal_trampoline() -> ! {
-    serial_println!("[RING 0] Loading Sovereign Intent Terminal binary...");
-    let (user_entry, user_stack_top) = match load_user_elf_with_stack(APP_TERMINAL_ELF, 0x0088_0000) {
-        Ok(res) => res,
-        Err(err) => {
-            serial_println!("[FATAL] Failed to load Terminal ELF: {}", err);
-            crate::task::terminate_current();
-        }
-    };
-    serial_println!("[OK] Terminal app mapped at virtual base: {:#010X}, stack: {:#010X}", user_entry, user_stack_top);
-    serial_println!("[RING 0] Launching Intent Terminal App in Ring 3 (User Mode)...");
-    unsafe {
-        jump_to_ring3(user_entry, user_stack_top);
-    }
+    user_process_entry()
 }
 
 /// Spawns the native Sovereign Intent Terminal App in Ring 3.
@@ -456,31 +552,19 @@ pub fn spawn_app_terminal(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
-    let id = SCHEDULER.lock().spawn(
+    let id = spawn_user_process(
         "app_terminal",
-        app_terminal_trampoline,
+        APP_TERMINAL_ELF,
         caps,
         1,
-    );
-    serial_println!("[OK] Spawned Task 18: app_terminal (Ring 3 User Mode, ID: {:?})", id);
+    ).expect("Failed to spawn Terminal app");
+    serial_println!("[OK] Spawned Task 18: app_terminal (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
 
 /// Trampoline for Sovereign Dialer App (Ring 3)
 pub extern "C" fn app_dialer_trampoline() -> ! {
-    serial_println!("[RING 0] Loading Sovereign Dialer App binary...");
-    let (user_entry, user_stack_top) = match load_user_elf_with_stack(APP_DIALER_ELF, 0x008C_0000) {
-        Ok(res) => res,
-        Err(err) => {
-            serial_println!("[FATAL] Failed to load Dialer ELF: {}", err);
-            crate::task::terminate_current();
-        }
-    };
-    serial_println!("[OK] Dialer app mapped at virtual base: {:#010X}, stack: {:#010X}", user_entry, user_stack_top);
-    serial_println!("[RING 0] Launching Sovereign Dialer App in Ring 3 (User Mode)...");
-    unsafe {
-        jump_to_ring3(user_entry, user_stack_top);
-    }
+    user_process_entry()
 }
 
 /// Spawns the native Sovereign Dialer App in Ring 3.
@@ -505,31 +589,19 @@ pub fn spawn_app_dialer(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
-    let id = SCHEDULER.lock().spawn(
+    let id = spawn_user_process(
         "app_dialer",
-        app_dialer_trampoline,
+        APP_DIALER_ELF,
         caps,
         1,
-    );
-    serial_println!("[OK] Spawned Task 19: app_dialer (Ring 3 User Mode, ID: {:?})", id);
+    ).expect("Failed to spawn Dialer app");
+    serial_println!("[OK] Spawned Task 19: app_dialer (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
 
 /// Trampoline for Sovereign Vault App (Ring 3)
 pub extern "C" fn app_vault_trampoline() -> ! {
-    serial_println!("[RING 0] Loading Sovereign Vault & Storage App binary...");
-    let (user_entry, user_stack_top) = match load_user_elf_with_stack(APP_VAULT_ELF, 0x009C_0000) {
-        Ok(res) => res,
-        Err(err) => {
-            serial_println!("[FATAL] Failed to load Vault ELF: {}", err);
-            crate::task::terminate_current();
-        }
-    };
-    serial_println!("[OK] Vault app mapped at virtual base: {:#010X}, stack: {:#010X}", user_entry, user_stack_top);
-    serial_println!("[RING 0] Launching Sovereign Vault App in Ring 3 (User Mode)...");
-    unsafe {
-        jump_to_ring3(user_entry, user_stack_top);
-    }
+    user_process_entry()
 }
 
 /// Spawns the native Sovereign Vault & Storage App in Ring 3.
@@ -560,31 +632,19 @@ pub fn spawn_app_vault(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
-    let id = SCHEDULER.lock().spawn(
+    let id = spawn_user_process(
         "app_vault",
-        app_vault_trampoline,
+        APP_VAULT_ELF,
         caps,
         1,
-    );
-    serial_println!("[OK] Spawned Task 20: app_vault (Ring 3 User Mode, ID: {:?})", id);
+    ).expect("Failed to spawn Vault app");
+    serial_println!("[OK] Spawned Task 20: app_vault (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
 
 /// Trampoline for Sovereign Camera App (Ring 3)
 pub extern "C" fn app_camera_trampoline() -> ! {
-    serial_println!("[RING 0] Loading Sovereign Camera App binary...");
-    let (user_entry, user_stack_top) = match load_user_elf_with_stack(APP_CAMERA_ELF, 0x00AC_0000) {
-        Ok(res) => res,
-        Err(err) => {
-            serial_println!("[FATAL] Failed to load Camera ELF: {}", err);
-            crate::task::terminate_current();
-        }
-    };
-    serial_println!("[OK] Camera app mapped at virtual base: {:#010X}, stack: {:#010X}", user_entry, user_stack_top);
-    serial_println!("[RING 0] Launching Sovereign Camera App in Ring 3 (User Mode)...");
-    unsafe {
-        jump_to_ring3(user_entry, user_stack_top);
-    }
+    user_process_entry()
 }
 
 /// Spawns the native Sovereign Camera & Neural Vision App in Ring 3.
@@ -621,31 +681,19 @@ pub fn spawn_app_camera(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
-    let id = SCHEDULER.lock().spawn(
+    let id = spawn_user_process(
         "app_camera",
-        app_camera_trampoline,
+        APP_CAMERA_ELF,
         caps,
         1,
-    );
-    serial_println!("[OK] Spawned Task 21: app_camera (Ring 3 User Mode, ID: {:?})", id);
+    ).expect("Failed to spawn Camera app");
+    serial_println!("[OK] Spawned Task 21: app_camera (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
 
 /// Trampoline for Open-Source Touch Calculator App (Ring 3)
 pub extern "C" fn app_calculator_trampoline() -> ! {
-    serial_println!("[RING 0] Loading Open-Source Touch Calculator App binary...");
-    let (user_entry, user_stack_top) = match load_user_elf_with_stack(APP_CALCULATOR_ELF, 0x00BC_0000) {
-        Ok(res) => res,
-        Err(err) => {
-            serial_println!("[FATAL] Failed to load Calculator ELF: {}", err);
-            crate::task::terminate_current();
-        }
-    };
-    serial_println!("[OK] Calculator app mapped at virtual base: {:#010X}, stack: {:#010X}", user_entry, user_stack_top);
-    serial_println!("[RING 0] Launching Open-Source Touch Calculator App in Ring 3 (User Mode)...");
-    unsafe {
-        jump_to_ring3(user_entry, user_stack_top);
-    }
+    user_process_entry()
 }
 
 /// Spawns the native Open-Source Touch Calculator App in Ring 3.
@@ -682,31 +730,19 @@ pub fn spawn_app_calculator(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
-    let id = SCHEDULER.lock().spawn(
+    let id = spawn_user_process(
         "app_calculator",
-        app_calculator_trampoline,
+        APP_CALCULATOR_ELF,
         caps,
         1,
-    );
-    serial_println!("[OK] Spawned Task 22: app_calculator (Ring 3 User Mode, ID: {:?})", id);
+    ).expect("Failed to spawn Calculator app");
+    serial_println!("[OK] Spawned Task 22: app_calculator (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
 
 /// Trampoline for Sovereign Browser App (Ring 3)
 pub extern "C" fn app_browser_trampoline() -> ! {
-    serial_println!("[RING 0] Loading Sovereign Browser App binary...");
-    let (user_entry, user_stack_top) = match load_user_elf_with_stack(APP_BROWSER_ELF, 0x00CC_0000) {
-        Ok(res) => res,
-        Err(err) => {
-            serial_println!("[FATAL] Failed to load Browser ELF: {}", err);
-            crate::task::terminate_current();
-        }
-    };
-    serial_println!("[OK] Browser app mapped at virtual base: {:#010X}, stack: {:#010X}", user_entry, user_stack_top);
-    serial_println!("[RING 0] Launching Sovereign Browser App in Ring 3 (User Mode)...");
-    unsafe {
-        jump_to_ring3(user_entry, user_stack_top);
-    }
+    user_process_entry()
 }
 
 /// Spawns the native Sovereign Browser & Decentralized Web Client in Ring 3.
@@ -755,31 +791,19 @@ pub fn spawn_app_browser(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
-    let id = SCHEDULER.lock().spawn(
+    let id = spawn_user_process(
         "app_browser",
-        app_browser_trampoline,
+        APP_BROWSER_ELF,
         caps,
         1,
-    );
-    serial_println!("[OK] Spawned Task 23: app_browser (Ring 3 User Mode, ID: {:?})", id);
+    ).expect("Failed to spawn Browser app");
+    serial_println!("[OK] Spawned Task 23: app_browser (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
 
 /// Trampoline for Sovereign Messages App (Ring 3)
 pub extern "C" fn app_messages_trampoline() -> ! {
-    serial_println!("[RING 0] Loading Sovereign Messages App binary...");
-    let (user_entry, user_stack_top) = match load_user_elf_with_stack(APP_MESSAGES_ELF, 0x00DC_0000) {
-        Ok(res) => res,
-        Err(err) => {
-            serial_println!("[FATAL] Failed to load Messages ELF: {}", err);
-            crate::task::terminate_current();
-        }
-    };
-    serial_println!("[OK] Messages app mapped at virtual base: {:#010X}, stack: {:#010X}", user_entry, user_stack_top);
-    serial_println!("[RING 0] Launching Sovereign Messages App in Ring 3 (User Mode)...");
-    unsafe {
-        jump_to_ring3(user_entry, user_stack_top);
-    }
+    user_process_entry()
 }
 
 /// Spawns the native Sovereign Messages & E2E Encrypted Wire Client in Ring 3.
@@ -828,31 +852,19 @@ pub fn spawn_app_messages(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
-    let id = SCHEDULER.lock().spawn(
+    let id = spawn_user_process(
         "app_messages",
-        app_messages_trampoline,
+        APP_MESSAGES_ELF,
         caps,
         1,
-    );
-    serial_println!("[OK] Spawned Task 24: app_messages (Ring 3 User Mode, ID: {:?})", id);
+    ).expect("Failed to spawn Messages app");
+    serial_println!("[OK] Spawned Task 24: app_messages (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
 
 /// Trampoline for Sovereign Calendar App (Ring 3)
 pub extern "C" fn app_calendar_trampoline() -> ! {
-    serial_println!("[RING 0] Loading Sovereign Calendar App binary...");
-    let (user_entry, user_stack_top) = match load_user_elf_with_stack(APP_CALENDAR_ELF, 0x00EC_0000) {
-        Ok(res) => res,
-        Err(err) => {
-            serial_println!("[FATAL] Failed to load Calendar ELF: {}", err);
-            crate::task::terminate_current();
-        }
-    };
-    serial_println!("[OK] Calendar app mapped at virtual base: {:#010X}, stack: {:#010X}", user_entry, user_stack_top);
-    serial_println!("[RING 0] Launching Sovereign Calendar App in Ring 3 (User Mode)...");
-    unsafe {
-        jump_to_ring3(user_entry, user_stack_top);
-    }
+    user_process_entry()
 }
 
 /// Spawns the native Sovereign Calendar & Chrono-Planner in Ring 3.
@@ -901,31 +913,19 @@ pub fn spawn_app_calendar(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
-    let id = SCHEDULER.lock().spawn(
+    let id = spawn_user_process(
         "app_calendar",
-        app_calendar_trampoline,
+        APP_CALENDAR_ELF,
         caps,
         1,
-    );
-    serial_println!("[OK] Spawned Task 25: app_calendar (Ring 3 User Mode, ID: {:?})", id);
+    ).expect("Failed to spawn Calendar app");
+    serial_println!("[OK] Spawned Task 25: app_calendar (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
 
 /// Trampoline for Sovereign Music App (Ring 3)
 pub extern "C" fn app_music_trampoline() -> ! {
-    serial_println!("[RING 0] Loading Sovereign Music App binary...");
-    let (user_entry, user_stack_top) = match load_user_elf_with_stack(APP_MUSIC_ELF, 0x00FC_0000) {
-        Ok(res) => res,
-        Err(err) => {
-            serial_println!("[FATAL] Failed to load Music ELF: {}", err);
-            crate::task::terminate_current();
-        }
-    };
-    serial_println!("[OK] Music app mapped at virtual base: {:#010X}, stack: {:#010X}", user_entry, user_stack_top);
-    serial_println!("[RING 0] Launching Sovereign Music App in Ring 3 (User Mode)...");
-    unsafe {
-        jump_to_ring3(user_entry, user_stack_top);
-    }
+    user_process_entry()
 }
 
 /// Spawns the native Sovereign Music & Hi-Fi Audio Synthesizer in Ring 3.
@@ -974,13 +974,13 @@ pub fn spawn_app_music(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
-    let id = SCHEDULER.lock().spawn(
+    let id = spawn_user_process(
         "app_music",
-        app_music_trampoline,
+        APP_MUSIC_ELF,
         caps,
         1,
-    );
-    serial_println!("[OK] Spawned Task 26: app_music (Ring 3 User Mode, ID: {:?})", id);
+    ).expect("Failed to spawn Music app");
+    serial_println!("[OK] Spawned Task 26: app_music (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
 
