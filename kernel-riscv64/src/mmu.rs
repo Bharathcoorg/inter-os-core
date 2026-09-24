@@ -37,10 +37,22 @@ impl PageTable {
     }
 }
 
-// Static kernel root page table and secondary table for bare-metal boot
+// Static kernel root page table and secondary/tertiary tables for bare-metal boot
 static mut KERNEL_ROOT_PT: PageTable = PageTable::empty();
 static mut USER_LVL1_PT: PageTable = PageTable::empty();
+static mut USER_LVL0_PT: PageTable = PageTable::empty();
 static mut USER_PAGE_FRAME: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
+static mut USER_STACK_FRAME: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
+
+pub const USER_CODE_VADDR: usize = 0x4000_0000;
+pub const USER_STACK_TOP: usize = 0x4000_2000;
+
+/// Copies userspace code payload into the dedicated physical code frame.
+pub unsafe fn load_user_code(code: &[u8]) {
+    assert!(code.len() <= PAGE_SIZE, "User code exceeds 4KiB page size");
+    let dest = (&raw mut USER_PAGE_FRAME) as *mut u8;
+    core::ptr::copy_nonoverlapping(code.as_ptr(), dest, code.len());
+}
 
 /// Initializes Sv39 virtual memory, maps kernel RAM and MMIO, and activates SATP.
 pub unsafe fn init_sv39() {
@@ -56,15 +68,25 @@ pub unsafe fn init_sv39() {
     let dram_ppn = 0x80000u64;
     root.entries[2] = (dram_ppn << 10) | PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
 
-    // 3. User lower-half mapping (0x0000_0040_0000_0000 or lower)
-    // We map a user page at virtual address 0x0000_0000_0040_0000 with PTE_U flag
+    // 3. User lower-half mapping (Gigapage 1: 0x4000_0000 .. 0x7FFF_FFFF)
     let user_lvl1 = unsafe { &mut *(&raw mut USER_LVL1_PT) };
     user_lvl1.clear();
+    let user_lvl0 = unsafe { &mut *(&raw mut USER_LVL0_PT) };
+    user_lvl0.clear();
 
+    // Leaf 0 (0x4000_0000): User Code Region (RX only: Read + Exec + User, NO Write -> W^X enforced!)
     let user_frame_paddr = (&raw const USER_PAGE_FRAME) as *const u8 as u64;
     let user_frame_ppn = user_frame_paddr >> 12;
-    // User page: Valid + Read + Write + Exec + User + Accessed + Dirty
-    user_lvl1.entries[0] = (user_frame_ppn << 10) | PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D;
+    user_lvl0.entries[0] = (user_frame_ppn << 10) | PTE_V | PTE_R | PTE_X | PTE_U | PTE_A | PTE_D;
+
+    // Leaf 1 (0x4000_1000): User Stack Region (RW only: Read + Write + User, NO Exec -> W^X enforced!)
+    let stack_frame_paddr = (&raw const USER_STACK_FRAME) as *const u8 as u64;
+    let stack_frame_ppn = stack_frame_paddr >> 12;
+    user_lvl0.entries[1] = (stack_frame_ppn << 10) | PTE_V | PTE_R | PTE_W | PTE_U | PTE_A | PTE_D;
+
+    // Point user_lvl1 entry 0 to user_lvl0 page table
+    let user_lvl0_ppn = (user_lvl0 as *const PageTable as u64) >> 12;
+    user_lvl1.entries[0] = (user_lvl0_ppn << 10) | PTE_V; // Branch pointer (no R/W/X flags)
 
     // Point root entry 1 to user_lvl1 page table
     let user_lvl1_ppn = (user_lvl1 as *const PageTable as u64) >> 12;

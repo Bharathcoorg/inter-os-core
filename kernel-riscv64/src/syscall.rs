@@ -41,7 +41,10 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
             } else {
                 let mut kbuf = [0u8; 1024];
                 unsafe {
+                    // Temporarily enable SUM (bit 18) to allow S-mode to safely read U-mode memory
+                    core::arch::asm!("csrrs zero, sstatus, {0}", in(reg) (1usize << 18));
                     core::ptr::copy_nonoverlapping(msg_ptr as *const u8, kbuf.as_mut_ptr(), msg_len);
+                    core::arch::asm!("csrrc zero, sstatus, {0}", in(reg) (1usize << 18));
                 }
                 if let Ok(s) = core::str::from_utf8(&kbuf[..msg_len]) {
                     println!("[USER:LOG] {}", s);

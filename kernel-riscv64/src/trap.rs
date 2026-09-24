@@ -27,8 +27,10 @@ pub unsafe fn init_traps() {
     asm!(
         "csrw stvec, {0}",
         "csrw sscratch, {1}",
+        "csrrs zero, sstatus, {2}", // Enable SUM (bit 18) for servicing U-mode syscall memory
         in(reg) trap_handler_addr,
         in(reg) stack_top,
+        in(reg) (1usize << 18),
         options(nostack)
     );
 }
@@ -157,8 +159,17 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
         match code {
             // Environment call from U-mode (User Syscall)
             8 => {
+                let syscall_num = tf.regs[17];
                 tf.sepc += 4; // Advance instruction pointer past ecall
                 crate::syscall::dispatch_syscall(tf);
+                if syscall_num == 2 {
+                    println!("[INIT] Userspace init process completed execution. Microkernel entering low-power state.");
+                    loop {
+                        unsafe {
+                            core::arch::asm!("wfi");
+                        }
+                    }
+                }
             }
             // Environment call from S-mode
             9 => {
@@ -188,3 +199,40 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
         }
     }
 }
+
+/// Returns the top address of the primordial kernel trap stack.
+pub fn kernel_stack_top() -> usize {
+    (&raw const TRAP_KERNEL_STACK) as usize + 16384
+}
+
+/// Drops CPU execution privilege from S-mode to U-mode via `sret`.
+#[unsafe(naked)]
+pub unsafe extern "C" fn enter_user_mode(entry_point: usize, user_sp: usize, kstack_top: usize) -> ! {
+    naked_asm!(
+        // a0 = entry_point, a1 = user_sp, a2 = kstack_top
+        // 1. Initialize sscratch with kernel stack for handling traps from U-mode
+        "csrw sscratch, a2",
+        // 2. Clear SPP (bit 8 = 0 for U-mode return) and set SPIE (bit 5 = 1)
+        "csrr t0, sstatus",
+        "li t1, ~(1 << 8)",
+        "and t0, t0, t1",
+        "ori t0, t0, (1 << 5)",
+        "csrw sstatus, t0",
+        // 3. Set sepc = entry_point (a0)
+        "csrw sepc, a0",
+        // 4. Set user SP = a1
+        "mv sp, a1",
+        // 5. Zero registers for process boundary isolation
+        "mv a0, zero",
+        "mv a1, zero",
+        "mv a2, zero",
+        "mv a3, zero",
+        "mv a4, zero",
+        "mv a5, zero",
+        "mv a6, zero",
+        "mv a7, zero",
+        // 6. Hardware privilege drop into U-mode at sepc
+        "sret",
+    );
+}
+

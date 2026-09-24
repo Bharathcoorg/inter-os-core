@@ -74,16 +74,47 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
     println!("[BOOT] System state: Userspace Ready (U-mode isolated).");
     println!("------------------------------------------------------------");
 
-    // Kernel heartbeat loop
-    let mut ticks = 0u64;
-    loop {
-        for _ in 0..10_000_000 {
-            core::hint::spin_loop();
-        }
-        ticks = ticks.wrapping_add(1);
-        if ticks % 5 == 0 {
-            println!("[KERNEL:RISCV64] Heartbeat tick={}, hart={}", ticks, hart_id);
-        }
+    // 5. Deploy and Launch Real RISC-V U-Mode Userspace Process
+    println!("--- [Launching RISC-V U-Mode Primordial Init Process] ---");
+
+    // Assemble native RISC-V U-mode machine code payload:
+    // 1. SYS_GET_TASK_ID (li a7, 7; ecall)
+    // 2. SYS_LOG (li a7, 3; li a0, 0; lui a1, 0x40000; addi a1, a1, 0x30; li a2, 38; ecall)
+    // 3. SYS_EXIT (li a7, 2; li a0, 0; ecall)
+    // 4. loop
+    let mut payload = [0u8; 128];
+    let msg = b"Hello from InterOS RISC-V Userspace!\n";
+    let code_words: [u32; 12] = [
+        0x00700893, // li a7, 7 (SYS_GET_TASK_ID)
+        0x00000073, // ecall
+        0x00300893, // li a7, 3 (SYS_LOG)
+        0x00000513, // li a0, 0 (cap_slot 0)
+        0x400005b7, // lui a1, 0x40000 (base 0x4000_0000)
+        0x03058593, // addi a1, a1, 0x30 (ptr 0x4000_0030)
+        (msg.len() as u32) << 20 | (0 << 15) | (0 << 12) | (12 << 7) | 0x13, // li a2, msg_len
+        0x00000073, // ecall
+        0x00200893, // li a7, 2 (SYS_EXIT)
+        0x00000513, // li a0, 0 (exit_code 0)
+        0x00000073, // ecall
+        0x0000006f, // j .
+    ];
+
+    for (i, word) in code_words.iter().enumerate() {
+        let bytes = word.to_le_bytes();
+        payload[i * 4..(i + 1) * 4].copy_from_slice(&bytes);
+    }
+
+    payload[48..48 + msg.len()].copy_from_slice(msg);
+
+    unsafe {
+        mmu::load_user_code(&payload);
+    }
+    println!("[INIT] Loaded native U-mode payload at VA 0x{:08x} (W^X RX code segment).", mmu::USER_CODE_VADDR);
+    println!("[INIT] Initialized U-mode stack at VA 0x{:08x} (W^X RW stack segment).", mmu::USER_STACK_TOP);
+    println!("[INIT] Dropping CPU execution privilege from S-mode to U-mode via sret...");
+
+    unsafe {
+        trap::enter_user_mode(mmu::USER_CODE_VADDR, mmu::USER_STACK_TOP, trap::kernel_stack_top());
     }
 }
 
