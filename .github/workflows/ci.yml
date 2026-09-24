@@ -47,6 +47,13 @@ jobs:
           rustup target add aarch64-unknown-none --toolchain nightly
           rustup target add riscv64gc-unknown-none-elf --toolchain nightly
 
+      - name: Build x86_64 userspace binaries required by kernel image embedding
+        run: |
+          cargo build --manifest-path userspace/init/Cargo.toml --target x86_64-unknown-none
+          for app in settings terminal dialer vault camera calculator browser messages calendar music; do
+            cargo build --manifest-path "apps/$app/Cargo.toml" --target x86_64-unknown-none
+          done
+
       - name: Check x86_64 Microkernel Target
         run: cargo check --manifest-path kernel/Cargo.toml --target x86_64-unknown-none
 
