@@ -1,6 +1,6 @@
-//! AMCP (Agent Model Context Protocol) Automation Package Format
+//! AMCP (Application Modular Capability Protocol) Automation Package Format
 //!
-//! Enforces verified execution of AI automations according to the core principles:
+//! Enforces verified execution of modular automations according to core security principles:
 //! - Package identity and publisher attestation
 //! - Cryptographic SHA-256 payload integrity verification
 //! - Explicitly declared capability requirements

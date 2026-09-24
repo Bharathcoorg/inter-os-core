@@ -3,7 +3,7 @@
 //! Initializes low-level architecture subsystems (GDT, TSS, IDT, PIC, PIT Timer,
 //! Serial COM1, Framebuffer Console, Physical Paging, and Heap Allocator),
 //! brings up the ATA PIO Block Driver, SHA-256 Cryptographic Subsystem,
-//! dm-verity Merkle Tree Verifier, Capability-Governed VFS, local MCP Tool Engine,
+//! dm-verity Merkle Tree Verifier, Capability-Governed VFS, local Capability Tool Engine,
 //! and pure `no_std` WebAssembly (WASM) Sandboxed Runtime.
 
 #![no_std]

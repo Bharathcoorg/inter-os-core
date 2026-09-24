@@ -21,7 +21,7 @@ InterOS Core is engineered from first principles as an open-source, memory-safe 
 |   - Cellular RIL / Serial AT Modem Daemon       - Touch Input Digitizer  |
 |   - Package Sideload Manager (.rapp/.apk)       - interos-std Syscalls   |
 +-------------------------------------------------------------------------+
-|                 Capability-Based Zero-Copy IPC Bus                      |
+|                 Capability-Based Shared-Memory IPC Bus                  |
 |       Shared-Memory Ring Buffers + Atomic Futex Synchronization         |
 +-------------------------------------------------------------------------+
 |                   InterOS Microkernel Core (Ring 0 / EL1 / S-Mode)      |

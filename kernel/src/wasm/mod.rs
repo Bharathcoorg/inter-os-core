@@ -1,7 +1,7 @@
 //! WebAssembly Isolation & Execution Subsystem
 //!
 //! Exposes a pure `no_std` stack machine interpreter, sandboxed linear memory,
-//! and host call bridges for local Model Context Protocol (MCP) automations.
+//! and host call bridges for local capability automations.
 
 pub mod memory;
 pub mod types;

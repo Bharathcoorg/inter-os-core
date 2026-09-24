@@ -2,10 +2,9 @@
 //!
 //! Enforces system-wide hardware resource budgets across CPU, RAM, Storage,
 //! Bandwidth, Battery, and Thermal conditions.
-//!
-//! Non-Negotiable Principle #7: Dynamic AI budgeting so AI never consumes most RAM/storage.
-//! Non-Negotiable Principle #8: Foreground user workloads have strict priority over
-//! background AI, state sync, and LiteVerse work.
+//! Resource Principle #7: Dynamic resource budgeting to prevent RAM/storage exhaustion.
+//! Resource Principle #8: Foreground user workloads have strict priority over
+//! background tasks and state synchronization.
 
 /// Workload priority tiers defined in master architecture specification.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]

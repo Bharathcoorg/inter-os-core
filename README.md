@@ -8,221 +8,202 @@
 ![Build: Passing](https://img.shields.io/badge/Build-Passing-brightgreen.svg)
 ![Status: Open Source](https://img.shields.io/badge/Status-Public%20Core%20Platform-blueviolet.svg)
 
-### **The Sovereign, Open-Source Rust Mobile Operating System & Application Platform**
-*The AOSP of Modern Memory-Safe Mobile Computing.*
+### **The Sovereign, Open-Source Rust Mobile Operating System Foundation**
+*A memory-safe, capability-based microkernel mobile platform for x86_64, AArch64, and RISC-V 64.*
 
-[Quickstart](#-one-click-turnkey-quickstart) • [Architecture](#-system-architecture) • [Device Studio](#-universal-device-studio--digital-twin) • [App Ecosystem](#-production-smartphone-apps-suite) • [App Dev SDK](#-app-development-platform--sdk) • [Hardware Bring-Up](#-supported-hardware-targets)
+[Quickstart](#-quickstart) • [Architecture](#-system-architecture) • [Feature Reality Matrix](#-feature-status--reality-matrix) • [Security & Isolation](#-security-invariants--isolation-model) • [Device Studio](#-universal-device-studio) • [Developer CLI](#-developer-cli-interos) • [Hardware Bring-Up](#-hardware-bring-up--experimental-roadmap)
 
 </div>
 
-> **Project Status: Engineering Prototype / Active Bring-Up Phase**
-> InterOS Core is an open-source bare-metal Rust microkernel and mobile platform foundation. Memory management (CR3 / TTBR0_EL1 / SATP page tables), capability enforcement, syscall pointer validation (`UserPtr`), Ed25519 `.rapp` package signing, and multi-architecture bring-up (x86_64, AArch64, RISC-V 64) are functional and verified in QEMU. Real-device testing is actively in progress.
+---
 
-**InterOS Core** is a clean-slate, memory-safe mobile operating system foundation engineered in bare-metal Rust (`#![no_std]`).
-
-Designed as an open-source research and engineering alternative to legacy monolithic mobile operating systems, InterOS Core eliminates ambient root privileges, monolithic kernel vulnerability surfaces, and proprietary telemetry. It delivers a microkernel architecture where device drivers, audio engines, network stacks, and user applications execute in isolated address spaces and protection domains.
-
-InterOS Core serves as both a **deployable mobile OS** for real ARM64 and RISC-V 64 hardware, and a comprehensive **App Development Platform** with a turnkey local emulator and hardware digital twin.
+> **Status Notice: Engineering Reality & Verification Status**  
+> InterOS Core is an open-source, bare-metal Rust microkernel and mobile operating system foundation. All user processes execute in isolated virtual address spaces with strict hardware MMU enforcement (CR3 / TTBR0_EL1 / SATP), capability-based access control, safe syscall memory copies (`UserPtr`), and mandatory Ed25519 cryptographic package attestation.  
+> Runtime execution is actively verified across three primary emulation targets (`qemu-system-x86_64`, `qemu-system-aarch64`, `qemu-system-riscv64`). Physical smartphone deployment is in experimental bring-up.
 
 ---
 
-## ⚡ One-Click Turnkey Quickstart
+## 📊 Feature Status & Reality Matrix
 
-Experience InterOS Core locally in seconds. The automated setup scripts detect prerequisites, configure the Rust cross-compilation targets, compile microkernels and reference apps, and launch the interactive Device Studio emulator on `http://localhost:4300`.
+In accordance with our engineering integrity policy, every subsystem is classified into an explicit verification tier:
 
-### On Windows (PowerShell)
-```powershell
-git clone https://github.com/InterOS/inter-os-core.git
-cd inter-os-core
-.\setup.ps1
-```
+| Subsystem / Feature | Implementation State | Verification Level | Verification Evidence / Mechanism |
+| :--- | :--- | :--- | :--- |
+| **x86_64 Virtual Address Isolation** | Real 4-Level PML4 CR3 per-process paging, W^X, stack guard pages | **Verified in QEMU** | Context switch reloads CR3; user text read-only; stack faults trigger guard page faults |
+| **AArch64 Virtual Address Isolation** | Split translation tables (`TTBR0_EL1` user, `TTBR1_EL1` kernel), PXN/UXN | **Verified in QEMU** | EL0 exception returns into isolated address space; TLBI shootdown on context switch |
+| **RISC-V 64 Sv39 MMU & U-Mode** | Sv39 3-level paging via `satp` Mode 8, U-mode execution | **Verified in QEMU** | OpenSBI boot chain; `stvec` trap vectors; user/supervisor privilege boundary |
+| **Syscall Pointer Validation** | `UserPtr<T>`, `UserSlice`, `copy_from_user`, `copy_to_user` | **Implemented & Adversarially Tested** | Null exclusion (<0x1000), integer overflow prevention, kernel address range rejection |
+| **Process Lifecycle & Multitasking** | PID assignment, Zombie states, parent tracking, exit codes | **Implemented & Tested** | `WaitPid` (Syscall 63) & `ExitWithCode` (Syscall 64) in kernel and `interos-std` |
+| **Capability Security Model** | Per-process capability token table, rights bitmask, generation tags | **Implemented & Tested** | Non-forgeable object handles; cross-process handle sharing prevented without delegation |
+| **Shared-Memory IPC** | Bounded ring buffers, atomic synchronization primitives | **Implemented & Tested** | Capability-gated endpoints; process termination cleans up and closes endpoints |
+| **Cryptographic `.rapp` Packages** | ZIP archives with canonical manifest, SHA-256 digests, Ed25519 signatures | **Implemented & Adversarially Tested** | Unsigned packages rejected; altered files trigger hash mismatch; zip-slip traversal blocked |
+| **Device Studio QEMU Backend** | Multi-arch process manager (`x86_64`, `aarch64`, `riscv64`) | **Implemented & Tested** | Real QEMU lifecycle management, live HMP/QMP register queries, dashes (`—`) when offline |
+| **Studio Adversarial Hardening** | SSRF filters, path traversal sanitization, command sandbox | **Implemented & Adversarially Tested** | `tests/test_adversarial_security.py` passes 6/6 tests (loopback, RFC1918, metadata rejection) |
+| **Unified Developer CLI (`interos`)** | Cross-platform CLI (`tools/interos.py`, `interos.ps1`, `interos.cmd`) | **Implemented & Tested** | `doctor`, `build`, `test`, `new`, `pack`, `sign`, `verify`, `devices`, `run`, `stop` |
+| **Userspace Reference Shell** | Surface, System Line, Activity Space, Events, Objects | **Implemented (Web/Studio)** | Modular consumer UX decoupled from kernel; honest telemetry from guest |
+| **Fastboot v2 Android Boot Image** | `boot-aarch64.img` (Android v2 header embedding ARM64 microkernel) | **Experimental Bring-Up** | Standard header validated; target bring-up on PinePhone (Allwinner A64) |
+| **GPU Hardware Acceleration** | Software linear framebuffer scanout (`SimpleFB`, VGA) | **Planned** | Hardware-accelerated DRM/KMS Vulkan driver stack on roadmap |
+| **Cellular Baseband Modem** | RIL serial AT protocol parser structure | **Unsupported** | Requires physical modem hardware bring-up; synthetic metrics strictly removed |
 
-### On Linux / macOS / GitHub Codespaces (Bash)
+---
+
+## ⚡ Quickstart
+
+### Prerequisites
+- **Rust Toolchain**: Rust Nightly (with `rust-src` component)
+- **Compilation Targets**:
+  - `x86_64-unknown-none`
+  - `aarch64-unknown-none`
+  - `riscv64gc-unknown-none-elf`
+- **Emulation**: `qemu-system-x86_64`, `qemu-system-aarch64`, `qemu-system-riscv64`
+- **Python**: Python 3.8+ with `cryptography` package (`pip install cryptography`)
+
+### 1. Run Environment Diagnostics
+Verify that your toolchains and emulator paths are correctly detected:
 ```bash
-git clone https://github.com/InterOS/inter-os-core.git
-cd inter-os-core
-chmod +x setup.sh
-./setup.sh
+python tools/interos.py doctor
+```
+*(On Windows, you can also run `.\interos.ps1 doctor` or `interos.cmd doctor`)*
+
+### 2. Run the Adversarial Security Test Suite
+Validate zero-trust invariants including SSRF filters, package signature checks, and sandbox constraints:
+```bash
+python tools/interos.py test --target security
 ```
 
-The script will automatically launch your default browser to **`http://localhost:4300`**.
+### 3. Launch Device Studio
+Start the local development server and digital twin interface:
+```bash
+python emulator/server.py
+```
+Open your browser to **`http://localhost:4300`**.
 
 ---
 
 ## 🏛 System Architecture
 
-InterOS Core is architected around a strict **Capability-Based Microkernel (Ring 0 TCB)** with asynchronous zero-copy shared memory IPC and a hardware abstraction layer (HAL) tailored for mobile silicon:
+InterOS Core implements a strict **Capability-Based Microkernel** architecture where consumer UI, services, and applications run in userspace:
 
+```text
+                    INTEROS CORE
+                         │
+                         ▼
+                    MICROKERNEL (Ring 0 / EL1 / S-Mode)
+                         │
+        ┌────────────────┼────────────────┐
+        │                │                │
+      Memory            IPC           Capabilities
+        │                │                │
+     Scheduler        Endpoints        Objects
+     Interrupts       Shared Mem       Rights
+     VM/MMU           Signals          Revocation
+        │
+        ▼
+               USERSPACE SERVICES (Ring 3 / EL0 / U-Mode)
+        ┌────────┬────────┬────────┬────────┐
+        │        │        │        │        │
+      init    displayd   inputd   storaged  netd
+        │        │        │        │        │
+        └────────┴────────┴────────┴────────┘
+                         │
+                     compositor
+                         │
+                    InterOS Shell
+                         │
+        ┌────────────────┼─────────────────┐
+        │                │                 │
+      Surface        Activities          Events
+        │                │                 │
+      Objects          Apps             Notifications
+                         │
+                    Applications (.rapp)
 ```
-+-------------------------------------------------------------------------+
-|                  InterOS Native Smartphone Applications                 |
-|    (Phone, Messages, Music Player, Calendar, Files, Camera, Settings)   |
-+-------------------------------------------------------------------------+
-|                Userspace System Services & SDK (Ring 3)                 |
-|   - Window Compositor (DRM/KMS Framebuffer)    - Audio Synthesizer Engine|
-|   - Cellular RIL / Serial AT Modem Daemon       - Touch Input Digitizer  |
-|   - Package Sideload Manager (.app/.wasm/.apk)  - interos-std Syscalls   |
-+-------------------------------------------------------------------------+
-|                 Capability-Based Zero-Copy IPC Bus                      |
-|       Shared-Memory Ring Buffers + Atomic Futex Synchronization         |
-+-------------------------------------------------------------------------+
-|                   InterOS Microkernel Core (Ring 0)                     |
-|   - Preemptive Priority Scheduler (100 Hz)   - Memory Paging & MMU       |
-|   - Hardware Keystore & Vault Controller      - Capability Token Matrix  |
-+-------------------------------------------------------------------------+
-|                   Hardware Abstraction Layer (HAL)                      |
-|      RISC-V 64 (QEMU Virt)   |   ARM64 (Cortex-A / PinePhone)   |  x86_64|
-|   - InterOS SBI / PLIC / CLINT |   - PSCI / GICv2/v3 / ArchTimer  |  - APIC|
-|   - NS16550A Serial UART     |   - SimpleFB & Goodix Touch      |  - VGA |
-+-------------------------------------------------------------------------+
-```
-
-### Key Architectural Tenets
-1. **Zero Ambient Authority**: Processes possess zero implicit capabilities. To access file sectors, transmit network packets, or read sensors, apps must present cryptographically signed capability tokens (`CapToken`).
-2. **True Memory Safety**: 100% of the microkernel, HAL, and userspace applications are written in Rust (`#![no_std]`).
-3. **Sub-Microsecond Zero-Copy IPC**: Shared-memory ring buffers with atomic futex synchronization deliver high-throughput audio and display streams without kernel buffer-copy overhead.
-4. **Ring 3 Sandboxing**: Crashes in network drivers, cellular modems, or third-party applications cannot compromise kernel memory or panic the device.
 
 ---
 
-## 📱 Universal Device Studio & Digital Twin
+## 🛡 Security Invariants & Isolation Model
 
-InterOS Core includes a production-grade **Smartphone Device Studio** running locally on Port 4300:
+Untrusted user processes operate under strict, hardware-enforced isolation:
 
-* **Hardware Chassis**: Realistic tactile buttons (Power Button with screen sleep/wake, Volume Up / Down with live haptic feedback).
-* **Quantum Capsule (Notch HUD)**: Interactive dynamic pill displaying real-time system heartbeats, active call timers, and playing music status.
-* **Gravity Shade (Swipe-Down Drawer)**: Swipe down from the top edge to toggle Wi-Fi, 5G cellular, Bluetooth, Flashlight, Airplane Mode, Do Not Disturb, and Battery Saver, complete with live brightness and master audio sliders.
-* **Developer Telemetry Deck**:
-  * **Microkernel UART Console**: Raw high-frequency serial telemetry directly from Ring 0.
-  * **Security Enclave Console**: Real-time audit log of capability tokens, hardware keystore derivations, and vault sector encryptions.
-  * **Package Sideload Deck**: Drag-and-drop installer for native `.app`, WebAssembly `.wasm`, and Android `.apk` bundles.
-  * **App Dev Inspector**: Live inspection of inter-process communication (IPC) packets and Ring 3 sandbox memory allocations.
-
----
-
-## 📦 Production Smartphone Apps Suite
-
-InterOS Core ships with a suite of functional, zero-placeholder smartphone applications written with `#![no_std]` Rust logic and interactive mobile interfaces:
-
-| App | Capabilities & Features |
-| :--- | :--- |
-| 📞 **Phone / Dialer** | Keypad with authentic Web Audio DTMF tones, live call screen with call duration timer, contact avatar, mute, speaker, and call history log. |
-| 💬 **Messages** | Threaded SMS/RCS conversations, responsive message composer, delivery acknowledgments, and automated simulated conversational replies. |
-| 🎵 **Music Player** | Real on-device Web Audio synthesizer supporting 4 waveforms (Sine, Square, Triangle, Sawtooth), turntable visualizer, playlist scrubber, and playback queue. |
-| 📅 **Calendar & Agenda** | Interactive monthly date picker, today indicator, event scheduler, and upcoming agenda tasks. |
-| 📁 **Files & Storage** | Virtual storage explorer navigating `/system/bin`, `/storage/emulated/0`, and `/vault`, with file hashes and download export. |
-| ⚙️ **Settings** | Wi-Fi & cellular management, display brightness & theme toggles, audio haptics, hardware keystore status, and kernel architecture info. |
-| 📷 **Camera Preview** | Synthetic mobile camera viewfinder, photo shutter flash animation, and media thumbnail gallery. |
-| 📦 **Sideload Manager** | Package catalog viewer, SHA-256 binary validation, Ring 3 privilege inspector, and one-click app launch. |
+1. **Hardware MMU Isolation**:
+   - **x86_64**: Per-process PML4 page tables. Context switching switches `CR3`. Kernel mappings are supervisor-only (`U/S = 0`). Data pages enforce `NX = 1` (No-Execute). Stack guard pages trigger unmapped page faults before buffer overflow can reach kernel structures.
+   - **AArch64**: Split translation tables (`TTBR0_EL1` for user virtual addresses, `TTBR1_EL1` for kernel). User pages set `AP = 0b01` (EL0 Read/Write) and `PXN = 1` (Privileged Execute-Never).
+   - **RISC-V 64**: Sv39 3-level paging via `satp` Mode 8. User pages require `PTE_U`. Supervisor mode cannot execute user pages.
+2. **Safe Syscall Memory Access (`UserPtr<T>`)**:
+   - Kernel code never constructs raw references (`&*user_ptr`) to untrusted userspace pointers.
+   - All data exchange uses safe copy-in/copy-out semantics (`copy_from_user`, `copy_to_user`).
+   - Pointers are checked against null page exclusion (`< 0x1000`), canonical userspace bounds, and integer overflow.
+3. **Capability Token Model**:
+   - Processes start with zero ambient authority.
+   - Capabilities are opaque handles into per-task kernel tables, guarded by bitmask rights (`READ`, `WRITE`, `EXECUTE`, `GRANT`) and generation tags.
+   - Stale, forged, or cross-process capability handles are rejected with `-EPERM`.
+4. **Mandatory Ed25519 Package Verification**:
+   - Applications distributed as `.rapp` bundles must contain `signature.json`.
+   - The installer verifies the publisher's Ed25519 public key against the canonical manifest and validates SHA-256 digests of every bundled file.
+   - Unsigned packages or packages with mismatched digests are rejected with atomic rollback.
 
 ---
 
-## 🛠 App Development Platform & Sovereign `.rapp` Toolchain
+## 📱 Universal Device Studio
 
-InterOS Core provides a complete development platform for building, packaging, and hot-deploying sovereign mobile applications using the **`.rapp` (Rust App Package)** standard.
+Device Studio (`http://localhost:4300`) provides a hardware digital twin and development console:
 
-### Dual-Tier Architecture
-Applications consist of two decoupled, high-performance tiers:
-1. **UI Tier**: Rapid, modern HTML5/CSS/WASM interface communicating through the high-speed `window.InterOS.ipc` bridge.
-2. **Backend Tier**: Sovereign `#![no_std]` Rust microkernel service compiling to native ELF (`aarch64-unknown-none` or `riscv64gc-unknown-none-elf`), running within a capability-gated Ring 3 sandbox.
+- **Real QEMU Management**: Launch, pause, resume, reset, or stop QEMU backends across `x86_64`, `aarch64`, and `riscv64`.
+- **Honest Hardware Telemetry**: Live registers (e.g. `CR0`, `CR3`, `EAX`, `RIP`) are queried directly from the running QEMU monitor. When QEMU is offline, registers reset and display dashes (`—`), RIP displays `Offline`, and status displays `Standby`. No synthetic numbers are presented.
+- **Process Table & Memory Maps**: Real inspection of active task states and memory allocations.
+- **Microkernel Serial UART**: High-frequency streaming UART logs directly from Ring 0 / EL1 / S-Mode.
+- **Package Sideloading**: Direct drag-and-drop installer for signed `.rapp` packages with cryptographic validation feedback.
 
 ---
 
-### The `interos` Developer CLI (`tools/interos.py`)
+## 🛠 Developer CLI (`interos`)
 
-A single unified command-line tool manages the complete application lifecycle:
+InterOS Core provides a developer CLI (`tools/interos.py`, with root wrappers `interos.ps1`, `interos.cmd`, and `interos`):
 
 ```bash
-# 1. Scaffold a new application from a reference template
-python tools/interos.py new my_authenticator --template authenticator
-# Available templates: basic, authenticator, sensor, meshchat
+# Environment & Diagnostic Check
+interos doctor
 
-# 2. Compile the #![no_std] Rust backend
-python tools/interos.py build my_authenticator --target aarch64-unknown-none
+# Build Microkernels and Userspace
+interos build --target x86_64
+interos build --target aarch64
+interos build --target riscv64
 
-# 3. Package into a sovereign .rapp bundle
-python tools/interos.py pack my_authenticator
-# Generates dist/my_authenticator.rapp containing manifest.json, UI assets, and compiled ELF
+# Execute Test Suites
+interos test --target workspace     # Run all unit and integration tests
+interos test --target security      # Run adversarial security suite
 
-# 4. Hot-Deploy directly into the running local Device Studio (Port 4300)
-python tools/interos.py run my_authenticator
+# Scaffold a New Sovereign Application
+interos new my_app --template authenticator
 
-# 5. Inspect all installed sovereign packages on the emulator
-python tools/interos.py list
+# Package Application into .rapp Bundle
+interos package my_app
+
+# Sign Package with Ed25519 Key
+interos sign dist/my_app.rapp --key dev.key
+
+# Verify Cryptographic Package Integrity
+interos verify dist/my_app.rapp
+
+# Inspect Installed Packages and Targets
+interos devices
+interos inspect dist/my_app.rapp
+
+# Run Application or Launch Microkernel in QEMU
+interos run --target aarch64
 ```
 
 ---
 
-### Production Flagship Showcase Applications
+## 🎯 Hardware Bring-Up & Experimental Roadmap
 
-InterOS Core includes three fully-functional production reference applications:
+| Architecture | Microkernel Crate | Target Triple | Target Platform | Status |
+| :--- | :--- | :--- | :--- | :--- |
+| **x86_64** | `kernel` | `x86_64-unknown-none` | QEMU PC (`pc-q35`), UEFI/BIOS | Verified in QEMU |
+| **AArch64** | `kernel-aarch64` | `aarch64-unknown-none` | QEMU `virt` (Cortex-A53), PinePhone | Verified in QEMU / Exp. Bring-Up |
+| **RISC-V 64** | `kernel-riscv64` | `riscv64gc-unknown-none-elf` | QEMU `virt` (RV64), VisionFive 2 | Verified in QEMU / Exp. Bring-Up |
 
-| Application | Package | Capability Permissions | Highlights |
-| :--- | :--- | :--- | :--- |
-| **Authenticator** | `authenticator.rapp` | `CAP_HARDWARE_KEYSTORE`, `CAP_SECURE_STORAGE` | Hardware-derived TOTP 2FA codes, 30s circular countdown timer, click-to-copy clipboard with heads-up notifications. |
-| **Health Hub** | `health.rapp` | `CAP_SENSOR_ACCEL`, `CAP_SENSOR_GYRO`, `CAP_SENSOR_HR` | Real-time 60Hz PPG optical waveform canvas rendering, 3-axis accelerometer/gyro registers, daily steps, and calories. |
-| **Mesh Chat** | `meshchat.rapp` | `CAP_MESH_RADIO`, `CAP_P2P_SOCKET` | Offline peer-to-peer radio messaging, radar node discovery, RSSI signal indicators, multi-hop packet routing, and notifications. |
-
----
-
-### Frontend <-> Microkernel IPC Bridge (`window.InterOS.ipc`)
-
-In the UI tier, applications communicate with system microkernel services and backend daemons through `window.InterOS.ipc`:
-
-```javascript
-// Send a syscall request to the backend service
-window.InterOS.ipc.send("org.interos.authenticator", 0x01, { refresh: true });
-
-// Await an asynchronous capability response
-const result = await window.InterOS.ipc.request("org.interos.health", 0x10, { sample_rate: 250 });
-console.log("Vitals Telemetry:", result);
-```
-
-Every IPC packet is tracked and visualized in real time inside the **App Dev Inspector** tab in the Device Studio.
-
----
-
-### Mobile Shell & Multitasking System
-* **Gravity Shade**: Swipe-down quick settings drawer with Wi-Fi, 5G Data, Bluetooth, Torch, Airplane Mode, DND, Auto-Rotate, and Battery Saver toggles synchronized with the status bar.
-* **Quantum Capsule**: Dynamic notch HUD pill reporting system heartbeat ticks, active phone calls, and media audio synthesis.
-* **Heads-up Notifications**: Floating push notification banner with audio chime and direct tap-to-open routing.
-* **Multitask App Switcher (Recents)**: Horizontal carousel tracking all active process sandboxes, with per-app termination (`×`) and "Clear All" memory cleanup. Swiping up on the home pill or clicking `▢` reveals running tasks.
-
----
-
-## 🎯 Supported Hardware Targets
-
-InterOS Core compiles for three primary target architectures:
-
-| Architecture | Target Triple | Microkernel Crate | Primary Hardware Target |
-| :--- | :--- | :--- | :--- |
-| **RISC-V 64** | `riscv64gc-unknown-none-elf` | `kernel-riscv64` | QEMU `virt` machine, SiFive HiFive, StarFive VisionFive 2 |
-| **ARM64** | `aarch64-unknown-none` | `kernel-aarch64` | Allwinner A64 PinePhone, Rockchip RK3399, Google Pixel |
-| **x86_64** | `x86_64-unknown-none` | `kernel` | QEMU x86_64 PC, Intel/AMD UEFI laptops & devboards |
-
-### Manual Bare-Metal Verification with QEMU
-
-#### 1. Booting RISC-V 64 Microkernel
-```bash
-cargo build --manifest-path kernel-riscv64/Cargo.toml --target riscv64gc-unknown-none-elf
-qemu-system-riscv64 -machine virt -cpu rv64 -m 512M -nographic -bios default -kernel target/riscv64gc-unknown-none-elf/debug/kernel-riscv64
-```
-
-#### 2. Booting ARM64 Microkernel
-```bash
-cargo build --manifest-path kernel-aarch64/Cargo.toml --target aarch64-unknown-none
-qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic -kernel target/aarch64-unknown-none/debug/kernel-aarch64
-```
-
-#### 3. Flashing Physical Smartphones
-See [docs/PHYSICAL_HARDWARE_FLASHING.md](docs/PHYSICAL_HARDWARE_FLASHING.md) for step-by-step instructions on generating Fastboot Android Boot Image v2 headers (`boot-aarch64.img`) and flashing physical PinePhone and Qualcomm Snapdragon devices.
-
----
-
-## 🤝 Contributing
-
-We welcome community contributions from kernel developers, embedded engineers, UI/UX designers, and application authors!
-Please see [CONTRIBUTING.md](CONTRIBUTING.md) for code style guidelines, pull request protocols, and testing workflows.
+For experimental physical device deployment, see [docs/PHYSICAL_HARDWARE_FLASHING.md](docs/PHYSICAL_HARDWARE_FLASHING.md).
 
 ---
 
@@ -231,5 +212,3 @@ Please see [CONTRIBUTING.md](CONTRIBUTING.md) for code style guidelines, pull re
 InterOS Core is dual-licensed under:
 * **MIT License** ([LICENSE-MIT](LICENSE-MIT))
 * **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE-APACHE))
-
-You may choose to use this project under either license at your option.

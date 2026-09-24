@@ -3,7 +3,7 @@
 //! Provides a pure `no_std` execution loop for WASM bytecode with:
 //! - Strict fuel metering to prevent infinite loops and denial of service.
 //! - Sandboxed linear memory load/store bounds checking.
-//! - Clean host call bindings for MCP capability tools.
+//! - Clean host call bindings for capability tools.
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};

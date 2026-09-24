@@ -2,28 +2,29 @@
 
 This guide details the complete deployment process for running **Inter OS Sovereign Microkernel v4.8+** on physical mobile ARM64 hardware (Allwinner A64 PinePhone, Rockchip RK3399 PinePhone Pro, Qualcomm Snapdragon, and Google Pixel / Tensor smartphones).
 
-> [!NOTE]
-> Physical deployment is currently in active hardware bring-up. The QEMU mobile digital twin and emulator environment are the primary verified targets. Follow these steps when flashing compatible development test devices.
+> [!WARNING]
+> **Status: Experimental Bring-Up / Research Roadmap**  
+> Physical hardware flashing is currently an experimental research roadmap. It is not yet verified for end-user production deployment.  
+> Verified runtime execution is established on QEMU emulation targets (`qemu-system-x86_64`, `qemu-system-aarch64`, `qemu-system-riscv64`).  
+> Use these instructions only for development boards (e.g. PinePhone Allwinner A64) in laboratory environments.
 
 ---
 
 ## 1. Architectural Overview & Hardware Readiness
 
-Inter OS is engineered with a **zero-mock, zero ambient authority** architecture designed to boot directly on physical ARM Cortex-A application processors.
-
-| Component | Physical Driver / Specification | Architectural State |
-| :--- | :--- | :--- |
-| **CPU Privilege** | ARM64 EL1 (Supervisor) / EL0 (User Isolation) | Configured via `entry.S` & `exceptions.rs` |
-| **MMU / Cache** | 39-bit VA space, 4-level translation tables | `TCR_EL1`, `MAIR_EL1`, `SCTLR_EL1` (M=1, C=1, I=1) |
-| **Interrupt Controller** | ARM GICv2 / GICv3 (Distributor & CPU Interface) | Base addresses probed via Device Tree (FDT) |
-| **Architectural Timer** | ARM Generic Timer (`CNTV_CTL_EL0`, `CNTV_TVAL_EL0`) | Programmed via `CNTFRQ_EL0` (100 Hz scheduling) |
-| **Firmware Interface** | ARM PSCI v1.1 (`hvc #0` / `smc #0`) | SMP core bringup, reset, power down |
-| **Mobile Display** | SimpleFB Linear Framebuffer | 720x1440 RGB565 portrait scanout |
-| **Multi-Touch** | Goodix GT911 Capacitive Digitizer | Dual-touch contact decoding & preemption |
-| **Cellular Baseband** | Streaming Serial RIL (3GPP AT Engine) | +CSQ signal tracking, +CRING voice call alerts |
-| **Flash Storage** | SDHCI eMMC 5.1 Host Controller | Hardware card detection & 512B FIFO transfers |
-| **Power Management** | PMIC Fuel Gauge, TSENS & DVFS Governor | 4-tier thermal mitigation & architectural `wfi` |
-| **Cryptographic Enclave** | RFC 4231 HMAC-SHA256 & Sovereign DID | Hardware root key derivation & state commitments |
+| Component | Physical Driver / Specification | Verification Status | Architectural State |
+| :--- | :--- | :--- | :--- |
+| **CPU Privilege** | ARM64 EL1 (Supervisor) / EL0 (User Isolation) | **Verified in QEMU** | Configured via `entry.S` & `exceptions.rs` |
+| **MMU / Translation** | 39-bit VA space, split tables (`TTBR0_EL1` / `TTBR1_EL1`) | **Verified in QEMU** | `TCR_EL1`, `MAIR_EL1`, `SCTLR_EL1` (M=1, C=1, I=1) |
+| **Interrupt Controller** | ARM GICv2 / GICv3 (Distributor & CPU Interface) | **Verified in QEMU** | Base addresses probed via Device Tree (FDT) |
+| **Architectural Timer** | ARM Generic Timer (`CNTV_CTL_EL0`, `CNTV_TVAL_EL0`) | **Verified in QEMU** | Programmed via `CNTFRQ_EL0` (100 Hz scheduling) |
+| **Firmware Interface** | ARM PSCI v1.1 (`hvc #0` / `smc #0`) | **Verified in QEMU** | Core bringup, reset, power down |
+| **Mobile Display** | SimpleFB Linear Framebuffer | **Verified in QEMU** | Portrait scanout via display HAL |
+| **Multi-Touch** | Goodix GT911 Capacitive Digitizer | **Experimental** | Dual-touch contact decoding logic |
+| **Cellular Baseband** | Streaming Serial RIL (3GPP AT Engine) | **Unsupported** | Protocol parser interface; physical modem unverified |
+| **Flash Storage** | SDHCI eMMC 5.1 Host Controller | **Experimental** | Hardware card detection & FIFO transfers |
+| **Power Management** | PMIC Fuel Gauge, TSENS & DVFS Governor | **Experimental** | Architectural `wfi` & mitigation stubs |
+| **Cryptographic Enclave** | RFC 4231 HMAC-SHA256 & Ed25519 Attestation | **Implemented & Tested** | Key verification & state commitments |
 
 ---
 

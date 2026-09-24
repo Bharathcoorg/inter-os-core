@@ -99,7 +99,7 @@ pub enum SyscallResult {
     FuelExhausted = -16,
     IdentityUninitialized = -17,
     StateSyncFailed = -18,
-    LiteVerseDisabled = -19,
+    FeatureDisabled = -19,
     NetworkError = -20,
     MarketplaceError = -21,
     AuditFailed = -22,

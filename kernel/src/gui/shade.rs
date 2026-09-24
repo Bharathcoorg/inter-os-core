@@ -13,7 +13,7 @@ pub enum ShadeState {
     Open,
 }
 
-/// A quick-setting toggle switch (WiFi, 5G, LiteVerse, Battery, DVFS).
+/// A quick-setting toggle switch (WiFi, 5G, Bluetooth, Battery, DVFS).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QuickToggle {
     pub name: &'static str,
