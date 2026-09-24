@@ -152,21 +152,18 @@ pub fn sys_exit() -> ! {
 /// Returns `Success` if the child has terminated (exit code logged to serial),
 /// or `NotReady` if the child is still running.
 pub fn sys_waitpid(child_id: u64) -> SyscallResult {
-    let sched = SCHEDULER.lock();
-    let child_tid = crate::task::TaskId(child_id);
-    match sched.get_task(child_tid) {
-        Some(task) => {
-            match task.state {
-                crate::task::TaskState::Zombie | crate::task::TaskState::Terminated => {
-                    let code = task.exit_code;
-                    drop(sched);
-                    serial_println!("[WAITPID] Child {} reaped with exit code {}", child_id, code);
-                    SyscallResult::Success
-                }
-                _ => SyscallResult::NotReady,
-            }
+    let mut sched = SCHEDULER.lock();
+    let parent_id = match sched.current_task_id() {
+        Some(id) => id,
+        None => return SyscallResult::PermissionDenied,
+    };
+    match sched.reap_child(parent_id, crate::task::TaskId(child_id)) {
+        Ok(code) => {
+            serial_println!("[WAITPID] Child {} reaped with exit code {}", child_id, code);
+            SyscallResult::Success
         }
-        None => SyscallResult::InvalidArgument,
+        Err(reason) if reason == "child not ready or not owned by caller" => SyscallResult::NotReady,
+        Err(_) => SyscallResult::InvalidArgument,
     }
 }
 
