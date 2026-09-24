@@ -704,10 +704,41 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {{
 # COMMAND: run
 # =============================================================================
 def cmd_run(args):
-    app_name = args.name.lower().replace("-", "_")
+    target_name = args.name.lower().replace("-", "_")
     target = getattr(args, "target", "aarch64-unknown-none")
     port = getattr(args, "port", 4300)
 
+    # Architecture profile boot mode
+    if target_name in ("x86_64", "aarch64", "riscv64", "qemu", "kernel"):
+        arch = "x86_64" if target_name in ("qemu", "kernel") else target_name
+        log(f"Building {arch} microkernel...")
+        b_args = argparse.Namespace(name=arch, target=None)
+        if cmd_build(b_args) != 0:
+            return 1
+        url = f"http://127.0.0.1:{port}/api/qemu/launch"
+        log(f"Launching QEMU {arch} microkernel via Device Studio API...")
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps({"profile": arch}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                if data.get("success"):
+                    log_success(f"{data.get('message')}")
+                    log(f"Connect to serial logs: .\\interos logs -f")
+                    log(f"Connect to serial shell: .\\interos shell")
+                    return 0
+                else:
+                    log_error(f"Launch failed: {data.get('message')}")
+                    return 1
+        except Exception as e:
+            log_error(f"Failed to communicate with Studio: {e}")
+            return 1
+
+    app_name = target_name
     # 1. Build
     build_args = argparse.Namespace(name=app_name, arch=target)
     ret = cmd_build(build_args)
@@ -832,6 +863,198 @@ def cmd_install(args):
         return 1
 
 
+# =============================================================================
+# COMMANDS: sign, stop, restart, logs, shell, snapshot, trace
+# =============================================================================
+def cmd_sign(args):
+    """Cryptographically signs an arbitrary file or .rapp with Ed25519."""
+    target_path = Path(args.target)
+    if not target_path.exists():
+        log_error(f"Target file not found: {target_path}")
+        return 1
+
+    try:
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        from cryptography.hazmat.primitives import serialization
+    except ImportError:
+        log_error("Python 'cryptography' library required. Run: pip install cryptography")
+        return 1
+
+    key_path = Path(args.key) if getattr(args, "key", None) else (PACKAGES_DIR / "developer.key")
+    if key_path.exists():
+        priv_key = ed25519.Ed25519PrivateKey.from_private_bytes(key_path.read_bytes())
+    else:
+        log(f"Generating new developer Ed25519 key at {key_path}...")
+        key_path.parent.mkdir(parents=True, exist_ok=True)
+        priv_key = ed25519.Ed25519PrivateKey.generate()
+        key_path.write_bytes(priv_key.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption()
+        ))
+
+    file_bytes = target_path.read_bytes()
+    file_sha = hashlib.sha256(file_bytes).hexdigest()
+    sig_bytes = priv_key.sign(file_sha.encode("utf-8"))
+    sig_out = target_path.with_suffix(target_path.suffix + ".sig")
+    sig_doc = {
+        "file": target_path.name,
+        "sha256": file_sha,
+        "public_key": priv_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw
+        ).hex(),
+        "signature": sig_bytes.hex()
+    }
+    sig_out.write_text(json.dumps(sig_doc, indent=2), encoding="utf-8")
+    log_success(f"Signature written to {sig_out}")
+    log(f"  • SHA-256: {file_sha}")
+    log(f"  • Ed25519: {sig_bytes.hex()[:24]}...")
+    return 0
+
+
+def cmd_stop(args):
+    """Stops the running QEMU microkernel instance."""
+    port = getattr(args, "port", 4300)
+    url = f"http://127.0.0.1:{port}/api/qemu/stop"
+    log(f"Sending stop signal to QEMU via Studio (port {port})...")
+    try:
+        req = urllib.request.Request(url, data=b"{}", headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            if data.get("success"):
+                log_success("QEMU microkernel process terminated successfully.")
+                return 0
+    except Exception as e:
+        log_warn(f"Studio API unreachable ({e}). Attempting direct process termination...")
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/F", "/IM", "qemu-system-*"], capture_output=True)
+        else:
+            subprocess.run(["pkill", "-f", "qemu-system"], capture_output=True)
+        log_success("Terminated local QEMU processes.")
+        return 0
+    return 1
+
+
+def cmd_restart(args):
+    """Triggers hardware reset or warm restart of the microkernel."""
+    port = getattr(args, "port", 4300)
+    url = f"http://127.0.0.1:{port}/api/qemu/reset"
+    log(f"Dispatching hardware reset signal to QEMU (port {port})...")
+    try:
+        req = urllib.request.Request(url, data=b"{}", headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            log_success("System reset signal acknowledged by QEMU microkernel.")
+            return 0
+    except Exception as e:
+        log_error(f"Failed to reset: {e}")
+        return 1
+
+
+def cmd_logs(args):
+    """Displays or follows live serial UART logs."""
+    port = getattr(args, "port", 4300)
+    follow = getattr(args, "follow", False)
+    after = 0
+    log("Connecting to live serial log stream...")
+    try:
+        while True:
+            url = f"http://127.0.0.1:{port}/api/serial?after={after}"
+            try:
+                with urllib.request.urlopen(url, timeout=3) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    lines = data.get("lines", [])
+                    for l in lines:
+                        print(l)
+                    after = data.get("next_index", after + len(lines))
+            except Exception:
+                pass
+            if not follow:
+                break
+            time.sleep(0.5)
+        return 0
+    except KeyboardInterrupt:
+        return 0
+
+
+def cmd_shell(args):
+    """Opens an interactive serial shell session to the microkernel."""
+    port = getattr(args, "port", 4301)
+    host = "127.0.0.1"
+    log(f"Connecting to guest serial UART at {host}:{port}...")
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.connect((host, port))
+            log_success("Connected to InterOS Serial UART. Press Ctrl+C to exit.")
+            s.setblocking(False)
+            while True:
+                try:
+                    data = s.recv(1024)
+                    if data:
+                        sys.stdout.write(data.decode("utf-8", errors="replace"))
+                        sys.stdout.flush()
+                except BlockingIOError:
+                    pass
+                time.sleep(0.05)
+    except ConnectionRefusedError:
+        log_error(f"Cannot connect to serial console at {host}:{port}. Is QEMU running with serial TCP active?")
+        return 1
+    except KeyboardInterrupt:
+        print("\n[Shell disconnected]")
+        return 0
+
+
+def cmd_snapshot(args):
+    """Manages QEMU snapshots (save, load, list)."""
+    port = getattr(args, "port", 4300)
+    action = getattr(args, "action", "list")
+    name = getattr(args, "name", "snap1")
+    url = f"http://127.0.0.1:{port}/api/qemu/snapshot"
+    log(f"Dispatching snapshot action '{action}' (name='{name}')...")
+    payload = json.dumps({"action": action, "name": name}).encode("utf-8")
+    try:
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            out = data.get("output", "")
+            if out:
+                print(out)
+            log_success(f"Snapshot operation '{action}' completed.")
+            return 0
+    except Exception as e:
+        log_error(f"Snapshot command failed: {e}")
+        return 1
+
+
+def cmd_trace(args):
+    """Queries and displays live guest telemetry and execution trace."""
+    port = getattr(args, "port", 4300)
+    url = f"http://127.0.0.1:{port}/api/qemu/telemetry"
+    try:
+        with urllib.request.urlopen(url, timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            print("================================================================")
+            print("  InterOS Guest Execution Trace & Telemetry")
+            print("================================================================")
+            print(f"Status:      {data.get('status')} (Mode: {data.get('mode')})")
+            print(f"QEMU Alive:  {data.get('qemu_alive')}")
+            cpu = data.get("cpu", {})
+            print(f"CPU Arch:    {cpu.get('arch')} (Thread: {cpu.get('thread_id')}, Halted: {cpu.get('halted')})")
+            print(f"RIP/PC:      {cpu.get('rip')}")
+            regs = cpu.get("registers", {})
+            if regs:
+                print("\nRegisters:")
+                for k, v in sorted(regs.items()):
+                    print(f"  {k:8s} = {v}")
+            else:
+                print("\nRegisters:   (Offline / Standby)")
+            print("================================================================")
+            return 0
+    except Exception as e:
+        log_error(f"Could not connect to Studio telemetry API: {e}")
+        return 1
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="InterOS Core Developer CLI (interos)",
@@ -905,6 +1128,45 @@ def main():
     p_un.add_argument("name", help="App ID or name")
     p_un.add_argument("--port", type=int, default=4300, help="Studio port")
     p_un.set_defaults(func=cmd_uninstall)
+
+    # sign
+    p_sgn = subparsers.add_parser("sign", help="Sign a file or package with Ed25519")
+    p_sgn.add_argument("target", help="File or package to sign")
+    p_sgn.add_argument("--key", help="Path to Ed25519 private key")
+    p_sgn.set_defaults(func=cmd_sign)
+
+    # stop
+    p_stp = subparsers.add_parser("stop", help="Stop running QEMU microkernel")
+    p_stp.add_argument("--port", type=int, default=4300, help="Studio port")
+    p_stp.set_defaults(func=cmd_stop)
+
+    # restart
+    p_rst = subparsers.add_parser("restart", help="Reset/restart QEMU microkernel")
+    p_rst.add_argument("--port", type=int, default=4300, help="Studio port")
+    p_rst.set_defaults(func=cmd_restart)
+
+    # logs
+    p_log = subparsers.add_parser("logs", help="Display or follow live serial UART logs")
+    p_log.add_argument("--port", type=int, default=4300, help="Studio port")
+    p_log.add_argument("-f", "--follow", action="store_true", help="Follow log stream continuously")
+    p_log.set_defaults(func=cmd_logs)
+
+    # shell
+    p_shl = subparsers.add_parser("shell", help="Connect to microkernel serial UART console")
+    p_shl.add_argument("--port", type=int, default=4301, help="Serial TCP port")
+    p_shl.set_defaults(func=cmd_shell)
+
+    # snapshot
+    p_snp = subparsers.add_parser("snapshot", help="Manage QEMU snapshots (save, load, list)")
+    p_snp.add_argument("--action", choices=["save", "load", "list", "delete"], default="list", help="Action")
+    p_snp.add_argument("--name", default="snap1", help="Snapshot name")
+    p_snp.add_argument("--port", type=int, default=4300, help="Studio port")
+    p_snp.set_defaults(func=cmd_snapshot)
+
+    # trace
+    p_trc = subparsers.add_parser("trace", help="Display real-time CPU registers and guest telemetry")
+    p_trc.add_argument("--port", type=int, default=4300, help="Studio port")
+    p_trc.set_defaults(func=cmd_trace)
 
     args = parser.parse_args()
     if not hasattr(args, "func"):

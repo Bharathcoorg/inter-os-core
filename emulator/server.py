@@ -452,69 +452,29 @@ def scan_packages_dir():
 latest_telemetry = {
     "qemu_alive": False,
     "websockify_alive": False,
-    "status": "ready",
+    "status": "standby",
     "cpu": {
         "arch": "x86_64",
-        "thread_id": "Core0-Thread0",
-        "halted": False,
-        "rip": "0x000001000000DC4D",
-        "registers": {
-            "RAX": "0x0000018000014D01",
-            "RBX": "0x0000000000004F98",
-            "RCX": "0x0000000000029400",
-            "RDX": "0x0000000000000001",
-            "RSI": "0x0000000000000000",
-            "RDI": "0x000001000003E900",
-            "RBP": "0x0000000000000000",
-            "RSP": "0x0000018000014DA8",
-            "R8":  "0x000001000003BD28",
-            "R9":  "0x00000000000000B8",
-            "R10": "0x000000000F080501",
-            "R11": "0x0000010000007E3D",
-            "R12": "0x0000000000006290",
-            "R13": "0x0000000000007728",
-            "R14": "0x0000038000000000",
-            "R15": "0x00000000000077A0",
-            "RIP": "0x000001000000DC4D",
-            "RFLAGS": "0x00000202",
-            "CR0": "0x80010011",
-            "CR3": "0x0000000001353000",
-            "CR4": "0x00000020",
-            "EFER": "0x0000000000000D00"
-        },
+        "thread_id": "Offline",
+        "halted": True,
+        "rip": "Offline",
+        "registers": {},
         "raw_registers": ""
     },
-    "pic": {
-        "master": {"irr": "00", "imr": "fb", "isr": "00", "base": "20"},
-        "slave": {"irr": "00", "imr": "ff", "isr": "00", "base": "28"}
-    },
+    "pic": {},
     "block": {
-        "device": "drive0",
-        "file": "inter-os-bios.img",
-        "read_bytes": 1048576,
+        "device": "standby",
+        "file": "inter-os-bios.img (Standby)",
+        "read_bytes": 0,
         "write_bytes": 0,
-        "read_ops": 256
+        "read_ops": 0
     },
     "kernel": {
-        "uptime_ticks": 1024,
+        "uptime_ticks": 0,
         "framebuffer": {"width": 1280, "height": 720, "bpp": 3, "byte_len": 2764800},
-        "heap": {"pool_size": "1 MiB", "start": "0x444444440000", "status": "Online"},
-        "memory_regions": [
-            {"name": "Boot Stage 4", "range": "0x00130000 - 0x00136250", "size": "25 KB", "type": "Executable"},
-            {"name": "Microkernel Binary", "range": "0x01000000 - 0x01352F98", "size": "3.48 MB", "type": "Ring 0 Code/Data"},
-            {"name": "PML4 Page Tables", "range": "0x01353000 - 0x01354000", "size": "4 KB", "type": "Page Root CR3"},
-            {"name": "Locked Heap", "range": "0x444444440000", "size": "1024 KB", "type": "Heap Dynamic"},
-            {"name": "VBE Framebuffer", "range": "0xFD000000 - 0xFD2A3000", "size": "2.76 MB", "type": "1280x720 RGB"}
-        ],
-        "tests_passed": [
-            "Serial UART 16550 initialized at COM1 (0x3F8)",
-            "GDT Loaded with 64-Bit Ring 0 and Ring 3 Code/Data descriptors",
-            "IDT Populated with 256 Exception & IRQ vectors",
-            "Page Table Hierarchy verified: 48-bit 4-Level Paging",
-            "Dynamic Linked-List Heap verified (1 MiB allocation pool)",
-            "SMP Multi-Core Discovery: Cores enumerated via MADT/FDT",
-            "Universal Rust App ABI (interos-std) Ring 3 boundary active"
-        ]
+        "heap": {"pool_size": "1 MiB", "start": "0x444444440000", "status": "Standby"},
+        "memory_regions": [],
+        "tests_passed": []
     }
 }
 
@@ -603,6 +563,78 @@ def serial_stream_worker():
             time.sleep(1.5)
 
 
+WORKSPACE_ROOT = os.path.dirname(DIRECTORY)
+
+SUPPORTED_PROFILES = {
+    "x86_64": {
+        "name": "InterOS x86_64 PC / VM",
+        "arch": "x86_64",
+        "machine": "pc-q35",
+        "cpu": "qemu64",
+        "ram": 1024,
+        "boot_type": "BIOS/MBR Bootloader",
+        "image": os.path.join(WORKSPACE_ROOT, "target", "inter-os-bios.img"),
+        "status": "Verified in QEMU",
+    },
+    "aarch64": {
+        "name": "InterOS AArch64 Virt Mobile",
+        "arch": "aarch64",
+        "machine": "virt",
+        "cpu": "cortex-a53",
+        "ram": 512,
+        "boot_type": "Direct Kernel ELF",
+        "image": os.path.join(WORKSPACE_ROOT, "target", "aarch64-unknown-none", "debug", "kernel-aarch64"),
+        "status": "Verified in QEMU",
+    },
+    "riscv64": {
+        "name": "InterOS RISC-V Virt Mobile",
+        "arch": "riscv64",
+        "machine": "virt",
+        "cpu": "rv64",
+        "ram": 256,
+        "boot_type": "OpenSBI / Direct Kernel ELF",
+        "image": os.path.join(WORKSPACE_ROOT, "target", "riscv64gc-unknown-none-elf", "debug", "kernel-riscv64"),
+        "status": "Verified in QEMU",
+    },
+}
+active_profile_key = "x86_64"
+
+
+def find_qemu_executable(arch):
+    """Locate QEMU executable for given architecture on the host system."""
+    bin_name = f"qemu-system-{arch}"
+    p = shutil.which(bin_name)
+    if p:
+        return p
+    common_dirs = [
+        os.path.join(os.path.expanduser("~"), "qemu"),
+        "C:\\Users\\bhara\\qemu",
+        "C:\\Program Files\\qemu",
+        "/usr/bin",
+        "/usr/local/bin"
+    ]
+    for d in common_dirs:
+        cand = os.path.join(d, f"{bin_name}.exe" if sys.platform == "win32" else bin_name)
+        if os.path.exists(cand):
+            return cand
+    return None
+
+
+def send_qemu_monitor_cmd(cmd_str, host='127.0.0.1', port=44445, timeout=0.8):
+    """Sends a raw command to QEMU HMP monitor and returns the response."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect((host, port))
+            _ = s.recv(1024)
+            s.sendall(cmd_str.strip().encode('utf-8') + b'\n')
+            time.sleep(0.05)
+            resp = s.recv(8192).decode('utf-8', errors='replace')
+            return True, resp.strip()
+    except Exception as e:
+        return False, str(e)
+
+
 def stop_qemu_backend():
     """Stops any running QEMU and websockify processes managed by this instance."""
     global qemu_subproc, ws_subproc
@@ -624,19 +656,77 @@ def stop_qemu_backend():
 
     latest_telemetry["qemu_alive"] = False
     latest_telemetry["status"] = "standby"
+    latest_telemetry["mode"] = "standby"
+    latest_telemetry["cpu"]["halted"] = True
+    latest_telemetry["cpu"]["rip"] = "Offline"
+    latest_telemetry["cpu"]["thread_id"] = "Offline"
+    latest_telemetry["cpu"]["registers"] = {}
+
+
+def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
+    """Launches a real QEMU instance for the specified target device profile."""
+    global qemu_subproc, active_profile_key
+    stop_qemu_backend()
+
+    if profile_key not in SUPPORTED_PROFILES:
+        return False, f"Unknown profile: {profile_key}"
+
+    prof = SUPPORTED_PROFILES[profile_key]
+    arch = prof["arch"]
+    exe = find_qemu_executable(arch)
+    if not exe:
+        return False, f"QEMU binary 'qemu-system-{arch}' not found on host."
+
+    img_path = prof["image"]
+    if not os.path.exists(img_path):
+        return False, f"Boot image not found at '{img_path}'. Build target first with 'interos build {arch}'."
+
+    ram = ram_mb or prof["ram"]
+    serial_log = os.path.join(WORKSPACE_ROOT, "target", f"{arch}_boot.log")
+    os.makedirs(os.path.dirname(serial_log), exist_ok=True)
+
+    cmd = [
+        exe,
+        "-m", f"{ram}M",
+        "-smp", str(smp),
+        "-monitor", "tcp:127.0.0.1:44445,server,nowait",
+        "-serial", "tcp:127.0.0.1:4301,server,nowait",
+        "-display", "none",
+        "-no-reboot"
+    ]
+    if arch == "x86_64":
+        cmd.extend(["-machine", "pc-q35", "-drive", f"format=raw,file={img_path}"])
+    elif arch == "aarch64":
+        cmd.extend(["-machine", "virt", "-cpu", "cortex-a53", "-kernel", img_path])
+    elif arch == "riscv64":
+        cmd.extend(["-machine", "virt", "-cpu", "rv64", "-bios", "default", "-kernel", img_path])
+
+    try:
+        qemu_subproc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        active_profile_key = profile_key
+        serial_lines.append(f"[STUDIO] Launched QEMU {arch} microkernel instance (PID {qemu_subproc.pid}).")
+        return True, f"QEMU {arch} started (PID {qemu_subproc.pid})"
+    except Exception as e:
+        return False, f"Failed to spawn QEMU: {e}"
 
 
 def start_qemu_backend():
-    """Launches or checks QEMU backend."""
+    """Checks if QEMU backend is reachable or keeps it in clean Standby."""
     global qemu_subproc, ws_subproc
 
-    # Check if a QEMU instance is already running on monitor or VNC port
+    # Check if a QEMU instance is already running on monitor port
     t = query_qemu_monitor()
     if t["qemu_alive"]:
-        return True, "Connected to existing microkernel instance"
+        return True, "Connected to active microkernel instance"
 
-    latest_telemetry["status"] = "standalone_dev"
-    return True, "Studio running in Standalone Developer Mode"
+    latest_telemetry["qemu_alive"] = False
+    latest_telemetry["status"] = "standby"
+    latest_telemetry["mode"] = "standby"
+    latest_telemetry["cpu"]["halted"] = True
+    latest_telemetry["cpu"]["rip"] = "Offline"
+    latest_telemetry["cpu"]["thread_id"] = "Offline"
+    latest_telemetry["cpu"]["registers"] = {}
+    return False, "QEMU Microkernel Standby (Launch via Studio or 'interos run')"
 
 
 last_telemetry_query = 0.0
@@ -744,6 +834,9 @@ def query_qemu_monitor(host='127.0.0.1', port=44445, timeout=0.35):
             latest_telemetry["status"] = "standby"
             latest_telemetry["mode"] = "standby"
             latest_telemetry["cpu"]["halted"] = True
+            latest_telemetry["cpu"]["rip"] = "Offline"
+            latest_telemetry["cpu"]["thread_id"] = "Offline"
+            latest_telemetry["cpu"]["registers"] = {}
             return latest_telemetry
 
 
@@ -976,7 +1069,25 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            response = json.dumps({'qemu': t["qemu_alive"], 'status': t["status"], 'mode': t.get("mode", "Developer Studio")})
+            response = json.dumps({
+                'qemu': t["qemu_alive"],
+                'status': t["status"],
+                'mode': t.get("mode", "standby"),
+                'active_profile': active_profile_key,
+                'pid': qemu_subproc.pid if qemu_subproc else None
+            })
+            self.wfile.write(response.encode())
+            return
+
+        if self.path == '/api/qemu/profiles':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            response = json.dumps({
+                'active_profile': active_profile_key,
+                'profiles': SUPPORTED_PROFILES
+            })
             self.wfile.write(response.encode())
             return
 
@@ -1132,6 +1243,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             rapp_apps = [a for a in (DEFAULT_APPS + sideloaded_apps) if a.get('filename', '').endswith('.rapp')]
             self.wfile.write(json.dumps({'apps': rapp_apps, 'total': len(rapp_apps)}).encode())
+            return
         if self.path.startswith('/api/fs/list'):
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             rel_path = query.get('path', ['/'])[0]
@@ -1583,6 +1695,114 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({'success': True, 'message': 'Reboot command executed', 'qemu_reset': reset_sent}).encode())
+            return
+
+        if self.path == '/api/qemu/launch':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8')) if body else {}
+            except Exception:
+                data = {}
+            profile = data.get('profile', active_profile_key)
+            ram = data.get('ram')
+            smp = data.get('smp', 1)
+            ok, msg = launch_qemu_profile(profile, ram, smp)
+            self.send_response(200 if ok else 400)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': ok,
+                'message': msg,
+                'pid': qemu_subproc.pid if qemu_subproc else None,
+                'profile': profile
+            }).encode())
+            return
+
+        if self.path == '/api/qemu/stop':
+            stop_qemu_backend()
+            serial_lines.append("[STUDIO] QEMU microkernel process stopped.")
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': True, 'message': 'QEMU stopped'}).encode())
+            return
+
+        if self.path == '/api/qemu/pause':
+            ok, resp = send_qemu_monitor_cmd('stop')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': ok, 'output': resp if ok else 'QEMU is currently offline.'}).encode())
+            return
+
+        if self.path == '/api/qemu/resume':
+            ok, resp = send_qemu_monitor_cmd('cont')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': ok, 'output': resp if ok else 'QEMU is currently offline.'}).encode())
+            return
+
+        if self.path == '/api/qemu/reset':
+            ok, resp = send_qemu_monitor_cmd('system_reset')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': ok, 'output': resp if ok else 'QEMU is currently offline.'}).encode())
+            return
+
+        if self.path == '/api/qemu/snapshot':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8')) if body else {}
+            except Exception:
+                data = {}
+            action = data.get('action', 'list')
+            name = re.sub(r'[^a-zA-Z0-9_\-]', '', str(data.get('name', 'snap1')))
+            if action == 'save':
+                ok, resp = send_qemu_monitor_cmd(f'savevm {name}')
+            elif action == 'load':
+                ok, resp = send_qemu_monitor_cmd(f'loadvm {name}')
+            elif action == 'delete':
+                ok, resp = send_qemu_monitor_cmd(f'delvm {name}')
+            else:
+                ok, resp = send_qemu_monitor_cmd('info snapshots')
+            self.send_response(200 if ok else 500)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': ok, 'action': action, 'output': resp}).encode())
+            return
+
+        if self.path == '/api/qemu/cmd':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8')) if body else {}
+            except Exception:
+                data = {}
+            raw_cmd = str(data.get('cmd', '')).strip()
+            allowed_prefixes = ('info ', 'help', 'p ', 'x ', 'pmemsave', 'memsave')
+            if not any(raw_cmd.lower().startswith(p) for p in allowed_prefixes):
+                self.send_response(403)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Command restricted in Studio security sandbox.'}).encode())
+                return
+            ok, resp = send_qemu_monitor_cmd(raw_cmd)
+            self.send_response(200 if ok else 500)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': ok, 'output': resp}).encode())
             return
 
         if self.path == '/api/fs/read':

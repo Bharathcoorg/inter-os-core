@@ -345,15 +345,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 4. QEMU Block Drive
     if (valBlockName) {
-      valBlockName.textContent = data.block?.file || (isAlive ? 'inter-os-bios.img' : 'inter-os-bios.img (Ready)');
+      valBlockName.textContent = isAlive ? (data.block?.file || 'inter-os-bios.img') : 'Standby / Offline';
     }
     if (valBlockIo) {
       if (isAlive) {
-        const readMb = data.block?.read_bytes ? (data.block.read_bytes / (1024 * 1024)).toFixed(2) + ' MB' : '1.05 MB';
-        const ops = data.block?.read_ops || 256;
+        const readMb = data.block?.read_bytes ? (data.block.read_bytes / (1024 * 1024)).toFixed(2) + ' MB' : '0 MB';
+        const ops = data.block?.read_ops || 0;
         valBlockIo.innerHTML = `Device: <strong>${data.block?.device || 'ide0-hd0'}</strong> &bull; Read: <strong>${readMb} (${ops} ops)</strong>`;
       } else {
-        valBlockIo.innerHTML = 'Device: <strong>ide0-hd0</strong> &bull; Raw Kernel Image';
+        valBlockIo.innerHTML = 'Device: <strong>Standby</strong> &bull; QEMU Inactive';
       }
     }
     if (fillBlockBar) {
@@ -369,10 +369,10 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     }
     if (valCpuRip) {
-      valCpuRip.innerHTML = `RIP: <strong>${isAlive ? (data.cpu?.rip || '0x000001000000DC4D') : '0x00000000'}</strong>`;
+      valCpuRip.innerHTML = `RIP: <strong>${isAlive ? (data.cpu?.rip || 'Offline') : 'Offline'}</strong>`;
     }
     if (valCpuTid) {
-      valCpuTid.textContent = `TID: ${isAlive ? (data.cpu?.thread_id || 'Active') : 'Standby'}`;
+      valCpuTid.textContent = `TID: ${isAlive ? (data.cpu?.thread_id || 'Active') : 'Offline'}`;
     }
 
     // Animate heatmap subtle activity when alive
@@ -388,7 +388,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // 6. CPU Registers Tab Update
-    if (data.cpu?.registers) {
+    if (data.cpu?.registers && isAlive && Object.keys(data.cpu.registers).length > 0) {
       for (const [domId, aliases] of Object.entries(regMap)) {
         const el = document.getElementById(domId);
         if (el) {
@@ -399,6 +399,11 @@ document.addEventListener('DOMContentLoaded', () => {
             }
           }
         }
+      }
+    } else {
+      for (const domId of Object.keys(regMap)) {
+        const el = document.getElementById(domId);
+        if (el) el.textContent = '—';
       }
     }
   }
