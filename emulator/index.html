@@ -904,342 +904,374 @@
                 </div>
               </div>
 
-              <!-- SUBVIEW 8: MINIMALIST GLASSMORPISM SETTINGS MATRIX -->
+              <!-- SUBVIEW: SETTINGS (Industry-Grade Smartphone Settings) -->
               <div class="screen-view" id="view-settings">
-                <div class="glass-settings-header">
-                  <button class="btn-subview-back" id="btn-back-settings" title="Back to Home">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+                <!-- Sleek Top Header -->
+                <div class="settings-nav-header">
+                  <button class="settings-back-btn" id="btn-back-settings" title="Back to Home">
+                    <i data-lucide="chevron-left" style="width: 20px; height: 20px;"></i>
                   </button>
-                  <div class="glass-title-group">
-                    <h3 class="glass-view-title">Settings</h3>
-                    <span class="glass-view-pill">InterOS 8.2</span>
-                  </div>
-                  <div class="glass-search-pill">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                    <input type="text" class="glass-search-input" id="set-search-input" placeholder="Search...">
+                  <h2 class="settings-page-title">Settings</h2>
+                  <div style="width: 32px;"></div>
+                </div>
+
+                <!-- Settings Search Pill -->
+                <div class="settings-search-wrapper">
+                  <div class="settings-search-bar">
+                    <i data-lucide="search" style="width: 15px; height: 15px; color: #94A3B8;"></i>
+                    <input type="text" class="settings-search-input" id="set-search-input" placeholder="Search settings...">
                   </div>
                 </div>
 
-                <div class="glass-settings-scroll">
-                  <!-- HERO POD: SOVEREIGN 1 -->
-                  <div class="glass-card glass-hero-pod">
-                    <div class="hero-left">
-                      <div class="hero-brand-row">
-                        <span class="hero-brand">InterOS</span>
-                        <span class="hero-pulse-dot" title="Microkernel Active"></span>
+                <!-- Main Scrollable Settings Container -->
+                <div class="settings-scroll-container">
+                  
+                  <!-- Profile & Device Account Card -->
+                  <div class="settings-group">
+                    <div class="settings-profile-card">
+                      <div class="profile-avatar">
+                        <span class="avatar-initials">BK</span>
+                        <div class="avatar-status-pip" title="Device Protected"></div>
                       </div>
-                      <div class="hero-model">Sovereign 1 (DevKit)</div>
-                      <div class="hero-chip-tags">
-                        <span class="hero-tag">8x Cortex-A53</span>
-                        <span class="hero-tag">Rust ABI</span>
+                      <div class="profile-info">
+                        <div class="profile-name">Bharath</div>
+                        <div class="profile-subtext">Inter OS Account &bull; Cloud &amp; Security</div>
+                      </div>
+                      <i data-lucide="chevron-right" style="width: 16px; height: 16px; color: #64748B;"></i>
+                    </div>
+                  </div>
+
+                  <!-- 1. CONNECTIVITY SECTION -->
+                  <div class="settings-section-header">CONNECTIVITY</div>
+                  <div class="settings-group">
+                    <!-- Wi-Fi -->
+                    <div class="settings-row">
+                      <div class="settings-row-left">
+                        <div class="settings-icon-disc disc-blue">
+                          <i data-lucide="wifi" style="width: 16px; height: 16px;"></i>
+                        </div>
+                        <div class="settings-row-meta">
+                          <span class="settings-row-title">Wi-Fi</span>
+                          <span class="settings-row-subtitle" id="set-wifi-status">Connected: InterLayer-5G-Ultra</span>
+                        </div>
+                      </div>
+                      <label class="settings-switch">
+                        <input type="checkbox" id="set-toggle-wifi" checked>
+                        <span class="settings-slider"></span>
+                      </label>
+                    </div>
+
+                    <!-- Bluetooth -->
+                    <div class="settings-row">
+                      <div class="settings-row-left">
+                        <div class="settings-icon-disc disc-cyan">
+                          <i data-lucide="bluetooth" style="width: 16px; height: 16px;"></i>
+                        </div>
+                        <div class="settings-row-meta">
+                          <span class="settings-row-title">Bluetooth</span>
+                          <span class="settings-row-subtitle" id="set-bt-status">On &bull; 2 Devices Paired</span>
+                        </div>
+                      </div>
+                      <label class="settings-switch">
+                        <input type="checkbox" id="set-toggle-bt" checked>
+                        <span class="settings-slider"></span>
+                      </label>
+                    </div>
+
+                    <!-- Cellular & 5G -->
+                    <div class="settings-row">
+                      <div class="settings-row-left">
+                        <div class="settings-icon-disc disc-emerald">
+                          <i data-lucide="signal" style="width: 16px; height: 16px;"></i>
+                        </div>
+                        <div class="settings-row-meta">
+                          <span class="settings-row-title">Cellular &amp; 5G</span>
+                          <span class="settings-row-subtitle">Primary SIM &bull; Standalone 5G</span>
+                        </div>
+                      </div>
+                      <span class="settings-badge-pill">Active</span>
+                    </div>
+
+                    <!-- Airplane Mode -->
+                    <div class="settings-row">
+                      <div class="settings-row-left">
+                        <div class="settings-icon-disc disc-amber">
+                          <i data-lucide="plane" style="width: 16px; height: 16px;"></i>
+                        </div>
+                        <div class="settings-row-meta">
+                          <span class="settings-row-title">Airplane Mode</span>
+                        </div>
+                      </div>
+                      <label class="settings-switch">
+                        <input type="checkbox" id="set-toggle-airplane">
+                        <span class="settings-slider"></span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <!-- 2. DISPLAY & APPEARANCE -->
+                  <div class="settings-section-header">DISPLAY &amp; APPEARANCE</div>
+                  <div class="settings-group">
+                    <!-- Brightness Slider -->
+                    <div class="settings-block">
+                      <div class="settings-block-top">
+                        <div class="settings-row-left">
+                          <div class="settings-icon-disc disc-amber">
+                            <i data-lucide="sun" style="width: 16px; height: 16px;"></i>
+                          </div>
+                          <span class="settings-row-title">Display Brightness</span>
+                        </div>
+                        <span class="settings-value-label" id="set-brightness-val">100%</span>
+                      </div>
+                      <div class="settings-range-track">
+                        <i data-lucide="sun-dim" style="width: 13px; height: 13px; color: #64748B;"></i>
+                        <input type="range" class="settings-slider-range" id="set-slider-brightness" min="15" max="100" value="100">
+                        <i data-lucide="sun" style="width: 16px; height: 16px; color: #F59E0B;"></i>
                       </div>
                     </div>
-                    <div class="hero-right">
-                      <div class="hero-storage-ring">
-                        <div class="ring-val">64<small>GB</small></div>
-                        <div class="ring-sub">UFS 3.1</div>
+
+                    <!-- Appearance Mode (Dark / Light) -->
+                    <div class="settings-row">
+                      <div class="settings-row-left">
+                        <div class="settings-icon-disc disc-violet">
+                          <i data-lucide="moon" style="width: 16px; height: 16px;"></i>
+                        </div>
+                        <div class="settings-row-meta">
+                          <span class="settings-row-title">Appearance</span>
+                          <span class="settings-row-subtitle">OLED Dark (Battery Efficient)</span>
+                        </div>
+                      </div>
+                      <div class="segmented-control" id="theme-segmented-ctrl">
+                        <button class="seg-btn active" id="btn-theme-dark">Dark</button>
+                        <button class="seg-btn" id="btn-theme-light">Light</button>
+                      </div>
+                    </div>
+
+                    <!-- Accent Color Theme Picker -->
+                    <div class="settings-block">
+                      <div class="settings-block-top">
+                        <span class="settings-row-title">System Accent Highlight</span>
+                      </div>
+                      <div class="accent-palette-row">
+                        <button class="accent-swatch-btn active" data-color="#00F2FE" style="background: #00F2FE;" title="Cyan Neon"></button>
+                        <button class="accent-swatch-btn" data-color="#10B981" style="background: #10B981;" title="Emerald"></button>
+                        <button class="accent-swatch-btn" data-color="#8B5CF6" style="background: #8B5CF6;" title="Electric Violet"></button>
+                        <button class="accent-swatch-btn" data-color="#F97316" style="background: #F97316;" title="Sunset Amber"></button>
+                        <button class="accent-swatch-btn" data-color="#EC4899" style="background: #EC4899;" title="Rose Pink"></button>
                       </div>
                     </div>
                   </div>
 
-                  <!-- POD 1: CONNECTIVITY CAPSULE -->
-                  <div class="glass-card glass-pod">
-                    <div class="pod-header">
-                      <div class="pod-title-box">
-                        <div class="pod-glyph">
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.55a11 11 0 0 1 14.08 0M1.42 9a16 16 0 0 1 21.16 0M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01"/></svg>
+                  <!-- 3. SOUND & HAPTICS -->
+                  <div class="settings-section-header">SOUND &amp; HAPTICS</div>
+                  <div class="settings-group">
+                    <!-- Volume Slider -->
+                    <div class="settings-block">
+                      <div class="settings-block-top">
+                        <div class="settings-row-left">
+                          <div class="settings-icon-disc disc-rose">
+                            <i data-lucide="volume-2" style="width: 16px; height: 16px;"></i>
+                          </div>
+                          <span class="settings-row-title">Media Volume</span>
                         </div>
-                        <div>
-                          <div class="pod-title">Wireless &amp; Carrier</div>
-                          <div class="pod-subtitle" id="set-wifi-status">Connected: InterLayer-Mesh-5G</div>
+                        <span class="settings-value-label" id="set-volume-val">80%</span>
+                      </div>
+                      <div class="settings-range-track">
+                        <i data-lucide="volume-x" style="width: 13px; height: 13px; color: #64748B;"></i>
+                        <input type="range" class="settings-slider-range" id="set-slider-volume" min="0" max="100" value="80">
+                        <i data-lucide="volume-2" style="width: 16px; height: 16px; color: #EC4899;"></i>
+                      </div>
+                    </div>
+
+                    <!-- Silent Mode -->
+                    <div class="settings-row">
+                      <div class="settings-row-left">
+                        <div class="settings-icon-disc disc-slate">
+                          <i data-lucide="bell-off" style="width: 16px; height: 16px;"></i>
+                        </div>
+                        <div class="settings-row-meta">
+                          <span class="settings-row-title">Silent Mode</span>
+                          <span class="settings-row-subtitle">Mute ringtones and alerts</span>
                         </div>
                       </div>
-                      <label class="glass-toggle">
-                        <input type="checkbox" id="set-toggle-wifi" checked>
-                        <span class="glass-toggle-slider"></span>
+                      <label class="settings-switch">
+                        <input type="checkbox" id="set-toggle-silent">
+                        <span class="settings-slider"></span>
                       </label>
                     </div>
 
-                    <!-- Dual SIM Switcher & Ping Gateway Row -->
-                    <div class="pod-controls-row">
-                      <div class="glass-segmented-pill">
-                        <button class="glass-seg-btn active" id="btn-sim-slot0">SIM 1: 5G</button>
-                        <button class="glass-seg-btn" id="btn-sim-slot1">eSIM 2: Mesh</button>
+                    <!-- Haptic Feedback -->
+                    <div class="settings-row">
+                      <div class="settings-row-left">
+                        <div class="settings-icon-disc disc-cyan">
+                          <i data-lucide="smartphone" style="width: 16px; height: 16px;"></i>
+                        </div>
+                        <div class="settings-row-meta">
+                          <span class="settings-row-title">System Haptics</span>
+                          <span class="settings-row-subtitle">Tactile clicks and navigation bumps</span>
+                        </div>
                       </div>
-                      <button class="glass-action-pill" id="set-btn-ping">
-                        <span class="ping-icon">⚡</span>
-                        <span id="set-ping-result">11.4 ms</span>
+                      <label class="settings-switch">
+                        <input type="checkbox" id="set-toggle-haptics" checked>
+                        <span class="settings-slider"></span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <!-- 4. SECURITY & PRIVACY -->
+                  <div class="settings-section-header">SECURITY &amp; PRIVACY</div>
+                  <div class="settings-group">
+                    <div class="settings-row">
+                      <div class="settings-row-left">
+                        <div class="settings-icon-disc disc-emerald">
+                          <i data-lucide="fingerprint" style="width: 16px; height: 16px;"></i>
+                        </div>
+                        <div class="settings-row-meta">
+                          <span class="settings-row-title">Biometrics &amp; Passcode</span>
+                          <span class="settings-row-subtitle">Face &amp; Fingerprint Enclave Active</span>
+                        </div>
+                      </div>
+                      <span class="settings-badge-pill green">ARMED</span>
+                    </div>
+
+                    <div class="settings-row">
+                      <div class="settings-row-left">
+                        <div class="settings-icon-disc disc-blue">
+                          <i data-lucide="shield-check" style="width: 16px; height: 16px;"></i>
+                        </div>
+                        <div class="settings-row-meta">
+                          <span class="settings-row-title">Hardware Security Vault</span>
+                          <span class="settings-row-subtitle">TrustZone Cryptographic Keystore</span>
+                        </div>
+                      </div>
+                      <span class="settings-badge-pill green">SECURED</span>
+                    </div>
+
+                    <div class="settings-row">
+                      <div class="settings-row-left">
+                        <div class="settings-icon-disc disc-violet">
+                          <i data-lucide="lock" style="width: 16px; height: 16px;"></i>
+                        </div>
+                        <div class="settings-row-meta">
+                          <span class="settings-row-title">Application Isolation</span>
+                          <span class="settings-row-subtitle">All 15 applications fully sandboxed</span>
+                        </div>
+                      </div>
+                      <span class="settings-badge-pill">ACTIVE</span>
+                    </div>
+                  </div>
+
+                  <!-- 5. BATTERY & PERFORMANCE -->
+                  <div class="settings-section-header">BATTERY &amp; POWER</div>
+                  <div class="settings-group">
+                    <div class="settings-block">
+                      <div class="settings-block-top">
+                        <div class="settings-row-left">
+                          <div class="settings-icon-disc disc-emerald">
+                            <i data-lucide="battery-charging" style="width: 16px; height: 16px;"></i>
+                          </div>
+                          <div>
+                            <span class="settings-row-title">Battery Level</span>
+                            <span class="settings-row-subtitle">18 hours remaining &bull; Health 100%</span>
+                          </div>
+                        </div>
+                        <span class="settings-value-label green">98%</span>
+                      </div>
+                      <div class="settings-battery-bar">
+                        <div class="settings-battery-fill" style="width: 98%;"></div>
+                      </div>
+                    </div>
+
+                    <div class="settings-row">
+                      <div class="settings-row-left">
+                        <div class="settings-icon-disc disc-amber">
+                          <i data-lucide="zap" style="width: 16px; height: 16px;"></i>
+                        </div>
+                        <div class="settings-row-meta">
+                          <span class="settings-row-title">Low Power Mode</span>
+                          <span class="settings-row-subtitle">Reduce background activity</span>
+                        </div>
+                      </div>
+                      <label class="settings-switch">
+                        <input type="checkbox" id="set-toggle-lowpower">
+                        <span class="settings-slider"></span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <!-- 6. STORAGE -->
+                  <div class="settings-section-header">DEVICE STORAGE</div>
+                  <div class="settings-group">
+                    <div class="settings-block">
+                      <div class="settings-block-top">
+                        <div class="settings-row-left">
+                          <div class="settings-icon-disc disc-violet">
+                            <i data-lucide="hard-drive" style="width: 16px; height: 16px;"></i>
+                          </div>
+                          <div>
+                            <span class="settings-row-title">Storage Breakdown</span>
+                            <span class="settings-row-subtitle" id="set-storage-used">14.2 GB used of 64 GB (78% Free)</span>
+                          </div>
+                        </div>
+                        <button class="settings-action-btn" id="btn-clear-cache">Optimize</button>
+                      </div>
+                      <div class="storage-multi-progress">
+                        <div class="smp-segment smp-sys" style="width: 5%;" title="System: 3.2 GB"></div>
+                        <div class="smp-segment smp-apps" style="width: 10%;" title="Apps: 6.4 GB"></div>
+                        <div class="smp-segment smp-media" style="width: 5%;" title="Media: 3.2 GB"></div>
+                        <div class="smp-segment smp-cache" id="gmb-cache" style="width: 2%;" title="Cache: 1.4 GB"></div>
+                      </div>
+                      <div class="storage-legend-row">
+                        <span class="legend-item"><span class="legend-dot dot-sys"></span>System</span>
+                        <span class="legend-item"><span class="legend-dot dot-apps"></span>Apps</span>
+                        <span class="legend-item"><span class="legend-dot dot-media"></span>Media</span>
+                        <span class="legend-item"><span class="legend-dot dot-cache"></span>Cache</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- 7. ABOUT DEVICE -->
+                  <div class="settings-section-header">ABOUT DEVICE</div>
+                  <div class="settings-group">
+                    <div class="settings-row">
+                      <div class="settings-row-left">
+                        <div class="settings-icon-disc disc-blue">
+                          <i data-lucide="smartphone" style="width: 16px; height: 16px;"></i>
+                        </div>
+                        <span class="settings-row-title">Device Name</span>
+                      </div>
+                      <span class="settings-row-value">Inter OS Phone</span>
+                    </div>
+
+                    <div class="settings-row">
+                      <div class="settings-row-left">
+                        <div class="settings-icon-disc disc-cyan">
+                          <i data-lucide="info" style="width: 16px; height: 16px;"></i>
+                        </div>
+                        <span class="settings-row-title">Software Version</span>
+                      </div>
+                      <span class="settings-row-value">Inter OS 2.0 (Stable)</span>
+                    </div>
+
+                    <div class="settings-row">
+                      <div class="settings-row-left">
+                        <div class="settings-icon-disc disc-slate">
+                          <i data-lucide="clock" style="width: 16px; height: 16px;"></i>
+                        </div>
+                        <span class="settings-row-title">System Uptime</span>
+                      </div>
+                      <span class="settings-row-value" id="set-system-uptime">00:14:32</span>
+                    </div>
+
+                    <div class="settings-action-row">
+                      <button class="settings-reboot-btn" id="btn-reboot-interos">
+                        <i data-lucide="rotate-ccw" style="width: 15px; height: 15px;"></i>
+                        <span>Restart Device</span>
                       </button>
                     </div>
-
-                    <!-- Airplane Mode Subrow -->
-                    <div class="pod-subrow">
-                      <div class="pod-subrow-left">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.3c.4-.2.6-.6.5-1.1z"/></svg>
-                        <span>Airplane Mode</span>
-                      </div>
-                      <label class="glass-toggle sm">
-                        <input type="checkbox" id="set-toggle-airplane">
-                        <span class="glass-toggle-slider"></span>
-                      </label>
-                    </div>
                   </div>
 
-                  <!-- POD 2: DISPLAY & MOTION CAPSULE -->
-                  <div class="glass-card glass-pod">
-                    <div class="pod-header">
-                      <div class="pod-title-box">
-                        <div class="pod-glyph">
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
-                        </div>
-                        <div>
-                          <div class="pod-title">Display &amp; Motion</div>
-                          <div class="pod-subtitle">Luminescence &amp; LTPO VRR</div>
-                        </div>
-                      </div>
-                      <span class="glass-badge" id="set-brightness-val">100%</span>
-                    </div>
-
-                    <!-- Fluid Luminescence Slider -->
-                    <div class="glass-slider-container">
-                      <input type="range" class="glass-slider" id="set-slider-brightness" min="20" max="100" value="100">
-                    </div>
-
-                    <!-- 3-Way Refresh Rate Pill Selector -->
-                    <div class="pod-subrow-block">
-                      <div class="pod-label-row">
-                        <span>Dynamic Refresh</span>
-                        <span class="glass-badge-sm" id="set-refresh-badge">120Hz ProMotion</span>
-                      </div>
-                      <div class="glass-segmented-pill tri">
-                        <button class="glass-seg-btn" id="btn-refresh-60">60Hz</button>
-                        <button class="glass-seg-btn" id="btn-refresh-90">90Hz</button>
-                        <button class="glass-seg-btn active" id="btn-refresh-120">120Hz LTPO</button>
-                      </div>
-                    </div>
-
-                    <!-- Ambient DC Dimming & Studio Theme -->
-                    <div class="pod-dual-toggles">
-                      <div class="pod-toggle-item">
-                        <div class="toggle-meta">
-                          <span>DC Dimming</span>
-                          <small>Flicker-free</small>
-                        </div>
-                        <label class="glass-toggle sm">
-                          <input type="checkbox" id="set-toggle-dcdim" checked>
-                          <span class="glass-toggle-slider"></span>
-                        </label>
-                      </div>
-                      <div class="pod-toggle-item">
-                        <div class="toggle-meta">
-                          <span>Studio Light</span>
-                          <small>OLED Dark default</small>
-                        </div>
-                        <label class="glass-toggle sm">
-                          <input type="checkbox" id="set-toggle-theme">
-                          <span class="glass-toggle-slider"></span>
-                        </label>
-                      </div>
-                    </div>
-                  </div>
-
-                  <!-- POD 2B: THEME & CUSTOMIZATION STUDIO -->
-                  <div class="glass-card glass-pod theme-studio-pod" id="pod-theme-studio">
-                    <div class="pod-header">
-                      <div class="pod-title-box">
-                        <div class="pod-glyph" style="background: rgba(0, 242, 254, 0.15); color: var(--accent-primary);">
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a7 7 0 0 0-7 7c0 2.38 1.19 4.47 3 5.74V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.26c1.81-1.27 3-3.36 3-5.74a7 7 0 0 0-7-7z"/></svg>
-                        </div>
-                        <div>
-                          <div class="pod-title">Theme &amp; Customization Studio</div>
-                          <div class="pod-subtitle">Modular .theme Engine &bull; Sovereign Glass</div>
-                        </div>
-                      </div>
-                      <span class="glass-badge" id="active-theme-badge">Bento Glass</span>
-                    </div>
-
-                    <!-- Horizontal Theme Cards Carousel -->
-                    <div class="themes-cards-scroll" id="theme-cards-carousel">
-                      <!-- Rendered dynamically by ThemeManager -->
-                    </div>
-
-                    <!-- Customizer Grid -->
-                    <div class="theme-customizer-grid">
-                      <!-- Accent Swatches -->
-                      <div class="theme-control-row">
-                        <span class="theme-control-label">Accent Highlight</span>
-                        <div class="accent-swatches-row" id="accent-swatches-row">
-                          <button class="accent-swatch-btn active" data-color="#00F2FE" style="background: #00F2FE;" title="Cyan Neon"></button>
-                          <button class="accent-swatch-btn" data-color="#10B981" style="background: #10B981;" title="Emerald"></button>
-                          <button class="accent-swatch-btn" data-color="#8B5CF6" style="background: #8B5CF6;" title="Electric Violet"></button>
-                          <button class="accent-swatch-btn" data-color="#F59E0B" style="background: #F59E0B;" title="Amber Gold"></button>
-                          <button class="accent-swatch-btn" data-color="#F43F5E" style="background: #F43F5E;" title="Rose Crimson"></button>
-                        </div>
-                      </div>
-
-                      <!-- Glass Blur Slider -->
-                      <div class="theme-control-row">
-                        <span class="theme-control-label">Glass Blur Level</span>
-                        <div class="glass-slider-container" style="flex: 1; max-width: 140px;">
-                          <input type="range" class="glass-slider" id="slider-glass-blur" min="0" max="40" value="24">
-                        </div>
-                      </div>
-
-                      <!-- Bootloader Text Customizer -->
-                      <div class="bootloader-customizer-card">
-                        <div class="theme-control-label" style="display: flex; justify-content: space-between; align-items: center;">
-                          <span>Bootloader Customization</span>
-                          <span style="font-size: 0.6rem; color: #10B981;">Brand Unchangeable</span>
-                        </div>
-                        <div class="bootloader-preview-box">
-                          <div class="bp-immutable-brand">
-                            INTER OS
-                            <span class="bp-lock-badge">IMMUTABLE BRAND</span>
-                          </div>
-                          <div class="bp-dynamic-subtext" id="bootloader-preview-subtext">Powered by Interlayer</div>
-                        </div>
-                        <div class="bootloader-input-row">
-                          <input type="text" class="bootloader-text-input" id="input-bootloader-subtext" placeholder="Custom bootloader subtext..." value="Powered by Interlayer" maxlength="48">
-                          <button class="btn-save-bootloader" id="btn-save-bootloader">Apply</button>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <!-- POD 3: SOUND & ACOUSTICS CAPSULE -->
-                  <div class="glass-card glass-pod">
-                    <div class="pod-header">
-                      <div class="pod-title-box">
-                        <div class="pod-glyph">
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
-                        </div>
-                        <div>
-                          <div class="pod-title">Acoustics &amp; Haptics</div>
-                          <div class="pod-subtitle">Spatial Output</div>
-                        </div>
-                      </div>
-                      <span class="glass-badge" id="set-volume-val">80%</span>
-                    </div>
-                    <div class="glass-slider-container">
-                      <input type="range" class="glass-slider volume" id="set-slider-volume" min="0" max="100" value="80">
-                    </div>
-                  </div>
-
-                  <!-- POD 4: STORAGE & MEMORY CAPSULE -->
-                  <div class="glass-card glass-pod">
-                    <div class="pod-header">
-                      <div class="pod-title-box">
-                        <div class="pod-glyph">
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-                        </div>
-                        <div>
-                          <div class="pod-title">Storage &amp; VFS</div>
-                          <div class="pod-subtitle" id="set-storage-used">12.8 GB / 64 GB (80% Free)</div>
-                        </div>
-                      </div>
-                      <button class="glass-action-pill sm" id="btn-clear-cache">Optimize</button>
-                    </div>
-                    <div class="glass-multi-bar">
-                      <div class="gmb-seg gmb-sys" id="gmb-sys" style="width: 5%;" title="System (3.2 GB)"></div>
-                      <div class="gmb-seg gmb-apps" id="gmb-apps" style="width: 10%;" title="Apps (6.4 GB)"></div>
-                      <div class="gmb-seg gmb-media" id="gmb-media" style="width: 5%;" title="Media (3.2 GB)"></div>
-                      <div class="gmb-seg gmb-cache" id="gmb-cache" style="width: 6%;" title="Cache (3.8 GB)"></div>
-                    </div>
-                    <div class="storage-tags-row">
-                      <span class="st-tag"><span class="st-dot dot-sys"></span>System</span>
-                      <span class="st-tag"><span class="st-dot dot-apps"></span>Apps</span>
-                      <span class="st-tag"><span class="st-dot dot-media"></span>Media</span>
-                      <span class="st-tag"><span class="st-dot dot-cache"></span>Cache</span>
-                    </div>
-                  </div>
-
-                  <!-- POD 5: SECURITY & VAULT CAPSULE (ZERO KERNEL JARGON) -->
-                  <div class="glass-card glass-pod">
-                    <div class="pod-header">
-                      <div class="pod-title-box">
-                        <div class="pod-glyph secure">
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#10B981" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                        </div>
-                        <div>
-                          <div class="pod-title">Security &amp; Privacy</div>
-                          <div class="pod-subtitle">Hardware Protection Active</div>
-                        </div>
-                      </div>
-                      <span class="glass-pill-badge secure">SECURED</span>
-                    </div>
-                    <div class="security-items-grid">
-                      <div class="sec-item">
-                        <span class="sec-lbl">Hardware Keystore</span>
-                        <span class="sec-val">TrustZone Enclave</span>
-                      </div>
-                      <div class="sec-item">
-                        <span class="sec-lbl">App Isolation</span>
-                        <span class="sec-val">Sandboxed</span>
-                      </div>
-                      <div class="sec-item">
-                        <span class="sec-lbl">Device Lock &amp; Guard</span>
-                        <span class="sec-val">Armed</span>
-                      </div>
-                      <div class="sec-item">
-                        <span class="sec-lbl">System Integrity</span>
-                        <span class="sec-val">Verified</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <!-- POD 6: DEVELOPER STUDIO CAPSULE -->
-                  <div class="glass-card glass-pod">
-                    <div class="pod-header">
-                      <div class="pod-title-box">
-                        <div class="pod-glyph">
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-                        </div>
-                        <div>
-                          <div class="pod-title">Developer Studio</div>
-                          <div class="pod-subtitle">Live Diagnostics HUD</div>
-                        </div>
-                      </div>
-                    </div>
-                    <div class="dev-toggles-list">
-                      <div class="dev-toggle-row">
-                        <span>Real-Time FPS HUD</span>
-                        <label class="glass-toggle sm">
-                          <input type="checkbox" id="set-toggle-fps">
-                          <span class="glass-toggle-slider"></span>
-                        </label>
-                      </div>
-                      <div class="dev-toggle-row">
-                        <span>Touch Coordinate Ripples</span>
-                        <label class="glass-toggle sm">
-                          <input type="checkbox" id="set-toggle-ripples" checked>
-                          <span class="glass-toggle-slider"></span>
-                        </label>
-                      </div>
-                      <div class="dev-toggle-row">
-                        <span>Layout Bounding Boxes</span>
-                        <label class="glass-toggle sm">
-                          <input type="checkbox" id="set-toggle-bounds">
-                          <span class="glass-toggle-slider"></span>
-                        </label>
-                      </div>
-                    </div>
-                  </div>
-
-                  <!-- POD 7: SYSTEM POWER & MAINTENANCE CAPSULE -->
-                  <div class="glass-card glass-pod glass-power-pod">
-                    <div class="power-meta-row">
-                      <div class="power-left">
-                        <div class="power-title">Inter OS Universal</div>
-                        <div class="power-sub">Uptime: <span id="set-system-uptime">00:14:32</span></div>
-                      </div>
-                      <span class="power-arch-pill">ARM64 / x86_64</span>
-                    </div>
-                    <button class="glass-btn-reboot" id="btn-reboot-interos">
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-                      Reboot Inter OS — Powered by Interlayer
-                    </button>
-                  </div>
-
+                  <div style="height: 30px;"></div>
                 </div>
               </div>
 
@@ -1996,23 +2028,67 @@
                 </div>
               </div>
 
-              <!-- SUBVIEW 10: OPTION 6 CHRONO-SPATIAL HORIZON MULTITASKING SWITCHER -->
+              <!-- SUBVIEW: MULTITASKING / RECENT APPS SWITCHER DECK -->
               <div class="screen-view" id="view-recents">
                 <div class="horizon-stage">
+                  <!-- Top Hardware Telemetry & Task Bar -->
                   <div class="horizon-header">
                     <div class="horizon-title-box">
-                      <span class="horizon-title">Recent Tasks</span>
-                      <span class="horizon-badge" id="horizon-task-count">0 Active</span>
+                      <div class="horizon-title-icon">
+                        <i data-lucide="layers" style="width: 16px; height: 16px;"></i>
+                      </div>
+                      <div class="horizon-title-info">
+                        <span class="horizon-title">Multitasking</span>
+                        <span class="horizon-badge" id="horizon-task-count">3 Running</span>
+                      </div>
                     </div>
-                    <button class="glass-action-pill sm" id="btn-clear-recents">Clear All</button>
+                    <div class="horizon-telemetry-cluster">
+                      <div class="horizon-ram-gauge-box">
+                        <div class="horizon-ram-meta">
+                          <span class="ram-meta-label">LPDDR4X</span>
+                          <span id="horizon-ram-text" class="ram-meta-val">3.1 GB Free</span>
+                        </div>
+                        <div class="horizon-ram-track">
+                          <div class="horizon-ram-bar" id="horizon-ram-bar" style="width: 77%;"></div>
+                        </div>
+                      </div>
+                      <div class="horizon-thermal-chip" title="Hardware SoC Status">
+                        <span class="soc-dot"></span>
+                        <span class="soc-text">120Hz &bull; 38&deg;C</span>
+                      </div>
+                    </div>
                   </div>
+
+                  <!-- 3D Spatial Horizon Chamber -->
                   <div class="horizon-chamber">
                     <div class="horizon-track" id="recents-carousel">
-                      <!-- 3D Perspective Floating Frosted Glass Pill Lenses -->
+                      <!-- High-Fidelity Interactive App Window Cards Rendered Dynamically -->
                     </div>
                   </div>
-                  <div class="horizon-footer">
-                    <span>Swipe up to close &bull; Tap to open</span>
+
+                  <!-- Flagship Overview Action Dock (Better Than Android & iOS) -->
+                  <div class="horizon-dock-container">
+                    <div class="recents-action-dock" id="recents-action-dock">
+                      <button class="recents-dock-btn" id="recents-btn-screenshot" title="Capture active window screenshot">
+                        <i data-lucide="camera" style="width: 15px; height: 15px;"></i>
+                        <span>Screenshot</span>
+                      </button>
+                      <button class="recents-dock-btn" id="recents-btn-split" title="Split Screen Multitasking">
+                        <i data-lucide="columns-2" style="width: 15px; height: 15px;"></i>
+                        <span>Split View</span>
+                      </button>
+                      <button class="recents-dock-btn" id="recents-btn-vision" title="AI Vision OCR Text & Link Inspect">
+                        <i data-lucide="scan" style="width: 15px; height: 15px;"></i>
+                        <span>AI Vision</span>
+                      </button>
+                      <button class="recents-dock-btn danger" id="btn-clear-recents" title="Clear all background sandboxes">
+                        <i data-lucide="trash-2" style="width: 15px; height: 15px;"></i>
+                        <span>Clear All</span>
+                      </button>
+                    </div>
+                    <div class="horizon-footer-hint">
+                      <span>Swipe up to dismiss &bull; Tap window to open</span>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -2065,10 +2141,6 @@
           <button class="emu-btn" id="emu-btn-reboot" title="Warm Reboot Microkernel">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
           </button>
-          <button class="emu-btn" id="emu-btn-vbe-toggle" title="Toggle Bare-Metal VBE Direct Framebuffer (QEMU Port 5900)">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-          </button>
-
           <div class="emu-divider"></div>
 
           <button class="emu-btn" id="emu-btn-back" title="Back Button (◁)">

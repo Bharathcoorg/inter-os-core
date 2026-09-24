@@ -17,10 +17,11 @@ node_modules/
 __pycache__/
 *.pyc
 
-# Sideloaded uploaded binaries
+# Sideloaded uploaded binaries and runtime theme artifacts
 emulator/installed_apps/
 emulator/data/apps/*
 !emulator/data/apps/.gitkeep
+emulator/data/themes/custom_*.theme
 
 # Agent & IDE caches
 .kilo/

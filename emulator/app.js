@@ -518,7 +518,12 @@ document.addEventListener('DOMContentLoaded', () => {
     'view-health': { name: 'Health Hub', lucide: 'activity', color: '#F43F5E', memory: '13 MB' },
     'view-meshchat': { name: 'Mesh Chat', lucide: 'radio', color: '#06B6D4', memory: '17 MB' }
   };
-  state.runningTasks = [];
+  state.runningTasks = [
+    { id: 'view-browser', title: 'Browser', lucide: 'compass', color: '#2563EB', memory: '42 MB', time: 'Just now' },
+    { id: 'view-messages', title: 'Messages', lucide: 'message-square', color: '#00F2FE', memory: '18 MB', time: '1m ago' },
+    { id: 'view-camera', title: 'Camera', lucide: 'camera', color: '#F59E0B', memory: '34 MB', time: '3m ago' },
+    { id: 'view-settings', title: 'Settings', lucide: 'settings', color: '#94A3B8', memory: '16 MB', time: '6m ago' }
+  ];
 
   // =========================================================================
   // 5. VIEW NAVIGATION & RECENTS SYSTEM
@@ -1275,6 +1280,191 @@ document.addEventListener('DOMContentLoaded', () => {
     switchView('view-recents');
   });
 
+  function getAppSnapshotHTML(task) {
+    const id = task.id;
+    if (id === 'view-browser') {
+      return `
+        <div class="mock-browser-bar">
+          <i data-lucide="lock" style="width: 10px; height: 10px; color: #10B981;"></i>
+          <span>interlayer.dev/os</span>
+        </div>
+        <div class="mock-browser-hero">
+          <span style="font-size: 0.58rem; color: #38BDF8; font-weight: 700; text-transform: uppercase;">UNIVERSAL MOBILE PLATFORM</span>
+          <div class="mock-browser-title">Inter OS Sovereign 2.0</div>
+          <div class="mock-browser-lines">
+            <div class="mock-line w80"></div>
+            <div class="mock-line w60"></div>
+            <div class="mock-line w40"></div>
+          </div>
+        </div>
+        <div style="background: rgba(255,255,255,0.04); border-radius: 8px; padding: 7px; display: flex; flex-direction: column; gap: 4px;">
+          <strong style="color: #F8FAFC; font-size: 0.65rem;">Rust Microkernel Core</strong>
+          <p style="margin: 0; color: #94A3B8; font-size: 0.58rem;">Sandboxed WASM and native APK binary runtime.</p>
+        </div>
+      `;
+    } else if (id === 'view-messages') {
+      return `
+        <div class="mock-chat-header">
+          <div class="mock-avatar">AM</div>
+          <div>
+            <div style="font-weight: 700; color: #FFFFFF; font-size: 0.68rem;">Alex Miller</div>
+            <div style="font-size: 0.55rem; color: #10B981;">Online &bull; Sovereign Mesh</div>
+          </div>
+        </div>
+        <div class="mock-bubble-left">Microkernel services booted successfully.</div>
+        <div class="mock-bubble-right">All 15 applications isolated in Ring 3 sandboxes.</div>
+        <div class="mock-bubble-left">Uptime verified. Zero memory leaks detected.</div>
+        <div style="margin-top: auto; background: rgba(255,255,255,0.06); border-radius: 12px; padding: 4px 8px; display: flex; align-items: center; justify-content: space-between; color: #64748B;">
+          <span>Type a message...</span>
+          <i data-lucide="send" style="width: 11px; height: 11px; color: #00F2FE;"></i>
+        </div>
+      `;
+    } else if (id === 'view-settings') {
+      return `
+        <div style="display: flex; align-items: center; gap: 8px; background: rgba(255,255,255,0.05); padding: 7px; border-radius: 10px;">
+          <div style="width: 24px; height: 24px; border-radius: 50%; background: linear-gradient(135deg, #00F2FE, #3B82F6); display: flex; align-items: center; justify-content: center; font-size: 0.62rem; font-weight: 700;">BK</div>
+          <div>
+            <div style="font-weight: 700; color: #FFF; font-size: 0.67rem;">Bharath</div>
+            <div style="font-size: 0.55rem; color: #94A3B8;">Inter OS ID &bull; Secured</div>
+          </div>
+        </div>
+        <div class="mock-settings-tile">
+          <span style="display: flex; align-items: center; gap: 6px;"><i data-lucide="wifi" style="width: 11px; height: 11px; color: #3B82F6;"></i> Wi-Fi</span>
+          <span style="color: #10B981; font-weight: 600;">InterLayer-5G</span>
+        </div>
+        <div class="mock-settings-tile">
+          <span style="display: flex; align-items: center; gap: 6px;"><i data-lucide="bluetooth" style="width: 11px; height: 11px; color: #00F2FE;"></i> Bluetooth</span>
+          <span style="color: #94A3B8;">On (2 Paired)</span>
+        </div>
+        <div class="mock-settings-tile">
+          <span style="display: flex; align-items: center; gap: 6px;"><i data-lucide="sun" style="width: 11px; height: 11px; color: #F59E0B;"></i> Brightness</span>
+          <span style="color: #38BDF8; font-family: monospace;">100%</span>
+        </div>
+      `;
+    } else if (id === 'view-camera') {
+      return `
+        <div class="mock-camera-lens">
+          <div class="mock-reticle">
+            <div style="width: 6px; height: 6px; border-radius: 50%; background: #F59E0B;"></div>
+          </div>
+          <div style="font-size: 0.55rem; color: rgba(255,255,255,0.7); letter-spacing: 0.1em; text-transform: uppercase;">PHOTO &bull; 4K 60FPS</div>
+          <div style="display: flex; align-items: center; gap: 14px; margin-top: 6px;">
+            <div style="width: 18px; height: 18px; border-radius: 4px; background: rgba(255,255,255,0.2);"></div>
+            <div class="mock-shutter"></div>
+            <i data-lucide="refresh-cw" style="width: 14px; height: 14px; color: #FFF;"></i>
+          </div>
+        </div>
+      `;
+    } else if (id === 'view-files') {
+      return `
+        <div style="background: rgba(139,92,246,0.12); border: 1px solid rgba(139,92,246,0.25); border-radius: 10px; padding: 7px;">
+          <div style="font-size: 0.6rem; color: #C4B5FD; font-weight: 700;">VFS Storage</div>
+          <div style="font-size: 0.8rem; font-weight: 800; color: #FFF; margin: 2px 0;">49.8 GB Free</div>
+          <div style="height: 4px; border-radius: 2px; background: rgba(255,255,255,0.1); overflow: hidden;">
+            <div style="width: 22%; height: 100%; background: #8B5CF6;"></div>
+          </div>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+          <div style="background: rgba(255,255,255,0.05); padding: 6px; border-radius: 8px; display: flex; align-items: center; gap: 5px;">
+            <i data-lucide="folder" style="width: 12px; height: 12px; color: #8B5CF6;"></i>
+            <span style="font-weight: 600; font-size: 0.62rem;">Documents</span>
+          </div>
+          <div style="background: rgba(255,255,255,0.05); padding: 6px; border-radius: 8px; display: flex; align-items: center; gap: 5px;">
+            <i data-lucide="image" style="width: 12px; height: 12px; color: #EC4899;"></i>
+            <span style="font-weight: 600; font-size: 0.62rem;">Photos</span>
+          </div>
+        </div>
+      `;
+    } else if (id === 'view-music') {
+      return `
+        <div class="mock-album-art">
+          <i data-lucide="disc" style="width: 32px; height: 32px;"></i>
+        </div>
+        <div style="text-align: center;">
+          <div style="font-weight: 700; color: #FFF; font-size: 0.72rem;">Midnight City</div>
+          <div style="font-size: 0.58rem; color: #EC4899;">M83 &bull; Electronic</div>
+        </div>
+        <div class="mock-wave-bars">
+          <div class="mock-bar" style="height: 10px;"></div>
+          <div class="mock-bar" style="height: 16px;"></div>
+          <div class="mock-bar" style="height: 12px;"></div>
+          <div class="mock-bar" style="height: 18px;"></div>
+          <div class="mock-bar" style="height: 14px;"></div>
+        </div>
+      `;
+    } else if (id === 'view-dialer') {
+      return `
+        <div style="display: flex; flex-direction: column; gap: 4px;">
+          <div style="display: flex; justify-content: space-between; font-size: 0.62rem; color: #E2E8F0; padding: 4px 6px; background: rgba(255,255,255,0.04); border-radius: 6px;">
+            <span style="font-weight: 600;">Bharath</span>
+            <span style="color: #64748B;">2m ago</span>
+          </div>
+          <div style="display: flex; justify-content: space-between; font-size: 0.62rem; color: #E2E8F0; padding: 4px 6px; background: rgba(255,255,255,0.04); border-radius: 6px;">
+            <span style="font-weight: 600;">Dev Cluster</span>
+            <span style="color: #64748B;">15m ago</span>
+          </div>
+        </div>
+        <div class="mock-keypad-grid">
+          <div class="mock-key">1</div><div class="mock-key">2</div><div class="mock-key">3</div>
+          <div class="mock-key">4</div><div class="mock-key">5</div><div class="mock-key">6</div>
+          <div class="mock-key">7</div><div class="mock-key">8</div><div class="mock-key">9</div>
+        </div>
+      `;
+    } else if (id === 'view-calculator') {
+      return `
+        <div class="mock-calc-screen">4,096 &times; 16 = 65,536</div>
+        <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-top: 4px;">
+          <div class="mock-key" style="background: rgba(239,68,68,0.2); color: #FCA5A5;">C</div>
+          <div class="mock-key">&plusmn;</div><div class="mock-key">%</div>
+          <div class="mock-key" style="background: rgba(245,158,11,0.25); color: #F59E0B;">&divide;</div>
+          <div class="mock-key">7</div><div class="mock-key">8</div><div class="mock-key">9</div>
+          <div class="mock-key" style="background: rgba(245,158,11,0.25); color: #F59E0B;">&times;</div>
+          <div class="mock-key">4</div><div class="mock-key">5</div><div class="mock-key">6</div>
+          <div class="mock-key" style="background: rgba(245,158,11,0.25); color: #F59E0B;">&minus;</div>
+        </div>
+      `;
+    } else if (id === 'view-terminal') {
+      return `
+        <div style="background: #000; border-radius: 8px; padding: 6px; font-family: monospace; font-size: 0.58rem; color: #10B981; display: flex; flex-direction: column; gap: 3px; height: 100%;">
+          <div>root@inter-os:~$ vfs status</div>
+          <div style="color: #94A3B8;">[OK] ext4 root rw mounted</div>
+          <div>root@inter-os:~$ cargo run</div>
+          <div style="color: #00F2FE;">[OK] IPC bus active (pid 142)</div>
+          <div style="color: #FFF;">root@inter-os:~$ _</div>
+        </div>
+      `;
+    } else if (id === 'view-clock') {
+      return `
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          <div style="background: rgba(255,255,255,0.05); padding: 8px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center;">
+            <div>
+              <div style="font-size: 0.6rem; color: #94A3B8;">San Francisco</div>
+              <div style="font-size: 1.1rem; font-weight: 700; color: #FFF;">09:41</div>
+            </div>
+            <span style="font-size: 0.6rem; color: #64748B;">Today, -12.5 hrs</span>
+          </div>
+          <div style="background: rgba(255,255,255,0.05); padding: 8px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center;">
+            <div>
+              <div style="font-size: 0.6rem; color: #94A3B8;">Tokyo</div>
+              <div style="font-size: 1.1rem; font-weight: 700; color: #FFF;">02:41</div>
+            </div>
+            <span style="font-size: 0.6rem; color: #64748B;">Tomorrow, +3.5 hrs</span>
+          </div>
+        </div>
+      `;
+    } else {
+      return `
+        <div style="flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;">
+          <div style="width: 44px; height: 44px; border-radius: 12px; background: ${task.color}22; border: 1.5px solid ${task.color}55; color: ${task.color}; display: flex; align-items: center; justify-content: center;">
+            <i data-lucide="${task.lucide || 'layers'}" style="width: 22px; height: 22px;"></i>
+          </div>
+          <div style="font-weight: 700; font-size: 0.8rem; color: #FFFFFF;">${task.title}</div>
+          <div style="font-size: 0.62rem; color: #10B981; font-family: monospace;">Active Sandbox &bull; ${task.memory || '12 MB'}</div>
+        </div>
+      `;
+    }
+  }
+
   function renderRecents() {
     const carousel = document.getElementById('recents-carousel');
     const taskCountBadge = document.getElementById('horizon-task-count');
@@ -1285,6 +1475,21 @@ document.addEventListener('DOMContentLoaded', () => {
     if (taskCountBadge) {
       taskCountBadge.textContent = `${count} ${count === 1 ? 'Task' : 'Tasks'} Active`;
     }
+
+    // Dynamic LPDDR4X RAM telemetry gauge update
+    const ramText = document.getElementById('horizon-ram-text');
+    const ramBar = document.getElementById('horizon-ram-bar');
+    const totalRamMB = 4096;
+    let baseRamMB = 860;
+    (state.runningTasks || []).forEach(t => {
+      const m = parseInt(t.memory) || 16;
+      baseRamMB += m;
+    });
+    const freeRamMB = Math.max(0, totalRamMB - baseRamMB);
+    const freeRamGB = (freeRamMB / 1024).toFixed(1);
+    const freePct = Math.round((freeRamMB / totalRamMB) * 100);
+    if (ramText) ramText.textContent = `${freeRamGB} GB Free`;
+    if (ramBar) ramBar.style.width = `${freePct}%`;
 
     if (!state.runningTasks || state.runningTasks.length === 0) {
       carousel.innerHTML = `
@@ -1307,30 +1512,36 @@ document.addEventListener('DOMContentLoaded', () => {
       lens.innerHTML = `
         <div class="horizon-lens-top">
           <div class="horizon-lens-identity">
-            <div class="horizon-lens-icon" style="background: ${task.color}22; border: 1px solid ${task.color}44; color: ${task.color};">
-              <i data-lucide="${task.lucide || 'layers'}" style="width: 14px; height: 14px;"></i>
+            <div class="horizon-lens-icon" style="background: ${task.color}25; border: 1px solid ${task.color}55; color: ${task.color};">
+              <i data-lucide="${task.lucide || 'layers'}" style="width: 13px; height: 13px;"></i>
             </div>
             <span class="horizon-lens-name">${task.title}</span>
+            <span class="horizon-lens-mem">${task.memory || '14 MB'}</span>
           </div>
           <button class="horizon-lens-kill-btn" title="Close Task">&times;</button>
         </div>
-        <div class="horizon-lens-glance">
-          <div class="lens-glance-icon" style="background: radial-gradient(circle, ${task.color}33, ${task.color}11); border-color: ${task.color}66; color: ${task.color}; box-shadow: 0 0 20px ${task.color}33;">
-            <i data-lucide="${task.lucide || 'layers'}" style="width: 28px; height: 28px;"></i>
-          </div>
-          <div class="lens-glance-title">${task.title}</div>
-          <div class="lens-glance-status">Active &bull; ${task.memory || '12 MB'}</div>
+        <div class="recents-app-window">
+          ${getAppSnapshotHTML(task)}
+        </div>
+        <div class="horizon-lens-actions">
+          <button class="lens-action-pill" title="Resume application">Resume Space</button>
+          <i data-lucide="arrow-up-right" style="width: 14px; height: 14px; color: #64748B;"></i>
         </div>
       `;
 
       // Tap to resume app
-      lens.querySelector('.horizon-lens-glance').addEventListener('click', () => {
+      lens.querySelector('.recents-app-window')?.addEventListener('click', () => {
+        playBeep(520, 0.02, 'sine');
+        switchView(task.id);
+      });
+      lens.querySelector('.lens-action-pill')?.addEventListener('click', (e) => {
+        e.stopPropagation();
         playBeep(520, 0.02, 'sine');
         switchView(task.id);
       });
 
       // Close button
-      lens.querySelector('.horizon-lens-kill-btn').addEventListener('click', (e) => {
+      lens.querySelector('.horizon-lens-kill-btn')?.addEventListener('click', (e) => {
         e.stopPropagation();
         dismissTask(lens, task);
       });
@@ -1375,19 +1586,71 @@ document.addEventListener('DOMContentLoaded', () => {
       state.runningTasks = (state.runningTasks || []).filter(t => t.id !== task.id);
       renderRecents();
       logConsole('info', `Closed task '${task.title}'.`);
-    }, 280);
+    }, 300);
   }
 
   document.getElementById('btn-clear-recents')?.addEventListener('click', () => {
     const lenses = document.querySelectorAll('.horizon-lens');
-    lenses.forEach(l => l.classList.add('dismissing'));
+    lenses.forEach((l, i) => {
+      setTimeout(() => l.classList.add('dismissing'), i * 60);
+    });
     playBeep(240, 0.08, 'sawtooth');
     setTimeout(() => {
       state.runningTasks = [];
       renderRecents();
       goHome();
       logConsole('ok', '[TASK_MGR] Cleared all background horizon task sandboxes.');
-    }, 300);
+    }, 380);
+  });
+
+  // Flagship Overview Action Dock: Screenshot Capture
+  document.getElementById('recents-btn-screenshot')?.addEventListener('click', () => {
+    playBeep(880, 0.04, 'triangle');
+    const phoneScreen = document.getElementById('phone-screen');
+    if (phoneScreen) {
+      const flash = document.createElement('div');
+      flash.style.position = 'absolute';
+      flash.style.top = '0';
+      flash.style.left = '0';
+      flash.style.width = '100%';
+      flash.style.height = '100%';
+      flash.style.backgroundColor = '#FFFFFF';
+      flash.style.opacity = '0.9';
+      flash.style.zIndex = '99999';
+      flash.style.pointerEvents = 'none';
+      flash.style.transition = 'opacity 0.38s ease';
+      phoneScreen.appendChild(flash);
+      setTimeout(() => {
+        flash.style.opacity = '0';
+        setTimeout(() => flash.remove(), 400);
+      }, 40);
+    }
+    const activeTask = (state.runningTasks || [])[0];
+    const targetName = activeTask ? activeTask.title : 'Overview Deck';
+    showToast(`📸 Captured screenshot of ${targetName} to Gallery`);
+    logConsole('ok', `[MULTITASK] Snapshot captured: ${targetName}. Saved to /data/user/photos.`);
+  });
+
+  // Flagship Overview Action Dock: Split Screen Multitask
+  document.getElementById('recents-btn-split')?.addEventListener('click', () => {
+    playBeep(440, 0.05, 'sine');
+    showToast('🔲 Split Screen: Dual-app sandbox activated');
+    logConsole('info', '[MULTITASK] Split screen layout initialized with active spaces.');
+  });
+
+  // Flagship Overview Action Dock: AI Vision OCR Text & Link Inspect
+  document.getElementById('recents-btn-vision')?.addEventListener('click', () => {
+    playBeep(620, 0.06, 'sawtooth');
+    const chamber = document.querySelector('.horizon-chamber');
+    if (chamber) {
+      const isActive = chamber.classList.toggle('recents-vision-active');
+      if (isActive) {
+        showToast('🔍 AI Vision OCR: 8 text fragments & 2 URLs indexed');
+        logConsole('ok', '[AI_VISION] Extracted live semantic tokens from active viewport.');
+      } else {
+        showToast('AI Vision scan completed');
+      }
+    }
   });
 
   // Swipe up on Home Pill for Recents
@@ -3262,11 +3525,47 @@ document.addEventListener('DOMContentLoaded', () => {
     showToast(e.target.checked ? 'Ambient DC Dimming active' : 'PWM Dimming standard');
   });
 
-  const setToggleTheme = document.getElementById('set-toggle-theme');
-  setToggleTheme?.addEventListener('change', (e) => {
-    document.body.classList.toggle('light-theme', e.target.checked);
-    showToast(e.target.checked ? 'Clean Studio Theme active' : 'Dark OLED Theme active');
+  const setToggleBt = document.getElementById('set-toggle-bt');
+  const setBtStatus = document.getElementById('set-bt-status');
+  setToggleBt?.addEventListener('change', (e) => {
+    const isChecked = e.target.checked;
+    if (setBtStatus) {
+      setBtStatus.textContent = isChecked ? 'On • 2 Devices Paired' : 'Bluetooth Off';
+    }
+    showToast(isChecked ? 'Bluetooth active' : 'Bluetooth offline');
   });
+
+  const btnThemeDark = document.getElementById('btn-theme-dark');
+  const btnThemeLight = document.getElementById('btn-theme-light');
+  btnThemeDark?.addEventListener('click', () => {
+    btnThemeDark.classList.add('active');
+    btnThemeLight?.classList.remove('active');
+    document.body.classList.remove('light-theme');
+    showToast('Dark Mode active');
+  });
+  btnThemeLight?.addEventListener('click', () => {
+    btnThemeLight.classList.add('active');
+    btnThemeDark?.classList.remove('active');
+    document.body.classList.add('light-theme');
+    showToast('Light Mode active');
+  });
+
+  const setToggleSilent = document.getElementById('set-toggle-silent');
+  setToggleSilent?.addEventListener('change', (e) => {
+    showToast(e.target.checked ? 'Silent Mode enabled' : 'Silent Mode disabled');
+  });
+
+  const setToggleHaptics = document.getElementById('set-toggle-haptics');
+  setToggleHaptics?.addEventListener('change', (e) => {
+    showToast(e.target.checked ? 'System Haptics enabled' : 'System Haptics disabled');
+  });
+
+  const setToggleLowpower = document.getElementById('set-toggle-lowpower');
+  setToggleLowpower?.addEventListener('change', (e) => {
+    showToast(e.target.checked ? 'Low Power Mode enabled (Save 40% battery)' : 'Normal Power Mode');
+  });
+
+  document.getElementById('btn-reboot-interos')?.addEventListener('click', triggerReboot);
 
   // =========================================================================
   // 10B. MODULAR .THEME ENGINE & CUSTOMIZATION STUDIO
@@ -3608,9 +3907,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const setSearchInput = document.getElementById('set-search-input');
   setSearchInput?.addEventListener('input', (e) => {
     const q = e.target.value.toLowerCase().trim();
-    document.querySelectorAll('#view-settings .glass-pod').forEach(pod => {
-      const txt = pod.textContent.toLowerCase();
-      pod.style.display = !q || txt.includes(q) ? '' : 'none';
+    document.querySelectorAll('#view-settings .settings-row, #view-settings .settings-block').forEach(item => {
+      const txt = item.textContent.toLowerCase();
+      item.style.display = !q || txt.includes(q) ? '' : 'none';
     });
   });
 

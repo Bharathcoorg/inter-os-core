@@ -1,35 +1,112 @@
 {
-  "theme_id": "bento_glass",
-  "name": "Bento Glass Horizon",
-  "version": "2.0.0",
-  "author": "InterOS Design Labs",
-  "description": "Monolithic smoked frosted glass tiles with 3D specular rim bevels and minimalist dock.",
-  "mockup_reference": "glass_home_screen_1790110483841.jpg",
-  "tokens": {
-    "--theme-bg": "radial-gradient(circle at 50% 12%, #080D1A 0%, #000000 100%)",
-    "--glass-surface": "rgba(255, 255, 255, 0.05)",
-    "--glass-surface-hover": "rgba(255, 255, 255, 0.09)",
-    "--glass-border": "rgba(255, 255, 255, 0.16)",
-    "--glass-border-hover": "rgba(255, 255, 255, 0.32)",
-    "--glass-specular": "inset 0 1.5px 2px 0 rgba(255, 255, 255, 0.45), inset 0 -1px 1px 0 rgba(0, 0, 0, 0.5)",
-    "--glass-blur": "32px",
-    "--accent-primary": "#00F2FE",
-    "--accent-secondary": "#4FACFE",
-    "--accent-glow": "rgba(0, 242, 254, 0.4)",
-    "--dock-bg": "rgba(20, 26, 36, 0.78)",
-    "--dock-border": "rgba(255, 255, 255, 0.20)",
-    "--dock-arc-glow": "#38BDF8",
-    "--card-radius": "30px",
-    "--pod-radius": "24px",
-    "--text-primary": "#FFFFFF",
-    "--text-secondary": "rgba(255, 255, 255, 0.75)",
-    "--neon-chassis-glow": "0 0 30px rgba(0, 242, 254, 0.35)"
+  "theme": {
+    "success": true,
+    "theme": {
+      "theme_id": "bento_glass",
+      "name": "Bento Glass Horizon",
+      "version": "2.0.0",
+      "author": "InterOS Design Labs",
+      "description": "Monolithic smoked frosted glass tiles with 3D specular rim bevels and minimalist dock.",
+      "mockup_reference": "glass_home_screen_1790110483841.jpg",
+      "tokens": {
+        "--theme-bg": "radial-gradient(circle at 50% 12%, #080D1A 0%, #000000 100%)",
+        "--glass-surface": "rgba(255, 255, 255, 0.05)",
+        "--glass-surface-hover": "rgba(255, 255, 255, 0.09)",
+        "--glass-border": "rgba(255, 255, 255, 0.16)",
+        "--glass-border-hover": "rgba(255, 255, 255, 0.32)",
+        "--glass-specular": "inset 0 1.5px 2px 0 rgba(255, 255, 255, 0.45), inset 0 -1px 1px 0 rgba(0, 0, 0, 0.5)",
+        "--glass-blur": "32px",
+        "--accent-primary": "#00F2FE",
+        "--accent-secondary": "#4FACFE",
+        "--accent-glow": "rgba(0, 242, 254, 0.4)",
+        "--dock-bg": "rgba(20, 26, 36, 0.78)",
+        "--dock-border": "rgba(255, 255, 255, 0.20)",
+        "--dock-arc-glow": "#38BDF8",
+        "--card-radius": "30px",
+        "--pod-radius": "24px",
+        "--text-primary": "#FFFFFF",
+        "--text-secondary": "rgba(255, 255, 255, 0.75)",
+        "--neon-chassis-glow": "0 0 30px rgba(0, 242, 254, 0.35)"
+      },
+      "bootloader": {
+        "immutable_brand": "InterOS",
+        "custom_subtext": "Universal Sovereign Mobile Edition",
+        "accent_color": "#00F2FE",
+        "spinner_glow": "rgba(0, 242, 254, 0.65)"
+      },
+      "id": "bento_glass"
+    },
+    "active_theme": {
+      "theme_id": "bento_glass",
+      "name": "Bento Glass Horizon",
+      "version": "2.0.0",
+      "author": "InterOS Design Labs",
+      "description": "Monolithic smoked frosted glass tiles with 3D specular rim bevels and minimalist dock.",
+      "mockup_reference": "glass_home_screen_1790110483841.jpg",
+      "tokens": {
+        "--theme-bg": "radial-gradient(circle at 50% 12%, #080D1A 0%, #000000 100%)",
+        "--glass-surface": "rgba(255, 255, 255, 0.05)",
+        "--glass-surface-hover": "rgba(255, 255, 255, 0.09)",
+        "--glass-border": "rgba(255, 255, 255, 0.16)",
+        "--glass-border-hover": "rgba(255, 255, 255, 0.32)",
+        "--glass-specular": "inset 0 1.5px 2px 0 rgba(255, 255, 255, 0.45), inset 0 -1px 1px 0 rgba(0, 0, 0, 0.5)",
+        "--glass-blur": "32px",
+        "--accent-primary": "#00F2FE",
+        "--accent-secondary": "#4FACFE",
+        "--accent-glow": "rgba(0, 242, 254, 0.4)",
+        "--dock-bg": "rgba(20, 26, 36, 0.78)",
+        "--dock-border": "rgba(255, 255, 255, 0.20)",
+        "--dock-arc-glow": "#38BDF8",
+        "--card-radius": "30px",
+        "--pod-radius": "24px",
+        "--text-primary": "#FFFFFF",
+        "--text-secondary": "rgba(255, 255, 255, 0.75)",
+        "--neon-chassis-glow": "0 0 30px rgba(0, 242, 254, 0.35)"
+      },
+      "bootloader": {
+        "immutable_brand": "InterOS",
+        "custom_subtext": "Universal Sovereign Mobile Edition",
+        "accent_color": "#00F2FE",
+        "spinner_glow": "rgba(0, 242, 254, 0.65)"
+      },
+      "id": "bento_glass"
+    },
+    "theme_id": "bento_glass",
+    "name": "Bento Glass Horizon",
+    "version": "2.0.0",
+    "author": "InterOS Design Labs",
+    "description": "Monolithic smoked frosted glass tiles with 3D specular rim bevels and minimalist dock.",
+    "mockup_reference": "glass_home_screen_1790110483841.jpg",
+    "tokens": {
+      "--theme-bg": "radial-gradient(circle at 50% 12%, #080D1A 0%, #000000 100%)",
+      "--glass-surface": "rgba(255, 255, 255, 0.05)",
+      "--glass-surface-hover": "rgba(255, 255, 255, 0.09)",
+      "--glass-border": "rgba(255, 255, 255, 0.16)",
+      "--glass-border-hover": "rgba(255, 255, 255, 0.32)",
+      "--glass-specular": "inset 0 1.5px 2px 0 rgba(255, 255, 255, 0.45), inset 0 -1px 1px 0 rgba(0, 0, 0, 0.5)",
+      "--glass-blur": "32px",
+      "--accent-primary": "#8B5CF6",
+      "--accent-secondary": "#4FACFE",
+      "--accent-glow": "#8B5CF655",
+      "--dock-bg": "rgba(20, 26, 36, 0.78)",
+      "--dock-border": "rgba(255, 255, 255, 0.20)",
+      "--dock-arc-glow": "#38BDF8",
+      "--card-radius": "30px",
+      "--pod-radius": "24px",
+      "--text-primary": "#FFFFFF",
+      "--text-secondary": "rgba(255, 255, 255, 0.75)",
+      "--neon-chassis-glow": "0 0 30px rgba(0, 242, 254, 0.35)"
+    },
+    "bootloader": {
+      "immutable_brand": "InterOS",
+      "custom_subtext": "Universal Sovereign Mobile Edition",
+      "accent_color": "#00F2FE",
+      "spinner_glow": "rgba(0, 242, 254, 0.65)"
+    },
+    "id": "bento_glass"
   },
+  "theme_id": "custom_theme",
   "bootloader": {
-    "immutable_brand": "InterOS",
-    "custom_subtext": "Universal Sovereign Mobile Edition",
-    "accent_color": "#00F2FE",
-    "spinner_glow": "rgba(0, 242, 254, 0.65)"
-  },
-  "id": "bento_glass"
+    "immutable_brand": "InterOS"
+  }
 }
