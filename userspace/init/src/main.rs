@@ -24,14 +24,6 @@ pub extern "C" fn _start() -> ! {
         "[USER INIT (Ring 3)] Hardware timer ticks queried via fast syscall.",
     ).ok();
 
-    // 3. Query Sovereign DID via fast syscall
-    let mut did_buf = [0u8; 64];
-    if let Ok(_len) = std::identity_get_did(&mut did_buf) {
-        std::log(
-            0,
-            "[USER INIT (Ring 3)] Sovereign DID attested in userspace via syscall.",
-        ).ok();
-    }
 
     // 4. Send attested IPC message to Security Daemon (Task 2)
     std::ipc_send(
@@ -45,14 +37,6 @@ pub extern "C" fn _start() -> ! {
         "[USER INIT (Ring 3)] Transmitted zero-trust IPC message to Task 2 via syscall.",
     ).ok();
 
-    // 5. Query P2P AMCP Marketplace Catalog from Ring 3 via fast syscall
-    let mut catalog_buf = [0u8; 128];
-    if let Ok(_len) = std::marketplace_list(&mut catalog_buf) {
-        std::log(
-            0,
-            "[USER INIT (Ring 3)] Queried P2P AMCP Marketplace catalog via fast syscall.",
-        ).ok();
-    }
 
     // 6. Pre-flight Capability Audit on 'org.interos.browser' from Ring 3
     if let Ok(verdict) = std::package_audit("org.interos.browser") {
@@ -166,14 +150,6 @@ pub extern "C" fn _start() -> ! {
         ).ok();
     }
 
-    // 18. Parse Quick Action Command from Ring 3
-    let mut intent_buf = [0u8; 256];
-    if let Ok(_len) = std::nl_parse_intent("open camera", &mut intent_buf) {
-        std::log(
-            0,
-            "[USER INIT (Ring 3)] Mobile quick action parsed: 'open camera' -> APP_LAUNCH_CAMERA.",
-        ).ok();
-    }
 
     // 19. Query Multi-Zone Dynamic Thermal Governor from Ring 3
     let mut therm_buf = [0u8; 128];
@@ -195,17 +171,6 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // 21. Compute On-Device Vector Embedding Cosine Similarity from Ring 3
-    let v1 = [100i16; 64];
-    let v2 = [100i16; 64];
-    if let Ok(sim) = std::vector_cosine_similarity(&v1, &v2) {
-        if sim == 10000 {
-            std::log(
-                0,
-                "[USER INIT (Ring 3)] Computed on-device vector cosine similarity: 10000/10000 (Exact Match).",
-            ).ok();
-        }
-    }
 
     // 22. Encrypt and decrypt sector in Sovereign Encrypted Vault from Ring 3
     let mut v_block = [0x55u8; 512];
@@ -223,15 +188,6 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // 23. Append semantic intent to on-device AI Context Broker from Ring 3
-    if let Ok(id) = std::context_broker_append(1, "Ring 3 prompt: order pizza") {
-        if id > 0 {
-            std::log(
-                0,
-                "[USER INIT (Ring 3)] Appended semantic intent to on-device AI Context Broker.",
-            ).ok();
-        }
-    }
 
     // 24. Query mobile wireless HAL (Wi-Fi and BLE beacon) from Ring 3
     let mut wire_buf = [0u8; 128];
@@ -258,25 +214,6 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // 26. Multi-Step Task Pipeline Execution from Ring 3
-    if let Ok(plan_id) = std::agent_plan_submit("System Diagnostic Task") {
-        if plan_id > 0 {
-            // Step 1: Parse intent (no consent required)
-            if let Ok((step, _status)) = std::agent_plan_step(plan_id, false) {
-                if step == 1 {
-                    // Step 2: Keystore authorization requires explicit consent
-                    if let Ok((step2, _status2)) = std::agent_plan_step(plan_id, true) {
-                        if step2 == 2 {
-                            std::log(
-                                0,
-                                "[USER INIT (Ring 3)] System diagnostic task step execution & verification verified.",
-                            ).ok();
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     // 27. Decentralized Sovereign Package Revocation & CRL from Ring 3
     if let Ok(is_rev) = std::revocation_is_package_revoked("rogue.malicious_crypto_miner") {
@@ -296,17 +233,6 @@ pub extern "C" fn _start() -> ! {
         ).ok();
     }
 
-    // 29. Sovereign Privacy Shield Intent Sanitization from Ring 3
-    let pii_input = "Pay upi://pay?pa=dev@axisbank for order and call +919123456789";
-    let mut pii_sanitized = [0u8; 128];
-    if let Ok(slen) = std::privacy_shield_audit(pii_input, &mut pii_sanitized) {
-        if slen > 0 {
-            std::log(
-                0,
-                "[USER INIT (Ring 3)] Sovereign Privacy Shield: Outbound intent PII sanitized via fast syscall.",
-            ).ok();
-        }
-    }
 
     // 30. Fluid Inertial Physics Touch Simulation from Ring 3
     let _ = std::surface_physics(0, 200, 720, 2000); // touch down
@@ -471,16 +397,6 @@ pub extern "C" fn _start() -> ! {
         let _ = std::fs_close(dex_fd);
     }
 
-    // 35. Sovereign Edge AI Model Inference via Fast Syscall
-    let mut ai_resp = [0u8; 256];
-    if let Ok(resp_len) = std::ai_assistant_query("Check sovereign system status", &mut ai_resp) {
-        if resp_len > 0 {
-            std::log(
-                0,
-                "[USER INIT (Ring 3)] Sovereign Edge AI Model (Qwen2.5-0.5B) query verified via fast syscall.",
-            ).ok();
-        }
-    }
 
     // 36. Zero-Trust Network Socket Creation & Transmission via Fast Syscall
     if let Ok(_sock_id) = std::net_socket(9090) {
@@ -575,12 +491,12 @@ pub extern "C" fn _start() -> ! {
     );
     let share_url = std::share_sheet_dispatch(
         "text/uri-list",
-        "interlayer://sovereign.mesh/docs",
+        "interos://system/docs",
         Some("interos.terminal"),
     );
     let share_drawer = std::share_sheet_dispatch(
         "text/plain",
-        "Hello from Sovereign OS",
+        "Hello from InterOS Core",
         None,
     );
 

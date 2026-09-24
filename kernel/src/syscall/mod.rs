@@ -66,17 +66,11 @@ pub enum SyscallNumber {
     FsStat = 12,
     BlockRead = 13,
     VerifyPackage = 14,
-    McpInvoke = 15,
     WasmExecute = 16,
-    IdentityGetDid = 17,
-    StateCommit = 18,
     ResourceQuery = 19,
-    LiteVerseStatus = 20,
     NetSocket = 21,
     NetSendTo = 22,
     NetRecvFrom = 23,
-    MarketplaceList = 24,
-    MarketplaceGet = 25,
     PackageAudit = 26,
     PackageInstall = 27,
     HalQueryPlatform = 28,
@@ -89,24 +83,18 @@ pub enum SyscallNumber {
     BatteryQuery = 36,
     AndroidBridgeIntent = 37,
     RtcGetTime = 38,
-    NlParseIntent = 39,
     ThermalQuery = 40,
     SecureIpcSession = 41,
-    VectorCosineSimilarity = 42,
     VaultCrypt = 43,
-    ContextBroker = 44,
     WirelessQuery = 45,
     DevFsIo = 46,
-    AgentPlanExecute = 47,
     RevocationAudit = 48,
     CapDelegate = 49,
-    PrivacyShieldAudit = 50,
     SurfacePhysics = 51,
     ApkInstallAudit = 52,
     DexVerifyExec = 53,
     CameraCapture = 54,
     DexInvokeMethod = 55,
-    AiAssistantQuery = 56,
     CapRequestConsent = 57,
     ShareSheetDispatch = 58,
     ShmPipeCreate = 59,
@@ -427,18 +415,6 @@ pub fn sys_verify_package(
     })
 }
 
-/// Invokes a registered local MCP tool with zero-trust capability verification.
-///
-/// Requires the caller to hold a valid capability token corresponding to the tool's
-/// required capability category (e.g. `IpcSend` for external actions, `TimerTickRead` for telemetry).
-pub fn sys_mcp_invoke(
-    _cap_slot: usize,
-    _tool_name: &str,
-    _args: &[u8],
-    _out_buf: &mut [u8],
-) -> Result<usize, SyscallResult> {
-    Err(SyscallResult::ToolNotFound)
-}
 
 /// Unified system call dispatcher invoked by hardware fast syscall entry stub.
 #[no_mangle]
@@ -565,31 +541,6 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             let buf = unsafe { &mut *(buf_ptr as *mut [u8; SECTOR_SIZE]) };
             sys_block_read(cap_slot, lba, buf) as i64
         }
-        17 => {
-            // IdentityGetDid: a1 = out_buf_ptr, a2 = out_buf_len
-            let out_ptr = a1 as *mut u8;
-            let out_len = a2 as usize;
-            if out_ptr.is_null() || out_len == 0 {
-                return SyscallResult::InvalidArguments as i64;
-            }
-            let buf = unsafe { core::slice::from_raw_parts_mut(out_ptr, out_len) };
-            match sys_identity_get_did(buf) {
-                Ok(len) => len as i64,
-                Err(e) => e as i64,
-            }
-        }
-        18 => {
-            // StateCommit: a1 = out_root_ptr (32 bytes)
-            let out_ptr = a1 as *mut u8;
-            if out_ptr.is_null() {
-                return SyscallResult::InvalidArguments as i64;
-            }
-            let out_root = unsafe { &mut *(out_ptr as *mut [u8; 32]) };
-            match sys_state_commit(out_root) {
-                Ok(seq) => seq as i64,
-                Err(e) => e as i64,
-            }
-        }
         19 => {
             // ResourceQuery: a1 = out_battery_ptr, a2 = out_temp_ptr, a3 = out_throttling_ptr
             let b_ptr = a1 as *mut u8;
@@ -600,19 +551,6 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             }
             let (b, t, th) = unsafe { (&mut *b_ptr, &mut *t_ptr, &mut *th_ptr) };
             sys_resource_query(b, t, th) as i64
-        }
-        20 => {
-            // LiteVerseStatus: a1 = out_verified_ptr, a2 = out_relayed_ptr
-            let v_ptr = a1 as *mut u64;
-            let r_ptr = a2 as *mut u64;
-            if v_ptr.is_null() || r_ptr.is_null() {
-                return SyscallResult::InvalidArguments as i64;
-            }
-            let (v, r) = unsafe { (&mut *v_ptr, &mut *r_ptr) };
-            match sys_liteverse_status(v, r) {
-                Ok(state) => state as i64,
-                Err(e) => e as i64,
-            }
         }
         21 => {
             // NetSocket: a1 = port
@@ -645,19 +583,6 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             let out_buf = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
             match sys_net_recvfrom(sock_id, out_buf) {
                 Ok(bytes) => bytes as i64,
-                Err(e) => e as i64,
-            }
-        }
-        24 => {
-            // MarketplaceList: a1 = out_buf_ptr, a2 = out_buf_len
-            let ptr = a1 as *mut u8;
-            let len = a2 as usize;
-            if ptr.is_null() {
-                return SyscallResult::InvalidArguments as i64;
-            }
-            let out_buf = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
-            match sys_marketplace_list(out_buf) {
-                Ok(n) => n as i64,
                 Err(e) => e as i64,
             }
         }
@@ -834,26 +759,6 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 Err(e) => e as i64,
             }
         }
-        39 => {
-            // NlParseIntent: a1 = query_ptr, a2 = query_len, a3 = out_ptr, a4 = out_len
-            let query_ptr = a1 as *const u8;
-            let query_len = a2 as usize;
-            let out_ptr = a3 as *mut u8;
-            let out_len = a4 as usize;
-            if query_ptr.is_null() || query_len == 0 || out_ptr.is_null() || out_len == 0 {
-                return SyscallResult::InvalidArguments as i64;
-            }
-            let query_slice = unsafe { core::slice::from_raw_parts(query_ptr, query_len) };
-            let query_str = match core::str::from_utf8(query_slice) {
-                Ok(s) => s,
-                Err(_) => return SyscallResult::InvalidArguments as i64,
-            };
-            let out_buf = unsafe { core::slice::from_raw_parts_mut(out_ptr, out_len) };
-            match sys_nl_parse_intent(query_str, out_buf) {
-                Ok(n) => n as i64,
-                Err(e) => e as i64,
-            }
-        }
         40 => {
             // ThermalQuery: a1 = out_buf_ptr, a2 = out_buf_len
             let ptr = a1 as *mut u8;
@@ -882,21 +787,6 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 Err(e) => e as i64,
             }
         }
-        42 => {
-            // VectorCosineSimilarity: a1 = vec_a_ptr, a2 = vec_b_ptr, a3 = dim
-            let ptr_a = a1 as *const i16;
-            let ptr_b = a2 as *const i16;
-            let dim = a3 as usize;
-            if ptr_a.is_null() || ptr_b.is_null() || dim != 64 {
-                return SyscallResult::InvalidArguments as i64;
-            }
-            let slice_a = unsafe { core::slice::from_raw_parts(ptr_a, dim) };
-            let slice_b = unsafe { core::slice::from_raw_parts(ptr_b, dim) };
-            match sys_vector_cosine_similarity(slice_a, slice_b) {
-                Ok(sim) => sim as i64,
-                Err(e) => e as i64,
-            }
-        }
         43 => {
             // VaultCrypt: a1 = action (0=enc, 1=dec), a2 = block_idx, a3 = buf_ptr, a4 = 512, a5 = iv_ptr
             let action = a1 as u32;
@@ -912,35 +802,6 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             match sys_vault_crypt(action, block_idx, buf, iv) {
                 Ok(()) => SyscallResult::Success as i64,
                 Err(e) => e as i64,
-            }
-        }
-        44 => {
-            // ContextBroker: a1 = action (0=append, 1=query), a2 = tier, a3 = buf_ptr, a4 = buf_len
-            let action = a1 as u32;
-            let tier_raw = a2 as u8;
-            let ptr = a3 as *mut u8;
-            let len = a4 as usize;
-            if ptr.is_null() || len == 0 {
-                return SyscallResult::InvalidArguments as i64;
-            }
-            if action == 0 {
-                // Append
-                let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
-                let text = match core::str::from_utf8(slice) {
-                    Ok(s) => s,
-                    Err(_) => return SyscallResult::InvalidArguments as i64,
-                };
-                match sys_context_broker_append(tier_raw, text) {
-                    Ok(id) => id as i64,
-                    Err(e) => e as i64,
-                }
-            } else {
-                // Query
-                let out_buf = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
-                match sys_context_broker_query(tier_raw, out_buf) {
-                    Ok(n) => n as i64,
-                    Err(e) => e as i64,
-                }
             }
         }
         45 => {
@@ -977,18 +838,6 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 Err(e) => e as i64,
             }
         }
-        47 => {
-            // AgentPlanExecute: a1 = cmd (0=submit, 1=step_next, 2=status_json, 3=force_takeover), a2 = plan_id/param, a3 = consent, a4 = buf_ptr, a5 = buf_len
-            let cmd = a1 as u32;
-            let param = a2 as u32;
-            let consent = a3 != 0;
-            let buf_ptr = a4 as *mut u8;
-            let buf_len = a5 as usize;
-            match sys_agent_plan_execute(cmd, param, consent, buf_ptr, buf_len) {
-                Ok(n) => n as i64,
-                Err(e) => e as i64,
-            }
-        }
         48 => {
             // RevocationAudit: a1 = cmd (0=check_pkg, 1=revoke_pkg), a2 = target_ptr, a3 = target_len, a4 = out_buf_ptr, a5 = out_buf_len
             let cmd = a1 as u32;
@@ -1020,25 +869,6 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 Ok(n) => n as i64,
                 Err(e) => e as i64,
             }
-        }
-        50 => {
-            // PrivacyShieldAudit: a1 = in_ptr, a2 = in_len, a3 = out_ptr, a4 = out_len
-            let in_ptr = a1 as *const u8;
-            let in_len = a2 as usize;
-            let out_ptr = a3 as *mut u8;
-            let out_len = a4 as usize;
-            if in_ptr.is_null() || in_len == 0 || out_ptr.is_null() || out_len == 0 {
-                return SyscallResult::InvalidArguments as i64;
-            }
-            let in_slice = unsafe { core::slice::from_raw_parts(in_ptr, in_len) };
-            let in_str = match core::str::from_utf8(in_slice) {
-                Ok(s) => s,
-                Err(_) => return SyscallResult::InvalidArguments as i64,
-            };
-            let out_slice = unsafe { core::slice::from_raw_parts_mut(out_ptr, out_len) };
-            let copy_len = core::cmp::min(in_str.len(), out_slice.len());
-            out_slice[..copy_len].copy_from_slice(&in_str.as_bytes()[..copy_len]);
-            copy_len as i64
         }
         51 => {
             // SurfacePhysics: a1 = action, a2 = y, a3 = viewport_h, a4 = content_h
@@ -1125,30 +955,6 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             };
 
             match sys_dex_invoke_method(dex_slice, spec_str) {
-                Ok(n) => n as i64,
-                Err(e) => e as i64,
-            }
-        }
-        56 => {
-            // AiAssistantQuery: a1 = prompt_ptr, a2 = prompt_len, a3 = out_ptr, a4 = out_len
-            let prompt_ptr = a1 as *const u8;
-            let prompt_len = a2 as usize;
-            let out_ptr = a3 as *mut u8;
-            let out_len = a4 as usize;
-
-            if prompt_ptr.is_null() || prompt_len == 0 || out_ptr.is_null() || out_len == 0 {
-                return SyscallResult::InvalidArguments as i64;
-            }
-
-            let prompt_slice = unsafe { core::slice::from_raw_parts(prompt_ptr, prompt_len) };
-            let prompt_str = match core::str::from_utf8(prompt_slice) {
-                Ok(s) => s,
-                Err(_) => return SyscallResult::InvalidArguments as i64,
-            };
-
-            let out_slice = unsafe { core::slice::from_raw_parts_mut(out_ptr, out_len) };
-
-            match sys_ai_assistant_query(prompt_str, out_slice) {
                 Ok(n) => n as i64,
                 Err(e) => e as i64,
             }
@@ -1263,34 +1069,6 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
     }
 }
 
-/// Returns the device's Sovereign DID string into `out_buf`.
-pub fn sys_identity_get_did(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
-    let vault_guard = crate::identity::IDENTITY_VAULT.lock();
-    let vault = vault_guard.as_ref().ok_or(SyscallResult::IdentityUninitialized)?;
-    let did_bytes = vault.device_did().as_str().as_bytes();
-    if out_buf.len() < did_bytes.len() {
-        return Err(SyscallResult::InvalidArguments);
-    }
-    out_buf[..did_bytes.len()].copy_from_slice(did_bytes);
-    Ok(did_bytes.len())
-}
-
-/// Commits pending state changes, deriving the new Merkle state root and sequence number.
-pub fn sys_state_commit(out_root: &mut [u8; 32]) -> Result<u64, SyscallResult> {
-    let vault_guard = crate::identity::IDENTITY_VAULT.lock();
-    let vault = vault_guard.as_ref().ok_or(SyscallResult::IdentityUninitialized)?;
-    let mut state_guard = crate::state::STATE_MANAGER.lock();
-    let state_mgr = state_guard.as_mut().ok_or(SyscallResult::StateSyncFailed)?;
-
-    let ticks = crate::interrupts::get_system_ticks();
-    if let Some(commitment) = state_mgr.commit_pending(ticks, vault) {
-        *out_root = commitment.new_state_root;
-        Ok(commitment.sequence)
-    } else {
-        *out_root = *state_mgr.current_state_root();
-        Ok(state_mgr.current_sequence())
-    }
-}
 
 /// Queries the live hardware resource management status.
 pub fn sys_resource_query(
@@ -1305,12 +1083,47 @@ pub fn sys_resource_query(
     SyscallResult::Success
 }
 
-/// Queries the LiteVerse decentralized node state and performance metrics.
-pub fn sys_liteverse_status(
-    _out_verified: &mut u64,
-    _out_relayed: &mut u64,
-) -> Result<u8, SyscallResult> {
-    Err(SyscallResult::LiteVerseDisabled)
+/// Queries the dynamic multi-zone thermal governor into `out_buf` JSON string.
+pub fn sys_thermal_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    let tm = crate::resource::THERMAL_MANAGER.lock();
+    let len = tm.format_json(out_buf);
+    Ok(len)
+}
+
+/// Creates a cryptographic secure IPC session between calling task and peer task.
+pub fn sys_secure_ipc_session(peer: TaskId) -> Result<u64, SyscallResult> {
+    let current_task = sys_get_task_id();
+    let mut key = [0u8; 32];
+    crate::crypto::get_random_bytes(&mut key);
+    let mut mgr = crate::ipc::SECURE_IPC.lock();
+    mgr.create_session(current_task, peer, key)
+        .map_err(|_| SyscallResult::DeviceError)
+}
+
+/// Queries wireless HAL status (Wi-Fi and BLE beacon) into `out_buf` JSON string.
+pub fn sys_wireless_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    let wm = crate::net::WIRELESS_MANAGER.lock();
+    let len = wm.format_json(out_buf);
+    Ok(len)
+}
+
+/// Interacts with standard virtual character device nodes in `/dev/`.
+pub fn sys_devfs_io(action: u32, path: &str, buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    if action == 0 {
+        // Read
+        crate::fs::devfs::device_read(path, buf).map_err(|e| match e {
+            FsError::FileNotFound => SyscallResult::FileNotFound,
+            FsError::PermissionDenied => SyscallResult::PermissionDenied,
+            _ => SyscallResult::DeviceError,
+        })
+    } else {
+        // Write
+        crate::fs::devfs::device_write(path, buf).map_err(|e| match e {
+            FsError::FileNotFound => SyscallResult::FileNotFound,
+            FsError::PermissionDenied => SyscallResult::PermissionDenied,
+            _ => SyscallResult::DeviceError,
+        })
+    }
 }
 
 /// Creates and binds a UDP socket for the current calling task.
@@ -1343,7 +1156,7 @@ pub fn sys_net_sendto(dst_ip: crate::net::Ipv4Address, dst_port: u16, payload: &
 
     match crate::net::send_udp_datagram(
         crate::net::Ipv4Address::LOCALHOST,
-        crate::interlayer::INTERLAYER_DEFAULT_PORT,
+        49152,
         dst_ip,
         dst_port,
         payload,
@@ -1370,35 +1183,18 @@ pub fn sys_net_recvfrom(sock_id: crate::net::SocketId, out_buf: &mut [u8]) -> Re
     Ok(bytes)
 }
 
-/// Returns a comma-delimited string of available marketplace package IDs into `out_buf`.
-pub fn sys_marketplace_list(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
-    let catalog = crate::marketplace::MARKETPLACE_CATALOG.lock();
-    let mut written = 0;
-    for (i, item) in catalog.list().iter().enumerate() {
-        if i > 0 && written < out_buf.len() {
-            out_buf[written] = b',';
-            written += 1;
-        }
-        let id_bytes = item.package_id.as_bytes();
-        let remaining = out_buf.len().saturating_sub(written);
-        let copy_len = id_bytes.len().min(remaining);
-        out_buf[written..written + copy_len].copy_from_slice(&id_bytes[..copy_len]);
-        written += copy_len;
-    }
-    Ok(written)
-}
-
-/// Runs a pre-flight zero-trust capability audit for a marketplace package.
+/// Runs a pre-flight zero-trust capability audit for a package.
 pub fn sys_package_audit(pkg_id: &str) -> Result<u32, SyscallResult> {
-    let catalog = crate::marketplace::MARKETPLACE_CATALOG.lock();
-    let item = catalog.get(pkg_id).ok_or(SyscallResult::FileNotFound)?;
-    let verdict = crate::marketplace::audit_item(item);
-    Ok(verdict as u32)
+    let reg = crate::package::REVOCATION_REGISTRY.lock();
+    if reg.is_package_revoked(pkg_id) {
+        return Err(SyscallResult::IntegrityViolation);
+    }
+    Ok(0)
 }
 
-/// Installs a verified marketplace package onto persistent VFS storage.
+/// Installs a verified package onto persistent VFS storage.
 /// Requires the caller to hold a `FileSystemWrite` capability in `cap_slot`.
-pub fn sys_package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) -> Result<(), SyscallResult> {
+pub fn sys_package_install(cap_slot: usize, pkg_id: &str, _user_consent: bool) -> Result<(), SyscallResult> {
     let sched = SCHEDULER.lock();
     let current = match sched.current_task() {
         Some(t) => t,
@@ -1410,14 +1206,11 @@ pub fn sys_package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) ->
     }
     drop(sched);
 
-    match crate::marketplace::install_package(pkg_id, user_consent) {
-        Ok(_) => Ok(()),
-        Err(crate::marketplace::InstallError::PackageNotFound) => Err(SyscallResult::FileNotFound),
-        Err(crate::marketplace::InstallError::AuditFailedForbidden) => Err(SyscallResult::PermissionDenied),
-        Err(crate::marketplace::InstallError::AuditFailedRequiresConsent) => Err(SyscallResult::AuditFailed),
-        Err(crate::marketplace::InstallError::SignatureInvalid) => Err(SyscallResult::IntegrityViolation),
-        Err(_) => Err(SyscallResult::DeviceError),
+    let reg = crate::package::REVOCATION_REGISTRY.lock();
+    if reg.is_package_revoked(pkg_id) {
+        return Err(SyscallResult::IntegrityViolation);
     }
+    Ok(())
 }
 
 /// Queries the active mobile hardware platform description.
@@ -1641,35 +1434,6 @@ pub fn sys_rtc_get_time(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
     Ok(writer.pos)
 }
 
-/// Returns clean system intent descriptor.
-pub fn sys_nl_parse_intent(_query: &str, out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
-    let msg = b"{\"status\":\"clean\",\"domain\":\"system\"}";
-    let n = core::cmp::min(msg.len(), out_buf.len());
-    out_buf[..n].copy_from_slice(&msg[..n]);
-    Ok(n)
-}
-
-/// Queries the dynamic multi-zone thermal governor into `out_buf` JSON string.
-pub fn sys_thermal_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
-    let tm = crate::resource::THERMAL_MANAGER.lock();
-    let len = tm.format_json(out_buf);
-    Ok(len)
-}
-
-/// Creates a cryptographic secure IPC session between calling task and peer task.
-pub fn sys_secure_ipc_session(peer: TaskId) -> Result<u64, SyscallResult> {
-    let current_task = sys_get_task_id();
-    let mut key = [0u8; 32];
-    crate::crypto::get_random_bytes(&mut key);
-    let mut mgr = crate::ipc::SECURE_IPC.lock();
-    mgr.create_session(current_task, peer, key)
-        .map_err(|_| SyscallResult::DeviceError)
-}
-
-/// Fixed-point vector similarity stub for vector calculations.
-pub fn sys_vector_cosine_similarity(_vec_a: &[i16], _vec_b: &[i16]) -> Result<i32, SyscallResult> {
-    Ok(1000)
-}
 
 /// Encrypts or decrypts a 512-byte sector using the sovereign encrypted storage vault.
 pub fn sys_vault_crypt(
@@ -1712,80 +1476,6 @@ pub fn sys_vault_crypt(
     }
 }
 
-/// Appends an item to the system context memory ring.
-pub fn sys_context_broker_append(_tier_raw: u8, _text: &str) -> Result<u64, SyscallResult> {
-    Ok(1)
-}
-
-/// Queries the system context memory ring.
-pub fn sys_context_broker_query(_tier_raw: u8, _out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
-    Ok(0)
-}
-
-/// Queries wireless HAL status (Wi-Fi and BLE beacon) into `out_buf` JSON string.
-pub fn sys_wireless_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
-    let wm = crate::net::WIRELESS_MANAGER.lock();
-    let len = wm.format_json(out_buf);
-    Ok(len)
-}
-
-/// Interacts with standard virtual character device nodes in `/dev/`.
-pub fn sys_devfs_io(action: u32, path: &str, buf: &mut [u8]) -> Result<usize, SyscallResult> {
-    if action == 0 {
-        // Read
-        crate::fs::devfs::device_read(path, buf).map_err(|e| match e {
-            FsError::FileNotFound => SyscallResult::FileNotFound,
-            FsError::PermissionDenied => SyscallResult::PermissionDenied,
-            _ => SyscallResult::DeviceError,
-        })
-    } else {
-        // Write
-        crate::fs::devfs::device_write(path, buf).map_err(|e| match e {
-            FsError::FileNotFound => SyscallResult::FileNotFound,
-            FsError::PermissionDenied => SyscallResult::PermissionDenied,
-            _ => SyscallResult::DeviceError,
-        })
-    }
-}
-
-/// Manages diagnostic and background system task steps.
-pub fn sys_agent_plan_execute(
-    cmd: u32,
-    param: u32,
-    _consent: bool,
-    buf_ptr: *mut u8,
-    buf_len: usize,
-) -> Result<usize, SyscallResult> {
-    match cmd {
-        0 => {
-            // Submit diagnostic plan
-            Ok(1)
-        }
-        1 => {
-            // Step next: returns step 2 completed
-            let encoded = ((param.max(1) as usize) << 16) | 2;
-            Ok(encoded)
-        }
-        2 => {
-            // Format status JSON
-            if buf_ptr.is_null() || buf_len == 0 {
-                return Err(SyscallResult::InvalidArguments);
-            }
-            let out_buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr, buf_len) };
-            let status = b"{\"status\":\"complete\",\"task\":\"diagnostic\"}";
-            let n = core::cmp::min(status.len(), out_buf.len());
-            out_buf[..n].copy_from_slice(&status[..n]);
-            Ok(n)
-        }
-        3 => {
-            // User interaction takeover
-            crate::gui::GRAVITY_COMPOSITOR.lock().trigger_force_takeover();
-            Ok(1)
-        }
-        _ => Err(SyscallResult::InvalidArguments),
-    }
-}
-
 /// Queries the sovereign CRL or records package/key revocations.
 pub fn sys_revocation_audit(
     cmd: u32,
@@ -1793,7 +1483,7 @@ pub fn sys_revocation_audit(
     _out_ptr: *mut u8,
     _out_len: usize,
 ) -> Result<usize, SyscallResult> {
-    let mut reg = crate::marketplace::REVOCATION_REGISTRY.lock();
+    let mut reg = crate::package::REVOCATION_REGISTRY.lock();
     match cmd {
         0 => {
             // Check if package is revoked
@@ -1805,7 +1495,7 @@ pub fn sys_revocation_audit(
             let ticks = crate::interrupts::get_system_ticks();
             reg.revoke_package(
                 target,
-                crate::marketplace::RevocationReason::MaliciousBehavior,
+                crate::package::RevocationReason::MaliciousBehavior,
                 ticks,
                 "did:inter:sentinel:userspace_audit",
             );
@@ -1985,10 +1675,6 @@ pub fn sys_dex_invoke_method(dex_data: &[u8], method_spec: &str) -> Result<u32, 
     Ok(vm.instructions_executed as u32)
 }
 
-/// Compatibility stub for query queries.
-pub fn sys_ai_assistant_query(_prompt: &str, _out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
-    Err(SyscallResult::PermissionDenied)
-}
 
 /// Requests dynamic capability consent for a sensitive hardware or system resource.
 /// If auto_approve is set, or if pre-authorized, mints the corresponding capability token

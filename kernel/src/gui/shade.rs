@@ -35,7 +35,7 @@ impl NotificationShade {
             toggles: [
                 QuickToggle { name: "WiFi", enabled: true, action_intent: "TOGGLE_WIFI" },
                 QuickToggle { name: "5G Cellular", enabled: true, action_intent: "TOGGLE_CELLULAR" },
-                QuickToggle { name: "LiteVerse", enabled: false, action_intent: "TOGGLE_LITEVERSE" },
+                QuickToggle { name: "Bluetooth", enabled: false, action_intent: "TOGGLE_BT" },
                 QuickToggle { name: "Battery Saver", enabled: false, action_intent: "TOGGLE_BATTERY_SAVER" },
                 QuickToggle { name: "Interactive DVFS", enabled: true, action_intent: "TOGGLE_DVFS" },
             ],

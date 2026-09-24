@@ -30,32 +30,32 @@ pub fn init() {
 
     // 1. Nominal conditions test
     assert!(rm.is_tier_permitted(WorkloadTier::ForegroundUserApp));
-    assert!(rm.is_tier_permitted(WorkloadTier::StateSynchronization));
-    assert!(rm.is_tier_permitted(WorkloadTier::LiteVerse));
-    assert!(rm.is_tier_permitted(WorkloadTier::BackgroundAi));
-    serial_println!("[TEST] Resource Manager Nominal State: All 9 workload tiers permitted.");
+    assert!(rm.is_tier_permitted(WorkloadTier::BackgroundSync));
+    assert!(rm.is_tier_permitted(WorkloadTier::BackgroundNetwork));
+    assert!(rm.is_tier_permitted(WorkloadTier::BackgroundTasks));
+    serial_println!("[TEST] Resource Manager Nominal State: All workload tiers permitted.");
 
     // 2. Low-battery test (< 20% discharging)
     rm.update_battery(14, false);
     assert!(rm.is_tier_permitted(WorkloadTier::ForegroundUserApp));
-    assert!(rm.is_tier_permitted(WorkloadTier::StateSynchronization));
-    assert!(!rm.is_tier_permitted(WorkloadTier::LiteVerse), "LiteVerse must pause on low battery");
-    assert!(!rm.is_tier_permitted(WorkloadTier::BackgroundAi), "Background AI must pause on low battery");
-    serial_println!("[TEST] Resource Manager Low-Battery Policy: LiteVerse & Background AI paused at 14% battery.");
+    assert!(rm.is_tier_permitted(WorkloadTier::BackgroundSync));
+    assert!(!rm.is_tier_permitted(WorkloadTier::BackgroundNetwork), "Background network must pause on low battery");
+    assert!(!rm.is_tier_permitted(WorkloadTier::BackgroundTasks), "Background tasks must pause on low battery");
+    serial_println!("[TEST] Resource Manager Low-Battery Policy: Background network paused at 14% battery.");
 
     // 3. Thermal throttling test (>= 75°C)
     rm.update_battery(85, false); // Restore battery
     rm.update_thermal(78);         // Thermal spike
     assert!(rm.thermal.throttling);
-    assert!(!rm.is_tier_permitted(WorkloadTier::LiteVerse), "LiteVerse must throttle at high temperature");
+    assert!(!rm.is_tier_permitted(WorkloadTier::BackgroundNetwork), "Background network must throttle at high temperature");
     serial_println!("[TEST] Resource Manager Thermal Policy: Throttling engaged at 78°C.");
 
     // 4. Foreground preemption test
     rm.update_thermal(40); // Restore thermal nominal
     rm.set_foreground_active(true);
     assert!(rm.is_tier_permitted(WorkloadTier::ForegroundUserApp));
-    assert!(!rm.is_tier_permitted(WorkloadTier::BackgroundAi), "Foreground task must preempt background AI");
-    serial_println!("[TEST] Resource Manager Preemption Policy: Foreground task preempts background AI.");
+    assert!(!rm.is_tier_permitted(WorkloadTier::BackgroundTasks), "Foreground task must preempt background tasks");
+    serial_println!("[TEST] Resource Manager Preemption Policy: Foreground task preempts background tasks.");
 
     rm.set_foreground_active(false); // Reset to nominal
 

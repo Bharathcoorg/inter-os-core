@@ -147,7 +147,7 @@ impl CameraApp {
         self.apply_isp_tone_curve(&mut raw_buf);
 
         let (r, g, b) = self.compute_histogram(&raw_buf);
-        let scene_str = match meta[2] {
+        let _scene_str = match meta[2] {
             1 => "Document / High-Contrast Text",
             2 => "Portrait / Human Subject",
             3 => "Landscape / Outdoor Horizon",
@@ -177,12 +177,6 @@ impl CameraApp {
         std::log(
             0,
             "[CAMERA APP] Shutter fired: Captured 160x120 frame, ISP tone-mapped, encrypted to Vault Sector 201.",
-        ).ok();
-
-        // Feed scene intelligence to on-device AI Context Broker
-        std::context_broker_append(
-            1,
-            scene_str,
         ).ok();
 
         Ok(self.total_photos)

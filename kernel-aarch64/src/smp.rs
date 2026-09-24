@@ -56,7 +56,7 @@ pub enum IpiKind {
 pub enum TaskAffinityClass {
     BackgroundDaemon, // Pins to LITTLE cores to save battery
     InteractiveUi,    // Pins to big cores for low latency
-    CameraNeuralNpu,  // Pins to big cores with vector acceleration
+    ComputeVector,    // Pins to big cores with vector acceleration
 }
 
 #[derive(Debug, Clone)]
@@ -215,7 +215,7 @@ impl SmpController {
 
         let target_cluster = match affinity {
             TaskAffinityClass::BackgroundDaemon => CoreCluster::LittleEfficiency,
-            TaskAffinityClass::InteractiveUi | TaskAffinityClass::CameraNeuralNpu => CoreCluster::BigPerformance,
+            TaskAffinityClass::InteractiveUi | TaskAffinityClass::ComputeVector => CoreCluster::BigPerformance,
         };
 
         // Find the least loaded online core in target cluster, fallback to any online core

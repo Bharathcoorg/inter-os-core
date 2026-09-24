@@ -692,11 +692,6 @@ pub fn spawn_app_calculator(id_security: TaskId) -> TaskId {
     id
 }
 
-/// Compatibility alias
-pub fn spawn_app_ai_assistant(id_security: TaskId) -> TaskId {
-    spawn_app_calculator(id_security)
-}
-
 /// Trampoline for Sovereign Browser App (Ring 3)
 pub extern "C" fn app_browser_trampoline() -> ! {
     serial_println!("[RING 0] Loading Sovereign Browser App binary...");

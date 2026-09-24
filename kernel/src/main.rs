@@ -25,12 +25,9 @@ pub mod fs;
 pub mod gdt;
 pub mod gui;
 pub mod hal;
-pub mod identity;
 pub mod input;
-pub mod interlayer;
 pub mod interrupts;
 pub mod ipc;
-pub mod marketplace;
 pub mod memory;
 pub mod net;
 pub mod package;
@@ -38,7 +35,6 @@ pub mod panic;
 pub mod resource;
 pub mod sensor;
 pub mod serial;
-pub mod state;
 pub mod storage;
 pub mod syscall;
 pub mod task;
@@ -81,9 +77,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     // 2. Output diagnostic banner to UART serial COM1
     serial_println!("================================================================================");
-    serial_println!("  INTER OS v1.3 -- Sovereign AI-Native Microkernel (x86_64)");
+    serial_println!("  INTER OS CORE -- Open-Source Rust Mobile Microkernel (x86_64)");
     serial_println!("  Security: Zero-Trust Capability Microkernel | Mode: Ring 0/Ring 3 User Separation");
-    serial_println!("  Subsystem: IMU Sensors, Battery Fuel Gauge, ACR Intent Bridge, Audio & Keystore");
+    serial_println!("  Subsystem: Hardware Drivers, Memory Management, IPC, VFS & Capabilities");
     serial_println!("================================================================================");
 
     // 3. Initialize Global Descriptor Table (GDT) and Task State Segment (TSS)
@@ -295,11 +291,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // 12. Initialize Android Compatibility Runtime (Zone 4 Isolation)
     compat::android::init();
 
-    // 13. Initialize Sovereign Identity Vault (RFC 4231 HMAC-SHA256, W3C DID)
-    identity::init();
 
-    // 14. Initialize Operating System State Manager (Merkle State Chain)
-    state::init();
 
     // 15. Initialize Unified Dynamic Resource Manager (Priorities & Preemption)
     resource::init();
@@ -316,11 +308,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // 21. Initialize In-Kernel Zero-Allocation Network Stack
     net::init();
 
-    // 22. Initialize InterLayer Zero-Trust Protocol Subsystem (Principle #14)
-    interlayer::init();
 
-    // 23. Initialize P2P AMCP Package Marketplace & Attestation Protocol
-    marketplace::init();
 
     // 24. Initialize Multi-Architecture Mobile SoC Hardware Abstraction Layer (HAL)
     hal::init();
@@ -499,61 +487,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     IPC_ROUTER.lock().register_task(id_storage);
     serial_println!("[OK] Spawned Task 4: storage_daemon (ID: {:?})", id_storage);
 
-    // Task 5: State Synchronization & Attestation Worker
-    let mut caps_state_sync = CapabilityTable::new(8);
-    caps_state_sync
-        .insert(Capability {
-            id: CapabilityId(501),
-            cap_type: CapabilityType::SerialOutput,
-            rights: Rights::WRITE,
-            object_id: 0,
-        })
-        .ok(); // Slot 0
-    caps_state_sync
-        .insert(Capability {
-            id: CapabilityId(502),
-            cap_type: CapabilityType::TimerTickRead,
-            rights: Rights::READ,
-            object_id: 0,
-        })
-        .ok(); // Slot 1
 
-    let id_state_sync = SCHEDULER.lock().spawn(
-        "state_sync_worker",
-        task_state_sync_worker,
-        caps_state_sync,
-        1,
-    );
-    IPC_ROUTER.lock().register_task(id_state_sync);
-    serial_println!("[OK] Spawned Task 5: state_sync_worker (ID: {:?})", id_state_sync);
-
-    // Task 6: LiteVerse Subordinated Network Worker
-    let mut caps_liteverse = CapabilityTable::new(8);
-    caps_liteverse
-        .insert(Capability {
-            id: CapabilityId(601),
-            cap_type: CapabilityType::SerialOutput,
-            rights: Rights::WRITE,
-            object_id: 0,
-        })
-        .ok(); // Slot 0
-    caps_liteverse
-        .insert(Capability {
-            id: CapabilityId(602),
-            cap_type: CapabilityType::TimerTickRead,
-            rights: Rights::READ,
-            object_id: 0,
-        })
-        .ok(); // Slot 1
-
-    let id_liteverse = SCHEDULER.lock().spawn(
-        "liteverse_worker",
-        task_liteverse_worker,
-        caps_liteverse,
-        1,
-    );
-    IPC_ROUTER.lock().register_task(id_liteverse);
-    serial_println!("[OK] Spawned Task 6: liteverse_worker (ID: {:?})", id_liteverse);
 
     // Task 7: Native Graphical Compositor & Event Loop Shell
     let mut caps_compositor = CapabilityTable::new(8);
@@ -639,41 +573,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let id_user_init = task::spawn_user_init(id_security);
     IPC_ROUTER.lock().register_task(id_user_init);
 
-    // Task 10: P2P AMCP Marketplace Worker Service
-    let mut caps_market = CapabilityTable::new(8);
-    caps_market
-        .insert(Capability {
-            id: CapabilityId(1001),
-            cap_type: CapabilityType::SerialOutput,
-            rights: Rights::WRITE,
-            object_id: 0,
-        })
-        .ok();
-    caps_market
-        .insert(Capability {
-            id: CapabilityId(1002),
-            cap_type: CapabilityType::IpcSend,
-            rights: Rights::WRITE,
-            object_id: id_security.0,
-        })
-        .ok();
-    caps_market
-        .insert(Capability {
-            id: CapabilityId(1003),
-            cap_type: CapabilityType::NetworkReceive,
-            rights: Rights::READ,
-            object_id: 0,
-        })
-        .ok();
 
-    let id_market = SCHEDULER.lock().spawn(
-        "marketplace_worker",
-        marketplace::task_marketplace_worker,
-        caps_market,
-        1,
-    );
-    IPC_ROUTER.lock().register_task(id_market);
-    serial_println!("[OK] Spawned Task 10: marketplace_worker (ID: {:?})", id_market);
 
     // Task 11: Sovereign Telephony & Cellular Modem Service
     let mut caps_telephony = CapabilityTable::new(8);
@@ -1037,56 +937,7 @@ extern "C" fn task_storage_daemon() -> ! {
     }
 }
 
-/// Task 5: State Synchronization & Attestation Worker
-/// Computes periodic state deltas, generates Merkle root commitments,
-/// and verifies continuous cryptographic state chain integrity.
-extern "C" fn task_state_sync_worker() -> ! {
-    let mut synced = false;
-    loop {
-        if !synced {
-            let mut did_buf = [0u8; 64];
-            if let Ok(did_len) = syscall::sys_identity_get_did(&mut did_buf) {
-                if let Ok(_did_str) = core::str::from_utf8(&did_buf[..did_len]) {
-                    syscall::sys_log(0, "[STATE SYNC WORKER] Sovereign Identity attested. Anchoring state delta...");
-                }
-            }
 
-            // Commit pending state changes via syscall
-            let mut root = [0u8; 32];
-            if let Ok(seq) = syscall::sys_state_commit(&mut root) {
-                let _ = seq;
-                syscall::sys_log(0, "[STATE SYNC WORKER] State Delta anchored. Merkle Root committed & attested.");
-                synced = true;
-            }
-        }
-        syscall::sys_yield();
-    }
-}
-
-/// Task 6: LiteVerse Subordinated Network Worker
-/// Subordinated to foreground workloads and resource manager constraints.
-/// Participates in distributed block verification and isolated shared storage relaying.
-extern "C" fn task_liteverse_worker() -> ! {
-    let mut verified = false;
-    loop {
-        if !verified {
-            let mut battery = 0u8;
-            let mut temp = 0u8;
-            let mut throttling = false;
-            syscall::sys_resource_query(&mut battery, &mut temp, &mut throttling);
-
-            if !throttling && battery >= 20 {
-                let mut blocks_verified = 0u64;
-                let mut bytes_relayed = 0u64;
-                if let Ok(_state) = syscall::sys_liteverse_status(&mut blocks_verified, &mut bytes_relayed) {
-                    syscall::sys_log(0, "[LITEVERSE WORKER] Subordinated network worker active. Quota checked: /liteverse/shared/ isolated.");
-                    verified = true;
-                }
-            }
-        }
-        syscall::sys_yield();
-    }
-}
 
 /// Task 7: Native Graphical Compositor & Event Loop Shell
 /// Pumps hardware input events from the non-allocating ring buffer,
@@ -1118,32 +969,18 @@ extern "C" fn task_compositor_shell() -> ! {
     }
 }
 
-/// Task 8: Network & InterLayer Client Worker
+/// Task 8: Network Worker
 ///
-/// Polls inbound network packets, demultiplexes IPv4/UDP datagrams,
-/// and synchronizes signed sovereign state deltas over the InterLayer protocol.
+/// Polls inbound network packets and demultiplexes IPv4/UDP datagrams.
 extern "C" fn task_net_worker() -> ! {
-    let mut synced = false;
+    let mut initial = true;
     loop {
         // 1. Poll network interface for incoming packets
         let _polled = net::poll_network_interface();
 
-        // 2. Perform initial InterLayer sovereign state delta sync
-        if !synced {
+        if initial {
             syscall::sys_log(0, "[NET WORKER] Network loop active: polling loopback & virtual NIC.");
-
-            let mut state_root = [0u8; 32];
-            if let Ok(_) = syscall::sys_state_commit(&mut state_root) {
-                let sched = SCHEDULER.lock();
-                if let Some(cur) = sched.current_task() {
-                    let caps = cur.cap_table.clone();
-                    drop(sched);
-                    let mut client = interlayer::INTERLAYER_CLIENT.lock();
-                    let _ = client.sync_state_delta(net::Ipv4Address::LOCALHOST, state_root, &caps);
-                    syscall::sys_log(0, "[NET WORKER] InterLayer Sovereign State Delta synchronized over UDP 8443.");
-                    synced = true;
-                }
-            }
+            initial = false;
         }
 
         syscall::sys_yield();

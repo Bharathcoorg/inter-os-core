@@ -18,7 +18,7 @@ pub enum KeySlot {
     SovereignMasterKey,
     TelephonyAuthKey,
     PaymentCredentialKey,
-    LiteVerseP2PKey,
+    NetworkP2PKey,
     AppSlot(u8),
 }
 
@@ -28,7 +28,7 @@ impl KeySlot {
             0 => Some(KeySlot::SovereignMasterKey),
             1 => Some(KeySlot::TelephonyAuthKey),
             2 => Some(KeySlot::PaymentCredentialKey),
-            3 => Some(KeySlot::LiteVerseP2PKey),
+            3 => Some(KeySlot::NetworkP2PKey),
             4..=15 => Some(KeySlot::AppSlot(val as u8)),
             _ => None,
         }
@@ -39,7 +39,7 @@ impl KeySlot {
             KeySlot::SovereignMasterKey => 0,
             KeySlot::TelephonyAuthKey => 1,
             KeySlot::PaymentCredentialKey => 2,
-            KeySlot::LiteVerseP2PKey => 3,
+            KeySlot::NetworkP2PKey => 3,
             KeySlot::AppSlot(idx) => idx as usize,
         }
     }
@@ -227,7 +227,7 @@ pub fn init() {
     let k0 = ks.derive_key(KeySlot::SovereignMasterKey, b"master");
     let k1 = ks.derive_key(KeySlot::TelephonyAuthKey, b"esim");
     let k2 = ks.derive_key(KeySlot::PaymentCredentialKey, b"pay");
-    let k3 = ks.derive_key(KeySlot::LiteVerseP2PKey, b"sync");
+    let k3 = ks.derive_key(KeySlot::NetworkP2PKey, b"net");
 
     assert_ne!(k0, [0u8; 32]);
     assert_ne!(k1, [0u8; 32]);

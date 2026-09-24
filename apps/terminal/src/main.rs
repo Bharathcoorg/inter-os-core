@@ -112,14 +112,8 @@ pub extern "C" fn _start() -> ! {
     // 6. Execute Zero-Copy DMA Pipeline
     term.execute_command("dma");
 
-    // 5. Execute Privacy Shield Sanitization
-    term.execute_command("privacy PII");
-
-    // 6. Execute Local AI Inference
-    term.execute_command("ai query");
-
-    // 7. Execute Working Memory Retrieval
-    term.execute_command("memory");
+    // 5. Execute Network Ping Diagnostic
+    term.execute_command("ping");
 
     // 8. Terminal Asynchronous Event Loop
     let mut term_ticks: u32 = 0;

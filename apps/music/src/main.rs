@@ -158,16 +158,7 @@ pub extern "C" fn _start() -> ! {
     // 2. Encrypt Track Record in Sector 204
     music.encrypt_track_record();
 
-    // 3. Sovereign Privacy Shield Scrubbing
-    let raw_query = "Playing track 'Sovereign Symphony' by user did:inter:composer?listen_tracking=true";
-    let mut sanitized = [0u8; 128];
-    if let Ok(slen) = std::privacy_shield_audit(raw_query, &mut sanitized) {
-        if slen > 0 {
-            std::log(0, "[MUSIC APP] Privacy Shield: Listening telemetry stripped; 100% private local playback.").ok();
-        }
-    }
-
-    // 4. Hardware Musical Arpeggio Synthesis
+    // 3. Hardware Musical Arpeggio Synthesis
     music.play_arpeggio();
 
     // 5. Zero-Copy DMA Audio Streaming over Pipe 1

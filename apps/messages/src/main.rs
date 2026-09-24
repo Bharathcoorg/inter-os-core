@@ -99,13 +99,6 @@ impl MessagesApp {
     pub fn send_message(&mut self, peer_did: &'static str, raw_body: &'static str) {
         self.total_sent += 1;
 
-        // 1. Sovereign Privacy Shield Message Scrubbing
-        let mut clean_msg = [0u8; 128];
-        if let Ok(slen) = std::privacy_shield_audit(raw_body, &mut clean_msg) {
-            if slen > 0 {
-                std::log(0, "[MESSAGES APP] Privacy Shield: Message sanitized; zero PII metadata leakage.").ok();
-            }
-        }
 
         // 2. Persist Encrypted Message in Sovereign Vault (Sector 202)
         let mut sector_buf = [0u8; 512];
@@ -137,11 +130,6 @@ pub extern "C" fn _start() -> ! {
     // 1. Ingest Hardware Keystore Key
     messages.derive_messaging_key();
 
-    // 2. Sovereign DID Peer Identity Attestation
-    let mut did_buf = [0u8; 64];
-    if let Ok(_len) = std::identity_get_did(&mut did_buf) {
-        std::log(0, "[MESSAGES APP] Peer identity verified: DID attestation valid, sovereign handshake established.").ok();
-    }
 
     // 3. Telephony Cellular Modem HAL Query
     let mut modem_buf = [0u8; 256];

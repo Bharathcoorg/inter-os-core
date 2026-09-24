@@ -139,35 +139,19 @@ impl CalendarApp {
         false
     }
 
-    /// Parses and inserts a natural language scheduling query.
-    pub fn schedule_intent(&mut self, nl_query: &'static str) {
-        // 1. Natural Language Intent Extraction
-        let mut intent_buf = [0u8; 128];
-        if let Ok(n) = std::nl_parse_intent(nl_query, &mut intent_buf) {
-            if n > 0 {
-                std::log(0, "[CALENDAR APP] Natural language intent resolved: Event = 'dev sync', Time = 15:00 UTC.").ok();
-            }
-        }
-
-        // 2. Sovereign Privacy Shield Scrubbing
-        let mut sanitized_buf = [0u8; 128];
-        if let Ok(slen) = std::privacy_shield_audit(nl_query, &mut sanitized_buf) {
-            if slen > 0 {
-                std::log(0, "[CALENDAR APP] Privacy Shield: Event scrubbed; zero cloud calendar metadata leakage.").ok();
-            }
-        }
-
-        // 3. Encrypt Updated Agenda in Sovereign Vault (Sector 203)
+    /// Inserts a scheduled event and encrypts in persistent storage.
+    pub fn schedule_event(&mut self, event_name: &'static str) {
+        // 1. Encrypt Updated Agenda in Storage Vault (Sector 203)
         let mut agenda_sector = [0u8; 512];
-        let copy_len = nl_query.len().min(128);
-        agenda_sector[..copy_len].copy_from_slice(&nl_query.as_bytes()[..copy_len]);
+        let copy_len = event_name.len().min(128);
+        agenda_sector[..copy_len].copy_from_slice(&event_name.as_bytes()[..copy_len]);
         let iv = [0x77u8; 16];
         if std::vault_encrypt_sector(203, &mut agenda_sector, &iv).is_ok() {
             self.sector_encrypted = true;
             std::log(0, "[CALENDAR APP] Sector 203: Updated agenda encrypted with AES-XTS/HMAC.").ok();
         }
 
-        // 4. Acoustic Reminder Chime (A-Major: 440Hz -> 554Hz -> 659Hz)
+        // 2. Acoustic Reminder Chime (A-Major: 440Hz -> 554Hz -> 659Hz)
         std::audio_play_tone(440).ok();
         std::audio_play_tone(554).ok();
         std::audio_play_tone(659).ok();
@@ -179,7 +163,7 @@ impl CalendarApp {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    std::log(0, "[CALENDAR APP (Ring 3)] Sovereign Chrono-Planner & Autonomous Agenda online.").ok();
+    std::log(0, "[CALENDAR APP (Ring 3)] Calendar Agenda service online.").ok();
 
     let mut calendar = CalendarApp::new();
 
@@ -194,8 +178,8 @@ pub extern "C" fn _start() -> ! {
         std::log(0, "[CALENDAR APP] Gregorian date math verified: Sept 2026 has 30 days, starting on Tuesday.").ok();
     }
 
-    // 3. Schedule Natural Language Intent
-    calendar.schedule_intent("schedule dev sync tomorrow at 3pm");
+    // 3. Schedule Calendar Event
+    calendar.schedule_event("dev sync at 15:00 UTC");
 
     // 4. Sovereign Asynchronous Event Reactor Loop
     let interest_mask = std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK;

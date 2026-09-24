@@ -22,17 +22,11 @@ pub enum SyscallNumber {
     FsStat = 12,
     BlockRead = 13,
     VerifyPackage = 14,
-    McpInvoke = 15,
     WasmExecute = 16,
-    IdentityGetDid = 17,
-    StateCommit = 18,
     ResourceQuery = 19,
-    LiteVerseStatus = 20,
     NetSocket = 21,
     NetSendTo = 22,
     NetRecvFrom = 23,
-    MarketplaceList = 24,
-    MarketplaceGet = 25,
     PackageAudit = 26,
     PackageInstall = 27,
     HalQueryPlatform = 28,
@@ -45,24 +39,18 @@ pub enum SyscallNumber {
     BatteryQuery = 36,
     AndroidBridgeIntent = 37,
     RtcGetTime = 38,
-    NlParseIntent = 39,
     ThermalQuery = 40,
     SecureIpcSession = 41,
-    VectorCosineSimilarity = 42,
     VaultCrypt = 43,
-    ContextBroker = 44,
     WirelessQuery = 45,
     DevFsIo = 46,
-    AgentPlanExecute = 47,
     RevocationAudit = 48,
     CapDelegate = 49,
-    PrivacyShieldAudit = 50,
     SurfacePhysics = 51,
     ApkInstallAudit = 52,
     DexVerifyExec = 53,
     CameraCapture = 54,
     DexInvokeMethod = 55,
-    AiAssistantQuery = 56,
     CapRequestConsent = 57,
     ShareSheetDispatch = 58,
     ShmPipeCreate = 59,
@@ -515,21 +503,6 @@ pub fn net_recvfrom(sock_id: u32, out_buf: &mut [u8]) -> Result<usize, i64> {
     }
 }
 
-/// Queries the device's sovereign Decentralized Identifier (DID).
-pub fn identity_get_did(out_buf: &mut [u8]) -> Result<usize, i64> {
-    let ret = unsafe {
-        syscall2(
-            SyscallNumber::IdentityGetDid,
-            out_buf.as_mut_ptr() as u64,
-            out_buf.len() as u64,
-        )
-    };
-    if ret >= 0 {
-        Ok(ret as usize)
-    } else {
-        Err(ret)
-    }
-}
 
 /// Queries hardware battery, thermals, and throttling status.
 pub fn resource_query() -> (u8, u8, bool) {
@@ -547,21 +520,6 @@ pub fn resource_query() -> (u8, u8, bool) {
     (battery, temp, throttling)
 }
 
-/// Queries the list of available marketplace package IDs.
-pub fn marketplace_list(out_buf: &mut [u8]) -> Result<usize, i64> {
-    let ret = unsafe {
-        syscall2(
-            SyscallNumber::MarketplaceList,
-            out_buf.as_mut_ptr() as u64,
-            out_buf.len() as u64,
-        )
-    };
-    if ret >= 0 {
-        Ok(ret as usize)
-    } else {
-        Err(ret)
-    }
-}
 
 /// Performs a zero-trust pre-flight capability audit for a marketplace package.
 /// Returns audit verdict (0 = Approved, 1 = RequiresConsent, 2 = BlockedForbidden, 3 = SignatureInvalid).
@@ -791,23 +749,6 @@ pub fn rtc_get_time(out_buf: &mut [u8]) -> Result<usize, i64> {
     }
 }
 
-/// Parses a natural language user query into an on-device structured AMCP intent JSON string.
-pub fn nl_parse_intent(query: &str, out_buf: &mut [u8]) -> Result<usize, i64> {
-    let ret = unsafe {
-        syscall4(
-            SyscallNumber::NlParseIntent,
-            query.as_ptr() as u64,
-            query.len() as u64,
-            out_buf.as_mut_ptr() as u64,
-            out_buf.len() as u64,
-        )
-    };
-    if ret >= 0 {
-        Ok(ret as usize)
-    } else {
-        Err(ret)
-    }
-}
 
 /// Queries multi-zone mobile thermal temperatures and cooling policy JSON string.
 pub fn thermal_query(out_buf: &mut [u8]) -> Result<usize, i64> {
@@ -841,22 +782,6 @@ pub fn secure_ipc_session(peer_task: u64, out_session_id: &mut u64) -> Result<()
     }
 }
 
-/// Computes on-device fixed-point cosine similarity between two 64-dimensional vectors.
-/// Returns similarity scaled by 10,000 (10000 = 1.0000).
-pub fn vector_cosine_similarity(vec_a: &[i16], vec_b: &[i16]) -> Result<i32, i64> {
-    if vec_a.len() != 64 || vec_b.len() != 64 {
-        return Err(-3); // InvalidArguments
-    }
-    let ret = unsafe {
-        syscall3(
-            SyscallNumber::VectorCosineSimilarity,
-            vec_a.as_ptr() as u64,
-            vec_b.as_ptr() as u64,
-            64,
-        )
-    };
-    Ok(ret as i32)
-}
 
 /// Encrypts a 512-byte sector using the sovereign encrypted storage vault.
 pub fn vault_encrypt_sector(block_index: u64, buf: &mut [u8; 512], iv: &[u8; 16]) -> Result<(), i64> {
@@ -896,41 +821,6 @@ pub fn vault_decrypt_sector(block_index: u64, buf: &mut [u8; 512], iv: &[u8; 16]
     }
 }
 
-/// Appends an entry to the on-device AI Context Broker working memory ring.
-pub fn context_broker_append(tier: u8, text: &str) -> Result<u64, i64> {
-    let ret = unsafe {
-        syscall4(
-            SyscallNumber::ContextBroker,
-            0,
-            tier as u64,
-            text.as_ptr() as u64,
-            text.len() as u64,
-        )
-    };
-    if ret >= 0 {
-        Ok(ret as u64)
-    } else {
-        Err(ret)
-    }
-}
-
-/// Queries working memory from the on-device AI Context Broker filtered by privacy tier.
-pub fn context_broker_query(tier: u8, out_buf: &mut [u8]) -> Result<usize, i64> {
-    let ret = unsafe {
-        syscall4(
-            SyscallNumber::ContextBroker,
-            1,
-            tier as u64,
-            out_buf.as_mut_ptr() as u64,
-            out_buf.len() as u64,
-        )
-    };
-    if ret >= 0 {
-        Ok(ret as usize)
-    } else {
-        Err(ret)
-    }
-}
 
 /// Queries mobile wireless HAL status (Wi-Fi and BLE beacon) into `out_buf` JSON string.
 pub fn wireless_query(out_buf: &mut [u8]) -> Result<usize, i64> {
@@ -986,83 +876,6 @@ pub fn devfs_write(path: &str, buf: &[u8]) -> Result<usize, i64> {
     }
 }
 
-/// Submits a multi-step system diagnostic task pipeline to the kernel execution engine.
-pub fn agent_plan_submit(name: &str) -> Result<u32, i64> {
-    let ret = unsafe {
-        syscall5(
-            SyscallNumber::AgentPlanExecute,
-            0,
-            0,
-            0,
-            name.as_ptr() as u64,
-            name.len() as u64,
-        )
-    };
-    if ret >= 0 {
-        Ok(ret as u32)
-    } else {
-        Err(ret)
-    }
-}
-
-/// Advances a system diagnostic task pipeline to the next step, providing user confirmation if required.
-pub fn agent_plan_step(plan_id: u32, consent: bool) -> Result<(u16, u16), i64> {
-    let ret = unsafe {
-        syscall5(
-            SyscallNumber::AgentPlanExecute,
-            1,
-            plan_id as u64,
-            if consent { 1 } else { 0 },
-            0,
-            0,
-        )
-    };
-    if ret >= 0 {
-        let step_num = ((ret as usize) >> 16) as u16;
-        let status = (ret as usize & 0xFFFF) as u16;
-        Ok((step_num, status))
-    } else {
-        Err(ret)
-    }
-}
-
-/// Formats the execution status of an autonomous agent plan into JSON.
-pub fn agent_plan_status(plan_id: u32, out_buf: &mut [u8]) -> Result<usize, i64> {
-    let ret = unsafe {
-        syscall5(
-            SyscallNumber::AgentPlanExecute,
-            2,
-            plan_id as u64,
-            0,
-            out_buf.as_mut_ptr() as u64,
-            out_buf.len() as u64,
-        )
-    };
-    if ret >= 0 {
-        Ok(ret as usize)
-    } else {
-        Err(ret)
-    }
-}
-
-/// Triggers immediate manual hardware force-takeover, aborting all active autonomous plans.
-pub fn agent_plan_force_takeover() -> Result<bool, i64> {
-    let ret = unsafe {
-        syscall5(
-            SyscallNumber::AgentPlanExecute,
-            3,
-            0,
-            0,
-            0,
-            0,
-        )
-    };
-    if ret >= 0 {
-        Ok(ret != 0)
-    } else {
-        Err(ret)
-    }
-}
 
 /// Checks if a package is revoked on the sovereign Certificate Revocation List (CRL).
 pub fn revocation_is_package_revoked(package_id: &str) -> Result<bool, i64> {
@@ -1127,23 +940,6 @@ pub fn cap_delegate(
     }
 }
 
-/// Sanitizes an input prompt/datagram by redacting personal identifiable information (PII).
-pub fn privacy_shield_audit(input: &str, out_buf: &mut [u8]) -> Result<usize, i64> {
-    let ret = unsafe {
-        syscall4(
-            SyscallNumber::PrivacyShieldAudit,
-            input.as_ptr() as u64,
-            input.len() as u64,
-            out_buf.as_mut_ptr() as u64,
-            out_buf.len() as u64,
-        )
-    };
-    if ret >= 0 {
-        Ok(ret as usize)
-    } else {
-        Err(ret)
-    }
-}
 
 /// Interacts with the microkernel fluid inertial physics scroller (0=down, 1=move, 2=up, 3=tick).
 pub fn surface_physics(action: u32, y: i32, viewport_h: i32, content_h: i32) -> Result<i32, i64> {
@@ -1328,23 +1124,6 @@ pub fn dex_invoke_method(dex_data: &[u8], method_spec: &str) -> Result<u32, i64>
     }
 }
 
-/// Queries the on-device AI model (Qwen2.5-0.5B) for intent synthesis and response generation.
-pub fn ai_assistant_query(prompt: &str, output_buf: &mut [u8]) -> Result<usize, i64> {
-    let ret = unsafe {
-        syscall4(
-            SyscallNumber::AiAssistantQuery,
-            prompt.as_ptr() as u64,
-            prompt.len() as u64,
-            output_buf.as_mut_ptr() as u64,
-            output_buf.len() as u64,
-        )
-    };
-    if ret >= 0 {
-        Ok(ret as usize)
-    } else {
-        Err(ret)
-    }
-}
 
 /// Sensitive hardware and system resource categories requiring user capability consent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

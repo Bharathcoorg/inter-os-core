@@ -41,7 +41,7 @@ pub struct SettingsApp {
     pub wifi_enabled: bool,
     pub ble_beacon_enabled: bool,
     pub auto_brightness: bool,
-    pub privacy_shield_strict: bool,
+    pub security_enforced: bool,
     pub cached_battery_soc: u8,
     pub cached_temp_c: u8,
 }
@@ -54,9 +54,9 @@ impl SettingsApp {
             wifi_enabled: true,
             ble_beacon_enabled: true,
             auto_brightness: true,
-            privacy_shield_strict: true,
-            cached_battery_soc: 94,
-            cached_temp_c: 42,
+            security_enforced: true,
+            cached_battery_soc: 0,
+            cached_temp_c: 0,
         }
     }
 
@@ -108,13 +108,6 @@ impl SettingsApp {
 
     /// Audits security identity and hardware keystore slots.
     pub fn audit_security(&mut self) {
-        let mut did_buf = [0u8; 64];
-        if let Ok(len) = std::identity_get_did(&mut did_buf) {
-            if len > 0 {
-                std::log(0, "[SETTINGS APP] Security: Device DID authenticated, W3C DID attestation valid.").ok();
-            }
-        }
-
         let mut key_buf = [0u8; 32];
         if let Ok(32) = std::keystore_derive(0, &mut key_buf) {
             std::log(0, "[SETTINGS APP] Keystore: Master hardware root of trust (Slot 0) ONLINE.").ok();
@@ -129,7 +122,7 @@ impl SettingsApp {
                 std::log(0, "[SETTINGS APP] System Time: Hardware RTC synchronized with UTC civil clock.").ok();
             }
         }
-        std::log(0, "[SETTINGS APP] About: Inter OS v3.4 (x86_64 Long Mode, Ring 0/Ring 3 User Separation).").ok();
+        std::log(0, "[SETTINGS APP] About: Inter OS Core (x86_64, Ring 0/Ring 3 User Separation).").ok();
     }
 }
 

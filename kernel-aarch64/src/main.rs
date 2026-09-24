@@ -1,8 +1,7 @@
-//! Inter OS — AArch64 Sovereign Smartphone Microkernel (v4.0)
+//! Inter OS Core — AArch64 Mobile Microkernel
 //!
 //! Bare-metal AArch64 entry point and hardware bring-up sequence for physical
-//! mobile ARM64 smartphones (PinePhone Allwinner A64, Qualcomm Snapdragon, MediaTek Dimensity)
-//! and QEMU `virt` machine.
+//! mobile ARM64 smartphones and QEMU `virt` machine.
 //!
 //! Executes with zero ambient authority, zero mocks, and direct register-level MMIO drivers.
 
@@ -11,7 +10,6 @@
 
 extern crate alloc;
 
-pub mod ai;
 pub mod allocator;
 pub mod capability;
 pub mod crypto;
@@ -37,11 +35,9 @@ pub mod touch;
 pub mod uart;
 pub mod user;
 pub mod wasm;
-pub mod liteverse;
 pub mod recovery;
 pub mod ota;
 pub mod audio;
-pub mod intent;
 pub mod camera;
 pub mod sms;
 pub mod nfc;
@@ -52,7 +48,6 @@ pub mod gps;
 pub mod haptics;
 pub mod biometrics;
 pub mod usb;
-pub mod npu;
 pub mod smp;
 pub mod sim;
 pub mod display_hal;
@@ -527,70 +522,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     kprintln!("[OK] Offline-First Merkle Sync: State delta applied -> Sync Version 2 (New Root: {:02X}{:02X}{:02X}{:02X}...).",
         new_merkle_root[0], new_merkle_root[1], new_merkle_root[2], new_merkle_root[3]);
 
-    // 21. Local On-Device Neural Inference Engine & Dynamic Resource Governor
-    kprintln!("--- [Testing Local On-Device Neural Inference Engine & Resource Governor] ---");
-    // Verify Q8 quantized dot product engine
-    let test_weights: [i8; 8] = [10, -5, 20, -15, 30, -25, 40, -35];
-    let test_activations: [i8; 8] = [2, 4, -1, 3, 5, -2, 1, 0];
-    let dot_prod = ai::NeuralInferenceEngine::dot_product_q8(&test_weights, &test_activations);
-    assert_eq!(dot_prod, 175);
-    kprintln!("[OK] Quantized Neural Tensor Core: Q8 Dot Product (acc=175) VERIFIED.");
 
-    // AI dynamic budgeting limit: 2 MiB ceiling out of 8 MiB heap (Non-Negotiable #7)
-    const AI_BUDGET_CEILING: usize = 2 * 1024 * 1024;
-    let mut ai_mgr = ai::ModelManager::new(AI_BUDGET_CEILING);
-
-    // Register 2 local open-weight model packages
-    let model_qwen = ai::ModelPackage::new(
-        "qwen2.5-0.5b-instruct",
-        ai::ModelFamily::Qwen,
-        500,
-        ai::Quantization::Q4_K_M,
-        2048,
-        1_200_000, // 1.2 MB footprint
-    );
-    let model_phi = ai::ModelPackage::new(
-        "phi3-mini-edge",
-        ai::ModelFamily::Phi,
-        1500,
-        ai::Quantization::Q4_K_M,
-        4096,
-        1_500_000, // 1.5 MB footprint
-    );
-    ai_mgr.register_model(model_qwen);
-    ai_mgr.register_model(model_phi);
-
-    // Dynamically load Model 1 (1.2 MB used)
-    ai_mgr.load_model("qwen2.5-0.5b-instruct").expect("Loading qwen failed");
-    assert_eq!(ai_mgr.current_ram_used_bytes, 1_200_000);
-    kprintln!("[OK] Dynamic AI Model Loader: Loaded qwen2.5-0.5b-instruct (RAM: 1200 KiB / 2048 KiB ceiling).");
-
-    // Capability setup for AI inference
-    let mut ai_caps = CapabilityTable::new();
-    ai_caps.mint(CapabilityType::AiInferenceExecution, Rights::INVOKE, None);
-
-    // Run offline inference intent classification
-    let (action, conf) = ai_mgr.run_inference(&ai_caps, "qwen2.5-0.5b-instruct", "DIAL +15550199234")
-        .expect("AI inference failed");
-    assert_eq!(action, ai::IntentAction::LaunchDialer(alloc::string::String::from("+15550199234")));
-    assert!(conf >= 90);
-    kprintln!("[OK] Local Neural Inference: Evaluated intent -> LaunchDialer(+15550199234) (Confidence: {}%).", conf);
-
-    // Test eviction: Loading Model 2 (1.5 MB) would exceed 2.0 MB ceiling (1.2 + 1.5 = 2.7 MB)
-    // ModelManager must autonomously evict Model 1 to maintain Non-Negotiable Principle #7!
-    ai_mgr.load_model("phi3-mini-edge").expect("Loading phi3 with auto-eviction failed");
-    assert_eq!(ai_mgr.current_ram_used_bytes, 1_500_000);
-    assert_eq!(ai_mgr.get_model("qwen2.5-0.5b-instruct").unwrap().state, ai::ModelState::Unloaded);
-    assert_eq!(ai_mgr.get_model("phi3-mini-edge").unwrap().state, ai::ModelState::Loaded);
-    kprintln!("[TEST] Dynamic AI Memory Budgeting: Auto-evicted qwen to stay within 2048 KiB ceiling VERIFIED.");
-
-    // Test instant hardware force-takeover / preemption (Non-Negotiable Principle #8)
-    // When incoming call or capacitive touch arrives, background AI is immediately purged from RAM
-    let freed_ram = ai_mgr.preempt_for_foreground_task();
-    assert_eq!(freed_ram, 1_500_000);
-    assert_eq!(ai_mgr.current_ram_used_bytes, 0);
-    assert_eq!(ai_mgr.get_model("phi3-mini-edge").unwrap().state, ai::ModelState::Preempted);
-    kprintln!("[TEST] Foreground Hardware Force-Takeover: Purged 1500 KiB background AI RAM instantly VERIFIED.");
 
     // 22. Sovereign Android Untrusted Compatibility Sandbox (APK Container & Syscall Gate)
     kprintln!("--- [Testing Sovereign Android Untrusted Compatibility Sandbox] ---");
@@ -731,122 +663,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert_eq!(digest_out, &expected_abc_digest);
     kprintln!("[OK] WASM Host Integration: Called inter_crypto_hash -> Verified SHA-256 ('abc' -> BA7816BF...) in linear memory.");
 
-    // 24. Optional LiteVerse Network Storage & Zero-Knowledge Partitioning
-    kprintln!("--- [Testing Optional LiteVerse Network Storage & Zero-Knowledge Partitioning] ---");
 
-    // Test 1: Principle #15 - Participation disabled by default
-    let default_cfg = liteverse::LiteVerseConfig::default_disabled();
-    assert!(!default_cfg.enabled, "LiteVerse must be disabled by default");
-    kprintln!("[OK] LiteVerse Opt-In Policy: Default disabled (zero ambient network storage) VERIFIED.");
-
-    // Test 2: Opt-in configuration with 64 KiB storage quota
-    let enabled_cfg = liteverse::LiteVerseConfig::enabled_with_quota(64 * 1024);
-    let mut node = liteverse::LiteVerseNode::new(enabled_cfg);
-    assert_eq!(node.state, liteverse::LiteVerseState::Active);
-
-    // Test 3: Capability enforcement: attempt write without LiteVerseStorage capability
-    let empty_caps = CapabilityTable::new();
-    let unauth_res = node.relay_payload(
-        "/liteverse/shared/block_001.dat",
-        b"payload data",
-        &empty_caps,
-        100,
-        true,
-    );
-    assert_eq!(unauth_res, Err(liteverse::LiteVerseStorageError::CapabilityDenied));
-    kprintln!("[TEST] Zero Ambient Authority: Uncredentialed LiteVerse relay write REJECTED (CapabilityDenied) VERIFIED.");
-
-    // Mint valid capability for LiteVerse storage
-    let mut liteverse_caps = CapabilityTable::new();
-    liteverse_caps.mint(CapabilityType::LiteVerseStorage, Rights::READ | Rights::WRITE, None);
-
-    // Test 4: Authorized isolated write and read within /liteverse/shared/
-    let sample_relay_blob = b"Sovereign LiteVerse Off-Chain State Chunk #001: Merkle delta payload";
-    let relay_res = node.relay_payload(
-        "/liteverse/shared/block_001.dat",
-        sample_relay_blob,
-        &liteverse_caps,
-        90,
-        false,
-    );
-    assert!(relay_res.is_ok());
-    assert_eq!(node.storage.used_bytes(), sample_relay_blob.len());
-    let read_back = node.storage.read_blob("/liteverse/shared/block_001.dat", &liteverse_caps).expect("Read blob failed");
-    assert_eq!(read_back, sample_relay_blob);
-    kprintln!("[OK] LiteVerse Shared Storage Pool: Stored and retrieved blob from '/liteverse/shared/' sandbox.");
-
-    // Test 5: Principle #16 - Storage Isolation Boundary Trapping (Reject traversal & private partitions)
-    let breach_vault = node.relay_payload(
-        "/vault/device_root_key.bin",
-        b"EXFILTRATE",
-        &liteverse_caps,
-        90,
-        false,
-    );
-    assert_eq!(breach_vault, Err(liteverse::LiteVerseStorageError::IsolationViolation));
-
-    let breach_system = node.relay_payload(
-        "/system/etc/kernel.conf",
-        b"OVERWRITE",
-        &liteverse_caps,
-        90,
-        false,
-    );
-    assert_eq!(breach_system, Err(liteverse::LiteVerseStorageError::IsolationViolation));
-
-    let breach_traversal = node.relay_payload(
-        "/liteverse/shared/../../data/leak.txt",
-        b"TRAVERSE",
-        &liteverse_caps,
-        90,
-        false,
-    );
-    assert_eq!(breach_traversal, Err(liteverse::LiteVerseStorageError::IsolationViolation));
-    kprintln!("[TEST] Principle #16 Storage Boundary: 3/3 Host private partition access attempts TRAPPED (IsolationViolation) VERIFIED.");
-
-    // Test 6: Storage quota enforcement (attempt to write 70 KiB into 64 KiB quota)
-    let oversize_buf = alloc::vec![0xAAu8; 70 * 1024];
-    let quota_res = node.relay_payload(
-        "/liteverse/shared/oversize_blob.bin",
-        &oversize_buf,
-        &liteverse_caps,
-        90,
-        false,
-    );
-    assert_eq!(quota_res, Err(liteverse::LiteVerseStorageError::QuotaExceeded));
-    kprintln!("[TEST] Storage Quota Enforcement: Allocation exceeding 64 KiB quota TRAPPED (QuotaExceeded) VERIFIED.");
-
-    // Test 7: Cryptographic block validation via SHA-256
-    let block_header = b"LiteVerse Consensus Header Block #1024";
-    let block_hash = crypto::sha256(block_header);
-    assert!(node.verify_block(block_header, &block_hash));
-    assert!(!node.verify_block(b"Tampered Consensus Header", &block_hash));
-    assert_eq!(node.blocks_verified, 1);
-    kprintln!("[OK] Cryptographic Block Verification: Merkle root validated with on-device SHA-256.");
-
-    // Test 8: Principle #8 - Battery Governor Integration & Foreground Preemption
-    // Low battery (20% discharging <= 25% threshold) triggers autonomous suspension
-    let state_low_batt = node.step(20, false, false);
-    assert_eq!(state_low_batt, liteverse::LiteVerseState::Paused);
-    let batt_err = node.relay_payload(
-        "/liteverse/shared/urgent.dat",
-        b"data",
-        &liteverse_caps,
-        20,
-        false,
-    );
-    assert_eq!(batt_err, Err(liteverse::LiteVerseStorageError::BatteryLow));
-    kprintln!("[TEST] Battery Governor Integration: Auto-paused relay under low battery (20% <= 25%) VERIFIED.");
-
-    // Foreground user task active immediately preempts LiteVerse
-    let state_foreground = node.step(95, true, true);
-    assert_eq!(state_foreground, liteverse::LiteVerseState::Paused);
-    kprintln!("[TEST] Foreground Workload Preemption: Autonomous pause when user application active VERIFIED.");
-
-    // Resumes when battery healthy and no foreground load
-    let state_active = node.step(85, false, false);
-    assert_eq!(state_active, liteverse::LiteVerseState::Active);
-    kprintln!("[OK] Autonomous Resumption: Re-entered Active state under healthy battery (85%) with no foreground contention.");
 
     // 25. Sovereign Decentralized Identity Peer Attestation & Social Recovery Enclave
     kprintln!("--- [Testing Sovereign DID Peer Attestation & Social Recovery Enclave] ---");
@@ -1168,75 +985,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert!(audio_driver.pump_hardware_dma(1).is_empty()); // Read from empty
     kprintln!("[TEST] Hardware Underrun Detection: Handled starved buffer gracefully VERIFIED.");
 
-    // 28. Sovereign Autonomous Intent Engine & Zero-Trust App Orchestration
-    kprintln!("--- [Testing Autonomous Intent Engine & Zero-Trust App Orchestration] ---");
 
-    let mut orchestrator = intent::IntentOrchestrator::new();
-
-    // Test 1: Zero Ambient Authority: Uncredentialed intent execution rejected
-    let dial_intent = intent::Intent::DialNumber { number: alloc::string::String::from("+15550199234") };
-    let unauth_intent = orchestrator.dispatch(&dial_intent, 100, &empty_caps);
-    assert!(matches!(unauth_intent, intent::IntentExecutionResult::Denied(_)));
-    kprintln!("[TEST] Zero Ambient Authority: Intent execution without IntentOrchestrator token REJECTED VERIFIED.");
-
-    // Mint orchestration token (without telephony)
-    let mut orchestrator_caps = CapabilityTable::new();
-    orchestrator_caps.mint(CapabilityType::IntentOrchestrator, Rights::INVOKE, None);
-
-    // Test 2: Fine-grained subsystem capability check (telephony denied)
-    let dial_denied = orchestrator.dispatch(&dial_intent, 101, &orchestrator_caps);
-    assert_eq!(dial_denied, intent::IntentExecutionResult::Denied(alloc::string::String::from("Missing TelephonyModem capability")));
-    kprintln!("[TEST] Fine-Grained Token Isolation: Intent lacking TelephonyModem capability TRAPPED VERIFIED.");
-
-    // Mint necessary hardware capabilities
-    orchestrator_caps.mint(CapabilityType::TelephonyModem, Rights::WRITE, None);
-    orchestrator_caps.mint(CapabilityType::AudioStreamDirect, Rights::WRITE, None);
-    orchestrator_caps.mint(CapabilityType::MeshNetworkTransmit, Rights::WRITE, None);
-    orchestrator_caps.mint(CapabilityType::WasmExecute, Rights::EXECUTE, None);
-    orchestrator_caps.mint(CapabilityType::AndroidContainerGuest, Rights::INVOKE, None);
-
-    // Test 3: Authorized DialNumber intent
-    let dial_res = orchestrator.dispatch(&dial_intent, 102, &orchestrator_caps);
-    assert_eq!(dial_res, intent::IntentExecutionResult::Executed(alloc::string::String::from("Dialed +15550199234")));
-    kprintln!("[OK] Intent Orchestrator: Dispatched DialNumber('+15550199234') -> Modem triggered.");
-
-    // Test 4: Authorized PlayAudioTone intent
-    let tone_intent = intent::Intent::PlayAudioTone { frequency_hz: 440, duration_ms: 500 };
-    let tone_res = orchestrator.dispatch(&tone_intent, 103, &orchestrator_caps);
-    assert_eq!(tone_res, intent::IntentExecutionResult::Executed(alloc::string::String::from("Tone 440 Hz for 500 ms")));
-    kprintln!("[OK] Intent Orchestrator: Dispatched PlayAudioTone(440 Hz, 500 ms) -> Audio driver triggered.");
-
-    // Test 5: Authorized SendP2PMeshMessage intent
-    let mesh_intent = intent::Intent::SendP2PMeshMessage {
-        peer_id: 0xAABBCCDDEEFF0011,
-        payload: alloc::vec![1, 2, 3, 4],
-    };
-    let mesh_res = orchestrator.dispatch(&mesh_intent, 104, &orchestrator_caps);
-    assert_eq!(mesh_res, intent::IntentExecutionResult::Executed(alloc::string::String::from("Relayed 4 bytes to peer 0xaabbccddeeff0011")));
-    kprintln!("[OK] Intent Orchestrator: Dispatched SendP2PMeshMessage -> Wireless mesh packet queued.");
-
-    // Test 6: Authorized ExecuteWasmAutomation intent
-    let wasm_intent = intent::Intent::ExecuteWasmAutomation {
-        script_name: alloc::string::String::from("sensor_filter.wasm"),
-        bytecode: alloc::vec![0x00, 0x61, 0x73, 0x6D],
-    };
-    let wasm_res = orchestrator.dispatch(&wasm_intent, 105, &orchestrator_caps);
-    assert_eq!(wasm_res, intent::IntentExecutionResult::Executed(alloc::string::String::from("Executed 'sensor_filter.wasm' (4 bytes)")));
-    kprintln!("[OK] Intent Orchestrator: Dispatched ExecuteWasmAutomation -> Sandboxed bytecode evaluated.");
-
-    // Test 7: Authorized LaunchGuestApp intent
-    let app_intent = intent::Intent::LaunchGuestApp {
-        package_name: alloc::string::String::from("org.sovereign.vault"),
-    };
-    let app_res = orchestrator.dispatch(&app_intent, 106, &orchestrator_caps);
-    assert_eq!(app_res, intent::IntentExecutionResult::Executed(alloc::string::String::from("Launched guest container 'org.sovereign.vault'")));
-    kprintln!("[OK] Intent Orchestrator: Dispatched LaunchGuestApp -> Sandboxed container spawned.");
-
-    // Test 8: Audit log validation
-    assert_eq!(orchestrator.total_dispatched, 5);
-    assert_eq!(orchestrator.total_blocked, 2);
-    assert_eq!(orchestrator.audit_logs.len(), 5);
-    kprintln!("[TEST] Monotonic Audit Trail: Recorded 5 authorized dispatches and 2 blocked attempts VERIFIED.");
 
     // 29. Sovereign Mobile Camera / Hardware ISP Frame Capture Driver & Multimodal Neural Vision
     kprintln!("--- [Testing Sovereign Mobile Camera & Hardware ISP Driver] ---");
@@ -1943,54 +1692,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert!(usb_pd.verify_data_access().is_ok());
     kprintln!("[OK] User Authorization: Unlocked USB data port multiplexer (MTP/ADB Data Transfer Enabled).");
 
-    // 39. Sovereign Mobile Neural Processing Unit (NPU) & On-Device Multimodal Pipeline HAL
-    kprintln!("--- [Testing Sovereign Mobile Neural Processing Unit (NPU) Subsystem] ---");
 
-    let mut npu = npu::NpuController::new(0x090C_0000);
-    npu.init_hardware();
-    assert!(npu.enabled);
-    kprintln!("[OK] Neural Accelerator (NPU): Initialized hardware @ 0x090C0000.");
-
-    // Test 1: Zero Ambient Authority: Uncredentialed tensor execution rejected
-    let dummy_a = alloc::vec![1i8; 6];
-    let dummy_b = alloc::vec![1i8; 6];
-    let dummy_bias = alloc::vec![0i32; 2];
-    let unauth_npu = npu.execute_gemm_int8(&dummy_a, 2, 3, &dummy_b, 2, &dummy_bias, &empty_caps);
-    assert_eq!(unauth_npu.err(), Some(npu::NpuError::CapabilityDenied));
-    kprintln!("[TEST] Zero Ambient Authority: Uncredentialed NPU matrix execution REJECTED (CapabilityDenied) VERIFIED.");
-
-    // Mint NPU INVOKE capability
-    let mut npu_caps = CapabilityTable::new();
-    npu_caps.mint(CapabilityType::NeuralProcessingUnitDirect, Rights::INVOKE, None);
-
-    // Test 2: Hardware INT8 GEMM Matrix Multiplication Engine
-    let gemm_out = npu.execute_gemm_int8(&dummy_a, 2, 3, &dummy_b, 2, &dummy_bias, &npu_caps)
-        .expect("GEMM execution failed");
-    assert_eq!(gemm_out.len(), 4);
-    kprintln!("[OK] NPU Hardware Tensor Core: Executed INT8 GEMM [2x3] * [3x2] with ReLU activation.");
-
-    // Test 3: Multimodal Vision Classification Head (Camera ISP -> NPU)
-    // Face features: prominent high-energy facial landmark pattern
-    let face_features: [i8; 8] = [30, 40, 15, 10, 5, 8, 12, 20];
-    let (vision_res, conf) = npu.classify_vision_features(&face_features, &npu_caps)
-        .expect("Vision classification failed");
-    assert_eq!(vision_res, npu::VisionClass::HumanFace);
-    kprintln!("[TEST] Multimodal Vision Head: Classified camera frame as HumanFace (Confidence: {}) VERIFIED.", conf);
-
-    // QR Code features: high-contrast checkerboard pattern
-    let qr_features: [i8; 8] = [2, 5, 50, 60, 45, 2, 0, -2];
-    let (qr_res, qr_conf) = npu.classify_vision_features(&qr_features, &npu_caps)
-        .expect("QR classification failed");
-    assert_eq!(qr_res, npu::VisionClass::QRCode);
-    kprintln!("[TEST] Multimodal Vision Head: Classified camera frame as QRCode (Confidence: {}) VERIFIED.", qr_conf);
-
-    // Test 4: Multimodal Audio Keyword Spotting Head (Microphone PCM -> NPU)
-    // Wake word features: spectral energy pattern matching "Hey Inter"
-    let wake_features: [i8; 8] = [15, 35, 55, 75, 50, 30, 20, 40];
-    let (audio_res, audio_conf) = npu.detect_audio_keyword(&wake_features, &npu_caps)
-        .expect("Audio keyword detection failed");
-    assert_eq!(audio_res, npu::AudioKeyword::WakeWordDetected);
-    kprintln!("[TEST] Multimodal Audio Head: Detected 'Hey Inter' Wake Word (Confidence: {}) VERIFIED.", audio_conf);
 
     // 40. Sovereign Mobile Multi-Core SMP Bring-Up, Inter-Processor Interrupts (IPI) & big.LITTLE Scheduler
     kprintln!("--- [Testing Sovereign Mobile Multi-Core SMP Subsystem] ---");
@@ -2026,10 +1728,10 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         .expect("Place background task failed");
     assert!(little_core < 4, "Background task must be placed on a LITTLE core (0..3)");
 
-    let big_core = smp.place_task_by_affinity(102, smp::TaskAffinityClass::CameraNeuralNpu, &smp_caps)
+    let big_core = smp.place_task_by_affinity(102, smp::TaskAffinityClass::ComputeVector, &smp_caps)
         .expect("Place camera task failed");
-    assert_eq!(big_core, 4, "Camera/NPU compute task must be placed on online big core (4)");
-    kprintln!("[TEST] big.LITTLE Energy Scheduler: Routed BackgroundDaemon to Core {} (LITTLE) & CameraNeuralNpu to Core {} (big) VERIFIED.",
+    assert_eq!(big_core, 4, "High compute task must be placed on online big core (4)");
+    kprintln!("[TEST] big.LITTLE Energy Scheduler: Routed BackgroundDaemon to Core {} (LITTLE) & ComputeVector to Core {} (big) VERIFIED.",
         little_core, big_core);
 
     // Test 5: Dynamic CPU Hotplug Power Management (Power off Core 1 to save battery)

@@ -16,9 +16,9 @@ pub enum WorkloadTier {
     ExplicitUserOperation = 3,
     CriticalCommunications = 4,
     OsServices = 5,
-    StateSynchronization = 6,
-    LiteVerse = 7,
-    BackgroundAi = 8,
+    BackgroundSync = 6,
+    BackgroundNetwork = 7,
+    BackgroundTasks = 8,
     Maintenance = 9,
 }
 
@@ -76,18 +76,18 @@ impl ResourceManager {
             return true;
         }
 
-        // Thermal throttling pauses LiteVerse and lower tiers
-        if self.thermal.throttling && tier >= WorkloadTier::LiteVerse {
+        // Thermal throttling pauses background network and lower tiers
+        if self.thermal.throttling && tier >= WorkloadTier::BackgroundNetwork {
             return false;
         }
 
-        // Low battery (< 20% and not charging) pauses LiteVerse and background AI
-        if !self.battery.is_charging && self.battery.percent < 20 && tier >= WorkloadTier::LiteVerse {
+        // Low battery (< 20% and not charging) pauses background network and lower tiers
+        if !self.battery.is_charging && self.battery.percent < 20 && tier >= WorkloadTier::BackgroundNetwork {
             return false;
         }
 
-        // When a foreground user task is intensely active, background AI and maintenance are paused
-        if self.active_foreground_task && tier >= WorkloadTier::BackgroundAi {
+        // When a foreground user task is intensely active, background tasks and maintenance are paused
+        if self.active_foreground_task && tier >= WorkloadTier::BackgroundTasks {
             return false;
         }
 

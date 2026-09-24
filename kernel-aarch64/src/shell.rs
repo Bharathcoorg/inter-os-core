@@ -12,7 +12,7 @@ use crate::touch::{TouchPhase, TouchPoint};
 pub enum MobileAction {
     LaunchDialer,
     LaunchVault,
-    LaunchAi,
+    LaunchTerminal,
     LaunchSettings,
 }
 
@@ -43,12 +43,12 @@ pub const DOCK_BUTTONS: [DockButton; 4] = [
         action: MobileAction::LaunchVault,
     },
     DockButton {
-        label: "AI ASSISTANT",
+        label: "TERMINAL",
         x_min: 320,
         x_max: 500,
         y_min: 1320,
         y_max: 1400,
-        action: MobileAction::LaunchAi,
+        action: MobileAction::LaunchTerminal,
     },
     DockButton {
         label: "SETTINGS",
@@ -145,35 +145,33 @@ impl MobileShell {
 
         match action {
             MobileAction::LaunchSettings => {
-                fb.draw_string(40, 130, "SOVEREIGN SETTINGS", (0, 229, 255), (14, 18, 32));
-                fb.draw_string(40, 160, "System Security: Zero Ambient Authority", (255, 255, 255), (14, 18, 32));
-                fb.draw_string(40, 190, "Capability Matrix: 8 Types Active", (160, 175, 195), (14, 18, 32));
-                fb.draw_string(40, 220, "DVFS Governor: Interactive (2.4 GHz)", (160, 175, 195), (14, 18, 32));
-                fb.draw_string(40, 250, "Flash Storage: 64 GB eMMC 5.1 (SDHCI)", (160, 175, 195), (14, 18, 32));
-                fb.draw_string(40, 280, "Identity DID: did:inter:440bd3181a19...", (0, 229, 255), (14, 18, 32));
-                fb.draw_string(40, 320, "[STATUS: OPTIMAL  |  TEMP: 32C  |  100% BAT]", (100, 255, 150), (14, 18, 32));
+                fb.draw_string(40, 130, "SYSTEM SETTINGS", (0, 229, 255), (14, 18, 32));
+                fb.draw_string(40, 160, "Security: Zero Ambient Authority", (255, 255, 255), (14, 18, 32));
+                fb.draw_string(40, 190, "Capability Matrix: Active & Enforced", (160, 175, 195), (14, 18, 32));
+                fb.draw_string(40, 220, "Architecture: AArch64 (ARMv8-A)", (160, 175, 195), (14, 18, 32));
+                fb.draw_string(40, 250, "Flash Storage: SDHCI Controller Online", (160, 175, 195), (14, 18, 32));
+                fb.draw_string(40, 280, "Kernel Privilege: EL1 Supervised Separation", (0, 229, 255), (14, 18, 32));
+                fb.draw_string(40, 320, "[STATUS: OPERATIONAL  |  MEMORY: ISOLATED]", (100, 255, 150), (14, 18, 32));
             }
             MobileAction::LaunchDialer => {
-                fb.draw_string(40, 130, "SOVEREIGN TELEPHONY DIALER", (0, 229, 255), (14, 18, 32));
-                fb.draw_string(40, 160, "Baseband Network: 5G NSA Connected", (255, 255, 255), (14, 18, 32));
-                fb.draw_string(40, 190, "Signal Quality: +CSQ 31 (100% Signal)", (100, 255, 150), (14, 18, 32));
-                fb.draw_string(40, 220, "Active Call: Ready to Place", (160, 175, 195), (14, 18, 32));
-                fb.draw_string(40, 250, "Encryption: Peer-to-Peer Double Ratchet", (0, 229, 255), (14, 18, 32));
-                fb.draw_string(40, 280, "Dialing Target: sovereign://telephony/peer", (160, 175, 195), (14, 18, 32));
+                fb.draw_string(40, 130, "TELEPHONY SUBSYSTEM", (0, 229, 255), (14, 18, 32));
+                fb.draw_string(40, 160, "Modem Interface: Serial AT Controller", (255, 255, 255), (14, 18, 32));
+                fb.draw_string(40, 190, "Capability Required: TelephonyModem", (160, 175, 195), (14, 18, 32));
+                fb.draw_string(40, 220, "Call State: Idle", (160, 175, 195), (14, 18, 32));
+                fb.draw_string(40, 250, "Modem Hardware: Checking UART / AT", (160, 175, 195), (14, 18, 32));
             }
             MobileAction::LaunchVault => {
-                fb.draw_string(40, 130, "SOVEREIGN ENCRYPTED VAULT", (0, 229, 255), (14, 18, 32));
+                fb.draw_string(40, 130, "ENCRYPTED VAULT", (0, 229, 255), (14, 18, 32));
                 fb.draw_string(40, 160, "Hardware Keystore: 16 Enclave Slots", (255, 255, 255), (14, 18, 32));
                 fb.draw_string(40, 190, "Master Seed: Sealed in EL1 Memory", (100, 255, 150), (14, 18, 32));
                 fb.draw_string(40, 220, "Storage Isolation: AES-256 Block Encrypted", (160, 175, 195), (14, 18, 32));
-                fb.draw_string(40, 250, "Zero-Knowledge Proofs: Ready", (0, 229, 255), (14, 18, 32));
             }
-            MobileAction::LaunchAi => {
-                fb.draw_string(40, 130, "SOVEREIGN ON-DEVICE AI AGENT", (0, 229, 255), (14, 18, 32));
-                fb.draw_string(40, 160, "Local Inference: Qwen 2.5 0.5B Instruct", (255, 255, 255), (14, 18, 32));
-                fb.draw_string(40, 190, "Memory Budget: Strictly Capped (Non-Monopolizing)", (160, 175, 195), (14, 18, 32));
-                fb.draw_string(40, 220, "User Preemption: Instant Yield Guaranteed", (100, 255, 150), (14, 18, 32));
-                fb.draw_string(40, 250, "Agent Status: Idle / Ready for Intent", (100, 255, 150), (14, 18, 32));
+            MobileAction::LaunchTerminal => {
+                fb.draw_string(40, 130, "DEVELOPER TERMINAL", (0, 229, 255), (14, 18, 32));
+                fb.draw_string(40, 160, "UART Serial Console: COM1 / PL011", (255, 255, 255), (14, 18, 32));
+                fb.draw_string(40, 190, "Privilege: Ring 3 / EL0 Process Ready", (160, 175, 195), (14, 18, 32));
+                fb.draw_string(40, 220, "IPC Router: Zero-Copy Endpoint Channel", (100, 255, 150), (14, 18, 32));
+                fb.draw_string(40, 250, "Status: Ready for Commands", (100, 255, 150), (14, 18, 32));
             }
         }
     }

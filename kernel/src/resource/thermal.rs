@@ -23,7 +23,7 @@ pub enum ThermalZone {
 pub enum CoolingState {
     Normal,            // < 45°C: Unrestricted execution
     Warm,              // 45°C - 55°C: Gradient monitoring, nominal DVFS
-    Alert,             // 55°C - 65°C: Liteverse and background AI down-clocked
+    Alert,             // 55°C - 65°C: Background tasks and network down-clocked
     Throttled,         // 65°C - 80°C: DVFS clamped to Powersave, mandatory task yield pauses
     CriticalShutdown,  // > 80°C: Emergency task freeze to prevent silicon damage
 }

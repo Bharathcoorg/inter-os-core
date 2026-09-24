@@ -129,25 +129,10 @@ impl BrowserApp {
         }
     }
 
-    /// Navigates to a target URL with Privacy Shield scrubbing and zero-trust socket dispatch.
+    /// Navigates to a target URL with zero-trust socket dispatch.
     pub fn navigate(&mut self, target_url: &'static str) {
         self.current_url = target_url;
         self.pages_loaded += 1;
-
-        // 1. Resolve Sovereign DID for Mutual Authentication
-        let mut did_buf = [0u8; 64];
-        if let Ok(_len) = std::identity_get_did(&mut did_buf) {
-            std::log(0, "[BROWSER APP] Sovereign DID authenticated: P2P domain attestation verified.").ok();
-        }
-
-        // 2. Sovereign Privacy Shield Anti-Tracking Scrubbing
-        let mut clean_url = [0u8; 128];
-        if let Ok(slen) = std::privacy_shield_audit(target_url, &mut clean_url) {
-            if slen > 0 {
-                self.trackers_blocked += 3;
-                std::log(0, "[BROWSER APP] Privacy Shield: 3 adtech telemetry trackers stripped; zero cloud leakage.").ok();
-            }
-        }
 
         // 3. Zero-Trust Network Socket Creation & Request Framing
         if let Ok(sock_id) = std::net_socket(8080) {

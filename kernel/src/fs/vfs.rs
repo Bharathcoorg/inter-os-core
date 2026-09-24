@@ -571,7 +571,7 @@ pub fn init() {
     vfs.create_static_file("/system/bin/dialer", crate::task::APP_DIALER_ELF);
     vfs.create_static_file("/system/bin/vault", crate::task::APP_VAULT_ELF);
     vfs.create_static_file("/system/bin/camera", crate::task::APP_CAMERA_ELF);
-    vfs.create_static_file("/system/bin/ai", crate::task::APP_AI_ELF);
+    vfs.create_static_file("/system/bin/calculator", crate::task::APP_CALCULATOR_ELF);
     vfs.create_static_file("/system/bin/browser", crate::task::APP_BROWSER_ELF);
     vfs.create_static_file("/system/bin/messages", crate::task::APP_MESSAGES_ELF);
     vfs.create_static_file("/system/bin/calendar", crate::task::APP_CALENDAR_ELF);
