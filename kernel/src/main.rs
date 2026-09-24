@@ -437,6 +437,14 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             object_id: 0,
         })
         .ok(); // Slot 1
+    caps_security
+        .insert(Capability {
+            id: CapabilityId(203),
+            cap_type: CapabilityType::ProcessSpawn,
+            rights: Rights::EXECUTE,
+            object_id: 0,
+        })
+        .ok(); // Slot 2: package/service launch authority
 
     let id_security = SCHEDULER.lock().spawn(
         "security_daemon",
@@ -759,45 +767,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     IPC_ROUTER.lock().register_task(id_wireless);
     serial_println!("[OK] Spawned Task 16: wireless_worker (ID: {:?})", id_wireless);
 
-    // Task 17: Sovereign Settings App (Ring 3 User Mode)
-    let id_settings = task::spawn_app_settings(id_security);
-    IPC_ROUTER.lock().register_task(id_settings);
-
-    // Task 18: Sovereign Intent Terminal App (Ring 3 User Mode)
-    let id_terminal = task::spawn_app_terminal(id_security);
-    IPC_ROUTER.lock().register_task(id_terminal);
-
-    // Task 19: Sovereign Dialer App (Ring 3 User Mode)
-    let id_dialer = task::spawn_app_dialer(id_security);
-    IPC_ROUTER.lock().register_task(id_dialer);
-
-    // Task 20: Sovereign Vault & Storage App (Ring 3 User Mode)
-    let id_vault = task::spawn_app_vault(id_security);
-    IPC_ROUTER.lock().register_task(id_vault);
-
-    // Task 21: Sovereign Camera & Neural Vision App (Ring 3 User Mode)
-    let id_camera = task::spawn_app_camera(id_security);
-    IPC_ROUTER.lock().register_task(id_camera);
-
-    // Task 22: Open-Source Touch Calculator App (Ring 3 User Mode)
-    let id_calc = task::spawn_app_calculator(id_security);
-    IPC_ROUTER.lock().register_task(id_calc);
-
-    // Task 23: Sovereign Browser & Web App (Ring 3 User Mode)
-    let id_browser = task::spawn_app_browser(id_security);
-    IPC_ROUTER.lock().register_task(id_browser);
-
-    // Task 24: Sovereign Messages & P2P Wire App (Ring 3 User Mode)
-    let id_messages = task::spawn_app_messages(id_security);
-    IPC_ROUTER.lock().register_task(id_messages);
-
-    // Task 25: Sovereign Calendar & Chrono-Planner App (Ring 3 User Mode)
-    let id_calendar = task::spawn_app_calendar(id_security);
-    IPC_ROUTER.lock().register_task(id_calendar);
-
-    // Task 26: Sovereign Music & Hi-Fi Audio App (Ring 3 User Mode)
-    let id_music = task::spawn_app_music(id_security);
-    IPC_ROUTER.lock().register_task(id_music);
+    // Native applications are no longer spawned directly by kernel_main.
+    // They are registered with the package/service boundary below and launched
+    // only after a userspace IPC request reaches the Security/Package service.
+    serial_println!("[OK] Native app package registry/service boundary online; no application spawned directly from kernel_main.");
 
     // Render the Mobile Smartphone Shell on the graphical display
     framebuffer::draw_mobile_shell();
@@ -859,13 +832,64 @@ extern "C" fn task_security_daemon() -> ! {
     let mut first = true;
     loop {
         if first {
-            syscall::sys_log(1, "[SECURITY DAEMON] Capability-guarded IPC mailbox open. Listening for security events...");
+            syscall::sys_log(1, "[SECURITY DAEMON] Capability-guarded IPC mailbox open. Listening for security and package-service requests...");
             first = false;
         }
-        // Attempt to receive incoming IPC message via Slot 0 (IpcReceive token)
+
+        // Userspace init reaches the package/service boundary exclusively through IPC.
+        // Message 0x5001 is a package launch request; payload is the canonical package ID.
         if let Ok(msg) = syscall::sys_ipc_recv(0) {
-            let _ = msg;
-            syscall::sys_log(1, "[SECURITY DAEMON] Received attested IPC message! Policy audit: APPROVED.");
+            if msg.msg_type == 0x5001 {
+                let package_id = match core::str::from_utf8(&msg.payload) {
+                    Ok(id) if !id.is_empty() && id.len() <= 96 => id,
+                    _ => {
+                        syscall::sys_log(1, "[PACKAGE SERVICE] Rejected malformed launch request.");
+                        syscall::sys_yield();
+                        continue;
+                    }
+                };
+
+                let spawn_allowed = {
+                    let sched = SCHEDULER.lock();
+                    sched.current_task()
+                        .map(|task| task.cap_table.verify(2, CapabilityType::ProcessSpawn, Rights::EXECUTE).is_ok())
+                        .unwrap_or(false)
+                };
+
+                if !spawn_allowed {
+                    syscall::sys_log(1, "[PACKAGE SERVICE] ProcessSpawn capability missing; launch denied.");
+                } else {
+                    let service_id = syscall::sys_get_task_id();
+                    syscall::sys_log(1, "[PACKAGE SERVICE] Resolving registered package and launching verified native process.");
+
+                    let launch = match package_id {
+                        "org.interos.settings" => task::spawn_app_settings(service_id),
+                        "org.interos.terminal" => task::spawn_app_terminal(service_id),
+                        "org.interos.dialer" => task::spawn_app_dialer(service_id),
+                        "org.interos.vault" => task::spawn_app_vault(service_id),
+                        "org.interos.camera" => task::spawn_app_camera(service_id),
+                        "org.interos.calculator" => task::spawn_app_calculator(service_id),
+                        "org.interos.browser" => task::spawn_app_browser(service_id),
+                        "org.interos.messages" => task::spawn_app_messages(service_id),
+                        "org.interos.calendar" => task::spawn_app_calendar(service_id),
+                        "org.interos.music" => task::spawn_app_music(service_id),
+                        _ => Err("package id is not registered"),
+                    };
+
+                    match launch {
+                        Ok(child_id) => {
+                            IPC_ROUTER.lock().register_task(child_id);
+                            serial_println!("[PACKAGE] id={} state=launched pid={} parent={}", package_id, child_id.0, service_id.0);
+                            syscall::sys_log(1, "[PACKAGE SERVICE] Package resolved, ELF loaded, and child process registered.");
+                        }
+                        Err(_) => {
+                            syscall::sys_log(1, "[PACKAGE SERVICE] Package resolution or ELF launch failed.");
+                        }
+                    }
+                }
+            } else {
+                syscall::sys_log(1, "[SECURITY DAEMON] Received attested IPC message! Policy audit: APPROVED.");
+            }
         }
         syscall::sys_yield();
     }
