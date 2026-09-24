@@ -129,110 +129,71 @@ uninstalled_app_ids = set()
 # -----------------------------------------------------------------------------
 # Real-Time Mobile Subsystems State (Cellular Baseband, PMIC/DVFS, KMS, Touch)
 # -----------------------------------------------------------------------------
-telephony_state = {
-    "call_state": "IDLE",
-    "active_number": "",
-    "call_start": 0,
-    "sms_messages": [
-        {"id": 1, "type": "in", "sender": "+15550192", "text": "Welcome to InterCell 5G SA Sovereign Network.", "time": "12:00"},
-        {"id": 2, "type": "out", "sender": "+15550192", "text": "InterOS baseband modem attached and operational.", "time": "12:01"}
-    ],
-    "pdp_data": True,
-    "operator": "InterCell 5G SA",
-    "signal_dbm": -82,
-    "signal_bars": 4,
-    "imei": "864209041234567"
+# Guest-backed telemetry only. Device Studio never invents hardware state.
+telemetry_cache = {
+    "telephony": {},
+    "pmic": {},
+    "kms": {},
+    "touch": {},
 }
 
-pmic_state = {
-    "battery_pct": 96,
-    "voltage_mv": 4210,
-    "temp_c": 31.8,
-    "current_ma": -380,
-    "charging": False,
-    "profile": "Balanced",
-    "cpu_freq_mhz": 1600,
-    "thermal_throttle": False
-}
+def unavailable_subsystem(name):
+    return {
+        "status": "UNAVAILABLE",
+        "source": "UNAVAILABLE",
+        "reason": f"Guest has not reported {name} telemetry",
+    }
 
-kms_state = {
-    "double_buffered": True,
-    "front_buffer": "0xFD000000",
-    "back_buffer": "0xFD800000",
-    "fps": 60,
-    "page_flips": 3120,
-    "surfaces": [
-        {"id": 0, "name": "Primary Display Scanout", "z_order": 0, "opacity": 1.0, "rect": [0, 0, 720, 1280]},
-        {"id": 1, "name": "Mobile Shell Activity Space", "z_order": 5, "opacity": 1.0, "rect": [0, 36, 720, 1208]},
-        {"id": 2, "name": "System Line Status Bar", "z_order": 10, "opacity": 0.95, "rect": [0, 0, 720, 36]},
-        {"id": 3, "name": "Gesture Navigation Bar", "z_order": 10, "opacity": 0.95, "rect": [0, 1244, 720, 36]}
-    ]
-}
+def parse_key_values(line):
+    values = {}
+    for part in line.split():
+        if "=" in part:
+            key, value = part.split("=", 1)
+            values[key] = value
+    return values
 
-touch_state = {
-    "slots": [
-        {"id": 0, "active": False, "x": 0, "y": 0, "start_ticks": 0},
-        {"id": 1, "active": False, "x": 0, "y": 0, "start_ticks": 0},
-        {"id": 2, "active": False, "x": 0, "y": 0, "start_ticks": 0},
-        {"id": 3, "active": False, "x": 0, "y": 0, "start_ticks": 0},
-        {"id": 4, "active": False, "x": 0, "y": 0, "start_ticks": 0}
-    ],
-    "recent_gestures": [
-        {"type": "Tap", "x": 360, "y": 640, "time": "Init"}
-    ]
-}
+def extract_guest_subsystem(name, prefix):
+    latest = None
+    for line in serial_lines:
+        if line.startswith(prefix):
+            payload = line[len(prefix):].strip()
+            values = parse_key_values(payload)
+            latest = {
+                "status": "AVAILABLE",
+                "source": "KERNEL_TELEMETRY",
+                **values,
+            }
+    if latest is not None:
+        telemetry_cache[name] = latest
+        return latest
+    return unavailable_subsystem(name)
 
 def extract_real_processes():
-    """Extracts genuine task/process table from guest kernel serial stream or monitor."""
+    """Return only processes explicitly reported by the guest kernel."""
     tasks = []
     for line in serial_lines:
-        if line.startswith("[PROC]"):
-            try:
-                parts = line[6:].strip().split()
-                pdict = {}
-                for part in parts:
-                    if "=" in part:
-                        k, v = part.split("=", 1)
-                        pdict[k] = v
-                tasks.append({
-                    "pid": int(pdict.get("pid", 0)),
-                    "name": pdict.get("name", "unknown"),
-                    "state": pdict.get("state", "Ready"),
-                    "ticks": int(pdict.get("ticks", 0)),
-                    "priority": int(pdict.get("prio", 1)),
-                    "ppid": int(pdict.get("ppid", 0)),
-                    "caps": int(pdict.get("caps", 0)),
-                    "memory": f"{pdict.get('mem', '128')} KB",
-                    "cr3": pdict.get("cr3", "0x0000000000100000"),
-                    "source": "KERNEL_TELEMETRY"
-                })
-            except Exception:
-                pass
-    if tasks:
-        seen = {}
-        for t in tasks:
-            seen[t["pid"]] = t
-        return list(seen.values())
-
-    t = query_qemu_monitor()
-    if t["qemu_alive"]:
-        cr3_val = t.get("cpu", {}).get("registers", {}).get("CR3", "0x0000000000100000")
-        return [
-            {"pid": 0, "name": "kernel_main", "state": "Running", "ticks": 124, "priority": 0, "ppid": 0, "caps": 1, "memory": "256 KB", "cr3": cr3_val, "source": "GUEST_SCHEDULER"},
-            {"pid": 1, "name": "telemetry_service", "state": "Ready", "ticks": 48, "priority": 1, "ppid": 0, "caps": 2, "memory": "128 KB", "cr3": cr3_val, "source": "GUEST_SCHEDULER"},
-            {"pid": 2, "name": "security_daemon", "state": "Blocked", "ticks": 26, "priority": 2, "ppid": 0, "caps": 2, "memory": "128 KB", "cr3": cr3_val, "source": "GUEST_SCHEDULER"},
-            {"pid": 3, "name": "device_manager", "state": "Ready", "ticks": 32, "priority": 2, "ppid": 0, "caps": 2, "memory": "128 KB", "cr3": cr3_val, "source": "GUEST_SCHEDULER"},
-            {"pid": 4, "name": "storage_daemon", "state": "Ready", "ticks": 18, "priority": 3, "ppid": 0, "caps": 2, "memory": "128 KB", "cr3": cr3_val, "source": "GUEST_SCHEDULER"},
-            {"pid": 7, "name": "compositor_shell", "state": "Running", "ticks": 312, "priority": 2, "ppid": 0, "caps": 2, "memory": "512 KB", "cr3": cr3_val, "source": "GUEST_SCHEDULER"},
-            {"pid": 8, "name": "net_worker", "state": "Blocked", "ticks": 14, "priority": 1, "ppid": 0, "caps": 5, "memory": "128 KB", "cr3": cr3_val, "source": "GUEST_SCHEDULER"},
-            {"pid": 9, "name": "user_init", "state": "Ready", "ticks": 85, "priority": 1, "ppid": 0, "caps": 4, "memory": "1024 KB", "cr3": "0x0000000000400000", "source": "GUEST_USERSPACE"},
-            {"pid": 11, "name": "telephony_worker", "state": "Ready", "ticks": 42, "priority": 1, "ppid": 0, "caps": 2, "memory": "128 KB", "cr3": cr3_val, "source": "GUEST_SCHEDULER"},
-            {"pid": 12, "name": "audio_worker", "state": "Blocked", "ticks": 10, "priority": 1, "ppid": 0, "caps": 2, "memory": "128 KB", "cr3": cr3_val, "source": "GUEST_SCHEDULER"},
-            {"pid": 13, "name": "sensor_worker", "state": "Ready", "ticks": 64, "priority": 1, "ppid": 0, "caps": 2, "memory": "128 KB", "cr3": cr3_val, "source": "GUEST_SCHEDULER"},
-            {"pid": 14, "name": "rtc_worker", "state": "Ready", "ticks": 98, "priority": 1, "ppid": 0, "caps": 2, "memory": "128 KB", "cr3": cr3_val, "source": "GUEST_SCHEDULER"},
-            {"pid": 15, "name": "thermal_worker", "state": "Ready", "ticks": 22, "priority": 1, "ppid": 0, "caps": 2, "memory": "128 KB", "cr3": cr3_val, "source": "GUEST_SCHEDULER"}
-        ]
-    return []
+        if not line.startswith("[PROC]"):
+            continue
+        try:
+            pdict = parse_key_values(line[6:].strip())
+            tasks.append({
+                "pid": int(pdict["pid"]),
+                "name": pdict["name"],
+                "state": pdict.get("state", "Unknown"),
+                "ticks": int(pdict.get("ticks", 0)),
+                "priority": int(pdict.get("prio", 0)),
+                "ppid": int(pdict.get("ppid", 0)),
+                "caps": int(pdict.get("caps", 0)),
+                "memory": pdict.get("mem", "Unavailable"),
+                "cr3": pdict.get("cr3", "Unavailable"),
+                "source": "KERNEL_TELEMETRY",
+            })
+        except (KeyError, ValueError):
+            continue
+    seen = {}
+    for task in tasks:
+        seen[task["pid"]] = task
+    return list(seen.values())
 
 def extract_real_memory():
     """Return only memory state actually observed from the live guest."""
@@ -1255,7 +1216,8 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            self.wfile.write(json.dumps({'success': True, 'messages': telephony_state['sms_messages']}).encode())
+            messages = extract_guest_subsystem("telephony", "[TELEPHONY]").get("sms_messages", [])
+            self.wfile.write(json.dumps({'success': True, 'messages': messages, 'source': 'KERNEL_TELEMETRY' if messages else 'UNAVAILABLE'}).encode())
             return
 
         if self.path == '/api/pmic/status':
@@ -1263,7 +1225,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            self.wfile.write(json.dumps({'success': True, 'pmic': pmic_state}).encode())
+            self.wfile.write(json.dumps({'success': True, 'pmic': extract_guest_subsystem("pmic", "[PMIC]")}).encode())
             return
 
         if self.path == '/api/kms/status':
@@ -1271,7 +1233,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            self.wfile.write(json.dumps({'success': True, 'kms': kms_state}).encode())
+            self.wfile.write(json.dumps({'success': True, 'kms': extract_guest_subsystem("kms", "[KMS]")}).encode())
             return
 
         if self.path == '/api/touch/status':
@@ -1279,7 +1241,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            self.wfile.write(json.dumps({'success': True, 'touch': touch_state}).encode())
+            self.wfile.write(json.dumps({'success': True, 'touch': extract_guest_subsystem("touch", "[TOUCH]")}).encode())
             return
 
         if self.path == '/api/kernel/processes':
@@ -1686,155 +1648,26 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
             return
 
-        if self.path == '/api/telephony/dial':
-            content_length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
-            try:
-                data = json.loads(body.decode('utf-8'))
-            except Exception:
-                data = {}
-            number = data.get("number", "+1-555-0192")
-            telephony_state["call_state"] = "ACTIVE"
-            telephony_state["active_number"] = number
-            telephony_state["call_start"] = time.time()
-            serial_lines.append(f"[RIL_MODEM] ATD{number}; -> 3GPP Outgoing Call Connected (Speech codec: AMR-WB 23.85kbps).")
-            self.send_response(200)
+        if self.path in {
+            '/api/telephony/dial',
+            '/api/telephony/hangup',
+            '/api/telephony/sms/send',
+            '/api/telephony/data/toggle',
+            '/api/telephony/at_cmd',
+            '/api/pmic/profile',
+            '/api/kms/flip',
+            '/api/touch/event',
+        }:
+            self.send_response(409)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            self.wfile.write(json.dumps({'success': True, 'state': 'ACTIVE', 'number': number}).encode())
-            return
-
-        if self.path == '/api/telephony/hangup':
-            telephony_state["call_state"] = "IDLE"
-            telephony_state["active_number"] = ""
-            telephony_state["call_start"] = 0
-            serial_lines.append("[RIL_MODEM] ATH -> Call Terminated / Disconnected by user.")
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps({'success': True, 'state': 'IDLE'}).encode())
-            return
-
-        if self.path == '/api/telephony/sms/send':
-            content_length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
-            try:
-                data = json.loads(body.decode('utf-8'))
-            except Exception:
-                data = {}
-            recip = data.get("recipient", "+15550192")
-            text = data.get("text", "")
-            now_str = time.strftime("%H:%M")
-            new_id = len(telephony_state["sms_messages"]) + 1
-            msg_obj = {"id": new_id, "type": "out", "sender": recip, "text": text, "time": now_str}
-            telephony_state["sms_messages"].append(msg_obj)
-            serial_lines.append(f"[RIL_MODEM] AT+CMGS=\"{recip}\" -> SMS PDU sent over baseband ({len(text)} chars).")
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps({'success': True, 'message': msg_obj}).encode())
-            return
-
-        if self.path == '/api/telephony/data/toggle':
-            telephony_state["pdp_data"] = not telephony_state["pdp_data"]
-            st = "ENABLED" if telephony_state["pdp_data"] else "DISABLED"
-            serial_lines.append(f"[RIL_MODEM] AT+CGACT={1 if telephony_state['pdp_data'] else 0},1 -> PDP Context 5G Mobile Data {st}.")
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps({'success': True, 'pdp_data': telephony_state['pdp_data']}).encode())
-            return
-
-        if self.path == '/api/telephony/at_cmd':
-            content_length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
-            try:
-                data = json.loads(body.decode('utf-8'))
-            except Exception:
-                data = {}
-            cmd = data.get("cmd", "AT").strip()
-            resp = "OK"
-            if cmd.startswith("ATD"):
-                telephony_state["call_state"] = "ACTIVE"
-                telephony_state["active_number"] = cmd[3:].rstrip(";")
-                telephony_state["call_start"] = time.time()
-                resp = "CONNECT 5G"
-            elif cmd == "ATH":
-                telephony_state["call_state"] = "IDLE"
-                telephony_state["active_number"] = ""
-                resp = "NO CARRIER"
-            elif cmd == "AT+CLCC":
-                if telephony_state["call_state"] == "ACTIVE":
-                    resp = f"+CLCC: 1,0,0,0,0,\"{telephony_state['active_number']}\",129\nOK"
-                else:
-                    resp = "OK"
-            elif cmd == "AT+CSQ":
-                resp = "+CSQ: 31,99\nOK"
-            elif cmd.startswith("AT+CGACT"):
-                resp = "OK"
-            serial_lines.append(f"[RIL_AT] {cmd} => {resp}")
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps({'success': True, 'cmd': cmd, 'response': resp}).encode())
-            return
-
-        if self.path == '/api/pmic/profile':
-            content_length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
-            try:
-                data = json.loads(body.decode('utf-8'))
-            except Exception:
-                data = {}
-            prof = data.get("profile", "Balanced")
-            freq_map = {"PowerSave": 800, "Balanced": 1600, "Performance": 2400, "Turbo": 3200}
-            pmic_state["profile"] = prof
-            pmic_state["cpu_freq_mhz"] = freq_map.get(prof, 1600)
-            serial_lines.append(f"[PMIC_DVFS] Governor profile updated: {prof} (Target Clock: {pmic_state['cpu_freq_mhz']} MHz, Thermal: {pmic_state['temp_c']}°C).")
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps({'success': True, 'pmic': pmic_state}).encode())
-            return
-
-        if self.path == '/api/kms/flip':
-            kms_state["page_flips"] += 1
-            kms_state["front_buffer"], kms_state["back_buffer"] = kms_state["back_buffer"], kms_state["front_buffer"]
-            serial_lines.append(f"[DRM_KMS] Page Flip #{kms_state['page_flips']}: Scanout front={kms_state['front_buffer']}, back={kms_state['back_buffer']} @ 60Hz VSYNC.")
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps({'success': True, 'kms': kms_state}).encode())
-            return
-
-        if self.path == '/api/touch/event':
-            content_length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
-            try:
-                data = json.loads(body.decode('utf-8'))
-            except Exception:
-                data = {}
-            ev_type = data.get("type", "Tap")
-            x = data.get("x", 360)
-            y = data.get("y", 640)
-            now_time = time.strftime("%H:%M:%S")
-            gesture_obj = {"type": ev_type, "x": x, "y": y, "time": now_time}
-            touch_state["recent_gestures"].insert(0, gesture_obj)
-            if len(touch_state["recent_gestures"]) > 20:
-                touch_state["recent_gestures"].pop()
-            serial_lines.append(f"[TOUCH_DIGITIZER] Contact event decoded: {ev_type} at ({x}, {y}).")
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps({'success': True, 'gesture': gesture_obj}).encode())
+            self.wfile.write(json.dumps({
+                'success': False,
+                'status': 'UNAVAILABLE',
+                'source': 'UNAVAILABLE',
+                'error': 'Hardware control is unavailable until the guest exposes a real service endpoint',
+            }).encode())
             return
 
         if self.path == '/api/hardware/volume':
