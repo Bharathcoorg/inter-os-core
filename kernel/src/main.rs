@@ -533,7 +533,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     IPC_ROUTER.lock().register_task(id_compositor);
     serial_println!("[OK] Spawned Task 7: compositor_shell (ID: {:?})", id_compositor);
 
-    // Task 8: Network & InterLayer Client Worker
+    // Task 8: Network & Network Worker
     let mut caps_net = CapabilityTable::new(8);
     caps_net
         .insert(Capability {
