@@ -181,11 +181,32 @@ def cmd_doctor(args):
     except Exception:
         pass
 
+    toolchain = ""
+    try:
+        rt = subprocess.run(["rustup", "show", "active-toolchain"], capture_output=True, text=True)
+        toolchain = rt.stdout.strip()
+    except Exception:
+        pass
+
+    # CI/developer environments may install targets for the active toolchain.
+    # Querying rustup's installed list without --toolchain can report the wrong
+    # toolchain when the repository pins nightly.
+    target_toolchain_args = ["--toolchain", toolchain.split()[0]] if toolchain else []
+
     for t in target_triples:
-        if t in installed_targets:
+        try:
+            res = subprocess.run(
+                ["rustup", "target", "list", "--installed", *target_toolchain_args],
+                capture_output=True, text=True
+            )
+            installed_for_active = res.returncode == 0 and t in res.stdout.splitlines()
+        except Exception:
+            installed_for_active = t in installed_targets
+
+        if installed_for_active:
             log_success(f"Rust target installed: {t}")
         else:
-            log_warn(f"Rust target missing: {t} (Run: rustup target add {t})")
+            log_warn(f"Rust target missing for active toolchain {toolchain or 'default'}: {t}")
             all_passed = False
 
     # 4. QEMU Emulators
