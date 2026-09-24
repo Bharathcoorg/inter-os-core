@@ -8,6 +8,7 @@ use bootloader_api::info::{MemoryRegionKind, MemoryRegions};
 use spin::Mutex;
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::mapper::MapToError;
+use x86_64::structures::paging::Mapper;
 use x86_64::structures::paging::{
     FrameAllocator, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB,
 };
@@ -407,3 +408,48 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Stack Guard Pages — Hardware-enforced stack overflow protection
+// ---------------------------------------------------------------------------
+
+/// Size of a stack guard region (one 4KiB page, unmapped to trigger page fault on overflow).
+pub const GUARD_PAGE_SIZE: usize = 4096;
+
+/// Maps a guard page (no PRESENT bit) at the given virtual address.
+///
+/// Any access to this address will trigger a Page Fault (#PF) exception,
+/// preventing silent stack corruption from buffer overflows.
+///
+/// # Safety
+/// The caller must ensure the virtual address is properly aligned and
+/// does not conflict with existing valid mappings.
+pub fn map_guard_page(guard_vaddr: VirtAddr) {
+    // Guard pages work by *not* mapping anything at that address.
+    // The MMU will fault on any access because no PTE with PRESENT exists.
+    // We only need to ensure any existing mapping is removed.
+    let page: Page<Size4KiB> = Page::containing_address(guard_vaddr);
+    let mut mapper_lock = MEMORY_MAPPER.lock();
+    if let Some(mapper) = mapper_lock.as_mut() {
+        // If there's an existing mapping, unmap it to create the guard
+        if let Ok((_frame, flush)) = mapper.unmap(page) {
+            flush.flush();
+            crate::serial_println!(
+                "[GUARD] Unmapped existing page at {:#x} to create guard",
+                guard_vaddr.as_u64()
+            );
+        }
+        // If no mapping exists, the page is already a guard (will fault on access)
+    }
+    crate::serial_println!(
+        "[GUARD] Stack guard page active at {:#x}",
+        guard_vaddr.as_u64()
+    );
+}
+
+/// Calculates the guard page address for a stack allocated at the given base.
+///
+/// For downward-growing stacks (x86_64): the guard page is at `stack_base - GUARD_PAGE_SIZE`.
+#[inline]
+pub fn guard_page_addr(stack_base: usize) -> VirtAddr {
+    VirtAddr::new((stack_base - GUARD_PAGE_SIZE) as u64)
+}
