@@ -80,6 +80,18 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly
+          components: rust-src
+
+      - name: Install Bare-Metal Targets for Active Nightly Toolchain
+        run: |
+          rustup target add x86_64-unknown-none --toolchain nightly
+          rustup target add aarch64-unknown-none --toolchain nightly
+          rustup target add riscv64gc-unknown-none-elf --toolchain nightly
+
       - name: Install QEMU
         run: |
           sudo apt-get update
