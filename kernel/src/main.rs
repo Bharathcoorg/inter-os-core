@@ -899,7 +899,7 @@ extern "C" fn task_security_daemon() -> ! {
                                             serial_println!("[PACKAGE] id={} state=launched pid={} parent={} source={} verified=digest", package_id, child_id.0, service_id.0, descriptor.path);
                                             syscall::sys_log(1, "[PACKAGE SERVICE] Verified RAPP payload loaded into isolated Ring-3 process.");
                                         }
-                                        Err(_) => syscall::sys_log(1, "[PACKAGE SERVICE] Verified package ELF launch failed."),
+                                        Err(_) => { syscall::sys_log(1, "[PACKAGE SERVICE] Verified package ELF launch failed."); }
                                     }
                                 }
                             }
