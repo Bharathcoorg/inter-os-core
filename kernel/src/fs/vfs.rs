@@ -564,10 +564,23 @@ pub fn init() {
     let audit_init = b"[SYSTEM AUDIT LOG INITIALIZED] Milestone v0.3 Storage & VFS Active.\n";
     vfs.create_file("/data/audit.log", audit_init, false);
 
-    // 4. Sovereign First-Party ELF Binaries (Read-Only Static Zero-Heap)
+    // 4. First-party native packages. The package service launches from these
+    // verified .rapp payloads; legacy /system/bin entries remain diagnostics.
     vfs.create_static_file("/system/bin/init", crate::task::USER_INIT_ELF);
     vfs.create_static_file("/system/bin/settings", crate::task::APP_SETTINGS_ELF);
     vfs.create_static_file("/system/bin/terminal", crate::task::APP_TERMINAL_ELF);
+
+    let settings_rapp = crate::package::build_rapp(
+        "org.interos.settings", "interos.first-party", (1, 0, 0),
+        crate::package::RappArch::X86_64, &[], crate::task::APP_SETTINGS_ELF,
+    );
+    vfs.create_file("/packages/org.interos.settings.rapp", &settings_rapp, true);
+
+    let terminal_rapp = crate::package::build_rapp(
+        "org.interos.terminal", "interos.first-party", (1, 0, 0),
+        crate::package::RappArch::X86_64, &[], crate::task::APP_TERMINAL_ELF,
+    );
+    vfs.create_file("/packages/org.interos.terminal.rapp", &terminal_rapp, true);
     vfs.create_static_file("/system/bin/dialer", crate::task::APP_DIALER_ELF);
     vfs.create_static_file("/system/bin/vault", crate::task::APP_VAULT_ELF);
     vfs.create_static_file("/system/bin/camera", crate::task::APP_CAMERA_ELF);
