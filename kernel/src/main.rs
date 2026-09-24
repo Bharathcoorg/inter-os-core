@@ -903,7 +903,7 @@ extern "C" fn task_security_daemon() -> ! {
                                     }
                                 }
                             }
-                            Err(_) => syscall::sys_log(1, "[PACKAGE SERVICE] RAPP verification failed; launch denied."),
+                            Err(_) => { syscall::sys_log(1, "[PACKAGE SERVICE] RAPP verification failed; launch denied."); }
                         }
                     } else {
                         syscall::sys_log(1, "[PACKAGE SERVICE] Package ID is not registered; launch denied.");
