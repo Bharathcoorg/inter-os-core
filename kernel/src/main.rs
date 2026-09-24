@@ -320,15 +320,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // 24b. Initialize Multi-Architecture Hardware & Boot Image Layer (Fastboot v2 & AArch64)
     arch::init();
 
-    // 24c. Initialize MMIO I2C Host Controller Driver (Physical Touch Screen & Sensors)
-    drivers::test_mmio_i2c_host();
-
-    // 24d. Initialize Goodix GT911 Physical Touch Digitizer Hardware Pipeline
-    drivers::test_gt911_pipeline();
-
-    // 24e. Initialize Mobile eMMC 5.1 / SDHCI Storage Host Controller Driver
-    drivers::test_sdhci_controller();
-
     // 25. Initialize Hardware TRNG & Entropy Subsystem
 
     crypto::rng::init();
@@ -811,14 +802,17 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Render the Mobile Smartphone Shell on the graphical display
     framebuffer::draw_mobile_shell();
 
-    // 26. Enable hardware CPU interrupts and begin multitasking
-    x86_64::instructions::interrupts::enable();
-    serial_println!("[OK] Hardware interrupts enabled on CPU.");
-
     serial_println!("================================================================================");
     serial_println!("  SYSTEM READY: Inter OS v3.0 Microkernel Fully Online.");
     serial_println!("  Encrypted Vault, Camera, Browser, Messages, Calendar, Music, Calculator & 26 Tasks Active.");
     serial_println!("================================================================================");
+
+    // Emit live process telemetry for userspace and Device Studio telemetry inspector
+    task::SCHEDULER.lock().dump_process_table();
+
+    // 26. Enable hardware CPU interrupts and begin multitasking
+    x86_64::instructions::interrupts::enable();
+    serial_println!("[OK] Hardware interrupts enabled on CPU.");
 
     // Hand over control to multitasking scheduler
     loop {

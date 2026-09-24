@@ -96,10 +96,13 @@ document.addEventListener('DOMContentLoaded', () => {
       { id: 'photo-1', url: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="300" height="200" style="background:%230A192F"><rect width="300" height="200" fill="%230F172A"/><circle cx="150" cy="100" r="40" fill="%2310B981" opacity="0.8"/><text x="150" y="105" fill="white" font-size="14" font-family="sans-serif" text-anchor="middle">Sample Capture 01</text></svg>', date: 'Sep 21, 23:45', res: '1920x1080' }
     ],
     installedPackages: [
-      { id: 'com.interos.calc', name: 'Calculator', filename: 'calculator.app', format: 'Native Rust (.app)', status: 'Verified' },
-      { id: 'com.interos.camera', name: 'Camera Preview', filename: 'camera_prev.app', format: 'Native Rust (.app)', status: 'Verified' },
-      { id: 'com.interos.sensors', name: 'Sensors HAL', filename: 'sensor_dash.app', format: 'Native Rust (.app)', status: 'Verified' },
-      { id: 'com.interos.hello', name: 'Hello World', filename: 'hello_world.app', format: 'Native Rust (.app)', status: 'Verified' }
+      { id: 'app.calculator', name: 'Touch Calculator', filename: 'calculator.rapp', format: 'Rust App Package (.rapp)', sha256: '4c2e9b17...', status: 'Verified (Ed25519)', capabilities: ['DisplayScanout', 'AudioPlayback'] },
+      { id: 'app.camera', name: 'Sovereign Camera', filename: 'camera.rapp', format: 'Rust App Package (.rapp)', sha256: '9b3c4d5e...', status: 'Verified (Ed25519)', capabilities: ['DisplayScanout', 'CameraCapture', 'SandboxedVFS'] },
+      { id: 'app.browser', name: 'Sovereign Browser', filename: 'browser.rapp', format: 'Rust App Package (.rapp)', sha256: '8f1a7d42...', status: 'Verified (Ed25519)', capabilities: ['DisplayScanout', 'ZeroTrustNetwork'] },
+      { id: 'app.settings', name: 'System Settings', filename: 'settings.rapp', format: 'Rust App Package (.rapp)', sha256: '3a4b5c6d...', status: 'Verified (Ed25519)', capabilities: ['HardwareHAL', 'PowerGovernor'] },
+      { id: 'app.dialer', name: 'Cellular Dialer', filename: 'dialer.rapp', format: 'Rust App Package (.rapp)', sha256: '2d3e4f5a...', status: 'Verified (Ed25519)', capabilities: ['CellularModem', 'AudioPlayback'] },
+      { id: 'app.messages', name: 'Sovereign Messages', filename: 'messages.rapp', format: 'Rust App Package (.rapp)', sha256: '5f6a7b8c...', status: 'Verified (Ed25519)', capabilities: ['CellularModem', 'SandboxedVFS'] },
+      { id: 'org.interos.authenticator', name: 'Authenticator', filename: 'authenticator.rapp', format: 'Rust App Package (.rapp)', sha256: '4a5b6c7d...', status: 'Verified (Ed25519)', capabilities: ['CAP_HARDWARE_KEYSTORE'] }
     ]
   };
 
@@ -2540,28 +2543,363 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function populatePackagesTable() {
     if (!packagesTableBody) return;
-    packagesTableBody.innerHTML = '';
-    state.installedPackages.forEach(pkg => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td><strong>${pkg.name}</strong></td>
-        <td><span class="pkg-badge">${pkg.format}</span></td>
-        <td><code>${pkg.filename}</code></td>
-        <td><span style="color: #10B981; font-weight: 700;">Ring 3</span></td>
-        <td><button class="btn-launch-pkg" data-pkg-id="${pkg.id}">Launch</button></td>
-      `;
-      packagesTableBody.appendChild(tr);
+    fetch('/api/apps/list')
+      .then(r => r.json())
+      .then(data => {
+        if (data && data.apps && data.apps.length > 0) {
+          state.installedPackages = data.apps;
+        }
+        renderPackagesRows();
+      })
+      .catch(() => renderPackagesRows());
+
+    function renderPackagesRows() {
+      packagesTableBody.innerHTML = '';
+      state.installedPackages.forEach(pkg => {
+        const tr = document.createElement('tr');
+        const capsList = Array.isArray(pkg.capabilities) ? pkg.capabilities.join(', ') : 'Ring 3 Standard';
+        tr.innerHTML = `
+          <td><strong>${escapeHtml(pkg.name)}</strong></td>
+          <td><span class="pkg-badge" style="background: rgba(16, 185, 129, 0.15); color: #10B981; border: 1px solid rgba(16, 185, 129, 0.3);">${escapeHtml(pkg.format || 'Rust App Package (.rapp)')}</span></td>
+          <td><code>${escapeHtml(pkg.filename)}</code></td>
+          <td><span style="color: #10B981; font-size: 11px;">${escapeHtml(pkg.status || 'Verified (Ed25519)')}</span><br><code style="font-size: 10px; color: var(--text-secondary);">${escapeHtml(pkg.sha256 || 'SHA-256 Valid')}</code></td>
+          <td><span style="font-size: 11px; color: var(--text-secondary);">${escapeHtml(capsList)}</span></td>
+          <td><button class="btn-launch-pkg btn-console-act" data-pkg-id="${escapeHtml(pkg.id)}" style="padding: 2px 8px;">Launch</button></td>
+        `;
+        packagesTableBody.appendChild(tr);
+      });
+      document.querySelectorAll('.btn-launch-pkg').forEach(b => {
+        b.addEventListener('click', () => {
+          logConsole('info', `[PROCESS] Spawning process for package: ${b.dataset.pkgId}`);
+          switchView('view-helloworld');
+        });
+      });
+    }
+  }
+  populatePackagesTable();
+
+  // --- Process Table Population ---
+  const procsTableBody = document.getElementById('procs-table-body');
+  const procCountBadge = document.getElementById('proc-count-badge');
+  const btnRefreshProcs = document.getElementById('btn-refresh-procs');
+
+  function populateProcessesTable() {
+    if (!procsTableBody) return;
+    fetch('/api/kernel/processes')
+      .then(r => r.json())
+      .then(data => {
+        procsTableBody.innerHTML = '';
+        const procs = (data && data.processes) ? data.processes : [];
+        if (procCountBadge) {
+          procCountBadge.textContent = `${procs.length} Tasks Active`;
+        }
+        if (procs.length === 0) {
+          procsTableBody.innerHTML = `<tr><td colspan="10" style="text-align:center; padding: 24px; color: var(--text-secondary);">QEMU Microkernel Standby &bull; Click "Boot Microkernel" to inspect live tasks</td></tr>`;
+          return;
+        }
+        procs.forEach(p => {
+          const tr = document.createElement('tr');
+          const stateColor = p.state === 'Running' ? '#10B981' : (p.state === 'Blocked' ? '#F59E0B' : '#94A3B8');
+          tr.innerHTML = `
+            <td><code>${p.pid}</code></td>
+            <td><strong>${escapeHtml(p.name)}</strong></td>
+            <td><span style="color: ${stateColor}; font-weight: 600;">${escapeHtml(p.state)}</span></td>
+            <td>${p.ticks}</td>
+            <td>${escapeHtml(p.memory || '128 KB')}</td>
+            <td>${p.priority}</td>
+            <td>${p.ppid}</td>
+            <td><span class="badge-chip" style="font-size: 10px;">${p.caps} Caps</span></td>
+            <td><code style="font-size: 10px;">${escapeHtml(p.cr3 || '0x100000')}</code></td>
+            <td><span style="font-size: 10px; color: var(--text-secondary);">${escapeHtml(p.source || 'KERNEL')}</span></td>
+          `;
+          procsTableBody.appendChild(tr);
+        });
+      })
+      .catch(() => {
+        if (procsTableBody) {
+          procsTableBody.innerHTML = `<tr><td colspan="10" style="text-align:center; padding: 18px; color: var(--text-secondary);">Standby &bull; Offline</td></tr>`;
+        }
+      });
+  }
+  btnRefreshProcs?.addEventListener('click', populateProcessesTable);
+  populateProcessesTable();
+  setInterval(populateProcessesTable, 4000);
+
+  // --- Real IPC Table Population ---
+  const ipcTableBody = document.getElementById('ipc-table-body');
+  const ipcCountBadge = document.getElementById('ipc-count-badge');
+
+  function populateIpcTable() {
+    if (!ipcTableBody) return;
+    fetch('/api/kernel/ipc')
+      .then(r => r.json())
+      .then(data => {
+        ipcTableBody.innerHTML = '';
+        const events = (data && data.events) ? data.events : [];
+        if (ipcCountBadge) ipcCountBadge.textContent = `${events.length} Msg Routed`;
+        events.forEach(ev => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td><code>${escapeHtml(ev.endpoint || '0x3F8')}</code></td>
+            <td><span style="color: #3B82F6;">${escapeHtml(ev.sender || 'kernel')}</span></td>
+            <td><span style="color: #10B981;">${escapeHtml(ev.receiver || 'daemon')}</span></td>
+            <td>${escapeHtml(ev.size || '64B')}</td>
+            <td><span class="badge-chip" style="font-size: 10px;">${escapeHtml(ev.cap || 'CAP_IPC')}</span></td>
+            <td><span style="color: #10B981;">${escapeHtml(ev.state || 'Delivered')}</span></td>
+            <td><span style="font-size: 10px; color: var(--text-secondary);">${escapeHtml(ev.time || 'Live')}</span></td>
+          `;
+          ipcTableBody.appendChild(tr);
+        });
+      })
+      .catch(() => {});
+  }
+  populateIpcTable();
+  setInterval(populateIpcTable, 4000);
+
+  // --- Telephony Subsystem Controller ---
+  function wireTelephony() {
+    const callStateEl = document.getElementById('tel-call-state');
+    const carrierValEl = document.getElementById('tel-carrier-val');
+    const dataStatusEl = document.getElementById('tel-data-status');
+    const dialInput = document.getElementById('tel-dial-input');
+    const btnDial = document.getElementById('btn-tel-dial');
+    const btnHangup = document.getElementById('btn-tel-hangup');
+    const btnToggleData = document.getElementById('btn-tel-toggle-data');
+    const smsRecipInput = document.getElementById('tel-sms-recip');
+    const smsTextInput = document.getElementById('tel-sms-text');
+    const btnSendSms = document.getElementById('btn-tel-send-sms');
+    const smsListEl = document.getElementById('tel-sms-list');
+    const atInput = document.getElementById('tel-at-input');
+    const btnRunAt = document.getElementById('btn-tel-run-at');
+    const atOutput = document.getElementById('tel-at-output');
+
+    function refreshTel() {
+      fetch('/api/telephony/status')
+        .then(r => r.json())
+        .then(d => {
+          if (d && d.telephony) {
+            const t = d.telephony;
+            if (callStateEl) {
+              callStateEl.textContent = t.call_state;
+              callStateEl.style.color = t.call_state === 'ACTIVE' ? '#10B981' : '#94A3B8';
+            }
+            if (carrierValEl) carrierValEl.textContent = t.operator;
+            if (dataStatusEl) {
+              dataStatusEl.textContent = t.pdp_data ? 'ENABLED (5G PDP)' : 'DISABLED';
+              dataStatusEl.style.color = t.pdp_data ? '#10B981' : '#EF4444';
+            }
+            const phoneSimBadge = document.getElementById('phone-sim-badge');
+            if (phoneSimBadge) {
+              phoneSimBadge.textContent = t.pdp_data ? '5G' : '3G';
+            }
+          }
+        })
+        .catch(() => {});
+
+      fetch('/api/telephony/sms/list')
+        .then(r => r.json())
+        .then(d => {
+          if (d && d.messages && smsListEl) {
+            smsListEl.innerHTML = '';
+            d.messages.forEach(m => {
+              const div = document.createElement('div');
+              div.style.padding = '4px 8px';
+              div.style.background = m.type === 'in' ? 'rgba(59, 130, 246, 0.1)' : 'rgba(16, 185, 129, 0.1)';
+              div.style.borderRadius = '6px';
+              div.style.borderLeft = m.type === 'in' ? '3px solid #3B82F6' : '3px solid #10B981';
+              div.innerHTML = `<span style="font-weight: 600;">${m.type === 'in' ? 'FROM' : 'TO'}: ${escapeHtml(m.sender)}</span>: ${escapeHtml(m.text)} <span style="float: right; color: var(--text-secondary);">${escapeHtml(m.time)}</span>`;
+              smsListEl.appendChild(div);
+            });
+          }
+        })
+        .catch(() => {});
+    }
+
+    btnDial?.addEventListener('click', () => {
+      const num = dialInput?.value || '+1-555-0192';
+      fetch('/api/telephony/dial', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ number: num })
+      }).then(() => {
+        showToast(`Dialing ${num} via 3GPP Baseband...`);
+        refreshTel();
+      });
     });
 
-    // Launch buttons
-    document.querySelectorAll('.btn-launch-pkg').forEach(b => {
-      b.addEventListener('click', () => {
-        logConsole('info', `[PROCESS] Spawning process for package: ${b.dataset.pkgId}`);
-        switchView('view-helloworld');
+    btnHangup?.addEventListener('click', () => {
+      fetch('/api/telephony/hangup', { method: 'POST' }).then(() => {
+        showToast('Call terminated (ATH).');
+        refreshTel();
+      });
+    });
+
+    btnToggleData?.addEventListener('click', () => {
+      fetch('/api/telephony/data/toggle', { method: 'POST' }).then(() => {
+        showToast('PDP Context Mobile Data toggled.');
+        refreshTel();
+      });
+    });
+
+    btnSendSms?.addEventListener('click', () => {
+      const recip = smsRecipInput?.value || '+15550192';
+      const text = smsTextInput?.value || '';
+      if (!text) return;
+      fetch('/api/telephony/sms/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recipient: recip, text })
+      }).then(() => {
+        showToast(`SMS sent to ${recip}`);
+        if (smsTextInput) smsTextInput.value = '';
+        refreshTel();
+      });
+    });
+
+    btnRunAt?.addEventListener('click', () => {
+      const cmd = atInput?.value || 'AT';
+      fetch('/api/telephony/at_cmd', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cmd })
+      })
+      .then(r => r.json())
+      .then(res => {
+        if (atOutput) {
+          atOutput.innerHTML += `<div><span style="color: #3B82F6;">&gt; ${escapeHtml(cmd)}</span><br><span style="color: #10B981;">${escapeHtml(res.response)}</span></div>`;
+          atOutput.scrollTop = atOutput.scrollHeight;
+        }
+        refreshTel();
+      });
+    });
+
+    setInterval(refreshTel, 4000);
+    refreshTel();
+  }
+  wireTelephony();
+
+  // --- PMIC & DVFS Power Governor ---
+  function wirePmic() {
+    const voltEl = document.getElementById('pmic-voltage-val');
+    const tempEl = document.getElementById('pmic-temp-val');
+    const freqEl = document.getElementById('pmic-freq-val');
+    const currEl = document.getElementById('pmic-current-val');
+    const socBadge = document.getElementById('pmic-soc-badge');
+    const dvfsBtns = document.querySelectorAll('.dvfs-btn');
+
+    function refreshPmic() {
+      fetch('/api/pmic/status')
+        .then(r => r.json())
+        .then(d => {
+          if (d && d.pmic) {
+            const p = d.pmic;
+            if (voltEl) voltEl.textContent = `${p.voltage_mv} mV`;
+            if (tempEl) tempEl.textContent = `${p.temp_c} \u00B0C (Normal)`;
+            if (freqEl) freqEl.textContent = `${p.cpu_freq_mhz} MHz`;
+            if (currEl) currEl.textContent = `${p.current_ma} mA`;
+            if (socBadge) socBadge.textContent = `${p.battery_pct}% SoC`;
+            const phoneBattery = document.getElementById('phone-battery');
+            if (phoneBattery) phoneBattery.textContent = `${p.battery_pct}%`;
+          }
+        })
+        .catch(() => {});
+    }
+
+    dvfsBtns.forEach(btn => {
+      btn.addEventListener('click', () => {
+        const prof = btn.dataset.profile;
+        dvfsBtns.forEach(b => {
+          b.classList.remove('active');
+          b.style.background = '';
+          b.style.borderColor = '';
+        });
+        btn.classList.add('active');
+        btn.style.background = 'rgba(16, 185, 129, 0.2)';
+        btn.style.borderColor = '#10B981';
+        fetch('/api/pmic/profile', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ profile: prof })
+        }).then(() => {
+          showToast(`DVFS Governor: Switched to ${prof}`);
+          refreshPmic();
+        });
+      });
+    });
+
+    setInterval(refreshPmic, 5000);
+    refreshPmic();
+  }
+  wirePmic();
+
+  // --- DRM/KMS Compositor ---
+  function wireKms() {
+    const btnFlip = document.getElementById('btn-kms-flip');
+    const flipsBadge = document.getElementById('kms-flips-badge');
+    const frontEl = document.getElementById('kms-front-buf');
+    const backEl = document.getElementById('kms-back-buf');
+
+    btnFlip?.addEventListener('click', () => {
+      fetch('/api/kms/flip', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+          if (d && d.kms) {
+            if (flipsBadge) flipsBadge.textContent = `${d.kms.page_flips} Page Flips`;
+            if (frontEl) frontEl.textContent = d.kms.front_buffer;
+            if (backEl) backEl.textContent = d.kms.back_buffer;
+            showToast(`KMS Page Flip #${d.kms.page_flips} @ 60Hz VSYNC`);
+          }
+        });
+    });
+  }
+  wireKms();
+
+  // --- Touch & Gestures ---
+  function wireTouch() {
+    const pad = document.getElementById('touchpad-surface');
+    const gesturesStream = document.getElementById('touch-gestures-stream');
+    let isDown = false;
+    let startX = 0, startY = 0;
+    let downTime = 0;
+
+    pad?.addEventListener('mousedown', (e) => {
+      isDown = true;
+      startX = e.offsetX;
+      startY = e.offsetY;
+      downTime = Date.now();
+      pad.style.background = 'rgba(16, 185, 129, 0.15)';
+    });
+
+    pad?.addEventListener('mouseup', (e) => {
+      if (!isDown) return;
+      isDown = false;
+      pad.style.background = 'rgba(0,0,0,0.6)';
+      const duration = Date.now() - downTime;
+      const dx = e.offsetX - startX;
+      const dy = e.offsetY - startY;
+
+      let gType = 'Tap';
+      if (duration >= 500 && Math.abs(dx) < 10 && Math.abs(dy) < 10) {
+        gType = 'LongPress';
+      } else if (Math.abs(dx) > 20 || Math.abs(dy) > 20) {
+        gType = 'Pan';
+      }
+
+      fetch('/api/touch/event', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: gType, x: e.offsetX, y: e.offsetY })
+      })
+      .then(r => r.json())
+      .then(res => {
+        if (gesturesStream && res.gesture) {
+          const g = res.gesture;
+          gesturesStream.innerHTML = `<div>[TOUCH] Recognized: <strong style="color: #10B981;">${g.type}</strong> at (${g.x}, ${g.y}) &bull; ${g.time}</div>` + gesturesStream.innerHTML;
+        }
       });
     });
   }
-  populatePackagesTable();
+  wireTouch();
 
   // =========================================================================
   // 13. HARDWARE DIGITAL TWIN SENSOR TELEMETRY SLIDERS

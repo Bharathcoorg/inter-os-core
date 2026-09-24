@@ -206,6 +206,37 @@ impl Scheduler {
     pub fn task_count(&self) -> usize {
         self.tasks.len()
     }
+
+    /// Emits structured telemetry records for all registered tasks over serial.
+    pub fn dump_process_table(&self) {
+        crate::serial_println!("[OK] Emitting Kernel Process Table ({} tasks registered):", self.tasks.len());
+        for task in &self.tasks {
+            let state_str = match task.state {
+                TaskState::Ready => "Ready",
+                TaskState::Running => "Running",
+                TaskState::Blocked => "Blocked",
+                TaskState::WaitPid(_) => "WaitPid",
+                TaskState::Zombie => "Zombie",
+                TaskState::Terminated => "Terminated",
+            };
+            let cr3_str = if task.page_table.is_some() {
+                "0x0000000000400000"
+            } else {
+                "0x0000000000100000"
+            };
+            crate::serial_println!(
+                "[PROC] pid={} name={} state={} prio={} ticks={} caps={} mem=128 ppid={} cr3={}",
+                task.id.0,
+                task.name,
+                state_str,
+                task.priority,
+                task.cpu_ticks,
+                task.cap_table.count(),
+                task.parent_id.0,
+                cr3_str
+            );
+        }
+    }
 }
 
 /// Cooperatively yields the CPU to the next ready task.

@@ -2275,11 +2275,15 @@
         <div class="ide-tab-bar">
           <button class="panel-tab active" data-tab="tab-console">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-            Live Kernel Console
+            Live Console
+          </button>
+          <button class="panel-tab" data-tab="tab-processes">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+            Processes &amp; TCBs
           </button>
           <button class="panel-tab" data-tab="tab-packages">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-            Installed Packages (.app)
+            Packages (.rapp)
           </button>
           <button class="panel-tab" data-tab="tab-registers">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/></svg>
@@ -2287,19 +2291,39 @@
           </button>
           <button class="panel-tab" data-tab="tab-memmap">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/></svg>
-            Memory Map
+            Memory &amp; Paging
+          </button>
+          <button class="panel-tab" data-tab="tab-ipc">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            IPC Inspector
           </button>
           <button class="panel-tab" data-tab="tab-capabilities">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
             Capabilities
           </button>
+          <button class="panel-tab" data-tab="tab-telephony">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+            Cellular &amp; 3GPP RIL
+          </button>
+          <button class="panel-tab" data-tab="tab-pmic">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="6" width="18" height="12" rx="2"/><line x1="23" y1="11" x2="23" y2="13"/></svg>
+            PMIC &amp; DVFS Power
+          </button>
+          <button class="panel-tab" data-tab="tab-kms">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
+            DRM/KMS Compositor
+          </button>
+          <button class="panel-tab" data-tab="tab-touch">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v8"/><path d="M8 12h8"/></svg>
+            Touch &amp; Gestures
+          </button>
           <button class="panel-tab" data-tab="tab-kernel">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
-            Microkernel Specs
+            Specs
           </button>
           <button class="panel-tab" data-tab="tab-appdev">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
-            App Dev Inspector
+            App Dev
           </button>
         </div>
 
@@ -2318,22 +2342,53 @@
           <div class="telemetry-terminal" id="telemetry-terminal"></div>
         </div>
 
+        <!-- Tab: Multitasking Process Table (TCBs) -->
+        <div class="tab-content" id="tab-processes">
+          <div class="memmap-header">
+            <strong>Ring 0 / Ring 3 Multitasking Process Table (TCBs)</strong>
+            <span class="badge-chip" id="proc-count-badge" style="color: #10B981; border-color: rgba(16, 185, 129, 0.3);">Live Scheduler</span>
+          </div>
+          <div style="margin-bottom: 12px; display: flex; gap: 8px; align-items: center;">
+            <button class="btn-console-act" id="btn-refresh-procs">Refresh Processes</button>
+            <span style="font-size: 11px; color: var(--text-secondary);" id="proc-telemetry-source">Source: Real Kernel Telemetry</span>
+          </div>
+          <table class="packages-table" id="procs-table">
+            <thead>
+              <tr>
+                <th>PID</th>
+                <th>NAME</th>
+                <th>STATE</th>
+                <th>TICKS</th>
+                <th>MEM</th>
+                <th>PRIO</th>
+                <th>PPID</th>
+                <th>CAPS</th>
+                <th>CR3 / ROOT</th>
+                <th>ORIGIN</th>
+              </tr>
+            </thead>
+            <tbody id="procs-table-body">
+              <!-- Dynamically populated from /api/kernel/processes -->
+            </tbody>
+          </table>
+        </div>
+
         <!-- Tab 2: Installed Packages & Sideload Inspector -->
         <div class="tab-content" id="tab-packages">
           <div class="memmap-header">
-            <strong>Ring 3 Installed Application Packages</strong>
+            <strong>Sovereign Rust App Packages (.rapp)</strong>
             <span class="badge-chip" id="pkg-count-badge" style="color: #10B981; border-color: rgba(16, 185, 129, 0.3);">9 Packages Active</span>
           </div>
 
           <!-- Sideload Dropzone -->
           <div class="sideload-dropzone" id="sideload-dropzone">
-            <input type="file" id="sideload-file-input" style="display: none;" accept=".app,.rap,.wasm,.apk,.bin">
+            <input type="file" id="sideload-file-input" style="display: none;" accept=".rapp,.app,.rap,.wasm,.apk,.bin">
             <div class="dropzone-icon">
               <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#10B981" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
             </div>
             <div class="dropzone-text">
               <strong>Drag &amp; Drop Package to Sideload</strong>
-              <span>Supports Native Rust (<code>.app</code>), WebAssembly (<code>.wasm</code>), and Android (<code>.apk</code>)</span>
+              <span>Supports Sovereign Rust App Packages (<code>.rapp</code>), WebAssembly (<code>.wasm</code>), and Android (<code>.apk</code>)</span>
             </div>
             <button class="btn-browse-package" id="btn-browse-package" type="button">Browse Local Package</button>
           </div>
@@ -2344,7 +2399,8 @@
                 <th>APPLICATION</th>
                 <th>FORMAT</th>
                 <th>PACKAGE FILE</th>
-                <th>PRIVILEGE</th>
+                <th>SIGNATURE / DIGEST</th>
+                <th>CAPABILITIES</th>
                 <th>ACTION</th>
               </tr>
             </thead>
@@ -2546,6 +2602,221 @@
               <strong class="stat-val" style="color: #3B82F6;">ChaCha20 Encrypted</strong>
             </div>
           </div>
+        </div>
+
+        <!-- Tab: Real-Time IPC Inspector -->
+        <div class="tab-content" id="tab-ipc">
+          <div class="memmap-header">
+            <strong>Zero-Trust IPC Message Bus &amp; Capability Router</strong>
+            <span class="badge-chip" id="ipc-count-badge" style="color: #10B981; border-color: rgba(16, 185, 129, 0.3);">Real Guest Stream</span>
+          </div>
+          <table class="packages-table" id="ipc-table">
+            <thead>
+              <tr>
+                <th>ENDPOINT</th>
+                <th>SENDER</th>
+                <th>RECEIVER</th>
+                <th>PAYLOAD</th>
+                <th>CAPABILITY</th>
+                <th>STATUS</th>
+                <th>TIMESTAMP</th>
+              </tr>
+            </thead>
+            <tbody id="ipc-table-body">
+              <!-- Dynamically populated from /api/kernel/ipc -->
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Tab: Cellular Baseband & 3GPP RIL -->
+        <div class="tab-content" id="tab-telephony">
+          <div class="memmap-header">
+            <strong>Cellular Baseband Modem &amp; 3GPP RIL Engine</strong>
+            <span class="badge-chip" id="tel-signal-badge" style="color: #10B981; border-color: rgba(16, 185, 129, 0.3);">5G SA &bull; -82 dBm</span>
+          </div>
+          
+          <div class="appdev-stats-grid" style="margin-bottom: 16px;">
+            <div class="appdev-stat-card">
+              <span class="stat-lbl">CALL STATE</span>
+              <strong class="stat-val" id="tel-call-state" style="color: #10B981;">IDLE</strong>
+            </div>
+            <div class="appdev-stat-card">
+              <span class="stat-lbl">OPERATOR CARRIER</span>
+              <strong class="stat-val" id="tel-carrier-val">InterCell 5G SA</strong>
+            </div>
+            <div class="appdev-stat-card">
+              <span class="stat-lbl">PDP MOBILE DATA</span>
+              <strong class="stat-val" id="tel-data-status" style="color: #10B981;">ENABLED (IPv4/IPv6)</strong>
+            </div>
+          </div>
+
+          <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-glass); border-radius: 12px; padding: 14px; margin-bottom: 16px;">
+            <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.5px; color: var(--text-secondary); margin-bottom: 8px;">VOICE CALL CONTROLLER</div>
+            <div style="display: flex; gap: 8px; align-items: center;">
+              <input type="text" id="tel-dial-input" placeholder="+1-555-0192" style="background: rgba(0,0,0,0.5); border: 1px solid var(--border-glass); border-radius: 8px; color: white; padding: 6px 12px; font-size: 13px; flex: 1;">
+              <button class="btn-console-act" id="btn-tel-dial" style="background: #10B981; color: white; border: none;">Dial Outgoing</button>
+              <button class="btn-console-act" id="btn-tel-hangup" style="background: #EF4444; color: white; border: none;">Hang Up</button>
+              <button class="btn-console-act" id="btn-tel-toggle-data">Toggle Data</button>
+            </div>
+          </div>
+
+          <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-glass); border-radius: 12px; padding: 14px; margin-bottom: 16px;">
+            <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.5px; color: var(--text-secondary); margin-bottom: 8px;">SMS BASEBAND TRANSMITTER</div>
+            <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+              <input type="text" id="tel-sms-recip" placeholder="Recipient: +15550192" style="background: rgba(0,0,0,0.5); border: 1px solid var(--border-glass); border-radius: 8px; color: white; padding: 6px 12px; font-size: 12px; width: 180px;">
+              <input type="text" id="tel-sms-text" placeholder="SMS message content..." style="background: rgba(0,0,0,0.5); border: 1px solid var(--border-glass); border-radius: 8px; color: white; padding: 6px 12px; font-size: 12px; flex: 1;">
+              <button class="btn-console-act" id="btn-tel-send-sms">Send SMS</button>
+            </div>
+            <div id="tel-sms-list" style="max-height: 120px; overflow-y: auto; font-size: 12px; display: flex; flex-direction: column; gap: 6px;">
+              <!-- Populated dynamically -->
+            </div>
+          </div>
+
+          <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-glass); border-radius: 12px; padding: 14px;">
+            <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.5px; color: var(--text-secondary); margin-bottom: 8px;">3GPP AT COMMAND CONSOLE (V.250 RIL)</div>
+            <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+              <input type="text" id="tel-at-input" placeholder="ATD+15550192; / ATH / AT+CSQ / AT+CLCC / AT+CMGS" style="background: rgba(0,0,0,0.5); border: 1px solid var(--border-glass); border-radius: 8px; color: white; padding: 6px 12px; font-size: 12px; font-family: var(--font-mono); flex: 1;">
+              <button class="btn-console-act" id="btn-tel-run-at">Send AT</button>
+            </div>
+            <div id="tel-at-output" class="telemetry-terminal" style="height: 100px; padding: 8px; font-size: 11px;"></div>
+          </div>
+        </div>
+
+        <!-- Tab: PMIC Fuel Gauge & DVFS Governor -->
+        <div class="tab-content" id="tab-pmic">
+          <div class="memmap-header">
+            <strong>PMIC Coulomb Counter &amp; Interactive DVFS Governor</strong>
+            <span class="badge-chip" id="pmic-soc-badge" style="color: #10B981; border-color: rgba(16, 185, 129, 0.3);">96% SoC</span>
+          </div>
+
+          <div class="appdev-stats-grid" style="margin-bottom: 16px;">
+            <div class="appdev-stat-card">
+              <span class="stat-lbl">BATTERY VOLTAGE</span>
+              <strong class="stat-val" id="pmic-voltage-val">4210 mV</strong>
+            </div>
+            <div class="appdev-stat-card">
+              <span class="stat-lbl">BATTERY TEMP</span>
+              <strong class="stat-val" id="pmic-temp-val" style="color: #10B981;">31.8 &deg;C (Normal)</strong>
+            </div>
+            <div class="appdev-stat-card">
+              <span class="stat-lbl">CPU CLOCK FREQUENCY</span>
+              <strong class="stat-val" id="pmic-freq-val" style="color: #3B82F6;">1600 MHz</strong>
+            </div>
+            <div class="appdev-stat-card">
+              <span class="stat-lbl">CURRENT DRAW</span>
+              <strong class="stat-val" id="pmic-current-val">-380 mA</strong>
+            </div>
+          </div>
+
+          <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-glass); border-radius: 12px; padding: 14px; margin-bottom: 16px;">
+            <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.5px; color: var(--text-secondary); margin-bottom: 10px;">INTERACTIVE DVFS GOVERNOR PROFILE SELECTOR</div>
+            <div style="display: flex; gap: 8px;">
+              <button class="btn-console-act dvfs-btn" data-profile="PowerSave">PowerSave (800 MHz)</button>
+              <button class="btn-console-act dvfs-btn active" data-profile="Balanced" style="background: rgba(16, 185, 129, 0.2); border-color: #10B981;">Balanced (1600 MHz)</button>
+              <button class="btn-console-act dvfs-btn" data-profile="Performance">Performance (2400 MHz)</button>
+              <button class="btn-console-act dvfs-btn" data-profile="Turbo">Turbo (3200 MHz)</button>
+            </div>
+          </div>
+
+          <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-glass); border-radius: 12px; padding: 14px;">
+            <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.5px; color: var(--text-secondary); margin-bottom: 8px;">THERMAL THROTTLING THRESHOLD MONITOR</div>
+            <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.6;">
+              Automated hardware safety constraint: Core temperatures exceeding <strong>70.0 &deg;C</strong> trigger immediate thermal governor downclocking to PowerSave (800 MHz) with IRQ priority elevation to protect mobile silicon.
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab: DRM/KMS Compositor -->
+        <div class="tab-content" id="tab-kms">
+          <div class="memmap-header">
+            <strong>DRM/KMS Multi-Surface Compositor &amp; Scanout Planes</strong>
+            <span class="badge-chip" id="kms-flips-badge" style="color: #10B981; border-color: rgba(16, 185, 129, 0.3);">3120 Page Flips</span>
+          </div>
+
+          <div class="appdev-stats-grid" style="margin-bottom: 16px;">
+            <div class="appdev-stat-card">
+              <span class="stat-lbl">SCANOUT MODE</span>
+              <strong class="stat-val" style="color: #10B981;">Double-Buffered (Page Flip)</strong>
+            </div>
+            <div class="appdev-stat-card">
+              <span class="stat-lbl">FRONT BUFFER</span>
+              <strong class="stat-val" id="kms-front-buf" style="font-family: var(--font-mono); font-size: 13px;">0xFD000000</strong>
+            </div>
+            <div class="appdev-stat-card">
+              <span class="stat-lbl">BACK BUFFER</span>
+              <strong class="stat-val" id="kms-back-buf" style="font-family: var(--font-mono); font-size: 13px;">0xFD800000</strong>
+            </div>
+            <div class="appdev-stat-card">
+              <span class="stat-lbl">REFRESH RATE</span>
+              <strong class="stat-val" style="color: #3B82F6;">60 Hz VSYNC</strong>
+            </div>
+          </div>
+
+          <div style="margin-bottom: 12px; display: flex; gap: 8px; align-items: center;">
+            <button class="btn-console-act" id="btn-kms-flip">Trigger Hardware Page Flip</button>
+            <span style="font-size: 11px; color: var(--text-secondary);">Swaps front &amp; back scanout addresses synchronously on VBLANK</span>
+          </div>
+
+          <table class="packages-table">
+            <thead>
+              <tr>
+                <th>PLANE ID</th>
+                <th>SURFACE NAME</th>
+                <th>Z-ORDER</th>
+                <th>OPACITY</th>
+                <th>VIEWPORT RECT</th>
+                <th>BLENDING MODE</th>
+              </tr>
+            </thead>
+            <tbody id="kms-planes-tbody">
+              <tr><td>0</td><td>Primary Display Scanout</td><td>0</td><td>100%</td><td>0, 0, 720, 1280</td><td>Opaque Direct</td></tr>
+              <tr><td>1</td><td>Mobile Shell Activity Space</td><td>5</td><td>100%</td><td>0, 36, 720, 1208</td><td>Porter-Duff SrcOver</td></tr>
+              <tr><td>2</td><td>System Line Status Bar</td><td>10</td><td>95%</td><td>0, 0, 720, 36</td><td>Alpha Composited</td></tr>
+              <tr><td>3</td><td>Gesture Navigation Bar</td><td>10</td><td>95%</td><td>0, 1244, 720, 36</td><td>Alpha Composited</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Tab: Touch & Gestures -->
+        <div class="tab-content" id="tab-touch">
+          <div class="memmap-header">
+            <strong>Capacitive Multi-Touch Digitizer &amp; Gesture Engine</strong>
+            <span class="badge-chip" id="touch-slots-badge" style="color: #10B981; border-color: rgba(16, 185, 129, 0.3);">5 Contact Slots Active</span>
+          </div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;">
+            <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-glass); border-radius: 12px; padding: 14px;">
+              <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.5px; color: var(--text-secondary); margin-bottom: 8px;">INTERACTIVE TOUCHPAD DIGITIZER</div>
+              <div id="touchpad-surface" style="height: 180px; background: rgba(0,0,0,0.6); border: 1px dashed rgba(255,255,255,0.2); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: var(--text-secondary); font-size: 12px; cursor: crosshair; user-select: none;">
+                Click, drag, or tap here to inject touch contacts
+              </div>
+            </div>
+
+            <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-glass); border-radius: 12px; padding: 14px;">
+              <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.5px; color: var(--text-secondary); margin-bottom: 8px;">RECOGNIZED GESTURES EVENT STREAM</div>
+              <div id="touch-gestures-stream" class="telemetry-terminal" style="height: 180px; padding: 8px; font-size: 11px;"></div>
+            </div>
+          </div>
+
+          <table class="packages-table">
+            <thead>
+              <tr>
+                <th>SLOT #</th>
+                <th>ACTIVE</th>
+                <th>CONTACT ID</th>
+                <th>CURRENT X</th>
+                <th>CURRENT Y</th>
+                <th>START TICKS</th>
+              </tr>
+            </thead>
+            <tbody id="touch-slots-tbody">
+              <tr><td>Slot 0</td><td>Idle</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>
+              <tr><td>Slot 1</td><td>Idle</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>
+              <tr><td>Slot 2</td><td>Idle</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>
+              <tr><td>Slot 3</td><td>Idle</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>
+              <tr><td>Slot 4</td><td>Idle</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>
+            </tbody>
+          </table>
         </div>
       </div>
     </aside>

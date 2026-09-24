@@ -48,6 +48,7 @@ pub fn init() {
 
     // 2. Capacitive Touch Screen Tap Gesture Self-Test
     let mut digitizer = TOUCH_DIGITIZER.lock();
+    let initial_taps = digitizer.total_taps_detected;
     let tap_x = (PHONE_X + 120) as u32;
     let tap_y = (PHONE_Y + 180) as u32;
 
@@ -60,7 +61,7 @@ pub fn init() {
     let g2 = digitizer.update_touch(0, tap_x, tap_y, 0, TouchPhase::Up);
     assert_eq!(g2, Some(TouchGesture::Tap { x: tap_x, y: tap_y }));
     assert_eq!(digitizer.active_touch_count(), 0);
-    assert_eq!(digitizer.total_taps_detected, 1);
+    assert_eq!(digitizer.total_taps_detected, initial_taps + 1);
     serial_println!("[TEST] Touch Digitizer: Single-finger capacitive Tap detected at ({}, {}).", tap_x, tap_y);
 
     // 3. Multi-Touch Slot Tracking Self-Test
