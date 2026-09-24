@@ -863,16 +863,16 @@ extern "C" fn task_security_daemon() -> ! {
                     syscall::sys_log(1, "[PACKAGE SERVICE] Resolving registered package and launching verified native process.");
 
                     let launch = match package_id {
-                        "org.interos.settings" => task::spawn_app_settings(service_id),
-                        "org.interos.terminal" => task::spawn_app_terminal(service_id),
-                        "org.interos.dialer" => task::spawn_app_dialer(service_id),
-                        "org.interos.vault" => task::spawn_app_vault(service_id),
-                        "org.interos.camera" => task::spawn_app_camera(service_id),
-                        "org.interos.calculator" => task::spawn_app_calculator(service_id),
-                        "org.interos.browser" => task::spawn_app_browser(service_id),
-                        "org.interos.messages" => task::spawn_app_messages(service_id),
-                        "org.interos.calendar" => task::spawn_app_calendar(service_id),
-                        "org.interos.music" => task::spawn_app_music(service_id),
+                        "org.interos.settings" => Ok(task::spawn_app_settings(service_id)),
+                        "org.interos.terminal" => Ok(task::spawn_app_terminal(service_id)),
+                        "org.interos.dialer" => Ok(task::spawn_app_dialer(service_id)),
+                        "org.interos.vault" => Ok(task::spawn_app_vault(service_id)),
+                        "org.interos.camera" => Ok(task::spawn_app_camera(service_id)),
+                        "org.interos.calculator" => Ok(task::spawn_app_calculator(service_id)),
+                        "org.interos.browser" => Ok(task::spawn_app_browser(service_id)),
+                        "org.interos.messages" => Ok(task::spawn_app_messages(service_id)),
+                        "org.interos.calendar" => Ok(task::spawn_app_calendar(service_id)),
+                        "org.interos.music" => Ok(task::spawn_app_music(service_id)),
                         _ => Err("package id is not registered"),
                     };
 
