@@ -445,6 +445,14 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             object_id: 0,
         })
         .ok(); // Slot 2: package/service launch authority
+    caps_security
+        .insert(Capability {
+            id: CapabilityId(204),
+            cap_type: CapabilityType::FileSystemRead,
+            rights: Rights::READ,
+            object_id: 0,
+        })
+        .ok(); // Slot 3: package registry read
 
     let id_security = SCHEDULER.lock().spawn(
         "security_daemon",
@@ -860,31 +868,45 @@ extern "C" fn task_security_daemon() -> ! {
                     syscall::sys_log(1, "[PACKAGE SERVICE] ProcessSpawn capability missing; launch denied.");
                 } else {
                     let service_id = syscall::sys_get_task_id();
-                    syscall::sys_log(1, "[PACKAGE SERVICE] Resolving registered package and launching verified native process.");
-
-                    let launch = match package_id {
-                        "org.interos.settings" => Ok(task::spawn_app_settings(service_id)),
-                        "org.interos.terminal" => Ok(task::spawn_app_terminal(service_id)),
-                        "org.interos.dialer" => Ok(task::spawn_app_dialer(service_id)),
-                        "org.interos.vault" => Ok(task::spawn_app_vault(service_id)),
-                        "org.interos.camera" => Ok(task::spawn_app_camera(service_id)),
-                        "org.interos.calculator" => Ok(task::spawn_app_calculator(service_id)),
-                        "org.interos.browser" => Ok(task::spawn_app_browser(service_id)),
-                        "org.interos.messages" => Ok(task::spawn_app_messages(service_id)),
-                        "org.interos.calendar" => Ok(task::spawn_app_calendar(service_id)),
-                        "org.interos.music" => Ok(task::spawn_app_music(service_id)),
-                        _ => Err("package id is not registered"),
-                    };
-
-                    match launch {
-                        Ok(child_id) => {
-                            IPC_ROUTER.lock().register_task(child_id);
-                            serial_println!("[PACKAGE] id={} state=launched pid={} parent={}", package_id, child_id.0, service_id.0);
-                            syscall::sys_log(1, "[PACKAGE SERVICE] Package resolved, ELF loaded, and child process registered.");
+                    if let Some(descriptor) = crate::package::first_party_package(package_id) {
+                        syscall::sys_log(1, "[PACKAGE SERVICE] Resolving package from VFS and verifying integrity.");
+                        let mut package_buf = [0u8; 65536];
+                        let verified = match syscall::sys_fs_open(3, descriptor.path, Rights::READ) {
+                            Ok(fd) => {
+                                let result = syscall::sys_fs_read(3, fd, &mut package_buf);
+                                let _ = syscall::sys_fs_close(fd);
+                                match result {
+                                    Ok(bytes) => crate::package::parse_rapp(&package_buf[..bytes]).map(|m| (m, bytes)),
+                                    Err(_) => Err(crate::package::RappError::BufferTooShort),
+                                }
+                            }
+                            Err(_) => Err(crate::package::RappError::BufferTooShort),
+                        };
+                        match verified {
+                            Ok((manifest, bytes_read)) => {
+                                let payload_start = manifest.payload_offset;
+                                let payload_end = payload_start.saturating_add(manifest.payload_len);
+                                if manifest.package_id != package_id || payload_end > bytes_read {
+                                    syscall::sys_log(1, "[PACKAGE SERVICE] Package identity or payload bounds rejected.");
+                                } else {
+                                    match task::spawn_packaged_process(
+                                        descriptor.process_name,
+                                        &package_buf[payload_start..payload_end],
+                                        service_id,
+                                    ) {
+                                        Ok(child_id) => {
+                                            IPC_ROUTER.lock().register_task(child_id);
+                                            serial_println!("[PACKAGE] id={} state=launched pid={} parent={} source={} verified=digest", package_id, child_id.0, service_id.0, descriptor.path);
+                                            syscall::sys_log(1, "[PACKAGE SERVICE] Verified RAPP payload loaded into isolated Ring-3 process.");
+                                        }
+                                        Err(_) => syscall::sys_log(1, "[PACKAGE SERVICE] Verified package ELF launch failed."),
+                                    }
+                                }
+                            }
+                            Err(_) => syscall::sys_log(1, "[PACKAGE SERVICE] RAPP verification failed; launch denied."),
                         }
-                        Err(_) => {
-                            syscall::sys_log(1, "[PACKAGE SERVICE] Package resolution or ELF launch failed.");
-                        }
+                    } else {
+                        syscall::sys_log(1, "[PACKAGE SERVICE] Package ID is not registered; launch denied.");
                     }
                 }
             } else {
