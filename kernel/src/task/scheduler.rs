@@ -61,7 +61,9 @@ impl Scheduler {
         cap_table: CapabilityTable,
         priority: u8,
     ) -> TaskId {
-        let tcb = TaskControlBlock::new(name, entry_point, cap_table, priority);
+        let mut tcb = TaskControlBlock::new(name, entry_point, cap_table, priority);
+        let parent_id = self.current_task_id().unwrap_or(TaskId(0));
+        tcb.parent_id = parent_id;
         let id = tcb.id;
         self.tasks.push(tcb);
         id
@@ -195,7 +197,9 @@ impl Scheduler {
     pub fn prepare_terminate(&mut self) -> (Option<*mut TaskContext>, Option<*const TaskContext>) {
         let current_idx = self.current_idx;
         let task_id = self.tasks[current_idx].id;
-        self.tasks[current_idx].state = TaskState::Terminated;
+        if self.tasks[current_idx].state != TaskState::Zombie {
+            self.tasks[current_idx].state = TaskState::Terminated;
+        }
         crate::ipc::cleanup_task(task_id);
         self.prepare_switch()
     }
