@@ -72,6 +72,12 @@ def main() -> None:
     must(interfs, "pub fn write_file", "on-disk file replacement")
     must(interfs, "self.device.write_sector", "filesystem uses BlockDevice writes")
     must(interfs, "self.device.read_sector", "filesystem uses BlockDevice reads")
+    # Region-relative bitmap metadata must never escape the filesystem base.
+    must(interfs, "self.device.read_sector(self.base_lba + lba", "bitmap reads stay inside filesystem region")
+    must(interfs, "self.device.write_sector(self.base_lba + lba", "bitmap writes stay inside filesystem region")
+    assert "self.device.read_sector(lba,&mut sector)" not in interfs, "bitmap read must not bypass filesystem base"
+    assert "self.device.write_sector(lba,&sector)" not in interfs, "bitmap write must not bypass filesystem base"
+    must(interfs, "inode.start_sector=if sectors == 0 { 0 } else { start };", "zero-length inode extent normalization")
 
     # M22: write payload sectors first and publish the generation header last.
     payload_write = persistent.index("drive.write_sector(base + sector, &buf)")
