@@ -456,6 +456,36 @@ impl TcpConnectionTable {
         None
     }
 
+    /// Releases every TCP connection owned by a terminating task.
+    ///
+    /// This is the TCP counterpart to SocketTable::release_owner and prevents
+    /// fixed-size connection slots from surviving process termination.
+    pub fn release_owner(&mut self, owner_task_id: u32) -> usize {
+        let mut released = 0;
+        for slot in self.entries.iter_mut() {
+            if slot.as_ref().map(|conn| conn.owner_task_id == owner_task_id).unwrap_or(false) {
+                *slot = None;
+                released += 1;
+            }
+        }
+        released
+    }
+
+    /// Reaps connections that reached the terminal Closed state.
+    ///
+    /// Called by the bounded network poll path so handshake/retransmission
+    /// failures cannot permanently consume the fixed TCP connection table.
+    pub fn reap_closed(&mut self) -> usize {
+        let mut reaped = 0;
+        for slot in self.entries.iter_mut() {
+            if slot.as_ref().map(|conn| conn.state == crate::net::TcpState::Closed && !conn.fin_pending).unwrap_or(false) {
+                *slot = None;
+                reaped += 1;
+            }
+        }
+        reaped
+    }
+
     pub fn is_closed(&self, id: u32) -> bool {
         self.get(id).map(|c| c.state == crate::net::TcpState::Closed && !c.fin_pending).unwrap_or(false)
     }
