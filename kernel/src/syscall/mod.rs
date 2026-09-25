@@ -85,6 +85,7 @@ pub enum SyscallNumber {
     SurfaceDestroy = 74,
     PowerSetProfile = 72,
     PackageList = 75,
+    PackageRegistry = 76,
 }
 
 /// System call result status codes.
@@ -1260,6 +1261,10 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             } else { return SyscallResult::InvalidArguments as i64; }
             if kms.destroy_surface(a1 as u32) { 0 } else { SyscallResult::InvalidArguments as i64 }
         }
+        76 => {
+            let out_len=a2 as usize; if out_len==0||out_len>4096{return SyscallResult::InvalidArguments as i64;}
+            let mut out=[0u8;4096]; match sys_package_registry(&mut out[..out_len]) { Ok(n)=>{if copy_to_user(a1,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;} n as i64}, Err(e)=>e as i64 }
+        }
         75 => {
             let out_len=a3 as usize;
             if out_len==0||out_len>4096{return SyscallResult::InvalidArguments as i64;}
@@ -1417,27 +1422,6 @@ pub fn sys_package_audit(pkg_id: &str) -> Result<u32, SyscallResult> {
         return Err(SyscallResult::IntegrityViolation);
     }
     Ok(0)
-}
-
-/// Installs a verified package onto persistent VFS storage.
-/// Requires the caller to hold a `FileSystemWrite` capability in `cap_slot`.
-pub fn sys_package_install(cap_slot: usize, pkg_id: &str, _user_consent: bool) -> Result<(), SyscallResult> {
-    let sched = SCHEDULER.lock();
-    let current = match sched.current_task() {
-        Some(t) => t,
-        None => return Err(SyscallResult::PermissionDenied),
-    };
-
-    if current.cap_table.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE).is_err() {
-        return Err(SyscallResult::PermissionDenied);
-    }
-    drop(sched);
-
-    let reg = crate::package::REVOCATION_REGISTRY.lock();
-    if reg.is_package_revoked(pkg_id) {
-        return Err(SyscallResult::IntegrityViolation);
-    }
-    Ok(())
 }
 
 /// Queries the active mobile hardware platform description.

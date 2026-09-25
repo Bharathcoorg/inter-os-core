@@ -5,11 +5,13 @@
 
 pub mod rapp;
 pub mod revocation;
+pub mod registry;
 
 pub use rapp::{
     build_rapp, parse_rapp, RappArch, RappError, RappManifest, RAPP_FORMAT_VERSION, RAPP_HEADER_SIZE,
     RAPP_MAGIC,
 };
+pub use registry::{PackageRegistry, PackageState, PACKAGE_REGISTRY};
 pub use revocation::{
     KeyRotationProof, RevocationReason, RevocationRecord, RevocationRegistry, REVOCATION_REGISTRY,
 };
