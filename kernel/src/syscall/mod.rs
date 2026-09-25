@@ -2535,6 +2535,13 @@ pub fn sys_service_list(out: &mut [u8]) -> Result<usize, SyscallResult> {
 }
 
 pub fn sys_window_list(out_buf:&mut [u8])->Result<usize,SyscallResult>{
+    {
+        let sched = SCHEDULER.lock();
+        let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+        if !task.cap_table.authorize_capability(CapabilityType::FrameBufferDirect, Rights::READ) {
+            return Err(SyscallResult::PermissionDenied);
+        }
+    }
     use core::fmt::Write;
     let mut snaps=[crate::drivers::display_kms::SurfaceSnapshot{id:0,owner_task:0,x:0,y:0,width:0,height:0,z_order:0,opacity:0,visible:false,dirty:false};32];
     let count={let kms=crate::drivers::display_kms::DRM_KMS.lock();kms.surface_snapshot(&mut snaps)};
