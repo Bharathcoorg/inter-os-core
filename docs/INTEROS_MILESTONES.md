@@ -38,7 +38,7 @@ This roadmap tracks the remaining work in dependency order. A milestone is **com
 |---|---|---|
 | M19 | Persistent block-device abstraction | 🟡 Implementation complete — ATA + SDHCI share the sector-level `BlockDevice` boundary; persistent journal default API fixed; CI evidence pending |
 | M20 | Real filesystem/storage backend | 🟡 Implementation complete — bounded block-backed InterFS is mounted before VFS, `/data` persistence uses it, region/bitmap/zero-length/corruption paths are hardened, and storage contracts are updated; CI/QEMU evidence pending |
-| M21 | Persistent VFS metadata | 🟡 In progress — crash-consistent metadata journal exists; inode-tree persistence remains |
+| M21 | Persistent VFS metadata | 🟡 Implementation complete — mutable `/data` inode metadata, stable inode IDs, parent/child reconstruction, and metadata restore-before-payload flow are implemented; CI evidence pending |
 | M22 | Atomic writes and crash recovery | 🟡 In progress — payload-before-header journal publication is implemented; fault-injection evidence remains |
 | M23 | Encrypted storage boundary | ⬜ Pending |
 | M24 | Storage service userspace implementation | ⬜ Pending |
