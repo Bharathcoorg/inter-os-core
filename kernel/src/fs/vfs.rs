@@ -573,14 +573,15 @@ impl Vfs {
             if kind == 1 {
                 self.mkdir(path);
             } else if kind == 2 {
-                let id2 = self.create_file(path, &[], false);
-                if let Some(inode) = self.inodes.get_mut(&id2) {
+                let created = self.create_file(path, &[], false);
+                if let Some(mut inode) = self.inodes.remove(&created) {
                     inode.id = InodeId(id);
                     inode.size = size;
                     inode.sha256_digest = digest;
                     inode.data = InodeData::Dynamic(Vec::new());
+                    self.inodes.insert(InodeId(id), inode);
+                    self.path_to_inode.insert(path.to_string(), InodeId(id));
                 }
-                self.path_to_inode.insert(path.to_string(), InodeId(id));
             }
             if id >= self.next_inode { self.next_inode = id.saturating_add(1); }
         }
@@ -612,6 +613,20 @@ impl Vfs {
             let dlen=u32::from_le_bytes([buf[pos],buf[pos+1],buf[pos+2],buf[pos+3]]) as usize; pos+=4;
             if dlen>8192 || pos+dlen>len { break; }
             self.create_file(path,&buf[pos..pos+dlen],false); pos+=dlen;
+        }
+    }
+
+    /// Rebuilds parent/child inode relationships from durable paths.
+    fn rebuild_children(&mut self) {
+        for inode in self.inodes.values_mut() { inode.children.clear(); }
+        let ids: Vec<InodeId> = self.inodes.keys().copied().collect();
+        for child_id in ids {
+            if child_id == InodeId(1) { continue; }
+            let Some(path) = self.inodes.get(&child_id).map(|i| i.path.clone()) else { continue; };
+            let parent = path.rsplit_once('/').map(|(p, _)| if p.is_empty() { "/" } else { p }).unwrap_or("/");
+            if let Some(parent_id) = self.path_to_inode.get(parent).copied() {
+                if let Some(parent_inode) = self.inodes.get_mut(&parent_id) { parent_inode.children.push(child_id); }
+            }
         }
     }
 
@@ -743,6 +758,7 @@ pub fn init() {
 
     vfs.restore_metadata_snapshot();
     vfs.restore_data_snapshot();
+    vfs.rebuild_children();
     let _ = vfs.persist_metadata_snapshot();
     *VFS.lock() = vfs;
 }
