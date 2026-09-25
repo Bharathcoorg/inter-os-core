@@ -2160,8 +2160,7 @@ pub fn sys_shm_pipe_create(
     let current_task = sched.get_task(current_id).ok_or(SyscallResult::PermissionDenied)?;
 
     let has_cap = current_task.cap_table.has_capability(CapabilityType::ShmProducer, Rights::WRITE)
-        || current_task.cap_table.has_capability(CapabilityType::ShmConsumer, Rights::READ)
-        || current_task.cap_table.has_capability(CapabilityType::SerialOutput, Rights::WRITE);
+        || current_task.cap_table.has_capability(CapabilityType::ShmConsumer, Rights::READ);
 
     if !has_cap {
         return Err(SyscallResult::PermissionDenied);
@@ -2193,8 +2192,7 @@ pub fn sys_shm_pipe_transfer(
     let current_id = sched.current_task_id().ok_or(SyscallResult::PermissionDenied)?;
     let current_task = sched.get_task(current_id).ok_or(SyscallResult::PermissionDenied)?;
 
-    let has_cap = current_task.cap_table.has_capability(CapabilityType::ShmProducer, Rights::WRITE)
-        || current_task.cap_table.has_capability(CapabilityType::SerialOutput, Rights::WRITE);
+    let has_cap = current_task.cap_table.has_capability(CapabilityType::ShmProducer, Rights::WRITE);
 
     if !has_cap {
         return Err(SyscallResult::PermissionDenied);
@@ -2236,8 +2234,7 @@ pub fn sys_shm_pipe_receive(
     let current_id = sched.current_task_id().ok_or(SyscallResult::PermissionDenied)?;
     let current_task = sched.get_task(current_id).ok_or(SyscallResult::PermissionDenied)?;
 
-    let has_cap = current_task.cap_table.has_capability(CapabilityType::ShmConsumer, Rights::READ)
-        || current_task.cap_table.has_capability(CapabilityType::SerialOutput, Rights::WRITE);
+    let has_cap = current_task.cap_table.has_capability(CapabilityType::ShmConsumer, Rights::READ);
 
     if !has_cap {
         return Err(SyscallResult::PermissionDenied);
