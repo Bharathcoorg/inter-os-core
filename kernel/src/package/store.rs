@@ -2,6 +2,7 @@
 //! Payloads are kept separate from registry metadata and addressed by package ID.
 use alloc::vec::Vec;
 use spin::Mutex;
+use crate::package::first_party_package;
 
 const MAX_BLOBS:usize=8;
 const MAX_BLOB_SIZE:usize=24576;
