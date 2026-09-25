@@ -86,6 +86,7 @@ pub enum SyscallNumber {
     PowerSetProfile = 72,
     PackageList = 75,
     PackageRegistry = 76,
+    WindowList = 77,
 }
 
 /// System call result status codes.
@@ -1270,6 +1271,16 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             drop(sched);
             let mut out=[0u8;4096]; match sys_package_registry(&mut out[..out_len]) { Ok(n)=>{if copy_to_user(a2,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;} n as i64}, Err(e)=>e as i64 }
         }
+        77 => {
+            // WindowList: a1=out_ptr, a2=out_len
+            let out_len=a2 as usize;
+            if out_len==0||out_len>4096{return SyscallResult::InvalidArguments as i64;}
+            let mut out=[0u8;4096];
+            match sys_window_list(&mut out[..out_len]) {
+                Ok(n)=>{if copy_to_user(a1,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},
+                Err(e)=>e as i64
+            }
+        }
         75 => {
             let out_len=a3 as usize;
             if out_len==0||out_len>4096{return SyscallResult::InvalidArguments as i64;}
@@ -1459,6 +1470,23 @@ pub fn sys_package_registry(out_buf:&mut [u8])->Result<usize,SyscallResult>{
         if pos+n>out_buf.len(){break;} out_buf[pos..pos+n].copy_from_slice(&line[..n]);pos+=n;
     }
     Ok(pos)
+}
+
+/// Returns the live compositor window registry, including owning process identity.
+pub fn sys_window_list(out_buf:&mut [u8])->Result<usize,SyscallResult>{
+    use core::fmt::Write;
+    let mut snaps=[crate::drivers::display_kms::SurfaceSnapshot{id:0,owner_task:0,x:0,y:0,width:0,height:0,z_order:0,opacity:0,visible:false,dirty:false};32];
+    let count={let kms=crate::drivers::display_kms::DRM_KMS.lock();kms.surface_snapshot(&mut snaps)};
+    let sched=SCHEDULER.lock();
+    struct W<'a>{b:&'a mut[u8],n:usize}
+    impl<'a> Write for W<'a>{fn write_str(&mut self,s:&str)->core::fmt::Result{let k=s.len().min(self.b.len().saturating_sub(self.n));self.b[self.n..self.n+k].copy_from_slice(&s.as_bytes()[..k]);self.n+=k;Ok(())}}
+    let mut w=W{b:out_buf,n:0};
+    for s in &snaps[..count]{
+        let name=sched.get_task(TaskId(s.owner_task)).map(|t|t.name).unwrap_or("unknown");
+        let _=write!(w,"{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",s.id,s.owner_task,name,s.x,s.y,s.width,s.height,s.z_order,s.opacity,s.visible as u8);
+        if w.n>=out_buf.len(){break;}
+    }
+    Ok(w.n)
 }
 
 /// Queries the active mobile hardware platform description.
