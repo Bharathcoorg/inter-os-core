@@ -56,7 +56,6 @@ extern "C" fn camerad() -> ! { service_loop(ServiceId::Camera, "[camerad] Camera
 
 pub static SERVICE_RECORDS: spin::Mutex<[Option<ServiceRecord>; 9]> = spin::Mutex::new([None; 9]);
 const HEARTBEAT_TIMEOUT_TICKS: u64 = 500;
-const PID1: TaskId = TaskId(0);
 static SERVICE_HEARTBEATS: [core::sync::atomic::AtomicU64; 9] = [
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
@@ -92,7 +91,7 @@ pub fn init() {
 }
 
 /// Starts one declared service on behalf of userspace PID 1.
-pub fn start(id: ServiceId) -> Result<TaskId, &'static str> {
+pub fn start(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str> {
     if id == ServiceId::Init { return Ok(TaskId(0)); }
     let existing = SERVICE_RECORDS.lock()[id as usize];
     if let Some(record) = existing {
@@ -105,7 +104,7 @@ pub fn start(id: ServiceId) -> Result<TaskId, &'static str> {
         ServiceId::Audio => ("audiod", audiod, 5), ServiceId::Camera => ("camerad", camerad, 5),
         ServiceId::Init => return Ok(TaskId(0)),
     };
-    let task = SCHEDULER.lock().spawn_with_parent(name, entry, caps(id), priority, PID1);
+    let task = SCHEDULER.lock().spawn_with_parent(name, entry, caps(id), priority, parent_id);
     crate::ipc::IPC_ROUTER.lock().register_task(task);
     SERVICE_HEARTBEATS[id as usize].store(crate::interrupts::get_system_ticks(), Ordering::Release);
     SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task, state: ServiceState::Running });
@@ -113,12 +112,12 @@ pub fn start(id: ServiceId) -> Result<TaskId, &'static str> {
 }
 
 /// Stops a service task without allowing userspace to terminate arbitrary tasks.
-pub fn stop(id: ServiceId) -> Result<(), &'static str> {
+pub fn stop(id: ServiceId, parent_id: TaskId) -> Result<(), &'static str> {
     if id == ServiceId::Init { return Err("init cannot be stopped"); }
     let record = SERVICE_RECORDS.lock()[id as usize].ok_or("service not declared")?;
     if record.task == TaskId(0) { return Ok(()); }
     SCHEDULER.lock().terminate_task(record.task, 0).map_err(|_| "service termination failed")?;
-    let _ = SCHEDULER.lock().reap_child(PID1, record.task);
+    let _ = SCHEDULER.lock().reap_child(parent_id, record.task);
     SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Stopped });
     Ok(())
 }
@@ -214,7 +213,7 @@ pub fn record_exit(task_id: TaskId, _exit_code: i32) {
 }
 
 /// Restarts failed services when explicitly requested by PID 1.
-pub fn restart_failed() -> usize {
+pub fn restart_failed(parent_id: TaskId) -> usize {
     let mut restarted = 0usize;
     for idx in 1..SERVICE_RECORDS.lock().len() {
         let id = match idx {
@@ -227,8 +226,8 @@ pub fn restart_failed() -> usize {
             _ => None,
         };
         if let Some(task) = failed_task {
-            let _ = SCHEDULER.lock().reap_child(PID1, task);
-            if start(id).is_ok() { restarted += 1; }
+            let _ = SCHEDULER.lock().reap_child(parent_id, task);
+            if start(id, parent_id).is_ok() { restarted += 1; }
         }
     }
     restarted
