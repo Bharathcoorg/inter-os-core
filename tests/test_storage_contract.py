@@ -53,6 +53,9 @@ def main() -> None:
     # M20: a real on-disk filesystem backend exists above BlockDevice.
     must(interfs, "pub struct InterFs", "block-backed filesystem controller")
     must(interfs, "pub fn format", "filesystem format operation")
+    must(interfs, "pub fn format_at", "explicit filesystem region formatting")
+    must(interfs, "pub fn mount_at", "explicit filesystem region mounting")
+    must(interfs, "base_lba", "filesystem region boundary state")
     must(interfs, "pub fn mount", "filesystem mount operation")
     must(interfs, "FS_MAGIC", "filesystem superblock magic")
     must(interfs, "struct DiskInode", "persistent inode record")
