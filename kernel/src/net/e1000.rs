@@ -71,6 +71,8 @@ unsafe fn write32(base: usize, offset: usize, value: u32) {
 }
 
 /// Minimal descriptor-ring E1000 driver.
+/// Descriptor storage must be backed by physically contiguous DMA memory.
+/// `rx_buffer_phys` and `tx_buffer_phys` point to arrays of RX/TX slots.
 pub struct E1000Device {
     base_vaddr: usize,
     mac: MacAddress,
@@ -102,6 +104,18 @@ impl E1000Device {
         Self { base_vaddr, mac, rx_desc, tx_desc, rx_desc_phys, tx_desc_phys,
             rx_buffer_phys, tx_buffer_phys, rx_index: 0, tx_index: 0, link_up: false }
     }
+
+    /// Returns the physical address currently programmed for the RX ring.
+    pub fn rx_ring_physical_address(&self) -> u64 { self.rx_desc_phys }
+
+    /// Returns the physical address currently programmed for the TX ring.
+    pub fn tx_ring_physical_address(&self) -> u64 { self.tx_desc_phys }
+
+    /// Returns the physical address of the first RX buffer slot.
+    pub fn rx_buffer_physical_address(&self) -> u64 { self.rx_buffer_phys }
+
+    /// Returns the physical address of the first TX buffer slot.
+    pub fn tx_buffer_physical_address(&self) -> u64 { self.tx_buffer_phys }
 
     pub fn reset(&mut self) {
         unsafe {
