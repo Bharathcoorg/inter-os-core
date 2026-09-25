@@ -59,6 +59,11 @@ def main():
     must(net, "transmit_tcp_segment(", "kernel TCP ACK transmission")
     must(dns, "encode_query", "DNS query encoder")
     must(dns, "parse_a_answer", "DNS A-record parser")
+    must(dns, "pub struct DnsResolver", "DNS runtime resolver state")
+    must(dns, "DNS_RETRY_TICKS", "DNS retry deadline")
+    must(dns, "pub fn accept_response", "DNS response integration")
+    must(dns, "pub fn poll_timeouts", "DNS timeout handling")
+    must(dns, "DnsCacheEntry", "DNS TTL cache")
     print("userspace network service contract: PASS")
 
 if __name__ == "__main__":
