@@ -1527,11 +1527,12 @@ pub fn sys_window_list(out_buf:&mut [u8])->Result<usize,SyscallResult>{
     let sched=SCHEDULER.lock();
     struct W<'a>{b:&'a mut[u8],n:usize}
     impl<'a> Write for W<'a>{fn write_str(&mut self,s:&str)->core::fmt::Result{let k=s.len().min(self.b.len().saturating_sub(self.n));self.b[self.n..self.n+k].copy_from_slice(&s.as_bytes()[..k]);self.n+=k;Ok(())}}
+    let capacity = out_buf.len();
     let mut w=W{b:out_buf,n:0};
     for s in &snaps[..count]{
         let name=sched.get_task(TaskId(s.owner_task)).map(|t|t.name).unwrap_or("unknown");
         let _=write!(w,"{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",s.id,s.owner_task,name,s.x,s.y,s.width,s.height,s.z_order,s.opacity,s.visible as u8);
-        if w.n>=out_buf.len(){break;}
+        if w.n>=capacity{break;}
     }
     Ok(w.n)
 }
