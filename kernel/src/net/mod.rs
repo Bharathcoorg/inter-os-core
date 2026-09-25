@@ -152,7 +152,7 @@ pub fn send_tcp_payload(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address,
     transmit_tcp_payload(src_ip, src_port, dst_ip, dst_port, seq, ack, payload)
 }
 
-pub fn send_tcp_syn(
+fn transmit_tcp_syn(
     src_ip: Ipv4Address,
     src_port: u16,
     dst_ip: Ipv4Address,
@@ -160,10 +160,7 @@ pub fn send_tcp_syn(
     seq: u32,
     caps: &CapabilityTable,
 ) -> Result<(), NetError> {
-    if !caps.has_capability(CapabilityType::NetworkSend, Rights::WRITE) {
-        return Err(NetError::CapabilityDenied);
-    }
-    let segment = TcpSegment {
+     let segment = TcpSegment {
         src_port, dst_port, seq, ack: 0, flags: 0x02, window: 65535, payload: &[],
     };
     let mut tcp_buf = [0u8; 64];
@@ -179,6 +176,20 @@ pub fn send_tcp_syn(
     let mut eth_buf = [0u8; 1514];
     let len = frame.serialize(&mut eth_buf).map_err(|_| NetError::BufferTooSmall)?;
     NETWORK_DEVICE.lock().transmit(&eth_buf[..len])
+}
+
+pub fn send_tcp_syn(
+    src_ip: Ipv4Address,
+    src_port: u16,
+    dst_ip: Ipv4Address,
+    dst_port: u16,
+    seq: u32,
+    caps: &CapabilityTable,
+) -> Result<(), NetError> {
+    if !caps.has_capability(CapabilityType::NetworkSend, Rights::WRITE) {
+        return Err(NetError::CapabilityDenied);
+    }
+    transmit_tcp_syn(src_ip, src_port, dst_ip, dst_port, seq)
 }
 
 /// Polls the network device and processes all inbound packets.
@@ -296,10 +307,9 @@ pub fn poll_network_interface() -> usize {
 /// Retransmits one bounded unacknowledged TCP payload when its deadline expires.
 pub fn poll_tcp_retransmissions(now: u64) -> usize {
     if let Some((_id, remote_ip, local_port, remote_port, seq)) = TCP_TABLE.lock().due_syn_retransmit(now) {
-        return if send_tcp_syn(
+        return if transmit_tcp_syn(
             if remote_ip.is_loopback() { Ipv4Address::LOCALHOST } else { DEFAULT_HOST_IP },
             local_port, remote_ip, remote_port, seq,
-            &CapabilityTable::new(0),
         ).is_ok() { 1 } else { 0 };
     }
     let due_fin = TCP_TABLE.lock().due_fin_retransmit(now);

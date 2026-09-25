@@ -77,6 +77,7 @@ def main():
     must(net, "poll_tcp_retransmissions", "TCP retransmission scheduler")
     must(net, "acknowledge_tx", "TCP acknowledgement retirement")
     must(net, "transmit_tcp_payload(", "kernel-internal TCP retransmission path")
+    must(net, "transmit_tcp_syn(", "kernel-internal TCP SYN retransmission path")
     must(net, "get_system_ticks()", "TCP retransmission timer source")
     must(sock, "TCP_MAX_RETRIES", "bounded TCP retry count")
     must(sock, "arm_retransmit", "TCP retransmission state")
