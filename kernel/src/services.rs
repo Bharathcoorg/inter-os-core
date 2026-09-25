@@ -101,6 +101,67 @@ fn start_locked(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str
     Ok(task)
 }
 
+/// Launches a previously verified signed service package through the authoritative
+/// lifecycle registry. This prevents the package-launch syscall from bypassing
+/// duplicate-instance, parent-ownership, and recovery state invariants.
+pub fn launch_verified_package(
+    id: ServiceId,
+    parent_id: TaskId,
+    manifest: &crate::package::RappManifest,
+    payload: &[u8],
+) -> Result<TaskId, &'static str> {
+    let _lifecycle = SERVICE_LIFECYCLE_LOCK.lock();
+
+    if id == ServiceId::Init {
+        return Err("init is not a package-launched service");
+    }
+
+    let existing = SERVICE_RECORDS.lock()[id as usize];
+    if let Some(record) = existing {
+        if record.state == ServiceState::Running && record.task != TaskId(0) {
+            return Ok(record.task);
+        }
+        if record.state == ServiceState::Starting {
+            return Err("service already starting");
+        }
+        if record.state == ServiceState::Failed && record.task != TaskId(0) {
+            return Err("failed service requires recovery");
+        }
+        if !matches!(record.state, ServiceState::Declared | ServiceState::Stopped | ServiceState::Failed) {
+            return Err("service is not package-launchable");
+        }
+    } else {
+        return Err("service not declared");
+    }
+
+    SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord {
+        id,
+        task: TaskId(0),
+        state: ServiceState::Starting,
+    });
+
+    let task = match crate::task::user::spawn_verified_rapp_process(manifest, payload, parent_id) {
+        Ok(task) if task != TaskId(0) => task,
+        _ => {
+            SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord {
+                id,
+                task: TaskId(0),
+                state: ServiceState::Failed,
+            });
+            return Err("verified service package spawn failed");
+        }
+    };
+
+    crate::ipc::IPC_ROUTER.lock().register_task(task);
+    SERVICE_HEARTBEATS[id as usize].store(crate::interrupts::get_system_ticks(), Ordering::Release);
+    SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord {
+        id,
+        task,
+        state: ServiceState::Running,
+    });
+    Ok(task)
+}
+
 /// Stops a service task without allowing userspace to terminate arbitrary tasks.
 pub fn stop(id: ServiceId, parent_id: TaskId) -> Result<(), &'static str> {
     let _lifecycle = SERVICE_LIFECYCLE_LOCK.lock();
