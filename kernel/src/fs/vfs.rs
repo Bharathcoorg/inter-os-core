@@ -629,28 +629,10 @@ pub fn init() {
     vfs.create_static_file("/system/bin/settings", crate::task::APP_SETTINGS_ELF);
     vfs.create_static_file("/system/bin/terminal", crate::task::APP_TERMINAL_ELF);
 
-    let settings_rapp = crate::package::build_rapp(
-        "org.interos.settings", "interos_official", (1, 0, 0),
-        crate::package::RappArch::X86_64, &[], crate::task::APP_SETTINGS_ELF,
-    );
-    vfs.create_file("/packages/org.interos.settings.rapp", &settings_rapp, true);
-
-    let terminal_rapp = crate::package::build_rapp(
-        "org.interos.terminal", "interos.first-party", (1, 0, 0),
-        crate::package::RappArch::X86_64, &[], crate::task::APP_TERMINAL_ELF,
-    );
-    vfs.create_file("/packages/org.interos.terminal.rapp", &terminal_rapp, true);
-    let compositor_rapp = crate::package::build_rapp(
-        "org.interos.compositor", "interos.first-party", (1, 0, 0),
-        crate::package::RappArch::X86_64, &[], crate::task::COMPOSITOR_ELF,
-    );
-    vfs.create_file("/packages/org.interos.compositor.rapp", &compositor_rapp, true);
-
-    let launcher_rapp = crate::package::build_rapp(
-        "org.interos.launcher", "interos.first-party", (1, 0, 0),
-        crate::package::RappArch::X86_64, &[], crate::task::LAUNCHER_ELF,
-    );
-    vfs.create_file("/packages/org.interos.launcher.rapp", &launcher_rapp, true);
+    // RAPP v2 packages are signed developer artifacts. The kernel must never
+    // synthesize unsigned packages during boot; provisioning occurs through the
+    // trusted package pipeline after publisher trust has been established.
+    crate::serial_println!("[PACKAGE] First-party RAPP provisioning deferred to trusted signed-package pipeline.");
     vfs.create_static_file("/system/bin/dialer", crate::task::APP_DIALER_ELF);
     vfs.create_static_file("/system/bin/vault", crate::task::APP_VAULT_ELF);
     vfs.create_static_file("/system/bin/camera", crate::task::APP_CAMERA_ELF);
