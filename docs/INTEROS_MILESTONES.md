@@ -36,8 +36,8 @@ This roadmap tracks the remaining work in dependency order. A milestone is **com
 
 | ID | Milestone | Status |
 |---|---|---|
-| M19 | Persistent block-device abstraction | 🟡 Implementation complete — ATA + SDHCI share the sector-level `BlockDevice` boundary; CI evidence pending |
-| M20 | Real filesystem/storage backend | 🟡 In progress — VFS remains memory-resident with persistent `/data` snapshot backing; real on-disk filesystem format remains |
+| M19 | Persistent block-device abstraction | 🟡 Implementation complete — ATA + SDHCI share the sector-level `BlockDevice` boundary; persistent journal default API fixed; CI evidence pending |
+| M20 | Real filesystem/storage backend | 🟡 In progress — VFS remains memory-resident with persistent `/data` snapshot backing; next implementation is a real on-disk filesystem layer above `BlockDevice` |
 | M21 | Persistent VFS metadata | 🟡 In progress — crash-consistent metadata journal exists; inode-tree persistence remains |
 | M22 | Atomic writes and crash recovery | 🟡 In progress — payload-before-header journal publication is implemented; fault-injection evidence remains |
 | M23 | Encrypted storage boundary | ⬜ Pending |
@@ -119,6 +119,6 @@ This roadmap tracks the remaining work in dependency order. A milestone is **com
 
 ## Current execution order
 
-**M12 → M13 → M14 → M15 → M16 → M17 → M18 → M19**
+**M12 → M13 → M14 → M15 → M16 → M17 → M18 → M19 → M20 → M21 → M22 → M23 → M24**
 
 The existing demo/reference applications are not counted as production-complete until the underlying service, storage, graphics, networking and hardware boundaries they depend on are real.
