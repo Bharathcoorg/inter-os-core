@@ -286,6 +286,25 @@ impl TcpConnectionTable {
         Ok(n)
     }
 
+    /// Accepts only the next in-order TCP sequence range. Out-of-order data is
+    /// rejected instead of silently advancing the receive sequence.
+    pub fn accept_rx_segment(&mut self, id: u32, seq: u32, payload: &[u8], fin: bool) -> Result<usize, NetError> {
+        let conn = self.get_mut(id).ok_or(NetError::NoPacketAvailable)?;
+        if conn.state != crate::net::TcpState::Established { return Err(NetError::NoPacketAvailable); }
+        if seq != conn.recv_seq { return Err(NetError::NoPacketAvailable); }
+        let room = TCP_RX_BUF_SIZE.saturating_sub(conn.rx_len);
+        let n = payload.len().min(room);
+        if n != payload.len() && !payload.is_empty() { return Err(NetError::QueueFull); }
+        conn.rx[conn.rx_len..conn.rx_len + n].copy_from_slice(payload);
+        conn.rx_len += n;
+        conn.recv_seq = conn.recv_seq.wrapping_add(n as u32);
+        if fin && n == payload.len() {
+            conn.recv_seq = conn.recv_seq.wrapping_add(1);
+            conn.state = crate::net::TcpState::CloseWait;
+        }
+        Ok(n)
+    }
+
     pub fn recv_owned(&mut self, id: u32, owner_task_id: u32, out: &mut [u8]) -> Result<usize, NetError> {
         let conn = self.get_mut(id).ok_or(NetError::NoPacketAvailable)?;
         if conn.owner_task_id != owner_task_id { return Err(NetError::CapabilityDenied); }

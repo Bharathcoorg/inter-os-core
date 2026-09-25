@@ -18,7 +18,7 @@ pub mod wireless;
 pub use arp::{ArpOpcode, ArpPacket, ArpTable};
 pub use device::{LoopbackDevice, NetDeviceInfo, NetError, NetworkBackend, NetworkDevice, NetworkDeviceManager, NETWORK_DEVICE};
 pub use e1000::E1000Device;
-pub use dns::{encode_query as dns_encode_query, parse_a_answer, DnsAnswer, DnsQuestion};
+pub use dns::{encode_query as dns_encode_query, parse_a_answer, DnsAnswer, DnsQuestion, DnsResolver, DNS_SERVER};
 pub use tcp::{next_state as tcp_next_state, TcpSegment, TcpState};
 pub use tls::{ContentType as TlsContentType, TlsRecord};
 pub use ethernet::{EtherType, EthernetFrame, MacAddress};
@@ -231,24 +231,31 @@ pub fn poll_network_interface() -> usize {
                                             if conn.remote_ip == ip_pkt.src && conn.remote_port == segment.src_port && conn.local_port == segment.dst_port {
                                                 let old_state = conn.state;
                                                 if segment.flags & 0x12 == 0x12 && old_state == TcpState::SynSent {
+                                                    // SYN consumes one sequence number; the ACK must
+                                                    // acknowledge exactly that SYN before we enter Established.
+                                                    if segment.ack != conn.send_seq.wrapping_add(1) { continue; }
                                                     conn.recv_seq = segment.seq.wrapping_add(1);
                                                     conn.send_seq = conn.send_seq.wrapping_add(1);
                                                     conn.state = TcpState::Established;
                                                     let ack_seq = conn.send_seq;
                                                     let _ = transmit_tcp_segment(ip_pkt.dst, conn.local_port, ip_pkt.src, conn.remote_port, ack_seq, conn.recv_seq, 0x10);
                                                 } else if old_state == TcpState::Established {
-                                                    if !segment.payload.is_empty() {
-                                                        let available = TCP_RX_BUF_SIZE.saturating_sub(conn.rx_len);
-                                                        let n = segment.payload.len().min(available);
-                                                        conn.rx[conn.rx_len..conn.rx_len+n].copy_from_slice(&segment.payload[..n]);
-                                                        conn.rx_len += n;
-                                                        conn.recv_seq = segment.seq.wrapping_add(n as u32);
-                                                        let _ = transmit_tcp_segment(ip_pkt.dst, conn.local_port, ip_pkt.src, conn.remote_port, conn.send_seq, conn.recv_seq, 0x10);
-                                                    }
-                                                    if segment.flags & 0x01 != 0 {
-                                                        conn.recv_seq = conn.recv_seq.wrapping_add(1);
-                                                        conn.state = TcpState::CloseWait;
-                                                        let _ = transmit_tcp_segment(ip_pkt.dst, conn.local_port, ip_pkt.src, conn.remote_port, conn.send_seq, conn.recv_seq, 0x10);
+                                                    // Never accept acknowledgements beyond data we have sent.
+                                                    if segment.ack > conn.send_seq { continue; }
+                                                    let fin = segment.flags & 0x01 != 0;
+                                                    if !segment.payload.is_empty() || fin {
+                                                        let conn_id = conn.id;
+                                                        let before = conn.recv_seq;
+                                                        drop(table);
+                                                        let accepted = TCP_TABLE.lock().accept_rx_segment(conn_id, segment.seq, segment.payload, fin).unwrap_or(0);
+                                                        let table2 = TCP_TABLE.lock();
+                                                        if let Some(c) = table2.get(conn_id) {
+                                                            if accepted > 0 || fin && c.recv_seq != before {
+                                                                let _ = transmit_tcp_segment(ip_pkt.dst, c.local_port, ip_pkt.src, c.remote_port, c.send_seq, c.recv_seq, 0x10);
+                                                            }
+                                                        }
+                                                        drop(table2);
+                                                        table = TCP_TABLE.lock();
                                                     }
                                                 } else {
                                                     conn.recv_seq = segment.seq.wrapping_add(segment.payload.len() as u32);
