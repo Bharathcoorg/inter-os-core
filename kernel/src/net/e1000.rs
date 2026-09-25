@@ -289,7 +289,9 @@ impl NetworkDevice for E1000Device {
             core::hint::spin_loop();
         }
         Err(NetError::NoPacketAvailable)
-    }\n\n    fn receive(&mut self, out: &mut [u8]) -> Result<usize, NetError> {
+    }
+
+    fn receive(&mut self, out: &mut [u8]) -> Result<usize, NetError> {
         if !self.link_up { return Err(NetError::DeviceDown); }
         let idx = self.rx_index as usize;
         unsafe {
