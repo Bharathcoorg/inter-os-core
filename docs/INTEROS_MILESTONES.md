@@ -28,8 +28,8 @@ This roadmap tracks the remaining work in dependency order. A milestone is **com
 | M13 | Service parent/reaping invariants | 🟡 In progress — implementation + contract tests complete; CI evidence pending |
 | M14 | Service capability isolation tests | 🟡 In progress — implementation + contract tests complete; CI evidence pending |
 | M15 | Trusted userspace service ABI | 🟡 In progress — implementation complete; CI evidence pending |
-| M16 | Signed service package loading | 🟡 In progress — verification boundary complete; execution handoff remains M17 |
-| M17 | Userspace service manager replaces kernel workers | 🟡 Implementation complete — Ring-3 service binaries + PID1 ownership; CI evidence pending |
+| M16 | Signed service package loading | 🟡 Implementation complete — verified RAPP execution handoff is lifecycle-owned; CI evidence pending |
+| M17 | Userspace service manager replaces kernel workers | 🟡 Implementation complete — Ring-3 services, PID1 ownership, and verified-package lifecycle integration; CI evidence pending |
 | M18 | Service crash/restart end-to-end validation | 🟡 Implementation complete — deterministic CI fault injection + PID1 recovery path; QEMU evidence pending |
 
 ## Storage
