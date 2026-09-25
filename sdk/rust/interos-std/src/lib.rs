@@ -87,6 +87,7 @@ pub enum SyscallNumber {
     ServiceStop = 87,
     ServiceRecoverFailed = 88,
     ServicePackageVerify = 89,
+    ServiceHeartbeat = 90,
 }
 
 // -----------------------------------------------------------------------------
@@ -1500,7 +1501,7 @@ pub fn service_package_verify(cap_slot: usize, path: &str) -> Result<u8, i64> {
     if r >= 0 { Ok(r as u8) } else { Err(r) }
 }
 
-/// Reads service lifecycle state.
+/// Publishes a heartbeat for the current registered userspace service.\npub fn service_heartbeat(service_id:u8)->Result<(),i64>{let r=unsafe{syscall1(SyscallNumber::ServiceHeartbeat,service_id as u64)};if r==0{Ok(())}else{Err(r)}}\n/// Reads service lifecycle state.
 pub fn service_list(out:&mut[u8])->Result<usize,i64>{let r=unsafe{syscall2(SyscallNumber::ServiceList,out.as_mut_ptr() as u64,out.len() as u64)};if r>=0{Ok(r as usize)}else{Err(r)}}
 /// Starts a declared system service. Only PID1/service-manager capability domains may invoke this.
 pub fn service_start(service_id:u8)->Result<u64,i64>{let r=unsafe{syscall1(SyscallNumber::ServiceStart,service_id as u64)};if r>=0{Ok(r as u64)}else{Err(r)}}
