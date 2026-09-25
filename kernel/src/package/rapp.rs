@@ -189,9 +189,20 @@ pub fn parse_rapp(data: &[u8]) -> Result<RappManifest, RappError> {
         return Err(RappError::DigestMismatch);
     }
 
-    // 14. Signature verification: NOT_IMPLEMENTED in development QEMU targets.
-    // In production, verify Ed25519 signature over header + payload here.
-    // For now, accept unsigned packages (signature = all zeros).
+    // 14. Enforce publisher trust. The package cannot nominate its own trust root.
+    // Development builds retain an explicit unsigned exception for embedded
+    // first-party packages; release builds require a valid trusted signature.
+    let unsigned = crate::crypto::ed25519::is_unsigned_signature(&signature);
+    if unsigned {
+        #[cfg(not(debug_assertions))]
+        { return Err(RappError::SignatureInvalid); }
+    } else if !crate::crypto::ed25519::verify_rapp_signature(
+        data,
+        &publisher_id,
+        &signature,
+    ) {
+        return Err(RappError::SignatureInvalid);
+    }
 
     Ok(RappManifest {
         package_id,
@@ -250,7 +261,8 @@ pub fn build_rapp(
     // SHA-256 digest
     buf.extend_from_slice(&digest);
 
-    // Ed25519 signature (zeros = unsigned)
+    // Signature is supplied by the external distribution/signing pipeline.
+    // The kernel builder never contains a publisher private key.
     buf.extend_from_slice(&[0u8; 64]);
 
     // Payload length

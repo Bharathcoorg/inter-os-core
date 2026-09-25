@@ -2,10 +2,6 @@
 
 The kernel binary RAPP format is the canonical **runtime** package format.
 
-A developer distribution package may wrap this runtime package with UI/resources
-and a signed distribution manifest, but the file handed to the kernel package
-service must be the canonical binary RAPP payload.
-
 ## Runtime invariants
 
 - Magic: `RAPP`
@@ -20,33 +16,41 @@ service must be the canonical binary RAPP payload.
 - Package identity must match the requested package ID
 - Package architecture must match the running kernel
 - Package revocation is checked before activation
-- Activation is persisted transactionally through the metadata journal
+- Activation is persisted transactionally
 - Anti-downgrade rejects an older version over an active newer version
+- Ed25519 signature covers the complete package with the signature field zeroed
+- Package-supplied public keys are never trust anchors
+- Release builds reject unsigned RAPPs
+
+## Trust-root configuration
+
+Production kernel builds provide:
+`INTEROS_TRUSTED_PUBLISHER_KEY_HEX=<64 hex characters>`
+
+The current trusted publisher identity is `interos_official`. The private signing key
+belongs only in the external release/signing environment and is never compiled into
+the kernel.
+
+Development builds retain an explicit unsigned-package exception for embedded QEMU
+development artifacts.
 
 ## Transaction flow
 
 ```text
 candidate .rapp
-    |
-    v
-parse header
-    |
-    v
-validate architecture / bounds / digest
-    |
-    v
-check package revocation
-    |
-    v
-check version policy
-    |
-    v
-persist staged -> active transaction
-    |
-    v
-launch isolated process
+ -> parse header
+ -> validate architecture / bounds / digest
+ -> verify publisher trust root + Ed25519 signature
+ -> check package revocation
+ -> check version / anti-downgrade policy
+ -> persist staged -> active
+ -> launch isolated process
 ```
 
-The current v1 binary parser verifies SHA-256 integrity. Ed25519 publisher
-signature enforcement remains a separate trust-root layer; unsigned development
-packages are therefore not equivalent to production-trusted packages.
+The metadata journal has separate record kinds for package registry and revocation
+state, with redundant slots and generation numbers. This prevents one metadata
+subsystem from overwriting the other.
+
+The remaining release-engineering step is external signing of final first-party
+artifacts and injection of the trusted public key; no private signing key is stored
+in the repository.

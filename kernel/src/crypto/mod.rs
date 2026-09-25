@@ -3,6 +3,7 @@
 //! Provides bare-metal cryptographic primitives for Merkle tree rootfs verification,
 //! `.rapp` package attestation, and sovereign identity state hashing.
 
+pub mod ed25519;
 pub mod hmac;
 pub mod keystore;
 pub mod rng;

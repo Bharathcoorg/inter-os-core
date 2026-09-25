@@ -55,7 +55,7 @@ impl PackageRegistry {
 
     fn restore(&mut self) -> bool {
         let mut buf = [0u8; 1024];
-        let loaded = crate::storage::persistent::load_latest(&mut buf);
+        let loaded = crate::storage::persistent::load_latest_kind(&mut buf, 1);
         let Ok(Some((_generation, len))) = loaded else { return false; };
         if len < 5 || &buf[..4] != b"PRG1" { return false; }
         let count = (buf[4] as usize).min(MAX_ENTRIES);
@@ -106,7 +106,7 @@ impl PackageRegistry {
     fn persist(&self) -> Result<(), ()> {
         let mut buf = [0u8; 1024];
         let len = self.encode(&mut buf);
-        crate::storage::persistent::commit(&buf[..len]).map(|_| ()).map_err(|_| ())
+        crate::storage::persistent::commit_kind(&buf[..len], 1).map(|_| ()).map_err(|_| ())
     }
 
     pub fn seed(&mut self) {
