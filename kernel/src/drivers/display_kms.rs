@@ -32,10 +32,12 @@ pub struct DrmSurface {
     pub visible: bool,
     pub pixels: Vec<u32>, // 32-bit ARGB pixels
     pub dirty: bool,
+    /// Owning userspace task. Surface mutation is restricted to the creator.
+    pub owner_task: u64,
 }
 
 impl DrmSurface {
-    pub fn new(id: u32, width: u32, height: u32, z_order: u32) -> Self {
+    pub fn new(id: u32, width: u32, height: u32, z_order: u32, owner_task: u64) -> Self {
         let size = (width as usize) * (height as usize);
         Self {
             id,
@@ -48,6 +50,7 @@ impl DrmSurface {
             visible: true,
             pixels: vec![0xFF000000; size], // default opaque black
             dirty: true,
+            owner_task,
         }
     }
 
@@ -92,11 +95,22 @@ impl DrmKmsController {
     }
 
     /// Allocates a new client surface for application rendering.
-    pub fn create_surface(&mut self, width: u32, height: u32, z_order: u32) -> u32 {
+    pub fn create_surface(&mut self, width: u32, height: u32, z_order: u32, owner_task: u64) -> u32 {
         let id = self.next_surface_id;
         self.next_surface_id += 1;
-        self.surfaces.push(DrmSurface::new(id, width, height, z_order));
+        self.surfaces.push(DrmSurface::new(id, width, height, z_order, owner_task));
         id
+    }
+
+    /// Writes a bounded chunk of ARGB pixels into an owned surface.
+    pub fn write_surface_pixels(&mut self, id: u32, owner_task: u64, offset: usize, src: &[u32]) -> Result<usize, &'static str> {
+        let surface = self.surfaces.iter_mut().find(|s| s.id == id).ok_or("surface not found")?;
+        if surface.owner_task != owner_task { return Err("surface ownership denied"); }
+        let end = offset.checked_add(src.len()).ok_or("surface write overflow")?;
+        if end > surface.pixels.len() { return Err("surface write out of bounds"); }
+        surface.pixels[offset..end].copy_from_slice(src);
+        surface.dirty = true;
+        Ok(src.len())
     }
 
     /// Destroys a surface by ID.
@@ -225,8 +239,8 @@ pub fn test_drm_kms() {
     assert_eq!(kms.front_buffer.len(), 320 * 480);
 
     // Create 2 surfaces: wallpaper (z=0) and status bar (z=10)
-    let s1 = kms.create_surface(320, 480, 0);
-    let s2 = kms.create_surface(320, 40, 10);
+    let s1 = kms.create_surface(320, 480, 0, 1);
+    let s2 = kms.create_surface(320, 40, 10, 1);
     assert_eq!(s1, 1);
     assert_eq!(s2, 2);
 
