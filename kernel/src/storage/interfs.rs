@@ -230,10 +230,10 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
         let bit=1u8 << (block % 8);
         let lba=BITMAP_LBA + (byte_index / SECTOR_SIZE) as u32;
         let mut sector=[0u8; SECTOR_SIZE];
-        self.device.read_sector(lba,&mut sector)?;
+        self.device.read_sector(self.base_lba + lba,&mut sector)?;
         if used { sector[byte_index % SECTOR_SIZE] |= bit; }
         else { sector[byte_index % SECTOR_SIZE] &= !bit; }
-        self.device.write_sector(lba,&sector)?;
+        self.device.write_sector(self.base_lba + lba,&sector)?;
         Ok(())
     }
 
@@ -303,7 +303,7 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
         let mut inode=DiskInode::empty();
         inode.used=true;
         inode.file_size=data.len() as u32;
-        inode.start_sector=start;
+        inode.start_sector=if sectors == 0 { 0 } else { start };
         inode.sector_count=sectors;
         inode.path_len=path.len() as u8;
         inode.path[..path.len()].copy_from_slice(path.as_bytes());
@@ -352,7 +352,7 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
         }
         let mut inode=old;
         inode.file_size=data.len() as u32;
-        inode.start_sector=start;
+        inode.start_sector=if sectors == 0 { 0 } else { start };
         inode.sector_count=sectors;
         if let Err(e)=self.write_inode(index,&inode) {
             let _=self.free_extent(start,sectors);
