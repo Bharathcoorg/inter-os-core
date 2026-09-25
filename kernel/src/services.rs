@@ -141,32 +141,34 @@ pub fn heartbeat(id: ServiceId) {
 /// init/service-manager ABI exists; the kernel never silently recreates a task.
 pub fn supervise() {
     let now = crate::interrupts::get_system_ticks();
-    let mut records = SERVICE_RECORDS.lock();
+    // Never hold the service-registry lock while inspecting the scheduler.
+    // Scheduler exit paths publish back into this registry, so the lock order
+    // must remain scheduler -> registry rather than registry -> scheduler.
+    let records = *SERVICE_RECORDS.lock();
     let sched = SCHEDULER.lock();
+    let mut states = [None; 9];
     for idx in 1..records.len() {
-        let id = match idx {
-            1 => ServiceId::Display, 2 => ServiceId::Input, 3 => ServiceId::Storage,
-            4 => ServiceId::Network, 5 => ServiceId::Power, 6 => ServiceId::Modem,
-            7 => ServiceId::Audio, 8 => ServiceId::Camera, _ => continue,
-        };
         let Some(record) = records[idx] else { continue; };
+        if !matches!(record.state, ServiceState::Running) {
+            states[idx] = Some(record.state);
+            continue;
+        }
         let task_id = record.task;
         let stale = now.saturating_sub(SERVICE_HEARTBEATS[idx].load(Ordering::Acquire)) > HEARTBEAT_TIMEOUT_TICKS;
         let failed = match sched.get_task(task_id) {
             Some(task) => matches!(task.state, crate::task::TaskState::Terminated | crate::task::TaskState::Zombie),
             None => true,
         };
-        let state = match record.state {
-            ServiceState::Stopped => ServiceState::Stopped,
-            ServiceState::Declared | ServiceState::Starting => record.state,
-            ServiceState::Running if failed || stale => ServiceState::Failed,
-            ServiceState::Running => ServiceState::Running,
-            ServiceState::Failed => ServiceState::Failed,
-        };
-        records[idx] = Some(ServiceRecord { id, task: task_id, state });
+        states[idx] = Some(if failed || stale { ServiceState::Failed } else { ServiceState::Running });
+    }
+    drop(sched);
+    let mut registry = SERVICE_RECORDS.lock();
+    for idx in 1..registry.len() {
+        if let (Some(record), Some(state)) = (records[idx], states[idx]) {
+            registry[idx] = Some(ServiceRecord { id: record.id, task: record.task, state });
+        }
     }
 }
-
 /// Serializes the authoritative Phase 25 service registry for diagnostics.
 pub fn snapshot(out: &mut [u8]) -> usize {
     use core::fmt::Write;
