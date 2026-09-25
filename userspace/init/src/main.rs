@@ -40,6 +40,12 @@ pub extern "C" fn _start() -> ! {
 
     // Native application lifecycle is owned by the package/service boundary.
     // kernel_main no longer spawns first-party apps directly.
+    if std::ipc_send(1, 2, 0x5001, b"org.interos.compositor").is_ok() {
+        std::log(0, "[USER INIT (Ring 3)] Package service launch request accepted for org.interos.compositor.").ok();
+    }
+    if std::ipc_send(1, 2, 0x5001, b"org.interos.launcher").is_ok() {
+        std::log(0, "[USER INIT (Ring 3)] Package service launch request accepted for org.interos.launcher.").ok();
+    }
     if std::ipc_send(1, 2, 0x5001, b"org.interos.settings").is_ok() {
         std::log(0, "[USER INIT (Ring 3)] Package service launch request accepted for org.interos.settings.").ok();
     }
