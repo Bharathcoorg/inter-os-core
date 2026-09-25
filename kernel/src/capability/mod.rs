@@ -346,6 +346,34 @@ impl CapabilityTable {
         false
     }
 
+    /// Authorizes a capability against type, rights, and object target. Delegated
+    /// capabilities consume one invocation only after every predicate matches.
+    pub fn authorize_object(
+        &self,
+        expected_type: CapabilityType,
+        required_rights: Rights,
+        expected_object_id: u64,
+    ) -> bool {
+        for slot in &self.slots {
+            let Some(cap) = slot.cap.as_ref() else { continue; };
+            if cap.cap_type != expected_type
+                || !cap.rights.contains(required_rights)
+                || cap.object_id != expected_object_id
+            {
+                continue;
+            }
+            if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
+                return delegation::consume_invocation(
+                    cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF,
+                    crate::interrupts::get_system_ticks(),
+                    required_rights,
+                ).is_ok();
+            }
+            return true;
+        }
+        false
+    }
+
     /// Verifies that the capability in `slot_idx` matches the expected type, rights, and specific object ID.
     pub fn verify_object(
         &self,
