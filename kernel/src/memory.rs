@@ -79,6 +79,32 @@ pub fn physical_to_virtual(physical: PhysAddr) -> VirtAddr {
     phys_mem_offset() + physical.as_u64()
 }
 
+/// Maps a physical MMIO range into the kernel address space with cache-disabled
+/// page attributes. The caller supplies a dedicated virtual base.
+pub fn map_mmio_region(
+    physical_base: PhysAddr,
+    size: usize,
+    virtual_base: VirtAddr,
+) -> Result<VirtAddr, &'static str> {
+    if size == 0 { return Err("MMIO mapping size is zero"); }
+    let pages = (size.saturating_add(4095)) / 4096;
+    let mut mapper_lock = MEMORY_MAPPER.lock();
+    let mapper = mapper_lock.as_mut().ok_or("Memory mapper not initialized")?;
+    let start = Page::<Size4KiB>::containing_address(virtual_base);
+    for index in 0..pages {
+        let page = start + index as u64;
+        let phys = PhysFrame::containing_address(physical_base + (index as u64) * 4096);
+        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE;
+        let map = unsafe { mapper.map_to(page, phys, flags, FRAME_ALLOCATOR.lock().as_mut().ok_or("Frame allocator not initialized")?) };
+        match map {
+            Ok(flush) => flush.flush(),
+            Err(MapToError::PageAlreadyMapped(_)) => return Err("MMIO virtual range already mapped"),
+            Err(_) => return Err("MMIO page mapping failed"),
+        }
+    }
+    Ok(virtual_base)
+}
+
 /// Allocates a single 4 KiB physical memory frame.
 pub fn allocate_frame() -> Option<PhysFrame<Size4KiB>> {
     FRAME_ALLOCATOR.lock().as_mut()?.allocate_frame()
