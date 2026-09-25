@@ -239,6 +239,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // 10. Virtual Filesystem (VFS) Initialization & Package Runtime
     serial_println!("\n--- [Initializing Virtual Filesystem & Package Runtime] ---");
     fs::init();
+    crate::package::PACKAGE_REGISTRY.lock().seed();
+    serial_println!("[PACKAGE] transactional registry seeded from first-party catalog.");
 
     // Generate sample sandboxed package bytecode: returns 0 (exit success)
     let mut wasm_app_code = Vec::new();
