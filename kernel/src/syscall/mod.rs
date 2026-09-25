@@ -1262,15 +1262,15 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             }
         }
         69 => {
-            // SurfaceCreate: a1 = width, a2 = height, a3 = z_order
-            match sys_surface_create(a1 as u32, a2 as u32, a3 as u32) {
+            // SurfaceCreate: a1 = display-cap slot, a2 = width, a3 = height, a4 = z_order
+            match sys_surface_create(a1 as usize, a2 as u32, a3 as u32, a4 as u32) {
                 Ok(id) => id as i64,
                 Err(e) => e as i64,
             }
         }
         70 => {
-            // SurfaceFlip
-            match sys_surface_flip() {
+            // SurfaceFlip: a1 = display-cap slot
+            match sys_surface_flip(a1 as usize) {
                 Ok(count) => count as i64,
                 Err(e) => e as i64,
             }
@@ -1279,6 +1279,32 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             // TouchPoll
             match sys_touch_poll() {
                 Ok(code) => code as i64,
+                Err(e) => e as i64,
+            }
+        }
+        73 => {
+            // SurfaceWrite: a1=display-cap slot, a2=surface id, a3=offset pixels,
+            // a4=pixel buffer pointer, a5=pixel count.
+            let count = a5 as usize;
+            if count == 0 || count > 4096 { return SyscallResult::InvalidArguments as i64; }
+            let mut pixels = [0u32; 4096];
+            let byte_len = count * core::mem::size_of::<u32>();
+            if copy_from_user(
+                unsafe { core::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, byte_len) },
+                a4,
+                byte_len,
+            ).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            match sys_surface_write(a1 as usize, a2 as u32, a3 as usize, &pixels[..count]) {
+                Ok(n) => n as i64,
+                Err(e) => e as i64,
+            }
+        }
+        74 => {
+            // SurfaceDestroy: a1=display-cap slot, a2=surface id
+            match sys_surface_destroy(a1 as usize, a2 as u32) {
+                Ok(()) => 0,
                 Err(e) => e as i64,
             }
         }
@@ -1678,27 +1704,56 @@ pub fn sys_telephony_set_data(enabled: bool) -> Result<bool, SyscallResult> {
 }
 
 /// Allocates a new hardware plane surface in the DRM/KMS compositor.
-pub fn sys_surface_create(width: u32, height: u32, z_order: u32) -> Result<u32, SyscallResult> {
+/// M25 display-service authority is object-scoped: only the display service's
+/// framebuffer capability (object 1) can access the hardware display boundary.
+fn require_display_service(cap_slot: usize) -> Result<TaskId, SyscallResult> {
     let sched = SCHEDULER.lock();
     let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    let owner_task = task.id.0;
-    if !task.cap_table.authorize_capability(CapabilityType::FrameBufferDirect, Rights::WRITE) { return Err(SyscallResult::PermissionDenied); }
-    drop(sched);
+    task.cap_table
+        .verify_object(cap_slot, CapabilityType::FrameBufferDirect, Rights::WRITE, 1)
+        .map_err(|_| SyscallResult::PermissionDenied)?;
+    Ok(task.id)
+}
+
+/// Creates a display surface on behalf of the Ring-3 display service.
+pub fn sys_surface_create(cap_slot: usize, width: u32, height: u32, z_order: u32) -> Result<u32, SyscallResult> {
+    let owner = require_display_service(cap_slot)?;
     if width == 0 || height == 0 || width > 3840 || height > 2160 {
         return Err(SyscallResult::InvalidArguments);
     }
-    Ok(crate::drivers::display_kms::DRM_KMS.lock().create_surface(width, height, z_order, owner_task))
+    let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+    let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
+    display.create_surface(width, height, z_order, owner.0)
+        .map_err(|_| SyscallResult::DeviceError)
 }
 
-/// Triggers DRM/KMS compositor surface blending and atomic page flip.
-pub fn sys_surface_flip() -> Result<u64, SyscallResult> {
-    let sched = SCHEDULER.lock();
-    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    if !task.cap_table.authorize_capability(CapabilityType::FrameBufferDirect, Rights::WRITE) { return Err(SyscallResult::PermissionDenied); }
-    drop(sched);
+/// Writes bounded ARGB pixels into an owned display surface.
+pub fn sys_surface_write(cap_slot: usize, surface_id: u32, offset: usize, pixels: &[u32]) -> Result<usize, SyscallResult> {
+    let owner = require_display_service(cap_slot)?;
+    if pixels.is_empty() || pixels.len() > 4096 {
+        return Err(SyscallResult::InvalidArguments);
+    }
     let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
-    kms.composite();
-    Ok(kms.page_flip())
+    let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
+    display.write_surface_pixels(surface_id, owner.0, offset, pixels)
+        .map_err(|_| SyscallResult::PermissionDenied)
+}
+
+/// Destroys an owned display surface.
+pub fn sys_surface_destroy(cap_slot: usize, surface_id: u32) -> Result<(), SyscallResult> {
+    let owner = require_display_service(cap_slot)?;
+    let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+    let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
+    display.destroy_surface(surface_id, owner.0)
+        .map_err(|_| SyscallResult::PermissionDenied)
+}
+
+/// Composites display surfaces and atomically flips the scanout buffer.
+pub fn sys_surface_flip(cap_slot: usize) -> Result<u64, SyscallResult> {
+    let _owner = require_display_service(cap_slot)?;
+    let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+    let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
+    display.composite_and_flip().map_err(|_| SyscallResult::DeviceError)
 }
 
 /// Polls recognized multi-touch gestures from the touch digitizer engine.
