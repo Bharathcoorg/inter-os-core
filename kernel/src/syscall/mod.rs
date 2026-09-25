@@ -91,6 +91,8 @@ pub enum SyscallNumber {
     WindowSetGeometry = 79,
     WindowFocus = 80,
     ServiceList = 81,
+    SettingsGet = 82,
+    SettingsSet = 83,
 }
 
 /// System call result status codes.
@@ -1277,6 +1279,8 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         }
         79 => { match sys_window_set_geometry(a1 as u32, a2 as i64 as i32, a3 as i64 as i32, a4 as u32, a5 != 0) { e => e as i64 } }
         80 => { sys_window_focus(a1 as u32, a2 as u32) as i64 }
+        82 => { let key_len=a3 as usize; let out_len=a4 as usize; if out_len>512{return SyscallResult::InvalidArguments as i64;} let mut out=[0u8;512]; match sys_settings_get(a1 as usize,a2,key_len,&mut out[..out_len]){Ok(n)=>{if copy_to_user(a5,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
+        83 => { match sys_settings_set(a1 as usize,a2,a3 as usize,a4,a5 as usize){Ok(())=>0,Err(e)=>e as i64} }
         81 => { let len=a3 as usize; if len==0||len>4096{return SyscallResult::InvalidArguments as i64;} let mut out=[0u8;4096]; match sys_service_list(&mut out[..len]){Ok(n)=>{if copy_to_user(a2,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
         78 => {
             // PackageRollback: a1=cap_slot, a2=pkg_id_ptr, a3=pkg_id_len, a4=user_consent
@@ -1553,6 +1557,34 @@ pub fn sys_window_focus(x: u32, y: u32) -> SyscallResult {
 
 
 /// Returns authoritative service lifecycle state.
+
+/// Reads one persistent setting. FileSystemRead capability is required.
+pub fn sys_settings_get(cap_slot: usize, key_ptr: u64, key_len: usize, out: &mut [u8]) -> Result<usize, SyscallResult> {
+    if key_len == 0 || key_len > 96 || out.len() > 512 { return Err(SyscallResult::InvalidArguments); }
+    let sched=SCHEDULER.lock();
+    let current=sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    current.cap_table.verify(cap_slot, CapabilityType::FileSystemRead, Rights::READ).map_err(|_|SyscallResult::PermissionDenied)?;
+    let mut key=[0u8;96];
+    unsafe{copy_from_user(&mut key[..key_len],key_ptr,key_len)}.map_err(|_|SyscallResult::InvalidArguments)?;
+    drop(sched);
+    let key=core::str::from_utf8(&key[..key_len]).map_err(|_|SyscallResult::InvalidArguments)?;
+    Ok(crate::settings::SETTINGS.lock().get(key,out))
+}
+
+/// Updates one persistent setting. FileSystemWrite capability is required.
+pub fn sys_settings_set(cap_slot: usize, key_ptr:u64,key_len:usize,val_ptr:u64,val_len:usize)->Result<(),SyscallResult>{
+    if key_len==0||key_len>96||val_len>512{return Err(SyscallResult::InvalidArguments);}
+    let sched=SCHEDULER.lock();
+    let current=sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    current.cap_table.verify(cap_slot,CapabilityType::FileSystemWrite,Rights::WRITE).map_err(|_|SyscallResult::PermissionDenied)?;
+    let mut key=[0u8;96];let mut val=[0u8;512];
+    unsafe{copy_from_user(&mut key[..key_len],key_ptr,key_len)}.map_err(|_|SyscallResult::InvalidArguments)?;
+    unsafe{copy_from_user(&mut val[..val_len],val_ptr,val_len)}.map_err(|_|SyscallResult::InvalidArguments)?;
+    drop(sched);
+    let key=core::str::from_utf8(&key[..key_len]).map_err(|_|SyscallResult::InvalidArguments)?;
+    crate::settings::SETTINGS.lock().set(key,&val[..val_len]).map_err(|_|SyscallResult::DeviceError)
+}
+
 pub fn sys_service_list(out: &mut [u8]) -> Result<usize, SyscallResult> {
     let n = crate::service::SERVICE_SUPERVISOR.lock().snapshot(out);
     Ok(n)
