@@ -120,7 +120,8 @@ pub fn stop(id: ServiceId) -> Result<(), &'static str> {
     let record = SERVICE_RECORDS.lock()[id as usize].ok_or("service not declared")?;
     if record.task == TaskId(0) { return Ok(()); }
     SCHEDULER.lock().terminate_task(record.task, 0).map_err(|_| "service termination failed")?;
-    SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: record.task, state: ServiceState::Stopped });
+    let _ = SCHEDULER.lock().reap_child(PID1, record.task);
+    SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Stopped });
     Ok(())
 }
 
@@ -221,8 +222,14 @@ pub fn restart_failed() -> usize {
             4 => ServiceId::Network, 5 => ServiceId::Power, 6 => ServiceId::Modem,
             7 => ServiceId::Audio, 8 => ServiceId::Camera, _ => continue,
         };
-        let failed = matches!(SERVICE_RECORDS.lock()[idx], Some(ServiceRecord { state: ServiceState::Failed, .. }));
-        if failed && start(id).is_ok() { restarted += 1; }
+        let failed_task = match SERVICE_RECORDS.lock()[idx] {
+            Some(ServiceRecord { state: ServiceState::Failed, task }) => Some(task),
+            _ => None,
+        };
+        if let Some(task) = failed_task {
+            let _ = SCHEDULER.lock().reap_child(PID1, task);
+            if start(id).is_ok() { restarted += 1; }
+        }
     }
     restarted
 }
