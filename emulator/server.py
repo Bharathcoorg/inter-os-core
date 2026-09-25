@@ -35,6 +35,9 @@ DIRECTORY = os.path.dirname(os.path.abspath(__file__))
 qemu_subproc = None
 ws_subproc = None
 serial_lines = []
+serial_socket_conn = None
+serial_socket_lock = threading.Lock()
+telemetry_lock = threading.Lock()
 
 INSTALLED_APPS_DIR = os.path.join(DIRECTORY, "data", "apps")
 os.makedirs(INSTALLED_APPS_DIR, exist_ok=True)
