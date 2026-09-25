@@ -88,6 +88,7 @@ pub enum SyscallNumber {
     ServiceRecoverFailed = 88,
     ServicePackageVerify = 89,
     ServiceHeartbeat = 90,
+    ServicePackageLaunch = 91,
 }
 
 // -----------------------------------------------------------------------------
@@ -430,6 +431,12 @@ pub fn log(cap_slot: usize, msg: &str) -> Result<(), i64> {
 
 /// Queries the hardware timer ticks since boot.
 /// Requires the caller to hold a `TimerTickRead` capability in `cap_slot`.
+/// Launches a signed trusted system-service RAPP after kernel verification.
+pub fn service_package_launch(cap_slot: usize, path: &str) -> Result<u64, i64> {
+    let ret = unsafe { syscall3(SyscallNumber::ServicePackageLaunch, cap_slot as u64, path.as_ptr() as u64, path.len() as u64) };
+    if ret >= 0 { Ok(ret as u64) } else { Err(ret) }
+}
+
 pub fn get_ticks(cap_slot: usize) -> Result<u64, i64> {
     let ret = unsafe { syscall1(SyscallNumber::GetTicks, cap_slot as u64) };
     if ret >= 0 {
