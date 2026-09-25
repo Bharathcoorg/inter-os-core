@@ -95,6 +95,9 @@ def main() -> None:
     must(interfs, "self.write_transaction(&txn)", "mutation transaction publication")
     must(interfs, "self.clear_transaction()?", "transaction completion/cleanup")
     assert interfs.index("self.write_transaction(&txn)") < interfs.index("self.write_inode(index,&inode)"), "transaction intent must precede inode publication"
+    assert interfs.index("self.write_transaction(&txn)") < interfs.index("self.mark_extent(start,sectors)"), "transaction must precede extent reservation"
+    assert interfs.index("self.mark_extent(start,sectors)") < interfs.index("self.device.write_sector(self.base_lba + self.superblock.data_start+start+block,&sector)"), "extent reservation must precede payload publication"
+    assert interfs.index("self.device.write_sector(self.base_lba + self.superblock.data_start+start+block,&sector)") < interfs.index("self.write_inode(index,&inode)"), "payload must precede inode publication"
     assert interfs.index("self.write_inode(index,&inode)") < interfs.index("self.clear_transaction()?"), "transaction must remain until inode publication completes"
 
     # M22: write payload sectors first and publish the generation header last.
