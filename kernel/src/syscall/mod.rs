@@ -153,7 +153,10 @@ pub fn sys_exit() -> ! {
 /// or `NotReady` if the child is still running.
 pub fn sys_waitpid(child_id: u64) -> SyscallResult {
     let mut sched = SCHEDULER.lock();
-    let parent_id = sched.current_task_id().ok_or(SyscallResult::PermissionDenied).unwrap();
+    let parent_id = match sched.current_task_id() {
+        Some(id) => id,
+        None => return SyscallResult::PermissionDenied,
+    };
     let child_tid = crate::task::TaskId(child_id);
     let child = match sched.get_task_mut(child_tid) {
         Some(task) => task,
