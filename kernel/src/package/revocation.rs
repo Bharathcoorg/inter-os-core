@@ -77,7 +77,7 @@ impl RevocationRegistry {
             let n = idb.len().min(32);
             buf[pos..pos + n].copy_from_slice(&idb[..n]);
             pos += 32;
-            buf[pos] = 0; pos += 1;
+            buf[pos] = rec.reason as u8; pos += 1;
             buf[pos..pos + 8].copy_from_slice(&rec.revoked_at_epoch.to_le_bytes()); pos += 8;
             buf[pos..pos + 32].fill(0);
             let ib = rec.issuer.as_bytes();
@@ -92,7 +92,7 @@ impl RevocationRegistry {
             if pos + RECORD_SIZE > buf.len() { break; }
             buf[pos..pos + 32].copy_from_slice(key);
             pos += 32;
-            buf[pos] = 1; pos += 1;
+            buf[pos] = 0x80 | rec.reason as u8; pos += 1;
             buf[pos..pos + 8].copy_from_slice(&rec.revoked_at_epoch.to_le_bytes()); pos += 8;
             buf[pos..pos + 32].fill(0);
             let ib = rec.issuer.as_bytes();
@@ -134,16 +134,22 @@ impl RevocationRegistry {
             };
             pos += 32;
             pos += 32;
-            let reason = RevocationReason::KeyCompromised;
+            let reason = match kind & 0x7F {
+                1 => RevocationReason::KeyCompromised,
+                2 => RevocationReason::MaliciousBehavior,
+                3 => RevocationReason::SupersededByRotation,
+                4 => RevocationReason::Expired,
+                _ => return false,
+            };
 
-            if kind == 0 {
+            if kind & 0x80 == 0 {
                 let id = match core::str::from_utf8(&target[..target_len]) {
                     Ok(v) => v.to_string(), Err(_) => return false
                 };
                 self.revoked_packages.insert(id.clone(), RevocationRecord {
                     target_id: id, reason, revoked_at_epoch: epoch, issuer,
                 });
-            } else if kind == 1 {
+            } else if kind & 0x80 != 0 {
                 let mut key = [0u8; 32];
                 key.copy_from_slice(target);
                 self.revoked_keys.insert(key, RevocationRecord {
