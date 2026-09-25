@@ -1714,11 +1714,11 @@ pub fn sys_surface_flip() -> Result<u64, SyscallResult> {
 pub fn sys_touch_poll() -> Result<u32, SyscallResult> {
     let mut engine = crate::drivers::touch_gestures::TOUCH_ENGINE.lock();
     match engine.gesture_queue.pop_front() {
-        Some(crate::drivers::touch_gestures::RecognizedGesture::Tap { .. }) => Ok(1),
-        Some(crate::drivers::touch_gestures::RecognizedGesture::DoubleTap { .. }) => Ok(2),
-        Some(crate::drivers::touch_gestures::RecognizedGesture::LongPress { .. }) => Ok(3),
-        Some(crate::drivers::touch_gestures::RecognizedGesture::Pan { .. }) => Ok(4),
-        Some(crate::drivers::touch_gestures::RecognizedGesture::Pinch { .. }) => Ok(5),
+        Some(crate::drivers::touch_gestures::RecognizedGesture::Tap { x, y }) => { let _ = sys_window_focus(x, y); Ok(1) },
+        Some(crate::drivers::touch_gestures::RecognizedGesture::DoubleTap { x, y }) => { let _ = sys_window_focus(x, y); Ok(2) },
+        Some(crate::drivers::touch_gestures::RecognizedGesture::LongPress { x, y }) => { let _ = sys_window_focus(x, y); Ok(3) },
+        Some(crate::drivers::touch_gestures::RecognizedGesture::Pan { current_x, current_y, .. }) => { let _ = sys_window_focus(current_x, current_y); Ok(4) },
+        Some(crate::drivers::touch_gestures::RecognizedGesture::Pinch { center_x, center_y, .. }) => { let _ = sys_window_focus(center_x, center_y); Ok(5) },
         None => Ok(0),
     }
 }
