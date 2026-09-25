@@ -82,6 +82,8 @@ def main():
     must(sock, "arm_retransmit", "TCP retransmission state")
     must(sock, "arm_fin", "TCP FIN lifecycle")
     must(sock, "due_fin_retransmit", "TCP FIN retransmission")
+    must(sock, "due_syn_retransmit", "TCP SYN retransmission")
+    must(sock, "acknowledge_syn", "TCP SYN acknowledgement retirement")
     must(net, "transmit_tcp_segment(", "kernel TCP ACK transmission")
     must(dns, "encode_query", "DNS query encoder")
     must(dns, "parse_a_answer", "DNS A-record parser")

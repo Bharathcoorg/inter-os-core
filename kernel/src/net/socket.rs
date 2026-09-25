@@ -237,6 +237,10 @@ pub struct TcpConnection {
     pub fin_seq: u32,
     pub fin_deadline: u64,
     pub fin_retries: u8,
+    pub syn_pending: bool,
+    pub syn_seq: u32,
+    pub syn_deadline: u64,
+    pub syn_retries: u8,
 }
 
 pub struct TcpConnectionTable {
@@ -282,6 +286,10 @@ impl TcpConnectionTable {
                     fin_seq: initial_seq,
                     fin_deadline: 0,
                     fin_retries: 0,
+                    syn_pending: true,
+                    syn_seq: initial_seq,
+                    syn_deadline: TCP_RETRANSMIT_TICKS,
+                    syn_retries: 0,
                 });
                 return Ok(id);
             }
@@ -365,6 +373,42 @@ impl TcpConnectionTable {
                     conn.tx_retries += 1;
                     conn.tx_deadline = now.saturating_add(TCP_RETRANSMIT_TICKS << conn.tx_retries);
                     return Some((conn.id, conn.remote_ip, conn.local_port, conn.remote_port, conn.tx_seq, conn.recv_seq, conn.tx_len));
+                }
+            }
+        }
+        None
+    }
+
+    pub fn arm_syn(&mut self, id: u32, now: u64) -> Result<(), NetError> {
+        let conn = self.get_mut(id).ok_or(NetError::NoPacketAvailable)?;
+        if conn.state != crate::net::TcpState::SynSent { return Err(NetError::NotReady); }
+        conn.syn_pending = true;
+        conn.syn_deadline = now.saturating_add(TCP_RETRANSMIT_TICKS);
+        conn.syn_retries = 0;
+        Ok(())
+    }
+
+    pub fn acknowledge_syn(&mut self, id: u32) -> bool {
+        if let Some(conn) = self.get_mut(id) {
+            conn.syn_pending = false;
+            conn.syn_retries = 0;
+            return true;
+        }
+        false
+    }
+
+    pub fn due_syn_retransmit(&mut self, now: u64) -> Option<(u32, Ipv4Address, u16, u16, u32)> {
+        for slot in self.entries.iter_mut() {
+            if let Some(conn) = slot.as_mut() {
+                if conn.syn_pending && conn.state == crate::net::TcpState::SynSent && now >= conn.syn_deadline {
+                    if conn.syn_retries >= TCP_MAX_RETRIES {
+                        conn.syn_pending = false;
+                        conn.state = crate::net::TcpState::Closed;
+                        continue;
+                    }
+                    conn.syn_retries += 1;
+                    conn.syn_deadline = now.saturating_add(TCP_RETRANSMIT_TICKS << conn.syn_retries);
+                    return Some((conn.id, conn.remote_ip, conn.local_port, conn.remote_port, conn.syn_seq));
                 }
             }
         }

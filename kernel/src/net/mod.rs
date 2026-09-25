@@ -242,6 +242,7 @@ pub fn poll_network_interface() -> usize {
                                                     conn.recv_seq = segment.seq.wrapping_add(1);
                                                     conn.send_seq = conn.send_seq.wrapping_add(1);
                                                     conn.state = TcpState::Established;
+                                                    let _ = TCP_TABLE.lock().acknowledge_syn(conn.id);
                                                     let ack_seq = conn.send_seq;
                                                     let _ = transmit_tcp_segment(ip_pkt.dst, conn.local_port, ip_pkt.src, conn.remote_port, ack_seq, conn.recv_seq, 0x10);
                                                 } else if old_state == TcpState::Established {
@@ -294,6 +295,13 @@ pub fn poll_network_interface() -> usize {
 
 /// Retransmits one bounded unacknowledged TCP payload when its deadline expires.
 pub fn poll_tcp_retransmissions(now: u64) -> usize {
+    if let Some((_id, remote_ip, local_port, remote_port, seq)) = TCP_TABLE.lock().due_syn_retransmit(now) {
+        return if send_tcp_syn(
+            if remote_ip.is_loopback() { Ipv4Address::LOCALHOST } else { DEFAULT_HOST_IP },
+            local_port, remote_ip, remote_port, seq,
+            &CapabilityTable::new(0),
+        ).is_ok() { 1 } else { 0 };
+    }
     let due_fin = TCP_TABLE.lock().due_fin_retransmit(now);
     if let Some((_id, remote_ip, local_port, remote_port, seq, ack)) = due_fin {
         return if transmit_tcp_segment(if remote_ip.is_loopback() { Ipv4Address::LOCALHOST } else { DEFAULT_HOST_IP }, local_port, remote_ip, remote_port, seq, ack, 0x11).is_ok() { 1 } else { 0 };
