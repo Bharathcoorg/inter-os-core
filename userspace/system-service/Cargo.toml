@@ -1,0 +1,39 @@
+[package]
+name = "interos-system-service"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+interos-std = { path = "../../sdk/rust/interos-std" }
+
+[[bin]]
+name = "displayd"
+path = "src/bin/displayd.rs"
+
+[[bin]]
+name = "inputd"
+path = "src/bin/inputd.rs"
+
+[[bin]]
+name = "storaged"
+path = "src/bin/storaged.rs"
+
+[[bin]]
+name = "netd"
+path = "src/bin/netd.rs"
+
+[[bin]]
+name = "powerd"
+path = "src/bin/powerd.rs"
+
+[[bin]]
+name = "modemd"
+path = "src/bin/modemd.rs"
+
+[[bin]]
+name = "audiod"
+path = "src/bin/audiod.rs"
+
+[[bin]]
+name = "camerad"
+path = "src/bin/camerad.rs"
