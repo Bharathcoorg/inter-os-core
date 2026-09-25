@@ -10,6 +10,7 @@
 
 pub mod ata;
 pub mod audio;
+pub mod display;
 pub mod display_kms;
 pub mod fdt;
 pub mod i2c_mmio;
@@ -21,6 +22,7 @@ pub mod touch_i2c;
 
 pub use ata::{AtaDrive, AtaError, BlockDevice, ATA_PRIMARY, SECTOR_SIZE};
 pub use audio::{PciAudioController, PciAudioDevice};
+pub use display::{DisplayDriver, KmsDisplayDriver};
 pub use display_kms::{DrmKmsController, DrmPixelFormat, DrmSurface, DRM_KMS, test_drm_kms};
 pub use fdt::{DiscoveredDevice, FdtParser, test_fdt_parser};
 pub use i2c_mmio::{MmioI2cController, test_mmio_i2c_host};
