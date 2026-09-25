@@ -480,6 +480,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         2,
     );
     IPC_ROUTER.lock().register_task(id_security);
+    crate::service::SERVICE_SUPERVISOR.lock().bind_task("package", id_security);
     serial_println!("[OK] Spawned Task 2: security_daemon (ID: {:?})", id_security);
 
     // Task 3: Device & Package Verification Manager (with VFS FileSystemRead + IpcSend to Task 2)
@@ -786,10 +787,29 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial_println!("[OK] Hardware interrupts enabled on CPU.");
 
     // Hand over control to multitasking scheduler
+    let mut supervisor_ticks=0u64;
     loop {
+        supervisor_ticks=supervisor_ticks.wrapping_add(1);
+        if supervisor_ticks%250==0 && crate::service::SERVICE_SUPERVISOR.lock().should_restart("package") { spawn_package_supervisor_recovery(); }
         task::yield_now();
         x86_64::instructions::hlt();
     }
+}
+
+
+/// Kernel recovery path for the package/security supervisor itself.
+/// This path is intentionally independent of the Ring-3 package service.
+fn spawn_package_supervisor_recovery() -> TaskId {
+    let mut caps = CapabilityTable::new(8);
+    caps.insert(Capability { id: CapabilityId(201), cap_type: CapabilityType::IpcReceive, rights: Rights::READ, object_id: 0 }).ok();
+    caps.insert(Capability { id: CapabilityId(202), cap_type: CapabilityType::SerialOutput, rights: Rights::WRITE, object_id: 0 }).ok();
+    caps.insert(Capability { id: CapabilityId(203), cap_type: CapabilityType::ProcessSpawn, rights: Rights::EXECUTE, object_id: 0 }).ok();
+    caps.insert(Capability { id: CapabilityId(204), cap_type: CapabilityType::FileSystemRead, rights: Rights::READ, object_id: 0 }).ok();
+    let id = SCHEDULER.lock().spawn("security_daemon", task_security_daemon, caps, 2);
+    IPC_ROUTER.lock().register_task(id);
+    crate::service::SERVICE_SUPERVISOR.lock().bind_task("package", id);
+    serial_println!("[SUPERVISOR] Recovered package/security service pid={}", id.0);
+    id
 }
 
 // -----------------------------------------------------------------------------
