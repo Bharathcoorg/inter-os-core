@@ -101,7 +101,7 @@ def main() -> None:
         "CapabilityType::NetworkReceive",
         "CapabilityType::HardwarePortIo",
     ):
-        must(services, f"// forbidden:{forbidden}", f"capability isolation marker {forbidden}")
+        must((ROOT / "kernel/src/task/user.rs").read_text(), f"// forbidden:{forbidden}", f"capability isolation marker {forbidden}")
 
     for marker in (
         "// service-cap:Display=FrameBufferDirect:WRITE",
@@ -114,7 +114,7 @@ def main() -> None:
         "// service-cap:Camera=EventPoll:READ",
         "// service-cap:Init=ProcessSpawn:GRANT",
     ):
-        must(services, marker, f"service capability matrix {marker}")
+        must((ROOT / "kernel/src/task/user.rs").read_text(), marker, f"service capability matrix {marker}")
 
     # M11 executable contract: PID1 must exercise the complete deterministic
     # lifecycle smoke sequence used by the QEMU vertical slice.
