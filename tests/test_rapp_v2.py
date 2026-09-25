@@ -2,6 +2,7 @@
 """Adversarial RAPP v2 format and Ed25519 trust-boundary tests."""
 import hashlib
 from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives import serialization
 from cryptography.exceptions import InvalidSignature
 
 HEADER = 0xB4
@@ -10,7 +11,7 @@ SIG_END = 0xB0
 
 def make_package(payload=b"\\x7fELF-test"):
     key = ed25519.Ed25519PrivateKey.generate()
-    pub = key.public_key().public_bytes_raw()
+    pub = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
     pkg = bytearray()
     pkg += b"RAPP" + (2).to_bytes(2,"little") + (0).to_bytes(2,"little")
     pkg += b"org.interos.test".ljust(32,b"\\0") + pub
