@@ -133,8 +133,7 @@ fn transmit_tcp_segment(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address,
     NETWORK_DEVICE.lock().transmit(&eth_buf[..len])
 }
 
-pub fn send_tcp_payload(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address, dst_port: u16, seq: u32, ack: u32, payload: &[u8], caps: &CapabilityTable) -> Result<usize, NetError> {
-    if !caps.has_capability(CapabilityType::NetworkSend, Rights::WRITE) { return Err(NetError::CapabilityDenied); }
+fn transmit_tcp_payload(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address, dst_port: u16, seq: u32, ack: u32, payload: &[u8]) -> Result<usize, NetError> {
     let segment = TcpSegment { src_port, dst_port, seq, ack, flags: 0x18, window: 65535, payload };
     let mut tcp_buf = [0u8; 1480];
     let tcp_len = crate::net::tcp::serialize_with_checksum(&segment, src_ip.0, dst_ip.0, &mut tcp_buf).map_err(|_| NetError::BufferTooSmall)?;
@@ -146,6 +145,11 @@ pub fn send_tcp_payload(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address,
     let n = frame.serialize(&mut eth_buf).map_err(|_| NetError::BufferTooSmall)?;
     NETWORK_DEVICE.lock().transmit(&eth_buf[..n])?;
     Ok(payload.len())
+}
+
+pub fn send_tcp_payload(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address, dst_port: u16, seq: u32, ack: u32, payload: &[u8], caps: &CapabilityTable) -> Result<usize, NetError> {
+    if !caps.has_capability(CapabilityType::NetworkSend, Rights::WRITE) { return Err(NetError::CapabilityDenied); }
+    transmit_tcp_payload(src_ip, src_port, dst_ip, dst_port, seq, ack, payload)
 }
 
 pub fn send_tcp_syn(
@@ -180,6 +184,7 @@ pub fn send_tcp_syn(
 /// Polls the network device and processes all inbound packets.
 pub fn poll_network_interface() -> usize {
     let mut processed = 0;
+    let _ = poll_tcp_retransmissions(crate::interrupts::get_system_ticks());
     loop {
         let mut rx_buf = [0u8; 1514];
         let len = {
@@ -289,7 +294,7 @@ pub fn poll_network_interface() -> usize {
 /// Retransmits one bounded unacknowledged TCP payload when its deadline expires.
 pub fn poll_tcp_retransmissions(now: u64) -> usize {
     let due = TCP_TABLE.lock().due_retransmit(now);
-    let Some((id, remote_ip, _unused, local_port, remote_port, seq, ack, len)) = due else { return 0; };
+    let Some((id, remote_ip, local_port, remote_port, seq, ack, len)) = due else { return 0; };
     let payload = {
         let table = TCP_TABLE.lock();
         let Some(c) = table.get(id) else { return 0; };
@@ -297,8 +302,7 @@ pub fn poll_tcp_retransmissions(now: u64) -> usize {
         buf[..len].copy_from_slice(&c.tx[..len]);
         buf
     };
-    let caps = CapabilityTable::new(0);
-    if send_tcp_payload(if remote_ip.is_loopback() { Ipv4Address::LOCALHOST } else { DEFAULT_HOST_IP }, local_port, remote_ip, remote_port, seq, ack, &payload[..len], &caps).is_ok() { 1 } else { 0 }
+    if transmit_tcp_payload(if remote_ip.is_loopback() { Ipv4Address::LOCALHOST } else { DEFAULT_HOST_IP }, local_port, remote_ip, remote_port, seq, ack, &payload[..len]).is_ok() { 1 } else { 0 }
 }
 
 /// Initializes the network stack and executes comprehensive in-kernel self-tests.

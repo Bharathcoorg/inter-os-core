@@ -65,6 +65,8 @@ def main():
     must(net, "segment.flags & 0x12 == 0x12", "TCP SYN-ACK integration")
     must(net, "poll_tcp_retransmissions", "TCP retransmission scheduler")
     must(net, "acknowledge_tx", "TCP acknowledgement retirement")
+    must(net, "transmit_tcp_payload(", "kernel-internal TCP retransmission path")
+    must(net, "get_system_ticks()", "TCP retransmission timer source")
     must(sock, "TCP_MAX_RETRIES", "bounded TCP retry count")
     must(sock, "arm_retransmit", "TCP retransmission state")
     must(net, "transmit_tcp_segment(", "kernel TCP ACK transmission")

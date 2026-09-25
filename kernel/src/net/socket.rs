@@ -356,7 +356,7 @@ impl TcpConnectionTable {
                     }
                     conn.tx_retries += 1;
                     conn.tx_deadline = now.saturating_add(TCP_RETRANSMIT_TICKS << conn.tx_retries);
-                    return Some((conn.id, conn.remote_ip, conn.remote_ip, conn.local_port, conn.remote_port, conn.tx_seq, conn.recv_seq, conn.tx_len));
+                    return Some((conn.id, conn.remote_ip, conn.local_port, conn.remote_port, conn.tx_seq, conn.recv_seq, conn.tx_len));
                 }
             }
         }
