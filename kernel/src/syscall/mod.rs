@@ -2552,7 +2552,8 @@ pub fn sys_service_start(service_id: u8) -> Result<crate::task::TaskId, SyscallR
         7 => crate::services::ServiceId::Audio, 8 => crate::services::ServiceId::Camera,
         _ => return Err(SyscallResult::InvalidArguments),
     };
-    crate::services::start(id).map_err(|_| SyscallResult::DeviceError)
+    let parent_id = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?;
+    crate::services::start(id, parent_id).map_err(|_| SyscallResult::DeviceError)
 }
 
 fn require_service_manager() -> Result<(), SyscallResult> {
@@ -2567,7 +2568,8 @@ fn require_service_manager() -> Result<(), SyscallResult> {
 
 pub fn sys_service_recover_failed() -> Result<u64, SyscallResult> {
     require_service_manager()?;
-    Ok(crate::services::restart_failed() as u64)
+    let parent_id = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?;
+    Ok(crate::services::restart_failed(parent_id) as u64)
 }
 
 pub fn sys_service_stop(service_id: u8) -> Result<(), SyscallResult> {
@@ -2579,7 +2581,8 @@ pub fn sys_service_stop(service_id: u8) -> Result<(), SyscallResult> {
         7 => crate::services::ServiceId::Audio, 8 => crate::services::ServiceId::Camera,
         _ => return Err(SyscallResult::InvalidArguments),
     };
-    crate::services::stop(id).map_err(|_| SyscallResult::DeviceError)
+    let parent_id = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?;
+    crate::services::stop(id, parent_id).map_err(|_| SyscallResult::DeviceError)
 }
 
 pub fn sys_window_list(out_buf:&mut [u8])->Result<usize,SyscallResult>{
