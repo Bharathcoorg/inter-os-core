@@ -24,7 +24,8 @@ fn caps(id: ServiceId) -> CapabilityTable {
     let mut t = CapabilityTable::new(16);
     let base = 0x5000 + id as u64 * 0x10;
     let _ = t.insert(Capability { id: CapabilityId(base), cap_type: CapabilityType::IpcReceive, rights: Rights::READ, object_id: 0 });
-    let _ = t.insert(Capability { id: CapabilityId(base + 1), cap_type: CapabilityType::IpcSend, rights: Rights::WRITE, object_id: 0 });
+    // IpcSend is intentionally omitted here. init() installs only explicit
+    // sender -> receiver object capabilities after all service task IDs exist.
     let _ = t.insert(Capability { id: CapabilityId(base + 2), cap_type: CapabilityType::TimerTickRead, rights: Rights::READ, object_id: 0 });
     let (kind, rights) = match id {
         ServiceId::Display => (CapabilityType::FrameBufferDirect, Rights::WRITE),
