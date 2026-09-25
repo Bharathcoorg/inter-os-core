@@ -882,7 +882,23 @@ extern "C" fn task_security_daemon() -> ! {
                     if let Some(descriptor) = crate::package::first_party_package(package_id) {
                         syscall::sys_log(1, "[PACKAGE SERVICE] Resolving package from VFS and verifying integrity.");
                         let mut package_buf = [0u8; 65536];
-                        let verified = match syscall::sys_fs_open(3, descriptor.path, Rights::READ) {
+                        let mut source_path = descriptor.path;
+                        if let Some(blob) = crate::package::PACKAGE_BLOB_STORE.lock().get(package_id) {
+                            if blob.bytes.len() <= package_buf.len() {
+                                package_buf[..blob.bytes.len()].copy_from_slice(&blob.bytes);
+                                let bytes = blob.bytes.len();
+                                let parsed = crate::package::parse_rapp(&package_buf[..bytes]).map(|m|(m,bytes));
+                                if let Ok((manifest, bytes_read)) = parsed {
+                                    let payload_start=manifest.payload_offset; let payload_end=payload_start.saturating_add(manifest.payload_len);
+                                    if manifest.package_id==package_id && payload_end<=bytes_read {
+                                        source_path="[persistent package store]";
+                                    }
+                                }
+                            }
+                        }
+                        let verified = if source_path=="[persistent package store]" {
+                            crate::package::parse_rapp(&package_buf[..]).map(|m|(m,package_buf.len()))
+                        } else { match syscall::sys_fs_open(3, descriptor.path, Rights::READ) {
                             Ok(fd) => {
                                 let result = syscall::sys_fs_read(3, fd, &mut package_buf);
                                 let _ = syscall::sys_fs_close(fd);
