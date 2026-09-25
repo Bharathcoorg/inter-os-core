@@ -547,9 +547,12 @@ impl Vfs {
             count=count.saturating_add(1);
         }
         buf[4..6].copy_from_slice(&count.to_le_bytes());
-        crate::storage::persistent::commit_kind(&buf[..pos],4).map(|_|()).map_err(|_|FsError::IntegrityViolation)?;
+        let mut sealed = Vec::new();
+        crate::storage::encrypted::seal(&buf[..pos], &mut sealed)
+            .map_err(|_| FsError::IntegrityViolation)?;
+        crate::storage::persistent::commit_kind(&sealed,4).map(|_|()).map_err(|_|FsError::IntegrityViolation)?;
         // The block-backed InterFS copy is the durable filesystem source of truth.
-        crate::storage::filesystem::store_data_file("/data/.vfs.snapshot", &buf[..pos])
+        crate::storage::filesystem::store_data_file("/data/.vfs.snapshot", &sealed)
             .map_err(|_| FsError::IntegrityViolation)
     }
 
@@ -574,14 +577,24 @@ impl Vfs {
             count = count.saturating_add(1);
         }
         buf[4..6].copy_from_slice(&count.to_le_bytes());
-        crate::storage::filesystem::store_data_file("/data/.vfs.metadata", &buf[..pos])
+        let mut sealed = Vec::new();
+        crate::storage::encrypted::seal(&buf[..pos], &mut sealed)
+            .map_err(|_| FsError::IntegrityViolation)?;
+        crate::storage::filesystem::store_data_file("/data/.vfs.metadata", &sealed)
             .map_err(|_| FsError::IntegrityViolation)
     }
 
     /// Restores the persistent /data inode tree before restoring file payloads.
     fn restore_metadata_snapshot(&mut self) {
+        let mut sealed = [0u8; 32768 + crate::storage::encrypted::ENCRYPTED_OVERHEAD];
+        let Ok(len) = crate::storage::filesystem::load_data_file("/data/.vfs.metadata", &mut sealed) else { return; };
         let mut buf = [0u8; 32768];
-        let Ok(len) = crate::storage::filesystem::load_data_file("/data/.vfs.metadata", &mut buf) else { return; };
+        let len = match crate::storage::encrypted::open(&sealed[..len], &mut buf) {
+            Ok(plain_len) => plain_len,
+            Err(_) => {
+                if len <= buf.len() { buf[..len].copy_from_slice(&sealed[..len]); len } else { return; }
+            }
+        };
         if len < 6 || &buf[..4] != b"IVM1" { return; }
         let count = u16::from_le_bytes([buf[4], buf[5]]) as usize;
         let mut pos = 6usize;
@@ -617,16 +630,27 @@ impl Vfs {
     /// The metadata journal remains a recovery fallback until M22 finalizes the
     /// transactional publication protocol.
     fn restore_data_snapshot(&mut self) {
-        let mut buf=[0u8;32768];
-        let block_len = match crate::storage::filesystem::load_data_file("/data/.vfs.snapshot", &mut buf) {
+        let mut sealed=[0u8;32768 + crate::storage::encrypted::ENCRYPTED_OVERHEAD];
+        let block_len = match crate::storage::filesystem::load_data_file("/data/.vfs.snapshot", &mut sealed) {
             Ok(len) => Some(len),
             Err(_) => None,
         };
         let len = if let Some(len) = block_len {
             len
         } else {
-            let Ok(Some((_generation,len)))=crate::storage::persistent::load_latest_kind(&mut buf,4) else { return; };
+            let Ok(Some((_generation,len)))=crate::storage::persistent::load_latest_kind(&mut sealed,4) else { return; };
             len
+        };
+        let mut buf=[0u8;32768];
+        let len = match crate::storage::encrypted::open(&sealed[..len], &mut buf) {
+            Ok(plain_len) => plain_len,
+            Err(_) => {
+                // One-time compatibility with pre-M23 plaintext snapshots.
+                if len <= buf.len() {
+                    buf[..len].copy_from_slice(&sealed[..len]);
+                    len
+                } else { return; }
+            }
         };
         if len<6 || &buf[..4]!=b"DTA1" { return; }
         let count=u16::from_le_bytes([buf[4],buf[5]]) as usize;
