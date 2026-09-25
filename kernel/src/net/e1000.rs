@@ -221,6 +221,24 @@ impl E1000Device {
     }
 
     pub fn mac_address(&self) -> MacAddress { self.mac }
+
+    /// Reads the permanent station address from the E1000 EEPROM.
+    pub unsafe fn read_mac_from_eeprom(base_vaddr: usize) -> MacAddress {
+        let read = |address: u8| -> u16 {
+            write32(base_vaddr, EERD, ((address as u32) << 8) | 1);
+            for _ in 0..100_000 {
+                let value = read32(base_vaddr, EERD);
+                if value & 1 != 0 { return (value >> 16) as u16; }
+            }
+            0
+        };
+        let w0 = read(0);
+        let w1 = read(1);
+        let w2 = read(2);
+        MacAddress([(w0 & 0xff) as u8, (w0 >> 8) as u8,
+                    (w1 & 0xff) as u8, (w1 >> 8) as u8,
+                    (w2 & 0xff) as u8, (w2 >> 8) as u8])
+    }
 }
 
 impl NetworkDevice for E1000Device {
