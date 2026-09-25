@@ -521,6 +521,9 @@ pub fn spawn_userspace_service(service_id: u8, parent_id: TaskId) -> Result<Task
         // capability object unscoped while retaining the dedicated service slot.
         3 => Some((CapabilityType::FileSystemRead, Rights::READ | Rights::WRITE, 0)),
         4 => Some((CapabilityType::NetworkSocket, Rights::READ | Rights::WRITE, service_id as u64)),
+        // netd owns the userspace network data plane: socket creation, TX, RX and
+        // device polling are all explicitly scoped to this service.
+        4 => Some((CapabilityType::NetworkSend, Rights::WRITE, 0)),
         2 | 5 | 6 | 7 | 8 => None,
         _ => return Err("unknown userspace service"),
     };
