@@ -17,7 +17,7 @@ def main():
         "pub fn run_network() -> !",
         "std::net_socket(4242)",
         "std::network_poll()",
-        "std::net_sendto([127, 0, 0, 1], 4242",
+        "std::net_send_socket(socket, [127, 0, 0, 1], 4242,
         "std::net_recvfrom(socket",
         "std::tcp_connect([127, 0, 0, 1], 4243, 4244, 1)",
         "std::EVENT_NETWORK_PACKET",
@@ -26,10 +26,13 @@ def main():
     must(bin_, "interos_system_service::run_network()", "netd entrypoint")
     must(sdk, "NetworkPoll = 93", "network poll syscall ABI")
     must(sdk, "pub fn network_poll()", "network poll SDK")
+    must(sdk, "pub fn net_send_socket(", "socket-bound send SDK")
     must(sdk, "TcpConnect = 94", "TCP connect syscall ABI")
     must(sdk, "pub fn tcp_connect(", "TCP connect SDK")
     must(syscall, "pub fn sys_network_poll()", "kernel network poll")
     must(syscall, "sock.owner_task_id != current_id.0 as u32", "socket owner isolation")
+    must(syscall, "pub fn sys_net_send_socket(", "socket-bound send kernel API")
+    must(syscall, "copy_from_user(&mut payload[..len]", "network payload user validation")
     must(syscall, "Ipv4Address::LOCALHOST", "loopback source selection")
     must(syscall, "DEFAULT_HOST_IP", "non-loopback source selection")
     must(syscall, "pub fn sys_tcp_connect(", "TCP connect kernel API")
