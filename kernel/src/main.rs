@@ -238,7 +238,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // 9b. Modular Hardware Driver Subsystems (DRM/KMS, FDT, PMIC, Touch)
     drivers::init_and_test_drivers();
 
-    // 10. Virtual Filesystem (VFS) Initialization & Package Runtime
+    // 10. Mount the canonical block-backed filesystem before VFS reconstruction.
+    match storage::init_block_filesystem() {
+        Ok(()) => serial_println!("[OK] Persistent InterFS region mounted/formatted."),
+        Err(e) => serial_println!("[WARN] Persistent InterFS unavailable: {:?}", e),
+    }
+
+    // 10b. Virtual Filesystem (VFS) Initialization & Package Runtime
     serial_println!("\n--- [Initializing Virtual Filesystem & Package Runtime] ---");
     fs::init();
     crate::package::PACKAGE_BLOB_STORE.lock().restore();
