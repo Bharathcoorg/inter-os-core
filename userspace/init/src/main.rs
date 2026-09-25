@@ -16,6 +16,16 @@ const POLL_INTERVAL_TICKS: u64 = 100;
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     std::log(0, "[PID1] Inter OS userspace init started in Ring 3.").ok();
+    // Phase B service-manager bootstrap. PID 1, not kernel_main, owns the
+    // startup ordering of the userspace service set.
+    const SERVICES: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+    for service_id in SERVICES {
+        match std::service_start(service_id) {
+            Ok(task_id) => std::log(0, "[PID1] Service started through lifecycle ABI.").ok(),
+            Err(_) => std::log(0, "[PID1] Service start request rejected.").ok(),
+        }
+    }
+
 
     // Establish the first userspace service-manager contract: PID 1 observes
     // the authoritative kernel service registry rather than hard-coding task IDs.
