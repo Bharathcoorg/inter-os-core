@@ -58,9 +58,9 @@ This roadmap tracks the remaining work in dependency order. A milestone is **com
 
 | ID | Milestone | Status |
 |---|---|---|
-| M31 | Network device/driver abstraction | 🟡 Implementation complete — protocol stack now consumes a canonical kernel network-device manager with explicit device identity, MTU/link state, and loopback backend; CI evidence pending |
-| M32 | Userspace network service | 🟡 Implementation complete — `netd` now owns network device polling and UDP socket TX/RX through explicit NetworkSocket/NetworkSend/NetworkReceive capabilities; CI/QEMU evidence pending |
-| M33 | TCP/IP + DNS + TLS integration | ⬜ Pending |
+| M31 | Network device/driver abstraction | 🟡 In progress — canonical device boundary exists, but the current backend is still loopback-only; a physical/virtual NIC backend and runtime validation remain |
+| M32 | Userspace network service | 🟡 In progress — `netd` has a real Ring-3 service loop and network polling ABI, but socket/data-plane brokering is not yet fully moved behind the userspace service boundary |
+| M33 | TCP/IP + DNS + TLS integration | 🟡 In progress — added bounded TCP wire/state primitives and DNS query/A-record codecs; TCP socket integration, DNS runtime resolution, and TLS transport remain |
 | M34 | Audio service and device pipeline | ⬜ Pending |
 | M35 | Camera sensor/CSI pipeline | ⬜ Pending |
 | M36 | Modem/RIL service boundary | ⬜ Pending |
