@@ -330,6 +330,10 @@ impl ShmPipeManager {
         assert_eq!(&rx_buf[..header.len()], header);
         assert_eq!(&rx_buf[1020..1024], &0xDEADBEEFu32.to_le_bytes());
 
+        // 1b. Ownership boundary: unrelated tasks cannot inject or consume frames.
+        assert_eq!(pipe.write(TaskId(99), b"FORGED", DMA_FLAG_ACCEL, 100), Err(ShmError::PermissionDenied));
+        assert_eq!(pipe.read(TaskId(99), &mut rx_buf), Err(ShmError::PermissionDenied));
+
         // 2. Multi-packet streaming & sequence verification
         for i in 0..7 {
             let mut chunk = [0u8; 512];
