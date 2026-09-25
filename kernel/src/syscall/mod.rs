@@ -1454,14 +1454,49 @@ pub fn sys_package_audit(pkg_id: &str) -> Result<u32, SyscallResult> {
 
 /// Installs a verified first-party package into the transactional runtime registry.
 pub fn sys_package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) -> Result<(), SyscallResult> {
-    let sched=SCHEDULER.lock();
-    let current=sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    if current.cap_table.verify(cap_slot,CapabilityType::FileSystemWrite,Rights::WRITE).is_err(){return Err(SyscallResult::PermissionDenied);}
+    let sched = SCHEDULER.lock();
+    let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    if current.cap_table.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE).is_err() {
+        return Err(SyscallResult::PermissionDenied);
+    }
     drop(sched);
-    if !user_consent{return Err(SyscallResult::PermissionDenied);}
-    if crate::package::REVOCATION_REGISTRY.lock().is_package_revoked(pkg_id){return Err(SyscallResult::IntegrityViolation);}
-    if crate::package::first_party_package(pkg_id).is_none(){return Err(SyscallResult::FileNotFound);}
-    crate::package::PACKAGE_REGISTRY.lock().activate(pkg_id).map_err(|_|SyscallResult::IntegrityViolation)
+
+    if !user_consent {
+        return Err(SyscallResult::PermissionDenied);
+    }
+    if crate::package::REVOCATION_REGISTRY.lock().is_package_revoked(pkg_id) {
+        return Err(SyscallResult::IntegrityViolation);
+    }
+    let descriptor = crate::package::first_party_package(pkg_id).ok_or(SyscallResult::FileNotFound)?;
+
+    let mut package_buf = [0u8; 65536];
+    let fd = sys_fs_open(3, descriptor.path, Rights::READ)?;
+    let bytes = match sys_fs_read(3, fd, &mut package_buf) {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = sys_fs_close(fd);
+            return Err(e);
+        }
+    };
+    let _ = sys_fs_close(fd);
+
+    let manifest = crate::package::parse_rapp(&package_buf[..bytes])
+        .map_err(|_| SyscallResult::IntegrityViolation)?;
+    if manifest.package_id != pkg_id || !manifest.arch.matches_current() {
+        return Err(SyscallResult::IntegrityViolation);
+    }
+
+    let payload_end = manifest.payload_offset
+        .checked_add(manifest.payload_len)
+        .ok_or(SyscallResult::InvalidArguments)?;
+    if payload_end > bytes {
+        return Err(SyscallResult::IntegrityViolation);
+    }
+
+    crate::package::PACKAGE_REGISTRY
+        .lock()
+        .activate_version(pkg_id, manifest.version)
+        .map_err(|_| SyscallResult::IntegrityViolation)
 }
 
 /// Returns transactional package state as package_id|generation|state records.
