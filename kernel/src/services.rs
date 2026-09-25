@@ -8,6 +8,7 @@
 use crate::capability::{Capability, CapabilityId, CapabilityTable, CapabilityType, Rights};
 use crate::task::{SCHEDULER, TaskId};
 use crate::syscall;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -52,9 +53,11 @@ extern "C" fn audiod() -> ! { service_loop("[audiod] Audio service online: codec
 extern "C" fn camerad() -> ! { service_loop("[camerad] Camera service online: sensor/CSI boundary active.") }
 
 pub static mut SERVICE_RECORDS: [Option<ServiceRecord>; 9] = [None; 9];
+static SERVICES_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// Starts the Phase 25 service set once, with isolated capability tables.
 pub fn init() {
+    if SERVICES_INITIALIZED.swap(true, Ordering::AcqRel) { return; }
     unsafe { SERVICE_RECORDS[ServiceId::Init as usize] = Some(ServiceRecord { id: ServiceId::Init, task: TaskId(0), state: ServiceState::Running }); }
     let defs: [(ServiceId, &'static str, extern "C" fn() -> !, u8); 8] = [
         (ServiceId::Display, "displayd", displayd, 6),
