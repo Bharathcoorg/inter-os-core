@@ -12,6 +12,8 @@ pub const JOURNAL_MAGIC: [u8; 4] = *b"IOSJ";
 pub const JOURNAL_VERSION: u32 = 1;
 const SLOT_SECTORS: u32 = 128;
 const SLOT_COUNT: u32 = 16;
+pub const JOURNAL_MIN_KIND: u8 = 1;
+pub const JOURNAL_MAX_KIND: u8 = 8;
 const HEADER_SIZE: usize = 64;
 const PAYLOAD_CAPACITY: usize = (SLOT_SECTORS as usize * SECTOR_SIZE) - HEADER_SIZE;
 
@@ -83,6 +85,9 @@ pub fn load_latest_kind(
     out: &mut [u8],
     kind: u8,
 ) -> Result<Option<(u64, usize)>, PersistentError> {
+    if !(JOURNAL_MIN_KIND..=JOURNAL_MAX_KIND).contains(&kind) {
+        return Err(PersistentError::Unavailable);
+    }
     let mut guard = ATA_PRIMARY.lock();
     let drive = guard.as_mut().ok_or(PersistentError::Unavailable)?;
     let total = drive.sector_count();
@@ -106,6 +111,10 @@ pub fn load_latest_kind(
 pub fn commit_kind(payload: &[u8], kind: u8) -> Result<u64, PersistentError> {
     if payload.is_empty() || payload.len() > PAYLOAD_CAPACITY {
         return Err(PersistentError::TooLarge);
+    }
+
+    if !(JOURNAL_MIN_KIND..=JOURNAL_MAX_KIND).contains(&kind) {
+        return Err(PersistentError::Unavailable);
     }
 
     let mut guard = ATA_PRIMARY.lock();
@@ -159,10 +168,14 @@ pub fn commit_kind(payload: &[u8], kind: u8) -> Result<u64, PersistentError> {
     Ok(next_generation)
 }
 
+/// Backward-compatible default record is the VFS state record (kind 4).
+/// New callers should prefer the explicit `*_kind` APIs.
 pub fn load_latest(out: &mut [u8]) -> Result<Option<(u64, usize)>, PersistentError> {
-    load_latest_kind(out, 0)
+    load_latest_kind(out, 4)
 }
 
+/// Backward-compatible default record is the VFS state record (kind 4).
+/// New callers should prefer the explicit `*_kind` APIs.
 pub fn commit(payload: &[u8]) -> Result<u64, PersistentError> {
-    commit_kind(payload, 0)
+    commit_kind(payload, 4)
 }
