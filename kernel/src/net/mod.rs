@@ -274,8 +274,8 @@ pub fn poll_network_interface() -> usize {
                                                 } else if old_state == TcpState::Established {
                                                     // Never accept acknowledgements beyond data we have sent.
                                                     if crate::net::tcp::seq_gt(segment.ack, conn.send_seq) { continue; }
-                                                    let _ = TCP_TABLE.lock().acknowledge_tx(conn.id, segment.ack);
-                                                    let _ = TCP_TABLE.lock().acknowledge_fin(conn.id, segment.ack);
+                                                    let _ = table.acknowledge_tx(conn.id, segment.ack);
+                                                    let _ = table.acknowledge_fin(conn.id, segment.ack);
                                                     let fin = segment.flags & 0x01 != 0;
                                                     if !segment.payload.is_empty() || fin {
                                                         let conn_id = conn.id;
