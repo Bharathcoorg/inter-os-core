@@ -8,6 +8,9 @@
 use core::sync::atomic::{compiler_fence, Ordering};
 use super::device::{NetError, NetworkDevice, MAX_PACKET_SIZE};
 use super::ethernet::MacAddress;
+use crate::memory::{allocate_dma_frames, physical_to_virtual};
+use x86_64::PhysFrame;
+use x86_64::structures::paging::Size4KiB;
 
 const CTRL: usize = 0x0000;
 const STATUS: usize = 0x0008;
@@ -73,6 +76,31 @@ unsafe fn write32(base: usize, offset: usize, value: u32) {
 /// Minimal descriptor-ring E1000 driver.
 /// Descriptor storage must be backed by physically contiguous DMA memory.
 /// `rx_buffer_phys` and `tx_buffer_phys` point to arrays of RX/TX slots.
+struct E1000DmaResources {
+    rx_desc_frames: alloc::vec::Vec<PhysFrame<Size4KiB>>,
+    tx_desc_frames: alloc::vec::Vec<PhysFrame<Size4KiB>>,
+    rx_buffer_frames: alloc::vec::Vec<PhysFrame<Size4KiB>>,
+    tx_buffer_frames: alloc::vec::Vec<PhysFrame<Size4KiB>>,
+}
+
+impl E1000DmaResources {
+    fn allocate() -> Option<Self> {
+        Some(Self {
+            rx_desc_frames: allocate_dma_frames(1)?,
+            tx_desc_frames: allocate_dma_frames(1)?,
+            rx_buffer_frames: allocate_dma_frames(6)?,
+            tx_buffer_frames: allocate_dma_frames(6)?,
+        })
+    }
+    fn rx_desc_phys(&self) -> u64 { self.rx_desc_frames[0].start_address().as_u64() }
+    fn tx_desc_phys(&self) -> u64 { self.tx_desc_frames[0].start_address().as_u64() }
+    fn rx_buffer_phys(&self) -> u64 { self.rx_buffer_frames[0].start_address().as_u64() }
+    fn tx_buffer_phys(&self) -> u64 { self.tx_buffer_frames[0].start_address().as_u64() }
+    fn rx_desc_ptr(&self) -> *mut RxDescriptor { physical_to_virtual(self.rx_desc_frames[0].start_address()).as_mut_ptr() }
+    fn tx_desc_ptr(&self) -> *mut TxDescriptor { physical_to_virtual(self.tx_desc_frames[0].start_address()).as_mut_ptr() }
+}
+
+/// Descriptor-ring E1000 controller with owned physically contiguous DMA storage.
 pub struct E1000Device {
     base_vaddr: usize,
     mac: MacAddress,
@@ -85,6 +113,7 @@ pub struct E1000Device {
     rx_index: u16,
     tx_index: u16,
     link_up: bool,
+    dma: Option<E1000DmaResources>,
 }
 
 unsafe impl Send for E1000Device {}
@@ -102,7 +131,21 @@ impl E1000Device {
         mac: MacAddress,
     ) -> Self {
         Self { base_vaddr, mac, rx_desc, tx_desc, rx_desc_phys, tx_desc_phys,
-            rx_buffer_phys, tx_buffer_phys, rx_index: 0, tx_index: 0, link_up: false }
+            rx_buffer_phys, tx_buffer_phys, rx_index: 0, tx_index: 0, link_up: false, dma: None }
+    }
+
+    /// Allocates and owns all DMA memory required by the controller.
+    pub unsafe fn allocate_with_dma(base_vaddr: usize, mac: MacAddress) -> Option<Self> {
+        let dma = E1000DmaResources::allocate()?;
+        let rx_desc = dma.rx_desc_ptr();
+        let tx_desc = dma.tx_desc_ptr();
+        let mut device = Self::new(
+            base_vaddr, rx_desc, tx_desc,
+            dma.rx_desc_phys(), dma.tx_desc_phys(),
+            dma.rx_buffer_phys(), dma.tx_buffer_phys(), mac,
+        );
+        device.dma = Some(dma);
+        Some(device)
     }
 
     /// Returns the physical address currently programmed for the RX ring.
