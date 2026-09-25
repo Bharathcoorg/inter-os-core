@@ -1,3 +1,4 @@
+pub mod service;
 //! Inter OS Userspace Standard Library (interos-std)
 //!
 //! Provides safe, ergonomic Rust bindings for Inter OS hardware fast system calls
