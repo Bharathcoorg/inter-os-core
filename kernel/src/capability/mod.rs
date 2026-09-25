@@ -279,10 +279,12 @@ impl CapabilityTable {
         // Delegated capabilities carry the high-bit marker in their opaque id.
         // Their lease must still be active; this check is intentionally performed
         // inside the kernel capability verifier so every syscall path inherits it.
-        if cap.id.0 & 0x8000_0000_0000_0000 != 0
-            && !delegation::is_lease_active(cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF, crate::interrupts::get_system_ticks())
-        {
-            return Err(CapError::InvalidSlot);
+        if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
+            delegation::consume_invocation(
+                cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF,
+                crate::interrupts::get_system_ticks(),
+                required_rights,
+            )?;
         }
         Ok(cap)
     }
@@ -301,10 +303,12 @@ impl CapabilityTable {
         if !cap.rights.contains(required_rights) {
             return Err(CapError::InsufficientRights);
         }
-        if cap.id.0 & 0x8000_0000_0000_0000 != 0
-            && !delegation::is_lease_active(cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF, crate::interrupts::get_system_ticks())
-        {
-            return Err(CapError::InvalidSlot);
+        if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
+            delegation::consume_invocation(
+                cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF,
+                crate::interrupts::get_system_ticks(),
+                required_rights,
+            )?;
         }
         Ok(cap)
     }
@@ -313,9 +317,19 @@ impl CapabilityTable {
     pub fn has_capability(&self, expected_type: CapabilityType, required_rights: Rights) -> bool {
         for slot in &self.slots {
             if let Some(ref cap) = slot.cap {
-                if cap.cap_type == expected_type && cap.rights.contains(required_rights) {
-                    return true;
+                if cap.cap_type != expected_type || !cap.rights.contains(required_rights) {
+                    continue;
                 }
+                if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
+                    if delegation::consume_invocation(
+                        cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF,
+                        crate::interrupts::get_system_ticks(),
+                        required_rights,
+                    ).is_err() {
+                        continue;
+                    }
+                }
+                return true;
             }
         }
         false
