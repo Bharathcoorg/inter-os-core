@@ -25,6 +25,15 @@ fn caps(id: ServiceId) -> CapabilityTable {
     let _ = t.insert(Capability { id: CapabilityId(base), cap_type: CapabilityType::IpcReceive, rights: Rights::READ, object_id: 0 });
     let _ = t.insert(Capability { id: CapabilityId(base + 1), cap_type: CapabilityType::IpcSend, rights: Rights::WRITE, object_id: 0 });
     let _ = t.insert(Capability { id: CapabilityId(base + 2), cap_type: CapabilityType::TimerTickRead, rights: Rights::READ, object_id: 0 });
+    let (kind, rights) = match id {
+        ServiceId::Display => (CapabilityType::FrameBufferDirect, Rights::WRITE),
+        ServiceId::Input => (CapabilityType::EventPoll, Rights::READ),
+        ServiceId::Storage => (CapabilityType::FileSystemRead, Rights::READ | Rights::WRITE),
+        ServiceId::Network => (CapabilityType::NetworkSocket, Rights::READ | Rights::WRITE),
+        ServiceId::Power | ServiceId::Modem | ServiceId::Audio | ServiceId::Camera => (CapabilityType::HardwarePortIo, Rights::READ | Rights::WRITE),
+        ServiceId::Init => (CapabilityType::ProcessSpawn, Rights::GRANT),
+    };
+    let _ = t.insert(Capability { id: CapabilityId(base + 3), cap_type: kind, rights, object_id: id as u64 });
     t
 }
 
@@ -46,6 +55,7 @@ pub static mut SERVICE_RECORDS: [Option<ServiceRecord>; 9] = [None; 9];
 
 /// Starts the Phase 25 service set once, with isolated capability tables.
 pub fn init() {
+    unsafe { SERVICE_RECORDS[ServiceId::Init as usize] = Some(ServiceRecord { id: ServiceId::Init, task: TaskId(0), state: ServiceState::Running }); }
     let defs: [(ServiceId, &'static str, extern "C" fn() -> !, u8); 8] = [
         (ServiceId::Display, "displayd", displayd, 6),
         (ServiceId::Input, "inputd", inputd, 6),
