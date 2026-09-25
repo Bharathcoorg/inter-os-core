@@ -199,13 +199,17 @@ impl TaskPageTable {
             f
         };
 
-        // Level 1: Leaf PTE
+        // Level 1: Leaf PTE. Refuse remapping a live virtual page so a retry
+        // cannot orphan the old physical frame or create an ownership ambiguity.
         let pt_ptr = (phys_offset + p1_frame.start_address().as_u64()).as_mut_ptr::<PageTable>();
         let pt = unsafe { &mut *pt_ptr };
+        if pt[p1_idx].flags().contains(PageTableFlags::PRESENT) {
+            return Err("Virtual page already mapped");
+        }
 
         let leaf_flags = flags | PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
         pt[p1_idx].set_frame(frame, leaf_flags);
-        if !self.allocated_frames.contains(&frame) { self.allocated_frames.push(frame); }
+        self.allocated_frames.push(frame);
 
         // If this page table is currently active, flush TLB
         let (active_cr3, _) = Cr3::read();
@@ -430,24 +434,38 @@ impl BootInfoFrameAllocator {
 
 unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
-        if let Some(frame) = self.recycled_frames.pop() {
-            return Some(frame);
-        }
-        self.advance_to_usable_region();
-        if self.region_idx >= self.memory_regions.len() {
-            return None;
-        }
-
-        let region = &self.memory_regions[self.region_idx];
-        if self.next_addr + 4096 <= region.end {
-            let frame = PhysFrame::containing_address(PhysAddr::new(self.next_addr));
-            self.next_addr += 4096;
-            Some(frame)
+        let frame = if let Some(frame) = self.recycled_frames.pop() {
+            frame
         } else {
-            self.region_idx += 1;
-            self.next_addr = 0;
-            self.allocate_frame()
+            self.advance_to_usable_region();
+            if self.region_idx >= self.memory_regions.len() {
+                return None;
+            }
+
+            let region = &self.memory_regions[self.region_idx];
+            if self.next_addr + 4096 <= region.end {
+                let frame = PhysFrame::containing_address(PhysAddr::new(self.next_addr));
+                self.next_addr += 4096;
+                frame
+            } else {
+                self.region_idx += 1;
+                self.next_addr = 0;
+                return self.allocate_frame();
+            }
+        };
+
+        // Frames may contain data from a previous address-space owner. Always
+        // zero before reuse so stale userspace contents cannot cross lifetimes.
+        if let Some(offset) = *PHYSICAL_MEMORY_OFFSET.lock() {
+            unsafe {
+                core::ptr::write_bytes(
+                    (offset + frame.start_address().as_u64()).as_mut_ptr::<u8>(),
+                    0,
+                    4096,
+                );
+            }
         }
+        Some(frame)
     }
 }
 
