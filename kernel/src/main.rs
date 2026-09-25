@@ -238,6 +238,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // 9b. Modular Hardware Driver Subsystems (DRM/KMS, FDT, PMIC, Touch)
     drivers::init_and_test_drivers();
 
+    // M23: establish the persistent device key before any VFS payload is reconstructed.
+    // The seed is loaded/generated after the physical block device is online.
+    crypto::rng::init();
+    crypto::keystore::init();
+    serial_println!("[OK] Persistent storage encryption root initialized before VFS mount.");
+
     // 10. Mount the canonical block-backed filesystem before VFS reconstruction.
     match storage::init_block_filesystem() {
         Ok(()) => serial_println!("[OK] Persistent InterFS region mounted/formatted."),
@@ -326,17 +332,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // 24b. Initialize Multi-Architecture Hardware & Boot Image Layer (Fastboot v2 & AArch64)
     arch::init();
 
-    // 25. Initialize Hardware TRNG & Entropy Subsystem
-
-    crypto::rng::init();
+    // 25. Validate the already-initialized hardware entropy and secure keystore.
     let mut trng_test_buf = [0u8; 32];
     crypto::get_random_bytes(&mut trng_test_buf);
     assert_ne!(trng_test_buf, [0u8; 32], "Hardware TRNG must produce non-zero entropy");
     serial_println!("[TEST] Hardware TRNG: Generated 32 bytes entropy, non-zero randomness validated.");
-
-    // 26. Initialize Hardware-Isolated Secure Enclave & Keystore
-    crypto::keystore::init();
-    serial_println!("[OK] Hardware-isolated Secure Enclave & Keystore initialized.");
+    serial_println!("[OK] Hardware-isolated Secure Enclave & Keystore remains initialized.");
 
     // 27. Initialize Bare-Metal Mobile Audio Subsystem (PC Speaker & PCI Audio)
     audio::init();
