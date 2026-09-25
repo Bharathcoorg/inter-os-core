@@ -29,7 +29,7 @@ pub struct ServiceMessage {
     pub service_id: u8,
     pub flags: u8,
     pub request_id: u32,
-    pub payload_len: u32,
+    pub payload_len: u16,
 }
 
 impl ServiceMessage {
@@ -40,7 +40,7 @@ impl ServiceMessage {
         out[8] = self.service_id;
         out[9] = self.flags;
         out[10..14].copy_from_slice(&self.request_id.to_le_bytes());
-        out[14..16].copy_from_slice(&(self.payload_len.min(u16::MAX as u32) as u16).to_le_bytes());
+        out[14..16].copy_from_slice(&self.payload_len.to_le_bytes());
     }
 
     pub fn decode(buf: &[u8]) -> Option<Self> {
@@ -54,7 +54,7 @@ impl ServiceMessage {
             service_id,
             flags: buf[9],
             request_id: u32::from_le_bytes([buf[10], buf[11], buf[12], buf[13]]),
-            payload_len: u16::from_le_bytes([buf[14], buf[15]]) as u32,
+            payload_len: u16::from_le_bytes([buf[14], buf[15]]),
         })
     }
 }
