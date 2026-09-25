@@ -145,21 +145,19 @@ pub fn heartbeat(id: ServiceId) {
 /// init/service-manager ABI exists; the kernel never silently recreates a task.
 pub fn supervise() {
     let now = crate::interrupts::get_system_ticks();
-    // Never hold the service-registry lock while inspecting the scheduler.
-    // Scheduler exit paths publish back into this registry, so the lock order
-    // must remain scheduler -> registry rather than registry -> scheduler.
-    let records = *SERVICE_RECORDS.lock();
+    // Lock order is scheduler -> registry. Exit paths already follow this
+    // order, so supervision must never acquire registry before scheduler.
     let sched = SCHEDULER.lock();
     let mut states = [None; 9];
+    let records = *SERVICE_RECORDS.lock();
     for idx in 1..records.len() {
         let Some(record) = records[idx] else { continue; };
         if !matches!(record.state, ServiceState::Running) {
             states[idx] = Some(record.state);
             continue;
         }
-        let task_id = record.task;
         let stale = now.saturating_sub(SERVICE_HEARTBEATS[idx].load(Ordering::Acquire)) > HEARTBEAT_TIMEOUT_TICKS;
-        let failed = match sched.get_task(task_id) {
+        let failed = match sched.get_task(record.task) {
             Some(task) => matches!(task.state, crate::task::TaskState::Terminated | crate::task::TaskState::Zombie),
             None => true,
         };
