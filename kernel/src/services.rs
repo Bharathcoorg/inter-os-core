@@ -70,6 +70,10 @@ static SERVICE_HEARTBEATS: [core::sync::atomic::AtomicU64; 9] = [
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
 ];
 static SERVICES_INITIALIZED: AtomicBool = AtomicBool::new(false);
+// Serializes lifecycle transitions so start/stop/recovery cannot observe and mutate
+// the same service record concurrently. Scheduler locks remain scoped inside this
+// boundary; callers never hold the lifecycle lock across context switches.
+static SERVICE_LIFECYCLE_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 // Restart backoff prevents a failed service from consuming the scheduler in a crash loop.
 static SERVICE_RETRY_AFTER: [core::sync::atomic::AtomicU64; 9] = [
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
@@ -106,6 +110,11 @@ pub fn init() {
 
 /// Starts one declared service on behalf of userspace PID 1.
 pub fn start(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str> {
+    let _lifecycle = SERVICE_LIFECYCLE_LOCK.lock();
+    start_locked(id, parent_id)
+}
+
+fn start_locked(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str> {
     if id == ServiceId::Init { return Ok(TaskId(0)); }
     let existing = SERVICE_RECORDS.lock()[id as usize];
     if let Some(record) = existing {
@@ -156,6 +165,7 @@ pub fn start(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str> {
 
 /// Stops a service task without allowing userspace to terminate arbitrary tasks.
 pub fn stop(id: ServiceId, parent_id: TaskId) -> Result<(), &'static str> {
+    let _lifecycle = SERVICE_LIFECYCLE_LOCK.lock();
     if id == ServiceId::Init { return Err("init cannot be stopped"); }
     let record = SERVICE_RECORDS.lock()[id as usize].ok_or("service not declared")?;
     if record.task == TaskId(0) { return Ok(()); }
@@ -193,6 +203,7 @@ pub fn heartbeat(id: ServiceId) {
 /// failed. Restart orchestration is intentionally deferred until a userspace
 /// init/service-manager ABI exists; the kernel never silently recreates a task.
 pub fn supervise() {
+    let _lifecycle = SERVICE_LIFECYCLE_LOCK.lock();
     let now = crate::interrupts::get_system_ticks();
     // Lock order is scheduler -> registry. Exit paths already follow this
     // order, so supervision must never acquire registry before scheduler.
@@ -254,6 +265,7 @@ pub fn last_heartbeat(id: ServiceId) -> u64 {
 
 /// Records a worker exit in the authoritative hardware-service registry.
 pub fn record_exit(task_id: TaskId, _exit_code: i32) {
+    let _lifecycle = SERVICE_LIFECYCLE_LOCK.lock();
     let mut records = SERVICE_RECORDS.lock();
     for idx in 1..records.len() {
         if let Some(record) = records[idx] {
@@ -267,6 +279,7 @@ pub fn record_exit(task_id: TaskId, _exit_code: i32) {
 
 /// Restarts failed services when explicitly requested by PID 1.
 pub fn restart_failed(parent_id: TaskId) -> usize {
+    let _lifecycle = SERVICE_LIFECYCLE_LOCK.lock();
     let mut restarted = 0usize;
     for idx in 1..SERVICE_RECORDS.lock().len() {
         let id = match idx {
@@ -289,7 +302,7 @@ pub fn restart_failed(parent_id: TaskId) -> usize {
             let _ = scheduler.terminate_task(task, -1);
             let _ = scheduler.reap_child(parent_id, task);
             drop(scheduler);
-            if start(id, parent_id).is_ok() {
+            if start_locked(id, parent_id).is_ok() {
                 restarted += 1;
             }
         }
