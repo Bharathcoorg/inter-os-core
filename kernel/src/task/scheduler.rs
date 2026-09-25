@@ -268,7 +268,9 @@ impl Scheduler {
         task.state = TaskState::Zombie;
         crate::ipc::cleanup_task(id);
         crate::drivers::display_kms::DRM_KMS.lock().destroy_surfaces_owned_by(id.0);
-        crate::services::record_exit(id, exit_code);
+        // Do not update the service registry while holding the scheduler lock.
+        // The registry's supervision path deliberately acquires scheduler -> registry;
+        // taking the inverse order here would deadlock recovery.
         Ok(())
     }
 
