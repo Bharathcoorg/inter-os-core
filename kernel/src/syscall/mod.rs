@@ -88,6 +88,8 @@ pub enum SyscallNumber {
     PackageRegistry = 76,
     WindowList = 77,
     PackageRollback = 78,
+    WindowSetGeometry = 79,
+    WindowFocus = 80,
 }
 
 /// System call result status codes.
@@ -1272,6 +1274,8 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             drop(sched);
             let mut out=[0u8;4096]; match sys_package_registry(&mut out[..out_len]) { Ok(n)=>{if copy_to_user(a2,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;} n as i64}, Err(e)=>e as i64 }
         }
+        79 => { match sys_window_set_geometry(a1 as u32, a2 as i64 as i32, a3 as i64 as i32, a4 as u32, a5 != 0) { e => e as i64 } }
+        80 => { sys_window_focus(a1 as u32, a2 as u32) as i64 }
         78 => {
             // PackageRollback: a1=cap_slot, a2=pkg_id_ptr, a3=pkg_id_len, a4=user_consent
             let cap_slot=a1 as usize; let len=a3 as usize;
@@ -1520,6 +1524,31 @@ pub fn sys_package_registry(out_buf:&mut [u8])->Result<usize,SyscallResult>{
 }
 
 /// Returns the live compositor window registry, including owning process identity.
+
+/// Moves a window owned by the caller.
+pub fn sys_window_set_geometry(id: u32, x: i32, y: i32, z: u32, visible: bool) -> SyscallResult {
+    let owner = match SCHEDULER.lock().current_task_id() {
+        Some(id) => id.0, None => return SyscallResult::PermissionDenied,
+    };
+    if crate::drivers::display_kms::DRM_KMS.lock().set_surface_geometry_owned(id, owner, x, y, z, visible) {
+        SyscallResult::Success
+    } else {
+        SyscallResult::PermissionDenied
+    }
+}
+
+/// Routes a touch coordinate to the topmost window and records focus.
+pub fn sys_window_focus(x: u32, y: u32) -> SyscallResult {
+    let target = crate::drivers::display_kms::DRM_KMS.lock().focus_at(x, y);
+    match target {
+        Some((_surface, owner)) => {
+            let _ = IPC_ROUTER.lock().send_direct(TaskId(0), TaskId(owner), 0x7001, &[x as u8, (x >> 8) as u8, y as u8, (y >> 8) as u8]);
+            SyscallResult::Success
+        }
+        None => SyscallResult::NotReady,
+    }
+}
+
 pub fn sys_window_list(out_buf:&mut [u8])->Result<usize,SyscallResult>{
     use core::fmt::Write;
     let mut snaps=[crate::drivers::display_kms::SurfaceSnapshot{id:0,owner_task:0,x:0,y:0,width:0,height:0,z_order:0,opacity:0,visible:false,dirty:false};32];
