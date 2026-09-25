@@ -81,6 +81,7 @@ pub enum SyscallNumber {
     SettingsGet = 82,
     SettingsSet = 83,
     StorageQuery = 84,
+    FsList = 85,
 }
 
 // -----------------------------------------------------------------------------
@@ -1490,3 +1491,6 @@ pub fn settings_set(cap_slot:usize,key:&str,value:&[u8])->Result<(),i64>{let r=u
 
 /// Returns live block-device capacity in bytes.
 pub fn storage_query()->Result<u64,i64>{let r=unsafe{syscall0(SyscallNumber::StorageQuery)};if r>=0{Ok(r as u64)}else{Err(r)}}
+
+/// Lists immediate VFS directory children using a read capability.
+pub fn fs_list(cap_slot:usize,path:&str,out:&mut[u8])->Result<usize,i64>{let r=unsafe{syscall4(SyscallNumber::FsList,cap_slot as u64,path.as_ptr() as u64,path.len() as u64,out.as_mut_ptr() as u64)};if r>=0{Ok(r as usize)}else{Err(r)}}
