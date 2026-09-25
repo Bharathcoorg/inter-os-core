@@ -235,7 +235,7 @@ pub fn restart_failed(parent_id: TaskId) -> usize {
             7 => ServiceId::Audio, 8 => ServiceId::Camera, _ => continue,
         };
         let failed_task = match SERVICE_RECORDS.lock()[idx] {
-            Some(ServiceRecord { state: ServiceState::Failed, task }) => Some(task),
+            Some(ServiceRecord { state: ServiceState::Failed, task, .. }) => Some(task),
             _ => None,
         };
         if let Some(task) = failed_task {
