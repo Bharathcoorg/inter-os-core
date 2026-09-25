@@ -418,7 +418,7 @@ def _rapp_v2_encode(manifest_data, publisher_key, signature, payload, arch_name=
     digest = hashlib.sha256(payload).digest()
     header = bytearray()
     header += b"RAPP" + (2).to_bytes(2, "little") + arch_map[arch_name].to_bytes(2, "little")
-    header += pkg.ljust(32, b"\\0")
+    header += pkg.ljust(32, b"\0")
     header += publisher_key
     header += version[0].to_bytes(2, "little") + version[1].to_bytes(2, "little") + version[2].to_bytes(2, "little")
     header += len(caps).to_bytes(2, "little")
@@ -432,7 +432,7 @@ def _rapp_v2_encode(manifest_data, publisher_key, signature, payload, arch_name=
 
 def _rapp_v2_signing_bytes(package_bytes):
     data = bytearray(package_bytes)
-    data[0x70:0xB0] = b"\\0" * 64
+    data[0x70:0xB0] = b"\0" * 64
     return bytes(data[:0xB4] + data[0xB4:])
 
 
@@ -478,7 +478,7 @@ def cmd_pack(args):
             key_file.write_bytes(priv_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
             log(f"Generated developer signing key at {key_file}")
         pub = priv_key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-        unsigned = _rapp_v2_encode(manifest_data, pub, b"\\0" * 64, payload, getattr(args, "arch", None))
+        unsigned = _rapp_v2_encode(manifest_data, pub, b"\0" * 64, payload, getattr(args, "arch", None))
         signature = priv_key.sign(_rapp_v2_signing_bytes(unsigned))
         package_bytes = _rapp_v2_encode(manifest_data, pub, signature, payload, getattr(args, "arch", None))
     except Exception as e:
@@ -526,7 +526,7 @@ def cmd_verify(args):
     except Exception as e:
         log_error(f"Rejected: Ed25519 verification failed: {e}")
         return 1
-    pkg_id = data[8:40].split(b"\\0", 1)[0].decode("utf-8", errors="strict")
+    pkg_id = data[8:40].split(b"\0", 1)[0].decode("utf-8", errors="strict")
     version = (int.from_bytes(data[0x48:0x4A], "little"), int.from_bytes(data[0x4A:0x4C], "little"), int.from_bytes(data[0x4C:0x4E], "little"))
     log_success(f"RAPP v2 '{pkg_id}' cryptographically verified")
     log(f"  • Publisher key: {pub.hex()}")
