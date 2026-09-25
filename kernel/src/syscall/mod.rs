@@ -1655,7 +1655,36 @@ pub fn sys_dns_resolve(name: &str) -> Result<crate::net::Ipv4Address, SyscallRes
                 return Ok(addr);
             }
         }
-        let _ = resolver.poll_timeouts(current_tick);
+
+        // Retransmit the DNS query when its bounded deadline expires. The
+        // resolver owns retry state; this syscall owns the actual UDP send.
+        let timed_out = resolver.query(query_id)
+            .map(|q| current_tick >= q.deadline)
+            .unwrap_or(false);
+        if timed_out {
+            let expired = resolver.poll_timeouts(current_tick);
+            if resolver.query(query_id).is_some() {
+                let retry_len = resolver.build_query(query_id, &mut packet)
+                    .map_err(|_| SyscallResult::NetworkError)?;
+                if crate::net::send_udp_datagram(
+                    crate::net::DEFAULT_HOST_IP,
+                    {
+                        let table = crate::net::SOCKET_TABLE.lock();
+                        table.get(socket).map(|s| s.local_port).unwrap_or(53000)
+                    },
+                    crate::net::DNS_SERVER,
+                    53,
+                    &packet[..retry_len],
+                    &caps,
+                ).is_err() {
+                    let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
+                    return Err(SyscallResult::NetworkError);
+                }
+            } else if expired > 0 {
+                let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
+                return Err(SyscallResult::NetworkError);
+            }
+        }
     }
 }
 
