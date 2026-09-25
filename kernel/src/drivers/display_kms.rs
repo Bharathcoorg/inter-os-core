@@ -137,6 +137,45 @@ impl DrmKmsController {
         }
     }
 
+    /// Destroys a surface only when the owner matches, or when the caller is the kernel.
+    pub fn destroy_surface_owned(&mut self, id: u32, owner_task: Option<u64>) -> bool {
+        if let Some(pos) = self.surfaces.iter().position(|s| {
+            s.id == id && owner_task.map(|owner| s.owner_task == owner).unwrap_or(true)
+        }) {
+            self.surfaces.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Removes every surface owned by a terminating userspace task.
+    pub fn destroy_surfaces_owned_by(&mut self, owner_task: u64) -> usize {
+        let before = self.surfaces.len();
+        self.surfaces.retain(|s| s.owner_task != owner_task);
+        before - self.surfaces.len()
+    }
+
+    /// Copies live window metadata without exposing client pixel memory.
+    pub fn surface_snapshot(&self, out: &mut [SurfaceSnapshot]) -> usize {
+        let count = self.surfaces.len().min(out.len());
+        for (dst, src) in out.iter_mut().zip(self.surfaces.iter()).take(count) {
+            *dst = SurfaceSnapshot {
+                id: src.id,
+                owner_task: src.owner_task,
+                x: src.x,
+                y: src.y,
+                width: src.width,
+                height: src.height,
+                z_order: src.z_order,
+                opacity: src.opacity,
+                visible: src.visible,
+                dirty: src.dirty,
+            };
+        }
+        count
+    }
+
     /// Sets surface position and z-order.
     pub fn set_surface_geometry(&mut self, id: u32, x: i32, y: i32, z_order: u32, visible: bool) -> bool {
         if let Some(s) = self.surfaces.iter_mut().find(|s| s.id == id) {
