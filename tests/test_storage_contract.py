@@ -57,6 +57,8 @@ def main() -> None:
     must(interfs, "FS_MAGIC", "filesystem superblock magic")
     must(interfs, "struct DiskInode", "persistent inode record")
     must(interfs, "BITMAP_LBA", "persistent allocation bitmap")
+    must(interfs, "BITMAP_CAPACITY_SECTORS", "filesystem bitmap geometry bound")
+    must(interfs, "data_sectors > BITMAP_CAPACITY_SECTORS", "filesystem geometry validation")
     must(interfs, "INODE_LBA", "persistent inode table")
     must(interfs, "pub fn create_file", "on-disk file creation")
     must(interfs, "pub fn read_file", "on-disk file read")
