@@ -44,6 +44,14 @@ DIST_DIR = WORKSPACE_ROOT / "dist"
 PACKAGES_DIR = WORKSPACE_ROOT / "packages"
 TARGET_DIR = WORKSPACE_ROOT / "target"
 
+RAPP_CAPABILITY_IDS = {
+    "CAP_LOGGING": 1, "CAP_FRAMEBUFFER": 2, "CAP_TIMER": 3, "CAP_HARDWARE_IO": 4,
+    "CAP_IPC_SEND": 5, "CAP_IPC_RECEIVE": 6, "CAP_PROCESS_SPAWN": 7, "CAP_PROCESS_KILL": 8,
+    "CAP_FILESYSTEM_READ": 9, "CAP_FILESYSTEM_WRITE": 10, "CAP_STORAGE_RAW": 11,
+    "CAP_NETWORK_SOCKET": 12, "CAP_NETWORK_SEND": 13, "CAP_NETWORK_RECEIVE": 14,
+    "CAP_SHM_PRODUCER": 15, "CAP_SHM_CONSUMER": 16, "CAP_EVENT_POLL": 17,
+}
+
 TEMPLATES = {
     "basic": {
         "title": "Basic App",
@@ -401,7 +409,7 @@ def _rapp_v2_encode(manifest_data, publisher_key, signature, payload):
     version = tuple(int(x) for x in str(manifest_data["version"]).split("."))
     if len(version) != 3 or any(x < 0 or x > 65535 for x in version):
         raise ValueError("version must be MAJOR.MINOR.PATCH with u16 components")
-    caps = list(range(len(manifest_data.get("permissions", []))))
+    caps = [RAPP_CAPABILITY_IDS[p] for p in manifest_data.get("permissions", [])]\n    if len(set(caps)) != len(caps):\n        raise ValueError("duplicate capability permissions are not allowed")
     if len(caps) > 1024:
         raise ValueError("too many capabilities")
     pkg = manifest_data["id"].encode("utf-8")
