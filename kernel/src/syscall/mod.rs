@@ -2540,6 +2540,10 @@ pub fn sys_settings_set(cap_slot: usize, key_ptr:u64,key_len:usize,val_ptr:u64,v
 
 pub fn sys_service_list(out: &mut [u8]) -> Result<usize, SyscallResult> {
     require_service_manager()?;
+    // Observation is also the service-manager supervision tick. This keeps
+    // failure detection in the authoritative lifecycle path without letting
+    // the kernel silently restart workers.
+    crate::services::supervise();
     Ok(crate::services::snapshot(out))
 }
 
@@ -2568,6 +2572,8 @@ fn require_service_manager() -> Result<(), SyscallResult> {
 
 pub fn sys_service_recover_failed() -> Result<u64, SyscallResult> {
     require_service_manager()?;
+    // Refresh failure state before applying the explicit PID1 recovery request.
+    crate::services::supervise();
     let parent_id = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?;
     Ok(crate::services::restart_failed(parent_id) as u64)
 }
