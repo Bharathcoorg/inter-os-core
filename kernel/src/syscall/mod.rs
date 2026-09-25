@@ -1418,7 +1418,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 Err(e) => e as i64,
             }
         }
-        93 => { match sys_network_poll() { Ok(n) => n as i64, Err(e) => e as i64 } }
+        93 => { match sys_network_poll() { Ok(n) => n as i64, Err(e) => e as i64 } },
         94 => match sys_tcp_connect(crate::net::Ipv4Address::new((a0 >> 24) as u8, (a0 >> 16) as u8, (a0 >> 8) as u8, a0 as u8), a1 as u16, a2 as u16, a3 as u32) { Ok(id) => id as i64, Err(e) => e as i64 },
         _ => SyscallResult::UnknownSyscall as i64,
     }
