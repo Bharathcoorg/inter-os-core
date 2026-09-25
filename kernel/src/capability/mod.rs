@@ -51,6 +51,8 @@ pub enum CapabilityType {
     ShmConsumer,
     /// Permission to register for and poll asynchronous kernel events (epoll/kqueue reactor).
     EventPoll,
+    /// Permission for privileged global kernel controls (power, crypto, telephony, audio, device policy).
+    SystemControl,
 }
 
 /// Bitmask representing granular rights held on a capability.
