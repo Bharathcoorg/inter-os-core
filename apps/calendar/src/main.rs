@@ -139,6 +139,16 @@ impl CalendarApp {
         false
     }
 
+
+    fn parse_rtc_date(&mut self, buf:&[u8], n:usize) {
+        if n<10{return;}
+        let d=|a:u8|if a.is_ascii_digit(){(a-b'0')as u32}else{10};
+        let y=[buf[0],buf[1],buf[2],buf[3]].iter().fold(0u32,|v,b|v*10+d(*b));
+        let m=d(buf[5]) as u8*10+d(buf[6]) as u8;
+        let day=d(buf[8]) as u8*10+d(buf[9]) as u8;
+        if y>1970&&m>=1&&m<=12&&day>=1&&day<=31{self.current_year=y;self.current_month=m;self.current_day=day;}
+    }
+
     /// Inserts a scheduled event and encrypts in persistent storage.
     pub fn schedule_event(&mut self, event_name: &'static str) {
         // 1. Encrypt Updated Agenda in Storage Vault (Sector 203)
