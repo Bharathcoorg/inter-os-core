@@ -1564,11 +1564,13 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32) {
         // Fit the compositor's logical scanout into the real boot framebuffer while
         // preserving aspect ratio. This keeps the portrait 720x1440 pipeline usable
         // on landscape QEMU framebuffers without exposing hardware memory to clients.
-        let scale_x = info.width / src_w;
-        let scale_y = info.height / src_h;
-        let integer_scale = scale_x.min(scale_y).max(1);
-        let dst_w = (src_w * integer_scale).min(info.width);
-        let dst_h = (src_h * integer_scale).min(info.height);
+        let (dst_w, dst_h) = if src_w.saturating_mul(info.height) <= src_h.saturating_mul(info.width) {
+            let h = info.height;
+            ((src_w * h / src_h).max(1).min(info.width), h)
+        } else {
+            let w = info.width;
+            (w, (src_h * w / src_w).max(1).min(info.height))
+        };
         let off_x = (info.width - dst_w) / 2;
         let off_y = (info.height - dst_h) / 2;
 
