@@ -158,6 +158,10 @@ def main() -> None:
     # service namespace/capability policy before M17 is allowed to execute them.
     must(syscall, "ServicePackageVerify = 89", "service package verification syscall number")
     must(syscall, "sys_service_package_verify", "service package verification kernel ABI")
+    must(syscall, "sys_service_package_launch", "verified service package launch handoff")
+    must(syscall, "spawn_verified_rapp_process", "verified RAPP Ring-3 execution handoff")
+    must(sdk, "ServicePackageLaunch = 91", "userspace verified service package launch ABI")
+    must(sdk, "pub fn service_package_launch", "userspace verified service package launcher")
     must(syscall, 'path.starts_with("/packages/")', "service package path boundary")
     must(syscall, 'path.ends_with(".rapp")', "service package format boundary")
     must(syscall, "sys_verify_package(cap_slot, path)", "service package signed RAPP verification")
