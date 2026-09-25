@@ -37,6 +37,18 @@ pub static APP_TERMINAL_ELF: &[u8] = include_bytes!(concat!(
     "/../target/x86_64-unknown-none/debug/terminal"
 ));
 
+/// Embedded Ring-3 compositor service.
+pub static COMPOSITOR_ELF: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../target/x86_64-unknown-none/debug/compositor"
+));
+
+/// Embedded Ring-3 launcher service.
+pub static LAUNCHER_ELF: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../target/x86_64-unknown-none/debug/launcher"
+));
+
 /// Embedded static ELF binary of the Sovereign Dialer app (`apps/dialer`).
 pub static APP_DIALER_ELF: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
