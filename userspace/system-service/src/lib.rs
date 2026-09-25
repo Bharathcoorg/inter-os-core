@@ -84,7 +84,7 @@ pub fn run_network() -> ! {
 
         let now = std::get_ticks(1).unwrap_or(last_tick);
         if now.saturating_sub(last_tick) >= 100 || last_tick == 0 {
-            let _ = std::net_sendto([127, 0, 0, 1], 4242, b"INTEROS_NETD_HEARTBEAT");
+            let _ = std::net_send_socket(socket, [127, 0, 0, 1], 4242, b"INTEROS_NETD_HEARTBEAT");
             let _ = std::net_recvfrom(socket, &mut rx);
             last_tick = now;
         }
