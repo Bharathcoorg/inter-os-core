@@ -872,8 +872,16 @@ extern "C" fn task_security_daemon() -> ! {
                             Ok((manifest, bytes_read)) => {
                                 let payload_start = manifest.payload_offset;
                                 let payload_end = payload_start.saturating_add(manifest.payload_len);
-                                if manifest.package_id != package_id || !manifest.arch.matches_current() || payload_end > bytes_read {
-                                    syscall::sys_log(1, "[PACKAGE SERVICE] Package identity, architecture, or payload bounds rejected.");
+                                let trusted_and_not_revoked = crate::crypto::ed25519::trusted_public_key(&manifest.publisher_id)
+                                    .map(|key| !crate::package::REVOCATION_REGISTRY.lock().is_key_revoked(&key))
+                                    .unwrap_or(false);
+                                if manifest.package_id != package_id
+                                    || !manifest.arch.matches_current()
+                                    || payload_end > bytes_read
+                                    || !trusted_and_not_revoked
+                                    || crate::package::REVOCATION_REGISTRY.lock().is_package_revoked(package_id)
+                                {
+                                    syscall::sys_log(1, "[PACKAGE SERVICE] Package identity, architecture, trust, revocation, or payload bounds rejected.");
                                 } else {
                                     match task::spawn_packaged_process(
                                         descriptor.process_name,
@@ -882,7 +890,7 @@ extern "C" fn task_security_daemon() -> ! {
                                     ) {
                                         Ok(child_id) => {
                                             IPC_ROUTER.lock().register_task(child_id);
-                                            serial_println!("[PACKAGE] id={} state=launched pid={} parent={} source={} verified=digest", package_id, child_id.0, parent_id.0, descriptor.path);
+                                            serial_println!("[PACKAGE] id={} state=launched pid={} parent={} source={} verified=integrity+publisher-policy", package_id, child_id.0, parent_id.0, descriptor.path);
                                             syscall::sys_log(1, "[PACKAGE SERVICE] Verified RAPP payload loaded into isolated Ring-3 process.");
                                         }
                                         Err(_) => { syscall::sys_log(1, "[PACKAGE SERVICE] Verified package ELF launch failed."); }
