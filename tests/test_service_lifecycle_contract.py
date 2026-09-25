@@ -127,6 +127,16 @@ def main() -> None:
     must(pid1, "std::service_recover_failed()",
          "PID1 explicit recovery request")
 
+    # PID1 must prove that the complete service set is running after bootstrap,
+    # rather than only proving that one start syscall returned successfully.
+    must(pid1, "registry_has_all_running_services(&service_buf[..len])",
+         "PID1 full service bootstrap validation")
+    must(pid1, "[PID1] All system services running after bootstrap.",
+         "PID1 complete service bootstrap evidence")
+    must(pid1, 'state != b"running" || task_bytes == b"0"',
+         "PID1 rejects non-running/zero-task registry entries")
+    must(pid1, "seen == 0xff", "PID1 requires all eight services")
+
     # Supervisor must inspect scheduler state before mutating the registry.
     must(services, "let sched = SCHEDULER.lock();", "supervisor scheduler lock")
     must(services, "let mut registry = SERVICE_RECORDS.lock();",
