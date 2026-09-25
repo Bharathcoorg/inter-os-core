@@ -59,6 +59,7 @@ use ipc::IPC_ROUTER;
 use package::{parse_rapp, RappArch};
 use storage::{MerkleVerifier, StorageError};
 use task::{SCHEDULER, TaskId};
+use task::user::spawn_verified_rapp_process;
 use wasm::{opcodes, Value, WasmError, WasmMemory, WasmModule, WasmVm};
 
 /// Custom bootloader configuration requesting dynamic physical memory mapping.
@@ -905,7 +906,7 @@ extern "C" fn task_device_manager() -> ! {
                             Ok(pkg) => {
                                 let payload = &buf[pkg.payload_offset..pkg.payload_offset + pkg.payload_len];
                                 let parent_id = SCHEDULER.lock().current_task_id().unwrap_or(TaskId(0));
-                                match task::spawn_verified_rapp_process(&pkg, payload, parent_id) {
+                                match spawn_verified_rapp_process(&pkg, payload, parent_id) {
                                     Ok(child) => {
                                         syscall::sys_log(1, "[DEVICE MANAGER] RAPP v2 verified; native Ring-3 process spawned.");
                                         crate::serial_println!(
