@@ -116,6 +116,20 @@ impl E1000Device {
 
     pub fn initialize(&mut self) -> Result<(), NetError> {
         unsafe {
+            for i in 0..RX_DESC_COUNT {
+                let desc = &mut *self.rx_desc.add(i);
+                desc.addr = self.rx_buffer_phys + (i * MAX_PACKET_SIZE) as u64;
+                desc.length = 0;
+                desc.status = 0;
+                desc.errors = 0;
+            }
+            for i in 0..TX_DESC_COUNT {
+                let desc = &mut *self.tx_desc.add(i);
+                desc.addr = self.tx_buffer_phys + (i * MAX_PACKET_SIZE) as u64;
+                desc.length = 0;
+                desc.cmd = 0;
+                desc.status = 1;
+            }
             write32(self.base_vaddr, RDBAL, self.rx_desc_phys as u32);
             write32(self.base_vaddr, RDBAH, (self.rx_desc_phys >> 32) as u32);
             write32(self.base_vaddr, RDLEN, (RX_DESC_COUNT * 16) as u32);
@@ -165,8 +179,9 @@ impl NetworkDevice for E1000Device {
             desc.length = frame.len() as u16;
             desc.cmd = TX_CMD_EOP | TX_CMD_IFCS | TX_CMD_RS;
             desc.status = 0;
-            core::ptr::copy_nonoverlapping(frame.as_ptr(), self.tx_buffer_phys as *mut u8, frame.len());
-            desc.addr = self.tx_buffer_phys;
+            let buffer = self.tx_buffer_phys + (idx * MAX_PACKET_SIZE) as u64;
+            core::ptr::copy_nonoverlapping(frame.as_ptr(), buffer as *mut u8, frame.len());
+            desc.addr = buffer;
             compiler_fence(Ordering::Release);
             write32(self.base_vaddr, TDT, ((idx + 1) % TX_DESC_COUNT) as u32);
         }
@@ -182,7 +197,8 @@ impl NetworkDevice for E1000Device {
             if desc.status & RX_EOP == 0 { return Err(NetError::NoPacketAvailable); }
             let len = desc.length as usize;
             if len > out.len() { return Err(NetError::BufferTooSmall); }
-            core::ptr::copy_nonoverlapping(self.rx_buffer_phys as *const u8, out.as_mut_ptr(), len);
+            let buffer = self.rx_buffer_phys + (idx * MAX_PACKET_SIZE) as u64;
+            core::ptr::copy_nonoverlapping(buffer as *const u8, out.as_mut_ptr(), len);
             desc.status = 0;
             compiler_fence(Ordering::Release);
             write32(self.base_vaddr, RDT, idx as u32);
