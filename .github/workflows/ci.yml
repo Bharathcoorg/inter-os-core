@@ -119,6 +119,9 @@ jobs:
       - name: Run RAPP v2 Trust-Boundary Tests
         run: python tests/test_rapp_v2.py
 
+      - name: Run Service Lifecycle Contract Tests
+        run: python tests/test_service_lifecycle_contract.py
+
 
   qemu-vertical-slice:
     name: QEMU x86_64 Build Contract
