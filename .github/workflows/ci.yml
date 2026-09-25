@@ -128,6 +128,9 @@ jobs:
       - name: Run Storage Architecture Contract Tests
         run: python tests/test_storage_contract.py
 
+      - name: Run Display Driver Boundary Contract Tests
+        run: python tests/test_display_contract.py
+
   qemu-vertical-slice:
     name: QEMU x86_64 Build Contract
     runs-on: ubuntu-latest
