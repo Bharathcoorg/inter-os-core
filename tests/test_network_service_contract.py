@@ -50,6 +50,7 @@ def main():
     must(syscall, "pub fn sys_tcp_recv(", "TCP receive kernel API")
     must(syscall, "pub fn sys_tcp_close(", "TCP close kernel API")
     must(syscall, "100 =>", "TCP close dispatcher")
+    must(syscall, "crate::net::transmit_tcp_segment(", "TCP FIN transmission")
     must(syscall, "97 =>", "TCP send dispatcher")
     must(syscall, "98 =>", "TCP receive dispatcher")
     must(syscall, "94 => match sys_tcp_connect", "TCP connect dispatcher")

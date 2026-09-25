@@ -1685,7 +1685,7 @@ pub fn sys_tcp_close(connection_id: u32) -> Result<(), SyscallResult> {
         seq = conn.send_seq;
         ack = conn.recv_seq;
     }
-    crate::net::transmit_tcp_segment_for_close(src_ip, local_port, dst_ip, remote_port, seq, ack, 0x11)
+    crate::net::crate::net::transmit_tcp_segment(src_ip, local_port, dst_ip, remote_port, seq, ack, 0x11)
         .map_err(|_| SyscallResult::NetworkError)?;
     crate::net::TCP_TABLE.lock().arm_fin(connection_id, crate::interrupts::get_system_ticks()).map_err(|_| SyscallResult::NotReady)?;
     Ok(())

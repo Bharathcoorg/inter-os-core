@@ -115,7 +115,7 @@ pub fn send_udp_datagram(
     NETWORK_DEVICE.lock().transmit(&eth_buf[0..eth_len])
 }
 
-fn transmit_tcp_segment(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address, dst_port: u16, seq: u32, ack: u32, flags: u16) -> Result<(), NetError> {
+pub fn transmit_tcp_segment(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address, dst_port: u16, seq: u32, ack: u32, flags: u16) -> Result<(), NetError> {
     let segment = TcpSegment { src_port, dst_port, seq, ack, flags, window: 65535, payload: &[] };
     let mut tcp_buf = [0u8; 64];
     let tcp_len = crate::net::tcp::serialize_with_checksum(&segment, src_ip.0, dst_ip.0, &mut tcp_buf)
