@@ -403,7 +403,7 @@ def cmd_test(args):
 # =============================================================================
 def _rapp_v2_encode(manifest_data, publisher_key, signature, payload):
     arch_map = {"x86_64": 0, "aarch64": 1, "riscv64": 2}
-    arch_name = manifest_data.get("architecture", "x86_64")
+    arch_name = getattr(args, "arch", None) or manifest_data.get("architecture", "x86_64")
     if arch_name not in arch_map:
         raise ValueError(f"Unsupported architecture: {arch_name}")
     version = tuple(int(x) for x in str(manifest_data["version"]).split("."))
@@ -718,7 +718,7 @@ def cmd_run(args):
 
     # 2. Package
     rapp_path = DIST_DIR / f"{app_name}.rapp"
-    pack_args = argparse.Namespace(name=app_name, output=str(rapp_path))
+    pack_args = argparse.Namespace(name=app_name, output=str(rapp_path), arch=("aarch64" if "aarch64" in target else ("riscv64" if "riscv64" in target else "x86_64")))
     ret = cmd_pack(pack_args)
     if ret != 0:
         return ret
@@ -1059,6 +1059,7 @@ def main():
     p_pack = subparsers.add_parser("package", aliases=["pack"], help="Bundle and sign app into .rapp package")
     p_pack.add_argument("name", help="App name")
     p_pack.add_argument("--output", help="Output file path (default: dist/<name>.rapp)")
+    p_pack.add_argument("--arch", choices=["x86_64", "aarch64", "riscv64"], default=None, help="RAPP target architecture")
     p_pack.set_defaults(func=cmd_pack)
 
     # verify
