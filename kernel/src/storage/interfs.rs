@@ -159,7 +159,7 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
             device.write_sector(base_lba + lba, &sector)?;
         }
         for lba in INODE_LBA..INODE_LBA + INODE_SECTORS {
-            device.write_sector(lba, &sector)?;
+            device.write_sector(base_lba + lba, &sector)?;
         }
         Ok(Self { device, superblock: sb, base_lba })
     }
@@ -197,7 +197,7 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
         let lba=INODE_LBA + index / INODES_PER_SECTOR as u32;
         let offset=(index as usize % INODES_PER_SECTOR) * INODE_SIZE;
         let mut sector=[0u8; SECTOR_SIZE];
-        self.device.read_sector(lba,&mut sector)?;
+        self.device.read_sector(self.base_lba + lba,&mut sector)?;
         let mut raw=[0u8; INODE_SIZE];
         inode.encode(&mut raw);
         sector[offset..offset+INODE_SIZE].copy_from_slice(&raw);
