@@ -73,6 +73,11 @@ pub enum SyscallNumber {
     PackageRegistry = 76,
     WindowList = 77,
     PackageRollback = 78,
+    WindowSetGeometry = 79,
+    WindowFocus = 80,
+    ServiceList = 81,
+    SettingsGet = 82,
+    SettingsSet = 83,
 }
 
 // -----------------------------------------------------------------------------
