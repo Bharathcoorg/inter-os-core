@@ -578,6 +578,12 @@ pub fn net_sendto(dst_ip: [u8; 4], dst_port: u16, payload: &[u8]) -> Result<(), 
 }
 
 /// Receives a packet from a UDP socket.
+/// Drives the userspace network service receive path.
+pub fn network_poll() -> Result<usize, i64> {
+    let ret = unsafe { syscall0(SyscallNumber::NetworkPoll) };
+    if ret >= 0 { Ok(ret as usize) } else { Err(ret) }
+}
+
 pub fn net_recvfrom(sock_id: u32, out_buf: &mut [u8]) -> Result<usize, i64> {
     let ret = unsafe {
         syscall3(
