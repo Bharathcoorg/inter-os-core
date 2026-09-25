@@ -116,3 +116,87 @@ impl NetworkDevice for LoopbackDevice {
         self.count > 0
     }
 }
+
+
+/// Stable identity and capabilities advertised by a network device.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct NetDeviceInfo {
+    pub kind: NetworkBackend,
+    pub mac: MacAddress,
+    pub mtu: u16,
+    pub link_up: bool,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum NetworkBackend {
+    Loopback,
+    EthernetPci,
+    Wifi,
+    Cellular,
+}
+
+/// Kernel-owned network-device manager. The protocol stack talks only to this
+/// boundary, allowing physical NIC drivers to replace loopback without changing
+/// Ethernet/IP/socket code.
+pub struct NetworkDeviceManager {
+    backend: LoopbackDevice,
+    kind: NetworkBackend,
+    mtu: u16,
+    link_up: bool,
+}
+
+impl NetworkDeviceManager {
+    pub const fn new_loopback() -> Self {
+        Self {
+            backend: LoopbackDevice::new(),
+            kind: NetworkBackend::Loopback,
+            mtu: 1500,
+            link_up: true,
+        }
+    }
+
+    pub fn info(&self) -> NetDeviceInfo {
+        NetDeviceInfo {
+            kind: self.kind,
+            mac: self.backend.mac(),
+            mtu: self.mtu,
+            link_up: self.link_up,
+        }
+    }
+
+    pub fn set_link_state(&mut self, up: bool) {
+        self.link_up = up;
+    }
+
+    pub fn transmit(&mut self, frame: &[u8]) -> Result<(), NetError> {
+        if !self.link_up {
+            return Err(NetError::DeviceDown);
+        }
+        if frame.len() > self.mtu as usize + 14 {
+            return Err(NetError::BufferTooSmall);
+        }
+        self.backend.transmit(frame)
+    }
+
+    pub fn receive(&mut self, out: &mut [u8]) -> Result<usize, NetError> {
+        if !self.link_up {
+            return Err(NetError::DeviceDown);
+        }
+        self.backend.receive(out)
+    }
+
+    pub fn has_packets(&self) -> bool {
+        self.backend.has_packets()
+    }
+}
+
+impl NetworkDevice for NetworkDeviceManager {
+    fn mac(&self) -> MacAddress { self.backend.mac() }
+    fn transmit(&mut self, frame: &[u8]) -> Result<(), NetError> { NetworkDeviceManager::transmit(self, frame) }
+    fn receive(&mut self, out: &mut [u8]) -> Result<usize, NetError> { NetworkDeviceManager::receive(self, out) }
+    fn has_packets(&self) -> bool { self.backend.has_packets() }
+}
+
+/// Canonical network-device endpoint consumed by the protocol stack.
+pub static NETWORK_DEVICE: spin::Mutex<NetworkDeviceManager> =
+    spin::Mutex::new(NetworkDeviceManager::new_loopback());
