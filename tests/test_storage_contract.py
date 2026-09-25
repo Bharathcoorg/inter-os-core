@@ -51,6 +51,15 @@ def main() -> None:
     must(vfs, "vfs.restore_data_snapshot();", "persistent VFS restore")
     must(vfs, 'crate::storage::persistent::commit_kind(&buf[..pos],4)', "VFS snapshot persistence")
     must(vfs, 'path.starts_with("/data/")', "persistent mutable-data boundary")
+    # M21: VFS persists and reconstructs the mutable inode tree, not only payload bytes.
+    must(vfs, 'buf[..4].copy_from_slice(b"IVM1")', "persistent inode metadata format")
+    must(vfs, 'persist_metadata_snapshot', "inode metadata persistence routine")
+    must(vfs, 'restore_metadata_snapshot', "inode metadata restore routine")
+    must(vfs, 'vfs.restore_metadata_snapshot();', "inode metadata restoration before payload restoration")
+    must(vfs, 'vfs.rebuild_children();', "persistent parent-child inode reconstruction")
+    must(vfs, 'fn parent_path(path: &str)', "hierarchical parent path helper")
+    must(vfs, 'inode.id = InodeId(id);', "stable persisted inode identity")
+    must(vfs, 'inode.sha256_digest = digest;', "persisted inode integrity metadata")
 
     # M20: a real on-disk filesystem backend exists above BlockDevice.
     must(interfs, "pub struct InterFs", "block-backed filesystem controller")
