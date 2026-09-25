@@ -1364,8 +1364,8 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             if a4==0{return SyscallResult::PermissionDenied as i64;}
             match crate::package::PACKAGE_REGISTRY.lock().rollback(pkg){Ok(())=>SyscallResult::Success as i64,Err(_)=>SyscallResult::FileNotFound as i64}
         }
-        79 => { match sys_window_set_geometry(a1 as u32, a2 as i64 as i32, a3 as i64 as i32, a4 as u32, a5 != 0) { e => e as i64 } }
-        80 => { sys_window_focus(a1 as u32, a2 as u32) as i64 }
+        79 => { let z=(a5 & 0x7FFF_FFFF) as u32; let visible=(a5 >> 63)!=0; sys_window_set_geometry(a1 as usize,a2 as u32,a3 as i64 as i32,a4 as i64 as i32,z,visible) as i64 }
+        80 => { sys_window_focus(a1 as usize, a2 as u32, a3 as u32) as i64 }
         81 => { let len=a3 as usize; if len==0||len>4096{return SyscallResult::InvalidArguments as i64;} let mut out=[0u8;4096]; match sys_service_list(&mut out[..len]){Ok(n)=>{if copy_to_user(a2,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
         82 => { let key_len=a3 as usize; let out_len=a4 as usize; if out_len>512{return SyscallResult::InvalidArguments as i64;} let mut out=[0u8;512]; match sys_settings_get(a1 as usize,a2,key_len,&mut out[..out_len]){Ok(n)=>{if copy_to_user(a5,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
         83 => { match sys_settings_set(a1 as usize,a2,a3 as usize,a4,a5 as usize){Ok(())=>0,Err(e)=>e as i64} }
@@ -2583,30 +2583,16 @@ pub fn sys_package_registry(out_buf:&mut [u8])->Result<usize,SyscallResult>{
     Ok(pos)
 }
 
-pub fn sys_window_set_geometry(id: u32, x: i32, y: i32, z: u32, visible: bool) -> SyscallResult {
-    let owner = match SCHEDULER.lock().current_task_id() {
-        Some(id) => id.0, None => return SyscallResult::PermissionDenied,
-    };
+pub fn sys_window_set_geometry(cap_slot: usize, id: u32, x: i32, y: i32, z: u32, visible: bool) -> SyscallResult {
+    let owner = match require_display_service(cap_slot) { Ok(id) => id.0, Err(e) => return e };
     if crate::drivers::display_kms::DRM_KMS.lock().set_surface_geometry_owned(id, owner, x, y, z, visible) {
         SyscallResult::Success
-    } else {
-        SyscallResult::PermissionDenied
-    }
+    } else { SyscallResult::PermissionDenied }
 }
 
-pub fn sys_window_focus(x: u32, y: u32) -> SyscallResult {
-    {
-        let sched = SCHEDULER.lock();
-        let task = match sched.current_task() {
-            Some(task) => task,
-            None => return SyscallResult::PermissionDenied,
-        };
-        if !task.cap_table.authorize_capability(CapabilityType::FrameBufferDirect, Rights::WRITE) {
-            return SyscallResult::PermissionDenied;
-        }
-    }
-    let target = crate::drivers::display_kms::DRM_KMS.lock().focus_at(x, y);
-    match target {
+pub fn sys_window_focus(cap_slot: usize, x: u32, y: u32) -> SyscallResult {
+    let _owner = match require_display_service(cap_slot) { Ok(id) => id, Err(e) => return e };
+    match crate::drivers::display_kms::DRM_KMS.lock().focus_at(x, y) {
         Some((_surface, owner)) => {
             let _ = IPC_ROUTER.lock().send_direct(TaskId(0), TaskId(owner), 0x7001, &[x as u8, (x >> 8) as u8, y as u8, (y >> 8) as u8]);
             SyscallResult::Success
@@ -2614,7 +2600,6 @@ pub fn sys_window_focus(x: u32, y: u32) -> SyscallResult {
         None => SyscallResult::NotReady,
     }
 }
-
 pub fn sys_fs_list(cap_slot:usize,path_ptr:u64,path_len:usize,out:&mut[u8])->Result<usize,SyscallResult>{
  if path_len==0||path_len>256||out.len()>4096{return Err(SyscallResult::InvalidArguments);}
  let sched=SCHEDULER.lock();let current=sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
