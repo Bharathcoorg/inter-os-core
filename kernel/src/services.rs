@@ -63,20 +63,6 @@ fn caps(id: ServiceId) -> CapabilityTable {
     t
 }
 
-extern "C" fn service_loop(id: ServiceId, name: &'static str) -> ! {
-    syscall::sys_log(4, name);
-    loop { heartbeat(id); syscall::sys_yield(); }
-}
-
-extern "C" fn displayd() -> ! { service_loop(ServiceId::Display, "[displayd] Display service online: compositor/DRM boundary active.") }
-extern "C" fn inputd() -> ! { service_loop(ServiceId::Input, "[inputd] Input service online: touch/gesture boundary active.") }
-extern "C" fn storaged() -> ! { service_loop(ServiceId::Storage, "[storaged] Storage service online: VFS/block boundary active.") }
-extern "C" fn netd() -> ! { service_loop(ServiceId::Network, "[netd] Network service online: socket/network HAL boundary active.") }
-extern "C" fn powerd() -> ! { service_loop(ServiceId::Power, "[powerd] Power service online: PMIC/DVFS boundary active.") }
-extern "C" fn modemd() -> ! { service_loop(ServiceId::Modem, "[modemd] Modem service online: cellular/RIL boundary active.") }
-extern "C" fn audiod() -> ! { service_loop(ServiceId::Audio, "[audiod] Audio service online: codec/audio HAL boundary active.") }
-extern "C" fn camerad() -> ! { service_loop(ServiceId::Camera, "[camerad] Camera service online: sensor/CSI boundary active.") }
-
 pub static SERVICE_RECORDS: spin::Mutex<[Option<ServiceRecord>; 9]> = spin::Mutex::new([None; 9]);
 const HEARTBEAT_TIMEOUT_TICKS: u64 = 500;
 const SERVICE_RESTART_BACKOFF_TICKS: u64 = 1000;
@@ -106,17 +92,7 @@ pub fn init() {
     }
     // Service definitions are registered but not started here. PID 1 owns
     // userspace service lifecycle through the ServiceStart syscall.
-    let defs: [(ServiceId, &'static str, extern "C" fn() -> !, u8); 8] = [
-        (ServiceId::Display, "displayd", displayd, 6),
-        (ServiceId::Input, "inputd", inputd, 6),
-        (ServiceId::Storage, "storaged", storaged, 5),
-        (ServiceId::Network, "netd", netd, 5),
-        (ServiceId::Power, "powerd", powerd, 7),
-        (ServiceId::Modem, "modemd", modemd, 6),
-        (ServiceId::Audio, "audiod", audiod, 5),
-        (ServiceId::Camera, "camerad", camerad, 5),
-    ];
-    for (id, _name, _entry, _priority) in defs {
+    for id in [ServiceId::Display, ServiceId::Input, ServiceId::Storage, ServiceId::Network, ServiceId::Power, ServiceId::Modem, ServiceId::Audio, ServiceId::Camera] {
         SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord {
             id, task: TaskId(0), state: ServiceState::Declared
         });
@@ -151,17 +127,7 @@ fn start_locked(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str
         task: TaskId(0),
         state: ServiceState::Starting,
     });
-    let (name, entry, priority): (&'static str, extern "C" fn() -> !, u8) = match id {
-        ServiceId::Display => ("displayd", displayd, 6), ServiceId::Input => ("inputd", inputd, 6),
-        ServiceId::Storage => ("storaged", storaged, 5), ServiceId::Network => ("netd", netd, 5),
-        ServiceId::Power => ("powerd", powerd, 7), ServiceId::Modem => ("modemd", modemd, 6),
-        ServiceId::Audio => ("audiod", audiod, 5), ServiceId::Camera => ("camerad", camerad, 5),
-        ServiceId::Init => return Ok(TaskId(0)),
-    };
-    let task_result = {
-        let mut scheduler = SCHEDULER.lock();
-        scheduler.spawn_with_parent(name, entry, caps(id), priority, parent_id)
-    };
+    let task_result = crate::task::user::spawn_userspace_service(id as u8, parent_id);
     let task = match task_result {
         task if task != TaskId(0) => task,
         _ => {
@@ -214,6 +180,15 @@ pub fn task_id(id: ServiceId) -> Option<TaskId> {
 pub fn heartbeat(id: ServiceId) {
     SERVICE_HEARTBEATS[id as usize].store(crate::interrupts::get_system_ticks(), Ordering::Release);
 }
+
+pub fn heartbeat_for_task(id: ServiceId, task_id: TaskId) -> Result<(), &'static str> {
+    let _lifecycle = SERVICE_LIFECYCLE_LOCK.lock();
+    let record = SERVICE_RECORDS.lock()[id as usize].ok_or("service not declared")?;
+    if record.task != task_id || record.state != ServiceState::Running { return Err("service task mismatch"); }
+    SERVICE_HEARTBEATS[id as usize].store(crate::interrupts::get_system_ticks(), Ordering::Release);
+    Ok(())
+}
+
 
 /// Supervises all registered services and marks missing/terminated workers as
 /// failed. Restart orchestration is intentionally deferred until a userspace
