@@ -58,7 +58,7 @@ This roadmap tracks the remaining work in dependency order. A milestone is **com
 
 | ID | Milestone | Status |
 |---|---|---|
-| M31 | Network device/driver abstraction | ⬜ Pending |
+| M31 | Network device/driver abstraction | 🟡 Implementation complete — protocol stack now consumes a canonical kernel network-device manager with explicit device identity, MTU/link state, and loopback backend; CI evidence pending |
 | M32 | Userspace network service | ⬜ Pending |
 | M33 | TCP/IP + DNS + TLS integration | ⬜ Pending |
 | M34 | Audio service and device pipeline | ⬜ Pending |
