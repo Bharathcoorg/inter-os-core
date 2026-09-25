@@ -12,7 +12,7 @@ pub mod udp;
 pub mod wireless;
 
 pub use arp::{ArpOpcode, ArpPacket, ArpTable};
-pub use device::{LoopbackDevice, NetError, NetworkDevice};
+pub use device::{LoopbackDevice, NetDeviceInfo, NetError, NetworkBackend, NetworkDevice, NetworkDeviceManager, NETWORK_DEVICE};
 pub use ethernet::{EtherType, EthernetFrame, MacAddress};
 pub use ipv4::{calculate_ipv4_checksum, verify_ipv4_checksum, IpProtocol, Ipv4Address, Ipv4Packet};
 pub use socket::{SocketId, SocketTable, UdpSocket};
@@ -78,16 +78,16 @@ pub fn send_udp_datagram(
     let eth_len = frame.serialize(&mut eth_buf).map_err(|_| NetError::BufferTooSmall)?;
 
     // 6. Transmit into Loopback / Virtual NIC
-    LOOPBACK.lock().transmit(&eth_buf[0..eth_len])
+    NETWORK_DEVICE.lock().transmit(&eth_buf[0..eth_len])
 }
 
 /// Polls the network device and processes all inbound packets.
 pub fn poll_network_interface() -> usize {
-    let mut loopback = LOOPBACK.lock();
+    let mut device = NETWORK_DEVICE.lock();
     let mut rx_buf = [0u8; 1514];
     let mut processed = 0;
 
-    while let Ok(len) = loopback.receive(&mut rx_buf) {
+    while let Ok(len) = device.receive(&mut rx_buf) {
         processed += 1;
         let frame_res = EthernetFrame::parse(&rx_buf[0..len]);
         if let Ok(frame) = frame_res {
