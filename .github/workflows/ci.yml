@@ -85,3 +85,6 @@ jobs:
           sleep 3
           python tests/test_adversarial_security.py
 
+      - name: Run RAPP v2 Trust-Boundary Tests
+        run: python tests/test_rapp_v2.py
+
