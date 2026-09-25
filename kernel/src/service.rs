@@ -83,7 +83,8 @@ impl ServiceSupervisor {
     pub fn task_for(&self, name: &str) -> Option<TaskId> {
         self.records.iter().find(|r| r.name == name).and_then(|r| r.task_id)
     }
-\n    pub fn snapshot(&self, out: &mut [u8]) -> usize {
+
+    pub fn snapshot(&self, out: &mut [u8]) -> usize {
         use core::fmt::Write;
         struct W<'a>{b:&'a mut [u8],n:usize}
         impl<'a> Write for W<'a>{fn write_str(&mut self,s:&str)->core::fmt::Result{let k=s.len().min(self.b.len().saturating_sub(self.n));self.b[self.n..self.n+k].copy_from_slice(&s.as_bytes()[..k]);self.n+=k;Ok(())}}
