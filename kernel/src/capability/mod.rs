@@ -345,6 +345,15 @@ impl CapabilityTable {
         self.revoke(slot_idx)
     }
 
+    /// Finds the first slot containing a capability with the requested type and rights.
+    pub fn find_slot(&self, expected_type: CapabilityType, required_rights: Rights) -> Option<usize> {
+        self.slots.iter().enumerate().find_map(|(idx, slot)| {
+            slot.cap.as_ref().and_then(|cap| {
+                if cap.cap_type == expected_type && cap.rights.contains(required_rights) { Some(idx) } else { None }
+            })
+        })
+    }
+
     /// Returns the total number of active capabilities in this table.
     pub fn count(&self) -> usize {
         self.slots.iter().filter(|s| s.cap.is_some()).count()
