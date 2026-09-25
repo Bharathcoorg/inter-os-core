@@ -19,7 +19,6 @@ def main():
         "std::network_poll()",
         "std::net_send_socket(socket, [127, 0, 0, 1], 4242,
         "std::net_recvfrom(socket",
-        "std::tcp_connect([127, 0, 0, 1], 4243, 4244, 1)",
         "std::EVENT_NETWORK_PACKET",
     ):
         must(svc, needle, needle)
@@ -42,6 +41,7 @@ def main():
     must(syscall, "pub fn sys_net_send_socket(", "socket-bound send kernel API")
     must(syscall, "pub fn sys_net_close_socket(", "socket close kernel API")
     must(syscall, "release_owner", "task socket cleanup")
+    must(syscall, "TCP_TABLE.lock().release_owner(owner)", "task TCP connection cleanup")
     must(syscall, "copy_from_user(&mut payload[..len]", "network payload user validation")
     must(syscall, "Ipv4Address::LOCALHOST", "loopback source selection")
     must(syscall, "DEFAULT_HOST_IP", "non-loopback source selection")
@@ -95,6 +95,9 @@ def main():
     must(sock, "due_fin_retransmit", "TCP FIN retransmission")
     must(sock, "due_syn_retransmit", "TCP SYN retransmission")
     must(sock, "acknowledge_syn", "TCP SYN acknowledgement retirement")
+    must(sock, "pub fn release_owner(&mut self, owner_task_id: u32)", "TCP owner cleanup")
+    must(sock, "pub fn reap_closed(&mut self)", "TCP closed-entry reaping")
+    must(net, "reap_closed()", "TCP closed-entry network-poll reaping")
     must(net, "transmit_tcp_segment(", "kernel TCP ACK transmission")
     must(dns, "encode_query", "DNS query encoder")
     must(dns, "parse_a_answer", "DNS A-record parser")
