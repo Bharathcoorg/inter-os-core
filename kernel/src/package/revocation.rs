@@ -61,6 +61,7 @@ pub struct RevocationRegistry {
     pub revoked_packages: BTreeMap<String, RevocationRecord>,
     pub revoked_keys: BTreeMap<[u8; 32], RevocationRecord>,
     pub rotated_keys: BTreeMap<String, [u8; 32]>,
+    pub trusted_keys: BTreeMap<[u8; 32], String>,
 }
 
 impl RevocationRegistry {
@@ -69,6 +70,7 @@ impl RevocationRegistry {
             revoked_packages: BTreeMap::new(),
             revoked_keys: BTreeMap::new(),
             rotated_keys: BTreeMap::new(),
+            trusted_keys: BTreeMap::new(),
         }
     }
 
@@ -125,6 +127,17 @@ impl RevocationRegistry {
     /// Returns true if a public key fingerprint is revoked.
     pub fn is_key_revoked(&self, key: &[u8; 32]) -> bool {
         self.revoked_keys.contains_key(key)
+    }
+
+    /// Registers a publisher public key in the device trust store.
+    /// Provisioning this key is a privileged device lifecycle operation.
+    pub fn trust_key(&mut self, key: [u8; 32], publisher: &str) {
+        self.trusted_keys.insert(key, publisher.to_string());
+    }
+
+    /// Returns true only for an explicitly provisioned publisher key.
+    pub fn is_key_trusted(&self, key: &[u8; 32]) -> bool {
+        self.trusted_keys.contains_key(key) && !self.is_key_revoked(key)
     }
 
     /// Processes an attested key rotation proof.
