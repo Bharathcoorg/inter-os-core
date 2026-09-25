@@ -49,7 +49,13 @@ impl DisplayDriver for KmsDisplayDriver<'_> {
 
     fn composite_and_flip(&mut self) -> Result<u64, &'static str> {
         self.controller.composite();
-        Ok(self.controller.page_flip())
+        let flip = self.controller.page_flip();
+        crate::framebuffer::present_argb8888(
+            &self.controller.front_buffer,
+            self.controller.scanout_width,
+            self.controller.scanout_height,
+        );
+        Ok(flip)
     }
 
     fn snapshot(&self, out: &mut [SurfaceSnapshot]) -> usize {
