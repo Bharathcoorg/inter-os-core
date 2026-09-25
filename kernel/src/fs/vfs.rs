@@ -521,13 +521,27 @@ impl Vfs {
             count=count.saturating_add(1);
         }
         buf[4..6].copy_from_slice(&count.to_le_bytes());
-        crate::storage::persistent::commit_kind(&buf[..pos],4).map(|_|()).map_err(|_|FsError::IntegrityViolation)
+        crate::storage::persistent::commit_kind(&buf[..pos],4).map(|_|()).map_err(|_|FsError::IntegrityViolation)?;
+        // The block-backed InterFS copy is the durable filesystem source of truth.
+        crate::storage::filesystem::store_data_file("/data/.vfs.snapshot", &buf[..pos])
+            .map_err(|_| FsError::IntegrityViolation)
     }
 
-    /// Restores mutable /data files from the persistent journal.
+    /// Restores mutable /data files from the block-backed filesystem first.
+    /// The metadata journal remains a recovery fallback until M22 finalizes the
+    /// transactional publication protocol.
     fn restore_data_snapshot(&mut self) {
         let mut buf=[0u8;32768];
-        let Ok(Some((_generation,len)))=crate::storage::persistent::load_latest_kind(&mut buf,4) else { return; };
+        let block_len = match crate::storage::filesystem::load_data_file("/data/.vfs.snapshot", &mut buf) {
+            Ok(len) => Some(len),
+            Err(_) => None,
+        };
+        let len = if let Some(len) = block_len {
+            len
+        } else {
+            let Ok(Some((_generation,len)))=crate::storage::persistent::load_latest_kind(&mut buf,4) else { return; };
+            len
+        };
         if len<6 || &buf[..4]!=b"DTA1" { return; }
         let count=u16::from_le_bytes([buf[4],buf[5]]) as usize;
         let mut pos=6usize;
