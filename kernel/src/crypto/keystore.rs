@@ -75,12 +75,7 @@ pub struct SecureKeystore {
 impl SecureKeystore {
     pub const fn new() -> Self {
         Self {
-            master_seed: [
-                0x7A, 0x4B, 0x19, 0xCE, 0x58, 0xD2, 0x3F, 0x61,
-                0x89, 0xAC, 0x4E, 0x93, 0x12, 0x57, 0xFE, 0x08,
-                0x23, 0x6B, 0x8C, 0xD1, 0x34, 0x9F, 0xAA, 0x55,
-                0x18, 0x7E, 0x22, 0xC4, 0x39, 0x81, 0x60, 0x4D,
-            ],
+            master_seed: [0u8; 32],
             entries: Vec::new(),
         }
     }
@@ -222,6 +217,26 @@ pub static SECURE_KEYSTORE: Mutex<SecureKeystore> = Mutex::new(SecureKeystore::n
 /// Initializes the Secure Keystore and verifies derivation & authenticated tamper-proofing.
 pub fn init() {
     let mut ks = SECURE_KEYSTORE.lock();
+
+    // The storage-encryption root is never a compiled-in constant. Persist the
+    // first generated device seed in the journal and reload it on subsequent boots.
+    let mut seed_record = [0u8; 40];
+    let loaded = crate::storage::persistent::load_latest_kind(&mut seed_record, 6)
+        .ok()
+        .flatten();
+    if let Some((_generation, len)) = loaded {
+        if len == 40 && &seed_record[..4] == b"IKS1" {
+            ks.master_seed.copy_from_slice(&seed_record[8..40]);
+        }
+    }
+    if ks.master_seed == [0u8; 32] {
+        crate::crypto::get_random_bytes(&mut ks.master_seed);
+        let mut record = [0u8; 40];
+        record[..4].copy_from_slice(b"IKS1");
+        record[4..8].copy_from_slice(&1u32.to_le_bytes());
+        record[8..40].copy_from_slice(&ks.master_seed);
+        let _ = crate::storage::persistent::commit_kind(&record, 6);
+    }
 
     // 1. Derive keys across pre-defined slots and verify uniqueness
     let k0 = ks.derive_key(KeySlot::SovereignMasterKey, b"master");
