@@ -51,7 +51,7 @@ This roadmap tracks the remaining work in dependency order. A milestone is **com
 | M26 | Input device event pipeline | 🟡 Implementation complete — normalized touch/gesture event queue, bounded userspace event ABI, dedicated `inputd`, and contract tests added; CI/QEMU evidence pending |
 | M27 | Compositor protocol | 🟡 Implementation complete — versioned bounded `ICMP` request/response protocol, kernel/SDK definitions, and CI contract added; runtime IPC evidence pending |
 | M28 | Window/surface management | 🟡 Implementation complete — surface geometry/focus operations are routed through the display-service capability boundary and ownership contracts updated; CI/runtime evidence pending |
-| M29 | Touch/gesture input integration | ⬜ Pending |
+| M29 | Touch/gesture input integration | 🟡 Implementation complete — normalized touch events now route to the focused surface owner over bounded IPC; contract evidence pending |
 | M30 | Hardware-backed graphics path | ⬜ Pending |
 
 ## Networking and smartphone services
