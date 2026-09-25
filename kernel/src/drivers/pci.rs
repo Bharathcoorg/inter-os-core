@@ -48,6 +48,14 @@ pub struct PciDevice {
 }
 
 impl PciDevice {
+    /// Enables PCI memory-space and bus-mastering for a DMA-capable device.
+    pub fn enable_memory_and_bus_master(&self) {
+        let mut command = pci_read_u16(self.addr, 0x04);
+        command |= 1 << 1;
+        command |= 1 << 2;
+        pci_write_u16(self.addr, 0x04, command);
+    }
+
     /// Reads a memory BAR base address from the device configuration header.
     pub fn memory_bar(&self, index: u8) -> Option<u64> {
         if index >= 6 { return None; }
@@ -201,6 +209,7 @@ pub fn find_e1000() -> Option<PciDevice> {
 /// Attempts to initialize the first Intel E1000 controller discovered on PCI.
 pub fn initialize_e1000_network() -> Result<(), &'static str> {
     let device = find_e1000().ok_or("No Intel E1000-compatible controller found")?;
+    device.enable_memory_and_bus_master();
     let bar = device.memory_bar(0).ok_or("E1000 MMIO BAR0 unavailable")?;
     let mmio_base = x86_64::VirtAddr::new(0xffff_9000_0000_0000);
     let mapped = crate::memory::map_mmio_region(
