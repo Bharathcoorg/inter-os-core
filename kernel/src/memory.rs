@@ -55,6 +55,30 @@ pub fn phys_mem_offset() -> VirtAddr {
         .expect("Physical memory offset not initialized")
 }
 
+/// Allocates physically contiguous 4 KiB frames for DMA buffers.
+pub fn allocate_dma_frames(count: usize) -> Option<alloc::vec::Vec<PhysFrame<Size4KiB>>> {
+    if count == 0 { return Some(alloc::vec::Vec::new()); }
+    let mut frames = alloc::vec::Vec::with_capacity(count);
+    let first = allocate_frame()?;
+    frames.push(first);
+    for _ in 1..count {
+        let next = allocate_frame()?;
+        let expected = frames.last()?.start_address().as_u64() + 4096;
+        if next.start_address().as_u64() != expected {
+            for frame in frames.drain(..) { recycle_frame(frame); }
+            recycle_frame(next);
+            return None;
+        }
+        frames.push(next);
+    }
+    Some(frames)
+}
+
+/// Converts a physical address into its bootloader-provided direct-map virtual address.
+pub fn physical_to_virtual(physical: PhysAddr) -> VirtAddr {
+    phys_mem_offset() + physical.as_u64()
+}
+
 /// Allocates a single 4 KiB physical memory frame.
 pub fn allocate_frame() -> Option<PhysFrame<Size4KiB>> {
     FRAME_ALLOCATOR.lock().as_mut()?.allocate_frame()
