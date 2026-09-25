@@ -74,6 +74,7 @@ pub fn run_network() -> ! {
             std::exit_with_code(1);
         }
     };
+    let _tcp_probe = std::tcp_connect([127, 0, 0, 1], 4243, 4244, 1);
     let mut last_tick = 0u64;
     let mut rx = [0u8; 512];
 
