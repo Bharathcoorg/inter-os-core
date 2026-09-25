@@ -134,7 +134,7 @@ jobs:
       - name: Build embedded x86_64 userspace binaries
         run: |
           cargo build --manifest-path userspace/init/Cargo.toml --target x86_64-unknown-none
-          for app in settings terminal compositor launcher; do
+          for app in settings terminal compositor launcher dialer vault camera calculator browser messages calendar music; do
             cargo build --manifest-path "apps/$app/Cargo.toml" --target x86_64-unknown-none
           done
       - name: Verify kernel QEMU target
