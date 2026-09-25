@@ -62,6 +62,12 @@ static SERVICE_HEARTBEATS: [core::sync::atomic::AtomicU64; 9] = [
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
 ];
 static SERVICES_INITIALIZED: AtomicBool = AtomicBool::new(false);
+// Restart backoff prevents a failed service from consuming the scheduler in a crash loop.
+static SERVICE_RETRY_AFTER: [core::sync::atomic::AtomicU64; 9] = [
+    core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
+];
 
 /// Starts the Phase 25 service set once, with isolated capability tables.
 pub fn init() {
@@ -226,11 +232,16 @@ pub fn restart_failed(parent_id: TaskId) -> usize {
             _ => None,
         };
         if let Some(task) = failed_task {
+            let now = crate::interrupts::get_system_ticks();
+            if now < SERVICE_RETRY_AFTER[idx].load(Ordering::Acquire) { continue; }
             // A heartbeat timeout may leave the worker schedulable. Terminate it
             // before spawning the replacement so recovery cannot duplicate a service.
             let _ = SCHEDULER.lock().terminate_task(task, -1);
             let _ = SCHEDULER.lock().reap_child(parent_id, task);
-            if start(id, parent_id).is_ok() { restarted += 1; }
+            if start(id, parent_id).is_ok() {
+                SERVICE_RETRY_AFTER[idx].store(now.saturating_add(1000), Ordering::Release);
+                restarted += 1;
+            }
         }
     }
     restarted
