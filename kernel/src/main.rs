@@ -521,34 +521,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
 
 
-    // Task 7: Native Graphical Compositor & Event Loop Shell
-    let mut caps_compositor = CapabilityTable::new(8);
-    caps_compositor
-        .insert(Capability {
-            id: CapabilityId(701),
-            cap_type: CapabilityType::SerialOutput,
-            rights: Rights::WRITE,
-            object_id: 0,
-        })
-        .ok(); // Slot 0
-    caps_compositor
-        .insert(Capability {
-            id: CapabilityId(702),
-            cap_type: CapabilityType::IpcSend,
-            rights: Rights::WRITE,
-            object_id: id_security.0, // Bound to Task 2
-        })
-        .ok(); // Slot 1
-
-    let id_compositor = SCHEDULER.lock().spawn(
-        "compositor_shell",
-        task_compositor_shell,
-        caps_compositor,
-        2,
-    );
-    IPC_ROUTER.lock().register_task(id_compositor);
-    serial_println!("[OK] Spawned Task 7: compositor_shell (ID: {:?})", id_compositor);
-
+    // Graphical composition is now owned by the Ring-3 compositor package.
+    // kernel_main does not spawn or drive the mobile UI directly.
     // Task 8: Network & Network Worker
     let mut caps_net = CapabilityTable::new(8);
     caps_net
@@ -779,9 +753,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // They are registered with the package/service boundary below and launched
     // only after a userspace IPC request reaches the Security/Package service.
     serial_println!("[OK] Native app package registry/service boundary online; no application spawned directly from kernel_main.");
-
-    // Render the Mobile Smartphone Shell on the graphical display
-    framebuffer::draw_mobile_shell();
 
     serial_println!("================================================================================");
     serial_println!("  SYSTEM READY: Inter OS v3.0 Microkernel Fully Online.");
