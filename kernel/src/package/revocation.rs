@@ -167,3 +167,19 @@ impl RevocationRegistry {
 }
 
 pub static REVOCATION_REGISTRY: Mutex<RevocationRegistry> = Mutex::new(RevocationRegistry::new());
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn trust_and_revocation_invariants() {
+        let key = [7u8; 32];
+        let mut r = RevocationRegistry::new();
+        assert!(!r.is_key_trusted(&key));
+        r.trust_key(key, "test-publisher");
+        assert!(r.is_key_trusted(&key));
+        r.revoke_key(&key, RevocationReason::KeyCompromised, 10, "root");
+        assert!(!r.is_key_trusted(&key));
+    }
+}
