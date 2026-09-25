@@ -83,6 +83,18 @@ impl ServiceSupervisor {
     pub fn task_for(&self, name: &str) -> Option<TaskId> {
         self.records.iter().find(|r| r.name == name).and_then(|r| r.task_id)
     }
+\n    pub fn snapshot(&self, out: &mut [u8]) -> usize {
+        use core::fmt::Write;
+        struct W<'a>{b:&'a mut [u8],n:usize}
+        impl<'a> Write for W<'a>{fn write_str(&mut self,s:&str)->core::fmt::Result{let k=s.len().min(self.b.len().saturating_sub(self.n));self.b[self.n..self.n+k].copy_from_slice(&s.as_bytes()[..k]);self.n+=k;Ok(())}}
+        let mut w=W{b:out,n:0};
+        for r in &self.records {
+            let state=match r.state{ServiceState::Registered=>"registered",ServiceState::Starting=>"starting",ServiceState::Running=>"running",ServiceState::Failed=>"failed",ServiceState::Stopped=>"stopped"};
+            let id=r.task_id.map(|x|x.0).unwrap_or(0);
+            let _=write!(w,"{}|{}|{}|{}|{}\n",r.name,state,id,r.restart_count,r.last_exit_code.unwrap_or(0));
+        }
+        w.n
+    }
 }
 
 pub static SERVICE_SUPERVISOR: Mutex<ServiceSupervisor> =
