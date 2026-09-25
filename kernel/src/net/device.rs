@@ -3,6 +3,7 @@
 //! Provides a unified interface for hardware Ethernet adapters and the internal loopback device.
 
 use super::ethernet::MacAddress;
+use super::e1000::E1000Device;
 
 pub const MAX_PACKET_SIZE: usize = 1514;
 pub const LOOPBACK_RING_SLOTS: usize = 8;
@@ -138,8 +139,13 @@ pub enum NetworkBackend {
 /// Kernel-owned network-device manager. The protocol stack talks only to this
 /// boundary, allowing physical NIC drivers to replace loopback without changing
 /// Ethernet/IP/socket code.
+pub enum NetworkDeviceBackend {
+    Loopback(LoopbackDevice),
+    E1000(E1000Device),
+}
+
 pub struct NetworkDeviceManager {
-    backend: LoopbackDevice,
+    backend: NetworkDeviceBackend,
     kind: NetworkBackend,
     mtu: u16,
     link_up: bool,
@@ -148,7 +154,7 @@ pub struct NetworkDeviceManager {
 impl NetworkDeviceManager {
     pub const fn new_loopback() -> Self {
         Self {
-            backend: LoopbackDevice::new(),
+            backend: NetworkDeviceBackend::Loopback(LoopbackDevice::new()),
             kind: NetworkBackend::Loopback,
             mtu: 1500,
             link_up: true,
@@ -158,7 +164,7 @@ impl NetworkDeviceManager {
     pub fn info(&self) -> NetDeviceInfo {
         NetDeviceInfo {
             kind: self.kind,
-            mac: self.backend.mac(),
+            mac: match &self.backend { NetworkDeviceBackend::Loopback(d) => d.mac(), NetworkDeviceBackend::E1000(d) => d.mac() },
             mtu: self.mtu,
             link_up: self.link_up,
         }
@@ -175,28 +181,35 @@ impl NetworkDeviceManager {
         if frame.len() > self.mtu as usize + 14 {
             return Err(NetError::BufferTooSmall);
         }
-        self.backend.transmit(frame)
+        match &mut self.backend { NetworkDeviceBackend::Loopback(d) => d.transmit(frame), NetworkDeviceBackend::E1000(d) => d.transmit(frame) }
     }
 
     pub fn receive(&mut self, out: &mut [u8]) -> Result<usize, NetError> {
         if !self.link_up {
             return Err(NetError::DeviceDown);
         }
-        self.backend.receive(out)
+        match &mut self.backend { NetworkDeviceBackend::Loopback(d) => d.receive(out), NetworkDeviceBackend::E1000(d) => d.receive(out) }
     }
 
     pub fn has_packets(&self) -> bool {
-        self.backend.has_packets()
+        match &self.backend { NetworkDeviceBackend::Loopback(d) => d.has_packets(), NetworkDeviceBackend::E1000(d) => d.has_packets() }
     }
 }
 
 impl NetworkDevice for NetworkDeviceManager {
-    fn mac(&self) -> MacAddress { self.backend.mac() }
+    fn mac(&self) -> MacAddress { self.info().mac }
     fn transmit(&mut self, frame: &[u8]) -> Result<(), NetError> { NetworkDeviceManager::transmit(self, frame) }
     fn receive(&mut self, out: &mut [u8]) -> Result<usize, NetError> { NetworkDeviceManager::receive(self, out) }
     fn has_packets(&self) -> bool { self.backend.has_packets() }
 }
 
 /// Canonical network-device endpoint consumed by the protocol stack.
+pub fn attach_e1000(&mut self, device: E1000Device) {
+        self.backend = NetworkDeviceBackend::E1000(device);
+        self.kind = NetworkBackend::EthernetPci;
+        self.mtu = 1500;
+        self.link_up = true;
+    }
+
 pub static NETWORK_DEVICE: spin::Mutex<NetworkDeviceManager> =
     spin::Mutex::new(NetworkDeviceManager::new_loopback());
