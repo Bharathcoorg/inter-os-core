@@ -87,6 +87,15 @@ def main() -> None:
     assert "self.device.read_sector(lba,&mut sector)" not in interfs, "bitmap read must not bypass filesystem base"
     assert "self.device.write_sector(lba,&sector)" not in interfs, "bitmap write must not bypass filesystem base"
     must(interfs, "inode.start_sector=if sectors == 0 { 0 } else { start };", "zero-length inode extent normalization")
+    # M22: metadata mutations use an on-disk transaction record with recovery on mount.
+    must(interfs, 'const TXN_MAGIC: [u8; 4] = *b"IFTX";', "filesystem transaction record magic")
+    must(interfs, "fn write_transaction", "transaction intent publication")
+    must(interfs, "fn recover_transaction", "transaction recovery")
+    must(interfs, "fs.recover_transaction()?;", "mount-time transaction recovery")
+    must(interfs, "self.write_transaction(&txn)", "mutation transaction publication")
+    must(interfs, "self.clear_transaction()?", "transaction completion/cleanup")
+    assert interfs.index("self.write_transaction(&txn)") < interfs.index("self.write_inode(index,&inode)"), "transaction intent must precede inode publication"
+    assert interfs.index("self.write_inode(index,&inode)") < interfs.index("self.clear_transaction()?"), "transaction must remain until inode publication completes"
 
     # M22: write payload sectors first and publish the generation header last.
     payload_write = persistent.index("drive.write_sector(base + sector, &buf)")
