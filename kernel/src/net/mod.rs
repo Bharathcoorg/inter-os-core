@@ -41,6 +41,11 @@ pub static ARP_TABLE: Mutex<ArpTable> = Mutex::new(ArpTable::new());
 pub static SOCKET_TABLE: Mutex<SocketTable> = Mutex::new(SocketTable::new());
 pub static TCP_TABLE: Mutex<TcpConnectionTable> = Mutex::new(TcpConnectionTable::new());
 
+/// Global bounded DNS resolver state. Keeping this state at network-subsystem
+/// scope makes the resolver cache effective across syscall invocations while
+/// preserving the fixed in-flight query and cache bounds.
+pub static DNS_RESOLVER: Mutex<DnsResolver> = Mutex::new(DnsResolver::new());
+
 fn transmit_arp_request(target_ip: Ipv4Address) -> Result<(), NetError> {
     let info = NETWORK_DEVICE.lock().info();
     let packet = ArpPacket {
