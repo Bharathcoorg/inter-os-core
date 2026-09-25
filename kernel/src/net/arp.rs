@@ -166,7 +166,9 @@ impl ArpTable {
 
     /// Looks up the hardware MAC address for a given IPv4 address.
     pub fn lookup(&self, ip: Ipv4Address) -> Option<MacAddress> {
-        self.lookup_at(ip, u64::MAX)
+        self.entries.iter()
+            .find(|entry| entry.valid && entry.ip == ip)
+            .map(|entry| entry.mac)
     }
 
     /// Looks up only a live dynamic mapping at the supplied tick.
