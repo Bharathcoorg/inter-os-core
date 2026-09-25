@@ -544,15 +544,29 @@ impl Vfs {
 
     /// Closes an open file descriptor.
     pub fn close(&mut self, task_id: TaskId, fd: FileDescriptor) -> Result<(), FsError> {
-        let table = self.task_file_tables.get_mut(&task_id).ok_or(FsError::InvalidFd)?;
-        if let Some(slot) = table.get_mut(fd.0 as usize) {
-            if slot.is_some() {
-                *slot = None;
-                if self.persist_data_snapshot().is_err() { crate::serial_println!("[VFS] persistent data snapshot unavailable; keeping live state."); }
-                return Ok(());
+        // End the descriptor borrow before persisting the filesystem snapshot.
+        // This keeps the VFS mutation and persistence phases independently
+        // borrow-checked and avoids holding a task FD-table borrow across I/O.
+        let closed = {
+            let table = self.task_file_tables.get_mut(&task_id).ok_or(FsError::InvalidFd)?;
+            if let Some(slot) = table.get_mut(fd.0 as usize) {
+                if slot.is_some() {
+                    *slot = None;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
             }
+        };
+        if !closed {
+            return Err(FsError::InvalidFd);
         }
-        Err(FsError::InvalidFd)
+        if self.persist_data_snapshot().is_err() {
+            crate::serial_println!("[VFS] persistent data snapshot unavailable; keeping live state.");
+        }
+        Ok(())
     }
 }
 
