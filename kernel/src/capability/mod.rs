@@ -335,14 +335,11 @@ impl CapabilityTable {
                 continue;
             }
             if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
-                delegation::consume_invocation(
+                return delegation::consume_invocation(
                     cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF,
                     crate::interrupts::get_system_ticks(),
                     required_rights,
-                ).is_ok() {
-                    return true;
-                }
-                return false;
+                ).is_ok();
             }
             return true;
         }
