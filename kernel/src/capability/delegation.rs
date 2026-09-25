@@ -9,22 +9,11 @@ use crate::capability::{CapError, Capability, CapabilityId, CapabilityType, Righ
 use crate::task::TaskId;
 use crate::serial_println;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 /// Kernel-owned registry for delegated leases. The registry is consulted by the
 /// capability verifier, so expiry cannot be bypassed by invoking another syscall.
 pub static DELEGATION_REGISTRY: Mutex<Vec<DelegatedLease>> = Mutex::new(Vec::new());
-
-/// Monotonic allocator for opaque lease identifiers. The high bit is reserved
-/// as the delegated-capability marker, so generated IDs always remain in the
-/// lower 63-bit namespace.
-static NEXT_LEASE_ID: AtomicU64 = AtomicU64::new(1);
-
-pub fn allocate_lease_id() -> u64 {
-    let id = NEXT_LEASE_ID.fetch_add(1, Ordering::Relaxed) & 0x7FFF_FFFF_FFFF_FFFF;
-    if id == 0 { 1 } else { id }
-}
 
 /// A time-bounded, usage-constrained capability delegation lease.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,11 +42,6 @@ impl DelegatedLease {
         duration_ticks: u64,
         current_ticks: u64,
     ) -> Result<Self, CapError> {
-        // A zero-use or zero-duration lease is never a meaningful authority.
-        if max_invocations == 0 || duration_ticks == 0 {
-            return Err(CapError::InvalidSlot);
-        }
-
         // 1. Parent must hold GRANT rights
         if !parent.rights.contains(Rights::GRANT) {
             return Err(CapError::InsufficientRights);
@@ -194,18 +178,3 @@ pub fn is_lease_active(lease_id: u64, current_ticks: u64) -> bool {
     registry.iter().any(|lease| lease.lease_id == lease_id && current_ticks < lease.expiry_ticks)
 }
 
-/// Validates and consumes one invocation from a delegated lease.
-/// The quota is consumed under the registry lock, making repeated syscall
-/// verification unable to reuse an exhausted delegation.
-pub fn consume_invocation(
-    lease_id: u64,
-    current_ticks: u64,
-    required_rights: Rights,
-) -> Result<(), CapError> {
-    let mut registry = DELEGATION_REGISTRY.lock();
-    let lease = registry
-        .iter_mut()
-        .find(|lease| lease.lease_id == lease_id)
-        .ok_or(CapError::InvalidSlot)?;
-    lease.consume_invocation(current_ticks, required_rights)
-}
