@@ -133,6 +133,21 @@ fn transmit_tcp_segment(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address,
     NETWORK_DEVICE.lock().transmit(&eth_buf[..len])
 }
 
+pub fn send_tcp_payload(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address, dst_port: u16, seq: u32, ack: u32, payload: &[u8], caps: &CapabilityTable) -> Result<usize, NetError> {
+    if !caps.has_capability(CapabilityType::NetworkSend, Rights::WRITE) { return Err(NetError::CapabilityDenied); }
+    let segment = TcpSegment { src_port, dst_port, seq, ack, flags: 0x18, window: 65535, payload };
+    let mut tcp_buf = [0u8; 1480];
+    let tcp_len = crate::net::tcp::serialize_with_checksum(&segment, src_ip.0, dst_ip.0, &mut tcp_buf).map_err(|_| NetError::BufferTooSmall)?;
+    let mut ip_buf = [0u8; 1514];
+    let ip_len = Ipv4Packet::serialize(src_ip, dst_ip, IpProtocol::Tcp, 64, &tcp_buf[..tcp_len], &mut ip_buf).map_err(|_| NetError::BufferTooSmall)?;
+    let dst_mac = resolve_destination_mac(dst_ip)?;
+    let frame = EthernetFrame { dst_mac, src_mac: NETWORK_DEVICE.lock().info().mac, ethertype: EtherType::Ipv4, payload: &ip_buf[..ip_len] };
+    let mut eth_buf = [0u8; 1514];
+    let n = frame.serialize(&mut eth_buf).map_err(|_| NetError::BufferTooSmall)?;
+    NETWORK_DEVICE.lock().transmit(&eth_buf[..n])?;
+    Ok(payload.len())
+}
+
 pub fn send_tcp_syn(
     src_ip: Ipv4Address,
     src_port: u16,
@@ -217,12 +232,24 @@ pub fn poll_network_interface() -> usize {
                                                 let old_state = conn.state;
                                                 if segment.flags & 0x12 == 0x12 && old_state == TcpState::SynSent {
                                                     conn.recv_seq = segment.seq.wrapping_add(1);
+                                                    conn.send_seq = conn.send_seq.wrapping_add(1);
                                                     conn.state = TcpState::Established;
-                                                    let ack_seq = conn.send_seq.wrapping_add(1);
-                                                    let _ = transmit_tcp_segment(
-                                                        ip_pkt.dst, conn.local_port, ip_pkt.src, conn.remote_port,
-                                                        ack_seq, conn.recv_seq, 0x10,
-                                                    );
+                                                    let ack_seq = conn.send_seq;
+                                                    let _ = transmit_tcp_segment(ip_pkt.dst, conn.local_port, ip_pkt.src, conn.remote_port, ack_seq, conn.recv_seq, 0x10);
+                                                } else if old_state == TcpState::Established {
+                                                    if !segment.payload.is_empty() {
+                                                        let available = TCP_RX_BUF_SIZE.saturating_sub(conn.rx_len);
+                                                        let n = segment.payload.len().min(available);
+                                                        conn.rx[conn.rx_len..conn.rx_len+n].copy_from_slice(&segment.payload[..n]);
+                                                        conn.rx_len += n;
+                                                        conn.recv_seq = segment.seq.wrapping_add(n as u32);
+                                                        let _ = transmit_tcp_segment(ip_pkt.dst, conn.local_port, ip_pkt.src, conn.remote_port, conn.send_seq, conn.recv_seq, 0x10);
+                                                    }
+                                                    if segment.flags & 0x01 != 0 {
+                                                        conn.recv_seq = conn.recv_seq.wrapping_add(1);
+                                                        conn.state = TcpState::CloseWait;
+                                                        let _ = transmit_tcp_segment(ip_pkt.dst, conn.local_port, ip_pkt.src, conn.remote_port, conn.send_seq, conn.recv_seq, 0x10);
+                                                    }
                                                 } else {
                                                     conn.recv_seq = segment.seq.wrapping_add(segment.payload.len() as u32);
                                                     conn.state = tcp_next_state(old_state, segment.flags);

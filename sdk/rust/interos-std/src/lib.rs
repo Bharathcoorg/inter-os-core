@@ -592,6 +592,9 @@ pub fn net_close_socket(socket_id: u32) -> Result<(), i64> {
     if ret == 0 { Ok(()) } else { Err(ret) }
 }
 
+
+pub fn tcp_send(connection_id: u32, payload: &[u8]) -> Result<(), i64> { let r=unsafe{syscall3(SyscallNumber::TcpSend,connection_id as u64,payload.as_ptr() as u64,payload.len() as u64)}; if r==0{Ok(())}else{Err(r)} }
+pub fn tcp_recv(connection_id: u32, out: &mut [u8]) -> Result<usize, i64> { let r=unsafe{syscall3(SyscallNumber::TcpRecv,connection_id as u64,out.as_mut_ptr() as u64,out.len() as u64)}; if r>=0{Ok(r as usize)}else{Err(r)} }
 pub fn tcp_connect(dst_ip: [u8; 4], dst_port: u16, local_port: u16, seq: u32) -> Result<u32, i64> {
     let ip = u32::from_be_bytes(dst_ip) as u64;
     let ret = unsafe { syscall4(SyscallNumber::TcpConnect, ip, dst_port as u64, local_port as u64, seq as u64) };

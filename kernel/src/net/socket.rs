@@ -10,6 +10,7 @@ use crate::capability::{CapabilityTable, CapabilityType, Rights};
 pub const MAX_SOCKETS: usize = 8;
 pub const SOCKET_RX_SLOTS: usize = 4;
 pub const SOCKET_RX_BUF_SIZE: usize = 512;
+pub const TCP_RX_BUF_SIZE: usize = 2048;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct SocketId(pub u32);
@@ -221,6 +222,8 @@ pub struct TcpConnection {
     pub state: crate::net::TcpState,
     pub send_seq: u32,
     pub recv_seq: u32,
+    pub rx: [u8; TCP_RX_BUF_SIZE],
+    pub rx_len: usize,
 }
 
 pub struct TcpConnectionTable {
@@ -254,6 +257,8 @@ impl TcpConnectionTable {
                     state: crate::net::TcpState::SynSent,
                     send_seq: initial_seq,
                     recv_seq: 0,
+                    rx: [0u8; TCP_RX_BUF_SIZE],
+                    rx_len: 0,
                 });
                 return Ok(id);
             }
@@ -269,6 +274,27 @@ impl TcpConnectionTable {
 
     pub fn get_mut(&mut self, id: u32) -> Option<&mut TcpConnection> {
         self.entries.iter_mut().flatten().find(|c| c.id == id)
+    }
+
+    pub fn enqueue_rx(&mut self, id: u32, owner_task_id: u32, payload: &[u8]) -> Result<usize, NetError> {
+        let conn = self.get_mut(id).ok_or(NetError::NoPacketAvailable)?;
+        if conn.owner_task_id != owner_task_id { return Err(NetError::CapabilityDenied); }
+        let room = TCP_RX_BUF_SIZE.saturating_sub(conn.rx_len);
+        let n = payload.len().min(room);
+        conn.rx[conn.rx_len..conn.rx_len+n].copy_from_slice(&payload[..n]);
+        conn.rx_len += n;
+        Ok(n)
+    }
+
+    pub fn recv_owned(&mut self, id: u32, owner_task_id: u32, out: &mut [u8]) -> Result<usize, NetError> {
+        let conn = self.get_mut(id).ok_or(NetError::NoPacketAvailable)?;
+        if conn.owner_task_id != owner_task_id { return Err(NetError::CapabilityDenied); }
+        if conn.rx_len == 0 { return Err(NetError::NoPacketAvailable); }
+        let n = out.len().min(conn.rx_len);
+        out[..n].copy_from_slice(&conn.rx[..n]);
+        conn.rx.copy_within(n..conn.rx_len, 0);
+        conn.rx_len -= n;
+        Ok(n)
     }
 
     pub fn close_owned(&mut self, id: u32, owner_task_id: u32) -> Result<(), NetError> {

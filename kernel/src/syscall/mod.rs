@@ -104,6 +104,8 @@ pub enum SyscallNumber {
     NetworkPoll = 93,
     TcpConnect = 94,
     NetSendSocket = 95,
+    TcpSend = 97,
+    TcpRecv = 98,
     NetCloseSocket = 96,
     SettingsGet = 82,
     SettingsSet = 83,
@@ -1425,6 +1427,19 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             }
         }
         93 => { match sys_network_poll() { Ok(n) => n as i64, Err(e) => e as i64 } },
+        98 => {
+            let len = a3 as usize;
+            if len > 2048 { return SyscallResult::InvalidArguments as i64; }
+            let mut buf = [0u8; 2048];
+            match sys_tcp_recv(a1 as u32, &mut buf[..len]) { Ok(n) => { if copy_to_user(a2, &buf[..n]).is_err() { return SyscallResult::InvalidArguments as i64; } n as i64 }, Err(e) => e as i64 }
+        }
+        97 => {
+            let len = a3 as usize;
+            if len > 1460 { return SyscallResult::InvalidArguments as i64; }
+            let mut buf = [0u8; 1460];
+            if copy_from_user(&mut buf[..len], a2, len).is_err() { return SyscallResult::InvalidArguments as i64; }
+            sys_tcp_send(a1 as u32, &buf[..len]) as i64
+        }
         94 => match sys_tcp_connect(crate::net::Ipv4Address::new((a0 >> 24) as u8, (a0 >> 16) as u8, (a0 >> 8) as u8, a0 as u8), a1 as u16, a2 as u16, a3 as u32) { Ok(id) => id as i64, Err(e) => e as i64 },
         96 => {
             // NetCloseSocket: a1 = socket id
@@ -1526,6 +1541,36 @@ pub fn sys_devfs_io(action: u32, path: &str, buf: &mut [u8]) -> Result<usize, Sy
 }
 
 /// Creates and binds a UDP socket for the current calling task.
+pub fn sys_tcp_send(connection_id: u32, payload: &[u8]) -> SyscallResult {
+    let sched = SCHEDULER.lock();
+    let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    if !current.cap_table.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE) {
+        return SyscallResult::PermissionDenied;
+    }
+    let owner = current.id.0 as u32;
+    let caps = current.cap_table.clone();
+    drop(sched);
+    if payload.len() > crate::net::tcp::TCP_MAX_SEGMENT { return SyscallResult::InvalidArguments; }
+    let (src_ip, src_port, dst_ip, dst_port, seq, ack, state) = {
+        let table = crate::net::TCP_TABLE.lock();
+        let conn = match table.get(connection_id) { Some(c) if c.owner_task_id == owner => c, Some(_) => return SyscallResult::PermissionDenied, None => return SyscallResult::InvalidArguments };
+        (if conn.remote_ip.is_loopback() { crate::net::Ipv4Address::LOCALHOST } else { crate::net::DEFAULT_HOST_IP }, conn.local_port, conn.remote_ip, conn.remote_port, conn.send_seq, conn.recv_seq, conn.state)
+    };
+    if state != crate::net::TcpState::Established { return SyscallResult::NotReady; }
+    crate::net::send_tcp_payload(src_ip, src_port, dst_ip, dst_port, seq, ack, payload, &caps)
+        .map(|n| { crate::net::TCP_TABLE.lock().get_mut(connection_id).map(|c| c.send_seq = c.send_seq.wrapping_add(n as u32)); n; })
+        .map(|_| SyscallResult::Success).unwrap_or(SyscallResult::NetworkError)
+}
+
+pub fn sys_tcp_recv(connection_id: u32, out: &mut [u8]) -> Result<usize, SyscallResult> {
+    let owner = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?.0 as u32;
+    crate::net::TCP_TABLE.lock().recv_owned(connection_id, owner, out).map_err(|e| match e {
+        NetError::CapabilityDenied => SyscallResult::PermissionDenied,
+        NetError::NoPacketAvailable => SyscallResult::NotReady,
+        _ => SyscallResult::NetworkError,
+    })
+}
+
 pub fn sys_tcp_connect(dst_ip: crate::net::Ipv4Address, dst_port: u16, local_port: u16, seq: u32) -> Result<u32, SyscallResult> {
     let sched = SCHEDULER.lock();
     let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
