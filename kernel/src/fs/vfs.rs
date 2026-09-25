@@ -263,6 +263,23 @@ impl Vfs {
         inode_id
     }
 
+    /// Lists immediate children of a directory into a newline-delimited buffer.
+    pub fn list_dir(&self, task_caps:&CapabilityTable, cap_slot:usize, path:&str, out:&mut [u8]) -> Result<usize,FsError>{
+        task_caps.verify(cap_slot,CapabilityType::FileSystemRead,Rights::READ).map_err(FsError::CapabilityError)?;
+        let dir=self.lookup(path).ok_or(FsError::FileNotFound)?;
+        let inode=self.inodes.get(&dir).ok_or(FsError::FileNotFound)?;
+        if inode.file_type!=FileType::Directory{return Err(FsError::NotADirectory);}
+        use core::fmt::Write;
+        struct W<'a>{b:&'a mut[u8],n:usize}
+        impl<'a> Write for W<'a>{fn write_str(&mut self,s:&str)->core::fmt::Result{let k=s.len().min(self.b.len().saturating_sub(self.n));self.b[self.n..self.n+k].copy_from_slice(&s.as_bytes()[..k]);self.n+=k;Ok(())}}
+        let mut w=W{b:out,n:0};
+        for child in self.inodes.values().filter(|n| n.path.starts_with(&(normalize_path(path)+"/")) && n.path[normalize_path(path).len()+1..].contains('/')==false) {
+            let _=write!(w,"{}|{}|{}\n",child.name,child.size,match child.file_type{FileType::Directory=>"dir",FileType::DeviceNode=>"dev",_=>"file"});
+            if w.n>=out.len(){break;}
+        }
+        Ok(w.n)
+    }
+
     /// Looks up InodeId by path.
     pub fn lookup(&self, path: &str) -> Option<InodeId> {
         let norm_path = normalize_path(path);
