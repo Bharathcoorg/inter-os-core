@@ -5,7 +5,7 @@ use spin::Mutex;
 use crate::package::first_party_package;
 
 const MAX_BLOBS:usize=8;
-const MAX_BLOB_SIZE:usize=24576;
+const MAX_BLOB_SIZE:usize=60000;
 
 #[derive(Clone)]
 pub struct PackageBlob { pub package_id:&'static str, pub version:(u16,u16,u16), pub bytes:Vec<u8> }
