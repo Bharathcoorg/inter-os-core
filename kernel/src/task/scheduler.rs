@@ -216,12 +216,6 @@ impl Scheduler {
 
         self.ticks_in_slice = self.ticks_in_slice.saturating_add(1);
 
-        // Service supervision runs from the scheduler tick path so a dead
-        // service is detected even when no userspace manager is scheduled.
-        if self.ticks_in_slice == 1 {
-            crate::services::supervise();
-        }
-
         if self.ticks_in_slice >= TIME_SLICE_TICKS {
             self.prepare_switch()
         } else {
@@ -309,6 +303,10 @@ pub fn on_timer_tick() {
             (None, None)
         }
     };
+
+    // Scheduler lock is released before supervision, avoiding recursive
+    // scheduler acquisition from the service manager.
+    crate::services::supervise();
 
     if let (Some(prev_ptr), Some(next_ptr)) = (prev, next) {
         unsafe {
