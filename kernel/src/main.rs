@@ -908,7 +908,7 @@ extern "C" fn task_security_daemon() -> ! {
                                 }
                             }
                             Err(_) => Err(crate::package::RappError::BufferTooShort),
-                        };
+                        }};
                         match verified {
                             Ok((manifest, bytes_read)) => {
                                 let payload_start = manifest.payload_offset;
