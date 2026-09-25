@@ -1345,8 +1345,10 @@ pub fn sys_resource_query(
     out_battery: &mut u8,
     out_temp: &mut u8,
     out_throttling: &mut bool,
-) -> SyscallResult {
-    require_system_control()?;
+ ) -> SyscallResult {
+    if require_system_control().is_err() {
+        return SyscallResult::PermissionDenied;
+    }
     let rm = crate::resource::RESOURCE_MANAGER.lock();
     *out_battery = rm.battery.percent;
     *out_temp = rm.thermal.temp_celsius;
@@ -1638,12 +1640,13 @@ pub fn sys_telephony_set_data(enabled: bool) -> Result<bool, SyscallResult> {
 pub fn sys_surface_create(width: u32, height: u32, z_order: u32) -> Result<u32, SyscallResult> {
     let sched = SCHEDULER.lock();
     let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    let owner_task = task.id.0;
     if !task.cap_table.authorize_capability(CapabilityType::FrameBufferDirect, Rights::WRITE) { return Err(SyscallResult::PermissionDenied); }
     drop(sched);
     if width == 0 || height == 0 || width > 3840 || height > 2160 {
         return Err(SyscallResult::InvalidArguments);
     }
-    Ok(crate::drivers::display_kms::DRM_KMS.lock().create_surface(width, height, z_order))
+    Ok(crate::drivers::display_kms::DRM_KMS.lock().create_surface(width, height, z_order, owner_task))
 }
 
 /// Triggers DRM/KMS compositor surface blending and atomic page flip.
