@@ -185,7 +185,7 @@ impl Scheduler {
 
     /// Invoked on timer tick: updates accounting and returns switch pointers if time slice expired.
     pub fn check_timer_tick(&mut self) -> (Option<*mut TaskContext>, Option<*const TaskContext>) {
-        if !self.initialized || self.tasks.is_empty() {
+        if !self.initialized || self.tasks.is_empty() || !self.validate_invariants() {
             return (None, None);
         }
 
@@ -202,9 +202,26 @@ impl Scheduler {
         }
     }
 
-    /// Returns the total count of registered tasks.
+    /// Returns the total count of registered tasks, including retained terminated records.
     pub fn task_count(&self) -> usize {
         self.tasks.len()
+    }
+
+    /// Returns the number of tasks that still own schedulable resources.
+    pub fn active_task_count(&self) -> usize {
+        self.tasks.iter().filter(|t| t.state != TaskState::Terminated).count()
+    }
+
+    /// Checks scheduler invariants before a context switch or telemetry snapshot.
+    /// Exactly one task may be Running; terminated tasks must never be the current task.
+    pub fn validate_invariants(&self) -> bool {
+        if self.tasks.is_empty() || self.current_idx >= self.tasks.len() {
+            return false;
+        }
+        if self.tasks[self.current_idx].state == TaskState::Terminated {
+            return false;
+        }
+        self.tasks.iter().filter(|t| t.state == TaskState::Running).count() == 1
     }
 
     /// Emits structured telemetry records for all registered tasks over serial.
