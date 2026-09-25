@@ -90,6 +90,7 @@ pub struct DrmKmsController {
     pub next_surface_id: u32,
     pub vsync_counter: u64,
     pub page_flips_completed: u64,
+    pub focused_surface: Option<u32>,
 }
 
 impl DrmKmsController {
@@ -105,6 +106,7 @@ impl DrmKmsController {
             next_surface_id: 1,
             vsync_counter: 0,
             page_flips_completed: 0,
+            focused_surface: None,
         }
     }
 
@@ -189,6 +191,36 @@ impl DrmKmsController {
             false
         }
     }
+
+    /// Moves an owned surface and updates its visibility.
+    pub fn set_surface_geometry_owned(&mut self, id: u32, owner: u64, x: i32, y: i32, z: u32, visible: bool) -> bool {
+        if let Some(s) = self.surfaces.iter_mut().find(|s| s.id == id && s.owner_task == owner) {
+            s.x=x; s.y=y; s.z_order=z; s.visible=visible; s.dirty=true; return true;
+        }
+        false
+    }
+
+    /// Focuses the topmost visible surface containing a screen coordinate.
+    pub fn focus_at(&mut self, x: u32, y: u32) -> Option<(u32,u64)> {
+        let mut best: Option<(u32,u32,u64)> = None;
+        for s in &self.surfaces {
+            if !s.visible || x < s.x.max(0) as u32 || y < s.y.max(0) as u32 {
+                continue;
+            }
+            if x >= (s.x.max(0) as u32).saturating_add(s.width) ||
+               y >= (s.y.max(0) as u32).saturating_add(s.height) { continue; }
+            if best.map(|v| s.z_order >= v.1).unwrap_or(true) {
+                best=Some((s.id,s.z_order,s.owner_task));
+            }
+        }
+        if let Some((id,_,owner))=best {
+            self.focused_surface=Some(id);
+            return Some((id,owner));
+        }
+        None
+    }
+
+    pub fn focused_surface(&self) -> Option<u32> { self.focused_surface }
 
     /// Composites all visible surfaces onto the back buffer in z-order.
     pub fn composite(&mut self) {
@@ -284,6 +316,7 @@ pub static DRM_KMS: Mutex<DrmKmsController> = Mutex::new(DrmKmsController {
     next_surface_id: 1,
     vsync_counter: 0,
     page_flips_completed: 0,
+    focused_surface: None,
 });
 
 /// Automated verification self-test for DRM/KMS surface composition and page flipping.
