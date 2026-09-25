@@ -90,7 +90,6 @@ pub fn init() {
     }
     crate::serial_println!("[SERVICE] Service definitions registered; PID 1 controls startup.");
 }
-}
 
 /// Starts one declared service on behalf of userspace PID 1.
 pub fn start(id: ServiceId) -> Result<TaskId, &'static str> {
