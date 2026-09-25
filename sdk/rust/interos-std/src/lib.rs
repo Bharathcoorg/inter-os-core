@@ -1578,11 +1578,13 @@ pub fn package_list(cap_slot: usize, out_buf: &mut [u8]) -> Result<usize, i64> {
 
 
 /// Moves an owned window in the compositor.
-pub fn window_set_geometry(id:u32,x:i32,y:i32,z:u32,visible:bool)->Result<(),i64>{
- let r=unsafe{syscall5(SyscallNumber::WindowSetGeometry,id as u64,x as i64 as u64,y as i64 as u64,z as u64,visible as u64)};if r==0{Ok(())}else{Err(r)}
+pub fn window_set_geometry(display_cap_slot: usize, id:u32,x:i32,y:i32,z:u32,visible:bool)->Result<(),i64>{
+ let packed=(z as u64)|if visible{1u64<<63}else{0};
+ let r=unsafe{syscall5(SyscallNumber::WindowSetGeometry,display_cap_slot as u64,id as u64,x as i64 as u64,y as i64 as u64,packed)};if r==0{Ok(())}else{Err(r)}
 }
-/// Focuses the topmost live window under screen coordinates.
-pub fn window_focus(x:u32,y:u32)->Result<(),i64>{let r=unsafe{syscall2(SyscallNumber::WindowFocus,x as u64,y as u64)};if r==0{Ok(())}else{Err(r)}}
+/// Focuses the topmost live surface through the display service.
+pub fn window_focus(display_cap_slot: usize,x:u32,y:u32)->Result<(),i64>{let r=unsafe{syscall3(SyscallNumber::WindowFocus,display_cap_slot as u64,x as u64,y as u64)};if r==0{Ok(())}else{Err(r)}}
+
 /// Verifies a signed Ring-3 system-service RAPP and returns its service ID.
 /// Requires the PID1 service-manager authority and a FileSystemRead capability.
 pub fn service_package_verify(cap_slot: usize, path: &str) -> Result<u8, i64> {
