@@ -213,6 +213,20 @@ pub fn load_user_elf_into_page_table(
 
     let phys_offset = crate::memory::phys_mem_offset();
     let mut entry_in_executable_segment = false;
+    let mut load_ranges: alloc::vec::Vec<(usize, usize, bool, bool)> = alloc::vec::Vec::new();
+
+    // The user stack has a fixed address in the current ABI. Reject ELF load
+    // segments that overlap the stack or its unmapped guard page, and reject
+    // overlapping PT_LOAD ranges so one segment cannot silently replace another
+    // segment's permissions/frame mapping.
+    if stack_top_addr > 0x0000_8000_0000_0000
+        || stack_top_addr < USER_STACK_SIZE + 4096
+    {
+        return Err("Invalid user stack address");
+    }
+    let stack_bottom_addr = stack_top_addr.checked_sub(USER_STACK_SIZE).ok_or("Stack address underflow")?;
+    let stack_guard_start = stack_bottom_addr.checked_sub(4096).ok_or("Stack guard address underflow")?;
+    let stack_guard_end = stack_top_addr;
 
     // 3. Process each program header
     for i in 0..e_phnum {
@@ -247,13 +261,26 @@ pub fn load_user_elf_into_page_table(
             return Err("Segment file size exceeds memory size");
         }
         let seg_end_vaddr = p_vaddr.checked_add(p_memsz).ok_or("Segment memory range overflow")?;
-        if seg_end_vaddr >= 0x0000_8000_0000_0000 {
-            return Err("Segment maps into kernel address space (canonical lower-half violation)");
+        if p_vaddr >= seg_end_vaddr || seg_end_vaddr > 0x0000_8000_0000_0000 {
+            return Err("Invalid or non-canonical user segment range");
         }
-
-        // W^X Enforcement: Segment cannot be both executable and writable!
+        if p_vaddr < stack_guard_end && seg_end_vaddr > stack_guard_start {
+            return Err("ELF segment overlaps user stack or stack guard region");
+        }
         let is_exec = (p_flags & 0x1) != 0;
         let is_write = (p_flags & 0x2) != 0;
+        if load_ranges.iter().any(|(start, end, old_exec, old_write)| {
+            p_vaddr < *end && seg_end_vaddr > *start
+                && (*old_exec != is_exec || *old_write != is_write)
+        }) {
+            return Err("Overlapping ELF load segments request conflicting permissions");
+        }
+        if load_ranges.iter().any(|(start, end, _, _)| p_vaddr < *end && seg_end_vaddr > *start) {
+            return Err("Overlapping ELF load segments are not supported");
+        }
+        load_ranges.push((p_vaddr, seg_end_vaddr, is_exec, is_write));
+
+        // W^X Enforcement: Segment cannot be both executable and writable!
         if is_exec && is_write {
             return Err("W^X security violation: ELF segment requests both write and execute permissions");
         }
@@ -312,9 +339,6 @@ pub fn load_user_elf_into_page_table(
     }
 
     // 4. Allocate 16 KiB dedicated user stack with NX, and leave guard page unmapped
-    if stack_top_addr < USER_STACK_SIZE + 4096 {
-        return Err("Stack top address too low");
-    }
     let stack_bottom = VirtAddr::new((stack_top_addr - USER_STACK_SIZE) as u64);
     let stack_top_vaddr = VirtAddr::new(stack_top_addr as u64);
 
