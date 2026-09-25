@@ -413,10 +413,21 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
         inode.sector_count=sectors;
         inode.path_len=path.len() as u8;
         inode.path[..path.len()].copy_from_slice(path.as_bytes());
+        let txn = FsTransaction {
+            op: 1,
+            inode_index: index,
+            old_used: false, old_size: 0, old_start: 0, old_count: 0,
+            new_used: true, new_size: inode.file_size, new_start: inode.start_sector, new_count: inode.sector_count,
+        };
+        if let Err(e)=self.write_transaction(&txn) {
+            let _=self.free_extent(start,sectors);
+            return Err(e);
+        }
         if let Err(e)=self.write_inode(index,&inode) {
             let _=self.free_extent(start,sectors);
             return Err(e);
         }
+        self.clear_transaction()?;
         Ok(index)
     }
 
@@ -460,21 +471,40 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
         inode.file_size=data.len() as u32;
         inode.start_sector=if sectors == 0 { 0 } else { start };
         inode.sector_count=sectors;
+        let txn = FsTransaction {
+            op: 2,
+            inode_index: index,
+            old_used: old.used, old_size: old.file_size, old_start: old.start_sector, old_count: old.sector_count,
+            new_used: inode.used, new_size: inode.file_size, new_start: inode.start_sector, new_count: inode.sector_count,
+        };
+        if let Err(e)=self.write_transaction(&txn) {
+            let _=self.free_extent(start,sectors);
+            return Err(e);
+        }
         if let Err(e)=self.write_inode(index,&inode) {
             let _=self.free_extent(start,sectors);
             return Err(e);
         }
-        let _=self.free_extent(old.start_sector,old.sector_count);
+        self.free_extent(old.start_sector,old.sector_count)?;
+        self.clear_transaction()?;
         Ok(())
     }
 
     pub fn delete_file(&mut self, path: &str) -> Result<(), FsBackendError> {
         Self::validate_path(path)?;
         let (index, inode) = self.find_inode(path)?.ok_or(FsBackendError::FileNotFound)?;
+        let txn = FsTransaction {
+            op: 3,
+            inode_index: index,
+            old_used: inode.used, old_size: inode.file_size, old_start: inode.start_sector, old_count: inode.sector_count,
+            new_used: false, new_size: 0, new_start: 0, new_count: 0,
+        };
+        self.write_transaction(&txn)?;
+        self.write_inode(index, &DiskInode::empty())?;
         if inode.sector_count != 0 {
             self.free_extent(inode.start_sector, inode.sector_count)?;
         }
-        self.write_inode(index, &DiskInode::empty())?;
+        self.clear_transaction()?;
         Ok(())
     }
 }
