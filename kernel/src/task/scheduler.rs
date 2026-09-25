@@ -207,6 +207,21 @@ impl Scheduler {
     /// Reaping is only allowed for Zombie/Terminated children and never removes
     /// the currently running task. Dropping the TCB releases its kernel stack,
     /// page table and capability table.
+    pub fn terminate_task(&mut self, id: TaskId, exit_code: i32) -> Result<(), &'static str> {
+        let current_id = self.current_task_id().ok_or("no current task")?;
+        if id == TaskId(0) || id == current_id {
+            return Err("task cannot be terminated by lifecycle manager");
+        }
+        let task = self.tasks.iter_mut().find(|task| task.id == id).ok_or("task not found")?;
+        if matches!(task.state, TaskState::Terminated | TaskState::Zombie) {
+            return Ok(());
+        }
+        task.exit_code = exit_code;
+        task.state = TaskState::Zombie;
+        crate::ipc::cleanup_task(id);
+        Ok(())
+    }
+
     pub fn reap_child(&mut self, parent_id: TaskId, child_id: TaskId) -> Result<i32, &'static str> {
         if child_id == TaskId(0) || child_id == self.tasks.get(self.current_idx).map(|t| t.id).unwrap_or(TaskId(0)) {
             return Err("child cannot be reaped");
