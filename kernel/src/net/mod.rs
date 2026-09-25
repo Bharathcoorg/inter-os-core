@@ -72,7 +72,7 @@ fn resolve_destination_mac(dst_ip: Ipv4Address) -> Result<MacAddress, NetError> 
     if dst_ip.is_loopback() {
         return Ok(MacAddress([0, 0, 0, 0, 0, 1]));
     }
-    if let Some(mac) = ARP_TABLE.lock().lookup(dst_ip) {
+    if let Some(mac) = ARP_TABLE.lock().lookup_at(dst_ip, crate::interrupts::get_system_ticks()) {
         return Ok(mac);
     }
     transmit_arp_request(dst_ip)?;
@@ -214,7 +214,7 @@ pub fn poll_network_interface() -> usize {
             match frame.ethertype {
                 EtherType::Arp => {
                     if let Ok(arp_pkt) = ArpPacket::parse(frame.payload) {
-                        ARP_TABLE.lock().insert(arp_pkt.sender_ip, arp_pkt.sender_mac);
+                        ARP_TABLE.lock().insert_at(arp_pkt.sender_ip, arp_pkt.sender_mac, crate::interrupts::get_system_ticks());
                         if arp_pkt.opcode == ArpOpcode::Request && arp_pkt.target_ip == DEFAULT_HOST_IP {
                             let local_mac = NETWORK_DEVICE.lock().info().mac;
                             let reply = ArpPacket {
