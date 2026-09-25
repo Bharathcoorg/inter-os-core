@@ -30,7 +30,7 @@ fn caps(id: ServiceId) -> CapabilityTable {
         ServiceId::Input => (CapabilityType::EventPoll, Rights::READ),
         ServiceId::Storage => (CapabilityType::FileSystemRead, Rights::READ | Rights::WRITE),
         ServiceId::Network => (CapabilityType::NetworkSocket, Rights::READ | Rights::WRITE),
-        ServiceId::Power | ServiceId::Modem | ServiceId::Audio | ServiceId::Camera => (CapabilityType::HardwarePortIo, Rights::READ | Rights::WRITE),
+        ServiceId::Power | ServiceId::Modem | ServiceId::Audio | ServiceId::Camera => (CapabilityType::SystemControl, Rights::INVOKE),
         ServiceId::Init => (CapabilityType::ProcessSpawn, Rights::GRANT),
     };
     let _ = t.insert(Capability { id: CapabilityId(base + 3), cap_type: kind, rights, object_id: id as u64 });
