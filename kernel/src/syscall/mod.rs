@@ -102,6 +102,7 @@ pub enum SyscallNumber {
     ServicePackageLaunch = 91,
     InputEventPoll = 92,
     NetworkPoll = 93,
+    TcpConnect = 94,
     SettingsGet = 82,
     SettingsSet = 83,
     StorageQuery = 84,
@@ -1418,6 +1419,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             }
         }
         93 => { match sys_network_poll() { Ok(n) => n as i64, Err(e) => e as i64 } }
+        94 => match sys_tcp_connect(crate::net::Ipv4Address::new((a0 >> 24) as u8, (a0 >> 16) as u8, (a0 >> 8) as u8, a0 as u8), a1 as u16, a2 as u16, a3 as u32) { Ok(id) => id as i64, Err(e) => e as i64 },
         _ => SyscallResult::UnknownSyscall as i64,
     }
 }
@@ -1500,6 +1502,29 @@ pub fn sys_devfs_io(action: u32, path: &str, buf: &mut [u8]) -> Result<usize, Sy
 }
 
 /// Creates and binds a UDP socket for the current calling task.
+pub fn sys_tcp_connect(dst_ip: crate::net::Ipv4Address, dst_port: u16, local_port: u16, seq: u32) -> Result<u32, SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    if !current.cap_table.authorize_capability(CapabilityType::NetworkSocket, Rights::WRITE)
+        || !current.cap_table.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE) {
+        return Err(SyscallResult::PermissionDenied);
+    }
+    let owner = current.id.0 as u32;
+    let caps = current.cap_table.clone();
+    drop(sched);
+    let id = crate::net::TCP_TABLE.lock()
+        .open(owner, local_port, dst_ip, dst_port, seq)
+        .map_err(|_| SyscallResult::NetworkError)?;
+    if crate::net::send_tcp_syn(
+        if dst_ip.is_loopback() { crate::net::Ipv4Address::LOCALHOST } else { crate::net::DEFAULT_HOST_IP },
+        local_port, dst_ip, dst_port, seq, &caps,
+    ).is_err() {
+        let _ = crate::net::TCP_TABLE.lock().close_owned(id, owner);
+        return Err(SyscallResult::NetworkError);
+    }
+    Ok(id)
+}
+
 pub fn sys_net_socket(port: u16) -> Result<u32, SyscallResult> {
     let sched = SCHEDULER.lock();
     let current = match sched.current_task() {
