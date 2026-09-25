@@ -226,6 +226,9 @@ pub fn restart_failed(parent_id: TaskId) -> usize {
             _ => None,
         };
         if let Some(task) = failed_task {
+            // A heartbeat timeout may leave the worker schedulable. Terminate it
+            // before spawning the replacement so recovery cannot duplicate a service.
+            let _ = SCHEDULER.lock().terminate_task(task, -1);
             let _ = SCHEDULER.lock().reap_child(parent_id, task);
             if start(id, parent_id).is_ok() { restarted += 1; }
         }
