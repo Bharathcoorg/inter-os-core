@@ -54,7 +54,7 @@ use crypto::Sha256;
 use drivers::{BlockDevice, ATA_PRIMARY, SECTOR_SIZE};
 use fs::VFS;
 use ipc::IPC_ROUTER;
-use package::{build_rapp, parse_rapp, RappArch};
+use package::{parse_rapp, RappArch};
 use storage::{MerkleVerifier, StorageError};
 use task::{SCHEDULER, TaskId};
 use wasm::{opcodes, Value, WasmError, WasmMemory, WasmModule, WasmVm};
@@ -248,16 +248,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     wasm_app_code.push(opcodes::RETURN);
     wasm_app_code.push(opcodes::END);
 
-    let rapp_binary = build_rapp(
-        "org.interos.calculator",
-        "interos_official",
-        (1, 0, 0),
-        RappArch::X86_64,
-        &[1], // Cap: SerialOutput
-        &wasm_app_code,
-    );
-
-    VFS.lock().create_file("/packages/calculator.rapp", &rapp_binary, true);
+    // RAPP v2 is fail-closed: unsigned kernel-built packages are never staged for execution.
+    // Signed packages are produced by tools/interos.py and must be provisioned into the trust store.
+    let _ = (RappArch::X86_64, wasm_app_code);
+    serial_println!("[OK] RAPP v2 runtime ready: unsigned packages are rejected by the kernel trust boundary.");
     serial_println!("[OK] Root filesystem mounted. Built-in package staged at '/packages/calculator.rapp'.");
 
     // 11. Zero-Trust Capability Enforcement Self-Tests
@@ -353,10 +347,30 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     // 31c. Verify .rapp package format round-trip (build → parse → SHA-256 verify)
     {
-        use package::rapp::{build_rapp, parse_rapp, RappArch};
+        use package::rapp::{parse_rapp, RappArch};
         let test_elf = b"\x7fELF_TEST_PAYLOAD_STUB";
-        let rapp_bin = build_rapp("com.test.hello", "interos", (1, 0, 0), RappArch::X86_64, &[1, 2], test_elf);
-        match parse_rapp(&rapp_bin) {
+        // Negative trust-boundary test: a zero-signature package must not parse.
+        let rapp_bin = {
+            let mut b = Vec::new();
+            b.extend_from_slice(b"RAPP");
+            b.extend_from_slice(&2u16.to_le_bytes());
+            b.extend_from_slice(&(RappArch::X86_64 as u16).to_le_bytes());
+            b.extend_from_slice(b"com.test.hello");
+            b.resize(40, 0);
+            b.extend_from_slice(&[0u8; 32]);
+            b.extend_from_slice(&1u16.to_le_bytes());
+            b.extend_from_slice(&0u16.to_le_bytes());
+            b.extend_from_slice(&0u16.to_le_bytes());
+            b.extend_from_slice(&2u16.to_le_bytes());
+            b.extend_from_slice(&crate::crypto::Sha256::digest(test_elf));
+            b.extend_from_slice(&[0u8; 64]);
+            b.extend_from_slice(&(test_elf.len() as u32).to_le_bytes());
+            b.extend_from_slice(&1u16.to_le_bytes());
+            b.extend_from_slice(&2u16.to_le_bytes());
+            b.extend_from_slice(test_elf);
+            b
+        };
+        assert!(parse_rapp(&rapp_bin).is_err());
             Ok(manifest) => {
                 assert_eq!(manifest.package_id, "com.test.hello");
                 assert_eq!(manifest.publisher_id, "interos");
