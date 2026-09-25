@@ -56,6 +56,8 @@ def main() -> None:
     must(interfs, "pub struct InterFs", "block-backed filesystem controller")
     must(interfs, "pub fn format", "filesystem format operation")
     must(interfs, "pub fn format_at", "explicit filesystem region formatting")
+    must(interfs, "pub fn format_region", "bounded filesystem formatting")
+    must(interfs, "pub fn mount_region", "bounded filesystem mounting")
     must(interfs, "pub fn mount_at", "explicit filesystem region mounting")
     must(interfs, "base_lba", "filesystem region boundary state")
     must(interfs, "pub fn mount", "filesystem mount operation")
