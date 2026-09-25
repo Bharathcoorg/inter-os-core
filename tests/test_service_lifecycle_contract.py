@@ -62,6 +62,10 @@ def main() -> None:
          "service stop parent ownership")
     must(services, 'return Err("service is not owned by caller")',
          "cross-parent service stop rejection")
+    must(services, "Do not grant generic SystemControl to individual services.",
+         "no ambient SystemControl in workers")
+    must(services, "ServiceId::Power | ServiceId::Modem | ServiceId::Audio | ServiceId::Camera =>",
+         "privileged service capability restriction")
 
     # Supervisor must inspect scheduler state before mutating the registry.
     must(services, "let sched = SCHEDULER.lock();", "supervisor scheduler lock")
