@@ -180,9 +180,13 @@ jobs:
           set -o pipefail
           timeout 20s qemu-system-x86_64 \\
             -drive format=raw,file=target/interos-os-ci.img \\
-            -nic user,model=e1000 \\
+            -nic user,model=e1000,hostfwd=udp::4242-:4242 \\
             -serial file:target/interos-qemu-serial.log \\
-            -display none -no-reboot -no-shutdown || test $? -eq 124
+            -display none -no-reboot -no-shutdown &
+          QEMU_PID=$!
+          sleep 6
+          python -c "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); [s.sendto(b'INTEROS_E1000_RX_PROBE',('127.0.0.1',4242)) for _ in range(5)]; s.close()"
+          wait $QEMU_PID || test $? -eq 124
           test -s target/interos-qemu-serial.log
           grep -F "INTER OS CORE -- Open-Source Rust Mobile Microkernel" target/interos-qemu-serial.log
           grep -F "[OK] PID1 userspace service manager spawned" target/interos-qemu-serial.log
@@ -195,6 +199,7 @@ jobs:
           grep -F "[PID1] All system services running after bootstrap." target/interos-qemu-serial.log
           grep -F "[NET] Intel E1000 network backend attached:" target/interos-qemu-serial.log
           grep -F "[OK] PCI Ethernet controller attached to canonical network device." target/interos-qemu-serial.log
+          grep -F "[netd] External UDP packet received through userspace network service." target/interos-qemu-serial.log
           grep -F "[PID1] Recovered failed system service(s)." target/interos-qemu-serial.log
       - name: Verify boot image builder
         run: cargo check --manifest-path boot/Cargo.toml
