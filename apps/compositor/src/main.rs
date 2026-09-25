@@ -30,7 +30,7 @@ pub extern "C" fn _start() -> ! {
             let _ = std::surface_flip();
             std::log(0, "[COMPOSITOR USERSPACE] First composition committed with atomic page flip.").ok();
         }
-        Err(_) => std::log(0, "[COMPOSITOR USERSPACE] Surface allocation unavailable; service remains alive.").ok(),
+        Err(_) => { std::log(0, "[COMPOSITOR USERSPACE] Surface allocation unavailable; service remains alive.").ok(); }
     }
 
     loop {
