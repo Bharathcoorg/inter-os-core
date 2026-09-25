@@ -8,7 +8,6 @@
 //! M22 will add transactional metadata publication and deterministic crash
 //! recovery around these mutations.
 
-use alloc::vec::Vec;
 use crate::drivers::{BlockDevice, AtaError, SECTOR_SIZE};
 
 pub const FS_MAGIC: [u8; 4] = *b"IOFS";
@@ -23,6 +22,7 @@ const INODE_SECTORS: u32 = 32;
 const DATA_LBA: u32 = INODE_LBA + INODE_SECTORS;
 const MAX_INODES: u32 = (INODE_SECTORS as usize * INODES_PER_SECTOR) as u32;
 const MAX_PATH: usize = 47;
+const BITMAP_CAPACITY_SECTORS: u32 = BITMAP_SECTORS * SECTOR_SIZE as u32 * 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsBackendError {
@@ -72,7 +72,7 @@ impl Superblock {
         let data_start = u32::from_le_bytes([buf[12],buf[13],buf[14],buf[15]]);
         let data_sectors = u32::from_le_bytes([buf[16],buf[17],buf[18],buf[19]]);
         let inode_count = u32::from_le_bytes([buf[20],buf[21],buf[22],buf[23]]);
-        if inode_count != MAX_INODES || data_start != DATA_LBA || data_sectors == 0
+        if inode_count != MAX_INODES || data_start != DATA_LBA || data_sectors == 0 || data_sectors > BITMAP_CAPACITY_SECTORS
             || data_start.checked_add(data_sectors).unwrap_or(u32::MAX) > total {
             return Err(FsBackendError::CorruptMetadata);
         }
@@ -135,7 +135,7 @@ pub struct InterFs<'a, D: BlockDevice> {
 impl<'a, D: BlockDevice> InterFs<'a, D> {
     pub fn format(device: &'a mut D) -> Result<Self, FsBackendError> {
         let total = device.sector_count();
-        if total <= DATA_LBA + 1 {
+        if total <= DATA_LBA + 1 || total - DATA_LBA > BITMAP_CAPACITY_SECTORS {
             return Err(FsBackendError::NoSpace);
         }
         let sb = Superblock {
