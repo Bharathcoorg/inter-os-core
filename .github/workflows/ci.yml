@@ -134,6 +134,9 @@ jobs:
       - name: Run Input Event Pipeline Contract Tests
         run: python tests/test_input_contract.py
 
+      - name: Run Compositor Protocol Contract Tests
+        run: python tests/test_compositor_protocol.py
+
   qemu-vertical-slice:
     name: QEMU x86_64 Build Contract
     runs-on: ubuntu-latest
