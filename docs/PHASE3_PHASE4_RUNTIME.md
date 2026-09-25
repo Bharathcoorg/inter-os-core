@@ -32,3 +32,7 @@ Then boot with:
     qemu-system-x86_64 -drive format=raw,file=target/inter-os-bios.img -serial stdio -display none
 
 The CI build contract intentionally uses cargo check for the bare-metal kernel: current nightly LLVM code generation has produced a sha2 backend failure during full x86_64 image compilation, while the same target passes compilation checks. CI therefore does not claim a runtime boot smoke test until code generation is stable.
+
+## Persistent payload store
+
+Phase 4 now separates package metadata from package bytes. Verified `.rapp` payloads installed through the package syscall are stored in persistent journal kind 5 and restored during boot. Launch prefers the restored verified payload before falling back to the immutable system staging path. The persistent journal reserves 128 sectors per slot so package payloads can exceed the small metadata record sizes.
