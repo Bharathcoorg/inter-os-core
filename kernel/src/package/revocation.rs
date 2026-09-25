@@ -9,6 +9,8 @@ use crate::serial_println;
 const MAX_PERSISTED_RECORDS: usize = 24;
 const RECORD_SIZE: usize = 105;
 const REVOCATION_MAGIC: &[u8; 4] = b"RVK1";
+const TRUST_MAGIC: &[u8; 4] = b"TRS1";
+const TRUST_RECORD_SIZE: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RevocationReason {
@@ -163,9 +165,56 @@ impl RevocationRegistry {
         true
     }
 
+    fn persist_trusted_keys(&self) -> Result<(), ()> {
+        let mut buf = [0u8; 4096];
+        buf[0..4].copy_from_slice(TRUST_MAGIC);
+        let count = self.trusted_keys.len().min(MAX_PERSISTED_RECORDS);
+        buf[4] = count as u8;
+        let mut pos = 5usize;
+        for (key, publisher) in self.trusted_keys.iter().take(count) {
+            if pos + TRUST_RECORD_SIZE > buf.len() { break; }
+            buf[pos..pos + 32].copy_from_slice(key);
+            pos += 32;
+            buf[pos..pos + 32].fill(0);
+            let bytes = publisher.as_bytes();
+            let n = bytes.len().min(32);
+            buf[pos..pos + n].copy_from_slice(&bytes[..n]);
+            pos += 32;
+        }
+        crate::storage::persistent::commit_kind(&buf[..pos], 3).map(|_| ()).map_err(|_| ())
+    }
+
+    fn restore_trusted_keys(&mut self) -> bool {
+        let mut buf = [0u8; 4096];
+        let Ok(Some((_generation, len))) =
+            crate::storage::persistent::load_latest_kind(&mut buf, 3) else { return false; };
+        if len < 5 || &buf[..4] != TRUST_MAGIC { return false; }
+        self.trusted_keys.clear();
+        let count = (buf[4] as usize).min(MAX_PERSISTED_RECORDS);
+        let mut pos = 5usize;
+        for _ in 0..count {
+            if pos + TRUST_RECORD_SIZE > len { return false; }
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&buf[pos..pos + 32]);
+            pos += 32;
+            let raw = &buf[pos..pos + 32];
+            let end = raw.iter().position(|b| *b == 0).unwrap_or(32);
+            let publisher = match core::str::from_utf8(&raw[..end]) {
+                Ok(v) => v.to_string(),
+                Err(_) => return false,
+            };
+            pos += 32;
+            self.trusted_keys.insert(key, publisher);
+        }
+        true
+    }
+
     pub fn seed(&mut self) {
         if self.restore() {
             serial_println!("[REVOCATION] persistent CRL restored.");
+        }
+        if self.restore_trusted_keys() {
+            serial_println!("[TRUST] persistent publisher trust roots restored.");
         }
     }
 
@@ -198,8 +247,11 @@ impl RevocationRegistry {
     }
 
     /// Registers a publisher public key in the device trust store.
+    /// Provisions a publisher trust root from a secure boot/provisioning path.
+    /// This method intentionally has no userspace syscall wrapper.
     pub fn trust_key(&mut self, key: [u8; 32], publisher: &str) {
         self.trusted_keys.insert(key, publisher.to_string());
+        let _ = self.persist_trusted_keys();
     }
 
     /// Returns true only for an explicitly provisioned publisher key.
@@ -209,6 +261,7 @@ impl RevocationRegistry {
 
     pub fn apply_key_rotation(&mut self, proof: &KeyRotationProof) -> Result<(), &'static str> {
         if !proof.verify() { return Err("Invalid key rotation cryptographic proof"); }
+        if !self.is_key_trusted(&proof.old_key) { return Err("Old key is not a trusted publisher root"); }
         if self.is_key_revoked(&proof.old_key) { return Err("Old key is revoked; cannot be rotated"); }
 
         self.rotated_keys.insert(proof.publisher.clone(), proof.new_key);
