@@ -13,6 +13,7 @@ STORAGE = ROOT / "kernel/src/storage/mod.rs"
 PERSISTENT = ROOT / "kernel/src/storage/persistent.rs"
 VFS = ROOT / "kernel/src/fs/vfs.rs"
 INTERFS = ROOT / "kernel/src/storage/interfs.rs"
+FILESYSTEM = ROOT / "kernel/src/storage/filesystem.rs"
 
 
 def must(text: str, needle: str, label: str) -> None:
@@ -26,6 +27,7 @@ def main() -> None:
     persistent = PERSISTENT.read_text()
     vfs = VFS.read_text()
     interfs = INTERFS.read_text()
+    filesystem = FILESYSTEM.read_text()
 
     # M19: hardware implementations share one sector-level abstraction.
     must(ata, "pub trait BlockDevice: Send + Sync", "canonical block-device trait")
