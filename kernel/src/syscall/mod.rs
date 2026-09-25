@@ -1527,8 +1527,13 @@ pub fn sys_net_sendto(dst_ip: crate::net::Ipv4Address, dst_port: u16, payload: &
     let caps = current.cap_table.clone();
     drop(sched);
 
+    let src_ip = if dst_ip.is_loopback() {
+        crate::net::Ipv4Address::LOCALHOST
+    } else {
+        crate::net::DEFAULT_HOST_IP
+    };
     match crate::net::send_udp_datagram(
-        crate::net::Ipv4Address::LOCALHOST,
+        src_ip,
         49152,
         dst_ip,
         dst_port,
@@ -1564,8 +1569,12 @@ pub fn sys_net_recvfrom(sock_id: crate::net::SocketId, out_buf: &mut [u8]) -> Re
     let caps = current.cap_table.clone();
     drop(sched);
 
+    let current_id = sched.current_task_id().ok_or(SyscallResult::PermissionDenied)?;
     let mut sock_table = crate::net::SOCKET_TABLE.lock();
     let sock = sock_table.get_mut(sock_id).ok_or(SyscallResult::InvalidArguments)?;
+    if sock.owner_task_id != current_id.0 as u32 {
+        return Err(SyscallResult::PermissionDenied);
+    }
     let (bytes, _, _) = sock.recv_from(out_buf, &caps).map_err(|_| SyscallResult::PermissionDenied)?;
     Ok(bytes)
 }
