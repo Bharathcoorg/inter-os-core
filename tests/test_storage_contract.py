@@ -12,6 +12,7 @@ SDHCI = ROOT / "kernel/src/drivers/sdhci.rs"
 STORAGE = ROOT / "kernel/src/storage/mod.rs"
 PERSISTENT = ROOT / "kernel/src/storage/persistent.rs"
 VFS = ROOT / "kernel/src/fs/vfs.rs"
+INTERFS = ROOT / "kernel/src/storage/interfs.rs"
 
 
 def must(text: str, needle: str, label: str) -> None:
@@ -24,6 +25,7 @@ def main() -> None:
     storage = STORAGE.read_text()
     persistent = PERSISTENT.read_text()
     vfs = VFS.read_text()
+    interfs = INTERFS.read_text()
 
     # M19: hardware implementations share one sector-level abstraction.
     must(ata, "pub trait BlockDevice: Send + Sync", "canonical block-device trait")
@@ -47,6 +49,20 @@ def main() -> None:
     must(vfs, "vfs.restore_data_snapshot();", "persistent VFS restore")
     must(vfs, 'crate::storage::persistent::commit_kind(&buf[..pos],4)', "VFS snapshot persistence")
     must(vfs, 'path.starts_with("/data/")', "persistent mutable-data boundary")
+
+    # M20: a real on-disk filesystem backend exists above BlockDevice.
+    must(interfs, "pub struct InterFs", "block-backed filesystem controller")
+    must(interfs, "pub fn format", "filesystem format operation")
+    must(interfs, "pub fn mount", "filesystem mount operation")
+    must(interfs, "FS_MAGIC", "filesystem superblock magic")
+    must(interfs, "struct DiskInode", "persistent inode record")
+    must(interfs, "BITMAP_LBA", "persistent allocation bitmap")
+    must(interfs, "INODE_LBA", "persistent inode table")
+    must(interfs, "pub fn create_file", "on-disk file creation")
+    must(interfs, "pub fn read_file", "on-disk file read")
+    must(interfs, "pub fn write_file", "on-disk file replacement")
+    must(interfs, "self.device.write_sector", "filesystem uses BlockDevice writes")
+    must(interfs, "self.device.read_sector", "filesystem uses BlockDevice reads")
 
     # M22: write payload sectors first and publish the generation header last.
     payload_write = persistent.index("drive.write_sector(base + sector, &buf)")
