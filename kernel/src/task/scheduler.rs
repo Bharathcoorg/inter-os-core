@@ -130,6 +130,9 @@ impl Scheduler {
                 if i < self.current_idx { self.current_idx -= 1; }
             }
         }
+        if self.current_idx >= self.tasks.len() {
+            self.current_idx = self.tasks.len().saturating_sub(1);
+        }
     }
 
     /// Prepares context pointers for switching to the next ready task in round-robin order.
@@ -196,8 +199,21 @@ impl Scheduler {
     pub fn prepare_terminate(&mut self) -> (Option<*mut TaskContext>, Option<*const TaskContext>) {
         let current_idx = self.current_idx;
         let task_id = self.tasks[current_idx].id;
-        self.tasks[current_idx].state = TaskState::Terminated;
+
+        // An exiting task remains a Zombie until its parent reaps it. Terminated
+        // is reserved for the post-waitpid state so resources are not reclaimed
+        // before the parent observes the exit status.
+        self.tasks[current_idx].state = TaskState::Zombie;
         crate::ipc::cleanup_task(task_id);
+
+        // Reparent live children to primordial init so a dead parent cannot leave
+        // an unreapable child/zombie subtree behind.
+        for task in &mut self.tasks {
+            if task.id != task_id && task.parent_id == task_id {
+                task.parent_id = TaskId(0);
+            }
+        }
+
         self.prepare_switch()
     }
 
