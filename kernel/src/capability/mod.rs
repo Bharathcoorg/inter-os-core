@@ -274,6 +274,13 @@ impl CapabilityTable {
         if !cap.rights.contains(required_rights) {
             return Err(CapError::InsufficientRights);
         }
+        if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
+            delegation::consume_invocation(
+                cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF,
+                crate::interrupts::get_system_ticks(),
+                required_rights,
+            )?;
+        }
         Ok(cap)
     }
 
@@ -291,6 +298,13 @@ impl CapabilityTable {
         if !cap.rights.contains(required_rights) {
             return Err(CapError::InsufficientRights);
         }
+        if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
+            delegation::consume_invocation(
+                cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF,
+                crate::interrupts::get_system_ticks(),
+                required_rights,
+            )?;
+        }
         Ok(cap)
     }
 
@@ -298,9 +312,19 @@ impl CapabilityTable {
     pub fn has_capability(&self, expected_type: CapabilityType, required_rights: Rights) -> bool {
         for slot in &self.slots {
             if let Some(ref cap) = slot.cap {
-                if cap.cap_type == expected_type && cap.rights.contains(required_rights) {
-                    return true;
+                if cap.cap_type != expected_type || !cap.rights.contains(required_rights) {
+                    continue;
                 }
+                if cap.id.0 & 0x8000_0000_0000_0000 != 0
+                    && delegation::consume_invocation(
+                        cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF,
+                        crate::interrupts::get_system_ticks(),
+                        required_rights,
+                    ).is_err()
+                {
+                    continue;
+                }
+                return true;
             }
         }
         false
