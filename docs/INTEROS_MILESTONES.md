@@ -40,7 +40,7 @@ This roadmap tracks the remaining work in dependency order. A milestone is **com
 | M20 | Real filesystem/storage backend | 🟡 Implementation complete — bounded block-backed InterFS is mounted before VFS, `/data` persistence uses it, region/bitmap/zero-length/corruption paths are hardened, and storage contracts are updated; CI/QEMU evidence pending |
 | M21 | Persistent VFS metadata | 🟡 Implementation complete — mutable `/data` inode metadata, stable inode IDs, parent/child reconstruction, and metadata restore-before-payload flow are implemented; CI evidence pending |
 | M22 | Atomic writes and crash recovery | 🟡 Implementation complete — InterFS create/write/delete operations publish a checksummed transaction intent before inode publication, recover unfinished transactions during mount, and clear the intent after metadata completion; CI/fault-injection evidence pending |
-| M23 | Encrypted storage boundary | ⬜ Pending |
+| M23 | Encrypted storage boundary | 🟡 Implementation complete — persistent device storage root is provisioned through the keystore, mutable VFS metadata/payloads use authenticated ENC1 encryption at rest, and legacy plaintext snapshots migrate on restore; CI evidence pending |
 | M24 | Storage service userspace implementation | ⬜ Pending |
 
 ## Graphics and input
