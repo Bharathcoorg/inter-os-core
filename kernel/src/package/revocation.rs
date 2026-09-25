@@ -3,7 +3,7 @@
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use spin::Mutex;
-use crate::crypto::HmacSha256;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use crate::serial_println;
 
 const MAX_PERSISTED_RECORDS: usize = 24;
@@ -34,20 +34,22 @@ pub struct KeyRotationProof {
     pub old_key: [u8; 32],
     pub new_key: [u8; 32],
     pub epoch: u64,
-    pub proof_signature: [u8; 32],
+    pub proof_signature: [u8; 64],
 }
 
 impl KeyRotationProof {
-    pub fn compute_signature(old_key: &[u8; 32], new_key: &[u8; 32], epoch: u64) -> [u8; 32] {
+    fn message(&self) -> [u8; 40] {
         let mut msg = [0u8; 40];
-        msg[..32].copy_from_slice(new_key);
-        msg[32..40].copy_from_slice(&epoch.to_le_bytes());
-        HmacSha256::compute(old_key, &msg)
+        msg[..32].copy_from_slice(&self.new_key);
+        msg[32..40].copy_from_slice(&self.epoch.to_le_bytes());
+        msg
     }
 
+    /// Verifies a rotation authorization signed by the old publisher private key.
     pub fn verify(&self) -> bool {
-        let expected = Self::compute_signature(&self.old_key, &self.new_key, self.epoch);
-        crate::crypto::constant_time_eq_32(&expected, &self.proof_signature)
+        let Ok(key) = VerifyingKey::from_bytes(&self.old_key) else { return false; };
+        let signature = Signature::from_bytes(&self.proof_signature);
+        key.verify(&self.message(), &signature).is_ok()
     }
 }
 
