@@ -71,6 +71,7 @@ pub enum SyscallNumber {
     SurfaceDestroy = 74,
     PackageList = 75,
     PackageRegistry = 76,
+    WindowList = 77,
 }
 
 // -----------------------------------------------------------------------------
@@ -587,6 +588,12 @@ pub fn package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) -> Res
     } else {
         Err(ret)
     }
+}
+
+/// Reads the live compositor window registry.
+pub fn window_list(out_buf:&mut [u8])->Result<usize,i64>{
+    let ret=unsafe{syscall2(SyscallNumber::WindowList,out_buf.as_mut_ptr() as u64,out_buf.len() as u64)};
+    if ret>=0{Ok(ret as usize)}else{Err(ret)}
 }
 
 /// Reads the kernel package lifecycle registry. Requires FileSystemRead capability in cap_slot.
