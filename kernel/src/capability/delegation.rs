@@ -177,3 +177,19 @@ pub fn is_lease_active(lease_id: u64, current_ticks: u64) -> bool {
     let registry = DELEGATION_REGISTRY.lock();
     registry.iter().any(|lease| lease.lease_id == lease_id && current_ticks < lease.expiry_ticks)
 }
+
+/// Validates and consumes one invocation from a delegated lease.
+/// The quota is consumed under the registry lock, making repeated syscall
+/// verification unable to reuse an exhausted delegation.
+pub fn consume_invocation(
+    lease_id: u64,
+    current_ticks: u64,
+    required_rights: Rights,
+) -> Result<(), CapError> {
+    let mut registry = DELEGATION_REGISTRY.lock();
+    let lease = registry
+        .iter_mut()
+        .find(|lease| lease.lease_id == lease_id)
+        .ok_or(CapError::InvalidSlot)?;
+    lease.consume_invocation(current_ticks, required_rights)
+}
