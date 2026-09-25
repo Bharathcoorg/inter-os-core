@@ -1312,6 +1312,15 @@ pub fn sys_wireless_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
 
 /// Interacts with standard virtual character device nodes in `/dev/`.
 pub fn sys_devfs_io(action: u32, path: &str, buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    let allowed = if action == 0 {
+        task.cap_table.has_capability(CapabilityType::FileSystemRead, Rights::READ)
+    } else {
+        task.cap_table.has_capability(CapabilityType::FileSystemWrite, Rights::WRITE)
+    };
+    drop(sched);
+    if !allowed { return Err(SyscallResult::PermissionDenied); }
     if action == 0 {
         // Read
         crate::fs::devfs::device_read(path, buf).map_err(|e| match e {
