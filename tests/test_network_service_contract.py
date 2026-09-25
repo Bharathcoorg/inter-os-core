@@ -49,6 +49,8 @@ def main():
     must(tcp, "serialize_with_checksum", "TCP checksum serialization")
     must(tcp, "tcp_checksum", "TCP pseudo-header checksum")
     must(tcp, "SynReceived", "TCP state machine")
+    must(net, "segment.flags & 0x12 == 0x12", "TCP SYN-ACK integration")
+    must(net, "transmit_tcp_segment(", "kernel TCP ACK transmission")
     must(dns, "encode_query", "DNS query encoder")
     must(dns, "parse_a_answer", "DNS A-record parser")
     print("userspace network service contract: PASS")
