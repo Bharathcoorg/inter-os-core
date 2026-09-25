@@ -401,9 +401,9 @@ def cmd_test(args):
 # =============================================================================
 # COMMAND: package (alias: pack)
 # =============================================================================
-def _rapp_v2_encode(manifest_data, publisher_key, signature, payload):
+def _rapp_v2_encode(manifest_data, publisher_key, signature, payload, arch_name=None):
     arch_map = {"x86_64": 0, "aarch64": 1, "riscv64": 2}
-    arch_name = getattr(args, "arch", None) or manifest_data.get("architecture", "x86_64")
+    arch_name = arch_name or manifest_data.get("architecture", "x86_64")
     if arch_name not in arch_map:
         raise ValueError(f"Unsupported architecture: {arch_name}")
     version = tuple(int(x) for x in str(manifest_data["version"]).split("."))
@@ -478,9 +478,9 @@ def cmd_pack(args):
             key_file.write_bytes(priv_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
             log(f"Generated developer signing key at {key_file}")
         pub = priv_key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-        unsigned = _rapp_v2_encode(manifest_data, pub, b"\\0" * 64, payload)
+        unsigned = _rapp_v2_encode(manifest_data, pub, b"\\0" * 64, payload, getattr(args, "arch", None))
         signature = priv_key.sign(_rapp_v2_signing_bytes(unsigned))
-        package_bytes = _rapp_v2_encode(manifest_data, pub, signature, payload)
+        package_bytes = _rapp_v2_encode(manifest_data, pub, signature, payload, getattr(args, "arch", None))
     except Exception as e:
         log_error(f"RAPP v2 signing failed: {e}")
         return 1
