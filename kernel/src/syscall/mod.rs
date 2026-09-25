@@ -165,8 +165,11 @@ pub fn sys_yield() {
 /// via `sys_waitpid`. If no parent is waiting, the scheduler will eventually reclaim it.
 pub fn sys_exit_with_code(exit_code: i32) -> ! {
     if let Some(id) = SCHEDULER.lock().current_task_id() {
-        let released = crate::net::SOCKET_TABLE.lock().release_owner(id.0 as u32);
+        let owner = id.0 as u32;
+        let released = crate::net::SOCKET_TABLE.lock().release_owner(owner);
         if released > 0 { serial_println!("[NET] Released {} socket(s) owned by exiting task {}.", released, id.0); }
+        let tcp_released = crate::net::TCP_TABLE.lock().release_owner(owner);
+        if tcp_released > 0 { serial_println!("[NET] Released {} TCP connection(s) owned by exiting task {}.", tcp_released, id.0); }
     }
     {
         let mut sched = SCHEDULER.lock();
