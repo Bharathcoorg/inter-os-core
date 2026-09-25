@@ -1,6 +1,6 @@
 //! Ed25519 package-signature verification and publisher trust root.
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 
 pub const PUBLISHER_ID: &str = "interos_official";
 pub const PUBLIC_KEY_LEN: usize = 32;

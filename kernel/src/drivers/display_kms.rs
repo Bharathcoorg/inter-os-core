@@ -264,17 +264,6 @@ impl DrmKmsController {
         }
     }
 
-    /// Copies window/surface metadata without exposing pixel memory to userspace.
-    pub fn surface_snapshot(&self, out: &mut [SurfaceSnapshot]) -> usize {
-        let mut n=0usize;
-        for s in &self.surfaces {
-            if n>=out.len(){break;}
-            out[n]=SurfaceSnapshot{id:s.id,owner_task:s.owner_task,x:s.x,y:s.y,width:s.width,height:s.height,z_order:s.z_order,opacity:s.opacity,visible:s.visible,dirty:s.dirty};
-            n+=1;
-        }
-        n
-    }
-
     /// Performs an atomic page flip: swaps back buffer to front scanout buffer.
     pub fn page_flip(&mut self) -> u64 {
         core::mem::swap(&mut self.front_buffer, &mut self.back_buffer);
