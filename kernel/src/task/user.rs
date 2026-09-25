@@ -578,6 +578,12 @@ pub fn spawn_user_init(id_security: TaskId) -> TaskId {
 
     // Slot 8: EventPoll capability (Sovereign Async Event Reactor & epoll/kqueue)
     user_caps.insert(Capability {
+        id: CapabilityId(910),
+        cap_type: CapabilityType::SystemControl,
+        rights: Rights::INVOKE,
+        object_id: 0,
+    }).expect("PID1 SystemControl capability");
+    user_caps.insert(Capability {
         id: CapabilityId(909),
         cap_type: CapabilityType::EventPoll,
         rights: Rights::READ.union(Rights::INVOKE),
