@@ -11,7 +11,7 @@ pub mod compositor {
     pub const MAGIC: [u8; 4] = *b"ICMP";
     pub const VERSION: u8 = 1;
     pub const MSG_TYPE: u32 = 0x434F_4D50;
-    pub const HEADER_SIZE: usize = 24;
+    pub const HEADER_SIZE: usize = 40;
 
     #[repr(u8)]
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,7 +19,8 @@ pub mod compositor {
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct Request {
-        pub op: Op, pub surface_id: u32, pub width: u32, pub height: u32, pub pixel_offset: u32,
+        pub op: Op, pub surface_id: u32, pub width: u32, pub height: u32,
+        pub x: i32, pub y: i32, pub z_order: u32, pub visible: bool, pub pixel_offset: u32,
     }
 
     impl Request {
@@ -33,6 +34,10 @@ pub mod compositor {
             out[12..16].copy_from_slice(&self.width.to_le_bytes());
             out[16..20].copy_from_slice(&self.height.to_le_bytes());
             out[20..24].copy_from_slice(&self.pixel_offset.to_le_bytes());
+            out[24..28].copy_from_slice(&self.x.to_le_bytes());
+            out[28..32].copy_from_slice(&self.y.to_le_bytes());
+            out[32..36].copy_from_slice(&self.z_order.to_le_bytes());
+            out[36] = self.visible as u8;
             Ok(HEADER_SIZE)
         }
     }
