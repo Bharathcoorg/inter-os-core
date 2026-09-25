@@ -548,10 +548,10 @@ impl Vfs {
         if let Some(slot) = table.get_mut(fd.0 as usize) {
             if slot.is_some() {
                 *slot = None;
+                self.persist_data_snapshot().map_err(|_|FsError::IntegrityViolation)?;
                 return Ok(());
             }
         }
-        if let Err(_) = self.persist_data_snapshot() { return Err(FsError::IntegrityViolation); }
         Err(FsError::InvalidFd)
     }
 }
