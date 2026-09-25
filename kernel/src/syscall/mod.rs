@@ -97,6 +97,7 @@ pub enum SyscallNumber {
     ServiceStart = 86,
     ServiceStop = 87,
     ServiceRecoverFailed = 88,
+    ServicePackageVerify = 89,
     SettingsGet = 82,
     SettingsSet = 83,
     StorageQuery = 84,
@@ -1344,6 +1345,20 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         86 => { match sys_service_start(a1 as u8) { Ok(id) => id.0 as i64, Err(e) => e as i64 } }
         87 => { match sys_service_stop(a1 as u8) { Ok(()) => 0, Err(e) => e as i64 } }
         88 => { match sys_service_recover_failed() { Ok(n) => n as i64, Err(e) => e as i64 } }
+        89 => {
+            // ServicePackageVerify: a1=read-cap slot, a2=path ptr, a3=path len.
+            let len = a3 as usize;
+            if len == 0 || len > 256 { return SyscallResult::InvalidArguments as i64; }
+            let mut path_buf = [0u8; 256];
+            let path = match read_user_string(a2, len, &mut path_buf) {
+                Ok(s) => s,
+                Err(_) => return SyscallResult::InvalidArguments as i64,
+            };
+            match sys_service_package_verify(a1 as usize, path) {
+                Ok(id) => id as i64,
+                Err(e) => e as i64,
+            }
+        }
         _ => SyscallResult::UnknownSyscall as i64,
     }
 }
@@ -2568,6 +2583,35 @@ fn require_service_manager() -> Result<(), SyscallResult> {
     } else {
         Err(SyscallResult::PermissionDenied)
     }
+}
+
+/// Verifies a signed RAPP service package and applies the narrow service ABI policy.
+/// This is verification/loading preparation only; M17 will hand the verified image to
+/// the userspace service manager for process creation.
+pub fn sys_service_package_verify(cap_slot: usize, path: &str) -> Result<u8, SyscallResult> {
+    require_service_manager()?;
+    let sched = SCHEDULER.lock();
+    let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    current.cap_table.verify(cap_slot, CapabilityType::FileSystemRead, Rights::READ)
+        .map_err(|_| SyscallResult::PermissionDenied)?;
+    drop(sched);
+
+    if path.is_empty() || path.len() > 256 || !path.starts_with("/packages/") || !path.ends_with(".rapp") {
+        return Err(SyscallResult::InvalidArguments);
+    }
+    let manifest = sys_verify_package(cap_slot, path)?;
+    let service_id = crate::service_abi::service_id_from_package_id(&manifest.package_id)
+        .ok_or(SyscallResult::PermissionDenied)?;
+    for capability in &manifest.capabilities {
+        if !crate::service_abi::service_capability_allowed(service_id, *capability) {
+            return Err(SyscallResult::PermissionDenied);
+        }
+    }
+    if manifest.payload_len == 0 {
+        return Err(SyscallResult::InvalidArguments);
+    }
+    serial_println!("[SERVICE] Verified signed service package '{}' for service {}", manifest.package_id, service_id);
+    Ok(service_id)
 }
 
 pub fn sys_service_recover_failed() -> Result<u64, SyscallResult> {
