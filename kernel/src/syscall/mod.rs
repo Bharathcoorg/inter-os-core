@@ -434,8 +434,10 @@ pub fn sys_verify_package(
     cap_slot: usize,
     path: &str,
 ) -> Result<RappManifest, SyscallResult> {
+    let stat = sys_fs_stat(cap_slot, path)?;
+    if stat.size == 0 || stat.size > 16 * 1024 * 1024 { return Err(SyscallResult::InvalidArguments); }
     let fd = sys_fs_open(cap_slot, path, Rights::READ)?;
-    let mut file_buf = alloc::vec![0u8; 4096];
+    let mut file_buf = alloc::vec![0u8; stat.size];
     let read_bytes = sys_fs_read(cap_slot, fd, &mut file_buf)?;
     sys_fs_close(fd);
 
