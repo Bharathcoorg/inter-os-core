@@ -75,6 +75,34 @@ def main() -> None:
     must(services, "start_locked(id, parent_id).is_ok()",
          "recovery uses locked start helper")
 
+    # Service capability matrix: each worker gets only the narrow authority
+    # required for its current kernel-hosted boundary. Privileged hardware
+    # services must not inherit unrelated process, storage, network, or control
+    # powers while their dedicated ABIs are still being designed.
+    for forbidden in (
+        "CapabilityType::ProcessKill",
+        "CapabilityType::ProcessSpawn",
+        "CapabilityType::StorageRawBlock",
+        "CapabilityType::SystemControl",
+        "CapabilityType::NetworkSend",
+        "CapabilityType::NetworkReceive",
+        "CapabilityType::HardwarePortIo",
+    ):
+        must(services, f"// forbidden:{forbidden}", f"capability isolation marker {forbidden}")
+
+    for marker in (
+        "// service-cap:Display=FrameBufferDirect:WRITE",
+        "// service-cap:Input=EventPoll:READ",
+        "// service-cap:Storage=FileSystemRead:READ|WRITE",
+        "// service-cap:Network=NetworkSocket:READ|WRITE",
+        "// service-cap:Power=EventPoll:READ",
+        "// service-cap:Modem=EventPoll:READ",
+        "// service-cap:Audio=EventPoll:READ",
+        "// service-cap:Camera=EventPoll:READ",
+        "// service-cap:Init=ProcessSpawn:GRANT",
+    ):
+        must(services, marker, f"service capability matrix {marker}")
+
     # Supervisor must inspect scheduler state before mutating the registry.
     must(services, "let sched = SCHEDULER.lock();", "supervisor scheduler lock")
     must(services, "let mut registry = SERVICE_RECORDS.lock();",
