@@ -1805,6 +1805,7 @@ pub fn sys_battery_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
 
 /// Dispatches an Android cross-zone intent into the host sovereign intent router.
 pub fn sys_android_bridge_intent(action: &str, data_uri: &str, out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    require_system_control()?;
     let intent = crate::compat::android::AndroidIntent::new(action, data_uri);
     match crate::compat::android::AndroidIntentBridge::translate_intent(&intent) {
         Ok(sovereign_act) => {
@@ -1857,6 +1858,14 @@ pub fn sys_vault_crypt(
     buf: &mut [u8; 512],
     iv: &[u8; 16],
 ) -> Result<(), SyscallResult> {
+    {
+        let sched = SCHEDULER.lock();
+        let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+        if !task.cap_table.authorize_capability(CapabilityType::StorageRawBlock, Rights::INVOKE) {
+            return Err(SyscallResult::PermissionDenied);
+        }
+    }
+
     let vault = crate::storage::STORAGE_VAULT.lock();
     if action == 0 {
         // Encrypt
@@ -2034,17 +2043,16 @@ pub fn sys_camera_capture(
     meta_buf: Option<&mut [u32]>,
 ) -> Result<usize, SyscallResult> {
     // 1. Verify capability: current task must possess HardwarePortIo or FrameBufferDirect
-    let current_id = crate::task::scheduler::SCHEDULER.lock().current_task_id().unwrap_or(crate::task::TaskId(0));
     let sched = crate::task::scheduler::SCHEDULER.lock();
-    let has_cap = if let Some(tcb) = sched.get_task(current_id) {
-        tcb.cap_table.authorize_capability(crate::capability::CapabilityType::HardwarePortIo, crate::capability::Rights::READ)
-    } else {
-        false
-    };
-    drop(sched);
-    if !has_cap {
+    let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    if !current.cap_table.authorize_object(
+        crate::capability::CapabilityType::HardwarePortIo,
+        crate::capability::Rights::READ,
+        0xCA00,
+    ) {
         return Err(SyscallResult::PermissionDenied);
     }
+    drop(sched);
 
     let mut cam = crate::hal::CAMERA.lock();
     if action == 3 {
@@ -2079,6 +2087,7 @@ pub fn sys_camera_capture(
 /// Invokes a verified Dalvik method inside the sandboxed ACR Virtual Machine runtime.
 /// Returns the number of Dalvik opcodes executed.
 pub fn sys_dex_invoke_method(dex_data: &[u8], method_spec: &str) -> Result<u32, SyscallResult> {
+    require_system_control()?;
     use crate::compat::android::dex::DexPackage;
     use crate::compat::android::runtime::DalvikVmState;
 
@@ -2169,7 +2178,14 @@ pub fn sys_share_sheet_dispatch(
     use crate::gui::{MOBILE_SHELL, ShareSheetDrawer};
     use crate::framebuffer::{PHONE_X, PHONE_Y, PHONE_W, PHONE_H};
 
-    let current_id = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?;
+    let current_id = {
+        let sched = SCHEDULER.lock();
+        let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+        if !task.cap_table.authorize_capability(CapabilityType::IpcSend, Rights::WRITE) {
+            return Err(SyscallResult::PermissionDenied);
+        }
+        task.id
+    };
     let current_ticks = crate::interrupts::get_system_ticks();
 
     if let Some(target_id_str) = target_app {
@@ -2443,6 +2459,16 @@ pub fn sys_window_set_geometry(id: u32, x: i32, y: i32, z: u32, visible: bool) -
 }
 
 pub fn sys_window_focus(x: u32, y: u32) -> SyscallResult {
+    {
+        let sched = SCHEDULER.lock();
+        let task = match sched.current_task() {
+            Some(task) => task,
+            None => return SyscallResult::PermissionDenied,
+        };
+        if !task.cap_table.authorize_capability(CapabilityType::FrameBufferDirect, Rights::WRITE) {
+            return SyscallResult::PermissionDenied;
+        }
+    }
     let target = crate::drivers::display_kms::DRM_KMS.lock().focus_at(x, y);
     match target {
         Some((_surface, owner)) => {
@@ -2463,6 +2489,13 @@ pub fn sys_fs_list(cap_slot:usize,path_ptr:u64,path_len:usize,out:&mut[u8])->Res
 }
 
 pub fn sys_storage_query() -> Result<u64,SyscallResult>{
+    {
+        let sched = SCHEDULER.lock();
+        let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+        if !task.cap_table.authorize_capability(CapabilityType::StorageRawBlock, Rights::READ) {
+            return Err(SyscallResult::PermissionDenied);
+        }
+    }
     let guard=crate::drivers::ATA_PRIMARY.lock();
     let drive=guard.as_ref().ok_or(SyscallResult::DeviceError)?;
     Ok((drive.sector_count() as u64).saturating_mul(crate::drivers::SECTOR_SIZE as u64))
@@ -2494,6 +2527,7 @@ pub fn sys_settings_set(cap_slot: usize, key_ptr:u64,key_len:usize,val_ptr:u64,v
 }
 
 pub fn sys_service_list(out: &mut [u8]) -> Result<usize, SyscallResult> {
+    require_system_control()?;
     let n = crate::service::SERVICE_SUPERVISOR.lock().snapshot(out);
     Ok(n)
 }
