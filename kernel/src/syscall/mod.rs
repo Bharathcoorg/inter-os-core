@@ -1609,11 +1609,19 @@ pub fn sys_dns_resolve(name: &str) -> Result<crate::net::Ipv4Address, SyscallRes
     let caps = current.cap_table.clone();
     drop(sched);
 
-    let mut resolver = crate::net::DnsResolver::new();
     let now = crate::interrupts::get_system_ticks();
-    let query_id = resolver.begin(name.as_bytes(), now).map_err(|_| SyscallResult::NetworkError)?;
+    if let Some(addr) = crate::net::DNS_RESOLVER.lock().cached(name.as_bytes(), now) {
+        return Ok(addr);
+    }
+
     let mut packet = [0u8; 512];
-    let packet_len = resolver.build_query(query_id, &mut packet).map_err(|_| SyscallResult::NetworkError)?;
+    let (query_id, packet_len) = {
+        let mut resolver = crate::net::DNS_RESOLVER.lock();
+        let query_id = resolver.begin(name.as_bytes(), now).map_err(|_| SyscallResult::NetworkError)?;
+        let packet_len = resolver.build_query(query_id, &mut packet)
+            .map_err(|_| SyscallResult::NetworkError)?;
+        (query_id, packet_len)
+    };
 
     let mut socket = None;
     for port in 53000u16..53008u16 {
@@ -1624,23 +1632,25 @@ pub fn sys_dns_resolve(name: &str) -> Result<crate::net::Ipv4Address, SyscallRes
     }
     let socket = socket.ok_or(SyscallResult::NetworkError)?;
 
-    let send_result = crate::net::send_udp_datagram(
+    let local_port = {
+        let table = crate::net::SOCKET_TABLE.lock();
+        table.get(socket).map(|s| s.local_port).unwrap_or(53000)
+    };
+    if crate::net::send_udp_datagram(
         crate::net::DEFAULT_HOST_IP,
-        {
-            let table = crate::net::SOCKET_TABLE.lock();
-            table.get(socket).map(|s| s.local_port).unwrap_or(53000)
-        },
+        local_port,
         crate::net::DNS_SERVER,
         53,
         &packet[..packet_len],
         &caps,
-    );
-    if send_result.is_err() {
+    ).is_err() {
         let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
         return Err(SyscallResult::NetworkError);
     }
 
-    let deadline = now.saturating_add(crate::net::dns::DNS_RETRY_TICKS * (crate::net::dns::DNS_MAX_RETRIES as u64 + 1));
+    let deadline = now.saturating_add(
+        crate::net::dns::DNS_RETRY_TICKS * (crate::net::dns::DNS_MAX_RETRIES as u64 + 1),
+    );
     let mut rx = [0u8; 512];
     loop {
         let current_tick = crate::interrupts::get_system_ticks();
@@ -1653,7 +1663,7 @@ pub fn sys_dns_resolve(name: &str) -> Result<crate::net::Ipv4Address, SyscallRes
             .ok_or(NetError::NoPacketAvailable)
             .and_then(|s| s.recv_from(&mut rx, &caps).map(|v| v.0))
         {
-            if let Ok(addr) = resolver.accept_response(&rx[..bytes], current_tick) {
+            if let Ok(addr) = crate::net::DNS_RESOLVER.lock().accept_response(&rx[..bytes], current_tick) {
                 let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
                 return Ok(addr);
             }
@@ -1661,29 +1671,38 @@ pub fn sys_dns_resolve(name: &str) -> Result<crate::net::Ipv4Address, SyscallRes
 
         // Retransmit the DNS query when its bounded deadline expires. The
         // resolver owns retry state; this syscall owns the actual UDP send.
-        let timed_out = resolver.query(query_id)
-            .map(|q| current_tick >= q.deadline)
-            .unwrap_or(false);
-        if timed_out {
-            let expired = resolver.poll_timeouts(current_tick);
-            if resolver.query(query_id).is_some() {
-                let retry_len = resolver.build_query(query_id, &mut packet)
-                    .map_err(|_| SyscallResult::NetworkError)?;
-                if crate::net::send_udp_datagram(
-                    crate::net::DEFAULT_HOST_IP,
-                    {
-                        let table = crate::net::SOCKET_TABLE.lock();
-                        table.get(socket).map(|s| s.local_port).unwrap_or(53000)
-                    },
-                    crate::net::DNS_SERVER,
-                    53,
-                    &packet[..retry_len],
-                    &caps,
-                ).is_err() {
-                    let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
-                    return Err(SyscallResult::NetworkError);
+        let retry = {
+            let mut resolver = crate::net::DNS_RESOLVER.lock();
+            let timed_out = resolver.query(query_id)
+                .map(|q| current_tick >= q.deadline)
+                .unwrap_or(false);
+            if !timed_out {
+                None
+            } else {
+                let expired = resolver.poll_timeouts(current_tick);
+                if resolver.query(query_id).is_some() {
+                    let retry_len = resolver.build_query(query_id, &mut packet)
+                        .map_err(|_| SyscallResult::NetworkError)?;
+                    Some((retry_len, false))
+                } else {
+                    Some((0, expired > 0))
                 }
-            } else if expired > 0 {
+            }
+        };
+
+        if let Some((retry_len, exhausted)) = retry {
+            if exhausted {
+                let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
+                return Err(SyscallResult::NetworkError);
+            }
+            if crate::net::send_udp_datagram(
+                crate::net::DEFAULT_HOST_IP,
+                local_port,
+                crate::net::DNS_SERVER,
+                53,
+                &packet[..retry_len],
+                &caps,
+            ).is_err() {
                 let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
                 return Err(SyscallResult::NetworkError);
             }
