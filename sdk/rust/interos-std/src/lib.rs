@@ -585,6 +585,13 @@ pub fn net_send_socket(socket_id: u32, dst_ip: [u8; 4], dst_port: u16, payload: 
     if ret == 0 { Ok(()) } else { Err(ret) }
 }
 
+
+/// Closes a UDP socket owned by the current task.
+pub fn net_close_socket(socket_id: u32) -> Result<(), i64> {
+    let ret = unsafe { syscall1(SyscallNumber::NetCloseSocket, socket_id as u64) };
+    if ret == 0 { Ok(()) } else { Err(ret) }
+}
+
 pub fn tcp_connect(dst_ip: [u8; 4], dst_port: u16, local_port: u16, seq: u32) -> Result<u32, i64> {
     let ip = u32::from_be_bytes(dst_ip) as u64;
     let ret = unsafe { syscall4(SyscallNumber::TcpConnect, ip, dst_port as u64, local_port as u64, seq as u64) };

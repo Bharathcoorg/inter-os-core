@@ -104,6 +104,7 @@ pub enum SyscallNumber {
     NetworkPoll = 93,
     TcpConnect = 94,
     NetSendSocket = 95,
+    NetCloseSocket = 96,
     SettingsGet = 82,
     SettingsSet = 83,
     StorageQuery = 84,
@@ -158,6 +159,10 @@ pub fn sys_yield() {
 /// The task transitions to `Zombie` state until its parent reaps the exit status
 /// via `sys_waitpid`. If no parent is waiting, the scheduler will eventually reclaim it.
 pub fn sys_exit_with_code(exit_code: i32) -> ! {
+    if let Some(id) = SCHEDULER.lock().current_task_id() {
+        let released = crate::net::SOCKET_TABLE.lock().release_owner(id.0 as u32);
+        if released > 0 { serial_println!("[NET] Released {} socket(s) owned by exiting task {}.", released, id.0); }
+    }
     {
         let mut sched = SCHEDULER.lock();
         if let Some(current) = sched.current_task_mut() {
@@ -1421,6 +1426,10 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         }
         93 => { match sys_network_poll() { Ok(n) => n as i64, Err(e) => e as i64 } },
         94 => match sys_tcp_connect(crate::net::Ipv4Address::new((a0 >> 24) as u8, (a0 >> 16) as u8, (a0 >> 8) as u8, a0 as u8), a1 as u16, a2 as u16, a3 as u32) { Ok(id) => id as i64, Err(e) => e as i64 },
+        96 => {
+            // NetCloseSocket: a1 = socket id
+            sys_net_close_socket(crate::net::SocketId(a1 as u32)) as i64
+        }
         95 => {
             let len = a4 as usize;
             if len > 2048 { return SyscallResult::InvalidArguments as i64; }
@@ -1558,6 +1567,18 @@ pub fn sys_net_socket(port: u16) -> Result<u32, SyscallResult> {
 }
 
 /// Transmits a UDP packet from the current calling task.
+pub fn sys_net_close_socket(sock_id: crate::net::SocketId) -> SyscallResult {
+    let sched = SCHEDULER.lock();
+    let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    let owner = current.id.0 as u32;
+    drop(sched);
+    match crate::net::SOCKET_TABLE.lock().close_owned(sock_id, owner) {
+        Ok(()) => SyscallResult::Success,
+        Err(NetError::CapabilityDenied) => SyscallResult::PermissionDenied,
+        Err(_) => SyscallResult::InvalidArguments,
+    }
+}
+
 pub fn sys_net_send_socket(
     sock_id: crate::net::SocketId,
     dst_ip: crate::net::Ipv4Address,

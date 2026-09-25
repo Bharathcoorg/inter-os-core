@@ -137,6 +137,10 @@ impl SocketTable {
             return Err(NetError::CapabilityDenied);
         }
 
+        if port == 0 { return Err(NetError::InvalidPort); }
+        if self.sockets.iter().flatten().any(|sock| sock.is_bound && sock.local_port == port) {
+            return Err(NetError::PortInUse);
+        }
         for slot in self.sockets.iter_mut() {
             if slot.is_none() {
                 let id = SocketId(self.next_id);
@@ -168,6 +172,32 @@ impl SocketTable {
     }
 
     /// Retrieves a mutable reference to a socket by ID.
+    /// Releases every socket owned by a terminated task.
+    pub fn release_owner(&mut self, owner_task_id: u32) -> usize {
+        let mut released = 0;
+        for slot in self.sockets.iter_mut() {
+            if slot.as_ref().map(|sock| sock.owner_task_id == owner_task_id).unwrap_or(false) {
+                *slot = None;
+                released += 1;
+            }
+        }
+        released
+    }
+
+    /// Closes a socket only when its owner matches the caller.
+    pub fn close_owned(&mut self, id: SocketId, owner_task_id: u32) -> Result<(), NetError> {
+        for slot in self.sockets.iter_mut() {
+            if slot.as_ref().map(|sock| sock.id == id).unwrap_or(false) {
+                if slot.as_ref().unwrap().owner_task_id != owner_task_id {
+                    return Err(NetError::CapabilityDenied);
+                }
+                *slot = None;
+                return Ok(());
+            }
+        }
+        Err(NetError::NoPacketAvailable)
+    }
+
     pub fn get_mut(&mut self, id: SocketId) -> Option<&mut UdpSocket> {
         for sock_opt in self.sockets.iter_mut() {
             if let Some(ref mut sock) = sock_opt {
