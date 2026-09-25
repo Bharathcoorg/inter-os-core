@@ -17,6 +17,12 @@ def main():
     for n in ("MAGIC","VERSION","MSG_TYPE","enum Op","struct Request","fn encode"):
         must(sdk,n,"SDK "+n)
     assert "ICMP" in k and "ICMP" in sdk
-    print("compositor protocol contract: PASS")
+    sys=(ROOT/"kernel/src/syscall/mod.rs").read_text()
+    user=(ROOT/"kernel/src/task/user.rs").read_text()
+    must(sys,"pub fn sys_window_set_geometry(cap_slot: usize","window geometry capability boundary")
+    must(sys,"pub fn sys_window_focus(cap_slot: usize","window focus capability boundary")
+    must(sys,"require_display_service(cap_slot)","window operations require display service")
+    must(user,"FrameBufferDirect, Rights::WRITE, service_id as u64","display service framebuffer capability")
+    print("compositor/window protocol contract: PASS")
 if __name__=="__main__":
     main()
