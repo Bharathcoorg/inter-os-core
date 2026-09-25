@@ -269,7 +269,6 @@ impl Scheduler {
         crate::ipc::cleanup_task(id);
         crate::drivers::display_kms::DRM_KMS.lock().destroy_surfaces_owned_by(id.0);
         crate::services::record_exit(id, exit_code);
-        crate::service::SERVICE_SUPERVISOR.lock().record_exit(id, exit_code);
         Ok(())
     }
 
@@ -393,7 +392,6 @@ pub fn terminate_current() -> ! {
     // Publish the exit only after releasing the scheduler lock. Service
     // supervision can then safely acquire its registry without lock inversion.
     crate::services::record_exit(exiting_id, exit_code);
-    crate::service::SERVICE_SUPERVISOR.lock().record_exit(exiting_id, exit_code);
 
     if let (Some(prev_ptr), Some(next_ptr)) = (prev, next) {
         unsafe {
