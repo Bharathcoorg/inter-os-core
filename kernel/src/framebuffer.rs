@@ -1550,6 +1550,29 @@ pub fn init(framebuffer: &'static mut FrameBuffer) {
 }
 
 /// Draws the complete phone device shell on screen
+/// Presents an ARGB8888 scanout buffer to the bootloader-provided physical framebuffer.
+/// This is the hardware-backed handoff used by the display driver on platforms where
+/// the bootloader exposes a linear framebuffer. No userspace pointer is retained.
+pub fn present_argb8888(pixels: &[u32], width: u32, height: u32) {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut fb = FRAMEBUFFER_WRITER.lock();
+        let info = match fb.info { Some(info) => info, None => return };
+        let copy_w = width.min(info.width as u32) as usize;
+        let copy_h = height.min(info.height as u32) as usize;
+        let needed = (width as usize).saturating_mul(height as usize);
+        if pixels.len() < needed { return; }
+        for y in 0..copy_h {
+            for x in 0..copy_w {
+                let src = pixels[y * width as usize + x];
+                let r = (src >> 16) as u8;
+                let g = (src >> 8) as u8;
+                let b = src as u8;
+                fb.set_pixel(x, y, (r, g, b));
+            }
+        }
+    });
+}
+
 pub fn draw_mobile_shell() {
     x86_64::instructions::interrupts::without_interrupts(|| {
         FRAMEBUFFER_WRITER.lock().draw_mobile_shell();
