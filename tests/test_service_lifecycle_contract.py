@@ -172,6 +172,8 @@ def main() -> None:
     must(sdk, "ServicePackageVerify = 89", "userspace signed service package ABI")
     must(sdk, "ServiceHeartbeat = 90", "userspace service heartbeat ABI")
     must(sdk, "pub fn service_heartbeat", "userspace heartbeat SDK")
+    must((ROOT / "userspace/system-service/src/lib.rs").read_text(), "ci-fault-injection", "service crash fault-injection test hook")
+    must((ROOT / ".github/workflows/ci.yml").read_text(), "--features ci-fault-injection", "QEMU crash-recovery validation mode")
 
     # Supervisor must inspect scheduler state before mutating the registry.
     must(services, "let sched = SCHEDULER.lock();", "supervisor scheduler lock")
