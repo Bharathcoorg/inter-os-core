@@ -1285,6 +1285,12 @@ pub fn sys_thermal_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
 /// Creates a cryptographic secure IPC session between calling task and peer task.
 pub fn sys_secure_ipc_session(peer: TaskId) -> Result<u64, SyscallResult> {
     let current_task = sys_get_task_id();
+    let sched = SCHEDULER.lock();
+    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    if !task.cap_table.has_capability(CapabilityType::IpcSend, Rights::WRITE) {
+        return Err(SyscallResult::PermissionDenied);
+    }
+    drop(sched);
     let mut key = [0u8; 32];
     crate::crypto::get_random_bytes(&mut key);
     let mut mgr = crate::ipc::SECURE_IPC.lock();
@@ -1532,6 +1538,10 @@ pub fn sys_telephony_set_data(enabled: bool) -> Result<bool, SyscallResult> {
 
 /// Allocates a new hardware plane surface in the DRM/KMS compositor.
 pub fn sys_surface_create(width: u32, height: u32, z_order: u32) -> Result<u32, SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    if !task.cap_table.has_capability(CapabilityType::FrameBufferDirect, Rights::WRITE) { return Err(SyscallResult::PermissionDenied); }
+    drop(sched);
     if width == 0 || height == 0 || width > 3840 || height > 2160 {
         return Err(SyscallResult::InvalidArguments);
     }
@@ -1540,6 +1550,10 @@ pub fn sys_surface_create(width: u32, height: u32, z_order: u32) -> Result<u32, 
 
 /// Triggers DRM/KMS compositor surface blending and atomic page flip.
 pub fn sys_surface_flip() -> Result<u64, SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    if !task.cap_table.has_capability(CapabilityType::FrameBufferDirect, Rights::WRITE) { return Err(SyscallResult::PermissionDenied); }
+    drop(sched);
     let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
     kms.composite();
     Ok(kms.page_flip())
@@ -1547,6 +1561,10 @@ pub fn sys_surface_flip() -> Result<u64, SyscallResult> {
 
 /// Polls recognized multi-touch gestures from the touch digitizer engine.
 pub fn sys_touch_poll() -> Result<u32, SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    if !task.cap_table.has_capability(CapabilityType::EventPoll, Rights::READ) { return Err(SyscallResult::PermissionDenied); }
+    drop(sched);
     let mut engine = crate::drivers::touch_gestures::TOUCH_ENGINE.lock();
     match engine.gesture_queue.pop_front() {
         Some(crate::drivers::touch_gestures::RecognizedGesture::Tap { .. }) => Ok(1),
