@@ -90,9 +90,9 @@ pub fn map_mmio_region(
     let pages = (size.saturating_add(4095)) / 4096;
     let mut mapper_lock = MEMORY_MAPPER.lock();
     let mapper = mapper_lock.as_mut().ok_or("Memory mapper not initialized")?;
-    let start = Page::<Size4KiB>::containing_address(virtual_base);
+    let _start = Page::<Size4KiB>::containing_address(virtual_base);
     for index in 0..pages {
-        let page = start + index as u64;
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virtual_base.as_u64() + (index as u64) * 4096));
         let phys = PhysFrame::containing_address(physical_base + (index as u64) * 4096);
         let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE;
         let map = unsafe { mapper.map_to(page, phys, flags, FRAME_ALLOCATOR.lock().as_mut().ok_or("Frame allocator not initialized")?) };
