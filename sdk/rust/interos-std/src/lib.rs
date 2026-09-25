@@ -1049,6 +1049,32 @@ pub fn surface_flip(display_cap_slot: usize) -> Result<u64, i64> {
     if ret >= 0 { Ok(ret as u64) } else { Err(ret) }
 }
 
+/// Normalized input event returned by the kernel input pipeline.
+#[derive(Clone, Copy, Debug)]
+pub struct InputEvent {
+    pub kind: u8,
+    pub x: u32,
+    pub y: u32,
+    pub dx: i32,
+    pub dy: i32,
+    pub scale_milli: u32,
+}
+
+/// Polls the normalized touch/input event pipeline.
+pub fn input_event_poll(out: &mut InputEvent) -> Result<(), i64> {
+    let mut buf = [0u8; 24];
+    let ret = unsafe { syscall2(SyscallNumber::InputEventPoll, buf.as_mut_ptr() as u64, buf.len() as u64) };
+    if ret < 0 { return Err(ret); }
+    if ret != 24 { return Err(-3); }
+    out.kind = buf[0];
+    out.x = u32::from_le_bytes(buf[4..8].try_into().unwrap());
+    out.y = u32::from_le_bytes(buf[8..12].try_into().unwrap());
+    out.dx = i32::from_le_bytes(buf[12..16].try_into().unwrap());
+    out.dy = i32::from_le_bytes(buf[16..20].try_into().unwrap());
+    out.scale_milli = u32::from_le_bytes(buf[20..24].try_into().unwrap());
+    Ok(())
+}
+
 pub fn surface_physics(action: u32, y: i32, viewport_h: i32, content_h: i32) -> Result<i32, i64> {
     let ret = unsafe {
         syscall4(
