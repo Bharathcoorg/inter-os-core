@@ -19,6 +19,9 @@ use crate::package::{parse_rapp, RappError, RappManifest};
 use crate::serial_println;
 use crate::task::{SCHEDULER, TaskId};
 
+/// Object-scoped capability target reserved for the PID1 service manager.
+pub const SERVICE_MANAGER_OBJECT: u64 = 0x5345_5256_4D47_52;
+
 /// Well-known system call identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u64)]
@@ -2536,12 +2539,12 @@ pub fn sys_settings_set(cap_slot: usize, key_ptr:u64,key_len:usize,val_ptr:u64,v
 }
 
 pub fn sys_service_list(out: &mut [u8]) -> Result<usize, SyscallResult> {
-    require_system_control()?;
+    require_service_manager()?;
     Ok(crate::services::snapshot(out))
 }
 
 pub fn sys_service_start(service_id: u8) -> Result<crate::task::TaskId, SyscallResult> {
-    require_system_control()?;
+    require_service_manager()?;
     let id = match service_id {
         1 => crate::services::ServiceId::Display, 2 => crate::services::ServiceId::Input,
         3 => crate::services::ServiceId::Storage, 4 => crate::services::ServiceId::Network,
@@ -2552,13 +2555,23 @@ pub fn sys_service_start(service_id: u8) -> Result<crate::task::TaskId, SyscallR
     crate::services::start(id).map_err(|_| SyscallResult::DeviceError)
 }
 
+fn require_service_manager() -> Result<(), SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    if task.cap_table.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, SERVICE_MANAGER_OBJECT) {
+        Ok(())
+    } else {
+        Err(SyscallResult::PermissionDenied)
+    }
+}
+
 pub fn sys_service_recover_failed() -> Result<u64, SyscallResult> {
-    require_system_control()?;
+    require_service_manager()?;
     Ok(crate::services::restart_failed() as u64)
 }
 
 pub fn sys_service_stop(service_id: u8) -> Result<(), SyscallResult> {
-    require_system_control()?;
+    require_service_manager()?;
     let id = match service_id {
         1 => crate::services::ServiceId::Display, 2 => crate::services::ServiceId::Input,
         3 => crate::services::ServiceId::Storage, 4 => crate::services::ServiceId::Network,
