@@ -21,6 +21,17 @@ def must(text: str, needle: str, label: str) -> None:
 
 
 def main() -> None:
+    system_service = (ROOT / "userspace/system-service/src/lib.rs").read_text()
+    storaged = (ROOT / "userspace/system-service/src/bin/storaged.rs").read_text()
+    user_task = (ROOT / "kernel/src/task/user.rs").read_text()
+    must(system_service, "pub fn run_storage() -> !", "M24 userspace storage service entry")
+    must(system_service, 'std::service_heartbeat(3)', "storaged lifecycle heartbeat")
+    must(system_service, 'std::fs_open(4, "/data/audit.log", std::FS_WRITE)', "storaged filesystem capability usage")
+    must(system_service, "std::fs_write(4, fd", "storaged userspace filesystem write")
+    must(system_service, "std::fs_close(fd)", "storaged descriptor lifecycle")
+    must(storaged, "interos_system_service::run_storage()", "storaged uses dedicated storage manager")
+    must(user_task, "3 => Some((CapabilityType::FileSystemRead, Rights::READ | Rights::WRITE, 0))", "storaged namespace-scoped filesystem capability")
+
     syscall = KERNEL_SYSCALL.read_text()
     sdk = SDK.read_text()
     services = SERVICES.read_text()
