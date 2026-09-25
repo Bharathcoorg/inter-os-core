@@ -1559,7 +1559,15 @@ pub fn sys_tcp_send(connection_id: u32, payload: &[u8]) -> SyscallResult {
     };
     if state != crate::net::TcpState::Established { return SyscallResult::NotReady; }
     crate::net::send_tcp_payload(src_ip, src_port, dst_ip, dst_port, seq, ack, payload, &caps)
-        .map(|n| { crate::net::TCP_TABLE.lock().get_mut(connection_id).map(|c| c.send_seq = c.send_seq.wrapping_add(n as u32)); n; })
+        .map(|n| {
+            let now = crate::interrupts::get_system_ticks();
+            let mut table = crate::net::TCP_TABLE.lock();
+            if let Some(c) = table.get_mut(connection_id) {
+                c.send_seq = c.send_seq.wrapping_add(n as u32);
+            }
+            if n > 0 { let _ = table.arm_retransmit(connection_id, seq, payload, now); }
+            n
+        })
         .map(|_| SyscallResult::Success).unwrap_or(SyscallResult::NetworkError)
 }
 

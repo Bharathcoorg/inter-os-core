@@ -23,7 +23,7 @@ pub use tcp::{next_state as tcp_next_state, seq_ge, seq_gt, seq_le, seq_lt, TcpS
 pub use tls::{ContentType as TlsContentType, TlsRecord};
 pub use ethernet::{EtherType, EthernetFrame, MacAddress};
 pub use ipv4::{calculate_ipv4_checksum, verify_ipv4_checksum, IpProtocol, Ipv4Address, Ipv4Packet};
-pub use socket::{SocketId, SocketTable, TcpConnection, TcpConnectionTable, UdpSocket};
+pub use socket::{SocketId, SocketTable, TcpConnection, TcpConnectionTable, UdpSocket, TCP_MAX_RETRIES, TCP_RETRANSMIT_TICKS};
 pub use udp::UdpDatagram;
 pub use wireless::{WifiState, WirelessManager, WIRELESS_MANAGER};
 
@@ -242,6 +242,7 @@ pub fn poll_network_interface() -> usize {
                                                 } else if old_state == TcpState::Established {
                                                     // Never accept acknowledgements beyond data we have sent.
                                                     if crate::net::tcp::seq_gt(segment.ack, conn.send_seq) { continue; }
+                                                    let _ = TCP_TABLE.lock().acknowledge_tx(conn.id, segment.ack);
                                                     let fin = segment.flags & 0x01 != 0;
                                                     if !segment.payload.is_empty() || fin {
                                                         let conn_id = conn.id;
@@ -283,6 +284,21 @@ pub fn poll_network_interface() -> usize {
         }
     }
     processed
+}
+
+/// Retransmits one bounded unacknowledged TCP payload when its deadline expires.
+pub fn poll_tcp_retransmissions(now: u64) -> usize {
+    let due = TCP_TABLE.lock().due_retransmit(now);
+    let Some((id, remote_ip, _unused, local_port, remote_port, seq, ack, len)) = due else { return 0; };
+    let payload = {
+        let table = TCP_TABLE.lock();
+        let Some(c) = table.get(id) else { return 0; };
+        let mut buf = [0u8; crate::net::tcp::TCP_MAX_SEGMENT];
+        buf[..len].copy_from_slice(&c.tx[..len]);
+        buf
+    };
+    let caps = CapabilityTable::new(0);
+    if send_tcp_payload(if remote_ip.is_loopback() { Ipv4Address::LOCALHOST } else { DEFAULT_HOST_IP }, local_port, remote_ip, remote_port, seq, ack, &payload[..len], &caps).is_ok() { 1 } else { 0 }
 }
 
 /// Initializes the network stack and executes comprehensive in-kernel self-tests.

@@ -11,6 +11,9 @@ pub const MAX_SOCKETS: usize = 8;
 pub const SOCKET_RX_SLOTS: usize = 4;
 pub const SOCKET_RX_BUF_SIZE: usize = 512;
 pub const TCP_RX_BUF_SIZE: usize = 2048;
+pub const TCP_TX_BUF_SIZE: usize = crate::net::tcp::TCP_MAX_SEGMENT;
+pub const TCP_RETRANSMIT_TICKS: u64 = 500;
+pub const TCP_MAX_RETRIES: u8 = 3;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct SocketId(pub u32);
@@ -224,6 +227,12 @@ pub struct TcpConnection {
     pub recv_seq: u32,
     pub rx: [u8; TCP_RX_BUF_SIZE],
     pub rx_len: usize,
+    pub tx: [u8; TCP_TX_BUF_SIZE],
+    pub tx_len: usize,
+    pub tx_seq: u32,
+    pub tx_deadline: u64,
+    pub tx_retries: u8,
+    pub tx_pending: bool,
 }
 
 pub struct TcpConnectionTable {
@@ -259,6 +268,12 @@ impl TcpConnectionTable {
                     recv_seq: 0,
                     rx: [0u8; TCP_RX_BUF_SIZE],
                     rx_len: 0,
+                    tx: [0u8; TCP_TX_BUF_SIZE],
+                    tx_len: 0,
+                    tx_seq: initial_seq,
+                    tx_deadline: 0,
+                    tx_retries: 0,
+                    tx_pending: false,
                 });
                 return Ok(id);
             }
@@ -304,6 +319,52 @@ impl TcpConnectionTable {
             conn.state = crate::net::TcpState::CloseWait;
         }
         Ok(n)
+    }
+
+    pub fn arm_retransmit(&mut self, id: u32, seq: u32, payload: &[u8], now: u64) -> Result<(), NetError> {
+        let conn = self.get_mut(id).ok_or(NetError::NoPacketAvailable)?;
+        if payload.len() > TCP_TX_BUF_SIZE { return Err(NetError::BufferTooSmall); }
+        conn.tx[..payload.len()].copy_from_slice(payload);
+        conn.tx_len = payload.len();
+        conn.tx_seq = seq;
+        conn.tx_deadline = now.saturating_add(TCP_RETRANSMIT_TICKS);
+        conn.tx_retries = 0;
+        conn.tx_pending = !payload.is_empty();
+        Ok(())
+    }
+
+    pub fn acknowledge_tx(&mut self, id: u32, ack: u32) -> bool {
+        let conn = match self.get_mut(id) { Some(c) => c, None => return false };
+        if !conn.tx_pending { return false; }
+        let end = conn.tx_seq.wrapping_add(conn.tx_len as u32);
+        if crate::net::tcp::seq_ge(ack, end) {
+            conn.tx_pending = false;
+            conn.tx_len = 0;
+            conn.tx_retries = 0;
+            return true;
+        }
+        false
+    }
+
+    pub fn due_retransmit(&mut self, now: u64) -> Option<(u32, Ipv4Address, u16, Ipv4Address, u16, u32, u32, usize)> {
+        for slot in self.entries.iter_mut() {
+            if let Some(conn) = slot.as_mut() {
+                if conn.tx_pending && now >= conn.tx_deadline {
+                    if conn.tx_retries >= TCP_MAX_RETRIES {
+                        conn.tx_pending = false;
+                        continue;
+                    }
+                    conn.tx_retries += 1;
+                    conn.tx_deadline = now.saturating_add(TCP_RETRANSMIT_TICKS << conn.tx_retries);
+                    return Some((conn.id, conn.remote_ip, conn.remote_ip, conn.local_port, conn.remote_port, conn.tx_seq, conn.recv_seq, conn.tx_len));
+                }
+            }
+        }
+        None
+    }
+
+    pub fn tx_payload(&self, id: u32) -> Option<&[u8]> {
+        self.get(id).filter(|c| c.tx_pending).map(|c| &c.tx[..c.tx_len])
     }
 
     pub fn recv_owned(&mut self, id: u32, owner_task_id: u32, out: &mut [u8]) -> Result<usize, NetError> {
