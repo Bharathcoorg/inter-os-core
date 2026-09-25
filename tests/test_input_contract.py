@@ -14,7 +14,7 @@ def main():
     svc=(ROOT/"userspace/system-service/src/lib.rs").read_text()
     binp=(ROOT/"userspace/system-service/src/bin/inputd.rs").read_text()
     for n in ("pub enum InputEventKind","pub struct InputEvent","pub struct InputPipeline",
-              "pub fn pump_touch_events","INPUT_PIPELINE"):
+              "pub fn pump_touch_events","pub fn dispatch_to_focused_window","INPUT_PIPELINE"):
         must(inp,n,n)
     must(drv,"pub mod input;","input driver module")
     must(sys,"InputEventPoll = 92","input syscall number")
@@ -22,6 +22,7 @@ def main():
     must(sys,"CapabilityType::EventPoll, Rights::READ","input capability gate")
     must(sys,"crate::drivers::input::pump_touch_events()","touch-to-event bridge")
     must(sys,"out_buf[0] = event.kind as u8","bounded event wire encoding")
+    must(inp,"send_direct(TaskId(0), TaskId(owner), 0x494E_5054","focused-window input IPC")
     must(sdk,"pub struct InputEvent","userspace event type")
     must(sdk,"SyscallNumber::InputEventPoll","userspace input ABI")
     must(svc,"pub fn run_input() -> !","dedicated input service")
