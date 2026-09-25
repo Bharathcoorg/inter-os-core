@@ -19,7 +19,7 @@ pub use dns::{encode_query as dns_encode_query, parse_a_answer, DnsAnswer, DnsQu
 pub use tcp::{next_state as tcp_next_state, TcpSegment, TcpState};
 pub use ethernet::{EtherType, EthernetFrame, MacAddress};
 pub use ipv4::{calculate_ipv4_checksum, verify_ipv4_checksum, IpProtocol, Ipv4Address, Ipv4Packet};
-pub use socket::{SocketId, SocketTable, UdpSocket};
+pub use socket::{SocketId, SocketTable, TcpConnection, TcpConnectionTable, UdpSocket};
 pub use udp::UdpDatagram;
 pub use wireless::{WifiState, WirelessManager, WIRELESS_MANAGER};
 
@@ -35,6 +35,7 @@ pub static ARP_TABLE: Mutex<ArpTable> = Mutex::new(ArpTable::new());
 
 /// Global capability-guarded socket table.
 pub static SOCKET_TABLE: Mutex<SocketTable> = Mutex::new(SocketTable::new());
+pub static TCP_TABLE: Mutex<TcpConnectionTable> = Mutex::new(TcpConnectionTable::new());
 
 /// Sends a UDP datagram over the network stack, verifying caller's capability.
 pub fn send_udp_datagram(
@@ -82,6 +83,39 @@ pub fn send_udp_datagram(
     NETWORK_DEVICE.lock().transmit(&eth_buf[0..eth_len])
 }
 
+pub fn send_tcp_syn(
+    src_ip: Ipv4Address,
+    src_port: u16,
+    dst_ip: Ipv4Address,
+    dst_port: u16,
+    seq: u32,
+    caps: &CapabilityTable,
+) -> Result<(), NetError> {
+    if !caps.has_capability(CapabilityType::NetworkSend, Rights::WRITE) {
+        return Err(NetError::CapabilityDenied);
+    }
+    let segment = TcpSegment {
+        src_port, dst_port, seq, ack: 0, flags: 0x02, window: 65535, payload: &[],
+    };
+    let mut tcp_buf = [0u8; 64];
+    let tcp_len = crate::net::tcp::serialize_with_checksum(&segment, src_ip.0, dst_ip.0, &mut tcp_buf)
+        .map_err(|_| NetError::BufferTooSmall)?;
+    let mut ip_buf = [0u8; 128];
+    let ip_len = Ipv4Packet::serialize(src_ip, dst_ip, IpProtocol::Tcp, 64, &tcp_buf[..tcp_len], &mut ip_buf)
+        .map_err(|_| NetError::BufferTooSmall)?;
+    let dst_mac = if dst_ip.is_loopback() {
+        MacAddress([0, 0, 0, 0, 0, 1])
+    } else {
+        ARP_TABLE.lock().lookup(dst_ip).unwrap_or(MacAddress::BROADCAST)
+    };
+    let frame = EthernetFrame {
+        dst_mac, src_mac: DEFAULT_HOST_MAC, ethertype: EtherType::Ipv4, payload: &ip_buf[..ip_len],
+    };
+    let mut eth_buf = [0u8; 1514];
+    let len = frame.serialize(&mut eth_buf).map_err(|_| NetError::BufferTooSmall)?;
+    NETWORK_DEVICE.lock().transmit(&eth_buf[..len])
+}
+
 /// Polls the network device and processes all inbound packets.
 pub fn poll_network_interface() -> usize {
     let mut device = NETWORK_DEVICE.lock();
@@ -102,7 +136,21 @@ pub fn poll_network_interface() -> usize {
                 }
                 EtherType::Ipv4 => {
                     if let Ok(ip_pkt) = Ipv4Packet::parse(frame.payload) {
-                        if ip_pkt.protocol == IpProtocol::Udp {
+                        if ip_pkt.protocol == IpProtocol::Tcp {
+                            if let Ok(segment) = TcpSegment::parse(ip_pkt.payload) {
+                                if segment.verify_checksum(ip_pkt.src.0, ip_pkt.dst.0, ip_pkt.payload) {
+                                    let mut table = TCP_TABLE.lock();
+                                    for conn in table.entries_mut() {
+                                        if let Some(conn) = conn.as_mut() {
+                                            if conn.remote_ip == ip_pkt.src && conn.remote_port == segment.src_port && conn.local_port == segment.dst_port {
+                                                conn.recv_seq = segment.seq.wrapping_add(segment.payload.len() as u32);
+                                                conn.state = tcp_next_state(conn.state, segment.flags);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else if ip_pkt.protocol == IpProtocol::Udp {
                             if let Ok(udp_dg) = UdpDatagram::parse(ip_pkt.payload) {
                                 SOCKET_TABLE.lock().deliver_udp(
                                     udp_dg.dst_port,
