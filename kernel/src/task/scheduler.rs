@@ -118,8 +118,25 @@ impl Scheduler {
     }
 
 
+    /// Reclaims terminated TCB resources that are no longer the current task.
+    /// This releases kernel stacks, page tables, and capability tables instead of
+    /// retaining terminated processes indefinitely.
+    fn reap_terminated(&mut self) {
+        if self.tasks.len() <= 1 { return; }
+        let current_id = self.tasks[self.current_idx].id;
+        let mut i = self.tasks.len();
+        while i > 0 {
+            i -= 1;
+            if self.tasks[i].id != current_id && self.tasks[i].state == TaskState::Terminated {
+                self.tasks.remove(i);
+                if i < self.current_idx { self.current_idx -= 1; }
+            }
+        }
+    }
+
     /// Prepares context pointers for switching to the next ready task in round-robin order.
     pub fn prepare_switch(&mut self) -> (Option<*mut TaskContext>, Option<*const TaskContext>) {
+        self.reap_terminated();
         if self.tasks.len() <= 1 {
             return (None, None);
         }
