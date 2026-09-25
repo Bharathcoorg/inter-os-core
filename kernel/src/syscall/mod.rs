@@ -90,6 +90,7 @@ pub enum SyscallNumber {
     PackageRollback = 78,
     WindowSetGeometry = 79,
     WindowFocus = 80,
+    ServiceList = 81,
 }
 
 /// System call result status codes.
@@ -1276,6 +1277,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         }
         79 => { match sys_window_set_geometry(a1 as u32, a2 as i64 as i32, a3 as i64 as i32, a4 as u32, a5 != 0) { e => e as i64 } }
         80 => { sys_window_focus(a1 as u32, a2 as u32) as i64 }
+        81 => { let len=a3 as usize; if len==0||len>4096{return SyscallResult::InvalidArguments as i64;} let mut out=[0u8;4096]; match sys_service_list(&mut out[..len]){Ok(n)=>{if copy_to_user(a2,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
         78 => {
             // PackageRollback: a1=cap_slot, a2=pkg_id_ptr, a3=pkg_id_len, a4=user_consent
             let cap_slot=a1 as usize; let len=a3 as usize;
@@ -1547,6 +1549,13 @@ pub fn sys_window_focus(x: u32, y: u32) -> SyscallResult {
         }
         None => SyscallResult::NotReady,
     }
+}
+
+
+/// Returns authoritative service lifecycle state.
+pub fn sys_service_list(out: &mut [u8]) -> Result<usize, SyscallResult> {
+    let n = crate::service::SERVICE_SUPERVISOR.lock().snapshot(out);
+    Ok(n)
 }
 
 pub fn sys_window_list(out_buf:&mut [u8])->Result<usize,SyscallResult>{
