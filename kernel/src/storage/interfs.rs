@@ -8,6 +8,7 @@
 //! M22 will add transactional metadata publication and deterministic crash
 //! recovery around these mutations.
 
+use crate::crypto::Sha256;
 use crate::drivers::{BlockDevice, AtaError, SECTOR_SIZE};
 
 pub const FS_MAGIC: [u8; 4] = *b"IOFS";
@@ -23,6 +24,65 @@ const DATA_LBA: u32 = INODE_LBA + INODE_SECTORS;
 const MAX_INODES: u32 = (INODE_SECTORS as usize * INODES_PER_SECTOR) as u32;
 const MAX_PATH: usize = 47;
 const BITMAP_CAPACITY_SECTORS: u32 = BITMAP_SECTORS * SECTOR_SIZE as u32 * 8;
+const TXN_OFFSET: usize = 64;
+const TXN_SIZE: usize = 64;
+const TXN_MAGIC: [u8; 4] = *b"IFTX";
+const TXN_VERSION: u8 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TxnOp { Create = 1, Write = 2, Delete = 3 }
+
+#[derive(Debug, Clone, Copy)]
+struct FsTransaction {
+    op: u8,
+    inode_index: u32,
+    old_used: bool,
+    old_size: u32,
+    old_start: u32,
+    old_count: u32,
+    new_used: bool,
+    new_size: u32,
+    new_start: u32,
+    new_count: u32,
+}
+
+impl FsTransaction {
+    fn encode(&self, out: &mut [u8; TXN_SIZE]) {
+        out.fill(0);
+        out[0..4].copy_from_slice(&TXN_MAGIC);
+        out[4] = TXN_VERSION;
+        out[5] = self.op;
+        out[8..12].copy_from_slice(&self.inode_index.to_le_bytes());
+        out[12] = self.old_used as u8;
+        out[13..17].copy_from_slice(&self.old_size.to_le_bytes());
+        out[17..21].copy_from_slice(&self.old_start.to_le_bytes());
+        out[21..25].copy_from_slice(&self.old_count.to_le_bytes());
+        out[25] = self.new_used as u8;
+        out[26..30].copy_from_slice(&self.new_size.to_le_bytes());
+        out[30..34].copy_from_slice(&self.new_start.to_le_bytes());
+        out[34..38].copy_from_slice(&self.new_count.to_le_bytes());
+        let digest = Sha256::digest(&out[..56]);
+        out[56..64].copy_from_slice(&digest[..8]);
+    }
+
+    fn decode(buf: &[u8; TXN_SIZE]) -> Option<Self> {
+        if buf[0..4] != TXN_MAGIC || buf[4] != TXN_VERSION { return None; }
+        if Sha256::digest(&buf[..56])[..8] != buf[56..64] { return None; }
+        if buf[12] > 1 || buf[25] > 1 { return None; }
+        Some(Self {
+            op: buf[5],
+            inode_index: u32::from_le_bytes([buf[8],buf[9],buf[10],buf[11]]),
+            old_used: buf[12] != 0,
+            old_size: u32::from_le_bytes([buf[13],buf[14],buf[15],buf[16]]),
+            old_start: u32::from_le_bytes([buf[17],buf[18],buf[19],buf[20]]),
+            old_count: u32::from_le_bytes([buf[21],buf[22],buf[23],buf[24]]),
+            new_used: buf[25] != 0,
+            new_size: u32::from_le_bytes([buf[26],buf[27],buf[28],buf[29]]),
+            new_start: u32::from_le_bytes([buf[30],buf[31],buf[32],buf[33]]),
+            new_count: u32::from_le_bytes([buf[34],buf[35],buf[36],buf[37]]),
+        })
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsBackendError {
@@ -184,7 +244,53 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
         if sb.total_sectors != region_sectors {
             return Err(FsBackendError::CorruptMetadata);
         }
-        Ok(Self { device, superblock: sb, base_lba })
+        let mut fs = Self { device, superblock: sb, base_lba };
+        fs.recover_transaction()?;
+        Ok(fs)
+    }
+
+    fn write_transaction(&mut self, txn: &FsTransaction) -> Result<(), FsBackendError> {
+        let mut sector=[0u8; SECTOR_SIZE];
+        self.device.read_sector(self.base_lba + FS_SUPERBLOCK_LBA, &mut sector)?;
+        let mut encoded=[0u8; TXN_SIZE];
+        txn.encode(&mut encoded);
+        sector[TXN_OFFSET..TXN_OFFSET + TXN_SIZE].copy_from_slice(&encoded);
+        self.device.write_sector(self.base_lba + FS_SUPERBLOCK_LBA, &sector)?;
+        Ok(())
+    }
+
+    fn clear_transaction(&mut self) -> Result<(), FsBackendError> {
+        let mut sector=[0u8; SECTOR_SIZE];
+        self.device.read_sector(self.base_lba + FS_SUPERBLOCK_LBA, &mut sector)?;
+        sector[TXN_OFFSET..TXN_OFFSET + TXN_SIZE].fill(0);
+        self.device.write_sector(self.base_lba + FS_SUPERBLOCK_LBA, &sector)?;
+        Ok(())
+    }
+
+    fn inode_matches(&mut self, index: u32, used: bool, size: u32, start: u32, count: u32) -> Result<bool, FsBackendError> {
+        let inode = self.read_inode(index)?;
+        Ok(inode.used == used && inode.file_size == size && inode.start_sector == start && inode.sector_count == count)
+    }
+
+    fn recover_transaction(&mut self) -> Result<(), FsBackendError> {
+        let mut sector=[0u8; SECTOR_SIZE];
+        self.device.read_sector(self.base_lba + FS_SUPERBLOCK_LBA, &mut sector)?;
+        let mut raw=[0u8; TXN_SIZE];
+        raw.copy_from_slice(&sector[TXN_OFFSET..TXN_OFFSET + TXN_SIZE]);
+        let Some(txn)=FsTransaction::decode(&raw) else { return Ok(()); };
+        if txn.inode_index >= MAX_INODES { return Err(FsBackendError::CorruptMetadata); }
+
+        let current_new = self.inode_matches(txn.inode_index, txn.new_used, txn.new_size, txn.new_start, txn.new_count)?;
+        let current_old = self.inode_matches(txn.inode_index, txn.old_used, txn.old_size, txn.old_start, txn.old_count)?;
+        if current_new {
+            if txn.old_count != 0 { self.free_extent(txn.old_start, txn.old_count)?; }
+        } else if current_old {
+            if txn.new_count != 0 { self.free_extent(txn.new_start, txn.new_count)?; }
+        } else {
+            return Err(FsBackendError::CorruptMetadata);
+        }
+        self.clear_transaction()?;
+        Ok(())
     }
 
     pub fn capacity_sectors(&self) -> u32 { self.superblock.data_sectors }
