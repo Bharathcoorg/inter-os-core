@@ -900,6 +900,7 @@ extern "C" fn task_security_daemon() -> ! {
                                     .map(|key| !crate::package::REVOCATION_REGISTRY.lock().is_key_revoked(&key))
                                     .unwrap_or(false);
                                 if manifest.package_id != package_id
+                                    || !crate::package::PACKAGE_REGISTRY.lock().launch_allowed(package_id, manifest.version)
                                     || !manifest.arch.matches_current()
                                     || payload_end > bytes_read
                                     || !trusted_and_not_revoked
