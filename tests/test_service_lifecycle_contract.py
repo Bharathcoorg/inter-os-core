@@ -61,8 +61,7 @@ def main() -> None:
     must(services, "let sched = SCHEDULER.lock();", "supervisor scheduler lock")
     must(services, "let mut registry = SERVICE_RECORDS.lock();",
          "supervisor registry update")
-    must(sched, "tcb.parent_id = parent_id;" if False else "tcb.parent_id = parent_id;",
-         "scheduler parent assignment")
+    must(sched, "tcb.parent_id = parent_id;", "scheduler parent assignment")
 
     # Lifecycle termination must not recurse into the service registry while
     # scheduler lock is held; this is a lock-order invariant.
