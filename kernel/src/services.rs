@@ -21,7 +21,7 @@ pub enum ServiceState { Declared, Running }
 pub struct ServiceRecord { pub id: ServiceId, pub task: TaskId, pub state: ServiceState }
 
 fn caps(id: ServiceId) -> CapabilityTable {
-    let mut t = CapabilityTable::new(8);
+    let mut t = CapabilityTable::new(16);
     let base = 0x5000 + id as u64 * 0x10;
     let _ = t.insert(Capability { id: CapabilityId(base), cap_type: CapabilityType::IpcReceive, rights: Rights::READ, object_id: 0 });
     let _ = t.insert(Capability { id: CapabilityId(base + 1), cap_type: CapabilityType::IpcSend, rights: Rights::WRITE, object_id: 0 });
@@ -70,13 +70,35 @@ pub fn init() {
         (ServiceId::Audio, "audiod", audiod, 5),
         (ServiceId::Camera, "camerad", camerad, 5),
     ];
-    for (id, name, entry, priority) in defs {
+    let mut tasks: [(ServiceId, TaskId); 8] = [(ServiceId::Display, TaskId(0)); 8];
+    for (idx, (id, name, entry, priority)) in defs.into_iter().enumerate() {
         let task = SCHEDULER.lock().spawn(name, entry, caps(id), priority);
         crate::ipc::IPC_ROUTER.lock().register_task(task);
+        tasks[idx] = (id, task);
         unsafe { SERVICE_RECORDS[id as usize] = Some(ServiceRecord { id, task, state: ServiceState::Running }); }
         crate::serial_println!("[SERVICE] {} registered as Task {} with dedicated capability domain.", name, task.0);
     }
-    crate::serial_println!("[SERVICE] Phase 25 service architecture online: displayd inputd storaged netd powerd modemd audiod camerad.");
+
+    // Replace the placeholder IPC send token with explicit object-targeted
+    // capabilities. Each service may send only to another registered service,
+    // never to an arbitrary task ID.
+    let mut sched = SCHEDULER.lock();
+    for (sender_id, sender_task) in tasks {
+        let sender = sched.get_task_mut(sender_task).expect("service task must exist");
+        for (target_id, target_task) in tasks {
+            if sender_id != target_id {
+                let cap_id = 0x6000 + ((sender_id as u64) << 8) + target_id as u64;
+                let _ = sender.cap_table.insert(Capability {
+                    id: CapabilityId(cap_id),
+                    cap_type: CapabilityType::IpcSend,
+                    rights: Rights::WRITE,
+                    object_id: target_task.0,
+                });
+            }
+        }
+    }
+    drop(sched);
+    crate::serial_println!("[SERVICE] Phase 25 service architecture online with explicit service-to-service IPC targets.");
 }
 
 /// Returns a task ID for a named service when registered.
