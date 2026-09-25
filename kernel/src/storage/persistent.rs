@@ -1,7 +1,7 @@
 //! Crash-consistent persistent metadata journal for InterOS.
 //!
-//! Four redundant slots are split by record kind so package-registry state and
-//! revocation state cannot overwrite one another. Payload sectors are written
+//! Sixteen redundant slots are partitioned into eight two-slot record kinds so
+//! package-registry, revocation, trust, VFS, and package-payload state cannot overwrite one another. Payload sectors are written
 //! before the generation-bearing header; boot selects the newest digest-valid
 //! record for the requested kind.
 
@@ -11,7 +11,7 @@ use crate::drivers::{BlockDevice, ATA_PRIMARY, SECTOR_SIZE};
 pub const JOURNAL_MAGIC: [u8; 4] = *b"IOSJ";
 pub const JOURNAL_VERSION: u32 = 1;
 const SLOT_SECTORS: u32 = 128;
-const SLOT_COUNT: u32 = 8;
+const SLOT_COUNT: u32 = 16;
 const HEADER_SIZE: usize = 64;
 const PAYLOAD_CAPACITY: usize = (SLOT_SECTORS as usize * SECTOR_SIZE) - HEADER_SIZE;
 
@@ -121,8 +121,14 @@ pub fn commit_kind(payload: &[u8], kind: u8) -> Result<u64, PersistentError> {
         }
     }
 
-    // Keep two slots per record kind. Kinds 1 and 2 use slot pairs 0/1 and 2/3.
-    let pair_start = match kind { 1 => 0usize, 2 => 2usize, 3 => 4usize, 4 => 6usize, _ => return Err(PersistentError::Unavailable) };
+    // Keep two slots per record kind. Eight kinds are available, each with an
+    // independent alternating pair so a partially written record never replaces
+    // the last known-good generation.
+    let pair_start = match kind {
+        1 => 0usize, 2 => 2usize, 3 => 4usize, 4 => 6usize,
+        5 => 8usize, 6 => 10usize, 7 => 12usize, 8 => 14usize,
+        _ => return Err(PersistentError::Unavailable),
+    };
     let a = pair_start;
     let b = pair_start + 1;
     let target = if generations[a] <= generations[b] { a } else { b };
