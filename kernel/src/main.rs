@@ -258,7 +258,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Signed packages are produced by tools/interos.py and must be provisioned into the trust store.
     let _ = (RappArch::X86_64, wasm_app_code);
     serial_println!("[OK] RAPP v2 runtime ready: unsigned packages are rejected by the kernel trust boundary.");
-    serial_println!("[OK] Root filesystem mounted. Built-in package staged at '/packages/calculator.rapp'.");
+    serial_println!("[OK] Root filesystem mounted. RAPP v2 package staging is provisioned through the trusted package pipeline.");
 
     // 11. Zero-Trust Capability Enforcement Self-Tests
     serial_println!("\n--- [Zero-Trust Capability Enforcement Self-Tests] ---");
