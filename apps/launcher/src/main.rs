@@ -57,13 +57,11 @@ pub extern "C" fn _start() -> ! {
         }
     };
 
-    static mut PIXELS: [u32; W * H] = [0; W * H];
-    unsafe { render_launcher(&mut PIXELS); }
+    let mut pixels = [0u32; W * H];
+    render_launcher(&mut pixels);
 
-    unsafe {
-        for (offset, chunk) in PIXELS.chunks(1024).enumerate() {
-            let _ = std::surface_write(surface, (offset * 1024) as u32, chunk);
-        }
+    for (offset, chunk) in pixels.chunks(1024).enumerate() {
+        let _ = std::surface_write(surface, (offset * 1024) as u32, chunk);
     }
     let _ = std::surface_flip();
     std::log(0, "[LAUNCHER USERSPACE] Launcher frame committed from real userspace pixel buffer.").ok();
