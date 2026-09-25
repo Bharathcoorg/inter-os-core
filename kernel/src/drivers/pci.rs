@@ -202,9 +202,9 @@ pub fn find_e1000() -> Option<PciDevice> {
 pub fn initialize_e1000_network() -> Result<(), &'static str> {
     let device = find_e1000().ok_or("No Intel E1000-compatible controller found")?;
     let bar = device.memory_bar(0).ok_or("E1000 MMIO BAR0 unavailable")?;
-    let mmio_base = crate::memory::VirtAddr::new(0xffff_9000_0000_0000);
+    let mmio_base = x86_64::VirtAddr::new(0xffff_9000_0000_0000);
     let mapped = crate::memory::map_mmio_region(
-        crate::memory::PhysAddr::new(bar & !0xfff),
+        x86_64::PhysAddr::new(bar & !0xfff),
         0x20000,
         mmio_base,
     )?;
