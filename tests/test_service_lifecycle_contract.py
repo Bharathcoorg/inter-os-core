@@ -52,9 +52,10 @@ def main() -> None:
     # syscall gate must verify that exact object before lifecycle operations.
     must(syscall, "task.cap_table.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, SERVICE_MANAGER_OBJECT)",
          "object-scoped service-manager authorization")
-    must(pid1, "cap_type: CapabilityType::SystemControl,", "PID1 manager capability type")
-    must(pid1, "object_id: crate::syscall::SERVICE_MANAGER_OBJECT,", "PID1 manager object binding")
-    must(pid1, "expect(\"PID1 SystemControl capability\")", "PID1 manager capability installation")
+    user_task = (ROOT / "kernel/src/task/user.rs").read_text()
+    must(user_task, "cap_type: CapabilityType::SystemControl,", "PID1 manager capability type")
+    must(user_task, "object_id: crate::syscall::SERVICE_MANAGER_OBJECT,", "PID1 manager object binding")
+    must(user_task, 'expect("PID1 SystemControl capability")', "PID1 manager capability installation")
 
     # Service isolation and lifecycle state transitions are explicit.
     must(services, "CapabilityType::IpcReceive", "service IPC receive capability")
