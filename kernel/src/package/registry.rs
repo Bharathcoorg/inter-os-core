@@ -185,6 +185,11 @@ impl PackageRegistry {
         Ok(())
     }
 
+
+    pub fn launch_allowed(&self, package_id:&str, version:(u16,u16,u16))->bool {
+        self.entries.iter().find(|e|e.package_id==package_id).map(|e| matches!(e.state,PackageState::Staged|PackageState::Active) && version>=e.version).unwrap_or(false)
+    }
+
     pub fn entries(&self) -> &[PackageEntry] { &self.entries }
 }
 
