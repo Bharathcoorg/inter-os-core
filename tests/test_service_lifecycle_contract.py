@@ -103,6 +103,21 @@ def main() -> None:
     ):
         must(services, marker, f"service capability matrix {marker}")
 
+    # M11 executable contract: PID1 must exercise the complete deterministic
+    # lifecycle smoke sequence used by the QEMU vertical slice.
+    must(pid1, "const SERVICES: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];",
+         "complete system-service bootstrap set")
+    must(pid1, "match std::service_stop(1)", "PID1 service stop exercise")
+    must(pid1, "std::service_start(1)", "PID1 service restart exercise")
+    must(pid1, "[PID1] Service stop lifecycle contract exercised.",
+         "PID1 successful stop evidence")
+    must(pid1, "[PID1] Service restart lifecycle contract exercised.",
+         "PID1 successful restart evidence")
+    must(pid1, "std::service_list(&mut service_buf)",
+         "PID1 service registry observation")
+    must(pid1, "std::service_recover_failed()",
+         "PID1 explicit recovery request")
+
     # Supervisor must inspect scheduler state before mutating the registry.
     must(services, "let sched = SCHEDULER.lock();", "supervisor scheduler lock")
     must(services, "let mut registry = SERVICE_RECORDS.lock();",
