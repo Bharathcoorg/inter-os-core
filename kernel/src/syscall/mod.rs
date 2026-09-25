@@ -1403,7 +1403,7 @@ pub fn sys_package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) ->
             .ok_or(SyscallResult::PermissionDenied)?;
         (read_slot, current.id)
     };
-    if pkg_id.is_empty() || pkg_id.contains('/') || pkg_id.contains('\\\\') || pkg_id.contains("..") {
+    if pkg_id.is_empty() || pkg_id.contains('/') || pkg_id.contains('\\') || pkg_id.contains("..") {
         return Err(SyscallResult::InvalidArguments);
     }
     let path = alloc::format!("/packages/{}.rapp", pkg_id);
