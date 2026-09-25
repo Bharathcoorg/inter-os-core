@@ -219,6 +219,7 @@ impl Scheduler {
         task.exit_code = exit_code;
         task.state = TaskState::Zombie;
         crate::ipc::cleanup_task(id);
+        crate::drivers::display_kms::DRM_KMS.lock().destroy_surfaces_owned_by(id.0);
         Ok(())
     }
 
