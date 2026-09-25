@@ -9,7 +9,7 @@ use core::sync::atomic::{compiler_fence, Ordering};
 use super::device::{NetError, NetworkDevice, MAX_PACKET_SIZE};
 use super::ethernet::MacAddress;
 use crate::memory::{allocate_dma_frames, physical_to_virtual};
-use x86_64::PhysFrame;
+use x86_64::{PhysAddr, PhysFrame};
 use x86_64::structures::paging::Size4KiB;
 
 const CTRL: usize = 0x0000;
@@ -255,7 +255,8 @@ impl NetworkDevice for E1000Device {
             desc.cmd = TX_CMD_EOP | TX_CMD_IFCS | TX_CMD_RS;
             desc.status = 0;
             let buffer = self.tx_buffer_phys + (idx * MAX_PACKET_SIZE) as u64;
-            core::ptr::copy_nonoverlapping(frame.as_ptr(), buffer as *mut u8, frame.len());
+            let buffer_virt = physical_to_virtual(PhysAddr::new(buffer)).as_mut_ptr();
+            core::ptr::copy_nonoverlapping(frame.as_ptr(), buffer_virt, frame.len());
             desc.addr = buffer;
             compiler_fence(Ordering::Release);
             write32(self.base_vaddr, TDT, ((idx + 1) % TX_DESC_COUNT) as u32);
@@ -273,7 +274,8 @@ impl NetworkDevice for E1000Device {
             let len = desc.length as usize;
             if len > out.len() { return Err(NetError::BufferTooSmall); }
             let buffer = self.rx_buffer_phys + (idx * MAX_PACKET_SIZE) as u64;
-            core::ptr::copy_nonoverlapping(buffer as *const u8, out.as_mut_ptr(), len);
+            let buffer_virt = physical_to_virtual(PhysAddr::new(buffer)).as_ptr();
+            core::ptr::copy_nonoverlapping(buffer_virt, out.as_mut_ptr(), len);
             desc.status = 0;
             compiler_fence(Ordering::Release);
             write32(self.base_vaddr, RDT, idx as u32);

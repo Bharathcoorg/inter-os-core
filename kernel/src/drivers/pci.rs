@@ -210,6 +210,10 @@ pub fn find_e1000() -> Option<PciDevice> {
 pub fn initialize_e1000_network() -> Result<(), &'static str> {
     let device = find_e1000().ok_or("No Intel E1000-compatible controller found")?;
     device.enable_memory_and_bus_master();
+    let command = pci_read_u16(device.addr, 0x04);
+    if command & (1 << 1) == 0 || command & (1 << 2) == 0 {
+        return Err("E1000 PCI memory/bus-mastering could not be enabled");
+    }
     let bar = device.memory_bar(0).ok_or("E1000 MMIO BAR0 unavailable")?;
     let mmio_base = x86_64::VirtAddr::new(0xffff_9000_0000_0000);
     let mapped = crate::memory::map_mmio_region(
@@ -226,6 +230,9 @@ pub fn initialize_e1000_network() -> Result<(), &'static str> {
             .ok_or("Unable to allocate contiguous E1000 DMA memory")?
     };
     nic.initialize().map_err(|_| "E1000 controller initialization failed")?;
+    if !nic.read_link_status() {
+        return Err("E1000 controller reports link down after initialization");
+    }
     crate::net::NETWORK_DEVICE.lock().attach_e1000(nic);
     serial_println!("[NET] Intel E1000 network backend attached: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         mac.0[0], mac.0[1], mac.0[2], mac.0[3], mac.0[4], mac.0[5]);
