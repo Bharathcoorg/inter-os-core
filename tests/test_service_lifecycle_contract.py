@@ -13,6 +13,7 @@ SDK = ROOT / "sdk/rust/interos-std/src/lib.rs"
 SERVICES = ROOT / "kernel/src/services.rs"
 PID1 = ROOT / "userspace/init/src/main.rs"
 SCHED = ROOT / "kernel/src/task/scheduler.rs"
+SERVICE_ABI = ROOT / "kernel/src/service_abi.rs"
 
 
 def must(text: str, needle: str, label: str) -> None:
@@ -137,6 +138,39 @@ def main() -> None:
     must(pid1, 'state != b"running" || task_bytes == b"0"',
          "PID1 rejects non-running/zero-task registry entries")
     must(pid1, "seen == 0xff", "PID1 requires all eight services")
+
+
+    # M15 trusted userspace service ABI is explicit, versioned, and bounded.
+    service_abi = SERVICE_ABI.read_text()
+    must(service_abi, 'SERVICE_ABI_MAGIC: [u8; 4] = *b"ISVC"', "service ABI magic")
+    must(service_abi, "SERVICE_ABI_VERSION: u16 = 1", "service ABI version")
+    must(service_abi, "pub enum ServiceOp", "service ABI operation enum")
+    must(service_abi, "Register = 1", "service register operation")
+    must(service_abi, "Heartbeat = 2", "service heartbeat operation")
+    must(service_abi, "pub fn decode", "service ABI decoder")
+    must(service_abi, "service_capability_allowed", "service capability policy")
+    must(sdk, "pub fn service_package_verify", "signed service package SDK ABI")
+
+    # M16 signed service packages must use the RAPP verifier and the narrow
+    # service namespace/capability policy before M17 is allowed to execute them.
+    must(syscall, "ServicePackageVerify = 89", "service package verification syscall number")
+    must(syscall, "sys_service_package_verify", "service package verification kernel ABI")
+    must(syscall, 'path.starts_with("/packages/")', "service package path boundary")
+    must(syscall, 'path.ends_with(".rapp")', "service package format boundary")
+    must(syscall, "sys_verify_package(cap_slot, path)", "service package signed RAPP verification")
+    must(syscall, "service_id_from_package_id", "trusted service package namespace")
+    must(syscall, "service_capability_allowed", "service package capability policy")
+    for forbidden in (
+        "CapabilityType::ProcessKill",
+        "CapabilityType::ProcessSpawn",
+        "CapabilityType::StorageRawBlock",
+        "CapabilityType::SystemControl",
+        "CapabilityType::NetworkSend",
+        "CapabilityType::NetworkReceive",
+        "CapabilityType::HardwarePortIo",
+    ):
+        must(service_abi, f"matches!(capability, 1 | 2 | 3 | 6 | 17)",
+             "restricted service capability policy")
 
     # Supervisor must inspect scheduler state before mutating the registry.
     must(services, "let sched = SCHEDULER.lock();", "supervisor scheduler lock")
