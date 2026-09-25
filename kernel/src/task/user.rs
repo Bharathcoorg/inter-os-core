@@ -368,6 +368,8 @@ pub fn spawn_user_process(
     tcb.user_entry = user_entry;
     tcb.user_stack_top = user_stack_top;
 
+    let parent_id = SCHEDULER.lock().current_task_id().unwrap_or(TaskId(0));
+    tcb.parent_id = parent_id;
     let id = tcb.id;
     SCHEDULER.lock().spawn_task(tcb);
     Ok(id)
