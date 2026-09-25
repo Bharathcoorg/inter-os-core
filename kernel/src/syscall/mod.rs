@@ -1270,6 +1270,7 @@ pub fn sys_resource_query(
     out_temp: &mut u8,
     out_throttling: &mut bool,
 ) -> SyscallResult {
+    require_system_control()?;
     let rm = crate::resource::RESOURCE_MANAGER.lock();
     *out_battery = rm.battery.percent;
     *out_temp = rm.thermal.temp_celsius;
@@ -1279,6 +1280,7 @@ pub fn sys_resource_query(
 
 /// Queries the dynamic multi-zone thermal governor into `out_buf` JSON string.
 pub fn sys_thermal_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    require_system_control()?;
     let tm = crate::resource::THERMAL_MANAGER.lock();
     let len = tm.format_json(out_buf);
     Ok(len)
@@ -1302,6 +1304,7 @@ pub fn sys_secure_ipc_session(peer: TaskId) -> Result<u64, SyscallResult> {
 
 /// Queries wireless HAL status (Wi-Fi and BLE beacon) into `out_buf` JSON string.
 pub fn sys_wireless_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    require_system_control()?;
     let wm = crate::net::WIRELESS_MANAGER.lock();
     let len = wm.format_json(out_buf);
     Ok(len)
@@ -1479,6 +1482,7 @@ pub fn sys_power_governor(action: u32, governor_id: u8) -> Result<u32, SyscallRe
 /// In standard QEMU / development emulator targets without a physical baseband modem,
 /// this reports honestly that no hardware modem is detected.
 pub fn sys_telephony_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    require_system_control()?;
     use core::fmt::Write;
     struct SliceWriter<'a> {
         buf: &'a mut [u8],
@@ -1645,6 +1649,7 @@ pub fn sys_keystore_derive(slot_idx: u32, out_buf: &mut [u8; 32]) -> Result<usiz
 /// Queries mobile hardware sensor telemetry (orientation, 3-axis accel, ambient lux, proximity).
 /// Reports honestly if hardware sensors are not physically present on the board.
 pub fn sys_sensor_read(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    require_system_control()?;
     use core::fmt::Write;
     struct SliceWriter<'a> {
         buf: &'a mut [u8],
@@ -1732,6 +1737,7 @@ pub fn sys_android_bridge_intent(action: &str, data_uri: &str, out_buf: &mut [u8
 
 /// Queries the active hardware real-time clock (RTC / CMOS) into `out_buf` JSON string.
 pub fn sys_rtc_get_time(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    require_system_control()?;
     let mut rtc = crate::hal::RTC.lock();
     let dt = rtc.read_hardware();
     use core::fmt::Write;
@@ -1807,6 +1813,7 @@ pub fn sys_revocation_audit(
     _out_ptr: *mut u8,
     _out_len: usize,
 ) -> Result<usize, SyscallResult> {
+    require_system_control()?;
     let mut reg = crate::package::REVOCATION_REGISTRY.lock();
     match cmd {
         0 => {
@@ -1876,6 +1883,10 @@ pub fn sys_surface_physics(
     viewport_h: i32,
     content_h: i32,
 ) -> Result<i32, SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    if !task.cap_table.has_capability(CapabilityType::FrameBufferDirect, Rights::WRITE) { return Err(SyscallResult::PermissionDenied); }
+    drop(sched);
     let mut scroller = GLOBAL_PHYSICS_SCROLLER.lock();
     if scroller.viewport_height != viewport_h || scroller.content_height != content_h {
         scroller.viewport_height = viewport_h;
