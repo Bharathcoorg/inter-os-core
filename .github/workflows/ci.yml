@@ -131,6 +131,9 @@ jobs:
       - name: Run Display Driver Boundary Contract Tests
         run: python tests/test_display_contract.py
 
+      - name: Run Input Event Pipeline Contract Tests
+        run: python tests/test_input_contract.py
+
   qemu-vertical-slice:
     name: QEMU x86_64 Build Contract
     runs-on: ubuntu-latest
