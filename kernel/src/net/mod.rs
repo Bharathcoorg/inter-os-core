@@ -133,13 +133,9 @@ pub fn send_tcp_syn(
     let mut ip_buf = [0u8; 128];
     let ip_len = Ipv4Packet::serialize(src_ip, dst_ip, IpProtocol::Tcp, 64, &tcp_buf[..tcp_len], &mut ip_buf)
         .map_err(|_| NetError::BufferTooSmall)?;
-    let dst_mac = if dst_ip.is_loopback() {
-        MacAddress([0, 0, 0, 0, 0, 1])
-    } else {
-        ARP_TABLE.lock().lookup(dst_ip).unwrap_or(MacAddress::BROADCAST)
-    };
+    let dst_mac = resolve_destination_mac(dst_ip)?;
     let frame = EthernetFrame {
-        dst_mac, src_mac: DEFAULT_HOST_MAC, ethertype: EtherType::Ipv4, payload: &ip_buf[..ip_len],
+        dst_mac, src_mac: NETWORK_DEVICE.lock().info().mac, ethertype: EtherType::Ipv4, payload: &ip_buf[..ip_len],
     };
     let mut eth_buf = [0u8; 1514];
     let len = frame.serialize(&mut eth_buf).map_err(|_| NetError::BufferTooSmall)?;
