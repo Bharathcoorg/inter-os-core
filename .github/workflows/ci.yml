@@ -145,5 +145,21 @@ jobs:
           done
       - name: Verify kernel QEMU target
         run: cargo check --manifest-path kernel/Cargo.toml --target x86_64-unknown-none
+      - name: Build kernel QEMU image input
+        run: cargo build --manifest-path kernel/Cargo.toml --target x86_64-unknown-none
+      - name: Build bootable BIOS image
+        run: cargo run --manifest-path boot/Cargo.toml -- target/x86_64-unknown-none/debug/kernel target/interos-os-ci.img
+      - name: Boot image and verify PID1 lifecycle handoff
+        run: |
+          set -o pipefail
+          timeout 20s qemu-system-x86_64 \\
+            -drive format=raw,file=target/interos-os-ci.img \\
+            -serial file:target/interos-qemu-serial.log \\
+            -display none -no-reboot -no-shutdown || test $? -eq 124
+          test -s target/interos-qemu-serial.log
+          grep -F "INTER OS CORE -- Open-Source Rust Mobile Microkernel" target/interos-qemu-serial.log
+          grep -F "[OK] PID1 userspace service manager spawned" target/interos-qemu-serial.log
+          grep -F "[PID1] Service started through lifecycle ABI." target/interos-qemu-serial.log
+          grep -F "[PID1] Service registry observed; userspace lifecycle loop active." target/interos-qemu-serial.log
       - name: Verify boot image builder
         run: cargo check --manifest-path boot/Cargo.toml
