@@ -158,9 +158,8 @@ fn transmit_tcp_syn(
     dst_ip: Ipv4Address,
     dst_port: u16,
     seq: u32,
-    caps: &CapabilityTable,
 ) -> Result<(), NetError> {
-     let segment = TcpSegment {
+    let segment = TcpSegment {
         src_port, dst_port, seq, ack: 0, flags: 0x02, window: 65535, payload: &[],
     };
     let mut tcp_buf = [0u8; 64];
