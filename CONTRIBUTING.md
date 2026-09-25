@@ -58,3 +58,15 @@ Before submitting a Pull Request, ensure:
 ## 🔒 Security Vulnerability Reporting
 
 Security is paramount in InterOS Core. If you discover a security vulnerability or capability leak, please do not open a public issue. Email security reports to `security@interos.org` or contact the core maintainers privately.
+
+
+## Canonical Development Branch
+
+**`master` is the single canonical development branch for InterOS Core.**
+
+- All new work must branch from the current `master`.
+- Antigravity and other development agents must use `master` as their integration base.
+- `qemu-vertical-slice` is retained as a historical/reference branch and must not receive new feature work.
+- Do not reset, force-push, or rebuild `master` from either historical branch.
+- When importing older work, reconcile it into `master` with an explicit commit and preserve the existing canonical tree.
+- Keep migration/backup branches until the corresponding audit and CI validation are complete.
