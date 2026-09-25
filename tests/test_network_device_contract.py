@@ -27,6 +27,7 @@ def main():
     must(net, "pub use device::{LoopbackDevice, NetDeviceInfo, NetError, NetworkBackend, NetworkDevice, NetworkDeviceManager, NETWORK_DEVICE};", "network abstraction exports")
     must(pci, "is_network_controller", "PCI network device discovery")
     must(pci, "pub fn memory_bar", "PCI BAR discovery")
+    must(pci, "pub fn enable_memory_and_bus_master", "PCI DMA enablement")
     must(pci, "pub fn find_e1000", "E1000 PCI discovery")
     must(pci, "pub fn initialize_e1000_network", "E1000 hardware attachment")
     must(pci, "map_mmio_region", "MMIO mapping")
