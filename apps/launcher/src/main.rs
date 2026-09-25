@@ -49,7 +49,7 @@ fn render_launcher(p: &mut [u32]) {
 pub extern "C" fn _start() -> ! {
     std::log(0, "[LAUNCHER USERSPACE] Real Rust launcher service online.").ok();
 
-    let surface = match std::surface_create(W as u32, H as u32, 200) {
+    let surface = match std::surface_create(W as u32, H as u32, 0) {
         Ok(id) => id,
         Err(_) => {
             std::log(0, "[LAUNCHER USERSPACE] Launcher surface allocation failed.").ok();
