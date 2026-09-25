@@ -233,6 +233,10 @@ pub struct TcpConnection {
     pub tx_deadline: u64,
     pub tx_retries: u8,
     pub tx_pending: bool,
+    pub fin_pending: bool,
+    pub fin_seq: u32,
+    pub fin_deadline: u64,
+    pub fin_retries: u8,
 }
 
 pub struct TcpConnectionTable {
@@ -274,6 +278,10 @@ impl TcpConnectionTable {
                     tx_deadline: 0,
                     tx_retries: 0,
                     tx_pending: false,
+                    fin_pending: false,
+                    fin_seq: initial_seq,
+                    fin_deadline: 0,
+                    fin_retries: 0,
                 });
                 return Ok(id);
             }
@@ -361,6 +369,63 @@ impl TcpConnectionTable {
             }
         }
         None
+    }
+
+    pub fn arm_fin(&mut self, id: u32, now: u64) -> Result<u32, NetError> {
+        let conn = self.get_mut(id).ok_or(NetError::NoPacketAvailable)?;
+        if conn.state != crate::net::TcpState::Established { return Err(NetError::NoPacketAvailable); }
+        conn.fin_seq = conn.send_seq;
+        conn.fin_pending = true;
+        conn.fin_deadline = now.saturating_add(TCP_RETRANSMIT_TICKS);
+        conn.fin_retries = 0;
+        conn.send_seq = conn.send_seq.wrapping_add(1);
+        conn.state = crate::net::TcpState::FinWait;
+        Ok(conn.fin_seq)
+    }
+
+    pub fn acknowledge_fin(&mut self, id: u32, ack: u32) -> bool {
+        let conn = match self.get_mut(id) { Some(c) => c, None => return false };
+        if conn.fin_pending && crate::net::tcp::seq_ge(ack, conn.fin_seq.wrapping_add(1)) {
+            conn.fin_pending = false;
+            conn.fin_retries = 0;
+            if conn.state == crate::net::TcpState::FinWait { conn.state = crate::net::TcpState::Closed; }
+            return true;
+        }
+        false
+    }
+
+    pub fn due_fin_retransmit(&mut self, now: u64) -> Option<(u32, Ipv4Address, u16, u16, u32, u32)> {
+        for slot in self.entries.iter_mut() {
+            if let Some(conn) = slot.as_mut() {
+                if conn.fin_pending && now >= conn.fin_deadline {
+                    if conn.fin_retries >= TCP_MAX_RETRIES {
+                        conn.fin_pending = false;
+                        conn.state = crate::net::TcpState::Closed;
+                        continue;
+                    }
+                    conn.fin_retries += 1;
+                    conn.fin_deadline = now.saturating_add(TCP_RETRANSMIT_TICKS << conn.fin_retries);
+                    return Some((conn.id, conn.remote_ip, conn.local_port, conn.remote_port, conn.fin_seq, conn.recv_seq));
+                }
+            }
+        }
+        None
+    }
+
+    pub fn is_closed(&self, id: u32) -> bool {
+        self.get(id).map(|c| c.state == crate::net::TcpState::Closed && !c.fin_pending).unwrap_or(false)
+    }
+
+    pub fn remove_closed(&mut self, id: u32, owner_task_id: u32) -> Result<(), NetError> {
+        let slot = self.entries.iter_mut().find(|s| s.as_ref().map(|c| c.id == id).unwrap_or(false));
+        match slot {
+            Some(entry) if entry.as_ref().map(|c| c.owner_task_id == owner_task_id && c.state == crate::net::TcpState::Closed).unwrap_or(false) => {
+                *entry = None;
+                Ok(())
+            }
+            Some(_) => Err(NetError::NotReady),
+            None => Err(NetError::NoPacketAvailable),
+        }
     }
 
     pub fn tx_payload(&self, id: u32) -> Option<&[u8]> {

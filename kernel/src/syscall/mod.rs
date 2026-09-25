@@ -113,6 +113,7 @@ pub enum SyscallNumber {
     StorageQuery = 84,
     FsList = 85,
     DnsResolve = 99,
+    TcpClose = 100,
 }
 
 /// System call result status codes.
@@ -1436,6 +1437,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             let host = match read_user_string(a0, len, &mut name) { Ok(v) => v, Err(_) => return SyscallResult::InvalidArguments as i64 };
             match sys_dns_resolve(host) { Ok(ip) => u32::from_be_bytes(ip.0) as i64, Err(e) => e as i64 }
         }
+        100 => match sys_tcp_close(a0 as u32) { Ok(()) => 0, Err(e) => e as i64 },
         98 => {
             let len = a3 as usize;
             if len > 2048 { return SyscallResult::InvalidArguments as i64; }
@@ -1655,6 +1657,38 @@ pub fn sys_dns_resolve(name: &str) -> Result<crate::net::Ipv4Address, SyscallRes
         }
         let _ = resolver.poll_timeouts(current_tick);
     }
+}
+
+/// Starts the bounded TCP FIN close handshake for an owned connection.
+pub fn sys_tcp_close(connection_id: u32) -> Result<(), SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    if !current.cap_table.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE) {
+        return Err(SyscallResult::PermissionDenied);
+    }
+    let owner = current.id.0 as u32;
+    let src_ip;
+    let local_port;
+    let dst_ip;
+    let remote_port;
+    let seq;
+    let ack;
+    {
+        let table = crate::net::TCP_TABLE.lock();
+        let conn = table.get(connection_id).ok_or(SyscallResult::InvalidArguments)?;
+        if conn.owner_task_id != owner { return Err(SyscallResult::PermissionDenied); }
+        if conn.state != crate::net::TcpState::Established { return Err(SyscallResult::NotReady); }
+        src_ip = if conn.remote_ip.is_loopback() { crate::net::Ipv4Address::LOCALHOST } else { crate::net::DEFAULT_HOST_IP };
+        local_port = conn.local_port;
+        dst_ip = conn.remote_ip;
+        remote_port = conn.remote_port;
+        seq = conn.send_seq;
+        ack = conn.recv_seq;
+    }
+    crate::net::transmit_tcp_segment_for_close(src_ip, local_port, dst_ip, remote_port, seq, ack, 0x11)
+        .map_err(|_| SyscallResult::NetworkError)?;
+    crate::net::TCP_TABLE.lock().arm_fin(connection_id, crate::interrupts::get_system_ticks()).map_err(|_| SyscallResult::NotReady)?;
+    Ok(())
 }
 
 pub fn sys_tcp_connect(dst_ip: crate::net::Ipv4Address, dst_port: u16, local_port: u16, seq: u32) -> Result<u32, SyscallResult> {

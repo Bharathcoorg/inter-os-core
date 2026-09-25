@@ -248,6 +248,7 @@ pub fn poll_network_interface() -> usize {
                                                     // Never accept acknowledgements beyond data we have sent.
                                                     if crate::net::tcp::seq_gt(segment.ack, conn.send_seq) { continue; }
                                                     let _ = TCP_TABLE.lock().acknowledge_tx(conn.id, segment.ack);
+                                                    let _ = TCP_TABLE.lock().acknowledge_fin(conn.id, segment.ack);
                                                     let fin = segment.flags & 0x01 != 0;
                                                     if !segment.payload.is_empty() || fin {
                                                         let conn_id = conn.id;
@@ -293,6 +294,10 @@ pub fn poll_network_interface() -> usize {
 
 /// Retransmits one bounded unacknowledged TCP payload when its deadline expires.
 pub fn poll_tcp_retransmissions(now: u64) -> usize {
+    let due_fin = TCP_TABLE.lock().due_fin_retransmit(now);
+    if let Some((_id, remote_ip, local_port, remote_port, seq, ack)) = due_fin {
+        return if transmit_tcp_segment(if remote_ip.is_loopback() { Ipv4Address::LOCALHOST } else { DEFAULT_HOST_IP }, local_port, remote_ip, remote_port, seq, ack, 0x11).is_ok() { 1 } else { 0 };
+    }
     let due = TCP_TABLE.lock().due_retransmit(now);
     let Some((id, remote_ip, local_port, remote_port, seq, ack, len)) = due else { return 0; };
     let payload = {
