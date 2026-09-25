@@ -50,7 +50,8 @@ def main() -> None:
     assert payload_write < header_write, "journal header must be published after payload sectors"
     must(persistent, "Sha256::digest(payload)", "journal payload integrity digest")
     must(persistent, "generation", "journal generation tracking")
-    must(persistent, "SLOT_COUNT", "redundant journal slots")
+    must(persistent, "const SLOT_COUNT: u32 = 16;", "redundant journal slots for eight record kinds")
+    must(persistent, "5 => 8usize", "package payload journal kind")
     must(persistent, "SLOT_SECTORS", "fixed journal slot geometry")
 
     # VFS descriptor close must release the FD-table borrow before persistence I/O.
