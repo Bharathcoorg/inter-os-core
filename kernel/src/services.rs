@@ -104,6 +104,12 @@ pub fn start(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str> {
     if let Some(record) = existing {
         if record.state == ServiceState::Running && record.task != TaskId(0) { return Ok(record.task); }
         if record.state == ServiceState::Starting { return Err("service already starting"); }
+        // A failed worker still owns a scheduler task until the explicit
+        // recovery path tears it down and reaps it. Do not spawn another
+        // worker here or recovery could create duplicate service instances.
+        if record.state == ServiceState::Failed && record.task != TaskId(0) {
+            return Err("failed service requires recovery");
+        }
         if !matches!(record.state, ServiceState::Declared | ServiceState::Stopped | ServiceState::Failed) {
             return Err("service is not startable");
         }
@@ -146,8 +152,19 @@ pub fn stop(id: ServiceId, parent_id: TaskId) -> Result<(), &'static str> {
     if id == ServiceId::Init { return Err("init cannot be stopped"); }
     let record = SERVICE_RECORDS.lock()[id as usize].ok_or("service not declared")?;
     if record.task == TaskId(0) { return Ok(()); }
+    // Services are children of the PID1 task that started them. Stopping a
+    // service must remain parent-scoped even when the caller has the manager
+    // capability; never allow the manager to terminate another owner's task.
+    let service_task = record.task;
+    {
+        let scheduler = SCHEDULER.lock();
+        let task = scheduler.get_task(service_task).ok_or("service task not found")?;
+        if task.parent_id != parent_id {
+            return Err("service is not owned by caller");
+        }
+    }
     let mut scheduler = SCHEDULER.lock();
-    scheduler.terminate_task(record.task, 0).map_err(|_| "service termination failed")?;
+    scheduler.terminate_task(service_task, 0).map_err(|_| "service termination failed")?;
     let _ = scheduler.reap_child(parent_id, record.task);
     SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Stopped });
     Ok(())
