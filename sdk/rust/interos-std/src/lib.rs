@@ -7,6 +7,36 @@ pub mod service;
 #![no_std]
 
 pub mod design;
+pub mod compositor {
+    pub const MAGIC: [u8; 4] = *b"ICMP";
+    pub const VERSION: u8 = 1;
+    pub const MSG_TYPE: u32 = 0x434F_4D50;
+    pub const HEADER_SIZE: usize = 24;
+
+    #[repr(u8)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Op { CreateSurface = 1, WritePixels = 2, SetGeometry = 3, DestroySurface = 4, Commit = 5, Focus = 6 }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Request {
+        pub op: Op, pub surface_id: u32, pub width: u32, pub height: u32, pub pixel_offset: u32,
+    }
+
+    impl Request {
+        pub fn encode(&self, out: &mut [u8]) -> Result<usize, ()> {
+            if out.len() < HEADER_SIZE { return Err(()); }
+            out[..HEADER_SIZE].fill(0);
+            out[..4].copy_from_slice(&MAGIC);
+            out[4] = VERSION;
+            out[5] = self.op as u8;
+            out[8..12].copy_from_slice(&self.surface_id.to_le_bytes());
+            out[12..16].copy_from_slice(&self.width.to_le_bytes());
+            out[16..20].copy_from_slice(&self.height.to_le_bytes());
+            out[20..24].copy_from_slice(&self.pixel_offset.to_le_bytes());
+            Ok(HEADER_SIZE)
+        }
+    }
+}
 
 /// Well-known system call identifiers matching the Inter OS microkernel.
 #[repr(u64)]
