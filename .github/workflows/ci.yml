@@ -140,6 +140,9 @@ jobs:
       - name: Run Network Device Abstraction Contract Tests
         run: python tests/test_network_device_contract.py
 
+      - name: Run Userspace Network Service Contract Tests
+        run: python tests/test_network_service_contract.py
+
   qemu-vertical-slice:
     name: QEMU x86_64 Build Contract
     runs-on: ubuntu-latest
