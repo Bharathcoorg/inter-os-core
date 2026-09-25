@@ -548,7 +548,7 @@ impl Vfs {
         if let Some(slot) = table.get_mut(fd.0 as usize) {
             if slot.is_some() {
                 *slot = None;
-                self.persist_data_snapshot().map_err(|_|FsError::IntegrityViolation)?;
+                if self.persist_data_snapshot().is_err() { crate::serial_println!("[VFS] persistent data snapshot unavailable; keeping live state."); }
                 return Ok(());
             }
         }
