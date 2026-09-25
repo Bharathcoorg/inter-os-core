@@ -45,6 +45,20 @@ pub fn run_display() -> ! {
     }
 }
 
+/// Input-service execution path. Hardware gesture recognition is normalized
+/// by the kernel into a bounded event ABI before reaching userspace.
+pub fn run_input() -> ! {
+    let _ = std::log(0, "[inputd] userspace input manager online.");
+    let mut event = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+    loop {
+        let _ = std::service_heartbeat(2);
+        if std::input_event_poll(&mut event).is_ok() {
+            let _ = std::log(0, "[inputd] normalized input event received.");
+        }
+        let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 20);
+    }
+}
+
 /// Storage-service execution path. The filesystem is no longer only a kernel
 /// bootstrap facility: storaged owns the userspace storage heartbeat and uses
 /// its dedicated FileSystem capability to perform bounded persistent I/O.
