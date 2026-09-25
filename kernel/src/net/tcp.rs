@@ -91,6 +91,19 @@ impl<'a> TcpSegment<'a> {
     }
 }
 
+pub fn serialize_with_checksum(
+    segment: &TcpSegment<'_>,
+    src: [u8; 4],
+    dst: [u8; 4],
+    out: &mut [u8],
+) -> Result<usize, &'static str> {
+    let n = segment.serialize(out)?;
+    out[16..18].fill(0);
+    let checksum = tcp_checksum(src, dst, &out[..n]);
+    out[16..18].copy_from_slice(&checksum.to_be_bytes());
+    Ok(n)
+}
+
 pub fn next_state(state: TcpState, flags: u16) -> TcpState {
     const SYN: u16 = 0x02;
     const ACK: u16 = 0x10;
