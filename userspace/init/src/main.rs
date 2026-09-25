@@ -43,6 +43,11 @@ pub extern "C" fn _start() -> ! {
                     std::log(0, "[PID1] Service registry returned no active services.").ok();
                 }
             }
+            if let Ok(restarted) = std::service_recover_failed() {
+                if restarted > 0 {
+                    std::log(0, "[PID1] Recovered failed system service(s).").ok();
+                }
+            }
             last_poll = now;
         }
 
