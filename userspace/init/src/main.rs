@@ -21,7 +21,7 @@ pub extern "C" fn _start() -> ! {
     const SERVICES: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
     for service_id in SERVICES {
         match std::service_start(service_id) {
-            Ok(task_id) => std::log(0, "[PID1] Service started through lifecycle ABI.").ok(),
+            Ok(_) => std::log(0, "[PID1] Service started through lifecycle ABI.").ok(),
             Err(_) => std::log(0, "[PID1] Service start request rejected.").ok(),
         }
     }
