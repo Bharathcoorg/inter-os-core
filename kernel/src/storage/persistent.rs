@@ -11,7 +11,7 @@ use crate::drivers::{BlockDevice, ATA_PRIMARY, SECTOR_SIZE};
 pub const JOURNAL_MAGIC: [u8; 4] = *b"IOSJ";
 pub const JOURNAL_VERSION: u32 = 1;
 const SLOT_SECTORS: u32 = 8;
-const SLOT_COUNT: u32 = 4;
+const SLOT_COUNT: u32 = 8;
 const HEADER_SIZE: usize = 64;
 const PAYLOAD_CAPACITY: usize = (SLOT_SECTORS as usize * SECTOR_SIZE) - HEADER_SIZE;
 
@@ -122,11 +122,7 @@ pub fn commit_kind(payload: &[u8], kind: u8) -> Result<u64, PersistentError> {
     }
 
     // Keep two slots per record kind. Kinds 1 and 2 use slot pairs 0/1 and 2/3.
-    let pair_start = match kind {
-        1 => 0usize,
-        2 => 2usize,
-        _ => 0usize,
-    };
+    let pair_start = match kind { 1 => 0usize, 2 => 2usize, 3 => 4usize, 4 => 6usize, _ => return Err(PersistentError::Unavailable) };
     let a = pair_start;
     let b = pair_start + 1;
     let target = if generations[a] <= generations[b] { a } else { b };
