@@ -386,6 +386,18 @@ pub struct BootInfoFrameAllocator {
 impl BootInfoFrameAllocator {
     /// Returns a task-owned physical frame to the allocator for reuse.
     pub fn recycle_frame(&mut self, frame: PhysFrame<Size4KiB>) {
+        // Reject duplicate returns: a frame may only enter the free pool once.
+        if self.recycled_frames.contains(&frame) {
+            return;
+        }
+        // Only frames belonging to a bootloader-declared usable region may be
+        // recycled back into the general allocator.
+        let addr = frame.start_address().as_u64();
+        if !self.memory_regions.iter().any(|region| {
+            region.kind == MemoryRegionKind::Usable && addr >= region.start && addr + 4096 <= region.end
+        }) {
+            return;
+        }
         self.recycled_frames.push(frame);
     }
 
