@@ -17,7 +17,7 @@ pub fn run(service_id: u8, name: &str) -> ! {
             }
         }
         let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 20);
-        let _ = std::get_ticks(2);
+        let _ = std::get_ticks(1);
     }
 }
 
