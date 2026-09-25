@@ -527,6 +527,65 @@ impl Vfs {
             .map_err(|_| FsError::IntegrityViolation)
     }
 
+    /// Persists the mutable /data inode tree separately from file payloads.
+    /// Paths and metadata are durable; file bytes remain in InterFS data files.
+    fn persist_metadata_snapshot(&self) -> Result<(), FsError> {
+        let mut buf = [0u8; 32768];
+        buf[..4].copy_from_slice(b"IVM1");
+        let mut pos = 6usize;
+        let mut count = 0u16;
+        for inode in self.inodes.values() {
+            if !inode.path.starts_with("/data/") && inode.path != "/data" { continue; }
+            let path = inode.path.as_bytes();
+            if path.len() > 255 || pos + 8 + 1 + 2 + path.len() + 4 + 32 > buf.len() { continue; }
+            buf[pos..pos + 8].copy_from_slice(&inode.id.0.to_le_bytes()); pos += 8;
+            let kind = match inode.file_type { FileType::Directory => 1u8, FileType::RegularFile => 2u8, _ => continue };
+            buf[pos] = kind; pos += 1;
+            buf[pos..pos + 2].copy_from_slice(&(path.len() as u16).to_le_bytes()); pos += 2;
+            buf[pos..pos + path.len()].copy_from_slice(path); pos += path.len();
+            buf[pos..pos + 4].copy_from_slice(&(inode.size as u32).to_le_bytes()); pos += 4;
+            buf[pos..pos + 32].copy_from_slice(&inode.sha256_digest); pos += 32;
+            count = count.saturating_add(1);
+        }
+        buf[4..6].copy_from_slice(&count.to_le_bytes());
+        crate::storage::filesystem::store_data_file("/data/.vfs.metadata", &buf[..pos])
+            .map_err(|_| FsError::IntegrityViolation)
+    }
+
+    /// Restores the persistent /data inode tree before restoring file payloads.
+    fn restore_metadata_snapshot(&mut self) {
+        let mut buf = [0u8; 32768];
+        let Ok(len) = crate::storage::filesystem::load_data_file("/data/.vfs.metadata", &mut buf) else { return; };
+        if len < 6 || &buf[..4] != b"IVM1" { return; }
+        let count = u16::from_le_bytes([buf[4], buf[5]]) as usize;
+        let mut pos = 6usize;
+        for _ in 0..count {
+            if pos + 11 > len { break; }
+            let id = u64::from_le_bytes([buf[pos],buf[pos+1],buf[pos+2],buf[pos+3],buf[pos+4],buf[pos+5],buf[pos+6],buf[pos+7]]); pos += 8;
+            let kind = buf[pos]; pos += 1;
+            let plen = u16::from_le_bytes([buf[pos],buf[pos+1]]) as usize; pos += 2;
+            if plen == 0 || plen > 255 || pos + plen + 36 > len { break; }
+            let path = match core::str::from_utf8(&buf[pos..pos+plen]).ok() { Some(v) => v, None => break };
+            pos += plen;
+            let size = u32::from_le_bytes([buf[pos],buf[pos+1],buf[pos+2],buf[pos+3]]) as usize; pos += 4;
+            let mut digest = [0u8; 32]; digest.copy_from_slice(&buf[pos..pos+32]); pos += 32;
+            if !path.starts_with("/data/") && path != "/data" { continue; }
+            if kind == 1 {
+                self.mkdir(path);
+            } else if kind == 2 {
+                let id2 = self.create_file(path, &[], false);
+                if let Some(inode) = self.inodes.get_mut(&id2) {
+                    inode.id = InodeId(id);
+                    inode.size = size;
+                    inode.sha256_digest = digest;
+                    inode.data = InodeData::Dynamic(Vec::new());
+                }
+                self.path_to_inode.insert(path.to_string(), InodeId(id));
+            }
+            if id >= self.next_inode { self.next_inode = id.saturating_add(1); }
+        }
+    }
+
     /// Restores mutable /data files from the block-backed filesystem first.
     /// The metadata journal remains a recovery fallback until M22 finalizes the
     /// transactional publication protocol.
@@ -579,6 +638,9 @@ impl Vfs {
         }
         if self.persist_data_snapshot().is_err() {
             crate::serial_println!("[VFS] persistent data snapshot unavailable; keeping live state.");
+        }
+        if self.persist_metadata_snapshot().is_err() {
+            crate::serial_println!("[VFS] persistent inode metadata unavailable; keeping live state.");
         }
         Ok(())
     }
@@ -679,6 +741,8 @@ pub fn init() {
     vfs.create_device_node("/dev/input/event0");
     vfs.create_device_node("/dev/ptmx");
 
+    vfs.restore_metadata_snapshot();
     vfs.restore_data_snapshot();
+    let _ = vfs.persist_metadata_snapshot();
     *VFS.lock() = vfs;
 }
