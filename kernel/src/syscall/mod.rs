@@ -91,6 +91,8 @@ pub enum SyscallNumber {
     WindowSetGeometry = 79,
     WindowFocus = 80,
     ServiceList = 81,
+    ServiceStart = 82,
+    ServiceStop = 83,
     SettingsGet = 82,
     SettingsSet = 83,
     StorageQuery = 84,
@@ -1330,7 +1332,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         }
         79 => { match sys_window_set_geometry(a1 as u32, a2 as i64 as i32, a3 as i64 as i32, a4 as u32, a5 != 0) { e => e as i64 } }
         80 => { sys_window_focus(a1 as u32, a2 as u32) as i64 }
-        81 => { let len=a3 as usize; if len==0||len>4096{return SyscallResult::InvalidArguments as i64;} let mut out=[0u8;4096]; match sys_service_list(&mut out[..len]){Ok(n)=>{if copy_to_user(a2,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
+        81 => { let len=a3 as usize; if len==0||len>4096{return SyscallResult::InvalidArguments as i64;} let mut out=[0u8;4096]; match sys_service_list(&mut out[..len]){Ok(n)=>{if copy_to_user(a2,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }\n        82 => { match sys_service_start(a1 as u8) { Ok(id) => id.0 as i64, Err(e) => e as i64 } }\n        83 => { match sys_service_stop(a1 as u8) { Ok(()) => 0, Err(e) => e as i64 } }
         82 => { let key_len=a3 as usize; let out_len=a4 as usize; if out_len>512{return SyscallResult::InvalidArguments as i64;} let mut out=[0u8;512]; match sys_settings_get(a1 as usize,a2,key_len,&mut out[..out_len]){Ok(n)=>{if copy_to_user(a5,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
         83 => { match sys_settings_set(a1 as usize,a2,a3 as usize,a4,a5 as usize){Ok(())=>0,Err(e)=>e as i64} }
         84 => { match sys_storage_query(){Ok(n)=>n as i64,Err(e)=>e as i64} }
@@ -2532,6 +2534,30 @@ pub fn sys_settings_set(cap_slot: usize, key_ptr:u64,key_len:usize,val_ptr:u64,v
 pub fn sys_service_list(out: &mut [u8]) -> Result<usize, SyscallResult> {
     require_system_control()?;
     Ok(crate::services::snapshot(out))
+}
+
+pub fn sys_service_start(service_id: u8) -> Result<crate::task::TaskId, SyscallResult> {
+    require_system_control()?;
+    let id = match service_id {
+        1 => crate::services::ServiceId::Display, 2 => crate::services::ServiceId::Input,
+        3 => crate::services::ServiceId::Storage, 4 => crate::services::ServiceId::Network,
+        5 => crate::services::ServiceId::Power, 6 => crate::services::ServiceId::Modem,
+        7 => crate::services::ServiceId::Audio, 8 => crate::services::ServiceId::Camera,
+        _ => return Err(SyscallResult::InvalidArguments),
+    };
+    crate::services::start(id).map_err(|_| SyscallResult::DeviceError)
+}
+
+pub fn sys_service_stop(service_id: u8) -> Result<(), SyscallResult> {
+    require_system_control()?;
+    let id = match service_id {
+        1 => crate::services::ServiceId::Display, 2 => crate::services::ServiceId::Input,
+        3 => crate::services::ServiceId::Storage, 4 => crate::services::ServiceId::Network,
+        5 => crate::services::ServiceId::Power, 6 => crate::services::ServiceId::Modem,
+        7 => crate::services::ServiceId::Audio, 8 => crate::services::ServiceId::Camera,
+        _ => return Err(SyscallResult::InvalidArguments),
+    };
+    crate::services::stop(id).map_err(|_| SyscallResult::DeviceError)
 }
 
 pub fn sys_window_list(out_buf:&mut [u8])->Result<usize,SyscallResult>{
