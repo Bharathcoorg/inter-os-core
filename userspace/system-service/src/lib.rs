@@ -62,6 +62,39 @@ pub fn run_input() -> ! {
 /// Storage-service execution path. The filesystem is no longer only a kernel
 /// bootstrap facility: storaged owns the userspace storage heartbeat and uses
 /// its dedicated FileSystem capability to perform bounded persistent I/O.
+/// Network-service execution path. netd owns the userspace network data
+/// plane: it drives device RX polling and exercises the capability-guarded
+/// UDP socket ABI against the local endpoint.
+pub fn run_network() -> ! {
+    let _ = std::log(0, "[netd] userspace network manager online.");
+    let socket = match std::net_socket(4242) {
+        Ok(id) => id,
+        Err(_) => {
+            let _ = std::log(0, "[netd] socket creation rejected.");
+            std::exit_with_code(1);
+        }
+    };
+    let mut last_tick = 0u64;
+    let mut rx = [0u8; 512];
+
+    loop {
+        let _ = std::service_heartbeat(4);
+        let _ = std::network_poll();
+
+        let now = std::get_ticks(1).unwrap_or(last_tick);
+        if now.saturating_sub(last_tick) >= 100 || last_tick == 0 {
+            let _ = std::net_sendto([127, 0, 0, 1], 4242, b"INTEROS_NETD_HEARTBEAT");
+            let _ = std::net_recvfrom(socket, &mut rx);
+            last_tick = now;
+        }
+
+        let _ = std::event_poll(
+            std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK | std::EVENT_NETWORK_PACKET,
+            20,
+        );
+    }
+}
+
 pub fn run_storage() -> ! {
     let _ = std::log(0, "[storaged] userspace storage manager online.");
     let mut last_tick = 0u64;
