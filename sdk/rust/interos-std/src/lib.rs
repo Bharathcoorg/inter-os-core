@@ -85,6 +85,7 @@ pub enum SyscallNumber {
     ServiceStart = 86,
     ServiceStop = 87,
     ServiceRecoverFailed = 88,
+    ServicePackageVerify = 89,
 }
 
 // -----------------------------------------------------------------------------
@@ -1484,6 +1485,20 @@ pub fn window_set_geometry(id:u32,x:i32,y:i32,z:u32,visible:bool)->Result<(),i64
 }
 /// Focuses the topmost live window under screen coordinates.
 pub fn window_focus(x:u32,y:u32)->Result<(),i64>{let r=unsafe{syscall2(SyscallNumber::WindowFocus,x as u64,y as u64)};if r==0{Ok(())}else{Err(r)}}
+/// Verifies a signed Ring-3 system-service RAPP and returns its service ID.
+/// Requires the PID1 service-manager authority and a FileSystemRead capability.
+pub fn service_package_verify(cap_slot: usize, path: &str) -> Result<u8, i64> {
+    let r = unsafe {
+        syscall3(
+            SyscallNumber::ServicePackageVerify,
+            cap_slot as u64,
+            path.as_ptr() as u64,
+            path.len() as u64,
+        )
+    };
+    if r >= 0 { Ok(r as u8) } else { Err(r) }
+}
+
 /// Reads service lifecycle state.
 pub fn service_list(out:&mut[u8])->Result<usize,i64>{let r=unsafe{syscall2(SyscallNumber::ServiceList,out.as_mut_ptr() as u64,out.len() as u64)};if r>=0{Ok(r as usize)}else{Err(r)}}
 /// Starts a declared system service. Only PID1/service-manager capability domains may invoke this.
