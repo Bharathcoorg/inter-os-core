@@ -1296,7 +1296,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             let mut out=[0u8;4096];let mut pos=0usize;
             for p in crate::package::FIRST_PARTY_PACKAGES{
                 let line=format_args!("{}|{}|{}\n",p.package_id,p.process_name,p.path);
-                let mut tmp=[0u8;192];let mut n=0usize;
+                let mut tmp=[0u8;192];let n;
                 struct W<'a>{b:&'a mut[u8],n:usize}
                 impl<'a> core::fmt::Write for W<'a>{fn write_str(&mut self,s:&str)->core::fmt::Result{let r=self.b.len().saturating_sub(self.n);let k=s.len().min(r);self.b[self.n..self.n+k].copy_from_slice(&s.as_bytes()[..k]);self.n+=k;Ok(())}}
                 {let mut w=W{b:&mut tmp,n:0};let _=core::fmt::Write::write_fmt(&mut w,line);n=w.n;}
