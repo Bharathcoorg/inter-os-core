@@ -1669,13 +1669,12 @@ pub fn sys_dns_resolve(name: &str) -> Result<crate::net::Ipv4Address, SyscallRes
         let table = crate::net::SOCKET_TABLE.lock();
         table.get(socket).map(|s| s.local_port).unwrap_or(53000)
     };
-    if crate::net::send_udp_datagram(
-        crate::net::DEFAULT_HOST_IP,
+    let first_send_deadline = now.saturating_add(crate::net::dns::DNS_RETRY_TICKS);
+    if send_dns_datagram_with_arp_retry(
         local_port,
-        crate::net::DNS_SERVER,
-        53,
         &packet[..packet_len],
         &caps,
+        first_send_deadline,
     ).is_err() {
         let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
         return Err(SyscallResult::NetworkError);
@@ -1728,13 +1727,11 @@ pub fn sys_dns_resolve(name: &str) -> Result<crate::net::Ipv4Address, SyscallRes
                 let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
                 return Err(SyscallResult::NetworkError);
             }
-            if crate::net::send_udp_datagram(
-                crate::net::DEFAULT_HOST_IP,
+            if send_dns_datagram_with_arp_retry(
                 local_port,
-                crate::net::DNS_SERVER,
-                53,
                 &packet[..retry_len],
                 &caps,
+                current_tick.saturating_add(crate::net::dns::DNS_RETRY_TICKS),
             ).is_err() {
                 let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
                 return Err(SyscallResult::NetworkError);
