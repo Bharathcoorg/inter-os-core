@@ -6,6 +6,7 @@
 use alloc::collections::VecDeque;
 use crate::drivers::touch_gestures::RecognizedGesture;
 use spin::Mutex;
+use crate::task::TaskId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -70,11 +71,31 @@ impl InputPipeline {
 pub static INPUT_PIPELINE: Mutex<InputPipeline> = Mutex::new(InputPipeline::new());
 
 /// Moves recognized hardware gestures into the stable userspace event queue.
+/// Routes normalized input events to the currently focused surface owner.
+pub fn dispatch_to_focused_window(event: InputEvent) {
+    let target = crate::drivers::display_kms::DRM_KMS.lock().focused_surface();
+    let owner = match target {
+        Some(id) => crate::drivers::display_kms::DRM_KMS.lock().surfaces.iter().find(|s| s.id == id).map(|s| s.owner_task),
+        None => None,
+    };
+    if let Some(owner) = owner {
+        let mut msg = [0u8; 24];
+        msg[0] = event.kind as u8;
+        msg[4..8].copy_from_slice(&event.x.to_le_bytes());
+        msg[8..12].copy_from_slice(&event.y.to_le_bytes());
+        msg[12..16].copy_from_slice(&event.dx.to_le_bytes());
+        msg[16..20].copy_from_slice(&event.dy.to_le_bytes());
+        msg[20..24].copy_from_slice(&event.scale_milli.to_le_bytes());
+        let _ = crate::ipc::IPC_ROUTER.lock().send_direct(TaskId(0), TaskId(owner), 0x494E_5054, &msg);
+    }
+}
+
 pub fn pump_touch_events() {
     let mut touch = crate::drivers::touch_gestures::TOUCH_ENGINE.lock();
     let mut pipeline = INPUT_PIPELINE.lock();
     while let Some(gesture) = touch.gesture_queue.pop_front() {
-        pipeline.push(InputEvent::from_gesture(gesture));
+        let event = InputEvent::from_gesture(gesture);
+        pipeline.push(event);
     }
 }
 
