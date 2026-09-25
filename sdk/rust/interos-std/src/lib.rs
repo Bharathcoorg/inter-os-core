@@ -67,6 +67,8 @@ pub enum SyscallNumber {
     SurfaceFlip = 70,
     TouchPoll = 71,
     PowerSetProfile = 72,
+    SurfaceWrite = 73,
+    SurfaceDestroy = 74,
 }
 
 // -----------------------------------------------------------------------------
@@ -1423,3 +1425,15 @@ pub fn power_set_profile(profile_idx: u32) -> Result<u32, i64> {
 
 
 
+
+/// Writes ARGB pixels into a userspace-owned DRM/KMS surface.
+pub fn surface_write(surface_id: u32, pixel_offset: u32, pixels: &[u32]) -> Result<usize, i64> {
+    let ret = unsafe { syscall4(SyscallNumber::SurfaceWrite, surface_id as u64, pixel_offset as u64, pixels.as_ptr() as u64, pixels.len() as u64) };
+    if ret >= 0 { Ok(ret as usize) } else { Err(ret) }
+}
+
+/// Destroys a userspace-owned DRM/KMS surface.
+pub fn surface_destroy(surface_id: u32) -> Result<(), i64> {
+    let ret = unsafe { syscall1(SyscallNumber::SurfaceDestroy, surface_id as u64) };
+    if ret == 0 { Ok(()) } else { Err(ret) }
+}
