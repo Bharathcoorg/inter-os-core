@@ -310,26 +310,40 @@ impl CapabilityTable {
         Ok(cap)
     }
 
-    /// Checks if this capability table contains at least one capability of the expected type and rights.
+    /// Checks whether the table contains a matching capability without consuming
+    /// delegated invocation quota. This is a pure inspection operation.
     pub fn has_capability(&self, expected_type: CapabilityType, required_rights: Rights) -> bool {
+        self.slots.iter().any(|slot| {
+            slot.cap.as_ref().is_some_and(|cap| {
+                cap.cap_type == expected_type && cap.rights.contains(required_rights)
+            })
+        })
+    }
+
+    /// Authorizes one operation against a matching capability. Delegated
+    /// capabilities consume exactly one invocation here; ordinary capabilities
+    /// are only inspected. Callers must use this method for security decisions
+    /// that represent an actual privileged operation.
+    pub fn authorize_capability(
+        &self,
+        expected_type: CapabilityType,
+        required_rights: Rights,
+    ) -> Result<(), CapError> {
         for slot in &self.slots {
-            if let Some(ref cap) = slot.cap {
-                if cap.cap_type != expected_type || !cap.rights.contains(required_rights) {
-                    continue;
-                }
-                if cap.id.0 & 0x8000_0000_0000_0000 != 0
-                    && delegation::consume_invocation(
-                        cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF,
-                        crate::interrupts::get_system_ticks(),
-                        required_rights,
-                    ).is_err()
-                {
-                    continue;
-                }
-                return true;
+            let Some(cap) = slot.cap.as_ref() else { continue; };
+            if cap.cap_type != expected_type || !cap.rights.contains(required_rights) {
+                continue;
             }
+            if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
+                delegation::consume_invocation(
+                    cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF,
+                    crate::interrupts::get_system_ticks(),
+                    required_rights,
+                )?;
+            }
+            return Ok(());
         }
-        false
+        Err(CapError::InsufficientRights)
     }
 
     /// Verifies that the capability in `slot_idx` matches the expected type, rights, and specific object ID.
@@ -340,9 +354,22 @@ impl CapabilityTable {
         required_rights: Rights,
         expected_object_id: u64,
     ) -> Result<&Capability, CapError> {
-        let cap = self.verify(slot_idx, expected_type, required_rights)?;
+        let cap = self.get(slot_idx)?;
+        if cap.cap_type != expected_type {
+            return Err(CapError::TypeMismatch);
+        }
+        if !cap.rights.contains(required_rights) {
+            return Err(CapError::InsufficientRights);
+        }
         if cap.object_id != expected_object_id {
             return Err(CapError::TargetMismatch);
+        }
+        if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
+            delegation::consume_invocation(
+                cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF,
+                crate::interrupts::get_system_ticks(),
+                required_rights,
+            )?;
         }
         Ok(cap)
     }
