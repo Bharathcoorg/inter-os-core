@@ -6,6 +6,26 @@
 pub const TCP_HEADER_LEN: usize = 20;
 pub const TCP_MAX_SEGMENT: usize = 1460;
 
+pub fn internet_checksum(data: &[u8]) -> u16 {
+    let mut sum = 0u32;
+    let mut i = 0usize;
+    while i + 1 < data.len() { sum = sum.wrapping_add(u16::from_be_bytes([data[i], data[i + 1]]) as u32); i += 2; }
+    if i < data.len() { sum = sum.wrapping_add((data[i] as u32) << 8); }
+    while sum >> 16 != 0 { sum = (sum & 0xffff) + (sum >> 16); }
+    !(sum as u16)
+}
+
+pub fn tcp_checksum(src: [u8; 4], dst: [u8; 4], segment: &[u8]) -> u16 {
+    let mut pseudo = [0u8; 12 + TCP_HEADER_LEN + TCP_MAX_SEGMENT];
+    pseudo[0..4].copy_from_slice(&src);
+    pseudo[4..8].copy_from_slice(&dst);
+    pseudo[9] = 6;
+    let len = segment.len().min(TCP_HEADER_LEN + TCP_MAX_SEGMENT);
+    pseudo[10..12].copy_from_slice(&(len as u16).to_be_bytes());
+    pseudo[12..12 + len].copy_from_slice(&segment[..len]);
+    internet_checksum(&pseudo[..12 + len])
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TcpState {
