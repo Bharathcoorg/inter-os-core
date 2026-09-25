@@ -4,8 +4,10 @@ pub mod crashdump;
 pub mod vault;
 pub mod persistent;
 pub mod interfs;
+pub mod filesystem;
 
 pub use interfs::{InterFs, FsBackendError, FS_MAGIC, FS_VERSION};
+pub use filesystem::{BLOCK_FS_BASE_LBA, BLOCK_FS_TAIL_RESERVED, init_block_filesystem, load_data_file, store_data_file};
 
 pub use verified::{MerkleVerifier, StorageError, VerifiedBlock, VERIFIED_BLOCK_SIZE};
 pub use crashdump::{CrashDumpHeader, CrashDumpManager, CRASH_DUMP, CRASH_DUMP_MAGIC};
