@@ -98,6 +98,7 @@ pub enum SyscallNumber {
     ServiceStop = 87,
     ServiceRecoverFailed = 88,
     ServicePackageVerify = 89,
+    ServiceHeartbeat = 90,
     SettingsGet = 82,
     SettingsSet = 83,
     StorageQuery = 84,
@@ -1359,6 +1360,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 Err(e) => e as i64,
             }
         }
+        90 => { match sys_service_heartbeat(a1 as u8) { Ok(()) => 0, Err(e) => e as i64 } }
         _ => SyscallResult::UnknownSyscall as i64,
     }
 }
@@ -2612,6 +2614,18 @@ pub fn sys_service_package_verify(cap_slot: usize, path: &str) -> Result<u8, Sys
     }
     serial_println!("[SERVICE] Verified signed service package '{}' for service {}", manifest.package_id, service_id);
     Ok(service_id)
+}
+
+pub fn sys_service_heartbeat(service_id: u8) -> Result<(), SyscallResult> {
+    let task_id = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?;
+    let id = match service_id {
+        1 => crate::services::ServiceId::Display, 2 => crate::services::ServiceId::Input,
+        3 => crate::services::ServiceId::Storage, 4 => crate::services::ServiceId::Network,
+        5 => crate::services::ServiceId::Power, 6 => crate::services::ServiceId::Modem,
+        7 => crate::services::ServiceId::Audio, 8 => crate::services::ServiceId::Camera,
+        _ => return Err(SyscallResult::InvalidArguments),
+    };
+    crate::services::heartbeat_for_task(id, task_id).map_err(|_| SyscallResult::PermissionDenied)
 }
 
 pub fn sys_service_recover_failed() -> Result<u64, SyscallResult> {
