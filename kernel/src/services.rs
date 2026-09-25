@@ -119,9 +119,7 @@ pub fn start(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str> {
         ServiceId::Audio => ("audiod", audiod, 5), ServiceId::Camera => ("camerad", camerad, 5),
         ServiceId::Init => return Ok(TaskId(0)),
     };
-    let task = match SCHEDULER.lock().spawn_with_parent(name, entry, caps(id), priority, parent_id) {
-        task => task,
-    };
+    let task = SCHEDULER.lock().spawn_with_parent(name, entry, caps(id), priority, parent_id);
     crate::ipc::IPC_ROUTER.lock().register_task(task);
     SERVICE_HEARTBEATS[id as usize].store(crate::interrupts::get_system_ticks(), Ordering::Release);
     SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task, state: ServiceState::Running });
