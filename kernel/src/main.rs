@@ -892,6 +892,7 @@ extern "C" fn task_security_daemon() -> ! {
                                     ) {
                                         Ok(child_id) => {
                                             IPC_ROUTER.lock().register_task(child_id);
+                                            crate::service::SERVICE_SUPERVISOR.lock().bind_task(descriptor.process_name, child_id);
                                             serial_println!("[PACKAGE] id={} state=launched pid={} parent={} source={} verified=integrity+publisher-policy", package_id, child_id.0, parent_id.0, descriptor.path);
                                             syscall::sys_log(1, "[PACKAGE SERVICE] Verified RAPP payload loaded into isolated Ring-3 process.");
                                         }
