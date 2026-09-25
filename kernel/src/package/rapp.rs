@@ -82,7 +82,9 @@ pub fn parse_rapp(data:&[u8])->Result<RappManifest,RappError>{
     let caps_end=header_end.checked_add(cap_count.checked_mul(2).ok_or(RappError::PayloadOverflow)?).ok_or(RappError::PayloadOverflow)?;
     if data.len()<caps_end{return Err(RappError::BufferTooShort)}
     let mut capabilities=Vec::with_capacity(cap_count);
-    for i in 0..cap_count{let o=header_end+i*2;let cap=u16::from_le_bytes([data[o],data[o+1]]);if cap>0x00FF{return Err(RappError::UnknownCapability)}capabilities.push(cap);}
+    for i in 0..cap_count{let o=header_end+i*2;let cap=u16::from_le_bytes([data[o],data[o+1]]);
+        if !(1..=17).contains(&cap){return Err(RappError::UnknownCapability)}
+        capabilities.push(cap);}
     let payload_offset=caps_end;
     let payload_end=payload_offset.checked_add(payload_len).ok_or(RappError::PayloadOverflow)?;
     if data.len()<payload_end{return Err(RappError::PayloadOverflow)}
