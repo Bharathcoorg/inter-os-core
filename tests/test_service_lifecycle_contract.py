@@ -143,6 +143,20 @@ def main() -> None:
          "supervisor registry update")
     must(sched, "tcb.parent_id = parent_id;", "scheduler parent assignment")
 
+    # M13 scheduler ownership/reaping invariants: children are explicitly
+    # attached to PID1, dead parents' live children are reparented, and reaping
+    # requires both the expected parent and a terminal child state.
+    must(sched, "if task.id != task_id && task.parent_id == task_id",
+         "child reparenting scan")
+    must(sched, "task.parent_id = TaskId(0);",
+         "orphan reparenting to primordial init")
+    must(sched, "&& task.parent_id == parent_id",
+         "parent-scoped reaping")
+    must(sched, "matches!(task.state, TaskState::Zombie | TaskState::Terminated)",
+         "terminal-state reaping gate")
+    must(sched, 'return Err("task cannot be terminated by lifecycle manager")',
+         "protected current/kernel task termination")
+
     # Lifecycle termination must not recurse into the service registry while
     # scheduler lock is held; this is a lock-order invariant.
     must(sched, "Do not update the service registry while holding the scheduler lock.",
