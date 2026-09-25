@@ -179,3 +179,74 @@ impl SocketTable {
         None
     }
 }
+
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TcpConnection {
+    pub id: u32,
+    pub owner_task_id: u32,
+    pub local_port: u16,
+    pub remote_ip: Ipv4Address,
+    pub remote_port: u16,
+    pub state: crate::net::TcpState,
+    pub send_seq: u32,
+    pub recv_seq: u32,
+}
+
+pub struct TcpConnectionTable {
+    entries: [Option<TcpConnection>; 8],
+    next_id: u32,
+}
+
+impl TcpConnectionTable {
+    pub const fn new() -> Self {
+        Self { entries: [None; 8], next_id: 1 }
+    }
+
+    pub fn open(
+        &mut self,
+        owner_task_id: u32,
+        local_port: u16,
+        remote_ip: Ipv4Address,
+        remote_port: u16,
+        initial_seq: u32,
+    ) -> Result<u32, NetError> {
+        for slot in self.entries.iter_mut() {
+            if slot.is_none() {
+                let id = self.next_id;
+                self.next_id = self.next_id.wrapping_add(1).max(1);
+                *slot = Some(TcpConnection {
+                    id,
+                    owner_task_id,
+                    local_port,
+                    remote_ip,
+                    remote_port,
+                    state: crate::net::TcpState::SynSent,
+                    send_seq: initial_seq,
+                    recv_seq: 0,
+                });
+                return Ok(id);
+            }
+        }
+        Err(NetError::QueueFull)
+    }
+
+    pub fn get(&self, id: u32) -> Option<&TcpConnection> {
+        self.entries.iter().flatten().find(|c| c.id == id)
+    }
+
+    pub fn get_mut(&mut self, id: u32) -> Option<&mut TcpConnection> {
+        self.entries.iter_mut().flatten().find(|c| c.id == id)
+    }
+
+    pub fn close_owned(&mut self, id: u32, owner_task_id: u32) -> Result<(), NetError> {
+        let slot = self.entries.iter_mut().find(|s| s.as_ref().map(|c| c.id == id).unwrap_or(false));
+        match slot {
+            Some(entry) if entry.as_ref().map(|c| c.owner_task_id == owner_task_id).unwrap_or(false) => {
+                *entry = None;
+                Ok(())
+            }
+            _ => Err(NetError::CapabilityDenied),
+        }
+    }
+}
