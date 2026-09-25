@@ -15,7 +15,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 pub enum ServiceId { Init=0, Display=1, Input=2, Storage=3, Network=4, Power=5, Modem=6, Audio=7, Camera=8 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ServiceState { Declared, Running }
+pub enum ServiceState { Declared, Running, Stopped, Failed }
 
 #[derive(Debug, Clone, Copy)]
 pub struct ServiceRecord { pub id: ServiceId, pub task: TaskId, pub state: ServiceState }
@@ -39,21 +39,26 @@ fn caps(id: ServiceId) -> CapabilityTable {
     t
 }
 
-extern "C" fn service_loop(name: &'static str) -> ! {
+extern "C" fn service_loop(id: ServiceId, name: &'static str) -> ! {
     syscall::sys_log(4, name);
-    loop { syscall::sys_yield(); }
+    loop { heartbeat(id); syscall::sys_yield(); }
 }
 
-extern "C" fn displayd() -> ! { service_loop("[displayd] Display service online: compositor/DRM boundary active.") }
-extern "C" fn inputd() -> ! { service_loop("[inputd] Input service online: touch/gesture boundary active.") }
-extern "C" fn storaged() -> ! { service_loop("[storaged] Storage service online: VFS/block boundary active.") }
-extern "C" fn netd() -> ! { service_loop("[netd] Network service online: socket/network HAL boundary active.") }
-extern "C" fn powerd() -> ! { service_loop("[powerd] Power service online: PMIC/DVFS boundary active.") }
-extern "C" fn modemd() -> ! { service_loop("[modemd] Modem service online: cellular/RIL boundary active.") }
-extern "C" fn audiod() -> ! { service_loop("[audiod] Audio service online: codec/audio HAL boundary active.") }
-extern "C" fn camerad() -> ! { service_loop("[camerad] Camera service online: sensor/CSI boundary active.") }
+extern "C" fn displayd() -> ! { service_loop(ServiceId::Display, "[displayd] Display service online: compositor/DRM boundary active.") }
+extern "C" fn inputd() -> ! { service_loop(ServiceId::Input, "[inputd] Input service online: touch/gesture boundary active.") }
+extern "C" fn storaged() -> ! { service_loop(ServiceId::Storage, "[storaged] Storage service online: VFS/block boundary active.") }
+extern "C" fn netd() -> ! { service_loop(ServiceId::Network, "[netd] Network service online: socket/network HAL boundary active.") }
+extern "C" fn powerd() -> ! { service_loop(ServiceId::Power, "[powerd] Power service online: PMIC/DVFS boundary active.") }
+extern "C" fn modemd() -> ! { service_loop(ServiceId::Modem, "[modemd] Modem service online: cellular/RIL boundary active.") }
+extern "C" fn audiod() -> ! { service_loop(ServiceId::Audio, "[audiod] Audio service online: codec/audio HAL boundary active.") }
+extern "C" fn camerad() -> ! { service_loop(ServiceId::Camera, "[camerad] Camera service online: sensor/CSI boundary active.") }
 
 pub static mut SERVICE_RECORDS: [Option<ServiceRecord>; 9] = [None; 9];
+static SERVICE_HEARTBEATS: [core::sync::atomic::AtomicU64; 9] = [
+    core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
+];
 static SERVICES_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// Starts the Phase 25 service set once, with isolated capability tables.
@@ -104,4 +109,41 @@ pub fn init() {
 /// Returns a task ID for a named service when registered.
 pub fn task_id(id: ServiceId) -> Option<TaskId> {
     unsafe { SERVICE_RECORDS[id as usize].map(|r| r.task) }
+}
+
+/// Records a service heartbeat. Service workers call this before yielding so
+/// the supervisor can distinguish a live worker from a dead/stopped task.
+pub fn heartbeat(id: ServiceId) {
+    SERVICE_HEARTBEATS[id as usize].store(crate::interrupts::get_system_ticks(), Ordering::Release);
+}
+
+/// Supervises all registered services and marks missing/terminated workers as
+/// failed. Restart orchestration is intentionally deferred until a userspace
+/// init/service-manager ABI exists; the kernel never silently recreates a task.
+pub fn supervise() {
+    let sched = SCHEDULER.lock();
+    for idx in 1..SERVICE_RECORDS.len() {
+        let id = match idx {
+            1 => ServiceId::Display, 2 => ServiceId::Input, 3 => ServiceId::Storage,
+            4 => ServiceId::Network, 5 => ServiceId::Power, 6 => ServiceId::Modem,
+            7 => ServiceId::Audio, 8 => ServiceId::Camera, _ => continue,
+        };
+        let task_id = unsafe { SERVICE_RECORDS[idx].map(|r| r.task) };
+        if let Some(task_id) = task_id {
+            if let Some(task) = sched.get_task(task_id) {
+                let state = match task.state {
+                    crate::task::TaskState::Terminated | crate::task::TaskState::Zombie => ServiceState::Failed,
+                    _ => ServiceState::Running,
+                };
+                unsafe { SERVICE_RECORDS[idx] = Some(ServiceRecord { id, task: task_id, state }); }
+            } else {
+                unsafe { SERVICE_RECORDS[idx] = Some(ServiceRecord { id, task: task_id, state: ServiceState::Failed }); }
+            }
+        }
+    }
+}
+
+/// Returns the most recent heartbeat tick for a service.
+pub fn last_heartbeat(id: ServiceId) -> u64 {
+    SERVICE_HEARTBEATS[id as usize].load(Ordering::Acquire)
 }
