@@ -102,7 +102,16 @@ pub fn start(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str> {
     let existing = SERVICE_RECORDS.lock()[id as usize];
     if let Some(record) = existing {
         if record.state == ServiceState::Running && record.task != TaskId(0) { return Ok(record.task); }
+        if record.state == ServiceState::Starting { return Err("service already starting"); }
+        if !matches!(record.state, ServiceState::Declared | ServiceState::Stopped | ServiceState::Failed) {
+            return Err("service is not startable");
+        }
     } else { return Err("service not declared"); }
+    SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord {
+        id,
+        task: TaskId(0),
+        state: ServiceState::Starting,
+    });
     let (name, entry, priority): (&'static str, extern "C" fn() -> !, u8) = match id {
         ServiceId::Display => ("displayd", displayd, 6), ServiceId::Input => ("inputd", inputd, 6),
         ServiceId::Storage => ("storaged", storaged, 5), ServiceId::Network => ("netd", netd, 5),
@@ -110,7 +119,9 @@ pub fn start(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str> {
         ServiceId::Audio => ("audiod", audiod, 5), ServiceId::Camera => ("camerad", camerad, 5),
         ServiceId::Init => return Ok(TaskId(0)),
     };
-    let task = SCHEDULER.lock().spawn_with_parent(name, entry, caps(id), priority, parent_id);
+    let task = match SCHEDULER.lock().spawn_with_parent(name, entry, caps(id), priority, parent_id) {
+        task => task,
+    };
     crate::ipc::IPC_ROUTER.lock().register_task(task);
     SERVICE_HEARTBEATS[id as usize].store(crate::interrupts::get_system_ticks(), Ordering::Release);
     SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task, state: ServiceState::Running });
