@@ -14,9 +14,9 @@ def make_package(payload=b"\\x7fELF-test"):
     pub = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
     pkg = bytearray()
     pkg += b"RAPP" + (2).to_bytes(2,"little") + (0).to_bytes(2,"little")
-    pkg += b"org.interos.test".ljust(32,b"\\0") + pub
+    pkg += b"org.interos.test".ljust(32,b"\0") + pub
     pkg += (1).to_bytes(2,"little") * 3 + (1).to_bytes(2,"little")
-    pkg += hashlib.sha256(payload).digest() + b"\\0"*64 + len(payload).to_bytes(4,"little")
+    pkg += hashlib.sha256(payload).digest() + b"\0"*64 + len(payload).to_bytes(4,"little")
     pkg += (1).to_bytes(2,"little") + payload
     signing = bytes(pkg)
     sig = key.sign(signing)
@@ -31,7 +31,7 @@ def verify(pkg):
     assert hashlib.sha256(pkg[off:]).digest() == pkg[0x50:0x70]
     pub = pkg[0x28:0x48]
     sig = pkg[SIG_OFF:SIG_END]
-    signing = bytearray(pkg); signing[SIG_OFF:SIG_END] = b"\\0"*64
+    signing = bytearray(pkg); signing[SIG_OFF:SIG_END] = b"\0"*64
     ed25519.Ed25519PublicKey.from_public_bytes(pub).verify(sig, bytes(signing))
 
 def expect_reject(blob, label):
@@ -51,7 +51,7 @@ def main():
     expect_reject(tampered_sig, "signature tamper")
     trailing = bytearray(pkg) + b"TRAILING"
     expect_reject(trailing, "trailing bytes")
-    zero_key = bytearray(pkg); zero_key[0x28:0x48] = b"\\0"*32
+    zero_key = bytearray(pkg); zero_key[0x28:0x48] = b"\0"*32
     expect_reject(zero_key, "zero publisher key")
     print("RAPP v2 adversarial tests: PASS")
 
