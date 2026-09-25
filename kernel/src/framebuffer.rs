@@ -1557,21 +1557,34 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32) {
     x86_64::instructions::interrupts::without_interrupts(|| {
         let mut fb = FRAMEBUFFER_WRITER.lock();
         let info = match fb.info { Some(info) => info, None => return };
-        let copy_w = width.min(info.width as u32) as usize;
-        let copy_h = height.min(info.height as u32) as usize;
-        let needed = (width as usize).saturating_mul(height as usize);
-        if pixels.len() < needed { return; }
-        for y in 0..copy_h {
-            for x in 0..copy_w {
-                let src = pixels[y * width as usize + x];
-                let r = (src >> 16) as u8;
-                let g = (src >> 8) as u8;
-                let b = src as u8;
-                fb.set_pixel(x, y, (r, g, b));
+        let src_w = width as usize;
+        let src_h = height as usize;
+        if src_w == 0 || src_h == 0 || pixels.len() < src_w.saturating_mul(src_h) { return; }
+
+        // Fit the compositor's logical scanout into the real boot framebuffer while
+        // preserving aspect ratio. This keeps the portrait 720x1440 pipeline usable
+        // on landscape QEMU framebuffers without exposing hardware memory to clients.
+        let scale_x = info.width / src_w;
+        let scale_y = info.height / src_h;
+        let integer_scale = scale_x.min(scale_y).max(1);
+        let dst_w = (src_w * integer_scale).min(info.width);
+        let dst_h = (src_h * integer_scale).min(info.height);
+        let off_x = (info.width - dst_w) / 2;
+        let off_y = (info.height - dst_h) / 2;
+
+        // Clear letterbox area first.
+        fb.clear(COLOR_OBSIDIAN);
+        for dy in 0..dst_h {
+            let sy = dy * src_h / dst_h;
+            for dx in 0..dst_w {
+                let sx = dx * src_w / dst_w;
+                let argb = pixels[sy * src_w + sx];
+                fb.set_pixel(off_x + dx, off_y + dy, ((argb >> 16) as u8, (argb >> 8) as u8, argb as u8));
             }
         }
     });
 }
+
 
 pub fn draw_mobile_shell() {
     x86_64::instructions::interrupts::without_interrupts(|| {
