@@ -215,6 +215,14 @@ pub fn sys_get_task_id() -> TaskId {
     SCHEDULER.lock().current_task_id().unwrap_or(TaskId(0))
 }
 
+/// Enforces an explicit capability for privileged kernel controls.
+fn require_system_control() -> Result<(), SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    task.cap_table.has_capability(CapabilityType::SystemControl, Rights::INVOKE)
+        .then_some(()).ok_or(SyscallResult::PermissionDenied)
+}
+
 /// Sends an IPC message to a destination task.
 pub fn sys_ipc_send(
     cap_slot: usize,
@@ -1431,6 +1439,7 @@ pub fn sys_hal_query_platform(out_buf: &mut [u8]) -> Result<usize, SyscallResult
 
 /// Queries or configures the mobile CPU DVFS power governor.
 pub fn sys_power_governor(action: u32, governor_id: u8) -> Result<u32, SyscallResult> {
+    require_system_control()?;
     let mut pm = crate::resource::POWER_MANAGER.lock();
     if action == 0 {
         // Query current governor
@@ -1491,6 +1500,7 @@ pub fn sys_telephony_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
 
 /// Initiates an outgoing cellular call.
 pub fn sys_telephony_dial(dest: &str) -> Result<(), SyscallResult> {
+    require_system_control()?;
     let ticks = crate::interrupts::get_system_ticks();
     crate::telephony::CELLULAR_MODEM.lock()
         .dial(dest, ticks)
@@ -1499,6 +1509,7 @@ pub fn sys_telephony_dial(dest: &str) -> Result<(), SyscallResult> {
 
 /// Terminates an active cellular call.
 pub fn sys_telephony_hangup() -> Result<(), SyscallResult> {
+    require_system_control()?;
     crate::telephony::CELLULAR_MODEM.lock()
         .hangup()
         .map_err(|_| SyscallResult::DeviceError)
@@ -1506,6 +1517,7 @@ pub fn sys_telephony_hangup() -> Result<(), SyscallResult> {
 
 /// Transmits an SMS message to a destination phone number.
 pub fn sys_telephony_send_sms(dest: &str, body: &str) -> Result<u32, SyscallResult> {
+    require_system_control()?;
     let ticks = crate::interrupts::get_system_ticks();
     crate::telephony::CELLULAR_MODEM.lock()
         .send_sms(dest, body, ticks)
@@ -1514,6 +1526,7 @@ pub fn sys_telephony_send_sms(dest: &str, body: &str) -> Result<u32, SyscallResu
 
 /// Toggles cellular packet data (PDP context).
 pub fn sys_telephony_set_data(enabled: bool) -> Result<bool, SyscallResult> {
+    require_system_control()?;
     Ok(crate::telephony::CELLULAR_MODEM.lock().set_data_enabled(enabled))
 }
 
@@ -1547,6 +1560,7 @@ pub fn sys_touch_poll() -> Result<u32, SyscallResult> {
 
 /// Sets the DVFS operational performance profile.
 pub fn sys_power_set_profile(profile_idx: u32) -> Result<u32, SyscallResult> {
+    require_system_control()?;
     let profile = match profile_idx {
         0 => crate::drivers::pmic::DvfsProfile::PowerSave,
         1 => crate::drivers::pmic::DvfsProfile::Balanced,
@@ -1561,12 +1575,14 @@ pub fn sys_power_set_profile(profile_idx: u32) -> Result<u32, SyscallResult> {
 
 /// Fills user buffer with cryptographically secure random bytes from hardware TRNG.
 pub fn sys_get_random(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    require_system_control()?;
     crate::crypto::get_random_bytes(out_buf);
     Ok(out_buf.len())
 }
 
 /// Dispatches audio feedback actions to the mobile audio subsystem.
 pub fn sys_audio_control(action: u32, param: u32) -> Result<u32, SyscallResult> {
+    require_system_control()?;
     let mut audio = crate::audio::AUDIO_MANAGER.lock();
     match action {
         0 => {
@@ -1591,6 +1607,7 @@ pub fn sys_audio_control(action: u32, param: u32) -> Result<u32, SyscallResult> 
 
 /// Derives an application-isolated 32-byte cryptographic key from hardware key slot.
 pub fn sys_keystore_derive(slot_idx: u32, out_buf: &mut [u8; 32]) -> Result<usize, SyscallResult> {
+    require_system_control()?;
     let slot = crate::crypto::KeySlot::from_u32(slot_idx).ok_or(SyscallResult::InvalidArguments)?;
     let ks = crate::crypto::SECURE_KEYSTORE.lock();
     let derived = ks.derive_key(slot, b"userspace_app_key");
