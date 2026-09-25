@@ -191,7 +191,14 @@ impl NetworkDeviceManager {
         match &mut self.backend { NetworkDeviceBackend::Loopback(d) => d.receive(out), NetworkDeviceBackend::E1000(d) => d.receive(out) }
     }
 
-    pub fn probe_transmit(&mut self, frame: &[u8]) -> Result<(), NetError> { match &mut self.backend { NetworkDeviceBackend::Loopback(d) => d.transmit(frame), NetworkDeviceBackend::E1000(d) => d.transmit_probe(frame), } }\n\n    pub fn has_packets(&self) -> bool {
+    pub fn probe_transmit(&mut self, frame: &[u8]) -> Result<(), NetError> {
+        match &mut self.backend {
+            NetworkDeviceBackend::Loopback(d) => d.transmit(frame),
+            NetworkDeviceBackend::E1000(d) => d.transmit_probe(frame),
+        }
+    }
+
+    pub fn has_packets(&self) -> bool {
         match &self.backend { NetworkDeviceBackend::Loopback(d) => d.has_packets(), NetworkDeviceBackend::E1000(d) => d.has_packets() }
     }
 

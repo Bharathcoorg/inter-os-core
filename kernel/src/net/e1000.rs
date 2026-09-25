@@ -198,7 +198,7 @@ impl E1000Device {
             write32(self.base_vaddr, TDH, 0);
             write32(self.base_vaddr, TDT, 0);
             write32(self.base_vaddr, RCTL, (1 << 1) | (1 << 15) | (1 << 26) | (1 << 30));
-            write32(self.base_vaddr, TCTL, (1 << 1) | (1 << 3) | (1 << 4) | (0x40 << 4) | (0x10 << 12));
+            write32(self.base_vaddr, TCTL, (1 << 1) | (1 << 3) | (0x10 << 4) | (0x40 << 12));
             write32(self.base_vaddr, CTRL, read32(self.base_vaddr, CTRL) | (1 << 1));
             self.link_up = true;
         }
