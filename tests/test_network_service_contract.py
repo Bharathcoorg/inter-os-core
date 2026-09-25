@@ -58,7 +58,7 @@ def main():
     must(syscall, "93 => { match sys_network_poll()", "network poll dispatcher")
     must(syscall, "99 =>", "DNS resolver dispatcher")
     must(syscall, "pub fn sys_dns_resolve(", "runtime DNS resolver")
-    must(syscall, "DnsResolver::new()", "DNS resolver state integration")
+    must(syscall, "crate::net::DNS_RESOLVER.lock()", "persistent DNS resolver state integration")
     must(syscall, "DNS_SERVER", "DNS server integration")
     must(syscall, "let timed_out = resolver.query(query_id)", "DNS retry deadline check")
     must(syscall, "resolver.build_query(query_id, &mut packet)", "DNS retry query rebuild")
