@@ -37,6 +37,7 @@ pub mod resource;
 pub mod sensor;
 pub mod serial;
 pub mod storage;
+pub mod service;
 pub mod syscall;
 pub mod task;
 pub mod telephony;
@@ -361,6 +362,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     // 31. Initialize Cryptographic Secure IPC Channels
     ipc::init();
+    service::init();
 
     // 31b. Initialize Asynchronous Event Notification Subsystem (Sovereign epoll/kqueue)
     event::init();
