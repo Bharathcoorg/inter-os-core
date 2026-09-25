@@ -97,12 +97,14 @@ impl ArpPacket {
 }
 
 pub const MAX_ARP_ENTRIES: usize = 16;
+pub const ARP_CACHE_TICKS: u64 = 30_000;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct ArpEntry {
     ip: Ipv4Address,
     mac: MacAddress,
     valid: bool,
+    expires_at: u64,
 }
 
 /// In-Kernel Static/Dynamic ARP Resolution Table
@@ -118,39 +120,59 @@ impl ArpTable {
                 ip: Ipv4Address::UNSPECIFIED,
                 mac: MacAddress::ZERO,
                 valid: false,
+                expires_at: 0,
             }; MAX_ARP_ENTRIES],
             count: 0,
         }
     }
 
-    /// Inserts or updates an IP-to-MAC mapping in the ARP cache.
+    /// Inserts a mapping with no expiration. Used by deterministic kernel
+    /// self-tests and retained for compatibility with the original API.
     pub fn insert(&mut self, ip: Ipv4Address, mac: MacAddress) {
+        self.insert_with_expiry(ip, mac, u64::MAX);
+    }
+
+    /// Inserts or refreshes a dynamic ARP mapping with a bounded lifetime.
+    pub fn insert_at(&mut self, ip: Ipv4Address, mac: MacAddress, now: u64) {
+        self.insert_with_expiry(ip, mac, now.saturating_add(ARP_CACHE_TICKS));
+    }
+
+    fn insert_with_expiry(&mut self, ip: Ipv4Address, mac: MacAddress, expires_at: u64) {
         for entry in self.entries.iter_mut() {
             if entry.valid && entry.ip == ip {
                 entry.mac = mac;
+                entry.expires_at = expires_at;
                 return;
             }
         }
 
-        // Insert into first free slot
+        // Reuse an expired entry before consuming a genuinely free slot.
         for entry in self.entries.iter_mut() {
-            if !entry.valid {
+            if !entry.valid || entry.expires_at <= expires_at.saturating_sub(ARP_CACHE_TICKS) {
+                if !entry.valid {
+                    self.count += 1;
+                }
                 entry.ip = ip;
                 entry.mac = mac;
                 entry.valid = true;
-                self.count += 1;
+                entry.expires_at = expires_at;
                 return;
             }
         }
 
-        // Evict slot 0 if full
-        self.entries[0] = ArpEntry { ip, mac, valid: true };
+        // Evict slot 0 if full.
+        self.entries[0] = ArpEntry { ip, mac, valid: true, expires_at };
     }
 
     /// Looks up the hardware MAC address for a given IPv4 address.
     pub fn lookup(&self, ip: Ipv4Address) -> Option<MacAddress> {
+        self.lookup_at(ip, u64::MAX)
+    }
+
+    /// Looks up only a live dynamic mapping at the supplied tick.
+    pub fn lookup_at(&self, ip: Ipv4Address, now: u64) -> Option<MacAddress> {
         for entry in &self.entries {
-            if entry.valid && entry.ip == ip {
+            if entry.valid && entry.ip == ip && entry.expires_at > now {
                 return Some(entry.mac);
             }
         }
