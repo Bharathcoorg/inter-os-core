@@ -35,11 +35,12 @@ fn caps(id: ServiceId) -> CapabilityTable {
         ServiceId::Init => (CapabilityType::ProcessSpawn, Rights::GRANT),
     };
     let _ = t.insert(Capability { id: CapabilityId(base + 3), cap_type: kind, rights, object_id: id as u64 });
+    let _ = t.insert(Capability { id: CapabilityId(base + 4), cap_type: CapabilityType::SerialOutput, rights: Rights::WRITE, object_id: 0 });
     t
 }
 
 extern "C" fn service_loop(name: &'static str) -> ! {
-    syscall::sys_log(0, name);
+    syscall::sys_log(4, name);
     loop { syscall::sys_yield(); }
 }
 
