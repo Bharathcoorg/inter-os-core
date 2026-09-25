@@ -601,6 +601,12 @@ pub fn tcp_connect(dst_ip: [u8; 4], dst_port: u16, local_port: u16, seq: u32) ->
     if ret >= 0 { Ok(ret as u32) } else { Err(ret) }
 }
 
+/// Resolves an IPv4 hostname through the capability-governed system DNS service.
+pub fn dns_resolve(host: &str) -> Result<[u8; 4], i64> {
+    let ret = unsafe { syscall2(SyscallNumber::DnsResolve, host.as_ptr() as u64, host.len() as u64) };
+    if ret >= 0 { Ok((ret as u32).to_be_bytes()) } else { Err(ret) }
+}
+
 pub fn network_poll() -> Result<usize, i64> {
     let ret = unsafe { syscall0(SyscallNumber::NetworkPoll) };
     if ret >= 0 { Ok(ret as usize) } else { Err(ret) }

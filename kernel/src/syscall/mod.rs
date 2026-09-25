@@ -112,6 +112,7 @@ pub enum SyscallNumber {
     SettingsSet = 83,
     StorageQuery = 84,
     FsList = 85,
+    DnsResolve = 99,
 }
 
 /// System call result status codes.
@@ -1428,6 +1429,13 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             }
         }
         93 => { match sys_network_poll() { Ok(n) => n as i64, Err(e) => e as i64 } },
+        99 => {
+            let len = a1 as usize;
+            if len == 0 || len > crate::net::dns::DNS_MAX_NAME { return SyscallResult::InvalidArguments as i64; }
+            let mut name = [0u8; crate::net::dns::DNS_MAX_NAME];
+            let host = match read_user_string(a0, len, &mut name) { Ok(v) => v, Err(_) => return SyscallResult::InvalidArguments as i64 };
+            match sys_dns_resolve(host) { Ok(ip) => u32::from_be_bytes(ip.0) as i64, Err(e) => e as i64 }
+        }
         98 => {
             let len = a3 as usize;
             if len > 2048 { return SyscallResult::InvalidArguments as i64; }
@@ -1578,6 +1586,75 @@ pub fn sys_tcp_recv(connection_id: u32, out: &mut [u8]) -> Result<usize, Syscall
         NetError::NoPacketAvailable => SyscallResult::NotReady,
         _ => SyscallResult::NetworkError,
     })
+}
+
+/// Resolves one hostname through the kernel DNS resolver over the capability-governed UDP path.
+pub fn sys_dns_resolve(name: &str) -> Result<crate::net::Ipv4Address, SyscallResult> {
+    if name.is_empty() || name.len() > crate::net::dns::DNS_MAX_NAME {
+        return Err(SyscallResult::InvalidArguments);
+    }
+    let sched = SCHEDULER.lock();
+    let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    if !current.cap_table.authorize_capability(CapabilityType::NetworkSocket, Rights::WRITE)
+        || !current.cap_table.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE)
+        || !current.cap_table.authorize_capability(CapabilityType::NetworkReceive, Rights::READ) {
+        return Err(SyscallResult::PermissionDenied);
+    }
+    let owner = current.id.0 as u32;
+    let caps = current.cap_table.clone();
+    drop(sched);
+
+    let mut resolver = crate::net::DnsResolver::new();
+    let now = crate::interrupts::get_system_ticks();
+    let query_id = resolver.begin(name.as_bytes(), now).map_err(|_| SyscallResult::NetworkError)?;
+    let mut packet = [0u8; 512];
+    let packet_len = resolver.build_query(query_id, &mut packet).map_err(|_| SyscallResult::NetworkError)?;
+
+    let mut socket = None;
+    for port in 53000u16..53008u16 {
+        if let Ok(id) = crate::net::SOCKET_TABLE.lock().create_socket(owner, port, &caps) {
+            socket = Some(id);
+            break;
+        }
+    }
+    let socket = socket.ok_or(SyscallResult::NetworkError)?;
+
+    let send_result = crate::net::send_udp_datagram(
+        crate::net::DEFAULT_HOST_IP,
+        {
+            let table = crate::net::SOCKET_TABLE.lock();
+            table.get(socket).map(|s| s.local_port).unwrap_or(53000)
+        },
+        crate::net::DNS_SERVER,
+        53,
+        &packet[..packet_len],
+        &caps,
+    );
+    if send_result.is_err() {
+        let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
+        return Err(SyscallResult::NetworkError);
+    }
+
+    let deadline = now.saturating_add(crate::net::dns::DNS_RETRY_TICKS * (crate::net::dns::DNS_MAX_RETRIES as u64 + 1));
+    let mut rx = [0u8; 512];
+    loop {
+        let current_tick = crate::interrupts::get_system_ticks();
+        if current_tick >= deadline {
+            let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
+            return Err(SyscallResult::NetworkError);
+        }
+        let _ = crate::net::poll_network_interface();
+        if let Ok(bytes) = crate::net::SOCKET_TABLE.lock().get_mut(socket)
+            .ok_or(NetError::NoPacketAvailable)
+            .and_then(|s| s.recv_from(&mut rx, &caps).map(|v| v.0))
+        {
+            if let Ok(addr) = resolver.accept_response(&rx[..bytes], current_tick) {
+                let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
+                return Ok(addr);
+            }
+        }
+        let _ = resolver.poll_timeouts(current_tick);
+    }
 }
 
 pub fn sys_tcp_connect(dst_ip: crate::net::Ipv4Address, dst_port: u16, local_port: u16, seq: u32) -> Result<u32, SyscallResult> {
