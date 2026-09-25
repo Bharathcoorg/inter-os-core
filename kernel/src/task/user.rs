@@ -512,21 +512,31 @@ pub fn spawn_userspace_service(service_id: u8, parent_id: TaskId) -> Result<Task
     // forbidden:CapabilityType::NetworkSend
     // forbidden:CapabilityType::NetworkReceive
     // forbidden:CapabilityType::HardwarePortIo
-    let (cap_type, rights) = match service_id {
-        1 => (CapabilityType::FrameBufferDirect, Rights::WRITE),
-        2 | 5 | 6 | 7 | 8 => (CapabilityType::EventPoll, Rights::READ),
-        3 => (CapabilityType::FileSystemRead, Rights::READ | Rights::WRITE),
-        4 => (CapabilityType::NetworkSocket, Rights::READ | Rights::WRITE),
+    // Slot 2 is the canonical EventPoll capability for every system service.
+    // Services that only require event polling (Input/Power/Modem/Audio/Camera)
+    // use that slot directly; do not install a duplicate EventPoll capability.
+    let service_specific = match service_id {
+        1 => Some((CapabilityType::FrameBufferDirect, Rights::WRITE)),
+        3 => Some((CapabilityType::FileSystemRead, Rights::READ | Rights::WRITE)),
+        4 => Some((CapabilityType::NetworkSocket, Rights::READ | Rights::WRITE)),
+        2 | 5 | 6 | 7 | 8 => None,
         _ => return Err("unknown userspace service"),
     };
-    if !(2..=8).contains(&service_id) || crate::service_abi::service_id_from_package_id(match service_id {
+    if !(1..=8).contains(&service_id) || crate::service_abi::service_id_from_package_id(match service_id {
         1 => "org.interos.service.displayd", 2 => "org.interos.service.inputd", 3 => "org.interos.service.storaged",
         4 => "org.interos.service.netd", 5 => "org.interos.service.powerd", 6 => "org.interos.service.modemd",
         7 => "org.interos.service.audiod", 8 => "org.interos.service.camerad", _ => "",
     }).is_none() {
         return Err("service policy rejected");
     }
-    caps.insert(Capability { id: CapabilityId(0x7004 + service_id as u64), cap_type, rights, object_id: service_id as u64 }).map_err(|_| "service capability table full")?;
+    if let Some((cap_type, rights)) = service_specific {
+        caps.insert(Capability {
+            id: CapabilityId(0x7004 + service_id as u64),
+            cap_type,
+            rights,
+            object_id: service_id as u64,
+        }).map_err(|_| "service capability table full")?;
+    }
     let id = spawn_user_process(name, elf, caps, 5)?;
     if let Some(task) = SCHEDULER.lock().get_task_mut(id) { task.parent_id = parent_id; }
     Ok(id)
