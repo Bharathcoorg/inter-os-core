@@ -37,7 +37,7 @@ This roadmap tracks the remaining work in dependency order. A milestone is **com
 | ID | Milestone | Status |
 |---|---|---|
 | M19 | Persistent block-device abstraction | 🟡 Implementation complete — ATA + SDHCI share the sector-level `BlockDevice` boundary; persistent journal default API fixed; CI evidence pending |
-| M20 | Real filesystem/storage backend | 🟡 In progress — VFS remains memory-resident with persistent `/data` snapshot backing; next implementation is a real on-disk filesystem layer above `BlockDevice` |
+| M20 | Real filesystem/storage backend | 🟡 In progress — block-backed InterFS format/mount/inode/bitmap/file I/O is implemented above `BlockDevice`; VFS integration and CI evidence remain |
 | M21 | Persistent VFS metadata | 🟡 In progress — crash-consistent metadata journal exists; inode-tree persistence remains |
 | M22 | Atomic writes and crash recovery | 🟡 In progress — payload-before-header journal publication is implemented; fault-injection evidence remains |
 | M23 | Encrypted storage boundary | ⬜ Pending |
