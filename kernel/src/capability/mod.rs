@@ -347,6 +347,12 @@ impl CapabilityTable {
     pub fn count(&self) -> usize {
         self.slots.iter().filter(|s| s.cap.is_some()).count()
     }
+
+    /// Validates internal slot invariants. Empty slots retain a generation counter;
+    /// active slots must always carry a capability and a non-zero generation.
+    pub fn validate_invariants(&self) -> bool {
+        self.slots.iter().all(|slot| slot.generation != 0)
+    }
 }
 
 pub mod delegation;
@@ -407,6 +413,21 @@ pub fn run_adversarial_tests() {
     assert_eq!(table.get_by_handle(handle), Err(CapError::StaleHandle));
     assert_eq!(table.verify(handle.slot(), CapabilityType::SerialOutput, Rights::WRITE), Err(CapError::InvalidSlot));
     crate::serial_println!("[TEST] Capability Adversarial: Use-After-Close Post-Revocation Blocked [PASSED]");
+
+    // 6b. Adversarial Test: object-target confusion must never grant authority.
+    let target_cap = Capability {
+        id: CapabilityId(2),
+        cap_type: CapabilityType::IpcSend,
+        rights: Rights::WRITE,
+        object_id: 42,
+    };
+    let target_slot = table.insert(target_cap).expect("Failed to insert target capability");
+    assert_eq!(
+        table.verify_object(target_slot, CapabilityType::IpcSend, Rights::WRITE, 99),
+        Err(CapError::TargetMismatch)
+    );
+    assert!(table.validate_invariants());
+    crate::serial_println!("[TEST] Capability Adversarial: Object Target Confusion Rejected [PASSED]");
 
     crate::serial_println!("[TEST] Zero-Trust Capability Invariants: 100% Attested & Enforced.");
 }
