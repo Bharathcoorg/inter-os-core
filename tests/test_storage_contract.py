@@ -100,6 +100,25 @@ def main() -> None:
     assert interfs.index("self.device.write_sector(self.base_lba + self.superblock.data_start+start+block,&sector)") < interfs.index("self.write_inode(index,&inode)"), "payload must precede inode publication"
     assert interfs.index("self.write_inode(index,&inode)") < interfs.index("self.clear_transaction()?"), "transaction must remain until inode publication completes"
 
+    # M23: persistent mutable VFS state is authenticated and encrypted at rest.
+    must(storage, "pub mod encrypted;", "encrypted storage module")
+    must(storage, "pub use encrypted::{seal, open, EncryptionError", "encrypted storage API")
+    constenc = "ENCRYPTED_MAGIC: [u8; 4] = *b\"ENC1\"";
+    must((ROOT / "kernel/src/storage/encrypted.rs").read_text(), constenc, "encrypted envelope magic")
+    must((ROOT / "kernel/src/storage/encrypted.rs").read_text(), "HmacSha256::compute", "authenticated encryption primitive")
+    must((ROOT / "kernel/src/storage/encrypted.rs").read_text(), "constant_time_eq_32", "constant-time tag verification")
+    must((ROOT / "kernel/src/storage/encrypted.rs").read_text(), "storage-at-rest-v1", "storage key domain separation")
+    keystore = (ROOT / "kernel/src/crypto/keystore.rs").read_text()
+    must(keystore, 'load_latest_kind(&mut seed_record, 6)', "persistent storage key loading")
+    must(keystore, 'commit_kind(&record, 6)', "persistent storage key provisioning")
+    assert "0x7A, 0x4B, 0x19" not in keystore, "storage root must not be a compiled-in static secret"
+    must(vfs, "crate::storage::encrypted::seal", "VFS encrypted persistence")
+    must(vfs, "crate::storage::encrypted::open", "VFS encrypted restoration")
+    must(vfs, "32768 + crate::storage::encrypted::ENCRYPTED_OVERHEAD", "encrypted restore buffer capacity")
+    must(vfs, "pre-M23 plaintext snapshots", "migration fallback for legacy snapshots")
+    must((ROOT / "kernel/src/main.rs").read_text(), "crypto::keystore::init();", "keystore initialized before VFS")
+    assert (ROOT / "kernel/src/main.rs").read_text().index("crypto::keystore::init();") < (ROOT / "kernel/src/main.rs").read_text().index("fs::init();"), "storage key must exist before VFS reconstruction"
+
     # M22: write payload sectors first and publish the generation header last.
     payload_write = persistent.index("drive.write_sector(base + sector, &buf)")
     header_write = persistent.index("drive.write_sector(base, &header)")
