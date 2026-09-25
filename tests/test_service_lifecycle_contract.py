@@ -56,6 +56,12 @@ def main() -> None:
          "restart backoff reservation")
     must(services, "scheduler.reap_child(parent_id, task)",
          "recovery child reaping")
+    must(services, 'record.state == ServiceState::Failed && record.task != TaskId(0)',
+         "failed worker cannot be started twice")
+    must(services, "task.parent_id != parent_id",
+         "service stop parent ownership")
+    must(services, 'return Err("service is not owned by caller")',
+         "cross-parent service stop rejection")
 
     # Supervisor must inspect scheduler state before mutating the registry.
     must(services, "let sched = SCHEDULER.lock();", "supervisor scheduler lock")
