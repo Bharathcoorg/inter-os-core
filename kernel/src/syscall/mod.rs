@@ -81,6 +81,8 @@ pub enum SyscallNumber {
     SurfaceCreate = 69,
     SurfaceFlip = 70,
     TouchPoll = 71,
+    SurfaceWrite = 73,
+    SurfaceDestroy = 74,
     PowerSetProfile = 72,
 }
 
@@ -1232,6 +1234,31 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 Err(e) => e as i64,
             }
         }
+        73 => {
+            // SurfaceWrite: a1=surface id, a2=offset pixels, a3=user u32 pointer, a4=count
+            let count = a4 as usize;
+            if count == 0 || count > 4096 { return SyscallResult::InvalidArguments as i64; }
+            let mut pixels = [0u32; 4096];
+            let byte_len = count.checked_mul(4).unwrap_or(0);
+            if copy_from_user(core::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, byte_len), a3, byte_len).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let owner = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied);
+            let owner = match owner { Ok(id) => id.0, Err(e) => return e as i64 };
+            match crate::drivers::display_kms::DRM_KMS.lock().write_surface_pixels(a1 as u32, owner, a2 as usize, &pixels[..count]) {
+                Ok(n) => n as i64,
+                Err(_) => SyscallResult::PermissionDenied as i64,
+            }
+        }
+        74 => {
+            // SurfaceDestroy: a1=surface id
+            let owner = match SCHEDULER.lock().current_task_id() { Some(id) => id.0, None => return SyscallResult::PermissionDenied as i64 };
+            let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+            if let Some(surface) = kms.surfaces.iter().find(|s| s.id == a1 as u32) {
+                if surface.owner_task != owner { return SyscallResult::PermissionDenied as i64; }
+            } else { return SyscallResult::InvalidArguments as i64; }
+            if kms.destroy_surface(a1 as u32) { 0 } else { SyscallResult::InvalidArguments as i64 }
+        }
         71 => {
             // TouchPoll
             match sys_touch_poll() {
@@ -1519,7 +1546,7 @@ pub fn sys_surface_create(width: u32, height: u32, z_order: u32) -> Result<u32, 
     if width == 0 || height == 0 || width > 3840 || height > 2160 {
         return Err(SyscallResult::InvalidArguments);
     }
-    Ok(crate::drivers::display_kms::DRM_KMS.lock().create_surface(width, height, z_order))
+    Ok(crate::drivers::display_kms::DRM_KMS.lock().create_surface(width, height, z_order, SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?.0))
 }
 
 /// Triggers DRM/KMS compositor surface blending and atomic page flip.
