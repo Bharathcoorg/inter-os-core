@@ -1,5 +1,5 @@
 /**
- * Inter OS Sovereign Package (.rapp) Type Definitions
+ * Canonical RAPP v2 type definitions.
  */
 
 export const RappArch = {
@@ -25,6 +25,10 @@ export const CapabilityType = {
   NetworkSocket: 12,
   NetworkSend: 13,
   NetworkReceive: 14,
+  ShmProducer: 15,
+  ShmConsumer: 16,
+  EventPoll: 17,
+  SystemControl: 18,
 } as const;
 
 export type CapabilityType = (typeof CapabilityType)[keyof typeof CapabilityType];
@@ -53,7 +57,7 @@ export interface ResourceLimits {
 
 export interface RappPackageMetadata {
   packageId: string;
-  publisherId: string;
+  publisherKey: Uint8Array;
   version: [number, number, number];
   arch: RappArch;
   capabilities: CapabilityType[];
