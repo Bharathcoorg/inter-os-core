@@ -252,9 +252,25 @@ pub fn poll_network_interface() -> usize {
                                                     conn.recv_seq = segment.seq.wrapping_add(1);
                                                     conn.send_seq = conn.send_seq.wrapping_add(1);
                                                     conn.state = TcpState::Established;
-                                                    let _ = TCP_TABLE.lock().acknowledge_syn(conn.id);
+                                                    // We already hold the TCP table lock through the current guard.
+                                                    // Re-locking TCP_TABLE here would deadlock the kernel.
+                                                    conn.syn_pending = false;
+                                                    conn.syn_retries = 0;
                                                     let ack_seq = conn.send_seq;
-                                                    let _ = transmit_tcp_segment(ip_pkt.dst, conn.local_port, ip_pkt.src, conn.remote_port, ack_seq, conn.recv_seq, 0x10);
+                                                    let ack_recv_seq = conn.recv_seq;
+                                                    let ack_local_port = conn.local_port;
+                                                    let ack_remote_port = conn.remote_port;
+                                                    drop(table);
+                                                    let _ = transmit_tcp_segment(
+                                                        ip_pkt.dst,
+                                                        ack_local_port,
+                                                        ip_pkt.src,
+                                                        ack_remote_port,
+                                                        ack_seq,
+                                                        ack_recv_seq,
+                                                        0x10,
+                                                    );
+                                                    table = TCP_TABLE.lock();
                                                 } else if old_state == TcpState::Established {
                                                     // Never accept acknowledgements beyond data we have sent.
                                                     if crate::net::tcp::seq_gt(segment.ack, conn.send_seq) { continue; }
