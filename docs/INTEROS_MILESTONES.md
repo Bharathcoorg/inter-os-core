@@ -48,7 +48,7 @@ This roadmap tracks the remaining work in dependency order. A milestone is **com
 | ID | Milestone | Status |
 |---|---|---|
 | M25 | Framebuffer/display driver boundary | 🟡 Implementation complete — neutral `DisplayDriver`/KMS boundary, display-service-only framebuffer capability, surface write/destroy ABI, and contract tests added; CI evidence pending |
-| M26 | Input device event pipeline | ⬜ Pending |
+| M26 | Input device event pipeline | 🟡 Implementation complete — normalized touch/gesture event queue, bounded userspace event ABI, dedicated `inputd`, and contract tests added; CI/QEMU evidence pending |
 | M27 | Compositor protocol | ⬜ Pending |
 | M28 | Window/surface management | ⬜ Pending |
 | M29 | Touch/gesture input integration | ⬜ Pending |
