@@ -1873,7 +1873,7 @@ pub fn sys_cap_delegate(
         let task = sched.get_task(current_id).ok_or(SyscallResult::TargetNotFound)?;
         let parent = task.cap_table.get(cap_slot).map_err(|_| SyscallResult::InvalidSlot)?;
         crate::capability::DelegatedLease::new(
-            current_ticks.wrapping_add(1),
+            crate::capability::delegation::allocate_lease_id(),
             parent,
             current_id,
             target_task,
