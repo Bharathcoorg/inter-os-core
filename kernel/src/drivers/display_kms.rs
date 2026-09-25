@@ -36,6 +36,20 @@ pub struct DrmSurface {
     pub owner_task: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct SurfaceSnapshot {
+    pub id: u32,
+    pub owner_task: u64,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub z_order: u32,
+    pub opacity: u8,
+    pub visible: bool,
+    pub dirty: bool,
+}
+
 impl DrmSurface {
     pub fn new(id: u32, width: u32, height: u32, z_order: u32, owner_task: u64) -> Self {
         let size = (width as usize) * (height as usize);
@@ -209,6 +223,17 @@ impl DrmKmsController {
             }
             surface.dirty = false;
         }
+    }
+
+    /// Copies window/surface metadata without exposing pixel memory to userspace.
+    pub fn surface_snapshot(&self, out: &mut [SurfaceSnapshot]) -> usize {
+        let mut n=0usize;
+        for s in &self.surfaces {
+            if n>=out.len(){break;}
+            out[n]=SurfaceSnapshot{id:s.id,owner_task:s.owner_task,x:s.x,y:s.y,width:s.width,height:s.height,z_order:s.z_order,opacity:s.opacity,visible:s.visible,dirty:s.dirty};
+            n+=1;
+        }
+        n
     }
 
     /// Performs an atomic page flip: swaps back buffer to front scanout buffer.
