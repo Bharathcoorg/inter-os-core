@@ -94,6 +94,7 @@ pub enum SyscallNumber {
     SettingsGet = 82,
     SettingsSet = 83,
     StorageQuery = 84,
+    FsList = 85,
 }
 
 /// System call result status codes.
@@ -1281,6 +1282,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         79 => { match sys_window_set_geometry(a1 as u32, a2 as i64 as i32, a3 as i64 as i32, a4 as u32, a5 != 0) { e => e as i64 } }
         80 => { sys_window_focus(a1 as u32, a2 as u32) as i64 }
         82 => { let key_len=a3 as usize; let out_len=a4 as usize; if out_len>512{return SyscallResult::InvalidArguments as i64;} let mut out=[0u8;512]; match sys_settings_get(a1 as usize,a2,key_len,&mut out[..out_len]){Ok(n)=>{if copy_to_user(a5,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
+        85 => { let len=a3 as usize; if len>4096{return SyscallResult::InvalidArguments as i64;} let mut out=[0u8;4096]; match sys_fs_list(a1 as usize,a2,a3 as usize,&mut out[..len]){Ok(n)=>{if copy_to_user(a4,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
         84 => { match sys_storage_query(){Ok(n)=>n as i64,Err(e)=>e as i64} }
         83 => { match sys_settings_set(a1 as usize,a2,a3 as usize,a4,a5 as usize){Ok(())=>0,Err(e)=>e as i64} }
         81 => { let len=a3 as usize; if len==0||len>4096{return SyscallResult::InvalidArguments as i64;} let mut out=[0u8;4096]; match sys_service_list(&mut out[..len]){Ok(n)=>{if copy_to_user(a2,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
@@ -1563,6 +1565,16 @@ pub fn sys_window_focus(x: u32, y: u32) -> SyscallResult {
 /// Reads one persistent setting. FileSystemRead capability is required.
 
 /// Returns authoritative block-device capacity in bytes.
+
+/// Lists a directory using the caller's FileSystemRead capability.
+pub fn sys_fs_list(cap_slot:usize,path_ptr:u64,path_len:usize,out:&mut[u8])->Result<usize,SyscallResult>{
+ if path_len==0||path_len>256||out.len()>4096{return Err(SyscallResult::InvalidArguments);}
+ let sched=SCHEDULER.lock();let current=sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+ current.cap_table.verify(cap_slot,CapabilityType::FileSystemRead,Rights::READ).map_err(|_|SyscallResult::PermissionDenied)?;
+ let mut path=[0u8;256];unsafe{copy_from_user(&mut path[..path_len],path_ptr,path_len)}.map_err(|_|SyscallResult::InvalidArguments)?;drop(sched);
+ let path=core::str::from_utf8(&path[..path_len]).map_err(|_|SyscallResult::InvalidArguments)?;
+ let sched=SCHEDULER.lock();let current=sched.current_task().ok_or(SyscallResult::PermissionDenied)?;let n=crate::fs::VFS.lock().list_dir(&current.cap_table,cap_slot,path,out).map_err(|_|SyscallResult::FileNotFound)?;Ok(n)
+}
 pub fn sys_storage_query() -> Result<u64,SyscallResult>{
     let guard=crate::drivers::ATA_PRIMARY.lock();
     let drive=guard.as_ref().ok_or(SyscallResult::DeviceError)?;
