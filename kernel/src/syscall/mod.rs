@@ -1882,6 +1882,9 @@ pub fn sys_cap_delegate(
     let target = sched.get_task_mut(target_task).ok_or(SyscallResult::TargetNotFound)?;
     let derived_cap = lease.to_capability();
     let slot = target.cap_table.insert(derived_cap).map_err(|_| SyscallResult::InvalidSlot)?;
+    // Register only after successful installation so the lease registry cannot
+    // contain an authority that was never granted to the target task.
+    crate::capability::delegation::register_lease(lease);
     Ok(slot)
 }
 
