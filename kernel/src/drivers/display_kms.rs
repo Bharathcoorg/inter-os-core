@@ -65,6 +65,19 @@ impl DrmSurface {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct SurfaceSnapshot {
+    pub id: u32,
+    pub owner_task: u64,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub z_order: u32,
+    pub visible: bool,
+    pub dirty: bool,
+}
+
 /// DRM/KMS Display Controller and Compositor.
 pub struct DrmKmsController {
     pub scanout_width: u32,
@@ -115,12 +128,45 @@ impl DrmKmsController {
 
     /// Destroys a surface by ID.
     pub fn destroy_surface(&mut self, id: u32) -> bool {
+        self.destroy_surface_owned(id, None)
+    }
+
+    pub fn destroy_surface_owned(&mut self, id: u32, owner_task: Option<u64>) -> bool {
         if let Some(pos) = self.surfaces.iter().position(|s| s.id == id) {
+            if let Some(owner) = owner_task {
+                if self.surfaces[pos].owner_task != owner {
+                    return false;
+                }
+            }
             self.surfaces.remove(pos);
             true
         } else {
             false
         }
+    }
+
+    pub fn destroy_surfaces_owned_by(&mut self, owner_task: u64) -> usize {
+        let before = self.surfaces.len();
+        self.surfaces.retain(|surface| surface.owner_task != owner_task);
+        before - self.surfaces.len()
+    }
+
+    pub fn surface_snapshot(&self, out: &mut [SurfaceSnapshot]) -> usize {
+        let count = out.len().min(self.surfaces.len());
+        for (dst, surface) in out.iter_mut().zip(self.surfaces.iter()).take(count) {
+            *dst = SurfaceSnapshot {
+                id: surface.id,
+                owner_task: surface.owner_task,
+                x: surface.x,
+                y: surface.y,
+                width: surface.width,
+                height: surface.height,
+                z_order: surface.z_order,
+                visible: surface.visible,
+                dirty: surface.dirty,
+            };
+        }
+        count
     }
 
     /// Sets surface position and z-order.
