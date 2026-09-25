@@ -28,6 +28,11 @@ def main():
     must(pci, "is_network_controller", "PCI network device discovery")
     must(pci, "pub fn memory_bar", "PCI BAR discovery")
     must(pci, "pub fn find_e1000", "E1000 PCI discovery")
+    must(pci, "pub fn initialize_e1000_network", "E1000 hardware attachment")
+    must(pci, "map_mmio_region", "MMIO mapping")
+    memory = (ROOT / "kernel/src/memory.rs").read_text()
+    must(memory, "pub fn allocate_dma_frames", "contiguous DMA frame allocation")
+    must(memory, "pub fn map_mmio_region", "kernel MMIO mapping")
     print("network device abstraction contract: PASS")
 
 if __name__ == "__main__":
