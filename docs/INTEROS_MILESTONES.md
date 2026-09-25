@@ -27,8 +27,8 @@ This roadmap tracks the remaining work in dependency order. A milestone is **com
 | M12 | QEMU PID1/service lifecycle assertions | 🟡 In progress |
 | M13 | Service parent/reaping invariants | 🟡 In progress |
 | M14 | Service capability isolation tests | 🟡 In progress |
-| M15 | Trusted userspace service ABI | ⬜ Pending |
-| M16 | Signed service package loading | ⬜ Pending |
+| M15 | Trusted userspace service ABI | 🟡 In progress |
+| M16 | Signed service package loading | 🟡 In progress |
 | M17 | Userspace service manager replaces kernel workers | ⬜ Pending |
 | M18 | Service crash/restart end-to-end validation | ⬜ Pending |
 
