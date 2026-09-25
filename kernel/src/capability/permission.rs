@@ -227,18 +227,23 @@ pub static PERMISSION_MANAGER: Mutex<PermissionManager> = Mutex::new(PermissionM
 pub fn init() {
     let mut pm = PERMISSION_MANAGER.lock();
 
-    // 1. Test auto-approved permission request
-    let (_req1_id, decision1) = pm.request_consent(
+    // 1. A caller cannot self-approve a new sensitive permission.
+    let (req1_id, decision1) = pm.request_consent(
         TaskId(21),
         "interos.camera",
         SensitivePermission::CameraCapture,
         true,
         100,
     );
-    assert_eq!(decision1, ConsentDecision::Granted);
+    assert_eq!(decision1, ConsentDecision::Pending);
+    assert!(!pm.has_permission(TaskId(21), SensitivePermission::CameraCapture));
+
+    // 2. Only an explicit consent resolution creates the grant.
+    let resolved1 = pm.resolve_consent(req1_id, ConsentDecision::Granted);
+    assert!(resolved1.is_some());
     assert!(pm.has_permission(TaskId(21), SensitivePermission::CameraCapture));
 
-    // 2. Test interactive pending request
+    // 3. Test interactive pending request
     let (req2_id, decision2) = pm.request_consent(
         TaskId(23),
         "interos.browser",
@@ -250,14 +255,14 @@ pub fn init() {
     assert!(pm.active_prompt.is_some());
     assert_eq!(pm.active_prompt.as_ref().unwrap().request_id, req2_id);
 
-    // 3. Resolve interactive pending request
+    // 4. Resolve interactive pending request
     let resolved = pm.resolve_consent(req2_id, ConsentDecision::Granted);
     assert!(resolved.is_some());
     assert_eq!(resolved.unwrap().decision, ConsentDecision::Granted);
     assert!(pm.active_prompt.is_none());
     assert!(pm.has_permission(TaskId(23), SensitivePermission::NetworkSend));
 
-    // 4. Test capability minting
+    // 5. Test capability minting
     let cap = SensitivePermission::TelephonyModem.to_capability(TaskId(19));
     assert_eq!(cap.cap_type, CapabilityType::HardwarePortIo);
     assert!(cap.rights.contains(Rights::READ));
