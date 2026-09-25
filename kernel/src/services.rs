@@ -5,7 +5,6 @@
 //! the userspace service ABI is fully available; all privileged work remains
 //! behind the existing syscall/capability boundary.
 
-use crate::capability::{Capability, CapabilityId, CapabilityTable, CapabilityType, Rights};
 use crate::task::{SCHEDULER, TaskId};
 use crate::syscall;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -19,49 +18,6 @@ pub enum ServiceState { Declared, Starting, Running, Stopped, Failed }
 
 #[derive(Debug, Clone, Copy)]
 pub struct ServiceRecord { pub id: ServiceId, pub task: TaskId, pub state: ServiceState }
-
-fn caps(id: ServiceId) -> CapabilityTable {
-    let mut t = CapabilityTable::new(16);
-    let base = 0x5000 + id as u64 * 0x10;
-    let _ = t.insert(Capability { id: CapabilityId(base), cap_type: CapabilityType::IpcReceive, rights: Rights::READ, object_id: 0 });
-    // IpcSend is intentionally omitted here. init() installs only explicit
-    // sender -> receiver object capabilities after all service task IDs exist.
-    let _ = t.insert(Capability { id: CapabilityId(base + 2), cap_type: CapabilityType::TimerTickRead, rights: Rights::READ, object_id: 0 });
-    let (kind, rights) = match id {
-        // service-cap:Display=FrameBufferDirect:WRITE
-        ServiceId::Display => (CapabilityType::FrameBufferDirect, Rights::WRITE),
-        // service-cap:Input=EventPoll:READ
-        ServiceId::Input => (CapabilityType::EventPoll, Rights::READ),
-        // service-cap:Storage=FileSystemRead:READ|WRITE
-        ServiceId::Storage => (CapabilityType::FileSystemRead, Rights::READ | Rights::WRITE),
-        // service-cap:Network=NetworkSocket:READ|WRITE
-        ServiceId::Network => (CapabilityType::NetworkSocket, Rights::READ | Rights::WRITE),
-        // Do not grant generic SystemControl to individual services. The
-        // current syscall boundary uses a broad SystemControl predicate; giving
-        // it to a worker would allow that worker to invoke unrelated privileged
-        // controls (power, telephony, audio, crypto, etc.). Service-specific
-        // privileged capabilities must be introduced before those workers gain
-        // hardware-control authority.
-        // service-cap:Power=EventPoll:READ
-        // service-cap:Modem=EventPoll:READ
-        // service-cap:Audio=EventPoll:READ
-        // service-cap:Camera=EventPoll:READ
-        ServiceId::Power | ServiceId::Modem | ServiceId::Audio | ServiceId::Camera =>
-            (CapabilityType::EventPoll, Rights::READ),
-        // service-cap:Init=ProcessSpawn:GRANT
-        ServiceId::Init => (CapabilityType::ProcessSpawn, Rights::GRANT),
-    };
-    let _ = t.insert(Capability { id: CapabilityId(base + 3), cap_type: kind, rights, object_id: id as u64 });
-    // forbidden:CapabilityType::ProcessKill
-    // forbidden:CapabilityType::ProcessSpawn
-    // forbidden:CapabilityType::StorageRawBlock
-    // forbidden:CapabilityType::SystemControl
-    // forbidden:CapabilityType::NetworkSend
-    // forbidden:CapabilityType::NetworkReceive
-    // forbidden:CapabilityType::HardwarePortIo
-    let _ = t.insert(Capability { id: CapabilityId(base + 4), cap_type: CapabilityType::SerialOutput, rights: Rights::WRITE, object_id: 0 });
-    t
-}
 
 pub static SERVICE_RECORDS: spin::Mutex<[Option<ServiceRecord>; 9]> = spin::Mutex::new([None; 9]);
 const HEARTBEAT_TIMEOUT_TICKS: u64 = 500;
