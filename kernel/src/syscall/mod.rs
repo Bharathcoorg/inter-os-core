@@ -15,6 +15,7 @@ use crate::capability::{CapError, CapabilityType, Rights};
 use crate::drivers::{BlockDevice, ATA_PRIMARY, SECTOR_SIZE};
 use crate::fs::{FileDescriptor, FileStat, FsError, VFS};
 use crate::ipc::{IpcError, IpcMessage, IPC_ROUTER};
+use crate::net::NetError;
 use crate::package::{parse_rapp, RappError, RappManifest};
 use crate::serial_println;
 use crate::task::{SCHEDULER, TaskId};
