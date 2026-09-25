@@ -1593,6 +1593,39 @@ pub fn sys_tcp_recv(connection_id: u32, out: &mut [u8]) -> Result<usize, Syscall
     })
 }
 
+/// Sends a DNS UDP query while allowing the network stack to resolve ARP.
+///
+/// The first UDP transmission can legitimately return NoPacketAvailable when
+/// the destination MAC is not cached yet. Polling between bounded retries lets
+/// an ARP reply arrive instead of turning first-contact DNS into a hard failure.
+fn send_dns_datagram_with_arp_retry(
+    src_port: u16,
+    payload: &[u8],
+    caps: &crate::capability::CapabilityTable,
+    deadline: u64,
+) -> Result<(), NetError> {
+    loop {
+        match crate::net::send_udp_datagram(
+            crate::net::DEFAULT_HOST_IP,
+            src_port,
+            crate::net::DNS_SERVER,
+            53,
+            payload,
+            caps,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(NetError::NoPacketAvailable) => {
+                if crate::interrupts::get_system_ticks() >= deadline {
+                    return Err(NetError::NoPacketAvailable);
+                }
+                let _ = crate::net::poll_network_interface();
+                crate::task::yield_now();
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 /// Resolves one hostname through the kernel DNS resolver over the capability-governed UDP path.
 pub fn sys_dns_resolve(name: &str) -> Result<crate::net::Ipv4Address, SyscallResult> {
     if name.is_empty() || name.len() > crate::net::dns::DNS_MAX_NAME {
