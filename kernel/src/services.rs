@@ -32,7 +32,14 @@ fn caps(id: ServiceId) -> CapabilityTable {
         ServiceId::Input => (CapabilityType::EventPoll, Rights::READ),
         ServiceId::Storage => (CapabilityType::FileSystemRead, Rights::READ | Rights::WRITE),
         ServiceId::Network => (CapabilityType::NetworkSocket, Rights::READ | Rights::WRITE),
-        ServiceId::Power | ServiceId::Modem | ServiceId::Audio | ServiceId::Camera => (CapabilityType::SystemControl, Rights::INVOKE),
+        // Do not grant generic SystemControl to individual services. The
+        // current syscall boundary uses a broad SystemControl predicate; giving
+        // it to a worker would allow that worker to invoke unrelated privileged
+        // controls (power, telephony, audio, crypto, etc.). Service-specific
+        // privileged capabilities must be introduced before those workers gain
+        // hardware-control authority.
+        ServiceId::Power | ServiceId::Modem | ServiceId::Audio | ServiceId::Camera =>
+            (CapabilityType::EventPoll, Rights::READ),
         ServiceId::Init => (CapabilityType::ProcessSpawn, Rights::GRANT),
     };
     let _ = t.insert(Capability { id: CapabilityId(base + 3), cap_type: kind, rights, object_id: id as u64 });
