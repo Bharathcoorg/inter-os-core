@@ -10,8 +10,8 @@ use crate::package::revocation::REVOCATION_REGISTRY;
 
 pub const RAPP_MAGIC: &[u8; 4] = b"RAPP";
 pub const RAPP_FORMAT_VERSION: u16 = 2;
-pub const RAPP_HEADER_SIZE: usize = 0xA4;
-pub const RAPP_SIGNATURE_OFFSET: usize = 0x60;
+pub const RAPP_HEADER_SIZE: usize = 0xB4;
+pub const RAPP_SIGNATURE_OFFSET: usize = 0x70;
 pub const RAPP_SIGNATURE_SIZE: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,7 +78,7 @@ pub fn parse_rapp(data:&[u8])->Result<RappManifest,RappError>{
     // v2 keeps the documented compact header offsets but the key/signature expansion
     // requires the actual capability/payload base to move to 0xB4.
     let payload_len=u32::from_le_bytes([data[0xB0],data[0xB1],data[0xB2],data[0xB3]]) as usize;
-    let header_end=0xB4;
+    let header_end=RAPP_HEADER_SIZE;
     let caps_end=header_end.checked_add(cap_count.checked_mul(2).ok_or(RappError::PayloadOverflow)?).ok_or(RappError::PayloadOverflow)?;
     if data.len()<caps_end{return Err(RappError::BufferTooShort)}
     let mut capabilities=Vec::with_capacity(cap_count);
@@ -100,7 +100,7 @@ pub fn parse_rapp(data:&[u8])->Result<RappManifest,RappError>{
 /// Encodes a RAPP v2 package. The caller must supply a real Ed25519 signature
 /// over the canonical message; zero signatures are intentionally rejected by parse_rapp.
 pub fn build_rapp(package_id:&str,publisher_key:&[u8;32],version:(u16,u16,u16),arch:RappArch,capabilities:&[u16],elf_payload:&[u8],signature:&[u8;64])->Vec<u8>{
-    let digest=Sha256::digest(elf_payload); let header_end=0xB4;
+    let digest=Sha256::digest(elf_payload); let header_end=RAPP_HEADER_SIZE;
     let mut b=Vec::with_capacity(header_end+capabilities.len()*2+elf_payload.len());
     b.extend_from_slice(RAPP_MAGIC); b.extend_from_slice(&RAPP_FORMAT_VERSION.to_le_bytes()); b.extend_from_slice(&(arch as u16).to_le_bytes());
     let mut pkg=[0u8;32]; let n=package_id.as_bytes().len().min(32); pkg[..n].copy_from_slice(&package_id.as_bytes()[..n]); b.extend_from_slice(&pkg);
