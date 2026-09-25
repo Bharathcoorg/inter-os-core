@@ -29,8 +29,8 @@ def verify(pkg):
     off = HEADER + caps*2
     assert off + int.from_bytes(pkg[0xB0:0xB4],"little") == len(pkg)
     assert hashlib.sha256(pkg[off:]).digest() == pkg[0x50:0x70]
-    pub = pkg[0x28:0x48]
-    sig = pkg[SIG_OFF:SIG_END]
+    pub = bytes(pkg[0x28:0x48])
+    sig = bytes(pkg[SIG_OFF:SIG_END])
     signing = bytearray(pkg); signing[SIG_OFF:SIG_END] = b"\0"*64
     ed25519.Ed25519PublicKey.from_public_bytes(pub).verify(sig, bytes(signing))
 
