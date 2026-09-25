@@ -871,8 +871,8 @@ extern "C" fn task_security_daemon() -> ! {
                             Ok((manifest, bytes_read)) => {
                                 let payload_start = manifest.payload_offset;
                                 let payload_end = payload_start.saturating_add(manifest.payload_len);
-                                if manifest.package_id != package_id || payload_end > bytes_read {
-                                    syscall::sys_log(1, "[PACKAGE SERVICE] Package identity or payload bounds rejected.");
+                                if manifest.package_id != package_id || !manifest.arch.matches_current() || payload_end > bytes_read {
+                                    syscall::sys_log(1, "[PACKAGE SERVICE] Package identity, architecture, or payload bounds rejected.");
                                 } else {
                                     match task::spawn_packaged_process(
                                         descriptor.process_name,
