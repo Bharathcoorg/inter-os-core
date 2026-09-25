@@ -24,10 +24,12 @@ pub fn init_block_filesystem() -> Result<(), FsBackendError> {
     let region = filesystem_region_sectors(device.sector_count())?;
     match InterFs::mount_region(device, BLOCK_FS_BASE_LBA, region) {
         Ok(fs) if fs.capacity_sectors() == region - 41 => Ok(()),
-        _ => {
+        Ok(_) => Err(FsBackendError::CorruptMetadata),
+        Err(FsBackendError::InvalidFormat) => {
             let _ = InterFs::format_region(device, BLOCK_FS_BASE_LBA, region)?;
             Ok(())
         }
+        Err(e) => Err(e),
     }
 }
 
@@ -43,7 +45,8 @@ pub fn load_data_file(path: &str, out: &mut [u8]) -> Result<usize, FsBackendErro
 pub fn store_data_file(path: &str, data: &[u8]) -> Result<(), FsBackendError> {
     let mut guard = ATA_PRIMARY.lock();
     let device = guard.as_mut().ok_or(FsBackendError::NoSpace)?;
-    let mut fs = InterFs::mount_at(device, BLOCK_FS_BASE_LBA)?;
+    let region = filesystem_region_sectors(device.sector_count())?;
+    let mut fs = InterFs::mount_region(device, BLOCK_FS_BASE_LBA, region)?;
     match fs.write_file(path, data) {
         Ok(()) => Ok(()),
         Err(FsBackendError::FileNotFound) => {
