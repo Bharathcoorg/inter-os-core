@@ -404,13 +404,6 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
         }
         let sectors=((data.len()+SECTOR_SIZE-1)/SECTOR_SIZE) as u32;
         let start=self.find_free_extent(sectors)?;
-        for block in 0..sectors {
-            let mut sector=[0u8; SECTOR_SIZE];
-            let begin=block as usize*SECTOR_SIZE;
-            let end=(begin+SECTOR_SIZE).min(data.len());
-            if begin<end { sector[..end-begin].copy_from_slice(&data[begin..end]); }
-            self.device.write_sector(self.base_lba + self.superblock.data_start+start+block,&sector)?;
-        }
         let mut inode=DiskInode::empty();
         inode.used=true;
         inode.file_size=data.len() as u32;
@@ -428,6 +421,7 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
             return Err(e);
         }
         if let Err(e)=self.mark_extent(start,sectors) {
+            let _=self.free_extent(start,sectors);
             let _=self.clear_transaction();
             return Err(e);
         }
@@ -479,13 +473,6 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
         }
         let sectors=((data.len()+SECTOR_SIZE-1)/SECTOR_SIZE) as u32;
         let start=self.find_free_extent(sectors)?;
-        for block in 0..sectors {
-            let mut sector=[0u8; SECTOR_SIZE];
-            let begin=block as usize*SECTOR_SIZE;
-            let end=(begin+SECTOR_SIZE).min(data.len());
-            if begin<end { sector[..end-begin].copy_from_slice(&data[begin..end]); }
-            self.device.write_sector(self.base_lba + self.superblock.data_start+start+block,&sector)?;
-        }
         let mut inode=old;
         inode.file_size=data.len() as u32;
         inode.start_sector=if sectors == 0 { 0 } else { start };
