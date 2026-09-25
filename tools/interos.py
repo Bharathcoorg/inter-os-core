@@ -409,7 +409,9 @@ def _rapp_v2_encode(manifest_data, publisher_key, signature, payload, arch_name=
     version = tuple(int(x) for x in str(manifest_data["version"]).split("."))
     if len(version) != 3 or any(x < 0 or x > 65535 for x in version):
         raise ValueError("version must be MAJOR.MINOR.PATCH with u16 components")
-    caps = [RAPP_CAPABILITY_IDS[p] for p in manifest_data.get("permissions", [])]\n    if len(set(caps)) != len(caps):\n        raise ValueError("duplicate capability permissions are not allowed")
+    caps = [RAPP_CAPABILITY_IDS[p] for p in manifest_data.get("permissions", [])]
+    if len(set(caps)) != len(caps):
+        raise ValueError("duplicate capability permissions are not allowed")
     if len(caps) > 1024:
         raise ValueError("too many capabilities")
     pkg = manifest_data["id"].encode("utf-8")
