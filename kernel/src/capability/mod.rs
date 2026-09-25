@@ -276,6 +276,14 @@ impl CapabilityTable {
         if !cap.rights.contains(required_rights) {
             return Err(CapError::InsufficientRights);
         }
+        // Delegated capabilities carry the high-bit marker in their opaque id.
+        // Their lease must still be active; this check is intentionally performed
+        // inside the kernel capability verifier so every syscall path inherits it.
+        if cap.id.0 & 0x8000_0000_0000_0000 != 0
+            && !delegation::is_lease_active(cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF, crate::interrupts::get_system_ticks())
+        {
+            return Err(CapError::InvalidSlot);
+        }
         Ok(cap)
     }
 
@@ -292,6 +300,11 @@ impl CapabilityTable {
         }
         if !cap.rights.contains(required_rights) {
             return Err(CapError::InsufficientRights);
+        }
+        if cap.id.0 & 0x8000_0000_0000_0000 != 0
+            && !delegation::is_lease_active(cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF, crate::interrupts::get_system_ticks())
+        {
+            return Err(CapError::InvalidSlot);
         }
         Ok(cap)
     }
