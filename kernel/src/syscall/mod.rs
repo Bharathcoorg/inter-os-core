@@ -1567,9 +1567,8 @@ pub fn sys_net_recvfrom(sock_id: crate::net::SocketId, out_buf: &mut [u8]) -> Re
         None => return Err(SyscallResult::PermissionDenied),
     };
     let caps = current.cap_table.clone();
+    let current_id = current.id;
     drop(sched);
-
-    let current_id = sched.current_task_id().ok_or(SyscallResult::PermissionDenied)?;
     let mut sock_table = crate::net::SOCKET_TABLE.lock();
     let sock = sock_table.get_mut(sock_id).ok_or(SyscallResult::InvalidArguments)?;
     if sock.owner_task_id != current_id.0 as u32 {
