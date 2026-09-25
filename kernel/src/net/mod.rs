@@ -321,18 +321,21 @@ pub fn poll_network_interface() -> usize {
 
 /// Retransmits one bounded unacknowledged TCP payload when its deadline expires.
 pub fn poll_tcp_retransmissions(now: u64) -> usize {
+    // Reclaim terminal TCP entries on every bounded network poll. This keeps
+    // handshake/retransmission failures from exhausting the fixed table.
+    let reaped = TCP_TABLE.lock().reap_closed();
     if let Some((_id, remote_ip, local_port, remote_port, seq)) = TCP_TABLE.lock().due_syn_retransmit(now) {
-        return if transmit_tcp_syn(
+        return reaped + if transmit_tcp_syn(
             if remote_ip.is_loopback() { Ipv4Address::LOCALHOST } else { DEFAULT_HOST_IP },
             local_port, remote_ip, remote_port, seq,
         ).is_ok() { 1 } else { 0 };
     }
     let due_fin = TCP_TABLE.lock().due_fin_retransmit(now);
     if let Some((_id, remote_ip, local_port, remote_port, seq, ack)) = due_fin {
-        return if transmit_tcp_segment(if remote_ip.is_loopback() { Ipv4Address::LOCALHOST } else { DEFAULT_HOST_IP }, local_port, remote_ip, remote_port, seq, ack, 0x11).is_ok() { 1 } else { 0 };
+        return reaped + if transmit_tcp_segment(if remote_ip.is_loopback() { Ipv4Address::LOCALHOST } else { DEFAULT_HOST_IP }, local_port, remote_ip, remote_port, seq, ack, 0x11).is_ok() { 1 } else { 0 };
     }
     let due = TCP_TABLE.lock().due_retransmit(now);
-    let Some((id, remote_ip, local_port, remote_port, seq, ack, len)) = due else { return 0; };
+    let Some((id, remote_ip, local_port, remote_port, seq, ack, len)) = due else { return reaped; };
     let payload = {
         let table = TCP_TABLE.lock();
         let Some(c) = table.get(id) else { return 0; };
@@ -340,7 +343,7 @@ pub fn poll_tcp_retransmissions(now: u64) -> usize {
         buf[..len].copy_from_slice(&c.tx[..len]);
         buf
     };
-    if transmit_tcp_payload(if remote_ip.is_loopback() { Ipv4Address::LOCALHOST } else { DEFAULT_HOST_IP }, local_port, remote_ip, remote_port, seq, ack, &payload[..len]).is_ok() { 1 } else { 0 }
+    reaped + if transmit_tcp_payload(if remote_ip.is_loopback() { Ipv4Address::LOCALHOST } else { DEFAULT_HOST_IP }, local_port, remote_ip, remote_port, seq, ack, &payload[..len]).is_ok() { 1 } else { 0 }
 }
 
 /// Initializes the network stack and executes comprehensive in-kernel self-tests.
