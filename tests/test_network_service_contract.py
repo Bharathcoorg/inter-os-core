@@ -63,7 +63,8 @@ def main():
     must(user, "CapabilityType::NetworkReceive", "netd RX capability")
     tcp = (ROOT / "kernel/src/net/tcp.rs").read_text()
     dns = (ROOT / "kernel/src/net/dns.rs").read_text()
-    net = (ROOT / "kernel/src/net/mod.rs").read_text()\n    must(tcp, "serialize_with_checksum", "TCP checksum serialization")
+    net = (ROOT / "kernel/src/net/mod.rs").read_text()
+    must(tcp, "serialize_with_checksum", "TCP checksum serialization")
     must(tcp, "pub fn seq_lt", "TCP wrapping sequence comparison")
     must(tcp, "pub fn seq_gt", "TCP wrapping ACK comparison")
     must(net, "crate::net::tcp::seq_gt(segment.ack, conn.send_seq)", "wrap-safe ACK validation")
@@ -78,7 +79,12 @@ def main():
     must(net, "acknowledge_tx", "TCP acknowledgement retirement")
     must(net, "transmit_tcp_payload(", "kernel-internal TCP retransmission path")
     must(net, "transmit_tcp_syn(", "kernel-internal TCP SYN retransmission path")
-    must(net, "get_system_ticks()", "TCP retransmission timer source")\n    must(net, "conn.syn_pending = false", "SYN acknowledgement retires retransmission state")\n    must(net, "conn.syn_retries = 0", "SYN retry state resets after handshake")\n    assert "TCP_TABLE.lock().acknowledge_syn" not in net, "SYN-ACK path must not re-lock TCP_TABLE while its guard is held"\n    assert "TCP_TABLE.lock().acknowledge_tx" not in net, "ACK path must not re-lock TCP_TABLE while its guard is held"\n    assert "TCP_TABLE.lock().acknowledge_fin" not in net, "FIN ACK path must not re-lock TCP_TABLE while its guard is held"
+    must(net, "get_system_ticks()", "TCP retransmission timer source")
+    must(net, "conn.syn_pending = false", "SYN acknowledgement retires retransmission state")
+    must(net, "conn.syn_retries = 0", "SYN retry state resets after handshake")
+    assert "TCP_TABLE.lock().acknowledge_syn" not in net, "SYN-ACK path must not re-lock TCP_TABLE while its guard is held"
+    assert "TCP_TABLE.lock().acknowledge_tx" not in net, "ACK path must not re-lock TCP_TABLE while its guard is held"
+    assert "TCP_TABLE.lock().acknowledge_fin" not in net, "FIN ACK path must not re-lock TCP_TABLE while its guard is held"
     must(sock, "TCP_MAX_RETRIES", "bounded TCP retry count")
     must(sock, "arm_retransmit", "TCP retransmission state")
     must(sock, "arm_fin", "TCP FIN lifecycle")
