@@ -100,6 +100,7 @@ pub enum SyscallNumber {
     ServicePackageVerify = 89,
     ServiceHeartbeat = 90,
     ServicePackageLaunch = 91,
+    InputEventPoll = 92,
     SettingsGet = 82,
     SettingsSet = 83,
     StorageQuery = 84,
@@ -1402,6 +1403,19 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 Err(e) => e as i64,
             }
         }
+        92 => {
+            // InputEventPoll: a1=out_buf_ptr, a2=out_buf_len
+            let len = a2 as usize;
+            if len < 24 || len > 256 { return SyscallResult::InvalidArguments as i64; }
+            let mut out = [0u8; 256];
+            match sys_input_event_poll(&mut out[..len]) {
+                Ok(n) => {
+                    if copy_to_user(a1, &out[..n]).is_err() { return SyscallResult::InvalidArguments as i64; }
+                    n as i64
+                }
+                Err(e) => e as i64,
+            }
+        }
         _ => SyscallResult::UnknownSyscall as i64,
     }
 }
@@ -1754,6 +1768,29 @@ pub fn sys_surface_flip(cap_slot: usize) -> Result<u64, SyscallResult> {
     let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
     let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
     display.composite_and_flip().map_err(|_| SyscallResult::DeviceError)
+}
+
+/// Polls the normalized userspace input event pipeline.
+pub fn sys_input_event_poll(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    if !task.cap_table.authorize_capability(CapabilityType::EventPoll, Rights::READ) {
+        return Err(SyscallResult::PermissionDenied);
+    }
+    drop(sched);
+
+    crate::drivers::input::pump_touch_events();
+    let event = crate::drivers::input::INPUT_PIPELINE.lock().pop().ok_or(SyscallResult::NotReady)?;
+    if out_buf.len() < 24 { return Err(SyscallResult::InvalidArguments); }
+
+    out_buf[..24].fill(0);
+    out_buf[0] = event.kind as u8;
+    out_buf[4..8].copy_from_slice(&event.x.to_le_bytes());
+    out_buf[8..12].copy_from_slice(&event.y.to_le_bytes());
+    out_buf[12..16].copy_from_slice(&event.dx.to_le_bytes());
+    out_buf[16..20].copy_from_slice(&event.dy.to_le_bytes());
+    out_buf[20..24].copy_from_slice(&event.scale_milli.to_le_bytes());
+    Ok(24)
 }
 
 /// Polls recognized multi-touch gestures from the touch digitizer engine.
