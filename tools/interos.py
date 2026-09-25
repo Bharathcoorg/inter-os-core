@@ -393,188 +393,139 @@ def cmd_test(args):
 # =============================================================================
 # COMMAND: package (alias: pack)
 # =============================================================================
+def _rapp_v2_encode(manifest_data, publisher_key, signature, payload):
+    arch_map = {"x86_64": 0, "aarch64": 1, "riscv64": 2}
+    arch_name = manifest_data.get("architecture", "x86_64")
+    if arch_name not in arch_map:
+        raise ValueError(f"Unsupported architecture: {arch_name}")
+    version = tuple(int(x) for x in str(manifest_data["version"]).split("."))
+    if len(version) != 3 or any(x < 0 or x > 65535 for x in version):
+        raise ValueError("version must be MAJOR.MINOR.PATCH with u16 components")
+    caps = list(range(len(manifest_data.get("permissions", []))))
+    if len(caps) > 1024:
+        raise ValueError("too many capabilities")
+    pkg = manifest_data["id"].encode("utf-8")
+    if not pkg or len(pkg) > 32:
+        raise ValueError("package id must be 1..32 UTF-8 bytes")
+    digest = hashlib.sha256(payload).digest()
+    header = bytearray()
+    header += b"RAPP" + (2).to_bytes(2, "little") + arch_map[arch_name].to_bytes(2, "little")
+    header += pkg.ljust(32, b"\\0")
+    header += publisher_key
+    header += version[0].to_bytes(2, "little") + version[1].to_bytes(2, "little") + version[2].to_bytes(2, "little")
+    header += len(caps).to_bytes(2, "little")
+    header += digest
+    header += signature
+    header += len(payload).to_bytes(4, "little")
+    for cap in caps:
+        header += int(cap).to_bytes(2, "little")
+    return bytes(header) + payload
+
+
+def _rapp_v2_signing_bytes(package_bytes):
+    data = bytearray(package_bytes)
+    data[0x70:0xB0] = b"\\0" * 64
+    return bytes(data[:0xB4] + data[0xB4:])
+
+
 def cmd_pack(args):
     app_name = args.name.lower().replace("-", "_")
     app_dir = APPS_DIR / app_name
     if not app_dir.exists():
         log_error(f"App not found at {app_dir}")
         return 1
-
     manifest_file = app_dir / "manifest.json"
     if not manifest_file.exists():
         log_error(f"manifest.json missing in {app_dir}")
         return 1
-
     try:
         manifest_data = json.loads(manifest_file.read_text(encoding="utf-8"))
     except Exception as e:
         log_error(f"Invalid JSON in manifest.json: {e}")
         return 1
-
-    required_fields = ["id", "name", "version", "entrypoint", "permissions"]
-    for f in required_fields:
-        if f not in manifest_data:
-            log_error(f"Manifest missing required field: {f}")
+    for field in ["id", "name", "version", "entrypoint", "permissions"]:
+        if field not in manifest_data:
+            log_error(f"Manifest missing required field: {field}")
             return 1
-
-    canonical_manifest = json.dumps(manifest_data, sort_keys=True, indent=2).encode("utf-8")
-    manifest_hash = hashlib.sha256(canonical_manifest).hexdigest()
-
+    bin_dir = app_dir / "bin"
+    elf_candidates = list(bin_dir.glob("*.elf")) if bin_dir.exists() else []
+    if not elf_candidates:
+        log_error("No ELF payload found in app/bin")
+        return 1
+    payload = elf_candidates[0].read_bytes()
+    try:
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        from cryptography.hazmat.primitives import serialization
+        key_dir = Path.home() / ".interos"
+        key_dir.mkdir(exist_ok=True)
+        key_file = key_dir / "developer_ed25519.key"
+        if key_file.exists():
+            raw = key_file.read_bytes()
+            try:
+                priv_key = serialization.load_pem_private_key(raw, password=None)
+            except ValueError:
+                priv_key = ed25519.Ed25519PrivateKey.from_private_bytes(raw)
+        else:
+            priv_key = ed25519.Ed25519PrivateKey.generate()
+            key_file.write_bytes(priv_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+            log(f"Generated developer signing key at {key_file}")
+        pub = priv_key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+        unsigned = _rapp_v2_encode(manifest_data, pub, b"\\0" * 64, payload)
+        signature = priv_key.sign(_rapp_v2_signing_bytes(unsigned))
+        package_bytes = _rapp_v2_encode(manifest_data, pub, signature, payload)
+    except Exception as e:
+        log_error(f"RAPP v2 signing failed: {e}")
+        return 1
     DIST_DIR.mkdir(parents=True, exist_ok=True)
-    output_zip = getattr(args, "output", None)
-    if not output_zip:
-        output_zip = DIST_DIR / f"{app_name}.rapp"
-    else:
-        output_zip = Path(output_zip)
-
-    log(f"Packaging and cryptographically signing {app_name} into sovereign .rapp bundle...")
-
-    file_hashes = {}
-    files_to_pack = []
-
-    for sub in ["ui", "bin"]:
-        sub_dir = app_dir / sub
-        if sub_dir.exists():
-            for root, _, files in os.walk(sub_dir):
-                for f in sorted(files):
-                    full_p = Path(root) / f
-                    rel_p = full_p.relative_to(app_dir).as_posix()
-                    if ".." in rel_p or rel_p.startswith("/"):
-                        log_error(f"Path traversal detected in app: {rel_p}")
-                        return 1
-                    data = full_p.read_bytes()
-                    file_hashes[rel_p] = hashlib.sha256(data).hexdigest()
-                    files_to_pack.append((full_p, rel_p))
-
-    # Ed25519 Signing
-    key_dir = Path.home() / ".interos"
-    key_dir.mkdir(exist_ok=True)
-    key_file = key_dir / "developer_ed25519.key"
-
-    from cryptography.hazmat.primitives.asymmetric import ed25519
-    from cryptography.hazmat.primitives import serialization
-
-    if key_file.exists():
-        priv_key = serialization.load_pem_private_key(key_file.read_bytes(), password=None)
-    else:
-        priv_key = ed25519.Ed25519PrivateKey.generate()
-        key_file.write_bytes(priv_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption()
-        ))
-        log(f"Generated sovereign developer signing key at {key_file}")
-
-    pub_key_bytes = priv_key.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw
-    )
-
-    signed_payload = json.dumps({
-        "package_id": manifest_data["id"],
-        "version": manifest_data["version"],
-        "manifest_sha256": manifest_hash,
-        "files_sha256": file_hashes,
-        "permissions": manifest_data.get("permissions", []),
-    }, sort_keys=True).encode("utf-8")
-
-    signature_bytes = priv_key.sign(signed_payload)
-
-    signature_manifest = {
-        "format": "InterOS-RAPP-Sig-v1",
-        "algorithm": "Ed25519",
-        "public_key": pub_key_bytes.hex(),
-        "signature": signature_bytes.hex(),
-        "signed_payload": json.loads(signed_payload.decode("utf-8"))
-    }
-
-    with zipfile.ZipFile(output_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("manifest.json", canonical_manifest)
-        zf.writestr("signature.json", json.dumps(signature_manifest, indent=2).encode("utf-8"))
-        for full_p, rel_p in files_to_pack:
-            zf.write(full_p, arcname=rel_p)
-
-    log_success(f"Package created: {output_zip.name} ({output_zip.stat().st_size} bytes)")
-    log(f"  • Publisher Public Key: {pub_key_bytes.hex()[:16]}...")
-    log(f"  • Ed25519 Signature: {signature_bytes.hex()[:16]}...")
-    log(f"  • Signed File Hashes: {len(file_hashes)}")
+    output = Path(getattr(args, "output", None) or DIST_DIR / f"{app_name}.rapp")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(package_bytes)
+    log_success(f"RAPP v2 package created: {output} ({len(package_bytes)} bytes)")
+    log(f"  • Publisher key: {pub.hex()}")
+    log(f"  • Ed25519 signature: {signature.hex()[:24]}...")
+    log(f"  • Architecture: {manifest_data.get('architecture', 'x86_64')}")
     return 0
 
 
-# =============================================================================
-# COMMAND: verify
-# =============================================================================
 def cmd_verify(args):
     pkg_path = Path(args.package_path)
     if not pkg_path.exists():
         log_error(f"Package file not found: {pkg_path}")
         return 1
-
-    log(f"Verifying sovereign .rapp package: {pkg_path.name}...")
-
-    if not zipfile.is_zipfile(pkg_path):
-        log_error("Invalid package: Not a valid ZIP container.")
+    data = pkg_path.read_bytes()
+    if len(data) < 0xB4 or data[:4] != b"RAPP":
+        log_error("Invalid RAPP v2 package")
         return 1
-
-    with zipfile.ZipFile(pkg_path, "r") as zf:
-        namelist = zf.namelist()
-        if "manifest.json" not in namelist:
-            log_error("Package rejected: missing manifest.json")
-            return 1
-        if "signature.json" not in namelist:
-            log_error("Package rejected: missing signature.json (Unsigned packages are not permitted)")
-            return 1
-
-        manifest_bytes = zf.read("manifest.json")
-        sig_bytes = zf.read("signature.json")
-
-        try:
-            sig_doc = json.loads(sig_bytes.decode("utf-8"))
-            pub_hex = sig_doc.get("public_key")
-            sig_hex = sig_doc.get("signature")
-            signed_payload = sig_doc.get("signed_payload", {})
-        except Exception as e:
-            log_error(f"Failed to parse signature.json: {e}")
-            return 1
-
+    if int.from_bytes(data[4:6], "little") != 2:
+        log_error("Rejected: package is not RAPP v2")
+        return 1
+    pub = data[0x28:0x48]
+    sig = data[0x70:0xB0]
+    payload_len = int.from_bytes(data[0xB0:0xB4], "little")
+    cap_count = int.from_bytes(data[0x4E:0x50], "little")
+    payload_offset = 0xB4 + cap_count * 2
+    if payload_offset + payload_len != len(data):
+        log_error("Rejected: malformed payload bounds")
+        return 1
+    digest = data[0x50:0x70]
+    if hashlib.sha256(data[payload_offset:]).digest() != digest:
+        log_error("Rejected: payload digest mismatch")
+        return 1
+    try:
         from cryptography.hazmat.primitives.asymmetric import ed25519
-
-        try:
-            pub_bytes = bytes.fromhex(pub_hex)
-            pub_key = ed25519.Ed25519PublicKey.from_public_bytes(pub_bytes)
-            signature = bytes.fromhex(sig_hex)
-            canonical_payload = json.dumps(signed_payload, sort_keys=True).encode("utf-8")
-            pub_key.verify(signature, canonical_payload)
-        except Exception as e:
-            log_error(f"Cryptographic signature check FAILED: {e}")
-            return 1
-
-        # Check manifest hash
-        expected_manifest_sha = signed_payload.get("manifest_sha256")
-        actual_manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
-        if expected_manifest_sha != actual_manifest_sha:
-            log_error("Manifest integrity check FAILED (hash mismatch)")
-            return 1
-
-        # Check all signed files
-        signed_files = signed_payload.get("files_sha256", {})
-        for rel_path, expected_sha in signed_files.items():
-            if rel_path not in namelist:
-                log_error(f"File missing from package: {rel_path}")
-                return 1
-            content = zf.read(rel_path)
-            actual_sha = hashlib.sha256(content).hexdigest()
-            if actual_sha != expected_sha:
-                log_error(f"Checksum mismatch on {rel_path}!")
-                return 1
-
-        log_success(f"Package '{pkg_path.name}' is CRYPTOGRAPHICALLY VERIFIED.")
-        log(f"  • Publisher Key: {pub_hex}")
-        log(f"  • Package ID:    {signed_payload.get('package_id')}")
-        log(f"  • Version:       {signed_payload.get('version')}")
-        log(f"  • Permissions:   {', '.join(signed_payload.get('permissions', []))}")
-        log(f"  • Verified Files: {len(signed_files)}")
-        return 0
+        key = ed25519.Ed25519PublicKey.from_public_bytes(pub)
+        key.verify(sig, _rapp_v2_signing_bytes(data))
+    except Exception as e:
+        log_error(f"Rejected: Ed25519 verification failed: {e}")
+        return 1
+    pkg_id = data[8:40].split(b"\\0", 1)[0].decode("utf-8", errors="strict")
+    version = (int.from_bytes(data[0x48:0x4A], "little"), int.from_bytes(data[0x4A:0x4C], "little"), int.from_bytes(data[0x4C:0x4E], "little"))
+    log_success(f"RAPP v2 '{pkg_id}' cryptographically verified")
+    log(f"  • Publisher key: {pub.hex()}")
+    log(f"  • Version: {version[0]}.{version[1]}.{version[2]}")
+    log(f"  • Payload: {payload_len} bytes")
+    log("  • Device trust: must be provisioned by the kernel trust store")
+    return 0
 
 
 # =============================================================================
