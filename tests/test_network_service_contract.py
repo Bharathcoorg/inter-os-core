@@ -59,6 +59,8 @@ def main():
     must(syscall, "99 =>", "DNS resolver dispatcher")
     must(syscall, "pub fn sys_dns_resolve(", "runtime DNS resolver")
     must(syscall, "crate::net::DNS_RESOLVER.lock()", "persistent DNS resolver state integration")
+    must(syscall, "fn send_dns_datagram_with_arp_retry(", "DNS ARP-aware transmission helper")
+    must(syscall, "NetError::NoPacketAvailable", "DNS ARP retry classification")
     must(syscall, "DNS_SERVER", "DNS server integration")
     must(syscall, "let timed_out = resolver.query(query_id)", "DNS retry deadline check")
     must(syscall, "resolver.build_query(query_id, &mut packet)", "DNS retry query rebuild")
