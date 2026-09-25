@@ -1,6 +1,9 @@
 use alloc::vec::Vec;
 use spin::Mutex;
 
+const MAX_ENTRIES: usize = 16;
+const RECORD_SIZE: usize = 48;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageState { Staged, Active, RolledBack }
 
@@ -9,36 +12,176 @@ pub struct PackageEntry {
     pub package_id: &'static str,
     pub generation: u64,
     pub state: PackageState,
+    pub version: (u16, u16, u16),
 }
 
 pub struct PackageRegistry {
     entries: Vec<PackageEntry>,
     generation: u64,
+    restored: bool,
 }
 
 impl PackageRegistry {
-    pub const fn new() -> Self { Self { entries: Vec::new(), generation: 0 } }
+    pub const fn new() -> Self {
+        Self { entries: Vec::new(), generation: 0, restored: false }
+    }
+
+    fn encode(&self, out: &mut [u8]) -> usize {
+        let count = self.entries.len().min(MAX_ENTRIES);
+        out[0..4].copy_from_slice(b"PRG1");
+        out[4] = count as u8;
+        let mut pos = 5usize;
+        for e in self.entries.iter().take(count) {
+            let id = e.package_id.as_bytes();
+            let take = id.len().min(32);
+            out[pos..pos + 32].fill(0);
+            out[pos..pos + take].copy_from_slice(&id[..take]);
+            pos += 32;
+            out[pos..pos + 8].copy_from_slice(&e.generation.to_le_bytes());
+            pos += 8;
+            out[pos] = match e.state {
+                PackageState::Staged => 0,
+                PackageState::Active => 1,
+                PackageState::RolledBack => 2,
+            };
+            pos += 1;
+            out[pos..pos + 2].copy_from_slice(&e.version.0.to_le_bytes()); pos += 2;
+            out[pos..pos + 2].copy_from_slice(&e.version.1.to_le_bytes()); pos += 2;
+            out[pos..pos + 2].copy_from_slice(&e.version.2.to_le_bytes()); pos += 2;
+            pos += 1;
+        }
+        pos
+    }
+
+    fn restore(&mut self) -> bool {
+        let mut buf = [0u8; 1024];
+        let loaded = crate::storage::persistent::load_latest(&mut buf);
+        let Ok(Some((_generation, len))) = loaded else { return false; };
+        if len < 5 || &buf[..4] != b"PRG1" { return false; }
+        let count = (buf[4] as usize).min(MAX_ENTRIES);
+        let mut pos = 5usize;
+        self.entries.clear();
+        self.generation = 0;
+
+        for _ in 0..count {
+            if pos + RECORD_SIZE > len { self.entries.clear(); return false; }
+            let raw_id = &buf[pos..pos + 32];
+            let end = raw_id.iter().position(|b| *b == 0).unwrap_or(32);
+            let id = match core::str::from_utf8(&raw_id[..end]).ok() {
+                Some(v) => v,
+                None => { self.entries.clear(); return false; }
+            };
+            let Some(desc) = crate::package::first_party_package(id) else {
+                self.entries.clear();
+                return false;
+            };
+            pos += 32;
+            let generation = u64::from_le_bytes([
+                buf[pos],buf[pos+1],buf[pos+2],buf[pos+3],
+                buf[pos+4],buf[pos+5],buf[pos+6],buf[pos+7],
+            ]);
+            pos += 8;
+            let state = match buf[pos] {
+                0 => PackageState::Staged,
+                1 => PackageState::Active,
+                2 => PackageState::RolledBack,
+                _ => { self.entries.clear(); return false; }
+            };
+            pos += 1;
+            let major=u16::from_le_bytes([buf[pos],buf[pos+1]]); pos+=2;
+            let minor=u16::from_le_bytes([buf[pos],buf[pos+1]]); pos+=2;
+            let patch=u16::from_le_bytes([buf[pos],buf[pos+1]]); pos+=2;
+            pos+=1;
+            self.generation=self.generation.max(generation);
+            self.entries.push(PackageEntry {
+                package_id:desc.package_id,
+                generation,
+                state,
+                version:(major,minor,patch),
+            });
+        }
+        count > 0
+    }
+
+    fn persist(&self) -> Result<(), ()> {
+        let mut buf = [0u8; 1024];
+        let len = self.encode(&mut buf);
+        crate::storage::persistent::commit(&buf[..len]).map(|_| ()).map_err(|_| ())
+    }
 
     pub fn seed(&mut self) {
+        if self.restored { return; }
+        self.restored = true;
+        if self.restore() {
+            crate::serial_println!("[PACKAGE] persistent registry restored from disk.");
+            return;
+        }
         if !self.entries.is_empty() { return; }
+
         for pkg in crate::package::FIRST_PARTY_PACKAGES {
-            self.entries.push(PackageEntry { package_id: pkg.package_id, generation: 0, state: PackageState::Staged });
+            self.entries.push(PackageEntry {
+                package_id: pkg.package_id,
+                generation: 0,
+                state: PackageState::Staged,
+                version: (1, 0, 0),
+            });
+        }
+
+        if self.persist().is_err() {
+            crate::serial_println!("[PACKAGE] registry persistence unavailable; runtime registry remains active.");
+        } else {
+            crate::serial_println!("[PACKAGE] persistent registry initialized.");
         }
     }
 
-    pub fn activate(&mut self, package_id: &str) -> Result<(), ()> {
+    pub fn activate_version(&mut self, package_id: &str, version: (u16,u16,u16)) -> Result<(), ()> {
         let idx=self.entries.iter().position(|e| e.package_id==package_id).ok_or(())?;
         let previous=self.entries[idx];
-        self.generation=self.generation.saturating_add(1);
-        self.entries[idx]=PackageEntry { package_id: previous.package_id, generation:self.generation, state:PackageState::Active };
+        if version < previous.version && previous.state == PackageState::Active {
+            return Err(());
+        }
+
+        let old=self.entries.clone();
+        let next_generation=self.generation.saturating_add(1);
+        self.generation=next_generation;
+        self.entries[idx]=PackageEntry {
+            package_id:previous.package_id,
+            generation:next_generation,
+            state:PackageState::Active,
+            version,
+        };
+
+        if self.persist().is_err() {
+            self.entries=old;
+            self.generation=self.entries.iter().map(|e| e.generation).max().unwrap_or(0);
+            return Err(());
+        }
         Ok(())
+    }
+
+    pub fn activate(&mut self, package_id: &str) -> Result<(), ()> {
+        let version=self.entries.iter().find(|e| e.package_id==package_id).map(|e| e.version).ok_or(())?;
+        self.activate_version(package_id, version)
     }
 
     pub fn rollback(&mut self, package_id: &str) -> Result<(), ()> {
         let idx=self.entries.iter().position(|e| e.package_id==package_id).ok_or(())?;
         let previous=self.entries[idx];
-        self.generation=self.generation.saturating_add(1);
-        self.entries[idx]=PackageEntry { package_id: previous.package_id, generation:self.generation, state:PackageState::RolledBack };
+        let old=self.entries.clone();
+        let next_generation=self.generation.saturating_add(1);
+        self.generation=next_generation;
+        self.entries[idx]=PackageEntry {
+            package_id:previous.package_id,
+            generation:next_generation,
+            state:PackageState::RolledBack,
+            version:previous.version,
+        };
+
+        if self.persist().is_err() {
+            self.entries=old;
+            self.generation=self.entries.iter().map(|e| e.generation).max().unwrap_or(0);
+            return Err(());
+        }
         Ok(())
     }
 
