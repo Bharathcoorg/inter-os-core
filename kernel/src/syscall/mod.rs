@@ -1424,6 +1424,38 @@ pub fn sys_package_audit(pkg_id: &str) -> Result<u32, SyscallResult> {
     Ok(0)
 }
 
+/// Installs a verified first-party package into the transactional runtime registry.
+pub fn sys_package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) -> Result<(), SyscallResult> {
+    let sched=SCHEDULER.lock();
+    let current=sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    if current.cap_table.verify(cap_slot,CapabilityType::FileSystemWrite,Rights::WRITE).is_err(){return Err(SyscallResult::PermissionDenied);}
+    drop(sched);
+    if !user_consent{return Err(SyscallResult::PermissionDenied);}
+    if crate::package::REVOCATION_REGISTRY.lock().is_package_revoked(pkg_id){return Err(SyscallResult::IntegrityViolation);}
+    if crate::package::first_party_package(pkg_id).is_none(){return Err(SyscallResult::FileNotFound);}
+    crate::package::PACKAGE_REGISTRY.lock().activate(pkg_id).map_err(|_|SyscallResult::IntegrityViolation)
+}
+
+/// Returns transactional package state as package_id|generation|state records.
+pub fn sys_package_registry(out_buf:&mut [u8])->Result<usize,SyscallResult>{
+    let reg=crate::package::PACKAGE_REGISTRY.lock();
+    let mut pos=0usize;
+    for e in reg.entries(){
+        let state=match e.state{crate::package::PackageState::Staged=>"staged",crate::package::PackageState::Active=>"active",crate::package::PackageState::RolledBack=>"rolled-back"};
+        let mut line=[0u8;192]; let mut n=0usize;
+        for b in e.package_id.as_bytes(){if n<line.len(){line[n]=*b;n+=1;}}
+        if n<line.len(){line[n]=b'|';n+=1;}
+        let mut digits=[0u8;20]; let mut x=e.generation; let mut d=0usize;
+        if x==0{digits[0]=b'0';d=1;}else{while x>0{digits[d]=b'0'+(x%10)as u8;d+=1;x/=10;}for j in 0..d/2{digits.swap(j,d-1-j);}}
+        for j in 0..d{if n<line.len(){line[n]=digits[j];n+=1;}}
+        if n<line.len(){line[n]=b'|';n+=1;}
+        for b in state.as_bytes(){if n<line.len(){line[n]=*b;n+=1;}}
+        if n<line.len(){line[n]=b'\n';n+=1;}
+        if pos+n>out_buf.len(){break;} out_buf[pos..pos+n].copy_from_slice(&line[..n]);pos+=n;
+    }
+    Ok(pos)
+}
+
 /// Queries the active mobile hardware platform description.
 pub fn sys_hal_query_platform(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
     let info = crate::hal::PLATFORM.info();
