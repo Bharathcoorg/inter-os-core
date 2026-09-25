@@ -87,6 +87,7 @@ pub enum SyscallNumber {
     PackageList = 75,
     PackageRegistry = 76,
     WindowList = 77,
+    PackageRollback = 78,
 }
 
 /// System call result status codes.
@@ -1270,6 +1271,17 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             if current.cap_table.verify(cap_slot,CapabilityType::FileSystemRead,Rights::READ).is_err(){return SyscallResult::PermissionDenied as i64;}
             drop(sched);
             let mut out=[0u8;4096]; match sys_package_registry(&mut out[..out_len]) { Ok(n)=>{if copy_to_user(a2,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;} n as i64}, Err(e)=>e as i64 }
+        }
+        78 => {
+            // PackageRollback: a1=cap_slot, a2=pkg_id_ptr, a3=pkg_id_len, a4=user_consent
+            let cap_slot=a1 as usize; let len=a3 as usize;
+            if len==0||len>128{return SyscallResult::InvalidArguments as i64;}
+            let mut buf=[0u8;128]; let pkg=match read_user_string(a2,len,&mut buf){Ok(s)=>s,Err(_)=>return SyscallResult::InvalidArguments as i64};
+            let sched=SCHEDULER.lock(); let current=match sched.current_task(){Some(t)=>t,None=>return SyscallResult::PermissionDenied as i64};
+            if current.cap_table.verify(cap_slot,CapabilityType::FileSystemWrite,Rights::WRITE).is_err(){return SyscallResult::PermissionDenied as i64;}
+            drop(sched);
+            if a4==0{return SyscallResult::PermissionDenied as i64;}
+            match crate::package::PACKAGE_REGISTRY.lock().rollback(pkg){Ok(())=>SyscallResult::Success as i64,Err(_)=>SyscallResult::FileNotFound as i64}
         }
         77 => {
             // WindowList: a1=out_ptr, a2=out_len
