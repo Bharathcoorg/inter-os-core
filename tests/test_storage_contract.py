@@ -39,6 +39,10 @@ def main() -> None:
     must(persistent, "use crate::drivers::{BlockDevice, ATA_PRIMARY, SECTOR_SIZE};", "journal uses block abstraction")
     must(persistent, "pub fn load_latest_kind", "persistent metadata read API")
     must(persistent, "pub fn commit_kind", "persistent metadata commit API")
+    must(persistent, "load_latest_kind(out, 4)", "default persistent read record kind")
+    must(persistent, "commit_kind(payload, 4)", "default persistent write record kind")
+    assert "load_latest_kind(out, 0)" not in persistent, "default loader must not use unsupported kind 0"
+    assert "commit_kind(payload, 0)" not in persistent, "default commit must not use unsupported kind 0"
     must(vfs, "pub fn init()", "VFS initialization")
     must(vfs, "vfs.restore_data_snapshot();", "persistent VFS restore")
     must(vfs, 'crate::storage::persistent::commit_kind(&buf[..pos],4)', "VFS snapshot persistence")
