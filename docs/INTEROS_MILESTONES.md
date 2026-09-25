@@ -16,15 +16,15 @@ This roadmap tracks the remaining work in dependency order. A milestone is **com
 | M06 | Persistent trust roots / revocation primitives | ✅ Complete |
 | M07 | Remove kernel hardcoded app/service startup | ✅ Complete |
 | M08 | PID1 Ring-3 bootstrap | ✅ Complete |
-| M09 | PID1-owned service lifecycle ABI | 🟡 In progress |
-| M10 | Service supervision, recovery and backoff | 🟡 In progress |
+| M09 | PID1-owned service lifecycle ABI | ✅ Complete |
+| M10 | Service supervision, recovery and backoff | ✅ Complete |
 
 ## Phase B — process and service architecture
 
 | ID | Milestone | Status |
 |---|---|---|
-| M11 | Lifecycle unit/integration tests | ⬜ Next |
-| M12 | QEMU PID1/service lifecycle assertions | ⬜ Pending |
+| M11 | Lifecycle unit/integration tests | ✅ Complete |
+| M12 | QEMU PID1/service lifecycle assertions | 🟡 In progress |
 | M13 | Service parent/reaping invariants | ⬜ Pending |
 | M14 | Service capability isolation tests | ⬜ Pending |
 | M15 | Trusted userspace service ABI | ⬜ Pending |
@@ -119,6 +119,6 @@ This roadmap tracks the remaining work in dependency order. A milestone is **com
 
 ## Current execution order
 
-**M09 → M10 → M11 → M12 → M13 → M14 → M15 → M16 → M17 → M18 → M19**
+**M12 → M13 → M14 → M15 → M16 → M17 → M18 → M19**
 
 The existing demo/reference applications are not counted as production-complete until the underlying service, storage, graphics, networking and hardware boundaries they depend on are real.
