@@ -1016,6 +1016,39 @@ pub fn cap_delegate(
 
 
 /// Interacts with the microkernel fluid inertial physics scroller (0=down, 1=move, 2=up, 3=tick).
+/// Creates a surface through the privileged Ring-3 display service boundary.
+pub fn surface_create(display_cap_slot: usize, width: u32, height: u32, z_order: u32) -> Result<u32, i64> {
+    let ret = unsafe { syscall5(SyscallNumber::SurfaceCreate, display_cap_slot as u64, width as u64, height as u64, z_order as u64, 0) };
+    if ret >= 0 { Ok(ret as u32) } else { Err(ret) }
+}
+
+/// Writes ARGB8888 pixels through the display service boundary.
+pub fn surface_write(display_cap_slot: usize, surface_id: u32, offset: usize, pixels: &[u32]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::SurfaceWrite,
+            display_cap_slot as u64,
+            surface_id as u64,
+            offset as u64,
+            pixels.as_ptr() as u64,
+            pixels.len() as u64,
+        )
+    };
+    if ret >= 0 { Ok(ret as usize) } else { Err(ret) }
+}
+
+/// Destroys a surface owned by the display service.
+pub fn surface_destroy(display_cap_slot: usize, surface_id: u32) -> Result<(), i64> {
+    let ret = unsafe { syscall2(SyscallNumber::SurfaceDestroy, display_cap_slot as u64, surface_id as u64) };
+    if ret == 0 { Ok(()) } else { Err(ret) }
+}
+
+/// Composites and atomically flips the display scanout.
+pub fn surface_flip(display_cap_slot: usize) -> Result<u64, i64> {
+    let ret = unsafe { syscall1(SyscallNumber::SurfaceFlip, display_cap_slot as u64) };
+    if ret >= 0 { Ok(ret as u64) } else { Err(ret) }
+}
+
 pub fn surface_physics(action: u32, y: i32, viewport_h: i32, content_h: i32) -> Result<i32, i64> {
     let ret = unsafe {
         syscall4(
