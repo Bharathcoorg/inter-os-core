@@ -419,28 +419,28 @@ pub fn load_user_elf(elf_data: &[u8]) -> Result<(usize, usize), &'static str> {
 }
 
 /// Maps canonical RAPP v2 capability identifiers into kernel capabilities.
-fn capabilities_from_rapp(ids: &[u16], object_id: u64) -> Result<CapabilityTable, &'static str> {
+fn capabilities_from_rapp(ids: &[u16], ipc_target: u64) -> Result<CapabilityTable, &'static str> {
     let mut caps = CapabilityTable::new(ids.len().max(1));
     for (slot, id) in ids.iter().copied().enumerate() {
-        let (cap_type, rights) = match id {
-            1 => (CapabilityType::SerialOutput, Rights::WRITE),
-            2 => (CapabilityType::FrameBufferDirect, Rights::WRITE),
-            3 => (CapabilityType::TimerTickRead, Rights::READ),
-            4 => (CapabilityType::HardwarePortIo, Rights::READ | Rights::WRITE),
-            5 => (CapabilityType::IpcSend, Rights::WRITE),
-            6 => (CapabilityType::IpcReceive, Rights::READ),
-            7 => (CapabilityType::ProcessSpawn, Rights::INVOKE),
-            8 => (CapabilityType::ProcessKill, Rights::INVOKE),
-            9 => (CapabilityType::FileSystemRead, Rights::READ),
-            10 => (CapabilityType::FileSystemWrite, Rights::WRITE),
-            11 => (CapabilityType::StorageRawBlock, Rights::READ | Rights::WRITE),
-            12 => (CapabilityType::NetworkSocket, Rights::WRITE),
-            13 => (CapabilityType::NetworkSend, Rights::WRITE),
-            14 => (CapabilityType::NetworkReceive, Rights::READ),
-            15 => (CapabilityType::ShmProducer, Rights::WRITE),
-            16 => (CapabilityType::ShmConsumer, Rights::READ),
-            17 => (CapabilityType::EventPoll, Rights::READ | Rights::INVOKE),
-            18 => (CapabilityType::SystemControl, Rights::INVOKE),
+        let (cap_type, rights, object_id) = match id {
+            1 => (CapabilityType::SerialOutput, Rights::WRITE, 0),
+            2 => (CapabilityType::FrameBufferDirect, Rights::WRITE, 0),
+            3 => (CapabilityType::TimerTickRead, Rights::READ, 0),
+            4 => (CapabilityType::HardwarePortIo, Rights::READ | Rights::WRITE, 0),
+            5 => (CapabilityType::IpcSend, Rights::WRITE, ipc_target),
+            6 => (CapabilityType::IpcReceive, Rights::READ, ipc_target),
+            7 => (CapabilityType::ProcessSpawn, Rights::INVOKE, 0),
+            8 => (CapabilityType::ProcessKill, Rights::INVOKE, 0),
+            9 => (CapabilityType::FileSystemRead, Rights::READ, 0),
+            10 => (CapabilityType::FileSystemWrite, Rights::WRITE, 0),
+            11 => (CapabilityType::StorageRawBlock, Rights::READ | Rights::WRITE, 0),
+            12 => (CapabilityType::NetworkSocket, Rights::WRITE, 0),
+            13 => (CapabilityType::NetworkSend, Rights::WRITE, 0),
+            14 => (CapabilityType::NetworkReceive, Rights::READ, 0),
+            15 => (CapabilityType::ShmProducer, Rights::WRITE, 0),
+            16 => (CapabilityType::ShmConsumer, Rights::READ, 0),
+            17 => (CapabilityType::EventPoll, Rights::READ | Rights::INVOKE, 0),
+            18 => (CapabilityType::SystemControl, Rights::INVOKE, 0),
             _ => return Err("Unknown RAPP v2 capability"),
         };
         caps.insert(Capability {
