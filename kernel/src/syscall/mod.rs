@@ -2671,7 +2671,18 @@ pub fn sys_service_package_launch(cap_slot: usize, path: &str) -> Result<crate::
     }
     let payload_end = verified.payload_offset.checked_add(verified.payload_len).ok_or(SyscallResult::InvalidArguments)?;
     let payload = &rapp[verified.payload_offset..payload_end];
-    let task_id = crate::task::user::spawn_verified_rapp_process(&verified, payload, parent_id)
+    let service = match service_id {
+        1 => crate::services::ServiceId::Display,
+        2 => crate::services::ServiceId::Input,
+        3 => crate::services::ServiceId::Storage,
+        4 => crate::services::ServiceId::Network,
+        5 => crate::services::ServiceId::Power,
+        6 => crate::services::ServiceId::Modem,
+        7 => crate::services::ServiceId::Audio,
+        8 => crate::services::ServiceId::Camera,
+        _ => return Err(SyscallResult::PermissionDenied),
+    };
+    let task_id = crate::services::launch_verified_package(service, parent_id, &verified, payload)
         .map_err(|_| SyscallResult::DeviceError)?;
     serial_println!("[SERVICE] Launched verified service package '{}' as task {}", verified.package_id, task_id.0);
     Ok(task_id)
