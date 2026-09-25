@@ -1,3 +1,6 @@
 [toolchain]
-channel = "nightly"
+# Pin the nightly compiler to avoid LLVM backend regressions that can break
+# bare-metal x86_64 builds. Update deliberately after the full multi-arch/QEMU
+# matrix is green.
+channel = "nightly-2026-09-15"
 components = ["rust-src", "llvm-tools-preview"]
