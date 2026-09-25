@@ -980,36 +980,6 @@ extern "C" fn task_storage_daemon() -> ! {
 
 
 
-/// Task 7: Native Graphical Compositor & Event Loop Shell
-/// Pumps hardware input events from the non-allocating ring buffer,
-/// performs UI hit testing, dispatches attested user intents via zero-trust IPC,
-/// and updates the graphical smartphone display.
-extern "C" fn task_compositor_shell() -> ! {
-    let mut initial = true;
-    loop {
-        if initial {
-            syscall::sys_log(0, "[COMPOSITOR SHELL] Native mobile touch event loop active. Polling digitizer queue...");
-            // Simulate capacitive touchscreen tap on Card 1 (System Diagnostics)
-            input::INPUT_QUEUE.lock().push(input::InputEvent::Gesture(input::TouchGesture::Tap {
-                x: (framebuffer::PHONE_X + 50) as u32,
-                y: (framebuffer::PHONE_Y + 160) as u32,
-            }));
-            initial = false;
-        }
-
-        // Pump input event queue
-        if let Some(event) = input::INPUT_QUEUE.lock().pop() {
-            if let Some(intent) = gui::MOBILE_SHELL.lock().handle_event(event) {
-                syscall::sys_log(0, "[COMPOSITOR SHELL] UI touch detected! Dispatching attested intent via IPC...");
-                // Send IPC to security sentinel via Slot 1 (IpcSend token)
-                syscall::sys_ipc_send(1, TaskId(2), 0x3001, intent.as_bytes());
-            }
-        }
-
-        syscall::sys_yield();
-    }
-}
-
 /// Task 8: Network Worker
 ///
 /// Polls inbound network packets and demultiplexes IPv4/UDP datagrams.
