@@ -5,6 +5,8 @@
 
 pub mod arp;
 pub mod device;
+pub mod dns;
+pub mod tcp;
 pub mod ethernet;
 pub mod ipv4;
 pub mod socket;
@@ -13,6 +15,8 @@ pub mod wireless;
 
 pub use arp::{ArpOpcode, ArpPacket, ArpTable};
 pub use device::{LoopbackDevice, NetDeviceInfo, NetError, NetworkBackend, NetworkDevice, NetworkDeviceManager, NETWORK_DEVICE};
+pub use dns::{encode_query as dns_encode_query, parse_a_answer, DnsAnswer, DnsQuestion};
+pub use tcp::{next_state as tcp_next_state, TcpSegment, TcpState};
 pub use ethernet::{EtherType, EthernetFrame, MacAddress};
 pub use ipv4::{calculate_ipv4_checksum, verify_ipv4_checksum, IpProtocol, Ipv4Address, Ipv4Packet};
 pub use socket::{SocketId, SocketTable, UdpSocket};
