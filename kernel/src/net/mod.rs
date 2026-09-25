@@ -26,9 +26,6 @@ use crate::serial_println;
 pub const DEFAULT_HOST_IP: Ipv4Address = Ipv4Address([10, 0, 2, 15]);
 pub const DEFAULT_HOST_MAC: MacAddress = MacAddress([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
 
-/// Global loopback network controller.
-pub static LOOPBACK: Mutex<LoopbackDevice> = Mutex::new(LoopbackDevice::new());
-
 /// Global dynamic ARP resolution cache.
 pub static ARP_TABLE: Mutex<ArpTable> = Mutex::new(ArpTable::new());
 
