@@ -194,6 +194,7 @@ impl NetworkDeviceManager {
     pub fn has_packets(&self) -> bool {
         match &self.backend { NetworkDeviceBackend::Loopback(d) => d.has_packets(), NetworkDeviceBackend::E1000(d) => d.has_packets() }
     }
+}
 
     /// Replaces the loopback backend with an initialized Ethernet controller.
     pub fn attach_e1000(&mut self, device: E1000Device) {

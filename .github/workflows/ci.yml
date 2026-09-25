@@ -180,6 +180,7 @@ jobs:
           set -o pipefail
           timeout 20s qemu-system-x86_64 \\
             -drive format=raw,file=target/interos-os-ci.img \\
+            -nic user,model=e1000 \\
             -serial file:target/interos-qemu-serial.log \\
             -display none -no-reboot -no-shutdown || test $? -eq 124
           test -s target/interos-qemu-serial.log
@@ -192,6 +193,8 @@ jobs:
           grep -F "[TASK displayd (ID " target/interos-qemu-serial.log
           grep -F "[TASK camerad (ID " target/interos-qemu-serial.log
           grep -F "[PID1] All system services running after bootstrap." target/interos-qemu-serial.log
+          grep -F "[NET] Intel E1000 network backend attached:" target/interos-qemu-serial.log
+          grep -F "[OK] PCI Ethernet controller attached to canonical network device." target/interos-qemu-serial.log
           grep -F "[PID1] Recovered failed system service(s)." target/interos-qemu-serial.log
       - name: Verify boot image builder
         run: cargo check --manifest-path boot/Cargo.toml
