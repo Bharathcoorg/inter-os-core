@@ -231,6 +231,8 @@ impl TcpConnectionTable {
         Err(NetError::QueueFull)
     }
 
+    pub fn entries_mut(&mut self) -> core::slice::IterMut<'_, Option<TcpConnection>> { self.entries.iter_mut() }
+
     pub fn get(&self, id: u32) -> Option<&TcpConnection> {
         self.entries.iter().flatten().find(|c| c.id == id)
     }
