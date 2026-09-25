@@ -125,6 +125,8 @@ jobs:
       - name: Run Service Lifecycle Contract Tests
         run: python tests/test_service_lifecycle_contract.py
 
+      - name: Run Storage Architecture Contract Tests
+        run: python tests/test_storage_contract.py
 
   qemu-vertical-slice:
     name: QEMU x86_64 Build Contract
