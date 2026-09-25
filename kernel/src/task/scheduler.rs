@@ -61,7 +61,9 @@ impl Scheduler {
         cap_table: CapabilityTable,
         priority: u8,
     ) -> TaskId {
-        let tcb = TaskControlBlock::new(name, entry_point, cap_table, priority);
+        let mut tcb = TaskControlBlock::new(name, entry_point, cap_table, priority);
+        let parent_id = self.current_task_id().unwrap_or(TaskId(0));
+        tcb.parent_id = parent_id;
         let id = tcb.id;
         self.tasks.push(tcb);
         id
@@ -118,29 +120,43 @@ impl Scheduler {
     }
 
 
+    /// Reclaims terminated TCB resources that are no longer the current task.
+    /// This releases kernel stacks, page tables, and capability tables instead of
+    /// retaining terminated processes indefinitely.
+    fn reap_terminated(&mut self) {
+        if self.tasks.len() <= 1 { return; }
+        let current_id = self.tasks[self.current_idx].id;
+        let mut i = self.tasks.len();
+        while i > 0 {
+            i -= 1;
+            if self.tasks[i].id != current_id && self.tasks[i].state == TaskState::Terminated {
+                self.tasks.remove(i);
+                if i < self.current_idx { self.current_idx -= 1; }
+            }
+        }
+    }
+
     /// Prepares context pointers for switching to the next ready task in round-robin order.
     pub fn prepare_switch(&mut self) -> (Option<*mut TaskContext>, Option<*const TaskContext>) {
+        self.reap_terminated();
         if self.tasks.len() <= 1 {
             return (None, None);
         }
 
         let current_idx = self.current_idx;
         let mut next_idx = (current_idx + 1) % self.tasks.len();
-        let mut best_idx = None;
-        let mut best_priority = 0u8;
+
+        // Find the next Ready task
         while next_idx != current_idx {
             if self.tasks[next_idx].state == TaskState::Ready {
-                let p = self.tasks[next_idx].priority;
-                if best_idx.is_none() || p > best_priority {
-                    best_idx = Some(next_idx);
-                    best_priority = p;
-                }
+                break;
             }
             next_idx = (next_idx + 1) % self.tasks.len();
         }
-        let Some(next_idx) = best_idx else {
-            return (None, None);
-        };
+
+        if next_idx == current_idx {
+            return (None, None); // No other ready task found
+        }
 
         // Verify stack canary of the departing task
         if !self.tasks[current_idx].check_stack_integrity() {
@@ -181,14 +197,16 @@ impl Scheduler {
     pub fn prepare_terminate(&mut self) -> (Option<*mut TaskContext>, Option<*const TaskContext>) {
         let current_idx = self.current_idx;
         let task_id = self.tasks[current_idx].id;
-        self.tasks[current_idx].state = TaskState::Terminated;
+        if self.tasks[current_idx].state != TaskState::Zombie {
+            self.tasks[current_idx].state = TaskState::Terminated;
+        }
         crate::ipc::cleanup_task(task_id);
         self.prepare_switch()
     }
 
     /// Invoked on timer tick: updates accounting and returns switch pointers if time slice expired.
     pub fn check_timer_tick(&mut self) -> (Option<*mut TaskContext>, Option<*const TaskContext>) {
-        if !self.initialized || self.tasks.is_empty() {
+        if !self.initialized || self.tasks.is_empty() || !self.validate_invariants() {
             return (None, None);
         }
 
@@ -205,51 +223,26 @@ impl Scheduler {
         }
     }
 
-    /// Reaps a terminated child owned by parent_id, returning its exit code.
-    ///
-    /// Reaping is only allowed for Zombie/Terminated children and never removes
-    /// the currently running task. Dropping the TCB releases its kernel stack,
-    /// page table and capability table.
-    pub fn terminate_task(&mut self, id: TaskId, exit_code: i32) -> Result<(), &'static str> {
-        let current_id = self.current_task_id().ok_or("no current task")?;
-        if id == TaskId(0) || id == current_id {
-            return Err("task cannot be terminated by lifecycle manager");
-        }
-        let task = self.tasks.iter_mut().find(|task| task.id == id).ok_or("task not found")?;
-        if matches!(task.state, TaskState::Terminated | TaskState::Zombie) {
-            return Ok(());
-        }
-        task.exit_code = exit_code;
-        task.state = TaskState::Zombie;
-        crate::ipc::cleanup_task(id);
-        crate::drivers::display_kms::DRM_KMS.lock().destroy_surfaces_owned_by(id.0);
-        crate::service::SERVICE_SUPERVISOR.lock().record_exit(id, exit_code);
-        Ok(())
-    }
-
-    pub fn reap_child(&mut self, parent_id: TaskId, child_id: TaskId) -> Result<i32, &'static str> {
-        if child_id == TaskId(0) || child_id == self.tasks.get(self.current_idx).map(|t| t.id).unwrap_or(TaskId(0)) {
-            return Err("child cannot be reaped");
-        }
-        let index = self.tasks.iter().position(|task| {
-            task.id == child_id
-                && task.parent_id == parent_id
-                && matches!(task.state, TaskState::Zombie | TaskState::Terminated)
-        }).ok_or("child not ready or not owned by caller")?;
-        let exit_code = self.tasks[index].exit_code;
-        self.tasks.remove(index);
-        if index < self.current_idx {
-            self.current_idx -= 1;
-        }
-        if self.current_idx >= self.tasks.len() && !self.tasks.is_empty() {
-            self.current_idx = self.tasks.len() - 1;
-        }
-        Ok(exit_code)
-    }
-
-    /// Returns the total count of registered tasks.
+    /// Returns the total count of registered tasks, including retained terminated records.
     pub fn task_count(&self) -> usize {
         self.tasks.len()
+    }
+
+    /// Returns the number of tasks that still own schedulable resources.
+    pub fn active_task_count(&self) -> usize {
+        self.tasks.iter().filter(|t| t.state != TaskState::Terminated).count()
+    }
+
+    /// Checks scheduler invariants before a context switch or telemetry snapshot.
+    /// Exactly one task may be Running; terminated tasks must never be the current task.
+    pub fn validate_invariants(&self) -> bool {
+        if self.tasks.is_empty() || self.current_idx >= self.tasks.len() {
+            return false;
+        }
+        if self.tasks[self.current_idx].state == TaskState::Terminated {
+            return false;
+        }
+        self.tasks.iter().filter(|t| t.state == TaskState::Running).count() == 1
     }
 
     /// Emits structured telemetry records for all registered tasks over serial.
@@ -270,14 +263,13 @@ impl Scheduler {
                 "0x0000000000100000"
             };
             crate::serial_println!(
-                "[PROC] pid={} name={} state={} prio={} ticks={} caps={} kstack={} ppid={} cr3={}",
+                "[PROC] pid={} name={} state={} prio={} ticks={} caps={} mem=128 ppid={} cr3={}",
                 task.id.0,
                 task.name,
                 state_str,
                 task.priority,
                 task.cpu_ticks,
                 task.cap_table.count(),
-                super::TASK_STACK_SIZE / 1024,
                 task.parent_id.0,
                 cr3_str
             );
@@ -311,6 +303,10 @@ pub fn on_timer_tick() {
             (None, None)
         }
     };
+
+    // Scheduler lock is released before supervision, avoiding recursive
+    // scheduler acquisition from the service manager.
+    crate::services::supervise();
 
     if let (Some(prev_ptr), Some(next_ptr)) = (prev, next) {
         unsafe {

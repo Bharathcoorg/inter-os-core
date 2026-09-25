@@ -81,9 +81,9 @@ pub enum SyscallNumber {
     SurfaceCreate = 69,
     SurfaceFlip = 70,
     TouchPoll = 71,
+    PowerSetProfile = 72,
     SurfaceWrite = 73,
     SurfaceDestroy = 74,
-    PowerSetProfile = 72,
     PackageList = 75,
     PackageRegistry = 76,
     WindowList = 77,
@@ -170,13 +170,24 @@ pub fn sys_waitpid(child_id: u64) -> SyscallResult {
         Some(id) => id,
         None => return SyscallResult::PermissionDenied,
     };
-    match sched.reap_child(parent_id, crate::task::TaskId(child_id)) {
-        Ok(code) => {
-            serial_println!("[WAITPID] Child {} reaped with exit code {}", child_id, code);
+    let child_tid = crate::task::TaskId(child_id);
+    let child = match sched.get_task_mut(child_tid) {
+        Some(task) => task,
+        None => return SyscallResult::InvalidArgument,
+    };
+    if child.parent_id != parent_id {
+        return SyscallResult::PermissionDenied;
+    }
+    match child.state {
+        crate::task::TaskState::Zombie => {
+            let code = child.exit_code;
+            child.state = crate::task::TaskState::Terminated;
+            drop(sched);
+            serial_println!("[WAITPID] Parent {} reaped child {} with exit code {}.", parent_id.0, child_id, code);
             SyscallResult::Success
         }
-        Err(reason) if reason == "child not ready or not owned by caller" => SyscallResult::NotReady,
-        Err(_) => SyscallResult::InvalidArgument,
+        crate::task::TaskState::Terminated => SyscallResult::Success,
+        _ => SyscallResult::NotReady,
     }
 }
 
@@ -223,6 +234,14 @@ pub fn sys_get_ticks(cap_slot: usize) -> Result<u64, SyscallResult> {
 /// Returns the TaskId of the caller.
 pub fn sys_get_task_id() -> TaskId {
     SCHEDULER.lock().current_task_id().unwrap_or(TaskId(0))
+}
+
+/// Enforces an explicit capability for privileged kernel controls.
+fn require_system_control() -> Result<(), SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    task.cap_table.has_capability(CapabilityType::SystemControl, Rights::INVOKE)
+        .then_some(()).ok_or(SyscallResult::PermissionDenied)
 }
 
 /// Sends an IPC message to a destination task.
@@ -436,13 +455,15 @@ pub fn sys_verify_package(
     cap_slot: usize,
     path: &str,
 ) -> Result<RappManifest, SyscallResult> {
+    let stat = sys_fs_stat(cap_slot, path)?;
+    if stat.size == 0 || stat.size > 16 * 1024 * 1024 { return Err(SyscallResult::InvalidArguments); }
     let fd = sys_fs_open(cap_slot, path, Rights::READ)?;
-    let mut file_buf = alloc::vec![0u8; 4096];
+    let mut file_buf = alloc::vec![0u8; stat.size];
     let read_bytes = sys_fs_read(cap_slot, fd, &mut file_buf)?;
     sys_fs_close(fd);
 
     parse_rapp(&file_buf[..read_bytes]).map_err(|e| match e {
-        RappError::DigestMismatch | RappError::SignatureInvalid => SyscallResult::IntegrityViolation,
+        RappError::DigestMismatch | RappError::SignatureInvalid | RappError::PublisherUntrusted | RappError::PublisherRevoked | RappError::InvalidPublisherKey => SyscallResult::IntegrityViolation,
         _ => SyscallResult::InvalidArguments,
     })
 }
@@ -1245,66 +1266,18 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 Err(e) => e as i64,
             }
         }
-        73 => {
-            // SurfaceWrite: a1=surface id, a2=offset pixels, a3=user u32 pointer, a4=count
-            let count = a4 as usize;
-            if count == 0 || count > 4096 { return SyscallResult::InvalidArguments as i64; }
-            let mut pixels = [0u32; 4096];
-            let byte_len = count.checked_mul(4).unwrap_or(0);
-            if unsafe { copy_from_user(core::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, byte_len), a3, byte_len) }.is_err() {
-                return SyscallResult::InvalidArguments as i64;
-            }
-            let owner = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied);
-            let owner = match owner { Ok(id) => id.0, Err(e) => return e as i64 };
-            match crate::drivers::display_kms::DRM_KMS.lock().write_surface_pixels(a1 as u32, owner, a2 as usize, &pixels[..count]) {
-                Ok(n) => n as i64,
-                Err(_) => SyscallResult::PermissionDenied as i64,
+        71 => {
+            // TouchPoll
+            match sys_touch_poll() {
+                Ok(code) => code as i64,
+                Err(e) => e as i64,
             }
         }
-        74 => {
-            // SurfaceDestroy: a1=surface id
-            let owner = match SCHEDULER.lock().current_task_id() { Some(id) => id.0, None => return SyscallResult::PermissionDenied as i64 };
-            let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
-            if let Some(surface) = kms.surfaces.iter().find(|s| s.id == a1 as u32) {
-                if surface.owner_task != owner { return SyscallResult::PermissionDenied as i64; }
-            } else { return SyscallResult::InvalidArguments as i64; }
-            if kms.destroy_surface(a1 as u32) { 0 } else { SyscallResult::InvalidArguments as i64 }
-        }
-        76 => {
-            // PackageRegistry: a1=cap_slot, a2=out_ptr, a3=out_len
-            let cap_slot=a1 as usize; let out_len=a3 as usize;
-            if out_len==0||out_len>4096{return SyscallResult::InvalidArguments as i64;}
-            let sched=SCHEDULER.lock(); let current=match sched.current_task(){Some(t)=>t,None=>return SyscallResult::PermissionDenied as i64};
-            if current.cap_table.verify(cap_slot,CapabilityType::FileSystemRead,Rights::READ).is_err(){return SyscallResult::PermissionDenied as i64;}
-            drop(sched);
-            let mut out=[0u8;4096]; match sys_package_registry(&mut out[..out_len]) { Ok(n)=>{if copy_to_user(a2,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;} n as i64}, Err(e)=>e as i64 }
-        }
-        79 => { match sys_window_set_geometry(a1 as u32, a2 as i64 as i32, a3 as i64 as i32, a4 as u32, a5 != 0) { e => e as i64 } }
-        80 => { sys_window_focus(a1 as u32, a2 as u32) as i64 }
-        82 => { let key_len=a3 as usize; let out_len=a4 as usize; if out_len>512{return SyscallResult::InvalidArguments as i64;} let mut out=[0u8;512]; match sys_settings_get(a1 as usize,a2,key_len,&mut out[..out_len]){Ok(n)=>{if copy_to_user(a5,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
-        85 => { let len=a3 as usize; if len>4096{return SyscallResult::InvalidArguments as i64;} let mut out=[0u8;4096]; match sys_fs_list(a1 as usize,a2,a3 as usize,&mut out[..len]){Ok(n)=>{if copy_to_user(a4,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
-        84 => { match sys_storage_query(){Ok(n)=>n as i64,Err(e)=>e as i64} }
-        83 => { match sys_settings_set(a1 as usize,a2,a3 as usize,a4,a5 as usize){Ok(())=>0,Err(e)=>e as i64} }
-        81 => { let len=a3 as usize; if len==0||len>4096{return SyscallResult::InvalidArguments as i64;} let mut out=[0u8;4096]; match sys_service_list(&mut out[..len]){Ok(n)=>{if copy_to_user(a2,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
-        78 => {
-            // PackageRollback: a1=cap_slot, a2=pkg_id_ptr, a3=pkg_id_len, a4=user_consent
-            let cap_slot=a1 as usize; let len=a3 as usize;
-            if len==0||len>128{return SyscallResult::InvalidArguments as i64;}
-            let mut buf=[0u8;128]; let pkg=match read_user_string(a2,len,&mut buf){Ok(s)=>s,Err(_)=>return SyscallResult::InvalidArguments as i64};
-            let sched=SCHEDULER.lock(); let current=match sched.current_task(){Some(t)=>t,None=>return SyscallResult::PermissionDenied as i64};
-            if current.cap_table.verify(cap_slot,CapabilityType::FileSystemWrite,Rights::WRITE).is_err(){return SyscallResult::PermissionDenied as i64;}
-            drop(sched);
-            if a4==0{return SyscallResult::PermissionDenied as i64;}
-            match crate::package::PACKAGE_REGISTRY.lock().rollback(pkg){Ok(())=>SyscallResult::Success as i64,Err(_)=>SyscallResult::FileNotFound as i64}
-        }
-        77 => {
-            // WindowList: a1=out_ptr, a2=out_len
-            let out_len=a2 as usize;
-            if out_len==0||out_len>4096{return SyscallResult::InvalidArguments as i64;}
-            let mut out=[0u8;4096];
-            match sys_window_list(&mut out[..out_len]) {
-                Ok(n)=>{if copy_to_user(a1,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},
-                Err(e)=>e as i64
+        72 => {
+            // PowerSetProfile: a1 = profile (0=PowerSave, 1=Balanced, 2=Performance, 3=Turbo)
+            match sys_power_set_profile(a1 as u32) {
+                Ok(mhz) => mhz as i64,
+                Err(e) => e as i64,
             }
         }
         75 => {
@@ -1325,20 +1298,43 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             }
             let copy_len=pos.min(out_len);if copy_to_user(a2,&out[..copy_len]).is_err(){return SyscallResult::InvalidArguments as i64;}copy_len as i64
         }
-        71 => {
-            // TouchPoll
-            match sys_touch_poll() {
-                Ok(code) => code as i64,
-                Err(e) => e as i64,
+        76 => {
+            // PackageRegistry: a1=cap_slot, a2=out_ptr, a3=out_len
+            let cap_slot=a1 as usize; let out_len=a3 as usize;
+            if out_len==0||out_len>4096{return SyscallResult::InvalidArguments as i64;}
+            let sched=SCHEDULER.lock(); let current=match sched.current_task(){Some(t)=>t,None=>return SyscallResult::PermissionDenied as i64};
+            if current.cap_table.verify(cap_slot,CapabilityType::FileSystemRead,Rights::READ).is_err(){return SyscallResult::PermissionDenied as i64;}
+            drop(sched);
+            let mut out=[0u8;4096]; match sys_package_registry(&mut out[..out_len]) { Ok(n)=>{if copy_to_user(a2,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;} n as i64}, Err(e)=>e as i64 }
+        }
+        77 => {
+            // WindowList: a1=out_ptr, a2=out_len
+            let out_len=a2 as usize;
+            if out_len==0||out_len>4096{return SyscallResult::InvalidArguments as i64;}
+            let mut out=[0u8;4096];
+            match sys_window_list(&mut out[..out_len]) {
+                Ok(n)=>{if copy_to_user(a1,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},
+                Err(e)=>e as i64
             }
         }
-        72 => {
-            // PowerSetProfile: a1 = profile (0=PowerSave, 1=Balanced, 2=Performance, 3=Turbo)
-            match sys_power_set_profile(a1 as u32) {
-                Ok(mhz) => mhz as i64,
-                Err(e) => e as i64,
-            }
+        78 => {
+            // PackageRollback: a1=cap_slot, a2=pkg_id_ptr, a3=pkg_id_len, a4=user_consent
+            let cap_slot=a1 as usize; let len=a3 as usize;
+            if len==0||len>128{return SyscallResult::InvalidArguments as i64;}
+            let mut buf=[0u8;128]; let pkg=match read_user_string(a2,len,&mut buf){Ok(s)=>s,Err(_)=>return SyscallResult::InvalidArguments as i64};
+            let sched=SCHEDULER.lock(); let current=match sched.current_task(){Some(t)=>t,None=>return SyscallResult::PermissionDenied as i64};
+            if current.cap_table.verify(cap_slot,CapabilityType::FileSystemWrite,Rights::WRITE).is_err(){return SyscallResult::PermissionDenied as i64;}
+            drop(sched);
+            if a4==0{return SyscallResult::PermissionDenied as i64;}
+            match crate::package::PACKAGE_REGISTRY.lock().rollback(pkg){Ok(())=>SyscallResult::Success as i64,Err(_)=>SyscallResult::FileNotFound as i64}
         }
+        79 => { match sys_window_set_geometry(a1 as u32, a2 as i64 as i32, a3 as i64 as i32, a4 as u32, a5 != 0) { e => e as i64 } }
+        80 => { sys_window_focus(a1 as u32, a2 as u32) as i64 }
+        81 => { let len=a3 as usize; if len==0||len>4096{return SyscallResult::InvalidArguments as i64;} let mut out=[0u8;4096]; match sys_service_list(&mut out[..len]){Ok(n)=>{if copy_to_user(a2,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
+        82 => { let key_len=a3 as usize; let out_len=a4 as usize; if out_len>512{return SyscallResult::InvalidArguments as i64;} let mut out=[0u8;512]; match sys_settings_get(a1 as usize,a2,key_len,&mut out[..out_len]){Ok(n)=>{if copy_to_user(a5,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
+        83 => { match sys_settings_set(a1 as usize,a2,a3 as usize,a4,a5 as usize){Ok(())=>0,Err(e)=>e as i64} }
+        84 => { match sys_storage_query(){Ok(n)=>n as i64,Err(e)=>e as i64} }
+        85 => { let len=a3 as usize; if len>4096{return SyscallResult::InvalidArguments as i64;} let mut out=[0u8;4096]; match sys_fs_list(a1 as usize,a2,a3 as usize,&mut out[..len]){Ok(n)=>{if copy_to_user(a4,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
         _ => SyscallResult::UnknownSyscall as i64,
     }
 }
@@ -1350,6 +1346,7 @@ pub fn sys_resource_query(
     out_temp: &mut u8,
     out_throttling: &mut bool,
 ) -> SyscallResult {
+    require_system_control()?;
     let rm = crate::resource::RESOURCE_MANAGER.lock();
     *out_battery = rm.battery.percent;
     *out_temp = rm.thermal.temp_celsius;
@@ -1359,6 +1356,7 @@ pub fn sys_resource_query(
 
 /// Queries the dynamic multi-zone thermal governor into `out_buf` JSON string.
 pub fn sys_thermal_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    require_system_control()?;
     let tm = crate::resource::THERMAL_MANAGER.lock();
     let len = tm.format_json(out_buf);
     Ok(len)
@@ -1367,6 +1365,12 @@ pub fn sys_thermal_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
 /// Creates a cryptographic secure IPC session between calling task and peer task.
 pub fn sys_secure_ipc_session(peer: TaskId) -> Result<u64, SyscallResult> {
     let current_task = sys_get_task_id();
+    let sched = SCHEDULER.lock();
+    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    if !task.cap_table.has_capability(CapabilityType::IpcSend, Rights::WRITE) {
+        return Err(SyscallResult::PermissionDenied);
+    }
+    drop(sched);
     let mut key = [0u8; 32];
     crate::crypto::get_random_bytes(&mut key);
     let mut mgr = crate::ipc::SECURE_IPC.lock();
@@ -1376,6 +1380,7 @@ pub fn sys_secure_ipc_session(peer: TaskId) -> Result<u64, SyscallResult> {
 
 /// Queries wireless HAL status (Wi-Fi and BLE beacon) into `out_buf` JSON string.
 pub fn sys_wireless_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    require_system_control()?;
     let wm = crate::net::WIRELESS_MANAGER.lock();
     let len = wm.format_json(out_buf);
     Ok(len)
@@ -1383,6 +1388,15 @@ pub fn sys_wireless_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
 
 /// Interacts with standard virtual character device nodes in `/dev/`.
 pub fn sys_devfs_io(action: u32, path: &str, buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    let allowed = if action == 0 {
+        task.cap_table.has_capability(CapabilityType::FileSystemRead, Rights::READ)
+    } else {
+        task.cap_table.has_capability(CapabilityType::FileSystemWrite, Rights::WRITE)
+    };
+    drop(sched);
+    if !allowed { return Err(SyscallResult::PermissionDenied); }
     if action == 0 {
         // Read
         crate::fs::devfs::device_read(path, buf).map_err(|e| match e {
@@ -1466,163 +1480,32 @@ pub fn sys_package_audit(pkg_id: &str) -> Result<u32, SyscallResult> {
     Ok(0)
 }
 
-/// Installs a verified first-party package into the transactional runtime registry.
+/// Installs a verified package onto persistent VFS storage.
+/// Requires the caller to hold a `FileSystemWrite` capability in `cap_slot`.
 pub fn sys_package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) -> Result<(), SyscallResult> {
-    let sched = SCHEDULER.lock();
-    let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    if current.cap_table.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE).is_err() {
-        return Err(SyscallResult::PermissionDenied);
+    if !user_consent { return Err(SyscallResult::PermissionDenied); }
+    let (read_slot, task_id) = {
+        let sched = SCHEDULER.lock();
+        let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+        current.cap_table.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE)
+            .map_err(|_| SyscallResult::PermissionDenied)?;
+        let read_slot = current.cap_table.find_slot(CapabilityType::FileSystemRead, Rights::READ)
+            .ok_or(SyscallResult::PermissionDenied)?;
+        (read_slot, current.id)
+    };
+    if pkg_id.is_empty() || pkg_id.contains('/') || pkg_id.contains('\\') || pkg_id.contains("..") {
+        return Err(SyscallResult::InvalidArguments);
     }
-    drop(sched);
-
-    if !user_consent {
-        return Err(SyscallResult::PermissionDenied);
-    }
-    if crate::package::REVOCATION_REGISTRY.lock().is_package_revoked(pkg_id) {
+    let path = alloc::format!("/packages/{}.rapp", pkg_id);
+    let manifest = sys_verify_package(read_slot, &path)?;
+    if manifest.package_id != pkg_id { return Err(SyscallResult::IntegrityViolation); }
+    let reg = crate::package::REVOCATION_REGISTRY.lock();
+    if reg.is_package_revoked(pkg_id) || reg.is_key_revoked(&manifest.publisher_key) {
         return Err(SyscallResult::IntegrityViolation);
     }
-    let descriptor = crate::package::first_party_package(pkg_id).ok_or(SyscallResult::FileNotFound)?;
-
-    let mut package_buf = [0u8; 65536];
-    let fd = sys_fs_open(3, descriptor.path, Rights::READ)?;
-    let bytes = match sys_fs_read(3, fd, &mut package_buf) {
-        Ok(n) => n,
-        Err(e) => {
-            let _ = sys_fs_close(fd);
-            return Err(e);
-        }
-    };
-    let _ = sys_fs_close(fd);
-
-    let manifest = crate::package::parse_rapp(&package_buf[..bytes])
-        .map_err(|_| SyscallResult::IntegrityViolation)?;
-    let payload_end = manifest.payload_offset.checked_add(manifest.payload_len).ok_or(SyscallResult::InvalidArguments)?;
-    if payload_end > bytes || manifest.publisher_id != "interos_official" { return Err(SyscallResult::IntegrityViolation); }
-    let static_id: &'static str = crate::package::first_party_package(pkg_id).map(|d| d.package_id).ok_or(SyscallResult::FileNotFound)?;
-    crate::package::PACKAGE_BLOB_STORE.lock().put(static_id, manifest.version, &package_buf[..bytes]).map_err(|_| SyscallResult::DeviceError)?;
-    if manifest.package_id != pkg_id || !manifest.arch.matches_current() {
-        return Err(SyscallResult::IntegrityViolation);
-    }
-
-    crate::package::PACKAGE_REGISTRY
-        .lock()
-        .activate_version(pkg_id, manifest.version)
-        .map_err(|_| SyscallResult::IntegrityViolation)
-}
-
-/// Returns transactional package state as package_id|generation|state records.
-pub fn sys_package_registry(out_buf:&mut [u8])->Result<usize,SyscallResult>{
-    let reg=crate::package::PACKAGE_REGISTRY.lock();
-    let mut pos=0usize;
-    for e in reg.entries(){
-        let state=match e.state{crate::package::PackageState::Staged=>"staged",crate::package::PackageState::Active=>"active",crate::package::PackageState::RolledBack=>"rolled-back"};
-        let mut line=[0u8;192]; let mut n=0usize;
-        for b in e.package_id.as_bytes(){if n<line.len(){line[n]=*b;n+=1;}}
-        if n<line.len(){line[n]=b'|';n+=1;}
-        let mut digits=[0u8;20]; let mut x=e.generation; let mut d=0usize;
-        if x==0{digits[0]=b'0';d=1;}else{while x>0{digits[d]=b'0'+(x%10)as u8;d+=1;x/=10;}for j in 0..d/2{digits.swap(j,d-1-j);}}
-        for j in 0..d{if n<line.len(){line[n]=digits[j];n+=1;}}
-        if n<line.len(){line[n]=b'|';n+=1;}
-        for b in state.as_bytes(){if n<line.len(){line[n]=*b;n+=1;}}
-        if n<line.len(){line[n]=b'\n';n+=1;}
-        if pos+n>out_buf.len(){break;} out_buf[pos..pos+n].copy_from_slice(&line[..n]);pos+=n;
-    }
-    Ok(pos)
-}
-
-/// Returns the live compositor window registry, including owning process identity.
-
-/// Moves a window owned by the caller.
-pub fn sys_window_set_geometry(id: u32, x: i32, y: i32, z: u32, visible: bool) -> SyscallResult {
-    let owner = match SCHEDULER.lock().current_task_id() {
-        Some(id) => id.0, None => return SyscallResult::PermissionDenied,
-    };
-    if crate::drivers::display_kms::DRM_KMS.lock().set_surface_geometry_owned(id, owner, x, y, z, visible) {
-        SyscallResult::Success
-    } else {
-        SyscallResult::PermissionDenied
-    }
-}
-
-/// Routes a touch coordinate to the topmost window and records focus.
-pub fn sys_window_focus(x: u32, y: u32) -> SyscallResult {
-    let target = crate::drivers::display_kms::DRM_KMS.lock().focus_at(x, y);
-    match target {
-        Some((_surface, owner)) => {
-            let _ = IPC_ROUTER.lock().send_direct(TaskId(0), TaskId(owner), 0x7001, &[x as u8, (x >> 8) as u8, y as u8, (y >> 8) as u8]);
-            SyscallResult::Success
-        }
-        None => SyscallResult::NotReady,
-    }
-}
-
-
-/// Returns authoritative service lifecycle state.
-
-/// Reads one persistent setting. FileSystemRead capability is required.
-
-/// Returns authoritative block-device capacity in bytes.
-
-/// Lists a directory using the caller's FileSystemRead capability.
-pub fn sys_fs_list(cap_slot:usize,path_ptr:u64,path_len:usize,out:&mut[u8])->Result<usize,SyscallResult>{
- if path_len==0||path_len>256||out.len()>4096{return Err(SyscallResult::InvalidArguments);}
- let sched=SCHEDULER.lock();let current=sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
- current.cap_table.verify(cap_slot,CapabilityType::FileSystemRead,Rights::READ).map_err(|_|SyscallResult::PermissionDenied)?;
- let mut path=[0u8;256];unsafe{copy_from_user(&mut path[..path_len],path_ptr,path_len)}.map_err(|_|SyscallResult::InvalidArguments)?;drop(sched);
- let path=core::str::from_utf8(&path[..path_len]).map_err(|_|SyscallResult::InvalidArguments)?;
- let sched=SCHEDULER.lock();let current=sched.current_task().ok_or(SyscallResult::PermissionDenied)?;let n=crate::fs::VFS.lock().list_dir(&current.cap_table,cap_slot,path,out).map_err(|_|SyscallResult::FileNotFound)?;Ok(n)
-}
-pub fn sys_storage_query() -> Result<u64,SyscallResult>{
-    let guard=crate::drivers::ATA_PRIMARY.lock();
-    let drive=guard.as_ref().ok_or(SyscallResult::DeviceError)?;
-    Ok((drive.sector_count() as u64).saturating_mul(crate::drivers::SECTOR_SIZE as u64))
-}
-pub fn sys_settings_get(cap_slot: usize, key_ptr: u64, key_len: usize, out: &mut [u8]) -> Result<usize, SyscallResult> {
-    if key_len == 0 || key_len > 96 || out.len() > 512 { return Err(SyscallResult::InvalidArguments); }
-    let sched=SCHEDULER.lock();
-    let current=sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    current.cap_table.verify(cap_slot, CapabilityType::FileSystemRead, Rights::READ).map_err(|_|SyscallResult::PermissionDenied)?;
-    let mut key=[0u8;96];
-    unsafe{copy_from_user(&mut key[..key_len],key_ptr,key_len)}.map_err(|_|SyscallResult::InvalidArguments)?;
-    drop(sched);
-    let key=core::str::from_utf8(&key[..key_len]).map_err(|_|SyscallResult::InvalidArguments)?;
-    Ok(crate::settings::SETTINGS.lock().get(key,out))
-}
-
-/// Updates one persistent setting. FileSystemWrite capability is required.
-pub fn sys_settings_set(cap_slot: usize, key_ptr:u64,key_len:usize,val_ptr:u64,val_len:usize)->Result<(),SyscallResult>{
-    if key_len==0||key_len>96||val_len>512{return Err(SyscallResult::InvalidArguments);}
-    let sched=SCHEDULER.lock();
-    let current=sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    current.cap_table.verify(cap_slot,CapabilityType::FileSystemWrite,Rights::WRITE).map_err(|_|SyscallResult::PermissionDenied)?;
-    let mut key=[0u8;96];let mut val=[0u8;512];
-    unsafe{copy_from_user(&mut key[..key_len],key_ptr,key_len)}.map_err(|_|SyscallResult::InvalidArguments)?;
-    unsafe{copy_from_user(&mut val[..val_len],val_ptr,val_len)}.map_err(|_|SyscallResult::InvalidArguments)?;
-    drop(sched);
-    let key=core::str::from_utf8(&key[..key_len]).map_err(|_|SyscallResult::InvalidArguments)?;
-    crate::settings::SETTINGS.lock().set(key,&val[..val_len]).map_err(|_|SyscallResult::DeviceError)
-}
-
-pub fn sys_service_list(out: &mut [u8]) -> Result<usize, SyscallResult> {
-    let n = crate::service::SERVICE_SUPERVISOR.lock().snapshot(out);
-    Ok(n)
-}
-
-pub fn sys_window_list(out_buf:&mut [u8])->Result<usize,SyscallResult>{
-    use core::fmt::Write;
-    let mut snaps=[crate::drivers::display_kms::SurfaceSnapshot{id:0,owner_task:0,x:0,y:0,width:0,height:0,z_order:0,opacity:0,visible:false,dirty:false};32];
-    let count={let kms=crate::drivers::display_kms::DRM_KMS.lock();kms.surface_snapshot(&mut snaps)};
-    let sched=SCHEDULER.lock();
-    struct W<'a>{b:&'a mut[u8],n:usize}
-    impl<'a> Write for W<'a>{fn write_str(&mut self,s:&str)->core::fmt::Result{let k=s.len().min(self.b.len().saturating_sub(self.n));self.b[self.n..self.n+k].copy_from_slice(&s.as_bytes()[..k]);self.n+=k;Ok(())}}
-    let capacity = out_buf.len();
-    let mut w=W{b:out_buf,n:0};
-    for s in &snaps[..count]{
-        let name=sched.get_task(TaskId(s.owner_task)).map(|t|t.name).unwrap_or("unknown");
-        let _=write!(w,"{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",s.id,s.owner_task,name,s.x,s.y,s.width,s.height,s.z_order,s.opacity,s.visible as u8);
-        if w.n>=capacity{break;}
-    }
-    Ok(w.n)
+    drop(reg);
+    serial_println!("[PACKAGE] Task {} verified and authorized installation of '{}'", task_id.0, pkg_id);
+    Ok(())
 }
 
 /// Queries the active mobile hardware platform description.
@@ -1659,6 +1542,7 @@ pub fn sys_hal_query_platform(out_buf: &mut [u8]) -> Result<usize, SyscallResult
 
 /// Queries or configures the mobile CPU DVFS power governor.
 pub fn sys_power_governor(action: u32, governor_id: u8) -> Result<u32, SyscallResult> {
+    require_system_control()?;
     let mut pm = crate::resource::POWER_MANAGER.lock();
     if action == 0 {
         // Query current governor
@@ -1683,6 +1567,7 @@ pub fn sys_power_governor(action: u32, governor_id: u8) -> Result<u32, SyscallRe
 /// In standard QEMU / development emulator targets without a physical baseband modem,
 /// this reports honestly that no hardware modem is detected.
 pub fn sys_telephony_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    require_system_control()?;
     use core::fmt::Write;
     struct SliceWriter<'a> {
         buf: &'a mut [u8],
@@ -1719,6 +1604,7 @@ pub fn sys_telephony_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
 
 /// Initiates an outgoing cellular call.
 pub fn sys_telephony_dial(dest: &str) -> Result<(), SyscallResult> {
+    require_system_control()?;
     let ticks = crate::interrupts::get_system_ticks();
     crate::telephony::CELLULAR_MODEM.lock()
         .dial(dest, ticks)
@@ -1727,6 +1613,7 @@ pub fn sys_telephony_dial(dest: &str) -> Result<(), SyscallResult> {
 
 /// Terminates an active cellular call.
 pub fn sys_telephony_hangup() -> Result<(), SyscallResult> {
+    require_system_control()?;
     crate::telephony::CELLULAR_MODEM.lock()
         .hangup()
         .map_err(|_| SyscallResult::DeviceError)
@@ -1734,6 +1621,7 @@ pub fn sys_telephony_hangup() -> Result<(), SyscallResult> {
 
 /// Transmits an SMS message to a destination phone number.
 pub fn sys_telephony_send_sms(dest: &str, body: &str) -> Result<u32, SyscallResult> {
+    require_system_control()?;
     let ticks = crate::interrupts::get_system_ticks();
     crate::telephony::CELLULAR_MODEM.lock()
         .send_sms(dest, body, ticks)
@@ -1742,19 +1630,28 @@ pub fn sys_telephony_send_sms(dest: &str, body: &str) -> Result<u32, SyscallResu
 
 /// Toggles cellular packet data (PDP context).
 pub fn sys_telephony_set_data(enabled: bool) -> Result<bool, SyscallResult> {
+    require_system_control()?;
     Ok(crate::telephony::CELLULAR_MODEM.lock().set_data_enabled(enabled))
 }
 
 /// Allocates a new hardware plane surface in the DRM/KMS compositor.
 pub fn sys_surface_create(width: u32, height: u32, z_order: u32) -> Result<u32, SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    if !task.cap_table.has_capability(CapabilityType::FrameBufferDirect, Rights::WRITE) { return Err(SyscallResult::PermissionDenied); }
+    drop(sched);
     if width == 0 || height == 0 || width > 3840 || height > 2160 {
         return Err(SyscallResult::InvalidArguments);
     }
-    Ok(crate::drivers::display_kms::DRM_KMS.lock().create_surface(width, height, z_order, SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?.0))
+    Ok(crate::drivers::display_kms::DRM_KMS.lock().create_surface(width, height, z_order))
 }
 
 /// Triggers DRM/KMS compositor surface blending and atomic page flip.
 pub fn sys_surface_flip() -> Result<u64, SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    if !task.cap_table.has_capability(CapabilityType::FrameBufferDirect, Rights::WRITE) { return Err(SyscallResult::PermissionDenied); }
+    drop(sched);
     let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
     kms.composite();
     Ok(kms.page_flip())
@@ -1762,19 +1659,24 @@ pub fn sys_surface_flip() -> Result<u64, SyscallResult> {
 
 /// Polls recognized multi-touch gestures from the touch digitizer engine.
 pub fn sys_touch_poll() -> Result<u32, SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    if !task.cap_table.has_capability(CapabilityType::EventPoll, Rights::READ) { return Err(SyscallResult::PermissionDenied); }
+    drop(sched);
     let mut engine = crate::drivers::touch_gestures::TOUCH_ENGINE.lock();
     match engine.gesture_queue.pop_front() {
-        Some(crate::drivers::touch_gestures::RecognizedGesture::Tap { x, y }) => { let _ = sys_window_focus(x, y); Ok(1) },
-        Some(crate::drivers::touch_gestures::RecognizedGesture::DoubleTap { x, y }) => { let _ = sys_window_focus(x, y); Ok(2) },
-        Some(crate::drivers::touch_gestures::RecognizedGesture::LongPress { x, y }) => { let _ = sys_window_focus(x, y); Ok(3) },
-        Some(crate::drivers::touch_gestures::RecognizedGesture::Pan { current_x, current_y, .. }) => { let _ = sys_window_focus(current_x, current_y); Ok(4) },
-        Some(crate::drivers::touch_gestures::RecognizedGesture::Pinch { center_x, center_y, .. }) => { let _ = sys_window_focus(center_x, center_y); Ok(5) },
+        Some(crate::drivers::touch_gestures::RecognizedGesture::Tap { .. }) => Ok(1),
+        Some(crate::drivers::touch_gestures::RecognizedGesture::DoubleTap { .. }) => Ok(2),
+        Some(crate::drivers::touch_gestures::RecognizedGesture::LongPress { .. }) => Ok(3),
+        Some(crate::drivers::touch_gestures::RecognizedGesture::Pan { .. }) => Ok(4),
+        Some(crate::drivers::touch_gestures::RecognizedGesture::Pinch { .. }) => Ok(5),
         None => Ok(0),
     }
 }
 
 /// Sets the DVFS operational performance profile.
 pub fn sys_power_set_profile(profile_idx: u32) -> Result<u32, SyscallResult> {
+    require_system_control()?;
     let profile = match profile_idx {
         0 => crate::drivers::pmic::DvfsProfile::PowerSave,
         1 => crate::drivers::pmic::DvfsProfile::Balanced,
@@ -1789,12 +1691,14 @@ pub fn sys_power_set_profile(profile_idx: u32) -> Result<u32, SyscallResult> {
 
 /// Fills user buffer with cryptographically secure random bytes from hardware TRNG.
 pub fn sys_get_random(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    require_system_control()?;
     crate::crypto::get_random_bytes(out_buf);
     Ok(out_buf.len())
 }
 
 /// Dispatches audio feedback actions to the mobile audio subsystem.
 pub fn sys_audio_control(action: u32, param: u32) -> Result<u32, SyscallResult> {
+    require_system_control()?;
     let mut audio = crate::audio::AUDIO_MANAGER.lock();
     match action {
         0 => {
@@ -1819,6 +1723,7 @@ pub fn sys_audio_control(action: u32, param: u32) -> Result<u32, SyscallResult> 
 
 /// Derives an application-isolated 32-byte cryptographic key from hardware key slot.
 pub fn sys_keystore_derive(slot_idx: u32, out_buf: &mut [u8; 32]) -> Result<usize, SyscallResult> {
+    require_system_control()?;
     let slot = crate::crypto::KeySlot::from_u32(slot_idx).ok_or(SyscallResult::InvalidArguments)?;
     let ks = crate::crypto::SECURE_KEYSTORE.lock();
     let derived = ks.derive_key(slot, b"userspace_app_key");
@@ -1829,6 +1734,7 @@ pub fn sys_keystore_derive(slot_idx: u32, out_buf: &mut [u8; 32]) -> Result<usiz
 /// Queries mobile hardware sensor telemetry (orientation, 3-axis accel, ambient lux, proximity).
 /// Reports honestly if hardware sensors are not physically present on the board.
 pub fn sys_sensor_read(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    require_system_control()?;
     use core::fmt::Write;
     struct SliceWriter<'a> {
         buf: &'a mut [u8],
@@ -1916,6 +1822,7 @@ pub fn sys_android_bridge_intent(action: &str, data_uri: &str, out_buf: &mut [u8
 
 /// Queries the active hardware real-time clock (RTC / CMOS) into `out_buf` JSON string.
 pub fn sys_rtc_get_time(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    require_system_control()?;
     let mut rtc = crate::hal::RTC.lock();
     let dt = rtc.read_hardware();
     use core::fmt::Write;
@@ -1991,6 +1898,7 @@ pub fn sys_revocation_audit(
     _out_ptr: *mut u8,
     _out_len: usize,
 ) -> Result<usize, SyscallResult> {
+    require_system_control()?;
     let mut reg = crate::package::REVOCATION_REGISTRY.lock();
     match cmd {
         0 => {
@@ -2061,6 +1969,10 @@ pub fn sys_surface_physics(
     viewport_h: i32,
     content_h: i32,
 ) -> Result<i32, SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    if !task.cap_table.has_capability(CapabilityType::FrameBufferDirect, Rights::WRITE) { return Err(SyscallResult::PermissionDenied); }
+    drop(sched);
     let mut scroller = GLOBAL_PHYSICS_SCROLLER.lock();
     if scroller.viewport_height != viewport_h || scroller.content_height != content_h {
         scroller.viewport_height = viewport_h;
@@ -2126,7 +2038,6 @@ pub fn sys_camera_capture(
     let sched = crate::task::scheduler::SCHEDULER.lock();
     let has_cap = if let Some(tcb) = sched.get_task(current_id) {
         tcb.cap_table.has_capability(crate::capability::CapabilityType::HardwarePortIo, crate::capability::Rights::READ)
-            || tcb.cap_table.has_capability(crate::capability::CapabilityType::FrameBufferDirect, crate::capability::Rights::WRITE)
     } else {
         false
     };
@@ -2333,9 +2244,9 @@ pub fn sys_shm_pipe_create(
     let current_id = sched.current_task_id().ok_or(SyscallResult::PermissionDenied)?;
     let current_task = sched.get_task(current_id).ok_or(SyscallResult::PermissionDenied)?;
 
-    let has_cap = current_task.cap_table.has_capability(CapabilityType::ShmProducer, Rights::WRITE)
-        || current_task.cap_table.has_capability(CapabilityType::ShmConsumer, Rights::READ)
-        || current_task.cap_table.has_capability(CapabilityType::SerialOutput, Rights::WRITE);
+    // Pipe creation establishes the producer endpoint, so a consumer-only
+    // capability can never be upgraded into producer authority here.
+    let has_cap = current_task.cap_table.has_capability(CapabilityType::ShmProducer, Rights::WRITE);
 
     if !has_cap {
         return Err(SyscallResult::PermissionDenied);
@@ -2367,8 +2278,7 @@ pub fn sys_shm_pipe_transfer(
     let current_id = sched.current_task_id().ok_or(SyscallResult::PermissionDenied)?;
     let current_task = sched.get_task(current_id).ok_or(SyscallResult::PermissionDenied)?;
 
-    let has_cap = current_task.cap_table.has_capability(CapabilityType::ShmProducer, Rights::WRITE)
-        || current_task.cap_table.has_capability(CapabilityType::SerialOutput, Rights::WRITE);
+    let has_cap = current_task.cap_table.has_capability(CapabilityType::ShmProducer, Rights::WRITE);
 
     if !has_cap {
         return Err(SyscallResult::PermissionDenied);
@@ -2410,8 +2320,7 @@ pub fn sys_shm_pipe_receive(
     let current_id = sched.current_task_id().ok_or(SyscallResult::PermissionDenied)?;
     let current_task = sched.get_task(current_id).ok_or(SyscallResult::PermissionDenied)?;
 
-    let has_cap = current_task.cap_table.has_capability(CapabilityType::ShmConsumer, Rights::READ)
-        || current_task.cap_table.has_capability(CapabilityType::SerialOutput, Rights::WRITE);
+    let has_cap = current_task.cap_table.has_capability(CapabilityType::ShmConsumer, Rights::READ);
 
     if !has_cap {
         return Err(SyscallResult::PermissionDenied);
@@ -2447,10 +2356,10 @@ pub fn sys_event_poll(interest_mask: u32, timeout_ticks: u32) -> Result<u32, Sys
     let current_id = sched.current_task_id().ok_or(SyscallResult::PermissionDenied)?;
     let current_task = sched.get_task(current_id).ok_or(SyscallResult::PermissionDenied)?;
 
-    // Capability verification: Caller must hold EventPoll capability or SerialOutput
+    // Event polling is a dedicated kernel resource. Diagnostic logging authority
+    // must never substitute for an event capability.
     let has_cap = current_task.cap_table.has_capability(CapabilityType::EventPoll, Rights::INVOKE)
-        || current_task.cap_table.has_capability(CapabilityType::EventPoll, Rights::READ)
-        || current_task.cap_table.has_capability(CapabilityType::SerialOutput, Rights::WRITE);
+        || current_task.cap_table.has_capability(CapabilityType::EventPoll, Rights::READ);
 
     if !has_cap {
         return Err(SyscallResult::PermissionDenied);
@@ -2501,3 +2410,107 @@ pub fn sys_event_poll(interest_mask: u32, timeout_ticks: u32) -> Result<u32, Sys
 
 
 
+
+
+pub fn sys_package_registry(out_buf:&mut [u8])->Result<usize,SyscallResult>{
+    let reg=crate::package::PACKAGE_REGISTRY.lock();
+    let mut pos=0usize;
+    for e in reg.entries(){
+        let state=match e.state{crate::package::PackageState::Staged=>"staged",crate::package::PackageState::Active=>"active",crate::package::PackageState::RolledBack=>"rolled-back"};
+        let mut line=[0u8;192]; let mut n=0usize;
+        for b in e.package_id.as_bytes(){if n<line.len(){line[n]=*b;n+=1;}}
+        if n<line.len(){line[n]=b'|';n+=1;}
+        let mut digits=[0u8;20]; let mut x=e.generation; let mut d=0usize;
+        if x==0{digits[0]=b'0';d=1;}else{while x>0{digits[d]=b'0'+(x%10)as u8;d+=1;x/=10;}for j in 0..d/2{digits.swap(j,d-1-j);}}
+        for j in 0..d{if n<line.len(){line[n]=digits[j];n+=1;}}
+        if n<line.len(){line[n]=b'|';n+=1;}
+        for b in state.as_bytes(){if n<line.len(){line[n]=*b;n+=1;}}
+        if n<line.len(){line[n]=b'\n';n+=1;}
+        if pos+n>out_buf.len(){break;} out_buf[pos..pos+n].copy_from_slice(&line[..n]);pos+=n;
+    }
+    Ok(pos)
+}
+
+pub fn sys_window_set_geometry(id: u32, x: i32, y: i32, z: u32, visible: bool) -> SyscallResult {
+    let owner = match SCHEDULER.lock().current_task_id() {
+        Some(id) => id.0, None => return SyscallResult::PermissionDenied,
+    };
+    if crate::drivers::display_kms::DRM_KMS.lock().set_surface_geometry_owned(id, owner, x, y, z, visible) {
+        SyscallResult::Success
+    } else {
+        SyscallResult::PermissionDenied
+    }
+}
+
+pub fn sys_window_focus(x: u32, y: u32) -> SyscallResult {
+    let target = crate::drivers::display_kms::DRM_KMS.lock().focus_at(x, y);
+    match target {
+        Some((_surface, owner)) => {
+            let _ = IPC_ROUTER.lock().send_direct(TaskId(0), TaskId(owner), 0x7001, &[x as u8, (x >> 8) as u8, y as u8, (y >> 8) as u8]);
+            SyscallResult::Success
+        }
+        None => SyscallResult::NotReady,
+    }
+}
+
+pub fn sys_fs_list(cap_slot:usize,path_ptr:u64,path_len:usize,out:&mut[u8])->Result<usize,SyscallResult>{
+ if path_len==0||path_len>256||out.len()>4096{return Err(SyscallResult::InvalidArguments);}
+ let sched=SCHEDULER.lock();let current=sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+ current.cap_table.verify(cap_slot,CapabilityType::FileSystemRead,Rights::READ).map_err(|_|SyscallResult::PermissionDenied)?;
+ let mut path=[0u8;256];unsafe{copy_from_user(&mut path[..path_len],path_ptr,path_len)}.map_err(|_|SyscallResult::InvalidArguments)?;drop(sched);
+ let path=core::str::from_utf8(&path[..path_len]).map_err(|_|SyscallResult::InvalidArguments)?;
+ let sched=SCHEDULER.lock();let current=sched.current_task().ok_or(SyscallResult::PermissionDenied)?;let n=crate::fs::VFS.lock().list_dir(&current.cap_table,cap_slot,path,out).map_err(|_|SyscallResult::FileNotFound)?;Ok(n)
+}
+
+pub fn sys_storage_query() -> Result<u64,SyscallResult>{
+    let guard=crate::drivers::ATA_PRIMARY.lock();
+    let drive=guard.as_ref().ok_or(SyscallResult::DeviceError)?;
+    Ok((drive.sector_count() as u64).saturating_mul(crate::drivers::SECTOR_SIZE as u64))
+}
+
+pub fn sys_settings_get(cap_slot: usize, key_ptr: u64, key_len: usize, out: &mut [u8]) -> Result<usize, SyscallResult> {
+    if key_len == 0 || key_len > 96 || out.len() > 512 { return Err(SyscallResult::InvalidArguments); }
+    let sched=SCHEDULER.lock();
+    let current=sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    current.cap_table.verify(cap_slot, CapabilityType::FileSystemRead, Rights::READ).map_err(|_|SyscallResult::PermissionDenied)?;
+    let mut key=[0u8;96];
+    unsafe{copy_from_user(&mut key[..key_len],key_ptr,key_len)}.map_err(|_|SyscallResult::InvalidArguments)?;
+    drop(sched);
+    let key=core::str::from_utf8(&key[..key_len]).map_err(|_|SyscallResult::InvalidArguments)?;
+    Ok(crate::settings::SETTINGS.lock().get(key,out))
+}
+
+pub fn sys_settings_set(cap_slot: usize, key_ptr:u64,key_len:usize,val_ptr:u64,val_len:usize)->Result<(),SyscallResult>{
+    if key_len==0||key_len>96||val_len>512{return Err(SyscallResult::InvalidArguments);}
+    let sched=SCHEDULER.lock();
+    let current=sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    current.cap_table.verify(cap_slot,CapabilityType::FileSystemWrite,Rights::WRITE).map_err(|_|SyscallResult::PermissionDenied)?;
+    let mut key=[0u8;96];let mut val=[0u8;512];
+    unsafe{copy_from_user(&mut key[..key_len],key_ptr,key_len)}.map_err(|_|SyscallResult::InvalidArguments)?;
+    unsafe{copy_from_user(&mut val[..val_len],val_ptr,val_len)}.map_err(|_|SyscallResult::InvalidArguments)?;
+    drop(sched);
+    let key=core::str::from_utf8(&key[..key_len]).map_err(|_|SyscallResult::InvalidArguments)?;
+    crate::settings::SETTINGS.lock().set(key,&val[..val_len]).map_err(|_|SyscallResult::DeviceError)
+}
+
+pub fn sys_service_list(out: &mut [u8]) -> Result<usize, SyscallResult> {
+    let n = crate::service::SERVICE_SUPERVISOR.lock().snapshot(out);
+    Ok(n)
+}
+
+pub fn sys_window_list(out_buf:&mut [u8])->Result<usize,SyscallResult>{
+    use core::fmt::Write;
+    let mut snaps=[crate::drivers::display_kms::SurfaceSnapshot{id:0,owner_task:0,x:0,y:0,width:0,height:0,z_order:0,opacity:0,visible:false,dirty:false};32];
+    let count={let kms=crate::drivers::display_kms::DRM_KMS.lock();kms.surface_snapshot(&mut snaps)};
+    let sched=SCHEDULER.lock();
+    struct W<'a>{b:&'a mut[u8],n:usize}
+    impl<'a> Write for W<'a>{fn write_str(&mut self,s:&str)->core::fmt::Result{let k=s.len().min(self.b.len().saturating_sub(self.n));self.b[self.n..self.n+k].copy_from_slice(&s.as_bytes()[..k]);self.n+=k;Ok(())}}
+    let capacity = out_buf.len();
+    let mut w=W{b:out_buf,n:0};
+    for s in &snaps[..count]{
+        let name=sched.get_task(TaskId(s.owner_task)).map(|t|t.name).unwrap_or("unknown");
+        let _=write!(w,"{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",s.id,s.owner_task,name,s.x,s.y,s.width,s.height,s.z_order,s.opacity,s.visible as u8);
+        if w.n>=capacity{break;}
+    }
+    Ok(w.n)
+}

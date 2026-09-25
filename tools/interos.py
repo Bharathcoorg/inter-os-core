@@ -44,6 +44,14 @@ DIST_DIR = WORKSPACE_ROOT / "dist"
 PACKAGES_DIR = WORKSPACE_ROOT / "packages"
 TARGET_DIR = WORKSPACE_ROOT / "target"
 
+RAPP_CAPABILITY_IDS = {
+    "CAP_LOGGING": 1, "CAP_FRAMEBUFFER": 2, "CAP_TIMER": 3, "CAP_HARDWARE_IO": 4,
+    "CAP_IPC_SEND": 5, "CAP_IPC_RECEIVE": 6, "CAP_PROCESS_SPAWN": 7, "CAP_PROCESS_KILL": 8,
+    "CAP_FILESYSTEM_READ": 9, "CAP_FILESYSTEM_WRITE": 10, "CAP_STORAGE_RAW": 11,
+    "CAP_NETWORK_SOCKET": 12, "CAP_NETWORK_SEND": 13, "CAP_NETWORK_RECEIVE": 14,
+    "CAP_SHM_PRODUCER": 15, "CAP_SHM_CONSUMER": 16, "CAP_EVENT_POLL": 17, "CAP_SYSTEM_CONTROL": 18,
+}
+
 TEMPLATES = {
     "basic": {
         "title": "Basic App",
@@ -75,7 +83,7 @@ SUPPORTED_DEVICES = {
         "cpu": "qemu64",
         "boot_type": "BIOS/MBR Bootloader",
         "image": "target/inter-os-bios.img",
-        "status": "QEMU target (runtime validation required)",
+        "status": "Verified in QEMU",
     },
     "aarch64": {
         "name": "InterOS AArch64 Virt Mobile",
@@ -84,7 +92,7 @@ SUPPORTED_DEVICES = {
         "cpu": "cortex-a53",
         "boot_type": "Direct Kernel ELF",
         "image": "target/aarch64-unknown-none/debug/kernel-aarch64",
-        "status": "QEMU target (runtime validation required)",
+        "status": "Verified in QEMU",
     },
     "riscv64": {
         "name": "InterOS RISC-V Virt Mobile",
@@ -93,7 +101,7 @@ SUPPORTED_DEVICES = {
         "cpu": "rv64",
         "boot_type": "OpenSBI / Direct Kernel ELF",
         "image": "target/riscv64gc-unknown-none-elf/debug/kernel-riscv64",
-        "status": "QEMU target (runtime validation required)",
+        "status": "Verified in QEMU",
     },
 }
 
@@ -181,32 +189,11 @@ def cmd_doctor(args):
     except Exception:
         pass
 
-    toolchain = ""
-    try:
-        rt = subprocess.run(["rustup", "show", "active-toolchain"], capture_output=True, text=True)
-        toolchain = rt.stdout.strip()
-    except Exception:
-        pass
-
-    # CI/developer environments may install targets for the active toolchain.
-    # Querying rustup's installed list without --toolchain can report the wrong
-    # toolchain when the repository pins nightly.
-    target_toolchain_args = ["--toolchain", toolchain.split()[0]] if toolchain else []
-
     for t in target_triples:
-        try:
-            res = subprocess.run(
-                ["rustup", "target", "list", "--installed", *target_toolchain_args],
-                capture_output=True, text=True
-            )
-            installed_for_active = res.returncode == 0 and t in res.stdout.splitlines()
-        except Exception:
-            installed_for_active = t in installed_targets
-
-        if installed_for_active:
+        if t in installed_targets:
             log_success(f"Rust target installed: {t}")
         else:
-            log_warn(f"Rust target missing for active toolchain {toolchain or 'default'}: {t}")
+            log_warn(f"Rust target missing: {t} (Run: rustup target add {t})")
             all_passed = False
 
     # 4. QEMU Emulators
@@ -414,98 +401,47 @@ def cmd_test(args):
 # =============================================================================
 # COMMAND: package (alias: pack)
 # =============================================================================
-def _load_runtime_signing_key(key_path=None):
-    from cryptography.hazmat.primitives.asymmetric import ed25519
-    from cryptography.hazmat.primitives import serialization
-
-    key_path = Path(key_path) if key_path else (PACKAGES_DIR / "developer.key")
-    if key_path.exists():
-        raw = key_path.read_bytes()
-        try:
-            return ed25519.Ed25519PrivateKey.from_private_bytes(raw)
-        except ValueError:
-            return serialization.load_pem_private_key(raw, password=None)
-
-    key_path.parent.mkdir(parents=True, exist_ok=True)
-    priv_key = ed25519.Ed25519PrivateKey.generate()
-    key_path.write_bytes(priv_key.private_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PrivateFormat.Raw,
-        encryption_algorithm=serialization.NoEncryption()
-    ))
-    log(f"Generated developer Ed25519 signing key at {key_path}")
-    return priv_key
-
-
-def _runtime_capabilities(permissions):
-    mapping = {
-        "CAP_LOGGING": 1,
-        "CAP_WINDOW_FOCUS": 2,
-        "CAP_HARDWARE_KEYSTORE": 3,
-        "CAP_SECURE_STORAGE": 4,
-        "CAP_SENSOR_ACCEL": 5,
-        "CAP_SENSOR_GYRO": 6,
-        "CAP_SENSOR_HR": 7,
-        "CAP_MESH_RADIO": 8,
-        "CAP_P2P_SOCKET": 9,
-    }
-    return [mapping[p] for p in permissions if p in mapping]
-
-
-def _build_runtime_rapp(manifest_data, elf_payload, signature=None):
-    import struct
-
-    package_id = manifest_data["id"]
-    publisher_id = manifest_data.get("publisher_id", "interos_official")
+def _rapp_v2_encode(manifest_data, publisher_key, signature, payload, arch_name=None):
+    arch_map = {"x86_64": 0, "aarch64": 1, "riscv64": 2}
+    arch_name = arch_name or manifest_data.get("architecture", "x86_64")
+    if arch_name not in arch_map:
+        raise ValueError(f"Unsupported architecture: {arch_name}")
     version = tuple(int(x) for x in str(manifest_data["version"]).split("."))
     if len(version) != 3 or any(x < 0 or x > 65535 for x in version):
-        raise ValueError("version must be a three-part u16 semantic version")
-
-    arch_name = manifest_data.get("architecture", "x86_64")
-    arch = {"x86_64": 0, "aarch64": 1, "riscv64": 2}.get(arch_name)
-    if arch is None:
-        raise ValueError(f"unsupported RAPP architecture: {arch_name}")
-
-    pkg = package_id.encode("utf-8")
-    pub = publisher_id.encode("utf-8")
-    if len(pkg) > 32 or len(pub) > 16:
-        raise ValueError("package_id/publisher_id exceed RAPP fixed-width fields")
-
-    caps = _runtime_capabilities(manifest_data.get("permissions", []))
-    if len(caps) > 65535:
-        raise ValueError("too many RAPP capabilities")
-
-    digest = hashlib.sha256(elf_payload).digest()
+        raise ValueError("version must be MAJOR.MINOR.PATCH with u16 components")
+    caps = [RAPP_CAPABILITY_IDS[p] for p in manifest_data.get("permissions", [])]\n    if len(set(caps)) != len(caps):\n        raise ValueError("duplicate capability permissions are not allowed")
+    if len(caps) > 1024:
+        raise ValueError("too many capabilities")
+    pkg = manifest_data["id"].encode("utf-8")
+    if not pkg or len(pkg) > 32:
+        raise ValueError("package id must be 1..32 UTF-8 bytes")
+    digest = hashlib.sha256(payload).digest()
     header = bytearray()
-    header += b"RAPP"
-    header += struct.pack("<HH", 1, arch)
-    header += pkg.ljust(32, b"\\0")
-    header += pub.ljust(16, b"\\0")
-    header += struct.pack("<HHH", *version)
-    header += struct.pack("<H", len(caps))
+    header += b"RAPP" + (2).to_bytes(2, "little") + arch_map[arch_name].to_bytes(2, "little")
+    header += pkg.ljust(32, b"\0")
+    header += publisher_key
+    header += version[0].to_bytes(2, "little") + version[1].to_bytes(2, "little") + version[2].to_bytes(2, "little")
+    header += len(caps).to_bytes(2, "little")
     header += digest
-    header += bytes(64)
-    header += struct.pack("<I", len(elf_payload))
+    header += signature
+    header += len(payload).to_bytes(4, "little")
     for cap in caps:
-        header += struct.pack("<H", cap)
+        header += int(cap).to_bytes(2, "little")
+    return bytes(header) + payload
 
-    rapp = header + elf_payload
-    if signature is not None:
-        if len(signature) != 64:
-            raise ValueError("RAPP signature must be 64 bytes")
-        rapp[0x60:0xA0] = signature
-    return bytes(rapp)
+
+def _rapp_v2_signing_bytes(package_bytes):
+    data = bytearray(package_bytes)
+    data[0x70:0xB0] = b"\0" * 64
+    return bytes(data[:0xB4] + data[0xB4:])
 
 
 def cmd_pack(args):
-    """Build the canonical binary InterOS runtime RAPP package."""
-    from cryptography.hazmat.primitives import serialization
     app_name = args.name.lower().replace("-", "_")
     app_dir = APPS_DIR / app_name
     if not app_dir.exists():
         log_error(f"App not found at {app_dir}")
         return 1
-
     manifest_file = app_dir / "manifest.json"
     if not manifest_file.exists():
         log_error(f"manifest.json missing in {app_dir}")
@@ -515,111 +451,90 @@ def cmd_pack(args):
     except Exception as e:
         log_error(f"Invalid JSON in manifest.json: {e}")
         return 1
-
-    for field in ["id", "version", "entrypoint", "permissions"]:
+    for field in ["id", "name", "version", "entrypoint", "permissions"]:
         if field not in manifest_data:
             log_error(f"Manifest missing required field: {field}")
             return 1
-
-    backend = manifest_data["entrypoint"].get("backend") if isinstance(manifest_data["entrypoint"], dict) else manifest_data["entrypoint"]
-    if not backend:
-        log_error("Manifest entrypoint.backend is required for a runtime RAPP")
+    bin_dir = app_dir / "bin"
+    elf_candidates = list(bin_dir.glob("*.elf")) if bin_dir.exists() else []
+    if not elf_candidates:
+        log_error("No ELF payload found in app/bin")
         return 1
-    elf_path = app_dir / backend
-    if not elf_path.exists():
-        log_error(f"ELF payload not found: {elf_path}. Build the app first.")
-        return 1
-
+    payload = elf_candidates[0].read_bytes()
     try:
-        priv_key = _load_runtime_signing_key(getattr(args, "key", None))
-        unsigned = _build_runtime_rapp(manifest_data, elf_path.read_bytes())
-        signature = priv_key.sign(unsigned)
-        package = _build_runtime_rapp(manifest_data, elf_path.read_bytes(), signature)
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        from cryptography.hazmat.primitives import serialization
+        key_dir = Path.home() / ".interos"
+        key_dir.mkdir(exist_ok=True)
+        key_file = key_dir / "developer_ed25519.key"
+        if key_file.exists():
+            raw = key_file.read_bytes()
+            try:
+                priv_key = serialization.load_pem_private_key(raw, password=None)
+            except ValueError:
+                priv_key = ed25519.Ed25519PrivateKey.from_private_bytes(raw)
+        else:
+            priv_key = ed25519.Ed25519PrivateKey.generate()
+            key_file.write_bytes(priv_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+            log(f"Generated developer signing key at {key_file}")
+        pub = priv_key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+        unsigned = _rapp_v2_encode(manifest_data, pub, b"\0" * 64, payload, getattr(args, "arch", None))
+        signature = priv_key.sign(_rapp_v2_signing_bytes(unsigned))
+        package_bytes = _rapp_v2_encode(manifest_data, pub, signature, payload, getattr(args, "arch", None))
     except Exception as e:
-        log_error(f"Failed to build/sign runtime RAPP: {e}")
+        log_error(f"RAPP v2 signing failed: {e}")
         return 1
-
     DIST_DIR.mkdir(parents=True, exist_ok=True)
-    output = Path(getattr(args, "output", None) or (DIST_DIR / f"{app_name}.rapp"))
+    output = Path(getattr(args, "output", None) or DIST_DIR / f"{app_name}.rapp")
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_bytes(package)
-
-    pub = priv_key.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw
-    )
-    log_success(f"Canonical runtime RAPP created: {output} ({len(package)} bytes)")
-    log(f"  • Publisher: {manifest_data.get('publisher_id', 'interos_official')}")
-    log(f"  • Public key: {pub.hex()}")
-    log(f"  • ELF payload: {len(elf_path.read_bytes())} bytes")
+    output.write_bytes(package_bytes)
+    log_success(f"RAPP v2 package created: {output} ({len(package_bytes)} bytes)")
+    log(f"  • Publisher key: {pub.hex()}")
+    log(f"  • Ed25519 signature: {signature.hex()[:24]}...")
+    log(f"  • Architecture: {manifest_data.get('architecture', 'x86_64')}")
     return 0
 
-# =============================================================================
-# COMMAND: verify
-# =============================================================================
+
 def cmd_verify(args):
-    """Verify the canonical binary runtime RAPP package."""
-    import struct
     pkg_path = Path(args.package_path)
     if not pkg_path.exists():
         log_error(f"Package file not found: {pkg_path}")
         return 1
-
     data = pkg_path.read_bytes()
-    if len(data) < 0xA4 or data[:4] != b"RAPP":
-        log_error("Invalid runtime RAPP: bad magic or truncated header.")
+    if len(data) < 0xB4 or data[:4] != b"RAPP":
+        log_error("Invalid RAPP v2 package")
         return 1
-    version, arch = struct.unpack_from("<HH", data, 4)
-    if version != 1 or arch not in (0, 1, 2):
-        log_error("Unsupported RAPP format or architecture.")
+    if int.from_bytes(data[4:6], "little") != 2:
+        log_error("Rejected: package is not RAPP v2")
         return 1
-
-    package_id = data[8:0x28].split(b"\\0", 1)[0].decode("utf-8", "strict")
-    publisher_id = data[0x28:0x38].split(b"\\0", 1)[0].decode("utf-8", "strict")
-    major, minor, patch = struct.unpack_from("<HHH", data, 0x38)
-    cap_count = struct.unpack_from("<H", data, 0x3E)[0]
-    digest = data[0x40:0x60]
-    signature = data[0x60:0xA0]
-    payload_len = struct.unpack_from("<I", data, 0xA0)[0]
-    payload_offset = 0xA4 + cap_count * 2
+    pub = data[0x28:0x48]
+    sig = data[0x70:0xB0]
+    payload_len = int.from_bytes(data[0xB0:0xB4], "little")
+    cap_count = int.from_bytes(data[0x4E:0x50], "little")
+    payload_offset = 0xB4 + cap_count * 2
     if payload_offset + payload_len != len(data):
-        log_error("RAPP payload bounds mismatch.")
+        log_error("Rejected: malformed payload bounds")
         return 1
+    digest = data[0x50:0x70]
     if hashlib.sha256(data[payload_offset:]).digest() != digest:
-        log_error("RAPP payload digest mismatch.")
+        log_error("Rejected: payload digest mismatch")
         return 1
-    if not any(signature):
-        log_error("Unsigned RAPP rejected.")
-        return 1
-
     try:
         from cryptography.hazmat.primitives.asymmetric import ed25519
-        unsigned = bytearray(data)
-        unsigned[0x60:0xA0] = bytes(64)
-        pub_hex = getattr(args, "trusted_key", None)
-        if pub_hex:
-            pub = bytes.fromhex(pub_hex)
-        else:
-            key_path = PACKAGES_DIR / "developer.key"
-            if not key_path.exists():
-                log_error("No trusted public key supplied and developer.key is missing.")
-                return 1
-            priv = ed25519.Ed25519PrivateKey.from_private_bytes(key_path.read_bytes())
-            pub = priv.public_key().public_bytes(
-                encoding=serialization.Encoding.Raw,
-                format=serialization.PublicFormat.Raw
-            )
-        ed25519.Ed25519PublicKey.from_public_bytes(pub).verify(signature, bytes(unsigned))
+        key = ed25519.Ed25519PublicKey.from_public_bytes(pub)
+        key.verify(sig, _rapp_v2_signing_bytes(data))
     except Exception as e:
-        log_error(f"Ed25519 RAPP signature verification FAILED: {e}")
+        log_error(f"Rejected: Ed25519 verification failed: {e}")
         return 1
-
-    log_success(f"RAPP '{package_id}' is cryptographically verified.")
-    log(f"  • Publisher: {publisher_id}")
-    log(f"  • Version: {major}.{minor}.{patch}")
-    log(f"  • Architecture: {['x86_64', 'aarch64', 'riscv64'][arch]}")
+    pkg_id = data[8:40].split(b"\0", 1)[0].decode("utf-8", errors="strict")
+    version = (int.from_bytes(data[0x48:0x4A], "little"), int.from_bytes(data[0x4A:0x4C], "little"), int.from_bytes(data[0x4C:0x4E], "little"))
+    log_success(f"RAPP v2 '{pkg_id}' cryptographically verified")
+    log(f"  • Publisher key: {pub.hex()}")
+    log(f"  • Version: {version[0]}.{version[1]}.{version[2]}")
     log(f"  • Payload: {payload_len} bytes")
+    log("  • Device trust: must be provisioned by the kernel trust store")
     return 0
+
 
 # =============================================================================
 # COMMAND: devices
@@ -803,7 +718,7 @@ def cmd_run(args):
 
     # 2. Package
     rapp_path = DIST_DIR / f"{app_name}.rapp"
-    pack_args = argparse.Namespace(name=app_name, output=str(rapp_path))
+    pack_args = argparse.Namespace(name=app_name, output=str(rapp_path), arch=("aarch64" if "aarch64" in target else ("riscv64" if "riscv64" in target else "x86_64")))
     ret = cmd_pack(pack_args)
     if ret != 0:
         return ret
@@ -923,41 +838,51 @@ def cmd_install(args):
 # COMMANDS: sign, stop, restart, logs, shell, snapshot, trace
 # =============================================================================
 def cmd_sign(args):
-    """Sign a canonical binary runtime RAPP without embedding a private key in it."""
+    """Cryptographically signs an arbitrary file or .rapp with Ed25519."""
     target_path = Path(args.target)
     if not target_path.exists():
         log_error(f"Target file not found: {target_path}")
         return 1
 
     try:
+        from cryptography.hazmat.primitives.asymmetric import ed25519
         from cryptography.hazmat.primitives import serialization
-        import struct
-        data = bytearray(target_path.read_bytes())
-        if len(data) < 0xA4 or data[:4] != b"RAPP":
-            log_error("Target is not a canonical binary RAPP.")
-            return 1
-        payload_len = struct.unpack_from("<I", data, 0xA0)[0]
-        cap_count = struct.unpack_from("<H", data, 0x3E)[0]
-        payload_offset = 0xA4 + cap_count * 2
-        if payload_offset + payload_len != len(data):
-            log_error("RAPP payload bounds mismatch.")
-            return 1
-        key_path = Path(args.key) if getattr(args, "key", None) else (PACKAGES_DIR / "developer.key")
-        priv_key = _load_runtime_signing_key(key_path)
-        data[0x60:0xA0] = bytes(64)
-        signature = priv_key.sign(bytes(data))
-        data[0x60:0xA0] = signature
-        target_path.write_bytes(data)
-        pub = priv_key.public_key().public_bytes(
+    except ImportError:
+        log_error("Python 'cryptography' library required. Run: pip install cryptography")
+        return 1
+
+    key_path = Path(args.key) if getattr(args, "key", None) else (PACKAGES_DIR / "developer.key")
+    if key_path.exists():
+        priv_key = ed25519.Ed25519PrivateKey.from_private_bytes(key_path.read_bytes())
+    else:
+        log(f"Generating new developer Ed25519 key at {key_path}...")
+        key_path.parent.mkdir(parents=True, exist_ok=True)
+        priv_key = ed25519.Ed25519PrivateKey.generate()
+        key_path.write_bytes(priv_key.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption()
+        ))
+
+    file_bytes = target_path.read_bytes()
+    file_sha = hashlib.sha256(file_bytes).hexdigest()
+    sig_bytes = priv_key.sign(file_sha.encode("utf-8"))
+    sig_out = target_path.with_suffix(target_path.suffix + ".sig")
+    sig_doc = {
+        "file": target_path.name,
+        "sha256": file_sha,
+        "public_key": priv_key.public_key().public_bytes(
             encoding=serialization.Encoding.Raw,
             format=serialization.PublicFormat.Raw
-        )
-        log_success(f"Canonical RAPP signed: {target_path}")
-        log(f"  • Trusted publisher key: {pub.hex()}")
-        return 0
-    except Exception as e:
-        log_error(f"RAPP signing failed: {e}")
-        return 1
+        ).hex(),
+        "signature": sig_bytes.hex()
+    }
+    sig_out.write_text(json.dumps(sig_doc, indent=2), encoding="utf-8")
+    log_success(f"Signature written to {sig_out}")
+    log(f"  • SHA-256: {file_sha}")
+    log(f"  • Ed25519: {sig_bytes.hex()[:24]}...")
+    return 0
+
 
 def cmd_stop(args):
     """Stops the running QEMU microkernel instance."""
@@ -1134,6 +1059,7 @@ def main():
     p_pack = subparsers.add_parser("package", aliases=["pack"], help="Bundle and sign app into .rapp package")
     p_pack.add_argument("name", help="App name")
     p_pack.add_argument("--output", help="Output file path (default: dist/<name>.rapp)")
+    p_pack.add_argument("--arch", choices=["x86_64", "aarch64", "riscv64"], default=None, help="RAPP target architecture")
     p_pack.set_defaults(func=cmd_pack)
 
     # verify

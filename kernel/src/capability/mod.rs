@@ -51,6 +51,8 @@ pub enum CapabilityType {
     ShmConsumer,
     /// Permission to register for and poll asynchronous kernel events (epoll/kqueue reactor).
     EventPoll,
+    /// Permission for privileged global kernel controls (power, crypto, telephony, audio, device policy).
+    SystemControl,
 }
 
 /// Bitmask representing granular rights held on a capability.
@@ -367,9 +369,24 @@ impl CapabilityTable {
         self.revoke(slot_idx)
     }
 
+    /// Finds the first slot containing a capability with the requested type and rights.
+    pub fn find_slot(&self, expected_type: CapabilityType, required_rights: Rights) -> Option<usize> {
+        self.slots.iter().enumerate().find_map(|(idx, slot)| {
+            slot.cap.as_ref().and_then(|cap| {
+                if cap.cap_type == expected_type && cap.rights.contains(required_rights) { Some(idx) } else { None }
+            })
+        })
+    }
+
     /// Returns the total number of active capabilities in this table.
     pub fn count(&self) -> usize {
         self.slots.iter().filter(|s| s.cap.is_some()).count()
+    }
+
+    /// Validates internal slot invariants. Empty slots retain a generation counter;
+    /// active slots must always carry a capability and a non-zero generation.
+    pub fn validate_invariants(&self) -> bool {
+        self.slots.iter().all(|slot| slot.generation != 0)
     }
 }
 
@@ -431,6 +448,13 @@ pub fn run_adversarial_tests() {
     assert_eq!(table.get_by_handle(handle), Err(CapError::StaleHandle));
     assert_eq!(table.verify(handle.slot(), CapabilityType::SerialOutput, Rights::WRITE), Err(CapError::InvalidSlot));
     crate::serial_println!("[TEST] Capability Adversarial: Use-After-Close Post-Revocation Blocked [PASSED]");
+
+    // Object-target confusion must never grant authority.
+    let target_cap = Capability { id: CapabilityId(2), cap_type: CapabilityType::IpcSend, rights: Rights::WRITE, object_id: 42 };
+    let target_slot = table.insert(target_cap).expect("Failed to insert target capability");
+    assert_eq!(table.verify_object(target_slot, CapabilityType::IpcSend, Rights::WRITE, 99), Err(CapError::TargetMismatch));
+    assert!(table.validate_invariants());
+    crate::serial_println!("[TEST] Capability Adversarial: Object Target Confusion Rejected [PASSED]");
 
     crate::serial_println!("[TEST] Zero-Trust Capability Invariants: 100% Attested & Enforced.");
 }

@@ -1,285 +1,112 @@
-//! `.rapp` — Rust App Package Format & Verifier
+//! Canonical RAPP v2 binary package parser and verifier.
 //!
-//! Defines the binary structure of `.rapp` packages for distributing native
-//! InterOS applications. Provides:
-//! - Binary header with magic, version, and architecture target
-//! - SHA-256 payload integrity digest
-//! - Ed25519 signature slot for publisher attestation (NOT_IMPLEMENTED on QEMU)
-//! - Capability manifest declaring required permissions
-//! - ELF binary payload for direct loading into per-process address spaces
-//!
-//! ## Binary Layout
-//!
-//! ```text
-//! Offset  Size    Field
-//! 0x00    4       Magic: "RAPP"
-//! 0x04    2       Format version (LE u16)
-//! 0x06    2       Target architecture (0=x86_64, 1=aarch64, 2=riscv64)
-//! 0x08    32      Package ID (UTF-8, null-padded)
-//! 0x28    16      Publisher ID (UTF-8, null-padded)
-//! 0x38    2       Version major (LE u16)
-//! 0x3A    2       Version minor (LE u16)
-//! 0x3C    2       Version patch (LE u16)
-//! 0x3E    2       Capability count (LE u16)
-//! 0x40    32      SHA-256 digest of ELF payload
-//! 0x60    64      Ed25519 signature (zeros if unsigned)
-//! 0xA0    4       ELF payload length (LE u32)
-//! 0xA4    N*2     Capability IDs (N entries, LE u16 each)
-//! 0xA4+N*2  ...   ELF payload bytes
-//! ```
+//! RAPP v2 is the kernel execution format. ZIP/JSON bundles are tooling-only.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use crate::crypto::{Sha256, SHA256_DIGEST_LENGTH};
+use crate::package::revocation::REVOCATION_REGISTRY;
 
-/// Magic header bytes identifying a `.rapp` package.
 pub const RAPP_MAGIC: &[u8; 4] = b"RAPP";
+pub const RAPP_FORMAT_VERSION: u16 = 2;
+pub const RAPP_HEADER_SIZE: usize = 0xB4;
+pub const RAPP_SIGNATURE_OFFSET: usize = 0x70;
+pub const RAPP_SIGNATURE_SIZE: usize = 64;
 
-/// Current `.rapp` format version.
-pub const RAPP_FORMAT_VERSION: u16 = 1;
-
-/// Minimum header size before capability array and payload.
-pub const RAPP_HEADER_SIZE: usize = 0xA4;
-
-/// Target CPU architecture for the ELF payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
-pub enum RappArch {
-    X86_64 = 0,
-    Aarch64 = 1,
-    Riscv64 = 2,
-}
+pub enum RappArch { X86_64=0, Aarch64=1, Riscv64=2 }
+impl RappArch { pub fn from_u16(v:u16)->Option<Self>{match v{0=>Some(Self::X86_64),1=>Some(Self::Aarch64),2=>Some(Self::Riscv64),_=>None}} }
 
-impl RappArch {
-    pub fn matches_current(self) -> bool {
-        #[cfg(target_arch = "x86_64")]
-        { return self == Self::X86_64; }
-        #[cfg(target_arch = "aarch64")]
-        { return self == Self::Aarch64; }
-        #[cfg(target_arch = "riscv64")]
-        { return self == Self::Riscv64; }
-        #[allow(unreachable_code)]
-        false
-    }
-
-    pub fn from_u16(v: u16) -> Option<Self> {
-        match v {
-            0 => Some(Self::X86_64),
-            1 => Some(Self::Aarch64),
-            2 => Some(Self::Riscv64),
-            _ => None,
-        }
-    }
-}
-
-/// Errors during `.rapp` package parsing or verification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RappError {
-    /// Buffer too short for header.
-    BufferTooShort,
-    /// Magic bytes do not match "RAPP".
-    InvalidMagic,
-    /// Unsupported format version.
-    UnsupportedVersion,
-    /// Target architecture not recognized.
-    UnsupportedArch,
-    /// SHA-256 digest of payload does not match header.
-    DigestMismatch,
-    /// Ed25519 signature verification failed.
-    SignatureInvalid,
-    /// Payload length in header exceeds remaining buffer.
-    PayloadOverflow,
-    /// Declared capability is not recognized.
-    UnknownCapability,
+    BufferTooShort, InvalidMagic, UnsupportedVersion, UnsupportedArch,
+    InvalidPackageId, InvalidPublisherKey, DigestMismatch, SignatureInvalid,
+    PublisherUntrusted, PublisherRevoked, PayloadOverflow, UnknownCapability,
+    TooManyCapabilities, InvalidPayload,
 }
 
-/// Verified `.rapp` package metadata.
 #[derive(Debug, Clone)]
 pub struct RappManifest {
-    pub package_id: String,
-    pub publisher_id: String,
-    pub version: (u16, u16, u16),
-    pub arch: RappArch,
-    pub capabilities: Vec<u16>,
-    pub payload_digest: [u8; SHA256_DIGEST_LENGTH],
-    pub signature: [u8; 64],
-    pub payload_offset: usize,
-    pub payload_len: usize,
+    pub package_id:String,
+    pub publisher_key:[u8;32],
+    pub version:(u16,u16,u16),
+    pub arch:RappArch,
+    pub capabilities:Vec<u16>,
+    pub payload_digest:[u8;SHA256_DIGEST_LENGTH],
+    pub signature:[u8;64],
+    pub payload_offset:usize,
+    pub payload_len:usize,
 }
 
-/// Parses and verifies a `.rapp` binary blob.
-///
-/// Returns a `RappManifest` with payload offset and length on success.
-/// The caller can then use `payload_offset..payload_offset+payload_len`
-/// to extract the ELF binary for loading.
-pub fn parse_rapp(data: &[u8]) -> Result<RappManifest, RappError> {
-    if data.len() < RAPP_HEADER_SIZE {
-        return Err(RappError::BufferTooShort);
-    }
-
-    // 1. Magic
-    if &data[0..4] != RAPP_MAGIC {
-        return Err(RappError::InvalidMagic);
-    }
-
-    // 2. Format version
-    let version = u16::from_le_bytes([data[4], data[5]]);
-    if version != RAPP_FORMAT_VERSION {
-        return Err(RappError::UnsupportedVersion);
-    }
-
-    // 3. Architecture
-    let arch_raw = u16::from_le_bytes([data[6], data[7]]);
-    let arch = RappArch::from_u16(arch_raw).ok_or(RappError::UnsupportedArch)?;
-
-    // 4. Package ID (32 bytes, null-padded UTF-8)
-    let pkg_bytes = &data[0x08..0x28];
-    let pkg_end = pkg_bytes.iter().position(|&b| b == 0).unwrap_or(32);
-    let package_id = core::str::from_utf8(&pkg_bytes[..pkg_end])
-        .unwrap_or("unknown")
-        .to_string();
-
-    // 5. Publisher ID (16 bytes, null-padded UTF-8)
-    let pub_bytes = &data[0x28..0x38];
-    let pub_end = pub_bytes.iter().position(|&b| b == 0).unwrap_or(16);
-    let publisher_id = core::str::from_utf8(&pub_bytes[..pub_end])
-        .unwrap_or("unknown")
-        .to_string();
-
-    // 6. Version tuple
-    let v_major = u16::from_le_bytes([data[0x38], data[0x39]]);
-    let v_minor = u16::from_le_bytes([data[0x3A], data[0x3B]]);
-    let v_patch = u16::from_le_bytes([data[0x3C], data[0x3D]]);
-
-    // 7. Capability count
-    let cap_count = u16::from_le_bytes([data[0x3E], data[0x3F]]) as usize;
-
-    // 8. SHA-256 digest
-    let mut payload_digest = [0u8; SHA256_DIGEST_LENGTH];
-    payload_digest.copy_from_slice(&data[0x40..0x60]);
-
-    // 9. Ed25519 signature
-    let mut signature = [0u8; 64];
-    signature.copy_from_slice(&data[0x60..0xA0]);
-
-    // 10. Payload length
-    let payload_len = u32::from_le_bytes([data[0xA0], data[0xA1], data[0xA2], data[0xA3]]) as usize;
-
-    // 11. Capabilities array
-    let caps_start = RAPP_HEADER_SIZE;
-    let caps_end = caps_start + cap_count * 2;
-    if data.len() < caps_end {
-        return Err(RappError::BufferTooShort);
-    }
-    let mut capabilities = Vec::with_capacity(cap_count);
-    for i in 0..cap_count {
-        let offset = caps_start + i * 2;
-        capabilities.push(u16::from_le_bytes([data[offset], data[offset + 1]]));
-    }
-
-    // 12. Payload bounds check
-    let payload_offset = caps_end;
-    if data.len() < payload_offset + payload_len {
-        return Err(RappError::PayloadOverflow);
-    }
-
-    // 13. Verify SHA-256 digest
-    let computed_digest = Sha256::digest(&data[payload_offset..payload_offset + payload_len]);
-    if computed_digest != payload_digest {
-        return Err(RappError::DigestMismatch);
-    }
-
-    // 14. Enforce publisher trust. The package cannot nominate its own trust root.
-    // Development builds retain an explicit unsigned exception for embedded
-    // first-party packages; release builds require a valid trusted signature.
-    let unsigned = crate::crypto::ed25519::is_unsigned_signature(&signature);
-    if unsigned {
-        #[cfg(not(debug_assertions))]
-        { return Err(RappError::SignatureInvalid); }
-    } else if !crate::crypto::ed25519::verify_rapp_signature(
-        data,
-        &publisher_id,
-        &signature,
-    ) {
-        return Err(RappError::SignatureInvalid);
-    }
-
-    Ok(RappManifest {
-        package_id,
-        publisher_id,
-        version: (v_major, v_minor, v_patch),
-        arch,
-        capabilities,
-        payload_digest,
-        signature,
-        payload_offset,
-        payload_len,
-    })
+fn fixed_utf8(data:&[u8])->Result<String,RappError>{
+    let end=data.iter().position(|&b|b==0).unwrap_or(data.len());
+    core::str::from_utf8(&data[..end]).map(|s|s.to_string()).map_err(|_|RappError::InvalidPackageId)
 }
 
-/// Builds a `.rapp` binary package from components.
-pub fn build_rapp(
-    package_id: &str,
-    publisher_id: &str,
-    version: (u16, u16, u16),
-    arch: RappArch,
-    capabilities: &[u16],
-    elf_payload: &[u8],
-) -> Vec<u8> {
-    let digest = Sha256::digest(elf_payload);
-    let mut buf = Vec::with_capacity(RAPP_HEADER_SIZE + capabilities.len() * 2 + elf_payload.len());
-
-    // Magic
-    buf.extend_from_slice(RAPP_MAGIC);
-    // Format version
-    buf.extend_from_slice(&RAPP_FORMAT_VERSION.to_le_bytes());
-    // Architecture
-    buf.extend_from_slice(&(arch as u16).to_le_bytes());
-
-    // Package ID (32 bytes, null-padded)
-    let mut pkg_buf = [0u8; 32];
-    let pkg_bytes = package_id.as_bytes();
-    let copy_len = pkg_bytes.len().min(32);
-    pkg_buf[..copy_len].copy_from_slice(&pkg_bytes[..copy_len]);
-    buf.extend_from_slice(&pkg_buf);
-
-    // Publisher ID (16 bytes, null-padded)
-    let mut pub_buf = [0u8; 16];
-    let pub_bytes = publisher_id.as_bytes();
-    let copy_len = pub_bytes.len().min(16);
-    pub_buf[..copy_len].copy_from_slice(&pub_bytes[..copy_len]);
-    buf.extend_from_slice(&pub_buf);
-
-    // Version
-    buf.extend_from_slice(&version.0.to_le_bytes());
-    buf.extend_from_slice(&version.1.to_le_bytes());
-    buf.extend_from_slice(&version.2.to_le_bytes());
-
-    // Capability count
-    buf.extend_from_slice(&(capabilities.len() as u16).to_le_bytes());
-
-    // SHA-256 digest
-    buf.extend_from_slice(&digest);
-
-    // Signature is supplied by the external distribution/signing pipeline.
-    // The kernel builder never contains a publisher private key.
-    buf.extend_from_slice(&[0u8; 64]);
-
-    // Payload length
-    buf.extend_from_slice(&(elf_payload.len() as u32).to_le_bytes());
-
-    // Capabilities
-    for &cap in capabilities {
-        buf.extend_from_slice(&cap.to_le_bytes());
-    }
-
-    // ELF payload
-    buf.extend_from_slice(elf_payload);
-
-    buf
+fn signed_message(data:&[u8], payload_offset:usize, payload_len:usize)->Vec<u8>{
+    let mut msg=Vec::with_capacity(0xA4 + data.len().saturating_sub(payload_offset));
+    msg.extend_from_slice(&data[..RAPP_SIGNATURE_OFFSET]);
+    msg.extend_from_slice(&[0u8;RAPP_SIGNATURE_SIZE]);
+    msg.extend_from_slice(&data[RAPP_SIGNATURE_OFFSET+RAPP_SIGNATURE_SIZE..payload_offset]);
+    msg.extend_from_slice(&data[payload_offset..payload_offset+payload_len]);
+    msg
 }
 
-#[cfg(test)]
-mod tests {
-    // Unit tests would go here for no_std testing harness
+pub fn verify_rapp_signature(data:&[u8], publisher_key:&[u8;32], signature:&[u8;64], payload_offset:usize, payload_len:usize)->Result<(),RappError>{
+    let key=VerifyingKey::from_bytes(publisher_key).map_err(|_|RappError::InvalidPublisherKey)?;
+    let sig=Signature::from_bytes(signature);
+    let msg=signed_message(data,payload_offset,payload_len);
+    key.verify(&msg,&sig).map_err(|_|RappError::SignatureInvalid)
+}
+
+pub fn parse_rapp(data:&[u8])->Result<RappManifest,RappError>{
+    if data.len()<RAPP_HEADER_SIZE{return Err(RappError::BufferTooShort)}
+    if &data[..4]!=RAPP_MAGIC{return Err(RappError::InvalidMagic)}
+    if u16::from_le_bytes([data[4],data[5]])!=RAPP_FORMAT_VERSION{return Err(RappError::UnsupportedVersion)}
+    let arch=RappArch::from_u16(u16::from_le_bytes([data[6],data[7]])).ok_or(RappError::UnsupportedArch)?;
+    let package_id=fixed_utf8(&data[8..40])?;
+    if package_id.is_empty(){return Err(RappError::InvalidPackageId)}
+    let mut publisher_key=[0u8;32]; publisher_key.copy_from_slice(&data[40..72]);
+    if publisher_key.iter().all(|&b|b==0){return Err(RappError::InvalidPublisherKey)}
+    let version=(u16::from_le_bytes([data[72],data[73]]),u16::from_le_bytes([data[74],data[75]]),u16::from_le_bytes([data[76],data[77]]));
+    let cap_count=u16::from_le_bytes([data[78],data[79]]) as usize;
+    if cap_count>1024{return Err(RappError::TooManyCapabilities)}
+    let mut digest=[0u8;32]; digest.copy_from_slice(&data[0x50..0x70]);
+    let mut signature=[0u8;64]; signature.copy_from_slice(&data[0x70..0xB0]);
+    // v2 keeps the documented compact header offsets but the key/signature expansion
+    // requires the actual capability/payload base to move to 0xB4.
+    let payload_len=u32::from_le_bytes([data[0xB0],data[0xB1],data[0xB2],data[0xB3]]) as usize;
+    let header_end=RAPP_HEADER_SIZE;
+    let caps_end=header_end.checked_add(cap_count.checked_mul(2).ok_or(RappError::PayloadOverflow)?).ok_or(RappError::PayloadOverflow)?;
+    if data.len()<caps_end{return Err(RappError::BufferTooShort)}
+    let mut capabilities=Vec::with_capacity(cap_count);
+    for i in 0..cap_count{let o=header_end+i*2;let cap=u16::from_le_bytes([data[o],data[o+1]]);
+        if !(1..=18).contains(&cap){return Err(RappError::UnknownCapability)}
+        capabilities.push(cap);}
+    let payload_offset=caps_end;
+    let payload_end=payload_offset.checked_add(payload_len).ok_or(RappError::PayloadOverflow)?;
+    if data.len()<payload_end{return Err(RappError::PayloadOverflow)}
+    if data.len()!=payload_end{return Err(RappError::PayloadOverflow)}
+    let computed=Sha256::digest(&data[payload_offset..payload_end]);
+    if computed!=digest{return Err(RappError::DigestMismatch)}
+    let reg=REVOCATION_REGISTRY.lock();
+    if reg.is_key_revoked(&publisher_key){return Err(RappError::PublisherRevoked)}
+    if !reg.is_key_trusted(&publisher_key){return Err(RappError::PublisherUntrusted)}
+    drop(reg);
+    verify_rapp_signature(data,&publisher_key,&signature,payload_offset,payload_len)?;
+    Ok(RappManifest{package_id,publisher_key,version,arch,capabilities,payload_digest:digest,signature,payload_offset,payload_len})
+}
+
+/// Encodes a RAPP v2 package. The caller must supply a real Ed25519 signature
+/// over the canonical message; zero signatures are intentionally rejected by parse_rapp.
+pub fn build_rapp(package_id:&str,publisher_key:&[u8;32],version:(u16,u16,u16),arch:RappArch,capabilities:&[u16],elf_payload:&[u8],signature:&[u8;64])->Vec<u8>{
+    let digest=Sha256::digest(elf_payload); let header_end=RAPP_HEADER_SIZE;
+    let mut b=Vec::with_capacity(header_end+capabilities.len()*2+elf_payload.len());
+    b.extend_from_slice(RAPP_MAGIC); b.extend_from_slice(&RAPP_FORMAT_VERSION.to_le_bytes()); b.extend_from_slice(&(arch as u16).to_le_bytes());
+    let mut pkg=[0u8;32]; let n=package_id.as_bytes().len().min(32); pkg[..n].copy_from_slice(&package_id.as_bytes()[..n]); b.extend_from_slice(&pkg);
+    b.extend_from_slice(publisher_key); b.extend_from_slice(&version.0.to_le_bytes()); b.extend_from_slice(&version.1.to_le_bytes()); b.extend_from_slice(&version.2.to_le_bytes()); b.extend_from_slice(&(capabilities.len() as u16).to_le_bytes());
+    b.extend_from_slice(&digest); b.extend_from_slice(signature); b.extend_from_slice(&(elf_payload.len() as u32).to_le_bytes());
+    for &cap in capabilities{b.extend_from_slice(&cap.to_le_bytes())} b.extend_from_slice(elf_payload); b
 }

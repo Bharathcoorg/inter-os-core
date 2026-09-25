@@ -37,18 +37,6 @@ pub static APP_TERMINAL_ELF: &[u8] = include_bytes!(concat!(
     "/../target/x86_64-unknown-none/debug/terminal"
 ));
 
-/// Embedded Ring-3 compositor service.
-pub static COMPOSITOR_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/compositor"
-));
-
-/// Embedded Ring-3 launcher service.
-pub static LAUNCHER_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/launcher"
-));
-
 /// Embedded static ELF binary of the Sovereign Dialer app (`apps/dialer`).
 pub static APP_DIALER_ELF: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -380,6 +368,8 @@ pub fn spawn_user_process(
     tcb.user_entry = user_entry;
     tcb.user_stack_top = user_stack_top;
 
+    let parent_id = SCHEDULER.lock().current_task_id().unwrap_or(TaskId(0));
+    tcb.parent_id = parent_id;
     let id = tcb.id;
     SCHEDULER.lock().spawn_task(tcb);
     Ok(id)
@@ -389,45 +379,6 @@ pub fn spawn_user_process(
 pub fn load_user_elf(elf_data: &[u8]) -> Result<(usize, usize), &'static str> {
     let mut pt = crate::memory::TaskPageTable::create_user_page_table()?;
     load_user_elf_into_page_table(elf_data, &mut pt, 0x0080_0000)
-}
-
-/// Launches a verified package payload as a Ring-3 child process.
-pub fn spawn_packaged_process(
-    process_name: &'static str,
-    elf_payload: &[u8],
-    parent_id: TaskId,
-) -> Result<TaskId, &'static str> {
-    let mut caps = CapabilityTable::new(8);
-    caps.insert(Capability {
-        id: CapabilityId(5001),
-        cap_type: CapabilityType::SerialOutput,
-        rights: Rights::WRITE,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(5002),
-        cap_type: CapabilityType::IpcSend,
-        rights: Rights::WRITE,
-        object_id: parent_id.0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(5003),
-        cap_type: CapabilityType::TimerTickRead,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(5004),
-        cap_type: CapabilityType::FileSystemRead,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-
-    let id = spawn_user_process(process_name, elf_payload, caps, 1)?;
-    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
-        task.parent_id = parent_id;
-    }
-    Ok(id)
 }
 
 /// Compatibility wrapper for loading an ELF with specified stack top.

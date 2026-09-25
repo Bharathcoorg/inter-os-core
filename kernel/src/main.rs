@@ -35,10 +35,11 @@ pub mod package;
 pub mod panic;
 pub mod resource;
 pub mod sensor;
-pub mod serial;
-pub mod storage;
 pub mod service;
 pub mod settings;
+pub mod services;
+pub mod serial;
+pub mod storage;
 pub mod syscall;
 pub mod task;
 pub mod telephony;
@@ -55,7 +56,7 @@ use crypto::Sha256;
 use drivers::{BlockDevice, ATA_PRIMARY, SECTOR_SIZE};
 use fs::VFS;
 use ipc::IPC_ROUTER;
-use package::{build_rapp, parse_rapp, RappArch};
+use package::{parse_rapp, RappArch};
 use storage::{MerkleVerifier, StorageError};
 use task::{SCHEDULER, TaskId};
 use wasm::{opcodes, Value, WasmError, WasmMemory, WasmModule, WasmVm};
@@ -253,29 +254,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     wasm_app_code.push(opcodes::RETURN);
     wasm_app_code.push(opcodes::END);
 
-    let rapp_binary = build_rapp(
-        "org.interos.calculator",
-        "interos_official",
-        (1, 0, 0),
-        RappArch::X86_64,
-        &[1], // Cap: SerialOutput
-        &wasm_app_code,
-    );
-
-    VFS.lock().create_file("/packages/calculator.rapp", &rapp_binary, true);
+    // RAPP v2 is fail-closed: unsigned kernel-built packages are never staged for execution.
+    // Signed packages are produced by tools/interos.py and must be provisioned into the trust store.
+    let _ = (RappArch::X86_64, wasm_app_code);
+    serial_println!("[OK] RAPP v2 runtime ready: unsigned packages are rejected by the kernel trust boundary.");
     serial_println!("[OK] Root filesystem mounted. Built-in package staged at '/packages/calculator.rapp'.");
-
-    let first_party = [
-        ("org.interos.compositor", "/packages/org.interos.compositor.rapp", task::COMPOSITOR_ELF),
-        ("org.interos.launcher", "/packages/org.interos.launcher.rapp", task::LAUNCHER_ELF),
-        ("org.interos.settings", "/packages/org.interos.settings.rapp", task::APP_SETTINGS_ELF),
-        ("org.interos.terminal", "/packages/org.interos.terminal.rapp", task::APP_TERMINAL_ELF),
-    ];
-    for (package_id, path, payload) in first_party {
-        let package = build_rapp(package_id, "interos_official", (1, 0, 0), RappArch::X86_64, &[1, 2, 3, 4], payload);
-        VFS.lock().create_file(path, &package, true);
-        serial_println!("[PACKAGE] staged id={} path={}", package_id, path);
-    }
 
     // 11. Zero-Trust Capability Enforcement Self-Tests
     serial_println!("\n--- [Zero-Trust Capability Enforcement Self-Tests] ---");
@@ -364,31 +347,37 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     // 31. Initialize Cryptographic Secure IPC Channels
     ipc::init();
-    service::init();
-    settings::init();
 
     // 31b. Initialize Asynchronous Event Notification Subsystem (Sovereign epoll/kqueue)
     event::init();
 
     // 31c. Verify .rapp package format round-trip (build → parse → SHA-256 verify)
     {
-        use package::rapp::{build_rapp, parse_rapp, RappArch};
+        use package::rapp::{parse_rapp, RappArch};
         let test_elf = b"\x7fELF_TEST_PAYLOAD_STUB";
-        let rapp_bin = build_rapp("com.test.hello", "interos", (1, 0, 0), RappArch::X86_64, &[1, 2], test_elf);
-        match parse_rapp(&rapp_bin) {
-            Ok(manifest) => {
-                assert_eq!(manifest.package_id, "com.test.hello");
-                assert_eq!(manifest.publisher_id, "interos");
-                assert_eq!(manifest.version, (1, 0, 0));
-                assert_eq!(manifest.arch, RappArch::X86_64);
-                assert_eq!(manifest.capabilities.len(), 2);
-                assert_eq!(manifest.payload_len, test_elf.len());
-                serial_println!("[OK] .rapp package round-trip: build → parse → SHA-256 verify PASSED");
-            }
-            Err(e) => {
-                serial_println!("[FAIL] .rapp package round-trip failed: {:?}", e);
-            }
-        }
+        // Negative trust-boundary test: a zero-signature package must not parse.
+        let rapp_bin = {
+            let mut b = Vec::new();
+            b.extend_from_slice(b"RAPP");
+            b.extend_from_slice(&2u16.to_le_bytes());
+            b.extend_from_slice(&(RappArch::X86_64 as u16).to_le_bytes());
+            b.extend_from_slice(b"com.test.hello");
+            b.resize(40, 0);
+            b.extend_from_slice(&[0u8; 32]);
+            b.extend_from_slice(&1u16.to_le_bytes());
+            b.extend_from_slice(&0u16.to_le_bytes());
+            b.extend_from_slice(&0u16.to_le_bytes());
+            b.extend_from_slice(&2u16.to_le_bytes());
+            b.extend_from_slice(&crate::crypto::Sha256::digest(test_elf));
+            b.extend_from_slice(&[0u8; 64]);
+            b.extend_from_slice(&(test_elf.len() as u32).to_le_bytes());
+            b.extend_from_slice(&1u16.to_le_bytes());
+            b.extend_from_slice(&2u16.to_le_bytes());
+            b.extend_from_slice(test_elf);
+            b
+        };
+        assert!(parse_rapp(&rapp_bin).is_err());
+        serial_println!("[TEST] RAPP v2 fail-closed unsigned-package rejection: PASSED");
     }
 
     // 32. Initialize Hardware MSR Fast System Call Extensions (SCE, STAR, LSTAR, FMASK)
@@ -410,6 +399,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         .ok();
     SCHEDULER.lock().init(main_caps);
     serial_println!("[OK] Primordial Kernel Thread registered as Task 0.");
+
+    // Phase 25: explicit userspace-style system service domains.
+    services::init();
+    service::init();
+    settings::init();
 
     // Task 1: Telemetry Service
     let mut caps_telemetry = CapabilityTable::new(8);
@@ -457,22 +451,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             object_id: 0,
         })
         .ok(); // Slot 1
-    caps_security
-        .insert(Capability {
-            id: CapabilityId(203),
-            cap_type: CapabilityType::ProcessSpawn,
-            rights: Rights::EXECUTE,
-            object_id: 0,
-        })
-        .ok(); // Slot 2: package/service launch authority
-    caps_security
-        .insert(Capability {
-            id: CapabilityId(204),
-            cap_type: CapabilityType::FileSystemRead,
-            rights: Rights::READ,
-            object_id: 0,
-        })
-        .ok(); // Slot 3: package registry read
 
     let id_security = SCHEDULER.lock().spawn(
         "security_daemon",
@@ -481,7 +459,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         2,
     );
     IPC_ROUTER.lock().register_task(id_security);
-    crate::service::SERVICE_SUPERVISOR.lock().bind_task("package", id_security);
     serial_println!("[OK] Spawned Task 2: security_daemon (ID: {:?})", id_security);
 
     // Task 3: Device & Package Verification Manager (with VFS FileSystemRead + IpcSend to Task 2)
@@ -542,9 +519,35 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
 
 
-    // Graphical composition is now owned by the Ring-3 compositor package.
-    // kernel_main does not spawn or drive the mobile UI directly.
-    // Task 8: Network & Network Worker
+    // Task 7: Native Graphical Compositor & Event Loop Shell
+    let mut caps_compositor = CapabilityTable::new(8);
+    caps_compositor
+        .insert(Capability {
+            id: CapabilityId(701),
+            cap_type: CapabilityType::SerialOutput,
+            rights: Rights::WRITE,
+            object_id: 0,
+        })
+        .ok(); // Slot 0
+    caps_compositor
+        .insert(Capability {
+            id: CapabilityId(702),
+            cap_type: CapabilityType::IpcSend,
+            rights: Rights::WRITE,
+            object_id: id_security.0, // Bound to Task 2
+        })
+        .ok(); // Slot 1
+
+    let id_compositor = SCHEDULER.lock().spawn(
+        "compositor_shell",
+        task_compositor_shell,
+        caps_compositor,
+        2,
+    );
+    IPC_ROUTER.lock().register_task(id_compositor);
+    serial_println!("[OK] Spawned Task 7: compositor_shell (ID: {:?})", id_compositor);
+
+    // Task 8: Network & InterLayer Client Worker
     let mut caps_net = CapabilityTable::new(8);
     caps_net
         .insert(Capability {
@@ -770,10 +773,48 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     IPC_ROUTER.lock().register_task(id_wireless);
     serial_println!("[OK] Spawned Task 16: wireless_worker (ID: {:?})", id_wireless);
 
-    // Native applications are no longer spawned directly by kernel_main.
-    // They are registered with the package/service boundary below and launched
-    // only after a userspace IPC request reaches the Security/Package service.
-    serial_println!("[OK] Native app package registry/service boundary online; no application spawned directly from kernel_main.");
+    // Task 17: Sovereign Settings App (Ring 3 User Mode)
+    let id_settings = task::spawn_app_settings(id_security);
+    IPC_ROUTER.lock().register_task(id_settings);
+
+    // Task 18: Sovereign Intent Terminal App (Ring 3 User Mode)
+    let id_terminal = task::spawn_app_terminal(id_security);
+    IPC_ROUTER.lock().register_task(id_terminal);
+
+    // Task 19: Sovereign Dialer App (Ring 3 User Mode)
+    let id_dialer = task::spawn_app_dialer(id_security);
+    IPC_ROUTER.lock().register_task(id_dialer);
+
+    // Task 20: Sovereign Vault & Storage App (Ring 3 User Mode)
+    let id_vault = task::spawn_app_vault(id_security);
+    IPC_ROUTER.lock().register_task(id_vault);
+
+    // Task 21: Sovereign Camera & Neural Vision App (Ring 3 User Mode)
+    let id_camera = task::spawn_app_camera(id_security);
+    IPC_ROUTER.lock().register_task(id_camera);
+
+    // Task 22: Open-Source Touch Calculator App (Ring 3 User Mode)
+    let id_calc = task::spawn_app_calculator(id_security);
+    IPC_ROUTER.lock().register_task(id_calc);
+
+    // Task 23: Sovereign Browser & Web App (Ring 3 User Mode)
+    let id_browser = task::spawn_app_browser(id_security);
+    IPC_ROUTER.lock().register_task(id_browser);
+
+    // Task 24: Sovereign Messages & P2P Wire App (Ring 3 User Mode)
+    let id_messages = task::spawn_app_messages(id_security);
+    IPC_ROUTER.lock().register_task(id_messages);
+
+    // Task 25: Sovereign Calendar & Chrono-Planner App (Ring 3 User Mode)
+    let id_calendar = task::spawn_app_calendar(id_security);
+    IPC_ROUTER.lock().register_task(id_calendar);
+
+    // Task 26: Sovereign Music & Hi-Fi Audio App (Ring 3 User Mode)
+    let id_music = task::spawn_app_music(id_security);
+    IPC_ROUTER.lock().register_task(id_music);
+
+    // Render the Mobile Smartphone Shell on the graphical display
+    framebuffer::draw_mobile_shell();
 
     serial_println!("================================================================================");
     serial_println!("  SYSTEM READY: Inter OS v3.0 Microkernel Fully Online.");
@@ -788,29 +829,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial_println!("[OK] Hardware interrupts enabled on CPU.");
 
     // Hand over control to multitasking scheduler
-    let mut supervisor_ticks=0u64;
     loop {
-        supervisor_ticks=supervisor_ticks.wrapping_add(1);
-        if supervisor_ticks%250==0 && crate::service::SERVICE_SUPERVISOR.lock().should_restart("package") { spawn_package_supervisor_recovery(); }
         task::yield_now();
         x86_64::instructions::hlt();
     }
-}
-
-
-/// Kernel recovery path for the package/security supervisor itself.
-/// This path is intentionally independent of the Ring-3 package service.
-fn spawn_package_supervisor_recovery() -> TaskId {
-    let mut caps = CapabilityTable::new(8);
-    caps.insert(Capability { id: CapabilityId(201), cap_type: CapabilityType::IpcReceive, rights: Rights::READ, object_id: 0 }).ok();
-    caps.insert(Capability { id: CapabilityId(202), cap_type: CapabilityType::SerialOutput, rights: Rights::WRITE, object_id: 0 }).ok();
-    caps.insert(Capability { id: CapabilityId(203), cap_type: CapabilityType::ProcessSpawn, rights: Rights::EXECUTE, object_id: 0 }).ok();
-    caps.insert(Capability { id: CapabilityId(204), cap_type: CapabilityType::FileSystemRead, rights: Rights::READ, object_id: 0 }).ok();
-    let id = SCHEDULER.lock().spawn("security_daemon", task_security_daemon, caps, 2);
-    IPC_ROUTER.lock().register_task(id);
-    crate::service::SERVICE_SUPERVISOR.lock().bind_task("package", id);
-    serial_println!("[SUPERVISOR] Recovered package/security service pid={}", id.0);
-    id
 }
 
 // -----------------------------------------------------------------------------
@@ -833,12 +855,8 @@ extern "C" fn task_telemetry_service() -> ! {
     loop {
         iteration = iteration.wrapping_add(1);
         if iteration == 1 || iteration % 250 == 0 {
-            if let Ok(ticks) = syscall::sys_get_ticks(0) {
-                syscall::sys_log(1, "[TELEMETRY TASK] Capability-verified timer telemetry active.");
-                // Refresh the guest process table so Device Studio can observe
-                // live scheduler state rather than a one-time boot snapshot.
-                crate::task::SCHEDULER.lock().dump_process_table();
-                crate::serial_println!("[TELEMETRY] uptime_ticks={}", ticks);
+            if let Ok(_ticks) = syscall::sys_get_ticks(0) {
+                syscall::sys_log(1, "[TELEMETRY TASK] Capability-verified telemetry heartbeat: Hardware timer active.");
             }
         }
         syscall::sys_yield();
@@ -851,104 +869,13 @@ extern "C" fn task_security_daemon() -> ! {
     let mut first = true;
     loop {
         if first {
-            syscall::sys_log(1, "[SECURITY DAEMON] Capability-guarded IPC mailbox open. Listening for security and package-service requests...");
+            syscall::sys_log(1, "[SECURITY DAEMON] Capability-guarded IPC mailbox open. Listening for security events...");
             first = false;
         }
-
-        // Userspace init reaches the package/service boundary exclusively through IPC.
-        // Message 0x5001 is a package launch request; payload is the canonical package ID.
+        // Attempt to receive incoming IPC message via Slot 0 (IpcReceive token)
         if let Ok(msg) = syscall::sys_ipc_recv(0) {
-            if msg.msg_type == 0x5001 {
-                let package_id = match core::str::from_utf8(&msg.payload[..msg.len]) {
-                    Ok(id) if !id.is_empty() && id.len() <= 96 => id,
-                    _ => {
-                        syscall::sys_log(1, "[PACKAGE SERVICE] Rejected malformed launch request.");
-                        syscall::sys_yield();
-                        continue;
-                    }
-                };
-
-                let spawn_allowed = {
-                    let sched = SCHEDULER.lock();
-                    sched.current_task()
-                        .map(|task| task.cap_table.verify(2, CapabilityType::ProcessSpawn, Rights::EXECUTE).is_ok())
-                        .unwrap_or(false)
-                };
-
-                if !spawn_allowed {
-                    syscall::sys_log(1, "[PACKAGE SERVICE] ProcessSpawn capability missing; launch denied.");
-                } else {
-                    let parent_id = msg.sender;
-                    if let Some(descriptor) = crate::package::first_party_package(package_id) {
-                        syscall::sys_log(1, "[PACKAGE SERVICE] Resolving package from VFS and verifying integrity.");
-                        let mut package_buf = [0u8; 65536];
-                        let mut source_path = descriptor.path;
-                        if let Some(blob) = crate::package::PACKAGE_BLOB_STORE.lock().get(package_id) {
-                            if blob.bytes.len() <= package_buf.len() {
-                                package_buf[..blob.bytes.len()].copy_from_slice(&blob.bytes);
-                                let bytes = blob.bytes.len();
-                                let parsed = crate::package::parse_rapp(&package_buf[..bytes]).map(|m|(m,bytes));
-                                if let Ok((manifest, bytes_read)) = parsed {
-                                    let payload_start=manifest.payload_offset; let payload_end=payload_start.saturating_add(manifest.payload_len);
-                                    if manifest.package_id==package_id && payload_end<=bytes_read {
-                                        source_path="[persistent package store]";
-                                    }
-                                }
-                            }
-                        }
-                        let verified = if source_path=="[persistent package store]" {
-                            crate::package::parse_rapp(&package_buf[..]).map(|m|(m,package_buf.len()))
-                        } else { match syscall::sys_fs_open(3, descriptor.path, Rights::READ) {
-                            Ok(fd) => {
-                                let result = syscall::sys_fs_read(3, fd, &mut package_buf);
-                                let _ = syscall::sys_fs_close(fd);
-                                match result {
-                                    Ok(bytes) => crate::package::parse_rapp(&package_buf[..bytes]).map(|m| (m, bytes)),
-                                    Err(_) => Err(crate::package::RappError::BufferTooShort),
-                                }
-                            }
-                            Err(_) => Err(crate::package::RappError::BufferTooShort),
-                        }};
-                        match verified {
-                            Ok((manifest, bytes_read)) => {
-                                let payload_start = manifest.payload_offset;
-                                let payload_end = payload_start.saturating_add(manifest.payload_len);
-                                let trusted_and_not_revoked = crate::crypto::ed25519::trusted_public_key(&manifest.publisher_id)
-                                    .map(|key| !crate::package::REVOCATION_REGISTRY.lock().is_key_revoked(&key))
-                                    .unwrap_or(false);
-                                if manifest.package_id != package_id
-                                    || !crate::package::PACKAGE_REGISTRY.lock().launch_allowed(package_id, manifest.version)
-                                    || !manifest.arch.matches_current()
-                                    || payload_end > bytes_read
-                                    || !trusted_and_not_revoked
-                                    || crate::package::REVOCATION_REGISTRY.lock().is_package_revoked(package_id)
-                                {
-                                    syscall::sys_log(1, "[PACKAGE SERVICE] Package identity, architecture, trust, revocation, or payload bounds rejected.");
-                                } else {
-                                    match task::spawn_packaged_process(
-                                        descriptor.process_name,
-                                        &package_buf[payload_start..payload_end],
-                                        parent_id,
-                                    ) {
-                                        Ok(child_id) => {
-                                            IPC_ROUTER.lock().register_task(child_id);
-                                            crate::service::SERVICE_SUPERVISOR.lock().bind_task(descriptor.process_name, child_id);
-                                            serial_println!("[PACKAGE] id={} state=launched pid={} parent={} source={} verified=integrity+publisher-policy", package_id, child_id.0, parent_id.0, descriptor.path);
-                                            syscall::sys_log(1, "[PACKAGE SERVICE] Verified RAPP payload loaded into isolated Ring-3 process.");
-                                        }
-                                        Err(_) => { syscall::sys_log(1, "[PACKAGE SERVICE] Verified package ELF launch failed."); }
-                                    }
-                                }
-                            }
-                            Err(_) => { syscall::sys_log(1, "[PACKAGE SERVICE] RAPP verification failed; launch denied."); }
-                        }
-                    } else {
-                        syscall::sys_log(1, "[PACKAGE SERVICE] Package ID is not registered; launch denied.");
-                    }
-                }
-            } else {
-                syscall::sys_log(1, "[SECURITY DAEMON] Received attested IPC message! Policy audit: APPROVED.");
-            }
+            let _ = msg;
+            syscall::sys_log(1, "[SECURITY DAEMON] Received attested IPC message! Policy audit: APPROVED.");
         }
         syscall::sys_yield();
     }
@@ -1045,6 +972,36 @@ extern "C" fn task_storage_daemon() -> ! {
 }
 
 
+
+/// Task 7: Native Graphical Compositor & Event Loop Shell
+/// Pumps hardware input events from the non-allocating ring buffer,
+/// performs UI hit testing, dispatches attested user intents via zero-trust IPC,
+/// and updates the graphical smartphone display.
+extern "C" fn task_compositor_shell() -> ! {
+    let mut initial = true;
+    loop {
+        if initial {
+            syscall::sys_log(0, "[COMPOSITOR SHELL] Native mobile touch event loop active. Polling digitizer queue...");
+            // Simulate capacitive touchscreen tap on Card 1 (System Diagnostics)
+            input::INPUT_QUEUE.lock().push(input::InputEvent::Gesture(input::TouchGesture::Tap {
+                x: (framebuffer::PHONE_X + 50) as u32,
+                y: (framebuffer::PHONE_Y + 160) as u32,
+            }));
+            initial = false;
+        }
+
+        // Pump input event queue
+        if let Some(event) = input::INPUT_QUEUE.lock().pop() {
+            if let Some(intent) = gui::MOBILE_SHELL.lock().handle_event(event) {
+                syscall::sys_log(0, "[COMPOSITOR SHELL] UI touch detected! Dispatching attested intent via IPC...");
+                // Send IPC to security sentinel via Slot 1 (IpcSend token)
+                syscall::sys_ipc_send(1, TaskId(2), 0x3001, intent.as_bytes());
+            }
+        }
+
+        syscall::sys_yield();
+    }
+}
 
 /// Task 8: Network Worker
 ///

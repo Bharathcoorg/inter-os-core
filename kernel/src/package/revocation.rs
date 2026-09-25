@@ -53,6 +53,7 @@ pub struct RevocationRegistry {
     pub revoked_packages: BTreeMap<String, RevocationRecord>,
     pub revoked_keys: BTreeMap<[u8; 32], RevocationRecord>,
     pub rotated_keys: BTreeMap<String, [u8; 32]>,
+    pub trusted_keys: BTreeMap<[u8; 32], String>,
 }
 
 impl RevocationRegistry {
@@ -61,6 +62,7 @@ impl RevocationRegistry {
             revoked_packages: BTreeMap::new(),
             revoked_keys: BTreeMap::new(),
             rotated_keys: BTreeMap::new(),
+            trusted_keys: BTreeMap::new(),
         }
     }
 
@@ -195,11 +197,22 @@ impl RevocationRegistry {
         self.revoked_keys.contains_key(key)
     }
 
+    /// Registers a publisher public key in the device trust store.
+    pub fn trust_key(&mut self, key: [u8; 32], publisher: &str) {
+        self.trusted_keys.insert(key, publisher.to_string());
+    }
+
+    /// Returns true only for an explicitly provisioned publisher key.
+    pub fn is_key_trusted(&self, key: &[u8; 32]) -> bool {
+        self.trusted_keys.contains_key(key) && !self.is_key_revoked(key)
+    }
+
     pub fn apply_key_rotation(&mut self, proof: &KeyRotationProof) -> Result<(), &'static str> {
         if !proof.verify() { return Err("Invalid key rotation cryptographic proof"); }
         if self.is_key_revoked(&proof.old_key) { return Err("Old key is revoked; cannot be rotated"); }
 
         self.rotated_keys.insert(proof.publisher.clone(), proof.new_key);
+        self.trust_key(proof.new_key, &proof.publisher);
         self.revoke_key(&proof.old_key, RevocationReason::SupersededByRotation, proof.epoch, &proof.publisher);
         serial_println!("[KEY ROTATION] Publisher '{}' rotated key successfully to epoch {}.", proof.publisher, proof.epoch);
         Ok(())
@@ -207,3 +220,19 @@ impl RevocationRegistry {
 }
 
 pub static REVOCATION_REGISTRY: Mutex<RevocationRegistry> = Mutex::new(RevocationRegistry::new());
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn trust_and_revocation_invariants() {
+        let key = [7u8; 32];
+        let mut r = RevocationRegistry::new();
+        assert!(!r.is_key_trusted(&key));
+        r.trust_key(key, "test-publisher");
+        assert!(r.is_key_trusted(&key));
+        r.revoke_key(&key, RevocationReason::KeyCompromised, 10, "root");
+        assert!(!r.is_key_trusted(&key));
+    }
+}
