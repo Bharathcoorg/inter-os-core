@@ -66,6 +66,14 @@ def main() -> None:
          "no ambient SystemControl in workers")
     must(services, "ServiceId::Power | ServiceId::Modem | ServiceId::Audio | ServiceId::Camera =>",
          "privileged service capability restriction")
+    must(services, "static SERVICE_LIFECYCLE_LOCK: spin::Mutex<()>",
+         "serialized lifecycle transition lock")
+    must(services, "let _lifecycle = SERVICE_LIFECYCLE_LOCK.lock();",
+         "lifecycle lock acquisition")
+    must(services, "fn start_locked(id: ServiceId, parent_id: TaskId)",
+         "non-recursive locked start helper")
+    must(services, "start_locked(id, parent_id).is_ok()",
+         "recovery uses locked start helper")
 
     # Supervisor must inspect scheduler state before mutating the registry.
     must(services, "let sched = SCHEDULER.lock();", "supervisor scheduler lock")
