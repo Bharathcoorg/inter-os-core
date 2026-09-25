@@ -29,8 +29,8 @@ This roadmap tracks the remaining work in dependency order. A milestone is **com
 | M14 | Service capability isolation tests | 🟡 In progress — implementation + contract tests complete; CI evidence pending |
 | M15 | Trusted userspace service ABI | 🟡 In progress — implementation complete; CI evidence pending |
 | M16 | Signed service package loading | 🟡 In progress — verification boundary complete; execution handoff remains M17 |
-| M17 | Userspace service manager replaces kernel workers | 🟡 In progress — Ring-3 service binaries and PID1 ownership implemented; CI evidence pending |
-| M18 | Service crash/restart end-to-end validation | 🟡 In progress — supervisor/recovery path implemented; QEMU fault-injection evidence pending |
+| M17 | Userspace service manager replaces kernel workers | 🟡 Implementation complete — Ring-3 service binaries + PID1 ownership; CI evidence pending |
+| M18 | Service crash/restart end-to-end validation | 🟡 Implementation complete — deterministic CI fault injection + PID1 recovery path; QEMU evidence pending |
 
 ## Storage
 
