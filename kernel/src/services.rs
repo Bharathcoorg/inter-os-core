@@ -39,7 +39,7 @@ static SERVICE_RETRY_AFTER: [core::sync::atomic::AtomicU64; 9] = [
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
 ];
 
-/// Starts the Phase 25 service set once, with isolated capability tables.
+/// Registers the system-service set. PID1 owns process creation and lifecycle.
 pub fn init() {
     if SERVICES_INITIALIZED.swap(true, Ordering::AcqRel) { return; }
     {
@@ -68,9 +68,9 @@ fn start_locked(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str
     if let Some(record) = existing {
         if record.state == ServiceState::Running && record.task != TaskId(0) { return Ok(record.task); }
         if record.state == ServiceState::Starting { return Err("service already starting"); }
-        // A failed worker still owns a scheduler task until the explicit
+        // A failed userspace service still owns a scheduler task until the explicit
         // recovery path tears it down and reaps it. Do not spawn another
-        // worker here or recovery could create duplicate service instances.
+        // process here or recovery could create duplicate service instances.
         if record.state == ServiceState::Failed && record.task != TaskId(0) {
             return Err("failed service requires recovery");
         }
@@ -210,7 +210,7 @@ pub fn last_heartbeat(id: ServiceId) -> u64 {
     SERVICE_HEARTBEATS[id as usize].load(Ordering::Acquire)
 }
 
-/// Records a worker exit in the authoritative hardware-service registry.
+/// Records a userspace service exit in the authoritative service registry.
 pub fn record_exit(task_id: TaskId, _exit_code: i32) {
     let _lifecycle = SERVICE_LIFECYCLE_LOCK.lock();
     let mut records = SERVICE_RECORDS.lock();
