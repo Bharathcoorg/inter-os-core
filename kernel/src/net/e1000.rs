@@ -29,7 +29,7 @@ const TX_DESC_COUNT: usize = 16;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
-struct RxDescriptor {
+pub struct RxDescriptor {
     addr: u64,
     length: u16,
     checksum: u16,
@@ -40,7 +40,7 @@ struct RxDescriptor {
 
 #[repr(C)]
 #[derive(Copy, Clone)]
-struct TxDescriptor {
+pub struct TxDescriptor {
     addr: u64,
     length: u16,
     cso: u8,
