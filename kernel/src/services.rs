@@ -56,6 +56,7 @@ extern "C" fn camerad() -> ! { service_loop(ServiceId::Camera, "[camerad] Camera
 
 pub static SERVICE_RECORDS: spin::Mutex<[Option<ServiceRecord>; 9]> = spin::Mutex::new([None; 9]);
 const HEARTBEAT_TIMEOUT_TICKS: u64 = 500;
+const SERVICE_RESTART_BACKOFF_TICKS: u64 = 1000;
 static SERVICE_HEARTBEATS: [core::sync::atomic::AtomicU64; 9] = [
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
@@ -145,8 +146,9 @@ pub fn stop(id: ServiceId, parent_id: TaskId) -> Result<(), &'static str> {
     if id == ServiceId::Init { return Err("init cannot be stopped"); }
     let record = SERVICE_RECORDS.lock()[id as usize].ok_or("service not declared")?;
     if record.task == TaskId(0) { return Ok(()); }
-    SCHEDULER.lock().terminate_task(record.task, 0).map_err(|_| "service termination failed")?;
-    let _ = SCHEDULER.lock().reap_child(parent_id, record.task);
+    let mut scheduler = SCHEDULER.lock();
+    scheduler.terminate_task(record.task, 0).map_err(|_| "service termination failed")?;
+    let _ = scheduler.reap_child(parent_id, record.task);
     SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Stopped });
     Ok(())
 }
@@ -255,12 +257,15 @@ pub fn restart_failed(parent_id: TaskId) -> usize {
         if let Some(task) = failed_task {
             let now = crate::interrupts::get_system_ticks();
             if now < SERVICE_RETRY_AFTER[idx].load(Ordering::Acquire) { continue; }
-            // A heartbeat timeout may leave the worker schedulable. Terminate it
-            // before spawning the replacement so recovery cannot duplicate a service.
-            let _ = SCHEDULER.lock().terminate_task(task, -1);
-            let _ = SCHEDULER.lock().reap_child(parent_id, task);
+            // A heartbeat timeout may leave the worker schedulable. Reserve the
+            // retry window before teardown/spawn so repeated spawn failures cannot
+            // immediately consume the scheduler in a tight recovery loop.
+            SERVICE_RETRY_AFTER[idx].store(now.saturating_add(SERVICE_RESTART_BACKOFF_TICKS), Ordering::Release);
+            let mut scheduler = SCHEDULER.lock();
+            let _ = scheduler.terminate_task(task, -1);
+            let _ = scheduler.reap_child(parent_id, task);
+            drop(scheduler);
             if start(id, parent_id).is_ok() {
-                SERVICE_RETRY_AFTER[idx].store(now.saturating_add(1000), Ordering::Release);
                 restarted += 1;
             }
         }
