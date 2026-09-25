@@ -499,6 +499,7 @@ def _build_runtime_rapp(manifest_data, elf_payload, signature=None):
 
 def cmd_pack(args):
     """Build the canonical binary InterOS runtime RAPP package."""
+    from cryptography.hazmat.primitives import serialization
     app_name = args.name.lower().replace("-", "_")
     app_dir = APPS_DIR / app_name
     if not app_dir.exists():
@@ -922,51 +923,41 @@ def cmd_install(args):
 # COMMANDS: sign, stop, restart, logs, shell, snapshot, trace
 # =============================================================================
 def cmd_sign(args):
-    """Cryptographically signs an arbitrary file or .rapp with Ed25519."""
+    """Sign a canonical binary runtime RAPP without embedding a private key in it."""
     target_path = Path(args.target)
     if not target_path.exists():
         log_error(f"Target file not found: {target_path}")
         return 1
 
     try:
-        from cryptography.hazmat.primitives.asymmetric import ed25519
         from cryptography.hazmat.primitives import serialization
-    except ImportError:
-        log_error("Python 'cryptography' library required. Run: pip install cryptography")
-        return 1
-
-    key_path = Path(args.key) if getattr(args, "key", None) else (PACKAGES_DIR / "developer.key")
-    if key_path.exists():
-        priv_key = ed25519.Ed25519PrivateKey.from_private_bytes(key_path.read_bytes())
-    else:
-        log(f"Generating new developer Ed25519 key at {key_path}...")
-        key_path.parent.mkdir(parents=True, exist_ok=True)
-        priv_key = ed25519.Ed25519PrivateKey.generate()
-        key_path.write_bytes(priv_key.private_bytes(
-            encoding=serialization.Encoding.Raw,
-            format=serialization.PrivateFormat.Raw,
-            encryption_algorithm=serialization.NoEncryption()
-        ))
-
-    file_bytes = target_path.read_bytes()
-    file_sha = hashlib.sha256(file_bytes).hexdigest()
-    sig_bytes = priv_key.sign(file_sha.encode("utf-8"))
-    sig_out = target_path.with_suffix(target_path.suffix + ".sig")
-    sig_doc = {
-        "file": target_path.name,
-        "sha256": file_sha,
-        "public_key": priv_key.public_key().public_bytes(
+        import struct
+        data = bytearray(target_path.read_bytes())
+        if len(data) < 0xA4 or data[:4] != b"RAPP":
+            log_error("Target is not a canonical binary RAPP.")
+            return 1
+        payload_len = struct.unpack_from("<I", data, 0xA0)[0]
+        cap_count = struct.unpack_from("<H", data, 0x3E)[0]
+        payload_offset = 0xA4 + cap_count * 2
+        if payload_offset + payload_len != len(data):
+            log_error("RAPP payload bounds mismatch.")
+            return 1
+        key_path = Path(args.key) if getattr(args, "key", None) else (PACKAGES_DIR / "developer.key")
+        priv_key = _load_runtime_signing_key(key_path)
+        data[0x60:0xA0] = bytes(64)
+        signature = priv_key.sign(bytes(data))
+        data[0x60:0xA0] = signature
+        target_path.write_bytes(data)
+        pub = priv_key.public_key().public_bytes(
             encoding=serialization.Encoding.Raw,
             format=serialization.PublicFormat.Raw
-        ).hex(),
-        "signature": sig_bytes.hex()
-    }
-    sig_out.write_text(json.dumps(sig_doc, indent=2), encoding="utf-8")
-    log_success(f"Signature written to {sig_out}")
-    log(f"  • SHA-256: {file_sha}")
-    log(f"  • Ed25519: {sig_bytes.hex()[:24]}...")
-    return 0
-
+        )
+        log_success(f"Canonical RAPP signed: {target_path}")
+        log(f"  • Trusted publisher key: {pub.hex()}")
+        return 0
+    except Exception as e:
+        log_error(f"RAPP signing failed: {e}")
+        return 1
 
 def cmd_stop(args):
     """Stops the running QEMU microkernel instance."""
