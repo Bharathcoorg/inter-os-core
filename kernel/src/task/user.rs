@@ -418,38 +418,79 @@ pub fn load_user_elf(elf_data: &[u8]) -> Result<(usize, usize), &'static str> {
     load_user_elf_into_page_table(elf_data, &mut pt, 0x0080_0000)
 }
 
-/// Launches a verified package payload as a Ring-3 child process.
+/// Maps canonical RAPP v2 capability identifiers into kernel capabilities.
+fn capabilities_from_rapp(ids: &[u16], object_id: u64) -> Result<CapabilityTable, &'static str> {
+    let mut caps = CapabilityTable::new(ids.len().max(1));
+    for (slot, id) in ids.iter().copied().enumerate() {
+        let (cap_type, rights) = match id {
+            1 => (CapabilityType::SerialOutput, Rights::WRITE),
+            2 => (CapabilityType::FrameBufferDirect, Rights::WRITE),
+            3 => (CapabilityType::TimerTickRead, Rights::READ),
+            4 => (CapabilityType::HardwarePortIo, Rights::READ | Rights::WRITE),
+            5 => (CapabilityType::IpcSend, Rights::WRITE),
+            6 => (CapabilityType::IpcReceive, Rights::READ),
+            7 => (CapabilityType::ProcessSpawn, Rights::INVOKE),
+            8 => (CapabilityType::ProcessKill, Rights::INVOKE),
+            9 => (CapabilityType::FileSystemRead, Rights::READ),
+            10 => (CapabilityType::FileSystemWrite, Rights::WRITE),
+            11 => (CapabilityType::StorageRawBlock, Rights::READ | Rights::WRITE),
+            12 => (CapabilityType::NetworkSocket, Rights::WRITE),
+            13 => (CapabilityType::NetworkSend, Rights::WRITE),
+            14 => (CapabilityType::NetworkReceive, Rights::READ),
+            15 => (CapabilityType::ShmProducer, Rights::WRITE),
+            16 => (CapabilityType::ShmConsumer, Rights::READ),
+            17 => (CapabilityType::EventPoll, Rights::READ | Rights::INVOKE),
+            18 => (CapabilityType::SystemControl, Rights::INVOKE),
+            _ => return Err("Unknown RAPP v2 capability"),
+        };
+        caps.insert(Capability {
+            id: CapabilityId(0x5000_0000u64 + slot as u64),
+            cap_type,
+            rights,
+            object_id,
+        }).map_err(|_| "RAPP capability table is full")?;
+    }
+    Ok(caps)
+}
+
+/// Launches a verified RAPP v2 payload as a Ring-3 child process.
+///
+/// The caller must have already called parse_rapp; that verification step
+/// enforces signature, publisher trust, revocation, digest, and capability
+/// validity. Capabilities are derived exclusively from the verified manifest;
+/// no implicit filesystem/network/hardware privileges are added.
+pub fn spawn_verified_rapp_process(
+    manifest: &crate::package::RappManifest,
+    elf_payload: &[u8],
+    parent_id: TaskId,
+) -> Result<TaskId, &'static str> {
+    let expected_arch = match manifest.arch {
+        crate::package::RappArch::X86_64 => true,
+        crate::package::RappArch::Aarch64 | crate::package::RappArch::Riscv64 => false,
+    };
+    if !expected_arch {
+        return Err("RAPP architecture does not match x86_64 kernel");
+    }
+    if manifest.payload_len != elf_payload.len() {
+        return Err("RAPP payload length mismatch");
+    }
+    let caps = capabilities_from_rapp(&manifest.capabilities, parent_id.0)?;
+    let id = spawn_user_process("rapp_process", elf_payload, caps, 1)?;
+    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
+        task.parent_id = parent_id;
+    }
+    Ok(id)
+}
+
+/// Legacy packaged-process launcher retained for source compatibility. It no
+/// longer grants implicit storage/filesystem privileges; new package execution
+/// must use spawn_verified_rapp_process.
 pub fn spawn_packaged_process(
     process_name: &'static str,
     elf_payload: &[u8],
     parent_id: TaskId,
 ) -> Result<TaskId, &'static str> {
-    let mut caps = CapabilityTable::new(8);
-    caps.insert(Capability {
-        id: CapabilityId(5001),
-        cap_type: CapabilityType::SerialOutput,
-        rights: Rights::WRITE,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(5002),
-        cap_type: CapabilityType::IpcSend,
-        rights: Rights::WRITE,
-        object_id: parent_id.0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(5003),
-        cap_type: CapabilityType::TimerTickRead,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(5004),
-        cap_type: CapabilityType::FileSystemRead,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-
+    let caps = capabilities_from_rapp(&[1, 3, 9], parent_id.0)?;
     let id = spawn_user_process(process_name, elf_payload, caps, 1)?;
     if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
         task.parent_id = parent_id;
