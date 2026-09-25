@@ -197,6 +197,32 @@ pub fn find_e1000() -> Option<PciDevice> {
     scan_pci_bus().into_iter().find(|d| d.is_intel_e1000())
 }
 
+
+/// Attempts to initialize the first Intel E1000 controller discovered on PCI.
+pub fn initialize_e1000_network() -> Result<(), &'static str> {
+    let device = find_e1000().ok_or("No Intel E1000-compatible controller found")?;
+    let bar = device.memory_bar(0).ok_or("E1000 MMIO BAR0 unavailable")?;
+    let mmio_base = crate::memory::VirtAddr::new(0xffff_9000_0000_0000);
+    let mapped = crate::memory::map_mmio_region(
+        crate::memory::PhysAddr::new(bar & !0xfff),
+        0x20000,
+        mmio_base,
+    )?;
+    let mac = unsafe { crate::net::E1000Device::read_mac_from_eeprom(mapped.as_u64() as usize) };
+    if mac == crate::net::MacAddress::ZERO {
+        return Err("E1000 EEPROM returned an invalid zero MAC");
+    }
+    let mut nic = unsafe {
+        crate::net::E1000Device::allocate_with_dma(mapped.as_u64() as usize, mac)
+            .ok_or("Unable to allocate contiguous E1000 DMA memory")?
+    };
+    nic.initialize().map_err(|_| "E1000 controller initialization failed")?;
+    crate::net::NETWORK_DEVICE.lock().attach_e1000(nic);
+    serial_println!("[NET] Intel E1000 network backend attached: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac.0[0], mac.0[1], mac.0[2], mac.0[3], mac.0[4], mac.0[5]);
+    Ok(())
+}
+
 /// Initializes and self-tests the PCI configuration space scanner.
 pub fn init() {
     let devices = scan_pci_bus();
