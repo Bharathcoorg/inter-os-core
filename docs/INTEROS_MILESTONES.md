@@ -52,7 +52,7 @@ This roadmap tracks the remaining work in dependency order. A milestone is **com
 | M27 | Compositor protocol | 🟡 Implementation complete — versioned bounded `ICMP` request/response protocol, kernel/SDK definitions, and CI contract added; runtime IPC evidence pending |
 | M28 | Window/surface management | 🟡 Implementation complete — surface geometry/focus operations are routed through the display-service capability boundary and ownership contracts updated; CI/runtime evidence pending |
 | M29 | Touch/gesture input integration | 🟡 Implementation complete — normalized touch events now route to the focused surface owner over bounded IPC; contract evidence pending |
-| M30 | Hardware-backed graphics path | ⬜ Pending |
+| M30 | Hardware-backed graphics path | 🟡 Implementation complete — KMS page flips now publish the composed scanout to the bootloader framebuffer with bounded, aspect-preserving presentation; CI/QEMU evidence pending |
 
 ## Networking and smartphone services
 
