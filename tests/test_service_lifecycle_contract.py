@@ -47,6 +47,15 @@ def main() -> None:
     must(pid1, "std::service_start(service_id)", "PID1 service startup ABI")
     must(pid1, "std::service_recover_failed()", "PID1 recovery ABI")
 
+    # Service-manager authority is object-scoped, not an ambient SystemControl
+    # right. PID1 must hold the dedicated manager object capability and the
+    # syscall gate must verify that exact object before lifecycle operations.
+    must(syscall, "task.cap_table.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, SERVICE_MANAGER_OBJECT)",
+         "object-scoped service-manager authorization")
+    must(pid1, "cap_type: CapabilityType::SystemControl,", "PID1 manager capability type")
+    must(pid1, "object_id: crate::syscall::SERVICE_MANAGER_OBJECT,", "PID1 manager object binding")
+    must(pid1, "expect(\"PID1 SystemControl capability\")", "PID1 manager capability installation")
+
     # Service isolation and lifecycle state transitions are explicit.
     must(services, "CapabilityType::IpcReceive", "service IPC receive capability")
     must(services, "IpcSend is intentionally omitted", "no broad service IPC send")
