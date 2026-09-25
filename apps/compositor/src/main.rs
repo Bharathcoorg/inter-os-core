@@ -1,63 +1,8 @@
 #![no_std]
 #![no_main]
-
 use core::panic::PanicInfo;
 use interos_std as std;
-
-const W: u32 = 720;
-const H: u32 = 96;
-const CHUNK: usize = 1024;
-
-fn chunk(surface: u32, offset: usize, count: usize) {
-    let mut pixels = [0u32; CHUNK];
-    pixels.fill(0xFF0B0F19);
-    for i in 0..count {
-        let q = offset + i;
-        let x = q % W as usize;
-        let y = q / W as usize;
-        if y < 2 || y >= H as usize - 2 || x < 2 || x >= W as usize - 2 {
-            pixels[i] = 0xFF253044;
-        }
-    }
-    let _ = std::surface_write(surface, offset as u32, &pixels[..count]);
-}
-
-#[no_mangle]
-pub extern "C" fn _start() -> ! {
-    std::log(0, "[COMPOSITOR USERSPACE] Ring-3 compositor service online.").ok();
-
-    match std::surface_create(W, H, 100) {
-        Ok(surface) => {
-            let total = (W * H) as usize;
-            let mut offset = 0usize;
-            while offset < total {
-                let count = (total - offset).min(CHUNK);
-                chunk(surface, offset, count);
-                offset += count;
-            }
-            let _ = std::surface_flip();
-            std::log(0, "[COMPOSITOR USERSPACE] Bounded system-line frame committed.").ok();
-        }
-        Err(_) => {
-            std::log(
-                0,
-                "[COMPOSITOR USERSPACE] Surface allocation unavailable; service remains alive.",
-            ).ok();
-        }
-    }
-
-    loop {
-        let _ = std::event_poll(
-            std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK | std::EVENT_IPC_MSG,
-            100,
-        );
-        let _ = std::touch_poll();
-        std::yield_now();
-    }
-}
-
-#[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    std::log(0, "[COMPOSITOR USERSPACE] Panic; terminating compositor task.").ok();
-    std::exit();
-}
+const W:u32=720;const H:u32=96;const CHUNK:usize=1024;
+fn chunk(surface:u32,offset:usize,count:usize,ticks:u64,windows:usize,services:usize){let mut pixels=[0u32;CHUNK];pixels.fill(std::design::color::SURFACE);for i in 0..count{let q=offset+i;let x=q%W as usize;let y=q/W as usize;if y<2||y>=H as usize-2||x<2||x>=W as usize-2{pixels[i]=std::design::color::BORDER;}else if y>=38&&y<42&&x<((ticks%600)as usize).min(W as usize-8){pixels[i]=std::design::color::ACCENT;}else if y>=70&&x<48+windows.min(8)*18{pixels[i]=std::design::color::SUCCESS;}else if y>=78&&x<48+services.min(8)*18{pixels[i]=std::design::color::TEXT_MUTED;}}let _=std::surface_write(surface,offset as u32,&pixels[..count]);}
+#[no_mangle]pub extern "C" fn _start()->!{std::log(0,"[COMPOSITOR USERSPACE] Ring-3 system-line compositor online.").ok();match std::surface_create(W,H,100){Ok(surface)=>{loop{let ticks=std::get_ticks(2).unwrap_or(0);let mut windows=[0u8;4096];let mut services=[0u8;1024];let wc=std::window_list(&mut windows).map(|n|if n>0{1}else{0}).unwrap_or(0);let sc=std::service_list(&mut services).map(|n|if n>0{1}else{0}).unwrap_or(0);let total=(W*H)as usize;let mut offset=0;while offset<total{let count=(total-offset).min(CHUNK);chunk(surface,offset,count,ticks,wc,sc);offset+=count;}let _=std::surface_flip();let _=std::event_poll(std::EVENT_TOUCH_INPUT|std::EVENT_TIMER_TICK|std::EVENT_IPC_MSG,100);std::yield_now();}}Err(_)=>{std::log(0,"[COMPOSITOR USERSPACE] Surface allocation unavailable; service remains alive.").ok();loop{std::yield_now();}}}}
+#[panic_handler]fn panic(_info:&PanicInfo)->!{std::exit();}
