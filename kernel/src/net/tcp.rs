@@ -67,6 +67,11 @@ impl<'a> TcpSegment<'a> {
         })
     }
 
+    pub fn verify_checksum(&self, src: [u8; 4], dst: [u8; 4], raw: &[u8]) -> bool {
+        if raw.len() < TCP_HEADER_LEN || raw.len() > TCP_HEADER_LEN + TCP_MAX_SEGMENT { return false; }
+        tcp_checksum(src, dst, raw) == 0
+    }
+
     pub fn serialize(&self, out: &mut [u8]) -> Result<usize, &'static str> {
         if self.payload.len() > TCP_MAX_SEGMENT || out.len() < TCP_HEADER_LEN + self.payload.len() {
             return Err("TCP segment too large");
@@ -104,6 +109,18 @@ pub fn next_state(state: TcpState, flags: u16) -> TcpState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tcp_checksum_detects_tamper() {
+        let seg = TcpSegment { src_port: 1000, dst_port: 443, seq: 1, ack: 2, flags: 0x18, window: 4096, payload: b"hello" };
+        let mut raw = [0u8; 64];
+        let n = seg.serialize(&mut raw).unwrap();
+        let csum = tcp_checksum([10,0,0,1], [10,0,0,2], &raw[..n]);
+        raw[16..18].copy_from_slice(&csum.to_be_bytes());
+        assert_eq!(tcp_checksum([10,0,0,1], [10,0,0,2], &raw[..n]), 0);
+        raw[n-1] ^= 1;
+        assert_ne!(tcp_checksum([10,0,0,1], [10,0,0,2], &raw[..n]), 0);
+    }
+
     #[test]
     fn tcp_round_trip() {
         let seg = TcpSegment { src_port: 1234, dst_port: 443, seq: 10, ack: 20, flags: 0x18, window: 4096, payload: b"GET" };
