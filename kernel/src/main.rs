@@ -241,9 +241,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // 10. Virtual Filesystem (VFS) Initialization & Package Runtime
     serial_println!("\n--- [Initializing Virtual Filesystem & Package Runtime] ---");
     fs::init();
+    crate::package::PACKAGE_BLOB_STORE.lock().restore();
     crate::package::PACKAGE_REGISTRY.lock().seed();
     crate::package::REVOCATION_REGISTRY.lock().seed();
-    serial_println!("[PACKAGE] transactional registry and persistent revocation state restored.");
+    serial_println!("[PACKAGE] persistent registry, payload store and revocation state restored.");
 
     // Generate sample sandboxed package bytecode: returns 0 (exit success)
     let mut wasm_app_code = Vec::new();
