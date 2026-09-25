@@ -1496,14 +1496,11 @@ pub fn sys_package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) ->
 
     let manifest = crate::package::parse_rapp(&package_buf[..bytes])
         .map_err(|_| SyscallResult::IntegrityViolation)?;
+    let payload_end = manifest.payload_offset.checked_add(manifest.payload_len).ok_or(SyscallResult::InvalidArguments)?;
+    if payload_end > bytes || manifest.publisher_id != "interos_official" { return Err(SyscallResult::IntegrityViolation); }
+    let static_id: &'static str = crate::package::first_party_package(pkg_id).map(|d| d.package_id).ok_or(SyscallResult::FileNotFound)?;
+    crate::package::PACKAGE_BLOB_STORE.lock().put(static_id, manifest.version, &package_buf[..bytes]).map_err(|_| SyscallResult::DeviceError)?;
     if manifest.package_id != pkg_id || !manifest.arch.matches_current() {
-        return Err(SyscallResult::IntegrityViolation);
-    }
-
-    let payload_end = manifest.payload_offset
-        .checked_add(manifest.payload_len)
-        .ok_or(SyscallResult::InvalidArguments)?;
-    if payload_end > bytes {
         return Err(SyscallResult::IntegrityViolation);
     }
 
