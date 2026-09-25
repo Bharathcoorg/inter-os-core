@@ -279,6 +279,9 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
             if !self.read_inode(index)?.used { inode_index=Some(index); break; }
         }
         let index=inode_index.ok_or(FsBackendError::TooManyFiles)?;
+        if data.len() > (self.superblock.data_sectors as usize).saturating_mul(SECTOR_SIZE) {
+            return Err(FsBackendError::FileTooLarge);
+        }
         let sectors=((data.len()+SECTOR_SIZE-1)/SECTOR_SIZE) as u32;
         let start=self.allocate_extent(sectors)?;
         for block in 0..sectors {
@@ -305,6 +308,10 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
     pub fn read_file(&mut self, path: &str, out: &mut [u8]) -> Result<usize, FsBackendError> {
         Self::validate_path(path)?;
         let (_index,inode)=self.find_inode(path)?.ok_or(FsBackendError::FileNotFound)?;
+        if inode.file_size == 0 { return Ok(0); }
+        if inode.sector_count == 0 || inode.start_sector.checked_add(inode.sector_count).unwrap_or(u32::MAX) > self.superblock.data_sectors {
+            return Err(FsBackendError::CorruptMetadata);
+        }
         if out.len() < inode.file_size as usize { return Err(FsBackendError::FileTooLarge); }
         let mut copied=0usize;
         for block in 0..inode.sector_count {
@@ -320,6 +327,9 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), FsBackendError> {
         Self::validate_path(path)?;
         let (index,old)=self.find_inode(path)?.ok_or(FsBackendError::FileNotFound)?;
+        if data.len() > (self.superblock.data_sectors as usize).saturating_mul(SECTOR_SIZE) {
+            return Err(FsBackendError::FileTooLarge);
+        }
         let sectors=((data.len()+SECTOR_SIZE-1)/SECTOR_SIZE) as u32;
         let start=self.allocate_extent(sectors)?;
         for block in 0..sectors {
@@ -338,6 +348,16 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
             return Err(e);
         }
         let _=self.free_extent(old.start_sector,old.sector_count);
+        Ok(())
+    }
+
+    pub fn delete_file(&mut self, path: &str) -> Result<(), FsBackendError> {
+        Self::validate_path(path)?;
+        let (index, inode) = self.find_inode(path)?.ok_or(FsBackendError::FileNotFound)?;
+        if inode.sector_count != 0 {
+            self.free_extent(inode.start_sector, inode.sector_count)?;
+        }
+        self.write_inode(index, &DiskInode::empty())?;
         Ok(())
     }
 }
