@@ -141,6 +141,10 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
     pub fn format_at(device: &'a mut D, base_lba: u32) -> Result<Self, FsBackendError> {
         let total = device.sector_count();
         let region_sectors = total.checked_sub(base_lba).ok_or(FsBackendError::NoSpace)?;
+        Self::format_region(device, base_lba, region_sectors)
+    }
+
+    pub fn format_region(device: &'a mut D, base_lba: u32, region_sectors: u32) -> Result<Self, FsBackendError> {
         if region_sectors <= DATA_LBA + 1 || region_sectors - DATA_LBA > BITMAP_CAPACITY_SECTORS {
             return Err(FsBackendError::NoSpace);
         }
@@ -169,10 +173,15 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
     }
 
     pub fn mount_at(device: &'a mut D, base_lba: u32) -> Result<Self, FsBackendError> {
+        let available = device.sector_count().checked_sub(base_lba).ok_or(FsBackendError::CorruptMetadata)?;
+        Self::mount_region(device, base_lba, available)
+    }
+
+    pub fn mount_region(device: &'a mut D, base_lba: u32, region_sectors: u32) -> Result<Self, FsBackendError> {
         let mut sector=[0u8; SECTOR_SIZE];
         device.read_sector(base_lba + FS_SUPERBLOCK_LBA, &mut sector)?;
         let sb=Superblock::decode(&sector)?;
-        if sb.total_sectors != device.sector_count().checked_sub(base_lba).ok_or(FsBackendError::CorruptMetadata)? {
+        if sb.total_sectors != region_sectors {
             return Err(FsBackendError::CorruptMetadata);
         }
         Ok(Self { device, superblock: sb, base_lba })
@@ -211,7 +220,7 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
         let bit=1u8 << (block % 8);
         let lba=BITMAP_LBA + (byte_index / SECTOR_SIZE) as u32;
         let mut sector=[0u8; SECTOR_SIZE];
-        self.device.read_sector(lba,&mut sector)?;
+        self.device.read_sector(self.base_lba + lba,&mut sector)?;
         Ok((sector[byte_index % SECTOR_SIZE] & bit) != 0)
     }
 
@@ -337,7 +346,7 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
             let begin=block as usize*SECTOR_SIZE;
             let end=(begin+SECTOR_SIZE).min(data.len());
             if begin<end { sector[..end-begin].copy_from_slice(&data[begin..end]); }
-            self.device.write_sector(self.superblock.data_start+start+block,&sector)?;
+            self.device.write_sector(self.base_lba + self.superblock.data_start+start+block,&sector)?;
         }
         let mut inode=old;
         inode.file_size=data.len() as u32;
