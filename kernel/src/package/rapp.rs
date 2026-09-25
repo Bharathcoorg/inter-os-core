@@ -51,6 +51,17 @@ pub enum RappArch {
 }
 
 impl RappArch {
+    pub fn matches_current(self) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        { return self == Self::X86_64; }
+        #[cfg(target_arch = "aarch64")]
+        { return self == Self::Aarch64; }
+        #[cfg(target_arch = "riscv64")]
+        { return self == Self::Riscv64; }
+        #[allow(unreachable_code)]
+        false
+    }
+
     pub fn from_u16(v: u16) -> Option<Self> {
         match v {
             0 => Some(Self::X86_64),
