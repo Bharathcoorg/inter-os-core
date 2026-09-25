@@ -34,21 +34,25 @@ def verify(pkg):
     signing = bytearray(pkg); signing[SIG_OFF:SIG_END] = b"\\0"*64
     ed25519.Ed25519PublicKey.from_public_bytes(pub).verify(sig, bytes(signing))
 
+def expect_reject(blob, label):
+    try:
+        verify(blob)
+    except Exception:
+        return
+    raise AssertionError(f"{label} accepted")
+
+
 def main():
     pkg, pub, key = make_package()
     verify(pkg)
     tampered = bytearray(pkg); tampered[-1] ^= 1
-    try: verify(tampered); raise AssertionError("payload tamper accepted")
-    except Exception: pass
+    expect_reject(tampered, "payload tamper")
     tampered_sig = bytearray(pkg); tampered_sig[SIG_OFF] ^= 1
-    try: verify(tampered_sig); raise AssertionError("signature tamper accepted")
-    except Exception: pass
+    expect_reject(tampered_sig, "signature tamper")
     trailing = bytearray(pkg) + b"TRAILING"
-    try: verify(trailing); raise AssertionError("trailing bytes accepted")
-    except Exception: pass
+    expect_reject(trailing, "trailing bytes")
     zero_key = bytearray(pkg); zero_key[0x28:0x48] = b"\\0"*32
-    try: verify(zero_key); raise AssertionError("zero publisher accepted")
-    except Exception: pass
+    expect_reject(zero_key, "zero publisher key")
     print("RAPP v2 adversarial tests: PASS")
 
 if __name__ == "__main__": main()
