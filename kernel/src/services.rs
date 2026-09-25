@@ -90,7 +90,6 @@ pub fn init() {
     }
     crate::serial_println!("[SERVICE] Service definitions registered; PID 1 controls startup.");
 }
-    crate::serial_println!("[SERVICE] Phase 25 service architecture online with explicit service-to-service IPC targets.");
 }
 
 /// Starts one declared service on behalf of userspace PID 1.
