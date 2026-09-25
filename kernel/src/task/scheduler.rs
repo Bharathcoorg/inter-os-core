@@ -61,7 +61,21 @@ impl Scheduler {
         cap_table: CapabilityTable,
         priority: u8,
     ) -> TaskId {
-        let tcb = TaskControlBlock::new(name, entry_point, cap_table, priority);
+        self.spawn_with_parent(name, entry_point, cap_table, priority, TaskId(0))
+    }
+
+    /// Spawns a task with explicit parent ownership. Userspace services are
+    /// children of PID 1 so their lifecycle can be observed and reaped there.
+    pub fn spawn_with_parent(
+        &mut self,
+        name: &'static str,
+        entry_point: extern "C" fn() -> !,
+        cap_table: CapabilityTable,
+        priority: u8,
+        parent_id: TaskId,
+    ) -> TaskId {
+        let mut tcb = TaskControlBlock::new(name, entry_point, cap_table, priority);
+        tcb.parent_id = parent_id;
         let id = tcb.id;
         self.tasks.push(tcb);
         id
