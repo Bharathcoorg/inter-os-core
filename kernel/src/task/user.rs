@@ -509,8 +509,7 @@ pub fn spawn_userspace_service(service_id: u8, parent_id: TaskId) -> Result<Task
     // forbidden:CapabilityType::ProcessSpawn
     // forbidden:CapabilityType::StorageRawBlock
     // forbidden:CapabilityType::SystemControl
-    // forbidden:CapabilityType::NetworkSend
-    // forbidden:CapabilityType::NetworkReceive
+    // NetworkSend/NetworkReceive are reserved for netd's explicit data-plane policy.
     // forbidden:CapabilityType::HardwarePortIo
     // Slot 2 is the canonical EventPoll capability for every system service.
     // Services that only require event polling (Input/Power/Modem/Audio/Camera)
