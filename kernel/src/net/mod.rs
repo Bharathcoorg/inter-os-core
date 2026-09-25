@@ -144,19 +144,44 @@ pub fn send_tcp_syn(
 
 /// Polls the network device and processes all inbound packets.
 pub fn poll_network_interface() -> usize {
-    let mut device = NETWORK_DEVICE.lock();
-    let mut rx_buf = [0u8; 1514];
     let mut processed = 0;
-
-    while let Ok(len) = device.receive(&mut rx_buf) {
+    loop {
+        let mut rx_buf = [0u8; 1514];
+        let len = {
+            let mut device = NETWORK_DEVICE.lock();
+            match device.receive(&mut rx_buf) {
+                Ok(len) => len,
+                Err(_) => break,
+            }
+        };
         processed += 1;
-        let frame_res = EthernetFrame::parse(&rx_buf[0..len]);
-        if let Ok(frame) = frame_res {
+        if let Ok(frame) = EthernetFrame::parse(&rx_buf[..len]) {
             match frame.ethertype {
                 EtherType::Arp => {
                     if let Ok(arp_pkt) = ArpPacket::parse(frame.payload) {
-                        if arp_pkt.opcode == ArpOpcode::Reply || arp_pkt.opcode == ArpOpcode::Request {
-                            ARP_TABLE.lock().insert(arp_pkt.sender_ip, arp_pkt.sender_mac);
+                        ARP_TABLE.lock().insert(arp_pkt.sender_ip, arp_pkt.sender_mac);
+                        if arp_pkt.opcode == ArpOpcode::Request && arp_pkt.target_ip == DEFAULT_HOST_IP {
+                            let local_mac = NETWORK_DEVICE.lock().info().mac;
+                            let reply = ArpPacket {
+                                opcode: ArpOpcode::Reply,
+                                sender_mac: local_mac,
+                                sender_ip: DEFAULT_HOST_IP,
+                                target_mac: arp_pkt.sender_mac,
+                                target_ip: arp_pkt.sender_ip,
+                            };
+                            let mut arp_buf = [0u8; 28];
+                            if let Ok(n) = reply.serialize(&mut arp_buf) {
+                                let response = EthernetFrame {
+                                    dst_mac: arp_pkt.sender_mac,
+                                    src_mac: local_mac,
+                                    ethertype: EtherType::Arp,
+                                    payload: &arp_buf[..n],
+                                };
+                                let mut frame_buf = [0u8; 1514];
+                                if let Ok(n) = response.serialize(&mut frame_buf) {
+                                    let _ = NETWORK_DEVICE.lock().transmit(&frame_buf[..n]);
+                                }
+                            }
                         }
                     }
                 }
@@ -192,7 +217,6 @@ pub fn poll_network_interface() -> usize {
             }
         }
     }
-
     processed
 }
 
