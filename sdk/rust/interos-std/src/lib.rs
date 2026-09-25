@@ -72,6 +72,7 @@ pub enum SyscallNumber {
     PackageList = 75,
     PackageRegistry = 76,
     WindowList = 77,
+    PackageRollback = 78,
 }
 
 // -----------------------------------------------------------------------------
@@ -588,6 +589,12 @@ pub fn package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) -> Res
     } else {
         Err(ret)
     }
+}
+
+/// Rolls back a first-party package registry activation transaction.
+pub fn package_rollback(cap_slot:usize,pkg_id:&str,user_consent:bool)->Result<(),i64>{
+    let ret=unsafe{syscall4(SyscallNumber::PackageRollback,cap_slot as u64,pkg_id.as_ptr() as u64,pkg_id.len() as u64,user_consent as u64)};
+    if ret>=0{Ok(())}else{Err(ret)}
 }
 
 /// Reads the live compositor window registry.
