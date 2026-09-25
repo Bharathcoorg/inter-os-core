@@ -37,7 +37,7 @@ pub static APP_TERMINAL_ELF: &[u8] = include_bytes!(concat!(
     "/../target/x86_64-unknown-none/debug/terminal"
 ));
 
-/// Embedded Ring-3 compositor service.
+/// Embedded Ring-3 system-service binaries.\npub static DISPLAYD_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/displayd"));\npub static INPUTD_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/inputd"));\npub static STORAGED_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/storaged"));\npub static NETD_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/netd"));\npub static POWERD_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/powerd"));\npub static MODEMD_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/modemd"));\npub static AUDIOD_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/audiod"));\npub static CAMERAD_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/camerad"));\n\n/// Embedded Ring-3 compositor service.
 pub static COMPOSITOR_ELF: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../target/x86_64-unknown-none/debug/compositor"
@@ -479,6 +479,40 @@ pub fn spawn_verified_rapp_process(
     if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
         task.parent_id = parent_id;
     }
+    Ok(id)
+}
+
+/// Spawns a first-party system service as an isolated Ring-3 process owned by PID1.
+pub fn spawn_userspace_service(service_id: u8, parent_id: TaskId) -> Result<TaskId, &'static str> {
+    let (name, elf) = match service_id {
+        1 => ("displayd", DISPLAYD_ELF), 2 => ("inputd", INPUTD_ELF),
+        3 => ("storaged", STORAGED_ELF), 4 => ("netd", NETD_ELF),
+        5 => ("powerd", POWERD_ELF), 6 => ("modemd", MODEMD_ELF),
+        7 => ("audiod", AUDIOD_ELF), 8 => ("camerad", CAMERAD_ELF),
+        _ => return Err("unknown userspace service"),
+    };
+    let mut caps = CapabilityTable::new(8);
+    caps.insert(Capability { id: CapabilityId(0x7000), cap_type: CapabilityType::SerialOutput, rights: Rights::WRITE, object_id: 0 }).map_err(|_| "service capability table full")?;
+    caps.insert(Capability { id: CapabilityId(0x7001), cap_type: CapabilityType::TimerTickRead, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
+    caps.insert(Capability { id: CapabilityId(0x7002), cap_type: CapabilityType::EventPoll, rights: Rights::READ | Rights::INVOKE, object_id: 0 }).map_err(|_| "service capability table full")?;
+    caps.insert(Capability { id: CapabilityId(0x7003), cap_type: CapabilityType::IpcReceive, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
+    let (cap_type, rights) = match service_id {
+        1 => (CapabilityType::FrameBufferDirect, Rights::WRITE),
+        2 | 5 | 6 | 7 | 8 => (CapabilityType::EventPoll, Rights::READ),
+        3 => (CapabilityType::FileSystemRead, Rights::READ | Rights::WRITE),
+        4 => (CapabilityType::NetworkSocket, Rights::READ | Rights::WRITE),
+        _ => return Err("unknown userspace service"),
+    };
+    if !(2..=8).contains(&service_id) || crate::service_abi::service_id_from_package_id(match service_id {
+        1 => "org.interos.service.displayd", 2 => "org.interos.service.inputd", 3 => "org.interos.service.storaged",
+        4 => "org.interos.service.netd", 5 => "org.interos.service.powerd", 6 => "org.interos.service.modemd",
+        7 => "org.interos.service.audiod", 8 => "org.interos.service.camerad", _ => "",
+    }).is_none() {
+        return Err("service policy rejected");
+    }
+    caps.insert(Capability { id: CapabilityId(0x7004 + service_id as u64), cap_type, rights, object_id: service_id as u64 }).map_err(|_| "service capability table full")?;
+    let id = spawn_user_process(name, elf, caps, 5)?;
+    if let Some(task) = SCHEDULER.lock().get_task_mut(id) { task.parent_id = parent_id; }
     Ok(id)
 }
 
