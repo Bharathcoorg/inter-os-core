@@ -136,7 +136,7 @@ pub fn supervise() {
             7 => ServiceId::Audio, 8 => ServiceId::Camera, _ => continue,
         };
         let Some(record) = records[idx] else { continue; };
-        let Some(task_id) = record.task.into() else { continue; };
+        let task_id = record.task;
         let stale = now.saturating_sub(SERVICE_HEARTBEATS[idx].load(Ordering::Acquire)) > HEARTBEAT_TIMEOUT_TICKS;
         let failed = match sched.get_task(task_id) {
             Some(task) => matches!(task.state, crate::task::TaskState::Terminated | crate::task::TaskState::Zombie),
