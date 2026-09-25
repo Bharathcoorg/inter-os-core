@@ -890,46 +890,38 @@ extern "C" fn task_device_manager() -> ! {
         if !executed {
             syscall::sys_log(1, "[DEVICE MANAGER] Reading package '/packages/calculator.rapp' from VFS...");
 
-            // Open package file using Slot 2 (FileSystemRead token)
+            // RAPP v2 is the native userspace execution format. The device
+            // manager may inspect a package, but execution is delegated to the
+            // verified Ring-3 process path; it must never execute raw payload
+            // bytes as WASM or bypass the RAPP trust boundary.
             match syscall::sys_fs_open(2, "/packages/calculator.rapp", Rights::READ) {
                 Ok(fd) => {
-                    let mut buf = [0u8; 1024];
+                    let mut buf = [0u8; 8192];
                     if let Ok(bytes_read) = syscall::sys_fs_read(2, fd, &mut buf) {
-                        syscall::sys_fs_close(fd);
-                        syscall::sys_log(1, "[DEVICE MANAGER] Package binary read successfully. Verifying SHA-256 attestation...");
+                        let _ = syscall::sys_fs_close(fd);
+                        syscall::sys_log(1, "[DEVICE MANAGER] Package binary read successfully. Verifying RAPP v2 trust chain...");
 
-                        // Parse and cryptographically verify package
                         match parse_rapp(&buf[..bytes_read]) {
                             Ok(pkg) => {
-                                syscall::sys_log(1, "[DEVICE MANAGER] Package Attestation SUCCESS! Instantiating sandboxed VM...");
-
-                                let mut wasm_module = wasm::WasmModule::new();
-                                wasm_module.add_host_import("host_call", 1, host_package_call);
-                                let payload = buf[pkg.payload_offset..pkg.payload_offset + pkg.payload_len].to_vec();
-                                let func_idx = wasm_module.add_function("main", 0, 0, payload);
-                                wasm_module.add_export("main", func_idx);
-
-                                let memory = wasm::WasmMemory::with_byte_limit(65536, 65536);
-                                let mut vm = wasm::WasmVm::new(wasm_module, memory, 2000);
-
-                                match vm.invoke_export("main", &[]) {
-                                    Ok(Some(wasm::Value::I32(0))) => {
-                                        syscall::sys_log(1, "[DEVICE MANAGER] Sandboxed execution succeeded! Return code 0 (OK).");
-                                        let msg = b"CALCULATOR_VERIFIED_OK";
-                                        let _ = syscall::sys_ipc_send(0, TaskId(2), 0x2001, msg);
-                                        executed = true;
-                                    }
-                                    Ok(_) => {
-                                        syscall::sys_log(1, "[DEVICE MANAGER] Sandboxed execution completed.");
+                                let payload = &buf[pkg.payload_offset..pkg.payload_offset + pkg.payload_len];
+                                let parent_id = SCHEDULER.lock().current_task_id().unwrap_or(TaskId(0));
+                                match task::spawn_verified_rapp_process(&pkg, payload, parent_id) {
+                                    Ok(child) => {
+                                        syscall::sys_log(1, "[DEVICE MANAGER] RAPP v2 verified; native Ring-3 process spawned.");
+                                        crate::serial_println!(
+                                            "[DEVICE MANAGER] verified package '{}' launched as Task {}.",
+                                            pkg.package_id,
+                                            child.0
+                                        );
                                         executed = true;
                                     }
                                     Err(_) => {
-                                        syscall::sys_log(1, "[DEVICE MANAGER] Sandbox execution trapped or aborted.");
+                                        syscall::sys_log(1, "[DEVICE MANAGER] RAPP verification passed but process launch was rejected.");
                                     }
                                 }
                             }
                             Err(_) => {
-                                syscall::sys_log(1, "[DEVICE MANAGER] Package cryptographic attestation failed.");
+                                syscall::sys_log(1, "[DEVICE MANAGER] Package cryptographic attestation or trust validation failed.");
                             }
                         }
                     }
@@ -942,7 +934,6 @@ extern "C" fn task_device_manager() -> ! {
         syscall::sys_yield();
     }
 }
-
 /// Task 4: Storage & Integrity Daemon
 /// Performs continuous background audits of filesystem integrity and disk sectors.
 extern "C" fn task_storage_daemon() -> ! {
