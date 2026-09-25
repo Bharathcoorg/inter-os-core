@@ -37,6 +37,7 @@ pub mod resource;
 pub mod sensor;
 pub mod settings;
 pub mod services;
+mod service_abi;
 pub mod serial;
 pub mod storage;
 pub mod syscall;
