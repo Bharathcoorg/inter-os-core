@@ -120,7 +120,7 @@ pub fn start(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str> {
         ServiceId::Init => return Ok(TaskId(0)),
     };
     let task_result = {
-        let scheduler = SCHEDULER.lock();
+        let mut scheduler = SCHEDULER.lock();
         scheduler.spawn_with_parent(name, entry, caps(id), priority, parent_id)
     };
     let task = match task_result {
