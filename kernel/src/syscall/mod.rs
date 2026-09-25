@@ -101,6 +101,7 @@ pub enum SyscallNumber {
     ServiceHeartbeat = 90,
     ServicePackageLaunch = 91,
     InputEventPoll = 92,
+    NetworkPoll = 93,
     SettingsGet = 82,
     SettingsSet = 83,
     StorageQuery = 84,
@@ -1416,6 +1417,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 Err(e) => e as i64,
             }
         }
+        93 => { match sys_network_poll() { Ok(n) => n as i64, Err(e) => e as i64 } }
         _ => SyscallResult::UnknownSyscall as i64,
     }
 }
@@ -1539,6 +1541,20 @@ pub fn sys_net_sendto(dst_ip: crate::net::Ipv4Address, dst_port: u16, payload: &
 }
 
 /// Reads a packet from a UDP socket for the current calling task.
+
+/// Polls the canonical network device and dispatches received Ethernet/IP/UDP
+/// frames into the kernel socket table. Only the userspace network service may
+/// drive the device polling path through its NetworkReceive capability.
+pub fn sys_network_poll() -> Result<usize, SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    if !current.cap_table.authorize_capability(CapabilityType::NetworkReceive, Rights::READ) {
+        return Err(SyscallResult::PermissionDenied);
+    }
+    drop(sched);
+    Ok(crate::net::poll_network_interface())
+}
+
 pub fn sys_net_recvfrom(sock_id: crate::net::SocketId, out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
     let sched = SCHEDULER.lock();
     let current = match sched.current_task() {
