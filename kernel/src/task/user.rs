@@ -861,12 +861,6 @@ pub fn spawn_app_camera(id_security: TaskId) -> TaskId {
         rights: Rights::READ | Rights::WRITE,
         object_id: 0,
     }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(2105),
-        cap_type: CapabilityType::FrameBufferDirect,
-        rights: Rights::WRITE,
-        object_id: 0,
-    }).ok();
 
     let id = spawn_user_process(
         "app_camera",
@@ -908,12 +902,6 @@ pub fn spawn_app_calculator(id_security: TaskId) -> TaskId {
         id: CapabilityId(2204),
         cap_type: CapabilityType::HardwarePortIo,
         rights: Rights::READ | Rights::WRITE,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(2205),
-        cap_type: CapabilityType::FrameBufferDirect,
-        rights: Rights::WRITE,
         object_id: 0,
     }).ok();
 
@@ -971,12 +959,6 @@ pub fn spawn_app_browser(id_security: TaskId) -> TaskId {
         rights: Rights::READ,
         object_id: 0,
     }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(2307),
-        cap_type: CapabilityType::FrameBufferDirect,
-        rights: Rights::WRITE,
-        object_id: 0,
-    }).ok();
 
     let id = spawn_user_process(
         "app_browser",
@@ -1029,12 +1011,6 @@ pub fn spawn_app_messages(id_security: TaskId) -> TaskId {
     caps.insert(Capability {
         id: CapabilityId(2406),
         cap_type: CapabilityType::FileSystemWrite,
-        rights: Rights::WRITE,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(2407),
-        cap_type: CapabilityType::FrameBufferDirect,
         rights: Rights::WRITE,
         object_id: 0,
     }).ok();
@@ -1093,12 +1069,6 @@ pub fn spawn_app_calendar(id_security: TaskId) -> TaskId {
         rights: Rights::WRITE,
         object_id: 0,
     }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(2507),
-        cap_type: CapabilityType::FrameBufferDirect,
-        rights: Rights::WRITE,
-        object_id: 0,
-    }).ok();
 
     let id = spawn_user_process(
         "app_calendar",
@@ -1151,12 +1121,6 @@ pub fn spawn_app_music(id_security: TaskId) -> TaskId {
     caps.insert(Capability {
         id: CapabilityId(2606),
         cap_type: CapabilityType::FileSystemWrite,
-        rights: Rights::WRITE,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(2607),
-        cap_type: CapabilityType::FrameBufferDirect,
         rights: Rights::WRITE,
         object_id: 0,
     }).ok();
