@@ -76,6 +76,8 @@ impl SettingsApp {
     /// Queries battery fuel gauge and updates power governor.
     pub fn refresh_power(&mut self) {
         let mut buf = [0u8; 128];
+        let mut profile=[0u8;32];
+        if let Ok(n)=std::settings_get(3,"power.profile",&mut profile){ if let Ok(v)=core::str::from_utf8(&profile[..n]){ std::log(0,v).ok(); } }
         if let Ok(len) = std::battery_query(&mut buf) {
             if len > 0 {
                 let profile_str = match self.power_profile {
@@ -83,7 +85,7 @@ impl SettingsApp {
                     PowerProfile::Balanced => "[SETTINGS APP] Power Profile: Interactive DVFS Governor set to Balanced (1.2 GHz).",
                     PowerProfile::PowerSaver => "[SETTINGS APP] Power Profile: Interactive DVFS Governor set to Power Saver (600 MHz).",
                 };
-                std::log(0, "[SETTINGS APP] Power: Fuel Gauge 94% SoC, 3850 mV, Drain = 2990 mW.").ok();
+                std::log(0, "[SETTINGS APP] Power telemetry available from the hardware service.").ok();
                 std::log(0, profile_str).ok();
             }
         }
@@ -94,14 +96,14 @@ impl SettingsApp {
         let mut t_buf = [0u8; 128];
         if let Ok(len) = std::thermal_query(&mut t_buf) {
             if len > 0 {
-                std::log(0, "[SETTINGS APP] Thermals: SoC 42C, State = Normal, Throttling = Inactive.").ok();
+                std::log(0, "[SETTINGS APP] Thermal telemetry available from the hardware service.").ok();
             }
         }
 
         let mut s_buf = [0u8; 128];
         if let Ok(len) = std::sensor_read(&mut s_buf) {
             if len > 0 {
-                std::log(0, "[SETTINGS APP] Sensors: Orientation = Portrait, Ambient Light = 450 lx.").ok();
+                std::log(0, "[SETTINGS APP] Sensor telemetry available from the hardware service.").ok();
             }
         }
     }
@@ -112,6 +114,13 @@ impl SettingsApp {
         if let Ok(32) = std::keystore_derive(0, &mut key_buf) {
             std::log(0, "[SETTINGS APP] Keystore: Master hardware root of trust (Slot 0) ONLINE.").ok();
         }
+    }
+
+
+    fn toggle_persistent_profile(&mut self) {
+        let next=match self.power_profile { PowerProfile::Performance=>PowerProfile::Balanced, PowerProfile::Balanced=>PowerProfile::PowerSaver, PowerProfile::PowerSaver=>PowerProfile::Performance };
+        let value=match next { PowerProfile::Performance=>b"performance".as_slice(), PowerProfile::Balanced=>b"balanced".as_slice(), PowerProfile::PowerSaver=>b"powersaver".as_slice() };
+        if std::settings_set(3,"power.profile",value).is_ok() && std::power_set_profile(next as u32).is_ok() { self.power_profile=next; }
     }
 
     /// Reads real-time hardware clock and microkernel version metadata.
