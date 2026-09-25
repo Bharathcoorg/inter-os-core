@@ -1240,7 +1240,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             if count == 0 || count > 4096 { return SyscallResult::InvalidArguments as i64; }
             let mut pixels = [0u32; 4096];
             let byte_len = count.checked_mul(4).unwrap_or(0);
-            if copy_from_user(core::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, byte_len), a3, byte_len).is_err() {
+            if unsafe { copy_from_user(core::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, byte_len), a3, byte_len) }.is_err() {
                 return SyscallResult::InvalidArguments as i64;
             }
             let owner = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied);
