@@ -2528,8 +2528,7 @@ pub fn sys_settings_set(cap_slot: usize, key_ptr:u64,key_len:usize,val_ptr:u64,v
 
 pub fn sys_service_list(out: &mut [u8]) -> Result<usize, SyscallResult> {
     require_system_control()?;
-    let n = crate::service::SERVICE_SUPERVISOR.lock().snapshot(out);
-    Ok(n)
+    Ok(crate::services::snapshot(out))
 }
 
 pub fn sys_window_list(out_buf:&mut [u8])->Result<usize,SyscallResult>{
