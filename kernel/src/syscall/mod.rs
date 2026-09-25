@@ -1392,22 +1392,29 @@ pub fn sys_package_audit(pkg_id: &str) -> Result<u32, SyscallResult> {
 
 /// Installs a verified package onto persistent VFS storage.
 /// Requires the caller to hold a `FileSystemWrite` capability in `cap_slot`.
-pub fn sys_package_install(cap_slot: usize, pkg_id: &str, _user_consent: bool) -> Result<(), SyscallResult> {
-    let sched = SCHEDULER.lock();
-    let current = match sched.current_task() {
-        Some(t) => t,
-        None => return Err(SyscallResult::PermissionDenied),
+pub fn sys_package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) -> Result<(), SyscallResult> {
+    if !user_consent { return Err(SyscallResult::PermissionDenied); }
+    let (read_slot, task_id) = {
+        let sched = SCHEDULER.lock();
+        let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+        current.cap_table.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE)
+            .map_err(|_| SyscallResult::PermissionDenied)?;
+        let read_slot = current.cap_table.find_slot(CapabilityType::FileSystemRead, Rights::READ)
+            .ok_or(SyscallResult::PermissionDenied)?;
+        (read_slot, current.id)
     };
-
-    if current.cap_table.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE).is_err() {
-        return Err(SyscallResult::PermissionDenied);
+    if pkg_id.is_empty() || pkg_id.contains('/') || pkg_id.contains('\\\\') || pkg_id.contains("..") {
+        return Err(SyscallResult::InvalidArguments);
     }
-    drop(sched);
-
+    let path = alloc::format!("/packages/{}.rapp", pkg_id);
+    let manifest = sys_verify_package(read_slot, &path)?;
+    if manifest.package_id != pkg_id { return Err(SyscallResult::IntegrityViolation); }
     let reg = crate::package::REVOCATION_REGISTRY.lock();
-    if reg.is_package_revoked(pkg_id) {
+    if reg.is_package_revoked(pkg_id) || reg.is_key_revoked(&manifest.publisher_key) {
         return Err(SyscallResult::IntegrityViolation);
     }
+    drop(reg);
+    serial_println!("[PACKAGE] Task {} verified and authorized installation of '{}'", task_id.0, pkg_id);
     Ok(())
 }
 
