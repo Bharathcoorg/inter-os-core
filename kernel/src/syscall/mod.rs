@@ -84,6 +84,7 @@ pub enum SyscallNumber {
     SurfaceWrite = 73,
     SurfaceDestroy = 74,
     PowerSetProfile = 72,
+    PackageList = 75,
 }
 
 /// System call result status codes.
@@ -1258,6 +1259,24 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 if surface.owner_task != owner { return SyscallResult::PermissionDenied as i64; }
             } else { return SyscallResult::InvalidArguments as i64; }
             if kms.destroy_surface(a1 as u32) { 0 } else { SyscallResult::InvalidArguments as i64 }
+        }
+        75 => {
+            let out_len=a3 as usize;
+            if out_len==0||out_len>4096{return SyscallResult::InvalidArguments as i64;}
+            let sched=SCHEDULER.lock();
+            let current=match sched.current_task(){Some(t)=>t,None=>return SyscallResult::PermissionDenied as i64};
+            if current.cap_table.verify(a1 as usize,CapabilityType::FileSystemRead,Rights::READ).is_err(){return SyscallResult::PermissionDenied as i64;}
+            drop(sched);
+            let mut out=[0u8;4096];let mut pos=0usize;
+            for p in crate::package::FIRST_PARTY_PACKAGES{
+                let line=format_args!("{}|{}|{}\n",p.package_id,p.process_name,p.path);
+                let mut tmp=[0u8;192];let mut n=0usize;
+                struct W<'a>{b:&'a mut[u8],n:usize}
+                impl<'a> core::fmt::Write for W<'a>{fn write_str(&mut self,s:&str)->core::fmt::Result{let r=self.b.len().saturating_sub(self.n);let k=s.len().min(r);self.b[self.n..self.n+k].copy_from_slice(&s.as_bytes()[..k]);self.n+=k;Ok(())}}
+                {let mut w=W{b:&mut tmp,n:0};let _=core::fmt::Write::write_fmt(&mut w,line);n=w.n;}
+                if pos+n>out.len(){break}out[pos..pos+n].copy_from_slice(&tmp[..n]);pos+=n;
+            }
+            let copy_len=pos.min(out_len);if copy_to_user(a2,&out[..copy_len]).is_err(){return SyscallResult::InvalidArguments as i64;}copy_len as i64
         }
         71 => {
             // TouchPoll

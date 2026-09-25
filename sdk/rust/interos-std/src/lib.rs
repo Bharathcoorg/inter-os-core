@@ -69,6 +69,7 @@ pub enum SyscallNumber {
     PowerSetProfile = 72,
     SurfaceWrite = 73,
     SurfaceDestroy = 74,
+    PackageList = 75,
 }
 
 // -----------------------------------------------------------------------------
@@ -1436,4 +1437,9 @@ pub fn surface_write(surface_id: u32, pixel_offset: u32, pixels: &[u32]) -> Resu
 pub fn surface_destroy(surface_id: u32) -> Result<(), i64> {
     let ret = unsafe { syscall1(SyscallNumber::SurfaceDestroy, surface_id as u64) };
     if ret == 0 { Ok(()) } else { Err(ret) }
+}
+
+pub fn package_list(cap_slot: usize, out_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret=unsafe{syscall3(SyscallNumber::PackageList,cap_slot as u64,out_buf.as_mut_ptr() as u64,out_buf.len() as u64)};
+    if ret>=0{Ok(ret as usize)}else{Err(ret)}
 }

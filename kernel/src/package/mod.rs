@@ -24,6 +24,8 @@ pub struct PackageDescriptor {
 }
 
 pub const FIRST_PARTY_PACKAGES: &[PackageDescriptor] = &[
+    PackageDescriptor { package_id: "org.interos.compositor", path: "/packages/org.interos.compositor.rapp", process_name: "compositor" },
+    PackageDescriptor { package_id: "org.interos.launcher", path: "/packages/org.interos.launcher.rapp", process_name: "launcher" },
     PackageDescriptor { package_id: "org.interos.settings", path: "/packages/org.interos.settings.rapp", process_name: "app_settings" },
     PackageDescriptor { package_id: "org.interos.terminal", path: "/packages/org.interos.terminal.rapp", process_name: "app_terminal" },
 ];

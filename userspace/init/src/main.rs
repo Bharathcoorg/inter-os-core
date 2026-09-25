@@ -46,13 +46,6 @@ pub extern "C" fn _start() -> ! {
     if std::ipc_send(1, 2, 0x5001, b"org.interos.launcher").is_ok() {
         std::log(0, "[USER INIT (Ring 3)] Package service launch request accepted for org.interos.launcher.").ok();
     }
-    if std::ipc_send(1, 2, 0x5001, b"org.interos.settings").is_ok() {
-        std::log(0, "[USER INIT (Ring 3)] Package service launch request accepted for org.interos.settings.").ok();
-    }
-    if std::ipc_send(1, 2, 0x5001, b"org.interos.terminal").is_ok() {
-        std::log(0, "[USER INIT (Ring 3)] Package service launch request accepted for org.interos.terminal.").ok();
-    }
-
     // 6. Pre-flight Capability Audit on 'org.interos.browser' from Ring 3
     if let Ok(verdict) = std::package_audit("org.interos.browser") {
         if verdict == 1 {

@@ -259,6 +259,18 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     VFS.lock().create_file("/packages/calculator.rapp", &rapp_binary, true);
     serial_println!("[OK] Root filesystem mounted. Built-in package staged at '/packages/calculator.rapp'.");
 
+    let first_party = [
+        ("org.interos.compositor", "/packages/org.interos.compositor.rapp", task::COMPOSITOR_ELF),
+        ("org.interos.launcher", "/packages/org.interos.launcher.rapp", task::LAUNCHER_ELF),
+        ("org.interos.settings", "/packages/org.interos.settings.rapp", task::APP_SETTINGS_ELF),
+        ("org.interos.terminal", "/packages/org.interos.terminal.rapp", task::APP_TERMINAL_ELF),
+    ];
+    for (package_id, path, payload) in first_party {
+        let package = build_rapp(package_id, "interos_official", (1, 0, 0), RappArch::X86_64, &[1, 2, 3, 4], payload);
+        VFS.lock().create_file(path, &package, true);
+        serial_println!("[PACKAGE] staged id={} path={}", package_id, path);
+    }
+
     // 11. Zero-Trust Capability Enforcement Self-Tests
     serial_println!("\n--- [Zero-Trust Capability Enforcement Self-Tests] ---");
     let mut test_caps = CapabilityTable::new(8);
@@ -819,7 +831,7 @@ extern "C" fn task_security_daemon() -> ! {
         // Message 0x5001 is a package launch request; payload is the canonical package ID.
         if let Ok(msg) = syscall::sys_ipc_recv(0) {
             if msg.msg_type == 0x5001 {
-                let package_id = match core::str::from_utf8(&msg.payload) {
+                let package_id = match core::str::from_utf8(&msg.payload[..msg.len]) {
                     Ok(id) if !id.is_empty() && id.len() <= 96 => id,
                     _ => {
                         syscall::sys_log(1, "[PACKAGE SERVICE] Rejected malformed launch request.");
@@ -838,7 +850,7 @@ extern "C" fn task_security_daemon() -> ! {
                 if !spawn_allowed {
                     syscall::sys_log(1, "[PACKAGE SERVICE] ProcessSpawn capability missing; launch denied.");
                 } else {
-                    let service_id = syscall::sys_get_task_id();
+                    let parent_id = msg.sender;
                     if let Some(descriptor) = crate::package::first_party_package(package_id) {
                         syscall::sys_log(1, "[PACKAGE SERVICE] Resolving package from VFS and verifying integrity.");
                         let mut package_buf = [0u8; 65536];
@@ -863,11 +875,11 @@ extern "C" fn task_security_daemon() -> ! {
                                     match task::spawn_packaged_process(
                                         descriptor.process_name,
                                         &package_buf[payload_start..payload_end],
-                                        service_id,
+                                        parent_id,
                                     ) {
                                         Ok(child_id) => {
                                             IPC_ROUTER.lock().register_task(child_id);
-                                            serial_println!("[PACKAGE] id={} state=launched pid={} parent={} source={} verified=digest", package_id, child_id.0, service_id.0, descriptor.path);
+                                            serial_println!("[PACKAGE] id={} state=launched pid={} parent={} source={} verified=digest", package_id, child_id.0, parent_id.0, descriptor.path);
                                             syscall::sys_log(1, "[PACKAGE SERVICE] Verified RAPP payload loaded into isolated Ring-3 process.");
                                         }
                                         Err(_) => { syscall::sys_log(1, "[PACKAGE SERVICE] Verified package ELF launch failed."); }

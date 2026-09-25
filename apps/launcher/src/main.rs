@@ -1,84 +1,29 @@
 #![no_std]
 #![no_main]
-
 use core::panic::PanicInfo;
 use interos_std as std;
-
-const W: usize = 720;
-const H: usize = 1440;
-
-fn fill_rect(p: &mut [u32], x: usize, y: usize, w: usize, h: usize, c: u32) {
-    let x1 = (x + w).min(W);
-    let y1 = (y + h).min(H);
-    for yy in y..y1 {
-        let row = yy * W;
-        for xx in x..x1 { p[row + xx] = c; }
-    }
+const W: usize=720; const H: usize=1440;
+fn fill_row(row:&mut [u32;W],y:usize,count:usize){
+ row.fill(if y<96{0xFF101827}else{0xFF070B12});
+ if (112..232).contains(&y){for x in 24..W-24{row[x]=0xFF111B2B;}}
+ if y==248{for x in 24..W-24{row[x]=0xFF26354D;}}
+ let rows=((count.max(1)+1)/2).min(4);
+ for card in 0..rows*2{let col=card%2;let r=card/2;let x0=56+col*304;let y0=400+r*180;
+  if y>=y0&&y<y0+130{for x in x0..x0+250{row[x]=0xFF111B2B;}}
+  if y>=y0+20&&y<y0+84{for x in x0+93..x0+157{row[x]=0xFF31C4FF;}}
+ }
+ if (1270..1400).contains(&y){for x in 24..W-24{row[x]=0xFF101827;}}
 }
-
-fn icon(p: &mut [u32], x: usize, y: usize, c: u32) {
-    fill_rect(p, x + 8, y, 64, 64, c);
-    fill_rect(p, x, y + 8, 80, 48, c);
+fn render(surface:u32,count:usize){let mut row=[0u32;W];for y in 0..H{fill_row(&mut row,y,count);let _=std::surface_write(surface,(y*W)as u32,&row);}}
+fn first_launchable(c:&[u8])->Option<&[u8]>{let mut s=0;while s<c.len(){let e=match c[s..].iter().position(|b|*b==b'\n'){Some(p)=>s+p,None=>c.len()};let l=&c[s..e];if l.starts_with(b"org.interos.settings|")||l.starts_with(b"org.interos.terminal|"){if let Some(p)=l.iter().position(|b|*b==b'|'){return Some(&l[..p]);}}if e==c.len(){break}s=e+1;}None}
+#[no_mangle]pub extern "C" fn _start()->!{
+ std::log(0,"[LAUNCHER USERSPACE] Real Rust launcher service online.").ok();
+ let surface=match std::surface_create(W as u32,H as u32,0){Ok(id)=>id,Err(_)=>{std::log(0,"[LAUNCHER USERSPACE] Launcher surface allocation failed.").ok();std::exit_with_code(1)}};
+ let mut catalog_buf=[0u8;2048];let n=std::package_list(3,&mut catalog_buf).unwrap_or(0);let catalog=&catalog_buf[..n];
+ let count=catalog.iter().filter(|b|**b==b'\n').count();
+ std::log(0,"[LAUNCHER USERSPACE] Package catalog loaded from kernel package service.").ok();
+ render(surface,count);let _=std::surface_flip();
+ let mut launched=false;
+ loop{if let Ok(events)=std::event_poll(std::EVENT_TOUCH_INPUT|std::EVENT_TIMER_TICK,100){if !launched&&(events&std::EVENT_TOUCH_INPUT)!=0{if let Some(id)=first_launchable(catalog){if std::ipc_send(1,2,0x5001,id).is_ok(){launched=true;std::log(0,"[LAUNCHER USERSPACE] Dynamic package launch request accepted.").ok();}}}}let _=std::touch_poll();std::yield_now();}
 }
-
-fn render_launcher(p: &mut [u32]) {
-    p.fill(0xFF070B12);
-    fill_rect(p, 0, 0, W, 96, 0xFF101827);
-    fill_rect(p, 24, 112, W - 48, 120, 0xFF111B2B);
-    fill_rect(p, 24, 248, W - 48, 2, 0xFF26354D);
-
-    let colors = [0xFF31C4FF, 0xFF63E6BE, 0xFFFFC857, 0xFFA78BFA,
-                  0xFFFF7AA2, 0xFF58A6FF, 0xFF7DD3FC, 0xFF94A3B8];
-    let labels_y = [400usize, 580, 760, 940];
-    for row in 0..4 {
-        for col in 0..2 {
-            let x = 56 + col * 304;
-            let y = labels_y[row];
-            fill_rect(p, x, y, 250, 130, 0xFF111B2B);
-            icon(p, x + 85, y + 20, colors[row * 2 + col]);
-            fill_rect(p, x + 60, y + 108, 130, 3, colors[row * 2 + col]);
-        }
-    }
-    fill_rect(p, 24, 1270, W - 48, 130, 0xFF101827);
-    for i in 0..4 {
-        icon(p, 70 + i * 165, 1302, colors[i]);
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn _start() -> ! {
-    std::log(0, "[LAUNCHER USERSPACE] Real Rust launcher service online.").ok();
-
-    let surface = match std::surface_create(W as u32, H as u32, 0) {
-        Ok(id) => id,
-        Err(_) => {
-            std::log(0, "[LAUNCHER USERSPACE] Launcher surface allocation failed.").ok();
-            std::exit_with_code(1);
-        }
-    };
-
-    let mut pixels = [0u32; W * H];
-    render_launcher(&mut pixels);
-
-    for (offset, chunk) in pixels.chunks(1024).enumerate() {
-        let _ = std::surface_write(surface, (offset * 1024) as u32, chunk);
-    }
-    let _ = std::surface_flip();
-    std::log(0, "[LAUNCHER USERSPACE] Launcher frame committed from real userspace pixel buffer.").ok();
-
-    // Package-backed first-party launch path: the launcher asks the package service
-    // to resolve and launch stable package IDs; it does not embed app ELF knowledge.
-    let _ = std::ipc_send(1, 2, 0x5001, b"org.interos.settings");
-
-    loop {
-        let _ = std::event_poll(std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK, 100);
-        let _ = std::touch_poll();
-        std::yield_now();
-    }
-}
-
-#[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    std::log(0, "[LAUNCHER USERSPACE] Panic; terminating launcher task.").ok();
-    std::exit();
-}
+#[panic_handler]fn panic(_info:&PanicInfo)->!{std::log(0,"[LAUNCHER USERSPACE] Panic; terminating launcher task.").ok();std::exit();}
