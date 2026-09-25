@@ -150,6 +150,7 @@ impl RevocationRegistry {
         }
 
         self.rotated_keys.insert(proof.publisher.clone(), proof.new_key);
+        self.trust_key(proof.new_key, &proof.publisher);
         self.revoke_key(
             &proof.old_key,
             RevocationReason::SupersededByRotation,
