@@ -198,6 +198,13 @@ impl NetworkDeviceManager {
         }
     }
 
+    pub fn probe_receive(&mut self, out: &mut [u8]) -> Result<usize, NetError> {
+        match &mut self.backend {
+            NetworkDeviceBackend::Loopback(d) => d.receive(out),
+            NetworkDeviceBackend::E1000(d) => d.receive_probe(out),
+        }
+    }
+
     pub fn has_packets(&self) -> bool {
         match &self.backend { NetworkDeviceBackend::Loopback(d) => d.has_packets(), NetworkDeviceBackend::E1000(d) => d.has_packets() }
     }

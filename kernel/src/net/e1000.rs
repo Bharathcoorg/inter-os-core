@@ -265,7 +265,31 @@ impl NetworkDevice for E1000Device {
         Ok(())
     }
 
-    pub fn transmit_probe(&mut self, frame: &[u8]) -> Result<(), NetError> { if !self.link_up { return Err(NetError::DeviceDown); } let idx = self.tx_index as usize; self.transmit(frame)?; unsafe { let desc = &*self.tx_desc.add(idx); for _ in 0..100_000 { if desc.status & 1 != 0 { return Ok(()); } core::hint::spin_loop(); } } Err(NetError::TransmitFailed) }\n\n    fn receive(&mut self, out: &mut [u8]) -> Result<usize, NetError> {
+    pub fn transmit_probe(&mut self, frame: &[u8]) -> Result<(), NetError> {
+        if !self.link_up { return Err(NetError::DeviceDown); }
+        let idx = self.tx_index as usize;
+        self.transmit(frame)?;
+        unsafe {
+            let desc = &*self.tx_desc.add(idx);
+            for _ in 0..100_000 {
+                if desc.status & 1 != 0 { return Ok(()); }
+                core::hint::spin_loop();
+            }
+        }
+        Err(NetError::TransmitFailed)
+    }
+
+    /// Bounded hardware RX-ring readiness probe used during NIC bring-up.
+    pub fn receive_probe(&mut self, out: &mut [u8]) -> Result<usize, NetError> {
+        if !self.link_up { return Err(NetError::DeviceDown); }
+        for _ in 0..100_000 {
+            if self.has_packets() {
+                return self.receive(out);
+            }
+            core::hint::spin_loop();
+        }
+        Err(NetError::NoPacketAvailable)
+    }\n\n    fn receive(&mut self, out: &mut [u8]) -> Result<usize, NetError> {
         if !self.link_up { return Err(NetError::DeviceDown); }
         let idx = self.rx_index as usize;
         unsafe {
