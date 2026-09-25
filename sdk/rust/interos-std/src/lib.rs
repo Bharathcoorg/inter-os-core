@@ -1464,3 +1464,18 @@ pub fn package_list(cap_slot: usize, out_buf: &mut [u8]) -> Result<usize, i64> {
     let ret=unsafe{syscall3(SyscallNumber::PackageList,cap_slot as u64,out_buf.as_mut_ptr() as u64,out_buf.len() as u64)};
     if ret>=0{Ok(ret as usize)}else{Err(ret)}
 }
+
+
+/// Moves an owned window in the compositor.
+pub fn window_set_geometry(id:u32,x:i32,y:i32,z:u32,visible:bool)->Result<(),i64>{
+ let r=unsafe{syscall5(SyscallNumber::WindowSetGeometry,id as u64,x as i64 as u64,y as i64 as u64,z as u64,visible as u64)};if r==0{Ok(())}else{Err(r)}
+}
+/// Focuses the topmost live window under screen coordinates.
+pub fn window_focus(x:u32,y:u32)->Result<(),i64>{let r=unsafe{syscall2(SyscallNumber::WindowFocus,x as u64,y as u64)};if r==0{Ok(())}else{Err(r)}}
+/// Reads service lifecycle state.
+pub fn service_list(out:&mut[u8])->Result<usize,i64>{let r=unsafe{syscall2(SyscallNumber::ServiceList,out.as_mut_ptr() as u64,out.len() as u64)};if r>=0{Ok(r as usize)}else{Err(r)}}
+/// Reads a persistent setting.
+pub fn settings_get(cap_slot:usize,key:&str,out:&mut[u8])->Result<usize,i64>{let r=unsafe{syscall5(SyscallNumber::SettingsGet,cap_slot as u64,key.as_ptr() as u64,key.len() as u64,out.len() as u64,out.as_mut_ptr() as u64)};if r>=0{Ok(r as usize)}else{Err(r)}}
+/// Updates a persistent setting.
+pub fn settings_set(cap_slot:usize,key:&str,value:&[u8])->Result<(),i64>{let r=unsafe{syscall5(SyscallNumber::SettingsSet,cap_slot as u64,key.as_ptr() as u64,key.len() as u64,value.as_ptr() as u64,value.len() as u64)};if r==0{Ok(())}else{Err(r)}}
+
