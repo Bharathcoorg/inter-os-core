@@ -161,11 +161,14 @@ impl ShmRingBuffer {
     /// Writes data directly into the next available ring buffer slot.
     pub fn write(
         &mut self,
-        _sender: TaskId,
+        sender: TaskId,
         data: &[u8],
         flags: u32,
         ticks: u64,
     ) -> Result<u64, ShmError> {
+        if sender != self.producer {
+            return Err(ShmError::PermissionDenied);
+        }
         if data.len() > SHM_SLOT_CAPACITY {
             return Err(ShmError::ExceedsSlotCapacity);
         }
@@ -192,9 +195,12 @@ impl ShmRingBuffer {
     /// Reads data directly from the current head slot of the ring buffer.
     pub fn read(
         &mut self,
-        _receiver: TaskId,
+        receiver: TaskId,
         out_buf: &mut [u8],
     ) -> Result<(usize, u64), ShmError> {
+        if receiver != self.consumer {
+            return Err(ShmError::PermissionDenied);
+        }
         if self.is_empty() {
             return Err(ShmError::RingEmpty);
         }
@@ -248,7 +254,9 @@ impl ShmPipeManager {
         consumer: TaskId,
         name: &'static str,
     ) -> Result<(), ShmError> {
-        let idx = (pipe_id as usize) % self.pipes.len();
+        let idx = pipe_id as usize;
+        if idx >= self.pipes.len() || producer == consumer { return Err(ShmError::InvalidArguments); }
+        if self.pipes[idx].is_some() { return Err(ShmError::PermissionDenied); }
         self.pipes[idx] = Some(ShmRingBuffer::new(pipe_id, producer, consumer, name));
         Ok(())
     }
@@ -262,7 +270,7 @@ impl ShmPipeManager {
         flags: u32,
         ticks: u64,
     ) -> Result<u64, ShmError> {
-        let idx = (pipe_id as usize) % self.pipes.len();
+        let idx = pipe_id as usize;
         let pipe = self.pipes[idx].as_mut().ok_or(ShmError::PipeNotFound)?;
         let consumer = pipe.consumer;
         let seq = pipe.write(sender, data, flags, ticks)?;
