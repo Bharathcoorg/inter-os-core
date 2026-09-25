@@ -1421,7 +1421,20 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         }
         93 => { match sys_network_poll() { Ok(n) => n as i64, Err(e) => e as i64 } },
         94 => match sys_tcp_connect(crate::net::Ipv4Address::new((a0 >> 24) as u8, (a0 >> 16) as u8, (a0 >> 8) as u8, a0 as u8), a1 as u16, a2 as u16, a3 as u32) { Ok(id) => id as i64, Err(e) => e as i64 },
-        95 => match sys_net_send_socket(crate::net::SocketId(a0 as u32), crate::net::Ipv4Address::new((a1 >> 24) as u8, (a1 >> 16) as u8, (a1 >> 8) as u8, a1 as u8), a2 as u16, unsafe { core::slice::from_raw_parts(a3 as *const u8, a4 as usize) }) { r => r as i64 },
+        95 => {
+            let len = a4 as usize;
+            if len > 2048 { return SyscallResult::InvalidArguments as i64; }
+            let mut payload = [0u8; 2048];
+            if copy_from_user(&mut payload[..len], a3, len).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            sys_net_send_socket(
+                crate::net::SocketId(a0 as u32),
+                crate::net::Ipv4Address((a1 as u32).to_be_bytes()),
+                a2 as u16,
+                &payload[..len],
+            ) as i64
+        },
         _ => SyscallResult::UnknownSyscall as i64,
     }
 }
