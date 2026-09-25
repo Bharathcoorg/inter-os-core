@@ -1262,8 +1262,13 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             if kms.destroy_surface(a1 as u32) { 0 } else { SyscallResult::InvalidArguments as i64 }
         }
         76 => {
-            let out_len=a2 as usize; if out_len==0||out_len>4096{return SyscallResult::InvalidArguments as i64;}
-            let mut out=[0u8;4096]; match sys_package_registry(&mut out[..out_len]) { Ok(n)=>{if copy_to_user(a1,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;} n as i64}, Err(e)=>e as i64 }
+            // PackageRegistry: a1=cap_slot, a2=out_ptr, a3=out_len
+            let cap_slot=a1 as usize; let out_len=a3 as usize;
+            if out_len==0||out_len>4096{return SyscallResult::InvalidArguments as i64;}
+            let sched=SCHEDULER.lock(); let current=match sched.current_task(){Some(t)=>t,None=>return SyscallResult::PermissionDenied as i64};
+            if current.cap_table.verify(cap_slot,CapabilityType::FileSystemRead,Rights::READ).is_err(){return SyscallResult::PermissionDenied as i64;}
+            drop(sched);
+            let mut out=[0u8;4096]; match sys_package_registry(&mut out[..out_len]) { Ok(n)=>{if copy_to_user(a2,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;} n as i64}, Err(e)=>e as i64 }
         }
         75 => {
             let out_len=a3 as usize;
