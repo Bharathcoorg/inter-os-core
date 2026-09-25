@@ -6,6 +6,7 @@
 
 use bootloader_api::info::{MemoryRegionKind, MemoryRegions};
 use spin::Mutex;
+use alloc::vec::Vec;
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::mapper::MapToError;
 use x86_64::structures::paging::Mapper;
@@ -57,6 +58,13 @@ pub fn phys_mem_offset() -> VirtAddr {
 /// Allocates a single 4 KiB physical memory frame.
 pub fn allocate_frame() -> Option<PhysFrame<Size4KiB>> {
     FRAME_ALLOCATOR.lock().as_mut()?.allocate_frame()
+}
+
+/// Recycles a task-owned physical frame after its address space is destroyed.
+pub fn recycle_frame(frame: PhysFrame<Size4KiB>) {
+    if let Some(allocator) = FRAME_ALLOCATOR.lock().as_mut() {
+        allocator.recycle_frame(frame);
+    }
 }
 
 /// Initializes the 1 MiB kernel heap using the global page mapper and frame allocator.
@@ -197,7 +205,7 @@ impl TaskPageTable {
 
         let leaf_flags = flags | PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
         pt[p1_idx].set_frame(frame, leaf_flags);
-        self.allocated_frames.push(frame);
+        if !self.allocated_frames.contains(&frame) { self.allocated_frames.push(frame); }
 
         // If this page table is currently active, flush TLB
         let (active_cr3, _) = Cr3::read();
@@ -257,6 +265,19 @@ impl TaskPageTable {
         let leaf_frame = p1_entry.frame().ok()?;
         let phys_addr = leaf_frame.start_address() + offset;
         Some((phys_addr, p1_entry.flags()))
+    }
+}
+
+impl Drop for TaskPageTable {
+    fn drop(&mut self) {
+        let (active_cr3, _) = Cr3::read();
+        if active_cr3 == self.pml4_frame {
+            switch_to_kernel_page_table();
+        }
+        // Clear owned mappings before returning frames to the allocator.
+        for frame in self.allocated_frames.drain(..) {
+            recycle_frame(frame);
+        }
     }
 }
 
@@ -359,15 +380,22 @@ pub struct BootInfoFrameAllocator {
     memory_regions: &'static MemoryRegions,
     region_idx: usize,
     next_addr: u64,
+    recycled_frames: Vec<PhysFrame<Size4KiB>>,
 }
 
 impl BootInfoFrameAllocator {
+    /// Returns a task-owned physical frame to the allocator for reuse.
+    pub fn recycle_frame(&mut self, frame: PhysFrame<Size4KiB>) {
+        self.recycled_frames.push(frame);
+    }
+
     /// Creates a FrameAllocator from the passed memory map.
     pub unsafe fn init(memory_regions: &'static MemoryRegions) -> Self {
         let mut allocator = BootInfoFrameAllocator {
             memory_regions,
             region_idx: 0,
             next_addr: 0,
+            recycled_frames: Vec::new(),
         };
         allocator.advance_to_usable_region();
         allocator
@@ -390,6 +418,9 @@ impl BootInfoFrameAllocator {
 
 unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
+        if let Some(frame) = self.recycled_frames.pop() {
+            return Some(frame);
+        }
         self.advance_to_usable_region();
         if self.region_idx >= self.memory_regions.len() {
             return None;
