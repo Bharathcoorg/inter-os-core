@@ -1964,7 +1964,6 @@ pub fn sys_camera_capture(
     let sched = crate::task::scheduler::SCHEDULER.lock();
     let has_cap = if let Some(tcb) = sched.get_task(current_id) {
         tcb.cap_table.has_capability(crate::capability::CapabilityType::HardwarePortIo, crate::capability::Rights::READ)
-            || tcb.cap_table.has_capability(crate::capability::CapabilityType::FrameBufferDirect, crate::capability::Rights::WRITE)
     } else {
         false
     };
@@ -2171,8 +2170,9 @@ pub fn sys_shm_pipe_create(
     let current_id = sched.current_task_id().ok_or(SyscallResult::PermissionDenied)?;
     let current_task = sched.get_task(current_id).ok_or(SyscallResult::PermissionDenied)?;
 
-    let has_cap = current_task.cap_table.has_capability(CapabilityType::ShmProducer, Rights::WRITE)
-        || current_task.cap_table.has_capability(CapabilityType::ShmConsumer, Rights::READ);
+    // Pipe creation establishes the producer endpoint, so a consumer-only
+    // capability can never be upgraded into producer authority here.
+    let has_cap = current_task.cap_table.has_capability(CapabilityType::ShmProducer, Rights::WRITE);
 
     if !has_cap {
         return Err(SyscallResult::PermissionDenied);
@@ -2282,10 +2282,10 @@ pub fn sys_event_poll(interest_mask: u32, timeout_ticks: u32) -> Result<u32, Sys
     let current_id = sched.current_task_id().ok_or(SyscallResult::PermissionDenied)?;
     let current_task = sched.get_task(current_id).ok_or(SyscallResult::PermissionDenied)?;
 
-    // Capability verification: Caller must hold EventPoll capability or SerialOutput
+    // Event polling is a dedicated kernel resource. Diagnostic logging authority
+    // must never substitute for an event capability.
     let has_cap = current_task.cap_table.has_capability(CapabilityType::EventPoll, Rights::INVOKE)
-        || current_task.cap_table.has_capability(CapabilityType::EventPoll, Rights::READ)
-        || current_task.cap_table.has_capability(CapabilityType::SerialOutput, Rights::WRITE);
+        || current_task.cap_table.has_capability(CapabilityType::EventPoll, Rights::READ);
 
     if !has_cap {
         return Err(SyscallResult::PermissionDenied);
