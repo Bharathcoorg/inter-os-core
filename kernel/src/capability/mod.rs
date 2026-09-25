@@ -328,7 +328,7 @@ impl CapabilityTable {
         &self,
         expected_type: CapabilityType,
         required_rights: Rights,
-    ) -> Result<(), CapError> {
+    ) -> bool {
         for slot in &self.slots {
             let Some(cap) = slot.cap.as_ref() else { continue; };
             if cap.cap_type != expected_type || !cap.rights.contains(required_rights) {
@@ -339,11 +339,14 @@ impl CapabilityTable {
                     cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF,
                     crate::interrupts::get_system_ticks(),
                     required_rights,
-                )?;
+                ).is_ok() {
+                    return true;
+                }
+                return false;
             }
-            return Ok(());
+            return true;
         }
-        Err(CapError::InsufficientRights)
+        false
     }
 
     /// Verifies that the capability in `slot_idx` matches the expected type, rights, and specific object ID.
