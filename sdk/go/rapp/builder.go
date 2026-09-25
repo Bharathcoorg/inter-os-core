@@ -3,20 +3,18 @@ package rapp
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 )
 
-var (
-	// RappMagic matches the kernel definition b"RAPP".
-	RappMagic = []byte{'R', 'A', 'P', 'P'}
-	// RappVersion matches the kernel definition 1.
-	RappVersion uint16 = 1
-)
+var RappMagic = []byte{'R', 'A', 'P', 'P'}
+const RappVersion uint16 = 2
 
-// Builder provides a fluent API for assembling and signing .rapp packages.
+// Builder assembles canonical RAPP v2 packages.
 type Builder struct {
 	packageID    string
-	publisherID  string
+	publisherKey [32]byte
+	hasPublisher bool
 	version      Version
 	arch         Arch
 	capabilities []CapabilityType
@@ -24,108 +22,79 @@ type Builder struct {
 	payload      []byte
 }
 
-// NewBuilder initializes a new .rapp package builder.
 func NewBuilder(packageID string) *Builder {
 	return &Builder{
 		packageID: packageID,
-		version:   Version{Major: 1, Minor: 0, Patch: 0},
-		arch:      ArchX86_64,
-		limits: ResourceLimits{
-			MaxCpuTicks:    20000,
-			MaxMemoryBytes: 65536,
-		},
+		version: Version{Major: 1, Minor: 0, Patch: 0},
+		arch: ArchX86_64,
+		limits: ResourceLimits{MaxCpuTicks: 20000, MaxMemoryBytes: 65536},
 	}
 }
 
-func (b *Builder) SetPublisher(pubID string) *Builder {
-	b.publisherID = pubID
+// SetPublisherKey configures the 32-byte Ed25519 public key embedded in RAPP v2.
+func (b *Builder) SetPublisherKey(key []byte) *Builder {
+	if len(key) == 32 {
+		copy(b.publisherKey[:], key)
+		b.hasPublisher = true
+	}
 	return b
 }
 
-func (b *Builder) SetArch(arch Arch) *Builder {
-	b.arch = arch
+// SetPublisher accepts a 64-character hexadecimal Ed25519 public key for compatibility.
+func (b *Builder) SetPublisher(hexKey string) *Builder {
+	decoded, err := hex.DecodeString(hexKey)
+	if err == nil && len(decoded) == 32 {
+		return b.SetPublisherKey(decoded)
+	}
 	return b
 }
 
+func (b *Builder) SetArch(arch Arch) *Builder { b.arch = arch; return b }
 func (b *Builder) SetVersion(maj, min, patch uint16) *Builder {
-	b.version = Version{Major: maj, Minor: min, Patch: patch}
-	return b
+	b.version = Version{Major: maj, Minor: min, Patch: patch}; return b
 }
-
 func (b *Builder) AddCapability(cap CapabilityType) *Builder {
-	b.capabilities = append(b.capabilities, cap)
-	return b
+	b.capabilities = append(b.capabilities, cap); return b
 }
-
 func (b *Builder) SetLimits(ticks, memBytes uint64) *Builder {
-	b.limits = ResourceLimits{MaxCpuTicks: ticks, MaxMemoryBytes: memBytes}
-	return b
+	b.limits = ResourceLimits{MaxCpuTicks: ticks, MaxMemoryBytes: memBytes}; return b
 }
+func (b *Builder) SetPayload(payload []byte) *Builder { b.payload = payload; return b }
 
-func (b *Builder) SetPayload(payload []byte) *Builder {
-	b.payload = payload
-	return b
-}
-
-// Sign computes the developer cryptographic signature.
-func (b *Builder) Sign(developerKey []byte) [32]byte {
-	digest := Sha256Digest(b.payload)
-	return ComputeSignature(b.packageID, b.version, digest, developerKey)
-}
-
-// BuildBinary serializes the package into binary .rapp bytes matching the kernel ABI.
+// BuildBinary builds an unsigned RAPP v2 binary. The returned package is not
+// executable until signed and trusted by the kernel.
 func (b *Builder) BuildBinary() ([]byte, error) {
-	if b.packageID == "" {
-		return nil, errors.New("rapp: package ID cannot be empty")
-	}
+	if b.packageID == "" { return nil, errors.New("rapp: package ID cannot be empty") }
+	if !b.hasPublisher { return nil, errors.New("rapp: Ed25519 publisher public key is required") }
+	if len(b.capabilities) > 1024 { return nil, errors.New("rapp: too many capabilities") }
 
+	const headerSize = 0xB4
+	capsSize := len(b.capabilities) * 2
 	buf := new(bytes.Buffer)
-
-	// 1. Magic Header (4 bytes: "RAPP")
+	buf.Grow(headerSize + capsSize + len(b.payload))
 	buf.Write(RappMagic)
-
-	// 2. Format Version (u16 LE = 1)
 	binary.Write(buf, binary.LittleEndian, RappVersion)
-
-	// 3. Architecture (u16 LE)
 	binary.Write(buf, binary.LittleEndian, uint16(b.arch))
-
-	// 4. Package ID (32 bytes, null-padded)
-	var pkgIDBuf [32]byte
-	copy(pkgIDBuf[:], []byte(b.packageID))
-	buf.Write(pkgIDBuf[:])
-
-	// 5. Publisher ID (16 bytes, null-padded)
-	var pubIDBuf [16]byte
-	copy(pubIDBuf[:], []byte(b.publisherID))
-	buf.Write(pubIDBuf[:])
-
-	// 6. Version Tuple (3 * u16 LE)
+	var pkgID [32]byte
+	copy(pkgID[:], []byte(b.packageID))
+	buf.Write(pkgID[:])
+	buf.Write(b.publisherKey[:])
 	binary.Write(buf, binary.LittleEndian, b.version.Major)
 	binary.Write(buf, binary.LittleEndian, b.version.Minor)
 	binary.Write(buf, binary.LittleEndian, b.version.Patch)
-
-	// 7. Capability count (u16 LE)
 	binary.Write(buf, binary.LittleEndian, uint16(len(b.capabilities)))
-
-	// 8. SHA-256 Digest (32 bytes)
 	digest := Sha256Digest(b.payload)
 	buf.Write(digest[:])
-
-	// 9. Ed25519 signature slot (64 bytes zeros)
-	var sigBuf [64]byte
-	buf.Write(sigBuf[:])
-
-	// 10. Payload length (u32 LE)
+	buf.Write(make([]byte, 64))
 	binary.Write(buf, binary.LittleEndian, uint32(len(b.payload)))
-
-	// 11. Capabilities (N * u16 LE)
-	for _, cap := range b.capabilities {
-		binary.Write(buf, binary.LittleEndian, uint16(cap))
-	}
-
-	// 12. Payload bytes
+	for _, cap := range b.capabilities { binary.Write(buf, binary.LittleEndian, uint16(cap)) }
 	buf.Write(b.payload)
-
 	return buf.Bytes(), nil
+}
+
+// BuildSigned builds and Ed25519-signs a complete canonical RAPP v2 package.
+func (b *Builder) BuildSigned(privateKey []byte) ([]byte, error) {
+	unsigned, err := b.BuildBinary()
+	if err != nil { return nil, err }
+	return SignBinary(unsigned, privateKey)
 }
