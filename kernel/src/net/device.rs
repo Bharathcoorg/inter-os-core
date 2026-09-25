@@ -196,19 +196,21 @@ impl NetworkDeviceManager {
     }
 }
 
-impl NetworkDevice for NetworkDeviceManager {
-    fn mac(&self) -> MacAddress { self.info().mac }
-    fn transmit(&mut self, frame: &[u8]) -> Result<(), NetError> { NetworkDeviceManager::transmit(self, frame) }
-    fn receive(&mut self, out: &mut [u8]) -> Result<usize, NetError> { NetworkDeviceManager::receive(self, out) }
-    fn has_packets(&self) -> bool { self.backend.has_packets() }
-}
-
     /// Replaces the loopback backend with an initialized Ethernet controller.
     pub fn attach_e1000(&mut self, device: E1000Device) {
         self.backend = NetworkDeviceBackend::E1000(device);
         self.kind = NetworkBackend::EthernetPci;
         self.mtu = 1500;
         self.link_up = true;
+    }
+}
+
+impl NetworkDevice for NetworkDeviceManager {
+    fn mac(&self) -> MacAddress { self.info().mac }
+    fn transmit(&mut self, frame: &[u8]) -> Result<(), NetError> { NetworkDeviceManager::transmit(self, frame) }
+    fn receive(&mut self, out: &mut [u8]) -> Result<usize, NetError> { NetworkDeviceManager::receive(self, out) }
+    fn has_packets(&self) -> bool {
+        NetworkDeviceManager::has_packets(self)
     }
 }
 
