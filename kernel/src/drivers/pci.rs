@@ -48,6 +48,24 @@ pub struct PciDevice {
 }
 
 impl PciDevice {
+    /// Reads a memory BAR base address from the device configuration header.
+    pub fn memory_bar(&self, index: u8) -> Option<u64> {
+        if index >= 6 { return None; }
+        let offset = 0x10u8.saturating_add(index.saturating_mul(4));
+        let low = pci_read_u32(self.addr, offset);
+        if low == 0 || low == 0xFFFF_FFFF { return None; }
+        if low & 1 != 0 { return None; }
+        let base = (low & 0xFFFF_FFF0) as u64;
+        if low & 0x4 != 0 {
+            if index >= 5 { return None; }
+            let high = pci_read_u32(self.addr, offset + 4) as u64;
+            Some(base | (high << 32))
+        } else {
+            Some(base)
+        }
+    }
+
+
     /// Returns true if this device is an Ethernet Network Controller (Class 0x02, Subclass 0x00).
     pub fn is_network_controller(&self) -> bool {
         self.class_code == 0x02 && self.subclass == 0x00
@@ -171,6 +189,12 @@ pub fn scan_pci_bus() -> Vec<PciDevice> {
     }
 
     devices
+}
+
+
+/// Returns the first discovered Intel E1000-compatible PCI controller.
+pub fn find_e1000() -> Option<PciDevice> {
+    scan_pci_bus().into_iter().find(|d| d.is_intel_e1000())
 }
 
 /// Initializes and self-tests the PCI configuration space scanner.
