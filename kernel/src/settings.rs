@@ -3,7 +3,6 @@
 //! Settings are authoritative kernel state mirrored to a crash-consistent ATA
 //! journal. Userspace accesses them only through capability-checked syscalls.
 
-use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 
