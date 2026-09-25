@@ -146,6 +146,9 @@ jobs:
           done
       - name: Verify kernel QEMU target
         run: cargo check --manifest-path kernel/Cargo.toml --target x86_64-unknown-none
+      - name: Configure portable bare-metal crypto backend
+        run: echo 'RUSTFLAGS=--cfg curve25519_dalek_backend="serial"' >> "$GITHUB_ENV"
+
       - name: Build kernel QEMU image input
         run: cargo build --manifest-path kernel/Cargo.toml --target x86_64-unknown-none
       - name: Build bootable BIOS image
