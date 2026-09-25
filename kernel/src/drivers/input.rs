@@ -96,6 +96,7 @@ pub fn pump_touch_events() {
     while let Some(gesture) = touch.gesture_queue.pop_front() {
         let event = InputEvent::from_gesture(gesture);
         pipeline.push(event);
+        dispatch_to_focused_window(event);
     }
 }
 
