@@ -382,10 +382,18 @@ pub fn on_timer_tick() {
 
 /// Terminates the current task and switches to the next available task.
 pub fn terminate_current() -> ! {
-    let (prev, next) = {
+    let (exiting_id, exit_code, prev, next) = {
         let mut sched = SCHEDULER.lock();
-        sched.prepare_terminate()
+        let id = sched.current_task_id().unwrap_or(TaskId(0));
+        let code = sched.current_task().map(|t| t.exit_code).unwrap_or(0);
+        let (prev, next) = sched.prepare_terminate();
+        (id, code, prev, next)
     };
+
+    // Publish the exit only after releasing the scheduler lock. Service
+    // supervision can then safely acquire its registry without lock inversion.
+    crate::services::record_exit(exiting_id, exit_code);
+    crate::service::SERVICE_SUPERVISOR.lock().record_exit(exiting_id, exit_code);
 
     if let (Some(prev_ptr), Some(next_ptr)) = (prev, next) {
         unsafe {
