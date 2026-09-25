@@ -9,7 +9,7 @@ const (
 	ArchRiscv64 Arch = 2
 )
 
-// CapabilityType represents a zero-trust fine-grained hardware or system capability.
+// CapabilityType represents a kernel RAPP v2 capability identifier.
 type CapabilityType uint16
 
 const (
@@ -27,6 +27,10 @@ const (
 	CapNetworkSocket    CapabilityType = 12
 	CapNetworkSend      CapabilityType = 13
 	CapNetworkReceive   CapabilityType = 14
+	CapShmProducer      CapabilityType = 15
+	CapShmConsumer      CapabilityType = 16
+	CapEventPoll        CapabilityType = 17
+	CapSystemControl    CapabilityType = 18
 )
 
 // CapabilityRisk classifies the permission risk level of a capability.
@@ -38,7 +42,7 @@ const (
 	RiskForbidden
 )
 
-// ResourceLimits defines CPU and RAM execution constraints.
+// ResourceLimits defines optional tooling-side execution constraints.
 type ResourceLimits struct {
 	MaxCpuTicks    uint64
 	MaxMemoryBytes uint64
