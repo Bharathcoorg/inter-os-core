@@ -27,6 +27,19 @@ pub extern "C" fn _start() -> ! {
     }
 
 
+    // Deterministic lifecycle smoke: exercise the real stop -> start path
+    // once after bootstrap. This makes QEMU validate more than initial spawning.
+    match std::service_stop(1) {
+        Ok(_) => {
+            let _ = std::log(0, "[PID1] Service stop lifecycle contract exercised.");
+            match std::service_start(1) {
+                Ok(_) => { let _ = std::log(0, "[PID1] Service restart lifecycle contract exercised."); }
+                Err(_) => { let _ = std::log(0, "[PID1] Service restart lifecycle contract failed."); }
+            }
+        }
+        Err(_) => { let _ = std::log(0, "[PID1] Service stop lifecycle contract failed."); }
+    }
+
     // Establish the first userspace service-manager contract: PID 1 observes
     // the authoritative kernel service registry rather than hard-coding task IDs.
     let mut service_buf = [0u8; SERVICE_BUFFER];
