@@ -70,6 +70,8 @@ pub fn init() {
         let mut records = SERVICE_RECORDS.lock();
         records[ServiceId::Init as usize] = Some(ServiceRecord { id: ServiceId::Init, task: TaskId(0), state: ServiceState::Running });
     }
+    // Service definitions are registered but not started here. PID 1 owns
+    // userspace service lifecycle through the ServiceStart syscall.
     let defs: [(ServiceId, &'static str, extern "C" fn() -> !, u8); 8] = [
         (ServiceId::Display, "displayd", displayd, 6),
         (ServiceId::Input, "inputd", inputd, 6),
@@ -80,37 +82,47 @@ pub fn init() {
         (ServiceId::Audio, "audiod", audiod, 5),
         (ServiceId::Camera, "camerad", camerad, 5),
     ];
-    let mut tasks: [(ServiceId, TaskId); 8] = [(ServiceId::Display, TaskId(0)); 8];
-    for (idx, (id, name, entry, priority)) in defs.into_iter().enumerate() {
-        let task = SCHEDULER.lock().spawn(name, entry, caps(id), priority);
-        crate::ipc::IPC_ROUTER.lock().register_task(task);
-        tasks[idx] = (id, task);
-        SERVICE_HEARTBEATS[id as usize].store(crate::interrupts::get_system_ticks(), Ordering::Release);
-        SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task, state: ServiceState::Running });
-        crate::serial_println!("[SERVICE] {} registered as Task {} with dedicated capability domain.", name, task.0);
+    for (id, _name, _entry, _priority) in defs {
+        SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord {
+            id, task: TaskId(0), state: ServiceState::Declared
+        });
     }
-
-    // Replace the placeholder IPC send token with explicit object-targeted
-    // capabilities. Each service may send only to another registered service,
-    // never to an arbitrary task ID.
-    let mut sched = SCHEDULER.lock();
-    for (sender_id, sender_task) in tasks {
-        let sender = sched.get_task_mut(sender_task).expect("service task must exist");
-        for (target_id, target_task) in tasks {
-            if sender_id != target_id {
-                let cap_id = 0x6000 + ((sender_id as u64) << 8) + target_id as u64;
-                let _ = sender.cap_table.insert(Capability {
-                    id: CapabilityId(cap_id),
-                    cap_type: CapabilityType::IpcSend,
-                    rights: Rights::WRITE,
-                    object_id: target_task.0,
-                });
-            }
-        }
-    }
-    drop(sched);
+    crate::serial_println!("[SERVICE] Service definitions registered; PID 1 controls startup.");
+}
     crate::serial_println!("[SERVICE] Phase 25 service architecture online with explicit service-to-service IPC targets.");
 }
+
+/// Starts one declared service on behalf of userspace PID 1.
+pub fn start(id: ServiceId) -> Result<TaskId, &'static str> {
+    if id == ServiceId::Init { return Ok(TaskId(0)); }
+    let existing = SERVICE_RECORDS.lock()[id as usize];
+    if let Some(record) = existing {
+        if record.state == ServiceState::Running && record.task != TaskId(0) { return Ok(record.task); }
+    } else { return Err("service not declared"); }
+    let (name, entry, priority): (&'static str, extern "C" fn() -> !, u8) = match id {
+        ServiceId::Display => ("displayd", displayd, 6), ServiceId::Input => ("inputd", inputd, 6),
+        ServiceId::Storage => ("storaged", storaged, 5), ServiceId::Network => ("netd", netd, 5),
+        ServiceId::Power => ("powerd", powerd, 7), ServiceId::Modem => ("modemd", modemd, 6),
+        ServiceId::Audio => ("audiod", audiod, 5), ServiceId::Camera => ("camerad", camerad, 5),
+        ServiceId::Init => return Ok(TaskId(0)),
+    };
+    let task = SCHEDULER.lock().spawn(name, entry, caps(id), priority);
+    crate::ipc::IPC_ROUTER.lock().register_task(task);
+    SERVICE_HEARTBEATS[id as usize].store(crate::interrupts::get_system_ticks(), Ordering::Release);
+    SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task, state: ServiceState::Running });
+    Ok(task)
+}
+
+/// Stops a service task without allowing userspace to terminate arbitrary tasks.
+pub fn stop(id: ServiceId) -> Result<(), &'static str> {
+    if id == ServiceId::Init { return Err("init cannot be stopped"); }
+    let record = SERVICE_RECORDS.lock()[id as usize].ok_or("service not declared")?;
+    if record.task == TaskId(0) { return Ok(()); }
+    SCHEDULER.lock().terminate_task(record.task, 0).map_err(|_| "service termination failed")?;
+    SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: record.task, state: ServiceState::Stopped });
+    Ok(())
+}
+
 
 /// Returns a task ID for a named service when registered.
 pub fn task_id(id: ServiceId) -> Option<TaskId> {
