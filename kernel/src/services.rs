@@ -119,6 +119,11 @@ pub fn launch_verified_package(
     let existing = SERVICE_RECORDS.lock()[id as usize];
     if let Some(record) = existing {
         if record.state == ServiceState::Running && record.task != TaskId(0) {
+            let scheduler = SCHEDULER.lock();
+            let task = scheduler.get_task(record.task).ok_or("running service task not found")?;
+            if task.parent_id != parent_id {
+                return Err("running service is not owned by caller");
+            }
             return Ok(record.task);
         }
         if record.state == ServiceState::Starting {
