@@ -10,7 +10,7 @@ use crate::drivers::{BlockDevice, ATA_PRIMARY, SECTOR_SIZE};
 
 pub const JOURNAL_MAGIC: [u8; 4] = *b"IOSJ";
 pub const JOURNAL_VERSION: u32 = 1;
-const SLOT_SECTORS: u32 = 8;
+const SLOT_SECTORS: u32 = 128;
 const SLOT_COUNT: u32 = 8;
 const HEADER_SIZE: usize = 64;
 const PAYLOAD_CAPACITY: usize = (SLOT_SECTORS as usize * SECTOR_SIZE) - HEADER_SIZE;
