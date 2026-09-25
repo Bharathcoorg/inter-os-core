@@ -7,6 +7,7 @@
 pub const COMPOSITOR_MAGIC: [u8; 4] = *b"ICMP";
 pub const COMPOSITOR_VERSION: u8 = 1;
 pub const COMPOSITOR_MAX_MESSAGE: usize = 256;
+pub const COMPOSITOR_HEADER_SIZE: usize = 40;
 pub const COMPOSITOR_MSG_TYPE: u32 = 0x434F_4D50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +35,7 @@ pub struct CompositorRequest {
 }
 
 impl CompositorRequest {
-    pub const HEADER_SIZE: usize = 24;
+    pub const HEADER_SIZE: usize = COMPOSITOR_HEADER_SIZE;
 
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, &'static str> {
         if out.len() < Self::HEADER_SIZE { return Err("compositor buffer too small"); }
@@ -46,6 +47,10 @@ impl CompositorRequest {
         out[12..16].copy_from_slice(&self.width.to_le_bytes());
         out[16..20].copy_from_slice(&self.height.to_le_bytes());
         out[20..24].copy_from_slice(&self.pixel_offset.to_le_bytes());
+        out[24..28].copy_from_slice(&self.x.to_le_bytes());
+        out[28..32].copy_from_slice(&self.y.to_le_bytes());
+        out[32..36].copy_from_slice(&self.z_order.to_le_bytes());
+        out[36] = if self.visible { 1 } else { 0 };
         Ok(Self::HEADER_SIZE)
     }
 
@@ -68,10 +73,10 @@ impl CompositorRequest {
             surface_id: u32::from_le_bytes(data[8..12].try_into().unwrap()),
             width: u32::from_le_bytes(data[12..16].try_into().unwrap()),
             height: u32::from_le_bytes(data[16..20].try_into().unwrap()),
-            x: 0,
-            y: 0,
-            z_order: 0,
-            visible: true,
+            x: i32::from_le_bytes(data[24..28].try_into().unwrap()),
+            y: i32::from_le_bytes(data[28..32].try_into().unwrap()),
+            z_order: u32::from_le_bytes(data[32..36].try_into().unwrap()),
+            visible: data[36] != 0,
             pixel_offset: u32::from_le_bytes(data[20..24].try_into().unwrap()),
         })
     }
@@ -109,7 +114,7 @@ mod tests {
             op: CompositorOp::CreateSurface, surface_id: 7, width: 320, height: 480,
             x: 0, y: 0, z_order: 1, visible: true, pixel_offset: 0,
         };
-        let mut buf = [0u8; 64];
+        let mut buf = [0u8; COMPOSITOR_HEADER_SIZE];
         let n = req.encode(&mut buf).unwrap();
         assert_eq!(CompositorRequest::decode(&buf[..n]).unwrap(), req);
         buf[0] = b'X';
