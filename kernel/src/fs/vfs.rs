@@ -589,7 +589,7 @@ pub fn init() {
     vfs.create_static_file("/system/bin/terminal", crate::task::APP_TERMINAL_ELF);
 
     let settings_rapp = crate::package::build_rapp(
-        "org.interos.settings", "interos.first-party", (1, 0, 0),
+        "org.interos.settings", "interos_official", (1, 0, 0),
         crate::package::RappArch::X86_64, &[], crate::task::APP_SETTINGS_ELF,
     );
     vfs.create_file("/packages/org.interos.settings.rapp", &settings_rapp, true);
