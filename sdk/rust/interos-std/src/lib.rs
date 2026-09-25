@@ -5,6 +5,8 @@
 
 #![no_std]
 
+pub mod design;
+
 /// Well-known system call identifiers matching the Inter OS microkernel.
 #[repr(u64)]
 pub enum SyscallNumber {
