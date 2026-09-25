@@ -53,7 +53,8 @@ extern "C" fn modemd() -> ! { service_loop(ServiceId::Modem, "[modemd] Modem ser
 extern "C" fn audiod() -> ! { service_loop(ServiceId::Audio, "[audiod] Audio service online: codec/audio HAL boundary active.") }
 extern "C" fn camerad() -> ! { service_loop(ServiceId::Camera, "[camerad] Camera service online: sensor/CSI boundary active.") }
 
-pub static mut SERVICE_RECORDS: [Option<ServiceRecord>; 9] = [None; 9];
+pub static SERVICE_RECORDS: spin::Mutex<[Option<ServiceRecord>; 9]> = spin::Mutex::new([None; 9]);
+const HEARTBEAT_TIMEOUT_TICKS: u64 = 500;
 static SERVICE_HEARTBEATS: [core::sync::atomic::AtomicU64; 9] = [
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
@@ -64,7 +65,10 @@ static SERVICES_INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// Starts the Phase 25 service set once, with isolated capability tables.
 pub fn init() {
     if SERVICES_INITIALIZED.swap(true, Ordering::AcqRel) { return; }
-    unsafe { SERVICE_RECORDS[ServiceId::Init as usize] = Some(ServiceRecord { id: ServiceId::Init, task: TaskId(0), state: ServiceState::Running }); }
+    {
+        let mut records = SERVICE_RECORDS.lock();
+        records[ServiceId::Init as usize] = Some(ServiceRecord { id: ServiceId::Init, task: TaskId(0), state: ServiceState::Running });
+    }
     let defs: [(ServiceId, &'static str, extern "C" fn() -> !, u8); 8] = [
         (ServiceId::Display, "displayd", displayd, 6),
         (ServiceId::Input, "inputd", inputd, 6),
@@ -80,7 +84,8 @@ pub fn init() {
         let task = SCHEDULER.lock().spawn(name, entry, caps(id), priority);
         crate::ipc::IPC_ROUTER.lock().register_task(task);
         tasks[idx] = (id, task);
-        unsafe { SERVICE_RECORDS[id as usize] = Some(ServiceRecord { id, task, state: ServiceState::Running }); }
+        SERVICE_HEARTBEATS[id as usize].store(crate::interrupts::get_system_ticks(), Ordering::Release);
+        SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task, state: ServiceState::Running });
         crate::serial_println!("[SERVICE] {} registered as Task {} with dedicated capability domain.", name, task.0);
     }
 
@@ -108,7 +113,7 @@ pub fn init() {
 
 /// Returns a task ID for a named service when registered.
 pub fn task_id(id: ServiceId) -> Option<TaskId> {
-    unsafe { SERVICE_RECORDS[id as usize].map(|r| r.task) }
+    SERVICE_RECORDS.lock()[id as usize].map(|r| r.task)
 }
 
 /// Records a service heartbeat. Service workers call this before yielding so
@@ -121,26 +126,51 @@ pub fn heartbeat(id: ServiceId) {
 /// failed. Restart orchestration is intentionally deferred until a userspace
 /// init/service-manager ABI exists; the kernel never silently recreates a task.
 pub fn supervise() {
+    let now = crate::interrupts::get_system_ticks();
+    let mut records = SERVICE_RECORDS.lock();
     let sched = SCHEDULER.lock();
-    for idx in 1..SERVICE_RECORDS.len() {
+    for idx in 1..records.len() {
         let id = match idx {
             1 => ServiceId::Display, 2 => ServiceId::Input, 3 => ServiceId::Storage,
             4 => ServiceId::Network, 5 => ServiceId::Power, 6 => ServiceId::Modem,
             7 => ServiceId::Audio, 8 => ServiceId::Camera, _ => continue,
         };
-        let task_id = unsafe { SERVICE_RECORDS[idx].map(|r| r.task) };
-        if let Some(task_id) = task_id {
-            if let Some(task) = sched.get_task(task_id) {
-                let state = match task.state {
-                    crate::task::TaskState::Terminated | crate::task::TaskState::Zombie => ServiceState::Failed,
-                    _ => ServiceState::Running,
-                };
-                unsafe { SERVICE_RECORDS[idx] = Some(ServiceRecord { id, task: task_id, state }); }
-            } else {
-                unsafe { SERVICE_RECORDS[idx] = Some(ServiceRecord { id, task: task_id, state: ServiceState::Failed }); }
-            }
+        let Some(record) = records[idx] else { continue; };
+        let Some(task_id) = record.task.into() else { continue; };
+        let stale = now.saturating_sub(SERVICE_HEARTBEATS[idx].load(Ordering::Acquire)) > HEARTBEAT_TIMEOUT_TICKS;
+        let failed = match sched.get_task(task_id) {
+            Some(task) => matches!(task.state, crate::task::TaskState::Terminated | crate::task::TaskState::Zombie),
+            None => true,
+        };
+        let state = if failed || stale { ServiceState::Failed } else { ServiceState::Running };
+        records[idx] = Some(ServiceRecord { id, task: task_id, state });
+    }
+}
+
+/// Serializes the authoritative Phase 25 service registry for diagnostics.
+pub fn snapshot(out: &mut [u8]) -> usize {
+    use core::fmt::Write;
+    struct W<'a> { b: &'a mut [u8], n: usize }
+    impl<'a> Write for W<'a> {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            let k = s.len().min(self.b.len().saturating_sub(self.n));
+            self.b[self.n..self.n + k].copy_from_slice(&s.as_bytes()[..k]);
+            self.n += k;
+            Ok(())
         }
     }
+    let records = SERVICE_RECORDS.lock();
+    let mut w = W { b: out, n: 0 };
+    for record in records.iter().flatten() {
+        let state = match record.state {
+            ServiceState::Declared => "declared",
+            ServiceState::Running => "running",
+            ServiceState::Stopped => "stopped",
+            ServiceState::Failed => "failed",
+        };
+        let _ = write!(w, "{}|{}|{}\n", record.id as u8, record.task.0, state);
+    }
+    w.n
 }
 
 /// Returns the most recent heartbeat tick for a service.
