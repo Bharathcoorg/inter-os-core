@@ -240,7 +240,7 @@ pub fn sys_get_task_id() -> TaskId {
 fn require_system_control() -> Result<(), SyscallResult> {
     let sched = SCHEDULER.lock();
     let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    task.cap_table.has_capability(CapabilityType::SystemControl, Rights::INVOKE)
+    task.cap_table.authorize_capability(CapabilityType::SystemControl, Rights::INVOKE)
         .then_some(()).ok_or(SyscallResult::PermissionDenied)
 }
 
@@ -1367,7 +1367,7 @@ pub fn sys_secure_ipc_session(peer: TaskId) -> Result<u64, SyscallResult> {
     let current_task = sys_get_task_id();
     let sched = SCHEDULER.lock();
     let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    if !task.cap_table.has_capability(CapabilityType::IpcSend, Rights::WRITE) {
+    if !task.cap_table.authorize_capability(CapabilityType::IpcSend, Rights::WRITE) {
         return Err(SyscallResult::PermissionDenied);
     }
     drop(sched);
@@ -1391,9 +1391,9 @@ pub fn sys_devfs_io(action: u32, path: &str, buf: &mut [u8]) -> Result<usize, Sy
     let sched = SCHEDULER.lock();
     let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
     let allowed = if action == 0 {
-        task.cap_table.has_capability(CapabilityType::FileSystemRead, Rights::READ)
+        task.cap_table.authorize_capability(CapabilityType::FileSystemRead, Rights::READ)
     } else {
-        task.cap_table.has_capability(CapabilityType::FileSystemWrite, Rights::WRITE)
+        task.cap_table.authorize_capability(CapabilityType::FileSystemWrite, Rights::WRITE)
     };
     drop(sched);
     if !allowed { return Err(SyscallResult::PermissionDenied); }
@@ -1638,7 +1638,7 @@ pub fn sys_telephony_set_data(enabled: bool) -> Result<bool, SyscallResult> {
 pub fn sys_surface_create(width: u32, height: u32, z_order: u32) -> Result<u32, SyscallResult> {
     let sched = SCHEDULER.lock();
     let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    if !task.cap_table.has_capability(CapabilityType::FrameBufferDirect, Rights::WRITE) { return Err(SyscallResult::PermissionDenied); }
+    if !task.cap_table.authorize_capability(CapabilityType::FrameBufferDirect, Rights::WRITE) { return Err(SyscallResult::PermissionDenied); }
     drop(sched);
     if width == 0 || height == 0 || width > 3840 || height > 2160 {
         return Err(SyscallResult::InvalidArguments);
@@ -1650,7 +1650,7 @@ pub fn sys_surface_create(width: u32, height: u32, z_order: u32) -> Result<u32, 
 pub fn sys_surface_flip() -> Result<u64, SyscallResult> {
     let sched = SCHEDULER.lock();
     let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    if !task.cap_table.has_capability(CapabilityType::FrameBufferDirect, Rights::WRITE) { return Err(SyscallResult::PermissionDenied); }
+    if !task.cap_table.authorize_capability(CapabilityType::FrameBufferDirect, Rights::WRITE) { return Err(SyscallResult::PermissionDenied); }
     drop(sched);
     let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
     kms.composite();
@@ -1661,7 +1661,7 @@ pub fn sys_surface_flip() -> Result<u64, SyscallResult> {
 pub fn sys_touch_poll() -> Result<u32, SyscallResult> {
     let sched = SCHEDULER.lock();
     let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    if !task.cap_table.has_capability(CapabilityType::EventPoll, Rights::READ) { return Err(SyscallResult::PermissionDenied); }
+    if !task.cap_table.authorize_capability(CapabilityType::EventPoll, Rights::READ) { return Err(SyscallResult::PermissionDenied); }
     drop(sched);
     let mut engine = crate::drivers::touch_gestures::TOUCH_ENGINE.lock();
     match engine.gesture_queue.pop_front() {
@@ -1971,7 +1971,7 @@ pub fn sys_surface_physics(
 ) -> Result<i32, SyscallResult> {
     let sched = SCHEDULER.lock();
     let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    if !task.cap_table.has_capability(CapabilityType::FrameBufferDirect, Rights::WRITE) { return Err(SyscallResult::PermissionDenied); }
+    if !task.cap_table.authorize_capability(CapabilityType::FrameBufferDirect, Rights::WRITE) { return Err(SyscallResult::PermissionDenied); }
     drop(sched);
     let mut scroller = GLOBAL_PHYSICS_SCROLLER.lock();
     if scroller.viewport_height != viewport_h || scroller.content_height != content_h {
@@ -2037,7 +2037,7 @@ pub fn sys_camera_capture(
     let current_id = crate::task::scheduler::SCHEDULER.lock().current_task_id().unwrap_or(crate::task::TaskId(0));
     let sched = crate::task::scheduler::SCHEDULER.lock();
     let has_cap = if let Some(tcb) = sched.get_task(current_id) {
-        tcb.cap_table.has_capability(crate::capability::CapabilityType::HardwarePortIo, crate::capability::Rights::READ)
+        tcb.cap_table.authorize_capability(crate::capability::CapabilityType::HardwarePortIo, crate::capability::Rights::READ)
     } else {
         false
     };
@@ -2246,7 +2246,7 @@ pub fn sys_shm_pipe_create(
 
     // Pipe creation establishes the producer endpoint, so a consumer-only
     // capability can never be upgraded into producer authority here.
-    let has_cap = current_task.cap_table.has_capability(CapabilityType::ShmProducer, Rights::WRITE);
+    let has_cap = current_task.cap_table.authorize_capability(CapabilityType::ShmProducer, Rights::WRITE);
 
     if !has_cap {
         return Err(SyscallResult::PermissionDenied);
@@ -2278,7 +2278,7 @@ pub fn sys_shm_pipe_transfer(
     let current_id = sched.current_task_id().ok_or(SyscallResult::PermissionDenied)?;
     let current_task = sched.get_task(current_id).ok_or(SyscallResult::PermissionDenied)?;
 
-    let has_cap = current_task.cap_table.has_capability(CapabilityType::ShmProducer, Rights::WRITE);
+    let has_cap = current_task.cap_table.authorize_capability(CapabilityType::ShmProducer, Rights::WRITE);
 
     if !has_cap {
         return Err(SyscallResult::PermissionDenied);
@@ -2320,7 +2320,7 @@ pub fn sys_shm_pipe_receive(
     let current_id = sched.current_task_id().ok_or(SyscallResult::PermissionDenied)?;
     let current_task = sched.get_task(current_id).ok_or(SyscallResult::PermissionDenied)?;
 
-    let has_cap = current_task.cap_table.has_capability(CapabilityType::ShmConsumer, Rights::READ);
+    let has_cap = current_task.cap_table.authorize_capability(CapabilityType::ShmConsumer, Rights::READ);
 
     if !has_cap {
         return Err(SyscallResult::PermissionDenied);
@@ -2358,8 +2358,8 @@ pub fn sys_event_poll(interest_mask: u32, timeout_ticks: u32) -> Result<u32, Sys
 
     // Event polling is a dedicated kernel resource. Diagnostic logging authority
     // must never substitute for an event capability.
-    let has_cap = current_task.cap_table.has_capability(CapabilityType::EventPoll, Rights::INVOKE)
-        || current_task.cap_table.has_capability(CapabilityType::EventPoll, Rights::READ);
+    let has_cap = current_task.cap_table.authorize_capability(CapabilityType::EventPoll, Rights::INVOKE)
+        || current_task.cap_table.authorize_capability(CapabilityType::EventPoll, Rights::READ);
 
     if !has_cap {
         return Err(SyscallResult::PermissionDenied);
