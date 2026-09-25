@@ -8,6 +8,12 @@
 use crate::capability::{CapError, Capability, CapabilityId, CapabilityType, Rights};
 use crate::task::TaskId;
 use crate::serial_println;
+use alloc::vec::Vec;
+use spin::Mutex;
+
+/// Kernel-owned registry for delegated leases. The registry is consulted by the
+/// capability verifier, so expiry cannot be bypassed by invoking another syscall.
+pub static DELEGATION_REGISTRY: Mutex<Vec<DelegatedLease>> = Mutex::new(Vec::new());
 
 /// A time-bounded, usage-constrained capability delegation lease.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,6 +161,19 @@ pub fn init() {
     assert_eq!(illegal, Err(CapError::InsufficientRights), "Deriving unheld rights must be rejected");
 
     serial_println!(
-        "[TEST] Attenuated Capability Delegation: Monotonic rights attenuation, tick lease, and quota enforcement VERIFIED."
+        "[TEST] Attenuated Capability Delegation: Monotonic rights attenuation and lease semantics VERIFIED."
     );
+}
+
+/// Registers a lease after the derived capability is successfully installed.
+pub fn register_lease(lease: DelegatedLease) {
+    let mut registry = DELEGATION_REGISTRY.lock();
+    registry.retain(|existing| existing.expiry_ticks > crate::interrupts::get_system_ticks());
+    registry.push(lease);
+}
+
+/// Returns true only while a kernel-registered delegated lease remains active.
+pub fn is_lease_active(lease_id: u64, current_ticks: u64) -> bool {
+    let registry = DELEGATION_REGISTRY.lock();
+    registry.iter().any(|lease| lease.lease_id == lease_id && current_ticks < lease.expiry_ticks)
 }
