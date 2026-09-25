@@ -37,7 +37,8 @@ pub fn init_block_filesystem() -> Result<(), FsBackendError> {
 pub fn load_data_file(path: &str, out: &mut [u8]) -> Result<usize, FsBackendError> {
     let mut guard = ATA_PRIMARY.lock();
     let device = guard.as_mut().ok_or(FsBackendError::NoSpace)?;
-    let mut fs = InterFs::mount_region(device, BLOCK_FS_BASE_LBA, filesystem_region_sectors(device.sector_count())?)?;
+    let region = filesystem_region_sectors(device.sector_count())?;
+    let mut fs = InterFs::mount_region(device, BLOCK_FS_BASE_LBA, region)?;
     fs.read_file(path, out)
 }
 
