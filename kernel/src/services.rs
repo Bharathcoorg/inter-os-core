@@ -15,7 +15,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 pub enum ServiceId { Init=0, Display=1, Input=2, Storage=3, Network=4, Power=5, Modem=6, Audio=7, Camera=8 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ServiceState { Declared, Running, Stopped, Failed }
+pub enum ServiceState { Declared, Starting, Running, Stopped, Failed }
 
 #[derive(Debug, Clone, Copy)]
 pub struct ServiceRecord { pub id: ServiceId, pub task: TaskId, pub state: ServiceState }
@@ -56,6 +56,7 @@ extern "C" fn camerad() -> ! { service_loop(ServiceId::Camera, "[camerad] Camera
 
 pub static SERVICE_RECORDS: spin::Mutex<[Option<ServiceRecord>; 9]> = spin::Mutex::new([None; 9]);
 const HEARTBEAT_TIMEOUT_TICKS: u64 = 500;
+const PID1: TaskId = TaskId(0);
 static SERVICE_HEARTBEATS: [core::sync::atomic::AtomicU64; 9] = [
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
@@ -106,7 +107,7 @@ pub fn start(id: ServiceId) -> Result<TaskId, &'static str> {
         ServiceId::Audio => ("audiod", audiod, 5), ServiceId::Camera => ("camerad", camerad, 5),
         ServiceId::Init => return Ok(TaskId(0)),
     };
-    let task = SCHEDULER.lock().spawn(name, entry, caps(id), priority);
+    let task = SCHEDULER.lock().spawn_with_parent(name, entry, caps(id), priority, PID1);
     crate::ipc::IPC_ROUTER.lock().register_task(task);
     SERVICE_HEARTBEATS[id as usize].store(crate::interrupts::get_system_ticks(), Ordering::Release);
     SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task, state: ServiceState::Running });
@@ -155,7 +156,13 @@ pub fn supervise() {
             Some(task) => matches!(task.state, crate::task::TaskState::Terminated | crate::task::TaskState::Zombie),
             None => true,
         };
-        let state = if failed || stale { ServiceState::Failed } else { ServiceState::Running };
+        let state = match record.state {
+            ServiceState::Stopped => ServiceState::Stopped,
+            ServiceState::Declared | ServiceState::Starting => record.state,
+            ServiceState::Running if failed || stale => ServiceState::Failed,
+            ServiceState::Running => ServiceState::Running,
+            ServiceState::Failed => ServiceState::Failed,
+        };
         records[idx] = Some(ServiceRecord { id, task: task_id, state });
     }
 }
@@ -177,6 +184,7 @@ pub fn snapshot(out: &mut [u8]) -> usize {
     for record in records.iter().flatten() {
         let state = match record.state {
             ServiceState::Declared => "declared",
+            ServiceState::Starting => "starting",
             ServiceState::Running => "running",
             ServiceState::Stopped => "stopped",
             ServiceState::Failed => "failed",
@@ -189,4 +197,32 @@ pub fn snapshot(out: &mut [u8]) -> usize {
 /// Returns the most recent heartbeat tick for a service.
 pub fn last_heartbeat(id: ServiceId) -> u64 {
     SERVICE_HEARTBEATS[id as usize].load(Ordering::Acquire)
+}
+
+/// Records a worker exit in the authoritative hardware-service registry.
+pub fn record_exit(task_id: TaskId, _exit_code: i32) {
+    let mut records = SERVICE_RECORDS.lock();
+    for idx in 1..records.len() {
+        if let Some(record) = records[idx] {
+            if record.task == task_id {
+                records[idx] = Some(ServiceRecord { id: record.id, task: task_id, state: ServiceState::Failed });
+                return;
+            }
+        }
+    }
+}
+
+/// Restarts failed services when explicitly requested by PID 1.
+pub fn restart_failed() -> usize {
+    let mut restarted = 0usize;
+    for idx in 1..SERVICE_RECORDS.lock().len() {
+        let id = match idx {
+            1 => ServiceId::Display, 2 => ServiceId::Input, 3 => ServiceId::Storage,
+            4 => ServiceId::Network, 5 => ServiceId::Power, 6 => ServiceId::Modem,
+            7 => ServiceId::Audio, 8 => ServiceId::Camera, _ => continue,
+        };
+        let failed = matches!(SERVICE_RECORDS.lock()[idx], Some(ServiceRecord { state: ServiceState::Failed, .. }));
+        if failed && start(id).is_ok() { restarted += 1; }
+    }
+    restarted
 }
