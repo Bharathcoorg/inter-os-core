@@ -11,6 +11,12 @@ def main():
     net = (ROOT / "kernel/src/net/mod.rs").read_text()
     pci = (ROOT / "kernel/src/drivers/pci.rs").read_text()
     must(dev, "pub trait NetworkDevice", "network device trait")
+    e1000 = (ROOT / "kernel/src/net/e1000.rs").read_text()
+    must(e1000, "pub struct E1000Device", "E1000 driver")
+    for marker in ("RDBAL", "TDBAL", "pub fn initialize", "impl NetworkDevice for E1000Device"):
+        must(e1000, marker, marker)
+    must(dev, "NetworkDeviceBackend::E1000", "E1000 backend selection")
+    must(dev, "pub fn attach_e1000", "E1000 device attachment")
     for marker in ("pub struct NetDeviceInfo", "pub enum NetworkBackend",
                    "pub struct NetworkDeviceManager", "pub static NETWORK_DEVICE",
                    "pub fn info(&self)", "pub fn set_link_state",
@@ -20,6 +26,8 @@ def main():
     must(net, "NETWORK_DEVICE.lock()", "network receive uses canonical device")
     must(net, "pub use device::{LoopbackDevice, NetDeviceInfo, NetError, NetworkBackend, NetworkDevice, NetworkDeviceManager, NETWORK_DEVICE};", "network abstraction exports")
     must(pci, "is_network_controller", "PCI network device discovery")
+    must(pci, "pub fn memory_bar", "PCI BAR discovery")
+    must(pci, "pub fn find_e1000", "E1000 PCI discovery")
     print("network device abstraction contract: PASS")
 
 if __name__ == "__main__":
