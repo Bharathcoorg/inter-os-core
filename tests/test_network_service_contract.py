@@ -51,6 +51,7 @@ def main():
     must(syscall, "pub fn sys_tcp_close(", "TCP close kernel API")
     must(syscall, "100 =>", "TCP close dispatcher")
     must(syscall, "crate::net::transmit_tcp_segment(", "TCP FIN transmission")
+    assert "crate::net::crate::net::transmit_tcp_segment" not in syscall, "TCP close must use the canonical network transport path"
     must(syscall, "97 =>", "TCP send dispatcher")
     must(syscall, "98 =>", "TCP receive dispatcher")
     must(syscall, "94 => match sys_tcp_connect", "TCP connect dispatcher")
