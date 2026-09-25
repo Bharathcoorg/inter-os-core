@@ -35,7 +35,6 @@ pub mod package;
 pub mod panic;
 pub mod resource;
 pub mod sensor;
-pub mod service;
 pub mod settings;
 pub mod services;
 pub mod serial;
@@ -401,247 +400,22 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     SCHEDULER.lock().init(main_caps);
     serial_println!("[OK] Primordial Kernel Thread registered as Task 0.");
 
-    // Phase 25: explicit userspace-style system service domains.
-    services::init();
-    service::init();
-    settings::init();
-
     // Phase B: kernel registers service definitions only. Ring-3 PID 1
-    // owns service startup through the ServiceStart syscall.
+    // owns service startup, recovery and lifecycle policy.
     services::init();
-    service::init();
     settings::init();
 
-    // Task 9: Primordial Userspace Init Process (Ring 3 User Mode, CPL 3)
-    let id_user_init = task::spawn_user_init(id_security);
+    // Primordial userspace init/service-manager. It owns service lifecycle
+    // through the object-scoped ServiceStart/Stop/Recover ABI.
+    let id_user_init = task::spawn_user_init(TaskId(0));
     IPC_ROUTER.lock().register_task(id_user_init);
 
+    serial_println!("[OK] PID1 userspace service manager spawned (Task {}).", id_user_init.0);
+    serial_println!("[OK] Kernel service registry initialized; application startup delegated to userspace.");
 
-
-    // Task 11: Sovereign Telephony & Cellular Modem Service
-    let mut caps_telephony = CapabilityTable::new(8);
-    caps_telephony
-        .insert(Capability {
-            id: CapabilityId(1101),
-            cap_type: CapabilityType::SerialOutput,
-            rights: Rights::WRITE,
-            object_id: 0,
-        })
-        .ok();
-    caps_telephony
-        .insert(Capability {
-            id: CapabilityId(1102),
-            cap_type: CapabilityType::IpcSend,
-            rights: Rights::WRITE,
-            object_id: id_security.0,
-        })
-        .ok();
-
-    let id_telephony = SCHEDULER.lock().spawn(
-        "telephony_worker",
-        telephony::task_telephony_worker,
-        caps_telephony,
-        1,
-    );
-    IPC_ROUTER.lock().register_task(id_telephony);
-    serial_println!("[OK] Spawned Task 11: telephony_worker (ID: {:?})", id_telephony);
-
-    // Task 12: Sovereign Audio Subsystem Service
-    let mut caps_audio = CapabilityTable::new(8);
-    caps_audio
-        .insert(Capability {
-            id: CapabilityId(1201),
-            cap_type: CapabilityType::SerialOutput,
-            rights: Rights::WRITE,
-            object_id: 0,
-        })
-        .ok();
-    caps_audio
-        .insert(Capability {
-            id: CapabilityId(1202),
-            cap_type: CapabilityType::IpcSend,
-            rights: Rights::WRITE,
-            object_id: id_security.0,
-        })
-        .ok();
-
-    let id_audio = SCHEDULER.lock().spawn(
-        "audio_worker",
-        task_audio_worker,
-        caps_audio,
-        1,
-    );
-    IPC_ROUTER.lock().register_task(id_audio);
-    serial_println!("[OK] Spawned Task 12: audio_worker (ID: {:?})", id_audio);
-
-    // Task 13: Mobile Hardware Sensor Service
-    let mut caps_sensor = CapabilityTable::new(8);
-    caps_sensor
-        .insert(Capability {
-            id: CapabilityId(1301),
-            cap_type: CapabilityType::SerialOutput,
-            rights: Rights::WRITE,
-            object_id: 0,
-        })
-        .ok();
-    caps_sensor
-        .insert(Capability {
-            id: CapabilityId(1302),
-            cap_type: CapabilityType::IpcSend,
-            rights: Rights::WRITE,
-            object_id: id_security.0,
-        })
-        .ok();
-
-    let id_sensor = SCHEDULER.lock().spawn(
-        "sensor_worker",
-        task_sensor_worker,
-        caps_sensor,
-        1,
-    );
-    IPC_ROUTER.lock().register_task(id_sensor);
-    serial_println!("[OK] Spawned Task 13: sensor_worker (ID: {:?})", id_sensor);
-
-    // Task 14: Real-Time Clock & Civil Calendar Daemon
-    let mut caps_rtc = CapabilityTable::new(8);
-    caps_rtc
-        .insert(Capability {
-            id: CapabilityId(1401),
-            cap_type: CapabilityType::SerialOutput,
-            rights: Rights::WRITE,
-            object_id: 0,
-        })
-        .ok();
-    caps_rtc
-        .insert(Capability {
-            id: CapabilityId(1402),
-            cap_type: CapabilityType::IpcSend,
-            rights: Rights::WRITE,
-            object_id: id_security.0,
-        })
-        .ok();
-
-    let id_rtc = SCHEDULER.lock().spawn(
-        "rtc_worker",
-        task_rtc_worker,
-        caps_rtc,
-        1,
-    );
-    IPC_ROUTER.lock().register_task(id_rtc);
-    serial_println!("[OK] Spawned Task 14: rtc_worker (ID: {:?})", id_rtc);
-
-    // Task 15: Mobile SoC Dynamic Thermal Governor Worker
-    let mut caps_thermal = CapabilityTable::new(8);
-    caps_thermal
-        .insert(Capability {
-            id: CapabilityId(1501),
-            cap_type: CapabilityType::SerialOutput,
-            rights: Rights::WRITE,
-            object_id: 0,
-        })
-        .ok();
-    caps_thermal
-        .insert(Capability {
-            id: CapabilityId(1502),
-            cap_type: CapabilityType::IpcSend,
-            rights: Rights::WRITE,
-            object_id: id_security.0,
-        })
-        .ok();
-
-    let id_thermal = SCHEDULER.lock().spawn(
-        "thermal_worker",
-        task_thermal_worker,
-        caps_thermal,
-        1,
-    );
-    IPC_ROUTER.lock().register_task(id_thermal);
-    serial_println!("[OK] Spawned Task 15: thermal_worker (ID: {:?})", id_thermal);
-
-    // Task 16: Mobile Wireless HAL & BLE Beacon Worker
-    let mut caps_wireless = CapabilityTable::new(8);
-    caps_wireless
-        .insert(Capability {
-            id: CapabilityId(1601),
-            cap_type: CapabilityType::SerialOutput,
-            rights: Rights::WRITE,
-            object_id: 0,
-        })
-        .ok();
-    caps_wireless
-        .insert(Capability {
-            id: CapabilityId(1602),
-            cap_type: CapabilityType::IpcSend,
-            rights: Rights::WRITE,
-            object_id: id_security.0,
-        })
-        .ok();
-
-    let id_wireless = SCHEDULER.lock().spawn(
-        "wireless_worker",
-        task_wireless_worker,
-        caps_wireless,
-        1,
-    );
-    IPC_ROUTER.lock().register_task(id_wireless);
-    serial_println!("[OK] Spawned Task 16: wireless_worker (ID: {:?})", id_wireless);
-
-    // Task 17: Sovereign Settings App (Ring 3 User Mode)
-    let id_settings = task::spawn_app_settings(id_security);
-    IPC_ROUTER.lock().register_task(id_settings);
-
-    // Task 18: Sovereign Intent Terminal App (Ring 3 User Mode)
-    let id_terminal = task::spawn_app_terminal(id_security);
-    IPC_ROUTER.lock().register_task(id_terminal);
-
-    // Task 19: Sovereign Dialer App (Ring 3 User Mode)
-    let id_dialer = task::spawn_app_dialer(id_security);
-    IPC_ROUTER.lock().register_task(id_dialer);
-
-    // Task 20: Sovereign Vault & Storage App (Ring 3 User Mode)
-    let id_vault = task::spawn_app_vault(id_security);
-    IPC_ROUTER.lock().register_task(id_vault);
-
-    // Task 21: Sovereign Camera & Neural Vision App (Ring 3 User Mode)
-    let id_camera = task::spawn_app_camera(id_security);
-    IPC_ROUTER.lock().register_task(id_camera);
-
-    // Task 22: Open-Source Touch Calculator App (Ring 3 User Mode)
-    let id_calc = task::spawn_app_calculator(id_security);
-    IPC_ROUTER.lock().register_task(id_calc);
-
-    // Task 23: Sovereign Browser & Web App (Ring 3 User Mode)
-    let id_browser = task::spawn_app_browser(id_security);
-    IPC_ROUTER.lock().register_task(id_browser);
-
-    // Task 24: Sovereign Messages & P2P Wire App (Ring 3 User Mode)
-    let id_messages = task::spawn_app_messages(id_security);
-    IPC_ROUTER.lock().register_task(id_messages);
-
-    // Task 25: Sovereign Calendar & Chrono-Planner App (Ring 3 User Mode)
-    let id_calendar = task::spawn_app_calendar(id_security);
-    IPC_ROUTER.lock().register_task(id_calendar);
-
-    // Task 26: Sovereign Music & Hi-Fi Audio App (Ring 3 User Mode)
-    let id_music = task::spawn_app_music(id_security);
-    IPC_ROUTER.lock().register_task(id_music);
-
-    // Render the Mobile Smartphone Shell on the graphical display
-    framebuffer::draw_mobile_shell();
-
-    serial_println!("================================================================================");
-    serial_println!("  SYSTEM READY: Inter OS v3.0 Microkernel Fully Online.");
-    serial_println!("  Encrypted Vault, Camera, Browser, Messages, Calendar, Music, Calculator & 26 Tasks Active.");
-    serial_println!("================================================================================");
-
-    // Emit live process telemetry for userspace and Device Studio telemetry inspector
-    task::SCHEDULER.lock().dump_process_table();
-
-    // 26. Enable hardware CPU interrupts and begin multitasking
     x86_64::instructions::interrupts::enable();
     serial_println!("[OK] Hardware interrupts enabled on CPU.");
 
-    // Hand over control to multitasking scheduler
     loop {
         task::yield_now();
         x86_64::instructions::hlt();
