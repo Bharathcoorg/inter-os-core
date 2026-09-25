@@ -43,8 +43,10 @@ def main() -> None:
 
     # PID1 is the only startup owner; kernel init must only register definitions.
     must(services, "PID 1 controls startup.", "kernel startup ownership")
-    must(services, "spawn_with_parent(name, entry, caps(id), priority, parent_id)",
-         "explicit service parent ownership")
+    must(services, "spawn_userspace_service(id as u8, parent_id)",
+         "PID1-owned Ring-3 service process spawn")
+    must((ROOT / "kernel/src/task/user.rs").read_text(), "pub fn spawn_userspace_service",
+         "userspace service process launcher")
     must(pid1, "std::service_start(service_id)", "PID1 service startup ABI")
     must(pid1, "std::service_recover_failed()", "PID1 recovery ABI")
 
@@ -140,7 +142,7 @@ def main() -> None:
     must(pid1, "seen == 0xff", "PID1 requires all eight services")
 
 
-    # M15 trusted userspace service ABI is explicit, versioned, and bounded.
+    # M13/M14 process and capability architecture must be userspace-owned and isolated.\n    must(services, "heartbeat_for_task", "service heartbeat ownership check")\n    must((ROOT / "kernel/src/task/user.rs").read_text(), "CapabilityType::SystemControl", "PID1-only manager authority remains distinct")\n    must((ROOT / ".github/workflows/ci.yml").read_text(), "userspace/system-service/Cargo.toml", "Ring-3 service build gate")\n\n    # M15 trusted userspace service ABI is explicit, versioned, and bounded.
     service_abi = SERVICE_ABI.read_text()
     must(service_abi, 'SERVICE_ABI_MAGIC: [u8; 4] = *b"ISVC"', "service ABI magic")
     must(service_abi, "SERVICE_ABI_VERSION: u16 = 1", "service ABI version")
@@ -148,6 +150,7 @@ def main() -> None:
     must(service_abi, "Register = 1", "service register operation")
     must(service_abi, "Heartbeat = 2", "service heartbeat operation")
     must(service_abi, "pub fn decode", "service ABI decoder")
+    must(service_abi, "pub payload_len: u16", "service ABI payload width")
     must(service_abi, "service_capability_allowed", "service capability policy")
     must(sdk, "pub fn service_package_verify", "signed service package SDK ABI")
 
@@ -167,6 +170,8 @@ def main() -> None:
     must(service_abi, "1 | 3 | 6 | 12 | 17", "network service capability allowlist")
     must(sdk, "pub mod service;", "userspace trusted service ABI module")
     must(sdk, "ServicePackageVerify = 89", "userspace signed service package ABI")
+    must(sdk, "ServiceHeartbeat = 90", "userspace service heartbeat ABI")
+    must(sdk, "pub fn service_heartbeat", "userspace heartbeat SDK")
 
     # Supervisor must inspect scheduler state before mutating the registry.
     must(services, "let sched = SCHEDULER.lock();", "supervisor scheduler lock")
