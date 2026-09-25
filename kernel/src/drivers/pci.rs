@@ -211,6 +211,13 @@ pub fn init() {
         );
     }
 
+    for dev in &devices {
+        if dev.is_network_controller() {
+            let bar = dev.memory_bar(0);
+            serial_println!("[NET] PCI network controller {:04x}:{:04x} BAR0={:?}", dev.vendor_id, dev.device_id, bar);
+        }
+    }
+
     // Self-test: Verify at least one device was found (Host bridge 0x06:0x00 is guaranteed in QEMU)
     assert!(!devices.is_empty(), "PCI bus scan failed: no devices found");
     serial_println!("[TEST] PCI Bus Enumeration: Hardware device scan PASSED.");
