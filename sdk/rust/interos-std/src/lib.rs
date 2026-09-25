@@ -70,6 +70,7 @@ pub enum SyscallNumber {
     SurfaceWrite = 73,
     SurfaceDestroy = 74,
     PackageList = 75,
+    PackageRegistry = 76,
 }
 
 // -----------------------------------------------------------------------------
@@ -586,6 +587,12 @@ pub fn package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) -> Res
     } else {
         Err(ret)
     }
+}
+
+/// Reads the kernel package lifecycle registry. Requires FileSystemRead capability in cap_slot.
+pub fn package_registry(cap_slot: usize, out_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret=unsafe{syscall3(SyscallNumber::PackageRegistry,cap_slot as u64,out_buf.as_mut_ptr() as u64,out_buf.len() as u64)};
+    if ret>=0{Ok(ret as usize)}else{Err(ret)}
 }
 
 /// Queries active mobile SoC platform parameters into `out_buf` JSON string.
