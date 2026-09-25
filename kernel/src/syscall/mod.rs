@@ -99,6 +99,7 @@ pub enum SyscallNumber {
     ServiceRecoverFailed = 88,
     ServicePackageVerify = 89,
     ServiceHeartbeat = 90,
+    ServicePackageLaunch = 91,
     SettingsGet = 82,
     SettingsSet = 83,
     StorageQuery = 84,
@@ -1361,6 +1362,20 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             }
         }
         90 => { match sys_service_heartbeat(a1 as u8) { Ok(()) => 0, Err(e) => e as i64 } }
+        91 => {
+            // ServicePackageLaunch: a1=read-cap slot, a2=path ptr, a3=path len.
+            let len = a3 as usize;
+            if len == 0 || len > 256 { return SyscallResult::InvalidArguments as i64; }
+            let mut path_buf = [0u8; 256];
+            let path = match read_user_string(a2, len, &mut path_buf) {
+                Ok(s) => s,
+                Err(_) => return SyscallResult::InvalidArguments as i64,
+            };
+            match sys_service_package_launch(a1 as usize, path) {
+                Ok(id) => id.0 as i64,
+                Err(e) => e as i64,
+            }
+        }
         _ => SyscallResult::UnknownSyscall as i64,
     }
 }
@@ -2614,6 +2629,52 @@ pub fn sys_service_package_verify(cap_slot: usize, path: &str) -> Result<u8, Sys
     }
     serial_println!("[SERVICE] Verified signed service package '{}' for service {}", manifest.package_id, service_id);
     Ok(service_id)
+}
+
+/// Verifies a signed RAPP service package and launches its verified ELF payload as a PID1-owned Ring-3 child.
+pub fn sys_service_package_launch(cap_slot: usize, path: &str) -> Result<crate::task::TaskId, SyscallResult> {
+    require_service_manager()?;
+    let sched = SCHEDULER.lock();
+    let parent_id = sched.current_task_id().ok_or(SyscallResult::PermissionDenied)?;
+    let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    current.cap_table.verify(cap_slot, CapabilityType::FileSystemRead, Rights::READ)
+        .map_err(|_| SyscallResult::PermissionDenied)?;
+    drop(sched);
+
+    if path.is_empty() || path.len() > 256 || !path.starts_with("/packages/") || !path.ends_with(".rapp") {
+        return Err(SyscallResult::InvalidArguments);
+    }
+
+    let manifest = sys_verify_package(cap_slot, path)?;
+    let service_id = crate::service_abi::service_id_from_package_id(&manifest.package_id)
+        .ok_or(SyscallResult::PermissionDenied)?;
+    for capability in &manifest.capabilities {
+        if !crate::service_abi::service_capability_allowed(service_id, *capability) {
+            return Err(SyscallResult::PermissionDenied);
+        }
+    }
+    if manifest.payload_len == 0 {
+        return Err(SyscallResult::InvalidArguments);
+    }
+
+    let stat = sys_fs_stat(cap_slot, path)?;
+    let fd = sys_fs_open(cap_slot, path, Rights::READ)?;
+    let mut rapp = alloc::vec![0u8; stat.size];
+    let read_bytes = sys_fs_read(cap_slot, fd, &mut rapp)?;
+    sys_fs_close(fd);
+    if read_bytes != stat.size {
+        return Err(SyscallResult::DeviceError);
+    }
+    let verified = parse_rapp(&rapp).map_err(|_| SyscallResult::IntegrityViolation)?;
+    if verified.package_id != manifest.package_id || verified.payload_offset != manifest.payload_offset || verified.payload_len != manifest.payload_len {
+        return Err(SyscallResult::IntegrityViolation);
+    }
+    let payload_end = verified.payload_offset.checked_add(verified.payload_len).ok_or(SyscallResult::InvalidArguments)?;
+    let payload = &rapp[verified.payload_offset..payload_end];
+    let task_id = crate::task::user::spawn_verified_rapp_process(&verified, payload, parent_id)
+        .map_err(|_| SyscallResult::DeviceError)?;
+    serial_println!("[SERVICE] Launched verified service package '{}' as task {}", verified.package_id, task_id.0);
+    Ok(task_id)
 }
 
 pub fn sys_service_heartbeat(service_id: u8) -> Result<(), SyscallResult> {
