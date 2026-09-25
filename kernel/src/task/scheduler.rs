@@ -126,18 +126,21 @@ impl Scheduler {
 
         let current_idx = self.current_idx;
         let mut next_idx = (current_idx + 1) % self.tasks.len();
-
-        // Find the next Ready task
+        let mut best_idx = None;
+        let mut best_priority = 0u8;
         while next_idx != current_idx {
             if self.tasks[next_idx].state == TaskState::Ready {
-                break;
+                let p = self.tasks[next_idx].priority;
+                if best_idx.is_none() || p > best_priority {
+                    best_idx = Some(next_idx);
+                    best_priority = p;
+                }
             }
             next_idx = (next_idx + 1) % self.tasks.len();
         }
-
-        if next_idx == current_idx {
-            return (None, None); // No other ready task found
-        }
+        let Some(next_idx) = best_idx else {
+            return (None, None);
+        };
 
         // Verify stack canary of the departing task
         if !self.tasks[current_idx].check_stack_integrity() {
@@ -220,6 +223,7 @@ impl Scheduler {
         task.state = TaskState::Zombie;
         crate::ipc::cleanup_task(id);
         crate::drivers::display_kms::DRM_KMS.lock().destroy_surfaces_owned_by(id.0);
+        crate::service::SERVICE_SUPERVISOR.lock().record_exit(id, exit_code);
         Ok(())
     }
 
