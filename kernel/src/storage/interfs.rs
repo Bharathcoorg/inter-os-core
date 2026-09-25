@@ -343,7 +343,7 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
         Ok(())
     }
 
-    fn allocate_extent(&mut self, needed: u32) -> Result<u32, FsBackendError> {
+    fn find_free_extent(&mut self, needed: u32) -> Result<u32, FsBackendError> {
         if needed == 0 { return Ok(0); }
         let max=self.superblock.data_sectors;
         let mut run=0u32;
@@ -352,15 +352,20 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
             if !self.bitmap_bit(block)? {
                 if run==0 { start=block; }
                 run+=1;
-                if run>=needed {
-                    for b in start..start+needed { self.set_bitmap_bit(b,true)?; }
-                    return Ok(start);
-                }
+                if run>=needed { return Ok(start); }
             } else {
                 run=0;
             }
         }
         Err(FsBackendError::NoSpace)
+    }
+
+    fn mark_extent(&mut self, start: u32, count: u32) -> Result<(), FsBackendError> {
+        if start.checked_add(count).unwrap_or(u32::MAX) > self.superblock.data_sectors {
+            return Err(FsBackendError::CorruptMetadata);
+        }
+        for block in start..start+count { self.set_bitmap_bit(block,true)?; }
+        Ok(())
     }
 
     fn free_extent(&mut self, start: u32, count: u32) -> Result<(), FsBackendError> {
@@ -398,7 +403,7 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
             return Err(FsBackendError::FileTooLarge);
         }
         let sectors=((data.len()+SECTOR_SIZE-1)/SECTOR_SIZE) as u32;
-        let start=self.allocate_extent(sectors)?;
+        let start=self.find_free_extent(sectors)?;
         for block in 0..sectors {
             let mut sector=[0u8; SECTOR_SIZE];
             let begin=block as usize*SECTOR_SIZE;
@@ -420,8 +425,22 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
             new_used: true, new_size: inode.file_size, new_start: inode.start_sector, new_count: inode.sector_count,
         };
         if let Err(e)=self.write_transaction(&txn) {
-            let _=self.free_extent(start,sectors);
             return Err(e);
+        }
+        if let Err(e)=self.mark_extent(start,sectors) {
+            let _=self.clear_transaction();
+            return Err(e);
+        }
+        for block in 0..sectors {
+            let mut sector=[0u8; SECTOR_SIZE];
+            let begin=block as usize*SECTOR_SIZE;
+            let end=(begin+SECTOR_SIZE).min(data.len());
+            if begin<end { sector[..end-begin].copy_from_slice(&data[begin..end]); }
+            if let Err(e)=self.device.write_sector(self.base_lba + self.superblock.data_start+start+block,&sector) {
+                let _=self.free_extent(start,sectors);
+                let _=self.clear_transaction();
+                return Err(e.into());
+            }
         }
         if let Err(e)=self.write_inode(index,&inode) {
             let _=self.free_extent(start,sectors);
@@ -459,7 +478,7 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
             return Err(FsBackendError::FileTooLarge);
         }
         let sectors=((data.len()+SECTOR_SIZE-1)/SECTOR_SIZE) as u32;
-        let start=self.allocate_extent(sectors)?;
+        let start=self.find_free_extent(sectors)?;
         for block in 0..sectors {
             let mut sector=[0u8; SECTOR_SIZE];
             let begin=block as usize*SECTOR_SIZE;
@@ -478,8 +497,22 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
             new_used: inode.used, new_size: inode.file_size, new_start: inode.start_sector, new_count: inode.sector_count,
         };
         if let Err(e)=self.write_transaction(&txn) {
-            let _=self.free_extent(start,sectors);
             return Err(e);
+        }
+        if let Err(e)=self.mark_extent(start,sectors) {
+            let _=self.clear_transaction();
+            return Err(e);
+        }
+        for block in 0..sectors {
+            let mut sector=[0u8; SECTOR_SIZE];
+            let begin=block as usize*SECTOR_SIZE;
+            let end=(begin+SECTOR_SIZE).min(data.len());
+            if begin<end { sector[..end-begin].copy_from_slice(&data[begin..end]); }
+            if let Err(e)=self.device.write_sector(self.base_lba + self.superblock.data_start+start+block,&sector) {
+                let _=self.free_extent(start,sectors);
+                let _=self.clear_transaction();
+                return Err(e.into());
+            }
         }
         if let Err(e)=self.write_inode(index,&inode) {
             let _=self.free_extent(start,sectors);
