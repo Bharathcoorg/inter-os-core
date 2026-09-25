@@ -43,6 +43,13 @@ pub extern "C" fn _start() -> ! {
     // Establish the first userspace service-manager contract: PID 1 observes
     // the authoritative kernel service registry rather than hard-coding task IDs.
     let mut service_buf = [0u8; SERVICE_BUFFER];
+    if let Ok(len) = std::service_list(&mut service_buf) {
+        if registry_has_all_running_services(&service_buf[..len]) {
+            let _ = std::log(0, "[PID1] All system services running after bootstrap.");
+        } else {
+            let _ = std::log(0, "[PID1] Service bootstrap validation failed.");
+        }
+    }
     let mut last_poll = 0u64;
 
     loop {
@@ -68,6 +75,25 @@ pub extern "C" fn _start() -> ! {
         // continuously spinning in Ring 3.
         let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 20);
     }
+}
+
+fn registry_has_all_running_services(buf: &[u8]) -> bool {
+    // Registry records are newline-delimited: service_id|task_id|state. PID 1
+    // only accepts the exact eight non-init system services as healthy when all
+    // have a non-zero task ID and the literal running state.
+    let mut seen = 0u8;
+    for line in buf.split(|b| *b == b'\n') {
+        if line.is_empty() { continue; }
+        let mut fields = line.split(|b| *b == b'|');
+        let Some(id_bytes) = fields.next() else { continue; };
+        let Some(task_bytes) = fields.next() else { continue; };
+        let Some(state) = fields.next() else { continue; };
+        if state != b"running" || task_bytes == b"0" { continue; }
+        if id_bytes.len() == 1 && (b'1'..=b'8').contains(&id_bytes[0]) {
+            seen |= 1 << (id_bytes[0] - b'1');
+        }
+    }
+    seen == 0xff
 }
 
 #[panic_handler]
