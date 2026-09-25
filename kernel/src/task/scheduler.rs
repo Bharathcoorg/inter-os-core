@@ -216,6 +216,12 @@ impl Scheduler {
 
         self.ticks_in_slice = self.ticks_in_slice.saturating_add(1);
 
+        // Service supervision runs from the scheduler tick path so a dead
+        // service is detected even when no userspace manager is scheduled.
+        if self.ticks_in_slice == 1 {
+            crate::services::supervise();
+        }
+
         if self.ticks_in_slice >= TIME_SLICE_TICKS {
             self.prepare_switch()
         } else {
