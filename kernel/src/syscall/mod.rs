@@ -103,6 +103,7 @@ pub enum SyscallNumber {
     InputEventPoll = 92,
     NetworkPoll = 93,
     TcpConnect = 94,
+    NetSendSocket = 95,
     SettingsGet = 82,
     SettingsSet = 83,
     StorageQuery = 84,
@@ -1420,6 +1421,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         }
         93 => { match sys_network_poll() { Ok(n) => n as i64, Err(e) => e as i64 } },
         94 => match sys_tcp_connect(crate::net::Ipv4Address::new((a0 >> 24) as u8, (a0 >> 16) as u8, (a0 >> 8) as u8, a0 as u8), a1 as u16, a2 as u16, a3 as u32) { Ok(id) => id as i64, Err(e) => e as i64 },
+        95 => match sys_net_send_socket(crate::net::SocketId(a0 as u32), crate::net::Ipv4Address::new((a1 >> 24) as u8, (a1 >> 16) as u8, (a1 >> 8) as u8, a1 as u8), a2 as u16, unsafe { core::slice::from_raw_parts(a3 as *const u8, a4 as usize) }) { r => r as i64 },
         _ => SyscallResult::UnknownSyscall as i64,
     }
 }
@@ -1543,6 +1545,39 @@ pub fn sys_net_socket(port: u16) -> Result<u32, SyscallResult> {
 }
 
 /// Transmits a UDP packet from the current calling task.
+pub fn sys_net_send_socket(
+    sock_id: crate::net::SocketId,
+    dst_ip: crate::net::Ipv4Address,
+    dst_port: u16,
+    payload: &[u8],
+) -> SyscallResult {
+    let sched = SCHEDULER.lock();
+    let current = match sched.current_task() {
+        Some(t) => t,
+        None => return SyscallResult::PermissionDenied,
+    };
+    if !current.cap_table.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE) {
+        return SyscallResult::PermissionDenied;
+    }
+    let owner = current.id.0 as u32;
+    let caps = current.cap_table.clone();
+    drop(sched);
+    let src_port = {
+        let table = crate::net::SOCKET_TABLE.lock();
+        match table.get(sock_id) {
+            Some(sock) if sock.owner_task_id == owner && sock.is_bound => sock.local_port,
+            Some(_) => return SyscallResult::PermissionDenied,
+            None => return SyscallResult::InvalidArguments,
+        }
+    };
+    let src_ip = if dst_ip.is_loopback() { crate::net::Ipv4Address::LOCALHOST } else { crate::net::DEFAULT_HOST_IP };
+    match crate::net::send_udp_datagram(src_ip, src_port, dst_ip, dst_port, payload, &caps) {
+        Ok(()) => SyscallResult::Success,
+        Err(NetError::NoPacketAvailable) => SyscallResult::NotReady,
+        Err(_) => SyscallResult::NetworkError,
+    }
+}
+
 pub fn sys_net_sendto(dst_ip: crate::net::Ipv4Address, dst_port: u16, payload: &[u8]) -> SyscallResult {
     let sched = SCHEDULER.lock();
     let current = match sched.current_task() {
