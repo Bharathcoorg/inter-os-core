@@ -58,7 +58,6 @@ use ipc::IPC_ROUTER;
 use package::{parse_rapp, RappArch};
 use storage::{MerkleVerifier, StorageError};
 use task::{SCHEDULER, TaskId};
-use task::user::spawn_verified_rapp_process;
 use wasm::{opcodes, Value, WasmError, WasmMemory, WasmModule, WasmVm};
 
 /// Custom bootloader configuration requesting dynamic physical memory mapping.
