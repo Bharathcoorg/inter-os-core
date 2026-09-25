@@ -20,6 +20,8 @@ members = [
     "apps/meshchat",
     "sdk/rust/interos-std",
     "userspace/init",
+    "apps/compositor",
+    "apps/launcher",
 ]
 exclude = [
     "boot",
