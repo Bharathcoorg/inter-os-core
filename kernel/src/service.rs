@@ -72,6 +72,8 @@ impl ServiceSupervisor {
         }
     }
 
+    pub fn restart_candidates(&self, out: &mut [&'static str; 8]) -> usize { let mut n=0; for r in &self.records { if r.task_id.is_none() && r.state==ServiceState::Failed && matches!(r.restart_policy,RestartPolicy::Always|RestartPolicy::OnFailure) && n<out.len(){out[n]=r.name;n+=1;} } n }
+
     pub fn should_restart(&self, name: &str) -> bool {
         self.records.iter().find(|r| r.name == name).map(|r| {
             r.task_id.is_none() &&
@@ -106,6 +108,6 @@ pub fn init() {
     s.register("compositor", RestartPolicy::Always);
     s.register("launcher", RestartPolicy::Always);
     s.register("package", RestartPolicy::Always);
-    s.register("settings", RestartPolicy::OnFailure);
-    s.register("terminal", RestartPolicy::OnFailure);
+    s.register("app_settings", RestartPolicy::OnFailure);
+    s.register("app_terminal", RestartPolicy::OnFailure);
 }
