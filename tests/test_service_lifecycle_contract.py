@@ -160,17 +160,13 @@ def main() -> None:
     must(syscall, "sys_verify_package(cap_slot, path)", "service package signed RAPP verification")
     must(syscall, "service_id_from_package_id", "trusted service package namespace")
     must(syscall, "service_capability_allowed", "service package capability policy")
-    for forbidden in (
-        "CapabilityType::ProcessKill",
-        "CapabilityType::ProcessSpawn",
-        "CapabilityType::StorageRawBlock",
-        "CapabilityType::SystemControl",
-        "CapabilityType::NetworkSend",
-        "CapabilityType::NetworkReceive",
-        "CapabilityType::HardwarePortIo",
-    ):
-        must(service_abi, f"matches!(capability, 1 | 2 | 3 | 6 | 17)",
-             "restricted service capability policy")
+    must(service_abi, '"org.interos.service.displayd"', "trusted display service namespace")
+    must(service_abi, '"org.interos.service.camerad"', "trusted camera service namespace")
+    must(service_abi, "1 | 2 | 3 | 6 | 17", "display service capability allowlist")
+    must(service_abi, "1 | 3 | 6 | 9 | 10 | 17", "storage service capability allowlist")
+    must(service_abi, "1 | 3 | 6 | 12 | 17", "network service capability allowlist")
+    must(sdk, "pub mod service;", "userspace trusted service ABI module")
+    must(sdk, "ServicePackageVerify = 89", "userspace signed service package ABI")
 
     # Supervisor must inspect scheduler state before mutating the registry.
     must(services, "let sched = SCHEDULER.lock();", "supervisor scheduler lock")
