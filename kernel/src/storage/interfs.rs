@@ -463,8 +463,9 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
         Ok(copied)
     }
 
-    /// Replaces file contents. Metadata is published only after the new extent
-    /// has been fully written; M22 will make bitmap/inode publication atomic.
+    /// Replaces file contents through the M22 transaction protocol: the intent
+    /// is durable before extent reservation, payload is written before inode
+    /// publication, and recovery finalizes or rolls back an interrupted update.
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), FsBackendError> {
         Self::validate_path(path)?;
         let (index,old)=self.find_inode(path)?.ok_or(FsBackendError::FileNotFound)?;
