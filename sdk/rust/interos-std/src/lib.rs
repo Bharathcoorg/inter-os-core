@@ -80,6 +80,7 @@ pub enum SyscallNumber {
     ServiceList = 81,
     SettingsGet = 82,
     SettingsSet = 83,
+    StorageQuery = 84,
 }
 
 // -----------------------------------------------------------------------------
@@ -1486,3 +1487,6 @@ pub fn settings_get(cap_slot:usize,key:&str,out:&mut[u8])->Result<usize,i64>{let
 /// Updates a persistent setting.
 pub fn settings_set(cap_slot:usize,key:&str,value:&[u8])->Result<(),i64>{let r=unsafe{syscall5(SyscallNumber::SettingsSet,cap_slot as u64,key.as_ptr() as u64,key.len() as u64,value.as_ptr() as u64,value.len() as u64)};if r==0{Ok(())}else{Err(r)}}
 
+
+/// Returns live block-device capacity in bytes.
+pub fn storage_query()->Result<u64,i64>{let r=unsafe{syscall0(SyscallNumber::StorageQuery)};if r>=0{Ok(r as u64)}else{Err(r)}}
