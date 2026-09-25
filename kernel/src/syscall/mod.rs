@@ -93,6 +93,7 @@ pub enum SyscallNumber {
     ServiceList = 81,
     ServiceStart = 86,
     ServiceStop = 87,
+    ServiceRecoverFailed = 88,
     SettingsGet = 82,
     SettingsSet = 83,
     StorageQuery = 84,
@@ -1339,6 +1340,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         85 => { let len=a3 as usize; if len>4096{return SyscallResult::InvalidArguments as i64;} let mut out=[0u8;4096]; match sys_fs_list(a1 as usize,a2,a3 as usize,&mut out[..len]){Ok(n)=>{if copy_to_user(a4,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
         86 => { match sys_service_start(a1 as u8) { Ok(id) => id.0 as i64, Err(e) => e as i64 } }
         87 => { match sys_service_stop(a1 as u8) { Ok(()) => 0, Err(e) => e as i64 } }
+        88 => { match sys_service_recover_failed() { Ok(n) => n as i64, Err(e) => e as i64 } }
         _ => SyscallResult::UnknownSyscall as i64,
     }
 }
@@ -2548,6 +2550,11 @@ pub fn sys_service_start(service_id: u8) -> Result<crate::task::TaskId, SyscallR
         _ => return Err(SyscallResult::InvalidArguments),
     };
     crate::services::start(id).map_err(|_| SyscallResult::DeviceError)
+}
+
+pub fn sys_service_recover_failed() -> Result<u64, SyscallResult> {
+    require_system_control()?;
+    Ok(crate::services::restart_failed() as u64)
 }
 
 pub fn sys_service_stop(service_id: u8) -> Result<(), SyscallResult> {
