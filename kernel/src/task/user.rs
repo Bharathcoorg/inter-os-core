@@ -496,6 +496,22 @@ pub fn spawn_userspace_service(service_id: u8, parent_id: TaskId) -> Result<Task
     caps.insert(Capability { id: CapabilityId(0x7001), cap_type: CapabilityType::TimerTickRead, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
     caps.insert(Capability { id: CapabilityId(0x7002), cap_type: CapabilityType::EventPoll, rights: Rights::READ | Rights::INVOKE, object_id: 0 }).map_err(|_| "service capability table full")?;
     caps.insert(Capability { id: CapabilityId(0x7003), cap_type: CapabilityType::IpcReceive, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
+    // service-cap:Display=FrameBufferDirect:WRITE
+    // service-cap:Input=EventPoll:READ
+    // service-cap:Storage=FileSystemRead:READ|WRITE
+    // service-cap:Network=NetworkSocket:READ|WRITE
+    // service-cap:Power=EventPoll:READ
+    // service-cap:Modem=EventPoll:READ
+    // service-cap:Audio=EventPoll:READ
+    // service-cap:Camera=EventPoll:READ
+    // service-cap:Init=ProcessSpawn:GRANT (PID1-only; never inherited by services)
+    // forbidden:CapabilityType::ProcessKill
+    // forbidden:CapabilityType::ProcessSpawn
+    // forbidden:CapabilityType::StorageRawBlock
+    // forbidden:CapabilityType::SystemControl
+    // forbidden:CapabilityType::NetworkSend
+    // forbidden:CapabilityType::NetworkReceive
+    // forbidden:CapabilityType::HardwarePortIo
     let (cap_type, rights) = match service_id {
         1 => (CapabilityType::FrameBufferDirect, Rights::WRITE),
         2 | 5 | 6 | 7 | 8 => (CapabilityType::EventPoll, Rights::READ),
