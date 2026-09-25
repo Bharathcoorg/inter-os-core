@@ -19,6 +19,32 @@ pub fn run(service_id: u8, name: &str) -> ! {
     }
 }
 
+/// Display-service execution path. The only Ring-3 task holding the
+/// FrameBufferDirect object-1 capability owns the hardware-facing display ABI.
+pub fn run_display() -> ! {
+    let _ = std::log(0, "[displayd] userspace display manager online.");
+    let surface = match std::surface_create(4, 320, 480, 0) {
+        Ok(id) => id,
+        Err(_) => {
+            let _ = std::log(0, "[displayd] display surface creation rejected.");
+            std::exit_with_code(1);
+        }
+    };
+    let pixels = [0xFF202830u32, 0xFF202830, 0xFF202830, 0xFF202830];
+    let _ = std::surface_write(4, surface, 0, &pixels);
+    let _ = std::surface_flip(4);
+    let mut last_tick = 0u64;
+    loop {
+        let _ = std::service_heartbeat(1);
+        let now = std::get_ticks(1).unwrap_or(last_tick);
+        if now.saturating_sub(last_tick) >= 100 || last_tick == 0 {
+            let _ = std::surface_flip(4);
+            last_tick = now;
+        }
+        let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 20);
+    }
+}
+
 /// Storage-service execution path. The filesystem is no longer only a kernel
 /// bootstrap facility: storaged owns the userspace storage heartbeat and uses
 /// its dedicated FileSystem capability to perform bounded persistent I/O.
