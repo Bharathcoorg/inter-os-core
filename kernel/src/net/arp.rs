@@ -129,15 +129,15 @@ impl ArpTable {
     /// Inserts a mapping with no expiration. Used by deterministic kernel
     /// self-tests and retained for compatibility with the original API.
     pub fn insert(&mut self, ip: Ipv4Address, mac: MacAddress) {
-        self.insert_with_expiry(ip, mac, u64::MAX);
+        self.insert_with_expiry(ip, mac, 0, u64::MAX);
     }
 
     /// Inserts or refreshes a dynamic ARP mapping with a bounded lifetime.
     pub fn insert_at(&mut self, ip: Ipv4Address, mac: MacAddress, now: u64) {
-        self.insert_with_expiry(ip, mac, now.saturating_add(ARP_CACHE_TICKS));
+        self.insert_with_expiry(ip, mac, now, now.saturating_add(ARP_CACHE_TICKS));
     }
 
-    fn insert_with_expiry(&mut self, ip: Ipv4Address, mac: MacAddress, expires_at: u64) {
+    fn insert_with_expiry(&mut self, ip: Ipv4Address, mac: MacAddress, now: u64, expires_at: u64) {
         for entry in self.entries.iter_mut() {
             if entry.valid && entry.ip == ip {
                 entry.mac = mac;
@@ -148,7 +148,7 @@ impl ArpTable {
 
         // Reuse an expired entry before consuming a genuinely free slot.
         for entry in self.entries.iter_mut() {
-            if !entry.valid || entry.expires_at <= expires_at.saturating_sub(ARP_CACHE_TICKS) {
+            if !entry.valid || entry.expires_at <= now {
                 if !entry.valid {
                     self.count += 1;
                 }
