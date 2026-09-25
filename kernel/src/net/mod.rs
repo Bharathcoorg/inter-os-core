@@ -39,6 +39,39 @@ pub static ARP_TABLE: Mutex<ArpTable> = Mutex::new(ArpTable::new());
 pub static SOCKET_TABLE: Mutex<SocketTable> = Mutex::new(SocketTable::new());
 pub static TCP_TABLE: Mutex<TcpConnectionTable> = Mutex::new(TcpConnectionTable::new());
 
+fn transmit_arp_request(target_ip: Ipv4Address) -> Result<(), NetError> {
+    let info = NETWORK_DEVICE.lock().info();
+    let packet = ArpPacket {
+        opcode: ArpOpcode::Request,
+        sender_mac: info.mac,
+        sender_ip: DEFAULT_HOST_IP,
+        target_mac: MacAddress::ZERO,
+        target_ip,
+    };
+    let mut arp_buf = [0u8; 28];
+    let arp_len = packet.serialize(&mut arp_buf).map_err(|_| NetError::BufferTooSmall)?;
+    let frame = EthernetFrame {
+        dst_mac: MacAddress::BROADCAST,
+        src_mac: info.mac,
+        ethertype: EtherType::Arp,
+        payload: &arp_buf[..arp_len],
+    };
+    let mut frame_buf = [0u8; 1514];
+    let len = frame.serialize(&mut frame_buf).map_err(|_| NetError::BufferTooSmall)?;
+    NETWORK_DEVICE.lock().transmit(&frame_buf[..len])
+}
+
+fn resolve_destination_mac(dst_ip: Ipv4Address) -> Result<MacAddress, NetError> {
+    if dst_ip.is_loopback() {
+        return Ok(MacAddress([0, 0, 0, 0, 0, 1]));
+    }
+    if let Some(mac) = ARP_TABLE.lock().lookup(dst_ip) {
+        return Ok(mac);
+    }
+    transmit_arp_request(dst_ip)?;
+    Err(NetError::NoPacketAvailable)
+}
+
 /// Sends a UDP datagram over the network stack, verifying caller's capability.
 pub fn send_udp_datagram(
     src_ip: Ipv4Address,
@@ -64,18 +97,13 @@ pub fn send_udp_datagram(
         .map_err(|_| NetError::BufferTooSmall)?;
 
     // 4. Resolve MAC Destination (ARP or Loopback)
-    let dst_mac = if dst_ip.is_loopback() {
-        MacAddress([0x00, 0x00, 0x00, 0x00, 0x00, 0x01])
-    } else {
-        let arp = ARP_TABLE.lock();
-        arp.lookup(dst_ip).unwrap_or(MacAddress::BROADCAST)
-    };
+    let dst_mac = resolve_destination_mac(dst_ip)?;
 
     // 5. Serialize Ethernet Frame
     let mut eth_buf = [0u8; 1514];
     let frame = EthernetFrame {
         dst_mac,
-        src_mac: DEFAULT_HOST_MAC,
+        src_mac: NETWORK_DEVICE.lock().info().mac,
         ethertype: EtherType::Ipv4,
         payload: &ip_buf[0..ip_len],
     };
