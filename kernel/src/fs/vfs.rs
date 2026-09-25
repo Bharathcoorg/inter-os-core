@@ -502,6 +502,46 @@ impl Vfs {
         Ok(buf.len())
     }
 
+    /// Persists mutable /data regular files as one crash-consistent filesystem snapshot.
+    fn persist_data_snapshot(&self) -> Result<(), FsError> {
+        let mut buf = [0u8; 32768];
+        buf[..4].copy_from_slice(b"DTA1");
+        let mut pos=6usize;
+        let mut count=0u16;
+        for inode in self.inodes.values() {
+            if inode.file_type != FileType::RegularFile || !inode.path.starts_with("/data/") { continue; }
+            let path=inode.path.as_bytes();
+            let data=inode.data.as_slice();
+            if path.len()>255 || data.len()>8192 { continue; }
+            if pos + 2 + path.len() + 4 + data.len() > buf.len() { break; }
+            buf[pos..pos+2].copy_from_slice(&(path.len() as u16).to_le_bytes()); pos+=2;
+            buf[pos..pos+path.len()].copy_from_slice(path); pos+=path.len();
+            buf[pos..pos+4].copy_from_slice(&(data.len() as u32).to_le_bytes()); pos+=4;
+            buf[pos..pos+data.len()].copy_from_slice(data); pos+=data.len();
+            count=count.saturating_add(1);
+        }
+        buf[4..6].copy_from_slice(&count.to_le_bytes());
+        crate::storage::persistent::commit_kind(&buf[..pos],4).map(|_|()).map_err(|_|FsError::IntegrityViolation)
+    }
+
+    /// Restores mutable /data files from the persistent journal.
+    fn restore_data_snapshot(&mut self) {
+        let mut buf=[0u8;32768];
+        let Ok(Some((_generation,len)))=crate::storage::persistent::load_latest_kind(&mut buf,4) else { return; };
+        if len<6 || &buf[..4]!=b"DTA1" { return; }
+        let count=u16::from_le_bytes([buf[4],buf[5]]) as usize;
+        let mut pos=6usize;
+        for _ in 0..count {
+            if pos+2>len { break; }
+            let plen=u16::from_le_bytes([buf[pos],buf[pos+1]]) as usize; pos+=2;
+            if plen==0 || plen>255 || pos+plen+4>len { break; }
+            let path=match core::str::from_utf8(&buf[pos..pos+plen]).ok(){Some(v)=>v, None=>break}; pos+=plen;
+            let dlen=u32::from_le_bytes([buf[pos],buf[pos+1],buf[pos+2],buf[pos+3]]) as usize; pos+=4;
+            if dlen>8192 || pos+dlen>len { break; }
+            self.create_file(path,&buf[pos..pos+dlen],false); pos+=dlen;
+        }
+    }
+
     /// Closes an open file descriptor.
     pub fn close(&mut self, task_id: TaskId, fd: FileDescriptor) -> Result<(), FsError> {
         let table = self.task_file_tables.get_mut(&task_id).ok_or(FsError::InvalidFd)?;
@@ -511,6 +551,7 @@ impl Vfs {
                 return Ok(());
             }
         }
+        if let Err(_) = self.persist_data_snapshot() { return Err(FsError::IntegrityViolation); }
         Err(FsError::InvalidFd)
     }
 }
@@ -628,5 +669,6 @@ pub fn init() {
     vfs.create_device_node("/dev/input/event0");
     vfs.create_device_node("/dev/ptmx");
 
+    vfs.restore_data_snapshot();
     *VFS.lock() = vfs;
 }
