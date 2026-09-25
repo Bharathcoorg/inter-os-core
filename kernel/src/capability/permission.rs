@@ -88,9 +88,9 @@ impl SensitivePermission {
                 0, // Network adapter object
             ),
             Self::CameraCapture => (
-                CapabilityType::FrameBufferDirect,
+                CapabilityType::HardwarePortIo,
                 Rights::READ.union(Rights::INVOKE),
-                task_id.0 as u64, // Camera stream handle
+                0xCA00, // Dedicated camera hardware object
             ),
             Self::AudioSynthesis => (
                 CapabilityType::HardwarePortIo,
@@ -162,9 +162,14 @@ impl PermissionManager {
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
 
-        let decision = if auto_approve {
+        // The syscall caller is never trusted to self-approve a new sensitive
+        // permission. An existing granted record is the only non-interactive path.
+        // auto_approve is retained for ABI compatibility and test callers, but
+        // cannot bypass the permission state.
+        let decision = if self.has_permission(task_id, permission) {
             ConsentDecision::Granted
         } else {
+            let _ = auto_approve;
             ConsentDecision::Pending
         };
 
