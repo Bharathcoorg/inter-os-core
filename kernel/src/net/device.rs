@@ -203,13 +203,14 @@ impl NetworkDevice for NetworkDeviceManager {
     fn has_packets(&self) -> bool { self.backend.has_packets() }
 }
 
-/// Canonical network-device endpoint consumed by the protocol stack.
-pub fn attach_e1000(&mut self, device: E1000Device) {
+    /// Replaces the loopback backend with an initialized Ethernet controller.
+    pub fn attach_e1000(&mut self, device: E1000Device) {
         self.backend = NetworkDeviceBackend::E1000(device);
         self.kind = NetworkBackend::EthernetPci;
         self.mtu = 1500;
         self.link_up = true;
     }
+}
 
 pub static NETWORK_DEVICE: spin::Mutex<NetworkDeviceManager> =
     spin::Mutex::new(NetworkDeviceManager::new_loopback());
