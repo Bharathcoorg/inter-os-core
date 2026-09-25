@@ -26,6 +26,8 @@ def main():
         must(dev, marker, marker)
     must(net, "NETWORK_DEVICE.lock().transmit", "network transmit uses canonical device")
     must(net, "NETWORK_DEVICE.lock()", "network receive uses canonical device")
+    service = (ROOT / "userspace/system-service/src/lib.rs").read_text()
+    must(service, "[netd] External UDP packet received through userspace network service.", "userspace RX evidence marker")
     must(net, "pub use device::{LoopbackDevice, NetDeviceInfo, NetError, NetworkBackend, NetworkDevice, NetworkDeviceManager, NETWORK_DEVICE};", "network abstraction exports")
     must(pci, "is_network_controller", "PCI network device discovery")
     must(pci, "pub fn memory_bar", "PCI BAR discovery")
