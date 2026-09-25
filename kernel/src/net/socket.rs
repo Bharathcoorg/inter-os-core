@@ -286,11 +286,12 @@ impl TcpConnectionTable {
         Ok(n)
     }
 
-    /// Accepts only the next in-order TCP sequence range. Out-of-order data is
-    /// rejected instead of silently advancing the receive sequence.
+    /// Accepts only the next in-order TCP sequence range. Duplicate data is
+    /// acknowledged by the caller without being appended a second time.
     pub fn accept_rx_segment(&mut self, id: u32, seq: u32, payload: &[u8], fin: bool) -> Result<usize, NetError> {
         let conn = self.get_mut(id).ok_or(NetError::NoPacketAvailable)?;
         if conn.state != crate::net::TcpState::Established { return Err(NetError::NoPacketAvailable); }
+        if crate::net::tcp::seq_lt(seq, conn.recv_seq) { return Ok(0); }
         if seq != conn.recv_seq { return Err(NetError::NoPacketAvailable); }
         let room = TCP_RX_BUF_SIZE.saturating_sub(conn.rx_len);
         let n = payload.len().min(room);

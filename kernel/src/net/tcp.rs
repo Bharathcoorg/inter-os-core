@@ -6,6 +6,13 @@
 pub const TCP_HEADER_LEN: usize = 20;
 pub const TCP_MAX_SEGMENT: usize = 1460;
 
+/// RFC 793 sequence-space comparison. Wrapping arithmetic is required because
+/// TCP sequence numbers are modulo 2^32.
+pub fn seq_lt(a: u32, b: u32) -> bool { (a.wrapping_sub(b) as i32) < 0 }
+pub fn seq_le(a: u32, b: u32) -> bool { a == b || seq_lt(a, b) }
+pub fn seq_gt(a: u32, b: u32) -> bool { seq_lt(b, a) }
+pub fn seq_ge(a: u32, b: u32) -> bool { a == b || seq_gt(a, b) }
+
 pub fn internet_checksum(data: &[u8]) -> u16 {
     let mut sum = 0u32;
     let mut i = 0usize;

@@ -19,7 +19,7 @@ pub use arp::{ArpOpcode, ArpPacket, ArpTable};
 pub use device::{LoopbackDevice, NetDeviceInfo, NetError, NetworkBackend, NetworkDevice, NetworkDeviceManager, NETWORK_DEVICE};
 pub use e1000::E1000Device;
 pub use dns::{encode_query as dns_encode_query, parse_a_answer, DnsAnswer, DnsQuestion, DnsResolver, DNS_SERVER};
-pub use tcp::{next_state as tcp_next_state, TcpSegment, TcpState};
+pub use tcp::{next_state as tcp_next_state, seq_ge, seq_gt, seq_le, seq_lt, TcpSegment, TcpState};
 pub use tls::{ContentType as TlsContentType, TlsRecord};
 pub use ethernet::{EtherType, EthernetFrame, MacAddress};
 pub use ipv4::{calculate_ipv4_checksum, verify_ipv4_checksum, IpProtocol, Ipv4Address, Ipv4Packet};
@@ -241,7 +241,7 @@ pub fn poll_network_interface() -> usize {
                                                     let _ = transmit_tcp_segment(ip_pkt.dst, conn.local_port, ip_pkt.src, conn.remote_port, ack_seq, conn.recv_seq, 0x10);
                                                 } else if old_state == TcpState::Established {
                                                     // Never accept acknowledgements beyond data we have sent.
-                                                    if segment.ack > conn.send_seq { continue; }
+                                                    if crate::net::tcp::seq_gt(segment.ack, conn.send_seq) { continue; }
                                                     let fin = segment.flags & 0x01 != 0;
                                                     if !segment.payload.is_empty() || fin {
                                                         let conn_id = conn.id;
