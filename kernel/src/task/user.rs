@@ -516,9 +516,11 @@ pub fn spawn_userspace_service(service_id: u8, parent_id: TaskId) -> Result<Task
     // Services that only require event polling (Input/Power/Modem/Audio/Camera)
     // use that slot directly; do not install a duplicate EventPoll capability.
     let service_specific = match service_id {
-        1 => Some((CapabilityType::FrameBufferDirect, Rights::WRITE)),
-        3 => Some((CapabilityType::FileSystemRead, Rights::READ | Rights::WRITE)),
-        4 => Some((CapabilityType::NetworkSocket, Rights::READ | Rights::WRITE)),
+        1 => Some((CapabilityType::FrameBufferDirect, Rights::WRITE, service_id as u64)),
+        // Storage is a filesystem namespace, not a single inode. Keep the
+        // capability object unscoped while retaining the dedicated service slot.
+        3 => Some((CapabilityType::FileSystemRead, Rights::READ | Rights::WRITE, 0)),
+        4 => Some((CapabilityType::NetworkSocket, Rights::READ | Rights::WRITE, service_id as u64)),
         2 | 5 | 6 | 7 | 8 => None,
         _ => return Err("unknown userspace service"),
     };
@@ -529,12 +531,12 @@ pub fn spawn_userspace_service(service_id: u8, parent_id: TaskId) -> Result<Task
     }).is_none() {
         return Err("service policy rejected");
     }
-    if let Some((cap_type, rights)) = service_specific {
+    if let Some((cap_type, rights, object_id)) = service_specific {
         caps.insert(Capability {
             id: CapabilityId(0x7004 + service_id as u64),
             cap_type,
             rights,
-            object_id: service_id as u64,
+            object_id,
         }).map_err(|_| "service capability table full")?;
     }
     let id = spawn_user_process(name, elf, caps, 5)?;
