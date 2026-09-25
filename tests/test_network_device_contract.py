@@ -13,7 +13,7 @@ def main():
     must(dev, "pub trait NetworkDevice", "network device trait")
     e1000 = (ROOT / "kernel/src/net/e1000.rs").read_text()
     must(e1000, "pub struct E1000Device", "E1000 driver")
-    for marker in ("RDBAL", "TDBAL", "pub fn initialize", "impl NetworkDevice for E1000Device"):
+    for marker in ("RDBAL", "TDBAL", "pub fn initialize", "impl NetworkDevice for E1000Device", "physical_to_virtual", "TX_CMD_RS", "read_link_status"):
         must(e1000, marker, marker)
     must(dev, "NetworkDeviceBackend::E1000", "E1000 backend selection")
     must(dev, "pub fn attach_e1000", "E1000 device attachment")
