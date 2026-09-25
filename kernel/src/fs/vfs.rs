@@ -154,7 +154,15 @@ impl Vfs {
         };
 
         self.inodes.insert(inode_id, inode);
-        self.path_to_inode.insert(norm_path, inode_id);
+        self.path_to_inode.insert(norm_path.clone(), inode_id);
+        if norm_path != "/" {
+            let parent = parent_path(&norm_path);
+            if let Some(parent_id) = self.path_to_inode.get(parent).copied() {
+                if let Some(parent_inode) = self.inodes.get_mut(&parent_id) {
+                    parent_inode.children.push(inode_id);
+                }
+            }
+        }
         inode_id
     }
 
@@ -195,7 +203,13 @@ impl Vfs {
         };
 
         self.inodes.insert(inode_id, inode);
-        self.path_to_inode.insert(norm_path, inode_id);
+        self.path_to_inode.insert(norm_path.clone(), inode_id);
+        let parent = parent_path(&norm_path);
+        if let Some(parent_id) = self.path_to_inode.get(parent).copied() {
+            if let Some(parent_inode) = self.inodes.get_mut(&parent_id) {
+                parent_inode.children.push(inode_id);
+            }
+        }
         inode_id
     }
 
@@ -669,6 +683,14 @@ fn normalize_path(path: &str) -> String {
         normalized.push_str(trimmed);
     }
     normalized
+}
+
+/// Returns the normalized parent path for an inode path.
+fn parent_path(path: &str) -> &str {
+    match path.rsplit_once('/') {
+        Some((parent, _)) if !parent.is_empty() => parent,
+        _ => "/",
+    }
 }
 
 /// Extracts filename from path.
