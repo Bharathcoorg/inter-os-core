@@ -1,0 +1,98 @@
+//! Minimal no_std TCP wire/state boundary for InterOS.
+//! This module intentionally keeps transport state separate from the NIC and
+//! IPv4 layers. It provides bounded parsing/serialization and the core
+//! connection state machine needed by the userspace network service.
+
+pub const TCP_HEADER_LEN: usize = 20;
+pub const TCP_MAX_SEGMENT: usize = 1460;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TcpState {
+    Closed,
+    Listen,
+    SynSent,
+    SynReceived,
+    Established,
+    FinWait,
+    CloseWait,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TcpSegment<'a> {
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub seq: u32,
+    pub ack: u32,
+    pub flags: u16,
+    pub window: u16,
+    pub payload: &'a [u8],
+}
+
+impl<'a> TcpSegment<'a> {
+    pub fn parse(buf: &'a [u8]) -> Result<Self, &'static str> {
+        if buf.len() < TCP_HEADER_LEN { return Err("TCP header too small"); }
+        let data_offset = ((buf[12] >> 4) as usize) * 4;
+        if data_offset < TCP_HEADER_LEN || data_offset > buf.len() {
+            return Err("invalid TCP data offset");
+        }
+        Ok(Self {
+            src_port: u16::from_be_bytes([buf[0], buf[1]]),
+            dst_port: u16::from_be_bytes([buf[2], buf[3]]),
+            seq: u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]),
+            ack: u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]),
+            flags: u16::from_be_bytes([buf[12] & 0x01, buf[13]]),
+            window: u16::from_be_bytes([buf[14], buf[15]]),
+            payload: &buf[data_offset..],
+        })
+    }
+
+    pub fn serialize(&self, out: &mut [u8]) -> Result<usize, &'static str> {
+        if self.payload.len() > TCP_MAX_SEGMENT || out.len() < TCP_HEADER_LEN + self.payload.len() {
+            return Err("TCP segment too large");
+        }
+        out[..TCP_HEADER_LEN].fill(0);
+        out[0..2].copy_from_slice(&self.src_port.to_be_bytes());
+        out[2..4].copy_from_slice(&self.dst_port.to_be_bytes());
+        out[4..8].copy_from_slice(&self.seq.to_be_bytes());
+        out[8..12].copy_from_slice(&self.ack.to_be_bytes());
+        out[12] = 0x50 | ((self.flags >> 8) as u8 & 0x01);
+        out[13] = self.flags as u8;
+        out[14..16].copy_from_slice(&self.window.to_be_bytes());
+        out[16..18].copy_from_slice(&0u16.to_be_bytes());
+        out[18..20].copy_from_slice(&0u16.to_be_bytes());
+        out[TCP_HEADER_LEN..TCP_HEADER_LEN + self.payload.len()].copy_from_slice(self.payload);
+        Ok(TCP_HEADER_LEN + self.payload.len())
+    }
+}
+
+pub fn next_state(state: TcpState, flags: u16) -> TcpState {
+    const SYN: u16 = 0x02;
+    const ACK: u16 = 0x10;
+    const FIN: u16 = 0x01;
+    match state {
+        TcpState::Closed if flags & SYN != 0 => TcpState::SynReceived,
+        TcpState::Listen if flags & SYN != 0 => TcpState::SynReceived,
+        TcpState::SynSent if flags & SYN != 0 && flags & ACK != 0 => TcpState::Established,
+        TcpState::SynReceived if flags & ACK != 0 => TcpState::Established,
+        TcpState::Established if flags & FIN != 0 => TcpState::CloseWait,
+        TcpState::FinWait if flags & ACK != 0 => TcpState::Closed,
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn tcp_round_trip() {
+        let seg = TcpSegment { src_port: 1234, dst_port: 443, seq: 10, ack: 20, flags: 0x18, window: 4096, payload: b"GET" };
+        let mut raw = [0u8; 64];
+        let n = seg.serialize(&mut raw).unwrap();
+        let parsed = TcpSegment::parse(&raw[..n]).unwrap();
+        assert_eq!(parsed.src_port, 1234);
+        assert_eq!(parsed.dst_port, 443);
+        assert_eq!(parsed.seq, 10);
+        assert_eq!(parsed.payload, b"GET");
+    }
+}
