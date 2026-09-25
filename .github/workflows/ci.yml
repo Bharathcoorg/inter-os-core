@@ -141,6 +141,8 @@ jobs:
         run: rustup target add x86_64-unknown-none --toolchain nightly-2026-09-15
       - name: Install QEMU
         run: sudo apt-get update && sudo apt-get install -y qemu-system-x86
+      - name: Build Ring-3 system services
+        run: cargo build --manifest-path userspace/system-service/Cargo.toml --target x86_64-unknown-none
       - name: Build embedded x86_64 userspace binaries
         run: |
           cargo build --manifest-path userspace/init/Cargo.toml --target x86_64-unknown-none
