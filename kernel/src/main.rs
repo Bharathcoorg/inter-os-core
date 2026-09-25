@@ -35,6 +35,7 @@ pub mod package;
 pub mod panic;
 pub mod resource;
 pub mod sensor;
+pub mod services;
 pub mod serial;
 pub mod storage;
 pub mod syscall;
@@ -390,6 +391,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         .ok();
     SCHEDULER.lock().init(main_caps);
     serial_println!("[OK] Primordial Kernel Thread registered as Task 0.");
+
+    // Phase 25: explicit userspace-style system service domains.
+    services::init();
 
     // Task 1: Telemetry Service
     let mut caps_telemetry = CapabilityTable::new(8);
