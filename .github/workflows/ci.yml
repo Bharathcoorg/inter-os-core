@@ -142,7 +142,7 @@ jobs:
       - name: Install QEMU
         run: sudo apt-get update && sudo apt-get install -y qemu-system-x86
       - name: Build Ring-3 system services
-        run: cargo build --manifest-path userspace/system-service/Cargo.toml --target x86_64-unknown-none
+        run: cargo build --manifest-path userspace/system-service/Cargo.toml --target x86_64-unknown-none --features ci-fault-injection
       - name: Build embedded x86_64 userspace binaries
         run: |
           cargo build --manifest-path userspace/init/Cargo.toml --target x86_64-unknown-none
@@ -172,6 +172,6 @@ jobs:
           grep -F "[PID1] Service registry observed; userspace lifecycle loop active." target/interos-qemu-serial.log
           grep -F "[PID1] Service stop lifecycle contract exercised." target/interos-qemu-serial.log
           grep -F "[PID1] Service restart lifecycle contract exercised." target/interos-qemu-serial.log
-          grep -F "[PID1] All system services running after bootstrap." target/interos-qemu-serial.log
+          grep -F "[PID1] All system services running after bootstrap." target/interos-qemu-serial.log\n          grep -F "[PID1] Recovered failed system service(s)." target/interos-qemu-serial.log
       - name: Verify boot image builder
         run: cargo check --manifest-path boot/Cargo.toml
