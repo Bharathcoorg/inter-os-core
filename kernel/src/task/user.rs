@@ -581,7 +581,7 @@ pub fn spawn_user_init(id_security: TaskId) -> TaskId {
         id: CapabilityId(910),
         cap_type: CapabilityType::SystemControl,
         rights: Rights::INVOKE,
-        object_id: 0,
+        object_id: crate::syscall::SERVICE_MANAGER_OBJECT,
     }).expect("PID1 SystemControl capability");
     user_caps.insert(Capability {
         id: CapabilityId(909),
