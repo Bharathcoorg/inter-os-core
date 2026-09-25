@@ -30,6 +30,9 @@ def main() -> None:
     ):
         must(drivers, marker, f"display boundary {marker}")
     must(kms, "pub fn write_surface_pixels", "KMS pixel write backend")
+    fb=(ROOT/"kernel/src/framebuffer.rs").read_text()
+    must(fb,"pub fn present_argb8888","hardware framebuffer scanout")
+    must(fb,"aspect ratio","hardware scanout scaling")
     must(kms, "pub fn destroy_surface_owned", "KMS owned surface destruction")
 
     must(syscall, "fn require_display_service", "display capability gate")
@@ -60,6 +63,7 @@ def main() -> None:
     must(service, "std::surface_create(4, 320, 480, 0)", "display service creates surface through ABI")
     must(service, "std::surface_write(4, surface", "display service writes through ABI")
     must(service, "std::surface_flip(4)", "display service flips through ABI")
+    must(drivers, "crate::framebuffer::present_argb8888", "KMS-to-hardware scanout handoff")
     must(displayd, "interos_system_service::run_display()", "displayd uses dedicated implementation")
 
     print("display driver boundary contract: PASS")
