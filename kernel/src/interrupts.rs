@@ -203,6 +203,8 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
             .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
     }
 
+    crate::serial::poll_serial_rx();
+
     // Dispatch timer deadlines & wakeups to Event Reactor
     crate::event::on_timer_tick(ticks + 1);
 
@@ -237,6 +239,13 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     }
 }
 
+extern "x86-interrupt" fn irq4_com1_handler(_stack_frame: InterruptStackFrame) {
+    crate::serial::poll_serial_rx();
+    unsafe {
+        PICS.lock().notify_end_of_interrupt(36);
+    }
+}
+
 extern "x86-interrupt" fn irq12_touch_digitizer_handler(_stack_frame: InterruptStackFrame) {
     let mut port = Port::new(0x60);
     let _byte: u8 = unsafe { port.read() };
@@ -257,7 +266,6 @@ macro_rules! define_pic_eoi_handler {
 
 define_pic_eoi_handler!(irq2_handler, 34);
 define_pic_eoi_handler!(irq3_handler, 35);
-define_pic_eoi_handler!(irq4_com1_handler, 36);
 define_pic_eoi_handler!(irq5_handler, 37);
 define_pic_eoi_handler!(irq6_handler, 38);
 define_pic_eoi_handler!(irq7_spurious_handler, 39);

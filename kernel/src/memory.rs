@@ -150,8 +150,6 @@ impl TaskPageTable {
 
             // Mirror all kernel and supervisor entries (1..512) from kernel PML4.
             // Index 0 is reserved exclusively for isolated Ring 3 user memory (text, stack, heap).
-            // Indices 1..512 contain kernel code/IDT/GDT (index 2), kernel stack (index 3),
-            // and the dynamic physical memory offset map.
             let kernel_pml4_frame = kernel_pml4();
             let kernel_pml4_ptr = (phys_offset + kernel_pml4_frame.start_address().as_u64()).as_ptr::<PageTable>();
             let kernel_pml4 = &*kernel_pml4_ptr;
@@ -356,13 +354,16 @@ pub fn switch_to_task_page_table(pml4_frame: PhysFrame<Size4KiB>) {
 pub fn run_mmu_adversarial_tests() {
     crate::serial_println!("[MMU TEST] Starting Hardware CR3 & Memory Isolation Adversarial Test Suite...");
 
-    // 1. Create two independent task page tables: Process A and Process B
+    crate::serial_println!("[MMU TEST] Step 1a: create PT A");
     let mut pt_a = TaskPageTable::create_user_page_table().expect("Failed to create PT A");
+    crate::serial_println!("[MMU TEST] Step 1b: create PT B");
     let mut pt_b = TaskPageTable::create_user_page_table().expect("Failed to create PT B");
+    crate::serial_println!("[MMU TEST] Step 1c: assert PML4 frames distinct");
 
     // PML4 root frames must be distinct
     assert_ne!(pt_a.frame(), pt_b.frame(), "Process A and B shared the same PML4 frame!");
 
+    crate::serial_println!("[MMU TEST] Step 2a: allocate frames");
     // 2. Allocate distinct physical frames for a shared virtual address (e.g. 0x0040_0000)
     let frame_a = allocate_frame().expect("Frame alloc A");
     let frame_b = allocate_frame().expect("Frame alloc B");
@@ -371,6 +372,7 @@ pub fn run_mmu_adversarial_tests() {
     let test_page = Page::<Size4KiB>::containing_address(VirtAddr::new(0x0040_0000));
     let phys_offset = phys_mem_offset();
 
+    crate::serial_println!("[MMU TEST] Step 2b: write distinct data");
     // Write distinct data into physical frames
     unsafe {
         let ptr_a = (phys_offset + frame_a.start_address().as_u64()).as_mut_ptr::<u32>();
@@ -380,9 +382,11 @@ pub fn run_mmu_adversarial_tests() {
         *ptr_b = 0xBBBB_2222;
     }
 
+    crate::serial_println!("[MMU TEST] Step 2c: map page in A");
     // Map test_page in A as Read+Execute (Code, RX), and in B as Read+Write+NX (Data, RW+NX)
     pt_a.map_user_page(test_page, frame_a, PageTableFlags::empty())
         .expect("Map page in A");
+    crate::serial_println!("[MMU TEST] Step 2d: map page in B");
     pt_b.map_user_page(test_page, frame_b, PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE)
         .expect("Map page in B");
 

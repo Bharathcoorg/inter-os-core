@@ -73,11 +73,22 @@ entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
 /// Primary kernel entry function invoked by the bootloader.
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
+    x86_64::instructions::interrupts::disable();
+
     // 1. Initialize COM1 serial port for diagnostics and test logging
     serial::init();
+    serial_println!("[BOOT] Serial COM1 online. Checking relocations...");
+
+    // 1b. Apply early dynamic relocations if kernel was loaded at higher-half offset
+    let num_relocated = unsafe { arch::apply_relocations() };
+    serial_println!("[BOOT] Relocations applied: {}", num_relocated);
 
     if let Some(framebuffer) = boot_info.framebuffer.as_mut() {
         framebuffer::init(framebuffer);
+    }
+
+    if num_relocated > 0 {
+        serial_println!("[OK] Dynamic self-relocations applied: {} symbols patched.", num_relocated);
     }
 
     // 2. Output diagnostic banner to UART serial COM1
@@ -95,11 +106,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     interrupts::init_idt();
     serial_println!("[OK] IDT loaded with CPU exception and hardware interrupt gates.");
 
-    // 5. Initialize 8259 PIC controllers and unmask interrupts
+    // 5. Initialize 8259 PIC controllers (PIT timer deferred until scheduler start)
     interrupts::init_pics();
-    interrupts::init_pit();
     serial_println!("[OK] Dual 8259 PIC remapped (IRQs 32-47).");
-    serial_println!("[OK] PIT system timer configured at {} Hz.", interrupts::SYSTEM_TICK_HZ);
 
     // 6. Initialize virtual memory page tables and physical frame allocator
     let phys_mem_offset_raw = boot_info
@@ -422,6 +431,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     serial_println!("[OK] PID1 userspace service manager spawned (Task {}).", id_user_init.0);
     serial_println!("[OK] Kernel service registry initialized; application startup delegated to userspace.");
+
+    interrupts::init_pit();
+    serial_println!("[OK] PIT system timer configured at {} Hz.", interrupts::SYSTEM_TICK_HZ);
 
     x86_64::instructions::interrupts::enable();
     serial_println!("[OK] Hardware interrupts enabled on CPU.");
