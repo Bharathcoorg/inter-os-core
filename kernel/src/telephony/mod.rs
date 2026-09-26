@@ -26,12 +26,12 @@ pub static SOVEREIGN_SIM: Mutex<SovereignEsim> = Mutex::new(SovereignEsim {
 
 /// Global static instance of the Cellular Modem Driver.
 pub static CELLULAR_MODEM: Mutex<CellularModem> = Mutex::new(CellularModem {
-    state: ModemRadioState::RegisteredHome,
+    state: ModemRadioState::PowerDown,
     call_state: CallState::Idle,
-    signal: SignalQuality { rssi: 28, ber: 99 },
-    pdp_context_active: true,
-    apn: "internet.interos.net",
-    ip_address: [10, 64, 12, 105],
+    signal: SignalQuality { rssi: 99, ber: 99 },
+    pdp_context_active: false,
+    apn: "",
+    ip_address: [0, 0, 0, 0],
     sms_inbox: alloc::vec::Vec::new(),
     sms_outbox: alloc::vec::Vec::new(),
     next_sms_id: 1,
@@ -110,6 +110,24 @@ pub fn init() {
     // 4. Test Streaming Serial RIL Driver & URC Event Dispatch
     serial_ril::test_serial_ril();
 
+    // 5. Reset to truthful hardware state: in standard QEMU virt without physical baseband,
+    // report PowerDown / undetectable signal instead of advertising active connectivity.
+    {
+        let mut modem = CELLULAR_MODEM.lock();
+        modem.state = ModemRadioState::PowerDown;
+        modem.call_state = CallState::Idle;
+        modem.signal = SignalQuality { rssi: 99, ber: 99 };
+        modem.pdp_context_active = false;
+        modem.apn = "";
+        modem.ip_address = [0, 0, 0, 0];
+        modem.sms_inbox.clear();
+        modem.sms_outbox.clear();
+
+        let mut sim = SOVEREIGN_SIM.lock();
+        sim.status = SimStatus::NoSim;
+        sim.carrier_operator = "None";
+    }
+
     serial_println!("--- [Sovereign Telephony Subsystem 100% Attested & Enforced] ---");
 }
 
@@ -120,12 +138,18 @@ pub extern "C" fn task_telephony_worker() -> ! {
         ticks = ticks.wrapping_add(1);
         if ticks % 50 == 0 {
             let modem = CELLULAR_MODEM.lock();
-            crate::serial_println!(
-                "[TASK telephony_worker (ID 11) LOG] [TELEPHONY WORKER] 5G Bearer: State = {:?}, RSSI = {}/31, APN = '{}'.",
-                modem.state,
-                modem.signal.rssi,
-                modem.apn
-            );
+            if modem.state == ModemRadioState::PowerDown {
+                crate::serial_println!(
+                    "[TASK telephony_worker (ID 11) LOG] [TELEPHONY WORKER] Cellular Modem: Standby (No hardware baseband modem detected)."
+                );
+            } else {
+                crate::serial_println!(
+                    "[TASK telephony_worker (ID 11) LOG] [TELEPHONY WORKER] 5G Bearer: State = {:?}, RSSI = {}/31, APN = '{}'.",
+                    modem.state,
+                    modem.signal.rssi,
+                    modem.apn
+                );
+            }
         }
         crate::task::yield_now();
     }

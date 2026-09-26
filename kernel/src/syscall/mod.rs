@@ -2123,9 +2123,11 @@ pub fn sys_telephony_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
     // Honest hardware detection: check if modem is actively registered (not PowerDown)
     let modem = crate::telephony::CELLULAR_MODEM.lock();
     let sim = crate::telephony::SOVEREIGN_SIM.lock();
+    let is_present = modem.state != crate::telephony::ModemRadioState::PowerDown;
     let _ = write!(
         writer,
-        r#"{{"present":true,"operator":"{}","rssi":{},"bars":{},"dbm":{},"state":"{:?}","call_state":"{:?}","pdp_active":{},"ip":"{}.{}.{}.{}"}}"#,
+        r#"{{"present":{},"operator":"{}","rssi":{},"bars":{},"dbm":{},"state":"{:?}","call_state":"{:?}","pdp_active":{},"ip":"{}.{}.{}.{}"}}"#,
+        is_present,
         sim.carrier_operator,
         modem.signal.rssi,
         modem.signal.to_bars(),
