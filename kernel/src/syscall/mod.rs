@@ -1752,23 +1752,30 @@ pub fn sys_tcp_close(connection_id: u32) -> Result<(), SyscallResult> {
     let local_port;
     let dst_ip;
     let remote_port;
-    let seq;
     let ack;
+    let state;
     {
         let table = crate::net::TCP_TABLE.lock();
         let conn = table.get(connection_id).ok_or(SyscallResult::InvalidArguments)?;
         if conn.owner_task_id != owner { return Err(SyscallResult::PermissionDenied); }
-        if conn.state != crate::net::TcpState::Established { return Err(SyscallResult::NotReady); }
+        if conn.state != crate::net::TcpState::Established && conn.state != crate::net::TcpState::CloseWait {
+            return Err(SyscallResult::NotReady);
+        }
         src_ip = if conn.remote_ip.is_loopback() { crate::net::Ipv4Address::LOCALHOST } else { crate::net::DEFAULT_HOST_IP };
         local_port = conn.local_port;
         dst_ip = conn.remote_ip;
         remote_port = conn.remote_port;
-        seq = conn.send_seq;
         ack = conn.recv_seq;
+        state = conn.state;
     }
-    crate::net::transmit_tcp_segment(src_ip, local_port, dst_ip, remote_port, seq, ack, 0x11)
-        .map_err(|_| SyscallResult::NetworkError)?;
-    crate::net::TCP_TABLE.lock().arm_fin(connection_id, crate::interrupts::get_system_ticks()).map_err(|_| SyscallResult::NotReady)?;
+    let seq = crate::net::TCP_TABLE.lock()
+        .arm_fin(connection_id, crate::interrupts::get_system_ticks())
+        .map_err(|_| SyscallResult::NotReady)?;
+    if crate::net::transmit_tcp_segment(src_ip, local_port, dst_ip, remote_port, seq, ack, 0x11).is_err() {
+        let _ = crate::net::TCP_TABLE.lock().rollback_fin(connection_id);
+        return Err(SyscallResult::NetworkError);
+    }
+    let _ = state;
     Ok(())
 }
 
