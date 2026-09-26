@@ -450,29 +450,10 @@ pub extern "C" fn _start() -> ! {
 
     let mut camera = CameraApp::new();
 
-    // 1. Initial Still Capture in Photo Mode
-    let _ = camera.capture_still_photo();
+    // Camera starts in Photo mode without capturing or changing hardware state.
+    // Capture, mode changes and flash controls are driven only by user input.
 
-    // 2. Switch Mode to Document Vision and test ISP Edge Filter
-    camera.mode = CameraMode::DocumentVision;
-    camera.filter = CameraFilter::HighContrast;
-    std::log(0, "[CAMERA APP] Mode switched to 'DocumentVision' (ISP Edge Detection active).").ok();
-    let _ = camera.capture_still_photo();
-
-    // 3. Switch Mode to 30fps Video and stream frame via DMA SHM Pipe 0
-    camera.mode = CameraMode::Video;
-    camera.filter = CameraFilter::Normal;
-    if let Ok(_seq) = camera.stream_video_frame() {
-        std::log(0, "[CAMERA APP] 30fps Video: Zero-Copy DMA frame streamed via SHM Pipe 0.").ok();
-    }
-
-    // 4. Toggle Flash Torch
-    camera.flash = FlashMode::Torch;
-    if let Ok(true) = std::camera_toggle_flash() {
-        std::log(0, "[CAMERA APP] Hardware LED flash torch active.").ok();
-    }
-
-    // 5. Allocate dedicated KMS Client Surface (z=200)
+    // Allocate dedicated KMS Client Surface (z=200)
     std::log(0, "[CAMERA APP] Step 1: Allocating application surface (z=200)...").ok();
     let surface = match std::surface_create(6, W as u32, H as u32, 200) {
         Ok(s) => {
@@ -485,7 +466,7 @@ pub extern "C" fn _start() -> ! {
         }
     };
 
-    // 6. Reset back to Photo mode, render initial UI and present
+    // Render initial UI and present
     camera.mode = CameraMode::Photo;
     render_camera_ui(surface, &camera);
     let _ = std::surface_flip(6);
@@ -493,7 +474,7 @@ pub extern "C" fn _start() -> ! {
 
     let mut ipc_msg = [0u8; 64];
 
-    // 7. Interactive Event Reactor Loop
+    // Interactive Event Reactor Loop
     loop {
         if let Ok(events) = std::event_poll(
             std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK | std::EVENT_IPC_MSG,
