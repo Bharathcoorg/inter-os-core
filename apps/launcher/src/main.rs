@@ -8,6 +8,81 @@ const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
 
+#[inline(always)]
+fn get_color(x: usize, y: usize) -> u32 {
+    if y < 96 {
+        return if y >= 94 { std::design::color::ACCENT } else { std::design::color::SURFACE };
+    }
+    if y < 112 { return std::design::color::BACKGROUND; }
+    if y < 232 {
+        return if x >= 24 && x < W - 24 {
+            if y >= 230 { std::design::color::ACCENT } else { std::design::color::SURFACE }
+        } else {
+            std::design::color::BACKGROUND
+        };
+    }
+    if y < 280 { return std::design::color::BACKGROUND; }
+    if y < 420 {
+        if x >= 56 && x < 306 {
+            return if y >= 330 && y < 394 && x >= 149 && x < 213 { std::design::color::ACCENT } else { std::design::color::SURFACE };
+        }
+        if x >= 360 && x < 610 {
+            return if y >= 330 && y < 394 && x >= 453 && x < 517 { std::design::color::SUCCESS } else { std::design::color::SURFACE };
+        }
+        return std::design::color::BACKGROUND;
+    }
+    if y < 450 { return std::design::color::BACKGROUND; }
+    if y < 590 {
+        if x >= 56 && x < 306 {
+            return if y >= 500 && y < 564 && x >= 149 && x < 213 { std::design::color::WARNING } else { std::design::color::SURFACE };
+        }
+        if x >= 360 && x < 610 {
+            return if y >= 500 && y < 564 && x >= 453 && x < 517 { std::design::color::DANGER } else { std::design::color::SURFACE };
+        }
+        return std::design::color::BACKGROUND;
+    }
+    if y < 620 { return std::design::color::BACKGROUND; }
+    if y < 760 {
+        if x >= 56 && x < 306 {
+            return if y >= 670 && y < 734 && x >= 149 && x < 213 { std::design::color::ACCENT } else { std::design::color::SURFACE };
+        }
+        if x >= 360 && x < 610 {
+            return if y >= 670 && y < 734 && x >= 453 && x < 517 { std::design::color::SUCCESS } else { std::design::color::SURFACE };
+        }
+        return std::design::color::BACKGROUND;
+    }
+    if y < 790 { return std::design::color::BACKGROUND; }
+    if y < 930 {
+        if x >= 56 && x < 306 {
+            return if y >= 840 && y < 904 && x >= 149 && x < 213 { std::design::color::TEXT_MUTED } else { std::design::color::SURFACE };
+        }
+        if x >= 360 && x < 610 {
+            return if y >= 840 && y < 904 && x >= 453 && x < 517 { std::design::color::WARNING } else { std::design::color::SURFACE };
+        }
+        return std::design::color::BACKGROUND;
+    }
+    if y < 960 { return std::design::color::BACKGROUND; }
+    if y < 1100 {
+        if x >= 56 && x < 306 {
+            return if y >= 1010 && y < 1074 && x >= 149 && x < 213 { std::design::color::ACCENT } else { std::design::color::SURFACE };
+        }
+        if x >= 360 && x < 610 {
+            return if y >= 1010 && y < 1074 && x >= 453 && x < 517 { std::design::color::SUCCESS } else { std::design::color::SURFACE };
+        }
+        return std::design::color::BACKGROUND;
+    }
+    if y >= 1260 && y < 1400 && x >= 24 && x < W - 24 {
+        let is_dock_icon = (x >= 60 && x < 124) || (x >= 220 && x < 284)
+            || (x >= 380 && x < 444) || (x >= 540 && x < 604);
+        return if y >= 1298 && y < 1362 && is_dock_icon {
+            std::design::color::ACCENT
+        } else {
+            std::design::color::SURFACE_RAISED
+        };
+    }
+    std::design::color::BACKGROUND
+}
+
 fn render_full(surface: u32) {
     let mut chunk = [0u32; CHUNK];
     let total = W * H;
@@ -17,92 +92,7 @@ fn render_full(surface: u32) {
         let mut x = offset % W;
         let mut y = offset / W;
         for i in 0..count {
-            if y < 96 {
-                // Status Bar / Header
-                chunk[i] = if y >= 94 { std::design::color::ACCENT } else { std::design::color::SURFACE };
-            } else if (112..232).contains(&y) && x >= 24 && x < W - 24 {
-                // Hero Widget / Clock & Search Banner
-                chunk[i] = if y >= 230 { std::design::color::ACCENT } else { std::design::color::SURFACE };
-            } else if (280..420).contains(&y) {
-                // Row 0: Settings (Card 0) & Terminal (Card 1)
-                if x >= 56 && x < 306 {
-                    chunk[i] = if (330..394).contains(&y) && x >= 149 && x < 213 {
-                        std::design::color::ACCENT
-                    } else {
-                        std::design::color::SURFACE
-                    };
-                } else if x >= 360 && x < 610 {
-                    chunk[i] = if (330..394).contains(&y) && x >= 453 && x < 517 {
-                        std::design::color::SUCCESS
-                    } else {
-                        std::design::color::SURFACE
-                    };
-                } else {
-                    chunk[i] = std::design::color::BACKGROUND;
-                }
-            } else if (450..590).contains(&y) {
-                // Row 1: Calculator (Card 2) & Vault (Card 3)
-                if x >= 56 && x < 306 {
-                    chunk[i] = if (500..564).contains(&y) && x >= 149 && x < 213 {
-                        std::design::color::WARNING
-                    } else {
-                        std::design::color::SURFACE
-                    };
-                } else if x >= 360 && x < 610 {
-                    chunk[i] = if (500..564).contains(&y) && x >= 453 && x < 517 {
-                        std::design::color::DANGER
-                    } else {
-                        std::design::color::SURFACE
-                    };
-                } else {
-                    chunk[i] = std::design::color::BACKGROUND;
-                }
-            } else if (620..760).contains(&y) {
-                // Row 2: Camera (Card 4) & Dialer (Card 5)
-                if x >= 56 && x < 306 {
-                    chunk[i] = if (670..734).contains(&y) && x >= 149 && x < 213 {
-                        std::design::color::ACCENT
-                    } else {
-                        std::design::color::SURFACE
-                    };
-                } else if x >= 360 && x < 610 {
-                    chunk[i] = if (670..734).contains(&y) && x >= 453 && x < 517 {
-                        std::design::color::SUCCESS
-                    } else {
-                        std::design::color::SURFACE
-                    };
-                } else {
-                    chunk[i] = std::design::color::BACKGROUND;
-                }
-            } else if (790..930).contains(&y) {
-                // Row 3: Browser (Card 6) & Messages (Card 7)
-                if x >= 56 && x < 306 {
-                    chunk[i] = if (840..904).contains(&y) && x >= 149 && x < 213 {
-                        std::design::color::TEXT_MUTED
-                    } else {
-                        std::design::color::SURFACE
-                    };
-                } else if x >= 360 && x < 610 {
-                    chunk[i] = if (840..904).contains(&y) && x >= 453 && x < 517 {
-                        std::design::color::WARNING
-                    } else {
-                        std::design::color::SURFACE
-                    };
-                } else {
-                    chunk[i] = std::design::color::BACKGROUND;
-                }
-            } else if (1260..1400).contains(&y) && x >= 24 && x < W - 24 {
-                // Bottom Quick-Launch Dock
-                let is_dock_icon = (x >= 60 && x < 124) || (x >= 220 && x < 284)
-                    || (x >= 380 && x < 444) || (x >= 540 && x < 604);
-                if (1298..1362).contains(&y) && is_dock_icon {
-                    chunk[i] = std::design::color::ACCENT;
-                } else {
-                    chunk[i] = std::design::color::SURFACE_RAISED;
-                }
-            } else {
-                chunk[i] = std::design::color::BACKGROUND;
-            }
+            chunk[i] = get_color(x, y);
             x += 1;
             if x == W {
                 x = 0;
@@ -112,7 +102,7 @@ fn render_full(surface: u32) {
         let _ = std::surface_write(4, surface, offset, &chunk[..count]);
         offset += count;
     }
-    std::log(0, "[LAUNCHER] render_full complete: 8-app home screen canvas initialized.").ok();
+    std::log(0, "[LAUNCHER] render_full complete: 10-app home screen canvas initialized.").ok();
 }
 
 fn render_header(surface: u32) {
@@ -166,6 +156,11 @@ fn resolve_app_at_touch(x: u32, y: u32) -> Option<&'static str> {
     if (790..930).contains(&y) {
         if (56..306).contains(&x) { return Some("org.interos.browser"); }
         if (360..610).contains(&x) { return Some("org.interos.messages"); }
+    }
+    // Row 4
+    if (960..1100).contains(&y) {
+        if (56..306).contains(&x) { return Some("org.interos.calendar"); }
+        if (360..610).contains(&x) { return Some("org.interos.music"); }
     }
     // Bottom Dock (y in 1260..1400)
     if (1260..1400).contains(&y) {
@@ -221,7 +216,7 @@ pub extern "C" fn _start() -> ! {
                 }
             }
 
-            if (events & std::EVENT_TIMER_TICK) != 0 {
+            if active_child.is_none() && (events & std::EVENT_TIMER_TICK) != 0 {
                 refresh_ticks += 1;
                 if refresh_ticks % 10 == 0 {
                     render_header(surface);
@@ -229,10 +224,10 @@ pub extern "C" fn _start() -> ! {
                 }
             }
 
-            // Consume the normalized kernel input pipeline. The kernel already
-            // routes hardware gestures to the focused surface; the launcher owns
-            // the focused surface while it is visible.
-            if (events & std::EVENT_TOUCH_INPUT) != 0 {
+            // Consume the normalized kernel input pipeline only when no child application
+            // is active. When a child app is active, it owns the foreground focused surface
+            // and consumes touch gestures directly.
+            if active_child.is_none() && (events & std::EVENT_TOUCH_INPUT) != 0 {
                 let mut input = std::InputEvent {
                     kind: 0,
                     x: 0,
@@ -250,6 +245,7 @@ pub extern "C" fn _start() -> ! {
                                 Ok(task_id) => {
                                     active_child = Some(task_id);
                                     std::log(0, "[LAUNCHER] Launched application from real touch input.").ok();
+                                    break;
                                 }
                                 Err(_) => {
                                     std::log(0, "[LAUNCHER] Application launch rejected by kernel.").ok();

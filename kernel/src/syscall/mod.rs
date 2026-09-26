@@ -181,12 +181,18 @@ pub fn sys_exit_with_code(exit_code: i32) -> ! {
             let _ = display.composite_and_flip();
         }
     }
-    {
+    let parent_id = {
         let mut sched = SCHEDULER.lock();
         if let Some(current) = sched.current_task_mut() {
             current.exit_code = exit_code;
             current.state = crate::task::TaskState::Zombie;
+            current.parent_id
+        } else {
+            crate::task::TaskId(0)
         }
+    };
+    if parent_id != crate::task::TaskId(0) {
+        crate::event::EVENT_REACTOR.lock().post_event(parent_id, crate::event::EVENT_TIMER_TICK);
     }
     crate::task::terminate_current();
 }
@@ -1330,30 +1336,18 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             // a4=pixel buffer pointer, a5=pixel count.
             let count = a5 as usize;
             if count == 0 || count > 4096 { return SyscallResult::InvalidArguments as i64; }
-            let mut total_written = 0usize;
-            let mut offset = a3 as usize;
-            let mut user_ptr = a4;
-            while total_written < count {
-                let chunk = (count - total_written).min(1024);
-                let mut pixels = [0u32; 1024];
-                let byte_len = chunk * core::mem::size_of::<u32>();
-                if copy_from_user(
-                    unsafe { core::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, byte_len) },
-                    user_ptr,
-                    byte_len,
-                ).is_err() {
-                    return SyscallResult::InvalidArguments as i64;
-                }
-                match sys_surface_write(a1 as usize, a2 as u32, offset, &pixels[..chunk]) {
-                    Ok(n) => {
-                        total_written += n;
-                        offset += n;
-                        user_ptr += (n * core::mem::size_of::<u32>()) as u64;
-                    }
-                    Err(e) => return e as i64,
-                }
+            let byte_len = match count.checked_mul(core::mem::size_of::<u32>()) {
+                Some(b) => b,
+                None => return SyscallResult::InvalidArguments as i64,
+            };
+            if validate_user_buffer(a4, byte_len).is_err() {
+                return SyscallResult::InvalidArguments as i64;
             }
-            total_written as i64
+            let user_slice = unsafe { core::slice::from_raw_parts(a4 as *const u32, count) };
+            match sys_surface_write(a1 as usize, a2 as u32, a3 as usize, user_slice) {
+                Ok(n) => n as i64,
+                Err(e) => e as i64,
+            }
         }
         74 => {
             // SurfaceDestroy: a1=display-cap slot, a2=surface id
@@ -2234,10 +2228,15 @@ pub fn sys_input_event_poll(out_buf: &mut [u8]) -> Result<usize, SyscallResult> 
     if !task.cap_table.authorize_capability(CapabilityType::EventPoll, Rights::READ) {
         return Err(SyscallResult::PermissionDenied);
     }
+    let is_inputd = task.name == "inputd";
     drop(sched);
 
     crate::drivers::input::pump_touch_events();
-    let event = crate::drivers::input::INPUT_PIPELINE.lock().pop().ok_or(SyscallResult::NotReady)?;
+    let event = if is_inputd {
+        crate::drivers::input::INPUT_PIPELINE.lock().pop_service().ok_or(SyscallResult::NotReady)?
+    } else {
+        crate::drivers::input::INPUT_PIPELINE.lock().pop().ok_or(SyscallResult::NotReady)?
+    };
     if out_buf.len() < 24 { return Err(SyscallResult::InvalidArguments); }
 
     out_buf[..24].fill(0);
