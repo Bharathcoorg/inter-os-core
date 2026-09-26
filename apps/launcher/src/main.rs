@@ -235,7 +235,7 @@ pub extern "C" fn _start() -> ! {
                             match std::app_launch(target_app) {
                                 Ok(task_id) => {
                                     std::log(0, "[LAUNCHER] Launched application from real touch input.").ok();
-                                    std::log(0, &format_args!("[LAUNCHER] Child task {} started.", task_id)).ok();
+                                    let _ = task_id;
                                 }
                                 Err(_) => {
                                     std::log(0, "[LAUNCHER] Application launch rejected by kernel.").ok();
@@ -248,7 +248,6 @@ pub extern "C" fn _start() -> ! {
 
 
         }
-        let _ = std::touch_poll();
         std::yield_now();
     }
 }
