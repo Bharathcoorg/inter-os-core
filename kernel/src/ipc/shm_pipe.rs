@@ -271,6 +271,9 @@ impl ShmPipeManager {
         ticks: u64,
     ) -> Result<u64, ShmError> {
         let idx = pipe_id as usize;
+        if idx >= self.pipes.len() {
+            return Err(ShmError::PipeNotFound);
+        }
         let pipe = self.pipes[idx].as_mut().ok_or(ShmError::PipeNotFound)?;
         let consumer = pipe.consumer;
         let seq = pipe.write(sender, data, flags, ticks)?;
@@ -285,7 +288,10 @@ impl ShmPipeManager {
         receiver: TaskId,
         out_buf: &mut [u8],
     ) -> Result<(usize, u64), ShmError> {
-        let idx = (pipe_id as usize) % self.pipes.len();
+        let idx = pipe_id as usize;
+        if idx >= self.pipes.len() {
+            return Err(ShmError::PipeNotFound);
+        }
         let pipe = self.pipes[idx].as_mut().ok_or(ShmError::PipeNotFound)?;
         let producer = pipe.producer;
         let res = pipe.read(receiver, out_buf)?;
