@@ -423,16 +423,8 @@ pub extern "C" fn _start() -> ! {
             s
         }
         Err(_) => {
-            std::log(0, "[CALCULATOR] Surface allocation unavailable; falling back to headless evaluation.").ok();
-            calc.push_digit(4);
-            calc.push_digit(2);
-            calc.set_operation('+');
-            calc.push_digit(5);
-            calc.push_digit(8);
-            let result = calc.evaluate();
-            assert_eq!(result, 100);
-            std::log(0, "[CALCULATOR] Headless arithmetic verified (42 + 58 = 100).").ok();
-            std::exit_with_code(0);
+            std::log(0, "[CALCULATOR] Display surface unavailable; refusing headless demo execution.").ok();
+            std::exit_with_code(1);
         }
     };
 
