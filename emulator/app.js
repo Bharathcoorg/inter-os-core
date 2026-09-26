@@ -4203,10 +4203,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Move obstacles
         cactusX -= 1.8;
-        if (cactusX < -20) cactusX = canvas.width + Math.random() * 80;
+        if (cactusX < -20) cactusX = canvas.width + 40;
 
         pteroX -= 2.4;
-        if (pteroX < -30) pteroX = canvas.width + 120 + Math.random() * 100;
+        if (pteroX < -30) pteroX = canvas.width + 160;
 
         // Draw Pixel Dino Silhouette
         ctx.fillStyle = '#18181B';
@@ -4357,6 +4357,58 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // Interactive Hardware Input Bridge: Forward touch coordinates to running QEMU
+  // ---------------------------------------------------------------------------
+  function initHardwareTouchBridge() {
+    const phoneViewport = document.getElementById('phone-viewport');
+    if (!phoneViewport) return;
+
+    let isPointerDown = false;
+
+    function forwardTouchEvent(e, type) {
+      if (!state.qemuRunning) return;
+      const rect = phoneViewport.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+
+      const clientX = e.clientX || (e.touches && e.touches[0] ? e.touches[0].clientX : 0);
+      const clientY = e.clientY || (e.touches && e.touches[0] ? e.touches[0].clientY : 0);
+
+      // Map viewport dimensions to standard 720x1440 guest canvas resolution
+      const guestX = Math.round(Math.max(0, Math.min(719, ((clientX - rect.left) / rect.width) * 720)));
+      const guestY = Math.round(Math.max(0, Math.min(1439, ((clientY - rect.top) / rect.height) * 1440)));
+
+      fetch('/api/qemu/input', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: type, x: guestX, y: guestY })
+      }).catch(() => {});
+    }
+
+    phoneViewport.addEventListener('mousedown', (e) => {
+      isPointerDown = true;
+      forwardTouchEvent(e, 'down');
+    });
+
+    window.addEventListener('mouseup', (e) => {
+      if (isPointerDown) {
+        isPointerDown = false;
+        forwardTouchEvent(e, 'touch');
+      }
+    });
+
+    phoneViewport.addEventListener('touchstart', (e) => {
+      forwardTouchEvent(e, 'down');
+    }, { passive: true });
+
+    phoneViewport.addEventListener('touchend', (e) => {
+      forwardTouchEvent(e, 'touch');
+    }, { passive: true });
+  }
+
+  // Initialize interactive hardware touch bridge
+  initHardwareTouchBridge();
 
   // Initialize both experiences on launch
   initLauncherHomescreen();

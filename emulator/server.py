@@ -575,8 +575,8 @@ def find_qemu_executable(arch):
         return p
     common_dirs = [
         os.path.join(os.path.expanduser("~"), "qemu"),
-        "C:\\Users\\bhara\\qemu",
         "C:\\Program Files\\qemu",
+        "C:\\qemu",
         "/usr/bin",
         "/usr/local/bin"
     ]
@@ -1820,6 +1820,54 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({'success': ok, 'output': resp if ok else 'QEMU is currently offline.'}).encode())
+            return
+
+        if self.path == '/api/qemu/input':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+            except Exception:
+                data = {}
+
+            event_type = data.get("type", "touch")
+            x = int(data.get("x", 0))
+            y = int(data.get("y", 0))
+            key = data.get("key", "")
+
+            # Forward real input events to QEMU guest via monitor
+            qemu_ok = False
+            qemu_resp = ""
+            if event_type in ("touch", "click", "down"):
+                ok1, r1 = send_qemu_monitor_cmd(f"mouse_set {x} {y}")
+                ok2, r2 = send_qemu_monitor_cmd("mouse_button 1")
+                time.sleep(0.02)
+                ok3, r3 = send_qemu_monitor_cmd("mouse_button 0")
+                qemu_ok = ok2 and ok3
+                qemu_resp = f"{r1} {r2} {r3}".strip()
+                if qemu_ok:
+                    serial_lines.append(f"[STUDIO_INPUT] Touch event delivered to guest: x={x}, y={y}")
+            elif event_type == "move":
+                ok, r = send_qemu_monitor_cmd(f"mouse_set {x} {y}")
+                qemu_ok, qemu_resp = ok, r
+            elif event_type == "key" and key:
+                ok, r = send_qemu_monitor_cmd(f"sendkey {key}")
+                qemu_ok, qemu_resp = ok, r
+                if qemu_ok:
+                    serial_lines.append(f"[STUDIO_INPUT] Key event delivered to guest: {key}")
+
+            self.send_response(200 if qemu_ok else 503)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': qemu_ok,
+                'source': 'QEMU_MONITOR',
+                'event': event_type,
+                'x': x,
+                'y': y,
+                'response': qemu_resp if qemu_ok else 'QEMU monitor not connected or input command rejected'
+            }).encode())
             return
 
         if self.path == '/api/qemu/snapshot':
