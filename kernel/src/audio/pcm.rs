@@ -6,6 +6,9 @@
 
 use alloc::vec::Vec;
 
+pub const PCM_MAX_FRAMES: usize = 48_000;
+pub const PCM_MAX_BYTES: usize = PCM_MAX_FRAMES * 2 * 2;
+
 /// Audio Sample Rates
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PcmSampleRate {
@@ -81,6 +84,30 @@ impl PcmBuffer {
         self.samples.is_empty()
     }
 
+    pub fn frame_count(&self) -> usize {
+        self.samples.len() / self.format.channels as usize
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.format.bits_per_sample != 16 { return Err("unsupported PCM bit depth"); }
+        if self.samples.len() > PCM_MAX_FRAMES * self.format.channels as usize { return Err("PCM buffer exceeds frame bound"); }
+        Ok(())
+    }
+
+    pub fn byte_len(&self) -> usize {
+        self.samples.len().saturating_mul(core::mem::size_of::<i16>())
+    }
+
+    pub fn encode_le(&self, out: &mut [u8]) -> Result<usize, &'static str> {
+        self.validate()?;
+        let needed = self.byte_len();
+        if out.len() < needed { return Err("PCM output buffer too small"); }
+        for (i, sample) in self.samples.iter().enumerate() {
+            out[i * 2..i * 2 + 2].copy_from_slice(&sample.to_le_bytes());
+        }
+        Ok(needed)
+    }
+
     /// Duration in milliseconds based on sample rate and channel count.
     pub fn duration_ms(&self) -> u32 {
         let rate = self.format.sample_rate as u32;
@@ -116,7 +143,7 @@ impl PcmBuffer {
     pub fn generate_sine(freq_hz: u32, duration_ms: u32, format: PcmFormat, amplitude: i16) -> Self {
         let sample_rate = format.sample_rate as u32;
         let channels = format.channels as u32;
-        let total_frames = (sample_rate * duration_ms) / 1000;
+        let total_frames = ((sample_rate as u64 * duration_ms as u64) / 1000).min(PCM_MAX_FRAMES as u64) as u32;
         let total_samples = (total_frames * channels) as usize;
 
         let mut samples = Vec::with_capacity(total_samples);
