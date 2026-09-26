@@ -144,35 +144,35 @@ fn render_header(surface: u32) {
     }
 }
 
-fn resolve_app_at_touch(x: u32, y: u32) -> Option<&'static [u8]> {
+fn resolve_app_at_touch(x: u32, y: u32) -> Option<&'static str> {
     let x = x as usize;
     let y = y as usize;
     // Row 0
     if (280..420).contains(&y) {
-        if (56..306).contains(&x) { return Some(b"org.interos.settings"); }
-        if (360..610).contains(&x) { return Some(b"org.interos.terminal"); }
+        if (56..306).contains(&x) { return Some("org.interos.settings"); }
+        if (360..610).contains(&x) { return Some("org.interos.terminal"); }
     }
     // Row 1
     if (450..590).contains(&y) {
-        if (56..306).contains(&x) { return Some(b"org.interos.calculator"); }
-        if (360..610).contains(&x) { return Some(b"org.interos.vault"); }
+        if (56..306).contains(&x) { return Some("org.interos.calculator"); }
+        if (360..610).contains(&x) { return Some("org.interos.vault"); }
     }
     // Row 2
     if (620..760).contains(&y) {
-        if (56..306).contains(&x) { return Some(b"org.interos.camera"); }
-        if (360..610).contains(&x) { return Some(b"org.interos.dialer"); }
+        if (56..306).contains(&x) { return Some("org.interos.camera"); }
+        if (360..610).contains(&x) { return Some("org.interos.dialer"); }
     }
     // Row 3
     if (790..930).contains(&y) {
-        if (56..306).contains(&x) { return Some(b"org.interos.browser"); }
-        if (360..610).contains(&x) { return Some(b"org.interos.messages"); }
+        if (56..306).contains(&x) { return Some("org.interos.browser"); }
+        if (360..610).contains(&x) { return Some("org.interos.messages"); }
     }
     // Bottom Dock (y in 1260..1400)
     if (1260..1400).contains(&y) {
-        if (40..160).contains(&x) { return Some(b"org.interos.dialer"); }
-        if (200..320).contains(&x) { return Some(b"org.interos.messages"); }
-        if (360..480).contains(&x) { return Some(b"org.interos.browser"); }
-        if (520..640).contains(&x) { return Some(b"org.interos.terminal"); }
+        if (40..160).contains(&x) { return Some("org.interos.dialer"); }
+        if (200..320).contains(&x) { return Some("org.interos.messages"); }
+        if (360..480).contains(&x) { return Some("org.interos.browser"); }
+        if (520..640).contains(&x) { return Some("org.interos.terminal"); }
     }
     None
 }
@@ -200,7 +200,6 @@ pub extern "C" fn _start() -> ! {
     std::log(0, "[LAUNCHER] Step 5: Initial presentation complete.").ok();
 
     let mut refresh_ticks: u64 = 0;
-    let mut ipc_buf = [0u8; 64];
 
     loop {
         if let Ok(events) = std::event_poll(
@@ -216,24 +215,37 @@ pub extern "C" fn _start() -> ! {
                 }
             }
 
-            // Handle direct touch events with grid hit-testing
+            // Consume the normalized kernel input pipeline. The kernel already
+            // routes hardware gestures to the focused surface; the launcher owns
+            // the focused surface while it is visible.
             if (events & std::EVENT_TOUCH_INPUT) != 0 {
-                let _ = std::touch_poll();
-            }
-
-            // Handle incoming IPC input messages (touch coordinates)
-            if (events & std::EVENT_IPC_MSG) != 0 {
-                if let Ok(len) = std::ipc_recv(5, &mut ipc_buf) {
-                    if len >= 12 {
-                        let x = u32::from_le_bytes([ipc_buf[4], ipc_buf[5], ipc_buf[6], ipc_buf[7]]);
-                        let y = u32::from_le_bytes([ipc_buf[8], ipc_buf[9], ipc_buf[10], ipc_buf[11]]);
-                        if let Some(target_app) = resolve_app_at_touch(x, y) {
-                            std::log(0, "[LAUNCHER] Touch hit-test matched application card. Dispatching launch IPC...").ok();
-                            let _ = std::ipc_send(2, 1, 0x5001, target_app);
+                let mut input = std::InputEvent {
+                    kind: 0,
+                    x: 0,
+                    y: 0,
+                    dx: 0,
+                    dy: 0,
+                    scale_milli: 1000,
+                };
+                while std::input_event_poll(&mut input).is_ok() {
+                    // A tap is the only launcher action. Pan/zoom gestures remain
+                    // available to the input pipeline without launching apps.
+                    if input.kind == 1 {
+                        if let Some(target_app) = resolve_app_at_touch(input.x, input.y) {
+                            match std::app_launch(target_app) {
+                                Ok(task_id) => {
+                                    std::log(0, "[LAUNCHER] Launched application from real touch input.").ok();
+                                    std::log(0, &format_args!("[LAUNCHER] Child task {} started.", task_id)).ok();
+                                }
+                                Err(_) => {
+                                    std::log(0, "[LAUNCHER] Application launch rejected by kernel.").ok();
+                                }
+                            }
                         }
                     }
                 }
             }
+
 
         }
         let _ = std::touch_poll();
