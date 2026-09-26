@@ -36,6 +36,20 @@ pub const DEFAULT_HOST_MAC: MacAddress = MacAddress([0x52, 0x54, 0x00, 0x12, 0x3
 
 /// Global dynamic ARP resolution cache.
 pub static ARP_TABLE: Mutex<ArpTable> = Mutex::new(ArpTable::new());
+pub const ARP_REQUEST_RETRY_TICKS: u64 = 100;
+
+#[derive(Copy, Clone)]
+struct ArpRequestState {
+    ip: Ipv4Address,
+    requested_at: u64,
+    valid: bool,
+}
+
+impl ArpRequestState {
+    const EMPTY: Self = Self { ip: Ipv4Address::UNSPECIFIED, requested_at: 0, valid: false };
+}
+
+static ARP_REQUESTS: Mutex<[ArpRequestState; 8]> = Mutex::new([ArpRequestState::EMPTY; 8]);
 
 /// Global capability-guarded socket table.
 pub static SOCKET_TABLE: Mutex<SocketTable> = Mutex::new(SocketTable::new());
@@ -72,9 +86,19 @@ fn resolve_destination_mac(dst_ip: Ipv4Address) -> Result<MacAddress, NetError> 
     if dst_ip.is_loopback() {
         return Ok(MacAddress([0, 0, 0, 0, 0, 1]));
     }
-    if let Some(mac) = ARP_TABLE.lock().lookup_at(dst_ip, crate::interrupts::get_system_ticks()) {
+    let now = crate::interrupts::get_system_ticks();
+    if let Some(mac) = ARP_TABLE.lock().lookup_at(dst_ip, now) {
         return Ok(mac);
     }
+    let mut requests = ARP_REQUESTS.lock();
+    if let Some(entry) = requests.iter().find(|entry| entry.valid && entry.ip == dst_ip) {
+        if now.saturating_sub(entry.requested_at) < ARP_REQUEST_RETRY_TICKS {
+            return Err(NetError::NoPacketAvailable);
+        }
+    }
+    let slot_index = requests.iter().position(|entry| !entry.valid || entry.ip == dst_ip).unwrap_or(0);
+    requests[slot_index] = ArpRequestState { ip: dst_ip, requested_at: now, valid: true };
+    drop(requests);
     transmit_arp_request(dst_ip)?;
     Err(NetError::NoPacketAvailable)
 }
@@ -215,6 +239,9 @@ pub fn poll_network_interface() -> usize {
                 EtherType::Arp => {
                     if let Ok(arp_pkt) = ArpPacket::parse(frame.payload) {
                         ARP_TABLE.lock().insert_at(arp_pkt.sender_ip, arp_pkt.sender_mac, crate::interrupts::get_system_ticks());
+                        if let Some(entry) = ARP_REQUESTS.lock().iter_mut().find(|entry| entry.valid && entry.ip == arp_pkt.sender_ip) {
+                            entry.valid = false;
+                        }
                         if arp_pkt.opcode == ArpOpcode::Request && arp_pkt.target_ip == DEFAULT_HOST_IP {
                             let local_mac = NETWORK_DEVICE.lock().info().mac;
                             let reply = ArpPacket {
