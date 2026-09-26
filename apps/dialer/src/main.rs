@@ -623,12 +623,11 @@ pub extern "C" fn _start() -> ! {
 
     // 5. Calls are initiated only from user input; no automatic call is placed at startup.
 
-    let mut ipc_msg = [0u8; 64];
 
     // 6. Interactive Event Reactor Loop
     loop {
         if let Ok(events) = std::event_poll(
-            std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK | std::EVENT_IPC_MSG | std::EVENT_MODEM_URC,
+            std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK | std::EVENT_MODEM_URC,
             100,
         ) {
             if (events & std::EVENT_TIMER_TICK) != 0 {
@@ -642,22 +641,13 @@ pub extern "C" fn _start() -> ! {
                 std::log(0, "[DIALER APP] Inbound Call: Tower alert received via 3GPP baseband URC.").ok();
             }
 
-            // Handle touch gesture events
             if (events & std::EVENT_TOUCH_INPUT) != 0 {
-                if let Ok(gesture) = std::touch_poll() {
-                    if gesture > 0 {
-                        std::log(0, "[DIALER APP] Touch gesture event acknowledged.").ok();
-                    }
-                }
-            }
-
-            // Handle IPC input messages (direct touch coordinates from digitizer)
-            if (events & std::EVENT_IPC_MSG) != 0 {
-                if let Ok(len) = std::ipc_recv(5, &mut ipc_msg) {
-                    if len >= 12 {
-                        let x = u32::from_le_bytes([ipc_msg[4], ipc_msg[5], ipc_msg[6], ipc_msg[7]]);
-                        let y = u32::from_le_bytes([ipc_msg[8], ipc_msg[9], ipc_msg[10], ipc_msg[11]]);
-                        if handle_touch_point(&mut dialer, x, y) {
+                let mut input = std::InputEvent {
+                    kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000,
+                };
+                while std::input_event_poll(&mut input).is_ok() {
+                    if input.kind == 1 {
+                        if handle_touch_point(&mut dialer, input.x, input.y) {
                             let _ = std::surface_destroy(6, surface);
                             std::exit_with_code(0);
                         }
