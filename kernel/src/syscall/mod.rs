@@ -1676,6 +1676,7 @@ pub fn sys_dns_resolve(name: &str) -> Result<crate::net::Ipv4Address, SyscallRes
         &caps,
         first_send_deadline,
     ).is_err() {
+        let _ = crate::net::DNS_RESOLVER.lock().abort(query_id);
         let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
         return Err(SyscallResult::NetworkError);
     }
@@ -1687,6 +1688,7 @@ pub fn sys_dns_resolve(name: &str) -> Result<crate::net::Ipv4Address, SyscallRes
     loop {
         let current_tick = crate::interrupts::get_system_ticks();
         if current_tick >= deadline {
+            let _ = crate::net::DNS_RESOLVER.lock().abort(query_id);
             let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
             return Err(SyscallResult::NetworkError);
         }
@@ -1724,6 +1726,7 @@ pub fn sys_dns_resolve(name: &str) -> Result<crate::net::Ipv4Address, SyscallRes
 
         if let Some((retry_len, exhausted)) = retry {
             if exhausted {
+                let _ = crate::net::DNS_RESOLVER.lock().abort(query_id);
                 let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
                 return Err(SyscallResult::NetworkError);
             }
@@ -1733,6 +1736,7 @@ pub fn sys_dns_resolve(name: &str) -> Result<crate::net::Ipv4Address, SyscallRes
                 &caps,
                 current_tick.saturating_add(crate::net::dns::DNS_RETRY_TICKS),
             ).is_err() {
+                let _ = crate::net::DNS_RESOLVER.lock().abort(query_id);
                 let _ = crate::net::SOCKET_TABLE.lock().close_owned(socket, owner);
                 return Err(SyscallResult::NetworkError);
             }
