@@ -200,6 +200,7 @@ pub extern "C" fn _start() -> ! {
     std::log(0, "[LAUNCHER] Step 5: Initial presentation complete.").ok();
 
     let mut refresh_ticks: u64 = 0;
+    let mut active_child: Option<u64> = None;
 
     loop {
         if let Ok(events) = std::event_poll(
@@ -207,6 +208,19 @@ pub extern "C" fn _start() -> ! {
             100,
         ) {
             let _ = std::service_heartbeat(10);
+
+            // Reap the foreground application when it exits. This is the
+            // authoritative parent-side lifecycle boundary; without it a
+            // completed app would remain as a Zombie TCB indefinitely.
+            if let Some(child_id) = active_child {
+                if std::waitpid(child_id).is_ok() {
+                    active_child = None;
+                    render_full(surface);
+                    let _ = std::surface_flip(4);
+                    std::log(0, "[LAUNCHER] Foreground application exited and was reaped.").ok();
+                }
+            }
+
             if (events & std::EVENT_TIMER_TICK) != 0 {
                 refresh_ticks += 1;
                 if refresh_ticks % 10 == 0 {
@@ -234,8 +248,8 @@ pub extern "C" fn _start() -> ! {
                         if let Some(target_app) = resolve_app_at_touch(input.x, input.y) {
                             match std::app_launch(target_app) {
                                 Ok(task_id) => {
+                                    active_child = Some(task_id);
                                     std::log(0, "[LAUNCHER] Launched application from real touch input.").ok();
-                                    let _ = task_id;
                                 }
                                 Err(_) => {
                                     std::log(0, "[LAUNCHER] Application launch rejected by kernel.").ok();
