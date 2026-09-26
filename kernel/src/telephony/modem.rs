@@ -70,6 +70,10 @@ pub struct SmsRecord {
 }
 
 /// Production 3GPP Cellular Modem Controller.
+pub const MAX_PHONE_NUMBER_LEN: usize = 32;
+pub const MAX_SMS_BODY_LEN: usize = 1024;
+pub const MAX_SMS_RECORDS: usize = 32;
+
 pub struct CellularModem {
     pub state: ModemRadioState,
     pub call_state: CallState,
@@ -99,6 +103,7 @@ impl CellularModem {
 
     /// Initiates an outgoing cellular voice call (`ATD<number>;`).
     pub fn dial(&mut self, number: &str, current_ticks: u64) -> Result<(), &'static str> {
+        if number.is_empty() || number.len() > MAX_PHONE_NUMBER_LEN { return Err("invalid phone number length"); }
         if self.state == ModemRadioState::PowerDown {
             return Err("Cellular radio is powered down");
         }
@@ -154,8 +159,10 @@ impl CellularModem {
         if self.state == ModemRadioState::PowerDown {
             return Err("Cellular radio powered down");
         }
+        if destination.is_empty() || destination.len() > MAX_PHONE_NUMBER_LEN || body.len() > MAX_SMS_BODY_LEN { return Err("SMS payload exceeds bound"); }
+        if self.sms_outbox.len() >= MAX_SMS_RECORDS { return Err("SMS outbox full"); }
         let id = self.next_sms_id;
-        self.next_sms_id += 1;
+        self.next_sms_id = self.next_sms_id.wrapping_add(1).max(1);
 
         let record = SmsRecord {
             id,
@@ -280,8 +287,10 @@ impl CellularModem {
 
     /// Inbound SMS processor: stores message in inbox and dispatches intent.
     pub fn process_inbound_sms(&mut self, sender: &str, body: &str, current_ticks: u64) -> Option<&'static str> {
+        if sender.is_empty() || sender.len() > MAX_PHONE_NUMBER_LEN || body.len() > MAX_SMS_BODY_LEN { return None; }
+        if self.sms_inbox.len() >= MAX_SMS_RECORDS { return None; }
         let id = self.next_sms_id;
-        self.next_sms_id += 1;
+        self.next_sms_id = self.next_sms_id.wrapping_add(1).max(1);
         self.sms_inbox.push(SmsRecord {
             id,
             address: sender.to_string(),
