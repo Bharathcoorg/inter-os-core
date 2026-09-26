@@ -429,14 +429,36 @@ impl TcpConnectionTable {
 
     pub fn arm_fin(&mut self, id: u32, now: u64) -> Result<u32, NetError> {
         let conn = self.get_mut(id).ok_or(NetError::NoPacketAvailable)?;
-        if conn.state != crate::net::TcpState::Established { return Err(NetError::NoPacketAvailable); }
+        let next_state = match conn.state {
+            crate::net::TcpState::Established => crate::net::TcpState::FinWait,
+            crate::net::TcpState::CloseWait => crate::net::TcpState::LastAck,
+            _ => return Err(NetError::NoPacketAvailable),
+        };
         conn.fin_seq = conn.send_seq;
         conn.fin_pending = true;
         conn.fin_deadline = now.saturating_add(TCP_RETRANSMIT_TICKS);
         conn.fin_retries = 0;
         conn.send_seq = conn.send_seq.wrapping_add(1);
-        conn.state = crate::net::TcpState::FinWait;
+        conn.state = next_state;
         Ok(conn.fin_seq)
+    }
+
+    /// Rolls back a locally armed FIN when the initial wire transmission fails.
+    /// This prevents the connection from becoming permanently half-closed when
+    /// the transport layer rejected the first FIN before it left the kernel.
+    pub fn rollback_fin(&mut self, id: u32) -> Result<(), NetError> {
+        let conn = self.get_mut(id).ok_or(NetError::NoPacketAvailable)?;
+        if !conn.fin_pending { return Err(NetError::NotReady); }
+        conn.send_seq = conn.send_seq.wrapping_sub(1);
+        conn.fin_pending = false;
+        conn.fin_retries = 0;
+        conn.fin_deadline = 0;
+        conn.state = match conn.state {
+            crate::net::TcpState::FinWait => crate::net::TcpState::Established,
+            crate::net::TcpState::LastAck => crate::net::TcpState::CloseWait,
+            state => state,
+        };
+        Ok(())
     }
 
     pub fn acknowledge_fin(&mut self, id: u32, ack: u32) -> bool {
@@ -444,7 +466,9 @@ impl TcpConnectionTable {
         if conn.fin_pending && crate::net::tcp::seq_ge(ack, conn.fin_seq.wrapping_add(1)) {
             conn.fin_pending = false;
             conn.fin_retries = 0;
-            if conn.state == crate::net::TcpState::FinWait { conn.state = crate::net::TcpState::Closed; }
+            if conn.state == crate::net::TcpState::FinWait || conn.state == crate::net::TcpState::LastAck {
+                conn.state = crate::net::TcpState::Closed;
+            }
             return true;
         }
         false
