@@ -17,6 +17,7 @@ pub const MAX_AT_LINE_LEN: usize = 256;
 pub const RX_BUFFER_CAPACITY: usize = 1024;
 /// Capacity of the outbound command queue.
 pub const TX_QUEUE_CAPACITY: usize = 8;
+pub const URC_QUEUE_CAPACITY: usize = 32;
 
 /// Unsolicited Result Code (URC) events emitted spontaneously by cellular baseband towers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +80,7 @@ impl SerialRilDriver {
         }
         let mut full_cmd = String::from(cmd.trim());
         full_cmd.push_str("\r\n");
+        if full_cmd.len() > MAX_AT_LINE_LEN { return Err("SerialRil: command too long"); }
         self.tx_queue.push(full_cmd);
         Ok(())
     }
@@ -156,7 +158,7 @@ impl SerialRilDriver {
     /// Attempts to parse an unsolicited result code (URC) from an inbound line.
     fn try_parse_urc(&mut self, line: &str) -> bool {
         if line.starts_with("RING") || line.starts_with("+CRING:") {
-            self.pending_urcs.push(UrcEvent::IncomingCall { caller_id: None });
+            self.push_urc(UrcEvent::IncomingCall { caller_id: None });
             self.notify_event_reactor();
             return true;
         }
@@ -169,7 +171,7 @@ impl SerialRilDriver {
             } else {
                 1
             };
-            self.pending_urcs.push(UrcEvent::NetworkRegistration { status });
+            self.push_urc(UrcEvent::NetworkRegistration { status: status.min(5) });
             self.notify_event_reactor();
             return true;
         }
@@ -188,7 +190,7 @@ impl SerialRilDriver {
                     ber = p2.trim().parse::<u8>().unwrap_or(99);
                 }
             }
-            self.pending_urcs.push(UrcEvent::SignalQuality { rssi, ber });
+            self.push_urc(UrcEvent::SignalQuality { rssi: rssi.min(99), ber: ber.min(99) });
             self.notify_event_reactor();
             return true;
         }
@@ -201,12 +203,16 @@ impl SerialRilDriver {
             } else {
                 0
             };
-            self.pending_urcs.push(UrcEvent::InboundSms { index: idx });
+            self.push_urc(UrcEvent::InboundSms { index: idx });
             self.notify_event_reactor();
             return true;
         }
 
         false
+    }
+
+    fn push_urc(&mut self, event: UrcEvent) {
+        if self.pending_urcs.len() < URC_QUEUE_CAPACITY { self.pending_urcs.push(event); self.notify_event_reactor(); }
     }
 
     /// Signals the sovereign event reactor that a modem URC has arrived.
