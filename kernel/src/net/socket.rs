@@ -379,7 +379,14 @@ impl TcpConnectionTable {
             if let Some(conn) = slot.as_mut() {
                 if conn.tx_pending && now >= conn.tx_deadline {
                     if conn.tx_retries >= TCP_MAX_RETRIES {
+                        // Exhaustion is a terminal transport failure. Do not
+                        // silently discard the payload while leaving the
+                        // connection Established and usable.
                         conn.tx_pending = false;
+                        conn.tx_len = 0;
+                        conn.tx_retries = 0;
+                        conn.tx_deadline = 0;
+                        conn.state = crate::net::TcpState::Closed;
                         continue;
                     }
                     conn.tx_retries += 1;
@@ -552,6 +559,37 @@ impl TcpConnectionTable {
         conn.rx_len -= n;
         Ok(n)
     }
+
+\n\n#[cfg(test)]
+mod tcp_reliability_tests {
+    use super::*;
+    use crate::net::ipv4::Ipv4Address;
+
+    #[test]
+    fn payload_retransmit_exhaustion_closes_connection_and_releases_slot() {
+        let mut table = TcpConnectionTable::new();
+        let id = table
+            .open(7, 40000, Ipv4Address::LOCALHOST, 40001, 100)
+            .expect("connection should open");
+
+        table.get_mut(id).expect("connection exists").state = crate::net::TcpState::Established;
+        table.arm_retransmit(id, 100, b"payload", 0).expect("arm retransmit");
+
+        assert!(table.due_retransmit(500).is_some());
+        assert!(table.due_retransmit(1500).is_some());
+        assert!(table.due_retransmit(3500).is_some());
+
+        assert!(table.due_retransmit(7500).is_none());
+        let conn = table.get(id).expect("closed entry remains until reap");
+        assert_eq!(conn.state, crate::net::TcpState::Closed);
+        assert!(!conn.tx_pending);
+        assert_eq!(conn.tx_len, 0);
+        assert_eq!(conn.tx_deadline, 0);
+
+        assert_eq!(table.reap_closed(), 1);
+        assert!(table.get(id).is_none());
+    }
+}
 
     pub fn close_owned(&mut self, id: u32, owner_task_id: u32) -> Result<(), NetError> {
         let slot = self.entries.iter_mut().find(|s| s.as_ref().map(|c| c.id == id).unwrap_or(false));
