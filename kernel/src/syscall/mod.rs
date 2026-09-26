@@ -2682,7 +2682,7 @@ pub fn sys_camera_capture(
         _ => return Err(SyscallResult::InvalidArguments),
     }
 
-    let frame = cam.capture_frame();
+    let frame = cam.capture_frame().map_err(|_| SyscallResult::DeviceError)?;
     let bytes_to_copy = frame.copy_to(out_buf).map_err(|_| SyscallResult::InvalidArguments)?;
 
     if let Some(meta) = meta_buf {
