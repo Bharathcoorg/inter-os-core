@@ -242,7 +242,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // 9b. Modular Hardware Driver Subsystems (DRM/KMS, FDT, PMIC, Touch)
     drivers::init_and_test_drivers();
 
-    // M23: establish the persistent device key before any VFS payload is reconstructed.
+    // Establish the persistent device key before any VFS payload is reconstructed.
     // The seed is loaded/generated after the physical block device is online.
     crypto::rng::init();
     crypto::keystore::init();

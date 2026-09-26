@@ -3168,7 +3168,7 @@ fn require_service_manager() -> Result<(), SyscallResult> {
 }
 
 /// Verifies a signed RAPP service package and applies the narrow service ABI policy.
-/// This is verification/loading preparation only; M17 will hand the verified image to
+/// This is verification/loading preparation only; the verified image is handed to
 /// the userspace service manager for process creation.
 pub fn sys_service_package_verify(cap_slot: usize, path: &str) -> Result<u8, SyscallResult> {
     require_service_manager()?;

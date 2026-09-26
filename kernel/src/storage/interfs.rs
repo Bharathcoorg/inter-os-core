@@ -1,12 +1,11 @@
 //! Minimal on-disk InterOS filesystem backend.
 //!
-//! M20 introduces a real block-backed filesystem boundary above `BlockDevice`.
+//! Block-backed filesystem boundary above `BlockDevice`.
 //! The format is intentionally small and deterministic: a superblock, allocation
 //! bitmap, fixed-size inode table, and contiguous file data extents. VFS can use
-//! this backend without knowing the physical ATA/SDHCI implementation.
-//!
-//! M22 will add transactional metadata publication and deterministic crash
-//! recovery around these mutations.
+//! this backend without knowing the physical ATA/SDHCI implementation,
+//! with transactional metadata publication and deterministic crash
+//! recovery around mutations.
 
 use crate::crypto::Sha256;
 use crate::drivers::{BlockDevice, AtaError, SECTOR_SIZE};
@@ -488,7 +487,7 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
         Ok(copied)
     }
 
-    /// Replaces file contents through the M22 transaction protocol: the intent
+    /// Replaces file contents through the atomic transaction protocol: the intent
     /// is durable before extent reservation, payload is written before inode
     /// publication, and recovery finalizes or rolls back an interrupted update.
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), FsBackendError> {

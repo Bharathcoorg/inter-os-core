@@ -643,8 +643,8 @@ impl Vfs {
     }
 
     /// Restores mutable /data files from the block-backed filesystem first.
-    /// The metadata journal remains a recovery fallback until M22 finalizes the
-    /// transactional publication protocol.
+    /// The metadata journal remains a recovery fallback until the transactional
+    /// publication protocol finalizes the write.
     fn restore_data_snapshot(&mut self) {
         let mut sealed=[0u8;32768 + crate::storage::encrypted::ENCRYPTED_OVERHEAD];
         let block_len = match crate::storage::filesystem::load_data_file("/data/.vfs.snapshot", &mut sealed) {

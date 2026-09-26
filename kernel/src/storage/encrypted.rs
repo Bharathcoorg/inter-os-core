@@ -1,6 +1,6 @@
 //! Encrypted storage boundary for mutable filesystem payloads.
 //!
-//! M23 keeps filesystem structure usable by the kernel while encrypting mutable
+//! Keeps filesystem structure usable by the kernel while encrypting mutable
 //! file payloads at rest. The root key comes from the persistent secure keystore;
 //! each blob receives a fresh nonce and HMAC-SHA256 authentication tag.
 

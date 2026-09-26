@@ -1,7 +1,7 @@
 //! Streaming Serial RIL (Radio Interface Layer) Engine
 //!
 //! Provides bare-metal character-stream processing for cellular baseband modems
-//! (Qualcomm Snapdragon X55/X65, MediaTek Helio/Dimensity M70/M80, Quectel RM500Q)
+//! (Qualcomm Snapdragon X55/X65, MediaTek Helio/Dimensity 5G Modems, Quectel RM500Q)
 //! communicating over high-speed UART or USB CDC-ACM character devices.
 //!
 //! Implements 3GPP TS 27.007 Hayes AT command framing, line buffered response matching,

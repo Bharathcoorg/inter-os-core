@@ -1,6 +1,6 @@
 //! Display hardware/service boundary.
 //!
-//! M25 separates the userspace display service ABI from the concrete DRM/KMS
+//! Separates the userspace display service ABI from the concrete DRM/KMS
 //! implementation. Future physical framebuffer/DRM backends implement this
 //! trait without changing the userspace-facing service contract.
 

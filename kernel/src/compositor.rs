@@ -1,8 +1,8 @@
 //! Stable compositor IPC protocol.
 //!
-//! M27 keeps rendering policy out of the kernel syscall ABI. Clients submit
+//! Rendering policy is separated from the kernel syscall ABI. Clients submit
 //! bounded commands to the display service; the service is responsible for
-//! translating them to the M25 display-driver boundary.
+//! translating them to the neutral display-driver boundary.
 
 pub const COMPOSITOR_MAGIC: [u8; 4] = *b"ICMP";
 pub const COMPOSITOR_VERSION: u8 = 1;
