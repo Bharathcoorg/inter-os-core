@@ -214,16 +214,30 @@ pub fn sys_waitpid(child_id: u64) -> SyscallResult {
     if child.parent_id != parent_id {
         return SyscallResult::PermissionDenied;
     }
-    match child.state {
-        crate::task::TaskState::Zombie => {
-            let code = child.exit_code;
-            child.state = crate::task::TaskState::Terminated;
-            drop(sched);
-            serial_println!("[WAITPID] Parent {} reaped child {} with exit code {}.", parent_id.0, child_id, code);
-            SyscallResult::Success
+    let state = child.state;
+    let code = child.exit_code;
+    drop(child);
+
+    match state {
+        crate::task::TaskState::Zombie | crate::task::TaskState::Terminated => {
+            match sched.reap_child(parent_id, child_tid) {
+                Ok(reaped_code) => {
+                    drop(sched);
+                    serial_println!(
+                        "[WAITPID] Parent {} reaped child {} with exit code {}.",
+                        parent_id.0,
+                        child_id,
+                        reaped_code
+                    );
+                    SyscallResult::Success
+                }
+                Err(_) => SyscallResult::DeviceError,
+            }
         }
-        crate::task::TaskState::Terminated => SyscallResult::Success,
-        _ => SyscallResult::NotReady,
+        _ => {
+            let _ = code;
+            SyscallResult::NotReady
+        }
     }
 }
 
