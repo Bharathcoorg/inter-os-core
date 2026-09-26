@@ -603,16 +603,8 @@ pub extern "C" fn _start() -> ! {
             s
         }
         Err(_) => {
-            std::log(0, "[DIALER APP] Surface allocation unavailable; executing headless verification.").ok();
-            let target_contact = &CONTACTS_BOOK[0];
-            for c in target_contact.number.chars() {
-                if c.is_ascii_digit() || c == '*' || c == '#' {
-                    dialer.input_digit(c);
-                }
-            }
-            let _ = dialer.dial(target_contact.number);
-            dialer.hangup();
-            std::exit_with_code(0);
+            std::log(0, "[DIALER APP] Display surface unavailable; refusing headless call simulation.").ok();
+            std::exit_with_code(1);
         }
     };
 
