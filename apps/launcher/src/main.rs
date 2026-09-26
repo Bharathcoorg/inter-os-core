@@ -199,9 +199,7 @@ pub extern "C" fn _start() -> ! {
     let _ = std::surface_flip(4);
     std::log(0, "[LAUNCHER] Step 5: Initial presentation complete.").ok();
 
-    let mut app_stage: usize = 0;
-    let mut ticks_seen: u64 = 0;
-    let mut stage_start_tick: u64 = 0;
+    let mut refresh_ticks: u64 = 0;
     let mut ipc_buf = [0u8; 64];
 
     loop {
@@ -211,8 +209,8 @@ pub extern "C" fn _start() -> ! {
         ) {
             let _ = std::service_heartbeat(10);
             if (events & std::EVENT_TIMER_TICK) != 0 {
-                ticks_seen += 1;
-                if (app_stage == 0 || app_stage >= 7) && ticks_seen % 10 == 0 {
+                refresh_ticks += 1;
+                if refresh_ticks % 10 == 0 {
                     render_header(surface);
                     let _ = std::surface_flip(4);
                 }
@@ -237,90 +235,6 @@ pub extern "C" fn _start() -> ! {
                 }
             }
 
-            // Stage 0: Launch primary application (Settings)
-            if app_stage == 0 && ((events & std::EVENT_TOUCH_INPUT) != 0 || ticks_seen >= 2) {
-                std::log(0, "[LAUNCHER USERSPACE] Launching primary application: org.interos.settings.").ok();
-                if std::ipc_send(2, 1, 0x5001, b"org.interos.settings").is_ok() {
-                    std::log(0, "[LAUNCHER USERSPACE] Primary app launch IPC successfully dispatched.").ok();
-                    app_stage = 1;
-                    stage_start_tick = ticks_seen;
-                } else {
-                    std::log(0, "[LAUNCHER USERSPACE] Primary app launch IPC failed.").ok();
-                }
-            }
-
-            // Stage 1: Wait for primary app to complete and exit, then launch secondary (Terminal)
-            if app_stage == 1 && ticks_seen.saturating_sub(stage_start_tick) >= 12 {
-                std::log(0, "[LAUNCHER USERSPACE] Primary application session concluded. Launcher remains alive.").ok();
-                std::log(0, "[LAUNCHER USERSPACE] Launching secondary application: org.interos.terminal.").ok();
-                if std::ipc_send(2, 1, 0x5001, b"org.interos.terminal").is_ok() {
-                    std::log(0, "[LAUNCHER USERSPACE] Secondary app launch IPC successfully dispatched.").ok();
-                    app_stage = 2;
-                    stage_start_tick = ticks_seen;
-                } else {
-                    std::log(0, "[LAUNCHER USERSPACE] Secondary app launch IPC failed.").ok();
-                }
-            }
-
-            // Stage 2: Wait for secondary app to complete, then launch tertiary (Calculator)
-            if app_stage == 2 && ticks_seen.saturating_sub(stage_start_tick) >= 12 {
-                std::log(0, "[LAUNCHER USERSPACE] Secondary application session concluded. Launcher remains alive.").ok();
-                std::log(0, "[LAUNCHER USERSPACE] Launching tertiary application: org.interos.calculator.").ok();
-                if std::ipc_send(2, 1, 0x5001, b"org.interos.calculator").is_ok() {
-                    std::log(0, "[LAUNCHER USERSPACE] Tertiary app launch IPC successfully dispatched.").ok();
-                    app_stage = 3;
-                    stage_start_tick = ticks_seen;
-                } else {
-                    std::log(0, "[LAUNCHER USERSPACE] Tertiary app launch IPC failed.").ok();
-                }
-            }
-
-            // Stage 3: Wait for calculator to complete, then launch quaternary (Dialer)
-            if app_stage == 3 && ticks_seen.saturating_sub(stage_start_tick) >= 16 {
-                std::log(0, "[LAUNCHER USERSPACE] Calculator application session concluded. Launcher remains alive.").ok();
-                std::log(0, "[LAUNCHER USERSPACE] Launching quaternary application: org.interos.dialer.").ok();
-                if std::ipc_send(2, 1, 0x5001, b"org.interos.dialer").is_ok() {
-                    std::log(0, "[LAUNCHER USERSPACE] Dialer app launch IPC successfully dispatched.").ok();
-                    app_stage = 4;
-                    stage_start_tick = ticks_seen;
-                } else {
-                    std::log(0, "[LAUNCHER USERSPACE] Dialer app launch IPC failed.").ok();
-                }
-            }
-
-            // Stage 4: Wait for dialer to complete, then launch quinary (Vault)
-            if app_stage == 4 && ticks_seen.saturating_sub(stage_start_tick) >= 20 {
-                std::log(0, "[LAUNCHER USERSPACE] Dialer application session concluded. Launcher remains alive.").ok();
-                std::log(0, "[LAUNCHER USERSPACE] Launching quinary application: org.interos.vault.").ok();
-                if std::ipc_send(2, 1, 0x5001, b"org.interos.vault").is_ok() {
-                    std::log(0, "[LAUNCHER USERSPACE] Vault app launch IPC successfully dispatched.").ok();
-                    app_stage = 5;
-                    stage_start_tick = ticks_seen;
-                } else {
-                    std::log(0, "[LAUNCHER USERSPACE] Vault app launch IPC failed.").ok();
-                }
-            }
-
-            // Stage 5: Wait for vault to complete, then launch senary (Camera)
-            if app_stage == 5 && ticks_seen.saturating_sub(stage_start_tick) >= 20 {
-                std::log(0, "[LAUNCHER USERSPACE] Vault application session concluded. Launcher remains alive.").ok();
-                std::log(0, "[LAUNCHER USERSPACE] Launching senary application: org.interos.camera.").ok();
-                if std::ipc_send(2, 1, 0x5001, b"org.interos.camera").is_ok() {
-                    std::log(0, "[LAUNCHER USERSPACE] Camera app launch IPC successfully dispatched.").ok();
-                    app_stage = 6;
-                    stage_start_tick = ticks_seen;
-                } else {
-                    std::log(0, "[LAUNCHER USERSPACE] Camera app launch IPC failed.").ok();
-                }
-            }
-
-            // Stage 6: All verified apps active; launcher remains alive and responsive
-            if app_stage == 6 && ticks_seen.saturating_sub(stage_start_tick) >= 20 {
-                std::log(0, "[LAUNCHER USERSPACE] Multi-application lifecycle execution cycle verified. Launcher active.").ok();
-                render_full(surface);
-                let _ = std::surface_flip(4);
-                app_stage = 7;
-            }
         }
         let _ = std::touch_poll();
         std::yield_now();
