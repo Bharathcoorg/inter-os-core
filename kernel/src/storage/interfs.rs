@@ -304,7 +304,32 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
         self.device.read_sector(self.base_lba + lba,&mut sector)?;
         let mut raw=[0u8; INODE_SIZE];
         raw.copy_from_slice(&sector[offset..offset+INODE_SIZE]);
-        DiskInode::decode(&raw)
+        let inode = DiskInode::decode(&raw)?;
+        if !inode.used {
+            return Ok(inode);
+        }
+
+        let path = inode.path()?;
+        if path.is_empty() || !path.starts_with('/') || path.contains("//") {
+            return Err(FsBackendError::CorruptMetadata);
+        }
+
+        if inode.file_size == 0 {
+            if inode.start_sector != 0 || inode.sector_count != 0 {
+                return Err(FsBackendError::CorruptMetadata);
+            }
+        } else {
+            if inode.sector_count == 0 || inode.start_sector.checked_add(inode.sector_count)
+                .map_or(true, |end| end > self.superblock.data_sectors)
+            {
+                return Err(FsBackendError::CorruptMetadata);
+            }
+            let capacity = (inode.sector_count as u64) * SECTOR_SIZE as u64;
+            if inode.file_size as u64 > capacity {
+                return Err(FsBackendError::CorruptMetadata);
+            }
+        }
+        Ok(inode)
     }
 
     fn write_inode(&mut self, index: u32, inode: &DiskInode) -> Result<(), FsBackendError> {
@@ -385,7 +410,7 @@ impl<'a, D: BlockDevice> InterFs<'a, D> {
     }
 
     fn validate_path(path: &str) -> Result<(), FsBackendError> {
-        if !path.starts_with('/') || path.len() > MAX_PATH || path.contains("//") {
+        if path.is_empty() || !path.starts_with('/') || path.len() > MAX_PATH || path.contains("//") {
             return Err(FsBackendError::InvalidPath);
         }
         Ok(())
