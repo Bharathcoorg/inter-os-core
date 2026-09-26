@@ -219,6 +219,7 @@ impl Scheduler {
         // before the parent observes the exit status.
         self.tasks[current_idx].state = TaskState::Zombie;
         crate::ipc::cleanup_task(task_id);
+        crate::fs::cleanup_task(task_id);
 
         // Reparent live children to primordial init so a dead parent cannot leave
         // an unreapable child/zombie subtree behind.
