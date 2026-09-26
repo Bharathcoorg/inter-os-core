@@ -3438,50 +3438,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const btn = document.getElementById(t.id);
     btn?.addEventListener('click', (e) => {
       e.stopPropagation();
-      btn.classList.toggle('active');
-      const isActive = btn.classList.contains('active');
-      logConsole(isActive ? 'ok' : 'info', `[SHADE_TOGGLE] ${t.name}: ${isActive ? t.onLog : t.offLog}`);
-      playBeep(isActive ? 640 : 360, 0.03, 'sine');
-
-      // Sync with Status Bar Indicators
-      if (t.id === 'toggle-wifi') {
-        const wifiIcon = document.getElementById('status-icon-wifi');
-        if (wifiIcon) wifiIcon.style.display = isActive ? 'block' : 'none';
-      }
-      if (t.id === 'toggle-cellular') {
-        const simBadge = document.getElementById('phone-sim-badge');
-        if (simBadge) simBadge.textContent = isActive ? '5G' : 'No SIM';
-      }
-      if (t.id === 'toggle-bt') {
-        const btIcon = document.getElementById('status-icon-bt');
-        if (btIcon) btIcon.style.display = isActive ? 'inline' : 'none';
-      }
-      if (t.id === 'toggle-torch') {
-        const torchIcon = document.getElementById('status-icon-torch');
-        if (torchIcon) torchIcon.style.display = isActive ? 'inline' : 'none';
-        if (deviceScreen) {
-          deviceScreen.style.boxShadow = isActive ? '0 0 45px rgba(255, 255, 255, 0.5)' : '';
-        }
-      }
-      if (t.id === 'toggle-airplane') {
-        const simBadge = document.getElementById('phone-sim-badge');
-        const wifiIcon = document.getElementById('status-icon-wifi');
-        const btIcon = document.getElementById('status-icon-bt');
-        if (simBadge) simBadge.textContent = isActive ? '✈️' : '5G';
-        if (wifiIcon) wifiIcon.style.display = isActive ? 'none' : 'block';
-        if (btIcon && isActive) btIcon.style.display = 'none';
-      }
-      if (t.id === 'toggle-dnd') {
-        const dndIcon = document.getElementById('status-icon-dnd');
-        if (dndIcon) dndIcon.style.display = isActive ? 'inline' : 'none';
-      }
-      if (t.id === 'toggle-rotate') {
-        toggleOrientation();
-      }
-      if (t.id === 'toggle-saver') {
-        const batt = document.getElementById('phone-battery');
-        if (batt) batt.style.color = isActive ? '#f59e0b' : '';
-      }
+      logConsole('warn', `[SHADE_TOGGLE] ${t.name}: unavailable until a real guest hardware control endpoint is connected.`);
+      showToast(`${t.name}: unavailable`);
     });
   });
 
