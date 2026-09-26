@@ -145,6 +145,15 @@ impl SecureChannelManager {
     pub fn get_session_mut(&mut self, session_id: u64) -> Option<&mut SecureSession> {
         self.sessions.iter_mut().find(|s| s.session_id == session_id)
     }
+
+    /// Releases secure sessions owned by a task that is terminating.
+    pub fn cleanup_task(&mut self, task_id: TaskId) -> usize {
+        let before = self.sessions.len();
+        self.sessions.retain(|session| {
+            session.client_task != task_id && session.server_task != task_id
+        });
+        before - self.sessions.len()
+    }
 }
 
 pub static SECURE_IPC: Mutex<SecureChannelManager> = Mutex::new(SecureChannelManager::new());
