@@ -77,6 +77,13 @@ impl EventReactor {
         }
     }
 
+    /// Removes all event state owned by a terminating task.
+    pub fn cleanup_task(&mut self, task_id: TaskId) -> bool {
+        let before = self.subscriptions.len();
+        self.subscriptions.retain(|sub| sub.task_id != task_id);
+        before != self.subscriptions.len()
+    }
+
     /// Posts an event to a designated target task, waking it if it is blocked on that event.
     pub fn post_event(&mut self, task_id: TaskId, event_mask: u32) {
         if let Some(sub) = self.subscriptions.iter_mut().find(|s| s.task_id == task_id) {
@@ -180,6 +187,10 @@ impl EventReactor {
 pub static EVENT_REACTOR: Mutex<EventReactor> = Mutex::new(EventReactor::new());
 
 /// Posts an event to a designated target task via the global Event Reactor.
+pub fn cleanup_task(task_id: TaskId) {
+    EVENT_REACTOR.lock().cleanup_task(task_id);
+}
+
 pub fn post_event(task_id: TaskId, event_mask: u32) {
     EVENT_REACTOR.lock().post_event(task_id, event_mask);
 }
