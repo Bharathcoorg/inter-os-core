@@ -55,6 +55,7 @@ pub fn init() {
     // 2. Test 3GPP AT Command State Machine & Voice Calling
     {
         let mut modem = CELLULAR_MODEM.lock();
+        modem.state = ModemRadioState::RegisteredHome;
         let sim = SOVEREIGN_SIM.lock();
 
         let at_resp = modem.execute_at("AT", &sim, 100).expect("AT failed");

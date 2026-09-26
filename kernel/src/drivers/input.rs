@@ -56,16 +56,25 @@ impl InputEvent {
 
 pub struct InputPipeline {
     queue: VecDeque<InputEvent>,
+    service_queue: VecDeque<InputEvent>,
 }
 
 impl InputPipeline {
-    pub const fn new() -> Self { Self { queue: VecDeque::new() } }
+    pub const fn new() -> Self {
+        Self {
+            queue: VecDeque::new(),
+            service_queue: VecDeque::new(),
+        }
+    }
 
     pub fn push(&mut self, event: InputEvent) {
         if self.queue.len() < 128 { self.queue.push_back(event); }
+        if self.service_queue.len() < 128 { self.service_queue.push_back(event); }
     }
 
     pub fn pop(&mut self) -> Option<InputEvent> { self.queue.pop_front() }
+
+    pub fn pop_service(&mut self) -> Option<InputEvent> { self.service_queue.pop_front() }
 }
 
 pub static INPUT_PIPELINE: Mutex<InputPipeline> = Mutex::new(InputPipeline::new());

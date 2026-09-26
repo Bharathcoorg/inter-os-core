@@ -166,6 +166,17 @@ pub fn post_touch_event(slot: u8, x: u32, y: u32, pressure: u16, phase: TouchPha
         let _ = crate::gui::GRAVITY_COMPOSITOR.lock().trigger_force_takeover();
     }
 
+    let ticks = crate::interrupts::get_system_ticks();
+    {
+        let mut engine = crate::drivers::touch_gestures::TOUCH_ENGINE.lock();
+        match phase {
+            TouchPhase::Down => engine.handle_down(slot as usize, slot, x, y, ticks),
+            TouchPhase::Move => engine.handle_move(slot as usize, x, y, ticks),
+            TouchPhase::Up | TouchPhase::Cancel => engine.handle_up(slot as usize, ticks),
+        }
+    }
+    crate::drivers::input::pump_touch_events();
+
     let gesture_opt = TOUCH_DIGITIZER.lock().update_touch(slot, x, y, pressure, phase);
     let mut q = INPUT_QUEUE.lock();
     q.push(InputEvent::Touch(TouchPoint {
