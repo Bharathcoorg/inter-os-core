@@ -21,9 +21,10 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rootDir = $scriptDir
 $kernelDir = Join-Path $rootDir "kernel"
 $targetDir = Join-Path $rootDir "target"
-$qemu_x86 = "C:\Users\bhara\qemu\qemu-system-x86_64.exe"
-$qemu_riscv = "C:\Users\bhara\qemu\qemu-system-riscv64.exe"
-$qemu_aarch64 = "C:\Users\bhara\qemu\qemu-system-aarch64.exe"
+. (Join-Path $rootDir "tools\qemu_env.ps1")
+$qemu_x86 = Resolve-QemuPath "qemu-system-x86_64.exe"
+$qemu_riscv = Resolve-QemuPath "qemu-system-riscv64.exe"
+$qemu_aarch64 = Resolve-QemuPath "qemu-system-aarch64.exe"
 
 function Write-Banner {
     param([string]$msg)

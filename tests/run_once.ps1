@@ -1,9 +1,11 @@
 Stop-Process -Name "qemu-system-x86_64" -Force -ErrorAction SilentlyContinue
 $log = "$PSScriptRoot\..\target\test_run.log"
 if (Test-Path $log) { Remove-Item $log -Force }
-$img = "$PSScriptRoot\..\target\inter-os-bios.img"
+$rootDir = (Resolve-Path "$PSScriptRoot\..").Path
+$img = "$rootDir\target\inter-os-bios.img"
+. (Join-Path $rootDir "tools\qemu_env.ps1")
 $psi = New-Object System.Diagnostics.ProcessStartInfo
-$psi.FileName = "C:\Users\bhara\qemu\qemu-system-x86_64.exe"
+$psi.FileName = Resolve-QemuPath "qemu-system-x86_64.exe"
 $psi.Arguments = "-drive format=raw,file=`"$img`" -serial stdio -display none -no-reboot"
 $psi.RedirectStandardOutput = $true
 $psi.UseShellExecute = $false

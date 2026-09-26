@@ -3,7 +3,8 @@ Push-Location (Join-Path $rootDir "kernel-riscv64")
 cargo build --target riscv64gc-unknown-none-elf
 Pop-Location
 $kernel = Join-Path $rootDir "kernel-riscv64\target\riscv64gc-unknown-none-elf\debug\kernel-riscv64"
-$qemu = "C:\Users\bhara\qemu\qemu-system-riscv64.exe"
+. (Join-Path $rootDir "tools\qemu_env.ps1")
+$qemu = Resolve-QemuPath "qemu-system-riscv64.exe"
 $logPath = Join-Path $rootDir "target\riscv_boot.log"
 
 if (Test-Path $logPath) { Remove-Item $logPath -Force }

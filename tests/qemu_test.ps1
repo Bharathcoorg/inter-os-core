@@ -5,7 +5,8 @@ param(
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rootDir = Split-Path -Parent $scriptDir
 $img = Join-Path $rootDir "target\inter-os-bios.img"
-$qemu = "C:\Users\bhara\qemu\qemu-system-x86_64.exe"
+. (Join-Path $rootDir "tools\qemu_env.ps1")
+$qemu = Resolve-QemuPath "qemu-system-x86_64.exe"
 
 if (-not (Test-Path $img)) {
     Write-Error "Disk image not found at $img! Run .\qemu\build.ps1 first."

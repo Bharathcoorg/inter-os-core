@@ -2,8 +2,25 @@ import socket
 import subprocess
 import time
 import os
+import shutil
 
-qemu_exe = r"C:\Users\bhara\qemu\qemu-system-x86_64.exe"
+def find_qemu(binary="qemu-system-x86_64.exe"):
+    if "QEMU_PATH" in os.environ and os.path.exists(os.path.join(os.environ["QEMU_PATH"], binary)):
+        return os.path.join(os.environ["QEMU_PATH"], binary)
+    found = shutil.which(binary)
+    if found:
+        return found
+    candidates = [
+        os.path.expanduser(f"~/qemu/{binary}"),
+        rf"C:\Program Files\qemu\{binary}",
+        rf"C:\qemu\{binary}"
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return binary
+
+qemu_exe = find_qemu("qemu-system-x86_64.exe")
 kernel_img = os.path.abspath(r"target\inter-os-bios.img")
 
 subprocess.run(["taskkill", "/F", "/IM", "qemu-system-x86_64.exe"], capture_output=True)

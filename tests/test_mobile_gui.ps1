@@ -1,10 +1,11 @@
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rootDir = Split-Path -Parent $scriptDir
 $img = Join-Path $rootDir "target\inter-os-bios.img"
-$qemu = "C:\Users\bhara\qemu\qemu-system-x86_64.exe"
+. (Join-Path $rootDir "tools\qemu_env.ps1")
+$qemu = Resolve-QemuPath "qemu-system-x86_64.exe"
 $ppmPath = Join-Path $rootDir "target\mobile_screen.ppm"
 $pngPath = Join-Path $rootDir "target\mobile_screen.png"
-$artifactPath = "C:\Users\bhara\.gemini\antigravity-ide\brain\175202b9-c9aa-4539-a203-7dc7ff36be11\inter_os_mobile_screen.png"
+$artifactPath = if ($env:ARTIFACT_PATH) { $env:ARTIFACT_PATH } else { Join-Path $rootDir "target\inter_os_mobile_screen.png" }
 
 # Kill any existing QEMU
 Get-Process -Name "qemu-system-x86_64" -ErrorAction SilentlyContinue | Stop-Process -Force

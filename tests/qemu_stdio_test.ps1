@@ -1,6 +1,8 @@
-$img = (Resolve-Path "$PSScriptRoot\..\target\inter-os-bios.img").Path
+$rootDir = (Resolve-Path "$PSScriptRoot\..").Path
+$img = (Resolve-Path "$rootDir\target\inter-os-bios.img").Path
+. (Join-Path $rootDir "tools\qemu_env.ps1")
 $psi = New-Object System.Diagnostics.ProcessStartInfo
-$psi.FileName = "C:\Users\bhara\qemu\qemu-system-x86_64.exe"
+$psi.FileName = Resolve-QemuPath "qemu-system-x86_64.exe"
 $psi.Arguments = "-drive format=raw,file=`"$img`" -serial stdio -display none"
 $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError = $true

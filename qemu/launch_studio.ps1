@@ -3,7 +3,8 @@ $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rootDir = Split-Path -Parent $scriptDir
 $img = "$rootDir\target\inter-os-bios.img"
-$qemu = "C:\Users\bhara\qemu\qemu-system-x86_64.exe"
+. (Join-Path $rootDir "tools\qemu_env.ps1")
+$qemu = Resolve-QemuPath "qemu-system-x86_64.exe"
 $emulatorDir = "$rootDir\emulator"
 
 # Ports

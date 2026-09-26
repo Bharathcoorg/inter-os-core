@@ -6,7 +6,8 @@ param(
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rootDir = Split-Path -Parent $scriptDir
 $kernelPath = "$rootDir\target\aarch64-unknown-none\debug\kernel-aarch64"
-$qemuBin = "C:\Users\bhara\qemu\qemu-system-aarch64.exe"
+. (Join-Path $rootDir "tools\qemu_env.ps1")
+$qemuBin = Resolve-QemuPath "qemu-system-aarch64.exe"
 
 if (-not (Test-Path $kernelPath)) {
     Write-Host "AArch64 kernel binary not found. Compiling now..." -ForegroundColor Yellow

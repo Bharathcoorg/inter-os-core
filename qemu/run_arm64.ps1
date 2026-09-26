@@ -1,7 +1,8 @@
 # Launches Inter OS on AArch64 ARMv8-A QEMU Virt Platform (Mobile Smartphone Emulation)
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rootDir = Split-Path -Parent $scriptDir
-$qemuExe = "C:\Users\bhara\qemu\qemu-system-aarch64.exe"
+. (Join-Path $rootDir "tools\qemu_env.ps1")
+$qemuExe = Resolve-QemuPath "qemu-system-aarch64.exe"
 $bootImg = "$rootDir\target\boot.img"
 
 if (-not (Test-Path $bootImg)) {

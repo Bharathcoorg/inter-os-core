@@ -6,7 +6,8 @@ param(
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rootDir = Split-Path -Parent $scriptDir
 $kernelPath = "$rootDir\target\riscv64gc-unknown-none-elf\debug\kernel-riscv64"
-$qemuBin = "C:\Users\bhara\qemu\qemu-system-riscv64.exe"
+. (Join-Path $rootDir "tools\qemu_env.ps1")
+$qemuBin = Resolve-QemuPath "qemu-system-riscv64.exe"
 
 if (-not (Test-Path $kernelPath)) {
     Write-Host "RISC-V 64 kernel binary not found. Compiling now..." -ForegroundColor Yellow

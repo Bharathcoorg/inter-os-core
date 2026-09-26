@@ -2,7 +2,8 @@ $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rootDir = Split-Path -Parent $scriptDir
 $img = Join-Path $rootDir "target\inter-os-bios.img"
-$qemu = "C:\Users\bhara\qemu\qemu-system-x86_64.exe"
+. (Join-Path $rootDir "tools\qemu_env.ps1")
+$qemu = Resolve-QemuPath "qemu-system-x86_64.exe"
 $logPath = Join-Path $rootDir "target\x86_boot.log"
 $ppmPath = Join-Path $rootDir "target\mobile_screen2.ppm"
 $pngPath = Join-Path $rootDir "target\mobile_screen2.png"
