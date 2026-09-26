@@ -216,7 +216,6 @@ pub fn sys_waitpid(child_id: u64) -> SyscallResult {
     }
     let state = child.state;
     let code = child.exit_code;
-    drop(child);
 
     match state {
         crate::task::TaskState::Zombie | crate::task::TaskState::Terminated => {
@@ -3169,6 +3168,18 @@ fn require_service_manager() -> Result<(), SyscallResult> {
     }
 }
 
+fn require_app_launcher_or_service_manager() -> Result<(), SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    if task.cap_table.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, SERVICE_MANAGER_OBJECT)
+        || task.cap_table.authorize_capability(CapabilityType::ProcessSpawn, Rights::INVOKE)
+    {
+        Ok(())
+    } else {
+        Err(SyscallResult::PermissionDenied)
+    }
+}
+
 /// Verifies a signed RAPP service package and applies the narrow service ABI policy.
 /// This is verification/loading preparation only; the verified image is handed to
 /// the userspace service manager for process creation.
@@ -3292,8 +3303,8 @@ pub fn sys_service_stop(service_id: u8) -> Result<(), SyscallResult> {
 
 /// Launches a first-party application in Ring 3 on behalf of PID 1 / service manager.
 pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult> {
-    if let Err(e) = require_service_manager() {
-        crate::serial_println!("[APP_LAUNCH DEBUG] require_service_manager error: {:?}", e);
+    if let Err(e) = require_app_launcher_or_service_manager() {
+        crate::serial_println!("[APP_LAUNCH DEBUG] require_app_launcher_or_service_manager error: {:?}", e);
         return Err(e);
     }
     let sched = SCHEDULER.lock();

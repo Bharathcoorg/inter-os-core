@@ -531,7 +531,7 @@ pub fn spawn_userspace_service(service_id: u8, parent_id: TaskId) -> Result<Task
         return Ok(id);
     }
     if service_id == 10 {
-        let mut caps = CapabilityTable::new(8);
+        let mut caps = CapabilityTable::new(10);
         caps.insert(Capability { id: CapabilityId(0x7000), cap_type: CapabilityType::SerialOutput, rights: Rights::WRITE, object_id: 0 }).map_err(|_| "service capability table full")?;
         caps.insert(Capability { id: CapabilityId(0x7001), cap_type: CapabilityType::TimerTickRead, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
         caps.insert(Capability { id: CapabilityId(0x7002), cap_type: CapabilityType::IpcSend, rights: Rights::WRITE, object_id: parent_id.0 }).map_err(|_| "service capability table full")?;
@@ -539,6 +539,7 @@ pub fn spawn_userspace_service(service_id: u8, parent_id: TaskId) -> Result<Task
         caps.insert(Capability { id: CapabilityId(0x7004), cap_type: CapabilityType::FrameBufferDirect, rights: Rights::WRITE, object_id: 1 }).map_err(|_| "service capability table full")?;
         caps.insert(Capability { id: CapabilityId(0x7005), cap_type: CapabilityType::EventPoll, rights: Rights::READ | Rights::INVOKE, object_id: 0 }).map_err(|_| "service capability table full")?;
         caps.insert(Capability { id: CapabilityId(0x7006), cap_type: CapabilityType::IpcReceive, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
+        caps.insert(Capability { id: CapabilityId(0x7007), cap_type: CapabilityType::ProcessSpawn, rights: Rights::INVOKE, object_id: 0 }).map_err(|_| "service capability table full")?;
         let id = spawn_user_process("launcher", LAUNCHER_ELF, caps, 5)?;
         if let Some(task) = SCHEDULER.lock().get_task_mut(id) { task.parent_id = parent_id; }
         return Ok(id);
@@ -796,6 +797,9 @@ pub fn spawn_app_settings(id_security: TaskId) -> TaskId {
         caps,
         1,
     ).expect("Failed to spawn Settings app");
+    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
+        task.parent_id = id_security;
+    }
     serial_println!("[OK] Spawned Task 17: app_settings (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
@@ -857,6 +861,9 @@ pub fn spawn_app_terminal(id_security: TaskId) -> TaskId {
         caps,
         1,
     ).expect("Failed to spawn Terminal app");
+    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
+        task.parent_id = id_security;
+    }
     serial_println!("[OK] Spawned Task 18: app_terminal (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
@@ -918,6 +925,9 @@ pub fn spawn_app_dialer(id_security: TaskId) -> TaskId {
         caps,
         1,
     ).expect("Failed to spawn Dialer app");
+    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
+        task.parent_id = id_security;
+    }
     serial_println!("[OK] Spawned Task 19: app_dialer (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
@@ -979,6 +989,9 @@ pub fn spawn_app_vault(id_security: TaskId) -> TaskId {
         caps,
         1,
     ).expect("Failed to spawn Vault app");
+    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
+        task.parent_id = id_security;
+    }
     serial_println!("[OK] Spawned Task 20: app_vault (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
@@ -1040,6 +1053,9 @@ pub fn spawn_app_camera(id_security: TaskId) -> TaskId {
         caps,
         1,
     ).expect("Failed to spawn Camera app");
+    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
+        task.parent_id = id_security;
+    }
     serial_println!("[OK] Spawned Task 21: app_camera (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
@@ -1101,6 +1117,9 @@ pub fn spawn_app_calculator(id_security: TaskId) -> TaskId {
         caps,
         1,
     ).expect("Failed to spawn Calculator app");
+    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
+        task.parent_id = id_security;
+    }
     serial_println!("[OK] Spawned Task 22: app_calculator (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
@@ -1112,7 +1131,7 @@ pub extern "C" fn app_browser_trampoline() -> ! {
 
 /// Spawns the native Sovereign Browser & Decentralized Web Client in Ring 3.
 pub fn spawn_app_browser(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(8);
+    let mut caps = CapabilityTable::new(10);
     caps.insert(Capability {
         id: CapabilityId(2301),
         cap_type: CapabilityType::SerialOutput,
@@ -1149,6 +1168,18 @@ pub fn spawn_app_browser(id_security: TaskId) -> TaskId {
         rights: Rights::READ,
         object_id: 0,
     }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2307),
+        cap_type: CapabilityType::FrameBufferDirect,
+        rights: Rights::WRITE,
+        object_id: 1,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2308),
+        cap_type: CapabilityType::EventPoll,
+        rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
 
     let id = spawn_user_process(
         "app_browser",
@@ -1156,6 +1187,9 @@ pub fn spawn_app_browser(id_security: TaskId) -> TaskId {
         caps,
         1,
     ).expect("Failed to spawn Browser app");
+    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
+        task.parent_id = id_security;
+    }
     serial_println!("[OK] Spawned Task 23: app_browser (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
@@ -1167,7 +1201,7 @@ pub extern "C" fn app_messages_trampoline() -> ! {
 
 /// Spawns the native Sovereign Messages & E2E Encrypted Wire Client in Ring 3.
 pub fn spawn_app_messages(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(8);
+    let mut caps = CapabilityTable::new(10);
     caps.insert(Capability {
         id: CapabilityId(2401),
         cap_type: CapabilityType::SerialOutput,
@@ -1204,6 +1238,18 @@ pub fn spawn_app_messages(id_security: TaskId) -> TaskId {
         rights: Rights::WRITE,
         object_id: 0,
     }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2407),
+        cap_type: CapabilityType::FrameBufferDirect,
+        rights: Rights::WRITE,
+        object_id: 1,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2408),
+        cap_type: CapabilityType::EventPoll,
+        rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
 
     let id = spawn_user_process(
         "app_messages",
@@ -1211,6 +1257,9 @@ pub fn spawn_app_messages(id_security: TaskId) -> TaskId {
         caps,
         1,
     ).expect("Failed to spawn Messages app");
+    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
+        task.parent_id = id_security;
+    }
     serial_println!("[OK] Spawned Task 24: app_messages (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
@@ -1222,7 +1271,7 @@ pub extern "C" fn app_calendar_trampoline() -> ! {
 
 /// Spawns the native Sovereign Calendar & Chrono-Planner in Ring 3.
 pub fn spawn_app_calendar(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(8);
+    let mut caps = CapabilityTable::new(10);
     caps.insert(Capability {
         id: CapabilityId(2501),
         cap_type: CapabilityType::SerialOutput,
@@ -1259,6 +1308,18 @@ pub fn spawn_app_calendar(id_security: TaskId) -> TaskId {
         rights: Rights::WRITE,
         object_id: 0,
     }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2507),
+        cap_type: CapabilityType::FrameBufferDirect,
+        rights: Rights::WRITE,
+        object_id: 1,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2508),
+        cap_type: CapabilityType::EventPoll,
+        rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
 
     let id = spawn_user_process(
         "app_calendar",
@@ -1266,6 +1327,9 @@ pub fn spawn_app_calendar(id_security: TaskId) -> TaskId {
         caps,
         1,
     ).expect("Failed to spawn Calendar app");
+    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
+        task.parent_id = id_security;
+    }
     serial_println!("[OK] Spawned Task 25: app_calendar (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
@@ -1277,7 +1341,7 @@ pub extern "C" fn app_music_trampoline() -> ! {
 
 /// Spawns the native Sovereign Music & Hi-Fi Audio Synthesizer in Ring 3.
 pub fn spawn_app_music(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(8);
+    let mut caps = CapabilityTable::new(10);
     caps.insert(Capability {
         id: CapabilityId(2601),
         cap_type: CapabilityType::SerialOutput,
@@ -1314,6 +1378,18 @@ pub fn spawn_app_music(id_security: TaskId) -> TaskId {
         rights: Rights::WRITE,
         object_id: 0,
     }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2607),
+        cap_type: CapabilityType::FrameBufferDirect,
+        rights: Rights::WRITE,
+        object_id: 1,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2608),
+        cap_type: CapabilityType::EventPoll,
+        rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
 
     let id = spawn_user_process(
         "app_music",
@@ -1321,6 +1397,9 @@ pub fn spawn_app_music(id_security: TaskId) -> TaskId {
         caps,
         1,
     ).expect("Failed to spawn Music app");
+    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
+        task.parent_id = id_security;
+    }
     serial_println!("[OK] Spawned Task 26: app_music (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }

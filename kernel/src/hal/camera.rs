@@ -6,7 +6,6 @@
 //! - Real-time on-device neural vision scene classification
 //! - Low-latency preview buffer generation for GUI compositor
 
-use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
 
@@ -106,6 +105,7 @@ impl CameraSensor {
     }
 
     /// Evaluates luminance distribution and edge contrast to classify the scene.
+    #[allow(dead_code)]
     fn classify_scene(&self, pixels: &[u8]) -> SceneType {
         let mut high_contrast_edges = 0;
         let mut total_luminance: u64 = 0;
