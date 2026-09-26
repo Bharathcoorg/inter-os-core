@@ -2831,11 +2831,9 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   function injectHardwareSensor(payload) {
-    fetch('/api/hardware/sensor_inject', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    }).catch(() => {});
+    const name = Object.keys(payload || {})[0] || 'hardware';
+    showToast(`${name}: unavailable until a real guest hardware endpoint is connected`);
+    logConsole('warn', `[HARDWARE] ${name} control is unavailable; Device Studio will not synthesize guest telemetry.`);
   }
 
   // =========================================================================
