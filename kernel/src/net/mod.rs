@@ -343,7 +343,7 @@ pub fn poll_tcp_retransmissions(now: u64) -> usize {
     let Some((id, remote_ip, local_port, remote_port, seq, ack, len)) = due else { return reaped; };
     let payload = {
         let table = TCP_TABLE.lock();
-        let Some(c) = table.get(id) else { return 0; };
+        let Some(c) = table.get(id) else { return reaped; };
         let mut buf = [0u8; crate::net::tcp::TCP_MAX_SEGMENT];
         buf[..len].copy_from_slice(&c.tx[..len]);
         buf
