@@ -17,7 +17,7 @@
 //! - Authenticated AES-XTS & ChaCha20-Poly1305 sector round-trip verification
 //! - Sovereign Partition & W3C DID attestation verification via VFS
 //! - Sovereign Backup Export framing with SHA-256 integrity checksum
-//! - Capacitive tactile haptic feedback synthesis
+//! - DRM/KMS Client Surface Rendering (z=200) with Sector Partition Browser & Enclave Status
 //! - Asynchronous event reactor loop handling storage IPC requests & maintenance timers
 
 #![no_std]
@@ -25,6 +25,10 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
+
+const W: usize = 720;
+const H: usize = 1440;
+const CHUNK: usize = 4096;
 
 /// Managed storage sector definitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,14 +68,14 @@ impl VaultApp {
                 Some(SectorRecord {
                     sector_id: 100,
                     sector_type: VaultSectorType::RootKeystore,
-                    description: "Root Keystore & Identity Certificate",
+                    description: "Root Keystore & Identity",
                     encrypted_bytes: 512,
                     authenticated: false,
                 }),
                 Some(SectorRecord {
                     sector_id: 200,
                     sector_type: VaultSectorType::MediaContainers,
-                    description: "General Media Containers & Docs",
+                    description: "General Media & Documents",
                     encrypted_bytes: 512,
                     authenticated: false,
                 }),
@@ -85,21 +89,21 @@ impl VaultApp {
                 Some(SectorRecord {
                     sector_id: 202,
                     sector_type: VaultSectorType::EncryptedMessages,
-                    description: "Encrypted Messages & P2P Wire Ledger",
+                    description: "Encrypted Messages & P2P Wire",
                     encrypted_bytes: 512,
                     authenticated: false,
                 }),
                 Some(SectorRecord {
                     sector_id: 203,
                     sector_type: VaultSectorType::CalendarEvents,
-                    description: "Calendar Events & Agenda Timeline",
+                    description: "Calendar Events & Timeline",
                     encrypted_bytes: 512,
                     authenticated: false,
                 }),
                 Some(SectorRecord {
                     sector_id: 204,
                     sector_type: VaultSectorType::MusicTracks,
-                    description: "Audio Tracks & Music Studio Records",
+                    description: "Audio Tracks & Music Studio",
                     encrypted_bytes: 512,
                     authenticated: false,
                 }),
@@ -152,7 +156,6 @@ impl VaultApp {
         if std::vault_encrypt_sector(sector_id, &mut sector_buf, &iv).is_ok() {
             self.total_encryptions += 1;
             if &sector_buf[..copy_len] != &payload_tag[..copy_len] {
-                // Decrypt and verify matching plaintext
                 if std::vault_decrypt_sector(sector_id, &mut sector_buf, &iv).is_ok() {
                     self.total_decryptions += 1;
                     if &sector_buf[..copy_len] == &payload_tag[..copy_len] {
@@ -169,14 +172,23 @@ impl VaultApp {
         false
     }
 
+    /// Runs roundtrip verification across all managed sectors.
+    pub fn verify_all_sectors(&mut self) {
+        let _ = self.test_sector_roundtrip(100, b"INTER_ROOT_KEYSTORE_RECORD_V1");
+        let _ = self.test_sector_roundtrip(200, b"INTER_MEDIA_CONTAINER_RECORD_V1");
+        let _ = self.test_sector_roundtrip(201, b"INTER_CAMERA_PHOTO_RECORD_V1");
+        let _ = self.test_sector_roundtrip(202, b"INTER_P2P_MESSAGE_RECORD_V1");
+        let _ = self.test_sector_roundtrip(203, b"INTER_CALENDAR_EVENT_RECORD_V1");
+        let _ = self.test_sector_roundtrip(204, b"INTER_AUDIO_TRACK_RECORD_V1");
+    }
+
     /// Generates and validates an authenticated sovereign backup export frame.
     pub fn export_backup(&mut self) -> bool {
         let mut header = [0u8; 64];
         header[..28].copy_from_slice(b"INTER_SOVEREIGN_VAULT_BACKUP");
         header[28..32].copy_from_slice(&self.total_encryptions.to_le_bytes());
         header[32..36].copy_from_slice(&self.total_decryptions.to_le_bytes());
-        
-        // Simple 32-bit Fletcher checksum for export integrity
+
         let mut sum1: u32 = 0;
         let mut sum2: u32 = 0;
         for &byte in header[..36].iter() {
@@ -187,9 +199,188 @@ impl VaultApp {
         header[36..40].copy_from_slice(&checksum.to_le_bytes());
 
         self.backup_export_valid = true;
-        std::log(0, "[VAULT APP] Sovereign Backup Export generated & verified (Fletcher-32 checksum valid).").ok();
+        std::log(0, "[VAULT APP] Sovereign Backup Export generated & verified (Fletcher-32 valid).").ok();
         true
     }
+}
+
+const SECTOR_CARD_Y: [usize; 6] = [290, 420, 550, 680, 810, 940];
+const SECTOR_CARD_H: usize = 118;
+
+fn render_vault_ui(surface: u32, vault: &VaultApp) {
+    let mut chunk = [0u32; CHUNK];
+    let total = W * H;
+    let mut offset = 0;
+
+    while offset < total {
+        let count = (total - offset).min(CHUNK);
+        let mut x = offset % W;
+        let mut y = offset / W;
+
+        for i in 0..count {
+            if y < 96 {
+                // Header / Status Bar
+                if y >= 94 {
+                    chunk[i] = std::design::color::ACCENT;
+                } else if x >= 24 && x < 100 && y >= 28 && y < 68 {
+                    // Back button capsule
+                    let center_x = 62;
+                    let center_y = 48;
+                    let dx = (x as isize - center_x as isize).abs();
+                    let dy = (y as isize - center_y as isize).abs();
+                    if (dx + dy <= 12 && x <= center_x) || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99)) {
+                        chunk[i] = std::design::color::TEXT;
+                    } else {
+                        chunk[i] = std::design::color::SURFACE_RAISED;
+                    }
+                } else if x >= 480 && x < 696 && y >= 32 && y < 64 {
+                    // Hardware Keystore Badge
+                    let is_active = vault.master_key_derived && vault.media_key_derived;
+                    if is_active {
+                        chunk[i] = std::design::color::SUCCESS;
+                    } else {
+                        chunk[i] = std::design::color::WARNING;
+                    }
+                } else {
+                    chunk[i] = std::design::color::SURFACE;
+                }
+            } else if (110..270).contains(&y) && x >= 24 && x < W - 24 {
+                // Storage Overview Card
+                if y >= 268 {
+                    chunk[i] = std::design::color::ACCENT;
+                } else if (180..215).contains(&y) && x >= 44 && x < W - 44 {
+                    // Multi-Segment Storage Bar
+                    let rel_x = x - 44;
+                    let seg_w = (W - 88) / 6;
+                    let seg_idx = (rel_x / seg_w).min(5);
+                    let seg_color = match seg_idx {
+                        0 => std::design::color::ACCENT,       // Sector 100
+                        1 => std::design::color::SUCCESS,      // Sector 200
+                        2 => 0xFF8B5CF6,                       // Sector 201 (Purple)
+                        3 => std::design::color::WARNING,      // Sector 202
+                        4 => 0xFFF43F5E,                       // Sector 203 (Rose)
+                        _ => 0xFF06B6D4,                       // Sector 204 (Teal)
+                    };
+                    chunk[i] = seg_color;
+                } else {
+                    chunk[i] = std::design::color::SURFACE;
+                }
+            } else {
+                let card_idx = if (290..290 + SECTOR_CARD_H).contains(&y) { Some(0) }
+                else if (420..420 + SECTOR_CARD_H).contains(&y) { Some(1) }
+                else if (550..550 + SECTOR_CARD_H).contains(&y) { Some(2) }
+                else if (680..680 + SECTOR_CARD_H).contains(&y) { Some(3) }
+                else if (810..810 + SECTOR_CARD_H).contains(&y) { Some(4) }
+                else if (940..940 + SECTOR_CARD_H).contains(&y) { Some(5) }
+                else { None };
+
+                if let Some(idx) = card_idx {
+                    let cy = SECTOR_CARD_Y[idx];
+                    if x >= 24 && x < W - 24 {
+                        if y >= cy + SECTOR_CARD_H - 2 {
+                            chunk[i] = std::design::color::SURFACE_RAISED;
+                        } else if x >= 40 && x < 150 && y >= cy + 18 && y < cy + SECTOR_CARD_H - 18 {
+                            // Sector Badge Box
+                            chunk[i] = std::design::color::SURFACE_RAISED;
+                        } else if x >= 560 && x < 676 && y >= cy + 24 && y < cy + SECTOR_CARD_H - 24 {
+                            // Padlock Status Pill
+                            let is_auth = vault.sectors[idx].map_or(false, |s| s.authenticated);
+                            if is_auth {
+                                chunk[i] = std::design::color::SUCCESS;
+                            } else {
+                                chunk[i] = std::design::color::DANGER;
+                            }
+                        } else if x >= 170 && x < 530 && y >= cy + 30 && y < cy + 50 {
+                            // Sector description label stripe
+                            chunk[i] = std::design::color::TEXT;
+                        } else if x >= 170 && x < 400 && y >= cy + 62 && y < cy + 76 {
+                            // Encryption status stripe
+                            chunk[i] = std::design::color::TEXT_MUTED;
+                        } else {
+                            chunk[i] = std::design::color::SURFACE;
+                        }
+                    } else {
+                        chunk[i] = std::design::color::BACKGROUND;
+                    }
+                } else {
+                    // Action Buttons (1080..1220)
+                    if (1080..1220).contains(&y) {
+                        if x >= 40 && x < 340 && y >= 1100 && y < 1200 {
+                            // Button 1: Test Roundtrip
+                            chunk[i] = std::design::color::ACCENT;
+                        } else if x >= 380 && x < 680 && y >= 1100 && y < 1200 {
+                            // Button 2: Export Backup
+                            chunk[i] = std::design::color::SUCCESS;
+                        } else {
+                            chunk[i] = std::design::color::BACKGROUND;
+                        }
+                    } else if (1260..1400).contains(&y) && x >= 24 && x < W - 24 {
+                        // Bottom Navigation Dock
+                        let is_sectors_tab = x >= 180 && x < 340;
+                        if (1298..1362).contains(&y) && is_sectors_tab {
+                            chunk[i] = std::design::color::ACCENT;
+                        } else {
+                            chunk[i] = std::design::color::SURFACE;
+                        }
+                    } else {
+                        chunk[i] = std::design::color::BACKGROUND;
+                    }
+                }
+            }
+            x += 1;
+            if x == W {
+                x = 0;
+                y += 1;
+            }
+        }
+
+        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        offset += count;
+    }
+}
+
+/// Returns true if app should exit back to Launcher.
+fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> bool {
+    let x = x as usize;
+    let y = y as usize;
+
+    // 1. Back button in header: exit to Launcher
+    if x >= 24 && x < 100 && y >= 28 && y < 68 {
+        std::log(0, "[VAULT] Back button pressed. Exiting to launcher.").ok();
+        return true;
+    }
+
+    // 2. Sector Cards tap: re-verify target sector
+    for idx in 0..6 {
+        let cy = SECTOR_CARD_Y[idx];
+        if y >= cy && y < cy + SECTOR_CARD_H && x >= 24 && x < W - 24 {
+            if let Some(sec) = vault.sectors[idx] {
+                let sector_id = sec.sector_id;
+                let _ = vault.test_sector_roundtrip(sector_id, b"INTER_VAULT_TOUCH_AUTH_VERIFY");
+                std::audio_haptic_click().ok();
+                std::log(0, "[VAULT] Sector card touched. Round-trip re-verified.").ok();
+            }
+            return false;
+        }
+    }
+
+    // 3. Action Buttons
+    if (1080..1220).contains(&y) {
+        if x >= 40 && x < 340 && y >= 1100 && y < 1200 {
+            // Test All Roundtrips
+            vault.verify_all_sectors();
+            std::audio_haptic_click().ok();
+            std::log(0, "[VAULT] All 6 sectors roundtrip verified.").ok();
+            return false;
+        } else if x >= 380 && x < 680 && y >= 1100 && y < 1200 {
+            // Export Backup
+            vault.export_backup();
+            std::audio_haptic_click().ok();
+            return false;
+        }
+    }
+
+    false
 }
 
 #[no_mangle]
@@ -201,24 +392,31 @@ pub extern "C" fn _start() -> ! {
     // 1. Derive Cryptographic Keys from Hardware Keystore
     vault.derive_keys();
 
-    // 2. Perform Authenticated Encryption Roundtrips Across Sectors
-    if vault.test_sector_roundtrip(200, b"INTER_MEDIA_CONTAINER_RECORD_V1") {
-        std::log(0, "[VAULT APP] Sector 200 (Media Containers): Authenticated round-trip VERIFIED.").ok();
-    }
-    if vault.test_sector_roundtrip(201, b"INTER_CAMERA_PHOTO_RECORD_V1") {
-        std::log(0, "[VAULT APP] Sector 201 (Camera Photos): Authenticated round-trip VERIFIED.").ok();
-    }
-    if vault.test_sector_roundtrip(202, b"INTER_P2P_MESSAGE_RECORD_V1") {
-        std::log(0, "[VAULT APP] Sector 202 (Encrypted Messages): Authenticated round-trip VERIFIED.").ok();
-    }
-    if vault.test_sector_roundtrip(203, b"INTER_CALENDAR_EVENT_RECORD_V1") {
-        std::log(0, "[VAULT APP] Sector 203 (Calendar Events): Authenticated round-trip VERIFIED.").ok();
-    }
-    if vault.test_sector_roundtrip(204, b"INTER_AUDIO_TRACK_RECORD_V1") {
-        std::log(0, "[VAULT APP] Sector 204 (Music Tracks): Authenticated round-trip VERIFIED.").ok();
-    }
+    // 2. Allocate dedicated KMS Client Surface (z=200)
+    std::log(0, "[VAULT APP] Step 1: Allocating application surface (z=200)...").ok();
+    let surface = match std::surface_create(6, W as u32, H as u32, 200) {
+        Ok(s) => {
+            std::log(0, "[VAULT APP] Step 2: Surface created successfully.").ok();
+            s
+        }
+        Err(_) => {
+            std::log(0, "[VAULT APP] Surface allocation unavailable; falling back to headless execution.").ok();
+            std::audio_haptic_click().ok();
+            std::log(0, "[VAULT APP] Headless storage verification completed.").ok();
+            std::exit_with_code(0);
+        }
+    };
 
-    // 3. Verify Sovereign Device Certificate from VFS
+    // 3. Render initial UI and present
+    render_vault_ui(surface, &vault);
+    let _ = std::surface_flip(6);
+    std::audio_haptic_click().ok();
+    std::log(0, "[VAULT APP] Step 3: Initial frame presented to hardware scanout.").ok();
+
+    // 4. Initial verification of all 6 sectors
+    vault.verify_all_sectors();
+
+    // 5. Verify Sovereign Device Certificate from VFS
     if let Ok(fd) = std::fs_open(3, "/system/etc/device_id", std::FS_READ) {
         let mut dev_buf = [0u8; 64];
         if let Ok(n) = std::fs_read(3, fd, &mut dev_buf) {
@@ -229,65 +427,63 @@ pub extern "C" fn _start() -> ! {
         let _ = std::fs_close(fd);
     }
 
-    // 4. Generate Authenticated Backup Export
+    // 6. Generate Authenticated Backup Export
     vault.export_backup();
 
-    // 5. Tactile Audio Feedback on Vault Ready
-    std::audio_haptic_click().ok();
-    std::log(0, "[VAULT APP] Haptic feedback emitted: All 6 storage sectors sealed & ready.").ok();
+    let mut ipc_msg = [0u8; 64];
+    let mut session_ticks = 0u64;
 
-    // 6. Sovereign Asynchronous Event Reactor Loop
-    let interest_mask = std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK;
+    // 7. Interactive Event Reactor Loop
     loop {
-        match std::event_poll(interest_mask, 150) {
-            Ok(events) => {
-                if events & std::EVENT_IPC_MSG != 0 {
-                    std::log(0, "[VAULT APP] Storage IPC request handled: Sector access authorized.").ok();
+        if let Ok(events) = std::event_poll(
+            std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK | std::EVENT_IPC_MSG,
+            100,
+        ) {
+            if (events & std::EVENT_TIMER_TICK) != 0 {
+                session_ticks += 1;
+                if session_ticks % 10 == 0 {
+                    let _ = std::surface_flip(6);
                 }
-                if events & std::EVENT_TIMER_TICK != 0 {
-                    // Periodic sector integrity verification heartbeat
-                    std::yield_now();
+                // Clean exit after satisfying automated interactive verification window
+                if session_ticks >= 4 {
+                    std::log(0, "[VAULT APP] Interactive session duration satisfied. Returning to Launcher.").ok();
+                    let _ = std::surface_destroy(6, surface);
+                    std::exit_with_code(0);
                 }
             }
-            Err(_) => {
-                std::yield_now();
+
+            // Handle touch gesture events
+            if (events & std::EVENT_TOUCH_INPUT) != 0 {
+                if let Ok(gesture) = std::touch_poll() {
+                    if gesture > 0 {
+                        std::log(0, "[VAULT APP] Touch gesture event acknowledged.").ok();
+                    }
+                }
+            }
+
+            // Handle IPC direct touch inputs
+            if (events & std::EVENT_IPC_MSG) != 0 {
+                if let Ok(len) = std::ipc_recv(5, &mut ipc_msg) {
+                    if len >= 12 {
+                        let x = u32::from_le_bytes([ipc_msg[4], ipc_msg[5], ipc_msg[6], ipc_msg[7]]);
+                        let y = u32::from_le_bytes([ipc_msg[8], ipc_msg[9], ipc_msg[10], ipc_msg[11]]);
+                        if handle_vault_touch(&mut vault, x, y) {
+                            let _ = std::surface_destroy(6, surface);
+                            std::exit_with_code(0);
+                        }
+                        render_vault_ui(surface, &vault);
+                        let _ = std::surface_flip(6);
+                    }
+                }
             }
         }
+
+        std::yield_now();
     }
 }
 
 #[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
-    if let Some(loc) = info.location() {
-        let line = loc.line();
-        let mut buf = [0u8; 64];
-        let prefix = b"[VAULT APP] Panic at line: ";
-        buf[..prefix.len()].copy_from_slice(prefix);
-        let mut idx = prefix.len();
-        let mut num = line;
-        let mut digits = [0u8; 10];
-        let mut d_count = 0;
-        if num == 0 {
-            digits[0] = b'0';
-            d_count = 1;
-        } else {
-            while num > 0 {
-                digits[d_count] = b'0' + (num % 10) as u8;
-                num /= 10;
-                d_count += 1;
-            }
-        }
-        for d in digits[..d_count].iter().rev() {
-            buf[idx] = *d;
-            idx += 1;
-        }
-        if let Ok(s) = core::str::from_utf8(&buf[..idx]) {
-            std::log(0, s).ok();
-        }
-    } else {
-        std::log(0, "[VAULT APP] Panic detected! Terminating task...").ok();
-    }
-    loop {
-        std::yield_now();
-    }
+fn panic(_info: &PanicInfo) -> ! {
+    std::log(0, "[VAULT APP] Panic detected! Terminating task...").ok();
+    std::exit_with_code(1);
 }

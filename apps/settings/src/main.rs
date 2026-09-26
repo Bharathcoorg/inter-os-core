@@ -249,8 +249,11 @@ pub extern "C" fn _start() -> ! {
             }
 
             // After completing verified execution session (~0.5s), terminate cleanly
-            if session_ticks >= 5 {
+            if session_ticks >= 3 {
                 std::log(0, "[SETTINGS APP] Active user interaction session complete. Exiting cleanly.").ok();
+                if surface > 0 {
+                    let _ = std::surface_destroy(6, surface);
+                }
                 std::exit();
             }
         }

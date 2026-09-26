@@ -2157,7 +2157,7 @@ pub fn sys_telephony_set_data(enabled: bool) -> Result<bool, SyscallResult> {
 }
 
 /// Allocates a new hardware plane surface in the DRM/KMS compositor.
-/// M25 display-service authority is object-scoped: only the display service's
+/// Display-service authority is object-scoped: only the display service's
 /// framebuffer capability (object 1) can access the hardware display boundary.
 fn require_display_service(cap_slot: usize) -> Result<TaskId, SyscallResult> {
     let sched = SCHEDULER.lock();

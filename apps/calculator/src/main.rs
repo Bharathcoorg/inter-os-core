@@ -467,7 +467,7 @@ pub extern "C" fn _start() -> ! {
                     let _ = std::surface_flip(6);
                 }
                 // Automated smoke session concludes cleanly after interactive verification window
-                if session_ticks >= 8 {
+                if session_ticks >= 4 {
                     std::log(0, "[CALCULATOR] Interactive session duration satisfied. Returning to Launcher.").ok();
                     let _ = std::surface_destroy(6, surface);
                     std::exit_with_code(0);

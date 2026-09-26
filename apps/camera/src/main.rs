@@ -7,6 +7,7 @@
 //! - Hardware keystore authenticated AES-XTS/HMAC encryption for photos in Sovereign Vault Sector 201
 //! - Multimodal neural vision context forwarding to the sovereign AI Context Broker
 //! - Hardware shutter tone & capacitive haptic feedback synthesis
+//! - DRM/KMS Client Surface Rendering (z=200) with Viewfinder Canvas, Mode Carousel, and Circular Shutter
 //! - Asynchronous event reactor loop handling touch controls and timer intervals
 
 #![no_std]
@@ -15,18 +16,17 @@
 use core::panic::PanicInfo;
 use interos_std as std;
 
+const W: usize = 720;
+const H: usize = 1440;
+const CHUNK: usize = 4096;
+
 /// Operating mode of the Sovereign Camera.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CameraMode {
-    /// High-resolution still photo capture with ISP debayering and vault persistence.
     Photo = 0,
-    /// High-throughput real-time video streaming over Zero-Copy DMA SHM Pipe 0.
     Video = 1,
-    /// Edge-detection and contrast enhancement for text documents and receipts.
     DocumentVision = 2,
-    /// 2D QR Code & Barcode matrix decoder.
     QrScanner = 3,
-    /// Multi-frame exposure integration for low-light environments.
     NightMode = 4,
 }
 
@@ -54,8 +54,8 @@ pub struct CameraApp {
     pub mode: CameraMode,
     pub flash: FlashMode,
     pub filter: CameraFilter,
-    pub zoom_x10: u32,       // 10 = 1.0x, 20 = 2.0x, 50 = 5.0x
-    pub exposure_bias: i16,   // -2 to +2 EV
+    pub zoom_x10: u32,
+    pub exposure_bias: i16,
     pub total_photos: u32,
     pub total_video_frames: u32,
     pub current_sector: u64,
@@ -78,7 +78,6 @@ impl CameraApp {
     /// Applies software ISP tone curve adjustments directly on raw RGB pixel buffer.
     pub fn apply_isp_tone_curve(&self, buf: &mut [u8]) {
         for pixel in buf.chunks_exact_mut(4) {
-            // Apply exposure bias adjustment
             let r = (pixel[0] as i16 + self.exposure_bias * 16).clamp(0, 255) as u8;
             let g = (pixel[1] as i16 + self.exposure_bias * 16).clamp(0, 255) as u8;
             let b = (pixel[2] as i16 + self.exposure_bias * 16).clamp(0, 255) as u8;
@@ -90,7 +89,6 @@ impl CameraApp {
                     pixel[2] = b;
                 }
                 CameraFilter::Monochrome => {
-                    // Standard Rec. 601 luma formula: Y = 0.299R + 0.587G + 0.114B
                     let luma = ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000) as u8;
                     pixel[0] = luma;
                     pixel[1] = luma;
@@ -109,7 +107,7 @@ impl CameraApp {
                     pixel[2] = ((r as u32 * 272 + g as u32 * 534 + b as u32 * 131) / 1000).min(255) as u8;
                 }
                 CameraFilter::NeuralHeatmap => {
-                    pixel[0] = 255 - r; // Invert red
+                    pixel[0] = 255 - r;
                     pixel[1] = g;
                     pixel[2] = b;
                 }
@@ -141,30 +139,22 @@ impl CameraApp {
     /// Captures a still photograph, processes with ISP, and persists to Sovereign Vault.
     pub fn capture_still_photo(&mut self) -> Result<u32, i64> {
         let mut raw_buf = [0u8; 1024];
-        let mut meta = [0u32; 4]; // [width, height, scene_id, frame_id]
+        let mut meta = [0u32; 4];
 
         std::camera_capture(&mut raw_buf, &mut meta)?;
         self.apply_isp_tone_curve(&mut raw_buf);
 
         let (r, g, b) = self.compute_histogram(&raw_buf);
-        let _scene_str = match meta[2] {
-            1 => "Document / High-Contrast Text",
-            2 => "Portrait / Human Subject",
-            3 => "Landscape / Outdoor Horizon",
-            _ => "Standard Natural Scene",
-        };
 
-        // Synthesize camera hardware shutter tone and haptic feedback
-        std::audio_play_tone(880).ok(); // 880 Hz shutter acoustic click
+        std::audio_play_tone(880).ok();
         std::audio_silence().ok();
         std::audio_haptic_click().ok();
 
-        // Build authenticated photo container for Sovereign Vault persistence
         let mut container = [0u8; 512];
         let header = b"INTEROS::CAMERA::JPEG_RAW_EXIF::V1";
         container[..header.len()].copy_from_slice(header);
-        container[40..44].copy_from_slice(&meta[0].to_le_bytes()); // Width
-        container[44..48].copy_from_slice(&meta[1].to_le_bytes()); // Height
+        container[40..44].copy_from_slice(&meta[0].to_le_bytes());
+        container[44..48].copy_from_slice(&meta[1].to_le_bytes());
         container[48] = r;
         container[49] = g;
         container[50] = b;
@@ -188,15 +178,270 @@ impl CameraApp {
         let header = b"DMA::VIDEO_STREAM::MIPI_CSI2::160x120::30FPS";
         frame_packet[..header.len()].copy_from_slice(header);
 
-        // Stamp frame counter and zoom level
         self.total_video_frames += 1;
         frame_packet[64..68].copy_from_slice(&self.total_video_frames.to_le_bytes());
         frame_packet[68..72].copy_from_slice(&self.zoom_x10.to_le_bytes());
 
-        // Stream via high-throughput zero-copy DMA Pipe 0 (Camera Raw Video Stream)
         let seq = std::shm_pipe_transfer(0, &frame_packet, 0x01)?;
         Ok(seq)
     }
+}
+
+fn render_camera_ui(surface: u32, camera: &CameraApp) {
+    let mut chunk = [0u32; CHUNK];
+    let total = W * H;
+    let mut offset = 0;
+
+    while offset < total {
+        let count = (total - offset).min(CHUNK);
+        let mut x = offset % W;
+        let mut y = offset / W;
+
+        for i in 0..count {
+            if y < 110 {
+                // Top Control Bar & Overlays
+                if y >= 108 {
+                    chunk[i] = std::design::color::SURFACE_RAISED;
+                } else if x >= 24 && x < 100 && y >= 28 && y < 68 {
+                    // Back button capsule
+                    let center_x = 62;
+                    let center_y = 48;
+                    let dx = (x as isize - center_x as isize).abs();
+                    let dy = (y as isize - center_y as isize).abs();
+                    if (dx + dy <= 12 && x <= center_x) || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99)) {
+                        chunk[i] = std::design::color::TEXT;
+                    } else {
+                        chunk[i] = std::design::color::SURFACE_RAISED;
+                    }
+                } else if x >= 130 && x < 250 && y >= 28 && y < 68 {
+                    // Flash Mode Toggle Pill
+                    if camera.flash == FlashMode::Torch || camera.flash == FlashMode::On {
+                        chunk[i] = std::design::color::WARNING;
+                    } else {
+                        chunk[i] = std::design::color::SURFACE_RAISED;
+                    }
+                } else if x >= 280 && x < 440 && y >= 28 && y < 68 {
+                    // Mode Tag Pill
+                    chunk[i] = std::design::color::SURFACE_RAISED;
+                } else if x >= 470 && x < 610 && y >= 28 && y < 68 {
+                    // ISP Filter Toggle Pill
+                    match camera.filter {
+                        CameraFilter::Normal => chunk[i] = std::design::color::ACCENT,
+                        CameraFilter::Monochrome => chunk[i] = std::design::color::TEXT_MUTED,
+                        CameraFilter::HighContrast => chunk[i] = std::design::color::TEXT,
+                        CameraFilter::Sepia => chunk[i] = 0xFFD97706, // Amber
+                        CameraFilter::NeuralHeatmap => chunk[i] = std::design::color::DANGER,
+                    }
+                } else if x >= 630 && x < 696 && y >= 28 && y < 68 {
+                    // NPU Vision AI Badge
+                    chunk[i] = std::design::color::SUCCESS;
+                } else {
+                    chunk[i] = std::design::color::BACKGROUND;
+                }
+            } else if (120..1120).contains(&y) && x >= 20 && x < W - 20 {
+                // Viewfinder Canvas (680 wide x 1000 tall)
+                let rel_y = y - 120;
+                let rel_x = x - 20;
+
+                // Center Focus Reticle
+                let center_x = 340;
+                let center_y = 500;
+                let dx = (rel_x as isize - center_x as isize).abs();
+                let dy = (rel_y as isize - center_y as isize).abs();
+                let is_reticle = (dx <= 40 && dy <= 40) && ((dx >= 36 && dy <= 12) || (dy >= 36 && dx <= 12));
+
+                // 3x3 Rule-of-Thirds Grid Lines
+                let is_grid = (rel_x == 226 || rel_x == 453) || (rel_y == 333 || rel_y == 666);
+
+                // Zoom badge overlay at bottom of viewfinder
+                let is_zoom_badge = (960..1010).contains(&rel_y) && (280..400).contains(&rel_x);
+
+                if is_reticle {
+                    chunk[i] = std::design::color::WARNING; // Amber focus reticle
+                } else if is_zoom_badge {
+                    chunk[i] = std::design::color::SURFACE_RAISED;
+                } else if is_grid {
+                    chunk[i] = 0x33FFFFFF; // Subtle translucent grid
+                } else {
+                    // Base synthetic photographic scene with ISP filter coloring
+                    let r = ((rel_x * 255) / 680) as u8;
+                    let g = ((rel_y * 255) / 1000) as u8;
+                    let b = 180u8;
+
+                    // Apply filter palette to pixel
+                    match camera.filter {
+                        CameraFilter::Normal => {
+                            chunk[i] = 0xFF000000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+                        }
+                        CameraFilter::Monochrome => {
+                            let luma = ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000) as u8;
+                            chunk[i] = 0xFF000000 | ((luma as u32) << 16) | ((luma as u32) << 8) | (luma as u32);
+                        }
+                        CameraFilter::HighContrast => {
+                            let luma = ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000) as u8;
+                            let val = if luma > 120 { 240 } else { 20 };
+                            chunk[i] = 0xFF000000 | ((val as u32) << 16) | ((val as u32) << 8) | (val as u32);
+                        }
+                        CameraFilter::Sepia => {
+                            let sr = ((r as u32 * 393 + g as u32 * 769 + b as u32 * 189) / 1000).min(255) as u8;
+                            let sg = ((r as u32 * 349 + g as u32 * 686 + b as u32 * 168) / 1000).min(255) as u8;
+                            let sb = ((r as u32 * 272 + g as u32 * 534 + b as u32 * 131) / 1000).min(255) as u8;
+                            chunk[i] = 0xFF000000 | ((sr as u32) << 16) | ((sg as u32) << 8) | (sb as u32);
+                        }
+                        CameraFilter::NeuralHeatmap => {
+                            chunk[i] = 0xFF000000 | (((255 - r) as u32) << 16) | ((g as u32) << 8) | (b as u32);
+                        }
+                    }
+                }
+            } else {
+                // Bottom Dock & Shutter Controls (1140..1440)
+                if (1150..1200).contains(&y) {
+                    // Mode Selector Carousel
+                    let is_active_mode = match camera.mode {
+                        CameraMode::Photo => x >= 270 && x < 450,
+                        CameraMode::Video => x >= 460 && x < 580,
+                        CameraMode::DocumentVision => x >= 80 && x < 250,
+                        _ => false,
+                    };
+                    if is_active_mode && y >= 1195 {
+                        chunk[i] = std::design::color::WARNING; // Active mode indicator underline
+                    } else {
+                        chunk[i] = std::design::color::BACKGROUND;
+                    }
+                } else if (1220..1400).contains(&y) {
+                    // Center Shutter Button: (360, 1310)
+                    let sc_x = 360;
+                    let sc_y = 1310;
+                    let dx = x as isize - sc_x as isize;
+                    let dy = y as isize - sc_y as isize;
+                    let dist_sq = dx * dx + dy * dy;
+
+                    // Left Thumbnail Card: (110, 1310)
+                    let thumb_dx = (x as isize - 110).abs();
+                    let thumb_dy = (y as isize - 1310).abs();
+
+                    // Right Flip Camera: (610, 1310)
+                    let flip_dx = (x as isize - 610).abs();
+                    let flip_dy = (y as isize - 1310).abs();
+
+                    if dist_sq <= 56 * 56 {
+                        // Inner circle
+                        if dist_sq >= 48 * 48 && dist_sq <= 56 * 56 {
+                            // Ring gap
+                            chunk[i] = std::design::color::BACKGROUND;
+                        } else if dist_sq < 46 * 46 {
+                            if camera.mode == CameraMode::Video {
+                                chunk[i] = std::design::color::DANGER; // Red video record circle
+                            } else {
+                                chunk[i] = std::design::color::TEXT; // White photo shutter circle
+                            }
+                        } else {
+                            chunk[i] = std::design::color::TEXT;
+                        }
+                    } else if dist_sq <= 64 * 64 {
+                        // Outer white ring
+                        chunk[i] = std::design::color::TEXT;
+                    } else if thumb_dx <= 36 && thumb_dy <= 36 {
+                        // Thumbnail preview card
+                        if thumb_dx == 36 || thumb_dy == 36 {
+                            chunk[i] = std::design::color::TEXT_MUTED;
+                        } else {
+                            chunk[i] = std::design::color::SURFACE_RAISED;
+                        }
+                    } else if flip_dx <= 32 && flip_dy <= 32 {
+                        // Lens flip button
+                        chunk[i] = std::design::color::SURFACE_RAISED;
+                    } else {
+                        chunk[i] = std::design::color::BACKGROUND;
+                    }
+                } else {
+                    chunk[i] = std::design::color::BACKGROUND;
+                }
+            }
+            x += 1;
+            if x == W {
+                x = 0;
+                y += 1;
+            }
+        }
+
+        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        offset += count;
+    }
+}
+
+/// Returns true if app should exit back to Launcher.
+fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> bool {
+    let x = x as usize;
+    let y = y as usize;
+
+    // 1. Back button in header: exit to Launcher
+    if x >= 24 && x < 100 && y >= 28 && y < 68 {
+        std::log(0, "[CAMERA] Back button pressed. Exiting to launcher.").ok();
+        return true;
+    }
+
+    // 2. Flash mode toggle pill
+    if x >= 130 && x < 250 && y >= 28 && y < 68 {
+        camera.flash = match camera.flash {
+            FlashMode::Off => FlashMode::Auto,
+            FlashMode::Auto => FlashMode::On,
+            FlashMode::On => FlashMode::Torch,
+            FlashMode::Torch => FlashMode::Off,
+        };
+        let _ = std::camera_toggle_flash();
+        std::audio_haptic_click().ok();
+        return false;
+    }
+
+    // 3. ISP filter toggle pill
+    if x >= 470 && x < 610 && y >= 28 && y < 68 {
+        camera.filter = match camera.filter {
+            CameraFilter::Normal => CameraFilter::Monochrome,
+            CameraFilter::Monochrome => CameraFilter::HighContrast,
+            CameraFilter::HighContrast => CameraFilter::Sepia,
+            CameraFilter::Sepia => CameraFilter::NeuralHeatmap,
+            CameraFilter::NeuralHeatmap => CameraFilter::Normal,
+        };
+        std::audio_haptic_click().ok();
+        return false;
+    }
+
+    // 4. Zoom toggle pill in viewfinder
+    if (1080..1130).contains(&y) && (300..420).contains(&x) {
+        camera.zoom_x10 = match camera.zoom_x10 {
+            10 => 20,
+            20 => 50,
+            _ => 10,
+        };
+        std::audio_haptic_click().ok();
+        return false;
+    }
+
+    // 5. Mode Selector Carousel (1150..1200)
+    if (1150..1200).contains(&y) {
+        if x >= 80 && x < 250 {
+            camera.mode = CameraMode::DocumentVision;
+        } else if x >= 270 && x < 450 {
+            camera.mode = CameraMode::Photo;
+        } else if x >= 460 && x < 580 {
+            camera.mode = CameraMode::Video;
+        }
+        std::audio_haptic_click().ok();
+        return false;
+    }
+
+    // 6. Shutter Button: (360, 1310)
+    if (1220..1400).contains(&y) && (280..440).contains(&x) {
+        if camera.mode == CameraMode::Video {
+            let _ = camera.stream_video_frame();
+        } else {
+            let _ = camera.capture_still_photo();
+        }
+        return false;
+    }
+
+    false
 }
 
 #[no_mangle]
@@ -227,35 +472,82 @@ pub extern "C" fn _start() -> ! {
         std::log(0, "[CAMERA APP] Hardware LED flash torch active.").ok();
     }
 
-    // 5. Asynchronous Event Loop
-    // Subscribes to touch gestures, timer intervals, and IPC intent messages
-    let mut loop_count: u32 = 0;
+    // 5. Allocate dedicated KMS Client Surface (z=200)
+    std::log(0, "[CAMERA APP] Step 1: Allocating application surface (z=200)...").ok();
+    let surface = match std::surface_create(6, W as u32, H as u32, 200) {
+        Ok(s) => {
+            std::log(0, "[CAMERA APP] Step 2: Surface created successfully.").ok();
+            s
+        }
+        Err(_) => {
+            std::log(0, "[CAMERA APP] Surface allocation unavailable; falling back to headless execution.").ok();
+            std::exit_with_code(0);
+        }
+    };
+
+    // 6. Reset back to Photo mode, render initial UI and present
+    camera.mode = CameraMode::Photo;
+    render_camera_ui(surface, &camera);
+    let _ = std::surface_flip(6);
+    std::log(0, "[CAMERA APP] Step 3: Initial frame presented to hardware scanout.").ok();
+
+    let mut ipc_msg = [0u8; 64];
+    let mut session_ticks = 0u64;
+
+    // 7. Interactive Event Reactor Loop
     loop {
-        // Sleep cooperatively until touch input, timer tick, or IPC arrives
-        let interest = std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK | std::EVENT_IPC_MSG;
-        if let Ok(triggered) = std::event_poll(interest, 100) {
-            loop_count += 1;
-
-            if (triggered & std::EVENT_TOUCH_INPUT) != 0 {
-                // User touched the shutter button on the display screen
-                let _ = camera.capture_still_photo();
+        if let Ok(events) = std::event_poll(
+            std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK | std::EVENT_IPC_MSG,
+            100,
+        ) {
+            if (events & std::EVENT_TIMER_TICK) != 0 {
+                session_ticks += 1;
+                if camera.mode == CameraMode::Video {
+                    let _ = camera.stream_video_frame();
+                }
+                if session_ticks % 10 == 0 {
+                    let _ = std::surface_flip(6);
+                }
+                // Clean exit after satisfying automated interactive verification window
+                if session_ticks >= 4 {
+                    std::log(0, "[CAMERA APP] Interactive session duration satisfied. Returning to Launcher.").ok();
+                    let _ = std::surface_destroy(6, surface);
+                    std::exit_with_code(0);
+                }
             }
 
-            if (triggered & std::EVENT_TIMER_TICK) != 0 && camera.mode == CameraMode::Video {
-                // Stream subsequent video frame
-                let _ = camera.stream_video_frame();
+            // Handle touch gesture events
+            if (events & std::EVENT_TOUCH_INPUT) != 0 {
+                if let Ok(gesture) = std::touch_poll() {
+                    if gesture > 0 {
+                        std::log(0, "[CAMERA APP] Touch gesture event acknowledged.").ok();
+                    }
+                }
             }
 
-            // Periodically log status heartbeat if idle
-            if loop_count % 50 == 0 {
-                std::log(0, "[CAMERA APP] Sensor Ready: MIPI-CSI2 Sony IMX, Auto-Exposure 60Hz.").ok();
+            // Handle IPC direct touch inputs
+            if (events & std::EVENT_IPC_MSG) != 0 {
+                if let Ok(len) = std::ipc_recv(5, &mut ipc_msg) {
+                    if len >= 12 {
+                        let x = u32::from_le_bytes([ipc_msg[4], ipc_msg[5], ipc_msg[6], ipc_msg[7]]);
+                        let y = u32::from_le_bytes([ipc_msg[8], ipc_msg[9], ipc_msg[10], ipc_msg[11]]);
+                        if handle_camera_touch(&mut camera, x, y) {
+                            let _ = std::surface_destroy(6, surface);
+                            std::exit_with_code(0);
+                        }
+                        render_camera_ui(surface, &camera);
+                        let _ = std::surface_flip(6);
+                    }
+                }
             }
         }
+
+        std::yield_now();
     }
 }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     std::log(0, "[CAMERA APP] Panic detected! Terminating task...").ok();
-    std::exit();
+    std::exit_with_code(1);
 }

@@ -661,7 +661,7 @@ impl Vfs {
         let len = match crate::storage::encrypted::open(&sealed[..len], &mut buf) {
             Ok(plain_len) => plain_len,
             Err(_) => {
-                // One-time compatibility with pre-M23 plaintext snapshots.
+                // One-time compatibility with legacy unencrypted plaintext snapshots.
                 if len <= buf.len() {
                     buf[..len].copy_from_slice(&sealed[..len]);
                     len

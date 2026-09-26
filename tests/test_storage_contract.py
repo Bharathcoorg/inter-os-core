@@ -123,7 +123,7 @@ def main() -> None:
     must(vfs, "crate::storage::encrypted::seal", "VFS encrypted persistence")
     must(vfs, "crate::storage::encrypted::open", "VFS encrypted restoration")
     must(vfs, "32768 + crate::storage::encrypted::ENCRYPTED_OVERHEAD", "encrypted restore buffer capacity")
-    must(vfs, "pre-M23 plaintext snapshots", "migration fallback for legacy snapshots")
+    must(vfs, "legacy unencrypted plaintext snapshots", "migration fallback for legacy snapshots")
     must((ROOT / "kernel/src/main.rs").read_text(), "crypto::keystore::init();", "keystore initialized before VFS")
     assert (ROOT / "kernel/src/main.rs").read_text().index("crypto::keystore::init();") < (ROOT / "kernel/src/main.rs").read_text().index("fs::init();"), "storage key must exist before VFS reconstruction"
 

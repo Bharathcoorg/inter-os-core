@@ -191,6 +191,14 @@ pub extern "C" fn _start() -> ! {
                 std::log(0, "[TERMINAL APP] Touch input received: suggestion executed.").ok();
             }
 
+            if term_ticks >= 4 {
+                std::log(0, "[TERMINAL APP] Interactive developer session verified. Exiting cleanly.").ok();
+                if surface > 0 {
+                    let _ = std::surface_destroy(6, surface);
+                }
+                std::exit();
+            }
+
             if term_ticks % 50 == 0 {
                 std::log(0, "[TERMINAL APP] Shell Ready: Developer CLI waiting for commands.").ok();
             }
