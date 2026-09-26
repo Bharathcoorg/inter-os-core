@@ -221,6 +221,9 @@ impl Scheduler {
         crate::ipc::cleanup_task(task_id);
         crate::fs::cleanup_task(task_id);
         crate::event::cleanup_task(task_id);
+        // Surface ownership follows task lifetime. Reclaim all app surfaces at
+        // the common exit path so normal std::exit() cannot leave stale windows.
+        crate::drivers::display_kms::DRM_KMS.lock().destroy_surfaces_owned_by(task_id.0);
 
         // Reparent live children to primordial init so a dead parent cannot leave
         // an unreapable child/zombie subtree behind.
