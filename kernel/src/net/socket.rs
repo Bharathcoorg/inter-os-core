@@ -560,7 +560,20 @@ impl TcpConnectionTable {
         Ok(n)
     }
 
-\n\n#[cfg(test)]
+    pub fn close_owned(&mut self, id: u32, owner_task_id: u32) -> Result<(), NetError> {
+        let slot = self.entries.iter_mut().find(|s| s.as_ref().map(|c| c.id == id).unwrap_or(false));
+        match slot {
+            Some(entry) if entry.as_ref().map(|c| c.owner_task_id == owner_task_id).unwrap_or(false) => {
+                *entry = None;
+                Ok(())
+            }
+            _ => Err(NetError::CapabilityDenied),
+        }
+    }
+}
+
+
+#[cfg(test)]
 mod tcp_reliability_tests {
     use super::*;
     use crate::net::ipv4::Ipv4Address;
@@ -591,14 +604,3 @@ mod tcp_reliability_tests {
     }
 }
 
-    pub fn close_owned(&mut self, id: u32, owner_task_id: u32) -> Result<(), NetError> {
-        let slot = self.entries.iter_mut().find(|s| s.as_ref().map(|c| c.id == id).unwrap_or(false));
-        match slot {
-            Some(entry) if entry.as_ref().map(|c| c.owner_task_id == owner_task_id).unwrap_or(false) => {
-                *entry = None;
-                Ok(())
-            }
-            _ => Err(NetError::CapabilityDenied),
-        }
-    }
-}
