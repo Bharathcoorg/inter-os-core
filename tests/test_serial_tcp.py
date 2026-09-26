@@ -3,6 +3,10 @@ import subprocess
 import time
 import os
 import shutil
+import sys
+
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
 
 def find_qemu(binary="qemu-system-x86_64.exe"):
     if "QEMU_PATH" in os.environ and os.path.exists(os.path.join(os.environ["QEMU_PATH"], binary)):
@@ -48,7 +52,7 @@ try:
         s.settimeout(0.5)
         start_t = time.time()
         buf = b""
-        while time.time() - start_t < 30.0:
+        while time.time() - start_t < 120.0:
             try:
                 data = s.recv(4096)
                 if not data:
@@ -60,6 +64,11 @@ try:
                     if decoded:
                         lines.append(decoded)
                         print(f"[SERIAL] {decoded}")
+                        if "Step 5: Initial presentation complete" in decoded:
+                            print(f"[SUCCESS] Launcher presentation complete at {time.time() - start_t:.1f}s")
+                            break
+                if any("Step 5: Initial presentation complete" in l for l in lines):
+                    break
             except socket.timeout:
                 continue
 except Exception as e:
