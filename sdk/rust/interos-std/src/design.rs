@@ -13,6 +13,7 @@ pub mod color {
     pub const TEXT_MUTED:u32=0xFF9AA8BC;
     pub const ACCENT:u32=0xFF31C4FF;
     pub const DANGER:u32=0xFFFF6B6B;
+    pub const WARNING:u32=0xFFFFC043;
     pub const SUCCESS:u32=0xFF56D68A;
 }
 pub mod spacing { pub const XS:usize=8; pub const SM:usize=12; pub const MD:usize=20; pub const LG:usize=28; pub const XL:usize=40; }

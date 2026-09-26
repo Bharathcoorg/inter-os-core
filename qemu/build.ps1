@@ -108,7 +108,7 @@ if ($LASTEXITCODE -ne 0) {
 
 # 4. Compile Standalone AArch64 Smartphone Microkernel
 Write-Host "[13/14] Compiling Standalone Smartphone Microkernel for aarch64-unknown-none..." -ForegroundColor Yellow
-cargo +nightly rustc --manifest-path "$rootDir\kernel-aarch64\Cargo.toml" --target aarch64-unknown-none -- -C link-arg=-Tkernel-aarch64/linker.ld
+cargo +nightly build --manifest-path "$rootDir\kernel-aarch64\Cargo.toml" --target aarch64-unknown-none
 if ($LASTEXITCODE -ne 0) {
     Write-Error "AArch64 kernel compilation failed!"
     exit 1
@@ -116,7 +116,7 @@ if ($LASTEXITCODE -ne 0) {
 
 # 5. Compile Standalone RISC-V 64 Smartphone Microkernel
 Write-Host "[14/14] Compiling Standalone Smartphone Microkernel for riscv64gc-unknown-none-elf..." -ForegroundColor Yellow
-cargo +nightly rustc --manifest-path "$rootDir\kernel-riscv64\Cargo.toml" --target riscv64gc-unknown-none-elf -- -C link-arg=-Tkernel-riscv64/linker.ld
+cargo +nightly build --manifest-path "$rootDir\kernel-riscv64\Cargo.toml" --target riscv64gc-unknown-none-elf
 if ($LASTEXITCODE -ne 0) {
     Write-Error "RISC-V 64 kernel compilation failed!"
     exit 1
@@ -150,7 +150,9 @@ Write-Host "Build complete! Fastboot flashable image ready at: $fastbootImg" -Fo
 
 # 7. Package Physical AArch64 Fastboot Android Boot Image
 Write-Host "[Packaging] Packaging Authentic AArch64 Fastboot Android boot-aarch64.img..." -ForegroundColor Yellow
-$aarch64KernelElf = "$rootDir\target\aarch64-unknown-none\debug\kernel-aarch64"
+$k_aarch64_1 = "$rootDir\target\aarch64-unknown-none\debug\kernel-aarch64"
+$k_aarch64_2 = "$rootDir\kernel-aarch64\target\aarch64-unknown-none\debug\kernel-aarch64"
+$aarch64KernelElf = if ((Test-Path $k_aarch64_2) -and (-not (Test-Path $k_aarch64_1) -or (Get-Item $k_aarch64_2).LastWriteTime -gt (Get-Item $k_aarch64_1).LastWriteTime)) { $k_aarch64_2 } else { $k_aarch64_1 }
 $aarch64BootImg = "$rootDir\target\boot-aarch64.img"
 cargo +nightly run --manifest-path "$rootDir\tools\mkbootimg\Cargo.toml" -- --kernel "$aarch64KernelElf" --output "$aarch64BootImg"
 if ($LASTEXITCODE -ne 0) {
@@ -160,7 +162,7 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "Build complete! Authentic AArch64 flashable image ready at: $aarch64BootImg" -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "  Milestone v4.0 Built Successfully (x86_64 + Standalone AArch64)" -ForegroundColor Cyan
+Write-Host "  InterOS Core Multi-Arch Built Successfully (x86_64 + Standalone AArch64 + RISC-V 64)" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 
 
