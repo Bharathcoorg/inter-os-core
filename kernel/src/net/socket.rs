@@ -261,6 +261,18 @@ impl TcpConnectionTable {
         remote_port: u16,
         initial_seq: u32,
     ) -> Result<u32, NetError> {
+        if local_port == 0 || remote_port == 0 {
+            return Err(NetError::InvalidPort);
+        }
+        if self.entries.iter().flatten().any(|conn| {
+            conn.local_port == local_port
+                && conn.remote_ip == remote_ip
+                && conn.remote_port == remote_port
+                && conn.state != crate::net::TcpState::Closed
+        }) {
+            return Err(NetError::PortInUse);
+        }
+
         for slot in self.entries.iter_mut() {
             if slot.is_none() {
                 let id = self.next_id;
