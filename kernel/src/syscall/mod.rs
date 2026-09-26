@@ -2225,6 +2225,22 @@ pub fn sys_audio_control(action: u32, param: u32) -> Result<u32, SyscallResult> 
             audio.play(crate::audio::AudioFeedback::Silence);
             Ok(0)
         }
+        4 => {
+            audio.configure_stream(param as usize).map_err(|_| SyscallResult::InvalidArguments)?;
+            Ok(0)
+        }
+        5 => {
+            audio.start_stream().map_err(|_| SyscallResult::NotReady)?;
+            Ok(1)
+        }
+        6 => {
+            audio.stop_stream();
+            Ok(0)
+        }
+        7 => {
+            audio.set_volume((param.min(100)) as u8);
+            Ok(audio.volume_percent as u32)
+        }
         _ => Err(SyscallResult::InvalidArguments),
     }
 }
