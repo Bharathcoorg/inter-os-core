@@ -5,8 +5,10 @@
 
 pub mod aarch64;
 pub mod fastboot;
+pub mod relocate;
 
 pub use fastboot::{FastbootBootImage, FastbootError, test_fastboot_boot_image};
+pub use relocate::apply_relocations;
 
 /// Initializes multi-architecture subsystems and tests.
 pub fn init() {

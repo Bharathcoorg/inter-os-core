@@ -12,5 +12,7 @@ rustflags = [
 
 [target.x86_64-unknown-none]
 rustflags = [
+    "-C", "link-arg=-z",
+    "-C", "link-arg=norelro",
     "--cfg", "curve25519_dalek_backend=\"fiat\"",
 ]
