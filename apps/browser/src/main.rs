@@ -157,20 +157,152 @@ impl BrowserApp {
     }
 }
 
+const W: usize = 720;
+const H: usize = 1440;
+const CHUNK: usize = 1024;
+
+fn render_browser_ui(surface: u32, _app: &BrowserApp) {
+    let mut chunk = [0u32; CHUNK];
+    let total = W * H;
+    let mut offset = 0;
+    while offset < total {
+        let count = (total - offset).min(CHUNK);
+        let mut x = offset % W;
+        let mut y = offset / W;
+        for i in 0..count {
+            if y < 96 {
+                if y >= 94 {
+                    chunk[i] = std::design::color::ACCENT;
+                } else if x >= 24 && x < 100 && y >= 28 && y < 68 {
+                    // Back button <
+                    let center_x = 62;
+                    let center_y = 48;
+                    let dx = (x as isize - center_x as isize).abs();
+                    let dy = (y as isize - center_y as isize).abs();
+                    if (dx + dy <= 12 && x <= center_x) || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99)) {
+                        chunk[i] = std::design::color::TEXT;
+                    } else {
+                        chunk[i] = std::design::color::SURFACE_RAISED;
+                    }
+                } else if x >= 112 && x < W - 24 && y >= 28 && y < 68 {
+                    // Address bar pill
+                    if y == 28 || y == 67 || x == 112 || x == W - 25 {
+                        chunk[i] = std::design::color::ACCENT;
+                    } else {
+                        chunk[i] = std::design::color::SURFACE_RAISED;
+                    }
+                } else {
+                    chunk[i] = std::design::color::SURFACE;
+                }
+            } else if (120..380).contains(&y) {
+                // Bookmarks strip
+                let card = (y - 120) / 80;
+                let card_y = (y - 120) % 80;
+                if card < 3 && x >= 32 && x < W - 32 && card_y < 68 {
+                    if card_y >= 28 && card_y < 40 && x >= 56 && x < 240 {
+                        chunk[i] = if BOOKMARKS[card].is_sovereign {
+                            std::design::color::ACCENT
+                        } else {
+                            std::design::color::SUCCESS
+                        };
+                    } else {
+                        chunk[i] = std::design::color::SURFACE;
+                    }
+                } else {
+                    chunk[i] = std::design::color::BACKGROUND;
+                }
+            } else if (400..1320).contains(&y) && x >= 24 && x < W - 24 {
+                // Main hypermedia DOM canvas
+                if (420..460).contains(&y) && x >= 48 && x < 320 {
+                    chunk[i] = std::design::color::TEXT;
+                } else if (500..510).contains(&y) && x >= 48 && x < W - 48 {
+                    chunk[i] = std::design::color::SURFACE_RAISED;
+                } else if (540..550).contains(&y) && x >= 48 && x < W - 80 {
+                    chunk[i] = std::design::color::SURFACE_RAISED;
+                } else if (600..740).contains(&y) && x >= 48 && x < W - 48 {
+                    chunk[i] = std::design::color::SURFACE;
+                } else {
+                    chunk[i] = 0xFF0D1117;
+                }
+            } else if (1340..1440).contains(&y) {
+                // Bottom toolbar
+                if y == 1340 {
+                    chunk[i] = std::design::color::SURFACE_RAISED;
+                } else {
+                    chunk[i] = std::design::color::SURFACE;
+                }
+            } else {
+                chunk[i] = std::design::color::BACKGROUND;
+            }
+            x += 1;
+            if x == W {
+                x = 0;
+                y += 1;
+            }
+        }
+        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        offset += count;
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     std::log(0, "[BROWSER APP (Ring 3)] Sovereign Decentralized Web & InterLayer Browser online.").ok();
 
     let mut browser = BrowserApp::new();
 
+    // Allocate DRM/KMS Client Surface (z=200)
+    let surface = match std::surface_create(6, W as u32, H as u32, 200) {
+        Ok(id) => {
+            std::log(0, "[BROWSER APP] DRM/KMS Client Surface allocated (z=200).").ok();
+            id
+        }
+        Err(_) => 0,
+    };
+
     // Ingest and navigate to default sovereign home portal
     browser.navigate("interlayer://sovereign.mesh/catalog?fbclid=track123&utm_source=ad");
 
+    if surface > 0 {
+        render_browser_ui(surface, &browser);
+        let _ = std::surface_flip(6);
+        std::log(0, "[BROWSER APP] Browser canvas presented to scanout buffer.").ok();
+    }
+
     // Sovereign Asynchronous Event Reactor Loop
-    let interest_mask = std::EVENT_IPC_MSG | std::EVENT_NETWORK_PACKET | std::EVENT_TIMER_TICK;
+    let interest_mask = std::EVENT_TOUCH_INPUT | std::EVENT_IPC_MSG | std::EVENT_NETWORK_PACKET | std::EVENT_TIMER_TICK;
     loop {
         match std::event_poll(interest_mask, 150) {
             Ok(events) => {
+                if events & std::EVENT_TOUCH_INPUT != 0 {
+                    let mut input = std::InputEvent {
+                        kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000,
+                    };
+                    while std::input_event_poll(&mut input).is_ok() {
+                        if input.kind == 1 {
+                            // Check Back button in header: exit cleanly to launcher
+                            if input.x >= 24 && input.x < 100 && input.y >= 28 && input.y < 68 {
+                                std::log(0, "[BROWSER APP] Back button pressed. Exiting to launcher.").ok();
+                                if surface > 0 {
+                                    let _ = std::surface_destroy(6, surface);
+                                }
+                                std::exit_with_code(0);
+                            }
+
+                            // Check bookmark card taps
+                            if input.y >= 120 && input.y < 380 && input.x >= 32 && input.x < (W as u32) - 32 {
+                                let card_idx = ((input.y - 120) / 80) as usize;
+                                if card_idx < BOOKMARKS.len() {
+                                    browser.navigate(BOOKMARKS[card_idx].url);
+                                    if surface > 0 {
+                                        render_browser_ui(surface, &browser);
+                                        let _ = std::surface_flip(6);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 if events & std::EVENT_IPC_MSG != 0 {
                     std::log(0, "[BROWSER APP] Incoming navigation intent handled.").ok();
                 }

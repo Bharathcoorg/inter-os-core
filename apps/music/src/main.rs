@@ -146,6 +146,90 @@ impl MusicApp {
     }
 }
 
+const W: usize = 720;
+const H: usize = 1440;
+const CHUNK: usize = 1024;
+
+fn render_music_ui(surface: u32, app: &MusicApp) {
+    let mut chunk = [0u32; CHUNK];
+    let total = W * H;
+    let mut offset = 0;
+    while offset < total {
+        let count = (total - offset).min(CHUNK);
+        let mut x = offset % W;
+        let mut y = offset / W;
+        for i in 0..count {
+            if y < 96 {
+                if y >= 94 {
+                    chunk[i] = std::design::color::ACCENT;
+                } else if x >= 24 && x < 100 && y >= 28 && y < 68 {
+                    // Back button <
+                    let center_x = 62;
+                    let center_y = 48;
+                    let dx = (x as isize - center_x as isize).abs();
+                    let dy = (y as isize - center_y as isize).abs();
+                    if (dx + dy <= 12 && x <= center_x) || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99)) {
+                        chunk[i] = std::design::color::TEXT;
+                    } else {
+                        chunk[i] = std::design::color::SURFACE_RAISED;
+                    }
+                } else if x >= 120 && x < 320 && (40..56).contains(&y) {
+                    chunk[i] = std::design::color::TEXT;
+                } else {
+                    chunk[i] = std::design::color::SURFACE;
+                }
+            } else if (120..640).contains(&y) && x >= 100 && x < W - 100 {
+                // Album artwork display canvas
+                let center_x = (W / 2) as isize;
+                let center_y = 380isize;
+                let dist_sq = (x as isize - center_x).pow(2) + (y as isize - center_y).pow(2);
+                if dist_sq < 220 * 220 {
+                    if dist_sq < 60 * 60 {
+                        chunk[i] = std::design::color::ACCENT;
+                    } else if (dist_sq % 2500) < 400 {
+                        chunk[i] = std::design::color::SURFACE_RAISED;
+                    } else {
+                        chunk[i] = 0xFF141923;
+                    }
+                } else {
+                    chunk[i] = std::design::color::SURFACE;
+                }
+            } else if (680..720).contains(&y) && x >= 48 && x < 380 {
+                chunk[i] = std::design::color::TEXT;
+            } else if (740..752).contains(&y) && x >= 48 && x < W - 48 {
+                // Progress bar
+                if x < 48 + 360 {
+                    chunk[i] = std::design::color::ACCENT;
+                } else {
+                    chunk[i] = std::design::color::SURFACE_RAISED;
+                }
+            } else if (800..960).contains(&y) {
+                // Play / Pause central button
+                let center_x = (W / 2) as isize;
+                let center_y = 880isize;
+                let dist_sq = (x as isize - center_x).pow(2) + (y as isize - center_y).pow(2);
+                if dist_sq < 56 * 56 {
+                    chunk[i] = match app.state {
+                        PlaybackState::Playing => std::design::color::ACCENT,
+                        _ => std::design::color::SURFACE_RAISED,
+                    };
+                } else {
+                    chunk[i] = std::design::color::BACKGROUND;
+                }
+            } else {
+                chunk[i] = std::design::color::BACKGROUND;
+            }
+            x += 1;
+            if x == W {
+                x = 0;
+                y += 1;
+            }
+        }
+        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        offset += count;
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     std::log(0, "[MUSIC APP (Ring 3)] Sovereign Hi-Fi Audio Studio & Synthesizer online.").ok();
@@ -158,18 +242,66 @@ pub extern "C" fn _start() -> ! {
     // 2. Encrypt Track Record in Sector 204
     music.encrypt_track_record();
 
-    // 3. Hardware Musical Arpeggio Synthesis
+    // 3. Allocate DRM/KMS Client Surface (z=200)
+    let surface = match std::surface_create(6, W as u32, H as u32, 200) {
+        Ok(id) => {
+            std::log(0, "[MUSIC APP] DRM/KMS Client Surface allocated (z=200).").ok();
+            id
+        }
+        Err(_) => 0,
+    };
+
+    // 4. Hardware Musical Arpeggio Synthesis
     music.play_arpeggio();
 
     // 5. Zero-Copy DMA Audio Streaming over Pipe 1
     music.stream_dma_audio_block();
     music.state = PlaybackState::Playing;
 
+    if surface > 0 {
+        render_music_ui(surface, &music);
+        let _ = std::surface_flip(6);
+        std::log(0, "[MUSIC APP] Music canvas presented to scanout buffer.").ok();
+    }
+
     // 6. Sovereign Asynchronous Event Reactor Loop
-    let interest_mask = std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK;
+    let interest_mask = std::EVENT_TOUCH_INPUT | std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK;
     loop {
         match std::event_poll(interest_mask, 150) {
             Ok(events) => {
+                if events & std::EVENT_TOUCH_INPUT != 0 {
+                    let mut input = std::InputEvent {
+                        kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000,
+                    };
+                    while std::input_event_poll(&mut input).is_ok() {
+                        if input.kind == 1 {
+                            // Check Back button in header: exit cleanly to launcher
+                            if input.x >= 24 && input.x < 100 && input.y >= 28 && input.y < 68 {
+                                std::log(0, "[MUSIC APP] Back button pressed. Exiting to launcher.").ok();
+                                if surface > 0 {
+                                    let _ = std::surface_destroy(6, surface);
+                                }
+                                std::exit_with_code(0);
+                            }
+
+                            // Check Play / Pause center button
+                            let center_x = (W / 2) as isize;
+                            let center_y = 880isize;
+                            let dist_sq = (input.x as isize - center_x).pow(2) + (input.y as isize - center_y).pow(2);
+                            if dist_sq < 56 * 56 {
+                                music.state = match music.state {
+                                    PlaybackState::Playing => PlaybackState::Paused,
+                                    _ => PlaybackState::Playing,
+                                };
+                                std::audio_haptic_click().ok();
+                                if surface > 0 {
+                                    render_music_ui(surface, &music);
+                                    let _ = std::surface_flip(6);
+                                }
+                            }
+                        }
+                    }
+                }
                 if events & std::EVENT_IPC_MSG != 0 {
                     std::log(0, "[MUSIC APP] Audio playback IPC command received (Play/Pause/Skip).").ok();
                 }

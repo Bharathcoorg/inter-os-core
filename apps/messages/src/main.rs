@@ -121,6 +121,97 @@ impl MessagesApp {
     }
 }
 
+const W: usize = 720;
+const H: usize = 1440;
+const CHUNK: usize = 1024;
+
+fn render_messages_ui(surface: u32, active_idx: usize) {
+    let mut chunk = [0u32; CHUNK];
+    let total = W * H;
+    let mut offset = 0;
+    while offset < total {
+        let count = (total - offset).min(CHUNK);
+        let mut x = offset % W;
+        let mut y = offset / W;
+        for i in 0..count {
+            if y < 96 {
+                if y >= 94 {
+                    chunk[i] = std::design::color::ACCENT;
+                } else if x >= 24 && x < 100 && y >= 28 && y < 68 {
+                    // Back button <
+                    let center_x = 62;
+                    let center_y = 48;
+                    let dx = (x as isize - center_x as isize).abs();
+                    let dy = (y as isize - center_y as isize).abs();
+                    if (dx + dy <= 12 && x <= center_x) || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99)) {
+                        chunk[i] = std::design::color::TEXT;
+                    } else {
+                        chunk[i] = std::design::color::SURFACE_RAISED;
+                    }
+                } else if x >= 120 && x < 320 && (40..56).contains(&y) {
+                    chunk[i] = std::design::color::TEXT;
+                } else {
+                    chunk[i] = std::design::color::SURFACE;
+                }
+            } else if (110..470).contains(&y) {
+                // Conversation threads list
+                let card = (y - 110) / 120;
+                let card_y = (y - 110) % 120;
+                if card < 3 && x >= 24 && x < W - 24 && card_y < 104 {
+                    if card == active_idx {
+                        if card_y >= 100 {
+                            chunk[i] = std::design::color::ACCENT;
+                        } else if card_y >= 20 && card_y < 36 && x >= 48 && x < 180 {
+                            chunk[i] = std::design::color::TEXT;
+                        } else if card_y >= 50 && card_y < 62 && x >= 48 && x < W - 60 {
+                            chunk[i] = std::design::color::TEXT_MUTED;
+                        } else {
+                            chunk[i] = std::design::color::SURFACE_RAISED;
+                        }
+                    } else {
+                        if card_y >= 20 && card_y < 36 && x >= 48 && x < 180 {
+                            chunk[i] = std::design::color::TEXT;
+                        } else if card_y >= 50 && card_y < 62 && x >= 48 && x < W - 60 {
+                            chunk[i] = std::design::color::TEXT_MUTED;
+                        } else {
+                            chunk[i] = std::design::color::SURFACE;
+                        }
+                    }
+                } else {
+                    chunk[i] = std::design::color::BACKGROUND;
+                }
+            } else if (490..1320).contains(&y) && x >= 24 && x < W - 24 {
+                // Active conversation bubbles pane
+                if (520..600).contains(&y) && x >= 48 && x < 420 {
+                    chunk[i] = std::design::color::SURFACE_RAISED;
+                } else if (640..720).contains(&y) && x >= 300 && x < W - 48 {
+                    chunk[i] = std::design::color::ACCENT;
+                } else {
+                    chunk[i] = 0xFF0F141C;
+                }
+            } else if (1340..1440).contains(&y) {
+                // Bottom compose input bar
+                if y == 1340 {
+                    chunk[i] = std::design::color::SURFACE_RAISED;
+                } else if (1360..1410).contains(&y) && x >= 24 && x < W - 24 {
+                    chunk[i] = std::design::color::SURFACE_RAISED;
+                } else {
+                    chunk[i] = std::design::color::SURFACE;
+                }
+            } else {
+                chunk[i] = std::design::color::BACKGROUND;
+            }
+            x += 1;
+            if x == W {
+                x = 0;
+                y += 1;
+            }
+        }
+        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        offset += count;
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     std::log(0, "[MESSAGES APP (Ring 3)] Sovereign Encrypted Messaging & P2P Wire Protocol online.").ok();
@@ -130,21 +221,69 @@ pub extern "C" fn _start() -> ! {
     // 1. Ingest Hardware Keystore Key
     messages.derive_messaging_key();
 
+    // 2. Allocate DRM/KMS Client Surface (z=200)
+    let surface = match std::surface_create(6, W as u32, H as u32, 200) {
+        Ok(id) => {
+            std::log(0, "[MESSAGES APP] DRM/KMS Client Surface allocated (z=200).").ok();
+            id
+        }
+        Err(_) => 0,
+    };
 
     // 3. Telephony Cellular Modem HAL Query
     let mut modem_buf = [0u8; 256];
-    if let Ok(_modem_len) = std::telephony_query(&mut modem_buf) {
-        std::log(0, "[MESSAGES APP] Telephony modem active: P2P cellular wire channel online (5G Sovereign).").ok();
+    if let Ok(modem_len) = std::telephony_query(&mut modem_buf) {
+        let is_present = core::str::from_utf8(&modem_buf[..modem_len])
+            .map(|s| s.contains("\"present\":true"))
+            .unwrap_or(false);
+        if is_present {
+            std::log(0, "[MESSAGES APP] Telephony modem active: P2P cellular wire channel online.").ok();
+        } else {
+            std::log(0, "[MESSAGES APP] Cellular modem in standby (No hardware modem detected).").ok();
+        }
     }
 
-    // 4. Dispatch Initial Outgoing Encrypted Message
-    messages.send_message("did:inter:user:alice001", "Hello Alice! Inter OS bare-metal microkernel is running smoothly.");
+    if surface > 0 {
+        render_messages_ui(surface, messages.active_thread_idx);
+        let _ = std::surface_flip(6);
+        std::log(0, "[MESSAGES APP] Messages canvas presented to scanout buffer.").ok();
+    }
 
-    // 5. Sovereign Asynchronous Event Reactor Loop
-    let interest_mask = std::EVENT_IPC_MSG | std::EVENT_MODEM_URC | std::EVENT_TIMER_TICK;
+    // 4. Sovereign Asynchronous Event Reactor Loop
+    let interest_mask = std::EVENT_TOUCH_INPUT | std::EVENT_IPC_MSG | std::EVENT_MODEM_URC | std::EVENT_TIMER_TICK;
     loop {
         match std::event_poll(interest_mask, 150) {
             Ok(events) => {
+                if events & std::EVENT_TOUCH_INPUT != 0 {
+                    let mut input = std::InputEvent {
+                        kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000,
+                    };
+                    while std::input_event_poll(&mut input).is_ok() {
+                        if input.kind == 1 {
+                            // Check Back button in header: exit cleanly to launcher
+                            if input.x >= 24 && input.x < 100 && input.y >= 28 && input.y < 68 {
+                                std::log(0, "[MESSAGES APP] Back button pressed. Exiting to launcher.").ok();
+                                if surface > 0 {
+                                    let _ = std::surface_destroy(6, surface);
+                                }
+                                std::exit_with_code(0);
+                            }
+
+                            // Check conversation thread card taps
+                            if input.y >= 110 && input.y < 470 && input.x >= 24 && input.x < (W as u32) - 24 {
+                                let card_idx = ((input.y - 110) / 120) as usize;
+                                if card_idx < THREADS.len() {
+                                    messages.active_thread_idx = card_idx;
+                                    std::audio_haptic_click().ok();
+                                    if surface > 0 {
+                                        render_messages_ui(surface, messages.active_thread_idx);
+                                        let _ = std::surface_flip(6);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 if events & std::EVENT_MODEM_URC != 0 {
                     std::log(0, "[MESSAGES APP] Cellular Baseband URC: Inbound SMS packet received.").ok();
                 }
