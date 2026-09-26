@@ -4040,19 +4040,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
-  const sampleEvents = {
-    '2026-09-22': [
-      { time: '09:00 AM', title: 'InterOS Core Microkernel Sync', desc: 'Bare-metal RISC-V 64 / ARM64 HAL integration', color: '#10B981' },
-      { time: '01:30 PM', title: 'Sovereign App Scaffolding Session', desc: 'Writing #![no_std] mobile apps via interos-std', color: '#3B82F6' },
-      { time: '04:00 PM', title: 'Hardware Keystore Security Audit', desc: 'Verify capability token validation and Ring 3 boundaries', color: '#F59E0B' }
-    ],
-    '2026-09-23': [
-      { time: '11:00 AM', title: 'QEMU VirtIO Framebuffer Test', desc: 'Verify LTPO 120Hz scanout and V-Sync ticks', color: '#8B5CF6' }
-    ],
-    '2026-09-25': [
-      { time: '02:00 PM', title: 'Community Sideloading Hackathon', desc: 'Testing .app and .wasm apps on device emulator', color: '#EC4899' }
-    ]
-  };
+  // Agenda entries must come from the guest calendar service. Do not
+  // present developer-authored sample meetings as device state.
+  const sampleEvents = {};
 
   function renderCalendar() {
     if (!calDaysGrid) return;
