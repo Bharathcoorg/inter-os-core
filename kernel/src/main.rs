@@ -61,10 +61,11 @@ use storage::{MerkleVerifier, StorageError};
 use task::{SCHEDULER, TaskId};
 use wasm::{opcodes, Value, WasmError, WasmMemory, WasmModule, WasmVm};
 
-/// Custom bootloader configuration requesting dynamic physical memory mapping.
+/// Custom bootloader configuration requesting dynamic physical memory mapping and 512 KiB kernel stack.
 pub static BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
     config.mappings.physical_memory = Some(Mapping::Dynamic);
+    config.kernel_stack_size = 512 * 1024;
     config
 };
 

@@ -34,11 +34,11 @@ static mut USER_RSP_SCRATCH: u64 = 0;
 #[no_mangle]
 pub static mut CURRENT_TASK_KERNEL_RSP: u64 = 0;
 
-/// Dedicated 16 KiB fallback kernel stack used during bootstrap syscall execution.
+/// Dedicated 128 KiB fallback kernel stack used during bootstrap syscall execution.
 #[allow(dead_code)]
 #[repr(align(16))]
-struct SyscallStack([u8; 16 * 1024]);
-static mut SYSCALL_KERNEL_STACK: SyscallStack = SyscallStack([0; 16 * 1024]);
+struct SyscallStack([u8; 128 * 1024]);
+static mut SYSCALL_KERNEL_STACK: SyscallStack = SyscallStack([0; 128 * 1024]);
 
 /// Updates the current active task's dedicated kernel stack top for syscall entry.
 #[inline(always)]
@@ -136,7 +136,7 @@ pub unsafe extern "C" fn syscall_entry() {
         "mov rsp, [rip + {current_kernel_rsp}]",
         "test rsp, rsp",
         "jnz 2f",
-        "lea rsp, [rip + {kernel_stack} + 16384]",
+        "lea rsp, [rip + {kernel_stack} + 131072]",
         "2:",
 
         // 3. Push user execution context onto kernel stack

@@ -148,12 +148,15 @@ impl TaskPageTable {
             let new_pml4 = &mut *new_pml4_ptr;
             new_pml4.zero();
 
-            // Mirror higher-half kernel entries (256..512) from kernel PML4
+            // Mirror all kernel and supervisor entries (1..512) from kernel PML4.
+            // Index 0 is reserved exclusively for isolated Ring 3 user memory (text, stack, heap).
+            // Indices 1..512 contain kernel code/IDT/GDT (index 2), kernel stack (index 3),
+            // and the dynamic physical memory offset map.
             let kernel_pml4_frame = kernel_pml4();
             let kernel_pml4_ptr = (phys_offset + kernel_pml4_frame.start_address().as_u64()).as_ptr::<PageTable>();
             let kernel_pml4 = &*kernel_pml4_ptr;
 
-            for i in 256..512 {
+            for i in 1..512 {
                 new_pml4[i] = kernel_pml4[i].clone();
             }
         }
