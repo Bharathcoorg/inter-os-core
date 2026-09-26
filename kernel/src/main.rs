@@ -96,7 +96,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     // 5. Initialize 8259 PIC controllers and unmask interrupts
     interrupts::init_pics();
+    interrupts::init_pit();
     serial_println!("[OK] Dual 8259 PIC remapped (IRQs 32-47).");
+    serial_println!("[OK] PIT system timer configured at {} Hz.", interrupts::SYSTEM_TICK_HZ);
 
     // 6. Initialize virtual memory page tables and physical frame allocator
     let phys_mem_offset_raw = boot_info
