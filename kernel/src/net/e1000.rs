@@ -9,8 +9,8 @@ use core::sync::atomic::{compiler_fence, Ordering};
 use super::device::{NetError, NetworkDevice, MAX_PACKET_SIZE};
 use super::ethernet::MacAddress;
 use crate::memory::{allocate_dma_frames, physical_to_virtual};
-use x86_64::{PhysAddr, PhysFrame};
-use x86_64::structures::paging::Size4KiB;
+use x86_64::PhysAddr;
+use x86_64::structures::paging::{PhysFrame, Size4KiB};
 
 const CTRL: usize = 0x0000;
 const STATUS: usize = 0x0008;
@@ -265,6 +265,31 @@ impl NetworkDevice for E1000Device {
         Ok(())
     }
 
+    fn receive(&mut self, out: &mut [u8]) -> Result<usize, NetError> {
+        if !self.link_up { return Err(NetError::DeviceDown); }
+        let idx = self.rx_index as usize;
+        unsafe {
+            let desc = &mut *self.rx_desc.add(idx);
+            if desc.status & RX_EOP == 0 { return Err(NetError::NoPacketAvailable); }
+            let len = desc.length as usize;
+            if len > out.len() { return Err(NetError::BufferTooSmall); }
+            let buffer = self.rx_buffer_phys + (idx * MAX_PACKET_SIZE) as u64;
+            let buffer_virt = physical_to_virtual(PhysAddr::new(buffer)).as_ptr();
+            core::ptr::copy_nonoverlapping(buffer_virt, out.as_mut_ptr(), len);
+            desc.status = 0;
+            compiler_fence(Ordering::Release);
+            write32(self.base_vaddr, RDT, idx as u32);
+            self.rx_index = ((idx + 1) % RX_DESC_COUNT) as u16;
+            Ok(len)
+        }
+    }
+
+    fn has_packets(&self) -> bool {
+        unsafe { (*self.rx_desc.add(self.rx_index as usize)).status & RX_EOP != 0 }
+    }
+}
+
+impl E1000Device {
     pub fn transmit_probe(&mut self, frame: &[u8]) -> Result<(), NetError> {
         if !self.link_up { return Err(NetError::DeviceDown); }
         let idx = self.tx_index as usize;
@@ -289,29 +314,6 @@ impl NetworkDevice for E1000Device {
             core::hint::spin_loop();
         }
         Err(NetError::NoPacketAvailable)
-    }
-
-    fn receive(&mut self, out: &mut [u8]) -> Result<usize, NetError> {
-        if !self.link_up { return Err(NetError::DeviceDown); }
-        let idx = self.rx_index as usize;
-        unsafe {
-            let desc = &mut *self.rx_desc.add(idx);
-            if desc.status & RX_EOP == 0 { return Err(NetError::NoPacketAvailable); }
-            let len = desc.length as usize;
-            if len > out.len() { return Err(NetError::BufferTooSmall); }
-            let buffer = self.rx_buffer_phys + (idx * MAX_PACKET_SIZE) as u64;
-            let buffer_virt = physical_to_virtual(PhysAddr::new(buffer)).as_ptr();
-            core::ptr::copy_nonoverlapping(buffer_virt, out.as_mut_ptr(), len);
-            desc.status = 0;
-            compiler_fence(Ordering::Release);
-            write32(self.base_vaddr, RDT, idx as u32);
-            self.rx_index = ((idx + 1) % RX_DESC_COUNT) as u16;
-            Ok(len)
-        }
-    }
-
-    fn has_packets(&self) -> bool {
-        unsafe { (*self.rx_desc.add(self.rx_index as usize)).status & RX_EOP != 0 }
     }
 }
 

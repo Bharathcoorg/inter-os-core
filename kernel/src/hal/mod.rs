@@ -13,7 +13,7 @@ pub use traits::{PlatformArch, PlatformInfo, PlatformTimer, SerialConsole, Power
 pub use platform::{PLATFORM, TIMER, CONSOLE, POWER, ACTIVE_SOC_NAME};
 pub use fdt::{FdtParser, FdtNode, FdtProperty, FdtError, build_synthetic_dtb};
 pub use rtc::{DateTime, RTC};
-pub use camera::{CAMERA, CameraSensor, CameraFrame, SceneType};
+pub use camera::{CAMERA, CameraSensor, CameraFrame, SceneType, AutoFocusState};
 
 use crate::serial_println;
 

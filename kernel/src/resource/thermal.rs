@@ -7,13 +7,13 @@
 
 use spin::Mutex;
 
-/// Monitored hardware thermal zones across the mobile SoC.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
 pub const THERMAL_MIN_C: i32 = -40;
 pub const THERMAL_MAX_C: i32 = 150;
 pub const THERMAL_JSON_MAX: usize = 256;
 
+/// Monitored hardware thermal zones across the mobile SoC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum ThermalZone {
     CpuJunction = 0,
     GpuCore = 1,
@@ -128,8 +128,8 @@ impl ThermalManager {
                 Ok(())
             }
         }
-        let mut writer = SliceWriter { buf: out, pos: 0 };
         if out.len() < THERMAL_JSON_MAX { return 0; }
+        let mut writer = SliceWriter { buf: out, pos: 0 };
         let state_str = match self.active_cooling_state {
             CoolingState::Normal => "Normal",
             CoolingState::Warm => "Warm",

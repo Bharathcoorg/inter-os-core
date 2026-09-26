@@ -202,6 +202,17 @@ impl SocketTable {
         Err(NetError::NoPacketAvailable)
     }
 
+    pub fn get(&self, id: SocketId) -> Option<&UdpSocket> {
+        for sock_opt in self.sockets.iter() {
+            if let Some(ref sock) = sock_opt {
+                if sock.id == id {
+                    return Some(sock);
+                }
+            }
+        }
+        None
+    }
+
     pub fn get_mut(&mut self, id: SocketId) -> Option<&mut UdpSocket> {
         for sock_opt in self.sockets.iter_mut() {
             if let Some(ref mut sock) = sock_opt {
@@ -309,6 +320,7 @@ impl TcpConnectionTable {
         Err(NetError::QueueFull)
     }
 
+    pub fn entries(&self) -> &[Option<TcpConnection>; 8] { &self.entries }
     pub fn entries_mut(&mut self) -> core::slice::IterMut<'_, Option<TcpConnection>> { self.entries.iter_mut() }
 
     pub fn get(&self, id: u32) -> Option<&TcpConnection> {
@@ -374,7 +386,7 @@ impl TcpConnectionTable {
         false
     }
 
-    pub fn due_retransmit(&mut self, now: u64) -> Option<(u32, Ipv4Address, u16, Ipv4Address, u16, u32, u32, usize)> {
+    pub fn due_retransmit(&mut self, now: u64) -> Option<(u32, Ipv4Address, u16, u16, u32, u32, usize)> {
         for slot in self.entries.iter_mut() {
             if let Some(conn) = slot.as_mut() {
                 if conn.tx_pending && now >= conn.tx_deadline {

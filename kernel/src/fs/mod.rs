@@ -12,4 +12,7 @@ pub use vfs::{
 };
 pub use devfs::{DeviceKind, device_read, device_write, resolve_device};
 
-/// Releases all VFS descriptors owned by a terminating task.\npub fn cleanup_task(task_id: crate::task::TaskId) -> usize { VFS.lock().cleanup_task(task_id) }\n
+/// Releases all VFS descriptors owned by a terminating task.
+pub fn cleanup_task(task_id: crate::task::TaskId) -> usize {
+    VFS.lock().cleanup_task(task_id)
+}

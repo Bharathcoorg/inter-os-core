@@ -7,10 +7,10 @@ pub mod manager;
 pub mod power;
 pub mod thermal;
 
-pub use battery::{BatteryFuelGauge, ChargingStatus};
+pub use battery::{BatteryFuelGauge, ChargingStatus, BATTERY_JSON_MAX};
 pub use manager::{BatteryStatus, ResourceManager, ThermalStatus, WorkloadTier};
 pub use power::{DvfsGovernor, PowerManager, ThermalTrip};
-pub use thermal::{CoolingState, ThermalManager, ThermalZone, THERMAL_MANAGER};
+pub use thermal::{CoolingState, ThermalManager, ThermalZone, THERMAL_MANAGER, THERMAL_JSON_MAX};
 
 use spin::Mutex;
 use crate::serial_println;

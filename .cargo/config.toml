@@ -9,3 +9,8 @@ rustflags = [
     "-C", "link-arg=-Lkernel-riscv64",
     "-C", "link-arg=-Tlinker.ld",
 ]
+
+[target.x86_64-unknown-none]
+rustflags = [
+    "--cfg", "curve25519_dalek_backend=\"fiat\"",
+]

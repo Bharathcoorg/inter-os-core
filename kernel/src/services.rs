@@ -6,7 +6,6 @@
 //! behind the existing syscall/capability boundary.
 
 use crate::task::{SCHEDULER, TaskId};
-use crate::syscall;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,7 +84,7 @@ fn start_locked(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str
     });
     let task_result = crate::task::user::spawn_userspace_service(id as u8, parent_id);
     let task = match task_result {
-        task if task != TaskId(0) => task,
+        Ok(task) if task != TaskId(0) => task,
         _ => {
             SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord {
                 id,

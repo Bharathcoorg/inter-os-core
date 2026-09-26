@@ -135,8 +135,9 @@ impl DnsResolver {
         false
     }
     pub fn build_query(&self,id:u16,out:&mut[u8])->Result<usize,&'static str>{let q=self.queries.iter().find(|q|q.valid&&q.id==id).ok_or("unknown DNS query")?;encode_query(id,&q.name[..q.name_len],out)}
-    pub fn accept_response(&mut self,packet:&[u8],now:u64)->Result<Ipv4Address,&'static str>{
-        let id=u16::from_be_bytes([packet.get(0).ok_or("DNS response too small")?,packet.get(1).ok_or("DNS response too small")?]);
+    pub fn accept_response(&mut self, packet: &[u8], now: u64) -> Result<Ipv4Address, &'static str> {
+        if packet.len() < 2 { return Err("DNS response too small"); }
+        let id = u16::from_be_bytes([packet[0], packet[1]]);
         let a=parse_a_answer(packet,id)?;let q=self.queries.iter_mut().find(|q|q.valid&&q.id==id).ok_or("unknown DNS query")?;
         let mut e=DnsCacheEntry::empty();e.name[..q.name_len].copy_from_slice(&q.name[..q.name_len]);e.name_len=q.name_len;e.addr=a.addr;e.expires_at=now.saturating_add((a.ttl as u64).max(1)*1000);e.valid=true;
         if let Some(dst)=self.cache.iter_mut().find(|e|!e.valid||e.expires_at<=now){*dst=e}else{self.cache[0]=e} q.valid=false;Ok(a.addr)

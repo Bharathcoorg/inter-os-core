@@ -13,6 +13,7 @@ pub use user_ptr::{
 
 use crate::capability::{CapError, CapabilityType, Rights};
 use crate::drivers::{BlockDevice, ATA_PRIMARY, SECTOR_SIZE};
+use crate::drivers::display::DisplayDriver;
 use crate::fs::{FileDescriptor, FileStat, FsError, VFS};
 use crate::ipc::{IpcError, IpcMessage, IPC_ROUTER};
 use crate::net::NetError;
@@ -1435,13 +1436,13 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         }
         93 => { match sys_network_poll() { Ok(n) => n as i64, Err(e) => e as i64 } },
         99 => {
-            let len = a1 as usize;
+            let len = a2 as usize;
             if len == 0 || len > crate::net::dns::DNS_MAX_NAME { return SyscallResult::InvalidArguments as i64; }
             let mut name = [0u8; crate::net::dns::DNS_MAX_NAME];
-            let host = match read_user_string(a0, len, &mut name) { Ok(v) => v, Err(_) => return SyscallResult::InvalidArguments as i64 };
+            let host = match read_user_string(a1, len, &mut name) { Ok(v) => v, Err(_) => return SyscallResult::InvalidArguments as i64 };
             match sys_dns_resolve(host) { Ok(ip) => u32::from_be_bytes(ip.0) as i64, Err(e) => e as i64 }
         }
-        100 => match sys_tcp_close(a0 as u32) { Ok(()) => 0, Err(e) => e as i64 },
+        100 => match sys_tcp_close(a1 as u32) { Ok(()) => 0, Err(e) => e as i64 },
         98 => {
             let len = a3 as usize;
             if len > 2048 { return SyscallResult::InvalidArguments as i64; }
@@ -1455,22 +1456,22 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             if copy_from_user(&mut buf[..len], a2, len).is_err() { return SyscallResult::InvalidArguments as i64; }
             sys_tcp_send(a1 as u32, &buf[..len]) as i64
         }
-        94 => match sys_tcp_connect(crate::net::Ipv4Address::new((a0 >> 24) as u8, (a0 >> 16) as u8, (a0 >> 8) as u8, a0 as u8), a1 as u16, a2 as u16, a3 as u32) { Ok(id) => id as i64, Err(e) => e as i64 },
+        94 => match sys_tcp_connect(crate::net::Ipv4Address::new((a1 >> 24) as u8, (a1 >> 16) as u8, (a1 >> 8) as u8, a1 as u8), a2 as u16, a3 as u16, a4 as u32) { Ok(id) => id as i64, Err(e) => e as i64 },
         96 => {
             // NetCloseSocket: a1 = socket id
             sys_net_close_socket(crate::net::SocketId(a1 as u32)) as i64
         }
         95 => {
-            let len = a4 as usize;
+            let len = a5 as usize;
             if len > 2048 { return SyscallResult::InvalidArguments as i64; }
             let mut payload = [0u8; 2048];
-            if copy_from_user(&mut payload[..len], a3, len).is_err() {
+            if copy_from_user(&mut payload[..len], a4, len).is_err() {
                 return SyscallResult::InvalidArguments as i64;
             }
             sys_net_send_socket(
-                crate::net::SocketId(a0 as u32),
-                crate::net::Ipv4Address((a1 as u32).to_be_bytes()),
-                a2 as u16,
+                crate::net::SocketId(a1 as u32),
+                crate::net::Ipv4Address((a2 as u32).to_be_bytes()),
+                a3 as u16,
                 &payload[..len],
             ) as i64
         },
@@ -1559,7 +1560,10 @@ pub fn sys_devfs_io(action: u32, path: &str, buf: &mut [u8]) -> Result<usize, Sy
 /// Creates and binds a UDP socket for the current calling task.
 pub fn sys_tcp_send(connection_id: u32, payload: &[u8]) -> SyscallResult {
     let sched = SCHEDULER.lock();
-    let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    let current = match sched.current_task() {
+        Some(t) => t,
+        None => return SyscallResult::PermissionDenied,
+    };
     if !current.cap_table.authorize_capability(CapabilityType::NetworkSend, Rights::WRITE) {
         return SyscallResult::PermissionDenied;
     }
@@ -1825,7 +1829,10 @@ pub fn sys_net_socket(port: u16) -> Result<u32, SyscallResult> {
 /// Transmits a UDP packet from the current calling task.
 pub fn sys_net_close_socket(sock_id: crate::net::SocketId) -> SyscallResult {
     let sched = SCHEDULER.lock();
-    let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    let current = match sched.current_task() {
+        Some(t) => t,
+        None => return SyscallResult::PermissionDenied,
+    };
     let owner = current.id.0 as u32;
     drop(sched);
     match crate::net::SOCKET_TABLE.lock().close_owned(sock_id, owner) {
@@ -3006,7 +3013,7 @@ pub fn sys_fs_list(cap_slot:usize,path_ptr:u64,path_len:usize,out:&mut[u8])->Res
  if path_len==0||path_len>256||out.len()>4096{return Err(SyscallResult::InvalidArguments);}
  let sched=SCHEDULER.lock();let current=sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
  current.cap_table.verify(cap_slot,CapabilityType::FileSystemRead,Rights::READ).map_err(|_|SyscallResult::PermissionDenied)?;
- let mut path=[0u8;256];unsafe{copy_from_user(&mut path[..path_len],path_ptr,path_len)}.map_err(|_|SyscallResult::InvalidArguments)?;drop(sched);
+ let mut path=[0u8;256];copy_from_user(&mut path[..path_len],path_ptr,path_len).map_err(|_|SyscallResult::InvalidArguments)?;drop(sched);
  let path=core::str::from_utf8(&path[..path_len]).map_err(|_|SyscallResult::InvalidArguments)?;
  let sched=SCHEDULER.lock();let current=sched.current_task().ok_or(SyscallResult::PermissionDenied)?;let n=crate::fs::VFS.lock().list_dir(&current.cap_table,cap_slot,path,out).map_err(|_|SyscallResult::FileNotFound)?;Ok(n)
 }
@@ -3030,20 +3037,21 @@ pub fn sys_settings_get(cap_slot: usize, key_ptr: u64, key_len: usize, out: &mut
     let current=sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
     current.cap_table.verify(cap_slot, CapabilityType::FileSystemRead, Rights::READ).map_err(|_|SyscallResult::PermissionDenied)?;
     let mut key=[0u8;96];
-    unsafe{copy_from_user(&mut key[..key_len],key_ptr,key_len)}.map_err(|_|SyscallResult::InvalidArguments)?;
+    copy_from_user(&mut key[..key_len], key_ptr, key_len).map_err(|_| SyscallResult::InvalidArguments)?;
     drop(sched);
-    let key=core::str::from_utf8(&key[..key_len]).map_err(|_|SyscallResult::InvalidArguments)?;
-    Ok(crate::settings::SETTINGS.lock().get(key,out))
+    let key = core::str::from_utf8(&key[..key_len]).map_err(|_| SyscallResult::InvalidArguments)?;
+    Ok(crate::settings::SETTINGS.lock().get(key, out))
 }
 
-pub fn sys_settings_set(cap_slot: usize, key_ptr:u64,key_len:usize,val_ptr:u64,val_len:usize)->Result<(),SyscallResult>{
-    if key_len==0||key_len>96||val_len>512{return Err(SyscallResult::InvalidArguments);}
-    let sched=SCHEDULER.lock();
-    let current=sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    current.cap_table.verify(cap_slot,CapabilityType::FileSystemWrite,Rights::WRITE).map_err(|_|SyscallResult::PermissionDenied)?;
-    let mut key=[0u8;96];let mut val=[0u8;512];
-    unsafe{copy_from_user(&mut key[..key_len],key_ptr,key_len)}.map_err(|_|SyscallResult::InvalidArguments)?;
-    unsafe{copy_from_user(&mut val[..val_len],val_ptr,val_len)}.map_err(|_|SyscallResult::InvalidArguments)?;
+pub fn sys_settings_set(cap_slot: usize, key_ptr: u64, key_len: usize, val_ptr: u64, val_len: usize) -> Result<(), SyscallResult> {
+    if key_len == 0 || key_len > 96 || val_len > 512 { return Err(SyscallResult::InvalidArguments); }
+    let sched = SCHEDULER.lock();
+    let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    current.cap_table.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE).map_err(|_| SyscallResult::PermissionDenied)?;
+    let mut key = [0u8; 96];
+    let mut val = [0u8; 512];
+    copy_from_user(&mut key[..key_len], key_ptr, key_len).map_err(|_| SyscallResult::InvalidArguments)?;
+    copy_from_user(&mut val[..val_len], val_ptr, val_len).map_err(|_| SyscallResult::InvalidArguments)?;
     drop(sched);
     let key=core::str::from_utf8(&key[..key_len]).map_err(|_|SyscallResult::InvalidArguments)?;
     crate::settings::SETTINGS.lock().set(key,&val[..val_len]).map_err(|_|SyscallResult::DeviceError)

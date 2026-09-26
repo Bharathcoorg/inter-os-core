@@ -16,6 +16,9 @@ pub enum NetError {
     QueueFull,
     DeviceDown,
     CapabilityDenied,
+    InvalidPort,
+    PortInUse,
+    NotReady,
 }
 
 /// Unified Network Device Driver Interface

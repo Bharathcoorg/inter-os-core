@@ -272,60 +272,63 @@ pub fn poll_network_interface() -> usize {
                         if ip_pkt.protocol == IpProtocol::Tcp {
                             if let Ok(segment) = TcpSegment::parse(ip_pkt.payload) {
                                 if segment.verify_checksum(ip_pkt.src.0, ip_pkt.dst.0, ip_pkt.payload) {
-                                    let mut table = TCP_TABLE.lock();
-                                    for conn in table.entries_mut() {
-                                        if let Some(conn) = conn.as_mut() {
-                                            if conn.remote_ip == ip_pkt.src && conn.remote_port == segment.src_port && conn.local_port == segment.dst_port {
+                                    let conn_id = {
+                                        let table = TCP_TABLE.lock();
+                                        table.entries().iter().flatten().find(|c| {
+                                            c.remote_ip == ip_pkt.src && c.remote_port == segment.src_port && c.local_port == segment.dst_port
+                                        }).map(|c| c.id)
+                                    };
+                                    if let Some(id) = conn_id {
+                                        let mut to_ack_syn: Option<(u16, u16, u32, u32)> = None;
+                                        let mut to_process_est: Option<(u32, bool, u32)> = None;
+                                        let mut need_ack: Option<u32> = None;
+                                        {
+                                            let mut table = TCP_TABLE.lock();
+                                            if let Some(conn) = table.get_mut(id) {
                                                 let old_state = conn.state;
                                                 if segment.flags & 0x12 == 0x12 && old_state == TcpState::SynSent {
-                                                    // SYN consumes one sequence number; the ACK must
-                                                    // acknowledge exactly that SYN before we enter Established.
-                                                    if segment.ack != conn.send_seq.wrapping_add(1) { continue; }
-                                                    conn.recv_seq = segment.seq.wrapping_add(1);
-                                                    conn.send_seq = conn.send_seq.wrapping_add(1);
-                                                    conn.state = TcpState::Established;
-                                                    // We already hold the TCP table lock through the current guard.
-                                                    // Re-locking TCP_TABLE here would deadlock the kernel.
-                                                    conn.syn_pending = false;
-                                                    conn.syn_retries = 0;
-                                                    let ack_seq = conn.send_seq;
-                                                    let ack_recv_seq = conn.recv_seq;
-                                                    let ack_local_port = conn.local_port;
-                                                    let ack_remote_port = conn.remote_port;
-                                                    drop(table);
-                                                    let _ = transmit_tcp_segment(
-                                                        ip_pkt.dst,
-                                                        ack_local_port,
-                                                        ip_pkt.src,
-                                                        ack_remote_port,
-                                                        ack_seq,
-                                                        ack_recv_seq,
-                                                        0x10,
-                                                    );
-                                                    table = TCP_TABLE.lock();
+                                                    if segment.ack == conn.send_seq.wrapping_add(1) {
+                                                        conn.recv_seq = segment.seq.wrapping_add(1);
+                                                        conn.send_seq = conn.send_seq.wrapping_add(1);
+                                                        conn.state = TcpState::Established;
+                                                        conn.syn_pending = false;
+                                                        conn.syn_retries = 0;
+                                                        to_ack_syn = Some((conn.local_port, conn.remote_port, conn.send_seq, conn.recv_seq));
+                                                    }
                                                 } else if old_state == TcpState::Established {
-                                                    // Never accept acknowledgements beyond data we have sent.
-                                                    if crate::net::tcp::seq_gt(segment.ack, conn.send_seq) { continue; }
-                                                    let _ = table.acknowledge_tx(conn.id, segment.ack);
-                                                    let _ = table.acknowledge_fin(conn.id, segment.ack);
-                                                    let fin = segment.flags & 0x01 != 0;
-                                                    if !segment.payload.is_empty() || fin {
-                                                        let conn_id = conn.id;
-                                                        let before = conn.recv_seq;
-                                                        drop(table);
-                                                        let accepted = TCP_TABLE.lock().accept_rx_segment(conn_id, segment.seq, segment.payload, fin).unwrap_or(0);
-                                                        let table2 = TCP_TABLE.lock();
-                                                        if let Some(c) = table2.get(conn_id) {
-                                                            if accepted > 0 || fin && c.recv_seq != before {
-                                                                let _ = transmit_tcp_segment(ip_pkt.dst, c.local_port, ip_pkt.src, c.remote_port, c.send_seq, c.recv_seq, 0x10);
-                                                            }
+                                                    if !crate::net::tcp::seq_gt(segment.ack, conn.send_seq) {
+                                                        need_ack = Some(segment.ack);
+                                                        let fin = segment.flags & 0x01 != 0;
+                                                        if !segment.payload.is_empty() || fin {
+                                                            to_process_est = Some((conn.id, fin, conn.recv_seq));
                                                         }
-                                                        drop(table2);
-                                                        table = TCP_TABLE.lock();
                                                     }
                                                 } else {
                                                     conn.recv_seq = segment.seq.wrapping_add(segment.payload.len() as u32);
                                                     conn.state = tcp_next_state(old_state, segment.flags);
+                                                }
+                                            }
+                                            if let Some(ack) = need_ack {
+                                                let _ = table.acknowledge_tx(id, ack);
+                                                let _ = table.acknowledge_fin(id, ack);
+                                            }
+                                        }
+                                        if let Some((ack_local_port, ack_remote_port, ack_seq, ack_recv_seq)) = to_ack_syn {
+                                            let _ = transmit_tcp_segment(
+                                                ip_pkt.dst,
+                                                ack_local_port,
+                                                ip_pkt.src,
+                                                ack_remote_port,
+                                                ack_seq,
+                                                ack_recv_seq,
+                                                0x10,
+                                            );
+                                        } else if let Some((c_id, fin, before)) = to_process_est {
+                                            let accepted = TCP_TABLE.lock().accept_rx_segment(c_id, segment.seq, segment.payload, fin).unwrap_or(0);
+                                            let table2 = TCP_TABLE.lock();
+                                            if let Some(c) = table2.get(c_id) {
+                                                if accepted > 0 || (fin && c.recv_seq != before) {
+                                                    let _ = transmit_tcp_segment(ip_pkt.dst, c.local_port, ip_pkt.src, c.remote_port, c.send_seq, c.recv_seq, 0x10);
                                                 }
                                             }
                                         }
