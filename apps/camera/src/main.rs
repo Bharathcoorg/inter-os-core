@@ -174,16 +174,9 @@ impl CameraApp {
 
     /// Streams an active video frame through Zero-Copy DMA SHM Pipe 0.
     pub fn stream_video_frame(&mut self) -> Result<u64, i64> {
-        let mut frame_packet = [0u8; 1024];
-        let header = b"DMA::VIDEO_STREAM::MIPI_CSI2::160x120::30FPS";
-        frame_packet[..header.len()].copy_from_slice(header);
-
-        self.total_video_frames += 1;
-        frame_packet[64..68].copy_from_slice(&self.total_video_frames.to_le_bytes());
-        frame_packet[68..72].copy_from_slice(&self.zoom_x10.to_le_bytes());
-
-        let seq = std::shm_pipe_transfer(0, &frame_packet, 0x01)?;
-        Ok(seq)
+        // A real camera frame must come from the camera HAL. Do not fabricate
+        // a MIPI/CSI frame packet when no hardware frame is available.
+        Err(-95)
     }
 }
 
@@ -263,35 +256,9 @@ fn render_camera_ui(surface: u32, camera: &CameraApp) {
                 } else if is_grid {
                     chunk[i] = 0x33FFFFFF; // Subtle translucent grid
                 } else {
-                    // Base synthetic photographic scene with ISP filter coloring
-                    let r = ((rel_x * 255) / 680) as u8;
-                    let g = ((rel_y * 255) / 1000) as u8;
-                    let b = 180u8;
-
-                    // Apply filter palette to pixel
-                    match camera.filter {
-                        CameraFilter::Normal => {
-                            chunk[i] = 0xFF000000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
-                        }
-                        CameraFilter::Monochrome => {
-                            let luma = ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000) as u8;
-                            chunk[i] = 0xFF000000 | ((luma as u32) << 16) | ((luma as u32) << 8) | (luma as u32);
-                        }
-                        CameraFilter::HighContrast => {
-                            let luma = ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000) as u8;
-                            let val = if luma > 120 { 240 } else { 20 };
-                            chunk[i] = 0xFF000000 | ((val as u32) << 16) | ((val as u32) << 8) | (val as u32);
-                        }
-                        CameraFilter::Sepia => {
-                            let sr = ((r as u32 * 393 + g as u32 * 769 + b as u32 * 189) / 1000).min(255) as u8;
-                            let sg = ((r as u32 * 349 + g as u32 * 686 + b as u32 * 168) / 1000).min(255) as u8;
-                            let sb = ((r as u32 * 272 + g as u32 * 534 + b as u32 * 131) / 1000).min(255) as u8;
-                            chunk[i] = 0xFF000000 | ((sr as u32) << 16) | ((sg as u32) << 8) | (sb as u32);
-                        }
-                        CameraFilter::NeuralHeatmap => {
-                            chunk[i] = 0xFF000000 | (((255 - r) as u32) << 16) | ((g as u32) << 8) | (b as u32);
-                        }
-                    }
+                    // No guest camera frame is available in this runtime.
+                    // Keep the viewfinder neutral instead of fabricating imagery.
+                    chunk[i] = std::design::color::BACKGROUND;
                 }
             } else {
                 // Bottom Dock & Shutter Controls (1140..1440)
