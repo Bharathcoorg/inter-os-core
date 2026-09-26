@@ -87,6 +87,12 @@ def main() -> None:
     assert "self.device.read_sector(lba,&mut sector)" not in interfs, "bitmap read must not bypass filesystem base"
     assert "self.device.write_sector(lba,&sector)" not in interfs, "bitmap write must not bypass filesystem base"
     must(interfs, "inode.start_sector=if sectors == 0 { 0 } else { start };", "zero-length inode extent normalization")
+    must(interfs, "if path.is_empty() || !path.starts_with('/') || path.len() > MAX_PATH || path.contains("//")", "strict on-disk path validation")
+    must(interfs, "if !inode.used", "unused inode metadata boundary")
+    must(interfs, "inode.file_size == 0", "zero-length inode consistency validation")
+    must(interfs, "inode.sector_count == 0 || inode.start_sector.checked_add(inode.sector_count)", "inode extent bounds validation")
+    must(interfs, "inode.file_size as u64 > capacity", "inode payload capacity validation")
+
     # M22: metadata mutations use an on-disk transaction record with recovery on mount.
     must(interfs, 'const TXN_MAGIC: [u8; 4] = *b"IFTX";', "filesystem transaction record magic")
     must(interfs, "fn write_transaction", "transaction intent publication")
