@@ -96,54 +96,13 @@ impl CameraSensor {
         self.af_state = state;
     }
 
-    /// Captures a raw preview frame from the sensor and processes it through the ISP pipeline.
-    pub fn capture_frame(&mut self) -> CameraFrame {
-        self.frame_counter = self.frame_counter.saturating_add(1);
-        let pixel_count = (self.width * self.height) as usize;
-        let mut pixels = vec![0u8; pixel_count * 4];
-
-        // Synthesize dynamic mobile sensor frame:
-        // A structured test scene with sharp document text region, dark bezel, and dynamic illumination
-        for y in 0..self.height {
-            for x in 0..self.width {
-                let idx = ((y * self.width + x) * 4) as usize;
-                let is_center_doc = x >= 30 && x < 130 && y >= 25 && y < 95;
-                let is_text_line = is_center_doc && (y % 10 < 3);
-
-                if is_text_line {
-                    // Dark text on bright paper (Document signature)
-                    pixels[idx] = 20;     // R
-                    pixels[idx + 1] = 20; // G
-                    pixels[idx + 2] = 20; // B
-                    pixels[idx + 3] = 255;
-                } else if is_center_doc {
-                    // Crisp white document page
-                    pixels[idx] = 240;
-                    pixels[idx + 1] = 240;
-                    pixels[idx + 2] = 240;
-                    pixels[idx + 3] = 255;
-                } else {
-                    // Dark desk backdrop with subtle gradient
-                    let bg = (15 + (x % 30) + (y % 20)) as u8;
-                    pixels[idx] = bg;
-                    pixels[idx + 1] = bg + 5;
-                    pixels[idx + 2] = bg + 10;
-                    pixels[idx + 3] = 255;
-                }
-            }
-        }
-
-        // Run on-device neural vision classifier
-        let scene = self.classify_scene(&pixels);
-
-        CameraFrame {
-            width: self.width,
-            height: self.height,
-            format: PixelFormat::Rgba8888,
-            pixels,
-            scene,
-            frame_id: self.frame_counter,
-        }
+    /// Captures a raw preview frame from a physical camera backend.
+    ///
+    /// The current public QEMU platform has no camera sensor backend. Returning
+    /// an error is intentional: generated pixels must never be exposed as
+    /// camera telemetry or application frames.
+    pub fn capture_frame(&mut self) -> Result<CameraFrame, &'static str> {
+        Err("camera sensor backend unavailable")
     }
 
     /// Evaluates luminance distribution and edge contrast to classify the scene.
