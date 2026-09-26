@@ -552,7 +552,7 @@ pub fn spawn_userspace_service(service_id: u8, parent_id: TaskId) -> Result<Task
         1 => Some((CapabilityType::FrameBufferDirect, Rights::WRITE, service_id as u64)),
         // Storage is a filesystem namespace, not a single inode. Keep the
         // capability object unscoped while retaining the dedicated service slot.
-        3 => Some((CapabilityType::FileSystemRead, Rights::READ | Rights::WRITE, 0)),
+        3 => Some((CapabilityType::FileSystemWrite, Rights::READ | Rights::WRITE, 0)),
         4 => Some((CapabilityType::NetworkSocket, Rights::READ | Rights::WRITE, service_id as u64)),
         2 | 5 | 6 | 7 | 8 => None,
         _ => return Err("unknown userspace service"),

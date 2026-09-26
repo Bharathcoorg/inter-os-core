@@ -516,6 +516,9 @@ pub fn init() {
     assert_eq!(unauth_recv.err(), Some(NetError::CapabilityDenied));
     serial_println!("[TEST] Zero-Trust Network Receive: Unauthorized socket read BLOCKED.");
 
+    // Clean up test socket so local port 4242 is freed for userspace netd
+    let _ = sock_table.close_owned(sock_id, 1);
+
     // Mobile Wireless HAL & BLE Beacon Initialization
     wireless::init();
 
