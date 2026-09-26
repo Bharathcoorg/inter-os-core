@@ -32,6 +32,8 @@ pub struct BatteryFuelGauge {
     pub charging_status: ChargingStatus,
 }
 
+pub const BATTERY_JSON_MAX: usize = 256;
+
 impl BatteryFuelGauge {
     /// Creates a fuel gauge initialized with reference smartphone battery telemetry.
     pub const fn new() -> Self {
@@ -85,6 +87,7 @@ impl BatteryFuelGauge {
 
     /// Returns battery health percentage (capacity retention vs design capacity).
     pub fn health_percent(&self) -> u8 {
+        if self.design_capacity_mah == 0 { return 0; }
         ((self.capacity_mah as u64 * 100) / self.design_capacity_mah as u64).min(100) as u8
     }
 }
