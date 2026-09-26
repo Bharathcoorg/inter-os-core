@@ -11,6 +11,8 @@ use crate::crypto::hmac::HmacSha256;
 use crate::crypto::SHA256_DIGEST_LENGTH;
 use crate::task::TaskId;
 
+pub const MAX_IPC_PAYLOAD: usize = 64;
+
 /// Errors returned by secure IPC channel operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecureIpcError {
@@ -86,6 +88,9 @@ impl SecureSession {
     pub fn verify_incoming(&mut self, frame: &SignedIpcFrame) -> Result<(), SecureIpcError> {
         if frame.session_id != self.session_id {
             return Err(SecureIpcError::SessionNotFound);
+        }
+        if frame.payload_len as usize > self::MAX_IPC_PAYLOAD {
+            return Err(SecureIpcError::PayloadTooLarge);
         }
         if frame.sequence <= self.seq_in {
             return Err(SecureIpcError::SequenceReplayDetected);
