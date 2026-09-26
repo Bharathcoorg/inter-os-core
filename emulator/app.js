@@ -92,18 +92,8 @@ document.addEventListener('DOMContentLoaded', () => {
     cameraZoom: 1.0,
     cameraMode: 'photo',
     cameraFacing: 'environment',
-    capturedPhotos: [
-      { id: 'photo-1', url: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="300" height="200" style="background:%230A192F"><rect width="300" height="200" fill="%230F172A"/><circle cx="150" cy="100" r="40" fill="%2310B981" opacity="0.8"/><text x="150" y="105" fill="white" font-size="14" font-family="sans-serif" text-anchor="middle">Sample Capture 01</text></svg>', date: 'Sep 21, 23:45', res: '1920x1080' }
-    ],
-    installedPackages: [
-      { id: 'app.calculator', name: 'Touch Calculator', filename: 'calculator.rapp', format: 'Rust App Package (.rapp)', sha256: '4c2e9b17...', status: 'Verified (Ed25519)', capabilities: ['DisplayScanout', 'AudioPlayback'] },
-      { id: 'app.camera', name: 'Sovereign Camera', filename: 'camera.rapp', format: 'Rust App Package (.rapp)', sha256: '9b3c4d5e...', status: 'Verified (Ed25519)', capabilities: ['DisplayScanout', 'CameraCapture', 'SandboxedVFS'] },
-      { id: 'app.browser', name: 'Sovereign Browser', filename: 'browser.rapp', format: 'Rust App Package (.rapp)', sha256: '8f1a7d42...', status: 'Verified (Ed25519)', capabilities: ['DisplayScanout', 'ZeroTrustNetwork'] },
-      { id: 'app.settings', name: 'System Settings', filename: 'settings.rapp', format: 'Rust App Package (.rapp)', sha256: '3a4b5c6d...', status: 'Verified (Ed25519)', capabilities: ['HardwareHAL', 'PowerGovernor'] },
-      { id: 'app.dialer', name: 'Cellular Dialer', filename: 'dialer.rapp', format: 'Rust App Package (.rapp)', sha256: '2d3e4f5a...', status: 'Verified (Ed25519)', capabilities: ['CellularModem', 'AudioPlayback'] },
-      { id: 'app.messages', name: 'Sovereign Messages', filename: 'messages.rapp', format: 'Rust App Package (.rapp)', sha256: '5f6a7b8c...', status: 'Verified (Ed25519)', capabilities: ['CellularModem', 'SandboxedVFS'] },
-      { id: 'org.interos.authenticator', name: 'Authenticator', filename: 'authenticator.rapp', format: 'Rust App Package (.rapp)', sha256: '4a5b6c7d...', status: 'Verified (Ed25519)', capabilities: ['CAP_HARDWARE_KEYSTORE'] }
-    ]
+    capturedPhotos: [],
+    installedPackages: []
   };
 
   // Web Audio Synthesizer (for click tones, shutter sounds)
@@ -430,18 +420,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (valCpuTid) {
       valCpuTid.textContent = `TID: ${isAlive ? (data.cpu?.thread_id || 'Active') : 'Offline'}`;
-    }
-
-    // Animate heatmap subtle activity when alive
-    if (cpuHeatmapMatrix && isAlive) {
-      const cells = cpuHeatmapMatrix.querySelectorAll('.heat-cell');
-      if (cells.length > 0) {
-        const randomIdx = Math.floor(Math.random() * cells.length);
-        const lvl = Math.floor(Math.random() * 4) + 1;
-        if (cells[randomIdx]) {
-          cells[randomIdx].className = `heat-cell lvl-${lvl}`;
-        }
-      }
     }
 
     // 6. CPU Registers Tab Update
@@ -1343,188 +1321,17 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   function getAppSnapshotHTML(task) {
-    const id = task.id;
-    if (id === 'view-browser') {
-      return `
-        <div class="mock-browser-bar">
-          <i data-lucide="lock" style="width: 10px; height: 10px; color: #10B981;"></i>
-          <span>interos.dev/os</span>
-        </div>
-        <div class="mock-browser-hero">
-          <span style="font-size: 0.58rem; color: #38BDF8; font-weight: 700; text-transform: uppercase;">UNIVERSAL MOBILE PLATFORM</span>
-          <div class="mock-browser-title">Inter OS Sovereign 2.0</div>
-          <div class="mock-browser-lines">
-            <div class="mock-line w80"></div>
-            <div class="mock-line w60"></div>
-            <div class="mock-line w40"></div>
-          </div>
-        </div>
-        <div style="background: rgba(255,255,255,0.04); border-radius: 8px; padding: 7px; display: flex; flex-direction: column; gap: 4px;">
-          <strong style="color: #F8FAFC; font-size: 0.65rem;">Rust Microkernel Core</strong>
-          <p style="margin: 0; color: #94A3B8; font-size: 0.58rem;">Sandboxed WASM and native APK binary runtime.</p>
-        </div>
-      `;
-    } else if (id === 'view-messages') {
-      return `
-        <div class="mock-chat-header">
-          <div class="mock-avatar">AM</div>
-          <div>
-            <div style="font-weight: 700; color: #FFFFFF; font-size: 0.68rem;">Alex Miller</div>
-            <div style="font-size: 0.55rem; color: #10B981;">Online &bull; Sovereign Mesh</div>
-          </div>
-        </div>
-        <div class="mock-bubble-left">Microkernel services booted successfully.</div>
-        <div class="mock-bubble-right">All 15 applications isolated in Ring 3 sandboxes.</div>
-        <div class="mock-bubble-left">Uptime verified. Zero memory leaks detected.</div>
-        <div style="margin-top: auto; background: rgba(255,255,255,0.06); border-radius: 12px; padding: 4px 8px; display: flex; align-items: center; justify-content: space-between; color: #64748B;">
-          <span>Type a message...</span>
-          <i data-lucide="send" style="width: 11px; height: 11px; color: #00F2FE;"></i>
-        </div>
-      `;
-    } else if (id === 'view-settings') {
-      return `
-        <div style="display: flex; align-items: center; gap: 8px; background: rgba(255,255,255,0.05); padding: 7px; border-radius: 10px;">
-          <div style="width: 24px; height: 24px; border-radius: 50%; background: linear-gradient(135deg, #00F2FE, #3B82F6); display: flex; align-items: center; justify-content: center; font-size: 0.62rem; font-weight: 700;">BK</div>
-          <div>
-            <div style="font-weight: 700; color: #FFF; font-size: 0.67rem;">Bharath</div>
-            <div style="font-size: 0.55rem; color: #94A3B8;">Inter OS ID &bull; Secured</div>
-          </div>
-        </div>
-        <div class="mock-settings-tile">
-          <span style="display: flex; align-items: center; gap: 6px;"><i data-lucide="wifi" style="width: 11px; height: 11px; color: #3B82F6;"></i> Wi-Fi</span>
-          <span style="color: #10B981; font-weight: 600;">InterOS-5G</span>
-        </div>
-        <div class="mock-settings-tile">
-          <span style="display: flex; align-items: center; gap: 6px;"><i data-lucide="bluetooth" style="width: 11px; height: 11px; color: #00F2FE;"></i> Bluetooth</span>
-          <span style="color: #94A3B8;">On (2 Paired)</span>
-        </div>
-        <div class="mock-settings-tile">
-          <span style="display: flex; align-items: center; gap: 6px;"><i data-lucide="sun" style="width: 11px; height: 11px; color: #F59E0B;"></i> Brightness</span>
-          <span style="color: #38BDF8; font-family: monospace;">100%</span>
-        </div>
-      `;
-    } else if (id === 'view-camera') {
-      return `
-        <div class="mock-camera-lens">
-          <div class="mock-reticle">
-            <div style="width: 6px; height: 6px; border-radius: 50%; background: #F59E0B;"></div>
-          </div>
-          <div style="font-size: 0.55rem; color: rgba(255,255,255,0.7); letter-spacing: 0.1em; text-transform: uppercase;">PHOTO &bull; 4K 60FPS</div>
-          <div style="display: flex; align-items: center; gap: 14px; margin-top: 6px;">
-            <div style="width: 18px; height: 18px; border-radius: 4px; background: rgba(255,255,255,0.2);"></div>
-            <div class="mock-shutter"></div>
-            <i data-lucide="refresh-cw" style="width: 14px; height: 14px; color: #FFF;"></i>
-          </div>
-        </div>
-      `;
-    } else if (id === 'view-files') {
-      return `
-        <div style="background: rgba(139,92,246,0.12); border: 1px solid rgba(139,92,246,0.25); border-radius: 10px; padding: 7px;">
-          <div style="font-size: 0.6rem; color: #C4B5FD; font-weight: 700;">VFS Storage</div>
-          <div style="font-size: 0.8rem; font-weight: 800; color: #FFF; margin: 2px 0;">49.8 GB Free</div>
-          <div style="height: 4px; border-radius: 2px; background: rgba(255,255,255,0.1); overflow: hidden;">
-            <div style="width: 22%; height: 100%; background: #8B5CF6;"></div>
-          </div>
-        </div>
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
-          <div style="background: rgba(255,255,255,0.05); padding: 6px; border-radius: 8px; display: flex; align-items: center; gap: 5px;">
-            <i data-lucide="folder" style="width: 12px; height: 12px; color: #8B5CF6;"></i>
-            <span style="font-weight: 600; font-size: 0.62rem;">Documents</span>
-          </div>
-          <div style="background: rgba(255,255,255,0.05); padding: 6px; border-radius: 8px; display: flex; align-items: center; gap: 5px;">
-            <i data-lucide="image" style="width: 12px; height: 12px; color: #EC4899;"></i>
-            <span style="font-weight: 600; font-size: 0.62rem;">Photos</span>
-          </div>
-        </div>
-      `;
-    } else if (id === 'view-music') {
-      return `
-        <div class="mock-album-art">
-          <i data-lucide="disc" style="width: 32px; height: 32px;"></i>
-        </div>
-        <div style="text-align: center;">
-          <div style="font-weight: 700; color: #FFF; font-size: 0.72rem;">Midnight City</div>
-          <div style="font-size: 0.58rem; color: #EC4899;">M83 &bull; Electronic</div>
-        </div>
-        <div class="mock-wave-bars">
-          <div class="mock-bar" style="height: 10px;"></div>
-          <div class="mock-bar" style="height: 16px;"></div>
-          <div class="mock-bar" style="height: 12px;"></div>
-          <div class="mock-bar" style="height: 18px;"></div>
-          <div class="mock-bar" style="height: 14px;"></div>
-        </div>
-      `;
-    } else if (id === 'view-dialer') {
-      return `
-        <div style="display: flex; flex-direction: column; gap: 4px;">
-          <div style="display: flex; justify-content: space-between; font-size: 0.62rem; color: #E2E8F0; padding: 4px 6px; background: rgba(255,255,255,0.04); border-radius: 6px;">
-            <span style="font-weight: 600;">Bharath</span>
-            <span style="color: #64748B;">2m ago</span>
-          </div>
-          <div style="display: flex; justify-content: space-between; font-size: 0.62rem; color: #E2E8F0; padding: 4px 6px; background: rgba(255,255,255,0.04); border-radius: 6px;">
-            <span style="font-weight: 600;">Dev Cluster</span>
-            <span style="color: #64748B;">15m ago</span>
-          </div>
-        </div>
-        <div class="mock-keypad-grid">
-          <div class="mock-key">1</div><div class="mock-key">2</div><div class="mock-key">3</div>
-          <div class="mock-key">4</div><div class="mock-key">5</div><div class="mock-key">6</div>
-          <div class="mock-key">7</div><div class="mock-key">8</div><div class="mock-key">9</div>
-        </div>
-      `;
-    } else if (id === 'view-calculator') {
-      return `
-        <div class="mock-calc-screen">4,096 &times; 16 = 65,536</div>
-        <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-top: 4px;">
-          <div class="mock-key" style="background: rgba(239,68,68,0.2); color: #FCA5A5;">C</div>
-          <div class="mock-key">&plusmn;</div><div class="mock-key">%</div>
-          <div class="mock-key" style="background: rgba(245,158,11,0.25); color: #F59E0B;">&divide;</div>
-          <div class="mock-key">7</div><div class="mock-key">8</div><div class="mock-key">9</div>
-          <div class="mock-key" style="background: rgba(245,158,11,0.25); color: #F59E0B;">&times;</div>
-          <div class="mock-key">4</div><div class="mock-key">5</div><div class="mock-key">6</div>
-          <div class="mock-key" style="background: rgba(245,158,11,0.25); color: #F59E0B;">&minus;</div>
-        </div>
-      `;
-    } else if (id === 'view-terminal') {
-      return `
-        <div style="background: #000; border-radius: 8px; padding: 6px; font-family: monospace; font-size: 0.58rem; color: #10B981; display: flex; flex-direction: column; gap: 3px; height: 100%;">
-          <div>root@inter-os:~$ vfs status</div>
-          <div style="color: #94A3B8;">[OK] ext4 root rw mounted</div>
-          <div>root@inter-os:~$ cargo run</div>
-          <div style="color: #00F2FE;">[OK] IPC bus active (pid 142)</div>
-          <div style="color: #FFF;">root@inter-os:~$ _</div>
-        </div>
-      `;
-    } else if (id === 'view-clock') {
-      return `
-        <div style="display: flex; flex-direction: column; gap: 6px;">
-          <div style="background: rgba(255,255,255,0.05); padding: 8px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center;">
-            <div>
-              <div style="font-size: 0.6rem; color: #94A3B8;">San Francisco</div>
-              <div style="font-size: 1.1rem; font-weight: 700; color: #FFF;">09:41</div>
-            </div>
-            <span style="font-size: 0.6rem; color: #64748B;">Today, -12.5 hrs</span>
-          </div>
-          <div style="background: rgba(255,255,255,0.05); padding: 8px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center;">
-            <div>
-              <div style="font-size: 0.6rem; color: #94A3B8;">Tokyo</div>
-              <div style="font-size: 1.1rem; font-weight: 700; color: #FFF;">02:41</div>
-            </div>
-            <span style="font-size: 0.6rem; color: #64748B;">Tomorrow, +3.5 hrs</span>
-          </div>
-        </div>
-      `;
-    } else {
-      return `
-        <div style="flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;">
-          <div style="width: 44px; height: 44px; border-radius: 12px; background: ${task.color}22; border: 1.5px solid ${task.color}55; color: ${task.color}; display: flex; align-items: center; justify-content: center;">
-            <i data-lucide="${task.lucide || 'layers'}" style="width: 22px; height: 22px;"></i>
-          </div>
-          <div style="font-weight: 700; font-size: 0.8rem; color: #FFFFFF;">${task.title}</div>
-          <div style="font-size: 0.62rem; color: #10B981; font-family: monospace;">Active Sandbox &bull; ${task.memory || '12 MB'}</div>
-        </div>
-      `;
-    }
+    const title = escapeHtml(task?.title || task?.name || 'Guest application');
+    const stateLabel = escapeHtml(task?.state || 'Unknown');
+    const pid = task?.pid ?? task?.id ?? 'unknown';
+    return `
+      <div class="guest-surface-unavailable" style="height: 100%; min-height: 150px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 20px; box-sizing: border-box; color: #94A3B8; text-align: center;">
+        <i data-lucide="monitor-off" style="width: 28px; height: 28px;"></i>
+        <strong style="color: #E2E8F0;">${title}</strong>
+        <span style="font-size: 0.65rem;">PID ${escapeHtml(pid)} · ${stateLabel}</span>
+        <span style="font-size: 0.62rem; max-width: 260px;">Application surface is not reported by the guest. Device Studio will not render a synthetic preview.</span>
+      </div>
+    `;
   }
 
   function renderRecents() {
@@ -5992,49 +5799,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const appdevIpcStream = document.getElementById('appdev-ipc-stream');
   const btnTriggerHotreload = document.getElementById('btn-trigger-hotreload');
 
-  const simulatedIpcPackets = [
-    { from: 'app:music', to: 'hal:audio', op: 'DMA_PCM_STREAM', size: '1024B' },
-    { from: 'app:dialer', to: 'srv:ril', op: 'AT+CSQ_SIGNAL', size: '32B' },
-    { from: 'app:calendar', to: 'srv:vault', op: 'SECTOR_204_READ', size: '512B' },
-    { from: 'app:settings', to: 'hal:display', op: 'VRR_120HZ_SYNC', size: '16B' },
-    { from: 'app:files', to: 'srv:vfs', op: 'VFS_DIR_ENUM', size: '256B' },
-    { from: 'app:camera', to: 'hal:isp', op: 'ISP_EXPOSURE_TUNE', size: '64B' }
-  ];
-
-  function injectSimulatedIpcPacket() {
-    if (!appdevIpcStream) return;
-    const pkt = simulatedIpcPackets[Math.floor(Math.random() * simulatedIpcPackets.length)];
-    const now = new Date();
-    const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
-
-    const row = document.createElement('div');
-    row.className = 'ipc-row';
-    row.innerHTML = `
-      <span class="ipc-time">${timeStr}</span>
-      <span class="ipc-from">${pkt.from}</span>
-      <span class="ipc-arrow">&rarr;</span>
-      <span class="ipc-to">${pkt.to}</span>
-      <span class="ipc-op">${pkt.op}</span>
-      <span class="ipc-size">${pkt.size}</span>
-    `;
-    appdevIpcStream.prepend(row);
-    if (appdevIpcStream.children.length > 25) {
-      appdevIpcStream.removeChild(appdevIpcStream.lastChild);
-    }
-  }
-  setInterval(injectSimulatedIpcPacket, 3200);
-
+  // IPC monitor is guest-backed only. Synthetic packet injection is disabled.
   btnTriggerHotreload?.addEventListener('click', () => {
-    playBeep(700, 0.08, 'triangle');
-    logConsole('ok', `[HOT_RELOAD] Recompiling & reloading active view '${state.currentView}'...`);
-    const activeViewEl = document.getElementById(state.currentView);
-    if (activeViewEl) {
-      activeViewEl.style.opacity = '0.3';
-      setTimeout(() => {
-        activeViewEl.style.opacity = '1';
-        logConsole('ok', `[HOT_RELOAD] State re-hydrated in 38ms. Memory footprint: 412 KiB.`);
-      }, 250);
-    }
+    showToast('Hot reload unavailable: guest build/reload endpoint is not connected');
+    logConsole('warn', '[HOT_RELOAD] UNAVAILABLE — Device Studio will not simulate a rebuild or reload.');
   });
 
   // Load packages initially
