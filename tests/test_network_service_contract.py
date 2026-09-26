@@ -49,6 +49,8 @@ def main():
     must(syscall, "pub fn sys_tcp_send(", "TCP send kernel API")
     must(syscall, "pub fn sys_tcp_recv(", "TCP receive kernel API")
     must(syscall, "pub fn sys_tcp_close(", "TCP close kernel API")
+    must(syscall, "conn.state != crate::net::TcpState::Established && conn.state != crate::net::TcpState::CloseWait", "TCP close accepts passive-close state")
+    must(syscall, "rollback_fin(connection_id)", "TCP FIN rollback on transmit failure")
     must(syscall, "100 =>", "TCP close dispatcher")
     must(syscall, "crate::net::transmit_tcp_segment(", "TCP FIN transmission")
     assert "crate::net::crate::net::transmit_tcp_segment" not in syscall, "TCP close must use the canonical network transport path"
