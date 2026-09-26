@@ -1497,20 +1497,18 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 ext = ".wasm"
                 app_type = "WASM Sandboxed"
             elif query_fname.endswith(".rapp"):
-                fmt_str = "Rust App Package (.rapp)"
-                ext = ".rapp"
-                app_type = "Sovereign RAPP"
-                try:
-                    with zipfile.ZipFile(io.BytesIO(body), "r") as zf:
-                        if "manifest.json" in zf.namelist():
-                            m_data = json.loads(zf.read("manifest.json").decode('utf-8'))
-                            app_id = m_data.get("id", f"org.interos.{filename.split('.')[0]}")
-                            app_name = m_data.get("name", query_name or filename.split('.')[0].title())
-                            version = m_data.get("version", "1.0.0")
-                            capabilities = m_data.get("requested_capabilities", capabilities)
-                            entrypoint = m_data.get("backend_entrypoint", "")
-                except Exception:
-                    pass
+                # RAPP v2 has a dedicated signed-binary installation endpoint.
+                # Do not silently reinterpret a ZIP/JSON package as executable.
+                self.send_response(409)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'status': 'UNAVAILABLE',
+                    'error': 'Use /api/rapp/install for canonical RAPP v2 binary packages'
+                }).encode())
+                return
             elif query_fname.endswith(".apk") or (body.startswith(b"PK\x03\x04") and (b"AndroidManifest.xml" in body or b"classes.dex" in body)):
                 fmt_str = "Android Package (.apk)"
                 ext = ".apk"
