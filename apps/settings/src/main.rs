@@ -227,22 +227,29 @@ pub extern "C" fn _start() -> ! {
 
     // 6. Interactive Event Loop
     loop {
-        let interest = std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK | std::EVENT_IPC_MSG;
+        let interest = std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK;
         if let Ok(triggered) = std::event_poll(interest, 100) {
             if (triggered & std::EVENT_TOUCH_INPUT) != 0 {
-                let next_tab = match settings.current_tab {
-                    SettingsTab::Wireless => SettingsTab::PowerAndBattery,
-                    SettingsTab::PowerAndBattery => SettingsTab::ThermalsAndSensors,
-                    SettingsTab::ThermalsAndSensors => SettingsTab::SecurityAndPrivacy,
-                    SettingsTab::SecurityAndPrivacy => SettingsTab::AboutDevice,
-                    SettingsTab::AboutDevice => SettingsTab::Wireless,
+                let mut input = std::InputEvent {
+                    kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000,
                 };
-                settings.current_tab = next_tab;
-                if surface > 0 {
-                    render_settings_ui(surface, settings.current_tab);
-                    let _ = std::surface_flip(6);
+                while std::input_event_poll(&mut input).is_ok() {
+                    if input.kind == 1 {
+                        let next_tab = match settings.current_tab {
+                            SettingsTab::Wireless => SettingsTab::PowerAndBattery,
+                            SettingsTab::PowerAndBattery => SettingsTab::ThermalsAndSensors,
+                            SettingsTab::ThermalsAndSensors => SettingsTab::SecurityAndPrivacy,
+                            SettingsTab::SecurityAndPrivacy => SettingsTab::AboutDevice,
+                            SettingsTab::AboutDevice => SettingsTab::Wireless,
+                        };
+                        settings.current_tab = next_tab;
+                        if surface > 0 {
+                            render_settings_ui(surface, settings.current_tab);
+                            let _ = std::surface_flip(6);
+                        }
+                        std::log(0, "[SETTINGS APP] Normalized touch event processed; tab switched.").ok();
+                    }
                 }
-                std::log(0, "[SETTINGS APP] Interactive touch event processed; tab switched.").ok();
             }
         }
     }
