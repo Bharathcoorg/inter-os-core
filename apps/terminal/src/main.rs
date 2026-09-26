@@ -161,13 +161,19 @@ pub extern "C" fn _start() -> ! {
         let interest = std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK | std::EVENT_IPC_MSG;
         if let Ok(triggered) = std::event_poll(interest, 100) {
             if (triggered & std::EVENT_TOUCH_INPUT) != 0 {
-                // User tapped command suggestion chip on screen
-                std::audio_haptic_click().ok();
-                if surface > 0 {
-                    render_terminal_ui(surface, term.history_count);
-                    let _ = std::surface_flip(6);
+                let mut input = std::InputEvent {
+                    kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000,
+                };
+                while std::input_event_poll(&mut input).is_ok() {
+                    if input.kind == 1 {
+                        std::audio_haptic_click().ok();
+                        if surface > 0 {
+                            render_terminal_ui(surface, term.history_count);
+                            let _ = std::surface_flip(6);
+                        }
+                        std::log(0, "[TERMINAL APP] Normalized touch event received.").ok();
+                    }
                 }
-                std::log(0, "[TERMINAL APP] Touch input received: suggestion executed.").ok();
             }
 
         }
