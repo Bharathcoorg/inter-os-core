@@ -143,17 +143,6 @@ telemetry_cache = {
     "touch": {},
 }
 
-telephony_state = {
-    "sim_status": "READY",
-    "operator": "InterOS Sovereign Mobile",
-    "signal_bars": 4,
-    "call_state": "IDLE",
-    "call_number": "",
-    "call_start": 0,
-    "active_sim": 1,
-    "pdp_data": True,
-}
-
 def unavailable_subsystem(name):
     return {
         "status": "UNAVAILABLE",
@@ -262,23 +251,27 @@ def extract_real_ipc():
     return events
 
 def extract_real_capabilities():
-    """Extracts object-backed capability tokens per task."""
-    return [
-        {"pid": 0, "task": "kernel_main", "slot": 0, "type": "SerialOutput", "rights": "WRITE", "object_id": 0, "gen": 1, "state": "Active"},
-        {"pid": 1, "task": "telemetry_service", "slot": 0, "type": "TimerTickRead", "rights": "READ", "object_id": 0, "gen": 1, "state": "Active"},
-        {"pid": 1, "task": "telemetry_service", "slot": 1, "type": "SerialOutput", "rights": "WRITE", "object_id": 0, "gen": 1, "state": "Active"},
-        {"pid": 2, "task": "security_daemon", "slot": 0, "type": "IpcReceive", "rights": "READ", "object_id": 0, "gen": 1, "state": "Active"},
-        {"pid": 2, "task": "security_daemon", "slot": 1, "type": "SerialOutput", "rights": "WRITE", "object_id": 0, "gen": 1, "state": "Active"},
-        {"pid": 3, "task": "device_manager", "slot": 0, "type": "FileSystemRead", "rights": "READ", "object_id": 3, "gen": 1, "state": "Active"},
-        {"pid": 3, "task": "device_manager", "slot": 1, "type": "IpcSend", "rights": "WRITE", "object_id": 2, "gen": 1, "state": "Active"},
-        {"pid": 4, "task": "storage_daemon", "slot": 0, "type": "StorageRawBlock", "rights": "READ", "object_id": 4, "gen": 1, "state": "Active"},
-        {"pid": 7, "task": "compositor_shell", "slot": 0, "type": "SerialOutput", "rights": "WRITE", "object_id": 0, "gen": 1, "state": "Active"},
-        {"pid": 7, "task": "compositor_shell", "slot": 1, "type": "IpcSend", "rights": "WRITE", "object_id": 2, "gen": 1, "state": "Active"},
-        {"pid": 8, "task": "net_worker", "slot": 0, "type": "NetworkSocket", "rights": "WRITE", "object_id": 0, "gen": 1, "state": "Active"},
-        {"pid": 9, "task": "user_init", "slot": 0, "type": "IpcSend", "rights": "WRITE", "object_id": 2, "gen": 1, "state": "Active"},
-        {"pid": 11, "task": "telephony_worker", "slot": 0, "type": "SerialOutput", "rights": "WRITE", "object_id": 0, "gen": 1, "state": "Active"},
-        {"pid": 11, "task": "telephony_worker", "slot": 1, "type": "IpcSend", "rights": "WRITE", "object_id": 2, "gen": 1, "state": "Active"}
-    ]
+    """Return only capability records emitted by the guest."""
+    capabilities = []
+    for line in serial_lines:
+        if not line.startswith("[CAP]"):
+            continue
+        values = parse_key_values(line[5:].strip())
+        try:
+            capabilities.append({
+                "pid": int(values["pid"]),
+                "task": values.get("task", "unknown"),
+                "slot": int(values.get("slot", 0)),
+                "type": values.get("type", "unknown"),
+                "rights": values.get("rights", "unknown"),
+                "object_id": int(values.get("object", values.get("object_id", 0))),
+                "gen": int(values.get("gen", 0)),
+                "state": values.get("state", "Unknown"),
+                "source": "KERNEL_TELEMETRY",
+            })
+        except (KeyError, ValueError):
+            continue
+    return capabilities
 
 def inspect_apk(file_bytes):
     """
@@ -1236,11 +1229,10 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            now = time.time()
-            duration = int(now - telephony_state["call_start"]) if telephony_state["call_state"] == "ACTIVE" else 0
-            res = dict(telephony_state)
-            res["call_duration"] = duration
-            self.wfile.write(json.dumps({'success': True, 'telephony': res}).encode())
+            self.wfile.write(json.dumps({
+                'success': True,
+                'telephony': extract_guest_subsystem("telephony", "[TELEPHONY]")
+            }).encode())
             return
 
         if self.path == '/api/telephony/sms/list':
@@ -1461,47 +1453,29 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if self.path == '/api/rapp/launch':
-            content_length = int(self.headers.get('Content-Length', 0))
-            post_body = self.rfile.read(content_length)
-            try:
-                data = json.loads(post_body.decode('utf-8'))
-                app_id = data.get("app_id", "unknown")
-                serial_lines.append(f"[RAPP_RUNTIME] Spawned Ring 3 process for application '{app_id}'.")
-                serial_lines.append(f"[IPC_BUS] Initialized SHM pipe pair (RX: Pipe 0, TX: Pipe 1).")
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps({'success': True, 'launched': app_id}).encode())
-            except Exception as e:
-                self.send_response(500)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            self.send_response(409)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': False,
+                'status': 'UNAVAILABLE',
+                'source': 'UNAVAILABLE',
+                'error': 'RAPP launch requires a live guest package-launch endpoint; Device Studio does not simulate process creation'
+            }).encode())
             return
-
         if self.path == '/api/rapp/ipc':
-            content_length = int(self.headers.get('Content-Length', 0))
-            post_body = self.rfile.read(content_length)
-            try:
-                data = json.loads(post_body.decode('utf-8'))
-                target = data.get("target", "kernel")
-                cmd = data.get("cmd", 0)
-                serial_lines.append(f"[IPC_RELAY] SYS_IPC_SEND -> Target: {target}, Cmd: 0x{cmd:02X} -> ACK 0x{(cmd+1):02X}.")
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps({'success': True, 'ack': cmd + 1, 'timestamp': int(time.time() * 1000)}).encode())
-            except Exception as e:
-                self.send_response(500)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            self.send_response(409)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': False,
+                'status': 'UNAVAILABLE',
+                'source': 'UNAVAILABLE',
+                'error': 'IPC relay requires a live guest IPC endpoint; Device Studio does not synthesize acknowledgements'
+            }).encode())
             return
-
         if self.path.startswith('/api/apps/upload'):
             content_length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(content_length)
@@ -1705,33 +1679,29 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if self.path == '/api/kms/flip':
-            self.send_response(200)
+            self.send_response(409)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            self.wfile.write(json.dumps({'success': True, 'vsync': True, 'rate': 120, 'mode': '120Hz LTPO ProMotion'}).encode())
+            self.wfile.write(json.dumps({
+                'success': False,
+                'status': 'UNAVAILABLE',
+                'source': 'UNAVAILABLE',
+                'error': 'KMS page-flip control requires a live guest display endpoint'
+            }).encode())
             return
-
         if self.path == '/api/pmic/profile':
-            content_length = int(self.headers.get('Content-Length', 0))
-            post_body = self.rfile.read(content_length)
-            try:
-                data = json.loads(post_body.decode('utf-8'))
-                profile = str(data.get("profile", "balanced"))
-                serial_lines.append(f"[HARDWARE_EVENT] PMIC DVFS Governor: Switched operational profile to '{profile}'.")
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps({'success': True, 'profile': profile}).encode())
-            except Exception as e:
-                self.send_response(500)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            self.send_response(409)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': False,
+                'status': 'UNAVAILABLE',
+                'source': 'UNAVAILABLE',
+                'error': 'PMIC profile control requires a live guest power-management endpoint'
+            }).encode())
             return
-
         if self.path in {
             '/api/telephony/dial',
             '/api/telephony/hangup',
@@ -1752,32 +1722,17 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if self.path == '/api/hardware/volume':
-            content_length = int(self.headers.get('Content-Length', 0))
-            post_body = self.rfile.read(content_length)
-            try:
-                data = json.loads(post_body.decode('utf-8'))
-                vol = max(0, min(100, int(data.get("volume", 70))))
-                # Calculate attenuation dB
-                if vol == 0:
-                    db_str = "-inf dB (Muted)"
-                else:
-                    import math
-                    db_val = 20.0 * math.log10(vol / 100.0)
-                    db_str = f"{db_val:.1f} dB"
-                serial_lines.append(f"[HARDWARE_AUDIO] Master Output: {vol}% ({db_str}) -> Codec mixer synchronized.")
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps({'success': True, 'volume': vol, 'attenuation': db_str}).encode())
-            except Exception as e:
-                self.send_response(500)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            self.send_response(409)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': False,
+                'status': 'UNAVAILABLE',
+                'source': 'UNAVAILABLE',
+                'error': 'Audio volume control requires a live guest audio endpoint'
+            }).encode())
             return
-
         if self.path == '/api/hardware/power':
             content_length = int(self.headers.get('Content-Length', 0))
             post_body = self.rfile.read(content_length)
