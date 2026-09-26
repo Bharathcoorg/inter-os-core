@@ -271,18 +271,28 @@ html, body.dark-theme {
   box-sizing: border-box;
   white-space: nowrap;
   flex-shrink: 0;
+  transition: all 0.2s ease;
+}
+
+.status-indicator.online {
+  color: #10B981;
+  background: rgba(16, 185, 129, 0.08);
+  border-color: rgba(16, 185, 129, 0.25);
 }
 
 .status-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #10B981;
-  box-shadow: 0 0 6px rgba(16, 185, 129, 0.6);
+  background: #71717A;
+  box-shadow: none;
   flex-shrink: 0;
+  transition: all 0.2s ease;
 }
 
 .status-dot.pulse {
+  background: #10B981;
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.6);
   animation: pulse-green 2s infinite;
 }
 
@@ -394,7 +404,7 @@ html, body.dark-theme {
 
 .device-stage.ide-device-pane .device-chassis {
   max-height: calc(100vh - 66px);
-  transform: scale(min(0.96, calc((100vh - 72px) / 780)));
+  transform: scale(min(0.96, calc((100vh - 72px) / 840)));
   transform-origin: center center;
   transition: transform 0.2s ease;
 }
@@ -468,13 +478,21 @@ html, body.dark-theme {
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.hw-telemetry-panel.is-collapsed .hw-cards-grid {
+  display: none !important;
 }
 
 .hw-panel-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 14px;
+  padding: 6px 12px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   background: rgba(255, 255, 255, 0.02);
 }
@@ -490,6 +508,12 @@ html, body.dark-theme {
   letter-spacing: 0.06em;
 }
 
+.hw-panel-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .hw-panel-badge {
   font-family: var(--font-mono);
   font-size: 0.58rem;
@@ -502,23 +526,73 @@ html, body.dark-theme {
   letter-spacing: 0.04em;
 }
 
+.btn-hw-collapse {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #A1A1AA;
+  border-radius: 4px;
+  padding: 2px 7px;
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.btn-hw-collapse:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #FFFFFF;
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.hw-collapse-icon {
+  transition: transform 0.2s ease;
+}
+
+.hw-telemetry-panel.is-collapsed .hw-collapse-icon {
+  transform: rotate(180deg);
+}
+
 .hw-cards-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  display: flex;
   gap: 8px;
-  padding: 10px 14px;
+  padding: 8px 12px;
   background: #09090C;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+  -webkit-overflow-scrolling: touch;
+}
+
+.hw-cards-grid::-webkit-scrollbar {
+  height: 4px;
+}
+
+.hw-cards-grid::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.hw-cards-grid::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 4px;
 }
 
 .hw-card {
   background: #111115;
   border: 1px solid rgba(255, 255, 255, 0.07);
   border-radius: 8px;
-  padding: 8px 10px;
+  padding: 6px 10px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  min-width: 0;
+  gap: 5px;
+  flex: 1 0 195px;
+  min-width: 195px;
+  box-sizing: border-box;
 }
 
 .hw-card-top {
@@ -656,7 +730,7 @@ html, body.dark-theme {
    IDE Tabbed Tool Window
    -------------------------------------------------------------------------- */
 .ide-tool-window {
-  flex: 1;
+  flex: 1 1 0%;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -664,14 +738,63 @@ html, body.dark-theme {
   background: #09090B;
 }
 
+.ide-tab-bar-wrap {
+  display: flex;
+  align-items: center;
+  background: #0D0D10;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  position: relative;
+  flex-shrink: 0;
+  width: 100%;
+  overflow: hidden;
+}
+
+.tab-scroll-btn {
+  width: 24px;
+  height: 100%;
+  min-height: 33px;
+  background: #0D0D10;
+  border: none;
+  color: #71717A;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  z-index: 5;
+  transition: all 0.15s ease;
+  padding: 0;
+}
+
+.tab-scroll-btn:hover {
+  color: #FFFFFF;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.tab-scroll-btn.left {
+  border-right: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.tab-scroll-btn.right {
+  border-left: 1px solid rgba(255, 255, 255, 0.05);
+}
+
 .ide-tab-bar {
   display: flex;
   gap: 2px;
-  background: #0D0D10;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  padding: 0 10px;
-  flex-shrink: 0;
+  padding: 0 4px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
   user-select: none;
+  scroll-behavior: smooth;
+}
+
+.ide-tab-bar::-webkit-scrollbar {
+  display: none;
 }
 
 .ide-tab-bar .panel-tab {
@@ -685,10 +808,12 @@ html, body.dark-theme {
   background: transparent;
   border: none;
   border-bottom: 2px solid transparent;
-  padding: 8px 12px;
+  padding: 7px 11px;
   cursor: pointer;
   transition: all 0.15s ease;
   border-radius: 0;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .ide-tab-bar .panel-tab:hover {
@@ -706,12 +831,11 @@ html, body.dark-theme {
 .tab-content {
   display: none;
   flex-direction: column;
-  flex: 1;
+  flex: 1 1 0%;
   min-height: 0;
-  height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 12px 14px;
+  padding: 10px 14px;
   box-sizing: border-box;
 }
 
@@ -11917,11 +12041,9 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 38px;
-  padding: 0 18px;
-  background: rgba(0, 0, 0, 0.35);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  height: 42px;
+  padding: 0 16px;
+  background: transparent !important;
   font-family: var(--font-display, 'Outfit'), var(--font-main), sans-serif;
   font-size: 0.78rem;
   font-weight: 600;
@@ -11931,11 +12053,27 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   box-sizing: border-box;
 }
 
-.phone-status-bar .status-left,
+.phone-status-bar .status-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 65px;
+}
+
+#phone-clock {
+  font-family: var(--font-display, 'Outfit'), sans-serif;
+  font-size: 0.84rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #FFFFFF;
+}
+
 .phone-status-bar .status-right {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
+  min-width: 65px;
+  justify-content: flex-end;
 }
 
 .ambient-prism-hud {
@@ -11943,20 +12081,20 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  min-width: 32px;
+  min-width: 38px;
   height: 22px;
   padding: 0 10px;
   border-radius: 12px;
-  background: rgba(0, 0, 0, 0.7);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  backdrop-filter: blur(20px);
+  background: #000000;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6), inset 0 1px 1px rgba(255, 255, 255, 0.2);
   transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
   cursor: pointer;
 }
 
 .ambient-prism-hud:hover {
-  border-color: rgba(0, 242, 254, 0.4);
-  box-shadow: 0 0 12px rgba(0, 242, 254, 0.2);
+  border-color: rgba(0, 242, 254, 0.45);
+  box-shadow: 0 0 14px rgba(0, 242, 254, 0.3);
 }
 
 .prism-idle-dot {
@@ -12018,10 +12156,10 @@ body[data-theme="cyberdeck_hud"] .device-screen {
 }
 
 .status-battery-gauge {
-  width: 20px;
-  height: 10px;
+  width: 22px;
+  height: 11px;
   border-radius: 3px;
-  border: 1px solid rgba(255, 255, 255, 0.65);
+  border: 1.2px solid rgba(255, 255, 255, 0.75);
   padding: 1px;
   box-sizing: border-box;
   display: flex;
@@ -12033,18 +12171,34 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   content: '';
   position: absolute;
   right: -3px;
-  top: 2.5px;
+  top: 2px;
   width: 2px;
-  height: 3px;
-  border-radius: 0 1px 1px 0;
-  background: rgba(255, 255, 255, 0.65);
+  height: 4px;
+  border-radius: 0 1.5px 1.5px 0;
+  background: rgba(255, 255, 255, 0.75);
 }
 
 .battery-gauge-level {
   height: 100%;
   border-radius: 1.5px;
-  background: #00F2FE;
+  background: #10B981;
   transition: width 0.3s ease;
+}
+
+.status-pill-text {
+  font-family: var(--font-mono), monospace;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #FFFFFF;
+}
+
+#phone-sim-badge {
+  background: rgba(255, 255, 255, 0.12);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 0.62rem;
+  border: 1px solid rgba(255, 255, 255, 0.2);
 }
 
 /* ==========================================================================
@@ -12217,4 +12371,36 @@ body[data-theme="cyberdeck_hud"] .device-screen {
 .stream-back-btn:hover {
   background: rgba(255, 255, 255, 0.18);
   transform: scale(1.08);
+}
+
+/* Responsive adjustments for compact display heights (<= 750px) */
+@media (max-height: 750px) {
+  .hw-panel-header {
+    padding: 4px 10px;
+  }
+  .hw-cards-grid {
+    padding: 5px 8px;
+    gap: 6px;
+  }
+  .hw-card {
+    padding: 4px 8px;
+    gap: 3px;
+    min-width: 175px;
+  }
+  .hw-card-name {
+    font-size: 0.58rem;
+  }
+  .hw-card-val {
+    font-size: 0.63rem;
+  }
+  .hw-bar-track {
+    height: 4px;
+  }
+  .hw-card-sub {
+    font-size: 0.55rem;
+  }
+  .ide-tab-bar .panel-tab {
+    padding: 5px 9px;
+    font-size: 0.67rem;
+  }
 }

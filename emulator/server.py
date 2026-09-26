@@ -53,7 +53,10 @@ def get_active_theme():
     if os.path.exists(ACTIVE_THEME_FILE):
         try:
             with open(ACTIVE_THEME_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                while isinstance(data, dict) and "theme" in data and isinstance(data["theme"], dict):
+                    data = data["theme"]
+                return data
         except Exception:
             pass
     default_theme_path = os.path.join(THEMES_DIR, "bento_glass.theme")
@@ -148,6 +151,7 @@ telephony_state = {
     "call_number": "",
     "call_start": 0,
     "active_sim": 1,
+    "pdp_data": True,
 }
 
 def unavailable_subsystem(name):
@@ -1253,7 +1257,8 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            self.wfile.write(json.dumps({'success': True, 'pmic': extract_guest_subsystem("pmic", "[PMIC]")}).encode())
+            pmic_info = extract_guest_subsystem("pmic", "[PMIC]")
+            self.wfile.write(json.dumps({'success': True, 'pmic': pmic_info}).encode())
             return
 
         if self.path == '/api/kms/status':

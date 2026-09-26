@@ -240,10 +240,14 @@ document.addEventListener('DOMContentLoaded', () => {
   const phoneBattery = document.getElementById('phone-battery');
   const phoneSimBadge = document.getElementById('phone-sim-badge');
 
-  // Tool Window Tabs
+  // Tool Window Tabs & Responsive Horizontal Scrolling Controls
   const panelTabs = document.querySelectorAll('.panel-tab');
   const tabContents = document.querySelectorAll('.tab-content');
   const packagesTableBody = document.getElementById('packages-table-body');
+  const ideTabBar = document.getElementById('ide-tab-bar');
+  const btnTabScrollLeft = document.getElementById('btn-tab-scroll-left');
+  const btnTabScrollRight = document.getElementById('btn-tab-scroll-right');
+  const ideRightPane = document.getElementById('ide-right-pane');
 
   panelTabs.forEach(tab => {
     tab.addEventListener('click', () => {
@@ -253,7 +257,52 @@ document.addEventListener('DOMContentLoaded', () => {
       const targetId = tab.getAttribute('data-tab');
       const targetContent = document.getElementById(targetId);
       if (targetContent) targetContent.classList.add('active');
+      tab.scrollIntoView({ behavior: 'smooth', inline: 'nearest', block: 'nearest' });
+      if (ideRightPane && ideRightPane.scrollTop !== 0) ideRightPane.scrollTop = 0;
     });
+  });
+
+  // Tab Bar Horizontal Scroll Buttons
+  btnTabScrollLeft?.addEventListener('click', () => {
+    ideTabBar?.scrollBy({ left: -240, behavior: 'smooth' });
+  });
+  btnTabScrollRight?.addEventListener('click', () => {
+    ideTabBar?.scrollBy({ left: 240, behavior: 'smooth' });
+  });
+
+  // Mouse Wheel horizontal scrolling on Tab Bar
+  ideTabBar?.addEventListener('wheel', (e) => {
+    if (e.deltaY !== 0) {
+      e.preventDefault();
+      ideTabBar.scrollLeft += e.deltaY;
+    }
+  }, { passive: false });
+
+  // Mouse Wheel horizontal scrolling on Hardware Profiler Cards Grid
+  const hwCardsGrid = document.querySelector('.hw-cards-grid');
+  hwCardsGrid?.addEventListener('wheel', (e) => {
+    if (e.deltaY !== 0 && hwCardsGrid.scrollWidth > hwCardsGrid.clientWidth) {
+      e.preventDefault();
+      hwCardsGrid.scrollLeft += e.deltaY;
+    }
+  }, { passive: false });
+
+  // Hardware Profiler Collapsible Toggle Button
+  const btnToggleHwPanel = document.getElementById('btn-toggle-hw-panel');
+  const hwTelemetryPanel = document.querySelector('.hw-telemetry-panel');
+  const hwCollapseText = document.querySelector('.hw-collapse-text');
+  btnToggleHwPanel?.addEventListener('click', () => {
+    if (!hwTelemetryPanel) return;
+    const isNowCollapsed = hwTelemetryPanel.classList.toggle('is-collapsed');
+    if (hwCollapseText) {
+      hwCollapseText.textContent = isNowCollapsed ? 'Expand' : 'Compact';
+    }
+    if (ideRightPane) ideRightPane.scrollTop = 0;
+  });
+
+  // Guard right pane from ever scrolling vertically
+  ideRightPane?.addEventListener('scroll', () => {
+    if (ideRightPane.scrollTop !== 0) ideRightPane.scrollTop = 0;
   });
 
   // =========================================================================
@@ -319,6 +368,11 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     }
     if (qemuGlobalStatus) {
+      if (isAlive) {
+        qemuGlobalStatus.classList.add('online');
+      } else {
+        qemuGlobalStatus.classList.remove('online');
+      }
       qemuGlobalStatus.title = isAlive 
         ? `QEMU Microkernel: ${data.status || 'running'} (Mode: ${data.mode || 'live'})`
         : 'QEMU Microkernel: Standby';
@@ -472,7 +526,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (lockClockTime) lockClockTime.textContent = timeStr;
     if (lockClockDate) lockClockDate.textContent = dateStr;
     if (homeBigClock) homeBigClock.textContent = timeStr;
-    if (homeBigDate) homeBigDate.textContent = `${dateStr} • 28°C Clear`;
+    if (homeBigDate) homeBigDate.textContent = dateStr;
   }
   updateTime();
   setInterval(updateTime, 1000);
@@ -2793,13 +2847,25 @@ document.addEventListener('DOMContentLoaded', () => {
         .then(d => {
           if (d && d.pmic) {
             const p = d.pmic;
-            if (voltEl) voltEl.textContent = `${p.voltage_mv} mV`;
-            if (tempEl) tempEl.textContent = `${p.temp_c} \u00B0C (Normal)`;
-            if (freqEl) freqEl.textContent = `${p.cpu_freq_mhz} MHz`;
-            if (currEl) currEl.textContent = `${p.current_ma} mA`;
-            if (socBadge) socBadge.textContent = `${p.battery_pct}% SoC`;
-            const phoneBattery = document.getElementById('phone-battery');
-            if (phoneBattery) phoneBattery.textContent = `${p.battery_pct}%`;
+            if (p.status === 'UNAVAILABLE' || p.battery_pct === undefined || p.battery_pct === null) {
+              if (voltEl) voltEl.textContent = 'Unavailable';
+              if (tempEl) tempEl.textContent = 'Unavailable';
+              if (freqEl) freqEl.textContent = 'Unavailable';
+              if (socBadge) socBadge.textContent = 'Standby';
+              const phoneBattery = document.getElementById('phone-battery');
+              if (phoneBattery) phoneBattery.textContent = '--%';
+              const batteryGauge = document.getElementById('battery-gauge-level');
+              if (batteryGauge) batteryGauge.style.width = '0%';
+            } else {
+              if (voltEl) voltEl.textContent = `${p.voltage_mv} mV`;
+              if (tempEl) tempEl.textContent = `${p.temp_c} \u00B0C`;
+              if (freqEl) freqEl.textContent = `${p.cpu_freq_mhz} MHz`;
+              if (socBadge) socBadge.textContent = `${p.battery_pct}% SoC`;
+              const phoneBattery = document.getElementById('phone-battery');
+              if (phoneBattery) phoneBattery.textContent = `${p.battery_pct}%`;
+              const batteryGauge = document.getElementById('battery-gauge-level');
+              if (batteryGauge) batteryGauge.style.width = `${p.battery_pct}%`;
+            }
           }
         })
         .catch(() => {});
@@ -3951,33 +4017,57 @@ document.addEventListener('DOMContentLoaded', () => {
     },
 
     applyThemeTokens(theme) {
-      if (!theme || !theme.tokens) return;
+      if (!theme) return;
+      let target = theme;
+      while (target && target.theme && typeof target.theme === 'object') {
+        target = target.theme;
+      }
+      if (!target || !target.tokens) return;
       const root = document.documentElement;
-      const t = theme.tokens;
-      const themeId = theme.theme_id || theme.id || 'bento_glass';
+      const t = target.tokens;
+      const themeId = target.theme_id || target.id || 'bento_glass';
 
       document.body.setAttribute('data-theme', themeId);
       document.documentElement.setAttribute('data-theme', themeId);
 
       const bentoLayout = document.getElementById('layout-bento-glass');
       const cyberLayout = document.getElementById('layout-cyberdeck-hud');
+      const minimalLayout = document.getElementById('layout-minimal-launcher');
+      const bentoApps = document.getElementById('layout-bento-apps');
+      const minimalStream = document.getElementById('layout-minimal-stream');
+
       if (themeId === 'cyberdeck_hud') {
         if (bentoLayout) bentoLayout.style.display = 'none';
         if (cyberLayout) cyberLayout.style.display = 'flex';
+        if (minimalLayout) minimalLayout.style.display = 'none';
+        if (bentoApps) bentoApps.style.display = 'flex';
+        if (minimalStream) minimalStream.style.display = 'none';
+      } else if (themeId === 'minimal_zen' || themeId === 'monochrome') {
+        if (bentoLayout) bentoLayout.style.display = 'none';
+        if (cyberLayout) cyberLayout.style.display = 'none';
+        if (minimalLayout) minimalLayout.style.display = 'flex';
+        if (bentoApps) bentoApps.style.display = 'none';
+        if (minimalStream) minimalStream.style.display = 'flex';
       } else {
         if (bentoLayout) bentoLayout.style.display = 'flex';
         if (cyberLayout) cyberLayout.style.display = 'none';
+        if (minimalLayout) minimalLayout.style.display = 'none';
+        if (bentoApps) bentoApps.style.display = 'flex';
+        if (minimalStream) minimalStream.style.display = 'none';
       }
 
-      if (t['--bg-gradient']) root.style.setProperty('--theme-bg-gradient', t['--bg-gradient']);
-      if (t['--theme-bg']) root.style.setProperty('--theme-bg', t['--theme-bg']);
-      if (t['--glass-bg']) root.style.setProperty('--theme-glass-bg', t['--glass-bg']);
-      if (t['--glass-surface']) root.style.setProperty('--glass-surface', t['--glass-surface']);
-      if (t['--glass-border']) {
-        root.style.setProperty('--theme-glass-border', t['--glass-border']);
-        root.style.setProperty('--glass-border', t['--glass-border']);
+      if (t['--theme-bg']) {
+        root.style.setProperty('--theme-bg', t['--theme-bg']);
+        const screenEl = document.getElementById('device-screen');
+        if (screenEl) screenEl.style.background = t['--theme-bg'];
       }
-      if (t['--glass-blur']) root.style.setProperty('--theme-glass-blur', t['--glass-blur']);
+
+      for (const [key, value] of Object.entries(t)) {
+        root.style.setProperty(key, value);
+        if (key.startsWith('--')) {
+          root.style.setProperty('--theme-' + key.slice(2), value);
+        }
+      }
       if (t['--accent-primary']) {
         root.style.setProperty('--theme-accent-primary', t['--accent-primary']);
         root.style.setProperty('--accent-primary', t['--accent-primary']);

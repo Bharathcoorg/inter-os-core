@@ -87,9 +87,9 @@
 
       <div class="ide-v-sep"></div>
 
-      <div class="status-indicator" id="qemu-global-status" title="Microkernel Hardware Execution State">
-        <span class="status-dot pulse" id="qemu-global-dot"></span>
-        <span id="qemu-global-text">Online</span>
+      <div class="status-indicator" id="qemu-global-status" title="Microkernel Hardware Execution State: Standby">
+        <span class="status-dot" id="qemu-global-dot"></span>
+        <span id="qemu-global-text">Standby</span>
       </div>
 
       <button class="ide-reboot-btn" id="btn-reboot-kernel" title="Warm Reboot Microkernel">
@@ -359,9 +359,9 @@
                 <span class="status-pill-text" id="phone-sim-badge">5G</span>
                 <i data-lucide="wifi" id="status-icon-wifi" style="width: 12px; height: 12px;"></i>
                 <div class="status-battery-wrap">
-                  <span class="status-pill-text" id="phone-battery">98%</span>
+                  <span class="status-pill-text" id="phone-battery">--%</span>
                   <div class="status-battery-gauge">
-                    <div class="battery-gauge-level" id="battery-gauge-level" style="width: 98%;"></div>
+                    <div class="battery-gauge-level" id="battery-gauge-level" style="width: 0%;"></div>
                   </div>
                 </div>
               </div>
@@ -388,24 +388,327 @@
             <!-- Phone Viewport & Subviews -->
             <div class="phone-viewport" id="phone-viewport">
               
-              <!-- SUBVIEW 1: HOMESCREEN (Production Minimalist Launcher) -->
+              <!-- SUBVIEW 1: HOMESCREEN (Dual Flagship Themes: Bento Glass & Cyberdeck HUD) -->
               <div class="screen-view active" id="view-home">
-                
-                <!-- Production Minimalist Launcher Homescreen (Inspired by Steve War Minimalist Split) -->
-                <div class="launcher-home-container" id="launcher-home-container">
+                <div class="bento-home-container" id="layout-bento-glass">
                   
-                  <!-- Top Search Bar -->
+                  <!-- 1. Hero Frosted Glass Clock & Date Bento Card -->
+                  <div class="bento-card bento-hero-clock" id="bento-hero-clock">
+                    <div class="bento-clock-time" id="home-big-clock">10:09</div>
+                    <div class="bento-clock-date" id="home-big-date">Wednesday, September 23</div>
+                    <div class="bento-clock-meta">
+                      <span class="bento-meta-badge">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#10B981" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                        Keystore Active
+                      </span>
+                      <span class="bento-meta-temp" id="home-bento-temp">InterOS Core</span>
+                    </div>
+                  </div>
+
+                  <!-- 2. Middle Row: Search Capsule + Live Waveform Music Bento Card -->
+                  <div class="bento-middle-row">
+                    <!-- Frosted Search Capsule -->
+                    <div class="bento-search-capsule" id="bento-search-pill" title="Search web, docs, crates...">
+                      <div class="bsc-icon">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                      </div>
+                      <span class="bsc-placeholder">Search...</span>
+                      <div class="bsc-globe">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                      </div>
+                    </div>
+
+                    <!-- Live Audio Waveform Bento Card -->
+                    <div class="bento-media-card" id="bento-media-card">
+                      <div class="bmc-header">
+                        <div class="bmc-nowplaying">
+                          <span class="bmc-pulse-dot"></span>
+                          <span class="bmc-title" id="bento-track-title">Midnight City [M83]</span>
+                        </div>
+                        <button class="bmc-play-btn" id="bento-media-play" title="Toggle Lo-Fi Synth Music">
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                        </button>
+                      </div>
+                      <canvas id="bento-waveform-canvas" class="bmc-canvas" width="140" height="28"></canvas>
+                    </div>
+                  </div>
+
+                  <!-- 3. Staggered Bento App Matrix (6 Frosted Glass Pods) -->
+                  <div class="bento-apps-matrix">
+                    <!-- Pod 1: Mechanical Camera Aperture -->
+                    <button class="bento-pod bento-camera-pod" id="bento-tile-camera" title="Camera">
+                      <div class="camera-aperture-disc">
+                        <div class="aperture-blade b1"></div>
+                        <div class="aperture-blade b2"></div>
+                        <div class="aperture-blade b3"></div>
+                        <div class="aperture-blade b4"></div>
+                        <div class="aperture-blade b5"></div>
+                        <div class="aperture-blade b6"></div>
+                        <div class="aperture-core"></div>
+                      </div>
+                      <div class="bp-info">
+                        <span class="bp-title">Camera</span>
+                        <span class="bp-sub">4K HDR</span>
+                      </div>
+                    </button>
+
+                    <!-- Pod 2: Photos / Gallery -->
+                    <button class="bento-pod" id="bento-tile-photos" title="Photos & Gallery">
+                      <div class="bp-icon-wrap" style="background: linear-gradient(135deg, rgba(236,72,153,0.25), rgba(168,85,247,0.25)); border-color: rgba(236,72,153,0.35);">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#EC4899" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                      </div>
+                      <div class="bp-info">
+                        <span class="bp-title">Gallery</span>
+                        <span class="bp-sub">348 Photos</span>
+                      </div>
+                    </button>
+
+                    <!-- Pod 3: Sovereign Files -->
+                    <button class="bento-pod" id="bento-tile-files" title="File Manager">
+                      <div class="bp-icon-wrap" style="background: linear-gradient(135deg, rgba(59,130,246,0.25), rgba(14,165,233,0.25)); border-color: rgba(59,130,246,0.35);">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#38BDF8" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                      </div>
+                      <div class="bp-info">
+                        <span class="bp-title">Files</span>
+                        <span class="bp-sub">Vault & Storage</span>
+                      </div>
+                    </button>
+
+                    <!-- Pod 4: Calculator -->
+                    <button class="bento-pod" id="bento-tile-calculator" title="Calculator">
+                      <div class="bp-icon-wrap" style="background: linear-gradient(135deg, rgba(245,158,11,0.25), rgba(234,88,12,0.25)); border-color: rgba(245,158,11,0.35);">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#F59E0B" stroke-width="2"><rect x="4" y="2" width="16" height="20" rx="2"/><line x1="8" y1="6" x2="16" y2="6"/><line x1="16" y1="14" x2="16" y2="18"/><path d="M16 10h.01"/><path d="M12 10h.01"/><path d="M8 10h.01"/><path d="M12 14h.01"/><path d="M8 14h.01"/><path d="M12 18h.01"/><path d="M8 18h.01"/></svg>
+                      </div>
+                      <div class="bp-info">
+                        <span class="bp-title">Calculator</span>
+                        <span class="bp-sub">Precision Math</span>
+                      </div>
+                    </button>
+
+                    <!-- Pod 5: System Settings -->
+                    <button class="bento-pod" id="bento-tile-settings" title="System Settings">
+                      <div class="bp-icon-wrap" style="background: linear-gradient(135deg, rgba(148,163,184,0.25), rgba(100,116,139,0.25)); border-color: rgba(148,163,184,0.35);">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#94A3B8" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                      </div>
+                      <div class="bp-info">
+                        <span class="bp-title">Settings</span>
+                        <span class="bp-sub">Inter OS 1.0</span>
+                      </div>
+                    </button>
+
+                    <!-- Pod 6: Keystore / Vault -->
+                    <button class="bento-pod" id="bento-tile-vault" title="Security Vault">
+                      <div class="bp-icon-wrap" style="background: linear-gradient(135deg, rgba(16,185,129,0.25), rgba(5,150,105,0.25)); border-color: rgba(16,185,129,0.35);">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#10B981" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><circle cx="12" cy="11" r="2"/><path d="M12 13v2"/></svg>
+                      </div>
+                      <div class="bp-info">
+                        <span class="bp-title">Vault</span>
+                        <span class="bp-sub">Keystore Active</span>
+                      </div>
+                    </button>
+                  </div>
+
+                  <!-- 4. Floating Frosted Glass Bottom Dock (Matching glass_home_screen_1790110483841.jpg) -->
+                  <div class="bento-dock-container">
+                    <div class="bento-dock-pill">
+                      <!-- Phone / Dialer -->
+                      <button class="bento-dock-btn" id="dock-phone" title="Phone Dialer">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+                      </button>
+
+                      <!-- Messages / SMS -->
+                      <button class="bento-dock-btn" id="dock-messages" title="Messages">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                      </button>
+
+                      <!-- All Applications / App Drawer -->
+                      <button class="bento-dock-btn" id="dock-apps" title="All Applications">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="6" r="2"/><circle cx="12" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="6" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="18" cy="12" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="12" cy="18" r="2"/><circle cx="18" cy="18" r="2"/></svg>
+                      </button>
+
+                      <!-- Browser -->
+                      <button class="bento-dock-btn" id="dock-browser" title="Inter Browser">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/><line x1="21.17" y1="8" x2="12" y2="8"/><line x1="3.95" y1="6.06" x2="8.54" y2="14"/><line x1="10.88" y1="21.94" x2="15.46" y2="14"/></svg>
+                      </button>
+
+                      <!-- Camera -->
+                      <button class="bento-dock-btn" id="dock-camera" title="Camera">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                      </button>
+                    </div>
+
+                    <!-- Glowing Cyan Neon Arc Indicator (Tap or swipe to open All Apps) -->
+                    <div class="home-neon-arc" id="home-neon-arc" title="Swipe or tap for All Applications"></div>
+                  </div>
+
+                </div>
+
+                <!-- LAYOUT B: CYBERDECK SOVEREIGN HUD (Matching cyberdeck_hud_ui_1790110344489.jpg) -->
+                <div class="cyberdeck-home-container" id="layout-cyberdeck-hud" style="display: none;">
+                  <!-- Top Telemetry & Biometric Enclave Core -->
+                  <div class="cyber-biometric-section">
+                    <!-- Left Wing HUD Nodes -->
+                    <div class="cyber-hud-wing left">
+                      <div class="cyber-hud-node">
+                        <div class="chn-header">SYSTEM TEMP:</div>
+                        <div class="chn-val">Standby</div>
+                        <div class="chn-meter"><div class="chn-meter-fill" style="width: 45%;"></div></div>
+                      </div>
+                      <div class="cyber-hud-node">
+                        <div class="chn-header">NETWORK UPLINK:</div>
+                        <div class="chn-val">5.8 GB/S</div>
+                        <div class="chn-spark">
+                          <svg width="46" height="10" viewBox="0 0 46 10"><path d="M0,8 L10,5 L20,9 L30,2 L40,6 L46,1" fill="none" stroke="#00FFD5" stroke-width="1.5"/></svg>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- Center Glowing Biometric Security Ring -->
+                    <div class="cyber-biometric-core" id="cyber-biometric-trigger" title="Tap to Authenticate Enclave">
+                      <div class="cyber-ring-outer"></div>
+                      <div class="cyber-ring-mid"></div>
+                      <div class="cyber-ring-glow"></div>
+                      <div class="cyber-ring-content">
+                        <div class="cyber-ring-tag-top">BIOMETRIC AUTHENTICATED</div>
+                        <div class="cyber-fingerprint-icon">
+                          <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#00FFD5" stroke-width="1.6" stroke-linecap="round">
+                            <path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4"/>
+                            <path d="M14 13.12c0 2.38 0 6.38-1 8.88"/>
+                            <path d="M17.29 21.02c.12-.6.43-2.3.5-3.02"/>
+                            <path d="M2 12a10 10 0 0 1 18-6"/>
+                            <path d="M2 16h.01"/>
+                            <path d="M21.8 16c.2-2 .131-5.354 0-6"/>
+                            <path d="M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2"/>
+                            <path d="M8.65 22c.21-.66.45-1.32.57-2"/>
+                            <path d="M9 6.8a6 6 0 0 1 9 5.2v2"/>
+                          </svg>
+                        </div>
+                        <div class="cyber-ring-status">SECURITY STATUS: OPTIMAL</div>
+                        <div class="cyber-ring-tag-bottom">ENCRYPTION ACTIVE</div>
+                      </div>
+                    </div>
+
+                    <!-- Right Wing HUD Nodes -->
+                    <div class="cyber-hud-wing right">
+                      <div class="cyber-hud-node">
+                        <div class="chn-header">CARRIER LINK:</div>
+                        <div class="chn-val">5G ULTRA</div>
+                        <div class="chn-spark">
+                          <svg width="46" height="10" viewBox="0 0 46 10"><path d="M0,9 L12,7 L24,4 L36,5 L46,2" fill="none" stroke="#10B981" stroke-width="1.5"/></svg>
+                        </div>
+                      </div>
+                      <div class="cyber-hud-node">
+                        <div class="chn-header">BATTERY: 98%</div>
+                        <div class="chn-val">[STEADY]</div>
+                        <div class="chn-meter"><div class="chn-meter-fill" style="width: 98%; background: #10B981;"></div></div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Middle & Lower Cyberdeck Bento Cards -->
+                  <div class="cyberdeck-cards-grid">
+                    <!-- 1. Daily Glance & Schedule Card (Consumer Smartphone) -->
+                    <div class="cyber-card cyber-glance-card" id="cyber-tile-calendar" title="Calendar &amp; Glance">
+                      <div class="cyber-card-header">
+                        <span class="cyber-card-title">TODAY'S GLANCE</span>
+                        <div class="cyber-card-dots"><span></span><span></span><span></span></div>
+                      </div>
+                      <div class="cyber-glance-content">
+                        <div class="cgc-event-title">Production Hardware Review</div>
+                        <div class="cgc-event-time">14:00 &bull; Main Studio</div>
+                        <div class="cgc-status-row">
+                          <span class="cgc-badge-active">Upcoming</span>
+                          <span class="cgc-weather">Microkernel</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- 2. Right Column: Audio Oscilloscope + Mini Browser -->
+                    <div class="cyber-col-right">
+                      <!-- Audio Frequency Oscilloscope -->
+                      <div class="cyber-card cyber-osc-card" id="cyber-tile-music" title="Tap to launch Hi-Fi Music">
+                        <div class="cyber-card-header">
+                          <span class="cyber-card-title">AUDIO OSCILLOSCOPE</span>
+                          <span class="cyber-badge-hz">20kHz</span>
+                        </div>
+                        <canvas id="cyber-osc-canvas" class="cyber-canvas" width="130" height="34"></canvas>
+                      </div>
+
+                      <!-- Mini Browser Search Card -->
+                      <div class="cyber-card cyber-browser-card" id="cyber-tile-browser" title="Tap to launch Browser">
+                        <div class="cyber-card-header">
+                          <span class="cyber-card-title">MINI BROWSER</span>
+                          <div class="cyber-browser-lights">
+                            <span class="cbl-dot red"></span>
+                            <span class="cbl-dot yellow"></span>
+                            <span class="cbl-dot green"></span>
+                          </div>
+                        </div>
+                        <div class="cyber-search-box">
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#00FFD5" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                          <span>rust-lang.org/crates</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Quick Cyber Launchers Bar -->
+                  <div class="cyber-quick-launchers">
+                    <button class="cyber-pill-btn" id="cyber-btn-camera" title="Camera Sensor">
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                      <span>Camera</span>
+                    </button>
+                    <button class="cyber-pill-btn" id="cyber-btn-files" title="VFS Storage">
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                      <span>VFS</span>
+                    </button>
+                    <button class="cyber-pill-btn" id="cyber-btn-calc" title="Calculator">
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="2" width="16" height="20" rx="2"/><line x1="8" y1="6" x2="16" y2="6"/><line x1="16" y1="14" x2="16" y2="18"/></svg>
+                      <span>Calc</span>
+                    </button>
+                    <button class="cyber-pill-btn" id="cyber-btn-vault" title="Hardware Vault">
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                      <span>Vault</span>
+                    </button>
+                    <button class="cyber-pill-btn" id="cyber-btn-settings" title="Settings Studio">
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                      <span>Settings</span>
+                    </button>
+                  </div>
+
+                  <!-- Floating Curved Cyberdeck Dock (Matching cyberdeck_hud_ui_1790110344489) -->
+                  <div class="cyber-dock-container">
+                    <div class="cyber-dock-pill">
+                      <button class="cyber-dock-btn active" id="cyber-dock-home" title="Home">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+                      </button>
+                      <button class="cyber-dock-btn" id="cyber-dock-apps" title="All Applications">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/></svg>
+                      </button>
+                      <button class="cyber-dock-btn" id="cyber-dock-messages" title="Secure Messages">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                      </button>
+                      <button class="cyber-dock-btn" id="cyber-dock-tools" title="Terminal & Tools">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+                      </button>
+                      <button class="cyber-dock-btn" id="cyber-dock-settings" title="Settings">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                      </button>
+                    </div>
+                    <!-- Radiant Cyan Neon Arc -->
+                    <div class="cyber-neon-arc"></div>
+                  </div>
+                </div>
+
+                <!-- LAYOUT C: MINIMALIST SPLIT LAUNCHER (Secondary/Zen option) -->
+                <div class="launcher-home-container" id="layout-minimal-launcher" style="display: none;">
                   <div class="launcher-search-bar" id="launcher-search-bar" title="Search applications and web">
                     <i data-lucide="search" style="width: 14px; height: 14px; color: rgba(255, 255, 255, 0.65);"></i>
                     <span class="lsb-text">Search apps &amp; web...</span>
                   </div>
-
-                  <!-- Center Living Ambient Stage -->
                   <div class="launcher-ambient-stage" id="launcher-ambient-stage" title="Tap canvas to jump">
                     <canvas id="launcher-retro-canvas" width="320" height="130" class="launcher-canvas"></canvas>
                   </div>
-
-                  <!-- Lower Typographic Clock & Deck -->
                   <div class="launcher-bottom-deck">
                     <div class="launcher-clock-block">
                       <div class="launcher-clock-time" id="launcher-clock-time">06:04</div>
@@ -416,41 +719,163 @@
                         <span class="weather-sun-dot" title="Clear Sky"></span>
                       </div>
                     </div>
-
-                    <!-- 5-Icon Sovereign Outline Dock -->
                     <div class="launcher-dock-row">
-                      <button class="launcher-dock-icon" id="ldock-phone" title="Phone Dialer" data-view="view-dialer">
-                        <i data-lucide="phone"></i>
-                      </button>
-                      <button class="launcher-dock-icon" id="ldock-messages" title="Messages" data-view="view-messages">
-                        <i data-lucide="message-square"></i>
-                      </button>
-                      <button class="launcher-dock-icon primary" id="ldock-apps" title="All Applications Drawer" data-view="view-apps">
-                        <i data-lucide="layout-grid"></i>
-                      </button>
-                      <button class="launcher-dock-icon" id="ldock-browser" title="Browser" data-view="view-browser">
-                        <i data-lucide="compass"></i>
-                      </button>
-                      <button class="launcher-dock-icon" id="ldock-camera" title="Camera" data-view="view-camera">
-                        <i data-lucide="camera"></i>
-                      </button>
+                      <button class="launcher-dock-icon" id="ldock-phone" title="Phone Dialer" data-view="view-dialer"><i data-lucide="phone"></i></button>
+                      <button class="launcher-dock-icon" id="ldock-messages" title="Messages" data-view="view-messages"><i data-lucide="message-square"></i></button>
+                      <button class="launcher-dock-icon primary" id="ldock-apps" title="All Applications Drawer" data-view="view-apps"><i data-lucide="layout-grid"></i></button>
+                      <button class="launcher-dock-icon" id="ldock-browser" title="Browser" data-view="view-browser"><i data-lucide="compass"></i></button>
+                      <button class="launcher-dock-icon" id="ldock-camera" title="Camera" data-view="view-camera"><i data-lucide="camera"></i></button>
                     </div>
                   </div>
-
                 </div>
               </div>
 
-              <!-- SUBVIEW 1B: ALL APPLICATIONS SCREEN (Niagara Luxury Stream) -->
+              <!-- SUBVIEW 1B: ALL APPLICATIONS SCREEN (Matching glass_apps_screen_1790110504090) -->
               <div class="screen-view" id="view-apps">
-                <div class="minimal-stream-container" id="minimal-stream-container">
-                  
-                  <!-- Top Typographic Day Header & Contextual Telemetry -->
+                <div class="apps-screen-container" id="layout-bento-apps">
+                  <!-- Search Omnibar Header -->
+                  <div class="apps-search-header">
+                    <button class="btn-apps-back" id="btn-back-apps" title="Back to Home">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+                    </button>
+                    <div class="apps-search-box">
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                      <input type="text" id="apps-search-input" placeholder="Search apps, tools, binaries..." autocomplete="off">
+                    </div>
+                  </div>
+
+                  <!-- Filter Pills Bar -->
+                  <div class="apps-filter-bar">
+                    <button class="app-filter-pill active" data-filter="all">All</button>
+                    <button class="app-filter-pill" data-filter="core">Core</button>
+                    <button class="app-filter-pill" data-filter="media">Media</button>
+                    <button class="app-filter-pill" data-filter="web">Web</button>
+                    <button class="app-filter-pill" data-filter="tools">Tools</button>
+                  </div>
+
+                  <!-- 2-Column Staggered Iridescent Bento Apps Grid -->
+                  <div class="apps-bento-grid" id="apps-grid-stream">
+                    <!-- 1. Photos -->
+                    <button class="app-bento-card" id="app-card-photos" data-category="media" data-view="view-gallery">
+                      <div class="abc-icon" style="color: #EC4899;">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                      </div>
+                      <span class="abc-badge">Moments</span>
+                      <span class="abc-title">Photos</span>
+                    </button>
+
+                    <!-- 2. Browser -->
+                    <button class="app-bento-card" id="app-card-browser" data-category="core web" data-view="view-browser">
+                      <div class="abc-icon" style="color: #60A5FA;">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/><line x1="21.17" y1="8" x2="12" y2="8"/><line x1="3.95" y1="6.06" x2="8.54" y2="14"/><line x1="10.88" y1="21.94" x2="15.46" y2="14"/></svg>
+                      </div>
+                      <span class="abc-badge">Web</span>
+                      <span class="abc-title">Browser</span>
+                    </button>
+
+                    <!-- 3. Calculator -->
+                    <button class="app-bento-card" id="app-card-calculator" data-category="tools" data-view="view-calculator">
+                      <div class="abc-icon" style="color: #34D399;">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="2" width="16" height="20" rx="2"/><line x1="8" y1="6" x2="16" y2="6"/><line x1="16" y1="14" x2="16" y2="18"/><path d="M16 10h.01M12 10h.01M8 10h.01M12 14h.01M8 14h.01M12 18h.01M8 18h.01"/></svg>
+                      </div>
+                      <span class="abc-badge">Utility</span>
+                      <span class="abc-title">Calculator</span>
+                    </button>
+
+                    <!-- 4. Camera -->
+                    <button class="app-bento-card" id="app-card-camera" data-category="media" data-view="view-camera">
+                      <div class="abc-icon" style="color: #F472B6;">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                      </div>
+                      <span class="abc-badge">Optical</span>
+                      <span class="abc-title">Camera</span>
+                    </button>
+
+                    <!-- 5. Files -->
+                    <button class="app-bento-card" id="app-card-files" data-category="core tools" data-view="view-files">
+                      <div class="abc-icon" style="color: #A78BFA;">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                      </div>
+                      <span class="abc-badge">Storage</span>
+                      <span class="abc-title">Files</span>
+                    </button>
+
+                    <!-- 6. Vault -->
+                    <button class="app-bento-card" id="app-card-vault" data-category="core tools" data-view="view-authenticator">
+                      <div class="abc-icon" style="color: #10B981;">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
+                      </div>
+                      <span class="abc-badge">Keystore</span>
+                      <span class="abc-title">Vault</span>
+                    </button>
+
+                    <!-- 7. Phone -->
+                    <button class="app-bento-card" id="app-card-phone" data-category="core" data-view="view-dialer">
+                      <div class="abc-icon" style="color: #10B981;">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+                      </div>
+                      <span class="abc-badge">VoLTE</span>
+                      <span class="abc-title">Phone</span>
+                    </button>
+
+                    <!-- 8. Messages -->
+                    <button class="app-bento-card" id="app-card-messages" data-category="core" data-view="view-messages">
+                      <div class="abc-icon" style="color: #06B6D4;">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                      </div>
+                      <span class="abc-badge">Chat</span>
+                      <span class="abc-title">Messages</span>
+                    </button>
+
+                    <!-- 9. Music -->
+                    <button class="app-bento-card" id="app-card-music" data-category="media" data-view="view-music">
+                      <div class="abc-icon" style="color: #F43F5E;">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+                      </div>
+                      <span class="abc-badge">Hi-Fi</span>
+                      <span class="abc-title">Music</span>
+                    </button>
+
+                    <!-- 10. Calendar -->
+                    <button class="app-bento-card" id="app-card-calendar" data-category="tools" data-view="view-calendar">
+                      <div class="abc-icon" style="color: #0EA5E9;">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                      </div>
+                      <span class="abc-badge">Agenda</span>
+                      <span class="abc-title">Calendar</span>
+                    </button>
+
+                    <!-- 11. Clock -->
+                    <button class="app-bento-card" id="app-card-clock" data-category="tools" data-view="view-clock">
+                      <div class="abc-icon" style="color: #818CF8;">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                      </div>
+                      <span class="abc-badge">World</span>
+                      <span class="abc-title">Clock</span>
+                    </button>
+
+                    <!-- 12. Settings -->
+                    <button class="app-bento-card" id="app-card-settings" data-category="core" data-view="view-settings">
+                      <div class="abc-icon" style="color: #94A3B8;">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                      </div>
+                      <span class="abc-badge">System</span>
+                      <span class="abc-title">Settings</span>
+                    </button>
+                  </div>
+
+                  <!-- Bottom Dismiss Handle -->
+                  <div class="apps-bottom-handle-bar" id="apps-bottom-handle" title="Tap to return Home">
+                    <div class="apps-handle-pill"></div>
+                  </div>
+                </div>
+
+                <!-- Secondary Minimal Stream (for minimal theme) -->
+                <div class="minimal-stream-container" id="layout-minimal-stream" style="display: none;">
                   <div class="stream-header-zone">
                     <div class="stream-header-top">
                       <div class="stream-day-header" id="stream-day-header">THURSDAY</div>
-                      <button class="stream-back-btn" id="btn-back-apps" title="Back to Home">
-                        <i data-lucide="arrow-left" style="width: 18px; height: 18px;"></i>
-                      </button>
+                      <button class="stream-back-btn" id="btn-back-stream" title="Back to Home"><i data-lucide="arrow-left" style="width: 18px; height: 18px;"></i></button>
                     </div>
                     <div class="stream-summary-box">
                       <p class="stream-summary-text" id="stream-summary-text">
@@ -459,45 +884,15 @@
                         Inter OS Microkernel: Optimal &bull; Storage: 48 GB Free
                       </p>
                     </div>
-
-                    <!-- Clean Search Capsule -->
                     <div class="stream-search-pill" id="stream-search-pill" title="Tap to search applications">
                       <i data-lucide="search" style="width: 13px; height: 13px; opacity: 0.7;"></i>
                       <span class="stream-search-placeholder">Search Now</span>
                     </div>
                   </div>
-
-                  <!-- Vertical Fluid App List with Official Lucide Icon Pack -->
                   <div class="stream-app-viewport" id="stream-app-viewport">
-                    <div class="stream-app-list" id="stream-app-list">
-                      <!-- Populated dynamically with official Lucide icons -->
-                    </div>
+                    <div class="stream-app-list" id="stream-app-list"></div>
                   </div>
-
-                  <!-- Right-Side Vertical Alphabet Scrubber Rail -->
-                  <div class="stream-alphabet-rail" id="stream-alphabet-rail" title="Alphabet Fast-Scrubber">
-                    <span class="alpha-node" data-letter="top">☆</span>
-                    <span class="alpha-node" data-letter="A">A</span>
-                    <span class="alpha-node" data-letter="B">B</span>
-                    <span class="alpha-node" data-letter="C">C</span>
-                    <span class="alpha-node" data-letter="D">D</span>
-                    <span class="alpha-node" data-letter="E">E</span>
-                    <span class="alpha-node" data-letter="F">F</span>
-                    <span class="alpha-node" data-letter="G">G</span>
-                    <span class="alpha-node" data-letter="H">H</span>
-                    <span class="alpha-node" data-letter="M">M</span>
-                    <span class="alpha-node" data-letter="P">P</span>
-                    <span class="alpha-node" data-letter="S">S</span>
-                    <span class="alpha-node" data-letter="T">T</span>
-                    <span class="alpha-node" data-letter="W">W</span>
-                    <span class="alpha-node" data-letter="Z">Z</span>
-                    <span class="alpha-node" data-letter="bottom">&bull;</span>
-                  </div>
-
-                  <!-- Bottom Floating Action Button (FAB) to return home -->
-                  <button class="stream-fab-btn" id="stream-fab-btn" title="Return to Home Screen">
-                    <i data-lucide="home" style="width: 20px; height: 20px;"></i>
-                  </button>
+                  <button class="stream-fab-btn" id="stream-fab-btn" title="Return to Home Screen"><i data-lucide="home" style="width: 20px; height: 20px;"></i></button>
                 </div>
               </div>
 
@@ -2173,7 +2568,11 @@
             <span class="hw-panel-title">HARDWARE PROFILER &amp; TELEMETRY</span>
           </div>
           <div class="hw-panel-meta">
-            <span class="hw-panel-badge" id="qemu-hal-badge" style="color: #10B981; border-color: rgba(16, 185, 129, 0.3);">QEMU / BARE-METAL &bull; LIVE</span>
+            <span class="hw-panel-badge" id="qemu-hal-badge" style="color: #71717A; border-color: rgba(255, 255, 255, 0.1);">QEMU &bull; STANDBY</span>
+            <button class="btn-hw-collapse" id="btn-toggle-hw-panel" title="Toggle Hardware Profiler Cards View">
+              <span class="hw-collapse-text">Compact</span>
+              <svg class="hw-collapse-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="18 15 12 9 6 15"/></svg>
+            </button>
           </div>
         </div>
 
@@ -2272,7 +2671,11 @@
 
       <!-- IDE Tabbed Tool Window -->
       <div class="ide-tool-window">
-        <div class="ide-tab-bar">
+        <div class="ide-tab-bar-wrap">
+          <button class="tab-scroll-btn left" id="btn-tab-scroll-left" title="Scroll tabs left">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+          </button>
+          <div class="ide-tab-bar" id="ide-tab-bar">
           <button class="panel-tab active" data-tab="tab-console">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
             Live Console
@@ -2324,6 +2727,10 @@
           <button class="panel-tab" data-tab="tab-appdev">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
             App Dev
+          </button>
+          </div>
+          <button class="tab-scroll-btn right" id="btn-tab-scroll-right" title="Scroll tabs right">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
           </button>
         </div>
 
