@@ -301,7 +301,10 @@ impl ShmPipeManager {
 
     /// Returns performance statistics for a given pipe.
     pub fn get_stats(&self, pipe_id: u32) -> Option<(usize, u64, usize, usize)> {
-        let idx = (pipe_id as usize) % self.pipes.len();
+        let idx = pipe_id as usize;
+        if idx >= self.pipes.len() {
+            return None;
+        }
         self.pipes[idx].as_ref().map(|p| {
             (
                 p.total_bytes,
