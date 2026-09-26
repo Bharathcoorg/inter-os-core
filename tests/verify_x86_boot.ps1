@@ -15,7 +15,7 @@ if (Test-Path $pngPath) { Remove-Item $pngPath -Force }
 Write-Host "Launching QEMU x86_64 with 1024M RAM..." -ForegroundColor Cyan
 $p = Start-Process -FilePath $qemu -ArgumentList "-m 1024M -drive format=raw,file=`"$img`" -display none -monitor tcp:127.0.0.1:44447,server,nowait -serial file:target/x86_boot.log -no-reboot" -WorkingDirectory $rootDir -PassThru
 
-Start-Sleep -Seconds 15
+Start-Sleep -Seconds 24
 
 try {
     $tcp = New-Object System.Net.Sockets.TcpClient

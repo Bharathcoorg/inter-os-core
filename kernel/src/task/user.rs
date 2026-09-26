@@ -887,6 +887,30 @@ pub fn spawn_app_dialer(id_security: TaskId) -> TaskId {
         rights: Rights::READ,
         object_id: 0,
     }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(1904),
+        cap_type: CapabilityType::FileSystemRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(1905),
+        cap_type: CapabilityType::EventPoll,
+        rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(1906),
+        cap_type: CapabilityType::IpcReceive,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(1907),
+        cap_type: CapabilityType::FrameBufferDirect,
+        rights: Rights::WRITE,
+        object_id: 1,
+    }).ok();
 
     let id = spawn_user_process(
         "app_dialer",
@@ -930,6 +954,24 @@ pub fn spawn_app_vault(id_security: TaskId) -> TaskId {
         rights: Rights::READ | Rights::WRITE | Rights::GRANT,
         object_id: 0,
     }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2005),
+        cap_type: CapabilityType::EventPoll,
+        rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2006),
+        cap_type: CapabilityType::IpcReceive,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2007),
+        cap_type: CapabilityType::FrameBufferDirect,
+        rights: Rights::WRITE,
+        object_id: 1,
+    }).ok();
 
     let id = spawn_user_process(
         "app_vault",
@@ -969,9 +1011,27 @@ pub fn spawn_app_camera(id_security: TaskId) -> TaskId {
     }).ok();
     caps.insert(Capability {
         id: CapabilityId(2104),
-        cap_type: CapabilityType::HardwarePortIo,
-        rights: Rights::READ | Rights::WRITE,
+        cap_type: CapabilityType::FileSystemRead,
+        rights: Rights::READ,
         object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2105),
+        cap_type: CapabilityType::EventPoll,
+        rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2106),
+        cap_type: CapabilityType::IpcReceive,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2107),
+        cap_type: CapabilityType::FrameBufferDirect,
+        rights: Rights::WRITE,
+        object_id: 1,
     }).ok();
 
     let id = spawn_user_process(
@@ -1012,9 +1072,27 @@ pub fn spawn_app_calculator(id_security: TaskId) -> TaskId {
     }).ok();
     caps.insert(Capability {
         id: CapabilityId(2204),
-        cap_type: CapabilityType::HardwarePortIo,
-        rights: Rights::READ | Rights::WRITE,
+        cap_type: CapabilityType::FileSystemRead,
+        rights: Rights::READ,
         object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2205),
+        cap_type: CapabilityType::EventPoll,
+        rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2206),
+        cap_type: CapabilityType::IpcReceive,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2207),
+        cap_type: CapabilityType::FrameBufferDirect,
+        rights: Rights::WRITE,
+        object_id: 1,
     }).ok();
 
     let id = spawn_user_process(

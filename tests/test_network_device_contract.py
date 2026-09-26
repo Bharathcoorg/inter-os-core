@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M31 network device/driver abstraction contracts."""
+"""Network device/driver abstraction contracts."""
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 

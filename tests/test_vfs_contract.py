@@ -8,4 +8,4 @@ assert "buf.len() > MAX_FILE_SIZE" in v
 assert "checked_add(buf.len())" in v
 assert "end > MAX_FILE_SIZE" in v
 assert "FsError::FileTooLarge | FsError::PathTooLong" in s
-print("M39 VFS boundary contract: PASS")
+print("VFS boundary contract: PASS")

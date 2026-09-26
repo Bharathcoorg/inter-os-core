@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M32 userspace network service contracts."""
+"""Userspace network service contracts."""
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 

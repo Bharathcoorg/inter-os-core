@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static storage architecture contracts for M19-M22.
+"""Static storage architecture contracts.
 
 These checks verify that the block-device abstraction, persistent journal,
 VFS snapshot boundary, and crash-safe write ordering remain explicit.
@@ -29,7 +29,7 @@ def main() -> None:
     interfs = INTERFS.read_text()
     filesystem = FILESYSTEM.read_text()
 
-    # M19: hardware implementations share one sector-level abstraction.
+    # Hardware implementations share one sector-level abstraction.
     must(ata, "pub trait BlockDevice: Send + Sync", "canonical block-device trait")
     must(ata, "fn read_sector", "block read operation")
     must(ata, "fn write_sector", "block write operation")
@@ -39,7 +39,7 @@ def main() -> None:
     must(sdhci, "impl BlockDevice for SdhciController", "SDHCI block-device implementation")
     must(storage, "pub mod persistent;", "storage subsystem persistence boundary")
 
-    # M20-M21: persistent storage is layered above the raw block interface.
+    # Persistent storage is layered above the raw block interface.
     must(persistent, "use crate::drivers::{BlockDevice, ATA_PRIMARY, SECTOR_SIZE};", "journal uses block abstraction")
     must(persistent, "pub fn load_latest_kind", "persistent metadata read API")
     must(persistent, "pub fn commit_kind", "persistent metadata commit API")
@@ -51,7 +51,7 @@ def main() -> None:
     must(vfs, "vfs.restore_data_snapshot();", "persistent VFS restore")
     must(vfs, 'crate::storage::persistent::commit_kind(&sealed,4)', "VFS snapshot persistence")
     must(vfs, 'path.starts_with("/data/")', "persistent mutable-data boundary")
-    # M21: VFS persists and reconstructs the mutable inode tree, not only payload bytes.
+    # VFS persists and reconstructs the mutable inode tree, not only payload bytes.
     must(vfs, 'buf[..4].copy_from_slice(b"IVM1")', "persistent inode metadata format")
     must(vfs, 'persist_metadata_snapshot', "inode metadata persistence routine")
     must(vfs, 'restore_metadata_snapshot', "inode metadata restore routine")
@@ -61,7 +61,7 @@ def main() -> None:
     must(vfs, 'inode.id = InodeId(id);', "stable persisted inode identity")
     must(vfs, 'inode.sha256_digest = digest;', "persisted inode integrity metadata")
 
-    # M20: a real on-disk filesystem backend exists above BlockDevice.
+    # A real on-disk filesystem backend exists above BlockDevice.
     must(interfs, "pub struct InterFs", "block-backed filesystem controller")
     must(interfs, "pub fn format", "filesystem format operation")
     must(interfs, "pub fn format_at", "explicit filesystem region formatting")
@@ -93,7 +93,7 @@ def main() -> None:
     must(interfs, "inode.sector_count == 0 || inode.start_sector.checked_add(inode.sector_count)", "inode extent bounds validation")
     must(interfs, "inode.file_size as u64 > capacity", "inode payload capacity validation")
 
-    # M22: metadata mutations use an on-disk transaction record with recovery on mount.
+    # Metadata mutations use an on-disk transaction record with recovery on mount.
     must(interfs, 'const TXN_MAGIC: [u8; 4] = *b"IFTX";', "filesystem transaction record magic")
     must(interfs, "fn write_transaction", "transaction intent publication")
     must(interfs, "fn recover_transaction", "transaction recovery")
@@ -108,7 +108,7 @@ def main() -> None:
     assert create_body.index("self.device.write_sector(self.base_lba + self.superblock.data_start+start+block,&sector)") < create_body.index("self.write_inode(index,&inode)"), "payload must precede inode publication"
     assert create_body.index("self.write_inode(index,&inode)") < create_body.index("self.clear_transaction()?"), "transaction must remain until inode publication completes"
 
-    # M23: persistent mutable VFS state is authenticated and encrypted at rest.
+    # Persistent mutable VFS state is authenticated and encrypted at rest.
     must(storage, "pub mod encrypted;", "encrypted storage module")
     must(storage, "pub use encrypted::{seal, open, EncryptionError", "encrypted storage API")
     constenc = "ENCRYPTED_MAGIC: [u8; 4] = *b\"ENC1\"";
@@ -127,7 +127,7 @@ def main() -> None:
     must((ROOT / "kernel/src/main.rs").read_text(), "crypto::keystore::init();", "keystore initialized before VFS")
     assert (ROOT / "kernel/src/main.rs").read_text().index("crypto::keystore::init();") < (ROOT / "kernel/src/main.rs").read_text().index("fs::init();"), "storage key must exist before VFS reconstruction"
 
-    # M22: write payload sectors first and publish the generation header last.
+    # Write payload sectors first and publish the generation header last.
     payload_write = persistent.index("drive.write_sector(base + sector, &buf)")
     header_write = persistent.index("drive.write_sector(base, &header)")
     assert payload_write < header_write, "journal header must be published after payload sectors"

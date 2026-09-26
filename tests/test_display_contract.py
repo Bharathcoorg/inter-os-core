@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static contracts for M25's display driver/service boundary."""
+"""Static contracts for display driver/service boundary."""
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]

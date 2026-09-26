@@ -8,4 +8,4 @@ assert "THERMAL_JSON_MAX: usize = 256" in t
 assert "temp_c.clamp(THERMAL_MIN_C, THERMAL_MAX_C)" in t
 assert "out_buf.len() < crate::resource::BATTERY_JSON_MAX" in s
 assert "out_buf.len() < crate::resource::THERMAL_JSON_MAX" in s
-print("M38 resource telemetry contract: PASS")
+print("Resource telemetry contract: PASS")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static contracts for M26 normalized userspace input."""
+"""Static contracts for normalized userspace input."""
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 

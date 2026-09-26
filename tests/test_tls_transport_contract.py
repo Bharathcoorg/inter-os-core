@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M33 bounded TLS transport contracts."""
+"""Bounded TLS transport contracts."""
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]

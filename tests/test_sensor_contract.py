@@ -10,4 +10,4 @@ assert "distance_mm.min(100)" in pr and "lux.min(100_000)" in pr
 assert "out_buf.len() < 32 || out_buf.len() > 512" in sc
 assert "pub fn sensor_read(out: &mut [u8])" in sdk
 assert "SyscallNumber::SensorRead" in sdk
-print("M36 sensor contract: PASS")
+print("Sensor contract: PASS")

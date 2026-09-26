@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M27 compositor protocol contracts."""
+"""Compositor protocol contracts."""
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 

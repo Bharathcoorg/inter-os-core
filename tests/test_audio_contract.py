@@ -17,4 +17,4 @@ assert "audio.configure_stream" in syscall
 assert "audio.start_stream" in syscall
 assert "audio.stop_stream" in syscall
 assert "audio.set_volume" in syscall
-print("M34 audio contract: PASS")
+print("Audio contract: PASS")

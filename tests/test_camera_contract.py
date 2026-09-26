@@ -13,4 +13,4 @@ assert "match action" in syscall
 assert "AutoFocusState::Locked" in syscall
 assert "frame.copy_to(out_buf)" in syscall
 assert "SyscallResult::InvalidArguments" in syscall
-print("M35 camera contract: PASS")
+print("Camera contract: PASS")

@@ -24,7 +24,7 @@ def main() -> None:
     system_service = (ROOT / "userspace/system-service/src/lib.rs").read_text()
     storaged = (ROOT / "userspace/system-service/src/bin/storaged.rs").read_text()
     user_task = (ROOT / "kernel/src/task/user.rs").read_text()
-    must(system_service, "pub fn run_storage() -> !", "M24 userspace storage service entry")
+    must(system_service, "pub fn run_storage() -> !", "Userspace storage service entry")
     must(system_service, 'std::service_heartbeat(3)', "storaged lifecycle heartbeat")
     must(system_service, 'std::fs_open(4, "/data/audit.log", std::FS_WRITE)', "storaged filesystem capability usage")
     must(system_service, "std::fs_write(4, fd", "storaged userspace filesystem write")
@@ -121,7 +121,7 @@ def main() -> None:
     ):
         must((ROOT / "kernel/src/task/user.rs").read_text(), marker, f"service capability matrix {marker}")
 
-    # M11 executable contract: PID1 must exercise the complete deterministic
+    # Executable contract: PID1 must exercise the complete deterministic
     # lifecycle smoke sequence used by the QEMU vertical slice.
     must(pid1, "const SERVICES: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];",
          "complete system-service bootstrap set")
@@ -147,7 +147,12 @@ def main() -> None:
     must(pid1, "seen == 0xff", "PID1 requires all eight services")
 
 
-    # M13/M14 process and capability architecture must be userspace-owned and isolated.\n    must(services, "heartbeat_for_task", "service heartbeat ownership check")\n    must((ROOT / "kernel/src/task/user.rs").read_text(), "CapabilityType::SystemControl", "PID1-only manager authority remains distinct")\n    must((ROOT / ".github/workflows/ci.yml").read_text(), "userspace/system-service/Cargo.toml", "Ring-3 service build gate")\n\n    # M15 trusted userspace service ABI is explicit, versioned, and bounded.
+    # Process and capability architecture must be userspace-owned and isolated.
+    must(services, "heartbeat_for_task", "service heartbeat ownership check")
+    must((ROOT / "kernel/src/task/user.rs").read_text(), "CapabilityType::SystemControl", "PID1-only manager authority remains distinct")
+    must((ROOT / ".github/workflows/ci.yml").read_text(), "userspace/system-service/Cargo.toml", "Ring-3 service build gate")
+
+    # Trusted userspace service ABI is explicit, versioned, and bounded.
     service_abi = SERVICE_ABI.read_text()
     must(service_abi, 'SERVICE_ABI_MAGIC: [u8; 4] = *b"ISVC"', "service ABI magic")
     must(service_abi, "SERVICE_ABI_VERSION: u16 = 1", "service ABI version")
@@ -159,8 +164,8 @@ def main() -> None:
     must(service_abi, "service_capability_allowed", "service capability policy")
     must(sdk, "pub fn service_package_verify", "signed service package SDK ABI")
 
-    # M16 signed service packages must use the RAPP verifier and the narrow
-    # service namespace/capability policy before M17 is allowed to execute them.
+    # Signed service packages must use the RAPP verifier and the narrow
+    # service namespace/capability policy before executing them.
     must(syscall, "ServicePackageVerify = 89", "service package verification syscall number")
     must(syscall, "sys_service_package_verify", "service package verification kernel ABI")
     must(syscall, "sys_service_package_launch", "verified service package launch handoff")
@@ -197,7 +202,7 @@ def main() -> None:
          "supervisor registry update")
     must(sched, "tcb.parent_id = parent_id;", "scheduler parent assignment")
 
-    # M13 scheduler ownership/reaping invariants: children are explicitly
+    # Scheduler ownership/reaping invariants: children are explicitly
     # attached to PID1, dead parents' live children are reparented, and reaping
     # requires both the expected parent and a terminal child state.
     must(sched, "if task.id != task_id && task.parent_id == task_id",

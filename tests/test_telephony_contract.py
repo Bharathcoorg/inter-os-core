@@ -11,4 +11,4 @@ assert "sms_inbox.len() >= MAX_SMS_RECORDS" in modem
 assert "URC_QUEUE_CAPACITY: usize = 32" in ril
 assert "full_cmd.len() > MAX_AT_LINE_LEN" in ril
 assert "fn push_urc(&mut self, event: UrcEvent)" in ril
-print("M37 telephony boundary contract: PASS")
+print("Telephony boundary contract: PASS")
