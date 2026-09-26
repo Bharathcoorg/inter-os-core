@@ -156,18 +156,6 @@
       if (window.InterOS && window.InterOS.ipc) {
         window.InterOS.ipc.send("org.interos.meshchat", 0x20, { message: text, timestamp: Date.now() });
       }
-
-      // Simulated peer response
-      setTimeout(() => {
-        const inBubble = document.createElement("div");
-        inBubble.className = "bubble in";
-        inBubble.innerHTML = `
-          <div>Packet verified & relayed by Node-Gamma. Hop count: 1.</div>
-          <div class="bubble-meta"><span>Node-Gamma (RSSI -58dBm)</span><span>1 Hop</span></div>
-        `;
-        stream.appendChild(inBubble);
-        stream.scrollTop = stream.scrollHeight;
-      }, 1200);
     }
 
     btnSend.addEventListener("click", sendMsg);

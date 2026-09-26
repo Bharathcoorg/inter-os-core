@@ -161,9 +161,15 @@
     function refreshCodes() {
       const cards = document.querySelectorAll(".token-card");
       cards.forEach(card => {
-        const newCode = Math.floor(100000 + Math.random() * 900000).toString();
-        card.dataset.code = newCode;
-        card.querySelector(".token-code").textContent = newCode.slice(0, 3) + " " + newCode.slice(3);
+        // Enclave-derived TOTP only. Refuse synthetic generation if enclave is offline.
+        if (card.dataset.enclaveCode) {
+          const code = card.dataset.enclaveCode;
+          card.dataset.code = code;
+          card.querySelector(".token-code").textContent = code.slice(0, 3) + " " + code.slice(3);
+        } else {
+          card.dataset.code = "";
+          card.querySelector(".token-code").textContent = "--- ---";
+        }
       });
       if (window.InterOS && window.InterOS.ipc) {
         window.InterOS.ipc.send("org.interos.authenticator", 0x01, { refresh: true, timestamp: Date.now() });
@@ -173,6 +179,7 @@
     document.querySelectorAll(".token-card").forEach(card => {
       card.addEventListener("click", () => {
         const code = card.dataset.code;
+        if (!code) return;
         navigator.clipboard?.writeText(code);
         showToast("Copied " + code);
       });
@@ -181,23 +188,23 @@
     document.getElementById("btn-add-account").addEventListener("click", () => {
       const name = prompt("Enter Account Label:", "Node Sentinel");
       if (!name) return;
-      const newCode = Math.floor(100000 + Math.random() * 900000).toString();
       const card = document.createElement("div");
       card.className = "token-card";
-      card.dataset.code = newCode;
+      card.dataset.code = "";
       card.innerHTML = `
         <div class="token-info">
           <h4>${name}</h4>
-          <div class="token-code">${newCode.slice(0,3)} ${newCode.slice(3)}</div>
+          <div class="token-code">--- ---</div>
         </div>
         <button class="copy-btn" style="background:none;border:none;color:#8b949e;cursor:pointer;">📋</button>
       `;
       card.addEventListener("click", () => {
-        navigator.clipboard?.writeText(newCode);
-        showToast("Copied " + newCode);
+        if (!card.dataset.code) return;
+        navigator.clipboard?.writeText(card.dataset.code);
+        showToast("Copied " + card.dataset.code);
       });
       document.getElementById("tokens-list").appendChild(card);
-      showToast("Account Key Provisioned");
+      showToast("Enclave Slot Requested");
       if (window.InterOS && window.InterOS.ipc) {
         window.InterOS.ipc.send("org.interos.authenticator", 0x02, { account: name });
       }
