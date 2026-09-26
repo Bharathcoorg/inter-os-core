@@ -10,7 +10,19 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum ServiceId { Init=0, Display=1, Input=2, Storage=3, Network=4, Power=5, Modem=6, Audio=7, Camera=8 }
+pub enum ServiceId {
+    Init = 0,
+    Display = 1,
+    Input = 2,
+    Storage = 3,
+    Network = 4,
+    Power = 5,
+    Modem = 6,
+    Audio = 7,
+    Camera = 8,
+    Compositor = 9,
+    Launcher = 10,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceState { Declared, Starting, Running, Stopped, Failed }
@@ -18,13 +30,14 @@ pub enum ServiceState { Declared, Starting, Running, Stopped, Failed }
 #[derive(Debug, Clone, Copy)]
 pub struct ServiceRecord { pub id: ServiceId, pub task: TaskId, pub state: ServiceState }
 
-pub static SERVICE_RECORDS: spin::Mutex<[Option<ServiceRecord>; 9]> = spin::Mutex::new([None; 9]);
+pub static SERVICE_RECORDS: spin::Mutex<[Option<ServiceRecord>; 11]> = spin::Mutex::new([None; 11]);
 const HEARTBEAT_TIMEOUT_TICKS: u64 = 500;
 const SERVICE_RESTART_BACKOFF_TICKS: u64 = 1000;
-static SERVICE_HEARTBEATS: [core::sync::atomic::AtomicU64; 9] = [
+static SERVICE_HEARTBEATS: [core::sync::atomic::AtomicU64; 11] = [
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
 ];
 static SERVICES_INITIALIZED: AtomicBool = AtomicBool::new(false);
 // Serializes lifecycle transitions so start/stop/recovery cannot observe and mutate
@@ -32,10 +45,11 @@ static SERVICES_INITIALIZED: AtomicBool = AtomicBool::new(false);
 // boundary; callers never hold the lifecycle lock across context switches.
 static SERVICE_LIFECYCLE_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 // Restart backoff prevents a failed service from consuming the scheduler in a crash loop.
-static SERVICE_RETRY_AFTER: [core::sync::atomic::AtomicU64; 9] = [
+static SERVICE_RETRY_AFTER: [core::sync::atomic::AtomicU64; 11] = [
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
 ];
 
 /// Registers the system-service set. PID1 owns process creation and lifecycle.
@@ -47,7 +61,11 @@ pub fn init() {
     }
     // Service definitions are registered but not started here. PID 1 owns
     // userspace service lifecycle through the ServiceStart syscall.
-    for id in [ServiceId::Display, ServiceId::Input, ServiceId::Storage, ServiceId::Network, ServiceId::Power, ServiceId::Modem, ServiceId::Audio, ServiceId::Camera] {
+    for id in [
+        ServiceId::Display, ServiceId::Input, ServiceId::Storage, ServiceId::Network,
+        ServiceId::Power, ServiceId::Modem, ServiceId::Audio, ServiceId::Camera,
+        ServiceId::Compositor, ServiceId::Launcher,
+    ] {
         SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord {
             id, task: TaskId(0), state: ServiceState::Declared
         });
@@ -220,7 +238,7 @@ pub fn supervise() {
     // Lock order is scheduler -> registry. Exit paths already follow this
     // order, so supervision must never acquire registry before scheduler.
     let sched = SCHEDULER.lock();
-    let mut states = [None; 9];
+    let mut states = [None; 11];
     let records = *SERVICE_RECORDS.lock();
     for idx in 1..records.len() {
         let Some(record) = records[idx] else { continue; };
@@ -228,7 +246,11 @@ pub fn supervise() {
             states[idx] = Some(record.state);
             continue;
         }
-        let stale = now.saturating_sub(SERVICE_HEARTBEATS[idx].load(Ordering::Acquire)) > HEARTBEAT_TIMEOUT_TICKS;
+        let stale = if idx <= 8 {
+            now.saturating_sub(SERVICE_HEARTBEATS[idx].load(Ordering::Acquire)) > HEARTBEAT_TIMEOUT_TICKS
+        } else {
+            false
+        };
         let failed = match sched.get_task(record.task) {
             Some(task) => matches!(task.state, crate::task::TaskState::Terminated | crate::task::TaskState::Zombie),
             None => true,
@@ -293,15 +315,21 @@ pub fn record_exit(task_id: TaskId, _exit_code: i32) {
 pub fn restart_failed(parent_id: TaskId) -> usize {
     let _lifecycle = SERVICE_LIFECYCLE_LOCK.lock();
     let mut restarted = 0usize;
-    for idx in 1..SERVICE_RECORDS.lock().len() {
+    let count = SERVICE_RECORDS.lock().len();
+    for idx in 1..count {
         let id = match idx {
             1 => ServiceId::Display, 2 => ServiceId::Input, 3 => ServiceId::Storage,
             4 => ServiceId::Network, 5 => ServiceId::Power, 6 => ServiceId::Modem,
-            7 => ServiceId::Audio, 8 => ServiceId::Camera, _ => continue,
+            7 => ServiceId::Audio, 8 => ServiceId::Camera,
+            9 => ServiceId::Compositor, 10 => ServiceId::Launcher,
+            _ => continue,
         };
-        let failed_task = match SERVICE_RECORDS.lock()[idx] {
-            Some(ServiceRecord { state: ServiceState::Failed, task, .. }) => Some(task),
-            _ => None,
+        let failed_task = {
+            let records = SERVICE_RECORDS.lock();
+            match records[idx] {
+                Some(ServiceRecord { state: ServiceState::Failed, task, .. }) => Some(task),
+                _ => None,
+            }
         };
         if let Some(task) = failed_task {
             let now = crate::interrupts::get_system_ticks();
@@ -314,6 +342,7 @@ pub fn restart_failed(parent_id: TaskId) -> usize {
             let _ = scheduler.terminate_task(task, -1);
             let _ = scheduler.reap_child(parent_id, task);
             drop(scheduler);
+            SERVICE_RECORDS.lock()[idx] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Declared });
             if start_locked(id, parent_id).is_ok() {
                 restarted += 1;
             }

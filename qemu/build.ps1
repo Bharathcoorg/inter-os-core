@@ -124,7 +124,9 @@ if ($LASTEXITCODE -ne 0) {
 
 # 5. Package bootable disk image for QEMU bare-metal x86_64
 Write-Host "[Packaging] Packaging bootable disk image with bootloader..." -ForegroundColor Yellow
-$kernelElf = "$rootDir\target\x86_64-unknown-none\debug\kernel"
+$k1 = "$rootDir\target\x86_64-unknown-none\debug\kernel"
+$k2 = "$rootDir\kernel\target\x86_64-unknown-none\debug\kernel"
+$kernelElf = if ((Test-Path $k2) -and (-not (Test-Path $k1) -or (Get-Item $k2).LastWriteTime -gt (Get-Item $k1).LastWriteTime)) { $k2 } else { $k1 }
 $outputImg = "$rootDir\target\inter-os-bios.img"
 
 cargo +nightly run --manifest-path "$rootDir\boot\Cargo.toml" -- "$kernelElf" "$outputImg"

@@ -1,20 +1,153 @@
 #![no_std]
 #![no_main]
+
 use core::panic::PanicInfo;
 use interos_std as std;
-const W:usize=720; const H:usize=1440;
-fn fill_row(row:&mut [u32;W],y:usize,packages:usize,windows:usize,services:usize){
- row.fill(if y<96{std::design::color::SURFACE}else{std::design::color::BACKGROUND});
- if y<96{let activity=((std::get_ticks(2).unwrap_or(0)%600)as usize).min(W-48);for x in 24..24+activity{row[x]=std::design::color::ACCENT;}}
- if (112..232).contains(&y){for x in 24..W-24{row[x]=std::design::color::SURFACE;}}
- if y==248{for x in 24..W-24{row[x]=std::design::color::BORDER;}}
- let rows=((packages.max(1)+1)/2).min(4);
- for card in 0..rows*2{let col=card%2;let r=card/2;let x0=56+col*304;let y0=400+r*180;if y>=y0&&y<y0+130{for x in x0..x0+250{row[x]=std::design::color::SURFACE;}}if y>=y0+20&&y<y0+84{for x in x0+93..x0+157{row[x]=std::design::color::ACCENT;}}}
- if (1170..1240).contains(&y){for x in 24..W-24{row[x]=std::design::color::SURFACE_RAISED;}}
- if (1270..1400).contains(&y){for x in 24..W-24{row[x]=std::design::color::SURFACE;}}
- for (i,n) in [windows.min(8),services.min(8)].iter().enumerate(){let x0=48+i*300;for k in 0..*n{for x in x0+k*24..x0+k*24+14{row[x]=std::design::color::SUCCESS;}}}
+
+const W: usize = 720;
+const H: usize = 1440;
+const CHUNK: usize = 4096;
+
+fn render_full(surface: u32) {
+    let mut chunk = [0u32; CHUNK];
+    let total = W * H;
+    let mut offset = 0;
+    while offset < total {
+        let count = (total - offset).min(CHUNK);
+        let mut x = offset % W;
+        let mut y = offset / W;
+        for i in 0..count {
+            if y < 96 {
+                chunk[i] = if y >= 94 { std::design::color::ACCENT } else { std::design::color::SURFACE };
+            } else if (112..232).contains(&y) && x >= 24 && x < W - 24 {
+                chunk[i] = std::design::color::SURFACE;
+            } else if (400..530).contains(&y) && x >= 56 && x < 306 {
+                chunk[i] = if (420..484).contains(&y) && x >= 149 && x < 213 {
+                    std::design::color::ACCENT
+                } else {
+                    std::design::color::SURFACE
+                };
+            } else if (400..530).contains(&y) && x >= 360 && x < 610 {
+                chunk[i] = if (420..484).contains(&y) && x >= 453 && x < 517 {
+                    std::design::color::SUCCESS
+                } else {
+                    std::design::color::SURFACE
+                };
+            } else if (1270..1400).contains(&y) && x >= 24 && x < W - 24 {
+                chunk[i] = std::design::color::SURFACE;
+            } else {
+                chunk[i] = std::design::color::BACKGROUND;
+            }
+            x += 1;
+            if x == W {
+                x = 0;
+                y += 1;
+            }
+        }
+        let _ = std::surface_write(4, surface, offset, &chunk[..count]);
+        offset += count;
+    }
+    std::log(0, "[LAUNCHER] render_full complete.").ok();
 }
-fn render(surface:u32,p:usize,w:usize,s:usize){let mut row=[0u32;W];for y in 0..H{fill_row(&mut row,y,p,w,s);let _=std::surface_write(4,surface,(y*W)as usize,&row);}}
-fn first_launchable(c:&[u8])->Option<&[u8]>{let mut start=0;while start<c.len(){let end=c[start..].iter().position(|b|*b==b'\n').map(|p|start+p).unwrap_or(c.len());let line=&c[start..end];if line.starts_with(b"org.interos.settings|")||line.starts_with(b"org.interos.terminal|"){if let Some(p)=line.iter().position(|b|*b==b'|'){return Some(&line[..p]);}}if end==c.len(){break}start=end+1;}None}
-#[no_mangle]pub extern "C" fn _start()->!{std::log(0,"[LAUNCHER USERSPACE] Live launcher online.").ok();let surface=match std::surface_create(4,W as u32,H as u32,0){Ok(id)=>id,Err(_)=>std::exit_with_code(1)};let mut catalog=[0u8;2048];let mut windows=[0u8;4096];let mut services=[0u8;1024];let n=std::package_list(3,&mut catalog).unwrap_or(0);let p=&catalog[..n];let package_count=p.iter().filter(|b|**b==b'\n').count();let wc=std::window_list(&mut windows).map(|n|if n>0{1}else{0}).unwrap_or(0);let sc=std::service_list(&mut services).map(|n|if n>0{1}else{0}).unwrap_or(0);render(surface,package_count,wc,sc);let _=std::surface_flip(4);let mut launched=false;loop{if let Ok(events)=std::event_poll(std::EVENT_TOUCH_INPUT|std::EVENT_TIMER_TICK|std::EVENT_IPC_MSG,100){if !launched&&(events&std::EVENT_TOUCH_INPUT)!=0{if let Some(id)=first_launchable(p){if std::ipc_send(1,2,0x5001,id).is_ok(){launched=true;}}}if events&std::EVENT_TIMER_TICK!=0{let wc=std::window_list(&mut windows).map(|n|if n>0{1}else{0}).unwrap_or(0);let sc=std::service_list(&mut services).map(|n|if n>0{1}else{0}).unwrap_or(0);render(surface,package_count,wc,sc);let _=std::surface_flip(4);}}let _=std::touch_poll();std::yield_now();}}
-#[panic_handler]fn panic(_info:&PanicInfo)->!{std::exit();}
+
+fn render_header(surface: u32) {
+    let mut chunk = [0u32; CHUNK];
+    let total = W * 96;
+    let mut offset = 0;
+    let ticks = std::get_ticks(1).unwrap_or(0);
+    let activity = ((ticks % 600) as usize).min(W - 48);
+    while offset < total {
+        let count = (total - offset).min(CHUNK);
+        let mut x = offset % W;
+        let mut y = offset / W;
+        for i in 0..count {
+            if y >= 94 {
+                chunk[i] = std::design::color::ACCENT;
+            } else if y >= 40 && y < 44 && x >= 24 && x < 24 + activity {
+                chunk[i] = std::design::color::ACCENT;
+            } else {
+                chunk[i] = std::design::color::SURFACE;
+            }
+            x += 1;
+            if x == W {
+                x = 0;
+                y += 1;
+            }
+        }
+        let _ = std::surface_write(4, surface, offset, &chunk[..count]);
+        offset += count;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn _start() -> ! {
+    std::log(0, "[LAUNCHER USERSPACE] Live launcher online.").ok();
+    
+    std::log(0, "[LAUNCHER] Step 1: Allocating desktop surface (z=0)...").ok();
+    let surface = match std::surface_create(4, W as u32, H as u32, 0) {
+        Ok(id) => {
+            std::log(0, "[LAUNCHER] Step 2: Surface created successfully.").ok();
+            id
+        }
+        Err(_) => {
+            std::log(0, "[LAUNCHER] Step 2: Surface creation failed!").ok();
+            std::exit_with_code(1)
+        }
+    };
+
+    std::log(0, "[LAUNCHER] Step 3: Rendering launcher UI canvas...").ok();
+    render_full(surface);
+    std::log(0, "[LAUNCHER] Step 4: Presenting initial frame to scanout...").ok();
+    let _ = std::surface_flip(4);
+    std::log(0, "[LAUNCHER] Step 5: Initial presentation complete.").ok();
+
+    let mut app_stage: usize = 0;
+    let mut ticks_seen: u64 = 0;
+
+    loop {
+        if let Ok(events) = std::event_poll(
+            std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK | std::EVENT_IPC_MSG,
+            100,
+        ) {
+            let _ = std::service_heartbeat(10);
+            if (events & std::EVENT_TIMER_TICK) != 0 {
+                ticks_seen += 1;
+                if ticks_seen % 10 == 0 {
+                    render_header(surface);
+                    let _ = std::surface_flip(4);
+                }
+            }
+
+            // Stage 0: Launch primary application (Settings)
+            if app_stage == 0 && ((events & std::EVENT_TOUCH_INPUT) != 0 || ticks_seen >= 2) {
+                std::log(0, "[LAUNCHER USERSPACE] Launching primary application: org.interos.settings.").ok();
+                // Slot 2 is IpcSend targeting Task 1 (PID 1)
+                if std::ipc_send(2, 1, 0x5001, b"org.interos.settings").is_ok() {
+                    std::log(0, "[LAUNCHER USERSPACE] Primary app launch IPC successfully dispatched.").ok();
+                    app_stage = 1;
+                } else {
+                    std::log(0, "[LAUNCHER USERSPACE] Primary app launch IPC failed.").ok();
+                }
+            }
+
+            // Stage 1: Wait for primary app to complete and exit, then launch secondary (Terminal)
+            if app_stage == 1 && ticks_seen >= 12 {
+                std::log(0, "[LAUNCHER USERSPACE] Primary application session concluded. Launcher remains alive.").ok();
+                std::log(0, "[LAUNCHER USERSPACE] Launching secondary application: org.interos.terminal.").ok();
+                if std::ipc_send(2, 1, 0x5001, b"org.interos.terminal").is_ok() {
+                    std::log(0, "[LAUNCHER USERSPACE] Secondary app launch IPC successfully dispatched.").ok();
+                    app_stage = 2;
+                } else {
+                    std::log(0, "[LAUNCHER USERSPACE] Secondary app launch IPC failed.").ok();
+                }
+            }
+        }
+        let _ = std::touch_poll();
+        std::yield_now();
+    }
+}
+
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
+    std::exit();
+}

@@ -115,6 +115,7 @@ impl DrmKmsController {
         let id = self.next_surface_id;
         self.next_surface_id += 1;
         self.surfaces.push(DrmSurface::new(id, width, height, z_order, owner_task));
+        self.focused_surface = Some(id);
         id
     }
 
@@ -133,6 +134,9 @@ impl DrmKmsController {
     pub fn destroy_surface(&mut self, id: u32) -> bool {
         if let Some(pos) = self.surfaces.iter().position(|s| s.id == id) {
             self.surfaces.remove(pos);
+            if self.focused_surface == Some(id) {
+                self.focused_surface = self.surfaces.iter().filter(|s| s.visible).max_by_key(|s| s.z_order).map(|s| s.id);
+            }
             true
         } else {
             false
@@ -145,6 +149,9 @@ impl DrmKmsController {
             s.id == id && owner_task.map(|owner| s.owner_task == owner).unwrap_or(true)
         }) {
             self.surfaces.remove(pos);
+            if self.focused_surface == Some(id) {
+                self.focused_surface = self.surfaces.iter().filter(|s| s.visible).max_by_key(|s| s.z_order).map(|s| s.id);
+            }
             true
         } else {
             false
@@ -155,6 +162,11 @@ impl DrmKmsController {
     pub fn destroy_surfaces_owned_by(&mut self, owner_task: u64) -> usize {
         let before = self.surfaces.len();
         self.surfaces.retain(|s| s.owner_task != owner_task);
+        if let Some(focused) = self.focused_surface {
+            if !self.surfaces.iter().any(|s| s.id == focused) {
+                self.focused_surface = self.surfaces.iter().filter(|s| s.visible).max_by_key(|s| s.z_order).map(|s| s.id);
+            }
+        }
         before - self.surfaces.len()
     }
 

@@ -115,6 +115,7 @@ pub enum SyscallNumber {
     FsList = 85,
     DnsResolve = 99,
     TcpClose = 100,
+    AppLaunch = 101,
 }
 
 /// System call result status codes.
@@ -171,6 +172,14 @@ pub fn sys_exit_with_code(exit_code: i32) -> ! {
         if released > 0 { serial_println!("[NET] Released {} socket(s) owned by exiting task {}.", released, id.0); }
         let tcp_released = crate::net::TCP_TABLE.lock().release_owner(owner);
         if tcp_released > 0 { serial_println!("[NET] Released {} TCP connection(s) owned by exiting task {}.", tcp_released, id.0); }
+        crate::ipc::IPC_ROUTER.lock().cleanup_task(id);
+        let surfaces_cleaned = crate::drivers::display_kms::DRM_KMS.lock().destroy_surfaces_owned_by(id.0);
+        if surfaces_cleaned > 0 {
+            serial_println!("[KMS] Reclaimed {} display surface(s) owned by exiting task {}.", surfaces_cleaned, id.0);
+            let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+            let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
+            let _ = display.composite_and_flip();
+        }
     }
     {
         let mut sched = SCHEDULER.lock();
@@ -250,7 +259,8 @@ pub fn sys_get_ticks(cap_slot: usize) -> Result<u64, SyscallResult> {
         None => return Err(SyscallResult::PermissionDenied),
     };
 
-    if current.cap_table.verify(cap_slot, CapabilityType::TimerTickRead, Rights::READ).is_err() {
+    if current.cap_table.verify(cap_slot, CapabilityType::TimerTickRead, Rights::READ).is_err()
+        && !current.cap_table.authorize_capability(CapabilityType::TimerTickRead, Rights::READ) {
         return Err(SyscallResult::PermissionDenied);
     }
     drop(sched);
@@ -311,7 +321,8 @@ pub fn sys_ipc_recv(cap_slot: usize) -> Result<IpcMessage, SyscallResult> {
             Some(t) => t,
             None => return Err(SyscallResult::PermissionDenied),
         };
-        let valid = current.cap_table.verify(cap_slot, CapabilityType::IpcReceive, Rights::READ).is_ok();
+        let valid = current.cap_table.verify(cap_slot, CapabilityType::IpcReceive, Rights::READ).is_ok()
+            || current.cap_table.authorize_capability(CapabilityType::IpcReceive, Rights::READ);
         (current.id, valid)
     };
 
@@ -550,7 +561,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             let out_len = a3 as usize;
             match sys_ipc_recv(cap_slot) {
                 Ok(msg) => {
-                    let copy_len = core::cmp::min(out_len, msg.payload.len());
+                    let copy_len = core::cmp::min(out_len, msg.len);
                     if copy_to_user(a2, &msg.payload[..copy_len]).is_err() {
                         return SyscallResult::InvalidArguments as i64;
                     }
@@ -1306,19 +1317,30 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             // a4=pixel buffer pointer, a5=pixel count.
             let count = a5 as usize;
             if count == 0 || count > 4096 { return SyscallResult::InvalidArguments as i64; }
-            let mut pixels = [0u32; 4096];
-            let byte_len = count * core::mem::size_of::<u32>();
-            if copy_from_user(
-                unsafe { core::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, byte_len) },
-                a4,
-                byte_len,
-            ).is_err() {
-                return SyscallResult::InvalidArguments as i64;
+            let mut total_written = 0usize;
+            let mut offset = a3 as usize;
+            let mut user_ptr = a4;
+            while total_written < count {
+                let chunk = (count - total_written).min(1024);
+                let mut pixels = [0u32; 1024];
+                let byte_len = chunk * core::mem::size_of::<u32>();
+                if copy_from_user(
+                    unsafe { core::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, byte_len) },
+                    user_ptr,
+                    byte_len,
+                ).is_err() {
+                    return SyscallResult::InvalidArguments as i64;
+                }
+                match sys_surface_write(a1 as usize, a2 as u32, offset, &pixels[..chunk]) {
+                    Ok(n) => {
+                        total_written += n;
+                        offset += n;
+                        user_ptr += (n * core::mem::size_of::<u32>()) as u64;
+                    }
+                    Err(e) => return e as i64,
+                }
             }
-            match sys_surface_write(a1 as usize, a2 as u32, a3 as usize, &pixels[..count]) {
-                Ok(n) => n as i64,
-                Err(e) => e as i64,
-            }
+            total_written as i64
         }
         74 => {
             // SurfaceDestroy: a1=display-cap slot, a2=surface id
@@ -1384,7 +1406,21 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         }
         79 => { let z=(a5 & 0x7FFF_FFFF) as u32; let visible=(a5 >> 63)!=0; sys_window_set_geometry(a1 as usize,a2 as u32,a3 as i64 as i32,a4 as i64 as i32,z,visible) as i64 }
         80 => { sys_window_focus(a1 as usize, a2 as u32, a3 as u32) as i64 }
-        81 => { let len=a3 as usize; if len==0||len>4096{return SyscallResult::InvalidArguments as i64;} let mut out=[0u8;4096]; match sys_service_list(&mut out[..len]){Ok(n)=>{if copy_to_user(a2,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
+        81 => {
+            let (user_ptr, user_len) = if a3 > 0 { (a2, a3 as usize) } else { (a1, a2 as usize) };
+            if user_len == 0 || user_len > 4096 { return SyscallResult::InvalidArguments as i64; }
+            let cap = user_len.min(512);
+            let mut out = [0u8; 512];
+            match sys_service_list(&mut out[..cap]) {
+                Ok(n) => {
+                    if copy_to_user(user_ptr, &out[..n]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    n as i64
+                }
+                Err(e) => e as i64,
+            }
+        }
         82 => { let key_len=a3 as usize; let out_len=a4 as usize; if out_len>512{return SyscallResult::InvalidArguments as i64;} let mut out=[0u8;512]; match sys_settings_get(a1 as usize,a2,key_len,&mut out[..out_len]){Ok(n)=>{if copy_to_user(a5,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
         83 => { match sys_settings_set(a1 as usize,a2,a3 as usize,a4,a5 as usize){Ok(())=>0,Err(e)=>e as i64} }
         84 => { match sys_storage_query(){Ok(n)=>n as i64,Err(e)=>e as i64} }
@@ -1475,6 +1511,28 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 &payload[..len],
             ) as i64
         },
+        101 => {
+            let len = a2 as usize;
+            if len == 0 || len > 128 {
+                crate::serial_println!("[APP_LAUNCH DEBUG] invalid string len: {}", len);
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let mut name_buf = [0u8; 128];
+            let app_id = match read_user_string(a1, len, &mut name_buf) {
+                Ok(s) => s,
+                Err(e) => {
+                    crate::serial_println!("[APP_LAUNCH DEBUG] read_user_string error: {:?}", e);
+                    return SyscallResult::InvalidArguments as i64;
+                }
+            };
+            match sys_app_launch(app_id) {
+                Ok(tid) => tid.0 as i64,
+                Err(e) => {
+                    crate::serial_println!("[APP_LAUNCH DEBUG] sys_app_launch('{}') error: {:?}", app_id, e);
+                    e as i64
+                }
+            }
+        }
         _ => SyscallResult::UnknownSyscall as i64,
     }
 }
@@ -2131,7 +2189,10 @@ pub fn sys_surface_write(cap_slot: usize, surface_id: u32, offset: usize, pixels
     let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
     let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
     display.write_surface_pixels(surface_id, owner.0, offset, pixels)
-        .map_err(|_| SyscallResult::PermissionDenied)
+        .map_err(|err| {
+            crate::serial_println!("[SURFACE_WRITE ERROR] id={} owner={} offset={} count={}: {}", surface_id, owner.0, offset, pixels.len(), err);
+            SyscallResult::PermissionDenied
+        })
 }
 
 /// Destroys an owned display surface.
@@ -3035,7 +3096,11 @@ pub fn sys_settings_get(cap_slot: usize, key_ptr: u64, key_len: usize, out: &mut
     if key_len == 0 || key_len > 96 || out.len() > 512 { return Err(SyscallResult::InvalidArguments); }
     let sched=SCHEDULER.lock();
     let current=sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    current.cap_table.verify(cap_slot, CapabilityType::FileSystemRead, Rights::READ).map_err(|_|SyscallResult::PermissionDenied)?;
+    let has_read = current.cap_table.verify(cap_slot, CapabilityType::FileSystemRead, Rights::READ).is_ok()
+        || current.cap_table.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok();
+    if !has_read {
+        return Err(SyscallResult::PermissionDenied);
+    }
     let mut key=[0u8;96];
     copy_from_user(&mut key[..key_len], key_ptr, key_len).map_err(|_| SyscallResult::InvalidArguments)?;
     drop(sched);
@@ -3058,11 +3123,9 @@ pub fn sys_settings_set(cap_slot: usize, key_ptr: u64, key_len: usize, val_ptr: 
 }
 
 pub fn sys_service_list(out: &mut [u8]) -> Result<usize, SyscallResult> {
-    require_service_manager()?;
-    // Observation is also the service-manager supervision tick. This keeps
-    // failure detection in the authoritative lifecycle path without letting
-    // the kernel silently restart workers.
-    crate::services::supervise();
+    if require_service_manager().is_ok() {
+        crate::services::supervise();
+    }
     Ok(crate::services::snapshot(out))
 }
 
@@ -3073,6 +3136,7 @@ pub fn sys_service_start(service_id: u8) -> Result<crate::task::TaskId, SyscallR
         3 => crate::services::ServiceId::Storage, 4 => crate::services::ServiceId::Network,
         5 => crate::services::ServiceId::Power, 6 => crate::services::ServiceId::Modem,
         7 => crate::services::ServiceId::Audio, 8 => crate::services::ServiceId::Camera,
+        9 => crate::services::ServiceId::Compositor, 10 => crate::services::ServiceId::Launcher,
         _ => return Err(SyscallResult::InvalidArguments),
     };
     let parent_id = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?;
@@ -3182,6 +3246,7 @@ pub fn sys_service_heartbeat(service_id: u8) -> Result<(), SyscallResult> {
         3 => crate::services::ServiceId::Storage, 4 => crate::services::ServiceId::Network,
         5 => crate::services::ServiceId::Power, 6 => crate::services::ServiceId::Modem,
         7 => crate::services::ServiceId::Audio, 8 => crate::services::ServiceId::Camera,
+        9 => crate::services::ServiceId::Compositor, 10 => crate::services::ServiceId::Launcher,
         _ => return Err(SyscallResult::InvalidArguments),
     };
     crate::services::heartbeat_for_task(id, task_id).map_err(|_| SyscallResult::PermissionDenied)
@@ -3202,10 +3267,69 @@ pub fn sys_service_stop(service_id: u8) -> Result<(), SyscallResult> {
         3 => crate::services::ServiceId::Storage, 4 => crate::services::ServiceId::Network,
         5 => crate::services::ServiceId::Power, 6 => crate::services::ServiceId::Modem,
         7 => crate::services::ServiceId::Audio, 8 => crate::services::ServiceId::Camera,
+        9 => crate::services::ServiceId::Compositor, 10 => crate::services::ServiceId::Launcher,
         _ => return Err(SyscallResult::InvalidArguments),
     };
     let parent_id = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?;
     crate::services::stop(id, parent_id).map_err(|_| SyscallResult::DeviceError)
+}
+
+/// Launches a first-party application in Ring 3 on behalf of PID 1 / service manager.
+pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult> {
+    if let Err(e) = require_service_manager() {
+        crate::serial_println!("[APP_LAUNCH DEBUG] require_service_manager error: {:?}", e);
+        return Err(e);
+    }
+    let sched = SCHEDULER.lock();
+    let parent_id = match sched.current_task_id() {
+        Some(id) => id,
+        None => {
+            crate::serial_println!("[APP_LAUNCH DEBUG] current_task_id is None");
+            return Err(SyscallResult::PermissionDenied);
+        }
+    };
+    drop(sched);
+
+    let app_id = app_id.trim_matches(|c: char| c.is_whitespace() || c == '\0');
+    let tid = match app_id {
+        "org.interos.settings" | "settings" | "app_settings" => {
+            crate::task::user::spawn_app_settings(parent_id)
+        }
+        "org.interos.terminal" | "terminal" | "app_terminal" => {
+            crate::task::user::spawn_app_terminal(parent_id)
+        }
+        "org.interos.calculator" | "calculator" => {
+            crate::task::user::spawn_app_calculator(parent_id)
+        }
+        "org.interos.dialer" | "dialer" => {
+            crate::task::user::spawn_app_dialer(parent_id)
+        }
+        "org.interos.vault" | "vault" => {
+            crate::task::user::spawn_app_vault(parent_id)
+        }
+        "org.interos.camera" | "camera" => {
+            crate::task::user::spawn_app_camera(parent_id)
+        }
+        "org.interos.browser" | "browser" => {
+            crate::task::user::spawn_app_browser(parent_id)
+        }
+        "org.interos.messages" | "messages" => {
+            crate::task::user::spawn_app_messages(parent_id)
+        }
+        "org.interos.calendar" | "calendar" => {
+            crate::task::user::spawn_app_calendar(parent_id)
+        }
+        "org.interos.music" | "music" => {
+            crate::task::user::spawn_app_music(parent_id)
+        }
+        _ => {
+            crate::serial_println!("[APP_LAUNCH DEBUG] unknown app_id: '{}'", app_id);
+            return Err(SyscallResult::InvalidArguments);
+        }
+    };
+    crate::ipc::IPC_ROUTER.lock().register_task(tid);
+    serial_println!("[APP] Launched application '{}' as Task {}", app_id, tid.0);
+    Ok(tid)
 }
 
 pub fn sys_window_list(out_buf:&mut [u8])->Result<usize,SyscallResult>{

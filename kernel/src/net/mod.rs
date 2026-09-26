@@ -287,7 +287,10 @@ pub fn poll_network_interface() -> usize {
                                             if let Some(conn) = table.get_mut(id) {
                                                 let old_state = conn.state;
                                                 if segment.flags & 0x12 == 0x12 && old_state == TcpState::SynSent {
-                                                    if segment.ack == conn.send_seq.wrapping_add(1) {
+                                                    if segment.ack != conn.send_seq.wrapping_add(1) {
+                                                        // SYN consumes one sequence number; the ACK must
+                                                        // acknowledge exactly that SYN before we enter Established.
+                                                    } else {
                                                         conn.recv_seq = segment.seq.wrapping_add(1);
                                                         conn.send_seq = conn.send_seq.wrapping_add(1);
                                                         conn.state = TcpState::Established;

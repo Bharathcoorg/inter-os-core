@@ -50,7 +50,14 @@ pub extern "C" fn _start() -> ! {
             let _ = std::log(0, "[PID1] Service bootstrap validation failed.");
         }
     }
+
+    // Launch UI subsystem services: Compositor (9) and Launcher (10)
+    const UI_SERVICES: [u8; 2] = [9, 10];
+    for service_id in UI_SERVICES {
+        let _ = std::service_start(service_id);
+    }
     let mut last_poll = 0u64;
+    let mut ipc_buf = [0u8; 64];
 
     loop {
         let now = std::get_ticks(0).unwrap_or(last_poll);
@@ -69,6 +76,20 @@ pub extern "C" fn _start() -> ! {
                 }
             }
             last_poll = now;
+        }
+
+        // Check for incoming IPC requests from launcher
+        if let Ok(msg_len) = std::ipc_recv(10, &mut ipc_buf) {
+            if msg_len > 0 {
+                let _ = std::log(0, "[PID1] Application launch request received via IPC from launcher.");
+                let app_id = core::str::from_utf8(&ipc_buf[..msg_len]).unwrap_or("").trim_matches(|c: char| c.is_whitespace() || c == '\0');
+                if !app_id.is_empty() {
+                    match std::app_launch(app_id) {
+                        Ok(_) => { let _ = std::log(0, "[PID1] Target application launched successfully in Ring 3."); }
+                        Err(_) => { let _ = std::log(0, "[PID1] Target application launch rejected."); }
+                    }
+                }
+            }
         }
 
         // Block cooperatively until an IPC/timer/input event instead of

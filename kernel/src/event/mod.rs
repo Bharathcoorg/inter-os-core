@@ -91,8 +91,10 @@ impl EventReactor {
             if matched != 0 {
                 sub.pending_mask |= matched;
                 if sub.is_waiting {
-                    sub.is_waiting = false;
-                    SCHEDULER.lock().unblock_task(task_id);
+                    if let Some(mut sched) = SCHEDULER.try_lock() {
+                        sub.is_waiting = false;
+                        sched.unblock_task(task_id);
+                    }
                 }
             }
         }
@@ -100,13 +102,27 @@ impl EventReactor {
 
     /// Broadcasts an event to all tasks registered with interest in the event mask.
     pub fn broadcast_event(&mut self, event_mask: u32) {
+        let mut to_unblock = [None; 16];
+        let mut count = 0;
         for sub in self.subscriptions.iter_mut() {
             let matched = event_mask & sub.interest_mask;
             if matched != 0 {
                 sub.pending_mask |= matched;
-                if sub.is_waiting {
-                    sub.is_waiting = false;
-                    SCHEDULER.lock().unblock_task(sub.task_id);
+                if sub.is_waiting && count < 16 {
+                    to_unblock[count] = Some(sub.task_id);
+                    count += 1;
+                }
+            }
+        }
+        if count > 0 {
+            if let Some(mut sched) = SCHEDULER.try_lock() {
+                for i in 0..count {
+                    if let Some(task_id) = to_unblock[i] {
+                        if let Some(sub) = self.subscriptions.iter_mut().find(|s| s.task_id == task_id) {
+                            sub.is_waiting = false;
+                        }
+                        sched.unblock_task(task_id);
+                    }
                 }
             }
         }
@@ -171,13 +187,29 @@ impl EventReactor {
 
     /// Invoked on hardware timer tick to evaluate deadlines and wake timed-out tasks.
     pub fn on_tick(&mut self, current_ticks: u64) {
+        let mut to_unblock = [None; 16];
+        let mut count = 0;
         for sub in self.subscriptions.iter_mut() {
             if sub.is_waiting && sub.wait_until_tick > 0 && current_ticks >= sub.wait_until_tick {
-                sub.is_waiting = false;
                 if (sub.interest_mask & EVENT_TIMER_TICK) != 0 {
                     sub.pending_mask |= EVENT_TIMER_TICK;
                 }
-                SCHEDULER.lock().unblock_task(sub.task_id);
+                if count < 16 {
+                    to_unblock[count] = Some(sub.task_id);
+                    count += 1;
+                }
+            }
+        }
+        if count > 0 {
+            if let Some(mut sched) = SCHEDULER.try_lock() {
+                for i in 0..count {
+                    if let Some(task_id) = to_unblock[i] {
+                        if let Some(sub) = self.subscriptions.iter_mut().find(|s| s.task_id == task_id) {
+                            sub.is_waiting = false;
+                        }
+                        sched.unblock_task(task_id);
+                    }
+                }
             }
         }
     }

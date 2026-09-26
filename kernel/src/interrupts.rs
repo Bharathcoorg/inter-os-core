@@ -192,6 +192,11 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     if ticks > 0 && ticks % 1000 == 0 {
         serial_println!("[KERNEL TICK HEARTBEAT] System uptime: {} ticks", ticks);
     }
+    if ticks > 0 && ticks % 2000 == 0 {
+        if let Some(sched) = crate::task::SCHEDULER.try_lock() {
+            sched.dump_process_table();
+        }
+    }
 
     unsafe {
         PICS.lock()

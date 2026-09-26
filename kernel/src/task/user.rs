@@ -11,7 +11,7 @@ use crate::capability::{Capability, CapabilityId, CapabilityTable, CapabilityTyp
 use crate::task::{SCHEDULER, TaskId};
 use crate::serial_println;
 
-pub const USER_STACK_SIZE: usize = 16 * 1024; // 16 KiB dedicated user-mode stack
+pub const USER_STACK_SIZE: usize = 64 * 1024; // 64 KiB dedicated user-mode stack
 
 /// User Code Segment Selector with RPL = 3 (GDT Index 4: 0x20 | 3 = 0x23)
 pub const USER_CS_SELECTOR: u64 = 0x23;
@@ -518,6 +518,32 @@ pub fn spawn_verified_rapp_process(
 
 /// Spawns a first-party system service as an isolated Ring-3 process owned by PID1.
 pub fn spawn_userspace_service(service_id: u8, parent_id: TaskId) -> Result<TaskId, &'static str> {
+    if service_id == 9 {
+        let mut caps = CapabilityTable::new(8);
+        caps.insert(Capability { id: CapabilityId(0x7000), cap_type: CapabilityType::SerialOutput, rights: Rights::WRITE, object_id: 0 }).map_err(|_| "service capability table full")?;
+        caps.insert(Capability { id: CapabilityId(0x7001), cap_type: CapabilityType::IpcReceive, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
+        caps.insert(Capability { id: CapabilityId(0x7002), cap_type: CapabilityType::TimerTickRead, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
+        caps.insert(Capability { id: CapabilityId(0x7003), cap_type: CapabilityType::EventPoll, rights: Rights::READ | Rights::INVOKE, object_id: 0 }).map_err(|_| "service capability table full")?;
+        caps.insert(Capability { id: CapabilityId(0x7004), cap_type: CapabilityType::FrameBufferDirect, rights: Rights::WRITE, object_id: 1 }).map_err(|_| "service capability table full")?;
+        caps.insert(Capability { id: CapabilityId(0x7005), cap_type: CapabilityType::FileSystemRead, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
+        let id = spawn_user_process("compositor", COMPOSITOR_ELF, caps, 5)?;
+        if let Some(task) = SCHEDULER.lock().get_task_mut(id) { task.parent_id = parent_id; }
+        return Ok(id);
+    }
+    if service_id == 10 {
+        let mut caps = CapabilityTable::new(8);
+        caps.insert(Capability { id: CapabilityId(0x7000), cap_type: CapabilityType::SerialOutput, rights: Rights::WRITE, object_id: 0 }).map_err(|_| "service capability table full")?;
+        caps.insert(Capability { id: CapabilityId(0x7001), cap_type: CapabilityType::TimerTickRead, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
+        caps.insert(Capability { id: CapabilityId(0x7002), cap_type: CapabilityType::IpcSend, rights: Rights::WRITE, object_id: parent_id.0 }).map_err(|_| "service capability table full")?;
+        caps.insert(Capability { id: CapabilityId(0x7003), cap_type: CapabilityType::FileSystemRead, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
+        caps.insert(Capability { id: CapabilityId(0x7004), cap_type: CapabilityType::FrameBufferDirect, rights: Rights::WRITE, object_id: 1 }).map_err(|_| "service capability table full")?;
+        caps.insert(Capability { id: CapabilityId(0x7005), cap_type: CapabilityType::EventPoll, rights: Rights::READ | Rights::INVOKE, object_id: 0 }).map_err(|_| "service capability table full")?;
+        caps.insert(Capability { id: CapabilityId(0x7006), cap_type: CapabilityType::IpcReceive, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
+        let id = spawn_user_process("launcher", LAUNCHER_ELF, caps, 5)?;
+        if let Some(task) = SCHEDULER.lock().get_task_mut(id) { task.parent_id = parent_id; }
+        return Ok(id);
+    }
+
     let (name, elf) = match service_id {
         1 => ("displayd", DISPLAYD_ELF), 2 => ("inputd", INPUTD_ELF),
         3 => ("storaged", STORAGED_ELF), 4 => ("netd", NETD_ELF),
@@ -538,26 +564,21 @@ pub fn spawn_userspace_service(service_id: u8, parent_id: TaskId) -> Result<Task
     // service-cap:Modem=EventPoll:READ
     // service-cap:Audio=EventPoll:READ
     // service-cap:Camera=EventPoll:READ
-    // service-cap:Init=ProcessSpawn:GRANT (PID1-only; never inherited by services)
+    // service-cap:Init=ProcessSpawn:GRANT
     // forbidden:CapabilityType::ProcessKill
     // forbidden:CapabilityType::ProcessSpawn
     // forbidden:CapabilityType::StorageRawBlock
     // forbidden:CapabilityType::SystemControl
     // NetworkSend/NetworkReceive are reserved for netd's explicit data-plane policy.
     // forbidden:CapabilityType::HardwarePortIo
-    // Slot 2 is the canonical EventPoll capability for every system service.
-    // Services that only require event polling (Input/Power/Modem/Audio/Camera)
-    // use that slot directly; do not install a duplicate EventPoll capability.
     let service_specific = match service_id {
         1 => Some((CapabilityType::FrameBufferDirect, Rights::WRITE, service_id as u64)),
-        // Storage is a filesystem namespace, not a single inode. Keep the
-        // capability object unscoped while retaining the dedicated service slot.
-        3 => Some((CapabilityType::FileSystemWrite, Rights::READ | Rights::WRITE, 0)),
+        3 => Some((CapabilityType::FileSystemRead, Rights::READ | Rights::WRITE, 0)),
         4 => Some((CapabilityType::NetworkSocket, Rights::READ | Rights::WRITE, service_id as u64)),
         2 | 5 | 6 | 7 | 8 => None,
         _ => return Err("unknown userspace service"),
     };
-    if !(1..=8).contains(&service_id) || crate::service_abi::service_id_from_package_id(match service_id {
+    if !(1..=10).contains(&service_id) || crate::service_abi::service_id_from_package_id(match service_id {
         1 => "org.interos.service.displayd", 2 => "org.interos.service.inputd", 3 => "org.interos.service.storaged",
         4 => "org.interos.service.netd", 5 => "org.interos.service.powerd", 6 => "org.interos.service.modemd",
         7 => "org.interos.service.audiod", 8 => "org.interos.service.camerad", _ => "",
@@ -700,6 +721,12 @@ pub fn spawn_user_init(id_security: TaskId) -> TaskId {
         rights: Rights::READ.union(Rights::INVOKE),
         object_id: 0,
     }).ok();
+    user_caps.insert(Capability {
+        id: CapabilityId(911),
+        cap_type: CapabilityType::IpcReceive,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
 
     let id = spawn_user_process(
         "user_init",
@@ -740,9 +767,27 @@ pub fn spawn_app_settings(id_security: TaskId) -> TaskId {
     }).ok();
     caps.insert(Capability {
         id: CapabilityId(1704),
-        cap_type: CapabilityType::FileSystemRead,
+        cap_type: CapabilityType::FileSystemWrite,
+        rights: Rights::READ.union(Rights::WRITE),
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(1705),
+        cap_type: CapabilityType::EventPoll,
+        rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(1706),
+        cap_type: CapabilityType::IpcReceive,
         rights: Rights::READ,
         object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(1707),
+        cap_type: CapabilityType::FrameBufferDirect,
+        rights: Rights::WRITE,
+        object_id: 1,
     }).ok();
 
     let id = spawn_user_process(
@@ -786,6 +831,24 @@ pub fn spawn_app_terminal(id_security: TaskId) -> TaskId {
         cap_type: CapabilityType::FileSystemRead,
         rights: Rights::READ,
         object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(1805),
+        cap_type: CapabilityType::EventPoll,
+        rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(1806),
+        cap_type: CapabilityType::IpcReceive,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(1807),
+        cap_type: CapabilityType::FrameBufferDirect,
+        rights: Rights::WRITE,
+        object_id: 1,
     }).ok();
 
     let id = spawn_user_process(

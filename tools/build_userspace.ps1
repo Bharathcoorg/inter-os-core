@@ -7,8 +7,12 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $WorkspaceRoot = Split-Path -Parent $ScriptDir
 Set-Location $WorkspaceRoot
 
-$ToolchainBin = "C:\Users\bhara\.rustup\toolchains\nightly-2026-09-15-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin"
-$StripExe = Join-Path $ToolchainBin "llvm-strip.exe"
+$SysRoot = (rustc --print sysroot).Trim()
+$StripExe = (Get-ChildItem -Path "$SysRoot\lib\rustlib" -Filter "llvm-strip.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+if (-not $StripExe) {
+    $found = Get-Command "llvm-strip" -ErrorAction SilentlyContinue
+    if ($found) { $StripExe = $found.Source }
+}
 
 $StaticFlags = @("-C", "relocation-model=static", "-C", "link-arg=-Ttext=0x00400000")
 

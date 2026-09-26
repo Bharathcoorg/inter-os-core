@@ -8,7 +8,7 @@ pub const SERVICE_ABI_MAGIC: [u8; 4] = *b"ISVC";
 pub const SERVICE_ABI_VERSION: u16 = 1;
 pub const SERVICE_ABI_HEADER_SIZE: usize = 16;
 pub const SERVICE_ID_MIN: u8 = 1;
-pub const SERVICE_ID_MAX: u8 = 8;
+pub const SERVICE_ID_MAX: u8 = 10;
 
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +69,8 @@ pub fn service_capability_allowed(service_id: u8, capability: u16) -> bool {
         3 => matches!(capability, 1 | 3 | 6 | 9 | 10 | 17),
         4 => matches!(capability, 1 | 3 | 6 | 12 | 17),
         5 | 6 | 7 | 8 => matches!(capability, 1 | 3 | 6 | 17),
+        9 => matches!(capability, 1 | 2 | 3 | 6 | 9 | 17),
+        10 => matches!(capability, 1 | 2 | 3 | 5 | 6 | 9 | 17),
         _ => false,
     }
 }
@@ -83,6 +85,8 @@ pub fn service_id_from_package_id(package_id: &str) -> Option<u8> {
         "org.interos.service.modemd" => Some(6),
         "org.interos.service.audiod" => Some(7),
         "org.interos.service.camerad" => Some(8),
+        "org.interos.compositor" | "org.interos.service.compositor" => Some(9),
+        "org.interos.launcher" | "org.interos.service.launcher" => Some(10),
         _ => None,
     }
 }

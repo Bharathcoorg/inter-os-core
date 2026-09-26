@@ -133,6 +133,7 @@ pub enum SyscallNumber {
     TcpRecv = 98,
     DnsResolve = 99,
     TcpClose = 100,
+    AppLaunch = 101,
 }
 
 // -----------------------------------------------------------------------------
@@ -1641,3 +1642,9 @@ pub fn storage_query()->Result<u64,i64>{let r=unsafe{syscall0(SyscallNumber::Sto
 
 /// Lists immediate VFS directory children using a read capability.
 pub fn fs_list(cap_slot:usize,path:&str,out:&mut[u8])->Result<usize,i64>{let r=unsafe{syscall4(SyscallNumber::FsList,cap_slot as u64,path.as_ptr() as u64,path.len() as u64,out.as_mut_ptr() as u64)};if r>=0{Ok(r as usize)}else{Err(r)}}
+
+/// Launches an application or verified package in Ring 3.
+pub fn app_launch(app_id: &str) -> Result<u64, i64> {
+    let r = unsafe { syscall2(SyscallNumber::AppLaunch, app_id.as_ptr() as u64, app_id.len() as u64) };
+    if r >= 0 { Ok(r as u64) } else { Err(r) }
+}

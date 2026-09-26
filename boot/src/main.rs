@@ -9,20 +9,31 @@ use std::path::PathBuf;
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
-    let kernel_path = if args.len() > 1 {
-        PathBuf::from(&args[1])
-    } else {
+    let kernel_path = {
         let p1 = PathBuf::from("target/x86_64-unknown-none/debug/kernel");
         let p2 = PathBuf::from("kernel/target/x86_64-unknown-none/debug/kernel");
-        if p1.exists() && p2.exists() {
-            let m1 = std::fs::metadata(&p1).and_then(|m| m.modified()).ok();
-            let m2 = std::fs::metadata(&p2).and_then(|m| m.modified()).ok();
-            if m1 >= m2 { p1 } else { p2 }
-        } else if p1.exists() {
-            p1
+        let arg_path = if args.len() > 1 {
+            Some(PathBuf::from(&args[1]))
         } else {
-            p2
+            None
+        };
+        let mut candidates = vec![p1, p2];
+        if let Some(ap) = arg_path {
+            candidates.insert(0, ap);
         }
+        let mut best: Option<PathBuf> = None;
+        let mut best_mtime = None;
+        for c in candidates {
+            if c.exists() {
+                if let Ok(m) = std::fs::metadata(&c).and_then(|m| m.modified()) {
+                    if best_mtime.is_none() || Some(m) > best_mtime {
+                        best_mtime = Some(m);
+                        best = Some(c);
+                    }
+                }
+            }
+        }
+        best.unwrap_or_else(|| PathBuf::from("kernel/target/x86_64-unknown-none/debug/kernel"))
     };
 
     let out_path = if args.len() > 2 {

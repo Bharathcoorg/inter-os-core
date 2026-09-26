@@ -10,6 +10,7 @@
 //!   - `share <mime> <uri> <target>`: Sovereign Share Sheet cross-app bus dispatch
 //!   - `dma <pipe> <payload>`: Zero-Copy DMA shared memory pipe streaming
 //!   - `ping`: Local loopback diagnostic
+//! - DRM/KMS Client Surface Rendering (z=200) & Terminal Canvas Presentation
 //! - Circular command history ledger
 //! - Asynchronous event reactor loop handling shell intents and touch commands
 
@@ -18,6 +19,10 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
+
+const W: usize = 720;
+const H: usize = 1440;
+const CHUNK: usize = 1024;
 
 /// Command entry in terminal history.
 #[derive(Debug, Clone, Copy)]
@@ -87,9 +92,57 @@ impl TerminalApp {
     }
 }
 
+fn render_terminal_ui(surface: u32, lines_count: usize) {
+    let mut chunk = [0u32; CHUNK];
+    let total = W * H;
+    let mut offset = 0;
+    while offset < total {
+        let count = (total - offset).min(CHUNK);
+        let mut x = offset % W;
+        let mut y = offset / W;
+        for i in 0..count {
+            if y < 96 {
+                chunk[i] = if y >= 94 { std::design::color::ACCENT } else { std::design::color::SURFACE };
+            } else if (120..800).contains(&y) {
+                let line_idx = (y - 120) / 56;
+                let line_y = (y - 120) % 56;
+                if line_idx <= lines_count.min(10) && line_y < 24 {
+                    if x >= 32 && x < 56 {
+                        chunk[i] = std::design::color::SUCCESS;
+                    } else if x >= 72 && x < 400 {
+                        chunk[i] = std::design::color::TEXT;
+                    } else {
+                        chunk[i] = 0xFF0A0E17;
+                    }
+                } else {
+                    chunk[i] = 0xFF0A0E17;
+                }
+            } else {
+                chunk[i] = 0xFF0A0E17;
+            }
+            x += 1;
+            if x == W {
+                x = 0;
+                y += 1;
+            }
+        }
+        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        offset += count;
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     std::log(0, "[TERMINAL APP (Ring 3)] InterOS Developer Terminal online.").ok();
+
+    // Slot 6 is FrameBufferDirect
+    let surface = match std::surface_create(6, W as u32, H as u32, 200) {
+        Ok(id) => {
+            std::log(0, "[TERMINAL APP] DRM/KMS Client Surface allocated (z=200).").ok();
+            id
+        }
+        Err(_) => 0,
+    };
 
     let mut term = TerminalApp::new();
 
@@ -111,8 +164,15 @@ pub extern "C" fn _start() -> ! {
     // 6. Execute Zero-Copy DMA Pipeline
     term.execute_command("dma");
 
-    // 5. Execute Network Ping Diagnostic
+    // 7. Execute Network Ping Diagnostic
     term.execute_command("ping");
+
+    // Render & present terminal UI
+    if surface > 0 {
+        render_terminal_ui(surface, term.history_count);
+        let _ = std::surface_flip(6);
+        std::log(0, "[TERMINAL APP] Terminal console presented to scanout buffer.").ok();
+    }
 
     // 8. Terminal Asynchronous Event Loop
     let mut term_ticks: u32 = 0;
@@ -124,6 +184,11 @@ pub extern "C" fn _start() -> ! {
             if (triggered & std::EVENT_TOUCH_INPUT) != 0 {
                 // User tapped command suggestion chip on screen
                 std::audio_haptic_click().ok();
+                if surface > 0 {
+                    render_terminal_ui(surface, term.history_count);
+                    let _ = std::surface_flip(6);
+                }
+                std::log(0, "[TERMINAL APP] Touch input received: suggestion executed.").ok();
             }
 
             if term_ticks % 50 == 0 {

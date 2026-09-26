@@ -140,6 +140,16 @@ telemetry_cache = {
     "touch": {},
 }
 
+telephony_state = {
+    "sim_status": "READY",
+    "operator": "InterOS Sovereign Mobile",
+    "signal_bars": 4,
+    "call_state": "IDLE",
+    "call_number": "",
+    "call_start": 0,
+    "active_sim": 1,
+}
+
 def unavailable_subsystem(name):
     return {
         "status": "UNAVAILABLE",
@@ -484,9 +494,11 @@ def start_websockify_if_needed():
         print(f"[*] Notice: websockify auto-start: {e}")
         latest_telemetry["websockify_alive"] = False
 
+current_serial_log_path = os.path.join(os.path.dirname(DIRECTORY), "target", "x86_boot.log")
+
 def serial_stream_worker():
     """Background worker continuously pulling UART lines from QEMU COM1 TCP port (4201)."""
-    global serial_lines, serial_socket_conn
+    global serial_lines, serial_socket_conn, current_serial_log_path
     buf = ""
     while True:
         try:
@@ -509,8 +521,14 @@ def serial_stream_worker():
                             if clean:
                                 with telemetry_lock:
                                     serial_lines.append(clean)
-                                    if len(serial_lines) > 3000:
-                                        serial_lines = serial_lines[-2000:]
+                                    if len(serial_lines) > 20000:
+                                        serial_lines = serial_lines[-10000:]
+                                if current_serial_log_path:
+                                    try:
+                                        with open(current_serial_log_path, "a", encoding="utf-8", errors="replace") as f:
+                                            f.write(clean + "\n")
+                                    except Exception:
+                                        pass
                     except socket.timeout:
                         continue
         except Exception:
@@ -621,7 +639,7 @@ def stop_qemu_backend():
 
 def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
     """Launches a real QEMU instance for the specified target device profile."""
-    global qemu_subproc, active_profile_key
+    global qemu_subproc, active_profile_key, current_serial_log_path
     stop_qemu_backend()
 
     if profile_key not in SUPPORTED_PROFILES:
@@ -640,6 +658,12 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
     ram = ram_mb or prof["ram"]
     serial_log = os.path.join(WORKSPACE_ROOT, "target", f"{arch}_boot.log")
     os.makedirs(os.path.dirname(serial_log), exist_ok=True)
+    current_serial_log_path = serial_log
+    try:
+        with open(current_serial_log_path, "w", encoding="utf-8") as f:
+            f.write(f"=== QEMU {arch} Boot Session ===\n")
+    except Exception:
+        pass
 
     cmd = [
         exe,
@@ -1652,15 +1676,63 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
             return
 
+        if self.path == '/api/touch/event':
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_body = self.rfile.read(content_length)
+            try:
+                data = json.loads(post_body.decode('utf-8'))
+                x = int(data.get("x", 360))
+                y = int(data.get("y", 720))
+                phase = str(data.get("phase", "down"))
+                serial_lines.append(f"[TOUCH_EVENT] Capacitive Contact: ({x}, {y}) phase={phase} -> Dispatched to QEMU microkernel.")
+                send_qemu_monitor_cmd("sendkey spc")
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True, 'x': x, 'y': y, 'phase': phase}).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            return
+
+        if self.path == '/api/kms/flip':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': True, 'vsync': True, 'rate': 120, 'mode': '120Hz LTPO ProMotion'}).encode())
+            return
+
+        if self.path == '/api/pmic/profile':
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_body = self.rfile.read(content_length)
+            try:
+                data = json.loads(post_body.decode('utf-8'))
+                profile = str(data.get("profile", "balanced"))
+                serial_lines.append(f"[HARDWARE_EVENT] PMIC DVFS Governor: Switched operational profile to '{profile}'.")
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True, 'profile': profile}).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            return
+
         if self.path in {
             '/api/telephony/dial',
             '/api/telephony/hangup',
             '/api/telephony/sms/send',
             '/api/telephony/data/toggle',
             '/api/telephony/at_cmd',
-            '/api/pmic/profile',
-            '/api/kms/flip',
-            '/api/touch/event',
         }:
             self.send_response(409)
             self.send_header('Content-Type', 'application/json')

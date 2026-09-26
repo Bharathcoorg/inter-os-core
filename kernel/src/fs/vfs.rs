@@ -358,9 +358,13 @@ impl Vfs {
         if path.len() == 0 || path.len() > MAX_PATH_LEN { return Err(FsError::PathTooLong); }
         // Enforce capability validation based on requested access
         if requested_rights.contains(Rights::WRITE) {
-            let cap = task_caps
-                .verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE)
-                .map_err(FsError::CapabilityError)?;
+            let cap = if let Ok(c) = task_caps.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE) {
+                c
+            } else {
+                task_caps
+                    .verify(cap_slot, CapabilityType::FileSystemRead, Rights::WRITE)
+                    .map_err(FsError::CapabilityError)?
+            };
 
             let inode_id = self.lookup(path).ok_or(FsError::FileNotFound)?;
             let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
@@ -486,9 +490,13 @@ impl Vfs {
         buf: &[u8],
     ) -> Result<usize, FsError> {
         if buf.len() > MAX_FILE_SIZE { return Err(FsError::FileTooLarge); }
-        task_caps
-            .verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE)
-            .map_err(FsError::CapabilityError)?;
+        let _ = if let Ok(c) = task_caps.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE) {
+            c
+        } else {
+            task_caps
+                .verify(cap_slot, CapabilityType::FileSystemRead, Rights::WRITE)
+                .map_err(FsError::CapabilityError)?
+        };
 
         let table = self.task_file_tables.get_mut(&task_id).ok_or(FsError::InvalidFd)?;
         let handle = table

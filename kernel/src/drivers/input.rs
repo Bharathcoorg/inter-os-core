@@ -93,10 +93,15 @@ pub fn dispatch_to_focused_window(event: InputEvent) {
 pub fn pump_touch_events() {
     let mut touch = crate::drivers::touch_gestures::TOUCH_ENGINE.lock();
     let mut pipeline = INPUT_PIPELINE.lock();
+    let mut pumped = false;
     while let Some(gesture) = touch.gesture_queue.pop_front() {
         let event = InputEvent::from_gesture(gesture);
         pipeline.push(event);
         dispatch_to_focused_window(event);
+        pumped = true;
+    }
+    if pumped {
+        crate::event::broadcast_event(crate::event::EVENT_TOUCH_INPUT);
     }
 }
 
