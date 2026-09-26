@@ -19,6 +19,13 @@ pub const PIC_1_OFFSET: u8 = 32;
 /// Slave PIC remapped interrupt offset (IRQ 8-15 -> INT 40-47).
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
+/// PIT input clock and requested system timer frequency.
+/// The resulting divisor is rounded to the nearest integer, giving a timer
+/// rate within normal PIT quantization of 1 kHz (approximately 1 ms/tick).
+pub const PIT_BASE_HZ: u32 = 1_193_182;
+pub const SYSTEM_TICK_HZ: u32 = 1_000;
+pub const PIT_DIVISOR: u16 = (PIT_BASE_HZ / SYSTEM_TICK_HZ) as u16;
+
 /// Global atomic system tick counter (incremented every PIT timer interrupt).
 pub static SYSTEM_TICKS: AtomicU64 = AtomicU64::new(0);
 
@@ -90,6 +97,18 @@ pub fn init_idt() {
 }
 
 /// Initializes and unmasks the 8259 PIC controllers.
+pub fn init_pit() {
+    let divisor = PIT_DIVISOR;
+    unsafe {
+        let mut command = Port::new(0x43);
+        let mut channel0 = Port::new(0x40);
+        // Channel 0, lobyte/hibyte access, mode 3 square wave, binary mode.
+        command.write(0x36u8);
+        channel0.write((divisor & 0xff) as u8);
+        channel0.write((divisor >> 8) as u8);
+    }
+}
+
 pub fn init_pics() {
     unsafe {
         PICS.lock().initialize();
