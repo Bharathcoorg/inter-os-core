@@ -117,31 +117,40 @@ Authority in InterOS Core is based on object capabilities rather than ambient us
 
 ## 5. Cryptographic `.rapp` Package Format
 
-Applications are packaged using standard ZIP containers with cryptographic integrity checks:
+Applications and system services are packaged using the native, deterministic `.rapp` binary format with cryptographic integrity and Ed25519 signature enforcement:
 
 ```
-my_app.rapp (ZIP Archive)
-├── manifest.json       (Canonical application manifest)
-├── bin/
-│   └── app.elf         (Native #![no_std] ELF binary)
-├── ui/
-│   ├── index.html      (HTML5 interface)
-│   ├── app.js          (Client application logic)
-│   └── styles.css      (Visual styling)
-└── signature.json      (Ed25519 signature & SHA-256 manifest)
++-------------------------------------------------------------+
+| RAPP Header (180 bytes / 0xB4)                              |
+| - Magic: b"RAPP" (4 bytes)                                  |
+| - Version: 2 (2 bytes) | Arch: x86_64/aarch64/riscv64 (2B) |
+| - Package ID: UTF-8 (32 bytes)                              |
+| - Publisher Ed25519 Public Key (32 bytes)                   |
+| - Semantic Version (3x u16: 6 bytes)                        |
+| - Capability Count: N (2 bytes)                             |
+| - Payload SHA-256 Digest (32 bytes)                         |
+| - Ed25519 Signature (64 bytes)                              |
+| - Payload Length: LE u32 (4 bytes)                          |
++-------------------------------------------------------------+
+| Capability IDs: N x u16 (2 * N bytes)                       |
++-------------------------------------------------------------+
+| Executable ELF Binary Payload (Payload Length bytes)        |
++-------------------------------------------------------------+
 ```
 
-### Installation Security Pipeline:
-1. **Zip-Slip & Path Traversal Defense**: Reject entries containing `..`, absolute paths, or leading slashes.
-2. **Zip-Bomb Mitigation**: Reject archives where uncompressed size exceeds limits (default 50 MB) or compression ratio exceeds 100:1.
+### Installation & Security Verification Pipeline:
+1. **Header Validation**: Checks `b"RAPP"` magic, version `2`, and verifies matching CPU architecture.
+2. **Buffer Bounds**: Strictly validates `data.len() == 0xB4 + 2 * cap_count + payload_len` to prevent buffer overruns or hidden payloads.
 3. **Cryptographic Attestation**:
-   - Compute SHA-256 hashes of all bundled files and match against `signature.json`.
-   - Verify Ed25519 asymmetric signature over canonical package digest using publisher public key.
-4. **Atomic Staging & Rollback**:
-   - Extract into `_staging_<id>/`.
-   - Verify all digests.
-   - Atomic rename to final installation directory.
-   - Rollback and directory purge on any validation failure.
+   - Computes SHA-256 hash over the embedded ELF payload and verifies against the header digest.
+   - Evaluates publisher public key against the kernel revocation and trust registry (`REVOCATION_REGISTRY`).
+   - Verifies Ed25519 signature over canonical signing message (header with zeroed signature field + capability array + ELF payload).
+4. **Isolated Process Execution**:
+   - Resolves declared capability IDs into microkernel capability rights.
+   - Maps ELF sections into a dedicated address space (`W^X` enforced).
+   - Launches child process in Ring 3 / EL0 userspace.
+
+For complete binary layout details, see [RAPP_FORMAT.md](file:///c:/Users/bhara/Desktop/Interlayer/QEMU/inter-os-core/docs/RAPP_FORMAT.md).
 
 ---
 
