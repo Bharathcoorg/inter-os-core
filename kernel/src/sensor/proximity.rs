@@ -21,7 +21,11 @@ impl ProximitySensor {
 
     /// Updates the measured proximity distance.
     pub fn update(&mut self, distance_mm: u16) {
-        self.distance_mm = distance_mm;
+        self.distance_mm = distance_mm.min(100);
+    }
+
+    pub fn reading_mm(&self) -> u16 {
+        self.distance_mm
     }
 }
 
@@ -53,6 +57,10 @@ impl LightSensor {
 
     /// Updates the ambient lux reading.
     pub fn update(&mut self, lux: u32) {
-        self.lux = lux;
+        self.lux = lux.min(100_000);
+    }
+
+    pub fn reading_lux(&self) -> u32 {
+        self.lux
     }
 }
