@@ -9,6 +9,7 @@ pub mod dns;
 pub mod e1000;
 pub mod tcp;
 pub mod tls;
+pub mod tls;
 pub mod ethernet;
 pub mod ipv4;
 pub mod socket;
