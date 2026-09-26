@@ -146,26 +146,8 @@ pub extern "C" fn _start() -> ! {
 
     let mut term = TerminalApp::new();
 
-    // 1. Execute Help Command
-    term.execute_command("help");
-
-    // 2. Execute System Status Command
-    term.execute_command("status");
-
-    // 3. Execute Process List Command
-    term.execute_command("ps");
-
-    // 4. Execute Memory Diagnostic Command
-    term.execute_command("mem");
-
-    // 5. Execute Capability Table Verification
-    term.execute_command("caps");
-
-    // 6. Execute Zero-Copy DMA Pipeline
-    term.execute_command("dma");
-
-    // 7. Execute Network Ping Diagnostic
-    term.execute_command("ping");
+    // The shell starts empty. Commands are executed only after a real user
+    // command is submitted; startup must not fabricate diagnostic activity.
 
     // Render & present terminal UI
     if surface > 0 {
