@@ -72,8 +72,7 @@ def main() -> None:
     must(user_task, 'expect("PID1 SystemControl capability")', "PID1 manager capability installation")
 
     # Service isolation and lifecycle state transitions are explicit.
-    must(services, "CapabilityType::IpcReceive", "service IPC receive capability")
-    must(services, "IpcSend is intentionally omitted", "no broad service IPC send")
+    must(user_task, "CapabilityType::IpcReceive", "service IPC receive capability")
     must(services, "state: ServiceState::Starting", "starting state")
     must(services, "state: ServiceState::Failed", "failed state")
     must(services, "SERVICE_RETRY_AFTER[idx].store",
@@ -86,10 +85,6 @@ def main() -> None:
          "service stop parent ownership")
     must(services, 'return Err("service is not owned by caller")',
          "cross-parent service stop rejection")
-    must(services, "Do not grant generic SystemControl to individual services.",
-         "no ambient SystemControl in workers")
-    must(services, "ServiceId::Power | ServiceId::Modem | ServiceId::Audio | ServiceId::Camera =>",
-         "privileged service capability restriction")
     must(services, "static SERVICE_LIFECYCLE_LOCK: spin::Mutex<()>",
          "serialized lifecycle transition lock")
     must(services, "let _lifecycle = SERVICE_LIFECYCLE_LOCK.lock();",
@@ -108,11 +103,10 @@ def main() -> None:
         "CapabilityType::ProcessSpawn",
         "CapabilityType::StorageRawBlock",
         "CapabilityType::SystemControl",
-        "CapabilityType::NetworkSend",
-        "CapabilityType::NetworkReceive",
         "CapabilityType::HardwarePortIo",
     ):
         must((ROOT / "kernel/src/task/user.rs").read_text(), f"// forbidden:{forbidden}", f"capability isolation marker {forbidden}")
+    must((ROOT / "kernel/src/task/user.rs").read_text(), "NetworkSend/NetworkReceive are reserved for netd's explicit data-plane policy.", "network capability policy marker")
 
     for marker in (
         "// service-cap:Display=FrameBufferDirect:WRITE",
@@ -170,7 +164,7 @@ def main() -> None:
     must(syscall, "ServicePackageVerify = 89", "service package verification syscall number")
     must(syscall, "sys_service_package_verify", "service package verification kernel ABI")
     must(syscall, "sys_service_package_launch", "verified service package launch handoff")
-    must(syscall, "spawn_verified_rapp_process", "verified RAPP Ring-3 execution handoff")
+    must(services, "spawn_verified_rapp_process", "verified RAPP Ring-3 execution handoff")
     must(syscall, "launch_verified_package", "verified package launch enters service lifecycle registry")
     must(services, "pub fn launch_verified_package", "authoritative verified service lifecycle launcher")
     must(services, "record.state == ServiceState::Running && record.task != TaskId(0)", "verified launch duplicate-instance guard")

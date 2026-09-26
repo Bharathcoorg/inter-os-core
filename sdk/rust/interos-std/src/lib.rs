@@ -1,11 +1,11 @@
-pub mod service;
+#![no_std]
+
 //! Inter OS Userspace Standard Library (interos-std)
 //!
 //! Provides safe, ergonomic Rust bindings for Inter OS hardware fast system calls
 //! (`syscall` instruction) executing in Ring 3 User Mode.
 
-#![no_std]
-
+pub mod service;
 pub mod design;
 pub mod compositor {
     pub const MAGIC: [u8; 4] = *b"ICMP";
@@ -124,6 +124,15 @@ pub enum SyscallNumber {
     ServicePackageVerify = 89,
     ServiceHeartbeat = 90,
     ServicePackageLaunch = 91,
+    InputEventPoll = 92,
+    NetworkPoll = 93,
+    TcpConnect = 94,
+    NetSendSocket = 95,
+    NetCloseSocket = 96,
+    TcpSend = 97,
+    TcpRecv = 98,
+    DnsResolve = 99,
+    TcpClose = 100,
 }
 
 // -----------------------------------------------------------------------------
@@ -831,12 +840,12 @@ pub fn keystore_derive(slot_index: u32, out_buf: &mut [u8; 32]) -> Result<usize,
 }
 
 /// Queries mobile hardware sensor telemetry (orientation, 3-axis accel, ambient lux, proximity).
-pub fn sensor_read(out_buf: &mut [u8]) -> Result<usize, i64> {
+pub fn sensor_read(out: &mut [u8]) -> Result<usize, i64> {
     let ret = unsafe {
         syscall2(
             SyscallNumber::SensorRead,
-            out_buf.as_mut_ptr() as u64,
-            out_buf.len() as u64,
+            out.as_mut_ptr() as u64,
+            out.len() as u64,
         )
     };
     if ret >= 0 {
@@ -1293,12 +1302,6 @@ pub fn camera_capture(preview_buf: &mut [u8], meta_out: &mut [u32; 4]) -> Result
     }
 }
 
-/// Reads bounded sensor telemetry as a JSON payload.
-pub fn sensor_read(out: &mut [u8]) -> Result<usize, i64> {
-    let ret = unsafe { syscall2(SyscallNumber::SensorRead, out.as_mut_ptr() as u64, out.len() as u64) };
-    if ret >= 0 { Ok(ret as usize) } else { Err(ret) }
-}
-
 /// Toggles the mobile camera LED flash torch state.
 pub fn camera_toggle_flash() -> Result<bool, i64> {
     let mut dummy = [0u8; 1];
@@ -1552,33 +1555,6 @@ pub fn telephony_set_data(enabled: bool) -> Result<bool, i64> {
     }
 }
 
-/// Allocates a new hardware surface in the DRM/KMS compositor.
-pub fn surface_create(width: u32, height: u32, z_order: u32) -> Result<u32, i64> {
-    let ret = unsafe {
-        syscall3(
-            SyscallNumber::SurfaceCreate,
-            width as u64,
-            height as u64,
-            z_order as u64,
-        )
-    };
-    if ret >= 0 {
-        Ok(ret as u32)
-    } else {
-        Err(ret)
-    }
-}
-
-/// Swaps the DRM/KMS back buffer to the front scanout buffer (atomic page flip).
-pub fn surface_flip() -> Result<u64, i64> {
-    let ret = unsafe { syscall0(SyscallNumber::SurfaceFlip) };
-    if ret >= 0 {
-        Ok(ret as u64)
-    } else {
-        Err(ret)
-    }
-}
-
 /// Polls recognized gestures from the multi-touch digitizer engine.
 pub fn touch_poll() -> Result<u32, i64> {
     let ret = unsafe { syscall0(SyscallNumber::TouchPoll) };
@@ -1609,23 +1585,10 @@ pub fn power_set_profile(profile_idx: u32) -> Result<u32, i64> {
 
 
 
-/// Writes ARGB pixels into a userspace-owned DRM/KMS surface.
-pub fn surface_write(surface_id: u32, pixel_offset: u32, pixels: &[u32]) -> Result<usize, i64> {
-    let ret = unsafe { syscall4(SyscallNumber::SurfaceWrite, surface_id as u64, pixel_offset as u64, pixels.as_ptr() as u64, pixels.len() as u64) };
-    if ret >= 0 { Ok(ret as usize) } else { Err(ret) }
-}
-
-/// Destroys a userspace-owned DRM/KMS surface.
-pub fn surface_destroy(surface_id: u32) -> Result<(), i64> {
-    let ret = unsafe { syscall1(SyscallNumber::SurfaceDestroy, surface_id as u64) };
-    if ret == 0 { Ok(()) } else { Err(ret) }
-}
-
 pub fn package_list(cap_slot: usize, out_buf: &mut [u8]) -> Result<usize, i64> {
     let ret=unsafe{syscall3(SyscallNumber::PackageList,cap_slot as u64,out_buf.as_mut_ptr() as u64,out_buf.len() as u64)};
     if ret>=0{Ok(ret as usize)}else{Err(ret)}
 }
-
 
 /// Moves an owned window in the compositor.
 pub fn window_set_geometry(display_cap_slot: usize, id:u32,x:i32,y:i32,z:u32,visible:bool)->Result<(),i64>{
@@ -1649,8 +1612,17 @@ pub fn service_package_verify(cap_slot: usize, path: &str) -> Result<u8, i64> {
     if r >= 0 { Ok(r as u8) } else { Err(r) }
 }
 
-/// Publishes a heartbeat for the current registered userspace service.\npub fn service_heartbeat(service_id:u8)->Result<(),i64>{let r=unsafe{syscall1(SyscallNumber::ServiceHeartbeat,service_id as u64)};if r==0{Ok(())}else{Err(r)}}\n/// Reads service lifecycle state.
-pub fn service_list(out:&mut[u8])->Result<usize,i64>{let r=unsafe{syscall2(SyscallNumber::ServiceList,out.as_mut_ptr() as u64,out.len() as u64)};if r>=0{Ok(r as usize)}else{Err(r)}}
+/// Publishes a heartbeat for the current registered userspace service.
+pub fn service_heartbeat(service_id: u8) -> Result<(), i64> {
+    let r = unsafe { syscall1(SyscallNumber::ServiceHeartbeat, service_id as u64) };
+    if r == 0 { Ok(()) } else { Err(r) }
+}
+
+/// Reads service lifecycle state.
+pub fn service_list(out: &mut [u8]) -> Result<usize, i64> {
+    let r = unsafe { syscall2(SyscallNumber::ServiceList, out.as_mut_ptr() as u64, out.len() as u64) };
+    if r >= 0 { Ok(r as usize) } else { Err(r) }
+}
 /// Starts a declared system service. Only PID1/service-manager capability domains may invoke this.
 pub fn service_start(service_id:u8)->Result<u64,i64>{let r=unsafe{syscall1(SyscallNumber::ServiceStart,service_id as u64)};if r>=0{Ok(r as u64)}else{Err(r)}}
 /// Stops a declared system service. Only PID1/service-manager capability domains may invoke this.

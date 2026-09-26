@@ -15,8 +15,10 @@ def main():
     must(e1000, "pub struct E1000Device", "E1000 driver")
     for marker in ("RDBAL", "TDBAL", "pub fn initialize", "impl NetworkDevice for E1000Device",
                    "physical_to_virtual(PhysAddr::new(buffer))", "TX_CMD_RS", "read_link_status",
-        "transmit_probe", "receive_probe", "probe_transmit", "0x10 << 4", "0x40 << 12"):
+        "transmit_probe", "receive_probe", "0x10 << 4", "0x40 << 12"):
         must(e1000, marker, marker)
+    must(dev, "pub fn probe_transmit", "device manager probe transmit")
+    must(dev, "pub fn probe_receive", "device manager probe receive")
     must(dev, "NetworkDeviceBackend::E1000", "E1000 backend selection")
     must(dev, "pub fn attach_e1000", "E1000 device attachment")
     for marker in ("pub struct NetDeviceInfo", "pub enum NetworkBackend",

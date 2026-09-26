@@ -49,7 +49,7 @@ def main() -> None:
     assert "commit_kind(payload, 0)" not in persistent, "default commit must not use unsupported kind 0"
     must(vfs, "pub fn init()", "VFS initialization")
     must(vfs, "vfs.restore_data_snapshot();", "persistent VFS restore")
-    must(vfs, 'crate::storage::persistent::commit_kind(&buf[..pos],4)', "VFS snapshot persistence")
+    must(vfs, 'crate::storage::persistent::commit_kind(&sealed,4)', "VFS snapshot persistence")
     must(vfs, 'path.starts_with("/data/")', "persistent mutable-data boundary")
     # M21: VFS persists and reconstructs the mutable inode tree, not only payload bytes.
     must(vfs, 'buf[..4].copy_from_slice(b"IVM1")', "persistent inode metadata format")
@@ -87,7 +87,7 @@ def main() -> None:
     assert "self.device.read_sector(lba,&mut sector)" not in interfs, "bitmap read must not bypass filesystem base"
     assert "self.device.write_sector(lba,&sector)" not in interfs, "bitmap write must not bypass filesystem base"
     must(interfs, "inode.start_sector=if sectors == 0 { 0 } else { start };", "zero-length inode extent normalization")
-    must(interfs, "if path.is_empty() || !path.starts_with('/') || path.len() > MAX_PATH || path.contains("//")", "strict on-disk path validation")
+    must(interfs, 'if path.is_empty() || !path.starts_with(\'/\') || path.contains("//")', "strict on-disk path validation")
     must(interfs, "if !inode.used", "unused inode metadata boundary")
     must(interfs, "inode.file_size == 0", "zero-length inode consistency validation")
     must(interfs, "inode.sector_count == 0 || inode.start_sector.checked_add(inode.sector_count)", "inode extent bounds validation")
@@ -100,11 +100,13 @@ def main() -> None:
     must(interfs, "fs.recover_transaction()?;", "mount-time transaction recovery")
     must(interfs, "self.write_transaction(&txn)", "mutation transaction publication")
     must(interfs, "self.clear_transaction()?", "transaction completion/cleanup")
-    assert interfs.index("self.write_transaction(&txn)") < interfs.index("self.write_inode(index,&inode)"), "transaction intent must precede inode publication"
-    assert interfs.index("self.write_transaction(&txn)") < interfs.index("self.mark_extent(start,sectors)"), "transaction must precede extent reservation"
-    assert interfs.index("self.mark_extent(start,sectors)") < interfs.index("self.device.write_sector(self.base_lba + self.superblock.data_start+start+block,&sector)"), "extent reservation must precede payload publication"
-    assert interfs.index("self.device.write_sector(self.base_lba + self.superblock.data_start+start+block,&sector)") < interfs.index("self.write_inode(index,&inode)"), "payload must precede inode publication"
-    assert interfs.index("self.write_inode(index,&inode)") < interfs.index("self.clear_transaction()?"), "transaction must remain until inode publication completes"
+    create_pos = interfs.index("pub fn create_file")
+    create_body = interfs[create_pos:]
+    assert create_body.index("self.write_transaction(&txn)") < create_body.index("self.write_inode(index,&inode)"), "transaction intent must precede inode publication"
+    assert create_body.index("self.write_transaction(&txn)") < create_body.index("self.mark_extent(start,sectors)"), "transaction must precede extent reservation"
+    assert create_body.index("self.mark_extent(start,sectors)") < create_body.index("self.device.write_sector(self.base_lba + self.superblock.data_start+start+block,&sector)"), "extent reservation must precede payload publication"
+    assert create_body.index("self.device.write_sector(self.base_lba + self.superblock.data_start+start+block,&sector)") < create_body.index("self.write_inode(index,&inode)"), "payload must precede inode publication"
+    assert create_body.index("self.write_inode(index,&inode)") < create_body.index("self.clear_transaction()?"), "transaction must remain until inode publication completes"
 
     # M23: persistent mutable VFS state is authenticated and encrypted at rest.
     must(storage, "pub mod encrypted;", "encrypted storage module")

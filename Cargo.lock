@@ -45,6 +45,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "compositor"
+version = "0.1.0"
+dependencies = [
+ "interos-std",
+]
+
+[[package]]
 name = "dialer"
 version = "0.1.0"
 dependencies = [
@@ -82,6 +89,20 @@ dependencies = [
 [[package]]
 name = "interos-std"
 version = "0.1.0"
+
+[[package]]
+name = "interos-system-service"
+version = "0.1.0"
+dependencies = [
+ "interos-std",
+]
+
+[[package]]
+name = "launcher"
+version = "0.1.0"
+dependencies = [
+ "interos-std",
+]
 
 [[package]]
 name = "meshchat"

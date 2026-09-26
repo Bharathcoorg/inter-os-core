@@ -17,7 +17,7 @@ def main():
         "pub fn run_network() -> !",
         "std::net_socket(4242)",
         "std::network_poll()",
-        "std::net_send_socket(socket, [127, 0, 0, 1], 4242,
+        "std::net_send_socket(socket, [127, 0, 0, 1], 4242,",
         "std::net_recvfrom(socket",
         "std::EVENT_NETWORK_PACKET",
     ):
@@ -84,7 +84,8 @@ def main():
     must(tcp, "SynReceived", "TCP state machine")
     must(net, "segment.flags & 0x12 == 0x12", "TCP SYN-ACK integration")
     must(net, "poll_tcp_retransmissions", "TCP retransmission scheduler")
-    must(net, "lookup_at(dst_ip, crate::interrupts::get_system_ticks())", "bounded ARP cache lookup")
+    must(net, "lookup_at(dst_ip, now)", "bounded ARP cache lookup")
+    must(net, "let now = crate::interrupts::get_system_ticks();", "ARP cache lookup timestamp")
     must(net, "ARP_REQUEST_RETRY_TICKS", "bounded ARP request retry interval")
     must(net, "ARP_REQUESTS.lock()", "ARP request state tracking")
     must(net, "requested_at", "ARP request timestamp tracking")
