@@ -102,7 +102,22 @@ fn render_terminal_ui(surface: u32, lines_count: usize) {
         let mut y = offset / W;
         for i in 0..count {
             if y < 96 {
-                chunk[i] = if y >= 94 { std::design::color::ACCENT } else { std::design::color::SURFACE };
+                if y >= 94 {
+                    chunk[i] = std::design::color::ACCENT;
+                } else if x >= 24 && x < 100 && y >= 28 && y < 68 {
+                    // Back button <
+                    let center_x = 62;
+                    let center_y = 48;
+                    let dx = (x as isize - center_x as isize).abs();
+                    let dy = (y as isize - center_y as isize).abs();
+                    if (dx + dy <= 12 && x <= center_x) || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99)) {
+                        chunk[i] = std::design::color::TEXT;
+                    } else {
+                        chunk[i] = std::design::color::SURFACE_RAISED;
+                    }
+                } else {
+                    chunk[i] = std::design::color::SURFACE;
+                }
             } else if (120..800).contains(&y) {
                 let line_idx = (y - 120) / 56;
                 let line_y = (y - 120) % 56;
@@ -144,7 +159,7 @@ pub extern "C" fn _start() -> ! {
         Err(_) => 0,
     };
 
-    let mut term = TerminalApp::new();
+    let term = TerminalApp::new();
 
     // The shell starts empty. Commands are executed only after a real user
     // command is submitted; startup must not fabricate diagnostic activity.
@@ -166,6 +181,14 @@ pub extern "C" fn _start() -> ! {
                 };
                 while std::input_event_poll(&mut input).is_ok() {
                     if input.kind == 1 {
+                        // Check if Back button was tapped: exit cleanly to launcher
+                        if input.x >= 24 && input.x < 100 && input.y >= 28 && input.y < 68 {
+                            std::log(0, "[TERMINAL APP] Back button pressed. Exiting to launcher.").ok();
+                            if surface > 0 {
+                                let _ = std::surface_destroy(6, surface);
+                            }
+                            std::exit_with_code(0);
+                        }
                         std::audio_haptic_click().ok();
                         if surface > 0 {
                             render_terminal_ui(surface, term.history_count);
@@ -175,8 +198,8 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
             }
-
         }
+        std::yield_now();
     }
 }
 

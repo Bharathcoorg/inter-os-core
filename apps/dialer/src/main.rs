@@ -296,21 +296,19 @@ fn render_dialer_ui(surface: u32, dialer: &DialerApp) {
                         chunk[i] = std::design::color::SURFACE_RAISED;
                     }
                 } else if x >= 610 && x < 670 && y >= 40 && y < 62 {
-                    // 4-bar cellular signal indicator
+                    // Cellular signal indicator (fail closed when no physical modem detected)
                     let bar_idx = (x - 610) / 15;
                     let bar_x = (x - 610) % 15;
                     let bar_min_y = 62 - (bar_idx + 1) * 5;
                     if bar_x < 9 && y >= bar_min_y {
-                        chunk[i] = std::design::color::SUCCESS;
+                        chunk[i] = std::design::color::SURFACE_RAISED;
                     } else {
                         chunk[i] = std::design::color::SURFACE;
                     }
                 } else if x >= 678 && x < 706 && y >= 44 && y < 58 {
-                    // Battery indicator
+                    // Battery indicator (fail closed outline when PMIC telemetry unavailable)
                     if x == 678 || x == 702 || y == 44 || y == 57 || (x >= 703 && y >= 48 && y < 54) {
                         chunk[i] = std::design::color::TEXT_MUTED;
-                    } else if x < 698 {
-                        chunk[i] = std::design::color::SUCCESS;
                     } else {
                         chunk[i] = std::design::color::SURFACE;
                     }
@@ -581,11 +579,17 @@ pub extern "C" fn _start() -> ! {
 
     let mut dialer = DialerApp::new();
 
-    // 1. Query 5G Cellular Modem Baseband Telemetry
+    // 1. Query Cellular Modem Baseband Telemetry
     let mut modem_buf = [0u8; 128];
     if let Ok(len) = std::telephony_query(&mut modem_buf) {
         if len > 0 {
-            std::log(0, "[DIALER APP] 5G Modem: Carrier = INTER_SOVEREIGN_5G, RSSI = 31/31 (Full Signal).").ok();
+            if let Ok(json_str) = core::str::from_utf8(&modem_buf[..len]) {
+                if json_str.contains("\"present\":true") {
+                    std::log(0, "[DIALER APP] Baseband Modem: Hardware detected and online.").ok();
+                } else {
+                    std::log(0, "[DIALER APP] Baseband Modem: Offline (No hardware modem backend detected).").ok();
+                }
+            }
         }
     }
 

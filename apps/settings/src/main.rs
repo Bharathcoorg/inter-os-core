@@ -56,12 +56,12 @@ impl SettingsApp {
         Self {
             current_tab: SettingsTab::Wireless,
             power_profile: PowerProfile::Balanced,
-            wifi_enabled: true,
-            ble_beacon_enabled: true,
-            auto_brightness: true,
+            wifi_enabled: false,
+            ble_beacon_enabled: false,
+            auto_brightness: false,
             security_enforced: true,
-            cached_battery_soc: 85,
-            cached_temp_c: 38,
+            cached_battery_soc: 0,
+            cached_temp_c: 0,
         }
     }
 
@@ -148,7 +148,22 @@ fn render_settings_ui(surface: u32, tab: SettingsTab) {
         let mut y = offset / W;
         for i in 0..count {
             if y < 96 {
-                chunk[i] = if y >= 94 { std::design::color::ACCENT } else { std::design::color::SURFACE };
+                if y >= 94 {
+                    chunk[i] = std::design::color::ACCENT;
+                } else if x >= 24 && x < 100 && y >= 28 && y < 68 {
+                    // Back button <
+                    let center_x = 62;
+                    let center_y = 48;
+                    let dx = (x as isize - center_x as isize).abs();
+                    let dy = (y as isize - center_y as isize).abs();
+                    if (dx + dy <= 12 && x <= center_x) || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99)) {
+                        chunk[i] = std::design::color::TEXT;
+                    } else {
+                        chunk[i] = std::design::color::SURFACE_RAISED;
+                    }
+                } else {
+                    chunk[i] = std::design::color::SURFACE;
+                }
             } else if (110..170).contains(&y) {
                 let t = x.saturating_sub(24) / 136;
                 chunk[i] = if t == tab_idx && (x % 136) < 120 { std::design::color::ACCENT } else { std::design::color::SURFACE_RAISED };
@@ -235,14 +250,33 @@ pub extern "C" fn _start() -> ! {
                 };
                 while std::input_event_poll(&mut input).is_ok() {
                     if input.kind == 1 {
-                        let next_tab = match settings.current_tab {
-                            SettingsTab::Wireless => SettingsTab::PowerAndBattery,
-                            SettingsTab::PowerAndBattery => SettingsTab::ThermalsAndSensors,
-                            SettingsTab::ThermalsAndSensors => SettingsTab::SecurityAndPrivacy,
-                            SettingsTab::SecurityAndPrivacy => SettingsTab::AboutDevice,
-                            SettingsTab::AboutDevice => SettingsTab::Wireless,
-                        };
-                        settings.current_tab = next_tab;
+                        // Check if Back button was tapped: exit cleanly to launcher
+                        if input.x >= 24 && input.x < 100 && input.y >= 28 && input.y < 68 {
+                            std::log(0, "[SETTINGS APP] Back button pressed. Exiting to launcher.").ok();
+                            if surface > 0 {
+                                let _ = std::surface_destroy(6, surface);
+                            }
+                            std::exit_with_code(0);
+                        }
+                        if input.y >= 110 && input.y < 170 && input.x >= 24 {
+                            let tapped = ((input.x - 24) / 136) as usize;
+                            settings.current_tab = match tapped {
+                                0 => SettingsTab::Wireless,
+                                1 => SettingsTab::PowerAndBattery,
+                                2 => SettingsTab::ThermalsAndSensors,
+                                3 => SettingsTab::SecurityAndPrivacy,
+                                _ => SettingsTab::AboutDevice,
+                            };
+                        } else {
+                            let next_tab = match settings.current_tab {
+                                SettingsTab::Wireless => SettingsTab::PowerAndBattery,
+                                SettingsTab::PowerAndBattery => SettingsTab::ThermalsAndSensors,
+                                SettingsTab::ThermalsAndSensors => SettingsTab::SecurityAndPrivacy,
+                                SettingsTab::SecurityAndPrivacy => SettingsTab::AboutDevice,
+                                SettingsTab::AboutDevice => SettingsTab::Wireless,
+                            };
+                            settings.current_tab = next_tab;
+                        }
                         if surface > 0 {
                             render_settings_ui(surface, settings.current_tab);
                             let _ = std::surface_flip(6);
@@ -252,6 +286,7 @@ pub extern "C" fn _start() -> ! {
                 }
             }
         }
+        std::yield_now();
     }
 }
 
