@@ -1293,6 +1293,12 @@ pub fn camera_capture(preview_buf: &mut [u8], meta_out: &mut [u32; 4]) -> Result
     }
 }
 
+/// Reads bounded sensor telemetry as a JSON payload.
+pub fn sensor_read(out: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe { syscall2(SyscallNumber::SensorRead, out.as_mut_ptr() as u64, out.len() as u64) };
+    if ret >= 0 { Ok(ret as usize) } else { Err(ret) }
+}
+
 /// Toggles the mobile camera LED flash torch state.
 pub fn camera_toggle_flash() -> Result<bool, i64> {
     let mut dummy = [0u8; 1];
