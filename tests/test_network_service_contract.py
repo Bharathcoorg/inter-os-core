@@ -83,6 +83,12 @@ def main():
     must(net, "segment.flags & 0x12 == 0x12", "TCP SYN-ACK integration")
     must(net, "poll_tcp_retransmissions", "TCP retransmission scheduler")
     must(net, "lookup_at(dst_ip, crate::interrupts::get_system_ticks())", "bounded ARP cache lookup")
+    must(net, "ARP_REQUEST_RETRY_TICKS", "bounded ARP request retry interval")
+    must(net, "ARP_REQUESTS.lock()", "ARP request state tracking")
+    must(net, "requested_at", "ARP request timestamp tracking")
+    must(net, "saturating_sub(entry.requested_at)", "ARP request retry deadline")
+    must(net, "entry.valid = false", "ARP request state cleanup")
+
     must(net, "insert_at(arp_pkt.sender_ip, arp_pkt.sender_mac", "bounded ARP cache refresh")
     must((ROOT / "kernel/src/net/arp.rs").read_text(), "ARP_CACHE_TICKS", "ARP cache aging")
     must(net, "acknowledge_tx", "TCP acknowledgement retirement")
