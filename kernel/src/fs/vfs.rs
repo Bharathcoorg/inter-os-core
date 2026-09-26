@@ -16,6 +16,8 @@ use crate::task::TaskId;
 
 /// Maximum number of file descriptors per task.
 pub const MAX_FD_PER_TASK: usize = 16;
+pub const MAX_FILE_SIZE: usize = 8192;
+pub const MAX_PATH_LEN: usize = 256;
 
 /// Unique Inode identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -100,6 +102,8 @@ pub enum FsError {
     TableFull,
     InvalidFd,
     IntegrityViolation,
+    PathTooLong,
+    FileTooLarge,
 }
 
 /// Virtual Filesystem Controller.
@@ -351,6 +355,7 @@ impl Vfs {
         path: &str,
         requested_rights: Rights,
     ) -> Result<FileDescriptor, FsError> {
+        if path.len() == 0 || path.len() > MAX_PATH_LEN { return Err(FsError::PathTooLong); }
         // Enforce capability validation based on requested access
         if requested_rights.contains(Rights::WRITE) {
             let cap = task_caps
@@ -480,6 +485,7 @@ impl Vfs {
         fd: FileDescriptor,
         buf: &[u8],
     ) -> Result<usize, FsError> {
+        if buf.len() > MAX_FILE_SIZE { return Err(FsError::FileTooLarge); }
         task_caps
             .verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE)
             .map_err(FsError::CapabilityError)?;
@@ -510,8 +516,10 @@ impl Vfs {
         // Extend buffer if necessary
         match &mut inode.data {
             InodeData::Dynamic(vec) => {
-                if offset + buf.len() > vec.len() {
-                    vec.resize(offset + buf.len(), 0);
+                let end = offset.checked_add(buf.len()).ok_or(FsError::FileTooLarge)?;
+                if end > MAX_FILE_SIZE { return Err(FsError::FileTooLarge); }
+                if end > vec.len() {
+                    vec.resize(end, 0);
                 }
                 vec[offset..offset + buf.len()].copy_from_slice(buf);
                 inode.size = vec.len();
