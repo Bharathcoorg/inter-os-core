@@ -1497,6 +1497,7 @@ pub fn sys_resource_query(
 /// Queries the dynamic multi-zone thermal governor into `out_buf` JSON string.
 pub fn sys_thermal_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
     require_system_control()?;
+    if out_buf.len() < crate::resource::THERMAL_JSON_MAX { return Err(SyscallResult::InvalidArguments); }
     let tm = crate::resource::THERMAL_MANAGER.lock();
     let len = tm.format_json(out_buf);
     Ok(len)
@@ -2296,6 +2297,8 @@ pub fn sys_sensor_read(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
 /// Queries battery fuel gauge telemetry (voltage, SoC %, capacity, charging status).
 /// In standard QEMU development targets without an ACPI/I2C fuel gauge, reports honestly.
 pub fn sys_battery_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    require_system_control()?;
+    if out_buf.len() < crate::resource::BATTERY_JSON_MAX { return Err(SyscallResult::InvalidArguments); }
     use core::fmt::Write;
     struct SliceWriter<'a> {
         buf: &'a mut [u8],
