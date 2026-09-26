@@ -43,6 +43,7 @@ pub enum TcpState {
     Established,
     FinWait,
     CloseWait,
+    LastAck,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -122,6 +123,7 @@ pub fn next_state(state: TcpState, flags: u16) -> TcpState {
         TcpState::SynReceived if flags & ACK != 0 => TcpState::Established,
         TcpState::Established if flags & FIN != 0 => TcpState::CloseWait,
         TcpState::FinWait if flags & ACK != 0 => TcpState::Closed,
+        TcpState::LastAck if flags & ACK != 0 => TcpState::Closed,
         other => other,
     }
 }
