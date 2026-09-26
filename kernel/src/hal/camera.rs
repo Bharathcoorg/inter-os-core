@@ -10,6 +10,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
 
+pub const CAMERA_MAX_WIDTH: u32 = 1920;
+pub const CAMERA_MAX_HEIGHT: u32 = 1080;
+
 /// Pixel format delivered by the mobile camera interface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PixelFormat {
@@ -80,6 +83,17 @@ impl CameraSensor {
     /// Configures sensor exposure time in microseconds.
     pub fn set_exposure(&mut self, exposure_us: u32) {
         self.exposure_us = exposure_us.clamp(100, 100_000);
+    }
+
+    pub fn configure(&mut self, width: u32, height: u32) -> Result<(), &'static str> {
+        if width == 0 || height == 0 || width > CAMERA_MAX_WIDTH || height > CAMERA_MAX_HEIGHT { return Err("camera resolution out of bounds"); }
+        self.width = width;
+        self.height = height;
+        Ok(())
+    }
+
+    pub fn set_focus(&mut self, state: AutoFocusState) {
+        self.af_state = state;
     }
 
     /// Captures a raw preview frame from the sensor and processes it through the ISP pipeline.
@@ -185,6 +199,16 @@ impl CameraSensor {
         } else {
             SceneType::General
         }
+    }
+}
+
+impl CameraFrame {
+    pub fn byte_len(&self) -> usize { self.pixels.len() }
+
+    pub fn copy_to(&self, out: &mut [u8]) -> Result<usize, &'static str> {
+        if out.len() < self.pixels.len() { return Err("camera output buffer too small"); }
+        out[..self.pixels.len()].copy_from_slice(&self.pixels);
+        Ok(self.pixels.len())
     }
 }
 
