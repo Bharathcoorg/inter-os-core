@@ -3291,6 +3291,56 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
     drop(sched);
 
     let app_id = app_id.trim_matches(|c: char| c.is_whitespace() || c == '\0');
+
+    // External applications use the canonical RAPP v2 execution path. The
+    // kernel verifies the package, derives capabilities only from its manifest,
+    // and loads the signed ELF payload into a Ring-3 child. First-party
+    // built-in apps continue through the native launcher table below.
+    if !app_id.is_empty()
+        && !app_id.contains('/')
+        && !app_id.contains('\\')
+        && !app_id.contains("..")
+    {
+        let read_slot = {
+            let sched = SCHEDULER.lock();
+            sched.current_task()
+                .and_then(|task| task.cap_table.find_slot(CapabilityType::FileSystemRead, Rights::READ))
+        };
+        if let Some(read_slot) = read_slot {
+            let path = alloc::format!("/packages/{}.rapp", app_id);
+            if let Ok(manifest) = sys_verify_package(read_slot, &path) {
+                if manifest.package_id == app_id && manifest.payload_len > 0 {
+                    let stat = sys_fs_stat(read_slot, &path)?;
+                    let fd = sys_fs_open(read_slot, &path, Rights::READ)?;
+                    let mut rapp = alloc::vec![0u8; stat.size];
+                    let read_bytes = sys_fs_read(read_slot, fd, &mut rapp)?;
+                    sys_fs_close(fd);
+                    if read_bytes != stat.size {
+                        return Err(SyscallResult::DeviceError);
+                    }
+                    let verified = crate::package::rapp::parse_rapp(&rapp)
+                        .map_err(|_| SyscallResult::IntegrityViolation)?;
+                    let payload_end = verified.payload_offset
+                        .checked_add(verified.payload_len)
+                        .ok_or(SyscallResult::InvalidArguments)?;
+                    let payload = &rapp[verified.payload_offset..payload_end];
+                    let tid = crate::task::user::spawn_verified_rapp_process(
+                        &verified,
+                        payload,
+                        parent_id,
+                    ).map_err(|_| SyscallResult::DeviceError)?;
+                    crate::ipc::IPC_ROUTER.lock().register_task(tid);
+                    serial_println!(
+                        "[APP] Launched verified RAPP '{}' as Task {}",
+                        verified.package_id,
+                        tid.0
+                    );
+                    return Ok(tid);
+                }
+            }
+        }
+    }
+
     let tid = match app_id {
         "org.interos.settings" | "settings" | "app_settings" => {
             crate::task::user::spawn_app_settings(parent_id)
