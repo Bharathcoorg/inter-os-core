@@ -688,6 +688,15 @@ impl Vfs {
         }
     }
 
+    /// Releases every open file descriptor owned by a terminating task.
+    ///
+    /// Descriptors are kernel-owned resources and must not survive task death.
+    pub fn cleanup_task(&mut self, task_id: TaskId) -> usize {
+        self.task_file_tables.remove(&task_id)
+            .map(|table| table.iter().filter(|slot| slot.is_some()).count())
+            .unwrap_or(0)
+    }
+
     /// Closes an open file descriptor.
     pub fn close(&mut self, task_id: TaskId, fd: FileDescriptor) -> Result<(), FsError> {
         // End the descriptor borrow before persisting the filesystem snapshot.
