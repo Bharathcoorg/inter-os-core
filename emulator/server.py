@@ -1613,66 +1613,29 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if self.path == '/api/hardware/sensor_inject':
-            content_length = int(self.headers.get('Content-Length', 0))
-            post_body = self.rfile.read(content_length)
-            try:
-                data = json.loads(post_body.decode('utf-8'))
-                if "battery_pct" in data:
-                    pct = int(data["battery_pct"])
-                    if pct <= 20:
-                        serial_lines.append(f"[HARDWARE_EVENT] Battery Governor: {pct}% charge detected -> Throttled LTPO refresh rate to 60Hz.")
-                    else:
-                        serial_lines.append(f"[HARDWARE_EVENT] Battery Governor: {pct}% charge -> LTPO 120Hz ProMotion active.")
-                if "ambient_lux" in data:
-                    lux = int(data["ambient_lux"])
-                    if lux >= 10000:
-                        serial_lines.append(f"[HARDWARE_EVENT] Ambient Sensor: {lux} lux detected -> Engaged 1000 nits High Brightness Mode (HBM).")
-                    else:
-                        serial_lines.append(f"[HARDWARE_EVENT] Ambient Sensor: {lux} lux -> Flicker-free DC dimming scaled.")
-                if "sim_slot" in data:
-                    slot = int(data["sim_slot"])
-                    slot_name = "Physical Nano-SIM" if slot == 0 else "eUICC eSIM Enclave"
-                    serial_lines.append(f"[HARDWARE_EVENT] Dual-SIM Controller: Switched active antenna to Slot {slot} ({slot_name}).")
-                if "killswitch_action" in data:
-                    action = str(data["killswitch_action"])
-                    serial_lines.append(f"[HARDWARE_EVENT] Remote Killswitch: Executed verified anti-theft action '{action}'.")
-
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps({'success': True, 'message': 'Hardware telemetry injected successfully'}).encode())
-            except Exception as e:
-                self.send_response(500)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            self.send_response(409)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': False,
+                'status': 'UNAVAILABLE',
+                'source': 'UNAVAILABLE',
+                'error': 'Hardware sensor injection is disabled; Device Studio only displays guest-reported telemetry'
+            }).encode())
             return
-
         if self.path == '/api/touch/event':
-            content_length = int(self.headers.get('Content-Length', 0))
-            post_body = self.rfile.read(content_length)
-            try:
-                data = json.loads(post_body.decode('utf-8'))
-                x = int(data.get("x", 360))
-                y = int(data.get("y", 720))
-                phase = str(data.get("phase", "down"))
-                serial_lines.append(f"[TOUCH_EVENT] Capacitive Contact: ({x}, {y}) phase={phase} -> Dispatched to QEMU microkernel.")
-                send_qemu_monitor_cmd("sendkey spc")
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps({'success': True, 'x': x, 'y': y, 'phase': phase}).encode())
-            except Exception as e:
-                self.send_response(500)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            self.send_response(409)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': False,
+                'status': 'UNAVAILABLE',
+                'source': 'UNAVAILABLE',
+                'error': 'Coordinate touch injection is unavailable until the guest exposes a real input endpoint'
+            }).encode())
             return
-
         if self.path == '/api/kms/flip':
             self.send_response(409)
             self.send_header('Content-Type', 'application/json')
@@ -1734,40 +1697,52 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             try:
                 data = json.loads(post_body.decode('utf-8'))
                 action = str(data.get("action", "reboot")).lower()
-                if action == "reboot":
-                    reset_sent = False
-                    try:
-                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s_rst:
-                            s_rst.settimeout(0.5)
-                            s_rst.connect(('127.0.0.1', 44445))
-                            _ = s_rst.recv(512)
-                            s_rst.sendall(b'system_reset\n')
-                            reset_sent = True
-                    except Exception:
-                        pass
-                    if reset_sent:
-                        serial_lines.append("[HARDWARE_RESET] Dispatched hardware reset pin (system_reset) to QEMU microkernel.")
-                    else:
-                        serial_lines.append("[KERNEL_EVENT] Hardware reboot command triggered -> Resetting ACPI machine state.")
-                    init_default_serial_logs()
-                elif action == "shutdown":
-                    serial_lines.append("[KERNEL_EVENT] ACPI system_powerdown signal delivered to hardware controller.")
-                elif action == "sleep":
-                    serial_lines.append("[HARDWARE_EVENT] Display controller: Entered low-power OLED sleep state (0.02W).")
-                elif action == "wake":
-                    serial_lines.append("[HARDWARE_EVENT] Display controller: Woke from sleep -> 120Hz LTPO scanout resumed.")
+            except Exception:
+                action = "invalid"
 
-                self.send_response(200)
+            if action != "reboot":
+                self.send_response(409)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
-                self.wfile.write(json.dumps({'success': True, 'action': action}).encode())
-            except Exception as e:
-                self.send_response(500)
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'status': 'UNAVAILABLE',
+                    'source': 'UNAVAILABLE',
+                    'error': 'Only a confirmed QEMU reboot command is currently exposed; shutdown/sleep/wake require guest endpoints'
+                }).encode())
+                return
+
+            reset_sent = False
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s_rst:
+                    s_rst.settimeout(0.5)
+                    s_rst.connect(('127.0.0.1', 44445))
+                    _ = s_rst.recv(512)
+                    s_rst.sendall(b'system_reset\n')
+                    reset_sent = True
+            except Exception:
+                pass
+
+            if not reset_sent:
+                self.send_response(409)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
-                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'status': 'UNAVAILABLE',
+                    'source': 'QEMU',
+                    'error': 'QEMU reset endpoint is not reachable'
+                }).encode())
+                return
+
+            serial_lines.append("[HARDWARE_RESET] Dispatched hardware reset pin (system_reset) to QEMU microkernel.")
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': True, 'action': 'reboot', 'source': 'QEMU'}).encode())
             return
 
         if self.path == '/api/qemu/reboot':
