@@ -98,16 +98,12 @@ def init_default_vfs():
         os.makedirs(f, exist_ok=True)
     
     defaults = {
-        os.path.join(VFS_ROOT, "data", "user", "notes.txt"): "InterOS Sovereign VFS\nPersonal scratchpad and secure notes.\n- Dual-SIM enabled\n- LTPO 120Hz smooth motion\n- StrongBox key 0x4A1F loaded\n",
-        os.path.join(VFS_ROOT, "data", "user", "contacts.json"): json.dumps([
-            {"name": "Alice Vance", "phone": "+1-555-0192", "sim": "SIM 1"},
-            {"name": "Bob Stone", "phone": "+1-555-0184", "sim": "eSIM 2"},
-            {"name": "Core Gateway", "phone": "*#06#", "sim": "SIM 1"}
-        ], indent=2),
-        os.path.join(VFS_ROOT, "sys", "kernel_info.txt"): "InterOS v1.3 (x86_64 SMP)\nPure Rust Microkernel\ndm-verity Merkle Tree: VERIFIED\nRing 0 / Ring 3 Privilege Separation: ENFORCED\n",
-        os.path.join(VFS_ROOT, "sys", "cpuinfo.txt"): "Processor: 8x Cortex-A53 / x86_64 Compatible\nFeatures: FPU VFPv4 NEON ASID64 AES SHA2\nCache: 32KB L1I, 32KB L1D, 512KB L2\n",
-        os.path.join(VFS_ROOT, "dev", "urandom"): "[Cryptographic Hardware TRNG Stream active]\n",
-        os.path.join(VFS_ROOT, "dev", "tty0"): "[Virtual Framebuffer Console scanout active]\n"
+        os.path.join(VFS_ROOT, "data", "user", "notes.txt"): "InterOS user notes\n",
+        os.path.join(VFS_ROOT, "data", "user", "contacts.json"): json.dumps([], indent=2),
+        os.path.join(VFS_ROOT, "sys", "kernel_info.txt"): "InterOS kernel information is reported by the guest runtime.\n",
+        os.path.join(VFS_ROOT, "sys", "cpuinfo.txt"): "CPU information is reported by the guest runtime.\n",
+        os.path.join(VFS_ROOT, "dev", "urandom"): "",
+        os.path.join(VFS_ROOT, "dev", "tty0"): ""
     }
     for path, content in defaults.items():
         if not os.path.exists(path):
