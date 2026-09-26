@@ -97,6 +97,10 @@ def main():
     must(net, "transmit_tcp_payload(", "kernel-internal TCP retransmission path")
     must(net, "transmit_tcp_syn(", "kernel-internal TCP SYN retransmission path")
     must(net, "get_system_ticks()", "TCP retransmission timer source")
+    must((ROOT / "kernel/src/interrupts.rs").read_text(), "PIT_BASE_HZ", "PIT clock source")
+    must((ROOT / "kernel/src/interrupts.rs").read_text(), "SYSTEM_TICK_HZ: u32 = 1_000", "defined system tick frequency")
+    must((ROOT / "kernel/src/interrupts.rs").read_text(), "command.write(0x36u8)", "PIT channel 0 mode configuration")
+    must((ROOT / "kernel/src/main.rs").read_text(), "interrupts::init_pit()", "boot-time PIT initialization")
     must(net, "conn.syn_pending = false", "SYN acknowledgement retires retransmission state")
     must(net, "conn.syn_retries = 0", "SYN retry state resets after handshake")
     assert "TCP_TABLE.lock().acknowledge_syn" not in net, "SYN-ACK path must not re-lock TCP_TABLE while its guard is held"
