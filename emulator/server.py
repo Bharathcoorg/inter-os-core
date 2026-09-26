@@ -856,128 +856,123 @@ def is_safe_proxy_url(url_str):
 
 
 def verify_and_install_rapp(body, pkg_name):
+    """Validate and install the canonical binary RAPP v2 format.
+
+    Device Studio performs structural, digest, and Ed25519 signature checks.
+    Publisher trust/revocation remains a guest/kernel decision; Studio never
+    upgrades a package to trusted merely because its embedded signature verifies.
+    The original binary package is stored unchanged.
     """
-    Cryptographically verifies and atomically installs a sovereign .rapp package.
-    Guarantees:
-    1. Rejection of zip bombs (decompression ratio limit, file count limit, total size limit)
-    2. Path traversal rejection (no '..', absolute paths, or special chars)
-    3. Mandatory manifest integrity and canonical structure
-    4. Cryptographic Ed25519 signature verification against SHA-256 file hashes
-    5. Atomic staging and commit (rollback on any failure)
-    """
-    MAX_FILES = 500
-    MAX_TOTAL_UNCOMPRESSED = 100 * 1024 * 1024 # 100 MB
-    MAX_SINGLE_FILE = 50 * 1024 * 1024 # 50 MB
-    MAX_RATIO = 100
+    import binascii
+    from cryptography.hazmat.primitives.asymmetric import ed25519
 
-    if len(body) < 32:
-        return False, "Package payload too small.", None
+    HEADER_SIZE = 0xB4
+    SIGNATURE_OFFSET = 0x70
+    SIGNATURE_SIZE = 64
+    MAX_CAPABILITIES = 1024
 
+    if len(body) < HEADER_SIZE:
+        return False, "RAPP v2 package is shorter than the canonical header.", None
+    if body[:4] != b"RAPP":
+        return False, "Invalid RAPP magic.", None
+    if int.from_bytes(body[4:6], "little") != 2:
+        return False, "Unsupported RAPP format version; expected v2.", None
+
+    arch_id = int.from_bytes(body[6:8], "little")
+    arch_names = {0: "x86_64", 1: "aarch64", 2: "riscv64"}
+    if arch_id not in arch_names:
+        return False, "Unsupported RAPP architecture.", None
+
+    raw_id = body[8:40].split(b"\0", 1)[0]
     try:
-        zf = zipfile.ZipFile(io.BytesIO(body), "r")
-    except Exception as e:
-        return False, f"Malformed ZIP container: {e}", None
+        app_id = raw_id.decode("utf-8")
+    except UnicodeDecodeError:
+        return False, "RAPP package ID is not valid UTF-8.", None
+    if not app_id or len(app_id) > 32:
+        return False, "Invalid RAPP package ID.", None
 
-    namelist = zf.namelist()
-    if len(namelist) > MAX_FILES:
-        return False, f"Zip bomb protection: excessive file count ({len(namelist)} > {MAX_FILES}).", None
+    publisher_key = body[40:72]
+    if publisher_key == b"\0" * 32:
+        return False, "RAPP publisher key is empty.", None
 
-    total_uncompressed = 0
-    for info in zf.infolist():
-        name = info.filename
-        if name.startswith("/") or name.startswith("\\") or ".." in name or "\0" in name:
-            return False, f"Path traversal attack detected: entry '{name}'.", None
-        if info.file_size > MAX_SINGLE_FILE:
-            return False, f"Oversized entry: '{name}' ({info.file_size} bytes).", None
-        total_uncompressed += info.file_size
-        if info.compress_size > 0 and (info.file_size / info.compress_size) > MAX_RATIO:
-            return False, f"Suspicious compression ratio on '{name}'.", None
+    version = tuple(int.from_bytes(body[o:o + 2], "little") for o in (72, 74, 76))
+    cap_count = int.from_bytes(body[78:80], "little")
+    if cap_count > MAX_CAPABILITIES:
+        return False, "RAPP capability count exceeds the canonical limit.", None
 
-    if total_uncompressed > MAX_TOTAL_UNCOMPRESSED:
-        return False, "Zip bomb protection: total uncompressed size exceeds limit.", None
+    payload_digest = body[0x50:0x70]
+    signature = body[SIGNATURE_OFFSET:SIGNATURE_OFFSET + SIGNATURE_SIZE]
+    payload_len = int.from_bytes(body[0xB0:0xB4], "little")
+    caps_end = HEADER_SIZE + cap_count * 2
+    payload_end = caps_end + payload_len
+    if caps_end > len(body) or payload_end != len(body):
+        return False, "RAPP v2 payload bounds are invalid.", None
 
-    if "manifest.json" not in namelist:
-        return False, "Package is missing required 'manifest.json' entry.", None
+    capabilities = []
+    for i in range(cap_count):
+        cap = int.from_bytes(body[HEADER_SIZE + i * 2:HEADER_SIZE + i * 2 + 2], "little")
+        if cap < 1 or cap > 18:
+            return False, f"Unknown RAPP capability ID {cap}.", None
+        capabilities.append(cap)
 
+    payload = body[caps_end:payload_end]
+    if hashlib.sha256(payload).digest() != payload_digest:
+        return False, "RAPP payload SHA-256 digest mismatch.", None
+
+    signed_message = (
+        body[:SIGNATURE_OFFSET]
+        + b"\0" * SIGNATURE_SIZE
+        + body[SIGNATURE_OFFSET + SIGNATURE_SIZE:caps_end]
+        + payload
+    )
     try:
-        manifest_bytes = zf.read("manifest.json")
-        manifest_data = json.loads(manifest_bytes.decode('utf-8'))
-    except Exception as e:
-        return False, f"Invalid manifest.json: {e}", None
+        ed25519.Ed25519PublicKey.from_public_bytes(publisher_key).verify(signature, signed_message)
+    except Exception:
+        return False, "RAPP Ed25519 signature verification failed.", None
 
-    app_id = manifest_data.get("id")
-    if not app_id or not re.match(r'^[a-zA-Z0-9_\-]+(\.[a-zA-Z0-9_\-]+)+$', app_id):
-        return False, f"Invalid or missing package id in manifest: '{app_id}'.", None
+    safe_name = os.path.basename(pkg_name or f"{app_id}.rapp")
+    if not safe_name.endswith(".rapp"):
+        safe_name = f"{safe_name}.rapp"
+    filename = safe_name
+    packages_dir = os.path.join(os.path.dirname(DIRECTORY), "packages")
+    os.makedirs(packages_dir, exist_ok=True)
 
-    app_name = manifest_data.get("name", app_id)
-    version = manifest_data.get("version", "1.0.0")
-    perms = manifest_data.get("permissions", ["CAP_RING3_USERSPACE"])
+    for target_dir in (packages_dir, INSTALLED_APPS_DIR):
+        target = os.path.join(target_dir, filename)
+        staging = target + ".staging"
+        try:
+            with open(staging, "wb") as f:
+                f.write(body)
+            os.replace(staging, target)
+        except Exception as exc:
+            try:
+                if os.path.exists(staging):
+                    os.remove(staging)
+            except Exception:
+                pass
+            return False, f"RAPP atomic install failed: {exc}", None
 
-    # Mandatory Ed25519 cryptographic signature verification
-    if "signature.json" not in namelist:
-        return False, "Package rejected: missing 'signature.json'. Unsigned packages are strictly forbidden in InterOS sovereign runtime.", None
-
-    sig_verified = False
-    pub_key_hex = ""
-
-    try:
-        sig_data = json.loads(zf.read("signature.json").decode('utf-8'))
-        pub_key_hex = sig_data.get("public_key", "")
-        sig_hex = sig_data.get("signature", "")
-        signed_payload = sig_data.get("signed_payload", {})
-
-        from cryptography.hazmat.primitives.asymmetric import ed25519
-
-        pub_key = ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(pub_key_hex))
-        canonical_payload = json.dumps(signed_payload, sort_keys=True).encode("utf-8")
-        pub_key.verify(bytes.fromhex(sig_hex), canonical_payload)
-
-        expected_files = signed_payload.get("files_sha256", {})
-        for rel_path, expected_hash in expected_files.items():
-            if rel_path not in namelist:
-                return False, f"Signed file missing from package: '{rel_path}'.", None
-            file_bytes = zf.read(rel_path)
-            actual_hash = hashlib.sha256(file_bytes).hexdigest()
-            if actual_hash != expected_hash:
-                return False, f"Cryptographic integrity violation: hash mismatch on '{rel_path}'.", None
-
-        sig_verified = True
-    except Exception as e:
-        return False, f"Cryptographic signature verification failed: {e}", None
-
-    # Atomic Staging & Installation
-    staging_dir = os.path.join(INSTALLED_APPS_DIR, f"_staging_{app_id}_{int(time.time()*1000)}")
-    final_dir = os.path.join(INSTALLED_APPS_DIR, app_id)
-
-    try:
-        os.makedirs(staging_dir, exist_ok=True)
-        zf.extractall(staging_dir)
-
-        if os.path.exists(final_dir):
-            shutil.rmtree(final_dir, ignore_errors=True)
-        shutil.move(staging_dir, final_dir)
-    except Exception as e:
-        if os.path.exists(staging_dir):
-            shutil.rmtree(staging_dir, ignore_errors=True)
-        return False, f"Atomic install commit failed: {e}", None
-
+    sha256 = hashlib.sha256(body).hexdigest()
+    version_text = ".".join(str(v) for v in version)
     app_entry = {
         "id": app_id,
-        "name": app_name,
-        "filename": pkg_name,
-        "format": "Rust App Package (.rapp)",
+        "name": app_id,
+        "filename": filename,
+        "format": "Rust App Package (RAPP v2 binary)",
         "type": "Sovereign Ring 3",
         "size": len(body),
-        "sha256": hashlib.sha256(body).hexdigest()[:16] + "...",
-        "status": "System Verified (Ed25519 Signed)" if sig_verified else "System Verified",
-        "capabilities": perms,
-        "permissions": perms,
-        "version": version,
-        "signature_verified": sig_verified,
-        "public_key": pub_key_hex[:16] + "..." if pub_key_hex else "None"
+        "sha256": sha256[:16] + "...",
+        "status": "Signature verified; guest trust required",
+        "capabilities": capabilities,
+        "permissions": capabilities,
+        "version": version_text,
+        "signature_verified": True,
+        "publisher_trusted": False,
+        "public_key": binascii.hexlify(publisher_key).decode("ascii")[:16] + "...",
+        "arch": arch_names[arch_id],
+        "payload_size": payload_len,
     }
-
-    return True, "Installation successful", app_entry
+    return True, "RAPP v2 signature and integrity verified; guest trust remains authoritative", app_entry
 
 
 class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
