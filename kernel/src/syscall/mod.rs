@@ -378,6 +378,7 @@ pub fn sys_fs_read(
         .map_err(|e| match e {
             FsError::CapabilityError(_) | FsError::PermissionDenied => SyscallResult::PermissionDenied,
             FsError::InvalidFd => SyscallResult::InvalidFd,
+            FsError::FileTooLarge | FsError::PathTooLong => SyscallResult::InvalidArguments,
             _ => SyscallResult::InvalidArguments,
         })
 }
