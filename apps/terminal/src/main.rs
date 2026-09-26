@@ -157,12 +157,9 @@ pub extern "C" fn _start() -> ! {
     }
 
     // 8. Terminal Asynchronous Event Loop
-    let mut term_ticks: u32 = 0;
     loop {
         let interest = std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK | std::EVENT_IPC_MSG;
         if let Ok(triggered) = std::event_poll(interest, 100) {
-            term_ticks += 1;
-
             if (triggered & std::EVENT_TOUCH_INPUT) != 0 {
                 // User tapped command suggestion chip on screen
                 std::audio_haptic_click().ok();
@@ -173,17 +170,6 @@ pub extern "C" fn _start() -> ! {
                 std::log(0, "[TERMINAL APP] Touch input received: suggestion executed.").ok();
             }
 
-            if term_ticks >= 4 {
-                std::log(0, "[TERMINAL APP] Interactive developer session verified. Exiting cleanly.").ok();
-                if surface > 0 {
-                    let _ = std::surface_destroy(6, surface);
-                }
-                std::exit();
-            }
-
-            if term_ticks % 50 == 0 {
-                std::log(0, "[TERMINAL APP] Shell Ready: Developer CLI waiting for commands.").ok();
-            }
         }
     }
 }
