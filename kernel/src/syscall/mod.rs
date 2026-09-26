@@ -1753,7 +1753,6 @@ pub fn sys_tcp_close(connection_id: u32) -> Result<(), SyscallResult> {
     let dst_ip;
     let remote_port;
     let ack;
-    let state;
     {
         let table = crate::net::TCP_TABLE.lock();
         let conn = table.get(connection_id).ok_or(SyscallResult::InvalidArguments)?;
@@ -1766,7 +1765,6 @@ pub fn sys_tcp_close(connection_id: u32) -> Result<(), SyscallResult> {
         dst_ip = conn.remote_ip;
         remote_port = conn.remote_port;
         ack = conn.recv_seq;
-        state = conn.state;
     }
     let seq = crate::net::TCP_TABLE.lock()
         .arm_fin(connection_id, crate::interrupts::get_system_ticks())
@@ -1775,7 +1773,6 @@ pub fn sys_tcp_close(connection_id: u32) -> Result<(), SyscallResult> {
         let _ = crate::net::TCP_TABLE.lock().rollback_fin(connection_id);
         return Err(SyscallResult::NetworkError);
     }
-    let _ = state;
     Ok(())
 }
 
