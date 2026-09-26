@@ -400,10 +400,8 @@ pub extern "C" fn _start() -> ! {
             s
         }
         Err(_) => {
-            std::log(0, "[VAULT APP] Surface allocation unavailable; falling back to headless execution.").ok();
-            std::audio_haptic_click().ok();
-            std::log(0, "[VAULT APP] Headless storage verification completed.").ok();
-            std::exit_with_code(0);
+            std::log(0, "[VAULT APP] Display surface unavailable; refusing headless demo execution.").ok();
+            std::exit_with_code(1);
         }
     };
 
