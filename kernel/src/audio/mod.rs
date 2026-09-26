@@ -26,9 +26,15 @@ pub enum AudioFeedback {
 }
 
 /// Global Audio Manager Subsystem
+pub const AUDIO_MAX_BUFFER_FRAMES: usize = 48_000;
+
 pub struct AudioManager {
     pub last_feedback: AudioFeedback,
     pub pci_devices: alloc::vec::Vec<PciAudioDevice>,
+    pub stream_active: bool,
+    pub stream_frames: usize,
+    pub volume_percent: u8,
+    pub underruns: u32,
 }
 
 impl AudioManager {
@@ -36,7 +42,31 @@ impl AudioManager {
         Self {
             last_feedback: AudioFeedback::Silence,
             pci_devices: alloc::vec::Vec::new(),
+            stream_active: false,
+            stream_frames: 0,
+            volume_percent: 100,
+            underruns: 0,
         }
+    }
+
+    pub fn configure_stream(&mut self, frames: usize) -> Result<(), &'static str> {
+        if frames == 0 || frames > AUDIO_MAX_BUFFER_FRAMES { return Err("audio stream exceeds bounded buffer"); }
+        self.stream_frames = frames;
+        Ok(())
+    }
+
+    pub fn start_stream(&mut self) -> Result<(), &'static str> {
+        if self.stream_frames == 0 { return Err("audio stream is not configured"); }
+        self.stream_active = true;
+        Ok(())
+    }
+
+    pub fn stop_stream(&mut self) {
+        self.stream_active = false;
+    }
+
+    pub fn set_volume(&mut self, percent: u8) {
+        self.volume_percent = percent.min(100);
     }
 
     /// Dispatches audio feedback to hardware drivers.
