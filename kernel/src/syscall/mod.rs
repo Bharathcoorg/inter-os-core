@@ -2258,6 +2258,7 @@ pub fn sys_keystore_derive(slot_idx: u32, out_buf: &mut [u8; 32]) -> Result<usiz
 /// Queries mobile hardware sensor telemetry (orientation, 3-axis accel, ambient lux, proximity).
 /// Reports honestly if hardware sensors are not physically present on the board.
 pub fn sys_sensor_read(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    if out_buf.len() < 32 || out_buf.len() > 512 { return Err(SyscallResult::InvalidArguments); }
     require_system_control()?;
     use core::fmt::Write;
     struct SliceWriter<'a> {
