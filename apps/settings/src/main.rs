@@ -244,8 +244,6 @@ pub extern "C" fn _start() -> ! {
                 }
                 std::log(0, "[SETTINGS APP] Interactive touch event processed; tab switched.").ok();
             }
-
-            }
         }
     }
 }

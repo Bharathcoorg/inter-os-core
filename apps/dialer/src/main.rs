@@ -622,7 +622,6 @@ pub extern "C" fn _start() -> ! {
     std::log(0, "[DIALER APP] Step 3: Initial frame presented to hardware scanout.").ok();
 
     // 5. Calls are initiated only from user input; no automatic call is placed at startup.
-    let _ = std::surface_flip(6);
 
     let mut ipc_msg = [0u8; 64];
 
