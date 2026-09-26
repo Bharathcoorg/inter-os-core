@@ -4,7 +4,9 @@
 //! authenticated until a real TLS implementation is integrated.
 
 pub const TLS_RECORD_HEADER: usize = 5;
-pub const TLS_MAX_RECORD: usize = 16384;
+pub const TLS_MAX_PLAINTEXT: usize = 16 * 1024;
+pub const TLS_MAX_RECORD: usize = TLS_MAX_PLAINTEXT + 256;
+pub const TLS_LEGACY_RECORD_VERSION: u16 = 0x0303;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -34,7 +36,7 @@ impl<'a> TlsRecord<'a> {
         if buf.len() < TLS_RECORD_HEADER { return Err("TLS record header too small"); }
         let content_type = ContentType::try_from(buf[0])?;
         let version = u16::from_be_bytes([buf[1], buf[2]]);
-        if version < 0x0301 || version > 0x0304 { return Err("unsupported TLS record version"); }
+        if version != TLS_LEGACY_RECORD_VERSION { return Err("unsupported TLS record version"); }
         let len = u16::from_be_bytes([buf[3], buf[4]]) as usize;
         if len > TLS_MAX_RECORD || buf.len() < TLS_RECORD_HEADER + len { return Err("invalid TLS record length"); }
         Ok(Self { content_type, version, payload: &buf[5..5 + len] })
@@ -42,6 +44,7 @@ impl<'a> TlsRecord<'a> {
 
     pub fn serialize(&self, out: &mut [u8]) -> Result<usize, &'static str> {
         if self.payload.len() > TLS_MAX_RECORD || out.len() < TLS_RECORD_HEADER + self.payload.len() { return Err("TLS output buffer too small"); }
+        if self.version != TLS_LEGACY_RECORD_VERSION { return Err("unsupported TLS record version"); }
         out[0] = self.content_type as u8;
         out[1..3].copy_from_slice(&self.version.to_be_bytes());
         out[3..5].copy_from_slice(&(self.payload.len() as u16).to_be_bytes());
@@ -55,7 +58,7 @@ mod tests {
     use super::*;
     #[test]
     fn record_round_trip_and_bounds() {
-        let r = TlsRecord { content_type: ContentType::Handshake, version: 0x0303, payload: b"hello" };
+        let r = TlsRecord { content_type: ContentType::Handshake, version: TLS_LEGACY_RECORD_VERSION, payload: b"hello" };
         let mut raw = [0u8; 32];
         let n = r.serialize(&mut raw).unwrap();
         let p = TlsRecord::parse(&raw[..n]).unwrap();
