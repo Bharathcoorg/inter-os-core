@@ -20,3 +20,7 @@ ed25519-dalek = { version = "2.1.1", default-features = false, features = ["allo
 # legalization ICEs seen with the hosted SIMD backend.
 sha2 = { version = "0.10.9", default-features = false, features = ["force-soft"] }
 interos-android-shared = { path = "src/compat/android/shared" }
+
+[profile.dev]
+opt-level = 1
+panic = "abort"

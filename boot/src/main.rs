@@ -12,9 +12,13 @@ fn main() -> anyhow::Result<()> {
     let kernel_path = if args.len() > 1 {
         PathBuf::from(&args[1])
     } else {
-        let p1 = PathBuf::from("kernel/target/x86_64-unknown-none/debug/kernel");
-        let p2 = PathBuf::from("target/x86_64-unknown-none/debug/kernel");
-        if p1.exists() {
+        let p1 = PathBuf::from("target/x86_64-unknown-none/debug/kernel");
+        let p2 = PathBuf::from("kernel/target/x86_64-unknown-none/debug/kernel");
+        if p1.exists() && p2.exists() {
+            let m1 = std::fs::metadata(&p1).and_then(|m| m.modified()).ok();
+            let m2 = std::fs::metadata(&p2).and_then(|m| m.modified()).ok();
+            if m1 >= m2 { p1 } else { p2 }
+        } else if p1.exists() {
             p1
         } else {
             p2

@@ -222,8 +222,20 @@ impl DrmKmsController {
 
     pub fn focused_surface(&self) -> Option<u32> { self.focused_surface }
 
+    /// Ensures that front and back scanout buffers are allocated to match scanout dimensions.
+    pub fn ensure_buffers(&mut self) {
+        let size = (self.scanout_width as usize) * (self.scanout_height as usize);
+        if self.front_buffer.len() != size {
+            self.front_buffer.resize(size, 0xFF000000);
+        }
+        if self.back_buffer.len() != size {
+            self.back_buffer.resize(size, 0xFF0B0F19);
+        }
+    }
+
     /// Composites all visible surfaces onto the back buffer in z-order.
     pub fn composite(&mut self) {
+        self.ensure_buffers();
         // Clear back buffer to base background color (slate navy: 0xFF0B0F19)
         let bg_color = 0xFF0B0F19u32;
         self.back_buffer.fill(bg_color);
@@ -298,6 +310,7 @@ impl DrmKmsController {
 
     /// Performs an atomic page flip: swaps back buffer to front scanout buffer.
     pub fn page_flip(&mut self) -> u64 {
+        self.ensure_buffers();
         core::mem::swap(&mut self.front_buffer, &mut self.back_buffer);
         self.vsync_counter += 1;
         self.page_flips_completed += 1;
