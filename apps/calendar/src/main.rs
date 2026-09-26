@@ -188,10 +188,10 @@ pub extern "C" fn _start() -> ! {
         std::log(0, "[CALENDAR APP] Gregorian date math verified: Sept 2026 has 30 days, starting on Tuesday.").ok();
     }
 
-    // 3. Schedule Calendar Event
-    calendar.schedule_event("dev sync at 15:00 UTC");
+    // Events are created only from user/intent input; startup does not
+    // inject a developer sample event.
 
-    // 4. Sovereign Asynchronous Event Reactor Loop
+    // Sovereign Asynchronous Event Reactor Loop
     let interest_mask = std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK;
     loop {
         match std::event_poll(interest_mask, 150) {
