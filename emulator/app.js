@@ -2778,58 +2778,17 @@ document.addEventListener('DOMContentLoaded', () => {
   // =========================================================================
   // 13. HARDWARE DIGITAL TWIN SENSOR TELEMETRY SLIDERS
   // =========================================================================
-  hwSliderBattery?.addEventListener('input', (e) => {
-    const val = parseInt(e.target.value, 10);
-    if (phoneBattery) phoneBattery.textContent = `${val}%`;
-    if (val <= 20) {
-      if (hwValBattery) hwValBattery.textContent = `${val}% (60Hz Low Power)`;
-      if (sensorValRefresh) sensorValRefresh.textContent = '60 Hz';
-      if (sensorBadgeRefresh) sensorBadgeRefresh.textContent = 'Energy Saver';
-      logConsole('warn', `[HARDWARE] Battery low (${val}%) &bull; Throttling display refresh rate to 60Hz.`);
-    } else {
-      if (hwValBattery) hwValBattery.textContent = `${val}% (120Hz LTPO)`;
-      if (sensorValRefresh) sensorValRefresh.textContent = '120 Hz';
-      if (sensorBadgeRefresh) sensorBadgeRefresh.textContent = 'ProMotion Active';
-    }
-    injectHardwareSensor({ battery_pct: val });
-  });
-
-  hwSliderLux?.addEventListener('input', (e) => {
-    const val = parseInt(e.target.value, 10);
-    if (val >= 10000) {
-      if (hwValLux) hwValLux.textContent = `${val} Lux (1000 nits HBM)`;
-      if (sensorBadgeLux) sensorBadgeLux.textContent = 'High Brightness Mode';
-    } else {
-      if (hwValLux) hwValLux.textContent = `${val} Lux (DC Dimming)`;
-      if (sensorBadgeLux) sensorBadgeLux.textContent = 'DC Dimming';
-    }
-    if (sensorValLux) sensorValLux.textContent = `${val} Lux`;
-    injectHardwareSensor({ ambient_lux: val });
-  });
-
-  let activeSim = 0;
-  btnSimToggle?.addEventListener('click', () => {
-    activeSim = (activeSim === 0) ? 1 : 0;
-    if (activeSim === 0) {
-      btnSimToggle.textContent = 'SIM: Slot 0 (Physical 5G)';
-      if (phoneSimBadge) phoneSimBadge.textContent = '5G';
-      logConsole('info', '[HAL_SIM] Switched active radio to Slot 0 (Physical Nano-SIM 5G).');
-    } else {
-      btnSimToggle.textContent = 'SIM: Slot 1 (eUICC eSIM)';
-      if (phoneSimBadge) phoneSimBadge.textContent = 'eSIM';
-      logConsole('info', '[HAL_SIM] Switched active radio to Slot 1 (eUICC Hardware Enclave).');
-    }
-    injectHardwareSensor({ sim_slot: activeSim });
-    playBeep(600, 0.03, 'sine');
-  });
-
-  btnHwKillswitch?.addEventListener('click', () => {
-    if (confirm('Engage Remote Hardware Killswitch? This triggers key zeroization test.')) {
-      logConsole('err', '[KILLSWITCH] Remote anti-theft killswitch engaged. Hardware enclave keys zeroized.');
-      injectHardwareSensor({ killswitch_action: 'LockDevice' });
-      playBeep(200, 0.2, 'sawtooth');
-    }
-  });
+  // Device Studio does not synthesize battery, ambient-light, SIM, or
+  // kill-switch state. These controls remain unavailable until a real guest
+  // hardware control endpoint is exposed.
+  const unavailableHardwareControl = (name) => {
+    logConsole('warn', `[HARDWARE] ${name}: unavailable; no guest control endpoint is connected.`);
+    showToast(`${name}: unavailable`);
+  };
+  hwSliderBattery?.addEventListener('input', () => unavailableHardwareControl('Battery profile'));
+  hwSliderLux?.addEventListener('input', () => unavailableHardwareControl('Ambient light'));
+  btnSimToggle?.addEventListener('click', () => unavailableHardwareControl('SIM selection'));
+  btnHwKillswitch?.addEventListener('click', () => unavailableHardwareControl('Hardware killswitch'));
 
   function injectHardwareSensor(payload) {
     const name = Object.keys(payload || {})[0] || 'hardware';
