@@ -2579,15 +2579,24 @@ pub fn sys_camera_capture(
     drop(sched);
 
     let mut cam = crate::hal::CAMERA.lock();
-    if action == 3 {
-        // Toggle flash torch
-        cam.flash_enabled = !cam.flash_enabled;
-        return Ok(if cam.flash_enabled { 1 } else { 0 });
+    match action {
+        1 => {
+            cam.set_focus(crate::hal::AutoFocusState::Locked);
+            return Ok(1);
+        }
+        2 => {
+            return Ok(if cam.af_state == crate::hal::AutoFocusState::Locked { 1 } else { 0 });
+        }
+        3 => {
+            cam.flash_enabled = !cam.flash_enabled;
+            return Ok(if cam.flash_enabled { 1 } else { 0 });
+        }
+        0 => {}
+        _ => return Err(SyscallResult::InvalidArguments),
     }
 
     let frame = cam.capture_frame();
-    let bytes_to_copy = core::cmp::min(out_buf.len(), frame.pixels.len());
-    out_buf[..bytes_to_copy].copy_from_slice(&frame.pixels[..bytes_to_copy]);
+    let bytes_to_copy = frame.copy_to(out_buf).map_err(|_| SyscallResult::InvalidArguments)?;
 
     if let Some(meta) = meta_buf {
         if meta.len() >= 4 {
