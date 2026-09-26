@@ -220,6 +220,7 @@ impl Scheduler {
         self.tasks[current_idx].state = TaskState::Zombie;
         crate::ipc::cleanup_task(task_id);
         crate::fs::cleanup_task(task_id);
+        crate::event::cleanup_task(task_id);
 
         // Reparent live children to primordial init so a dead parent cannot leave
         // an unreapable child/zombie subtree behind.
@@ -268,6 +269,8 @@ impl Scheduler {
         task.exit_code = exit_code;
         task.state = TaskState::Zombie;
         crate::ipc::cleanup_task(id);
+        crate::fs::cleanup_task(id);
+        crate::event::cleanup_task(id);
         crate::drivers::display_kms::DRM_KMS.lock().destroy_surfaces_owned_by(id.0);
         // Do not update the service registry while holding the scheduler lock.
         // The registry's supervision path deliberately acquires scheduler -> registry;
