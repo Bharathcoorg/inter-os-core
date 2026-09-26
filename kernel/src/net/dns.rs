@@ -110,9 +110,29 @@ impl DnsResolver {
     pub fn begin(&mut self,name:&[u8],now:u64)->Result<u16,&'static str>{
         if name.is_empty()||name.len()>DNS_MAX_NAME{return Err("invalid DNS name")}
         if self.cached(name,now).is_some(){return Err("DNS cache hit")}
-        let id=self.next_id; self.next_id=self.next_id.wrapping_add(1).max(1);
+        let mut id = self.next_id.max(1);
+        let mut free_id = None;
+        for _ in 0..u16::MAX {
+            if !self.queries.iter().any(|q| q.valid && q.id == id) {
+                free_id = Some(id);
+                break;
+            }
+            id = id.wrapping_add(1).max(1);
+        }
+        let id = free_id.ok_or("DNS query id space exhausted")?;
+        self.next_id = id.wrapping_add(1).max(1);
+
         let q=self.queries.iter_mut().find(|q|!q.valid).ok_or("DNS query table full")?;
         q.id=id;q.name[..name.len()].copy_from_slice(name);q.name_len=name.len();q.retries=0;q.deadline=now.saturating_add(DNS_RETRY_TICKS);q.valid=true;Ok(id)
+    }
+    pub fn abort(&mut self, id: u16) -> bool {
+        if let Some(q) = self.queries.iter_mut().find(|q| q.valid && q.id == id) {
+            q.valid = false;
+            q.retries = 0;
+            q.deadline = 0;
+            return true;
+        }
+        false
     }
     pub fn build_query(&self,id:u16,out:&mut[u8])->Result<usize,&'static str>{let q=self.queries.iter().find(|q|q.valid&&q.id==id).ok_or("unknown DNS query")?;encode_query(id,&q.name[..q.name_len],out)}
     pub fn accept_response(&mut self,packet:&[u8],now:u64)->Result<Ipv4Address,&'static str>{
@@ -130,4 +150,31 @@ mod resolver_tests {
  use super::*;
  #[test] fn resolver_query_cache(){let mut r=DnsResolver::new();let id=r.begin(b"example.com",0).unwrap();let mut q=[0u8;300];assert!(r.build_query(id,&mut q).unwrap()>DNS_HEADER_LEN);assert!(r.query(id).is_some());}
  #[test] fn resolver_expires(){let mut r=DnsResolver::new();let id=r.begin(b"example.com",0).unwrap();for n in 1..=4{r.poll_timeouts(DNS_RETRY_TICKS*n as u64);}assert!(r.query(id).is_none());}
+}
+
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn abort_releases_inflight_query() {
+        let mut r = DnsResolver::new();
+        let id = r.begin(b"example.com", 0).unwrap();
+        assert!(r.query(id).is_some());
+        assert!(r.abort(id));
+        assert!(r.query(id).is_none());
+        let replacement = r.begin(b"example.net", 1).unwrap();
+        assert_ne!(replacement, 0);
+    }
+
+    #[test]
+    fn query_ids_skip_active_ids_after_wrap() {
+        let mut r = DnsResolver::new();
+        r.next_id = u16::MAX;
+        let first = r.begin(b"one.example", 0).unwrap();
+        let second = r.begin(b"two.example", 0).unwrap();
+        assert_ne!(first, second);
+        assert_ne!(second, 0);
+    }
 }
