@@ -58,6 +58,14 @@ impl ImuSensor {
         self.accel = new_accel;
     }
 
+    pub fn update_gyro(&mut self, new_gyro: Vector3D) {
+        self.gyro = new_gyro;
+    }
+
+    pub fn sample(&self) -> (Vector3D, Vector3D) {
+        (self.accel, self.gyro)
+    }
+
     /// Determines the phone's physical screen orientation from the gravity vector.
     pub fn determine_orientation(&self) -> ScreenOrientation {
         let abs_x = self.accel.x.abs();
