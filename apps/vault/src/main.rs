@@ -431,7 +431,6 @@ pub extern "C" fn _start() -> ! {
     vault.export_backup();
 
     let mut ipc_msg = [0u8; 64];
-    let mut session_ticks = 0u64;
 
     // 7. Interactive Event Reactor Loop
     loop {
@@ -440,16 +439,7 @@ pub extern "C" fn _start() -> ! {
             100,
         ) {
             if (events & std::EVENT_TIMER_TICK) != 0 {
-                session_ticks += 1;
-                if session_ticks % 10 == 0 {
-                    let _ = std::surface_flip(6);
-                }
-                // Clean exit after satisfying automated interactive verification window
-                if session_ticks >= 4 {
-                    std::log(0, "[VAULT APP] Interactive session duration satisfied. Returning to Launcher.").ok();
-                    let _ = std::surface_destroy(6, surface);
-                    std::exit_with_code(0);
-                }
+                let _ = std::surface_flip(6);
             }
 
             // Handle touch gesture events

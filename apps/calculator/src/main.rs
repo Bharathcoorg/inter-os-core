@@ -436,15 +436,8 @@ pub extern "C" fn _start() -> ! {
         }
     };
 
-    // 2. Perform automated arithmetic verification: 42 + 58 = 100
-    calc.push_digit(4);
-    calc.push_digit(2);
-    calc.set_operation('+');
-    calc.push_digit(5);
-    calc.push_digit(8);
-    let result = calc.evaluate();
-    assert_eq!(result, 100);
-    std::log(0, "[CALCULATOR] Arithmetic execution verified (42 + 58 = 100).").ok();
+    // 2. Start with an empty expression; calculations are driven by user input.
+    calc.clear();
 
     // 3. Render initial Calculator UI frame and present
     render_calculator_ui(surface, &calc);
@@ -452,7 +445,6 @@ pub extern "C" fn _start() -> ! {
     std::log(0, "[CALCULATOR] Initial frame presented to hardware scanout.").ok();
 
     let mut ipc_msg = [0u8; 64];
-    let mut session_ticks = 0u64;
 
     // 4. Interactive Event Reactor Loop
     loop {
@@ -461,17 +453,7 @@ pub extern "C" fn _start() -> ! {
             100,
         ) {
             if (events & std::EVENT_TIMER_TICK) != 0 {
-                session_ticks += 1;
-                // Periodic presentation heartbeat
-                if session_ticks % 10 == 0 {
-                    let _ = std::surface_flip(6);
-                }
-                // Automated smoke session concludes cleanly after interactive verification window
-                if session_ticks >= 4 {
-                    std::log(0, "[CALCULATOR] Interactive session duration satisfied. Returning to Launcher.").ok();
-                    let _ = std::surface_destroy(6, surface);
-                    std::exit_with_code(0);
-                }
+                let _ = std::surface_flip(6);
             }
 
             // Handle touch gesture events

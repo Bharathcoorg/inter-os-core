@@ -225,13 +225,10 @@ pub extern "C" fn _start() -> ! {
         std::log(0, "[SETTINGS APP] Settings UI presented to scanout buffer.").ok();
     }
 
-    // 6. Interactive Event & Demonstration Loop
-    let mut session_ticks: u32 = 0;
+    // 6. Interactive Event Loop
     loop {
         let interest = std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK | std::EVENT_IPC_MSG;
         if let Ok(triggered) = std::event_poll(interest, 100) {
-            session_ticks += 1;
-
             if (triggered & std::EVENT_TOUCH_INPUT) != 0 {
                 let next_tab = match settings.current_tab {
                     SettingsTab::Wireless => SettingsTab::PowerAndBattery,
@@ -248,13 +245,6 @@ pub extern "C" fn _start() -> ! {
                 std::log(0, "[SETTINGS APP] Interactive touch event processed; tab switched.").ok();
             }
 
-            // After completing verified execution session (~0.5s), terminate cleanly
-            if session_ticks >= 3 {
-                std::log(0, "[SETTINGS APP] Active user interaction session complete. Exiting cleanly.").ok();
-                if surface > 0 {
-                    let _ = std::surface_destroy(6, surface);
-                }
-                std::exit();
             }
         }
     }

@@ -616,27 +616,15 @@ pub extern "C" fn _start() -> ! {
         }
     };
 
-    // 4. Prepopulate with Alice's number and render initial UI
-    let target_contact = &CONTACTS_BOOK[0];
-    for c in target_contact.number.chars() {
-        if c.is_ascii_digit() || c == '*' || c == '#' {
-            if dialer.active_len < dialer.active_number.len() {
-                dialer.active_number[dialer.active_len] = c as u8;
-                dialer.active_len += 1;
-            }
-        }
-    }
+    // 4. Render an empty dialer; numbers are entered by the user.
     render_dialer_ui(surface, &dialer);
     let _ = std::surface_flip(6);
     std::log(0, "[DIALER APP] Step 3: Initial frame presented to hardware scanout.").ok();
 
-    // 5. Automated call test: Dial Alice, connect, and hang up
-    let _ = dialer.dial(target_contact.number);
-    render_dialer_ui(surface, &dialer);
+    // 5. Calls are initiated only from user input; no automatic call is placed at startup.
     let _ = std::surface_flip(6);
 
     let mut ipc_msg = [0u8; 64];
-    let mut session_ticks = 0u64;
 
     // 6. Interactive Event Reactor Loop
     loop {
@@ -645,28 +633,10 @@ pub extern "C" fn _start() -> ! {
             100,
         ) {
             if (events & std::EVENT_TIMER_TICK) != 0 {
-                session_ticks += 1;
                 if dialer.state == CallState::ActiveCall {
                     dialer.call_duration_secs += 1;
                 }
-
-                if session_ticks == 2 {
-                    // Hangup after 2 ticks of active call verification
-                    dialer.hangup();
-                    render_dialer_ui(surface, &dialer);
-                    let _ = std::surface_flip(6);
-                }
-
-                if session_ticks % 10 == 0 {
-                    let _ = std::surface_flip(6);
-                }
-
-                // Clean session exit after satisfying interactive verification duration
-                if session_ticks >= 4 {
-                    std::log(0, "[DIALER APP] Interactive session duration satisfied. Returning to Launcher.").ok();
-                    let _ = std::surface_destroy(6, surface);
-                    std::exit_with_code(0);
-                }
+                let _ = std::surface_flip(6);
             }
 
             if (events & std::EVENT_MODEM_URC) != 0 {
