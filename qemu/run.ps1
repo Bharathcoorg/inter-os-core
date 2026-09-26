@@ -15,7 +15,7 @@ if (-not (Test-Path $imagePath)) {
 }
 
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "  Booting Gravity OS v0.1 in QEMU" -ForegroundColor Cyan
+Write-Host "  Booting InterOS Core in QEMU" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "Image: $imagePath"
 Write-Host "QEMU:  $qemuBin"
