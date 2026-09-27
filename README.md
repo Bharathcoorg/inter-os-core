@@ -47,6 +47,10 @@ In accordance with our engineering integrity policy, every subsystem is classifi
 | **Capacitive Touch & Gesture Engine** | Multi-touch contact tracking (5 slots), Tap, DoubleTap, LongPress, Pan, Pinch | **Implemented & Kernel-Tested** | `kernel/src/drivers/touch_gestures.rs`; contact slot lifetime tracking & high-level gesture queue; Syscall 71 |
 | **Flattened Device Tree (FDT) Parser** | Native DTB binary parser (`0xd00dfeed`) for hardware peripheral enumeration | **Implemented & Kernel-Tested** | `kernel/src/drivers/fdt.rs`; node tree traversal, MMIO register extraction, interrupt mapping |
 | **PMIC Fuel Gauge & DVFS Governor** | Coulomb counter SoC tracking, interactive frequency scaling, thermal throttle | **Implemented & Kernel-Tested** | `kernel/src/drivers/pmic.rs`; PowerSave/Balanced/Performance/Turbo profiles & >70°C throttle; Syscall 72 |
+| **Secure System Update Policy** | Monotonic versioning, SHA-256 payload attestation, Ed25519 publisher verification, A/B activation and bounded rollback | **Implemented** | `kernel/src/update.rs`; fail-closed staging and recovery policy |
+| **Boot Recovery State** | Persistent boot-health record, bounded boot attempts, last-known-good slot recovery | **Implemented** | `kernel/src/recovery.rs`; persistent journal record with deterministic rollback |
+| **Structured Diagnostics** | Bounded diagnostic ring plus persistent crash-dump subsystem | **Implemented** | `kernel/src/diagnostics.rs`, `kernel/src/storage/crashdump.rs` |
+| **Performance Measurement** | Scheduler, IPC and frame timing counters with worst-case tracking | **Implemented** | `kernel/src/performance.rs`; measurement primitives only |
 
 ---
 
