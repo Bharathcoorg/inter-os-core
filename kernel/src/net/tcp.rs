@@ -155,3 +155,24 @@ mod tests {
         assert_eq!(parsed.payload, b"GET");
     }
 }
+
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Retransmission { pub seq:u32, pub len:u16, pub sent_at:u64, pub attempts:u8 }
+
+pub const MAX_RETRANSMISSIONS: usize = 16;
+pub const TCP_RETRANSMIT_TIMEOUT: u64 = 100;
+pub const TCP_TIME_WAIT: u64 = 200;
+
+pub struct TcpReliability { pending:[Option<Retransmission>;MAX_RETRANSMISSIONS], pub time_wait_until:u64 }
+impl TcpReliability {
+ pub const fn new()->Self{Self{pending:[None;MAX_RETRANSMISSIONS],time_wait_until:0}}
+ pub fn track(&mut self,seq:u32,len:u16,now:u64)->Result<(),&'static str>{
+  if let Some(slot)=self.pending.iter_mut().find(|x|x.is_none()){*slot=Some(Retransmission{seq,len,sent_at:now,attempts:0});Ok(())}else{Err("TCP retransmission queue full")}
+ }
+ pub fn acknowledge(&mut self,ack:u32){for slot in &mut self.pending{if let Some(r)=*slot{if seq_ge(ack,r.seq.wrapping_add(r.len as u32)){*slot=None;}}}}
+ pub fn due(&mut self,now:u64)->Option<Retransmission>{for slot in &mut self.pending{if let Some(mut r)=*slot{if now.saturating_sub(r.sent_at)>=TCP_RETRANSMIT_TIMEOUT{r.sent_at=now;r.attempts=r.attempts.saturating_add(1);*slot=Some(r);return Some(r);}}}None}
+ pub fn enter_time_wait(&mut self,now:u64){self.time_wait_until=now.saturating_add(TCP_TIME_WAIT)}
+ pub fn time_wait_expired(&self,now:u64)->bool{self.time_wait_until!=0&&now>=self.time_wait_until}
+ pub fn pending(&self)->usize{self.pending.iter().filter(|x|x.is_some()).count()}
+}
