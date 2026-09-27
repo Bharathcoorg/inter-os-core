@@ -77,3 +77,8 @@ mod tests {
         assert_eq!(out[3].argument, 69);
     }
 }
+
+use spin::Mutex;
+pub static DIAGNOSTICS: Mutex<DiagnosticRing> = Mutex::new(DiagnosticRing::new());
+
+pub fn init() { DIAGNOSTICS.lock().record(0, DiagnosticLevel::Info, 1, 0); }

@@ -39,6 +39,7 @@ pub mod recovery;
 pub mod update;
 pub mod diagnostics;
 pub mod performance;
+pub mod watchdog;
 pub mod sensor;
 pub mod settings;
 pub mod services;
@@ -328,6 +329,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     // 15. Initialize Unified Dynamic Resource Manager (Priorities & Preemption)
     resource::init();
+    diagnostics::init();
+    performance::init();
 
     // 16. Initialize Hardware Input Subsystem (Capacitive Touch Digitizer & Mobile Gesture Engine)
     input::init();

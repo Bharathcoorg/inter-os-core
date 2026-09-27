@@ -36,3 +36,9 @@ impl PerformanceSnapshot {
         Self { scheduler: Counter::new(), ipc: Counter::new(), frame: Counter::new() }
     }
 }
+
+
+use spin::Mutex;
+pub static PERFORMANCE: Mutex<PerformanceSnapshot> = Mutex::new(PerformanceSnapshot::new());
+
+pub fn init() { *PERFORMANCE.lock() = PerformanceSnapshot::new(); }
