@@ -432,7 +432,8 @@ pub fn spawn_userspace_service(service_id: u8, parent_id: TaskId) -> Result<Task
         caps.insert(Capability { id: CapabilityId(0x7003), cap_type: CapabilityType::EventPoll, rights: Rights::READ | Rights::INVOKE, object_id: 0 }).map_err(|_| "service capability table full")?;
         caps.insert(Capability { id: CapabilityId(0x7004), cap_type: CapabilityType::FrameBufferDirect, rights: Rights::READ | Rights::WRITE, object_id: 1 }).map_err(|_| "service capability table full")?;
         caps.insert(Capability { id: CapabilityId(0x7005), cap_type: CapabilityType::FileSystemRead, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
-        let id = spawn_user_process_with_parent("compositor", COMPOSITOR_ELF, caps, 5, parent_id)?;
+        let image = service_image(service_id).ok_or("unknown userspace service image")?;
+        let id = spawn_user_process_with_parent(image.name, image.elf, caps, 5, parent_id)?;
         return Ok(id);
     }
     if service_id == 10 {
@@ -445,17 +446,12 @@ pub fn spawn_userspace_service(service_id: u8, parent_id: TaskId) -> Result<Task
         caps.insert(Capability { id: CapabilityId(0x7005), cap_type: CapabilityType::EventPoll, rights: Rights::READ | Rights::INVOKE, object_id: 0 }).map_err(|_| "service capability table full")?;
         caps.insert(Capability { id: CapabilityId(0x7006), cap_type: CapabilityType::IpcReceive, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
         caps.insert(Capability { id: CapabilityId(0x7007), cap_type: CapabilityType::ProcessSpawn, rights: Rights::INVOKE, object_id: 0 }).map_err(|_| "service capability table full")?;
-        let id = spawn_user_process_with_parent("launcher", LAUNCHER_ELF, caps, 5, parent_id)?;
+        let image = service_image(service_id).ok_or("unknown userspace service image")?;
+        let id = spawn_user_process_with_parent(image.name, image.elf, caps, 5, parent_id)?;
         return Ok(id);
     }
 
-    let (name, elf) = match service_id {
-        1 => ("displayd", DISPLAYD_ELF), 2 => ("inputd", INPUTD_ELF),
-        3 => ("storaged", STORAGED_ELF), 4 => ("netd", NETD_ELF),
-        5 => ("powerd", POWERD_ELF), 6 => ("modemd", MODEMD_ELF),
-        7 => ("audiod", AUDIOD_ELF), 8 => ("camerad", CAMERAD_ELF),
-        _ => return Err("unknown userspace service"),
-    };
+    let image = service_image(service_id).ok_or("unknown userspace service image")?;
     let mut caps = CapabilityTable::new(8);
     caps.insert(Capability { id: CapabilityId(0x7000), cap_type: CapabilityType::SerialOutput, rights: Rights::WRITE, object_id: 0 }).map_err(|_| "service capability table full")?;
     caps.insert(Capability { id: CapabilityId(0x7001), cap_type: CapabilityType::TimerTickRead, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
@@ -514,7 +510,7 @@ pub fn spawn_userspace_service(service_id: u8, parent_id: TaskId) -> Result<Task
             object_id: 0,
         }).map_err(|_| "service capability table full")?;
     }
-    spawn_user_process_with_parent(name, elf, caps, 5, parent_id)
+    spawn_user_process_with_parent(image.name, image.elf, caps, 5, parent_id)
 }
 
 /// Legacy packaged-process launcher retained for source compatibility. It no
