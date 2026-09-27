@@ -81,6 +81,8 @@ impl CameraSensor {
         }
     }
 
+    pub fn is_hardware_present(&self) -> bool { self.hardware_present }
+
     /// Configures sensor exposure time in microseconds.
     pub fn set_exposure(&mut self, exposure_us: u32) {
         self.exposure_us = exposure_us.clamp(100, 100_000);
