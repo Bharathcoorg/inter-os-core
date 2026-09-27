@@ -92,7 +92,7 @@ SUPPORTED_DEVICES = {
         "cpu": "qemu64",
         "boot_type": "BIOS/MBR Bootloader",
         "image": "target/inter-os-bios.img",
-        "status": "Verified in QEMU",
+        "status": "Primary emulation contract; runtime validation pending",
     },
     "aarch64": {
         "name": "InterOS AArch64 Virt Mobile",
@@ -101,7 +101,7 @@ SUPPORTED_DEVICES = {
         "cpu": "cortex-a53",
         "boot_type": "Direct Kernel ELF",
         "image": "target/aarch64-unknown-none/debug/kernel-aarch64",
-        "status": "Verified in QEMU",
+        "status": "Source-level architecture target; runtime validation pending",
     },
     "riscv64": {
         "name": "InterOS RISC-V Virt Mobile",
@@ -110,7 +110,7 @@ SUPPORTED_DEVICES = {
         "cpu": "rv64",
         "boot_type": "OpenSBI / Direct Kernel ELF",
         "image": "target/riscv64gc-unknown-none-elf/debug/kernel-riscv64",
-        "status": "Verified in QEMU",
+        "status": "Source-level architecture target; runtime validation pending",
     },
 }
 
