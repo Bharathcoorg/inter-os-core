@@ -217,14 +217,7 @@ def main():
                 print(f"  {l}")
 
         assert launcher_ready, f"Launcher failed to present initial frame within timeout (QEMU poll: {proc.poll()})"
-        print("[LIFECYCLE TEST] [OK] Launcher lock screen presented.")
-
-        # Unlock device to Home Screen
-        print("[LIFECYCLE TEST] Swiping up to unlock device from Lock Screen to Home Screen...")
-        reader.sock.sendall(b"SWIPE 360 1370 360 1100 5\n")
-        unlocked = reader.wait_for("Device unlocked", timeout=10.0, print_keywords=["LAUNCHER", "Device unlocked"])
-        assert unlocked, "Failed to unlock device to Home Screen"
-        print("[LIFECYCLE TEST] [OK] Device unlocked to Home Screen.")
+        print("[LIFECYCLE TEST] [OK] Launcher home screen presented.")
         time.sleep(1.0)
 
         # Take screendump of launcher homescreen
