@@ -56,6 +56,72 @@ def send_monitor_cmd(sock, cmd):
             break
     return resp.decode('utf-8', errors='replace')
 
+class SerialReader:
+    def __init__(self, sock):
+        self.sock = sock
+        self.buf = b""
+        self.captured_logs = []
+
+    def wait_for(self, marker, timeout=15.0, print_keywords=None):
+        start_t = time.time()
+        while time.time() - start_t < timeout:
+            try:
+                data = self.sock.recv(4096)
+                if not data:
+                    break
+                self.buf += data
+                while b"\n" in self.buf:
+                    line, self.buf = self.buf.split(b"\n", 1)
+                    decoded = line.decode('utf-8', errors='replace').strip()
+                    if decoded:
+                        self.captured_logs.append(decoded)
+                        if print_keywords and any(k in decoded for k in print_keywords):
+                            print(f"  [GUEST] {decoded}")
+                        if marker in decoded:
+                            return True
+            except socket.timeout:
+                continue
+            except ConnectionResetError:
+                break
+        return False
+
+def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_coords, present_marker, dump_prefix):
+    print(f"\n[LIFECYCLE TEST] === Phase {phase_num}: Testing {app_name} ({app_id}) ===")
+    print(f"[LIFECYCLE TEST] Dispatching touch tap on {app_name} card at {tap_coords}...")
+    reader.sock.sendall(f"TAP {tap_coords[0]} {tap_coords[1]}\n".encode('utf-8'))
+
+    # Wait for app launch and presentation
+    presented = reader.wait_for(
+        present_marker,
+        timeout=15.0,
+        print_keywords=[app_name.upper(), "APP", "LAUNCHER", "INPUT", "Step", app_id]
+    )
+    assert presented, f"{app_name} failed to present frame within timeout"
+    print(f"[LIFECYCLE TEST] [OK] {app_name} launched and presented application frame.")
+
+    time.sleep(0.5)
+    ppm_app = os.path.abspath(rf"target\{dump_prefix}.ppm")
+    _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_app}")
+    print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_app}")
+
+    # Dispatch touch tap on Back button
+    print(f"[LIFECYCLE TEST] Dispatching touch tap on Back button (x=62, y=48)...")
+    reader.sock.sendall(b"TAP 62 48\n")
+
+    # Wait for child exit and Launcher reaping
+    reaped = reader.wait_for(
+        "Foreground application exited and was reaped",
+        timeout=15.0,
+        print_keywords=[app_name.upper(), "APP", "LAUNCHER", "INPUT", "WAITPID"]
+    )
+    assert reaped, f"{app_name} exit / Launcher waitpid reaping was not observed"
+    print(f"[LIFECYCLE TEST] [OK] Back navigation successfully triggered child exit, surface teardown, and parent waitpid reaping.")
+
+    time.sleep(0.3)
+    ppm_reaped = os.path.abspath(rf"target\test_launcher_after_{dump_prefix}.ppm")
+    _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_reaped}")
+    print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_reaped}")
+
 def main():
     qemu_exe = find_qemu("qemu-system-x86_64.exe")
     kernel_img = os.path.abspath(r"target\inter-os-bios.img")
@@ -84,7 +150,6 @@ def main():
 
     serial_sock = None
     monitor_sock = None
-    captured_logs = []
 
     try:
         # Connect to serial socket
@@ -93,45 +158,25 @@ def main():
         serial_sock.connect(('127.0.0.1', ser_port))
         serial_sock.settimeout(0.2)
         print("[LIFECYCLE TEST] Connected to QEMU serial socket.")
+        reader = SerialReader(serial_sock)
 
         # 1. Wait for launcher presentation
         print("[LIFECYCLE TEST] Phase 1: Awaiting Launcher homescreen presentation...")
-        launcher_ready = False
-        start_t = time.time()
-        buf = b""
-
-        while time.time() - start_t < 90.0:
-            try:
-                data = serial_sock.recv(4096)
-                if not data:
-                    break
-                buf += data
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    decoded = line.decode('utf-8', errors='replace').strip()
-                    if decoded:
-                        captured_logs.append(decoded)
-                        if any(k in decoded for k in ["LAUNCHER", "APP", "CALCULATOR", "PID1", "Step 5"]):
-                            print(f"  [GUEST] {decoded}")
-                        if "Step 5: Initial presentation complete" in decoded:
-                            launcher_ready = True
-                            break
-                if launcher_ready:
-                    break
-            except socket.timeout:
-                continue
-            except ConnectionResetError:
-                break
+        launcher_ready = reader.wait_for(
+            "Step 5: Initial presentation complete",
+            timeout=90.0,
+            print_keywords=["LAUNCHER", "APP", "PID1", "Step 5"]
+        )
 
         if not launcher_ready:
-            print(f"[DEBUG] Captured {len(captured_logs)} lines:")
-            for l in captured_logs:
+            print(f"[DEBUG] Captured {len(reader.captured_logs)} lines:")
+            for l in reader.captured_logs[-50:]:
                 print(f"  {l}")
 
         assert launcher_ready, "Launcher failed to present initial frame within timeout"
         print("[LIFECYCLE TEST] [OK] Launcher home screen presented.")
 
-        # Connect to monitor socket now that guest is fully booted and interactive
+        # Connect to monitor socket
         monitor_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         monitor_sock.settimeout(2.0)
         monitor_sock.connect(('127.0.0.1', mon_port))
@@ -144,95 +189,45 @@ def main():
         _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_launcher}")
         print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_launcher}")
 
-        # 2. Tap Calculator card on Launcher: Row 1, Card 0 (x=180, y=520)
-        print("[LIFECYCLE TEST] Phase 2: Dispatching touch tap on Calculator card (x=180, y=520)...")
-        serial_sock.sendall(b"TAP 180 520\n")
+        # 2. Multi-App Roundtrips:
+        # App 1: Calculator (Row 1, Card 0: x=180, y=520)
+        test_app_lifecycle(
+            reader=reader,
+            monitor_sock=monitor_sock,
+            phase_num=2,
+            app_name="Calculator",
+            app_id="org.interos.calculator",
+            tap_coords=(180, 520),
+            present_marker="Initial frame presented to hardware scanout",
+            dump_prefix="test_calculator"
+        )
 
-        # 3. Wait for Calculator app launch and presentation
-        calc_launched = False
-        calc_presented = False
-        start_t = time.time()
+        # App 2: Settings (Row 0, Card 0: x=180, y=350)
+        test_app_lifecycle(
+            reader=reader,
+            monitor_sock=monitor_sock,
+            phase_num=3,
+            app_name="Settings",
+            app_id="org.interos.settings",
+            tap_coords=(180, 350),
+            present_marker="Settings UI presented to scanout buffer",
+            dump_prefix="test_settings"
+        )
 
-        while time.time() - start_t < 15.0:
-            try:
-                data = serial_sock.recv(4096)
-                if not data:
-                    break
-                buf += data
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    decoded = line.decode('utf-8', errors='replace').strip()
-                    if decoded:
-                        captured_logs.append(decoded)
-                        if any(k in decoded for k in ["LAUNCHER", "APP", "CALCULATOR", "INPUT"]):
-                            print(f"  [GUEST] {decoded}")
-                        if "Launched application from real touch input" in decoded or "org.interos.calculator" in decoded:
-                            calc_launched = True
-                        if "Initial frame presented to hardware scanout" in decoded:
-                            calc_presented = True
-                            break
-                if calc_presented:
-                    break
-            except socket.timeout:
-                continue
-            except ConnectionResetError:
-                break
-
-        assert calc_presented, "Calculator app failed to present initial frame"
-        print("[LIFECYCLE TEST] [OK] Calculator launched and presented application frame.")
-
-        # Allow calculator event reactor loop to settle
-        time.sleep(0.5)
-
-        # Take screendump of running calculator
-        ppm_calc = os.path.abspath(r"target\test_calculator.ppm")
-        _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_calc}")
-        print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_calc}")
-
-        # 4. Tap Calculator Back button (<) in header: (x=62, y=48)
-        print("[LIFECYCLE TEST] Phase 3: Dispatching touch tap on Back button (x=62, y=48)...")
-        serial_sock.sendall(b"TAP 62 48\n")
-
-        # 5. Wait for Calculator exit and Launcher reaping
-        calc_exited = False
-        reaped = False
-        start_t = time.time()
-
-        while time.time() - start_t < 15.0:
-            try:
-                data = serial_sock.recv(4096)
-                if not data:
-                    break
-                buf += data
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    decoded = line.decode('utf-8', errors='replace').strip()
-                    if decoded:
-                        captured_logs.append(decoded)
-                        if any(k in decoded for k in ["LAUNCHER", "APP", "CALCULATOR", "INPUT"]):
-                            print(f"  [GUEST] {decoded}")
-                        if "Exit button tapped" in decoded or "Exiting to launcher" in decoded:
-                            calc_exited = True
-                        if "Foreground application exited and was reaped" in decoded:
-                            reaped = True
-                            break
-                if reaped:
-                    break
-            except socket.timeout:
-                continue
-            except ConnectionResetError:
-                break
-
-        assert calc_exited or reaped, "Child app exit / parent reaping was not observed"
-        print("[LIFECYCLE TEST] [OK] Back navigation successfully triggered child exit, surface teardown, and parent waitpid reaping.")
-
-        # Take screendump of re-presented launcher
-        ppm_reaped = os.path.abspath(r"target\test_launcher_reaped.ppm")
-        _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_reaped}")
-        print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_reaped}")
+        # App 3: Terminal (Row 0, Card 1: x=485, y=350)
+        test_app_lifecycle(
+            reader=reader,
+            monitor_sock=monitor_sock,
+            phase_num=4,
+            app_name="Terminal",
+            app_id="org.interos.terminal",
+            tap_coords=(485, 350),
+            present_marker="Terminal console presented to scanout buffer",
+            dump_prefix="test_terminal"
+        )
 
         print("\n============================================================")
-        print("  INTEROS CORE INTERACTIVE LIFECYCLE VERIFICATION: PASSED   ")
+        print("  INTEROS CORE INTERACTIVE MULTI-APP LIFECYCLE: ALL PASSED  ")
         print("============================================================")
 
     except Exception as e:
