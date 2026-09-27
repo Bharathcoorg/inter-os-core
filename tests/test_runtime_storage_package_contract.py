@@ -94,3 +94,10 @@ def test_package_launch_requires_exact_active_version_and_active_dependencies():
     source = (ROOT / "kernel/src/package/registry.rs").read_text(encoding="utf-8")
     assert "matches!(entry.state, PackageState::Active)" in source
     assert "version == e.version" in source
+
+
+def test_repository_does_not_track_generated_application_elfs():
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+    assert "apps/*/bin/" in gitignore
+    assert "!apps/test_app/bin/test_app.elf" not in gitignore
+    assert not (ROOT / "apps/test_app/bin/test_app.elf").exists()
