@@ -45,6 +45,7 @@ pub struct PowerManager {
     pub battery_percent: u8,
     pub is_charging: bool,
     pub touch_boost_active: bool,
+    pub telemetry_valid: bool,
 }
 
 impl PowerManager {
@@ -56,10 +57,11 @@ impl PowerManager {
             max_freq_mhz: base_freq_mhz,
             min_freq_mhz: base_freq_mhz / 4, // 25% minimum frequency floor
             thermal_trip: ThermalTrip::Nominal,
-            display_refresh_hz: 120, // 120Hz ProMotion display
-            battery_percent: 100,
-            is_charging: true,
+            display_refresh_hz: 0,
+            battery_percent: 0,
+            is_charging: false,
             touch_boost_active: false,
+            telemetry_valid: false,
         }
     }
 
@@ -85,6 +87,7 @@ impl PowerManager {
 
     /// Updates thermal status and adjusts thermal trip points.
     pub fn update_thermal(&mut self, temperature_c: u8) {
+        self.telemetry_valid = true;
         self.thermal_trip = if temperature_c >= 85 {
             ThermalTrip::Critical
         } else if temperature_c >= 75 {
@@ -99,6 +102,7 @@ impl PowerManager {
 
     /// Updates battery charge level and charging status.
     pub fn update_battery(&mut self, percent: u8, is_charging: bool) {
+        self.telemetry_valid = true;
         self.battery_percent = percent;
         self.is_charging = is_charging;
         self.recalculate_frequency();
