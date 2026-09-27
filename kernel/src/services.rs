@@ -1,6 +1,6 @@
 //! InterOS userspace-style system service registry and lifecycle bootstrap.
 //!
-//! Phase 25 establishes explicit service ownership and capability boundaries.
+//! The service registry establishes explicit service ownership and capability boundaries.
 //! The service functions are intentionally small kernel-hosted workers until
 //! the userspace service ABI is fully available; all privileged work remains
 //! behind the existing syscall/capability boundary.
@@ -261,7 +261,7 @@ pub fn supervise() {
         }
     }
 }
-/// Serializes the authoritative Phase 25 service registry for diagnostics.
+/// Serializes the authoritative service registry for diagnostics.
 pub fn snapshot(out: &mut [u8]) -> usize {
     use core::fmt::Write;
     struct W<'a> { b: &'a mut [u8], n: usize }
