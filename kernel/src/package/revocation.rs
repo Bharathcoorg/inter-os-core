@@ -220,24 +220,46 @@ impl RevocationRegistry {
         }
     }
 
-    pub fn revoke_package(&mut self, package_id: &str, reason: RevocationReason, epoch: u64, issuer: &str) {
+    pub fn revoke_package(&mut self, package_id: &str, reason: RevocationReason, epoch: u64, issuer: &str) -> Result<(), &'static str> {
         let rec = RevocationRecord {
             target_id: package_id.to_string(), reason,
             revoked_at_epoch: epoch, issuer: issuer.to_string(),
         };
+        if !self.revoked_packages.contains_key(package_id) && self.revoked_packages.len() >= MAX_PERSISTED_RECORDS {
+            return Err("package revocation registry is full");
+        }
+        let previous = self.revoked_packages.get(package_id).cloned();
         self.revoked_packages.insert(package_id.to_string(), rec);
-        let _ = self.persist();
+        if self.persist().is_err() {
+            match previous {
+                Some(old) => { self.revoked_packages.insert(package_id.to_string(), old); }
+                None => { self.revoked_packages.remove(package_id); }
+            }
+            return Err("failed to persist package revocation");
+        }
         serial_println!("[REVOCATION] Package '{}' placed on CRL (Reason: {:?}).", package_id, reason);
+        Ok(())
     }
 
-    pub fn revoke_key(&mut self, key: &[u8; 32], reason: RevocationReason, epoch: u64, issuer: &str) {
+    pub fn revoke_key(&mut self, key: &[u8; 32], reason: RevocationReason, epoch: u64, issuer: &str) -> Result<(), &'static str> {
         let rec = RevocationRecord {
             target_id: String::from("KEY_REVOCATION"), reason,
             revoked_at_epoch: epoch, issuer: issuer.to_string(),
         };
+        if !self.revoked_keys.contains_key(key) && self.revoked_keys.len() >= MAX_PERSISTED_RECORDS {
+            return Err("key revocation registry is full");
+        }
+        let previous = self.revoked_keys.get(key).cloned();
         self.revoked_keys.insert(*key, rec);
-        let _ = self.persist();
+        if self.persist().is_err() {
+            match previous {
+                Some(old) => { self.revoked_keys.insert(*key, old); }
+                None => { self.revoked_keys.remove(key); }
+            }
+            return Err("failed to persist key revocation");
+        }
         serial_println!("[REVOCATION] Key 0x{:02X}{:02X}... placed on CRL (Reason: {:?}).", key[0], key[1], reason);
+        Ok(())
     }
 
     pub fn is_package_revoked(&self, package_id: &str) -> bool {
@@ -251,9 +273,20 @@ impl RevocationRegistry {
     /// Registers a publisher public key in the device trust store.
     /// Provisions a publisher trust root from a secure boot/provisioning path.
     /// This method intentionally has no userspace syscall wrapper.
-    pub fn trust_key(&mut self, key: [u8; 32], publisher: &str) {
+    pub fn trust_key(&mut self, key: [u8; 32], publisher: &str) -> Result<(), &'static str> {
+        if !self.trusted_keys.contains_key(&key) && self.trusted_keys.len() >= MAX_PERSISTED_RECORDS {
+            return Err("publisher trust store is full");
+        }
+        let previous = self.trusted_keys.get(&key).cloned();
         self.trusted_keys.insert(key, publisher.to_string());
-        let _ = self.persist_trusted_keys();
+        if self.persist_trusted_keys().is_err() {
+            match previous {
+                Some(old) => { self.trusted_keys.insert(key, old); }
+                None => { self.trusted_keys.remove(&key); }
+            }
+            return Err("failed to persist publisher trust root");
+        }
+        Ok(())
     }
 
     /// Returns true only for an explicitly provisioned publisher key.
@@ -267,8 +300,8 @@ impl RevocationRegistry {
         if self.is_key_revoked(&proof.old_key) { return Err("Old key is revoked; cannot be rotated"); }
 
         self.rotated_keys.insert(proof.publisher.clone(), proof.new_key);
-        self.trust_key(proof.new_key, &proof.publisher);
-        self.revoke_key(&proof.old_key, RevocationReason::SupersededByRotation, proof.epoch, &proof.publisher);
+        self.trust_key(proof.new_key, &proof.publisher).map_err(|_| "failed to persist rotated trust root")?;
+        self.revoke_key(&proof.old_key, RevocationReason::SupersededByRotation, proof.epoch, &proof.publisher)?;
         serial_println!("[KEY ROTATION] Publisher '{}' rotated key successfully to epoch {}.", proof.publisher, proof.epoch);
         Ok(())
     }
