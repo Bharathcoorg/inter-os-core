@@ -437,25 +437,38 @@ pub fn spawn_user_process(
     caps: CapabilityTable,
     priority: u8,
 ) -> Result<TaskId, &'static str> {
-    // 1. Create independent per-process PML4 address space
-    let mut pt = crate::memory::TaskPageTable::create_user_page_table()?;
+    let parent_id = SCHEDULER.lock().current_task_id().unwrap_or(TaskId(0));
+    spawn_user_process_with_parent(name, elf_data, caps, priority, parent_id)
+}
 
-    // 2. Load ELF into this process's page table with W^X and stack guard page
+/// Creates an isolated userspace process with an explicit parent identity.
+///
+/// Keeping parent assignment inside task creation makes the process table and
+/// scheduler agree on ownership; callers no longer need to mutate a TCB after
+/// it has already been registered as a process.
+pub fn spawn_user_process_with_parent(
+    name: &'static str,
+    elf_data: &[u8],
+    caps: CapabilityTable,
+    priority: u8,
+    parent_id: TaskId,
+) -> Result<TaskId, &'static str> {
+    let mut pt = crate::memory::TaskPageTable::create_user_page_table()?;
     let stack_top = 0x0080_0000;
     let (user_entry, user_stack_top) = load_user_elf_into_page_table(elf_data, &mut pt, stack_top)?;
 
-    // 3. Create TaskControlBlock
     let mut tcb = crate::task::TaskControlBlock::new(name, user_process_entry, caps, priority);
     tcb.page_table = Some(pt);
     tcb.user_entry = user_entry;
     tcb.user_stack_top = user_stack_top;
-
-    let parent_id = SCHEDULER.lock().current_task_id().unwrap_or(TaskId(0));
     tcb.parent_id = parent_id;
 
     let id = tcb.id;
-    SCHEDULER.lock().spawn_task(tcb);
-    Ok(id)
+    let spawned = SCHEDULER.lock().spawn_task(tcb);
+    if spawned == TaskId(0) {
+        return Err("process registration failed");
+    }
+    Ok(spawned)
 }
 
 /// Loads a 64-bit ELF binary into a new page table with default stack top (0x0080_0000).
@@ -521,11 +534,7 @@ pub fn spawn_verified_rapp_process(
         return Err("RAPP payload length mismatch");
     }
     let caps = capabilities_from_rapp(&manifest.capabilities, parent_id.0)?;
-    let id = spawn_user_process("rapp_process", elf_payload, caps, 1)?;
-    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
-        task.parent_id = parent_id;
-    }
-    Ok(id)
+    spawn_user_process_with_parent("rapp_process", elf_payload, caps, 1, parent_id)
 }
 
 /// Spawns a first-party system service as an isolated Ring-3 process owned by PID1.
@@ -538,8 +547,7 @@ pub fn spawn_userspace_service(service_id: u8, parent_id: TaskId) -> Result<Task
         caps.insert(Capability { id: CapabilityId(0x7003), cap_type: CapabilityType::EventPoll, rights: Rights::READ | Rights::INVOKE, object_id: 0 }).map_err(|_| "service capability table full")?;
         caps.insert(Capability { id: CapabilityId(0x7004), cap_type: CapabilityType::FrameBufferDirect, rights: Rights::READ | Rights::WRITE, object_id: 1 }).map_err(|_| "service capability table full")?;
         caps.insert(Capability { id: CapabilityId(0x7005), cap_type: CapabilityType::FileSystemRead, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
-        let id = spawn_user_process("compositor", COMPOSITOR_ELF, caps, 5)?;
-        if let Some(task) = SCHEDULER.lock().get_task_mut(id) { task.parent_id = parent_id; }
+        let id = spawn_user_process_with_parent("compositor", COMPOSITOR_ELF, caps, 5, parent_id)?;
         return Ok(id);
     }
     if service_id == 10 {
@@ -552,8 +560,7 @@ pub fn spawn_userspace_service(service_id: u8, parent_id: TaskId) -> Result<Task
         caps.insert(Capability { id: CapabilityId(0x7005), cap_type: CapabilityType::EventPoll, rights: Rights::READ | Rights::INVOKE, object_id: 0 }).map_err(|_| "service capability table full")?;
         caps.insert(Capability { id: CapabilityId(0x7006), cap_type: CapabilityType::IpcReceive, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
         caps.insert(Capability { id: CapabilityId(0x7007), cap_type: CapabilityType::ProcessSpawn, rights: Rights::INVOKE, object_id: 0 }).map_err(|_| "service capability table full")?;
-        let id = spawn_user_process("launcher", LAUNCHER_ELF, caps, 5)?;
-        if let Some(task) = SCHEDULER.lock().get_task_mut(id) { task.parent_id = parent_id; }
+        let id = spawn_user_process_with_parent("launcher", LAUNCHER_ELF, caps, 5, parent_id)?;
         return Ok(id);
     }
 
@@ -622,9 +629,7 @@ pub fn spawn_userspace_service(service_id: u8, parent_id: TaskId) -> Result<Task
             object_id: 0,
         }).map_err(|_| "service capability table full")?;
     }
-    let id = spawn_user_process(name, elf, caps, 5)?;
-    if let Some(task) = SCHEDULER.lock().get_task_mut(id) { task.parent_id = parent_id; }
-    Ok(id)
+    spawn_user_process_with_parent(name, elf, caps, 5, parent_id)
 }
 
 /// Legacy packaged-process launcher retained for source compatibility. It no
@@ -636,11 +641,7 @@ pub fn spawn_packaged_process(
     parent_id: TaskId,
 ) -> Result<TaskId, &'static str> {
     let caps = capabilities_from_rapp(&[1, 3, 9], parent_id.0)?;
-    let id = spawn_user_process(process_name, elf_payload, caps, 1)?;
-    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
-        task.parent_id = parent_id;
-    }
-    Ok(id)
+    spawn_user_process_with_parent(process_name, elf_payload, caps, 1, parent_id)
 }
 
 /// Compatibility wrapper for loading an ELF with specified stack top.
