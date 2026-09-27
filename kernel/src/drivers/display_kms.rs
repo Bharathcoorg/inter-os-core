@@ -19,6 +19,9 @@ pub enum DrmPixelFormat {
     Rgb565,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayOrientation { Portrait, LandscapeRight, PortraitInverted, LandscapeLeft }
+
 /// A hardware plane / application graphics surface managed by KMS.
 #[derive(Debug, Clone)]
 pub struct DrmSurface {
@@ -91,6 +94,9 @@ pub struct DrmKmsController {
     pub vsync_counter: u64,
     pub page_flips_completed: u64,
     pub focused_surface: Option<u32>,
+    pub orientation: DisplayOrientation,
+    pub refresh_hz: u16,
+    pub frame_deadline_ticks: u64,
 }
 
 impl DrmKmsController {
@@ -107,6 +113,9 @@ impl DrmKmsController {
             vsync_counter: 0,
             page_flips_completed: 0,
             focused_surface: None,
+            orientation: DisplayOrientation::Portrait,
+            refresh_hz: 60,
+            frame_deadline_ticks: 0,
         }
     }
 
@@ -320,12 +329,31 @@ impl DrmKmsController {
         }
     }
 
+    pub fn set_display_mode(&mut self, width: u32, height: u32, refresh_hz: u16) -> Result<(), &'static str> {
+        if width == 0 || height == 0 || refresh_hz == 0 || refresh_hz > 240 {
+            return Err("invalid display mode");
+        }
+        self.scanout_width = width;
+        self.scanout_height = height;
+        self.refresh_hz = refresh_hz;
+        self.ensure_buffers();
+        Ok(())
+    }
+
+    pub fn set_orientation(&mut self, orientation: DisplayOrientation) {
+        self.orientation = orientation;
+    }
+
+    pub fn next_frame_deadline(&self) -> u64 { self.frame_deadline_ticks }
+
     /// Performs an atomic page flip: swaps back buffer to front scanout buffer.
     pub fn page_flip(&mut self) -> u64 {
         self.ensure_buffers();
         core::mem::swap(&mut self.front_buffer, &mut self.back_buffer);
         self.vsync_counter += 1;
         self.page_flips_completed += 1;
+        let ticks_per_frame = (crate::interrupts::get_timer_frequency_hz() / self.refresh_hz.max(1) as u64).max(1);
+        self.frame_deadline_ticks = crate::interrupts::get_system_ticks().saturating_add(ticks_per_frame);
         self.page_flips_completed
     }
 }
@@ -342,6 +370,9 @@ pub static DRM_KMS: Mutex<DrmKmsController> = Mutex::new(DrmKmsController {
     vsync_counter: 0,
     page_flips_completed: 0,
     focused_surface: None,
+    orientation: DisplayOrientation::Portrait,
+    refresh_hz: 60,
+    frame_deadline_ticks: 0,
 });
 
 /// Automated verification self-test for DRM/KMS surface composition and page flipping.
