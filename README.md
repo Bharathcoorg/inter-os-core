@@ -19,7 +19,7 @@
 
 > **Status Notice: Engineering Reality & Verification Status**  
 > InterOS Core is an open-source, bare-metal Rust microkernel and mobile operating system foundation. All user processes execute in isolated virtual address spaces with strict hardware MMU enforcement (CR3 / TTBR0_EL1 / SATP), capability-based access control, safe syscall memory copies (`UserPtr`), and mandatory Ed25519 cryptographic package attestation.  
-> Runtime execution is actively verified across three primary emulation targets (`qemu-system-x86_64`, `qemu-system-aarch64`, `qemu-system-riscv64`). Physical smartphone deployment is in experimental bring-up.
+> The current repository evidence treats x86_64 QEMU as the primary emulation contract; AArch64 and RISC-V remain source-level architecture targets pending fresh runtime validation. Physical smartphone deployment remains unverified experimental bring-up.
 
 ---
 
