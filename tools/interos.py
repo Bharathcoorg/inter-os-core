@@ -547,6 +547,25 @@ def cmd_verify(args):
     return 0
 
 
+
+# =============================================================================
+# COMMAND: reality
+# =============================================================================
+def cmd_reality(args):
+    """Report the repository's explicit implementation/verification contract."""
+    print("=" * 64)
+    print("  InterOS Platform Reality Contract")
+    print("=" * 64)
+    print("Hardware state:      unavailable unless a backend reports presence")
+    print("QEMU state:          emulated; never physical-hardware evidence")
+    print("Verification levels: source-only / unit-tested / QEMU-verified / hardware-verified")
+    print("Package trust:       Ed25519 signature + payload digest")
+    print("Userspace isolation: required platform invariant")
+    print("Persistent state:    required platform invariant")
+    print("-" * 64)
+    print("Use 'interos devices' for target profiles and 'interos contracts' for static checks.")
+    return 0
+
 # =============================================================================
 # COMMAND: devices
 # =============================================================================
@@ -1099,6 +1118,10 @@ def main():
     # contracts
     p_contracts = subparsers.add_parser("contracts", help="Run fast static system contract checks")
     p_contracts.set_defaults(func=cmd_contracts)
+
+    # reality
+    p_real = subparsers.add_parser("reality", help="Report implementation and hardware verification reality")
+    p_real.set_defaults(func=cmd_reality)
 
     # devices
     p_dev = subparsers.add_parser("devices", help="List supported target device profiles")
