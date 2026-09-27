@@ -1292,31 +1292,70 @@ document.addEventListener('DOMContentLoaded', () => {
       <div style="position: relative; width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; background: #070B12; overflow: hidden;">
         <img id="live-scanout-img" src="/api/screen/frame?t=${Date.now()}" style="width: 100%; height: 100%; object-fit: contain; cursor: crosshair; user-select: none;" alt="Live Scanout" />
         <div style="position: absolute; bottom: 8px; left: 8px; font-size: 0.65rem; color: #94A3B8; background: rgba(0,0,0,0.65); padding: 3px 8px; border-radius: 4px; pointer-events: none; border: 1px solid rgba(255,255,255,0.1);">
-          QEMU DRM/KMS Scanout · Tap to Touch
+          QEMU DRM/KMS Scanout · Touch & Swipe Gestures Active
         </div>
       </div>
     `;
 
     const img = document.getElementById('live-scanout-img');
     if (img) {
-      img.addEventListener('click', (ev) => {
+      let isPointerDown = false;
+      let startX = 0;
+      let startY = 0;
+
+      img.addEventListener('pointerdown', (ev) => {
+        isPointerDown = true;
         const rect = img.getBoundingClientRect();
         const relX = (ev.clientX - rect.left) / rect.width;
         const relY = (ev.clientY - rect.top) / rect.height;
-        const touchX = Math.round(relX * 720);
-        const touchY = Math.round(relY * 1440);
-        fetch('/api/touch/event', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ x: touchX, y: touchY, action: 'tap' })
-        }).then(r => r.json()).then(data => {
-          if (data.success) {
-            logConsole('ok', `[TOUCH] Injected hardware touch tap at (${touchX}, ${touchY}).`);
-            setTimeout(() => {
-              img.src = `/api/screen/frame?t=${Date.now()}`;
-            }, 80);
-          }
-        }).catch(() => {});
+        startX = Math.max(0, Math.min(720, Math.round(relX * 720)));
+        startY = Math.max(0, Math.min(1440, Math.round(relY * 1440)));
+        try { img.setPointerCapture(ev.pointerId); } catch (_) {}
+      });
+
+      img.addEventListener('pointerup', (ev) => {
+        if (!isPointerDown) return;
+        isPointerDown = false;
+        const rect = img.getBoundingClientRect();
+        const relX = (ev.clientX - rect.left) / rect.width;
+        const relY = (ev.clientY - rect.top) / rect.height;
+        const endX = Math.max(0, Math.min(720, Math.round(relX * 720)));
+        const endY = Math.max(0, Math.min(1440, Math.round(relY * 1440)));
+        const dx = endX - startX;
+        const dy = endY - startY;
+        const dist = Math.hypot(dx, dy);
+
+        if (dist > 25) {
+          fetch('/api/touch/event', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ x: startX, y: startY, x2: endX, y2: endY, action: 'swipe', steps: 6 })
+          }).then(r => r.json()).then(data => {
+            if (data.success) {
+              logConsole('ok', `[TOUCH] Injected hardware swipe gesture: (${startX}, ${startY}) -> (${endX}, ${endY}).`);
+              setTimeout(() => {
+                img.src = `/api/screen/frame?t=${Date.now()}`;
+              }, 120);
+            }
+          }).catch(() => {});
+        } else {
+          fetch('/api/touch/event', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ x: endX, y: endY, action: 'tap' })
+          }).then(r => r.json()).then(data => {
+            if (data.success) {
+              logConsole('ok', `[TOUCH] Injected hardware touch tap at (${endX}, ${endY}).`);
+              setTimeout(() => {
+                img.src = `/api/screen/frame?t=${Date.now()}`;
+              }, 80);
+            }
+          }).catch(() => {});
+        }
+      });
+
+      img.addEventListener('pointercancel', () => {
+        isPointerDown = false;
       });
 
       httpScanoutTimer = setInterval(() => {

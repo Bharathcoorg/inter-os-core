@@ -1705,6 +1705,15 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                             serial_socket_conn.sendall(f"DOWN {x} {y}\n".encode('utf-8'))
                         elif action == 'up':
                             serial_socket_conn.sendall(f"UP {x} {y}\n".encode('utf-8'))
+                        elif action == 'move':
+                            serial_socket_conn.sendall(f"MOVE {x} {y}\n".encode('utf-8'))
+                        elif action == 'swipe':
+                            x2 = int(data.get('x2', x))
+                            y2 = int(data.get('y2', y))
+                            x2 = max(0, min(720, x2))
+                            y2 = max(0, min(1440, y2))
+                            steps = int(data.get('steps', 5))
+                            serial_socket_conn.sendall(f"SWIPE {x} {y} {x2} {y2} {steps}\n".encode('utf-8'))
                         else:
                             serial_socket_conn.sendall(f"TAP {x} {y}\n".encode('utf-8'))
                         sent = True
