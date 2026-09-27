@@ -28,3 +28,11 @@ def test_userspace_address_space_is_bounded_before_mapping():
     assert "USER_ADDRESS_SPACE_LIMIT" in source
     assert 'userspace address-space limit exceeded' in source
     assert "mapped_address_space.checked_add(USER_STACK_SIZE)" in source
+
+
+def test_volume_registry_supports_resolution_and_non_destructive_unregistration():
+    source = (ROOT / "kernel/src/storage/volume.rs").read_text(encoding="utf-8")
+    assert "pub fn resolve_lba" in source
+    assert "pub fn unregister" in source
+    assert "Data destruction is deliberately outside" in source
+    assert "pub fn descriptors" in source
