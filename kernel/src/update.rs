@@ -6,6 +6,8 @@
 //! boot/update backend.
 
 use crate::crypto::{ed25519, Sha256, SHA256_DIGEST_LENGTH};
+use crate::storage::persistent;
+use spin::Mutex;
 
 pub const UPDATE_FORMAT_VERSION: u16 = 1;
 pub const UPDATE_SIGNATURE_LEN: usize = ed25519::SIGNATURE_LEN;
@@ -69,6 +71,25 @@ pub struct ActivationRecord {
 }
 
 impl ActivationRecord {
+    fn encode(&self) -> [u8; 18] {
+        let mut out=[0u8;18];
+        out[0]=match self.active { UpdateSlot::A=>0, UpdateSlot::B=>1 };
+        out[1]=match self.pending { None=>255, Some(UpdateSlot::A)=>0, Some(UpdateSlot::B)=>1 };
+        out[2..10].copy_from_slice(&self.pending_version.to_le_bytes());
+        out[10]=self.boot_attempts;
+        out
+    }
+    fn decode(bytes:&[u8]) -> Option<Self> {
+        if bytes.len()<11 || bytes[0]>1 || (bytes[1]!=255 && bytes[1]>1) { return None; }
+        Some(Self {
+            active: if bytes[0]==0 {UpdateSlot::A} else {UpdateSlot::B},
+            pending: match bytes[1] { 255=>None, 0=>Some(UpdateSlot::A), _=>Some(UpdateSlot::B) },
+            pending_version:u64::from_le_bytes(bytes[2..10].try_into().ok()?),
+            boot_attempts:bytes[10],
+        })
+    }
+    fn persist(&self) { let _=persistent::commit_kind(&self.encode(), 8); }
+
     pub const fn new(active: UpdateSlot, version: u64) -> Self { Self { active, pending: None, pending_version: version, boot_attempts: 0 } }
     pub fn stage(&mut self, version: u64) -> Result<UpdateSlot, UpdateError> {
         if version <= self.pending_version { return Err(UpdateError::Downgrade); }
@@ -147,5 +168,15 @@ mod tests {
         let payload = b"update";
         let m = UpdateManifest::new(4, payload.len() as u64, Sha256::digest(payload));
         assert_eq!(UpdateTransaction::stage(m, payload, 4), Err(UpdateError::Downgrade));
+    }
+}
+
+pub static UPDATE_ACTIVATION: Mutex<ActivationRecord> = Mutex::new(ActivationRecord::new(UpdateSlot::A, 0));
+
+pub fn init() {
+    let mut activation = UPDATE_ACTIVATION.lock();
+    let mut buf=[0u8;32];
+    if let Ok(Some((_,len)))=persistent::load_latest_kind(&mut buf,8) {
+        if let Some(restored)=ActivationRecord::decode(&buf[..len]) { *activation=restored; }
     }
 }
