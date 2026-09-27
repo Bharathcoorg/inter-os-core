@@ -58,4 +58,30 @@ impl VolumeTable {
     pub fn get(&self, id: u32) -> Option<VolumeDescriptor> {
         self.entries.iter().flatten().find(|v| v.id == id).copied()
     }
+
+    /// Resolves a logical sector to its owning volume.
+    pub fn resolve_lba(&self, lba: u32) -> Option<VolumeDescriptor> {
+        self.entries.iter().flatten().find(|volume| volume.contains(lba)).copied()
+    }
+
+    /// Removes a registered volume descriptor without touching its underlying data.
+    ///
+    /// Data destruction is deliberately outside this registry API; callers must
+    /// explicitly format or erase storage through the appropriate backend.
+    pub fn unregister(&mut self, id: u32) -> Result<VolumeDescriptor, VolumeError> {
+        let slot = self.entries.iter_mut()
+            .find(|entry| entry.as_ref().map(|volume| volume.id == id).unwrap_or(false))
+            .ok_or(VolumeError::NotFound)?;
+        slot.take().ok_or(VolumeError::NotFound)
+    }
+
+    pub fn descriptors(&self, out: &mut [VolumeDescriptor]) -> usize {
+        let mut count = 0;
+        for volume in self.entries.iter().flatten() {
+            if count == out.len() { break; }
+            out[count] = *volume;
+            count += 1;
+        }
+        count
+    }
 }
