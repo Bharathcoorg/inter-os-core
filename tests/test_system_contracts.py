@@ -31,3 +31,29 @@ class SystemContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+    def test_persistent_state_is_initialized_after_storage(self):
+        main = (ROOT / "kernel/src/main.rs").read_text(encoding="utf-8")
+        self.assertLess(main.index("storage::init();"), main.index("recovery::init();"))
+        self.assertLess(main.index("storage::init();"), main.index("update::init();"))
+
+    def test_unavailable_hardware_defaults_are_truthful(self):
+        wireless = (ROOT / "kernel/src/net/wireless.rs").read_text(encoding="utf-8")
+        self.assertIn("hardware_present: false", wireless)
+        self.assertIn("wifi_rssi_dbm: 0", wireless)
+        camera = (ROOT / "kernel/src/hal/camera.rs").read_text(encoding="utf-8")
+        self.assertIn('hardware_present: false', camera)
+        self.assertIn('sensor_model: "unavailable"', camera)
+        pmic = (ROOT / "kernel/src/drivers/pmic.rs").read_text(encoding="utf-8")
+        self.assertIn("hardware_present: false", pmic)
+        battery = (ROOT / "kernel/src/resource/battery.rs").read_text(encoding="utf-8")
+        self.assertIn("telemetry_valid: false", battery)
+
+    def test_telephony_boot_does_not_claim_a_modem(self):
+        telephony = (ROOT / "kernel/src/telephony/mod.rs").read_text(encoding="utf-8")
+        init_start = telephony.index("pub fn init() {")
+        worker_start = telephony.index("/// Periodic multitasking worker task", init_start)
+        init_body = telephony[init_start:worker_start]
+        self.assertIn("SimStatus::NoSim", init_body)
+        self.assertIn("ModemRadioState::PowerDown", init_body)
+        self.assertNotIn("ATD+18005550100", init_body)
