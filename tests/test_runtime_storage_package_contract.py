@@ -124,3 +124,11 @@ def test_service_discovery_exposes_stable_metadata_without_task_identity():
     assert "pub fn sys_service_query" in syscall
     assert "pub fn service_query" in sdk
     assert "task identity" in syscall
+
+
+
+def test_platform_documentation_does_not_claim_unverified_qemu_or_hardware_validation():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "Runtime execution is actively verified across three primary emulation targets" not in readme
+    assert "| Primary emulation contract; runtime validation pending |" in readme
+    assert "| Source-level architecture target; runtime validation pending |" in readme
