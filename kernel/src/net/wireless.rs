@@ -55,8 +55,11 @@ impl WirelessManager {
             wifi_state: WifiState::Disabled,
             wifi_ssid: [0u8; 32],
             wifi_ssid_len: 0,
-            wifi_rssi_dbm: -52,
-            wifi_freq_mhz: 5180, // 5 GHz Channel 36
+            wifi_rssi_dbm: 0,
+            wifi_freq_mhz: 0,
+            hardware_present: false,
+            bluetooth_state: BluetoothState::Disabled,
+            paired_devices: [None; 8]
         }
     }
 
