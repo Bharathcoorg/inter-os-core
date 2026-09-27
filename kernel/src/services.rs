@@ -229,9 +229,8 @@ pub fn heartbeat_for_task(id: ServiceId, task_id: TaskId) -> Result<(), &'static
 }
 
 
-/// Supervises all registered services and marks missing/terminated workers as
-/// failed. Restart orchestration is intentionally deferred until a userspace
-/// init/service-manager ABI exists; the kernel never silently recreates a task.
+/// Supervises all registered services and marks missing, terminated, or
+/// heartbeat-stale workers as failed. Recovery remains an explicit PID 1 action.
 pub fn supervise() {
     let _lifecycle = SERVICE_LIFECYCLE_LOCK.lock();
     let now = crate::interrupts::get_system_ticks();
@@ -246,11 +245,8 @@ pub fn supervise() {
             states[idx] = Some(record.state);
             continue;
         }
-        let stale = if idx <= 8 {
-            now.saturating_sub(SERVICE_HEARTBEATS[idx].load(Ordering::Acquire)) > HEARTBEAT_TIMEOUT_TICKS
-        } else {
-            false
-        };
+        let stale = now.saturating_sub(SERVICE_HEARTBEATS[idx].load(Ordering::Acquire))
+            > HEARTBEAT_TIMEOUT_TICKS;
         let failed = match sched.get_task(record.task) {
             Some(task) => matches!(task.state, crate::task::TaskState::Terminated | crate::task::TaskState::Zombie),
             None => true,
