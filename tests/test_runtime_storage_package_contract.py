@@ -110,3 +110,17 @@ def test_service_capability_policy_is_authoritative_for_userspace_launch():
     assert "pub fn capability_policy" in services
     assert "crate::services::capability_policy(service, parent_id)" in user
     assert "CapabilityType::ProcessKill" not in user[user.index("pub fn spawn_userspace_service"):user.index("/// Legacy packaged-process launcher")]
+
+
+
+def test_service_discovery_exposes_stable_metadata_without_task_identity():
+    services = (ROOT / "kernel/src/services.rs").read_text(encoding="utf-8")
+    syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
+    sdk = (ROOT / "sdk/rust/interos-std/src/lib.rs").read_text(encoding="utf-8")
+    assert "pub struct ServiceInfo" in services
+    assert "pub fn lookup(service_id: u8)" in services
+    assert "generation" in services
+    assert "ServiceQuery = 102" in syscall
+    assert "pub fn sys_service_query" in syscall
+    assert "pub fn service_query" in sdk
+    assert "task identity" in syscall
