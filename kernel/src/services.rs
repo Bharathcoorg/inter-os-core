@@ -4,6 +4,8 @@
 //! The kernel owns only the authoritative lifecycle registry and enforcement boundary;
 //! PID 1 owns service startup/recovery policy and userspace service execution.
 
+use alloc::vec::Vec;
+use crate::capability::{CapabilityType, Rights};
 use crate::task::{SCHEDULER, TaskId};
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -57,6 +59,51 @@ pub fn descriptor(id: ServiceId) -> ServiceDescriptor {
         ServiceId::Compositor => ServiceDescriptor { id, abi_version: SERVICE_ABI_VERSION, restart: RestartPolicy::OnFailure, critical: true, dependencies: UI_DEPS },
         ServiceId::Launcher => ServiceDescriptor { id, abi_version: SERVICE_ABI_VERSION, restart: RestartPolicy::OnFailure, critical: true, dependencies: LAUNCHER_DEPS },
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceCapabilitySpec {
+    pub cap_type: CapabilityType,
+    pub rights: Rights,
+    pub object_id: u64,
+}
+
+pub fn capability_policy(id: ServiceId, parent_id: TaskId) -> Result<Vec<ServiceCapabilitySpec>, &'static str> {
+    let mut policy = Vec::with_capacity(10);
+    policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SerialOutput, rights: Rights::WRITE, object_id: 0 });
+    match id {
+        ServiceId::Compositor => {
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::IpcReceive, rights: Rights::READ, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::TimerTickRead, rights: Rights::READ, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::EventPoll, rights: Rights::READ | Rights::INVOKE, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FrameBufferDirect, rights: Rights::READ | Rights::WRITE, object_id: 1 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FileSystemRead, rights: Rights::READ, object_id: 0 });
+        }
+        ServiceId::Launcher => {
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::TimerTickRead, rights: Rights::READ, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::IpcSend, rights: Rights::WRITE, object_id: parent_id.0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FileSystemRead, rights: Rights::READ, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FrameBufferDirect, rights: Rights::READ | Rights::WRITE, object_id: 1 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::EventPoll, rights: Rights::READ | Rights::INVOKE, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::IpcReceive, rights: Rights::READ, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::ProcessSpawn, rights: Rights::INVOKE, object_id: 0 });
+        }
+        ServiceId::Display => policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FrameBufferDirect, rights: Rights::WRITE, object_id: 1 }),
+        ServiceId::Storage => policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FileSystemRead, rights: Rights::READ | Rights::WRITE, object_id: 0 }),
+        ServiceId::Network => {
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::NetworkSocket, rights: Rights::READ | Rights::WRITE, object_id: ServiceId::Network as u64 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::NetworkSend, rights: Rights::WRITE, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::NetworkReceive, rights: Rights::READ, object_id: 0 });
+        }
+        ServiceId::Input | ServiceId::Power | ServiceId::Modem | ServiceId::Audio | ServiceId::Camera => {}
+        ServiceId::Init => return Err("init does not use userspace service capability policy"),
+    }
+    if !matches!(id, ServiceId::Compositor | ServiceId::Launcher) {
+        policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::TimerTickRead, rights: Rights::READ, object_id: 0 });
+        policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::EventPoll, rights: Rights::READ | Rights::INVOKE, object_id: 0 });
+        policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::IpcReceive, rights: Rights::READ, object_id: 0 });
+    }
+    Ok(policy)
 }
 
 #[derive(Debug, Clone, Copy)]
