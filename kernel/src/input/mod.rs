@@ -157,6 +157,12 @@ pub fn post_char_event(c: char) {
 }
 
 /// Enqueues a touch screen contact event from the digitizer controller.
+/// Resolves a screen coordinate to the authoritative application window before
+/// delivering the event. System overlays and modal windows take precedence.
+pub fn route_touch_target(x: u32, y: u32) -> Option<(crate::gui::WindowId, u64)> {
+    crate::gui::WINDOW_MANAGER.lock().hit_test(x, y)
+}
+
 pub fn post_touch_event(slot: u8, x: u32, y: u32, pressure: u16, phase: TouchPhase) {
     // Dismiss transient modal overlay if screen is touched
     if phase == TouchPhase::Down {
