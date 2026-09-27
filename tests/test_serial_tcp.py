@@ -42,6 +42,7 @@ port = 5555
 args = [
     qemu_exe,
     "-drive", f"format=raw,file={kernel_img}",
+    "-snapshot",
     "-m", "1024M",
     "-display", "none",
     "-chardev", f"socket,id=ser0,host=127.0.0.1,port={port},server=on,wait=off",
@@ -60,7 +61,7 @@ try:
         s.settimeout(0.5)
         start_t = time.time()
         buf = b""
-        while time.time() - start_t < 120.0:
+        while time.time() - start_t < 180.0:
             try:
                 data = s.recv(4096)
                 if not data:
@@ -148,6 +149,20 @@ try:
                             print("[TEST STEP 24] Tapping digit '7' on Calculator keypad at (100, 680)...")
                             send_and_wait_for(b"TAP 100 680\n", "Keypad digit pressed")
                             print("[TEST STEP 25] Tapping bottom home pill at (360, 1420) to exit Calculator back to Launcher...")
+                            send_and_wait_for(b"TAP 360 1420\n", "Foreground application exited and was reaped")
+                            print("[TEST STEP 26] Tapping Dialer card on HomeScreen at (480, 690) to launch...")
+                            send_and_wait_for(b"TAP 480 690\n", "Initial frame presented to hardware scanout")
+                            print("[TEST STEP 27] Tapping digit '1' on Dialer keypad at (140, 470)...")
+                            send_and_wait_for(b"TAP 140 470\n", "Keypad digit entered")
+                            print("[TEST STEP 28] Tapping Call button at (360, 1060)...")
+                            send_and_wait_for(b"TAP 360 1060\n", "Call Connected: Voice bearer active")
+                            print("[TEST STEP 29] Tapping bottom home pill at (360, 1420) to exit Dialer back to Launcher...")
+                            send_and_wait_for(b"TAP 360 1420\n", "Foreground application exited and was reaped")
+                            print("[TEST STEP 30] Tapping Terminal card on HomeScreen at (480, 350) to launch...")
+                            send_and_wait_for(b"TAP 480 350\n", "Terminal console presented to scanout buffer")
+                            print("[TEST STEP 31] Tapping inside Terminal at (300, 300)...")
+                            send_and_wait_for(b"TAP 300 300\n", "Normalized touch event received")
+                            print("[TEST STEP 32] Tapping bottom home pill at (360, 1420) to exit Terminal back to Launcher...")
                             send_and_wait_for(b"TAP 360 1420\n", "Foreground application exited and was reaped")
                             print("[TEST COMPLETE] All interactive gesture steps completed.")
                             lines.append("[TEST COMPLETE]")
