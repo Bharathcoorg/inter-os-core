@@ -1116,7 +1116,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Take Screenshot
-  emuBtnScreenshot?.addEventListener('click', () => {
+  emuBtnScreenshot?.addEventListener('click', async () => {
     playShutterSound();
     // Brief white flash
     const flash = document.createElement('div');
@@ -1127,28 +1127,24 @@ document.addEventListener('DOMContentLoaded', () => {
       setTimeout(() => flash.remove(), 250);
     }, 50);
 
-    // Create a canvas snapshot and download PNG
-    const canvas = document.createElement('canvas');
-    canvas.width = 720;
-    canvas.height = 1280;
-    const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#0F172A';
-    ctx.fillRect(0, 0, 720, 1280);
-    ctx.fillStyle = '#10B981';
-    ctx.font = 'bold 36px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('InterOS Microkernel v8.2', 360, 500);
-    ctx.fillStyle = '#E2E8F0';
-    ctx.font = '22px monospace';
-    ctx.fillText('Screen Capture: 1280x720 Framebuffer', 360, 560);
-    ctx.fillText(`Timestamp: ${new Date().toISOString()}`, 360, 600);
+    try {
+      const resp = await fetch('/api/screen/frame');
+      if (resp.ok) {
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.download = `interos_scanout_${Date.now()}.png`;
+        link.href = url;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+        logConsole('ok', '[SCREENSHOT] Authentic microkernel scanout captured and exported from QEMU DRM/KMS.');
+        showToast('Microkernel Scanout Screenshot Saved');
+        return;
+      }
+    } catch (e) {}
 
-    const link = document.createElement('a');
-    link.download = `interos_screenshot_${Date.now()}.png`;
-    link.href = canvas.toDataURL('image/png');
-    link.click();
-
-    logConsole('info', '[SCREENSHOT] Display framebuffer (1280x720) captured and exported.');
+    logConsole('warn', '[SCREENSHOT] QEMU scanout buffer offline; live capture unavailable.');
+    showToast('QEMU scanout offline (Standby)');
   });
 
   // Rotate Screen (Orientation)
@@ -1264,29 +1260,72 @@ document.addEventListener('DOMContentLoaded', () => {
       });
 
       rfb.addEventListener('disconnect', (e) => {
-        logConsole('warn', `[VBE_RFB] Disconnected from QEMU Framebuffer.`);
-        if (vbeStatusLabel) vbeStatusLabel.textContent = 'VBE Disconnected';
+        logConsole('warn', `[VBE_RFB] Disconnected from QEMU Framebuffer; trying HTTP live scanout fallback.`);
+        if (vbeStatusLabel) vbeStatusLabel.textContent = 'QEMU Scanout (HTTP Stream)';
         if (state.vbeActive && vbeScreenTarget) {
-          vbeScreenTarget.innerHTML = `
-            <div class="vbe-placeholder">
-              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#F43F5E" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-              <span>VBE Framebuffer Disconnected</span>
-              <button class="vbe-ctrl-btn" id="btn-vbe-retry-inner">Retry Connection</button>
-            </div>
-          `;
-          document.getElementById('btn-vbe-retry-inner')?.addEventListener('click', connectRFB);
+          setupHttpScanoutViewer();
         }
       });
 
       state.rfbClient = rfb;
     } catch (err) {
-      logConsole('err', `[VBE_RFB] Failed to initialize RFB client: ${err.message}`);
-      vbeScreenTarget.innerHTML = `
-        <div class="vbe-placeholder">
-          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#F43F5E" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
-          <span>Failed to load RFB module: ${err.message}</span>
+      logConsole('warn', `[VBE_RFB] RFB module unavailable (${err.message}); using HTTP live scanout fallback.`);
+      if (vbeStatusLabel) vbeStatusLabel.textContent = 'QEMU Scanout (HTTP Stream)';
+      setupHttpScanoutViewer();
+    }
+  }
+
+  let httpScanoutTimer = null;
+
+  function stopHttpScanoutViewer() {
+    if (httpScanoutTimer) {
+      clearInterval(httpScanoutTimer);
+      httpScanoutTimer = null;
+    }
+  }
+
+  function setupHttpScanoutViewer() {
+    stopHttpScanoutViewer();
+    if (!vbeScreenTarget) return;
+
+    vbeScreenTarget.innerHTML = `
+      <div style="position: relative; width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; background: #070B12; overflow: hidden;">
+        <img id="live-scanout-img" src="/api/screen/frame?t=${Date.now()}" style="width: 100%; height: 100%; object-fit: contain; cursor: crosshair; user-select: none;" alt="Live Scanout" />
+        <div style="position: absolute; bottom: 8px; left: 8px; font-size: 0.65rem; color: #94A3B8; background: rgba(0,0,0,0.65); padding: 3px 8px; border-radius: 4px; pointer-events: none; border: 1px solid rgba(255,255,255,0.1);">
+          QEMU DRM/KMS Scanout · Tap to Touch
         </div>
-      `;
+      </div>
+    `;
+
+    const img = document.getElementById('live-scanout-img');
+    if (img) {
+      img.addEventListener('click', (ev) => {
+        const rect = img.getBoundingClientRect();
+        const relX = (ev.clientX - rect.left) / rect.width;
+        const relY = (ev.clientY - rect.top) / rect.height;
+        const touchX = Math.round(relX * 720);
+        const touchY = Math.round(relY * 1440);
+        fetch('/api/touch/event', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ x: touchX, y: touchY, action: 'tap' })
+        }).then(r => r.json()).then(data => {
+          if (data.success) {
+            logConsole('ok', `[TOUCH] Injected hardware touch tap at (${touchX}, ${touchY}).`);
+            setTimeout(() => {
+              img.src = `/api/screen/frame?t=${Date.now()}`;
+            }, 80);
+          }
+        }).catch(() => {});
+      });
+
+      httpScanoutTimer = setInterval(() => {
+        if (!state.vbeActive) {
+          stopHttpScanoutViewer();
+          return;
+        }
+        img.src = `/api/screen/frame?t=${Date.now()}`;
+      }, 500);
     }
   }
 
@@ -1302,6 +1341,7 @@ document.addEventListener('DOMContentLoaded', () => {
       logConsole('info', '[DISPLAY_MODE] Switched to Bare-Metal VBE Direct Framebuffer.');
     } else {
       emuBtnVbeToggle?.classList.remove('active-vbe');
+      stopHttpScanoutViewer();
       if (state.rfbClient) {
         try { state.rfbClient.disconnect(); } catch (e) {}
         state.rfbClient = null;
@@ -1313,7 +1353,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
   emuBtnVbeToggle?.addEventListener('click', () => toggleVBE());
   btnVbeExit?.addEventListener('click', () => toggleVBE(false));
-  btnVbeReconnect?.addEventListener('click', () => connectRFB());
+  btnVbeReconnect?.addEventListener('click', () => {
+    if (state.rfbClient) {
+      connectRFB();
+    } else {
+      setupHttpScanoutViewer();
+    }
+  });
 
   // Recents / Multitasking Switcher
   emuBtnRecents?.addEventListener('click', () => {

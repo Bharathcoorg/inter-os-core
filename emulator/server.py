@@ -602,6 +602,47 @@ def send_qemu_monitor_cmd(cmd_str, host='127.0.0.1', port=44445, timeout=0.8):
         return False, str(e)
 
 
+def capture_qemu_screen_frame(full_scanout=False):
+    """
+    Captures live QEMU scanout buffer via HMP screendump command.
+    Returns (bytes, content_type) or (None, error_str) if QEMU monitor is unavailable.
+    """
+    dump_dir = os.path.join(WORKSPACE_ROOT, "target")
+    os.makedirs(dump_dir, exist_ok=True)
+    ppm_path = os.path.join(dump_dir, "live_scanout.ppm").replace("\\", "/")
+
+    ok, resp = send_qemu_monitor_cmd(f'screendump "{ppm_path}"')
+    if not ok:
+        return None, f"QEMU monitor screendump failed: {resp}"
+
+    time.sleep(0.04)
+    if not os.path.exists(ppm_path):
+        return None, "Screendump PPM file not produced"
+
+    try:
+        from PIL import Image
+        with Image.open(ppm_path) as img:
+            if full_scanout:
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                return buf.getvalue(), "image/png"
+            else:
+                width, height = img.size
+                if width >= 820 and height >= 720:
+                    crop_box = (460, 0, 820, 720)
+                    cropped = img.crop(crop_box)
+                    scaled = cropped.resize((720, 1440), Image.Resampling.BILINEAR)
+                    buf = io.BytesIO()
+                    scaled.save(buf, format="PNG")
+                    return buf.getvalue(), "image/png"
+                else:
+                    buf = io.BytesIO()
+                    img.save(buf, format="PNG")
+                    return buf.getvalue(), "image/png"
+    except Exception as e:
+        return None, f"Image processing error: {e}"
+
+
 def stop_qemu_backend():
     """Stops any running QEMU and websockify processes managed by this instance."""
     global qemu_subproc, ws_subproc
@@ -1068,6 +1109,29 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps(t).encode())
+            return
+
+        if parsed_path.path in ('/api/screen/frame', '/api/qemu/screendump'):
+            query = urllib.parse.parse_qs(parsed_path.query)
+            full_scanout = query.get('full', ['0'])[0] in ('1', 'true', 'yes')
+            frame_bytes, err_or_type = capture_qemu_screen_frame(full_scanout=full_scanout)
+            if frame_bytes:
+                self.send_response(200)
+                self.send_header('Content-Type', err_or_type)
+                self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(frame_bytes)
+            else:
+                self.send_response(503)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'status': 'UNAVAILABLE',
+                    'error': err_or_type or 'Scanout buffer unavailable'
+                }).encode())
             return
 
         if parsed_path.path == '/api/browser/proxy':
@@ -1619,16 +1683,58 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             }).encode())
             return
         if self.path == '/api/touch/event':
-            self.send_response(409)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps({
-                'success': False,
-                'status': 'UNAVAILABLE',
-                'source': 'UNAVAILABLE',
-                'error': 'Coordinate touch injection is unavailable until the guest exposes a real input endpoint'
-            }).encode())
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+            except Exception:
+                data = {}
+
+            x = int(data.get('x', 0))
+            y = int(data.get('y', 0))
+            action = str(data.get('action', 'tap')).strip().lower()
+
+            x = max(0, min(720, x))
+            y = max(0, min(1440, y))
+
+            sent = False
+            with serial_socket_lock:
+                if serial_socket_conn:
+                    try:
+                        if action == 'down':
+                            serial_socket_conn.sendall(f"DOWN {x} {y}\n".encode('utf-8'))
+                        elif action == 'up':
+                            serial_socket_conn.sendall(f"UP {x} {y}\n".encode('utf-8'))
+                        else:
+                            serial_socket_conn.sendall(f"TAP {x} {y}\n".encode('utf-8'))
+                        sent = True
+                    except Exception:
+                        sent = False
+
+            if sent:
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': True,
+                    'status': 'DISPATCHED',
+                    'source': 'UART_COM1',
+                    'action': action,
+                    'x': x,
+                    'y': y
+                }).encode())
+            else:
+                self.send_response(503)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'status': 'UNAVAILABLE',
+                    'source': 'UART_COM1',
+                    'error': 'QEMU COM1 serial input socket is offline or not connected'
+                }).encode())
             return
         if self.path == '/api/kms/flip':
             self.send_response(409)
