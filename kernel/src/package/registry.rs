@@ -1,4 +1,5 @@
 use alloc::vec::Vec;
+use crate::package::dependency::{PackagePolicy, PackageVersion};
 use spin::Mutex;
 
 const MAX_ENTRIES: usize = 32;
@@ -132,6 +133,19 @@ impl PackageRegistry {
         } else {
             crate::serial_println!("[PACKAGE] persistent registry initialized.");
         }
+    }
+
+    pub fn dependencies_satisfied(&self, policy: &PackagePolicy) -> bool {
+        policy.validate() && policy.dependencies.iter().all(|dep| {
+            self.entries.iter().find(|entry| entry.package_id == dep.package_id)
+                .map(|entry| dep.requirement.matches(PackageVersion::new(entry.version.0, entry.version.1, entry.version.2)) && matches!(entry.state, PackageState::Staged | PackageState::Active))
+                .unwrap_or(false)
+        })
+    }
+
+    pub fn activate_version_with_policy(&mut self, package_id: &str, version: (u16,u16,u16), policy: &PackagePolicy) -> Result<(), ()> {
+        if !self.dependencies_satisfied(policy) { return Err(()); }
+        self.activate_version(package_id, version)
     }
 
     pub fn activate_version(&mut self, package_id: &str, version: (u16,u16,u16)) -> Result<(), ()> {
