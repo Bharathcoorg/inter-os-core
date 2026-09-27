@@ -55,6 +55,7 @@ impl SceneType {
 
 /// Camera sensor hardware specifications and active state.
 pub struct CameraSensor {
+    pub hardware_present: bool,
     pub sensor_model: &'static str,
     pub width: u32,
     pub height: u32,
