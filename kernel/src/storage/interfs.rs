@@ -8,7 +8,8 @@
 //! recovery around mutations.
 
 use crate::crypto::Sha256;
-use crate::drivers::{BlockDevice, AtaError, SECTOR_SIZE};
+use crate::storage::block::{BlockDevice, SECTOR_SIZE};
+use crate::drivers::AtaError;
 
 pub const FS_MAGIC: [u8; 4] = *b"IOFS";
 pub const FS_VERSION: u32 = 1;
@@ -187,13 +188,13 @@ impl DiskInode {
     }
 }
 
-pub struct InterFs<'a, D: BlockDevice> {
+pub struct InterFs<'a, D: BlockDevice + ?Sized> {
     device: &'a mut D,
     superblock: Superblock,
     base_lba: u32,
 }
 
-impl<'a, D: BlockDevice> InterFs<'a, D> {
+impl<'a, D: BlockDevice + ?Sized> InterFs<'a, D> {
     pub fn format(device: &'a mut D) -> Result<Self, FsBackendError> {
         Self::format_at(device, 0)
     }
