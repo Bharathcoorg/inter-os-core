@@ -134,6 +134,7 @@ pub enum SyscallNumber {
     DnsResolve = 99,
     TcpClose = 100,
     AppLaunch = 101,
+    ServiceQuery = 102,
 }
 
 // -----------------------------------------------------------------------------
@@ -1624,6 +1625,12 @@ pub fn service_list(out: &mut [u8]) -> Result<usize, i64> {
     let r = unsafe { syscall2(SyscallNumber::ServiceList, out.as_mut_ptr() as u64, out.len() as u64) };
     if r >= 0 { Ok(r as usize) } else { Err(r) }
 }
+/// Queries stable service metadata. The response is a 12-byte ABI record.
+pub fn service_query(service_id: u8, out: &mut [u8; 12]) -> Result<usize, i64> {
+    let r = unsafe { syscall2(SyscallNumber::ServiceQuery, service_id as u64, out.as_mut_ptr() as u64) };
+    if r >= 0 { Ok(r as usize) } else { Err(r) }
+}
+
 /// Starts a declared system service. Only PID1/service-manager capability domains may invoke this.
 pub fn service_start(service_id:u8)->Result<u64,i64>{let r=unsafe{syscall1(SyscallNumber::ServiceStart,service_id as u64)};if r>=0{Ok(r as u64)}else{Err(r)}}
 /// Stops a declared system service. Only PID1/service-manager capability domains may invoke this.
