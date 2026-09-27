@@ -33,19 +33,6 @@ pub use user::{
     spawn_app_calendar,
     spawn_app_music,
     spawn_packaged_process,
-    USER_INIT_ELF,
-    APP_SETTINGS_ELF,
-    APP_TERMINAL_ELF,
-    COMPOSITOR_ELF,
-    LAUNCHER_ELF,
-    APP_DIALER_ELF,
-    APP_VAULT_ELF,
-    APP_CAMERA_ELF,
-    APP_CALCULATOR_ELF,
-    APP_BROWSER_ELF,
-    APP_MESSAGES_ELF,
-    APP_CALENDAR_ELF,
-    APP_MUSIC_ELF,
 };
 use crate::capability::CapabilityTable;
 
