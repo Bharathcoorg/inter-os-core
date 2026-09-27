@@ -6,6 +6,9 @@
 
 use alloc::string::String;
 use spin::Mutex;
+
+pub use crate::storage::block::{BlockDevice, BlockDeviceError};
+pub type AtaError = BlockDeviceError;
 use x86_64::instructions::port::{Port, PortReadOnly, PortWriteOnly};
 
 /// Sector size in bytes for standard ATA drives.
