@@ -252,6 +252,7 @@ pub struct TcpConnection {
     pub syn_seq: u32,
     pub syn_deadline: u64,
     pub syn_retries: u8,
+    pub time_wait_until: u64,
 }
 
 pub struct TcpConnectionTable {
@@ -313,6 +314,7 @@ impl TcpConnectionTable {
                     syn_seq: initial_seq,
                     syn_deadline: TCP_RETRANSMIT_TICKS,
                     syn_retries: 0,
+                    time_wait_until: 0,
                 });
                 return Ok(id);
             }
@@ -485,7 +487,10 @@ impl TcpConnectionTable {
         if conn.fin_pending && crate::net::tcp::seq_ge(ack, conn.fin_seq.wrapping_add(1)) {
             conn.fin_pending = false;
             conn.fin_retries = 0;
-            if conn.state == crate::net::TcpState::FinWait || conn.state == crate::net::TcpState::LastAck {
+            if conn.state == crate::net::TcpState::FinWait {
+                conn.time_wait_until = crate::interrupts::get_system_ticks().saturating_add(crate::net::tcp::TCP_TIME_WAIT);
+                conn.state = crate::net::TcpState::TimeWait;
+            } else if conn.state == crate::net::TcpState::LastAck {
                 conn.state = crate::net::TcpState::Closed;
             }
             return true;
@@ -530,6 +535,24 @@ impl TcpConnectionTable {
     ///
     /// Called by the bounded network poll path so handshake/retransmission
     /// failures cannot permanently consume the fixed TCP connection table.
+    /// Expires active TIME-WAIT entries only after the protocol hold period.
+    ///
+    /// TIME-WAIT connections remain addressable during the hold interval so a
+    /// delayed duplicate segment cannot immediately collide with a new 4-tuple.
+    pub fn reap_time_wait(&mut self, now: u64) -> usize {
+        let mut expired = 0;
+        for slot in self.entries.iter_mut() {
+            if let Some(conn) = slot.as_mut() {
+                if conn.state == crate::net::TcpState::TimeWait && now >= conn.time_wait_until {
+                    conn.state = crate::net::TcpState::Closed;
+                    conn.time_wait_until = 0;
+                    expired += 1;
+                }
+            }
+        }
+        expired
+    }
+
     pub fn reap_closed(&mut self) -> usize {
         let mut reaped = 0;
         for slot in self.entries.iter_mut() {
