@@ -536,6 +536,30 @@ impl<'a, D: BlockDevice + ?Sized> InterFs<'a, D> {
         Ok(())
     }
 
+    /// Resizes a file while preserving existing bytes and zero-filling growth.
+    ///
+    /// The final publication uses the existing write transaction protocol, so a
+    /// crash cannot expose a partially rewritten inode or leaked extent.
+    pub fn truncate_file(&mut self, path: &str, new_size: u32) -> Result<(), FsBackendError> {
+        Self::validate_path(path)?;
+        let (_, inode) = self.find_inode(path)?.ok_or(FsBackendError::FileNotFound)?;
+        let old_size = inode.file_size as usize;
+        let target = new_size as usize;
+        if target == old_size {
+            return Ok(());
+        }
+        if target > (self.superblock.data_sectors as usize).saturating_mul(SECTOR_SIZE) {
+            return Err(FsBackendError::FileTooLarge);
+        }
+
+        let mut data = alloc::vec![0u8; target];
+        let copy_len = old_size.min(target);
+        if copy_len != 0 {
+            self.read_file(path, &mut data[..copy_len])?;
+        }
+        self.write_file(path, &data)
+    }
+
     pub fn delete_file(&mut self, path: &str) -> Result<(), FsBackendError> {
         Self::validate_path(path)?;
         let (index, inode) = self.find_inode(path)?.ok_or(FsBackendError::FileNotFound)?;
