@@ -6,6 +6,7 @@
 pub mod arp;
 pub mod device;
 pub mod dns;
+pub mod dhcp;
 pub mod e1000;
 pub mod tcp;
 pub mod tls;
