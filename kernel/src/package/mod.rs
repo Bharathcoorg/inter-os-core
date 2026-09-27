@@ -7,6 +7,8 @@ pub mod rapp;
 pub mod revocation;
 pub mod registry;
 pub mod store;
+pub mod dependency;
+pub mod transaction;
 
 pub use rapp::{
     build_rapp, parse_rapp, RappArch, RappError, RappManifest, RAPP_FORMAT_VERSION, RAPP_HEADER_SIZE,
@@ -14,6 +16,8 @@ pub use rapp::{
 };
 pub use registry::{PackageRegistry, PackageState, PACKAGE_REGISTRY};
 pub use store::{PackageBlobStore, PACKAGE_BLOB_STORE};
+pub use dependency::{Dependency, PackagePolicy, PackageVersion, Permission, VersionRequirement};
+pub use transaction::{InstallStage, InstallTransaction};
 pub use revocation::{
     KeyRotationProof, RevocationReason, RevocationRecord, RevocationRegistry, REVOCATION_REGISTRY,
 };
