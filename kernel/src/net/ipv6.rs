@@ -77,3 +77,24 @@ impl Ipv6RoutingTable {
  pub fn lookup(&self,dst:Ipv6Address)->Option<Ipv6Route>{self.routes.iter().flatten().filter(|r|r.prefix.contains(dst)).max_by_key(|r|(r.prefix.prefix_len as u16,u16::MAX-r.metric)).copied()}
  pub fn len(&self)->usize{self.routes.iter().filter(|r|r.is_some()).count()}
 }
+
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NeighborEntry { pub address: Ipv6Address, pub mac: [u8;6], pub reachable_until: u64 }
+
+pub const MAX_IPV6_NEIGHBORS: usize = 32;
+pub struct NeighborCache { entries:[Option<NeighborEntry>;MAX_IPV6_NEIGHBORS] }
+impl NeighborCache {
+ pub const fn new()->Self{Self{entries:[None;MAX_IPV6_NEIGHBORS]}}
+ pub fn learn(&mut self,address:Ipv6Address,mac:[u8;6],now:u64,ttl:u64){
+  if let Some(e)=self.entries.iter_mut().flatten().find(|e|e.address==address){*e=NeighborEntry{address,mac,reachable_until:now.saturating_add(ttl)};return;}
+  if let Some(slot)=self.entries.iter_mut().find(|e|e.is_none()){*slot=Some(NeighborEntry{address,mac,reachable_until:now.saturating_add(ttl)});}
+ }
+ pub fn lookup(&self,address:Ipv6Address,now:u64)->Option<[u8;6]>{self.entries.iter().flatten().find(|e|e.address==address&&now<=e.reachable_until).map(|e|e.mac)}
+ pub fn expire(&mut self,now:u64){for e in &mut self.entries{if e.map(|x|now>x.reachable_until).unwrap_or(false){*e=None;}}}
+ pub fn len(&self)->usize{self.entries.iter().filter(|e|e.is_some()).count()}
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ipv6Autoconfig { pub prefix:Ipv6Prefix, pub interface_id:[u8;8] }
+impl Ipv6Autoconfig { pub fn address(&self)->Ipv6Address { let mut a=self.prefix.address.0; a[8..16].copy_from_slice(&self.interface_id); Ipv6Address(a) } }
