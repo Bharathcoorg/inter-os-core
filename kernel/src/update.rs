@@ -54,6 +54,37 @@ impl UpdateManifest {
     }
 }
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateSlot { A, B }
+
+impl UpdateSlot { pub const fn other(self) -> Self { match self { Self::A => Self::B, Self::B => Self::A } } }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActivationRecord {
+    pub active: UpdateSlot,
+    pub pending: Option<UpdateSlot>,
+    pub pending_version: u64,
+    pub boot_attempts: u8,
+}
+
+impl ActivationRecord {
+    pub const fn new(active: UpdateSlot, version: u64) -> Self { Self { active, pending: None, pending_version: version, boot_attempts: 0 } }
+    pub fn stage(&mut self, version: u64) -> Result<UpdateSlot, UpdateError> {
+        if version <= self.pending_version { return Err(UpdateError::Downgrade); }
+        let slot = self.active.other();
+        self.pending = Some(slot);
+        self.pending_version = version;
+        self.boot_attempts = 0;
+        Ok(slot)
+    }
+    pub fn begin_boot(&mut self) { if self.pending.is_some() { self.boot_attempts = self.boot_attempts.saturating_add(1); } }
+    pub fn confirm(&mut self) { if let Some(slot)=self.pending.take() { self.active=slot; self.boot_attempts=0; } }
+    pub fn rollback(&mut self) { self.pending=None; self.boot_attempts=0; }
+    pub const fn boot_attempt_limit(&self) -> u8 { 3 }
+    pub const fn recovery_required(&self) -> bool { self.pending.is_some() && self.boot_attempts >= self.boot_attempt_limit() }
+}
+
 pub struct UpdateTransaction {
     pub manifest: UpdateManifest,
     pub state: UpdateState,
