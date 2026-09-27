@@ -106,8 +106,11 @@ pub fn capability_policy(id: ServiceId, parent_id: TaskId) -> Result<Vec<Service
     Ok(policy)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceInfo { pub id: ServiceId, pub abi_version: u16, pub state: ServiceState, pub restart: RestartPolicy, pub critical: bool, pub generation: u32 }
+
 #[derive(Debug, Clone, Copy)]
-pub struct ServiceRecord { pub id: ServiceId, pub task: TaskId, pub state: ServiceState }
+pub struct ServiceRecord { pub id: ServiceId, pub task: TaskId, pub state: ServiceState, pub generation: u32 }
 
 pub static SERVICE_RECORDS: spin::Mutex<[Option<ServiceRecord>; 11]> = spin::Mutex::new([None; 11]);
 const SERVICE_RESTART_BACKOFF_TICKS: u64 = 1000;
@@ -151,7 +154,7 @@ pub fn init() {
         ServiceId::Compositor, ServiceId::Launcher,
     ] {
         SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord {
-            id, task: TaskId(0), state: ServiceState::Declared
+            id, task: TaskId(0), state: ServiceState::Declared, generation: 0
         });
     }
     crate::serial_println!("[SERVICE] Service definitions registered; PID 1 controls startup.");
@@ -185,7 +188,8 @@ fn start_locked(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str
         let dep = SERVICE_RECORDS.lock()[*dependency as usize].ok_or("service dependency not declared")?;
         if dep.state != ServiceState::Running || dep.task == TaskId(0) { return Err("service dependency is not running"); }
     }
-    SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Starting });
+    let generation = SERVICE_RECORDS.lock()[id as usize].map(|r| r.generation.saturating_add(1)).unwrap_or(1);
+    SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Starting, generation });
     let task_result = crate::task::user::spawn_userspace_service(id as u8, parent_id);
     let task = match task_result {
         Ok(task) if task != TaskId(0) => task,
@@ -194,6 +198,7 @@ fn start_locked(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str
                 id,
                 task: TaskId(0),
                 state: ServiceState::Failed,
+                generation,
             });
             return Err("service spawn failed");
         }
@@ -202,7 +207,7 @@ fn start_locked(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str
     let now = crate::interrupts::get_system_ticks();
     SERVICE_HEARTBEATS[id as usize].store(now, Ordering::Release);
     SERVICE_STARTED_AT[id as usize].store(now, Ordering::Release);
-    SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task, state: ServiceState::Running });
+    SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task, state: ServiceState::Running, generation });
     Ok(task)
 }
 
@@ -264,11 +269,8 @@ pub fn launch_verified_package(
 
     crate::ipc::IPC_ROUTER.lock().register_task(task);
     SERVICE_HEARTBEATS[id as usize].store(crate::interrupts::get_system_ticks(), Ordering::Release);
-    SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord {
-        id,
-        task,
-        state: ServiceState::Running,
-    });
+    let generation = existing.map(|r| r.generation.saturating_add(1)).unwrap_or(1);
+    SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task, state: ServiceState::Running, generation });
     Ok(task)
 }
 
@@ -292,10 +294,23 @@ pub fn stop(id: ServiceId, parent_id: TaskId) -> Result<(), &'static str> {
     let mut scheduler = SCHEDULER.lock();
     scheduler.terminate_task(service_task, 0).map_err(|_| "service termination failed")?;
     let _ = scheduler.reap_child(parent_id, record.task);
-    SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Stopped });
+    let generation = record.generation.saturating_add(1);
+    SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Stopped, generation });
     Ok(())
 }
 
+
+/// Returns stable public metadata without exposing scheduler task identity.
+pub fn info(id: ServiceId) -> Option<ServiceInfo> {
+    let record = SERVICE_RECORDS.lock()[id as usize]?;
+    let desc = descriptor(id);
+    Some(ServiceInfo { id, abi_version: desc.abi_version, state: record.state, restart: desc.restart, critical: desc.critical, generation: record.generation })
+}
+
+pub fn lookup(service_id: u8) -> Option<ServiceInfo> {
+    let id = match service_id { 0 => ServiceId::Init, 1 => ServiceId::Display, 2 => ServiceId::Input, 3 => ServiceId::Storage, 4 => ServiceId::Network, 5 => ServiceId::Power, 6 => ServiceId::Modem, 7 => ServiceId::Audio, 8 => ServiceId::Camera, 9 => ServiceId::Compositor, 10 => ServiceId::Launcher, _ => return None };
+    info(id)
+}
 
 /// Returns a task ID for a named service when registered.
 pub fn task_id(id: ServiceId) -> Option<TaskId> {
