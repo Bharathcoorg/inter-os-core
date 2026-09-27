@@ -299,9 +299,26 @@ impl RevocationRegistry {
         if !self.is_key_trusted(&proof.old_key) { return Err("Old key is not a trusted publisher root"); }
         if self.is_key_revoked(&proof.old_key) { return Err("Old key is revoked; cannot be rotated"); }
 
+        let previous_rotated = self.rotated_keys.get(&proof.publisher).copied();
+        let previous_new_trust = self.trusted_keys.get(&proof.new_key).cloned();
+
         self.rotated_keys.insert(proof.publisher.clone(), proof.new_key);
-        self.trust_key(proof.new_key, &proof.publisher).map_err(|_| "failed to persist rotated trust root")?;
-        self.revoke_key(&proof.old_key, RevocationReason::SupersededByRotation, proof.epoch, &proof.publisher)?;
+        if self.revoke_key(&proof.old_key, RevocationReason::SupersededByRotation, proof.epoch, &proof.publisher).is_err()
+            || self.trust_key(proof.new_key, &proof.publisher).is_err()
+        {
+            match previous_rotated {
+                Some(old) => { self.rotated_keys.insert(proof.publisher.clone(), old); }
+                None => { self.rotated_keys.remove(&proof.publisher); }
+            }
+            match previous_new_trust {
+                Some(old) => { self.trusted_keys.insert(proof.new_key, old); }
+                None => { self.trusted_keys.remove(&proof.new_key); }
+            }
+            let _ = self.persist_trusted_keys();
+            let _ = self.persist();
+            return Err("failed to persist key rotation");
+        }
+
         serial_println!("[KEY ROTATION] Publisher '{}' rotated key successfully to epoch {}.", proof.publisher, proof.epoch);
         Ok(())
     }
