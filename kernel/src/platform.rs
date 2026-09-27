@@ -65,3 +65,36 @@ pub static PLATFORM_CONTRACT: PlatformContract =
 pub fn init() {
     debug_assert!(PLATFORM_CONTRACT.valid());
 }
+
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CpuArchitecture { X86_64=0, Aarch64=1, Riscv64=2 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct PlatformResources {
+    pub cpu_count: u16,
+    pub memory_bytes: u64,
+    pub timer_hz: u32,
+    pub has_interrupt_controller: bool,
+    pub has_display: bool,
+    pub has_storage: bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct BoardDescriptor {
+    pub name: &'static str,
+    pub architecture: CpuArchitecture,
+    pub resources: PlatformResources,
+}
+
+impl BoardDescriptor {
+    pub const fn qemu_x86_64() -> Self { Self {
+        name: "qemu-x86_64",
+        architecture: CpuArchitecture::X86_64,
+        resources: PlatformResources { cpu_count: 1, memory_bytes: 0, timer_hz: 100, has_interrupt_controller: true, has_display: true, has_storage: true },
+    } }
+    pub const fn validate(self) -> bool { self.resources.cpu_count > 0 && self.resources.timer_hz > 0 }
+}
+
+pub static BOARD_DESCRIPTOR: BoardDescriptor = BoardDescriptor::qemu_x86_64();
