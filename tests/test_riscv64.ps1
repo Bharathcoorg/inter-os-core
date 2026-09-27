@@ -2,6 +2,7 @@ Stop-Process -Name "qemu-system-riscv64" -Force -ErrorAction SilentlyContinue
 $log = "$PSScriptRoot\..\target\riscv64_boot.log"
 $k1 = "$PSScriptRoot\..\target\riscv64gc-unknown-none-elf\debug\kernel-riscv64"
 $k2 = "$PSScriptRoot\..\kernel-riscv64\target\riscv64gc-unknown-none-elf\debug\kernel-riscv64"
+$kernel = if (Test-Path $k1) { $k1 } else { $k2 }
 $rootDir = (Resolve-Path "$PSScriptRoot\..").Path
 . (Join-Path $rootDir "tools\qemu_env.ps1")
 $qemuBin = Resolve-QemuPath "qemu-system-riscv64.exe"
