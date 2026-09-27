@@ -1962,7 +1962,7 @@ fn resolve_app_at_touch(x: u32, y: u32) -> Option<&'static str> {
     if (1120..1400).contains(&y) {
         if (40..185).contains(&x) { return Some("org.interos.messages"); }
         if (190..335).contains(&x) { return Some("org.interos.camera"); }
-        if (340..485).contains(&x) { return Some("org.interos.vault"); }
+        if (340..485).contains(&x) { return Some("org.interos.gallery"); }
         if (490..645).contains(&x) { return Some("org.interos.vault"); }
     }
     None

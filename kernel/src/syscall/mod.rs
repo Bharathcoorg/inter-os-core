@@ -3405,6 +3405,9 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         "org.interos.file_manager" | "file_manager" | "files" => {
             crate::task::user::spawn_app_file_manager(parent_id)
         }
+        "org.interos.gallery" | "gallery" | "photos" => {
+            crate::task::user::spawn_app_gallery(parent_id)
+        }
         _ => {
             crate::serial_println!("[APP_LAUNCH DEBUG] unknown app_id: '{}'", app_id);
             return Err(SyscallResult::InvalidArguments);

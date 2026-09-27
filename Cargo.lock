@@ -66,6 +66,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "gallery"
+version = "0.1.0"
+dependencies = [
+ "interos-std",
+]
+
+[[package]]
 name = "health"
 version = "0.1.0"
 dependencies = [

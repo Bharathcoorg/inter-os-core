@@ -137,6 +137,12 @@ pub static APP_FILE_MANAGER_ELF: &[u8] = include_bytes!(concat!(
     "/../target/x86_64-unknown-none/debug/file_manager"
 ));
 
+/// Embedded static ELF binary of the Sovereign Gallery app (`apps/gallery`).
+pub static APP_GALLERY_ELF: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../target/x86_64-unknown-none/debug/gallery"
+));
+
 /// Drops CPU execution privilege from Ring 0 to Ring 3 via an `iretq` stack frame.
 ///
 /// Hardware sets:
@@ -1477,5 +1483,75 @@ pub fn spawn_app_file_manager(id_security: TaskId) -> TaskId {
         task.parent_id = id_security;
     }
     serial_println!("[OK] Spawned Task 27: app_file_manager (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
+    id
+}
+
+/// Trampoline for Sovereign Gallery App (Ring 3)
+pub extern "C" fn app_gallery_trampoline() -> ! {
+    user_process_entry()
+}
+
+/// Spawns the native Sovereign Gallery & Photo Studio in Ring 3.
+pub fn spawn_app_gallery(id_security: TaskId) -> TaskId {
+    let mut caps = CapabilityTable::new(10);
+    caps.insert(Capability {
+        id: CapabilityId(2801),
+        cap_type: CapabilityType::SerialOutput,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2802),
+        cap_type: CapabilityType::IpcSend,
+        rights: Rights::WRITE,
+        object_id: id_security.0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2803),
+        cap_type: CapabilityType::TimerTickRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2804),
+        cap_type: CapabilityType::HardwarePortIo,
+        rights: Rights::READ | Rights::WRITE,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2805),
+        cap_type: CapabilityType::FileSystemRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2806),
+        cap_type: CapabilityType::FileSystemWrite,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2807),
+        cap_type: CapabilityType::FrameBufferDirect,
+        rights: Rights::WRITE,
+        object_id: 1,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2808),
+        cap_type: CapabilityType::EventPoll,
+        rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
+
+    let id = spawn_user_process(
+        "app_gallery",
+        APP_GALLERY_ELF,
+        caps,
+        1,
+    ).expect("Failed to spawn Gallery app");
+    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
+        task.parent_id = id_security;
+    }
+    serial_println!("[OK] Spawned Task 28: app_gallery (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }

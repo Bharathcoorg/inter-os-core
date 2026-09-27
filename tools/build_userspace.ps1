@@ -45,7 +45,7 @@ $apps = @(
     "compositor", "launcher", "settings", "terminal",
     "dialer", "vault", "camera", "calculator",
     "browser", "messages", "calendar", "music",
-    "file_manager"
+    "file_manager", "gallery"
 )
 
 foreach ($app in $apps) {

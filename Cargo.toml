@@ -23,6 +23,7 @@ members = [
     "userspace/system-service",
     "apps/compositor",
     "apps/launcher",
+    "apps/gallery",
 ]
 exclude = [
     "boot",
