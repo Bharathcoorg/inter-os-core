@@ -77,20 +77,21 @@ impl Scheduler {
         let mut tcb = TaskControlBlock::new(name, entry_point, cap_table, priority);
         tcb.parent_id = parent_id;
         let id = tcb.id;
+        let process_id = crate::task::process::register_leader(id, parent_id).ok_or(()).unwrap_or(crate::task::ProcessId(0));
+        tcb.process_id = Some(process_id);
         self.tasks.push(tcb);
-        if id != TaskId(0) {
-            crate::task::process::register_leader(id, parent_id);
-        }
         id
     }
 
     /// Spawns an existing TaskControlBlock (e.g. userspace process with isolated page table).
     pub fn spawn_task(&mut self, tcb: TaskControlBlock) -> TaskId {
         let id = tcb.id;
-        let parent_id = tcb.parent_id;
+        let process_id = tcb.process_id;
         self.tasks.push(tcb);
-        if id != TaskId(0) {
-            crate::task::process::register_leader(id, parent_id);
+        if process_id.is_none() && id != TaskId(0) {
+            if let Some(pid) = crate::task::process::register_leader(id, self.tasks.last().map(|t| t.parent_id).unwrap_or(TaskId(0))) {
+                self.tasks.last_mut().unwrap().process_id = Some(pid);
+            }
         }
         id
     }

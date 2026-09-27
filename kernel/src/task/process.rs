@@ -58,6 +58,22 @@ pub fn process_for_task(task: TaskId) -> Option<ProcessId> {
     PROCESS_TABLE.lock().iter().flatten().find(|r| r.leader_task == task).map(|r| r.id)
 }
 
+pub fn record_for_process(process: ProcessId) -> Option<ProcessRecord> {
+    PROCESS_TABLE.lock().iter().flatten().find(|r| r.id == process).copied()
+}
+
+pub fn can_create_thread(process: ProcessId) -> Result<(), &'static str> {
+    let table = PROCESS_TABLE.lock();
+    let record = table.iter().flatten().find(|r| r.id == process).ok_or("process not found")?;
+    if record.state != ProcessState::Running { return Err("process is not running"); }
+    if record.thread_count >= record.limits.max_threads { return Err("thread limit exceeded"); }
+    Ok(())
+}
+
+pub fn thread_started(process: ProcessId) -> Result<(), &'static str> {
+    account_thread(process)
+}
+
 pub fn mark_zombie(task: TaskId, exit_code: i32) {
     let mut table = PROCESS_TABLE.lock();
     if let Some(record) = table.iter_mut().flatten().find(|r| r.leader_task == task) {

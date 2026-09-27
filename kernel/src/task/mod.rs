@@ -102,6 +102,8 @@ pub struct TaskControlBlock {
     pub user_entry: usize,
     /// Virtual address of userspace stack top (Ring 3 RSP).
     pub user_stack_top: usize,
+    /// Stable process identity owning this task. A process may later own multiple threads.
+    pub process_id: Option<ProcessId>,
     /// Parent task ID (0 = init / no parent).
     pub parent_id: TaskId,
     /// Exit code set on termination (only valid in Zombie/Terminated state).
@@ -146,6 +148,7 @@ impl TaskControlBlock {
             page_table: None,
             user_entry: 0,
             user_stack_top: 0,
+            process_id: None,
             parent_id: TaskId(0),
             exit_code: 0,
         }
