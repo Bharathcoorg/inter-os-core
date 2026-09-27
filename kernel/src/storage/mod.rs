@@ -6,7 +6,9 @@ pub mod persistent;
 pub mod interfs;
 pub mod filesystem;
 pub mod encrypted;
+pub mod block;
 
+pub use block::{BlockDevice, BlockDeviceError, BlockDeviceInfo, BlockDeviceKind, SECTOR_SIZE};
 pub use interfs::{InterFs, FsBackendError, FS_MAGIC, FS_VERSION};
 pub use filesystem::{BLOCK_FS_BASE_LBA, BLOCK_FS_TAIL_RESERVED, init_block_filesystem, load_data_file, store_data_file};
 pub use encrypted::{seal, open, EncryptionError, ENCRYPTED_MAGIC, ENCRYPTED_VERSION, ENCRYPTED_OVERHEAD};
