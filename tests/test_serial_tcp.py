@@ -6,7 +6,7 @@ import shutil
 import sys
 
 if hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 def find_qemu(binary="qemu-system-x86_64.exe"):
     if "QEMU_PATH" in os.environ and os.path.exists(os.path.join(os.environ["QEMU_PATH"], binary)):
@@ -34,7 +34,7 @@ port = 5555
 args = [
     qemu_exe,
     "-drive", f"format=raw,file={kernel_img}",
-    "-m", "512M",
+    "-m", "1024M",
     "-display", "none",
     "-chardev", f"socket,id=ser0,host=127.0.0.1,port={port},server=on,wait=off",
     "-serial", "chardev:ser0",

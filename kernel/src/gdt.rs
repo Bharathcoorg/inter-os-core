@@ -72,18 +72,27 @@ static GDT: Lazy<(GlobalDescriptorTable, Selectors)> = Lazy::new(|| {
 });
 
 /// Initializes the GDT and loads the Task State Segment (TSS).
+#[inline(never)]
 pub fn init() {
     use x86_64::instructions::segmentation::{Segment, CS, DS, ES, SS};
     use x86_64::instructions::tables::load_tss;
+    use core::sync::atomic::{compiler_fence, Ordering};
 
-    GDT.0.load();
+    let (gdt_ref, selectors) = (&GDT.0, &GDT.1);
+    let code_sel = selectors.kernel_code_selector;
+    let data_sel = selectors.kernel_data_selector;
+    let tss_sel = selectors.tss_selector;
+
+    compiler_fence(Ordering::SeqCst);
+    gdt_ref.load();
     unsafe {
-        CS::set_reg(GDT.1.kernel_code_selector);
-        DS::set_reg(GDT.1.kernel_data_selector);
-        ES::set_reg(GDT.1.kernel_data_selector);
-        SS::set_reg(GDT.1.kernel_data_selector);
-        load_tss(GDT.1.tss_selector);
+        CS::set_reg(code_sel);
+        DS::set_reg(data_sel);
+        ES::set_reg(data_sel);
+        SS::set_reg(data_sel);
+        load_tss(tss_sel);
     }
+    compiler_fence(Ordering::SeqCst);
 }
 
 /// Returns the static GDT segment selectors.

@@ -11,7 +11,7 @@ use crate::capability::{Capability, CapabilityId, CapabilityTable, CapabilityTyp
 use crate::task::{SCHEDULER, TaskId};
 use crate::serial_println;
 
-pub const USER_STACK_SIZE: usize = 64 * 1024; // 64 KiB dedicated user-mode stack
+pub const USER_STACK_SIZE: usize = 256 * 1024; // 256 KiB dedicated user-mode stack
 
 /// User Code Segment Selector with RPL = 3 (GDT Index 4: 0x20 | 3 = 0x23)
 pub const USER_CS_SELECTOR: u64 = 0x23;

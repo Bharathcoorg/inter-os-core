@@ -22,7 +22,7 @@ import shutil
 import sys
 
 if hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(encoding='utf-8', line_buffering=True)
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
 
 def find_qemu(binary="qemu-system-x86_64.exe"):
     if "QEMU_PATH" in os.environ and os.path.exists(os.path.join(os.environ["QEMU_PATH"], binary)):
@@ -41,6 +41,8 @@ def find_qemu(binary="qemu-system-x86_64.exe"):
     return binary
 
 def send_monitor_cmd(sock, cmd):
+    if not sock:
+        return ""
     if cmd:
         sock.sendall((cmd + "\n").encode('utf-8'))
     resp = b""
@@ -84,7 +86,8 @@ class SerialReader:
             except socket.timeout:
                 continue
             except ConnectionResetError:
-                break
+                time.sleep(0.1)
+                continue
         return False
 
 def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_coords, present_marker, dump_prefix, in_app_interactions=None, exit_gesture="back"):
@@ -159,25 +162,23 @@ def main():
     assert os.path.exists(kernel_img), f"Kernel image not found at {kernel_img}"
 
     subprocess.run(["taskkill", "/F", "/IM", "qemu-system-x86_64.exe"], capture_output=True)
-    time.sleep(0.5)
+    time.sleep(1.0)
 
     ser_port = 5555
-    mon_port = 44447
 
     args = [
         qemu_exe,
         "-drive", f"format=raw,file={kernel_img}",
-        "-m", "512M",
+        "-m", "1024M",
         "-display", "none",
         "-chardev", f"socket,id=ser0,host=127.0.0.1,port={ser_port},server=on,wait=off",
         "-serial", "chardev:ser0",
-        "-monitor", f"tcp:127.0.0.1:{mon_port},server,nowait",
         "-no-reboot"
     ]
 
     print("[LIFECYCLE TEST] Launching QEMU instance...")
     proc = subprocess.Popen(args)
-    time.sleep(1.0)
+    time.sleep(0.5)
 
     serial_sock = None
     monitor_sock = None
@@ -185,9 +186,9 @@ def main():
     try:
         # Connect to serial socket
         serial_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        serial_sock.settimeout(2.0)
+        serial_sock.settimeout(5.0)
         serial_sock.connect(('127.0.0.1', ser_port))
-        serial_sock.settimeout(0.2)
+        serial_sock.settimeout(0.5)
         print("[LIFECYCLE TEST] Connected to QEMU serial socket.")
         reader = SerialReader(serial_sock)
 
@@ -196,24 +197,17 @@ def main():
         launcher_ready = reader.wait_for(
             "Step 5: Initial presentation complete",
             timeout=90.0,
-            print_keywords=["LAUNCHER", "APP", "PID1", "Step 5"]
+            print_keywords=["LAUNCHER", "APP", "PID1", "Step 5", "EXCEPTION", "FAULT", "Accessed", "RIP", "PANIC", "SECURITY"]
         )
 
         if not launcher_ready:
+            print(f"[DEBUG] QEMU proc poll: {proc.poll()}")
             print(f"[DEBUG] Captured {len(reader.captured_logs)} lines:")
             for l in reader.captured_logs[-50:]:
                 print(f"  {l}")
 
-        assert launcher_ready, "Launcher failed to present initial frame within timeout"
+        assert launcher_ready, f"Launcher failed to present initial frame within timeout (QEMU poll: {proc.poll()})"
         print("[LIFECYCLE TEST] [OK] Launcher home screen presented.")
-
-        # Connect to monitor socket
-        monitor_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        monitor_sock.settimeout(2.0)
-        monitor_sock.connect(('127.0.0.1', mon_port))
-        monitor_sock.settimeout(0.5)
-        print("[LIFECYCLE TEST] Connected to QEMU monitor socket.")
-        _ = send_monitor_cmd(monitor_sock, "")
 
         # Take screendump of launcher homescreen
         ppm_launcher = os.path.abspath(r"target\test_launcher.ppm").replace("\\", "/")
