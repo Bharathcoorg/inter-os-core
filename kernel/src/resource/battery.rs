@@ -40,13 +40,13 @@ impl BatteryFuelGauge {
     /// Creates a fuel gauge initialized with reference smartphone battery telemetry.
     pub const fn new() -> Self {
         Self {
-            voltage_mv: 3850,
-            capacity_mah: 4700,
+            voltage_mv: 0,
+            capacity_mah: 0,
             design_capacity_mah: 5000,
-            soc_percent: 94,
-            temperature_c: 28,
-            cycle_count: 42,
-            charging_status: ChargingStatus::ChargingAC,
+            soc_percent: 0,
+            temperature_c: 0,
+            cycle_count: 0,
+            charging_status: ChargingStatus::Disconnected,
         }
     }
 
