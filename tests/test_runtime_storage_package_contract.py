@@ -78,3 +78,13 @@ def test_update_activation_metadata_is_persisted_before_backend_switch():
 def test_animation_deadline_is_overflow_safe():
     source = (ROOT / "kernel/src/gui/ui.rs").read_text(encoding="utf-8")
     assert "saturating_add(self.duration_ms as u64)" in source
+
+
+def test_userspace_loader_does_not_embed_first_party_images_directly():
+    user = (ROOT / "kernel/src/task/user.rs").read_text(encoding="utf-8")
+    images = (ROOT / "kernel/src/task/images.rs").read_text(encoding="utf-8")
+    task_mod = (ROOT / "kernel/src/task/mod.rs").read_text(encoding="utf-8")
+    assert "include_bytes!" not in user
+    assert "pub mod images;" in task_mod
+    assert "pub fn service_image" in images
+    assert "spawn_user_process_with_parent(image.name, image.elf" in user
