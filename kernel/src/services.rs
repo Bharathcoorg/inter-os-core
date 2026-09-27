@@ -45,6 +45,12 @@ static SERVICES_INITIALIZED: AtomicBool = AtomicBool::new(false);
 // boundary; callers never hold the lifecycle lock across context switches.
 static SERVICE_LIFECYCLE_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 // Restart backoff prevents a failed service from consuming the scheduler in a crash loop.
+static SERVICE_STARTED_AT: [core::sync::atomic::AtomicU64; 11] = [
+    core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
+];
 static SERVICE_RETRY_AFTER: [core::sync::atomic::AtomicU64; 11] = [
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
@@ -95,11 +101,13 @@ fn start_locked(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str
             return Err("service is not startable");
         }
     } else { return Err("service not declared"); }
-    SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord {
-        id,
-        task: TaskId(0),
-        state: ServiceState::Starting,
-    });
+    let desc = descriptor(id);
+    if desc.abi_version != SERVICE_ABI_VERSION { return Err("unsupported service ABI"); }
+    for dependency in desc.dependencies {
+        let dep = SERVICE_RECORDS.lock()[*dependency as usize].ok_or("service dependency not declared")?;
+        if dep.state != ServiceState::Running || dep.task == TaskId(0) { return Err("service dependency is not running"); }
+    }
+    SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Starting });
     let task_result = crate::task::user::spawn_userspace_service(id as u8, parent_id);
     let task = match task_result {
         Ok(task) if task != TaskId(0) => task,
@@ -113,7 +121,9 @@ fn start_locked(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str
         }
     };
     crate::ipc::IPC_ROUTER.lock().register_task(task);
-    SERVICE_HEARTBEATS[id as usize].store(crate::interrupts::get_system_ticks(), Ordering::Release);
+    let now = crate::interrupts::get_system_ticks();
+    SERVICE_HEARTBEATS[id as usize].store(now, Ordering::Release);
+    SERVICE_STARTED_AT[id as usize].store(now, Ordering::Release);
     SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task, state: ServiceState::Running });
     Ok(task)
 }
@@ -241,6 +251,11 @@ pub fn supervise() {
     let records = *SERVICE_RECORDS.lock();
     for idx in 1..records.len() {
         let Some(record) = records[idx] else { continue; };
+        if record.state == ServiceState::Starting {
+            let started = SERVICE_STARTED_AT[idx].load(Ordering::Acquire);
+            states[idx] = Some(if now.saturating_sub(started) > SERVICE_START_TIMEOUT_TICKS { ServiceState::Failed } else { ServiceState::Starting });
+            continue;
+        }
         if !matches!(record.state, ServiceState::Running) {
             states[idx] = Some(record.state);
             continue;
@@ -307,42 +322,21 @@ pub fn record_exit(task_id: TaskId, _exit_code: i32) {
     }
 }
 
-/// Restarts failed services when explicitly requested by PID 1.
-pub fn restart_failed(parent_id: TaskId) -> usize {
+/// Recovers one failed service when explicitly requested by PID 1.
+pub fn recover_failed(id: ServiceId, parent_id: TaskId) -> Result<(), &'static str> {
     let _lifecycle = SERVICE_LIFECYCLE_LOCK.lock();
-    let mut restarted = 0usize;
-    let count = SERVICE_RECORDS.lock().len();
-    for idx in 1..count {
-        let id = match idx {
-            1 => ServiceId::Display, 2 => ServiceId::Input, 3 => ServiceId::Storage,
-            4 => ServiceId::Network, 5 => ServiceId::Power, 6 => ServiceId::Modem,
-            7 => ServiceId::Audio, 8 => ServiceId::Camera,
-            9 => ServiceId::Compositor, 10 => ServiceId::Launcher,
-            _ => continue,
-        };
-        let failed_task = {
-            let records = SERVICE_RECORDS.lock();
-            match records[idx] {
-                Some(ServiceRecord { state: ServiceState::Failed, task, .. }) => Some(task),
-                _ => None,
-            }
-        };
-        if let Some(task) = failed_task {
-            let now = crate::interrupts::get_system_ticks();
-            if now < SERVICE_RETRY_AFTER[idx].load(Ordering::Acquire) { continue; }
-            // A heartbeat timeout may leave the worker schedulable. Reserve the
-            // retry window before teardown/spawn so repeated spawn failures cannot
-            // immediately consume the scheduler in a tight recovery loop.
-            SERVICE_RETRY_AFTER[idx].store(now.saturating_add(SERVICE_RESTART_BACKOFF_TICKS), Ordering::Release);
-            let mut scheduler = SCHEDULER.lock();
-            let _ = scheduler.terminate_task(task, -1);
-            let _ = scheduler.reap_child(parent_id, task);
-            drop(scheduler);
-            SERVICE_RECORDS.lock()[idx] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Declared });
-            if start_locked(id, parent_id).is_ok() {
-                restarted += 1;
-            }
-        }
+    if id == ServiceId::Init { return Err("init cannot be recovered"); }
+    let idx = id as usize;
+    let record = SERVICE_RECORDS.lock()[idx].ok_or("service not declared")?;
+    if record.state != ServiceState::Failed { return Err("service is not failed"); }
+    let now = crate::interrupts::get_system_ticks();
+    if now < SERVICE_RETRY_AFTER[idx].load(Ordering::Acquire) { return Err("service recovery backoff active"); }
+    SERVICE_RETRY_AFTER[idx].store(now.saturating_add(SERVICE_RESTART_BACKOFF_TICKS), Ordering::Release);
+    if record.task != TaskId(0) {
+        let mut scheduler = SCHEDULER.lock();
+        let _ = scheduler.terminate_task(record.task, -1);
+        let _ = scheduler.reap_child(parent_id, record.task);
     }
-    restarted
+    SERVICE_RECORDS.lock()[idx] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Declared });
+    start_locked(id, parent_id).map(|_| ())
 }

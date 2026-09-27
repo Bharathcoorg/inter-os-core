@@ -1434,7 +1434,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         85 => { let len=a3 as usize; if len>4096{return SyscallResult::InvalidArguments as i64;} let mut out=[0u8;4096]; match sys_fs_list(a1 as usize,a2,a3 as usize,&mut out[..len]){Ok(n)=>{if copy_to_user(a4,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;}n as i64},Err(e)=>e as i64} }
         86 => { match sys_service_start(a1 as u8) { Ok(id) => id.0 as i64, Err(e) => e as i64 } }
         87 => { match sys_service_stop(a1 as u8) { Ok(()) => 0, Err(e) => e as i64 } }
-        88 => { match sys_service_recover_failed() { Ok(n) => n as i64, Err(e) => e as i64 } }
+        88 => { match sys_service_recover_failed(a1 as u8) { Ok(n) => n as i64, Err(e) => e as i64 } }
         89 => {
             // ServicePackageVerify: a1=read-cap slot, a2=path ptr, a3=path len.
             let len = a3 as usize;
@@ -3282,12 +3282,19 @@ pub fn sys_service_heartbeat(service_id: u8) -> Result<(), SyscallResult> {
     crate::services::heartbeat_for_task(id, task_id).map_err(|_| SyscallResult::PermissionDenied)
 }
 
-pub fn sys_service_recover_failed() -> Result<u64, SyscallResult> {
+pub fn sys_service_recover_failed(service_id: u8) -> Result<u64, SyscallResult> {
     require_service_manager()?;
-    // Refresh failure state before applying the explicit PID1 recovery request.
     crate::services::supervise();
+    let id = match service_id {
+        1 => crate::services::ServiceId::Display, 2 => crate::services::ServiceId::Input,
+        3 => crate::services::ServiceId::Storage, 4 => crate::services::ServiceId::Network,
+        5 => crate::services::ServiceId::Power, 6 => crate::services::ServiceId::Modem,
+        7 => crate::services::ServiceId::Audio, 8 => crate::services::ServiceId::Camera,
+        9 => crate::services::ServiceId::Compositor, 10 => crate::services::ServiceId::Launcher,
+        _ => return Err(SyscallResult::InvalidArguments),
+    };
     let parent_id = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?;
-    Ok(crate::services::restart_failed(parent_id) as u64)
+    crate::services::recover_failed(id, parent_id).map(|_| 1).map_err(|_| SyscallResult::NotReady)
 }
 
 pub fn sys_service_stop(service_id: u8) -> Result<(), SyscallResult> {

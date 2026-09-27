@@ -70,9 +70,9 @@ pub extern "C" fn _start() -> ! {
                     std::log(0, "[PID1] Service registry returned no active services.").ok();
                 }
             }
-            if let Ok(restarted) = std::service_recover_failed() {
-                if restarted > 0 {
-                    std::log(0, "[PID1] Recovered failed system service(s).").ok();
+            for service_id in 1u8..=10u8 {
+                if std::service_recover_failed(service_id).is_ok() {
+                    std::log(0, "[PID1] Recovered a failed service through the lifecycle ABI.").ok();
                 }
             }
             last_poll = now;
