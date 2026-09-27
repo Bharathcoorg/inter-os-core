@@ -104,6 +104,8 @@ pub enum FsError {
     IntegrityViolation,
     PathTooLong,
     FileTooLarge,
+    DirectoryNotEmpty,
+    InvalidPath,
 }
 
 /// Virtual Filesystem Controller.
@@ -168,6 +170,33 @@ impl Vfs {
             }
         }
         inode_id
+    }
+
+    /// Atomically renames a regular file or empty directory within the VFS.
+    pub fn rename(&mut self, old_path: &str, new_path: &str) -> Result<(), FsError> {
+        let old = normalize_path(old_path); let new = normalize_path(new_path);
+        if old == "/" || new == "/" || old == new { return Err(FsError::InvalidPath); }
+        let id = self.lookup(&old).ok_or(FsError::FileNotFound)?;
+        if self.path_to_inode.contains_key(&new) { return Err(FsError::InvalidPath); }
+        let parent = parent_path(&new); let parent_id = self.lookup(parent).ok_or(FsError::FileNotFound)?;
+        if self.inodes.get(&parent_id).map(|i| i.file_type != FileType::Directory).unwrap_or(true) { return Err(FsError::NotADirectory); }
+        if self.inodes.get(&id).map(|i| i.file_type == FileType::Directory && !i.children.is_empty()).unwrap_or(false) { return Err(FsError::DirectoryNotEmpty); }
+        self.path_to_inode.remove(&old);
+        if let Some(inode) = self.inodes.get_mut(&id) { inode.path=new.clone(); inode.name=path_filename(&new); }
+        self.path_to_inode.insert(new,id); self.rebuild_children(); Ok(())
+    }
+
+    /// Truncates a writable regular file and publishes the mutation immediately.
+    pub fn truncate(&mut self, task_id: TaskId, fd: FileDescriptor, length: usize) -> Result<(), FsError> {
+        if length > MAX_FILE_SIZE { return Err(FsError::FileTooLarge); }
+        let table=self.task_file_tables.get_mut(&task_id).ok_or(FsError::InvalidFd)?;
+        let handle=table.get_mut(fd.0 as usize).and_then(|x|x.as_mut()).ok_or(FsError::InvalidFd)?;
+        if !handle.rights.contains(Rights::WRITE) { return Err(FsError::PermissionDenied); }
+        let inode_id=handle.inode_id;
+        let inode=self.inodes.get_mut(&inode_id).ok_or(FsError::FileNotFound)?;
+        match &mut inode.data { InodeData::Dynamic(data)=>{data.resize(length,0);inode.size=length;inode.sha256_digest=Sha256::digest(data)}, InodeData::Static(_)=>return Err(FsError::ReadOnlyFileSystem) }
+        if handle.offset>length { handle.offset=length; }
+        self.persist_data_snapshot()?; self.persist_metadata_snapshot()?; Ok(())
     }
 
     /// Creates or updates a file node with content.
