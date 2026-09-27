@@ -87,7 +87,7 @@ class SerialReader:
                 break
         return False
 
-def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_coords, present_marker, dump_prefix):
+def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_coords, present_marker, dump_prefix, in_app_interactions=None):
     print(f"\n[LIFECYCLE TEST] === Phase {phase_num}: Testing {app_name} ({app_id}) ===")
     print(f"[LIFECYCLE TEST] Dispatching touch tap on {app_name} card at {tap_coords}...")
     reader.sock.sendall(f"TAP {tap_coords[0]} {tap_coords[1]}\n".encode('utf-8'))
@@ -106,6 +106,26 @@ def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_co
     _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_app}")
     print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_app}")
     time.sleep(0.5)
+
+    # Perform in-app functional interactions if specified
+    if in_app_interactions:
+        for action_name, action_coords, action_marker, dump_suffix in in_app_interactions:
+            print(f"[LIFECYCLE TEST] In-App Interaction: {action_name} at {action_coords}...")
+            reader.sock.sendall(f"TAP {action_coords[0]} {action_coords[1]}\n".encode('utf-8'))
+            if action_marker:
+                action_ok = reader.wait_for(
+                    action_marker,
+                    timeout=10.0,
+                    print_keywords=[app_name.upper(), "APP", "INPUT", action_marker]
+                )
+                assert action_ok, f"{app_name} failed to process interaction '{action_name}'"
+                print(f"[LIFECYCLE TEST] [OK] Interaction '{action_name}' verified.")
+            time.sleep(0.8)
+            if dump_suffix:
+                ppm_inter = os.path.abspath(rf"target\{dump_prefix}_{dump_suffix}.ppm")
+                _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_inter}")
+                print(f"[LIFECYCLE TEST] In-app interaction screendump recorded: {ppm_inter}")
+                time.sleep(0.4)
 
     # Dispatch touch tap on Back button
     print(f"[LIFECYCLE TEST] Dispatching touch tap on Back button (x=62, y=48)...")
@@ -203,7 +223,13 @@ def main():
             app_id="org.interos.calculator",
             tap_coords=(180, 520),
             present_marker="Initial frame presented to hardware scanout",
-            dump_prefix="test_calculator"
+            dump_prefix="test_calculator",
+            in_app_interactions=[
+                ("Tap '7'", (100, 680), "Keypad digit pressed.", None),
+                ("Tap '+'", (598, 1020), "Keypad operator selected.", None),
+                ("Tap '5'", (266, 850), "Keypad digit pressed.", None),
+                ("Tap '=' (evaluate 7 + 5)", (598, 1190), "Evaluation completed.", "evaluated"),
+            ]
         )
 
         # App 2: Settings (Row 0, Card 0: x=180, y=350)
@@ -215,7 +241,11 @@ def main():
             app_id="org.interos.settings",
             tap_coords=(180, 350),
             present_marker="Settings UI presented to scanout buffer",
-            dump_prefix="test_settings"
+            dump_prefix="test_settings",
+            in_app_interactions=[
+                ("Tap Power & Battery Tab", (228, 140), "tab switched.", "tab_power"),
+                ("Tap Thermals & Sensors Tab", (364, 140), "tab switched.", "tab_thermals"),
+            ]
         )
 
         # App 3: Terminal (Row 0, Card 1: x=485, y=350)
@@ -227,7 +257,10 @@ def main():
             app_id="org.interos.terminal",
             tap_coords=(485, 350),
             present_marker="Terminal console presented to scanout buffer",
-            dump_prefix="test_terminal"
+            dump_prefix="test_terminal",
+            in_app_interactions=[
+                ("Tap terminal console area", (360, 500), "Normalized touch event received.", "touch"),
+            ]
         )
 
         # App 4: Vault (Row 1, Card 1: x=485, y=520)
@@ -239,7 +272,10 @@ def main():
             app_id="org.interos.vault",
             tap_coords=(485, 520),
             present_marker="Initial frame presented to hardware scanout",
-            dump_prefix="test_vault"
+            dump_prefix="test_vault",
+            in_app_interactions=[
+                ("Tap Sector Card 0 (Root Keystore)", (200, 350), "Sector card touched. Round-trip re-verified.", "sector_verified"),
+            ]
         )
 
         # App 5: Camera (Row 2, Card 0: x=180, y=690)
@@ -251,7 +287,10 @@ def main():
             app_id="org.interos.camera",
             tap_coords=(180, 690),
             present_marker="Initial frame presented to hardware scanout",
-            dump_prefix="test_camera"
+            dump_prefix="test_camera",
+            in_app_interactions=[
+                ("Tap Mode Carousel (Document Vision)", (165, 1175), None, "mode_doc"),
+            ]
         )
 
         # App 6: Dialer (Row 2, Card 1: x=485, y=690)
@@ -263,7 +302,10 @@ def main():
             app_id="org.interos.dialer",
             tap_coords=(485, 690),
             present_marker="Initial frame presented to hardware scanout",
-            dump_prefix="test_dialer"
+            dump_prefix="test_dialer",
+            in_app_interactions=[
+                ("Tap '9'", (582, 772), "Keypad digit entered.", "digit_entered"),
+            ]
         )
 
         # App 7: Browser (Row 3, Card 0: x=180, y=860)
@@ -275,7 +317,10 @@ def main():
             app_id="org.interos.browser",
             tap_coords=(180, 860),
             present_marker="Browser canvas presented to scanout buffer.",
-            dump_prefix="test_browser"
+            dump_prefix="test_browser",
+            in_app_interactions=[
+                ("Tap Bookmark 1", (200, 240), None, "navigated"),
+            ]
         )
 
         # App 8: Messages (Row 3, Card 1: x=485, y=860)
@@ -287,7 +332,10 @@ def main():
             app_id="org.interos.messages",
             tap_coords=(485, 860),
             present_marker="Messages canvas presented to scanout buffer.",
-            dump_prefix="test_messages"
+            dump_prefix="test_messages",
+            in_app_interactions=[
+                ("Tap Conversation Thread 1 (Bob)", (200, 290), None, "thread_bob"),
+            ]
         )
 
         # App 9: Calendar (Row 4, Card 0: x=180, y=1030)
@@ -311,7 +359,10 @@ def main():
             app_id="org.interos.music",
             tap_coords=(485, 1030),
             present_marker="Music canvas presented to scanout buffer.",
-            dump_prefix="test_music"
+            dump_prefix="test_music",
+            in_app_interactions=[
+                ("Tap Play/Pause toggle", (360, 880), None, "playback_toggled"),
+            ]
         )
 
         print("\n============================================================")
