@@ -63,7 +63,6 @@ pub fn descriptor(id: ServiceId) -> ServiceDescriptor {
 pub struct ServiceRecord { pub id: ServiceId, pub task: TaskId, pub state: ServiceState }
 
 pub static SERVICE_RECORDS: spin::Mutex<[Option<ServiceRecord>; 11]> = spin::Mutex::new([None; 11]);
-const HEARTBEAT_TIMEOUT_TICKS: u64 = 500;
 const SERVICE_RESTART_BACKOFF_TICKS: u64 = 1000;
 static SERVICE_HEARTBEATS: [core::sync::atomic::AtomicU64; 11] = [
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
