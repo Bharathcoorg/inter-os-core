@@ -15,9 +15,14 @@ impl PackageBlobStore {
  pub const fn new()->Self{Self{blobs:Vec::new()}}
  pub fn put(&mut self,package_id:&'static str,version:(u16,u16,u16),bytes:&[u8])->Result<(),()>{
   if bytes.is_empty()||bytes.len()>MAX_BLOB_SIZE{return Err(());}
+  let previous=self.blobs.clone();
   if let Some(b)=self.blobs.iter_mut().find(|b|b.package_id==package_id){b.version=version;b.bytes.clear();b.bytes.extend_from_slice(bytes);}
   else {if self.blobs.len()>=MAX_BLOBS{return Err(());}self.blobs.push(PackageBlob{package_id,version,bytes:bytes.to_vec()});}
-  self.persist()
+  if self.persist().is_err() {
+   self.blobs=previous;
+   return Err(());
+  }
+  Ok(())
  }
  pub fn get(&self,id:&str)->Option<&PackageBlob>{self.blobs.iter().find(|b|b.package_id==id)}
  fn persist(&self)->Result<(),()>{
