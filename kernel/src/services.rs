@@ -1,9 +1,8 @@
 //! InterOS userspace-style system service registry and lifecycle bootstrap.
 //!
 //! The service registry establishes explicit service ownership and capability boundaries.
-//! The service functions are intentionally small kernel-hosted workers until
-//! the userspace service ABI is fully available; all privileged work remains
-//! behind the existing syscall/capability boundary.
+//! The kernel owns only the authoritative lifecycle registry and enforcement boundary;
+//! PID 1 owns service startup/recovery policy and userspace service execution.
 
 use crate::task::{SCHEDULER, TaskId};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -26,6 +25,39 @@ pub enum ServiceId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceState { Declared, Starting, Running, Stopped, Failed }
+
+pub const SERVICE_ABI_VERSION: u16 = 1;
+pub const HEARTBEAT_TIMEOUT_TICKS: u64 = 500;
+pub const SERVICE_START_TIMEOUT_TICKS: u64 = 500;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartPolicy { Manual, OnFailure }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceDescriptor {
+    pub id: ServiceId,
+    pub abi_version: u16,
+    pub restart: RestartPolicy,
+    pub critical: bool,
+    pub dependencies: &'static [ServiceId],
+}
+
+const NO_DEPS: &[ServiceId] = &[];
+const POWER_DEP: &[ServiceId] = &[ServiceId::Power];
+const UI_DEPS: &[ServiceId] = &[ServiceId::Display, ServiceId::Input];
+const LAUNCHER_DEPS: &[ServiceId] = &[ServiceId::Compositor];
+
+pub fn descriptor(id: ServiceId) -> ServiceDescriptor {
+    match id {
+        ServiceId::Init => ServiceDescriptor { id, abi_version: SERVICE_ABI_VERSION, restart: RestartPolicy::Manual, critical: true, dependencies: NO_DEPS },
+        ServiceId::Display | ServiceId::Input | ServiceId::Storage => ServiceDescriptor { id, abi_version: SERVICE_ABI_VERSION, restart: RestartPolicy::OnFailure, critical: true, dependencies: NO_DEPS },
+        ServiceId::Network | ServiceId::Modem => ServiceDescriptor { id, abi_version: SERVICE_ABI_VERSION, restart: RestartPolicy::OnFailure, critical: false, dependencies: NO_DEPS },
+        ServiceId::Power => ServiceDescriptor { id, abi_version: SERVICE_ABI_VERSION, restart: RestartPolicy::OnFailure, critical: true, dependencies: NO_DEPS },
+        ServiceId::Audio | ServiceId::Camera => ServiceDescriptor { id, abi_version: SERVICE_ABI_VERSION, restart: RestartPolicy::OnFailure, critical: false, dependencies: POWER_DEP },
+        ServiceId::Compositor => ServiceDescriptor { id, abi_version: SERVICE_ABI_VERSION, restart: RestartPolicy::OnFailure, critical: true, dependencies: UI_DEPS },
+        ServiceId::Launcher => ServiceDescriptor { id, abi_version: SERVICE_ABI_VERSION, restart: RestartPolicy::OnFailure, critical: true, dependencies: LAUNCHER_DEPS },
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct ServiceRecord { pub id: ServiceId, pub task: TaskId, pub state: ServiceState }
