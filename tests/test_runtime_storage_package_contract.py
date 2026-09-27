@@ -58,3 +58,23 @@ def test_security_registries_fail_closed_at_persistence_capacity():
     assert 'package revocation registry is full' in source
     assert 'key revocation registry is full' in source
     assert 'failed to persist key rotation' in source
+
+
+def test_power_policy_does_not_publish_refresh_rate_before_telemetry():
+    source = (ROOT / "kernel/src/resource/power.rs").read_text(encoding="utf-8")
+    assert "thermal_valid: bool" in source
+    assert "battery_valid: bool" in source
+    assert 'if !self.telemetry_valid' in source
+    assert "self.display_refresh_hz = 0" in source
+
+
+def test_update_activation_metadata_is_persisted_before_backend_switch():
+    source = (ROOT / "kernel/src/update.rs").read_text(encoding="utf-8")
+    assert "PersistenceFailed" in source
+    assert "if activation.persist().is_err()" in source
+    assert "backend.activate_slot" in source
+
+
+def test_animation_deadline_is_overflow_safe():
+    source = (ROOT / "kernel/src/gui/ui.rs").read_text(encoding="utf-8")
+    assert "saturating_add(self.duration_ms as u64)" in source
