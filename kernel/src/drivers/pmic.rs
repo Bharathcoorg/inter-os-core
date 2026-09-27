@@ -130,6 +130,7 @@ pub struct PmicFuelGauge {
     pub telemetry: BatteryTelemetry,
     pub coulomb_counter_mah: f32,
     pub max_capacity_mah: u32,
+    pub hardware_present: bool,
 }
 
 impl PmicFuelGauge {
