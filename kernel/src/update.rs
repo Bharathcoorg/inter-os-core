@@ -97,11 +97,12 @@ impl ActivationRecord {
         self.pending = Some(slot);
         self.pending_version = version;
         self.boot_attempts = 0;
+        self.persist();
         Ok(slot)
     }
-    pub fn begin_boot(&mut self) { if self.pending.is_some() { self.boot_attempts = self.boot_attempts.saturating_add(1); } }
-    pub fn confirm(&mut self) { if let Some(slot)=self.pending.take() { self.active=slot; self.boot_attempts=0; } }
-    pub fn rollback(&mut self) { self.pending=None; self.boot_attempts=0; }
+    pub fn begin_boot(&mut self) { if self.pending.is_some() { self.boot_attempts = self.boot_attempts.saturating_add(1); self.persist(); } }
+    pub fn confirm(&mut self) { if let Some(slot)=self.pending.take() { self.active=slot; self.boot_attempts=0; self.persist(); } }
+    pub fn rollback(&mut self) { self.pending=None; self.boot_attempts=0; self.persist(); }
     pub const fn boot_attempt_limit(&self) -> u8 { 3 }
     pub const fn recovery_required(&self) -> bool { self.pending.is_some() && self.boot_attempts >= self.boot_attempt_limit() }
 }
