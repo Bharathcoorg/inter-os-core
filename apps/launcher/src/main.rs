@@ -242,7 +242,7 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     if y < 48 {
         if y == 47 { return BORDER_SUBTLE; }
         if y >= 16 && y < 32 {
-            if let Some(c) = test_text(x, y, 48, 16, 2, b"09:20", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 48, 16, 2, b"--:--", TEXT_PRIMARY) { return c; }
         }
         // 4-Bar Cellular Signal
         if x >= 590 && x <= 608 && y >= 16 && y <= 32 {
@@ -260,11 +260,11 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 return TEXT_PRIMARY;
             }
         }
-        // Battery (outline pill + 78% fill)
+        // Battery (outline only until real telemetry is available)
         if x >= 658 && x <= 686 && y >= 18 && y <= 32 {
             if x == 658 || x == 684 || y == 18 || y == 32 { return TEXT_PRIMARY; }
             if x >= 685 && x <= 686 && y >= 22 && y <= 28 { return TEXT_PRIMARY; }
-            if x >= 661 && x <= 680 && y >= 21 && y <= 29 { return SUCCESS_EMERALD; }
+            // No synthetic battery fill: hardware telemetry must provide the level.
         }
         return BG_DARK;
     }
@@ -273,10 +273,10 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     if y < 235 {
         // Date & Tabular Clock
         if y >= 64 && y < 80 {
-            if let Some(c) = test_text(x, y, 48, 64, 2, b"Mon, 12 Jan", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 48, 64, 2, b"Date unavailable", TEXT_MUTED) { return c; }
         }
         if y >= 90 && y < 122 {
-            if let Some(c) = test_text(x, y, 48, 90, 4, b"09:20", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 48, 90, 4, b"--:--", TEXT_PRIMARY) { return c; }
         }
 
         // Weather Widget Right
@@ -285,7 +285,7 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             let dy = (y as i32) - 96;
             if dx * dx + dy * dy <= 81 { return ACCENT_AMBER; }
             if y >= 84 && y < 92 {
-                if let Some(c) = test_text(x, y, 520, 84, 1, b"Bangalore", TEXT_MUTED) { return c; }
+                if let Some(c) = test_text(x, y, 520, 84, 1, b"Location unavailable", TEXT_MUTED) { return c; }
             }
             if y >= 98 && y < 114 {
                 if let Some(c) = test_text(x, y, 520, 98, 2, b"24*", TEXT_PRIMARY) { return c; }
@@ -859,7 +859,7 @@ fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     if y < 48 {
         if y == 47 { return BORDER_SUBTLE; }
         if y >= 16 && y < 32 {
-            if let Some(c) = test_text(x, y, 48, 16, 2, b"09:20", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 48, 16, 2, b"--:--", TEXT_PRIMARY) { return c; }
         }
         // 4-Bar Cellular Signal
         if x >= 590 && x <= 608 && y >= 16 && y <= 32 {
@@ -877,11 +877,11 @@ fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 return TEXT_PRIMARY;
             }
         }
-        // Battery (outline pill + 78% fill)
+        // Battery (outline only until real telemetry is available)
         if x >= 658 && x <= 686 && y >= 18 && y <= 32 {
             if x == 658 || x == 684 || y == 18 || y == 32 { return TEXT_PRIMARY; }
             if x >= 685 && x <= 686 && y >= 22 && y <= 28 { return TEXT_PRIMARY; }
-            if x >= 661 && x <= 680 && y >= 21 && y <= 29 { return SUCCESS_EMERALD; }
+            // No synthetic battery fill: hardware telemetry must provide the level.
         }
         return BG_DARK;
     }
@@ -896,7 +896,7 @@ fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         if let Some(c) = test_text(x, y, 48, 160, 2, b"Wed, 24 Sep", TEXT_MUTED) { return c; }
     }
     if y >= 210 && y < 250 {
-        if let Some(c) = test_text(x, y, 48, 210, 5, b"09:20", TEXT_PRIMARY) { return c; }
+        if let Some(c) = test_text(x, y, 48, 210, 5, b"--:--", TEXT_PRIMARY) { return c; }
     }
 
     // Mountain Silhouette Layering
@@ -1040,7 +1040,7 @@ fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     if y < 48 {
         if y == 47 { return BORDER_SUBTLE; }
         if y >= 16 && y < 32 {
-            if let Some(c) = test_text(x, y, 48, 16, 2, b"09:20", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 48, 16, 2, b"--:--", TEXT_PRIMARY) { return c; }
         }
         // Cellular
         if x >= 590 && x <= 608 && y >= 16 && y <= 32 {
@@ -1062,7 +1062,7 @@ fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         if x >= 658 && x <= 686 && y >= 18 && y <= 32 {
             if x == 658 || x == 684 || y == 18 || y == 32 { return TEXT_PRIMARY; }
             if x >= 685 && x <= 686 && y >= 22 && y <= 28 { return TEXT_PRIMARY; }
-            if x >= 661 && x <= 680 && y >= 21 && y <= 29 { return SUCCESS_EMERALD; }
+            // No synthetic battery fill: hardware telemetry must provide the level.
         }
         return BG_DARK;
     }
@@ -1227,7 +1227,7 @@ fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     if y < 48 {
         if y == 47 { return BORDER_SUBTLE; }
         if y >= 16 && y < 32 {
-            if let Some(c) = test_text(x, y, 48, 16, 2, b"09:20", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 48, 16, 2, b"--:--", TEXT_PRIMARY) { return c; }
         }
         // Cellular
         if x >= 590 && x <= 608 && y >= 16 && y <= 32 {
@@ -1249,7 +1249,7 @@ fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         if x >= 658 && x <= 686 && y >= 18 && y <= 32 {
             if x == 658 || x == 684 || y == 18 || y == 32 { return TEXT_PRIMARY; }
             if x >= 685 && x <= 686 && y >= 22 && y <= 28 { return TEXT_PRIMARY; }
-            if x >= 661 && x <= 680 && y >= 21 && y <= 29 { return SUCCESS_EMERALD; }
+            // No synthetic battery fill: hardware telemetry must provide the level.
         }
         return BG_DARK;
     }
@@ -1456,7 +1456,7 @@ fn get_ai_companion_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     if y < 48 {
         if y == 47 { return BORDER_SUBTLE; }
         if y >= 16 && y < 32 {
-            if let Some(c) = test_text(x, y, 48, 16, 2, b"09:20", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 48, 16, 2, b"--:--", TEXT_PRIMARY) { return c; }
         }
         // Cellular
         if x >= 590 && x <= 608 && y >= 16 && y <= 32 {
@@ -1478,7 +1478,7 @@ fn get_ai_companion_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         if x >= 658 && x <= 686 && y >= 18 && y <= 32 {
             if x == 658 || x == 684 || y == 18 || y == 32 { return TEXT_PRIMARY; }
             if x >= 685 && x <= 686 && y >= 22 && y <= 28 { return TEXT_PRIMARY; }
-            if x >= 661 && x <= 680 && y >= 21 && y <= 29 { return SUCCESS_EMERALD; }
+            // No synthetic battery fill: hardware telemetry must provide the level.
         }
         return BG_DARK;
     }
@@ -1662,7 +1662,7 @@ fn get_live_widgets_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
     if y < 48 {
         if y == 47 { return BORDER_SUBTLE; }
         if y >= 16 && y < 32 {
-            if let Some(c) = test_text(x, y, 48, 16, 2, b"09:20", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 48, 16, 2, b"--:--", TEXT_PRIMARY) { return c; }
         }
         // Cellular
         if x >= 590 && x <= 608 && y >= 16 && y <= 32 {
@@ -1684,7 +1684,7 @@ fn get_live_widgets_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
         if x >= 658 && x <= 686 && y >= 18 && y <= 32 {
             if x == 658 || x == 684 || y == 18 || y == 32 { return TEXT_PRIMARY; }
             if x >= 685 && x <= 686 && y >= 22 && y <= 28 { return TEXT_PRIMARY; }
-            if x >= 661 && x <= 680 && y >= 21 && y <= 29 { return SUCCESS_EMERALD; }
+            // No synthetic battery fill: hardware telemetry must provide the level.
         }
         return BG_DARK;
     }
@@ -1705,7 +1705,7 @@ fn get_live_widgets_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
     if y >= 135 && y < 315 && x >= 40 && x < 345 {
         if y == 135 || y == 314 || x == 40 || x == 344 { return BORDER_SUBTLE; }
         if y >= 155 && y < 171 {
-            if let Some(c) = test_text(x, y, 65, 155, 2, b"Bangalore", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 65, 155, 2, b"Location unavailable", TEXT_PRIMARY) { return c; }
         }
         if y >= 190 && y < 214 {
             if let Some(c) = test_text(x, y, 65, 190, 3, b"24*C", ACCENT_AMBER) { return c; }
@@ -2198,672 +2198,3 @@ pub extern "C" fn _start() -> ! {
                                 if (630..740).contains(&y) && (375..680).contains(&x) {
                                     state.current_view = ViewMode::PowerMenu;
                                     render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Power menu opened from Quick Controls.").ok();
-                                    break;
-                                }
-                            }
-                        }
-                        ViewMode::SystemSpace => {
-                            if (input.kind == 4 && input.dy >= 60) || (input.kind == 1 && input.y >= 1350) {
-                                state.current_view = ViewMode::HomeScreen;
-                                render_view(surface, &state);
-                                let _ = std::surface_flip(4);
-                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                while std::input_event_poll(&mut drain).is_ok() {}
-                                break;
-                            }
-                            if input.kind == 1 {
-                                let x = input.x as usize;
-                                let y = input.y as usize;
-                                if (590..710).contains(&y) && (40..345).contains(&x) {
-                                    state.current_view = ViewMode::PowerMenu;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Power menu opened from System Space.").ok();
-                                    break;
-                                }
-                                state.push_recent("org.interos.settings");
-                                if let Ok(task_id) = std::app_launch("org.interos.settings") {
-                                    state.active_child = Some(task_id);
-                                    state.current_view = ViewMode::HomeScreen;
-                                    let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
-                            }
-                        }
-                        ViewMode::LockScreen => {
-                            // 1. Vertical swipe up to unlock
-                            if input.kind == 4 && input.dy <= -60 {
-                                state.current_view = ViewMode::HomeScreen;
-                                render_view(surface, &state);
-                                let _ = std::surface_flip(4);
-                                std::log(0, "[LAUNCHER] Device unlocked via swipe-up gesture.").ok();
-                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                while std::input_event_poll(&mut drain).is_ok() {}
-                                break;
-                            }
-                            // 2. Touch tap
-                            if input.kind == 1 {
-                                let x = input.x as usize;
-                                let y = input.y as usize;
-
-                                // Flashlight circle button at (72, 1330, r: 35)
-                                let f_dx = (x as i32) - 72;
-                                let f_dy = (y as i32) - 1330;
-                                if f_dx * f_dx + f_dy * f_dy <= 1225 {
-                                    state.flashlight_on = !state.flashlight_on;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Flashlight toggled on lock screen.").ok();
-                                    break;
-                                }
-
-                                // Camera circle button at (648, 1330, r: 35)
-                                let c_dx = (x as i32) - 648;
-                                let c_dy = (y as i32) - 1330;
-                                if c_dx * c_dx + c_dy * c_dy <= 1225 {
-                                    state.push_recent("org.interos.camera");
-                                    if let Ok(task_id) = std::app_launch("org.interos.camera") {
-                                        state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
-                                        std::log(0, "[LAUNCHER] Camera launched from lock screen shortcut.").ok();
-                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-
-                                // Bottom home bar or hint area tap unlocks
-                                if y >= 1370 {
-                                    state.current_view = ViewMode::HomeScreen;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Device unlocked via bottom tap.").ok();
-                                    let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
-                            }
-                        }
-                        ViewMode::PowerMenu => {
-                            // Swipe right to dismiss
-                            if input.kind == 4 && input.dx >= 60 {
-                                state.current_view = ViewMode::HomeScreen;
-                                render_view(surface, &state);
-                                let _ = std::surface_flip(4);
-                                std::log(0, "[LAUNCHER] Power menu dismissed via swipe.").ok();
-                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                while std::input_event_poll(&mut drain).is_ok() {}
-                                break;
-                            }
-                            // Touch tap
-                            if input.kind == 1 {
-                                let x = input.x as usize;
-                                let y = input.y as usize;
-
-                                // Tap outside drawer or Cancel button dismisses
-                                if x < 340 || y > 660 || (y >= 580 && y < 635 && x >= 420 && x < 640) {
-                                    state.current_view = ViewMode::HomeScreen;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Power menu dismissed.").ok();
-                                    let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
-
-                                // Card 1: Lock device (y: 190..265, x: 365..695)
-                                if (190..265).contains(&y) && (365..695).contains(&x) {
-                                    state.current_view = ViewMode::LockScreen;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Device locked via power menu.").ok();
-                                    let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
-
-                                // Card 2: Restart (y: 285..360, x: 365..695)
-                                if (285..360).contains(&y) && (365..695).contains(&x) {
-                                    std::log(0, "[LAUNCHER] Power menu: System restart confirmed.").ok();
-                                    state.current_view = ViewMode::HomeScreen;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    break;
-                                }
-
-                                // Card 3: Power off (y: 380..455, x: 365..695)
-                                if (380..455).contains(&y) && (365..695).contains(&x) {
-                                    std::log(0, "[LAUNCHER] Power menu: System power off confirmed.").ok();
-                                    state.current_view = ViewMode::HomeScreen;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    break;
-                                }
-
-                                // Card 4: Emergency (y: 475..550, x: 365..695)
-                                if (475..550).contains(&y) && (365..695).contains(&x) {
-                                    state.push_recent("org.interos.dialer");
-                                    if let Ok(task_id) = std::app_launch("org.interos.dialer") {
-                                        state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
-                                        std::log(0, "[LAUNCHER] Emergency dialer launched from power menu.").ok();
-                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        ViewMode::AppDrawer => {
-                            // 1. Gesture Navigation
-                            // Swipe down or swipe right returns to HomeScreen
-                            if (input.kind == 4 && (input.dy >= 60 || input.dx >= 60)) || (input.kind == 1 && input.y >= 1400) {
-                                state.current_view = ViewMode::HomeScreen;
-                                render_view(surface, &state);
-                                let _ = std::surface_flip(4);
-                                std::log(0, "[LAUNCHER] Returned to Home from App Drawer.").ok();
-                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                while std::input_event_poll(&mut drain).is_ok() {}
-                                break;
-                            }
-                            // 2. Touch Tap
-                            if input.kind == 1 {
-                                let x = input.x as usize;
-                                let y = input.y as usize;
-
-                                // Filter tabs (y: 135..185)
-                                if (135..185).contains(&y) {
-                                    if (40..170).contains(&x) {
-                                        state.app_drawer_tab = 0;
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
-                                        break;
-                                    } else if (185..315).contains(&x) {
-                                        state.app_drawer_tab = 1;
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
-                                        break;
-                                    } else if (330..460).contains(&x) {
-                                        state.app_drawer_tab = 2;
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
-                                        break;
-                                    } else if (475..605).contains(&x) {
-                                        state.app_drawer_tab = 3;
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
-                                        std::log(0, "[LAUNCHER] App drawer category tab switched.").ok();
-                                        break;
-                                    }
-                                }
-
-                                // Launch application from 16-app grid
-                                if let Some(target_app) = resolve_app_in_drawer(x, y) {
-                                    state.push_recent(target_app);
-                                    match std::app_launch(target_app) {
-                                        Ok(task_id) => {
-                                            state.active_child = Some(task_id);
-                                            state.current_view = ViewMode::HomeScreen;
-                                            std::log(0, "[LAUNCHER] App launched from drawer.").ok();
-                                            let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                            while std::input_event_poll(&mut drain).is_ok() {}
-                                            break;
-                                        }
-                                        Err(_) => {
-                                            std::log(0, "[LAUNCHER] Application launch rejected by kernel.").ok();
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        ViewMode::Notifications => {
-                            // 1. Gesture Navigation
-                            // Swipe up or swipe right returns to HomeScreen
-                            if (input.kind == 4 && (input.dy <= -60 || input.dx >= 60)) || (input.kind == 1 && input.y >= 1400) {
-                                state.current_view = ViewMode::HomeScreen;
-                                render_view(surface, &state);
-                                let _ = std::surface_flip(4);
-                                std::log(0, "[LAUNCHER] Returned to Home from Notifications.").ok();
-                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                while std::input_event_poll(&mut drain).is_ok() {}
-                                break;
-                            }
-                            // 2. Touch Tap
-                            if input.kind == 1 {
-                                let x = input.x as usize;
-                                let y = input.y as usize;
-
-                                // Filter tabs (y: 135..185)
-                                if (135..185).contains(&y) {
-                                    if (40..170).contains(&x) {
-                                        state.notif_tab = 0;
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
-                                        break;
-                                    } else if (185..315).contains(&x) {
-                                        state.notif_tab = 1;
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
-                                        break;
-                                    } else if (330..460).contains(&x) {
-                                        state.notif_tab = 2;
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
-                                        break;
-                                    } else if (475..605).contains(&x) {
-                                        state.notif_tab = 3;
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
-                                        break;
-                                    }
-                                }
-
-                                // Clear all button or header icon
-                                let dx_c = (x as i32) - 644;
-                                let dy_c = (y as i32) - 76;
-                                if (y >= 700 && y < 755 && x >= 260 && x < 460) || (dx_c * dx_c + dy_c * dy_c <= 324) {
-                                    let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    state.current_view = ViewMode::HomeScreen;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Notifications cleared.").ok();
-                                    break;
-                                }
-
-                                // Card 0: Terminal
-                                if (205..310).contains(&y) && (40..680).contains(&x) {
-                                    state.push_recent("org.interos.terminal");
-                                    if let Ok(task_id) = std::app_launch("org.interos.terminal") {
-                                        state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
-                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-                                // Card 1: Messages
-                                if (325..430).contains(&y) && (40..680).contains(&x) {
-                                    state.push_recent("org.interos.messages");
-                                    if let Ok(task_id) = std::app_launch("org.interos.messages") {
-                                        state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
-                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-                                // Card 2: Calendar
-                                if (445..550).contains(&y) && (40..680).contains(&x) {
-                                    state.push_recent("org.interos.calendar");
-                                    if let Ok(task_id) = std::app_launch("org.interos.calendar") {
-                                        state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
-                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-                                // Card 3: Settings
-                                if (565..670).contains(&y) && (40..680).contains(&x) {
-                                    state.push_recent("org.interos.settings");
-                                    if let Ok(task_id) = std::app_launch("org.interos.settings") {
-                                        state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
-                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        ViewMode::AiCompanion => {
-                            // Swipe right or swipe down returns to HomeScreen
-                            if (input.kind == 4 && (input.dx >= 60 || input.dy >= 60)) || (input.kind == 1 && input.y >= 1400) {
-                                state.current_view = ViewMode::HomeScreen;
-                                render_view(surface, &state);
-                                let _ = std::surface_flip(4);
-                                std::log(0, "[LAUNCHER] Returned to Home from AI Companion.").ok();
-                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                while std::input_event_poll(&mut drain).is_ok() {}
-                                break;
-                            }
-                            if input.kind == 1 {
-                                let x = input.x as usize;
-                                let y = input.y as usize;
-
-                                // Mic icon tap (x: 620..670, y: 1290..1365)
-                                if (1290..1365).contains(&y) && x >= 620 {
-                                    state.ai_listening = !state.ai_listening;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] AI voice listening toggled.").ok();
-                                    break;
-                                }
-
-                                // Card 0: Summarize (390..465)
-                                if (390..465).contains(&y) && (40..680).contains(&x) {
-                                    state.push_recent("org.interos.browser");
-                                    if let Ok(task_id) = std::app_launch("org.interos.browser") {
-                                        state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
-                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-
-                                // Card 1: Create (480..555)
-                                if (480..555).contains(&y) && (40..680).contains(&x) {
-                                    state.push_recent("org.interos.test_app");
-                                    if let Ok(task_id) = std::app_launch("org.interos.test_app") {
-                                        state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
-                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-
-                                // Card 2: Find (570..645)
-                                if (570..645).contains(&y) && (40..680).contains(&x) {
-                                    state.push_recent("org.interos.file_manager");
-                                    if let Ok(task_id) = std::app_launch("org.interos.file_manager") {
-                                        state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
-                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-
-                                // Card 3: Do (660..735)
-                                if (660..735).contains(&y) && (40..680).contains(&x) {
-                                    state.push_recent("org.interos.settings");
-                                    if let Ok(task_id) = std::app_launch("org.interos.settings") {
-                                        state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
-                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        ViewMode::LiveWidgets => {
-                            // Swipe right returns to HomeScreen
-                            if (input.kind == 4 && input.dx >= 60) || (input.kind == 1 && input.y >= 1400) {
-                                state.current_view = ViewMode::HomeScreen;
-                                render_view(surface, &state);
-                                let _ = std::surface_flip(4);
-                                std::log(0, "[LAUNCHER] Returned to Home from Live Widgets.").ok();
-                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                while std::input_event_poll(&mut drain).is_ok() {}
-                                break;
-                            }
-                            if input.kind == 1 {
-                                let x = input.x as usize;
-                                let y = input.y as usize;
-
-                                // Weather widget (135..315, 40..345)
-                                if (135..315).contains(&y) && (40..345).contains(&x) {
-                                    state.push_recent("org.interos.sensor_dashboard");
-                                    if let Ok(task_id) = std::app_launch("org.interos.sensor_dashboard") {
-                                        state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
-                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-                                // Build status widget (135..315, 375..680)
-                                if (135..315).contains(&y) && (375..680).contains(&x) {
-                                    state.push_recent("org.interos.terminal");
-                                    if let Ok(task_id) = std::app_launch("org.interos.terminal") {
-                                        state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
-                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-                                // Media widget (335..485)
-                                if (335..485).contains(&y) && (40..680).contains(&x) {
-                                    state.push_recent("org.interos.music");
-                                    if let Ok(task_id) = std::app_launch("org.interos.music") {
-                                        state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
-                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-                                // Calendar widget (505..685, 40..345)
-                                if (505..685).contains(&y) && (40..345).contains(&x) {
-                                    state.push_recent("org.interos.calendar");
-                                    if let Ok(task_id) = std::app_launch("org.interos.calendar") {
-                                        state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
-                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-                                // Health widget (505..685, 375..680)
-                                if (505..685).contains(&y) && (375..680).contains(&x) {
-                                    state.push_recent("org.interos.health");
-                                    if let Ok(task_id) = std::app_launch("org.interos.health") {
-                                        state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
-                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        ViewMode::HomeScreen => {
-                            // Long-press opens Power Menu
-                            if input.kind == 6 {
-                                state.current_view = ViewMode::PowerMenu;
-                                render_view(surface, &state);
-                                let _ = std::surface_flip(4);
-                                std::log(0, "[LAUNCHER] Power menu opened via long-press.").ok();
-                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                while std::input_event_poll(&mut drain).is_ok() {}
-                                break;
-                            }
-
-                            // 1. Gesture Navigation
-                            // Swipe up: bottom bar opens Activity Space, middle opens App Drawer
-                            if input.kind == 4 && input.dy <= -60 {
-                                if input.y >= 1200 {
-                                    state.current_view = ViewMode::ActivitySpace;
-                                    let mut win_buf = [0u8; 1024];
-                                    let _ = std::window_list(&mut win_buf);
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Overview / Recent Apps switcher opened via swipe-up gesture.").ok();
-                                } else {
-                                    state.current_view = ViewMode::AppDrawer;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] App Drawer opened via upward swipe gesture.").ok();
-                                }
-                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                while std::input_event_poll(&mut drain).is_ok() {}
-                                break;
-                            }
-                            // Swipe down: left/center opens Notifications, right opens Quick Controls
-                            if input.kind == 4 && input.dy >= 60 && input.y <= 120 {
-                                if input.x < 360 {
-                                    state.current_view = ViewMode::Notifications;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Notifications shade opened via swipe-down gesture.").ok();
-                                } else {
-                                    state.current_view = ViewMode::QuickControls;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Quick Controls shade opened via swipe-down gesture.").ok();
-                                }
-                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                while std::input_event_poll(&mut drain).is_ok() {}
-                                break;
-                            }
-                            // Edge swipe from right opens Quick Controls
-                            if input.kind == 4 && input.dx <= -60 && input.x >= 650 {
-                                state.current_view = ViewMode::QuickControls;
-                                render_view(surface, &state);
-                                let _ = std::surface_flip(4);
-                                std::log(0, "[LAUNCHER] Quick Controls shade opened via edge swipe gesture.").ok();
-                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                while std::input_event_poll(&mut drain).is_ok() {}
-                                break;
-                            }
-                            // Horizontal swipe left opens Live Widgets
-                            if input.kind == 4 && input.dx <= -60 && input.x < 650 {
-                                state.current_view = ViewMode::LiveWidgets;
-                                render_view(surface, &state);
-                                let _ = std::surface_flip(4);
-                                std::log(0, "[LAUNCHER] Live Widgets opened via horizontal swipe gesture.").ok();
-                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                while std::input_event_poll(&mut drain).is_ok() {}
-                                break;
-                            }
-
-                            // 2. Touch Tap
-                            if input.kind == 1 {
-                                let x = input.x as usize;
-                                let y = input.y as usize;
-
-                                // Tapping bottom home pill opens Activity Space
-                                if (240..=480).contains(&x) && y >= 1400 {
-                                    state.current_view = ViewMode::ActivitySpace;
-                                    let mut win_buf = [0u8; 1024];
-                                    let _ = std::window_list(&mut win_buf);
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Overview / Recent Apps switcher opened via home bar tap.").ok();
-                                    let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
-
-                                // Tapping top status bar: left opens Notifications, right opens PowerMenu, center opens Quick Controls
-                                if y <= 48 {
-                                    if x < 240 {
-                                        state.current_view = ViewMode::Notifications;
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
-                                        std::log(0, "[LAUNCHER] Notifications shade opened via top status bar tap.").ok();
-                                    } else if x >= 480 {
-                                        state.current_view = ViewMode::PowerMenu;
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
-                                        std::log(0, "[LAUNCHER] Power menu opened via battery status bar tap.").ok();
-                                    } else {
-                                        state.current_view = ViewMode::QuickControls;
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
-                                        std::log(0, "[LAUNCHER] Quick Controls shade opened via top status bar tap.").ok();
-                                    }
-                                    let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
-
-                                // Tapping Today card chevron '>' opens Notifications
-                                if (240..300).contains(&y) && x >= 600 {
-                                    state.current_view = ViewMode::Notifications;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Notifications opened from Today card header.").ok();
-                                    let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
-
-                                // Tapping Today card radio buttons toggles task state
-                                if (65..=95).contains(&x) {
-                                    if (305..=330).contains(&y) {
-                                        state.task_done[0] = !state.task_done[0];
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
-                                        break;
-                                    } else if (355..=380).contains(&y) {
-                                        state.task_done[1] = !state.task_done[1];
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
-                                        break;
-                                    } else if (405..=430).contains(&y) {
-                                        state.task_done[2] = !state.task_done[2];
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
-                                        break;
-                                    }
-                                }
-
-                                // Tapping "Ask anything..." search pill: mic opens AI companion, body opens System Space
-                                if (1290..1365).contains(&y) && (40..680).contains(&x) {
-                                    if x >= 620 {
-                                        state.current_view = ViewMode::AiCompanion;
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
-                                        std::log(0, "[LAUNCHER] AI Companion opened via mic tap.").ok();
-                                    } else {
-                                        state.current_view = ViewMode::SystemSpace;
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
-                                        std::log(0, "[LAUNCHER] System Space opened via universal search bar tap.").ok();
-                                    }
-                                    let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
-
-                                // Tapping dock 4th item (490..645, 1120..1400) opens App Drawer
-                                if (1120..1400).contains(&y) && (490..645).contains(&x) {
-                                    state.current_view = ViewMode::AppDrawer;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] App Drawer opened from dock shortcut.").ok();
-                                    let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
-
-                                // Launch application
-                                if let Some(target_app) = resolve_app_at_touch(input.x, input.y) {
-                                    state.push_recent(target_app);
-                                    match std::app_launch(target_app) {
-                                        Ok(task_id) => {
-                                            state.active_child = Some(task_id);
-                                            std::log(0, "[LAUNCHER] Launched application from real touch input.").ok();
-                                            break;
-                                        }
-                                        Err(_) => {
-                                            std::log(0, "[LAUNCHER] Application launch rejected by kernel.").ok();
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        std::yield_now();
-    }
-}
-
-#[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    std::log(0, "[LAUNCHER] Panic occurred!").ok();
-    loop {
-        std::yield_now();
-    }
-}
