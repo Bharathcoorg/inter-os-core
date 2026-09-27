@@ -69,13 +69,14 @@ pub struct CameraSensor {
 impl CameraSensor {
     pub const fn new() -> Self {
         Self {
-            sensor_model: "Sony IMX586 (MIPI-CSI2)",
-            width: 160,
-            height: 120,
-            exposure_us: 16666, // 1/60s exposure
-            gain_db: 12,
+            hardware_present: false,
+            sensor_model: "unavailable",
+            width: 0,
+            height: 0,
+            exposure_us: 0,
+            gain_db: 0,
             flash_enabled: false,
-            af_state: AutoFocusState::Locked,
+            af_state: AutoFocusState::Idle,
             frame_counter: 0,
         }
     }
