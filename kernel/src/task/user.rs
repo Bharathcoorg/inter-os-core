@@ -12,6 +12,9 @@ use crate::task::{SCHEDULER, TaskId};
 use crate::serial_println;
 
 pub const USER_STACK_SIZE: usize = 256 * 1024; // 256 KiB dedicated user-mode stack
+/// Maximum mapped userspace address-space footprint for a single process.
+/// This is the default runtime limit until per-process limit configuration is wired into exec.
+pub const USER_ADDRESS_SPACE_LIMIT: usize = 256 * 1024 * 1024;
 
 /// User Code Segment Selector with RPL = 3 (GDT Index 4: 0x20 | 3 = 0x23)
 pub const USER_CS_SELECTOR: u64 = 0x23;
@@ -259,6 +262,7 @@ pub fn load_user_elf_into_page_table(
 
     let phys_offset = crate::memory::phys_mem_offset();
     let mut entry_in_executable_segment = false;
+    let mut mapped_address_space = 0usize;
     let mut load_ranges: alloc::vec::Vec<(usize, usize, bool, bool)> = alloc::vec::Vec::new();
 
     // The user stack has a fixed address in the current ABI. Reject ELF load
@@ -325,6 +329,12 @@ pub fn load_user_elf_into_page_table(
             return Err("Overlapping ELF load segments are not supported");
         }
         load_ranges.push((p_vaddr, seg_end_vaddr, is_exec, is_write));
+        mapped_address_space = mapped_address_space
+            .checked_add(((seg_end_vaddr - p_vaddr + 4095) / 4096) * 4096)
+            .ok_or("userspace address-space size overflow")?;
+        if mapped_address_space.checked_add(USER_STACK_SIZE).ok_or("userspace address-space size overflow")? > USER_ADDRESS_SPACE_LIMIT {
+            return Err("userspace address-space limit exceeded");
+        }
 
         // W^X Enforcement: Segment cannot be both executable and writable!
         if is_exec && is_write {
