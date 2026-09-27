@@ -614,6 +614,30 @@ mod tcp_reliability_tests {
     use crate::net::ipv4::Ipv4Address;
 
     #[test]
+    fn active_close_holds_connection_until_time_wait_expiry() {
+        let mut table = TcpConnectionTable::new();
+        let id = table
+            .open(7, 41000, Ipv4Address::LOCALHOST, 41001, 100)
+            .expect("connection should open");
+
+        {
+            let conn = table.get_mut(id).expect("connection exists");
+            conn.state = crate::net::TcpState::Established;
+        }
+        let fin_seq = table.arm_fin(id, 0).expect("FIN should arm");
+        assert!(table.acknowledge_fin(id, fin_seq.wrapping_add(1)));
+
+        let until = table.get(id).expect("TIME-WAIT entry remains").time_wait_until;
+        assert_eq!(table.get(id).expect("entry remains").state, crate::net::TcpState::TimeWait);
+        assert_eq!(table.reap_time_wait(until.saturating_sub(1)), 0);
+        assert!(table.get(id).is_some());
+
+        assert_eq!(table.reap_time_wait(until), 1);
+        assert_eq!(table.reap_closed(), 1);
+        assert!(table.get(id).is_none());
+    }
+
+    #[test]
     fn payload_retransmit_exhaustion_closes_connection_and_releases_slot() {
         let mut table = TcpConnectionTable::new();
         let id = table
