@@ -38,7 +38,7 @@ pub static CELLULAR_MODEM: Mutex<CellularModem> = Mutex::new(CellularModem {
 });
 
 /// Initializes the Telephony subsystem and executes automated self-tests.
-pub fn init() {
+pub fn test_telephony() {
     serial_println!("--- [Initializing Mobile Telephony & Baseband Subsystem] ---");
 
     // Initialize SIM profile state
@@ -130,6 +130,24 @@ pub fn init() {
     }
 
     serial_println!("--- [Sovereign Telephony Subsystem 100% Attested & Enforced] ---");
+}
+
+
+/// Initializes telephony to a truthful hardware-neutral state.
+pub fn init() {
+    let mut modem = CELLULAR_MODEM.lock();
+    modem.state = ModemRadioState::PowerDown;
+    modem.call_state = CallState::Idle;
+    modem.signal = SignalQuality { rssi: 99, ber: 99 };
+    modem.pdp_context_active = false;
+    modem.apn = "";
+    modem.ip_address = [0, 0, 0, 0];
+    modem.sms_inbox.clear();
+    modem.sms_outbox.clear();
+    let mut sim = SOVEREIGN_SIM.lock();
+    sim.status = SimStatus::NoSim;
+    sim.carrier_operator = "None";
+    serial_println!("[TELEPHONY] No physical baseband/SIM backend registered; runtime state remains offline.");
 }
 
 /// Periodic multitasking worker task for the cellular modem (Task 11).
