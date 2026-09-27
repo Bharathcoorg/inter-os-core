@@ -23,6 +23,15 @@
 
 ---
 
+
+## Platform Reality Contract
+
+InterOS distinguishes implementation from verification. Hardware-facing features use explicit **Unavailable**, **Emulated**, and **Present** states, while verification is classified as source-only, unit-tested, QEMU-verified, or hardware-verified. QEMU evidence is never represented as physical-device evidence.
+
+The launcher and developer tooling do not treat fixed demonstration values as live telemetry. Missing hardware backends are reported as unavailable, and package trust remains based on cryptographic verification.
+
+See [Platform Reality Contract](docs/PLATFORM_REALITY_CONTRACT.md) and run `python tools/interos.py reality` for the current runtime contract.
+
 ## 📊 Feature Status & Reality Matrix
 
 In accordance with our engineering integrity policy, every subsystem is classified into an explicit verification tier:
