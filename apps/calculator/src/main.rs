@@ -16,7 +16,7 @@ use interos_std as std;
 
 const W: usize = 720;
 const H: usize = 1440;
-const CHUNK: usize = 1024;
+const CHUNK: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CalculatorState {

@@ -41,19 +41,21 @@ def find_qemu(binary="qemu-system-x86_64.exe"):
     return binary
 
 def send_monitor_cmd(sock, cmd):
-    sock.sendall((cmd + "\n").encode('utf-8'))
-    time.sleep(0.1)
+    if cmd:
+        sock.sendall((cmd + "\n").encode('utf-8'))
     resp = b""
-    while True:
+    start_t = time.time()
+    while time.time() - start_t < 5.0:
         try:
             chunk = sock.recv(1024)
             if not chunk:
                 break
             resp += chunk
-            if b"(qemu)" in chunk or b"\n" in chunk:
+            if b"(qemu)" in resp:
                 break
         except socket.timeout:
-            break
+            continue
+    time.sleep(0.2)
     return resp.decode('utf-8', errors='replace')
 
 class SerialReader:
@@ -99,10 +101,11 @@ def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_co
     assert presented, f"{app_name} failed to present frame within timeout"
     print(f"[LIFECYCLE TEST] [OK] {app_name} launched and presented application frame.")
 
-    time.sleep(0.5)
+    time.sleep(1.0)
     ppm_app = os.path.abspath(rf"target\{dump_prefix}.ppm")
     _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_app}")
     print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_app}")
+    time.sleep(0.5)
 
     # Dispatch touch tap on Back button
     print(f"[LIFECYCLE TEST] Dispatching touch tap on Back button (x=62, y=48)...")
@@ -117,10 +120,11 @@ def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_co
     assert reaped, f"{app_name} exit / Launcher waitpid reaping was not observed"
     print(f"[LIFECYCLE TEST] [OK] Back navigation successfully triggered child exit, surface teardown, and parent waitpid reaping.")
 
-    time.sleep(0.3)
+    time.sleep(0.8)
     ppm_reaped = os.path.abspath(rf"target\test_launcher_after_{dump_prefix}.ppm")
     _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_reaped}")
     print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_reaped}")
+    time.sleep(0.5)
 
 def main():
     qemu_exe = find_qemu("qemu-system-x86_64.exe")

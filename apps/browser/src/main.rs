@@ -159,7 +159,7 @@ impl BrowserApp {
 
 const W: usize = 720;
 const H: usize = 1440;
-const CHUNK: usize = 1024;
+const CHUNK: usize = 4096;
 
 fn render_browser_ui(surface: u32, _app: &BrowserApp) {
     let mut chunk = [0u32; CHUNK];

@@ -148,7 +148,7 @@ impl MusicApp {
 
 const W: usize = 720;
 const H: usize = 1440;
-const CHUNK: usize = 1024;
+const CHUNK: usize = 4096;
 
 fn render_music_ui(surface: u32, app: &MusicApp) {
     let mut chunk = [0u32; CHUNK];
