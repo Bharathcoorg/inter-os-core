@@ -10,6 +10,7 @@ pub mod surface;
 pub mod compositor;
 pub mod physics;
 pub mod window;
+pub mod ui;
 
 pub use component::{PermissionModal, ShareSheetDrawer, UiCard};
 pub use shade::{NotificationShade, QuickToggle, ShadeState};
@@ -18,6 +19,7 @@ pub use surface::{Color, Rect, Surface};
 pub use compositor::{GravityGlassCompositor, LayerType, SystemOverlayState, GRAVITY_COMPOSITOR};
 pub use physics::InertialScroller;
 pub use window::{Window, WindowId, WindowKind, WindowManager, WindowRect};
+pub use ui::{Alignment, Axis, UiAnimation, UiBounds, UiInsets, UiLayout, UiNode, UiPoint, UiRole, UiSize};
 
 use spin::Mutex;
 use crate::framebuffer::{PHONE_X, PHONE_Y};
