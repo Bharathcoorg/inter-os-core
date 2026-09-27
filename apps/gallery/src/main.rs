@@ -23,7 +23,7 @@ use interos_std as std;
 
 const W: usize = 720;
 const H: usize = 1440;
-const CHUNK: usize = 512;
+const CHUNK: usize = 4096;
 
 // -----------------------------------------------------------------------------
 // 32-bit ARGB8888 Design Color Tokens

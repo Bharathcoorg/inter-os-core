@@ -6,7 +6,7 @@ use interos_std as std;
 
 const W: usize = 720;
 const H: usize = 1440;
-const CHUNK: usize = 512;
+const CHUNK: usize = 4096;
 
 // -----------------------------------------------------------------------------
 // 32-bit ARGB8888 Design Color Tokens
@@ -2465,12 +2465,12 @@ pub extern "C" fn _start() -> ! {
                                 let dx_c = (x as i32) - 644;
                                 let dy_c = (y as i32) - 76;
                                 if (y >= 700 && y < 755 && x >= 260 && x < 460) || (dx_c * dx_c + dy_c * dy_c <= 324) {
-                                    std::log(0, "[LAUNCHER] Notifications cleared.").ok();
+                                    let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
-                                    let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    std::log(0, "[LAUNCHER] Notifications cleared.").ok();
                                     break;
                                 }
 
