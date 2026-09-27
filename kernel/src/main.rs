@@ -329,6 +329,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     // 15. Initialize Unified Dynamic Resource Manager (Priorities & Preemption)
     resource::init();
+    recovery::init();
+    update::init();
     diagnostics::init();
     performance::init();
 
