@@ -16,6 +16,15 @@ pub enum WifiState {
     ConnectedWpa3,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BluetoothState { Disabled, Scanning, Pairing, Connected }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PairedDevice {
+    pub address: [u8; 6],
+    pub profile_mask: u8,
+}
+
 /// BLE GAP Advertising Data (AD) Types.
 pub const BLE_AD_TYPE_FLAGS: u8 = 0x01;
 pub const BLE_AD_TYPE_128BIT_UUID: u8 = 0x07;
@@ -34,6 +43,8 @@ pub struct WirelessManager {
     pub wifi_rssi_dbm: i8,
     pub wifi_freq_mhz: u16,
     pub hardware_present: bool,
+    pub bluetooth_state: BluetoothState,
+    pub paired_devices: [Option<PairedDevice>; 8],
 }
 
 impl WirelessManager {
@@ -91,6 +102,23 @@ impl WirelessManager {
         self.wifi_rssi_dbm = rssi_dbm;
         self.wifi_state = WifiState::ConnectedWpa3;
 }
+
+    pub fn set_bluetooth_available(&mut self, available: bool) {
+        self.bluetooth_state = if available { BluetoothState::Scanning } else { BluetoothState::Disabled };
+    }
+
+    pub fn pair_bluetooth(&mut self, address: [u8; 6], profile_mask: u8) -> Result<(), &'static str> {
+        if self.bluetooth_state == BluetoothState::Disabled { return Err("bluetooth hardware unavailable"); }
+        if let Some(slot) = self.paired_devices.iter_mut().find(|d| d.map(|v| v.address) == Some(address)) {
+            *slot = Some(PairedDevice { address, profile_mask });
+            self.bluetooth_state = BluetoothState::Connected;
+            return Ok(());
+        }
+        let slot = self.paired_devices.iter_mut().find(|d| d.is_none()).ok_or("paired device limit reached")?;
+        *slot = Some(PairedDevice { address, profile_mask });
+        self.bluetooth_state = BluetoothState::Connected;
+        Ok(())
+    }
 
     /// Serializes wireless state telemetry into a standardized JSON representation.
     pub fn format_json(&self, out: &mut [u8]) -> usize {
