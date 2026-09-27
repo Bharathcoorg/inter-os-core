@@ -5,7 +5,7 @@
 ![License: MIT / Apache-2.0](https://img.shields.io/badge/License-MIT%20%2F%20Apache--2.0-blue.svg)
 ![Language: Rust](https://img.shields.io/badge/Language-Pure%20Rust%20%23!%5Bno__std%5D-orange.svg)
 ![Architecture: RISC-V 64 / AArch64 / x86_64](https://img.shields.io/badge/Targets-RISC--V%2064%20%7C%20ARM64%20%7C%20x86__64-success.svg)
-![Build: Passing](https://img.shields.io/badge/Build-Passing-brightgreen.svg)
+![Build: CI](https://img.shields.io/badge/Build-CI-blue.svg)
 ![Status: Open Source](https://img.shields.io/badge/Status-Public%20Core%20Platform-blueviolet.svg)
 
 ### **The Sovereign, Open-Source Rust Mobile Operating System Foundation**
@@ -207,6 +207,12 @@ interos run --target aarch64
 | **RISC-V 64** | `kernel-riscv64` | `riscv64gc-unknown-none-elf` | QEMU `virt` (RV64), VisionFive 2 | Verified in QEMU / Exp. Bring-Up |
 
 For experimental physical device deployment, see [docs/PHYSICAL_HARDWARE_FLASHING.md](docs/PHYSICAL_HARDWARE_FLASHING.md).
+
+### Reliability and recovery
+
+- [Recovery and Secure Updates](docs/RECOVERY_AND_UPDATES.md) — authenticated update transactions, A/B activation, bounded rollback.
+- [Diagnostics and Performance](docs/DIAGNOSTICS_AND_PERFORMANCE.md) — bounded diagnostics and truthful performance measurement.
+- [Developer Guide](docs/DEVELOPER_GUIDE.md) — QEMU, Device Studio, CLI, testing, and hardware workflow.
 
 ---
 
