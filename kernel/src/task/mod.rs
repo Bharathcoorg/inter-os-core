@@ -4,6 +4,7 @@
 //! `TaskState`, `TaskControlBlock` (TCB), stack management, and scheduling.
 
 pub mod context;
+pub mod images;
 pub mod process;
 pub mod scheduler;
 pub mod user;
@@ -14,6 +15,11 @@ use core::sync::atomic::{AtomicU64, Ordering};
 pub use context::{switch_context, TaskContext};
 pub use process::{ProcessId, ProcessRecord, ProcessState, ResourceLimits};
 pub use scheduler::{on_timer_tick, terminate_current, yield_now, Scheduler, SCHEDULER};
+pub use images::{
+    USER_INIT_ELF, APP_SETTINGS_ELF, APP_TERMINAL_ELF, COMPOSITOR_ELF, LAUNCHER_ELF,
+    APP_DIALER_ELF, APP_VAULT_ELF, APP_CAMERA_ELF, APP_CALCULATOR_ELF, APP_BROWSER_ELF,
+    APP_MESSAGES_ELF, APP_CALENDAR_ELF, APP_MUSIC_ELF, APP_FILE_MANAGER_ELF, APP_GALLERY_ELF,
+};
 pub use user::{
     spawn_user_init,
     spawn_app_settings,
