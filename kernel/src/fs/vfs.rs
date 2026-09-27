@@ -546,7 +546,7 @@ impl Vfs {
 
     /// Persists mutable /data regular files as one crash-consistent filesystem snapshot.
     fn persist_data_snapshot(&self) -> Result<(), FsError> {
-        let mut buf = [0u8; 32768];
+        let mut buf = alloc::vec![0u8; 32768];
         buf[..4].copy_from_slice(b"DTA1");
         let mut pos=6usize;
         let mut count=0u16;
@@ -575,7 +575,7 @@ impl Vfs {
     /// Persists the mutable /data inode tree separately from file payloads.
     /// Paths and metadata are durable; file bytes remain in InterFS data files.
     fn persist_metadata_snapshot(&self) -> Result<(), FsError> {
-        let mut buf = [0u8; 32768];
+        let mut buf = alloc::vec![0u8; 32768];
         buf[..4].copy_from_slice(b"IVM1");
         let mut pos = 6usize;
         let mut count = 0u16;
@@ -602,9 +602,9 @@ impl Vfs {
 
     /// Restores the persistent /data inode tree before restoring file payloads.
     fn restore_metadata_snapshot(&mut self) {
-        let mut sealed = [0u8; 32768 + crate::storage::encrypted::ENCRYPTED_OVERHEAD];
+        let mut sealed = alloc::vec![0u8; 32768 + crate::storage::encrypted::ENCRYPTED_OVERHEAD];
         let Ok(len) = crate::storage::filesystem::load_data_file("/data/.vfs.metadata", &mut sealed) else { return; };
-        let mut buf = [0u8; 32768];
+        let mut buf = alloc::vec![0u8; 32768];
         let len = match crate::storage::encrypted::open(&sealed[..len], &mut buf) {
             Ok(plain_len) => plain_len,
             Err(_) => {
@@ -646,7 +646,7 @@ impl Vfs {
     /// The metadata journal remains a recovery fallback until the transactional
     /// publication protocol finalizes the write.
     fn restore_data_snapshot(&mut self) {
-        let mut sealed=[0u8;32768 + crate::storage::encrypted::ENCRYPTED_OVERHEAD];
+        let mut sealed = alloc::vec![0u8; 32768 + crate::storage::encrypted::ENCRYPTED_OVERHEAD];
         let block_len = match crate::storage::filesystem::load_data_file("/data/.vfs.snapshot", &mut sealed) {
             Ok(len) => Some(len),
             Err(_) => None,
@@ -657,7 +657,7 @@ impl Vfs {
             let Ok(Some((_generation,len)))=crate::storage::persistent::load_latest_kind(&mut sealed,4) else { return; };
             len
         };
-        let mut buf=[0u8;32768];
+        let mut buf = alloc::vec![0u8; 32768];
         let len = match crate::storage::encrypted::open(&sealed[..len], &mut buf) {
             Ok(plain_len) => plain_len,
             Err(_) => {
