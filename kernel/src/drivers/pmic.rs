@@ -150,8 +150,17 @@ impl PmicFuelGauge {
         }
     }
 
+    pub fn is_hardware_present(&self) -> bool { self.hardware_present && self.telemetry.present }
+
+    pub fn set_telemetry(&mut self, voltage_mv: u32, soc_percent: u8, capacity_mah: u32, temperature_c: i8, charging_state: ChargingState) {
+        self.hardware_present = true;
+        self.telemetry = BatteryTelemetry { present: true, voltage_mv, soc_percent: soc_percent.min(100), capacity_mah, temperature_c, charging_state };
+        self.coulomb_counter_mah = capacity_mah.min(self.max_capacity_mah) as f32;
+    }
+
     /// Updates fuel gauge readings using coulomb counting and OCV battery curve.
     pub fn update(&mut self, current_draw_ma: f32, delta_hours: f32) {
+        if !self.is_hardware_present() { return; }
         if self.telemetry.charging_state == ChargingState::Charging {
             self.coulomb_counter_mah += current_draw_ma * delta_hours;
             if self.coulomb_counter_mah >= self.max_capacity_mah as f32 {
