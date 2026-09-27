@@ -66,6 +66,7 @@ impl WirelessManager {
     /// Constructs a standard 31-byte BLE 5.0 GAP advertising packet broadcasting
     /// a standard 128-bit service UUID for local peer discovery.
     pub fn build_ble_beacon(&mut self, service_uuid: &[u8; 16]) {
+        if !self.hardware_present { self.ble_advertising = false; return; }
         let mut frame = [0u8; 31];
 
         // 1. Flags AD Structure (3 bytes: len=2, type=0x01, val=0x06)
