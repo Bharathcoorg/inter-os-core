@@ -95,11 +95,15 @@ impl ActivationRecord {
     pub const fn new(active: UpdateSlot, version: u64) -> Self { Self { active, pending: None, pending_version: version, boot_attempts: 0 } }
     pub fn stage(&mut self, version: u64) -> Result<UpdateSlot, UpdateError> {
         if version <= self.pending_version { return Err(UpdateError::Downgrade); }
+        let previous = *self;
         let slot = self.active.other();
         self.pending = Some(slot);
         self.pending_version = version;
         self.boot_attempts = 0;
-        self.persist()?;
+        if self.persist().is_err() {
+            *self = previous;
+            return Err(UpdateError::PersistenceFailed);
+        }
         Ok(slot)
     }
     pub fn begin_boot(&mut self) -> Result<(), UpdateError> {
