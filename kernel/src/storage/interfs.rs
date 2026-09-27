@@ -8,8 +8,7 @@
 //! recovery around mutations.
 
 use crate::crypto::Sha256;
-use crate::storage::block::{BlockDevice, SECTOR_SIZE};
-use crate::drivers::AtaError;
+use crate::storage::block::{BlockDevice, BlockDeviceError, SECTOR_SIZE};
 
 pub const FS_MAGIC: [u8; 4] = *b"IOFS";
 pub const FS_VERSION: u32 = 1;
@@ -87,7 +86,7 @@ impl FsTransaction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsBackendError {
-    Io(AtaError),
+    Io(BlockDeviceError),
     InvalidFormat,
     NoSpace,
     TooManyFiles,
@@ -97,8 +96,8 @@ pub enum FsBackendError {
     CorruptMetadata,
 }
 
-impl From<AtaError> for FsBackendError {
-    fn from(value: AtaError) -> Self { Self::Io(value) }
+impl From<BlockDeviceError> for FsBackendError {
+    fn from(value: BlockDeviceError) -> Self { Self::Io(value) }
 }
 
 #[derive(Debug, Clone, Copy)]

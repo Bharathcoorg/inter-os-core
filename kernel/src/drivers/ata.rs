@@ -171,7 +171,7 @@ impl AtaDrive {
             }
 
             // Wait for drive to become ready
-            self.wait_not_busy()?;
+            self.wait_not_busy().map_err(map_block_error)?;
 
             // Check for ATAPI/SATA non-standard devices (lba_mid != 0 or lba_high != 0)
             let mid = self.lba_mid_port.read();
@@ -181,7 +181,7 @@ impl AtaDrive {
             }
 
             // Wait for DRQ
-            self.wait_drq()?;
+            self.wait_drq().map_err(map_block_error)?;
 
             // Read 256 16-bit words (512 bytes) of identity data
             let mut id_data = [0u16; 256];
@@ -209,15 +209,19 @@ impl AtaDrive {
     }
 }
 
+fn map_block_error(e: AtaError) -> BlockDeviceError {
+    match e { AtaError::DeviceNotFound => BlockDeviceError::DeviceNotFound, AtaError::Timeout => BlockDeviceError::Timeout, AtaError::LbaOutOfRange => BlockDeviceError::LbaOutOfRange, _ => BlockDeviceError::DeviceFault }
+}
+
 impl BlockDevice for AtaDrive {
-    fn read_sector(&mut self, lba: u32, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), AtaError> {
+    fn read_sector(&mut self, lba: u32, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), BlockDeviceError> {
         if self.total_sectors > 0 && lba >= self.total_sectors {
-            return Err(AtaError::LbaOutOfRange);
+            return Err(BlockDeviceError::LbaOutOfRange);
         }
 
         unsafe {
             self._control_port.write(0x02);
-            self.wait_not_busy()?;
+            self.wait_not_busy().map_err(map_block_error)?;
 
             // Send Drive/Head with LBA mode enabled (0xE0) + top 4 bits of LBA
             let drive_head = 0xE0 | ((lba >> 24) & 0x0F) as u8;
@@ -237,8 +241,8 @@ impl BlockDevice for AtaDrive {
             self.delay_400ns();
 
             // Wait for drive to process and assert DRQ
-            self.wait_not_busy()?;
-            self.wait_drq()?;
+            self.wait_not_busy().map_err(map_block_error)?;
+            self.wait_drq().map_err(map_block_error)?;
 
             // Read 256 16-bit words from Data port
             for i in 0..256 {
@@ -251,14 +255,14 @@ impl BlockDevice for AtaDrive {
         }
     }
 
-    fn write_sector(&mut self, lba: u32, buf: &[u8; SECTOR_SIZE]) -> Result<(), AtaError> {
+    fn write_sector(&mut self, lba: u32, buf: &[u8; SECTOR_SIZE]) -> Result<(), BlockDeviceError> {
         if self.total_sectors > 0 && lba >= self.total_sectors {
             return Err(AtaError::LbaOutOfRange);
         }
 
         unsafe {
             self._control_port.write(0x02);
-            self.wait_not_busy()?;
+            self.wait_not_busy().map_err(map_block_error)?;
 
             // Send Drive/Head with LBA mode enabled (0xE0) + top 4 bits of LBA
             let drive_head = 0xE0 | ((lba >> 24) & 0x0F) as u8;
@@ -279,7 +283,7 @@ impl BlockDevice for AtaDrive {
 
             // Wait for drive to signal ready for data (DRQ)
             self.wait_not_busy()?;
-            self.wait_drq()?;
+            self.wait_drq().map_err(map_block_error)?;
 
             // Write 256 16-bit words to Data port
             for i in 0..256 {

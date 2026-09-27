@@ -9,7 +9,8 @@
 //! Provides bare-metal register-level block reads and writes (512-byte sectors)
 //! conforming to the microkernel's `BlockDevice` interface.
 
-use super::ata::{AtaError, BlockDevice, SECTOR_SIZE};
+use super::ata::AtaError;
+use crate::storage::block::{BlockDevice, BlockDeviceError, SECTOR_SIZE};
 use core::sync::atomic::{compiler_fence, Ordering};
 
 // -----------------------------------------------------------------------------
@@ -325,12 +326,12 @@ impl SdhciController {
 // -----------------------------------------------------------------------------
 
 impl BlockDevice for SdhciController {
-    fn read_sector(&mut self, lba: u32, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), AtaError> {
-        self.read_block(lba, buf)
+    fn read_sector(&mut self, lba: u32, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), BlockDeviceError> {
+        self.read_block(lba, buf).map_err(|e| match e { AtaError::DeviceNotFound => BlockDeviceError::DeviceNotFound, AtaError::Timeout => BlockDeviceError::Timeout, AtaError::LbaOutOfRange => BlockDeviceError::LbaOutOfRange, _ => BlockDeviceError::DeviceFault })
     }
 
-    fn write_sector(&mut self, lba: u32, buf: &[u8; SECTOR_SIZE]) -> Result<(), AtaError> {
-        self.write_block(lba, buf)
+    fn write_sector(&mut self, lba: u32, buf: &[u8; SECTOR_SIZE]) -> Result<(), BlockDeviceError> {
+        self.write_block(lba, buf).map_err(|e| match e { AtaError::DeviceNotFound => BlockDeviceError::DeviceNotFound, AtaError::Timeout => BlockDeviceError::Timeout, AtaError::LbaOutOfRange => BlockDeviceError::LbaOutOfRange, _ => BlockDeviceError::DeviceFault })
     }
 
     fn sector_count(&self) -> u32 {
