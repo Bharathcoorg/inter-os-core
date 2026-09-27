@@ -88,7 +88,8 @@ impl UiAnimation {
 
     pub fn value_at(&self, now_ms: u64) -> i32 {
         if now_ms <= self.start_ms { return self.from; }
-        if self.duration_ms == 0 || now_ms >= self.start_ms + self.duration_ms as u64 { return self.to; }
+        let end_ms = self.start_ms.saturating_add(self.duration_ms as u64);
+        if self.duration_ms == 0 || now_ms >= end_ms { return self.to; }
         let elapsed = now_ms - self.start_ms;
         self.from + (((self.to - self.from) as i64 * elapsed as i64) / self.duration_ms as i64) as i32
     }
