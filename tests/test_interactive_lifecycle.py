@@ -481,12 +481,211 @@ def main():
         assert returned_home, "Failed to return home from overview deck"
         print("[LIFECYCLE TEST] [OK] Successfully returned to home grid after card dismissals.")
 
+        # Phase 14: Testing Quick Controls Shade
+        print("\n[LIFECYCLE TEST] === Phase 14: Testing Quick Controls Shade ===")
+        time.sleep(0.5)
+        print("[LIFECYCLE TEST] Opening Quick Controls via status bar tap (360, 25)...")
+        reader.sock.sendall(b"TAP 360 25\n")
+        qc_ready = reader.wait_for(
+            "render_quick_controls complete: Control center presented.",
+            timeout=10.0,
+            print_keywords=["LAUNCHER", "Quick", "Controls", "render_quick_controls"]
+        )
+        assert qc_ready, "Failed to open Quick Controls shade"
+        print("[LIFECYCLE TEST] [OK] Quick Controls shade opened.")
+        ppm_qc = os.path.abspath(r"target\test_quick_controls.ppm").replace("\\", "/")
+        _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_qc}")
+        print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_qc}")
+        time.sleep(0.5)
+        print("[LIFECYCLE TEST] Returning to Home from Quick Controls via bottom bar tap...")
+        reader.sock.sendall(b"TAP 360 1410\n")
+        qc_returned = reader.wait_for(
+            "render_full complete: 10-app home screen canvas initialized.",
+            timeout=10.0,
+            print_keywords=["LAUNCHER", "render_full"]
+        )
+        assert qc_returned, "Failed to return to Home from Quick Controls"
+        print("[LIFECYCLE TEST] [OK] Returned to Home from Quick Controls.")
+
+        # Phase 15: Testing Notifications Shade
+        print("\n[LIFECYCLE TEST] === Phase 15: Testing Notifications Shade ===")
+        time.sleep(0.5)
+        print("[LIFECYCLE TEST] Opening Notifications via top-left status bar tap (100, 25)...")
+        reader.sock.sendall(b"TAP 100 25\n")
+        notif_ready = reader.wait_for(
+            "render_notifications complete: Notifications & events presented.",
+            timeout=10.0,
+            print_keywords=["LAUNCHER", "Notifications", "render_notifications"]
+        )
+        assert notif_ready, "Failed to open Notifications shade"
+        print("[LIFECYCLE TEST] [OK] Notifications shade opened.")
+        ppm_notif = os.path.abspath(r"target\test_notifications.ppm").replace("\\", "/")
+        _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_notif}")
+        print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_notif}")
+        time.sleep(0.5)
+        print("[LIFECYCLE TEST] Returning to Home from Notifications via bottom bar tap...")
+        reader.sock.sendall(b"TAP 360 1410\n")
+        notif_returned = reader.wait_for(
+            "render_full complete: 10-app home screen canvas initialized.",
+            timeout=10.0,
+            print_keywords=["LAUNCHER", "render_full"]
+        )
+        assert notif_returned, "Failed to return to Home from Notifications"
+        print("[LIFECYCLE TEST] [OK] Returned to Home from Notifications.")
+
+        # Phase 16: Testing App Drawer
+        print("\n[LIFECYCLE TEST] === Phase 16: Testing App Drawer ===")
+        time.sleep(0.5)
+        print("[LIFECYCLE TEST] Opening App Drawer via upward swipe (360, 700) -> (360, 400)...")
+        reader.sock.sendall(b"SWIPE 360 700 360 400 5\n")
+        drawer_ready = reader.wait_for(
+            "render_app_drawer complete: 16-app grid presented.",
+            timeout=10.0,
+            print_keywords=["LAUNCHER", "Drawer", "render_app_drawer"]
+        )
+        assert drawer_ready, "Failed to open App Drawer"
+        print("[LIFECYCLE TEST] [OK] App Drawer opened.")
+        time.sleep(0.5)
+        print("[LIFECYCLE TEST] Switching category tab in App Drawer (x=250, y=160)...")
+        reader.sock.sendall(b"TAP 250 160\n")
+        tab_switched = reader.wait_for(
+            "render_app_drawer complete: 16-app grid presented.",
+            timeout=10.0,
+            print_keywords=["LAUNCHER", "category", "tab", "render_app_drawer"]
+        )
+        assert tab_switched, "Failed to switch App Drawer category tab"
+        print("[LIFECYCLE TEST] [OK] App Drawer category tab switched.")
+        ppm_drawer = os.path.abspath(r"target\test_app_drawer.ppm").replace("\\", "/")
+        _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_drawer}")
+        print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_drawer}")
+        time.sleep(0.5)
+        print("[LIFECYCLE TEST] Returning to Home from App Drawer via bottom tap...")
+        reader.sock.sendall(b"TAP 360 1410\n")
+        drawer_returned = reader.wait_for(
+            "render_full complete: 10-app home screen canvas initialized.",
+            timeout=10.0,
+            print_keywords=["LAUNCHER", "render_full"]
+        )
+        assert drawer_returned, "Failed to return to Home from App Drawer"
+        print("[LIFECYCLE TEST] [OK] Returned to Home from App Drawer.")
+
+        # Phase 17: Testing AI Companion
+        print("\n[LIFECYCLE TEST] === Phase 17: Testing AI Companion ===")
+        time.sleep(0.5)
+        print("[LIFECYCLE TEST] Opening AI Companion via mic tap on search bar (650, 1330)...")
+        reader.sock.sendall(b"TAP 650 1330\n")
+        ai_ready = reader.wait_for(
+            "render_ai_companion complete: Sovereign AI assistant presented.",
+            timeout=10.0,
+            print_keywords=["LAUNCHER", "AI", "Companion", "render_ai_companion"]
+        )
+        assert ai_ready, "Failed to open AI Companion"
+        print("[LIFECYCLE TEST] [OK] AI Companion opened.")
+        ppm_ai = os.path.abspath(r"target\test_ai_companion.ppm").replace("\\", "/")
+        _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_ai}")
+        print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_ai}")
+        time.sleep(0.5)
+        print("[LIFECYCLE TEST] Toggling AI listening via mic tap...")
+        reader.sock.sendall(b"TAP 650 1330\n")
+        ai_toggled = reader.wait_for(
+            "render_ai_companion complete: Sovereign AI assistant presented.",
+            timeout=10.0,
+            print_keywords=["LAUNCHER", "render_ai_companion"]
+        )
+        assert ai_toggled, "Failed to toggle AI voice listening"
+        print("[LIFECYCLE TEST] [OK] AI voice listening toggled.")
+        time.sleep(0.5)
+        print("[LIFECYCLE TEST] Returning to Home from AI Companion via bottom tap...")
+        reader.sock.sendall(b"TAP 360 1410\n")
+        ai_returned = reader.wait_for(
+            "render_full complete: 10-app home screen canvas initialized.",
+            timeout=10.0,
+            print_keywords=["LAUNCHER", "render_full"]
+        )
+        assert ai_returned, "Failed to return to Home from AI Companion"
+        print("[LIFECYCLE TEST] [OK] Returned to Home from AI Companion.")
+
+        # Phase 18: Testing Live Widgets
+        print("\n[LIFECYCLE TEST] === Phase 18: Testing Live Widgets ===")
+        time.sleep(0.5)
+        print("[LIFECYCLE TEST] Opening Live Widgets via horizontal swipe left (500, 700) -> (150, 700)...")
+        reader.sock.sendall(b"SWIPE 500 700 150 700 5\n")
+        widgets_ready = reader.wait_for(
+            "render_live_widgets complete: Live widgets dashboard presented.",
+            timeout=10.0,
+            print_keywords=["LAUNCHER", "Widgets", "render_live_widgets"]
+        )
+        assert widgets_ready, "Failed to open Live Widgets"
+        print("[LIFECYCLE TEST] [OK] Live Widgets opened.")
+        ppm_widgets = os.path.abspath(r"target\test_live_widgets.ppm").replace("\\", "/")
+        _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_widgets}")
+        print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_widgets}")
+        time.sleep(0.5)
+        print("[LIFECYCLE TEST] Returning to Home from Live Widgets via bottom tap...")
+        reader.sock.sendall(b"TAP 360 1410\n")
+        widgets_returned = reader.wait_for(
+            "render_full complete: 10-app home screen canvas initialized.",
+            timeout=10.0,
+            print_keywords=["LAUNCHER", "render_full"]
+        )
+        assert widgets_returned, "Failed to return to Home from Live Widgets"
+        print("[LIFECYCLE TEST] [OK] Returned to Home from Live Widgets.")
+
+        # Phase 19: Testing Power Menu & Lock Screen
+        print("\n[LIFECYCLE TEST] === Phase 19: Testing Power Menu & Lock Screen ===")
+        time.sleep(0.5)
+        print("[LIFECYCLE TEST] Opening Power Menu via battery status bar tap (600, 25)...")
+        reader.sock.sendall(b"TAP 600 25\n")
+        pm_ready = reader.wait_for(
+            "render_power_menu complete: Power & safety drawer presented.",
+            timeout=10.0,
+            print_keywords=["LAUNCHER", "Power", "menu", "render_power_menu"]
+        )
+        assert pm_ready, "Failed to open Power Menu"
+        print("[LIFECYCLE TEST] [OK] Power Menu opened.")
+        ppm_pm = os.path.abspath(r"target\test_power_menu.ppm").replace("\\", "/")
+        _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_pm}")
+        print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_pm}")
+        time.sleep(0.5)
+        print("[LIFECYCLE TEST] Locking device from Power Menu (500, 225)...")
+        reader.sock.sendall(b"TAP 500 225\n")
+        device_locked = reader.wait_for(
+            "render_lock_screen complete: Atmospheric lock screen presented.",
+            timeout=10.0,
+            print_keywords=["LAUNCHER", "Device", "locked", "render_lock_screen"]
+        )
+        assert device_locked, "Failed to lock device from Power Menu"
+        print("[LIFECYCLE TEST] [OK] Device locked into Lock Screen.")
+        ppm_lock = os.path.abspath(r"target\test_lock_screen.ppm").replace("\\", "/")
+        _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_lock}")
+        print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_lock}")
+        time.sleep(0.5)
+        print("[LIFECYCLE TEST] Toggling flashlight on Lock Screen (72, 1330)...")
+        reader.sock.sendall(b"TAP 72 1330\n")
+        torch_toggled = reader.wait_for(
+            "render_lock_screen complete: Atmospheric lock screen presented.",
+            timeout=10.0,
+            print_keywords=["LAUNCHER", "Flashlight", "toggled", "render_lock_screen"]
+        )
+        assert torch_toggled, "Failed to toggle flashlight on Lock Screen"
+        print("[LIFECYCLE TEST] [OK] Flashlight toggled on Lock Screen.")
+        time.sleep(0.5)
+        print("[LIFECYCLE TEST] Unlocking device via bottom tap...")
+        reader.sock.sendall(b"TAP 360 1410\n")
+        unlocked = reader.wait_for(
+            "render_full complete: 10-app home screen canvas initialized.",
+            timeout=10.0,
+            print_keywords=["LAUNCHER", "Device", "unlocked", "render_full"]
+        )
+        assert unlocked, "Failed to unlock device"
+        print("[LIFECYCLE TEST] [OK] Device unlocked, returned to Home grid.")
+
         ppm_final = os.path.abspath(r"target\test_launcher_final.ppm").replace("\\", "/")
         _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_final}")
         print(f"[LIFECYCLE TEST] Final screendump recorded: {ppm_final}")
 
         print("\n============================================================")
-        print("  INTEROS CORE 10-APP & OVERVIEW LIFECYCLE: ALL PASSED (100%)")
+        print("  INTEROS CORE ALL 19 PHASES (10 APPS + 10 SCREENS): PASSED (100%)")
         print("============================================================")
 
     except Exception as e:

@@ -366,11 +366,11 @@ fn render_calculator_ui(surface: u32, calc: &CalculatorState) {
     }
 }
 
-fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> bool {
+fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> (bool, Option<&'static str>) {
     // Check if exit / back button or home gesture bar pressed
     if (x >= 24 && x < 100 && y >= 28 && y < 68) || (x >= 240 && x <= 480 && y >= 1400) {
         std::log(0, "[CALCULATOR] Exit button or home gesture tapped. Returning to launcher.").ok();
-        return true;
+        return (true, None);
     }
 
     for row in 0..5 {
@@ -380,37 +380,39 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> bool {
                 let bx = COL_X[col] as u32;
                 if x >= bx && x < bx + (BTN_W as u32) {
                     if let Some(action) = get_button_action(row, col) {
-                        match action {
+                        let msg = match action {
                             '0'..='9' => {
                                 let digit = (action as u8 - b'0') as i64;
                                 calc.push_digit(digit);
-                                std::log(0, "[CALCULATOR] Keypad digit pressed.").ok();
+                                Some("[CALCULATOR] Keypad digit pressed.")
                             }
                             '+' | '-' | '*' | '/' => {
                                 calc.set_operation(action);
-                                std::log(0, "[CALCULATOR] Keypad operator selected.").ok();
+                                Some("[CALCULATOR] Keypad operator selected.")
                             }
                             '=' => {
                                 let res = calc.evaluate();
-                                std::log(0, "[CALCULATOR] Evaluation completed.").ok();
                                 let _ = res;
+                                Some("[CALCULATOR] Evaluation completed.")
                             }
                             'C' => {
                                 calc.clear();
-                                std::log(0, "[CALCULATOR] Clear pressed.").ok();
+                                Some("[CALCULATOR] Clear pressed.")
                             }
                             '~' => {
                                 calc.toggle_sign();
+                                None
                             }
-                            _ => {}
-                        }
+                            _ => None,
+                        };
+                        return (false, msg);
                     }
-                    return false;
+                    return (false, None);
                 }
             }
         }
     }
-    false
+    (false, None)
 }
 
 #[no_mangle]
@@ -462,12 +464,16 @@ pub extern "C" fn _start() -> ! {
                         std::exit_with_code(0);
                     }
                     if input.kind == 1 {
-                        if handle_touch_point(&mut calc, input.x, input.y) {
+                        let (should_exit, action_logged) = handle_touch_point(&mut calc, input.x, input.y);
+                        if should_exit {
                             let _ = std::surface_destroy(6, surface);
                             std::exit_with_code(0);
                         }
                         render_calculator_ui(surface, &calc);
                         let _ = std::surface_flip(6);
+                        if let Some(msg) = action_logged {
+                            std::log(0, msg).ok();
+                        }
                     }
                 }
             }
