@@ -72,8 +72,28 @@ def main():
     assert "Android Boot Image v2 format verified" in res_x86.stdout
     assert "target\\boot.img" in res_x86.stdout or "target/boot.img" in res_x86.stdout
 
+    # 5. Dry-run Bash flasher script
+    sh_script = os.path.join(root, "tools", "flash_phone.sh")
+    assert os.path.exists(sh_script), f"Bash flasher script missing: {sh_script}"
+    bash_candidates = [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        "bash",
+    ]
+    bash_bin = next((c for c in bash_candidates if os.path.exists(c)), None)
+    if bash_bin:
+        res_sh = subprocess.run(
+            [bash_bin, sh_script, aarch64_img, "info"],
+            capture_output=True,
+            text=True,
+            cwd=root,
+        )
+        assert res_sh.returncode == 0, f"flash_phone.sh failed: {res_sh.stderr}"
+        assert "Android Boot Image v2 format verified" in res_sh.stdout
+        assert "Fastboot flasher pipeline verified" in res_sh.stdout
+
     print(
-        f"[PASS] Fastboot Flasher Contract: AOSP v2 headers verified (aarch64={info_aarch64['file_size']}B, x86_64={info_x86['file_size']}B) and flash_phone.ps1 validated."
+        f"[PASS] Fastboot Flasher Contract: AOSP v2 headers verified (aarch64={info_aarch64['file_size']}B, x86_64={info_x86['file_size']}B) and flash scripts (ps1/sh) validated."
     )
 
 if __name__ == "__main__":
