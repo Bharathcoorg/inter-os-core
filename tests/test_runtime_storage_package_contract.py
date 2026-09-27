@@ -21,3 +21,10 @@ def test_package_activation_is_transactional():
     assert "InstallTransaction" in source
     assert "transaction.rollback()" in source
     assert "manifest.policy.validate()" in source
+
+
+def test_userspace_address_space_is_bounded_before_mapping():
+    source = (ROOT / "kernel/src/task/user.rs").read_text(encoding="utf-8")
+    assert "USER_ADDRESS_SPACE_LIMIT" in source
+    assert 'userspace address-space limit exceeded' in source
+    assert "mapped_address_space.checked_add(USER_STACK_SIZE)" in source
