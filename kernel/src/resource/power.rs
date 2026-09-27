@@ -46,6 +46,8 @@ pub struct PowerManager {
     pub is_charging: bool,
     pub touch_boost_active: bool,
     pub telemetry_valid: bool,
+    pub thermal_valid: bool,
+    pub battery_valid: bool,
 }
 
 impl PowerManager {
@@ -62,6 +64,8 @@ impl PowerManager {
             is_charging: false,
             touch_boost_active: false,
             telemetry_valid: false,
+            thermal_valid: false,
+            battery_valid: false,
         }
     }
 
@@ -87,7 +91,8 @@ impl PowerManager {
 
     /// Updates thermal status and adjusts thermal trip points.
     pub fn update_thermal(&mut self, temperature_c: u8) {
-        self.telemetry_valid = true;
+        self.thermal_valid = true;
+        self.telemetry_valid = self.thermal_valid || self.battery_valid;
         self.thermal_trip = if temperature_c >= 85 {
             ThermalTrip::Critical
         } else if temperature_c >= 75 {
@@ -102,7 +107,8 @@ impl PowerManager {
 
     /// Updates battery charge level and charging status.
     pub fn update_battery(&mut self, percent: u8, is_charging: bool) {
-        self.telemetry_valid = true;
+        self.battery_valid = true;
+        self.telemetry_valid = self.thermal_valid || self.battery_valid;
         self.battery_percent = percent;
         self.is_charging = is_charging;
         self.recalculate_frequency();
@@ -110,6 +116,10 @@ impl PowerManager {
 
     /// Recalculates effective clock frequency and display refresh rate based on policy.
     fn recalculate_frequency(&mut self) {
+        if !self.telemetry_valid {
+            self.display_refresh_hz = 0;
+            return;
+        }
         match self.governor {
             DvfsGovernor::Performance => {
                 // Performance locks to max unless critical thermal
