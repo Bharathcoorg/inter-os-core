@@ -1,5 +1,6 @@
 use alloc::vec::Vec;
 use crate::package::dependency::{PackagePolicy, PackageVersion};
+use crate::package::transaction::{InstallStage, InstallTransaction};
 use spin::Mutex;
 
 const MAX_ENTRIES: usize = 32;
@@ -148,40 +149,86 @@ impl PackageRegistry {
     /// Stages a verified package for later activation. Registration is bounded and
     /// independent of the built-in package catalog so downstream forks can ship
     /// their own signed applications without modifying kernel source.
+    /// Atomically records a verified package as the next install candidate.
+    ///
+    /// A package ID has one authoritative registry record. Replacing an existing
+    /// record prevents an older active entry from shadowing a newly staged version
+    /// and keeps launch/rollback decisions deterministic across reboots.
     pub fn stage_verified(&mut self, manifest: &crate::package::RappManifest) -> Result<(), ()> {
-        if self.entries.iter().any(|e| e.package_id == manifest.package_id && e.version == manifest.version) { return Ok(()); }
-        if self.entries.len() >= MAX_ENTRIES { return Err(()); }
-        self.generation = self.generation.saturating_add(1);
-        self.entries.push(PackageEntry {
-            package_id: manifest.package_id.clone(),
-            generation: self.generation,
-            state: PackageState::Staged,
-            version: manifest.version,
-        });
-        if self.persist().is_err() { self.entries.pop(); return Err(()); }
+        if !manifest.policy.validate() { return Err(()); }
+
+        let old = self.entries.clone();
+        let existing = self.entries.iter().position(|entry| entry.package_id == manifest.package_id);
+        if existing.is_none() && self.entries.len() >= MAX_ENTRIES { return Err(()); }
+
+        if let Some(idx) = existing {
+            let previous = self.entries[idx].clone();
+            if manifest.version < previous.version && previous.state == PackageState::Active {
+                return Err(());
+            }
+            if manifest.version == previous.version && matches!(previous.state, PackageState::Staged | PackageState::Active) {
+                return Ok(());
+            }
+            self.generation = self.generation.saturating_add(1);
+            self.entries[idx] = PackageEntry {
+                package_id: manifest.package_id.clone(),
+                generation: self.generation,
+                state: PackageState::Staged,
+                version: manifest.version,
+            };
+        } else {
+            self.generation = self.generation.saturating_add(1);
+            self.entries.push(PackageEntry {
+                package_id: manifest.package_id.clone(),
+                generation: self.generation,
+                state: PackageState::Staged,
+                version: manifest.version,
+            });
+        }
+
+        if self.persist().is_err() {
+            self.entries = old;
+            self.generation = self.entries.iter().map(|entry| entry.generation).max().unwrap_or(0);
+            return Err(());
+        }
         Ok(())
     }
 
+    /// Commits the staged version through an explicit install transaction.
+    ///
+    /// The transaction is kept in-memory because the registry snapshot itself is
+    /// the durable commit point: either the new Active record is persisted, or the
+    /// previous snapshot is restored before returning an error.
     pub fn activate_version(&mut self, package_id: &str, version: (u16,u16,u16)) -> Result<(), ()> {
-        let idx=self.entries.iter().position(|e| e.package_id==package_id).ok_or(())?;
-        let previous=self.entries[idx].clone();
+        let idx = self.entries.iter().position(|entry| entry.package_id == package_id).ok_or(())?;
+        let previous = self.entries[idx].clone();
         if version < previous.version && previous.state == PackageState::Active {
             return Err(());
         }
+        if version != previous.version {
+            return Err(());
+        }
+        if !matches!(previous.state, PackageState::Staged | PackageState::Active) {
+            return Err(());
+        }
 
-        let old=self.entries.clone();
-        let next_generation=self.generation.saturating_add(1);
-        self.generation=next_generation;
-        self.entries[idx]=PackageEntry {
-            package_id: previous.package_id.clone(),
-            generation:next_generation,
-            state:PackageState::Active,
-            version,
-        };
+        let old = self.entries.clone();
+        let next_generation = self.generation.saturating_add(1);
+        let mut transaction = InstallTransaction::new(idx as u32, previous.state, next_generation);
+        transaction.stage();
+        if !matches!(transaction.stage, InstallStage::Staged) {
+            return Err(());
+        }
 
-        if self.persist().is_err() {
-            self.entries=old;
-            self.generation=self.entries.iter().map(|e| e.generation).max().unwrap_or(0);
+        self.generation = next_generation;
+        self.entries[idx].generation = next_generation;
+        self.entries[idx].state = PackageState::Active;
+        transaction.activate();
+
+        if !transaction.committed() || self.persist().is_err() {
+            transaction.rollback();
+            self.entries = old;
+            self.generation = self.entries.iter().map(|entry| entry.generation).max().unwrap_or(0);
             return Err(());
         }
         Ok(())
