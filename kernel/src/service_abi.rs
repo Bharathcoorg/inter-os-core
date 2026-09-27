@@ -4,6 +4,8 @@
 //! system services. Lifecycle authority remains in PID1; services do not
 //! receive generic SystemControl authority.
 
+#![allow(dead_code)]
+
 pub const SERVICE_ABI_MAGIC: [u8; 4] = *b"ISVC";
 pub const SERVICE_ABI_VERSION: u16 = 1;
 pub const SERVICE_ABI_HEADER_SIZE: usize = 16;

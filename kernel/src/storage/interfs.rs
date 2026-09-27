@@ -28,6 +28,7 @@ const TXN_SIZE: usize = 64;
 const TXN_MAGIC: [u8; 4] = *b"IFTX";
 const TXN_VERSION: u8 = 1;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TxnOp { Create = 1, Write = 2, Delete = 3 }
 

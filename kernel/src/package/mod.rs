@@ -32,6 +32,16 @@ pub const FIRST_PARTY_PACKAGES: &[PackageDescriptor] = &[
     PackageDescriptor { package_id: "org.interos.launcher", path: "/packages/org.interos.launcher.rapp", process_name: "launcher" },
     PackageDescriptor { package_id: "org.interos.settings", path: "/packages/org.interos.settings.rapp", process_name: "app_settings" },
     PackageDescriptor { package_id: "org.interos.terminal", path: "/packages/org.interos.terminal.rapp", process_name: "app_terminal" },
+    PackageDescriptor { package_id: "org.interos.calculator", path: "/packages/org.interos.calculator.rapp", process_name: "app_calculator" },
+    PackageDescriptor { package_id: "org.interos.dialer", path: "/packages/org.interos.dialer.rapp", process_name: "app_dialer" },
+    PackageDescriptor { package_id: "org.interos.vault", path: "/packages/org.interos.vault.rapp", process_name: "app_vault" },
+    PackageDescriptor { package_id: "org.interos.camera", path: "/packages/org.interos.camera.rapp", process_name: "app_camera" },
+    PackageDescriptor { package_id: "org.interos.browser", path: "/packages/org.interos.browser.rapp", process_name: "app_browser" },
+    PackageDescriptor { package_id: "org.interos.messages", path: "/packages/org.interos.messages.rapp", process_name: "app_messages" },
+    PackageDescriptor { package_id: "org.interos.calendar", path: "/packages/org.interos.calendar.rapp", process_name: "app_calendar" },
+    PackageDescriptor { package_id: "org.interos.music", path: "/packages/org.interos.music.rapp", process_name: "app_music" },
+    PackageDescriptor { package_id: "org.interos.file_manager", path: "/packages/org.interos.file_manager.rapp", process_name: "app_file_manager" },
+    PackageDescriptor { package_id: "org.interos.gallery", path: "/packages/org.interos.gallery.rapp", process_name: "app_gallery" },
 ];
 
 pub fn first_party_package(package_id: &str) -> Option<&'static PackageDescriptor> {
