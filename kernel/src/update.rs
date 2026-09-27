@@ -172,6 +172,28 @@ mod tests {
     }
 }
 
+
+
+/// Platform boundary for writing and activating a verified system image.
+/// The kernel owns verification policy; board-specific code owns the actual
+/// inactive-slot media operations.
+pub trait UpdateBackend {
+    fn write_inactive_slot(&mut self, slot: UpdateSlot, payload: &[u8]) -> Result<(), UpdateError>;
+    fn verify_slot(&mut self, slot: UpdateSlot, manifest: &UpdateManifest) -> Result<(), UpdateError>;
+    fn activate_slot(&mut self, slot: UpdateSlot, version: u64) -> Result<(), UpdateError>;
+}
+
+pub struct VerifiedUpdate<'a, B: UpdateBackend> { backend: &'a mut B }
+impl<'a, B: UpdateBackend> VerifiedUpdate<'a, B> {
+    pub fn install(backend:&'a mut B, slot:UpdateSlot, tx:&mut UpdateTransaction, payload:&[u8])->Result<(),UpdateError>{
+        if tx.state != UpdateState::Verified { return Err(UpdateError::InvalidFormat); }
+        backend.write_inactive_slot(slot,payload)?;
+        backend.verify_slot(slot,&tx.manifest)?;
+        backend.activate_slot(slot,tx.manifest.version)?;
+        tx.commit()
+    }
+}
+
 pub static UPDATE_ACTIVATION: Mutex<ActivationRecord> = Mutex::new(ActivationRecord::new(UpdateSlot::A, 0));
 
 pub fn init() {
