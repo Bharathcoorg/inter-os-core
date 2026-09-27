@@ -33,6 +33,7 @@ pub struct WirelessManager {
     pub wifi_ssid_len: usize,
     pub wifi_rssi_dbm: i8,
     pub wifi_freq_mhz: u16,
+    pub hardware_present: bool,
 }
 
 impl WirelessManager {
@@ -76,13 +77,20 @@ impl WirelessManager {
 
     /// Connects to a Wi-Fi WPA3 network.
     pub fn connect_wifi(&mut self, ssid: &str, rssi_dbm: i8) {
+        if !self.hardware_present {
+            self.wifi_state = WifiState::Disabled;
+            self.wifi_ssid_len = 0;
+            self.wifi_rssi_dbm = 0;
+            self.wifi_freq_mhz = 0;
+            return;
+        }
         let bytes = ssid.as_bytes();
         let copy_len = bytes.len().min(32);
         self.wifi_ssid[..copy_len].copy_from_slice(&bytes[..copy_len]);
         self.wifi_ssid_len = copy_len;
         self.wifi_rssi_dbm = rssi_dbm;
         self.wifi_state = WifiState::ConnectedWpa3;
-    }
+}
 
     /// Serializes wireless state telemetry into a standardized JSON representation.
     pub fn format_json(&self, out: &mut [u8]) -> usize {
