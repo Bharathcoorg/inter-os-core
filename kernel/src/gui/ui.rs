@@ -93,3 +93,47 @@ impl UiAnimation {
         self.from + (((self.to - self.from) as i64 * elapsed as i64) / self.duration_ms as i64) as i32
     }
 }
+
+
+/// Bounded retained-mode UI tree used by native applications.
+/// Nodes own stable IDs and parent/child relationships; rendering remains a
+/// separate concern so layout and accessibility do not depend on pixels.
+pub const MAX_UI_NODES: usize = 256;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UiNodeId(pub u32);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UiTreeNode {
+    pub id: UiNodeId,
+    pub parent: Option<UiNodeId>,
+    pub node: UiNode,
+}
+
+pub struct UiTree {
+    nodes: [Option<UiTreeNode>; MAX_UI_NODES],
+    next_id: u32,
+}
+
+impl UiTree {
+    pub const fn new() -> Self { Self { nodes: [None; MAX_UI_NODES], next_id: 1 } }
+
+    pub fn insert(&mut self, parent: Option<UiNodeId>, mut node: UiNode) -> Option<UiNodeId> {
+        if parent.is_some() && self.get(parent.unwrap()).is_none() { return None; }
+        let slot = self.nodes.iter().position(|n| n.is_none())?;
+        let id = UiNodeId(self.next_id.max(1));
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        node.id = id.0;
+        self.nodes[slot] = Some(UiTreeNode { id, parent, node });
+        Some(id)
+    }
+
+    pub fn get(&self, id: UiNodeId) -> Option<&UiTreeNode> { self.nodes.iter().flatten().find(|n| n.id == id) }
+    pub fn node(&self, id: UiNodeId) -> Option<&UiTreeNode> { self.nodes.iter().flatten().find(|n| n.id == id) }
+    pub fn node_mut(&mut self, id: UiNodeId) -> Option<&mut UiTreeNode> { self.nodes.iter_mut().flatten().find(|n| n.id == id) }
+    pub fn hit_test(&self, point: UiPoint) -> Option<UiNodeId> {
+        self.nodes.iter().flatten().filter(|n| n.node.enabled && n.node.hit_test(point)).last().map(|n| n.id)
+    }
+    pub fn len(&self) -> usize { self.nodes.iter().filter(|n| n.is_some()).count() }
+    pub fn is_empty(&self) -> bool { self.len() == 0 }
+}
