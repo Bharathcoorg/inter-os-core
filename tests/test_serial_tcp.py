@@ -27,6 +27,14 @@ def find_qemu(binary="qemu-system-x86_64.exe"):
 qemu_exe = find_qemu("qemu-system-x86_64.exe")
 kernel_img = os.path.abspath(r"target\inter-os-bios.img")
 
+k1 = os.path.abspath(r"kernel\target\x86_64-unknown-none\debug\kernel")
+k2 = os.path.abspath(r"target\x86_64-unknown-none\debug\kernel")
+kernel_elf = k1 if os.path.exists(k1) else k2
+if os.path.exists(kernel_elf):
+    if not os.path.exists(kernel_img) or os.path.getmtime(kernel_elf) > os.path.getmtime(kernel_img):
+        print("[TEST SETUP] Updating bootable disk image with latest kernel ELF...")
+        subprocess.run(["cargo", "+nightly", "run", "--manifest-path", "boot/Cargo.toml", "--", kernel_elf, kernel_img], check=True)
+
 subprocess.run(["taskkill", "/F", "/IM", "qemu-system-x86_64.exe"], capture_output=True)
 time.sleep(0.5)
 
@@ -134,6 +142,12 @@ try:
                             print("[TEST STEP 21] Tapping Close button at (360, 1170) to close inspection modal...")
                             send_and_wait_for(b"TAP 360 1170\n", "Closed photo inspection modal")
                             print("[TEST STEP 22] Tapping bottom home pill at (360, 1420) to exit Gallery back to Launcher...")
+                            send_and_wait_for(b"TAP 360 1420\n", "Foreground application exited and was reaped")
+                            print("[TEST STEP 23] Tapping Calculator card on HomeScreen at (180, 520) to launch...")
+                            send_and_wait_for(b"TAP 180 520\n", "Initial frame presented to hardware scanout")
+                            print("[TEST STEP 24] Tapping digit '7' on Calculator keypad at (100, 680)...")
+                            send_and_wait_for(b"TAP 100 680\n", "Keypad digit pressed")
+                            print("[TEST STEP 25] Tapping bottom home pill at (360, 1420) to exit Calculator back to Launcher...")
                             send_and_wait_for(b"TAP 360 1420\n", "Foreground application exited and was reaped")
                             print("[TEST COMPLETE] All interactive gesture steps completed.")
                             lines.append("[TEST COMPLETE]")
