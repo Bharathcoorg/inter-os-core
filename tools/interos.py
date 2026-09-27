@@ -768,6 +768,24 @@ def cmd_run(args):
 
 
 # =============================================================================
+# COMMAND: contracts
+# =============================================================================
+def cmd_contracts(args):
+    """Run fast static system-contract checks without building the kernel."""
+    test_file = ROOT_DIR / "tests" / "test_system_contracts.py"
+    if not test_file.exists():
+        log_error("System contract test file is missing.")
+        return 1
+    log("Running InterOS system contract checks...")
+    result = subprocess.run([sys.executable, str(test_file)], cwd=str(ROOT_DIR))
+    if result.returncode == 0:
+        log_success("System contract checks passed.")
+    else:
+        log_error("System contract checks failed.")
+    return result.returncode
+
+
+# =============================================================================
 # COMMAND: list, uninstall, install
 # =============================================================================
 def cmd_list(args):
@@ -1077,6 +1095,10 @@ def main():
     p_ver = subparsers.add_parser("verify", help="Cryptographically verify a .rapp package")
     p_ver.add_argument("package_path", help="Path to .rapp package")
     p_ver.set_defaults(func=cmd_verify)
+
+    # contracts
+    p_contracts = subparsers.add_parser("contracts", help="Run fast static system contract checks")
+    p_contracts.set_defaults(func=cmd_contracts)
 
     # devices
     p_dev = subparsers.add_parser("devices", help="List supported target device profiles")
