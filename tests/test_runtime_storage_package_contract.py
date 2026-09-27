@@ -50,3 +50,11 @@ def test_ipv6_autoconfiguration_rejects_non_64bit_interface_prefixes():
     assert "pub fn valid(&self)->bool" in source
     assert "self.prefix.prefix_len == 64" in source
     assert "pub fn address(&self)->Option<Ipv6Address>" in source
+
+
+def test_security_registries_fail_closed_at_persistence_capacity():
+    source = (ROOT / "kernel/src/package/revocation.rs").read_text(encoding="utf-8")
+    assert 'publisher trust store is full' in source
+    assert 'package revocation registry is full' in source
+    assert 'key revocation registry is full' in source
+    assert 'failed to persist key rotation' in source
