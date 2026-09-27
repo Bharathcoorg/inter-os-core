@@ -1,0 +1,17 @@
+{
+  "id": "org.interos.sensor_dashboard",
+  "name": "Sensor Dashboard",
+  "version": "1.0.0",
+  "category": "utility",
+  "description": "Ring 3 thermal and ambient sensor telemetry monitor",
+  "icon": "ui/icon.svg",
+  "entrypoint": {
+    "backend": "bin/sensor_dashboard.elf"
+  },
+  "permissions": [
+    "CAP_LOGGING",
+    "CAP_HARDWARE_IO",
+    "CAP_EVENT_POLL"
+  ],
+  "min_sdk_version": "0.8.0"
+}

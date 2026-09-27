@@ -42,6 +42,13 @@ pub const FIRST_PARTY_PACKAGES: &[PackageDescriptor] = &[
     PackageDescriptor { package_id: "org.interos.music", path: "/packages/org.interos.music.rapp", process_name: "app_music" },
     PackageDescriptor { package_id: "org.interos.file_manager", path: "/packages/org.interos.file_manager.rapp", process_name: "app_file_manager" },
     PackageDescriptor { package_id: "org.interos.gallery", path: "/packages/org.interos.gallery.rapp", process_name: "app_gallery" },
+    PackageDescriptor { package_id: "org.interos.authenticator", path: "/packages/org.interos.authenticator.rapp", process_name: "authenticator" },
+    PackageDescriptor { package_id: "org.interos.health", path: "/packages/org.interos.health.rapp", process_name: "health" },
+    PackageDescriptor { package_id: "org.interos.meshchat", path: "/packages/org.interos.meshchat.rapp", process_name: "meshchat" },
+    PackageDescriptor { package_id: "org.interos.hello_world", path: "/packages/org.interos.hello_world.rapp", process_name: "hello_world" },
+    PackageDescriptor { package_id: "org.interos.sensor_dashboard", path: "/packages/org.interos.sensor_dashboard.rapp", process_name: "sensor_dashboard" },
+    PackageDescriptor { package_id: "org.interos.camera_preview", path: "/packages/org.interos.camera_preview.rapp", process_name: "camera_preview" },
+    PackageDescriptor { package_id: "org.interos.test_app", path: "/packages/org.interos.test_app.rapp", process_name: "test_app" },
 ];
 
 pub fn first_party_package(package_id: &str) -> Option<&'static PackageDescriptor> {
