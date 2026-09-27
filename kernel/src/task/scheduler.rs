@@ -306,9 +306,12 @@ impl Scheduler {
         self.tasks.len()
     }
 
-    /// Returns the number of tasks that still own schedulable resources.
+    /// Returns the number of tasks that can still participate in scheduling.
+    /// Zombies remain registered for parent reaping but are no longer schedulable.
     pub fn active_task_count(&self) -> usize {
-        self.tasks.iter().filter(|t| t.state != TaskState::Terminated).count()
+        self.tasks.iter().filter(|t| {
+            matches!(t.state, TaskState::Ready | TaskState::Running | TaskState::Blocked | TaskState::WaitPid(_))
+        }).count()
     }
 
     /// Checks scheduler invariants before a context switch or telemetry snapshot.
