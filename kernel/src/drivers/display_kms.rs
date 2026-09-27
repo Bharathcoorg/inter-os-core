@@ -352,7 +352,7 @@ impl DrmKmsController {
         core::mem::swap(&mut self.front_buffer, &mut self.back_buffer);
         self.vsync_counter += 1;
         self.page_flips_completed += 1;
-        let ticks_per_frame = (crate::interrupts::get_timer_frequency_hz() / self.refresh_hz.max(1) as u64).max(1);
+        let ticks_per_frame = (100u64 / self.refresh_hz.max(1) as u64).max(1);
         self.frame_deadline_ticks = crate::interrupts::get_system_ticks().saturating_add(ticks_per_frame);
         self.page_flips_completed
     }
