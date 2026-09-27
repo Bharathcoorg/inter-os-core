@@ -10,7 +10,7 @@ pub enum PackageState { Staged, Active, RolledBack }
 
 #[derive(Debug, Clone, Copy)]
 pub struct PackageEntry {
-    pub package_id: &'static str,
+    pub package_id: String,
     pub generation: u64,
     pub state: PackageState,
     pub version: (u16, u16, u16),
@@ -95,7 +95,7 @@ impl PackageRegistry {
             pos+=1;
             self.generation=self.generation.max(generation);
             self.entries.push(PackageEntry {
-                package_id:desc.package_id,
+                package_id:desc.package_id.to_string(),
                 generation,
                 state,
                 version:(major,minor,patch),
@@ -121,7 +121,7 @@ impl PackageRegistry {
 
         for pkg in crate::package::FIRST_PARTY_PACKAGES {
             self.entries.push(PackageEntry {
-                package_id: pkg.package_id,
+                package_id: String::from(pkg.package_id),
                 generation: 0,
                 state: PackageState::Staged,
                 version: (1, 0, 0),
@@ -148,6 +148,24 @@ impl PackageRegistry {
         self.activate_version(package_id, version)
     }
 
+
+    /// Stages a verified package for later activation. Registration is bounded and
+    /// independent of the built-in package catalog so downstream forks can ship
+    /// their own signed applications without modifying kernel source.
+    pub fn stage_verified(&mut self, manifest: &crate::package::RappManifest) -> Result<(), ()> {
+        if self.entries.iter().any(|e| e.package_id == manifest.package_id && e.version == manifest.version) { return Ok(()); }
+        if self.entries.len() >= MAX_ENTRIES { return Err(()); }
+        self.generation = self.generation.saturating_add(1);
+        self.entries.push(PackageEntry {
+            package_id: manifest.package_id.clone(),
+            generation: self.generation,
+            state: PackageState::Staged,
+            version: manifest.version,
+        });
+        if self.persist().is_err() { self.entries.pop(); return Err(()); }
+        Ok(())
+    }
+
     pub fn activate_version(&mut self, package_id: &str, version: (u16,u16,u16)) -> Result<(), ()> {
         let idx=self.entries.iter().position(|e| e.package_id==package_id).ok_or(())?;
         let previous=self.entries[idx];
@@ -159,7 +177,7 @@ impl PackageRegistry {
         let next_generation=self.generation.saturating_add(1);
         self.generation=next_generation;
         self.entries[idx]=PackageEntry {
-            package_id:previous.package_id,
+            package_id: previous.package_id.clone(),
             generation:next_generation,
             state:PackageState::Active,
             version,
@@ -185,7 +203,7 @@ impl PackageRegistry {
         let next_generation=self.generation.saturating_add(1);
         self.generation=next_generation;
         self.entries[idx]=PackageEntry {
-            package_id:previous.package_id,
+            package_id: previous.package_id.clone(),
             generation:next_generation,
             state:PackageState::RolledBack,
             version:previous.version,
