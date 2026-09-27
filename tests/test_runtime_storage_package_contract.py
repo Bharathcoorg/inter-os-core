@@ -43,3 +43,10 @@ def test_graphics_frame_fence_requires_explicit_signal_before_scanout():
     assert "pub fn signal" in source
     assert 'frame fence not signaled' in source
     assert "b.fence.signaled=false" in source
+
+
+def test_ipv6_autoconfiguration_rejects_non_64bit_interface_prefixes():
+    source = (ROOT / "kernel/src/net/ipv6.rs").read_text(encoding="utf-8")
+    assert "pub fn valid(&self)->bool" in source
+    assert "self.prefix.prefix_len == 64" in source
+    assert "pub fn address(&self)->Option<Ipv6Address>" in source
