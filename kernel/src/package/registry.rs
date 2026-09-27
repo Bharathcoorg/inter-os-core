@@ -8,7 +8,7 @@ const RECORD_SIZE: usize = 48;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageState { Staged, Active, RolledBack }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PackageEntry {
     pub package_id: String,
     pub generation: u64,
@@ -168,7 +168,7 @@ impl PackageRegistry {
 
     pub fn activate_version(&mut self, package_id: &str, version: (u16,u16,u16)) -> Result<(), ()> {
         let idx=self.entries.iter().position(|e| e.package_id==package_id).ok_or(())?;
-        let previous=self.entries[idx];
+        let previous=self.entries[idx].clone();
         if version < previous.version && previous.state == PackageState::Active {
             return Err(());
         }
