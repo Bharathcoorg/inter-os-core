@@ -34,6 +34,7 @@ pub mod memory;
 pub mod net;
 pub mod package;
 pub mod panic;
+pub mod platform;
 pub mod resource;
 pub mod recovery;
 pub mod update;
@@ -132,6 +133,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     // Run Hardware MMU & Memory Isolation Adversarial Tests
     memory::run_mmu_adversarial_tests();
+
+    // Establish the truthful runtime/platform contract before subsystem self-tests.
+    platform::init();
 
     // 8. Run kernel core self-tests
     serial_println!("\n--- [Running Kernel Core Self-Tests] ---");
@@ -454,4 +458,3 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         x86_64::instructions::hlt();
     }
 }
-
