@@ -25,3 +25,21 @@ impl PackagePolicy {
  pub fn validate(&self)->bool { self.permissions.len()<=32 && self.dependencies.len()<=32 && self.dependencies.iter().all(|d|!d.package_id.is_empty()) }
  pub fn requires(&self,p:Permission)->bool{self.permissions.iter().any(|x|*x==p)}
 }
+
+impl PackagePolicy {
+    pub fn from_rapp_capabilities(capabilities: &[u16]) -> Self {
+        let mut permissions = Vec::new();
+        for cap in capabilities {
+            let permission = match *cap {
+                1 => Some(Permission::FileRead), 2 => Some(Permission::FileWrite),
+                3 | 4 | 5 => Some(Permission::Network), 6 => Some(Permission::Camera),
+                7 => Some(Permission::Microphone), 8 => Some(Permission::Location),
+                9 => Some(Permission::Notifications), 10 => Some(Permission::Bluetooth),
+                11 | 12 => Some(Permission::Telephony), 13 => Some(Permission::Sensors),
+                _ => None,
+            };
+            if let Some(p) = permission { if !permissions.contains(&p) { permissions.push(p); } }
+        }
+        Self { dependencies: Vec::new(), permissions }
+    }
+}

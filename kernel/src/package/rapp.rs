@@ -38,6 +38,7 @@ pub struct RappManifest {
     pub signature:[u8;64],
     pub payload_offset:usize,
     pub payload_len:usize,
+    pub policy: crate::package::dependency::PackagePolicy,
 }
 
 fn fixed_utf8(data:&[u8])->Result<String,RappError>{
@@ -96,7 +97,7 @@ pub fn parse_rapp(data:&[u8])->Result<RappManifest,RappError>{
     if !reg.is_key_trusted(&publisher_key){return Err(RappError::PublisherUntrusted)}
     drop(reg);
     verify_rapp_signature(data,&publisher_key,&signature,payload_offset,payload_len)?;
-    Ok(RappManifest{package_id,publisher_key,version,arch,capabilities,payload_digest:digest,signature,payload_offset,payload_len})
+    Ok(RappManifest{ package_id, publisher_key, version, arch, policy: crate::package::dependency::PackagePolicy::from_rapp_capabilities(&capabilities), capabilities, payload_digest:digest, signature, payload_offset, payload_len })
 }
 
 /// Encodes a RAPP v2 package. The caller must supply a real Ed25519 signature
