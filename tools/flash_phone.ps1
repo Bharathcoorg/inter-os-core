@@ -24,7 +24,11 @@ param(
 
     [string]$TargetImg = "",
 
-    [string]$Slot = "auto"
+    [string]$Slot = "auto",
+
+    [switch]$AllowPersistentFlash,
+
+    [string]$ExpectedProduct = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -122,14 +126,28 @@ if (-not $devices) {
     exit 0
 }
 
-Write-Host "[DEVICE] Connected Fastboot Devices:" -ForegroundColor Green
-Write-Host $devices -ForegroundColor White
+$deviceLines = @($devices | Where-Object { $_ -and $_.ToString().Trim() })
+if ($deviceLines.Count -ne 1) {
+    Write-Error "Expected exactly one Fastboot device before any device operation; found $($deviceLines.Count). Refusing to continue."
+    exit 1
+}
+
+Write-Host "[DEVICE] Connected Fastboot Device:" -ForegroundColor Green
+Write-Host $deviceLines[0] -ForegroundColor White
 
 # Query device properties
 try {
     $product = (& $fastbootPath getvar product 2>&1) | Out-String
     $unlocked = (& $fastbootPath getvar unlocked 2>&1) | Out-String
     $currentSlot = (& $fastbootPath getvar current-slot 2>&1) | Out-String
+
+    if ($ExpectedProduct) {
+        if ($product -notmatch [regex]::Escape($ExpectedProduct)) {
+            Write-Error "Connected device product does not match ExpectedProduct '$ExpectedProduct'. Refusing to continue."
+            exit 1
+        }
+        Write-Host "[OK] Device product matches expected target '$ExpectedProduct'." -ForegroundColor Green
+    }
     Write-Host "[DEVICE INFO]" -ForegroundColor Cyan
     Write-Host "  $product" -ForegroundColor Gray
     Write-Host "  $unlocked" -ForegroundColor Gray
@@ -153,12 +171,42 @@ if ($Mode -eq "Boot") {
         Write-Error "Tethered boot failed with exit code $LASTEXITCODE."
     }
 } elseif ($Mode -eq "Flash") {
-    Write-Host "[OPERATION] Flashing Inter OS to physical boot partition..." -ForegroundColor Yellow
+    if (-not $AllowPersistentFlash) {
+        Write-Error "Persistent flashing is disabled by default. Re-run with -AllowPersistentFlash only after verifying the device and image."
+        exit 1
+    }
+
+    if ($unlocked -notmatch "(?i)(yes|true|unlocked)") {
+        Write-Error "Bootloader does not report an unlocked state. Refusing persistent flash."
+        exit 1
+    }
+
+    if ($Slot -notin @("auto", "a", "b")) {
+        Write-Error "Invalid slot '$Slot'. Expected auto, a, or b."
+        exit 1
+    }
+
     $partition = "boot"
     if ($Slot -ne "auto") {
         $partition = "boot_$Slot"
+    } elseif ($currentSlot -match "(?i)([ab])") {
+        $activeSlot = $Matches[1].ToLower()
+        $partition = "boot_$activeSlot"
+        Write-Host "[SLOT] Auto-selected active slot '$activeSlot' -> partition '$partition'." -ForegroundColor Cyan
     }
 
+    Write-Host ""
+    Write-Host "[DANGER] This operation writes to persistent device storage." -ForegroundColor Red
+    Write-Host "[DANGER] Device product: $product" -ForegroundColor Red
+    Write-Host "[DANGER] Target partition: $partition" -ForegroundColor Red
+    Write-Host "[DANGER] Image SHA-256: $hashStr" -ForegroundColor Red
+    $confirmation = Read-Host "Type FLASH to continue, or anything else to abort"
+    if ($confirmation -cne "FLASH") {
+        Write-Host "[ABORTED] Persistent flash cancelled; no device storage was modified." -ForegroundColor Yellow
+        exit 0
+    }
+
+    Write-Host "[OPERATION] Flashing Inter OS to physical boot partition..." -ForegroundColor Yellow
     Write-Host "Writing $fileSize bytes to partition '$partition'..." -ForegroundColor White
     & $fastbootPath flash $partition "$resolvedImg"
     if ($LASTEXITCODE -ne 0) {
