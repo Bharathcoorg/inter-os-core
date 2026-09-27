@@ -36,3 +36,10 @@ def test_volume_registry_supports_resolution_and_non_destructive_unregistration(
     assert "pub fn unregister" in source
     assert "Data destruction is deliberately outside" in source
     assert "pub fn descriptors" in source
+
+
+def test_graphics_frame_fence_requires_explicit_signal_before_scanout():
+    source = (ROOT / "kernel/src/gui/buffer.rs").read_text(encoding="utf-8")
+    assert "pub fn signal" in source
+    assert 'frame fence not signaled' in source
+    assert "b.fence.signaled=false" in source
