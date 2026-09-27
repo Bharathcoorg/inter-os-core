@@ -171,7 +171,7 @@ impl AtaDrive {
             }
 
             // Wait for drive to become ready
-            self.wait_not_busy().map_err(map_block_error)?;
+            self.wait_not_busy()?;
 
             // Check for ATAPI/SATA non-standard devices (lba_mid != 0 or lba_high != 0)
             let mid = self.lba_mid_port.read();
@@ -181,7 +181,7 @@ impl AtaDrive {
             }
 
             // Wait for DRQ
-            self.wait_drq().map_err(map_block_error)?;
+            self.wait_drq()?;
 
             // Read 256 16-bit words (512 bytes) of identity data
             let mut id_data = [0u16; 256];
@@ -282,7 +282,7 @@ impl BlockDevice for AtaDrive {
             self.delay_400ns();
 
             // Wait for drive to signal ready for data (DRQ)
-            self.wait_not_busy()?;
+            self.wait_not_busy().map_err(map_block_error)?;
             self.wait_drq().map_err(map_block_error)?;
 
             // Write 256 16-bit words to Data port
@@ -294,7 +294,7 @@ impl BlockDevice for AtaDrive {
             // Flush write cache
             self.cmd_port.write(CMD_CACHE_FLUSH);
             self.delay_400ns();
-            self.wait_not_busy()?;
+            self.wait_not_busy().map_err(map_block_error)?;
 
             Ok(())
         }
