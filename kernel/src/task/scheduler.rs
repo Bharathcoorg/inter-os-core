@@ -77,7 +77,9 @@ impl Scheduler {
         let mut tcb = TaskControlBlock::new(name, entry_point, cap_table, priority);
         tcb.parent_id = parent_id;
         let id = tcb.id;
-        let process_id = crate::task::process::register_leader(id, parent_id).ok_or(()).unwrap_or(crate::task::ProcessId(0));
+        let Some(process_id) = crate::task::process::register_leader(id, parent_id) else {
+            return TaskId(0);
+        };
         tcb.process_id = Some(process_id);
         self.tasks.push(tcb);
         id
