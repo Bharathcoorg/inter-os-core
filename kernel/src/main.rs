@@ -270,6 +270,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     // 10b. Virtual Filesystem (VFS) Initialization & Package Runtime
     serial_println!("\n--- [Initializing Virtual Filesystem & Package Runtime] ---");
+    // Persistent storage is now ready; recovery/update journals are restored before userspace starts.
+    recovery::init();
+    update::init();
+
     fs::init();
     crate::package::PACKAGE_BLOB_STORE.lock().restore();
     crate::package::PACKAGE_REGISTRY.lock().seed();
@@ -327,7 +331,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
 
 
-    // 15. Initialize Unified Dynamic Resource Manager (Priorities & Preemption)
+    // 15. Initialize persistent resource/recovery/update state after storage is mounted.
     resource::init();
     recovery::init();
     update::init();
