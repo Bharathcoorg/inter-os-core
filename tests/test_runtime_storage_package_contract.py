@@ -101,3 +101,12 @@ def test_repository_does_not_track_generated_application_elfs():
     assert "apps/*/bin/" in gitignore
     assert "!apps/test_app/bin/test_app.elf" not in gitignore
     assert not (ROOT / "apps/test_app/bin/test_app.elf").exists()
+
+
+def test_service_capability_policy_is_authoritative_for_userspace_launch():
+    services = (ROOT / "kernel/src/services.rs").read_text(encoding="utf-8")
+    user = (ROOT / "kernel/src/task/user.rs").read_text(encoding="utf-8")
+    assert "pub struct ServiceCapabilitySpec" in services
+    assert "pub fn capability_policy" in services
+    assert "crate::services::capability_policy(service, parent_id)" in user
+    assert "CapabilityType::ProcessKill" not in user[user.index("pub fn spawn_userspace_service"):user.index("/// Legacy packaged-process launcher")]
