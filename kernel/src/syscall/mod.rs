@@ -116,6 +116,7 @@ pub enum SyscallNumber {
     DnsResolve = 99,
     TcpClose = 100,
     AppLaunch = 101,
+    ServiceQuery = 102,
 }
 
 /// System call result status codes.
@@ -3147,6 +3148,21 @@ pub fn sys_service_list(out: &mut [u8]) -> Result<usize, SyscallResult> {
     Ok(crate::services::snapshot(out))
 }
 
+/// Returns stable, non-authoritative service metadata without exposing task identity.
+pub fn sys_service_query(service_id: u8, out: &mut [u8]) -> Result<usize, SyscallResult> {
+    if out.len() < 12 { return Err(SyscallResult::InvalidArguments); }
+    let info = crate::services::lookup(service_id).ok_or(SyscallResult::InvalidArguments)?;
+    out[0] = info.id as u8;
+    out[1] = info.state as u8;
+    out[2] = info.restart as u8;
+    out[3] = info.critical as u8;
+    out[4..6].copy_from_slice(&info.abi_version.to_le_bytes());
+    out[6..10].copy_from_slice(&info.generation.to_le_bytes());
+    out[10] = 1; // discovery schema version
+    out[11] = 0;
+    Ok(12)
+}
+
 pub fn sys_service_start(service_id: u8) -> Result<crate::task::TaskId, SyscallResult> {
     require_service_manager()?;
     let id = match service_id {
@@ -3414,6 +3430,14 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         }
         "org.interos.gallery" | "gallery" | "photos" => {
             crate::task::user::spawn_app_gallery(parent_id)
+        }
+        102 => {
+            if a2 < 12 { return SyscallResult::InvalidArguments as i64; }
+            let mut out = [0u8; 12];
+            match sys_service_query(a1 as u8, &mut out) {
+                Ok(n) => { if copy_to_user(a2, &out[..n]).is_err() { SyscallResult::InvalidArguments as i64 } else { n as i64 } }
+                Err(e) => e as i64,
+            }
         }
         _ => {
             crate::serial_println!("[APP_LAUNCH DEBUG] unknown app_id: '{}'", app_id);
