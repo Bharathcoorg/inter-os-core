@@ -144,7 +144,7 @@ pub fn init() {
     if SERVICES_INITIALIZED.swap(true, Ordering::AcqRel) { return; }
     {
         let mut records = SERVICE_RECORDS.lock();
-        records[ServiceId::Init as usize] = Some(ServiceRecord { id: ServiceId::Init, task: TaskId(0), state: ServiceState::Running });
+        records[ServiceId::Init as usize] = Some(ServiceRecord { id: ServiceId::Init, task: TaskId(0), state: ServiceState::Running, generation: 1 });
     }
     // Service definitions are registered but not started here. PID 1 owns
     // userspace service lifecycle through the ServiceStart syscall.
@@ -358,7 +358,7 @@ pub fn supervise() {
     let mut registry = SERVICE_RECORDS.lock();
     for idx in 1..registry.len() {
         if let (Some(record), Some(state)) = (records[idx], states[idx]) {
-            registry[idx] = Some(ServiceRecord { id: record.id, task: record.task, state });
+            registry[idx] = Some(ServiceRecord { id: record.id, task: record.task, state, generation: record.generation });
         }
     }
 }
