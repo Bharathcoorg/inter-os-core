@@ -159,6 +159,15 @@ def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_co
 def main():
     qemu_exe = find_qemu("qemu-system-x86_64.exe")
     kernel_img = os.path.abspath(r"target\inter-os-bios.img")
+
+    k1 = os.path.abspath(r"kernel\target\x86_64-unknown-none\debug\kernel")
+    k2 = os.path.abspath(r"target\x86_64-unknown-none\debug\kernel")
+    kernel_elf = k1 if os.path.exists(k1) else k2
+    if os.path.exists(kernel_elf):
+        if not os.path.exists(kernel_img) or os.path.getmtime(kernel_elf) > os.path.getmtime(kernel_img):
+            print("[TEST SETUP] Updating bootable disk image with latest kernel ELF...")
+            subprocess.run(["cargo", "+nightly", "run", "--manifest-path", "boot/Cargo.toml", "--", kernel_elf, kernel_img], check=True)
+
     assert os.path.exists(kernel_img), f"Kernel image not found at {kernel_img}"
 
     subprocess.run(["taskkill", "/F", "/IM", "qemu-system-x86_64.exe"], capture_output=True)
@@ -169,6 +178,7 @@ def main():
     args = [
         qemu_exe,
         "-drive", f"format=raw,file={kernel_img}",
+        "-snapshot",
         "-m", "1024M",
         "-display", "none",
         "-chardev", f"socket,id=ser0,host=127.0.0.1,port={ser_port},server=on,wait=off",
@@ -207,7 +217,15 @@ def main():
                 print(f"  {l}")
 
         assert launcher_ready, f"Launcher failed to present initial frame within timeout (QEMU poll: {proc.poll()})"
-        print("[LIFECYCLE TEST] [OK] Launcher home screen presented.")
+        print("[LIFECYCLE TEST] [OK] Launcher lock screen presented.")
+
+        # Unlock device to Home Screen
+        print("[LIFECYCLE TEST] Swiping up to unlock device from Lock Screen to Home Screen...")
+        reader.sock.sendall(b"SWIPE 360 1370 360 1100 5\n")
+        unlocked = reader.wait_for("Device unlocked", timeout=10.0, print_keywords=["LAUNCHER", "Device unlocked"])
+        assert unlocked, "Failed to unlock device to Home Screen"
+        print("[LIFECYCLE TEST] [OK] Device unlocked to Home Screen.")
+        time.sleep(1.0)
 
         # Take screendump of launcher homescreen
         ppm_launcher = os.path.abspath(r"target\test_launcher.ppm").replace("\\", "/")

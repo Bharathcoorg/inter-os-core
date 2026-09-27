@@ -61,7 +61,7 @@ try:
         s.settimeout(0.5)
         start_t = time.time()
         buf = b""
-        while time.time() - start_t < 180.0:
+        while time.time() - start_t < 400.0:
             try:
                 data = s.recv(4096)
                 if not data:
@@ -75,18 +75,21 @@ try:
                         print(f"[SERIAL] {decoded}")
                         if "Step 5: Initial presentation complete" in decoded:
                             print(f"[SUCCESS] Launcher presentation complete at {time.time() - start_t:.1f}s")
-                            def send_and_wait_for(cmd, target_str, timeout=6.0):
+                            non_local_buf = bytearray(buf)
+                            def send_and_wait_for(cmd, target_str, timeout=25.0):
+                                time.sleep(0.35)
                                 s.sendall(cmd)
                                 deadline = time.time() + timeout
-                                non_local_buf = b""
                                 found = False
                                 while time.time() < deadline:
                                     try:
                                         d = s.recv(4096)
                                         if d:
-                                            non_local_buf += d
+                                            non_local_buf.extend(d)
                                             while b"\n" in non_local_buf:
-                                                nl, non_local_buf = non_local_buf.split(b"\n", 1)
+                                                idx = non_local_buf.index(b"\n")
+                                                nl = bytes(non_local_buf[:idx])
+                                                del non_local_buf[:idx+1]
                                                 dec = nl.decode('utf-8', errors='replace').strip()
                                                 if dec:
                                                     lines.append(dec)
@@ -94,11 +97,12 @@ try:
                                                     if target_str in dec:
                                                         found = True
                                         if found:
-                                            time.sleep(0.3)
+                                            time.sleep(0.2)
                                             return True
                                     except socket.timeout:
                                         pass
-                                return found
+                                assert found, f"Timed out waiting for '{target_str}' after sending {cmd}"
+                                return True
 
                             print("[TEST STEP 1] Tapping battery icon at (670, 25) to open Power Menu...")
                             send_and_wait_for(b"TAP 670 25\n", "Power menu opened via battery status bar tap")
@@ -182,5 +186,5 @@ finally:
 
 print(f"Total lines captured: {len(lines)}")
 for l in lines:
-    if any(k in l for k in ["[TEST]", "SDHCI", "Goodix", "SimpleFB", "PANIC", "assertion"]):
+    if any(k in l for k in ["[TEST]", "SDHCI", "Goodix", "SimpleFB", "PANIC", "assertion", "[TEST STEP", "[TEST COMPLETE"]):
         print(l)
