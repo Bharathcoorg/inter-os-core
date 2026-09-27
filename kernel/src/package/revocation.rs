@@ -301,6 +301,7 @@ impl RevocationRegistry {
 
         let previous_rotated = self.rotated_keys.get(&proof.publisher).copied();
         let previous_new_trust = self.trusted_keys.get(&proof.new_key).cloned();
+        let previous_old_revocation = self.revoked_keys.get(&proof.old_key).cloned();
 
         self.rotated_keys.insert(proof.publisher.clone(), proof.new_key);
         if self.revoke_key(&proof.old_key, RevocationReason::SupersededByRotation, proof.epoch, &proof.publisher).is_err()
@@ -313,6 +314,10 @@ impl RevocationRegistry {
             match previous_new_trust {
                 Some(old) => { self.trusted_keys.insert(proof.new_key, old); }
                 None => { self.trusted_keys.remove(&proof.new_key); }
+            }
+            match previous_old_revocation {
+                Some(old) => { self.revoked_keys.insert(proof.old_key, old); }
+                None => { self.revoked_keys.remove(&proof.old_key); }
             }
             let _ = self.persist_trusted_keys();
             let _ = self.persist();
