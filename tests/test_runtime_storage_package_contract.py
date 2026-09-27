@@ -88,3 +88,9 @@ def test_userspace_loader_does_not_embed_first_party_images_directly():
     assert "pub mod images;" in task_mod
     assert "pub fn service_image" in images
     assert "spawn_user_process_with_parent(image.name, image.elf" in user
+
+
+def test_package_launch_requires_exact_active_version_and_active_dependencies():
+    source = (ROOT / "kernel/src/package/registry.rs").read_text(encoding="utf-8")
+    assert "matches!(entry.state, PackageState::Active)" in source
+    assert "version == e.version" in source
