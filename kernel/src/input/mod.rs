@@ -153,9 +153,6 @@ pub fn post_char_event(c: char) {
         char_code: c,
         pressed: true,
     });
-    // Synthesize touch contact for the unified input pipeline and wake event listeners
-    post_touch_event(0, 360, 720, 1000, TouchPhase::Down);
-    post_touch_event(0, 360, 720, 0, TouchPhase::Up);
     crate::event::broadcast_event(crate::event::EVENT_TOUCH_INPUT);
 }
 

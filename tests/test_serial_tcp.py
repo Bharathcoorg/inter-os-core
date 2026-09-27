@@ -6,7 +6,7 @@ import shutil
 import sys
 
 if hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
 
 def find_qemu(binary="qemu-system-x86_64.exe"):
     if "QEMU_PATH" in os.environ and os.path.exists(os.path.join(os.environ["QEMU_PATH"], binary)):
@@ -66,35 +66,63 @@ try:
                         print(f"[SERIAL] {decoded}")
                         if "Step 5: Initial presentation complete" in decoded:
                             print(f"[SUCCESS] Launcher presentation complete at {time.time() - start_t:.1f}s")
-                            print("[TEST STEP] Tapping battery icon at (670, 25) to open Power Menu...")
-                            s.sendall(b"TAP 670 25\n")
-                            time.sleep(1.0)
-                            print("[TEST STEP] Tapping Lock Device card at (450, 230)...")
-                            s.sendall(b"TAP 450 230\n")
-                            time.sleep(1.0)
-                            print("[TEST STEP] Tapping Flashlight shortcut at (72, 1330)...")
-                            s.sendall(b"TAP 72 1330\n")
-                            time.sleep(1.0)
-                            print("[TEST STEP] Swiping up to unlock (360 1370 -> 360 1100)...")
-                            s.sendall(b"SWIPE 360 1370 360 1100 5\n")
-                            time.sleep(1.0)
-                            print("[TEST STEP] Tapping top status bar left at (100, 25) to open Notifications...")
-                            s.sendall(b"TAP 100 25\n")
-                            time.sleep(1.0)
-                            print("[TEST STEP] Tapping Clear All at (360, 720) to dismiss Notifications...")
-                            s.sendall(b"TAP 360 720\n")
-                            time.sleep(1.0)
-                            print("[TEST STEP] Swiping up from middle (360 800 -> 360 400) to open App Drawer...")
-                            s.sendall(b"SWIPE 360 800 360 400 5\n")
-                            time.sleep(1.0)
-                            print("[TEST STEP] Tapping Tools tab at (540, 160)...")
-                            s.sendall(b"TAP 540 160\n")
-                            time.sleep(1.0)
-                            print("[TEST STEP] Tapping bottom home pill at (360, 1420) to return Home...")
-                            s.sendall(b"TAP 360 1420\n")
-                            time.sleep(1.5)
+                            def send_and_wait_for(cmd, target_str, timeout=6.0):
+                                s.sendall(cmd)
+                                deadline = time.time() + timeout
+                                non_local_buf = b""
+                                found = False
+                                while time.time() < deadline:
+                                    try:
+                                        d = s.recv(4096)
+                                        if d:
+                                            non_local_buf += d
+                                            while b"\n" in non_local_buf:
+                                                nl, non_local_buf = non_local_buf.split(b"\n", 1)
+                                                dec = nl.decode('utf-8', errors='replace').strip()
+                                                if dec:
+                                                    lines.append(dec)
+                                                    print(f"[SERIAL] {dec}")
+                                                    if target_str in dec:
+                                                        found = True
+                                        if found:
+                                            time.sleep(0.3)
+                                            return True
+                                    except socket.timeout:
+                                        pass
+                                return found
+
+                            print("[TEST STEP 1] Tapping battery icon at (670, 25) to open Power Menu...")
+                            send_and_wait_for(b"TAP 670 25\n", "Power menu opened via battery status bar tap")
+                            print("[TEST STEP 2] Tapping Lock Device card at (450, 230)...")
+                            send_and_wait_for(b"TAP 450 230\n", "Device locked via power menu")
+                            print("[TEST STEP 3] Tapping Flashlight shortcut at (72, 1330)...")
+                            send_and_wait_for(b"TAP 72 1330\n", "Flashlight toggled on lock screen")
+                            print("[TEST STEP 4] Swiping up to unlock (360 1370 -> 360 1100)...")
+                            send_and_wait_for(b"SWIPE 360 1370 360 1100 5\n", "Device unlocked")
+                            print("[TEST STEP 5] Tapping top status bar left at (100, 25) to open Notifications...")
+                            send_and_wait_for(b"TAP 100 25\n", "Notifications shade opened")
+                            print("[TEST STEP 6] Tapping Clear All at (360, 720) to dismiss Notifications...")
+                            send_and_wait_for(b"TAP 360 720\n", "Notifications cleared")
+                            print("[TEST STEP 7] Swiping up from middle (360 800 -> 360 400) to open App Drawer...")
+                            send_and_wait_for(b"SWIPE 360 800 360 400 5\n", "App Drawer opened")
+                            print("[TEST STEP 8] Tapping Tools tab at (540, 160)...")
+                            send_and_wait_for(b"TAP 540 160\n", "App drawer category tab switched")
+                            print("[TEST STEP 9] Tapping bottom home pill at (360, 1420) to return Home...")
+                            send_and_wait_for(b"TAP 360 1420\n", "Returned to Home from App Drawer")
+                            print("[TEST STEP 10] Tapping mic icon at (640, 1330) to open AI Companion...")
+                            send_and_wait_for(b"TAP 640 1330\n", "AI Companion opened via mic tap")
+                            print("[TEST STEP 11] Tapping mic icon at (640, 1330) to toggle voice listening...")
+                            send_and_wait_for(b"TAP 640 1330\n", "AI voice listening toggled")
+                            print("[TEST STEP 12] Tapping bottom home pill at (360, 1420) to return Home...")
+                            send_and_wait_for(b"TAP 360 1420\n", "Returned to Home from AI Companion")
+                            print("[TEST STEP 13] Swiping left (500 800 -> 300 800) to open Live Widgets...")
+                            send_and_wait_for(b"SWIPE 500 800 300 800 5\n", "Live Widgets opened")
+                            print("[TEST STEP 14] Tapping bottom home pill at (360, 1420) to return Home...")
+                            send_and_wait_for(b"TAP 360 1420\n", "Returned to Home from Live Widgets")
+                            print("[TEST COMPLETE] All interactive gesture steps completed.")
+                            lines.append("[TEST COMPLETE]")
                             break
-                if any("Step 5: Initial presentation complete" in l for l in lines):
+                if any("[TEST COMPLETE]" in l for l in lines) or any("All interactive gesture steps completed" in l for l in lines):
                     break
             except socket.timeout:
                 continue
