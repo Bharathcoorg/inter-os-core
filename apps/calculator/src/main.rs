@@ -346,7 +346,11 @@ fn render_calculator_ui(surface: u32, calc: &CalculatorState) {
                 }
 
                 if !hit_btn {
-                    chunk[i] = std::design::color::BACKGROUND;
+                    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
+                        chunk[i] = std::design::color::TEXT_MUTED;
+                    } else {
+                        chunk[i] = std::design::color::BACKGROUND;
+                    }
                 }
             }
 
@@ -363,9 +367,9 @@ fn render_calculator_ui(surface: u32, calc: &CalculatorState) {
 }
 
 fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> bool {
-    // Check if exit / back button pressed
-    if x >= 24 && x < 100 && y >= 28 && y < 68 {
-        std::log(0, "[CALCULATOR] Exit button tapped. Returning to launcher.").ok();
+    // Check if exit / back button or home gesture bar pressed
+    if (x >= 24 && x < 100 && y >= 28 && y < 68) || (x >= 240 && x <= 480 && y >= 1400) {
+        std::log(0, "[CALCULATOR] Exit button or home gesture tapped. Returning to launcher.").ok();
         return true;
     }
 

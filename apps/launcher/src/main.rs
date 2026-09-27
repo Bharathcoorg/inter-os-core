@@ -80,6 +80,9 @@ fn get_color(x: usize, y: usize) -> u32 {
             std::design::color::SURFACE_RAISED
         };
     }
+    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
+        return std::design::color::TEXT_MUTED;
+    }
     std::design::color::BACKGROUND
 }
 

@@ -87,7 +87,7 @@ class SerialReader:
                 break
         return False
 
-def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_coords, present_marker, dump_prefix, in_app_interactions=None):
+def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_coords, present_marker, dump_prefix, in_app_interactions=None, exit_gesture="back"):
     print(f"\n[LIFECYCLE TEST] === Phase {phase_num}: Testing {app_name} ({app_id}) ===")
     print(f"[LIFECYCLE TEST] Dispatching touch tap on {app_name} card at {tap_coords}...")
     reader.sock.sendall(f"TAP {tap_coords[0]} {tap_coords[1]}\n".encode('utf-8'))
@@ -127,9 +127,13 @@ def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_co
                 print(f"[LIFECYCLE TEST] In-app interaction screendump recorded: {ppm_inter}")
                 time.sleep(0.4)
 
-    # Dispatch touch tap on Back button
-    print(f"[LIFECYCLE TEST] Dispatching touch tap on Back button (x=62, y=48)...")
-    reader.sock.sendall(b"TAP 62 48\n")
+    # Dispatch touch tap on Back button or Home Gesture Bar
+    if exit_gesture == "home_bar":
+        print(f"[LIFECYCLE TEST] Dispatching touch tap on Home Gesture Bar (x=360, y=1420)...")
+        reader.sock.sendall(b"TAP 360 1420\n")
+    else:
+        print(f"[LIFECYCLE TEST] Dispatching touch tap on Back button (x=62, y=48)...")
+        reader.sock.sendall(b"TAP 62 48\n")
 
     # Wait for child exit and Launcher reaping
     reaped = reader.wait_for(
@@ -138,7 +142,7 @@ def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_co
         print_keywords=[app_name.upper(), "APP", "LAUNCHER", "INPUT", "WAITPID"]
     )
     assert reaped, f"{app_name} exit / Launcher waitpid reaping was not observed"
-    print(f"[LIFECYCLE TEST] [OK] Back navigation successfully triggered child exit, surface teardown, and parent waitpid reaping.")
+    print(f"[LIFECYCLE TEST] [OK] {exit_gesture.capitalize()} navigation successfully triggered child exit, surface teardown, and parent waitpid reaping.")
 
     time.sleep(1.2)
     ppm_reaped = os.path.abspath(rf"target\test_launcher_after_{dump_prefix}.ppm")
@@ -245,7 +249,8 @@ def main():
             in_app_interactions=[
                 ("Tap Power & Battery Tab", (228, 140), "tab switched.", "tab_power"),
                 ("Tap Thermals & Sensors Tab", (364, 140), "tab switched.", "tab_thermals"),
-            ]
+            ],
+            exit_gesture="home_bar"
         )
 
         # App 3: Terminal (Row 0, Card 1: x=485, y=350)
@@ -260,7 +265,8 @@ def main():
             dump_prefix="test_terminal",
             in_app_interactions=[
                 ("Tap terminal console area", (360, 500), "Normalized touch event received.", "touch"),
-            ]
+            ],
+            exit_gesture="home_bar"
         )
 
         # App 4: Vault (Row 1, Card 1: x=485, y=520)
@@ -275,7 +281,8 @@ def main():
             dump_prefix="test_vault",
             in_app_interactions=[
                 ("Tap Sector Card 0 (Root Keystore)", (200, 350), "Sector card touched. Round-trip re-verified.", "sector_verified"),
-            ]
+            ],
+            exit_gesture="back"
         )
 
         # App 5: Camera (Row 2, Card 0: x=180, y=690)
@@ -290,7 +297,8 @@ def main():
             dump_prefix="test_camera",
             in_app_interactions=[
                 ("Tap Mode Carousel (Document Vision)", (165, 1175), None, "mode_doc"),
-            ]
+            ],
+            exit_gesture="home_bar"
         )
 
         # App 6: Dialer (Row 2, Card 1: x=485, y=690)
@@ -305,7 +313,8 @@ def main():
             dump_prefix="test_dialer",
             in_app_interactions=[
                 ("Tap '9'", (582, 772), "Keypad digit entered.", "digit_entered"),
-            ]
+            ],
+            exit_gesture="back"
         )
 
         # App 7: Browser (Row 3, Card 0: x=180, y=860)
@@ -320,7 +329,8 @@ def main():
             dump_prefix="test_browser",
             in_app_interactions=[
                 ("Tap Bookmark 1", (200, 240), None, "navigated"),
-            ]
+            ],
+            exit_gesture="home_bar"
         )
 
         # App 8: Messages (Row 3, Card 1: x=485, y=860)
@@ -335,7 +345,8 @@ def main():
             dump_prefix="test_messages",
             in_app_interactions=[
                 ("Tap Conversation Thread 1 (Bob)", (200, 290), None, "thread_bob"),
-            ]
+            ],
+            exit_gesture="back"
         )
 
         # App 9: Calendar (Row 4, Card 0: x=180, y=1030)
@@ -347,7 +358,8 @@ def main():
             app_id="org.interos.calendar",
             tap_coords=(180, 1030),
             present_marker="Calendar canvas presented to scanout buffer.",
-            dump_prefix="test_calendar"
+            dump_prefix="test_calendar",
+            exit_gesture="back"
         )
 
         # App 10: Music (Row 4, Card 1: x=485, y=1030)
@@ -362,7 +374,8 @@ def main():
             dump_prefix="test_music",
             in_app_interactions=[
                 ("Tap Play/Pause toggle", (360, 880), None, "playback_toggled"),
-            ]
+            ],
+            exit_gesture="home_bar"
         )
 
         print("\n============================================================")

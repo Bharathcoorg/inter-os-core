@@ -321,6 +321,8 @@ fn render_camera_ui(surface: u32, camera: &CameraApp) {
                     } else {
                         chunk[i] = std::design::color::BACKGROUND;
                     }
+                } else if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
+                    chunk[i] = std::design::color::TEXT_MUTED;
                 } else {
                     chunk[i] = std::design::color::BACKGROUND;
                 }
@@ -342,9 +344,9 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> bool {
     let x = x as usize;
     let y = y as usize;
 
-    // 1. Back button in header: exit to Launcher
-    if x >= 24 && x < 100 && y >= 28 && y < 68 {
-        std::log(0, "[CAMERA] Back button pressed. Exiting to launcher.").ok();
+    // 1. Back button in header or Home gesture bar: exit to Launcher
+    if (x >= 24 && x < 100 && y >= 28 && y < 68) || (x >= 240 && x <= 480 && y >= 1400) {
+        std::log(0, "[CAMERA] Back button or home gesture pressed. Exiting to launcher.").ok();
         return true;
     }
 

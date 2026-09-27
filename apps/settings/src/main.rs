@@ -184,6 +184,8 @@ fn render_settings_ui(surface: u32, tab: SettingsTab) {
                 } else {
                     chunk[i] = std::design::color::BACKGROUND;
                 }
+            } else if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
+                chunk[i] = std::design::color::TEXT_MUTED;
             } else {
                 chunk[i] = std::design::color::BACKGROUND;
             }
@@ -250,9 +252,11 @@ pub extern "C" fn _start() -> ! {
                 };
                 while std::input_event_poll(&mut input).is_ok() {
                     if input.kind == 1 {
-                        // Check if Back button was tapped: exit cleanly to launcher
-                        if input.x >= 24 && input.x < 100 && input.y >= 28 && input.y < 68 {
-                            std::log(0, "[SETTINGS APP] Back button pressed. Exiting to launcher.").ok();
+                        // Check if Back button or Home gesture bar was tapped: exit cleanly to launcher
+                        if (input.x >= 24 && input.x < 100 && input.y >= 28 && input.y < 68)
+                            || (input.x >= 240 && input.x <= 480 && input.y >= 1400)
+                        {
+                            std::log(0, "[SETTINGS APP] Back button or home gesture pressed. Exiting to launcher.").ok();
                             if surface > 0 {
                                 let _ = std::surface_destroy(6, surface);
                             }
