@@ -5,7 +5,7 @@
 ![License: MIT / Apache-2.0](https://img.shields.io/badge/License-MIT%20%2F%20Apache--2.0-blue.svg)
 ![Language: Rust](https://img.shields.io/badge/Language-Pure%20Rust%20%23!%5Bno__std%5D-orange.svg)
 ![Architecture: RISC-V 64 / AArch64 / x86_64](https://img.shields.io/badge/Targets-RISC--V%2064%20%7C%20ARM64%20%7C%20x86__64-success.svg)
-![Build: CI](https://img.shields.io/badge/Build-CI-blue.svg)
+![Build: Local](https://img.shields.io/badge/Build-Local-blue.svg)
 ![Status: Open Source](https://img.shields.io/badge/Status-Public%20Core%20Platform-blueviolet.svg)
 
 ### **The Sovereign, Open-Source Rust Mobile Operating System Foundation**
@@ -38,9 +38,9 @@ In accordance with our engineering integrity policy, every subsystem is classifi
 
 | Subsystem / Feature | Implementation State | Verification Level | Verification Evidence / Mechanism |
 | :--- | :--- | :--- | :--- |
-| **x86_64 Virtual Address Isolation** | Real 4-Level PML4 CR3 per-process paging, W^X, stack guard pages | **Verified in QEMU** | Context switch reloads CR3; user text read-only; stack faults trigger guard page faults |
-| **AArch64 Virtual Address Isolation** | Split translation tables (`TTBR0_EL1` user, `TTBR1_EL1` kernel), PXN/UXN | **Verified in QEMU** | EL0 exception returns into isolated address space; TLBI shootdown on context switch |
-| **RISC-V 64 Sv39 MMU & U-Mode** | Sv39 3-level paging via `satp` Mode 8, U-mode execution | **Verified in QEMU** | OpenSBI boot chain; `stvec` trap vectors; user/supervisor privilege boundary |
+| **x86_64 Virtual Address Isolation** | Real 4-Level PML4 CR3 per-process paging, W^X, stack guard pages | **Implemented; QEMU validation pending** | Kernel page-table and loader contracts are present; this pass does not claim a fresh runtime boot validation |
+| **AArch64 Virtual Address Isolation** | Architecture/platform work in progress | **Source-level only** | No current runtime evidence is claimed in this repository state |
+| **RISC-V 64 MMU & U-Mode** | Architecture/platform work in progress | **Source-level only** | No current runtime evidence is claimed in this repository state |
 | **Syscall Pointer Validation** | `UserPtr<T>`, `UserSlice`, `copy_from_user`, `copy_to_user` | **Implemented & Adversarially Tested** | Null exclusion (<0x1000), integer overflow prevention, kernel address range rejection |
 | **Process Lifecycle & Multitasking** | PID assignment, Zombie states, parent tracking, exit codes | **Implemented & Tested** | `WaitPid` (Syscall 63) & `ExitWithCode` (Syscall 64) in kernel and `interos-std` |
 | **Capability Security Model** | Per-process capability token table, rights bitmask, generation tags | **Implemented & Tested** | Non-forgeable object handles; cross-process handle sharing prevented without delegation |
