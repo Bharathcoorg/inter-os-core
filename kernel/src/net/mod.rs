@@ -365,7 +365,11 @@ pub fn poll_network_interface() -> usize {
 pub fn poll_tcp_retransmissions(now: u64) -> usize {
     // Reclaim terminal TCP entries on every bounded network poll. This keeps
     // handshake/retransmission failures from exhausting the fixed table.
-    let reaped = TCP_TABLE.lock().reap_closed();
+    let reaped = {
+        let mut table = TCP_TABLE.lock();
+        let expired = table.reap_time_wait(crate::interrupts::get_system_ticks());
+        expired + table.reap_closed()
+    };
     if let Some((_id, remote_ip, local_port, remote_port, seq)) = TCP_TABLE.lock().due_syn_retransmit(now) {
         return reaped + if transmit_tcp_syn(
             if remote_ip.is_loopback() { Ipv4Address::LOCALHOST } else { DEFAULT_HOST_IP },
