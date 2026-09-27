@@ -10,10 +10,9 @@ use x86_64::VirtAddr;
 use crate::capability::{Capability, CapabilityId, CapabilityTable, CapabilityType, Rights};
 use crate::task::{SCHEDULER, TaskId};
 use crate::serial_println;
+use super::images::*;
 
-pub const USER_STACK_SIZE: usize = 256 * 1024; // 256 KiB dedicated user-mode stack
-/// Maximum mapped userspace address-space footprint for a single process.
-/// This is the default runtime limit until per-process limit configuration is wired into exec.
+pub const USER_STACK_SIZE: usize = 256 * 1024;
 pub const USER_ADDRESS_SPACE_LIMIT: usize = 256 * 1024 * 1024;
 
 /// User Code Segment Selector with RPL = 3 (GDT Index 4: 0x20 | 3 = 0x23)
@@ -21,130 +20,6 @@ pub const USER_CS_SELECTOR: u64 = 0x23;
 
 /// User Data Segment Selector with RPL = 3 (GDT Index 3: 0x18 | 3 = 0x1B)
 pub const USER_SS_SELECTOR: u64 = 0x1B;
-
-/// Embedded static ELF binary of the primordial userspace init process (`userspace/init`).
-pub static USER_INIT_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/init"
-));
-
-/// Embedded static ELF binary of the Sovereign Settings app (`apps/settings`).
-pub static APP_SETTINGS_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/settings"
-));
-
-/// Embedded static ELF binary of the Sovereign Intent Terminal app (`apps/terminal`).
-pub static APP_TERMINAL_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/terminal"
-));
-
-/// Embedded Ring-3 system-service binaries.
-pub static DISPLAYD_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/displayd"
-));
-pub static INPUTD_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/inputd"
-));
-pub static STORAGED_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/storaged"
-));
-pub static NETD_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/netd"
-));
-pub static POWERD_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/powerd"
-));
-pub static MODEMD_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/modemd"
-));
-pub static AUDIOD_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/audiod"
-));
-pub static CAMERAD_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/camerad"
-));
-
-/// Embedded Ring-3 compositor service.
-pub static COMPOSITOR_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/compositor"
-));
-
-/// Embedded Ring-3 launcher service.
-pub static LAUNCHER_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/launcher"
-));
-
-/// Embedded static ELF binary of the Sovereign Dialer app (`apps/dialer`).
-pub static APP_DIALER_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/dialer"
-));
-
-/// Embedded static ELF binary of the Sovereign Vault & Storage app (`apps/vault`).
-pub static APP_VAULT_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/vault"
-));
-
-/// Embedded static ELF binary of the Sovereign Camera & Neural Vision app (`apps/camera`).
-pub static APP_CAMERA_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/camera"
-));
-
-/// Embedded static ELF binary of the Open-Source Touch Calculator app (`apps/calculator`).
-pub static APP_CALCULATOR_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/calculator"
-));
-
-/// Embedded static ELF binary of the Sovereign Browser app (`apps/browser`).
-pub static APP_BROWSER_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/browser"
-));
-
-/// Embedded static ELF binary of the Sovereign Messages app (`apps/messages`).
-pub static APP_MESSAGES_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/messages"
-));
-
-/// Embedded static ELF binary of the Sovereign Calendar app (`apps/calendar`).
-pub static APP_CALENDAR_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/calendar"
-));
-
-/// Embedded static ELF binary of the Sovereign Music app (`apps/music`).
-pub static APP_MUSIC_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/music"
-));
-
-/// Embedded static ELF binary of the Sovereign File Manager app (`apps/file_manager`).
-pub static APP_FILE_MANAGER_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/file_manager"
-));
-
-/// Embedded static ELF binary of the Sovereign Gallery app (`apps/gallery`).
-pub static APP_GALLERY_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../target/x86_64-unknown-none/debug/gallery"
-));
 
 /// Drops CPU execution privilege from Ring 0 to Ring 3 via an `iretq` stack frame.
 ///
