@@ -132,6 +132,17 @@ mod tests {
         assert_eq!(UpdateTransaction::stage(bad, payload, 1), Err(UpdateError::DigestMismatch));
     }
     #[test]
+    fn activation_targets_inactive_slot_and_rolls_back_after_failures() {
+        let mut a = ActivationRecord::new(UpdateSlot::A, 10);
+        assert_eq!(a.stage(11), Ok(UpdateSlot::B));
+        a.begin_boot(); a.begin_boot(); a.begin_boot();
+        assert!(a.recovery_required());
+        a.rollback();
+        assert_eq!(a.active, UpdateSlot::A);
+        assert!(a.pending.is_none());
+    }
+
+    #[test]
     fn downgrades_are_rejected() {
         let payload = b"update";
         let m = UpdateManifest::new(4, payload.len() as u64, Sha256::digest(payload));
