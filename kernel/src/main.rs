@@ -333,8 +333,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     // 15. Initialize persistent resource/recovery/update state after storage is mounted.
     resource::init();
-    recovery::init();
-    update::init();
     diagnostics::init();
     performance::init();
 
