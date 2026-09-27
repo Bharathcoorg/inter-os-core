@@ -70,16 +70,16 @@ impl WindowManager {
     }
 
     pub fn set_visible_owned(&mut self, id: WindowId, owner: u64, visible: bool) -> bool {
-        let Some(w) = self.windows.iter_mut().find(|w| w.id == id && w.owner == owner) else { return false; };
-        w.visible = visible;
+        let Some(pos) = self.windows.iter().position(|w| w.id == id && w.owner == owner) else { return false; };
+        self.windows[pos].visible = visible;
         if !visible && self.focused == Some(id) { self.focused = self.top_visible(); }
         true
     }
 
     pub fn focus_owned(&mut self, id: WindowId, owner: u64) -> bool {
-        let Some(target) = self.windows.iter_mut().find(|w| w.id == id && w.owner == owner && w.visible) else { return false; };
+        let Some(pos) = self.windows.iter().position(|w| w.id == id && w.owner == owner && w.visible) else { return false; };
         let next_z = self.windows.iter().map(|w| w.z).max().unwrap_or(0).saturating_add(1);
-        target.z = next_z;
+        self.windows[pos].z = next_z;
         self.focused = Some(id);
         true
     }
