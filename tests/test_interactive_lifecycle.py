@@ -120,7 +120,7 @@ def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_co
     assert reaped, f"{app_name} exit / Launcher waitpid reaping was not observed"
     print(f"[LIFECYCLE TEST] [OK] Back navigation successfully triggered child exit, surface teardown, and parent waitpid reaping.")
 
-    time.sleep(0.8)
+    time.sleep(1.2)
     ppm_reaped = os.path.abspath(rf"target\test_launcher_after_{dump_prefix}.ppm")
     _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_reaped}")
     print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_reaped}")
@@ -228,6 +228,42 @@ def main():
             tap_coords=(485, 350),
             present_marker="Terminal console presented to scanout buffer",
             dump_prefix="test_terminal"
+        )
+
+        # App 4: Vault (Row 1, Card 1: x=485, y=520)
+        test_app_lifecycle(
+            reader=reader,
+            monitor_sock=monitor_sock,
+            phase_num=5,
+            app_name="Vault",
+            app_id="org.interos.vault",
+            tap_coords=(485, 520),
+            present_marker="Initial frame presented to hardware scanout",
+            dump_prefix="test_vault"
+        )
+
+        # App 5: Camera (Row 2, Card 0: x=180, y=690)
+        test_app_lifecycle(
+            reader=reader,
+            monitor_sock=monitor_sock,
+            phase_num=6,
+            app_name="Camera",
+            app_id="org.interos.camera",
+            tap_coords=(180, 690),
+            present_marker="Initial frame presented to hardware scanout",
+            dump_prefix="test_camera"
+        )
+
+        # App 6: Dialer (Row 2, Card 1: x=485, y=690)
+        test_app_lifecycle(
+            reader=reader,
+            monitor_sock=monitor_sock,
+            phase_num=7,
+            app_name="Dialer",
+            app_id="org.interos.dialer",
+            tap_coords=(485, 690),
+            present_marker="Initial frame presented to hardware scanout",
+            dump_prefix="test_dialer"
         )
 
         print("\n============================================================")

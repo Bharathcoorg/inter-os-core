@@ -1574,8 +1574,15 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32) {
         let off_x = (info.width - dst_w) / 2;
         let off_y = (info.height - dst_h) / 2;
 
-        // Clear letterbox area first.
-        fb.clear(COLOR_OBSIDIAN);
+        // Clear letterbox borders outside the active viewport only
+        if off_x > 0 {
+            fb.draw_rect(0, 0, off_x, info.height, COLOR_OBSIDIAN);
+            fb.draw_rect(off_x + dst_w, 0, info.width.saturating_sub(off_x + dst_w), info.height, COLOR_OBSIDIAN);
+        }
+        if off_y > 0 {
+            fb.draw_rect(off_x, 0, dst_w, off_y, COLOR_OBSIDIAN);
+            fb.draw_rect(off_x, off_y + dst_h, dst_w, info.height.saturating_sub(off_y + dst_h), COLOR_OBSIDIAN);
+        }
         for dy in 0..dst_h {
             let sy = dy * src_h / dst_h;
             for dx in 0..dst_w {
