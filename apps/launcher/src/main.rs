@@ -157,6 +157,8 @@ pub enum ViewMode {
     SystemSpace,
     LockScreen,
     PowerMenu,
+    AppDrawer,
+    Notifications,
 }
 
 pub struct LauncherState {
@@ -167,6 +169,8 @@ pub struct LauncherState {
     pub dark_mode: bool,
     pub media_playing: bool,
     pub flashlight_on: bool,
+    pub app_drawer_tab: usize,
+    pub notif_tab: usize,
     pub recent_apps: [&'static str; 3],
     pub active_child: Option<u64>,
 }
@@ -181,6 +185,8 @@ impl LauncherState {
             dark_mode: true,
             media_playing: true,
             flashlight_on: false,
+            app_drawer_tab: 0,
+            notif_tab: 0,
             recent_apps: [
                 "org.interos.calculator",
                 "org.interos.settings",
@@ -1025,6 +1031,422 @@ fn get_power_menu_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
 }
 
 #[inline(never)]
+fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
+    // 1. Status Bar (y: 0..48)
+    if y < 48 {
+        if y == 47 { return BORDER_SUBTLE; }
+        if y >= 16 && y < 32 {
+            if let Some(c) = test_text(x, y, 48, 16, 2, b"09:20", TEXT_PRIMARY) { return c; }
+        }
+        // Cellular
+        if x >= 590 && x <= 608 && y >= 16 && y <= 32 {
+            if x <= 593 && y >= 28 { return TEXT_PRIMARY; }
+            if x >= 595 && x <= 598 && y >= 24 { return TEXT_PRIMARY; }
+            if x >= 600 && x <= 603 && y >= 20 { return TEXT_PRIMARY; }
+            if x >= 605 && x <= 608 && y >= 16 { return TEXT_PRIMARY; }
+        }
+        // Wi-Fi
+        if x >= 626 && x <= 644 && y >= 18 && y <= 32 {
+            let dx = (x as i32) - 635;
+            let dy = (y as i32) - 30;
+            let d2 = dx * dx + dy * dy;
+            if (d2 >= 100 && d2 <= 144 && dy <= -2) || (d2 >= 36 && d2 <= 64 && dy <= -1) || d2 <= 9 {
+                return TEXT_PRIMARY;
+            }
+        }
+        // Battery
+        if x >= 658 && x <= 686 && y >= 18 && y <= 32 {
+            if x == 658 || x == 684 || y == 18 || y == 32 { return TEXT_PRIMARY; }
+            if x >= 685 && x <= 686 && y >= 22 && y <= 28 { return TEXT_PRIMARY; }
+            if x >= 661 && x <= 680 && y >= 21 && y <= 29 { return SUCCESS_EMERALD; }
+        }
+        return BG_DARK;
+    }
+
+    // 2. Header & Search (y: 50..130)
+    if y >= 50 && y < 130 {
+        if y >= 64 && y < 88 {
+            if let Some(c) = test_text(x, y, 48, 64, 3, b"Apps", TEXT_PRIMARY) { return c; }
+        }
+        if y >= 98 && y < 106 {
+            if let Some(c) = test_text(x, y, 48, 98, 1, b"Sovereign .rapp registry", TEXT_MUTED) { return c; }
+        }
+        // Search icon circle at (644, 76, r: 20)
+        let dx = (x as i32) - 644;
+        let dy = (y as i32) - 76;
+        let d2 = dx * dx + dy * dy;
+        if d2 <= 400 {
+            if d2 >= 361 { return BORDER_SUBTLE; }
+            if (d2 >= 16 && d2 <= 64) || (dx >= 4 && dx <= 8 && dx == dy) { return TEXT_PRIMARY; }
+            return SURFACE_RAISED;
+        }
+        return BG_DARK;
+    }
+
+    // 3. Category Filter Tabs (y: 135..185)
+    if y >= 135 && y < 185 {
+        // Tab 0: All (x: 40..170)
+        if x >= 40 && x < 170 {
+            if y == 135 || y == 184 || x == 40 || x == 169 { return BORDER_SUBTLE; }
+            if y >= 153 && y < 169 {
+                let fg = if state.app_drawer_tab == 0 { TEXT_DARK } else { TEXT_MUTED };
+                if let Some(c) = test_text(x, y, 82, 153, 2, b"All", fg) { return c; }
+            }
+            return if state.app_drawer_tab == 0 { SURFACE_LIGHT } else { SURFACE_RAISED };
+        }
+        // Tab 1: Recent (x: 185..315)
+        if x >= 185 && x < 315 {
+            if y == 135 || y == 184 || x == 185 || x == 314 { return BORDER_SUBTLE; }
+            if y >= 153 && y < 169 {
+                let fg = if state.app_drawer_tab == 1 { TEXT_DARK } else { TEXT_MUTED };
+                if let Some(c) = test_text(x, y, 210, 153, 2, b"Recent", fg) { return c; }
+            }
+            return if state.app_drawer_tab == 1 { SURFACE_LIGHT } else { SURFACE_RAISED };
+        }
+        // Tab 2: System (x: 330..460)
+        if x >= 330 && x < 460 {
+            if y == 135 || y == 184 || x == 330 || x == 459 { return BORDER_SUBTLE; }
+            if y >= 153 && y < 169 {
+                let fg = if state.app_drawer_tab == 2 { TEXT_DARK } else { TEXT_MUTED };
+                if let Some(c) = test_text(x, y, 355, 153, 2, b"System", fg) { return c; }
+            }
+            return if state.app_drawer_tab == 2 { SURFACE_LIGHT } else { SURFACE_RAISED };
+        }
+        // Tab 3: Tools (x: 475..605)
+        if x >= 475 && x < 605 {
+            if y == 135 || y == 184 || x == 475 || x == 604 { return BORDER_SUBTLE; }
+            if y >= 153 && y < 169 {
+                let fg = if state.app_drawer_tab == 3 { TEXT_DARK } else { TEXT_MUTED };
+                if let Some(c) = test_text(x, y, 508, 153, 2, b"Tools", fg) { return c; }
+            }
+            return if state.app_drawer_tab == 3 { SURFACE_LIGHT } else { SURFACE_RAISED };
+        }
+        return BG_DARK;
+    }
+
+    // 4. 4-Column Sovereign App Grid (y: 205..705)
+    let (row_idx, row_y0) = if (205..315).contains(&y) {
+        (0, 205)
+    } else if (335..445).contains(&y) {
+        (1, 335)
+    } else if (465..575).contains(&y) {
+        (2, 465)
+    } else if (595..705).contains(&y) {
+        (3, 595)
+    } else {
+        (99, 0)
+    };
+
+    if row_idx < 4 {
+        let (col_idx, col_x0) = if (40..180).contains(&x) {
+            (0, 40)
+        } else if (200..340).contains(&x) {
+            (1, 200)
+        } else if (360..500).contains(&x) {
+            (2, 360)
+        } else if (520..660).contains(&x) {
+            (3, 520)
+        } else {
+            (99, 0)
+        };
+
+        if col_idx < 4 {
+            let app_idx = row_idx * 4 + col_idx;
+            if y == row_y0 || y == row_y0 + 109 || x == col_x0 || x == col_x0 + 139 {
+                return BORDER_SUBTLE;
+            }
+
+            let (name, icon, accent): (&[u8], &[u8], u32) = match app_idx {
+                0 => (b"Terminal", b">_", ACCENT_SKY),
+                1 => (b"Browser", b"WWW", 0xFF4ADE80),
+                2 => (b"Files", b"DIR", 0xFF60A5FA),
+                3 => (b"Camera", b"CAM", 0xFFF472B6),
+                4 => (b"Notes", b"NOT", ACCENT_AMBER),
+                5 => (b"AI Studio", b"AI*", 0xFFA78BFA),
+                6 => (b"Gallery", b"IMG", 0xFF38BDF8),
+                7 => (b"Settings", b"SET", TEXT_MUTED),
+                8 => (b"Vault", b"KEY", 0xFFEAB308),
+                9 => (b"Health", b"FIT", SUCCESS_EMERALD),
+                10 => (b"Calendar", b"CAL", 0xFFFB7185),
+                11 => (b"Calc", b"+-=", 0xFFF97316),
+                12 => (b"Phone", b"TEL", SUCCESS_EMERALD),
+                13 => (b"Messages", b"MSG", ACCENT_SKY),
+                14 => (b"Music", b"AUD", 0xFFA855F7),
+                15 => (b"Sensors", b"SNS", 0xFF06B6D4),
+                _ => (b"", b"", BG_DARK),
+            };
+
+            let b_dx = (x as i32) - (col_x0 as i32 + 70);
+            let b_dy = (y as i32) - (row_y0 as i32 + 36);
+            let b_d2 = b_dx * b_dx + b_dy * b_dy;
+            if b_d2 <= 400 {
+                if b_d2 >= 361 { return accent; }
+                if y >= row_y0 + 28 && y < row_y0 + 44 {
+                    let text_ox = (col_x0 + 70).saturating_sub(icon.len() * 8);
+                    if let Some(c) = test_text(x, y, text_ox, row_y0 + 28, 2, icon, accent) { return c; }
+                }
+                return 0xFF0E1422;
+            }
+
+            if y >= row_y0 + 72 && y < row_y0 + 88 {
+                let text_ox = (col_x0 + 70).saturating_sub((name.len() * 8) / 2);
+                if let Some(c) = test_text(x, y, text_ox, row_y0 + 72, 1, name, TEXT_PRIMARY) { return c; }
+            }
+
+            return SURFACE_RAISED;
+        }
+        return BG_DARK;
+    }
+
+    // 5. Pagination Indicator (y: 840..856)
+    if y >= 844 && y <= 852 {
+        let dx_c = (x as i32) - 360;
+        let dy_c = (y as i32) - 848;
+        if dx_c * dx_c + dy_c * dy_c <= 16 { return TEXT_PRIMARY; }
+        let dx_l = (x as i32) - 336;
+        if dx_l * dx_l + dy_c * dy_c <= 9 { return TEXT_MUTED; }
+        let dx_r = (x as i32) - 384;
+        if dx_r * dx_r + dy_c * dy_c <= 9 { return TEXT_MUTED; }
+    }
+
+    // 6. Home Gesture Pill (x: 260..460, y: 1418..1424)
+    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
+        return TEXT_MUTED;
+    }
+
+    BG_DARK
+}
+
+#[inline(never)]
+fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32 {
+    // 1. Status Bar (y: 0..48)
+    if y < 48 {
+        if y == 47 { return BORDER_SUBTLE; }
+        if y >= 16 && y < 32 {
+            if let Some(c) = test_text(x, y, 48, 16, 2, b"09:20", TEXT_PRIMARY) { return c; }
+        }
+        // Cellular
+        if x >= 590 && x <= 608 && y >= 16 && y <= 32 {
+            if x <= 593 && y >= 28 { return TEXT_PRIMARY; }
+            if x >= 595 && x <= 598 && y >= 24 { return TEXT_PRIMARY; }
+            if x >= 600 && x <= 603 && y >= 20 { return TEXT_PRIMARY; }
+            if x >= 605 && x <= 608 && y >= 16 { return TEXT_PRIMARY; }
+        }
+        // Wi-Fi
+        if x >= 626 && x <= 644 && y >= 18 && y <= 32 {
+            let dx = (x as i32) - 635;
+            let dy = (y as i32) - 30;
+            let d2 = dx * dx + dy * dy;
+            if (d2 >= 100 && d2 <= 144 && dy <= -2) || (d2 >= 36 && d2 <= 64 && dy <= -1) || d2 <= 9 {
+                return TEXT_PRIMARY;
+            }
+        }
+        // Battery
+        if x >= 658 && x <= 686 && y >= 18 && y <= 32 {
+            if x == 658 || x == 684 || y == 18 || y == 32 { return TEXT_PRIMARY; }
+            if x >= 685 && x <= 686 && y >= 22 && y <= 28 { return TEXT_PRIMARY; }
+            if x >= 661 && x <= 680 && y >= 21 && y <= 29 { return SUCCESS_EMERALD; }
+        }
+        return BG_DARK;
+    }
+
+    // 2. Header (y: 50..130)
+    if y >= 50 && y < 130 {
+        if y >= 64 && y < 88 {
+            if let Some(c) = test_text(x, y, 48, 64, 3, b"Notifications", TEXT_PRIMARY) { return c; }
+        }
+        if y >= 96 && y < 104 {
+            if let Some(c) = test_text(x, y, 48, 96, 1, b"Grouped system and app events", TEXT_MUTED) { return c; }
+        }
+        // Clear icon circle at (644, 76, r: 18)
+        let dx = (x as i32) - 644;
+        let dy = (y as i32) - 76;
+        let d2 = dx * dx + dy * dy;
+        if d2 <= 324 {
+            if d2 >= 289 { return BORDER_SUBTLE; }
+            if y >= 72 && y < 80 {
+                if let Some(c) = test_text(x, y, 640, 72, 1, b"X", TEXT_MUTED) { return c; }
+            }
+            return SURFACE_RAISED;
+        }
+        return BG_DARK;
+    }
+
+    // 3. Filter Tabs (y: 135..185)
+    if y >= 135 && y < 185 {
+        // Tab 0: All (x: 40..170)
+        if x >= 40 && x < 170 {
+            if y == 135 || y == 184 || x == 40 || x == 169 { return BORDER_SUBTLE; }
+            if y >= 153 && y < 169 {
+                let fg = if state.notif_tab == 0 { TEXT_DARK } else { TEXT_MUTED };
+                if let Some(c) = test_text(x, y, 82, 153, 2, b"All", fg) { return c; }
+            }
+            return if state.notif_tab == 0 { SURFACE_LIGHT } else { SURFACE_RAISED };
+        }
+        // Tab 1: Messages (x: 185..315)
+        if x >= 185 && x < 315 {
+            if y == 135 || y == 184 || x == 185 || x == 314 { return BORDER_SUBTLE; }
+            if y >= 153 && y < 169 {
+                let fg = if state.notif_tab == 1 { TEXT_DARK } else { TEXT_MUTED };
+                if let Some(c) = test_text(x, y, 202, 153, 2, b"Messages", fg) { return c; }
+            }
+            return if state.notif_tab == 1 { SURFACE_LIGHT } else { SURFACE_RAISED };
+        }
+        // Tab 2: System (x: 330..460)
+        if x >= 330 && x < 460 {
+            if y == 135 || y == 184 || x == 330 || x == 459 { return BORDER_SUBTLE; }
+            if y >= 153 && y < 169 {
+                let fg = if state.notif_tab == 2 { TEXT_DARK } else { TEXT_MUTED };
+                if let Some(c) = test_text(x, y, 355, 153, 2, b"System", fg) { return c; }
+            }
+            return if state.notif_tab == 2 { SURFACE_LIGHT } else { SURFACE_RAISED };
+        }
+        // Tab 3: Apps (x: 475..605)
+        if x >= 475 && x < 605 {
+            if y == 135 || y == 184 || x == 475 || x == 604 { return BORDER_SUBTLE; }
+            if y >= 153 && y < 169 {
+                let fg = if state.notif_tab == 3 { TEXT_DARK } else { TEXT_MUTED };
+                if let Some(c) = test_text(x, y, 514, 153, 2, b"Apps", fg) { return c; }
+            }
+            return if state.notif_tab == 3 { SURFACE_LIGHT } else { SURFACE_RAISED };
+        }
+        return BG_DARK;
+    }
+
+    // 4. Actionable Notification Cards (y: 205..670, x: 40..680)
+    // Card 0 (y: 205..310)
+    if y >= 205 && y < 310 && x >= 40 && x < 680 {
+        if x < 48 { return SUCCESS_EMERALD; }
+        if y == 205 || y == 309 || x == 40 || x == 679 { return BORDER_SUBTLE; }
+        if y >= 222 && y < 238 {
+            if let Some(c) = test_text(x, y, 65, 222, 2, b"Build Complete", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 570, 226, 1, b"5m ago", TEXT_MUTED) { return c; }
+        }
+        if y >= 252 && y < 260 {
+            if let Some(c) = test_text(x, y, 65, 252, 1, b"InterOS kernel compiled successfully", TEXT_MUTED) { return c; }
+        }
+        if y >= 272 && y < 280 {
+            if let Some(c) = test_text(x, y, 65, 272, 1, b"> Tap to launch terminal console", ACCENT_SKY) { return c; }
+        }
+        return SURFACE_RAISED;
+    }
+
+    // Card 1 (y: 325..430)
+    if y >= 325 && y < 430 && x >= 40 && x < 680 {
+        if x < 48 { return ACCENT_SKY; }
+        if y == 325 || y == 429 || x == 40 || x == 679 { return BORDER_SUBTLE; }
+        if y >= 342 && y < 358 {
+            if let Some(c) = test_text(x, y, 65, 342, 2, b"2 new messages", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 570, 346, 1, b"7m ago", TEXT_MUTED) { return c; }
+        }
+        if y >= 372 && y < 380 {
+            if let Some(c) = test_text(x, y, 65, 372, 1, b"Bharath, Team: Ready for device sync", TEXT_MUTED) { return c; }
+        }
+        if y >= 392 && y < 400 {
+            if let Some(c) = test_text(x, y, 65, 392, 1, b"> Tap to view conversation threads", SUCCESS_EMERALD) { return c; }
+        }
+        return SURFACE_RAISED;
+    }
+
+    // Card 2 (y: 445..550)
+    if y >= 445 && y < 550 && x >= 40 && x < 680 {
+        if x < 48 { return ACCENT_AMBER; }
+        if y == 445 || y == 549 || x == 40 || x == 679 { return BORDER_SUBTLE; }
+        if y >= 462 && y < 478 {
+            if let Some(c) = test_text(x, y, 65, 462, 2, b"Meeting at 11:00 AM", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 560, 466, 1, b"12m ago", TEXT_MUTED) { return c; }
+        }
+        if y >= 492 && y < 500 {
+            if let Some(c) = test_text(x, y, 65, 492, 1, b"InterOS Sync (Google Meet)", TEXT_MUTED) { return c; }
+        }
+        if y >= 512 && y < 520 {
+            if let Some(c) = test_text(x, y, 65, 512, 1, b"> Tap to open calendar schedule", ACCENT_AMBER) { return c; }
+        }
+        return SURFACE_RAISED;
+    }
+
+    // Card 3 (y: 565..670)
+    if y >= 565 && y < 670 && x >= 40 && x < 680 {
+        if x < 48 { return 0xFFA78BFA; }
+        if y == 565 || y == 669 || x == 40 || x == 679 { return BORDER_SUBTLE; }
+        if y >= 582 && y < 598 {
+            if let Some(c) = test_text(x, y, 65, 582, 2, b"System Update", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 570, 586, 1, b"1h ago", TEXT_MUTED) { return c; }
+        }
+        if y >= 612 && y < 620 {
+            if let Some(c) = test_text(x, y, 65, 612, 1, b"InterOS v0.2.1 available for deployment", TEXT_MUTED) { return c; }
+        }
+        if y >= 632 && y < 640 {
+            if let Some(c) = test_text(x, y, 65, 632, 1, b"> Tap to review and install update", ACCENT_SKY) { return c; }
+        }
+        return SURFACE_RAISED;
+    }
+
+    // 5. "Clear All" Pill Button (y: 700..755, x: 260..460)
+    if y >= 700 && y < 755 && x >= 260 && x < 460 {
+        if y == 700 || y == 754 || x == 260 || x == 459 { return BORDER_SUBTLE; }
+        if y >= 720 && y < 736 {
+            if let Some(c) = test_text(x, y, 316, 720, 2, b"Clear All", TEXT_MUTED) { return c; }
+        }
+        return SURFACE_RAISED;
+    }
+
+    // 6. Home Gesture Pill (x: 260..460, y: 1418..1424)
+    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
+        return TEXT_MUTED;
+    }
+
+    BG_DARK
+}
+
+fn resolve_app_in_drawer(x: usize, y: usize) -> Option<&'static str> {
+    let row_idx = if (205..315).contains(&y) {
+        0
+    } else if (335..445).contains(&y) {
+        1
+    } else if (465..575).contains(&y) {
+        2
+    } else if (595..705).contains(&y) {
+        3
+    } else {
+        return None;
+    };
+
+    let col_idx = if (40..180).contains(&x) {
+        0
+    } else if (200..340).contains(&x) {
+        1
+    } else if (360..500).contains(&x) {
+        2
+    } else if (520..660).contains(&x) {
+        3
+    } else {
+        return None;
+    };
+
+    let app_idx = row_idx * 4 + col_idx;
+    match app_idx {
+        0 => Some("org.interos.terminal"),
+        1 => Some("org.interos.browser"),
+        2 => Some("org.interos.file_manager"),
+        3 => Some("org.interos.camera"),
+        4 => Some("org.interos.test_app"),
+        5 => Some("org.interos.aistudio"),
+        6 => Some("org.interos.gallery"),
+        7 => Some("org.interos.settings"),
+        8 => Some("org.interos.vault"),
+        9 => Some("org.interos.health"),
+        10 => Some("org.interos.calendar"),
+        11 => Some("org.interos.calculator"),
+        12 => Some("org.interos.dialer"),
+        13 => Some("org.interos.messages"),
+        14 => Some("org.interos.music"),
+        15 => Some("org.interos.sensor_dashboard"),
+        _ => None,
+    }
+}
+
+#[inline(never)]
 fn render_view(surface: u32, state: &LauncherState) {
     let mut chunk = [0u32; CHUNK];
     let total = W * H;
@@ -1042,6 +1464,8 @@ fn render_view(surface: u32, state: &LauncherState) {
                 ViewMode::SystemSpace => get_system_space_color(x, y, state),
                 ViewMode::LockScreen => get_lock_screen_color(x, y, state),
                 ViewMode::PowerMenu => get_power_menu_color(x, y, state),
+                ViewMode::AppDrawer => get_app_drawer_color(x, y, state),
+                ViewMode::Notifications => get_notifications_color(x, y, state),
             };
             x += 1;
             if x == W {
@@ -1070,6 +1494,12 @@ fn render_view(surface: u32, state: &LauncherState) {
         }
         ViewMode::PowerMenu => {
             std::log(0, "[LAUNCHER] render_power_menu complete: Power & safety drawer presented.").ok();
+        }
+        ViewMode::AppDrawer => {
+            std::log(0, "[LAUNCHER] render_app_drawer complete: 16-app grid presented.").ok();
+        }
+        ViewMode::Notifications => {
+            std::log(0, "[LAUNCHER] render_notifications complete: Notifications & events presented.").ok();
         }
     }
 }
@@ -1530,6 +1960,168 @@ pub extern "C" fn _start() -> ! {
                                 }
                             }
                         }
+                        ViewMode::AppDrawer => {
+                            // 1. Gesture Navigation
+                            // Swipe down or swipe right returns to HomeScreen
+                            if (input.kind == 4 && (input.dy >= 60 || input.dx >= 60)) || (input.kind == 1 && input.y >= 1400) {
+                                state.current_view = ViewMode::HomeScreen;
+                                render_view(surface, &state);
+                                let _ = std::surface_flip(4);
+                                std::log(0, "[LAUNCHER] Returned to Home from App Drawer.").ok();
+                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                while std::input_event_poll(&mut drain).is_ok() {}
+                                break;
+                            }
+                            // 2. Touch Tap
+                            if input.kind == 1 {
+                                let x = input.x as usize;
+                                let y = input.y as usize;
+
+                                // Filter tabs (y: 135..185)
+                                if (135..185).contains(&y) {
+                                    if (40..170).contains(&x) {
+                                        state.app_drawer_tab = 0;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        break;
+                                    } else if (185..315).contains(&x) {
+                                        state.app_drawer_tab = 1;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        break;
+                                    } else if (330..460).contains(&x) {
+                                        state.app_drawer_tab = 2;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        break;
+                                    } else if (475..605).contains(&x) {
+                                        state.app_drawer_tab = 3;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        break;
+                                    }
+                                }
+
+                                // Launch application from 16-app grid
+                                if let Some(target_app) = resolve_app_in_drawer(x, y) {
+                                    state.push_recent(target_app);
+                                    match std::app_launch(target_app) {
+                                        Ok(task_id) => {
+                                            state.active_child = Some(task_id);
+                                            state.current_view = ViewMode::HomeScreen;
+                                            std::log(0, "[LAUNCHER] App launched from drawer.").ok();
+                                            let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                            while std::input_event_poll(&mut drain).is_ok() {}
+                                            break;
+                                        }
+                                        Err(_) => {
+                                            std::log(0, "[LAUNCHER] Application launch rejected by kernel.").ok();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ViewMode::Notifications => {
+                            // 1. Gesture Navigation
+                            // Swipe up or swipe right returns to HomeScreen
+                            if (input.kind == 4 && (input.dy <= -60 || input.dx >= 60)) || (input.kind == 1 && input.y >= 1400) {
+                                state.current_view = ViewMode::HomeScreen;
+                                render_view(surface, &state);
+                                let _ = std::surface_flip(4);
+                                std::log(0, "[LAUNCHER] Returned to Home from Notifications.").ok();
+                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                while std::input_event_poll(&mut drain).is_ok() {}
+                                break;
+                            }
+                            // 2. Touch Tap
+                            if input.kind == 1 {
+                                let x = input.x as usize;
+                                let y = input.y as usize;
+
+                                // Filter tabs (y: 135..185)
+                                if (135..185).contains(&y) {
+                                    if (40..170).contains(&x) {
+                                        state.notif_tab = 0;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        break;
+                                    } else if (185..315).contains(&x) {
+                                        state.notif_tab = 1;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        break;
+                                    } else if (330..460).contains(&x) {
+                                        state.notif_tab = 2;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        break;
+                                    } else if (475..605).contains(&x) {
+                                        state.notif_tab = 3;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        break;
+                                    }
+                                }
+
+                                // Clear all button or header icon
+                                let dx_c = (x as i32) - 644;
+                                let dy_c = (y as i32) - 76;
+                                if (y >= 700 && y < 755 && x >= 260 && x < 460) || (dx_c * dx_c + dy_c * dy_c <= 324) {
+                                    std::log(0, "[LAUNCHER] Notifications cleared.").ok();
+                                    state.current_view = ViewMode::HomeScreen;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
+
+                                // Card 0: Terminal
+                                if (205..310).contains(&y) && (40..680).contains(&x) {
+                                    state.push_recent("org.interos.terminal");
+                                    if let Ok(task_id) = std::app_launch("org.interos.terminal") {
+                                        state.active_child = Some(task_id);
+                                        state.current_view = ViewMode::HomeScreen;
+                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                        while std::input_event_poll(&mut drain).is_ok() {}
+                                        break;
+                                    }
+                                }
+                                // Card 1: Messages
+                                if (325..430).contains(&y) && (40..680).contains(&x) {
+                                    state.push_recent("org.interos.messages");
+                                    if let Ok(task_id) = std::app_launch("org.interos.messages") {
+                                        state.active_child = Some(task_id);
+                                        state.current_view = ViewMode::HomeScreen;
+                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                        while std::input_event_poll(&mut drain).is_ok() {}
+                                        break;
+                                    }
+                                }
+                                // Card 2: Calendar
+                                if (445..550).contains(&y) && (40..680).contains(&x) {
+                                    state.push_recent("org.interos.calendar");
+                                    if let Ok(task_id) = std::app_launch("org.interos.calendar") {
+                                        state.active_child = Some(task_id);
+                                        state.current_view = ViewMode::HomeScreen;
+                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                        while std::input_event_poll(&mut drain).is_ok() {}
+                                        break;
+                                    }
+                                }
+                                // Card 3: Settings
+                                if (565..670).contains(&y) && (40..680).contains(&x) {
+                                    state.push_recent("org.interos.settings");
+                                    if let Ok(task_id) = std::app_launch("org.interos.settings") {
+                                        state.active_child = Some(task_id);
+                                        state.current_view = ViewMode::HomeScreen;
+                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                        while std::input_event_poll(&mut drain).is_ok() {}
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                         ViewMode::HomeScreen => {
                             // Long-press opens Power Menu
                             if input.kind == 6 {
@@ -1543,24 +2135,38 @@ pub extern "C" fn _start() -> ! {
                             }
 
                             // 1. Gesture Navigation
-                            // Swipe up opens Activity Space
-                            if input.kind == 4 && input.dy <= -60 && input.y >= 1200 {
-                                state.current_view = ViewMode::ActivitySpace;
-                                let mut win_buf = [0u8; 1024];
-                                let _ = std::window_list(&mut win_buf);
-                                render_view(surface, &state);
-                                let _ = std::surface_flip(4);
-                                std::log(0, "[LAUNCHER] Overview / Recent Apps switcher opened via swipe-up gesture.").ok();
+                            // Swipe up: bottom bar opens Activity Space, middle opens App Drawer
+                            if input.kind == 4 && input.dy <= -60 {
+                                if input.y >= 1200 {
+                                    state.current_view = ViewMode::ActivitySpace;
+                                    let mut win_buf = [0u8; 1024];
+                                    let _ = std::window_list(&mut win_buf);
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Overview / Recent Apps switcher opened via swipe-up gesture.").ok();
+                                } else {
+                                    state.current_view = ViewMode::AppDrawer;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] App Drawer opened via upward swipe gesture.").ok();
+                                }
                                 let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
                                 while std::input_event_poll(&mut drain).is_ok() {}
                                 break;
                             }
-                            // Swipe down from top status bar opens Quick Controls
+                            // Swipe down: left/center opens Notifications, right opens Quick Controls
                             if input.kind == 4 && input.dy >= 60 && input.y <= 120 {
-                                state.current_view = ViewMode::QuickControls;
-                                render_view(surface, &state);
-                                let _ = std::surface_flip(4);
-                                std::log(0, "[LAUNCHER] Quick Controls shade opened via swipe-down gesture.").ok();
+                                if input.x < 360 {
+                                    state.current_view = ViewMode::Notifications;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Notifications shade opened via swipe-down gesture.").ok();
+                                } else {
+                                    state.current_view = ViewMode::QuickControls;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Quick Controls shade opened via swipe-down gesture.").ok();
+                                }
                                 let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
                                 while std::input_event_poll(&mut drain).is_ok() {}
                                 break;
@@ -1594,19 +2200,35 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
-                                // Tapping top status bar: right side (battery) opens PowerMenu, left side opens Quick Controls
+                                // Tapping top status bar: right (battery) opens PowerMenu, center opens Quick Controls, left opens Notifications
                                 if y <= 48 {
                                     if x >= 650 {
                                         state.current_view = ViewMode::PowerMenu;
                                         render_view(surface, &state);
                                         let _ = std::surface_flip(4);
                                         std::log(0, "[LAUNCHER] Power menu opened via battery status bar tap.").ok();
-                                    } else {
+                                    } else if x >= 360 {
                                         state.current_view = ViewMode::QuickControls;
                                         render_view(surface, &state);
                                         let _ = std::surface_flip(4);
                                         std::log(0, "[LAUNCHER] Quick Controls shade opened via top status bar tap.").ok();
+                                    } else {
+                                        state.current_view = ViewMode::Notifications;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        std::log(0, "[LAUNCHER] Notifications shade opened via top status bar tap.").ok();
                                     }
+                                    let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
+
+                                // Tapping Today card chevron '>' opens Notifications
+                                if (240..300).contains(&y) && x >= 600 {
+                                    state.current_view = ViewMode::Notifications;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Notifications opened from Today card header.").ok();
                                     let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
                                     while std::input_event_poll(&mut drain).is_ok() {}
                                     break;
@@ -1638,6 +2260,17 @@ pub extern "C" fn _start() -> ! {
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
                                     std::log(0, "[LAUNCHER] System Space opened via universal search bar tap.").ok();
+                                    let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
+
+                                // Tapping dock 4th item (490..645, 1120..1400) opens App Drawer
+                                if (1120..1400).contains(&y) && (490..645).contains(&x) {
+                                    state.current_view = ViewMode::AppDrawer;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] App Drawer opened from dock shortcut.").ok();
                                     let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
                                     while std::input_event_poll(&mut drain).is_ok() {}
                                     break;
