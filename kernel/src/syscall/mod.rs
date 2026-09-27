@@ -2209,8 +2209,12 @@ pub fn sys_surface_destroy(cap_slot: usize, surface_id: u32) -> Result<(), Sysca
     let owner = require_display_service(cap_slot)?;
     let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
     let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
-    display.destroy_surface(surface_id, owner.0)
-        .map_err(|_| SyscallResult::PermissionDenied)
+    let res = display.destroy_surface(surface_id, owner.0)
+        .map_err(|_| SyscallResult::PermissionDenied);
+    drop(display);
+    drop(kms);
+    crate::drivers::input::INPUT_PIPELINE.lock().clear();
+    res
 }
 
 /// Composites display surfaces and atomically flips the scanout buffer.

@@ -43,10 +43,18 @@ impl InputEvent {
             RecognizedGesture::Tap { x, y } => Self { kind: InputEventKind::Tap, x, y, ..Self::EMPTY },
             RecognizedGesture::DoubleTap { x, y } => Self { kind: InputEventKind::DoubleTap, x, y, ..Self::EMPTY },
             RecognizedGesture::LongPress { x, y } => Self { kind: InputEventKind::LongPress, x, y, ..Self::EMPTY },
-            RecognizedGesture::Pan { start_x, start_y, current_x, current_y, dx, dy } => Self {
-                kind: InputEventKind::Pan, x: current_x, y: current_y, dx: (current_x as i32 - start_x as i32).max(dx),
-                dy: (current_y as i32 - start_y as i32).max(dy), ..Self::EMPTY
-            },
+            RecognizedGesture::Pan { start_x, start_y, current_x, current_y, dx, dy } => {
+                let disp_x = current_x as i32 - start_x as i32;
+                let disp_y = current_y as i32 - start_y as i32;
+                Self {
+                    kind: InputEventKind::Pan,
+                    x: current_x,
+                    y: current_y,
+                    dx: if disp_x != 0 { disp_x } else { dx },
+                    dy: if disp_y != 0 { disp_y } else { dy },
+                    ..Self::EMPTY
+                }
+            }
             RecognizedGesture::Pinch { center_x, center_y, scale_factor } => Self {
                 kind: InputEventKind::Pinch, x: center_x, y: center_y, scale_milli: (scale_factor * 1000.0) as u32, ..Self::EMPTY
             },
@@ -75,6 +83,11 @@ impl InputPipeline {
     pub fn pop(&mut self) -> Option<InputEvent> { self.queue.pop_front() }
 
     pub fn pop_service(&mut self) -> Option<InputEvent> { self.service_queue.pop_front() }
+
+    pub fn clear(&mut self) {
+        self.queue.clear();
+        self.service_queue.clear();
+    }
 }
 
 pub static INPUT_PIPELINE: Mutex<InputPipeline> = Mutex::new(InputPipeline::new());
@@ -126,5 +139,14 @@ mod tests {
         });
         assert_eq!(e.kind, InputEventKind::Pan);
         assert_eq!((e.x, e.y, e.dx, e.dy), (30, 50, 20, 30));
+    }
+
+    #[test]
+    fn swipe_up_displacement_preserved() {
+        let e = InputEvent::from_gesture(RecognizedGesture::Pan {
+            start_x: 360, start_y: 1420, current_x: 360, current_y: 1100, dx: 0, dy: -320,
+        });
+        assert_eq!(e.kind, InputEventKind::Pan);
+        assert_eq!((e.x, e.y, e.dx, e.dy), (360, 1100, 0, -320));
     }
 }

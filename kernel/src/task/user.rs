@@ -524,7 +524,7 @@ pub fn spawn_userspace_service(service_id: u8, parent_id: TaskId) -> Result<Task
         caps.insert(Capability { id: CapabilityId(0x7001), cap_type: CapabilityType::IpcReceive, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
         caps.insert(Capability { id: CapabilityId(0x7002), cap_type: CapabilityType::TimerTickRead, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
         caps.insert(Capability { id: CapabilityId(0x7003), cap_type: CapabilityType::EventPoll, rights: Rights::READ | Rights::INVOKE, object_id: 0 }).map_err(|_| "service capability table full")?;
-        caps.insert(Capability { id: CapabilityId(0x7004), cap_type: CapabilityType::FrameBufferDirect, rights: Rights::WRITE, object_id: 1 }).map_err(|_| "service capability table full")?;
+        caps.insert(Capability { id: CapabilityId(0x7004), cap_type: CapabilityType::FrameBufferDirect, rights: Rights::READ | Rights::WRITE, object_id: 1 }).map_err(|_| "service capability table full")?;
         caps.insert(Capability { id: CapabilityId(0x7005), cap_type: CapabilityType::FileSystemRead, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
         let id = spawn_user_process("compositor", COMPOSITOR_ELF, caps, 5)?;
         if let Some(task) = SCHEDULER.lock().get_task_mut(id) { task.parent_id = parent_id; }
@@ -536,7 +536,7 @@ pub fn spawn_userspace_service(service_id: u8, parent_id: TaskId) -> Result<Task
         caps.insert(Capability { id: CapabilityId(0x7001), cap_type: CapabilityType::TimerTickRead, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
         caps.insert(Capability { id: CapabilityId(0x7002), cap_type: CapabilityType::IpcSend, rights: Rights::WRITE, object_id: parent_id.0 }).map_err(|_| "service capability table full")?;
         caps.insert(Capability { id: CapabilityId(0x7003), cap_type: CapabilityType::FileSystemRead, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
-        caps.insert(Capability { id: CapabilityId(0x7004), cap_type: CapabilityType::FrameBufferDirect, rights: Rights::WRITE, object_id: 1 }).map_err(|_| "service capability table full")?;
+        caps.insert(Capability { id: CapabilityId(0x7004), cap_type: CapabilityType::FrameBufferDirect, rights: Rights::READ | Rights::WRITE, object_id: 1 }).map_err(|_| "service capability table full")?;
         caps.insert(Capability { id: CapabilityId(0x7005), cap_type: CapabilityType::EventPoll, rights: Rights::READ | Rights::INVOKE, object_id: 0 }).map_err(|_| "service capability table full")?;
         caps.insert(Capability { id: CapabilityId(0x7006), cap_type: CapabilityType::IpcReceive, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
         caps.insert(Capability { id: CapabilityId(0x7007), cap_type: CapabilityType::ProcessSpawn, rights: Rights::INVOKE, object_id: 0 }).map_err(|_| "service capability table full")?;

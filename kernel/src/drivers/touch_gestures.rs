@@ -180,6 +180,15 @@ impl TouchGestureEngine {
                     self.last_tap_coords = (s.current_x, s.current_y);
                 }
             }
+        } else {
+            self.gesture_queue.push_back(RecognizedGesture::Pan {
+                start_x: s.start_x,
+                start_y: s.start_y,
+                current_x: s.current_x,
+                current_y: s.current_y,
+                dx: s.current_x as i32 - s.start_x as i32,
+                dy: s.current_y as i32 - s.start_y as i32,
+            });
         }
     }
 }
@@ -222,6 +231,12 @@ pub fn test_touch_gestures() {
     engine.handle_down(0, 1, 200, 400, 150);
     engine.handle_move(0, 250, 410, 155);
     assert!(matches!(engine.gesture_queue.pop_front(), Some(RecognizedGesture::Pan { dx: 50, .. })));
+
+    // 5. Test Swipe Up
+    engine.handle_down(0, 1, 360, 1420, 200);
+    engine.handle_move(0, 360, 1100, 205);
+    engine.handle_up(0, 210);
+    assert!(matches!(engine.gesture_queue.pop_front(), Some(RecognizedGesture::Pan { dy, .. }) if dy < 0));
 
     crate::serial_println!("[TEST] Touch Gestures: Tap, DoubleTap, LongPress, and Pan recognition verified.");
 }
