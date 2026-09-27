@@ -135,7 +135,7 @@ impl PackageRegistry {
     pub fn dependencies_satisfied(&self, policy: &PackagePolicy) -> bool {
         policy.validate() && policy.dependencies.iter().all(|dep| {
             self.entries.iter().find(|entry| entry.package_id == dep.package_id)
-                .map(|entry| dep.requirement.matches(PackageVersion::new(entry.version.0, entry.version.1, entry.version.2)) && matches!(entry.state, PackageState::Staged | PackageState::Active))
+                .map(|entry| dep.requirement.matches(PackageVersion::new(entry.version.0, entry.version.1, entry.version.2)) && matches!(entry.state, PackageState::Active))
                 .unwrap_or(false)
         })
     }
@@ -262,7 +262,10 @@ impl PackageRegistry {
 
 
     pub fn launch_allowed(&self, package_id:&str, version:(u16,u16,u16))->bool {
-        self.entries.iter().find(|e|e.package_id==package_id).map(|e| matches!(e.state,PackageState::Staged|PackageState::Active) && version>=e.version).unwrap_or(false)
+        self.entries.iter()
+            .find(|e| e.package_id == package_id)
+            .map(|e| matches!(e.state, PackageState::Active) && version == e.version)
+            .unwrap_or(false)
     }
 
     pub fn entries(&self) -> &[PackageEntry] { &self.entries }
