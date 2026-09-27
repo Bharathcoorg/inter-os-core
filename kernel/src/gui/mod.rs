@@ -28,6 +28,8 @@ use crate::serial_println;
 
 /// Global thread-safe instance of the Mobile Shell.
 pub static MOBILE_SHELL: Mutex<MobileShell> = Mutex::new(MobileShell::new());
+/// Authoritative application window registry used by input routing and composition.
+pub static WINDOW_MANAGER: Mutex<WindowManager> = Mutex::new(WindowManager::new());
 
 /// Initializes the GUI subsystem and verifies capacitive touch hit testing via self-tests.
 pub fn init() {
