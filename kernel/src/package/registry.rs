@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 use spin::Mutex;
 
-const MAX_ENTRIES: usize = 16;
+const MAX_ENTRIES: usize = 32;
 const RECORD_SIZE: usize = 48;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +54,7 @@ impl PackageRegistry {
     }
 
     fn restore(&mut self) -> bool {
-        let mut buf = [0u8; 1024];
+        let mut buf = [0u8; 2048];
         let loaded = crate::storage::persistent::load_latest_kind(&mut buf, 1);
         let Ok(Some((_generation, len))) = loaded else { return false; };
         if len < 5 || &buf[..4] != b"PRG1" { return false; }
@@ -104,7 +104,7 @@ impl PackageRegistry {
     }
 
     fn persist(&self) -> Result<(), ()> {
-        let mut buf = [0u8; 1024];
+        let mut buf = [0u8; 2048];
         let len = self.encode(&mut buf);
         crate::storage::persistent::commit_kind(&buf[..len], 1).map(|_| ()).map_err(|_| ())
     }
