@@ -2,7 +2,8 @@
 //!
 //! Owns the physical placement policy for the InterFS region so the filesystem
 //! cannot overlap the boot area or the persistent metadata journal.
-use crate::drivers::{BlockDevice, ATA_PRIMARY};
+use crate::storage::block::BlockDevice;
+use crate::drivers::ATA_PRIMARY;
 use super::interfs::{FsBackendError, InterFs};
 
 /// Leave the first 4096 sectors to the bootloader/partition/device-specific area.
