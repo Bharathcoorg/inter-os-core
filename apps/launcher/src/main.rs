@@ -155,6 +155,8 @@ pub enum ViewMode {
     ActivitySpace,
     QuickControls,
     SystemSpace,
+    LockScreen,
+    PowerMenu,
 }
 
 pub struct LauncherState {
@@ -164,6 +166,7 @@ pub struct LauncherState {
     pub bt_on: bool,
     pub dark_mode: bool,
     pub media_playing: bool,
+    pub flashlight_on: bool,
     pub recent_apps: [&'static str; 3],
     pub active_child: Option<u64>,
 }
@@ -177,6 +180,7 @@ impl LauncherState {
             bt_on: true,
             dark_mode: true,
             media_playing: true,
+            flashlight_on: false,
             recent_apps: [
                 "org.interos.calculator",
                 "org.interos.settings",
@@ -840,6 +844,187 @@ fn get_system_space_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
 }
 
 #[inline(never)]
+fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
+    // 1. Status Bar (y: 0..48)
+    if y < 48 {
+        if y == 47 { return BORDER_SUBTLE; }
+        if y >= 16 && y < 32 {
+            if let Some(c) = test_text(x, y, 48, 16, 2, b"09:20", TEXT_PRIMARY) { return c; }
+        }
+        // 4-Bar Cellular Signal
+        if x >= 590 && x <= 608 && y >= 16 && y <= 32 {
+            if x <= 593 && y >= 28 { return TEXT_PRIMARY; }
+            if x >= 595 && x <= 598 && y >= 24 { return TEXT_PRIMARY; }
+            if x >= 600 && x <= 603 && y >= 20 { return TEXT_PRIMARY; }
+            if x >= 605 && x <= 608 && y >= 16 { return TEXT_PRIMARY; }
+        }
+        // Wi-Fi 3-arcs
+        if x >= 626 && x <= 644 && y >= 18 && y <= 32 {
+            let dx = (x as i32) - 635;
+            let dy = (y as i32) - 30;
+            let d2 = dx * dx + dy * dy;
+            if (d2 >= 100 && d2 <= 144 && dy <= -2) || (d2 >= 36 && d2 <= 64 && dy <= -1) || d2 <= 9 {
+                return TEXT_PRIMARY;
+            }
+        }
+        // Battery (outline pill + 78% fill)
+        if x >= 658 && x <= 686 && y >= 18 && y <= 32 {
+            if x == 658 || x == 684 || y == 18 || y == 32 { return TEXT_PRIMARY; }
+            if x >= 685 && x <= 686 && y >= 22 && y <= 28 { return TEXT_PRIMARY; }
+            if x >= 661 && x <= 680 && y >= 21 && y <= 29 { return SUCCESS_EMERALD; }
+        }
+        return BG_DARK;
+    }
+
+    // 2. Scenic Mountain Atmospheric Backdrop (y: 48..1280)
+    let r1 = 620 + (((x as i32 - 360) * (x as i32 - 360)) / 1400) as usize;
+    let r2 = 780 + (((x as i32 - 180) * (x as i32 - 540)) / 1800).abs() as usize;
+    let r3 = 940 + (((x as i32 - 280) * (x as i32 - 440)) / 1200).abs() as usize;
+
+    // Date & Tabular Clock Overlay
+    if y >= 160 && y < 176 {
+        if let Some(c) = test_text(x, y, 48, 160, 2, b"Wed, 24 Sep", TEXT_MUTED) { return c; }
+    }
+    if y >= 210 && y < 250 {
+        if let Some(c) = test_text(x, y, 48, 210, 5, b"09:20", TEXT_PRIMARY) { return c; }
+    }
+
+    // Mountain Silhouette Layering
+    if y >= r3 && y < 1280 {
+        return 0xFF080B10; // Forefront mountain ridge
+    } else if y >= r2 && y < 1280 {
+        return 0xFF101726; // Mid mountain ridge
+    } else if y >= r1 && y < 1280 {
+        return 0xFF182236; // Distant mountain ridge
+    } else if y >= 48 && y < 1280 {
+        // Sky gradient
+        let ratio = (y - 48) / 30;
+        let blue = (0x18 + ratio).min(0x28) as u32;
+        return 0xFF0B1000 | blue;
+    }
+
+    // 3. Bottom Shortcuts & Unlock Hint (y: 1280..1440)
+    // Flashlight Circular Button at (72, 1330, r: 30)
+    let f_dx = (x as i32) - 72;
+    let f_dy = (y as i32) - 1330;
+    let f_d2 = f_dx * f_dx + f_dy * f_dy;
+    if f_d2 <= 900 {
+        if f_d2 >= 841 { return BORDER_SUBTLE; }
+        if y >= 1324 && y < 1332 {
+            let label = if state.flashlight_on { &b"ON"[..] } else { &b"LGT"[..] };
+            let fg = if state.flashlight_on { TEXT_DARK } else { TEXT_PRIMARY };
+            let ox = if state.flashlight_on { 64 } else { 60 };
+            if let Some(c) = test_text(x, y, ox, 1324, 1, label, fg) { return c; }
+        }
+        return if state.flashlight_on { ACCENT_AMBER } else { SURFACE_RAISED };
+    }
+
+    // Camera Circular Button at (648, 1330, r: 30)
+    let c_dx = (x as i32) - 648;
+    let c_dy = (y as i32) - 1330;
+    let c_d2 = c_dx * c_dx + c_dy * c_dy;
+    if c_d2 <= 900 {
+        if c_d2 >= 841 { return BORDER_SUBTLE; }
+        if y >= 1324 && y < 1332 {
+            if let Some(c) = test_text(x, y, 636, 1324, 1, b"CAM", TEXT_PRIMARY) { return c; }
+        }
+        return SURFACE_RAISED;
+    }
+
+    // Centered "Swipe up to unlock" Hint
+    if y >= 1374 && y < 1390 {
+        if let Some(c) = test_text(x, y, 208, 1374, 2, b"Swipe up to unlock", TEXT_MUTED) { return c; }
+    }
+
+    // Home Gesture Indicator Pill
+    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
+        return TEXT_MUTED;
+    }
+
+    0xFF080B10
+}
+
+#[inline(never)]
+fn get_power_menu_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
+    // Backdrop blur / dim on left
+    if x < 340 {
+        return 0xFF05070A;
+    }
+
+    // Drawer Container (x >= 340)
+    if x == 340 {
+        return BORDER_SUBTLE;
+    }
+
+    // Header (y: 80..150)
+    if y >= 95 && y < 111 {
+        if let Some(c) = test_text(x, y, 370, 95, 2, b"Power & Safety", TEXT_PRIMARY) { return c; }
+    }
+    if y >= 120 && y < 128 {
+        if let Some(c) = test_text(x, y, 370, 120, 1, b"System actions & control", TEXT_MUTED) { return c; }
+    }
+
+    // Action Card 1: Lock device (y: 190..265, x: 365..695)
+    if y >= 190 && y < 265 && x >= 365 && x < 695 {
+        if y == 190 || y == 264 || x == 365 || x == 694 { return BORDER_SUBTLE; }
+        if y >= 212 && y < 228 {
+            if let Some(c) = test_text(x, y, 395, 212, 2, b"Lock Device", TEXT_PRIMARY) { return c; }
+        }
+        if y >= 236 && y < 244 {
+            if let Some(c) = test_text(x, y, 395, 236, 1, b"Secure current session", TEXT_MUTED) { return c; }
+        }
+        return SURFACE_RAISED;
+    }
+
+    // Action Card 2: Restart (y: 285..360, x: 365..695)
+    if y >= 285 && y < 360 && x >= 365 && x < 695 {
+        if y == 285 || y == 359 || x == 365 || x == 694 { return BORDER_SUBTLE; }
+        if y >= 307 && y < 323 {
+            if let Some(c) = test_text(x, y, 395, 307, 2, b"Restart", TEXT_PRIMARY) { return c; }
+        }
+        if y >= 331 && y < 339 {
+            if let Some(c) = test_text(x, y, 395, 331, 1, b"Reboot InterOS kernel", TEXT_MUTED) { return c; }
+        }
+        return SURFACE_RAISED;
+    }
+
+    // Action Card 3: Power off (y: 380..455, x: 365..695)
+    if y >= 380 && y < 455 && x >= 365 && x < 695 {
+        if y == 380 || y == 454 || x == 365 || x == 694 { return BORDER_SUBTLE; }
+        if y >= 402 && y < 418 {
+            if let Some(c) = test_text(x, y, 395, 402, 2, b"Power Off", TEXT_PRIMARY) { return c; }
+        }
+        if y >= 426 && y < 434 {
+            if let Some(c) = test_text(x, y, 395, 426, 1, b"Shut down device power", TEXT_MUTED) { return c; }
+        }
+        return SURFACE_RAISED;
+    }
+
+    // Action Card 4: Emergency (y: 475..550, x: 365..695)
+    if y >= 475 && y < 550 && x >= 365 && x < 695 {
+        if y == 475 || y == 549 || x == 365 || x == 694 { return DANGER_CRIMSON; }
+        if y >= 497 && y < 513 {
+            if let Some(c) = test_text(x, y, 395, 497, 2, b"Emergency", DANGER_CRIMSON) { return c; }
+        }
+        if y >= 521 && y < 529 {
+            if let Some(c) = test_text(x, y, 395, 521, 1, b"Direct dial emergency lines", TEXT_MUTED) { return c; }
+        }
+        return 0xFF221115;
+    }
+
+    // Dismiss Button (y: 580..635, x: 420..640)
+    if y >= 580 && y < 635 && x >= 420 && x < 640 {
+        if y == 580 || y == 634 || x == 420 || x == 639 { return BORDER_SUBTLE; }
+        if y >= 600 && y < 616 {
+            if let Some(c) = test_text(x, y, 490, 600, 2, b"Cancel", TEXT_PRIMARY) { return c; }
+        }
+        return SURFACE_RAISED;
+    }
+
+    SURFACE_DARK
+}
+
+#[inline(never)]
 fn render_view(surface: u32, state: &LauncherState) {
     let mut chunk = [0u32; CHUNK];
     let total = W * H;
@@ -855,6 +1040,8 @@ fn render_view(surface: u32, state: &LauncherState) {
                 ViewMode::ActivitySpace => get_activity_color(x, y, state),
                 ViewMode::QuickControls => get_quick_controls_color(x, y, state),
                 ViewMode::SystemSpace => get_system_space_color(x, y, state),
+                ViewMode::LockScreen => get_lock_screen_color(x, y, state),
+                ViewMode::PowerMenu => get_power_menu_color(x, y, state),
             };
             x += 1;
             if x == W {
@@ -877,6 +1064,12 @@ fn render_view(surface: u32, state: &LauncherState) {
         }
         ViewMode::SystemSpace => {
             std::log(0, "[LAUNCHER] render_system_space complete: Visual system space presented.").ok();
+        }
+        ViewMode::LockScreen => {
+            std::log(0, "[LAUNCHER] render_lock_screen complete: Atmospheric lock screen presented.").ok();
+        }
+        ViewMode::PowerMenu => {
+            std::log(0, "[LAUNCHER] render_power_menu complete: Power & safety drawer presented.").ok();
         }
     }
 }
@@ -1175,6 +1368,13 @@ pub extern "C" fn _start() -> ! {
                                         break;
                                     }
                                 }
+                                if (630..740).contains(&y) && (375..680).contains(&x) {
+                                    state.current_view = ViewMode::PowerMenu;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Power menu opened from Quick Controls.").ok();
+                                    break;
+                                }
                             }
                         }
                         ViewMode::SystemSpace => {
@@ -1187,6 +1387,15 @@ pub extern "C" fn _start() -> ! {
                                 break;
                             }
                             if input.kind == 1 {
+                                let x = input.x as usize;
+                                let y = input.y as usize;
+                                if (590..710).contains(&y) && (40..345).contains(&x) {
+                                    state.current_view = ViewMode::PowerMenu;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Power menu opened from System Space.").ok();
+                                    break;
+                                }
                                 state.push_recent("org.interos.settings");
                                 if let Ok(task_id) = std::app_launch("org.interos.settings") {
                                     state.active_child = Some(task_id);
@@ -1197,7 +1406,142 @@ pub extern "C" fn _start() -> ! {
                                 }
                             }
                         }
+                        ViewMode::LockScreen => {
+                            // 1. Vertical swipe up to unlock
+                            if input.kind == 4 && input.dy <= -60 {
+                                state.current_view = ViewMode::HomeScreen;
+                                render_view(surface, &state);
+                                let _ = std::surface_flip(4);
+                                std::log(0, "[LAUNCHER] Device unlocked via swipe-up gesture.").ok();
+                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                while std::input_event_poll(&mut drain).is_ok() {}
+                                break;
+                            }
+                            // 2. Touch tap
+                            if input.kind == 1 {
+                                let x = input.x as usize;
+                                let y = input.y as usize;
+
+                                // Flashlight circle button at (72, 1330, r: 35)
+                                let f_dx = (x as i32) - 72;
+                                let f_dy = (y as i32) - 1330;
+                                if f_dx * f_dx + f_dy * f_dy <= 1225 {
+                                    state.flashlight_on = !state.flashlight_on;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Flashlight toggled on lock screen.").ok();
+                                    break;
+                                }
+
+                                // Camera circle button at (648, 1330, r: 35)
+                                let c_dx = (x as i32) - 648;
+                                let c_dy = (y as i32) - 1330;
+                                if c_dx * c_dx + c_dy * c_dy <= 1225 {
+                                    state.push_recent("org.interos.camera");
+                                    if let Ok(task_id) = std::app_launch("org.interos.camera") {
+                                        state.active_child = Some(task_id);
+                                        state.current_view = ViewMode::HomeScreen;
+                                        std::log(0, "[LAUNCHER] Camera launched from lock screen shortcut.").ok();
+                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                        while std::input_event_poll(&mut drain).is_ok() {}
+                                        break;
+                                    }
+                                }
+
+                                // Bottom home bar or hint area tap unlocks
+                                if y >= 1370 {
+                                    state.current_view = ViewMode::HomeScreen;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Device unlocked via bottom tap.").ok();
+                                    let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
+                            }
+                        }
+                        ViewMode::PowerMenu => {
+                            // Swipe right to dismiss
+                            if input.kind == 4 && input.dx >= 60 {
+                                state.current_view = ViewMode::HomeScreen;
+                                render_view(surface, &state);
+                                let _ = std::surface_flip(4);
+                                std::log(0, "[LAUNCHER] Power menu dismissed via swipe.").ok();
+                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                while std::input_event_poll(&mut drain).is_ok() {}
+                                break;
+                            }
+                            // Touch tap
+                            if input.kind == 1 {
+                                let x = input.x as usize;
+                                let y = input.y as usize;
+
+                                // Tap outside drawer or Cancel button dismisses
+                                if x < 340 || (y >= 580 && y < 635 && x >= 420 && x < 640) {
+                                    state.current_view = ViewMode::HomeScreen;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Power menu dismissed.").ok();
+                                    let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
+
+                                // Card 1: Lock device (y: 190..265, x: 365..695)
+                                if (190..265).contains(&y) && (365..695).contains(&x) {
+                                    state.current_view = ViewMode::LockScreen;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Device locked via power menu.").ok();
+                                    let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
+
+                                // Card 2: Restart (y: 285..360, x: 365..695)
+                                if (285..360).contains(&y) && (365..695).contains(&x) {
+                                    std::log(0, "[LAUNCHER] Power menu: System restart confirmed.").ok();
+                                    state.current_view = ViewMode::HomeScreen;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    break;
+                                }
+
+                                // Card 3: Power off (y: 380..455, x: 365..695)
+                                if (380..455).contains(&y) && (365..695).contains(&x) {
+                                    std::log(0, "[LAUNCHER] Power menu: System power off confirmed.").ok();
+                                    state.current_view = ViewMode::HomeScreen;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    break;
+                                }
+
+                                // Card 4: Emergency (y: 475..550, x: 365..695)
+                                if (475..550).contains(&y) && (365..695).contains(&x) {
+                                    state.push_recent("org.interos.dialer");
+                                    if let Ok(task_id) = std::app_launch("org.interos.dialer") {
+                                        state.active_child = Some(task_id);
+                                        state.current_view = ViewMode::HomeScreen;
+                                        std::log(0, "[LAUNCHER] Emergency dialer launched from power menu.").ok();
+                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                        while std::input_event_poll(&mut drain).is_ok() {}
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                         ViewMode::HomeScreen => {
+                            // Long-press opens Power Menu
+                            if input.kind == 6 {
+                                state.current_view = ViewMode::PowerMenu;
+                                render_view(surface, &state);
+                                let _ = std::surface_flip(4);
+                                std::log(0, "[LAUNCHER] Power menu opened via long-press.").ok();
+                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                while std::input_event_poll(&mut drain).is_ok() {}
+                                break;
+                            }
+
                             // 1. Gesture Navigation
                             // Swipe up opens Activity Space
                             if input.kind == 4 && input.dy <= -60 && input.y >= 1200 {
@@ -1250,12 +1594,19 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
-                                // Tapping top status bar opens Quick Controls
+                                // Tapping top status bar: right side (battery) opens PowerMenu, left side opens Quick Controls
                                 if y <= 48 {
-                                    state.current_view = ViewMode::QuickControls;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Quick Controls shade opened via top status bar tap.").ok();
+                                    if x >= 650 {
+                                        state.current_view = ViewMode::PowerMenu;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        std::log(0, "[LAUNCHER] Power menu opened via battery status bar tap.").ok();
+                                    } else {
+                                        state.current_view = ViewMode::QuickControls;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        std::log(0, "[LAUNCHER] Quick Controls shade opened via top status bar tap.").ok();
+                                    }
                                     let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
                                     while std::input_event_poll(&mut drain).is_ok() {}
                                     break;

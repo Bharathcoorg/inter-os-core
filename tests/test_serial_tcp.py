@@ -66,6 +66,18 @@ try:
                         print(f"[SERIAL] {decoded}")
                         if "Step 5: Initial presentation complete" in decoded:
                             print(f"[SUCCESS] Launcher presentation complete at {time.time() - start_t:.1f}s")
+                            print("[TEST STEP] Tapping battery icon at (670, 25) to open Power Menu...")
+                            s.sendall(b"TAP 670 25\n")
+                            time.sleep(1.0)
+                            print("[TEST STEP] Tapping Lock Device card at (450, 230)...")
+                            s.sendall(b"TAP 450 230\n")
+                            time.sleep(1.0)
+                            print("[TEST STEP] Tapping Flashlight shortcut at (72, 1330)...")
+                            s.sendall(b"TAP 72 1330\n")
+                            time.sleep(1.0)
+                            print("[TEST STEP] Swiping up to unlock (360 1370 -> 360 1100)...")
+                            s.sendall(b"SWIPE 360 1370 360 1100 5\n")
+                            time.sleep(1.5)
                             break
                 if any("Step 5: Initial presentation complete" in l for l in lines):
                     break
