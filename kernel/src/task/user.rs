@@ -131,6 +131,12 @@ pub static APP_MUSIC_ELF: &[u8] = include_bytes!(concat!(
     "/../target/x86_64-unknown-none/debug/music"
 ));
 
+/// Embedded static ELF binary of the Sovereign File Manager app (`apps/file_manager`).
+pub static APP_FILE_MANAGER_ELF: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../target/x86_64-unknown-none/debug/file_manager"
+));
+
 /// Drops CPU execution privilege from Ring 0 to Ring 3 via an `iretq` stack frame.
 ///
 /// Hardware sets:
@@ -1404,6 +1410,72 @@ pub fn spawn_app_music(id_security: TaskId) -> TaskId {
     id
 }
 
+/// Trampoline for Sovereign File Manager App (Ring 3)
+pub extern "C" fn app_file_manager_trampoline() -> ! {
+    user_process_entry()
+}
 
+/// Spawns the native Sovereign File Manager & VFS Explorer in Ring 3.
+pub fn spawn_app_file_manager(id_security: TaskId) -> TaskId {
+    let mut caps = CapabilityTable::new(10);
+    caps.insert(Capability {
+        id: CapabilityId(2701),
+        cap_type: CapabilityType::SerialOutput,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2702),
+        cap_type: CapabilityType::IpcSend,
+        rights: Rights::WRITE,
+        object_id: id_security.0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2703),
+        cap_type: CapabilityType::TimerTickRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2704),
+        cap_type: CapabilityType::HardwarePortIo,
+        rights: Rights::READ | Rights::WRITE,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2705),
+        cap_type: CapabilityType::FileSystemRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2706),
+        cap_type: CapabilityType::FileSystemWrite,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2707),
+        cap_type: CapabilityType::FrameBufferDirect,
+        rights: Rights::WRITE,
+        object_id: 1,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2708),
+        cap_type: CapabilityType::EventPoll,
+        rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
 
-
+    let id = spawn_user_process(
+        "app_file_manager",
+        APP_FILE_MANAGER_ELF,
+        caps,
+        1,
+    ).expect("Failed to spawn File Manager app");
+    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
+        task.parent_id = id_security;
+    }
+    serial_println!("[OK] Spawned Task 27: app_file_manager (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
+    id
+}
