@@ -19,6 +19,8 @@ pub enum UpdateError {
     DigestMismatch,
     InvalidSignature,
     EmptyPayload,
+    PersistenceFailed,
+    ActivationFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +90,7 @@ impl ActivationRecord {
             boot_attempts:bytes[10],
         })
     }
-    fn persist(&self) { let _=persistent::commit_kind(&self.encode(), 8); }
+    fn persist(&self) -> Result<(), UpdateError> { persistent::commit_kind(&self.encode(), 8).map(|_| ()).map_err(|_| UpdateError::PersistenceFailed) }
 
     pub const fn new(active: UpdateSlot, version: u64) -> Self { Self { active, pending: None, pending_version: version, boot_attempts: 0 } }
     pub fn stage(&mut self, version: u64) -> Result<UpdateSlot, UpdateError> {
@@ -97,12 +99,29 @@ impl ActivationRecord {
         self.pending = Some(slot);
         self.pending_version = version;
         self.boot_attempts = 0;
-        self.persist();
+        self.persist()?;
         Ok(slot)
     }
-    pub fn begin_boot(&mut self) { if self.pending.is_some() { self.boot_attempts = self.boot_attempts.saturating_add(1); self.persist(); } }
-    pub fn confirm(&mut self) { if let Some(slot)=self.pending.take() { self.active=slot; self.boot_attempts=0; self.persist(); } }
-    pub fn rollback(&mut self) { self.pending=None; self.boot_attempts=0; self.persist(); }
+    pub fn begin_boot(&mut self) -> Result<(), UpdateError> {
+        if self.pending.is_some() {
+            self.boot_attempts = self.boot_attempts.saturating_add(1);
+            self.persist()?;
+        }
+        Ok(())
+    }
+    pub fn confirm(&mut self) -> Result<(), UpdateError> {
+        if let Some(slot)=self.pending.take() {
+            self.active=slot;
+            self.boot_attempts=0;
+            self.persist()?;
+        }
+        Ok(())
+    }
+    pub fn rollback(&mut self) -> Result<(), UpdateError> {
+        self.pending=None;
+        self.boot_attempts=0;
+        self.persist()
+    }
     pub const fn boot_attempt_limit(&self) -> u8 { 3 }
     pub const fn recovery_required(&self) -> bool { self.pending.is_some() && self.boot_attempts >= self.boot_attempt_limit() }
 }
@@ -187,9 +206,24 @@ pub struct VerifiedUpdate<'a, B: UpdateBackend> { backend: &'a mut B }
 impl<'a, B: UpdateBackend> VerifiedUpdate<'a, B> {
     pub fn install(backend:&'a mut B, slot:UpdateSlot, tx:&mut UpdateTransaction, payload:&[u8])->Result<(),UpdateError>{
         if tx.state != UpdateState::Verified { return Err(UpdateError::InvalidFormat); }
-        backend.write_inactive_slot(slot,payload)?;
-        backend.verify_slot(slot,&tx.manifest)?;
-        backend.activate_slot(slot,tx.manifest.version)?;
+        {
+            let mut activation = UPDATE_ACTIVATION.lock();
+            if slot == activation.active { return Err(UpdateError::ActivationFailed); }
+            let previous = *activation;
+            activation.pending = Some(slot);
+            activation.pending_version = tx.manifest.version;
+            activation.boot_attempts = 0;
+            if activation.persist().is_err() {
+                *activation = previous;
+                return Err(UpdateError::PersistenceFailed);
+            }
+        }
+        if let Err(error) = backend.write_inactive_slot(slot,payload)
+            .and_then(|_| backend.verify_slot(slot,&tx.manifest))
+            .and_then(|_| backend.activate_slot(slot,tx.manifest.version)) {
+            let _ = UPDATE_ACTIVATION.lock().rollback();
+            return Err(error);
+        }
         tx.commit()
     }
 }
