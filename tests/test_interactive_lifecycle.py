@@ -102,7 +102,7 @@ def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_co
     print(f"[LIFECYCLE TEST] [OK] {app_name} launched and presented application frame.")
 
     time.sleep(1.0)
-    ppm_app = os.path.abspath(rf"target\{dump_prefix}.ppm")
+    ppm_app = os.path.abspath(rf"target\{dump_prefix}.ppm").replace("\\", "/")
     _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_app}")
     print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_app}")
     time.sleep(0.5)
@@ -122,15 +122,18 @@ def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_co
                 print(f"[LIFECYCLE TEST] [OK] Interaction '{action_name}' verified.")
             time.sleep(0.8)
             if dump_suffix:
-                ppm_inter = os.path.abspath(rf"target\{dump_prefix}_{dump_suffix}.ppm")
+                ppm_inter = os.path.abspath(rf"target\{dump_prefix}_{dump_suffix}.ppm").replace("\\", "/")
                 _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_inter}")
                 print(f"[LIFECYCLE TEST] In-app interaction screendump recorded: {ppm_inter}")
                 time.sleep(0.4)
 
-    # Dispatch touch tap on Back button or Home Gesture Bar
+    # Dispatch touch tap on Back button, Home Gesture Bar, or Swipe Up
     if exit_gesture == "home_bar":
         print(f"[LIFECYCLE TEST] Dispatching touch tap on Home Gesture Bar (x=360, y=1420)...")
         reader.sock.sendall(b"TAP 360 1420\n")
+    elif exit_gesture == "swipe_up":
+        print(f"[LIFECYCLE TEST] Dispatching swipe-up gesture from bottom bar (360, 1420) -> (360, 1100)...")
+        reader.sock.sendall(b"SWIPE 360 1420 360 1100 5\n")
     else:
         print(f"[LIFECYCLE TEST] Dispatching touch tap on Back button (x=62, y=48)...")
         reader.sock.sendall(b"TAP 62 48\n")
@@ -145,7 +148,7 @@ def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_co
     print(f"[LIFECYCLE TEST] [OK] {exit_gesture.capitalize()} navigation successfully triggered child exit, surface teardown, and parent waitpid reaping.")
 
     time.sleep(1.2)
-    ppm_reaped = os.path.abspath(rf"target\test_launcher_after_{dump_prefix}.ppm")
+    ppm_reaped = os.path.abspath(rf"target\test_launcher_after_{dump_prefix}.ppm").replace("\\", "/")
     _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_reaped}")
     print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_reaped}")
     time.sleep(0.5)
@@ -213,7 +216,7 @@ def main():
         _ = send_monitor_cmd(monitor_sock, "")
 
         # Take screendump of launcher homescreen
-        ppm_launcher = os.path.abspath(r"target\test_launcher.ppm")
+        ppm_launcher = os.path.abspath(r"target\test_launcher.ppm").replace("\\", "/")
         _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_launcher}")
         print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_launcher}")
 
@@ -266,7 +269,7 @@ def main():
             in_app_interactions=[
                 ("Tap terminal console area", (360, 500), "Normalized touch event received.", "touch"),
             ],
-            exit_gesture="home_bar"
+            exit_gesture="swipe_up"
         )
 
         # App 4: Vault (Row 1, Card 1: x=485, y=520)
@@ -298,7 +301,7 @@ def main():
             in_app_interactions=[
                 ("Tap Mode Carousel (Document Vision)", (165, 1175), None, "mode_doc"),
             ],
-            exit_gesture="home_bar"
+            exit_gesture="swipe_up"
         )
 
         # App 6: Dialer (Row 2, Card 1: x=485, y=690)
@@ -359,7 +362,7 @@ def main():
             tap_coords=(180, 1030),
             present_marker="Calendar canvas presented to scanout buffer.",
             dump_prefix="test_calendar",
-            exit_gesture="back"
+            exit_gesture="swipe_up"
         )
 
         # App 10: Music (Row 4, Card 1: x=485, y=1030)
@@ -378,8 +381,54 @@ def main():
             exit_gesture="home_bar"
         )
 
+        # Phase 12: Overview / Recent Apps Switcher Test
+        print("\n[LIFECYCLE TEST] === Phase 12: Testing Overview / Recent Apps Deck ===")
+        print("[LIFECYCLE TEST] Dispatching swipe-up gesture from bottom bar on homescreen to open overview...")
+        reader.sock.sendall(b"SWIPE 360 1420 360 1100 5\n")
+        overview_ready = reader.wait_for(
+            "render_overview complete: Recent apps overview deck displayed.",
+            timeout=10.0,
+            print_keywords=["LAUNCHER", "overview", "deck"]
+        )
+        assert overview_ready, "Launcher failed to open overview mode within timeout"
+        print("[LIFECYCLE TEST] [OK] Overview / Recent Apps deck opened.")
+        time.sleep(0.8)
+        ppm_overview = os.path.abspath(r"target\test_overview_deck.ppm").replace("\\", "/")
+        _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_overview}")
+        print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_overview}")
+
+        # Tap on recent app Card 0 (y=340, x=360) in overview deck
+        print("[LIFECYCLE TEST] Tapping Card 0 in overview to switch to recent app...")
+        reader.sock.sendall(b"TAP 360 340\n")
+        switched = reader.wait_for(
+            "Switched to recent app from overview card 0",
+            timeout=10.0,
+            print_keywords=["LAUNCHER", "Switched", "APP"]
+        )
+        assert switched, "Failed to switch to recent app from overview"
+        print("[LIFECYCLE TEST] [OK] Switched to recent app from overview card 0.")
+        
+        recent_presented = reader.wait_for(
+            "Music canvas presented to scanout buffer.",
+            timeout=10.0,
+            print_keywords=["MUSIC", "APP", "canvas"]
+        )
+        assert recent_presented, "Recent app failed to present canvas within timeout"
+        time.sleep(1.0)
+
+        # Exit child app via swipe up to return to launcher
+        print("[LIFECYCLE TEST] Dispatching swipe-up from recent app to return to launcher...")
+        reader.sock.sendall(b"SWIPE 360 1420 360 1100 5\n")
+        reaped = reader.wait_for(
+            "Foreground application exited and was reaped",
+            timeout=15.0,
+            print_keywords=["LAUNCHER", "WAITPID"]
+        )
+        assert reaped, "Failed to reap recent app upon swipe up"
+        print("[LIFECYCLE TEST] [OK] Child application reaped, launcher returned to home grid.")
+
         print("\n============================================================")
-        print("  INTEROS CORE 10-APP INTERACTIVE LIFECYCLE: ALL PASSED     ")
+        print("  INTEROS CORE 10-APP & OVERVIEW LIFECYCLE: ALL PASSED (100%)")
         print("============================================================")
 
     except Exception as e:
