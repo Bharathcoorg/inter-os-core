@@ -424,90 +424,28 @@ pub fn spawn_verified_rapp_process(
 
 /// Spawns a first-party system service as an isolated Ring-3 process owned by PID1.
 pub fn spawn_userspace_service(service_id: u8, parent_id: TaskId) -> Result<TaskId, &'static str> {
-    if service_id == 9 {
-        let mut caps = CapabilityTable::new(8);
-        caps.insert(Capability { id: CapabilityId(0x7000), cap_type: CapabilityType::SerialOutput, rights: Rights::WRITE, object_id: 0 }).map_err(|_| "service capability table full")?;
-        caps.insert(Capability { id: CapabilityId(0x7001), cap_type: CapabilityType::IpcReceive, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
-        caps.insert(Capability { id: CapabilityId(0x7002), cap_type: CapabilityType::TimerTickRead, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
-        caps.insert(Capability { id: CapabilityId(0x7003), cap_type: CapabilityType::EventPoll, rights: Rights::READ | Rights::INVOKE, object_id: 0 }).map_err(|_| "service capability table full")?;
-        caps.insert(Capability { id: CapabilityId(0x7004), cap_type: CapabilityType::FrameBufferDirect, rights: Rights::READ | Rights::WRITE, object_id: 1 }).map_err(|_| "service capability table full")?;
-        caps.insert(Capability { id: CapabilityId(0x7005), cap_type: CapabilityType::FileSystemRead, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
-        let image = service_image(service_id).ok_or("unknown userspace service image")?;
-        let id = spawn_user_process_with_parent(image.name, image.elf, caps, 5, parent_id)?;
-        return Ok(id);
-    }
-    if service_id == 10 {
-        let mut caps = CapabilityTable::new(10);
-        caps.insert(Capability { id: CapabilityId(0x7000), cap_type: CapabilityType::SerialOutput, rights: Rights::WRITE, object_id: 0 }).map_err(|_| "service capability table full")?;
-        caps.insert(Capability { id: CapabilityId(0x7001), cap_type: CapabilityType::TimerTickRead, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
-        caps.insert(Capability { id: CapabilityId(0x7002), cap_type: CapabilityType::IpcSend, rights: Rights::WRITE, object_id: parent_id.0 }).map_err(|_| "service capability table full")?;
-        caps.insert(Capability { id: CapabilityId(0x7003), cap_type: CapabilityType::FileSystemRead, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
-        caps.insert(Capability { id: CapabilityId(0x7004), cap_type: CapabilityType::FrameBufferDirect, rights: Rights::READ | Rights::WRITE, object_id: 1 }).map_err(|_| "service capability table full")?;
-        caps.insert(Capability { id: CapabilityId(0x7005), cap_type: CapabilityType::EventPoll, rights: Rights::READ | Rights::INVOKE, object_id: 0 }).map_err(|_| "service capability table full")?;
-        caps.insert(Capability { id: CapabilityId(0x7006), cap_type: CapabilityType::IpcReceive, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
-        caps.insert(Capability { id: CapabilityId(0x7007), cap_type: CapabilityType::ProcessSpawn, rights: Rights::INVOKE, object_id: 0 }).map_err(|_| "service capability table full")?;
-        let image = service_image(service_id).ok_or("unknown userspace service image")?;
-        let id = spawn_user_process_with_parent(image.name, image.elf, caps, 5, parent_id)?;
-        return Ok(id);
-    }
-
-    let image = service_image(service_id).ok_or("unknown userspace service image")?;
-    let mut caps = CapabilityTable::new(8);
-    caps.insert(Capability { id: CapabilityId(0x7000), cap_type: CapabilityType::SerialOutput, rights: Rights::WRITE, object_id: 0 }).map_err(|_| "service capability table full")?;
-    caps.insert(Capability { id: CapabilityId(0x7001), cap_type: CapabilityType::TimerTickRead, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
-    caps.insert(Capability { id: CapabilityId(0x7002), cap_type: CapabilityType::EventPoll, rights: Rights::READ | Rights::INVOKE, object_id: 0 }).map_err(|_| "service capability table full")?;
-    caps.insert(Capability { id: CapabilityId(0x7003), cap_type: CapabilityType::IpcReceive, rights: Rights::READ, object_id: 0 }).map_err(|_| "service capability table full")?;
-    // service-cap:Display=FrameBufferDirect:WRITE
-    // service-cap:Input=EventPoll:READ
-    // service-cap:Storage=FileSystemRead:READ|WRITE
-    // service-cap:Network=NetworkSocket:READ|WRITE
-    // service-cap:Power=EventPoll:READ
-    // service-cap:Modem=EventPoll:READ
-    // service-cap:Audio=EventPoll:READ
-    // service-cap:Camera=EventPoll:READ
-    // service-cap:Init=ProcessSpawn:GRANT
-    // forbidden:CapabilityType::ProcessKill
-    // forbidden:CapabilityType::ProcessSpawn
-    // forbidden:CapabilityType::StorageRawBlock
-    // forbidden:CapabilityType::SystemControl
-    // NetworkSend/NetworkReceive are reserved for netd's explicit data-plane policy.
-    // forbidden:CapabilityType::HardwarePortIo
-    let service_specific = match service_id {
-        1 => Some((CapabilityType::FrameBufferDirect, Rights::WRITE, service_id as u64)),
-        3 => Some((CapabilityType::FileSystemRead, Rights::READ | Rights::WRITE, 0)),
-        4 => Some((CapabilityType::NetworkSocket, Rights::READ | Rights::WRITE, service_id as u64)),
-        2 | 5 | 6 | 7 | 8 => None,
+    let service = match service_id {
+        1 => crate::services::ServiceId::Display,
+        2 => crate::services::ServiceId::Input,
+        3 => crate::services::ServiceId::Storage,
+        4 => crate::services::ServiceId::Network,
+        5 => crate::services::ServiceId::Power,
+        6 => crate::services::ServiceId::Modem,
+        7 => crate::services::ServiceId::Audio,
+        8 => crate::services::ServiceId::Camera,
+        9 => crate::services::ServiceId::Compositor,
+        10 => crate::services::ServiceId::Launcher,
         _ => return Err("unknown userspace service"),
     };
-    if !(1..=10).contains(&service_id) || crate::service_abi::service_id_from_package_id(match service_id {
-        1 => "org.interos.service.displayd", 2 => "org.interos.service.inputd", 3 => "org.interos.service.storaged",
-        4 => "org.interos.service.netd", 5 => "org.interos.service.powerd", 6 => "org.interos.service.modemd",
-        7 => "org.interos.service.audiod", 8 => "org.interos.service.camerad", _ => "",
-    }).is_none() {
-        return Err("service policy rejected");
-    }
-    if let Some((cap_type, rights, object_id)) = service_specific {
+    let image = service_image(service_id).ok_or("unknown userspace service image")?;
+    let policy = crate::services::capability_policy(service, parent_id)?;
+    let mut caps = CapabilityTable::new(policy.len().max(8));
+    for (slot, spec) in policy.iter().enumerate() {
         caps.insert(Capability {
-            id: CapabilityId(0x7004 + service_id as u64),
-            cap_type,
-            rights,
-            object_id,
-        }).map_err(|_| "service capability table full")?;
-    }
-    // netd owns the userspace network data plane. Keep TX/RX/polling
-    // capabilities separate so the service boundary remains auditable.
-    if service_id == 4 {
-        caps.insert(Capability {
-            id: CapabilityId(0x7014),
-            cap_type: CapabilityType::NetworkSend,
-            rights: Rights::WRITE,
-            object_id: 0,
-        }).map_err(|_| "service capability table full")?;
-        caps.insert(Capability {
-            id: CapabilityId(0x7015),
-            cap_type: CapabilityType::NetworkReceive,
-            rights: Rights::READ,
-            object_id: 0,
+            id: CapabilityId(0x7000 + slot as u64),
+            cap_type: spec.cap_type,
+            rights: spec.rights,
+            object_id: spec.object_id,
         }).map_err(|_| "service capability table full")?;
     }
     spawn_user_process_with_parent(image.name, image.elf, caps, 5, parent_id)
