@@ -48,3 +48,10 @@ pub fn verify_rapp_signature(data: &[u8], publisher_id: &str, signature_bytes: &
 pub fn is_unsigned_signature(signature: &[u8; SIGNATURE_LEN]) -> bool {
     signature.iter().all(|b| *b == 0)
 }
+
+pub fn verify_detached_signature(data: &[u8], publisher_id: &str, signature_bytes: &[u8; SIGNATURE_LEN]) -> bool {
+    let Some(public_key_bytes) = trusted_public_key(publisher_id) else { return false; };
+    let Ok(public_key) = VerifyingKey::from_bytes(&public_key_bytes) else { return false; };
+    let signature = Signature::from_bytes(signature_bytes);
+    public_key.verify_strict(data, &signature).is_ok()
+}
