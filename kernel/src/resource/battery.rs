@@ -30,6 +30,8 @@ pub struct BatteryFuelGauge {
     pub cycle_count: u32,
     /// Current charging power source
     pub charging_status: ChargingStatus,
+    /// False until a board-specific fuel-gauge backend supplies these values.
+    pub telemetry_valid: bool,
 }
 
 pub const BATTERY_JSON_MAX: usize = 256;
@@ -50,8 +52,16 @@ impl BatteryFuelGauge {
 
     /// Checks if a physical ACPI or I2C battery fuel gauge is present on the board.
     pub fn is_hardware_present(&self) -> bool {
-        // Standard development QEMU/PC platform runs on AC/line power without physical battery
-        false
+        self.telemetry_valid
+    }
+
+    pub fn set_telemetry(&mut self, voltage_mv: u32, capacity_mah: u32, temperature_c: i8, charging_status: ChargingStatus) {
+        self.voltage_mv = voltage_mv;
+        self.capacity_mah = capacity_mah.min(self.design_capacity_mah);
+        self.soc_percent = ((self.capacity_mah as u64 * 100) / self.design_capacity_mah.max(1) as u64) as u8;
+        self.temperature_c = temperature_c;
+        self.charging_status = charging_status;
+        self.telemetry_valid = true;
     }
 
     /// Updates terminal voltage and recalculates State of Charge (SoC) curve.
