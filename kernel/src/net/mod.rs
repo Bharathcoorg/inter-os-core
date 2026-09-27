@@ -16,6 +16,7 @@ pub mod ipv6;
 pub mod socket;
 pub mod udp;
 pub mod wireless;
+pub mod route;
 
 pub use arp::{ArpOpcode, ArpPacket, ArpTable};
 pub use device::{LoopbackDevice, NetDeviceInfo, NetError, NetworkBackend, NetworkDevice, NetworkDeviceManager, NETWORK_DEVICE};
@@ -28,6 +29,7 @@ pub use ipv4::{calculate_ipv4_checksum, verify_ipv4_checksum, IpProtocol, Ipv4Ad
 pub use socket::{SocketId, SocketTable, TcpConnection, TcpConnectionTable, UdpSocket, TCP_MAX_RETRIES, TCP_RETRANSMIT_TICKS};
 pub use udp::UdpDatagram;
 pub use wireless::{WifiState, WirelessManager, WIRELESS_MANAGER};
+pub use route::{Ipv4Cidr, Route, RoutingTable, MAX_ROUTES};
 
 use spin::Mutex;
 use crate::capability::{Capability, CapabilityId, CapabilityTable, CapabilityType, Rights};
