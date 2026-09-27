@@ -72,10 +72,6 @@ impl PackageRegistry {
                 Some(v) => v,
                 None => { self.entries.clear(); return false; }
             };
-            let Some(desc) = crate::package::first_party_package(id) else {
-                self.entries.clear();
-                return false;
-            };
             pos += 32;
             let generation = u64::from_le_bytes([
                 buf[pos],buf[pos+1],buf[pos+2],buf[pos+3],
@@ -95,7 +91,7 @@ impl PackageRegistry {
             pos+=1;
             self.generation=self.generation.max(generation);
             self.entries.push(PackageEntry {
-                package_id:desc.package_id.to_string(),
+                package_id:id.to_string(),
                 generation,
                 state,
                 version:(major,minor,patch),
@@ -198,7 +194,7 @@ impl PackageRegistry {
 
     pub fn rollback(&mut self, package_id: &str) -> Result<(), ()> {
         let idx=self.entries.iter().position(|e| e.package_id==package_id).ok_or(())?;
-        let previous=self.entries[idx];
+        let previous=self.entries[idx].clone();
         let old=self.entries.clone();
         let next_generation=self.generation.saturating_add(1);
         self.generation=next_generation;
