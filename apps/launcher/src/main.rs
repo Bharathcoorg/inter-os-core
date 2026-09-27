@@ -183,6 +183,8 @@ fn get_overview_color(x: usize, y: usize) -> u32 {
     }
     // Card 0: y in 200..480, x in 56..(W - 56)
     if y >= 200 && y < 480 && x >= 56 && x < (W - 56) {
+        // Dismiss badge [x] top right
+        if y >= 210 && y < 240 && x >= 590 && x < 644 { return std::design::color::DANGER; }
         if y < 250 { return std::design::color::ACCENT; }
         if y >= 476 || x < 60 || x >= (W - 60) { return std::design::color::BORDER; }
         if y >= 330 && y < 370 && x >= 100 && x < (W - 100) { return std::design::color::SURFACE_RAISED; }
@@ -190,6 +192,8 @@ fn get_overview_color(x: usize, y: usize) -> u32 {
     }
     // Card 1: y in 520..800, x in 56..(W - 56)
     if y >= 520 && y < 800 && x >= 56 && x < (W - 56) {
+        // Dismiss badge [x] top right
+        if y >= 530 && y < 560 && x >= 590 && x < 644 { return std::design::color::DANGER; }
         if y < 570 { return std::design::color::SUCCESS; }
         if y >= 796 || x < 60 || x >= (W - 60) { return std::design::color::BORDER; }
         if y >= 650 && y < 690 && x >= 100 && x < (W - 100) { return std::design::color::SURFACE_RAISED; }
@@ -197,6 +201,8 @@ fn get_overview_color(x: usize, y: usize) -> u32 {
     }
     // Card 2: y in 840..1120, x in 56..(W - 56)
     if y >= 840 && y < 1120 && x >= 56 && x < (W - 56) {
+        // Dismiss badge [x] top right
+        if y >= 850 && y < 880 && x >= 590 && x < 644 { return std::design::color::DANGER; }
         if y < 890 { return std::design::color::WARNING; }
         if y >= 1116 || x < 60 || x >= (W - 60) { return std::design::color::BORDER; }
         if y >= 970 && y < 1010 && x >= 100 && x < (W - 100) { return std::design::color::SURFACE_RAISED; }
@@ -234,6 +240,19 @@ fn render_overview(surface: u32) {
         offset += count;
     }
     std::log(0, "[LAUNCHER] render_overview complete: Recent apps overview deck displayed.").ok();
+}
+
+fn dismiss_recent(recents: &mut [&'static str; 3], index: usize) {
+    if index == 0 {
+        recents[0] = recents[1];
+        recents[1] = recents[2];
+        recents[2] = "org.interos.calculator";
+    } else if index == 1 {
+        recents[1] = recents[2];
+        recents[2] = "org.interos.settings";
+    } else if index == 2 {
+        recents[2] = "org.interos.terminal";
+    }
 }
 
 fn push_recent(recents: &mut [&'static str; 3], app: &'static str) {
@@ -337,47 +356,118 @@ pub extern "C" fn _start() -> ! {
                 while std::input_event_poll(&mut input).is_ok() {
                     if in_overview {
                         // In Overview / Recents Switcher mode
-                        if input.kind == 4 && input.dy >= 60 {
-                            // Swipe down to dismiss overview
-                            in_overview = false;
-                            render_full(surface);
-                            let _ = std::surface_flip(4);
-                            std::log(0, "[LAUNCHER] Returned to home grid from recents via swipe.").ok();
-                            break;
+                        // 1. Swipe gestures
+                        if input.kind == 4 {
+                            // Vertical swipe down to dismiss overview and return home
+                            if input.dy >= 60 {
+                                in_overview = false;
+                                render_full(surface);
+                                let _ = std::surface_flip(4);
+                                std::log(0, "[LAUNCHER] Returned to home grid from recents via swipe.").ok();
+                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                while std::input_event_poll(&mut drain).is_ok() {}
+                                break;
+                            }
+                            // Horizontal swipe-to-dismiss on cards
+                            if input.dx.abs() >= 60 {
+                                let y = input.y as usize;
+                                if (200..480).contains(&y) {
+                                    dismiss_recent(&mut recent_apps, 0);
+                                    render_overview(surface);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Card 0 dismissed via swipe.").ok();
+                                    let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                } else if (520..800).contains(&y) {
+                                    dismiss_recent(&mut recent_apps, 1);
+                                    render_overview(surface);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Card 1 dismissed via swipe.").ok();
+                                    let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                } else if (840..1120).contains(&y) {
+                                    dismiss_recent(&mut recent_apps, 2);
+                                    render_overview(surface);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Card 2 dismissed via swipe.").ok();
+                                    let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
+                            }
                         }
+                        // 2. Tap gestures
                         if input.kind == 1 {
                             let x = input.x as usize;
                             let y = input.y as usize;
-                            // Tap Card 0
-                            if (200..480).contains(&y) && (56..664).contains(&x) {
+                            // Check dismiss button on Card 0: x in 580..664, y in 200..260
+                            if (200..260).contains(&y) && (580..664).contains(&x) {
+                                dismiss_recent(&mut recent_apps, 0);
+                                render_overview(surface);
+                                let _ = std::surface_flip(4);
+                                std::log(0, "[LAUNCHER] Card 0 dismissed via dismiss button tap.").ok();
+                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                while std::input_event_poll(&mut drain).is_ok() {}
+                                break;
+                            }
+                            // Tap Card 0 body to switch
+                            else if (200..480).contains(&y) && (56..580).contains(&x) {
                                 let target = recent_apps[0];
                                 push_recent(&mut recent_apps, target);
                                 if let Ok(task_id) = std::app_launch(target) {
                                     active_child = Some(task_id);
                                     in_overview = false;
                                     std::log(0, "[LAUNCHER] Switched to recent app from overview card 0.").ok();
+                                    let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
                                     break;
                                 }
                             }
-                            // Tap Card 1
-                            else if (520..800).contains(&y) && (56..664).contains(&x) {
+                            // Check dismiss button on Card 1: x in 580..664, y in 520..580
+                            else if (520..580).contains(&y) && (580..664).contains(&x) {
+                                dismiss_recent(&mut recent_apps, 1);
+                                render_overview(surface);
+                                let _ = std::surface_flip(4);
+                                std::log(0, "[LAUNCHER] Card 1 dismissed via dismiss button tap.").ok();
+                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                while std::input_event_poll(&mut drain).is_ok() {}
+                                break;
+                            }
+                            // Tap Card 1 body to switch
+                            else if (520..800).contains(&y) && (56..580).contains(&x) {
                                 let target = recent_apps[1];
                                 push_recent(&mut recent_apps, target);
                                 if let Ok(task_id) = std::app_launch(target) {
                                     active_child = Some(task_id);
                                     in_overview = false;
                                     std::log(0, "[LAUNCHER] Switched to recent app from overview card 1.").ok();
+                                    let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
                                     break;
                                 }
                             }
-                            // Tap Card 2
-                            else if (840..1120).contains(&y) && (56..664).contains(&x) {
+                            // Check dismiss button on Card 2: x in 580..664, y in 840..900
+                            else if (840..900).contains(&y) && (580..664).contains(&x) {
+                                dismiss_recent(&mut recent_apps, 2);
+                                render_overview(surface);
+                                let _ = std::surface_flip(4);
+                                std::log(0, "[LAUNCHER] Card 2 dismissed via dismiss button tap.").ok();
+                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                while std::input_event_poll(&mut drain).is_ok() {}
+                                break;
+                            }
+                            // Tap Card 2 body to switch
+                            else if (840..1120).contains(&y) && (56..580).contains(&x) {
                                 let target = recent_apps[2];
                                 push_recent(&mut recent_apps, target);
                                 if let Ok(task_id) = std::app_launch(target) {
                                     active_child = Some(task_id);
                                     in_overview = false;
                                     std::log(0, "[LAUNCHER] Switched to recent app from overview card 2.").ok();
+                                    let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
                                     break;
                                 }
                             }
@@ -387,6 +477,8 @@ pub extern "C" fn _start() -> ! {
                                 render_full(surface);
                                 let _ = std::surface_flip(4);
                                 std::log(0, "[LAUNCHER] Returned to home grid from recents.").ok();
+                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                while std::input_event_poll(&mut drain).is_ok() {}
                                 break;
                             }
                         }
@@ -400,6 +492,8 @@ pub extern "C" fn _start() -> ! {
                             render_overview(surface);
                             let _ = std::surface_flip(4);
                             std::log(0, "[LAUNCHER] Overview / Recent Apps switcher opened via swipe-up gesture.").ok();
+                            let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                            while std::input_event_poll(&mut drain).is_ok() {}
                             break;
                         }
                         // 2. Tap
@@ -412,6 +506,8 @@ pub extern "C" fn _start() -> ! {
                                 render_overview(surface);
                                 let _ = std::surface_flip(4);
                                 std::log(0, "[LAUNCHER] Overview / Recent Apps switcher opened via home bar tap.").ok();
+                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                while std::input_event_poll(&mut drain).is_ok() {}
                                 break;
                             }
                             if let Some(target_app) = resolve_app_at_touch(input.x, input.y) {

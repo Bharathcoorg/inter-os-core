@@ -427,6 +427,59 @@ def main():
         assert reaped, "Failed to reap recent app upon swipe up"
         print("[LIFECYCLE TEST] [OK] Child application reaped, launcher returned to home grid.")
 
+        # Phase 13: Overview Card Dismissal Test (Tap dismiss badge & swipe-to-dismiss)
+        print("\n[LIFECYCLE TEST] === Phase 13: Testing Overview Card Dismissal ===")
+        time.sleep(1.0)
+        print("[LIFECYCLE TEST] Dispatching swipe-up from homescreen to open overview...")
+        reader.sock.sendall(b"SWIPE 360 1420 360 1100 5\n")
+        overview2_ready = reader.wait_for(
+            "render_overview complete: Recent apps overview deck displayed.",
+            timeout=10.0,
+            print_keywords=["LAUNCHER", "overview", "deck"]
+        )
+        assert overview2_ready, "Launcher failed to re-open overview deck"
+        print("[LIFECYCLE TEST] [OK] Overview deck re-opened.")
+        time.sleep(0.5)
+
+        # Tap dismiss badge [X] on Card 0 (x=610, y=230)
+        print("[LIFECYCLE TEST] Tapping dismiss badge on Card 0 (x=610, y=230)...")
+        reader.sock.sendall(b"TAP 610 230\n")
+        card0_dismissed = reader.wait_for(
+            "Card 0 dismissed via dismiss button tap.",
+            timeout=10.0,
+            print_keywords=["LAUNCHER", "Card", "dismissed"]
+        )
+        assert card0_dismissed, "Failed to dismiss Card 0 via dismiss button tap"
+        print("[LIFECYCLE TEST] [OK] Card 0 dismissed via dismiss badge tap.")
+        time.sleep(0.5)
+
+        # Dispatch horizontal swipe on Card 1 (y=660: x1=200 -> x2=550)
+        print("[LIFECYCLE TEST] Dispatching horizontal swipe gesture on Card 1 (200, 660) -> (550, 660)...")
+        reader.sock.sendall(b"SWIPE 200 660 550 660 5\n")
+        card1_dismissed = reader.wait_for(
+            "Card 1 dismissed via swipe.",
+            timeout=10.0,
+            print_keywords=["LAUNCHER", "Card", "dismissed"]
+        )
+        assert card1_dismissed, "Failed to dismiss Card 1 via horizontal swipe"
+        print("[LIFECYCLE TEST] [OK] Card 1 dismissed via horizontal swipe gesture.")
+        time.sleep(1.0)
+
+        # Return home via close button tap
+        print("[LIFECYCLE TEST] Returning home from overview deck via close button tap...")
+        reader.sock.sendall(b"TAP 360 1240\n")
+        returned_home = reader.wait_for(
+            "Returned to home grid from recents.",
+            timeout=10.0,
+            print_keywords=["LAUNCHER", "Returned", "home"]
+        )
+        assert returned_home, "Failed to return home from overview deck"
+        print("[LIFECYCLE TEST] [OK] Successfully returned to home grid after card dismissals.")
+
+        ppm_final = os.path.abspath(r"target\test_launcher_final.ppm").replace("\\", "/")
+        _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_final}")
+        print(f"[LIFECYCLE TEST] Final screendump recorded: {ppm_final}")
+
         print("\n============================================================")
         print("  INTEROS CORE 10-APP & OVERVIEW LIFECYCLE: ALL PASSED (100%)")
         print("============================================================")
