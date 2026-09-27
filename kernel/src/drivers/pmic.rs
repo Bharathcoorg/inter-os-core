@@ -137,15 +137,16 @@ impl PmicFuelGauge {
     pub const fn new() -> Self {
         Self {
             telemetry: BatteryTelemetry {
-                present: true,
-                voltage_mv: 3950,
-                soc_percent: 82,
-                capacity_mah: 4000,
-                temperature_c: 28,
-                charging_state: ChargingState::Discharging,
+                present: false,
+                voltage_mv: 0,
+                soc_percent: 0,
+                capacity_mah: 0,
+                temperature_c: 0,
+                charging_state: ChargingState::Disconnected,
             },
-            coulomb_counter_mah: 3280.0,
+            coulomb_counter_mah: 0.0,
             max_capacity_mah: 4000,
+            hardware_present: false,
         }
     }
 
