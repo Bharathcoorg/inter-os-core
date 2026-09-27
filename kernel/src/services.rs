@@ -249,20 +249,13 @@ pub fn launch_verified_package(
         return Err("service not declared");
     }
 
-    SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord {
-        id,
-        task: TaskId(0),
-        state: ServiceState::Starting,
-    });
+    let generation = existing.map(|r| r.generation.saturating_add(1)).unwrap_or(1);
+    SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Starting, generation });
 
     let task = match crate::task::user::spawn_verified_rapp_process(manifest, payload, parent_id) {
         Ok(task) if task != TaskId(0) => task,
         _ => {
-            SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord {
-                id,
-                task: TaskId(0),
-                state: ServiceState::Failed,
-            });
+            SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Failed, generation });
             return Err("verified service package spawn failed");
         }
     };
@@ -408,7 +401,7 @@ pub fn record_exit(task_id: TaskId, _exit_code: i32) {
     for idx in 1..records.len() {
         if let Some(record) = records[idx] {
             if record.task == task_id {
-                records[idx] = Some(ServiceRecord { id: record.id, task: task_id, state: ServiceState::Failed });
+                records[idx] = Some(ServiceRecord { id: record.id, task: task_id, state: ServiceState::Failed, generation: record.generation });
                 return;
             }
         }
@@ -430,6 +423,6 @@ pub fn recover_failed(id: ServiceId, parent_id: TaskId) -> Result<(), &'static s
         let _ = scheduler.terminate_task(record.task, -1);
         let _ = scheduler.reap_child(parent_id, record.task);
     }
-    SERVICE_RECORDS.lock()[idx] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Declared });
+    SERVICE_RECORDS.lock()[idx] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Declared, generation: record.generation });
     start_locked(id, parent_id).map(|_| ())
 }
