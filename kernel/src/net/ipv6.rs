@@ -97,4 +97,12 @@ impl NeighborCache {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Ipv6Autoconfig { pub prefix:Ipv6Prefix, pub interface_id:[u8;8] }
-impl Ipv6Autoconfig { pub fn address(&self)->Ipv6Address { let mut a=self.prefix.address.0; a[8..16].copy_from_slice(&self.interface_id); Ipv6Address(a) } }
+impl Ipv6Autoconfig {
+ pub fn valid(&self)->bool { self.prefix.prefix_len == 64 }
+ pub fn address(&self)->Option<Ipv6Address> {
+  if !self.valid() { return None; }
+  let mut a=self.prefix.address.0;
+  a[8..16].copy_from_slice(&self.interface_id);
+  Some(Ipv6Address(a))
+ }
+}
