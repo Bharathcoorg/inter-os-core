@@ -266,8 +266,56 @@ def main():
             dump_prefix="test_dialer"
         )
 
+        # App 7: Browser (Row 3, Card 0: x=180, y=860)
+        test_app_lifecycle(
+            reader=reader,
+            monitor_sock=monitor_sock,
+            phase_num=8,
+            app_name="Browser",
+            app_id="org.interos.browser",
+            tap_coords=(180, 860),
+            present_marker="Browser canvas presented to scanout buffer.",
+            dump_prefix="test_browser"
+        )
+
+        # App 8: Messages (Row 3, Card 1: x=485, y=860)
+        test_app_lifecycle(
+            reader=reader,
+            monitor_sock=monitor_sock,
+            phase_num=9,
+            app_name="Messages",
+            app_id="org.interos.messages",
+            tap_coords=(485, 860),
+            present_marker="Messages canvas presented to scanout buffer.",
+            dump_prefix="test_messages"
+        )
+
+        # App 9: Calendar (Row 4, Card 0: x=180, y=1030)
+        test_app_lifecycle(
+            reader=reader,
+            monitor_sock=monitor_sock,
+            phase_num=10,
+            app_name="Calendar",
+            app_id="org.interos.calendar",
+            tap_coords=(180, 1030),
+            present_marker="Calendar canvas presented to scanout buffer.",
+            dump_prefix="test_calendar"
+        )
+
+        # App 10: Music (Row 4, Card 1: x=485, y=1030)
+        test_app_lifecycle(
+            reader=reader,
+            monitor_sock=monitor_sock,
+            phase_num=11,
+            app_name="Music",
+            app_id="org.interos.music",
+            tap_coords=(485, 1030),
+            present_marker="Music canvas presented to scanout buffer.",
+            dump_prefix="test_music"
+        )
+
         print("\n============================================================")
-        print("  INTEROS CORE INTERACTIVE MULTI-APP LIFECYCLE: ALL PASSED  ")
+        print("  INTEROS CORE 10-APP INTERACTIVE LIFECYCLE: ALL PASSED     ")
         print("============================================================")
 
     except Exception as e:
