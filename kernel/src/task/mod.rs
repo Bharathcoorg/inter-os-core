@@ -4,6 +4,7 @@
 //! `TaskState`, `TaskControlBlock` (TCB), stack management, and scheduling.
 
 pub mod context;
+pub mod process;
 pub mod scheduler;
 pub mod user;
 
@@ -11,6 +12,7 @@ use alloc::boxed::Box;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 pub use context::{switch_context, TaskContext};
+pub use process::{ProcessId, ProcessRecord, ProcessState, ResourceLimits};
 pub use scheduler::{on_timer_tick, terminate_current, yield_now, Scheduler, SCHEDULER};
 pub use user::{
     spawn_user_init,

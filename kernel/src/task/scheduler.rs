@@ -78,13 +78,20 @@ impl Scheduler {
         tcb.parent_id = parent_id;
         let id = tcb.id;
         self.tasks.push(tcb);
+        if id != TaskId(0) {
+            crate::task::process::register_leader(id, parent_id);
+        }
         id
     }
 
     /// Spawns an existing TaskControlBlock (e.g. userspace process with isolated page table).
     pub fn spawn_task(&mut self, tcb: TaskControlBlock) -> TaskId {
         let id = tcb.id;
+        let parent_id = tcb.parent_id;
         self.tasks.push(tcb);
+        if id != TaskId(0) {
+            crate::task::process::register_leader(id, parent_id);
+        }
         id
     }
 
@@ -218,6 +225,9 @@ impl Scheduler {
         // is reserved for the post-waitpid state so resources are not reclaimed
         // before the parent observes the exit status.
         self.tasks[current_idx].state = TaskState::Zombie;
+        if task_id != TaskId(0) {
+            crate::task::process::mark_zombie(task_id, self.tasks[current_idx].exit_code);
+        }
         crate::ipc::cleanup_task(task_id);
         crate::fs::cleanup_task(task_id);
         crate::event::cleanup_task(task_id);
@@ -271,6 +281,7 @@ impl Scheduler {
         }
         task.exit_code = exit_code;
         task.state = TaskState::Zombie;
+        crate::task::process::mark_zombie(id, exit_code);
         crate::ipc::cleanup_task(id);
         crate::fs::cleanup_task(id);
         crate::event::cleanup_task(id);
@@ -292,6 +303,7 @@ impl Scheduler {
         }).ok_or("child not ready or not owned by caller")?;
         let exit_code = self.tasks[index].exit_code;
         self.tasks.remove(index);
+        crate::task::process::reap(child_id);
         if index < self.current_idx {
             self.current_idx -= 1;
         }
