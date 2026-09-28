@@ -129,6 +129,7 @@ pub enum FsError {
 pub struct Vfs {
     inodes: BTreeMap<InodeId, Inode>,
     path_to_inode: BTreeMap<String, InodeId>,
+    hard_links: BTreeMap<String, InodeId>,
     next_inode: u64,
     task_file_tables: BTreeMap<TaskId, Vec<Option<OpenFileHandle>>>,
 }
@@ -139,6 +140,7 @@ impl Vfs {
         let mut vfs = Self {
             inodes: BTreeMap::new(),
             path_to_inode: BTreeMap::new(),
+            hard_links: BTreeMap::new(),
             next_inode: 1,
             task_file_tables: BTreeMap::new(),
         };
@@ -374,7 +376,7 @@ impl Vfs {
     /// Looks up InodeId by path.
     pub fn lookup(&self, path: &str) -> Option<InodeId> {
         let norm_path = normalize_path(path);
-        self.path_to_inode.get(&norm_path).copied()
+        self.path_to_inode.get(&norm_path).copied().or_else(|| self.hard_links.get(&norm_path).copied())
     }
 
     /// Returns the data byte size of an inode.
@@ -411,6 +413,35 @@ impl Vfs {
             read_only: inode.file_type == FileType::ReadOnlySystem,
             sha256_digest: inode.sha256_digest,
         })
+    }
+
+    pub fn link(&mut self, old_path: &str, new_path: &str) -> Result<(), FsError> {
+        let old = normalize_path(old_path); let new = normalize_path(new_path);
+        if old == "/" || new == "/" || old == new || self.path_to_inode.contains_key(&new) || self.hard_links.contains_key(&new) { return Err(FsError::InvalidPath); }
+        let inode_id = self.lookup(&old).ok_or(FsError::FileNotFound)?;
+        let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
+        if inode.file_type != FileType::RegularFile { return Err(FsError::InvalidPath); }
+        let parent_id = self.path_to_inode.get(parent_path(&new)).copied().ok_or(FsError::FileNotFound)?;
+        if self.inodes.get(&parent_id).map(|i| i.file_type != FileType::Directory).unwrap_or(true) { return Err(FsError::NotADirectory); }
+        self.hard_links.insert(new, inode_id);
+        if let Some(inode) = self.inodes.get_mut(&inode_id) { inode.nlink = inode.nlink.saturating_add(1); inode.ctime = crate::interrupts::get_system_ticks(); }
+        self.persist_metadata_snapshot().map_err(|_| FsError::IntegrityViolation)
+    }
+
+    pub fn unlink(&mut self, path: &str) -> Result<(), FsError> {
+        let norm = normalize_path(path);
+        if let Some(inode_id) = self.hard_links.remove(&norm) {
+            if let Some(inode) = self.inodes.get_mut(&inode_id) { inode.nlink = inode.nlink.saturating_sub(1); inode.ctime = crate::interrupts::get_system_ticks(); }
+            self.persist_metadata_snapshot().map_err(|_| FsError::IntegrityViolation)?;
+            return Ok(());
+        }
+        let inode_id = self.path_to_inode.get(&norm).copied().ok_or(FsError::FileNotFound)?;
+        let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
+        if inode.file_type == FileType::Directory { return Err(FsError::InvalidPath); }
+        self.path_to_inode.remove(&norm);
+        if let Some(inode) = self.inodes.get_mut(&inode_id) { inode.nlink = inode.nlink.saturating_sub(1); inode.ctime = crate::interrupts::get_system_ticks(); }
+        if self.inodes.get(&inode_id).map(|i| i.nlink == 0).unwrap_or(false) { self.inodes.remove(&inode_id); }
+        self.persist_metadata_snapshot().map_err(|_| FsError::IntegrityViolation)
     }
 
     pub fn chmod(&mut self, task_caps: &CapabilityTable, cap_slot: usize, path: &str, mode: u16) -> Result<(), FsError> {
@@ -689,6 +720,15 @@ impl Vfs {
             buf[pos..pos + 8].copy_from_slice(&inode.ctime.to_le_bytes()); pos += 8;
             count = count.saturating_add(1);
         }
+        for (alias, inode_id) in &self.hard_links {
+            let path = alias.as_bytes();
+            if path.len() > 255 || pos + 11 + path.len() > buf.len() { continue; }
+            buf[pos..pos+8].copy_from_slice(&inode_id.0.to_le_bytes()); pos += 8;
+            buf[pos] = 3; pos += 1;
+            buf[pos..pos+2].copy_from_slice(&(path.len() as u16).to_le_bytes()); pos += 2;
+            buf[pos..pos+path.len()].copy_from_slice(path); pos += path.len();
+            count = count.saturating_add(1);
+        }
         buf[4..6].copy_from_slice(&count.to_le_bytes());
         let mut sealed = Vec::new();
         crate::storage::encrypted::seal(&buf[..pos], &mut sealed).map_err(|_| FsError::IntegrityViolation)?;
@@ -717,6 +757,13 @@ impl Vfs {
             if plen == 0 || plen > 255 || pos + plen + extra > len { break; }
             let path = match core::str::from_utf8(&buf[pos..pos+plen]).ok() { Some(v) => v, None => break };
             pos += plen;
+            if kind == 3 {
+                if self.inodes.contains_key(&InodeId(id)) {
+                    self.hard_links.insert(path.to_string(), InodeId(id));
+                    if let Some(inode) = self.inodes.get_mut(&InodeId(id)) { inode.nlink = inode.nlink.saturating_add(1); }
+                }
+                continue;
+            }
             let size = u32::from_le_bytes([buf[pos],buf[pos+1],buf[pos+2],buf[pos+3]]) as usize; pos += 4;
             let mut digest=[0u8;32]; digest.copy_from_slice(&buf[pos..pos+32]); pos += 32;
             let (uid,gid,mode,nlink,atime,mtime,ctime) = if v2 {
