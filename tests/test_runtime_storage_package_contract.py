@@ -276,3 +276,9 @@ def test_verified_boot_policy_is_monotonic_and_persistent():
     assert "pub fn accept_version" in source
     assert "pub fn advance" in source
     assert "commit_kind(&version.to_le_bytes(), 9)" in source
+
+def test_tcp_acks_advertise_current_receive_window():
+    source = (ROOT / "kernel/src/net/mod.rs").read_text(encoding="utf-8")
+    assert "to_ack_syn: Option<(u16, u16, u32, u32, u16)>" in source
+    assert "c.rcv_wnd.min(u16::MAX as u32) as u16" in source
+    assert "transmit_tcp_segment_with_window" in source
