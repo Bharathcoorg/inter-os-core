@@ -7,6 +7,47 @@
 use crate::trap::TrapFrame;
 use crate::println;
 
+fn validate_user_range(addr: usize, len: usize, write: bool) -> Result<(), i64> {
+    if len == 0 || addr < USER_SPACE_MIN { return if len == 0 { Ok(()) } else { Err(-14) }; }
+    let end = addr.checked_add(len).ok_or(-14)?;
+    if end > USER_SPACE_MAX { return Err(-14); }
+
+    let first = addr & !(crate::mmu::PAGE_SIZE - 1);
+    let last = (end - 1) & !(crate::mmu::PAGE_SIZE - 1);
+    let mut page = first;
+    loop {
+        if page == crate::mmu::USER_CODE_VADDR {
+            if write { return Err(-13); }
+        } else if page != crate::mmu::USER_CODE_VADDR + crate::mmu::PAGE_SIZE {
+            return Err(-14);
+        }
+        if page == last { break; }
+        page = page.checked_add(crate::mmu::PAGE_SIZE).ok_or(-14)?;
+    }
+    Ok(())
+}
+
+fn copy_from_user(dst: &mut [u8], addr: usize, len: usize) -> Result<(), i64> {
+    if len > dst.len() { return Err(-22); }
+    validate_user_range(addr, len, false)?;
+    unsafe {
+        core::arch::asm!("csrrs zero, sstatus, {0}", in(reg) (1usize << 18));
+        core::ptr::copy_nonoverlapping(addr as *const u8, dst.as_mut_ptr(), len);
+        core::arch::asm!("csrrc zero, sstatus, {0}", in(reg) (1usize << 18));
+    }
+    Ok(())
+}
+
+fn copy_to_user(addr: usize, src: &[u8]) -> Result<(), i64> {
+    validate_user_range(addr, src.len(), true)?;
+    unsafe {
+        core::arch::asm!("csrrs zero, sstatus, {0}", in(reg) (1usize << 18));
+        core::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len());
+        core::arch::asm!("csrrc zero, sstatus, {0}", in(reg) (1usize << 18));
+    }
+    Ok(())
+}
+
 pub const USER_SPACE_MIN: usize = 0x0000_1000;
 pub const USER_SPACE_MAX: usize = 0x7FFF_FFFF; // Below 2GB Kernel DRAM
 pub const KERNEL_DRAM_START: usize = 0x8000_0000;
@@ -34,17 +75,14 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
             let msg_ptr = a1;
             let msg_len = a2;
 
-            if msg_ptr < USER_SPACE_MIN || msg_ptr.saturating_add(msg_len) > USER_SPACE_MAX || msg_ptr >= KERNEL_DRAM_START {
-                -14 // -EFAULT (Forbidden kernel DRAM or MMIO)
+            if validate_user_range(msg_ptr, msg_len, false).is_err() {
+                -14 // -EFAULT
             } else if msg_len > 1024 {
                 -22 // -EINVAL
             } else {
                 let mut kbuf = [0u8; 1024];
-                unsafe {
-                    // Temporarily enable SUM (bit 18) to allow S-mode to safely read U-mode memory
-                    core::arch::asm!("csrrs zero, sstatus, {0}", in(reg) (1usize << 18));
-                    core::ptr::copy_nonoverlapping(msg_ptr as *const u8, kbuf.as_mut_ptr(), msg_len);
-                    core::arch::asm!("csrrc zero, sstatus, {0}", in(reg) (1usize << 18));
+                if copy_from_user(&mut kbuf, msg_ptr, msg_len).is_err() {
+                    return -14;
                 }
                 if let Ok(s) = core::str::from_utf8(&kbuf[..msg_len]) {
                     println!("[USER:LOG] {}", s);
