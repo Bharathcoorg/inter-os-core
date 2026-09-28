@@ -124,6 +124,7 @@ impl Scheduler {
             Some(space) => space,
             None => {
                 crate::task::process::cancel_thread_reservation(process_id);
+                crate::task::process::release_address_space(process_id, crate::task::user::USER_STACK_SIZE);
                 return Err("process has no userspace address space");
             }
         };
