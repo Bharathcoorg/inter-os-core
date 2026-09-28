@@ -295,6 +295,13 @@ pub fn sys_get_task_id() -> TaskId {
 }
 
 /// Enforces an explicit capability for privileged kernel controls.
+pub fn require_system_control_object(object_id: u64) -> Result<(), SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    task.cap_table.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, object_id)
+        .then_some(()).ok_or(SyscallResult::PermissionDenied)
+}
+
 fn require_system_control() -> Result<(), SyscallResult> {
     let sched = SCHEDULER.lock();
     let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
@@ -1560,7 +1567,7 @@ pub fn sys_resource_query(
     out_temp: &mut u8,
     out_throttling: &mut bool,
  ) -> SyscallResult {
-    if require_system_control().is_err() {
+    if require_system_control_object(crate::services::SERVICE_POWER_CONTROL_OBJECT).is_err() && require_system_control().is_err() {
         return SyscallResult::PermissionDenied;
     }
     let rm = crate::resource::RESOURCE_MANAGER.lock();
@@ -1572,7 +1579,7 @@ pub fn sys_resource_query(
 
 /// Queries the dynamic multi-zone thermal governor into `out_buf` JSON string.
 pub fn sys_thermal_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
-    require_system_control()?;
+    if require_system_control_object(crate::services::SERVICE_POWER_CONTROL_OBJECT).is_err() { require_system_control()?; }
     if out_buf.len() < crate::resource::THERMAL_JSON_MAX { return Err(SyscallResult::InvalidArguments); }
     let tm = crate::resource::THERMAL_MANAGER.lock();
     let len = tm.format_json(out_buf);
@@ -2104,7 +2111,7 @@ pub fn sys_hal_query_platform(out_buf: &mut [u8]) -> Result<usize, SyscallResult
 
 /// Queries or configures the mobile CPU DVFS power governor.
 pub fn sys_power_governor(action: u32, governor_id: u8) -> Result<u32, SyscallResult> {
-    require_system_control()?;
+    if require_system_control_object(crate::services::SERVICE_POWER_CONTROL_OBJECT).is_err() { require_system_control()?; }
     let mut pm = crate::resource::POWER_MANAGER.lock();
     if action == 0 {
         // Query current governor
@@ -2129,7 +2136,7 @@ pub fn sys_power_governor(action: u32, governor_id: u8) -> Result<u32, SyscallRe
 /// In standard QEMU / development emulator targets without a physical baseband modem,
 /// this reports honestly that no hardware modem is detected.
 pub fn sys_telephony_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
-    require_system_control()?;
+    if require_system_control_object(crate::services::SERVICE_TELEPHONY_CONTROL_OBJECT).is_err() { require_system_control()?; }
     use core::fmt::Write;
     struct SliceWriter<'a> {
         buf: &'a mut [u8],
@@ -2168,7 +2175,7 @@ pub fn sys_telephony_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
 
 /// Initiates an outgoing cellular call.
 pub fn sys_telephony_dial(dest: &str) -> Result<(), SyscallResult> {
-    require_system_control()?;
+    if require_system_control_object(crate::services::SERVICE_TELEPHONY_CONTROL_OBJECT).is_err() { require_system_control()?; }
     let ticks = crate::interrupts::get_system_ticks();
     crate::telephony::CELLULAR_MODEM.lock()
         .dial(dest, ticks)
@@ -2177,7 +2184,7 @@ pub fn sys_telephony_dial(dest: &str) -> Result<(), SyscallResult> {
 
 /// Terminates an active cellular call.
 pub fn sys_telephony_hangup() -> Result<(), SyscallResult> {
-    require_system_control()?;
+    if require_system_control_object(crate::services::SERVICE_TELEPHONY_CONTROL_OBJECT).is_err() { require_system_control()?; }
     crate::telephony::CELLULAR_MODEM.lock()
         .hangup()
         .map_err(|_| SyscallResult::DeviceError)
@@ -2185,7 +2192,7 @@ pub fn sys_telephony_hangup() -> Result<(), SyscallResult> {
 
 /// Transmits an SMS message to a destination phone number.
 pub fn sys_telephony_send_sms(dest: &str, body: &str) -> Result<u32, SyscallResult> {
-    require_system_control()?;
+    if require_system_control_object(crate::services::SERVICE_TELEPHONY_CONTROL_OBJECT).is_err() { require_system_control()?; }
     let ticks = crate::interrupts::get_system_ticks();
     crate::telephony::CELLULAR_MODEM.lock()
         .send_sms(dest, body, ticks)
@@ -2194,7 +2201,7 @@ pub fn sys_telephony_send_sms(dest: &str, body: &str) -> Result<u32, SyscallResu
 
 /// Toggles cellular packet data (PDP context).
 pub fn sys_telephony_set_data(enabled: bool) -> Result<bool, SyscallResult> {
-    require_system_control()?;
+    if require_system_control_object(crate::services::SERVICE_TELEPHONY_CONTROL_OBJECT).is_err() { require_system_control()?; }
     Ok(crate::telephony::CELLULAR_MODEM.lock().set_data_enabled(enabled))
 }
 
@@ -2305,7 +2312,7 @@ pub fn sys_touch_poll() -> Result<u32, SyscallResult> {
 
 /// Sets the DVFS operational performance profile.
 pub fn sys_power_set_profile(profile_idx: u32) -> Result<u32, SyscallResult> {
-    require_system_control()?;
+    if require_system_control_object(crate::services::SERVICE_POWER_CONTROL_OBJECT).is_err() { require_system_control()?; }
     let profile = match profile_idx {
         0 => crate::drivers::pmic::DvfsProfile::PowerSave,
         1 => crate::drivers::pmic::DvfsProfile::Balanced,
@@ -2327,7 +2334,7 @@ pub fn sys_get_random(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
 
 /// Dispatches audio feedback actions to the mobile audio subsystem.
 pub fn sys_audio_control(action: u32, param: u32) -> Result<u32, SyscallResult> {
-    require_system_control()?;
+    if require_system_control_object(crate::services::SERVICE_AUDIO_CONTROL_OBJECT).is_err() { require_system_control()?; }
     let mut audio = crate::audio::AUDIO_MANAGER.lock();
     match action {
         0 => {
@@ -2380,7 +2387,7 @@ pub fn sys_keystore_derive(slot_idx: u32, out_buf: &mut [u8; 32]) -> Result<usiz
 /// Reports honestly if hardware sensors are not physically present on the board.
 pub fn sys_sensor_read(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
     if out_buf.len() < 32 || out_buf.len() > 512 { return Err(SyscallResult::InvalidArguments); }
-    require_system_control()?;
+    if require_system_control_object(crate::services::SERVICE_SENSOR_CONTROL_OBJECT).is_err() { require_system_control()?; }
     use core::fmt::Write;
     struct SliceWriter<'a> {
         buf: &'a mut [u8],
@@ -2417,7 +2424,7 @@ pub fn sys_sensor_read(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
 /// Queries battery fuel gauge telemetry (voltage, SoC %, capacity, charging status).
 /// In standard QEMU development targets without an ACPI/I2C fuel gauge, reports honestly.
 pub fn sys_battery_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
-    require_system_control()?;
+    if require_system_control_object(crate::services::SERVICE_POWER_CONTROL_OBJECT).is_err() { require_system_control()?; }
     if out_buf.len() < crate::resource::BATTERY_JSON_MAX { return Err(SyscallResult::InvalidArguments); }
     use core::fmt::Write;
     struct SliceWriter<'a> {
@@ -2694,6 +2701,10 @@ pub fn sys_camera_capture(
     let sched = crate::task::scheduler::SCHEDULER.lock();
     let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
     if !current.cap_table.authorize_object(
+        crate::capability::CapabilityType::SystemControl,
+        crate::capability::Rights::INVOKE,
+        crate::services::SERVICE_CAMERA_CONTROL_OBJECT,
+    ) && !current.cap_table.authorize_object(
         crate::capability::CapabilityType::HardwarePortIo,
         crate::capability::Rights::READ,
         0xCA00,
@@ -3202,7 +3213,7 @@ pub fn sys_service_start(service_id: u8) -> Result<crate::task::TaskId, SyscallR
         3 => crate::services::ServiceId::Storage, 4 => crate::services::ServiceId::Network,
         5 => crate::services::ServiceId::Power, 6 => crate::services::ServiceId::Modem,
         7 => crate::services::ServiceId::Audio, 8 => crate::services::ServiceId::Camera,
-        9 => crate::services::ServiceId::Compositor, 10 => crate::services::ServiceId::Launcher,
+        9 => crate::services::ServiceId::Compositor, 10 => crate::services::ServiceId::Launcher, 11 => crate::services::ServiceId::Sensor,
         _ => return Err(SyscallResult::InvalidArguments),
     };
     let parent_id = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?;
@@ -3324,7 +3335,7 @@ pub fn sys_service_heartbeat(service_id: u8) -> Result<(), SyscallResult> {
         3 => crate::services::ServiceId::Storage, 4 => crate::services::ServiceId::Network,
         5 => crate::services::ServiceId::Power, 6 => crate::services::ServiceId::Modem,
         7 => crate::services::ServiceId::Audio, 8 => crate::services::ServiceId::Camera,
-        9 => crate::services::ServiceId::Compositor, 10 => crate::services::ServiceId::Launcher,
+        9 => crate::services::ServiceId::Compositor, 10 => crate::services::ServiceId::Launcher, 11 => crate::services::ServiceId::Sensor,
         _ => return Err(SyscallResult::InvalidArguments),
     };
     crate::services::heartbeat_for_task(id, task_id).map_err(|_| SyscallResult::PermissionDenied)
@@ -3338,7 +3349,7 @@ pub fn sys_service_recover_failed(service_id: u8) -> Result<u64, SyscallResult> 
         3 => crate::services::ServiceId::Storage, 4 => crate::services::ServiceId::Network,
         5 => crate::services::ServiceId::Power, 6 => crate::services::ServiceId::Modem,
         7 => crate::services::ServiceId::Audio, 8 => crate::services::ServiceId::Camera,
-        9 => crate::services::ServiceId::Compositor, 10 => crate::services::ServiceId::Launcher,
+        9 => crate::services::ServiceId::Compositor, 10 => crate::services::ServiceId::Launcher, 11 => crate::services::ServiceId::Sensor,
         _ => return Err(SyscallResult::InvalidArguments),
     };
     let parent_id = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?;
@@ -3352,7 +3363,7 @@ pub fn sys_service_stop(service_id: u8) -> Result<(), SyscallResult> {
         3 => crate::services::ServiceId::Storage, 4 => crate::services::ServiceId::Network,
         5 => crate::services::ServiceId::Power, 6 => crate::services::ServiceId::Modem,
         7 => crate::services::ServiceId::Audio, 8 => crate::services::ServiceId::Camera,
-        9 => crate::services::ServiceId::Compositor, 10 => crate::services::ServiceId::Launcher,
+        9 => crate::services::ServiceId::Compositor, 10 => crate::services::ServiceId::Launcher, 11 => crate::services::ServiceId::Sensor,
         _ => return Err(SyscallResult::InvalidArguments),
     };
     let parent_id = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?;
