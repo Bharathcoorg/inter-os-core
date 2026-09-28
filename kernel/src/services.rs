@@ -6,7 +6,7 @@
 
 use alloc::vec::Vec;
 use crate::capability::{CapabilityType, Rights};
-use crate::task::{SCHEDULER, TaskId};
+use crate::task::{SCHEDULER, TaskId, ResourceLimits};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +23,7 @@ pub enum ServiceId {
     Camera = 8,
     Compositor = 9,
     Launcher = 10,
+    Sensor = 11,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +32,11 @@ pub enum ServiceState { Declared, Starting, Running, Stopped, Failed }
 pub const SERVICE_ABI_VERSION: u16 = 1;
 pub const HEARTBEAT_TIMEOUT_TICKS: u64 = 500;
 pub const SERVICE_START_TIMEOUT_TICKS: u64 = 500;
+pub const SERVICE_POWER_CONTROL_OBJECT: u64 = 0x504F_5745_5200_01;
+pub const SERVICE_TELEPHONY_CONTROL_OBJECT: u64 = 0x5445_4C45_0000_01;
+pub const SERVICE_AUDIO_CONTROL_OBJECT: u64 = 0x4155_4449_0000_01;
+pub const SERVICE_CAMERA_CONTROL_OBJECT: u64 = 0x4341_4D45_0000_01;
+pub const SERVICE_SENSOR_CONTROL_OBJECT: u64 = 0x5345_4E53_0000_01;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestartPolicy { Manual, OnFailure }
@@ -58,6 +64,7 @@ pub fn descriptor(id: ServiceId) -> ServiceDescriptor {
         ServiceId::Audio | ServiceId::Camera => ServiceDescriptor { id, abi_version: SERVICE_ABI_VERSION, restart: RestartPolicy::OnFailure, critical: false, dependencies: POWER_DEP },
         ServiceId::Compositor => ServiceDescriptor { id, abi_version: SERVICE_ABI_VERSION, restart: RestartPolicy::OnFailure, critical: true, dependencies: UI_DEPS },
         ServiceId::Launcher => ServiceDescriptor { id, abi_version: SERVICE_ABI_VERSION, restart: RestartPolicy::OnFailure, critical: true, dependencies: LAUNCHER_DEPS },
+        ServiceId::Sensor => ServiceDescriptor { id, abi_version: SERVICE_ABI_VERSION, restart: RestartPolicy::OnFailure, critical: false, dependencies: &[ServiceId::Power] },
     }
 }
 
@@ -89,13 +96,22 @@ pub fn capability_policy(id: ServiceId, parent_id: TaskId) -> Result<Vec<Service
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::ProcessSpawn, rights: Rights::INVOKE, object_id: 0 });
         }
         ServiceId::Display => policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FrameBufferDirect, rights: Rights::WRITE, object_id: 1 }),
-        ServiceId::Storage => policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FileSystemRead, rights: Rights::READ | Rights::WRITE, object_id: 0 }),
+        ServiceId::Storage => {
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FileSystemRead, rights: Rights::READ, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FileSystemWrite, rights: Rights::WRITE, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::StorageRawBlock, rights: Rights::READ, object_id: 0 });
+        }
         ServiceId::Network => {
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::NetworkSocket, rights: Rights::READ | Rights::WRITE, object_id: ServiceId::Network as u64 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::NetworkSend, rights: Rights::WRITE, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::NetworkReceive, rights: Rights::READ, object_id: 0 });
         }
-        ServiceId::Input | ServiceId::Power | ServiceId::Modem | ServiceId::Audio | ServiceId::Camera => {}
+        ServiceId::Power => policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SystemControl, rights: Rights::INVOKE, object_id: SERVICE_POWER_CONTROL_OBJECT }),
+        ServiceId::Modem => policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SystemControl, rights: Rights::INVOKE, object_id: SERVICE_TELEPHONY_CONTROL_OBJECT }),
+        ServiceId::Audio => policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SystemControl, rights: Rights::INVOKE, object_id: SERVICE_AUDIO_CONTROL_OBJECT }),
+        ServiceId::Camera => policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SystemControl, rights: Rights::INVOKE, object_id: SERVICE_CAMERA_CONTROL_OBJECT }),
+        ServiceId::Sensor => policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SystemControl, rights: Rights::INVOKE, object_id: SERVICE_SENSOR_CONTROL_OBJECT }),
+        ServiceId::Input => {}
         ServiceId::Init => return Err("init does not use userspace service capability policy"),
     }
     if !matches!(id, ServiceId::Compositor | ServiceId::Launcher) {
@@ -112,13 +128,19 @@ pub struct ServiceInfo { pub id: ServiceId, pub abi_version: u16, pub state: Ser
 #[derive(Debug, Clone, Copy)]
 pub struct ServiceRecord { pub id: ServiceId, pub task: TaskId, pub state: ServiceState, pub generation: u32 }
 
-pub static SERVICE_RECORDS: spin::Mutex<[Option<ServiceRecord>; 11]> = spin::Mutex::new([None; 11]);
+pub static SERVICE_RECORDS: spin::Mutex<[Option<ServiceRecord>; 12]> = spin::Mutex::new([None; 12]);
 const SERVICE_RESTART_BACKOFF_TICKS: u64 = 1000;
-static SERVICE_HEARTBEATS: [core::sync::atomic::AtomicU64; 11] = [
+static SERVICE_HEARTBEATS: [core::sync::atomic::AtomicU64; 12] = [
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
+];
+static SERVICE_FAILURES: [core::sync::atomic::AtomicU64; 12] = [
+    core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
 ];
 static SERVICES_INITIALIZED: AtomicBool = AtomicBool::new(false);
 // Serializes lifecycle transitions so start/stop/recovery cannot observe and mutate
@@ -126,13 +148,13 @@ static SERVICES_INITIALIZED: AtomicBool = AtomicBool::new(false);
 // boundary; callers never hold the lifecycle lock across context switches.
 static SERVICE_LIFECYCLE_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 // Restart backoff prevents a failed service from consuming the scheduler in a crash loop.
-static SERVICE_STARTED_AT: [core::sync::atomic::AtomicU64; 11] = [
+static SERVICE_STARTED_AT: [core::sync::atomic::AtomicU64; 12] = [
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
 ];
-static SERVICE_RETRY_AFTER: [core::sync::atomic::AtomicU64; 11] = [
+static SERVICE_RETRY_AFTER: [core::sync::atomic::AtomicU64; 12] = [
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
@@ -150,7 +172,7 @@ pub fn init() {
     // userspace service lifecycle through the ServiceStart syscall.
     for id in [
         ServiceId::Display, ServiceId::Input, ServiceId::Storage, ServiceId::Network,
-        ServiceId::Power, ServiceId::Modem, ServiceId::Audio, ServiceId::Camera,
+        ServiceId::Power, ServiceId::Modem, ServiceId::Audio, ServiceId::Camera, ServiceId::Sensor,
         ServiceId::Compositor, ServiceId::Launcher,
     ] {
         SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord {
@@ -158,6 +180,19 @@ pub fn init() {
         });
     }
     crate::serial_println!("[SERVICE] Service definitions registered; PID 1 controls startup.");
+}
+
+/// Resource budget assigned to each first-party system service. These limits are
+/// process-scoped and intentionally conservative so a faulty service cannot consume
+/// the same address-space, IPC, descriptor, or thread budget as an unrestricted app.
+pub fn resource_limits(id: ServiceId) -> ResourceLimits {
+    match id {
+        ServiceId::Display | ServiceId::Compositor => ResourceLimits { max_threads: 8, max_open_files: 64, max_ipc_endpoints: 32, max_address_space_bytes: 64 * 1024 * 1024 },
+        ServiceId::Storage => ResourceLimits { max_threads: 4, max_open_files: 128, max_ipc_endpoints: 32, max_address_space_bytes: 48 * 1024 * 1024 },
+        ServiceId::Network => ResourceLimits { max_threads: 8, max_open_files: 64, max_ipc_endpoints: 32, max_address_space_bytes: 64 * 1024 * 1024 },
+        ServiceId::Launcher => ResourceLimits { max_threads: 8, max_open_files: 64, max_ipc_endpoints: 48, max_address_space_bytes: 64 * 1024 * 1024 },
+        _ => ResourceLimits { max_threads: 4, max_open_files: 32, max_ipc_endpoints: 16, max_address_space_bytes: 32 * 1024 * 1024 },
+    }
 }
 
 /// Starts one declared service on behalf of userspace PID 1.
@@ -204,6 +239,17 @@ fn start_locked(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str
         }
     };
     crate::ipc::IPC_ROUTER.lock().register_task(task);
+    let process = crate::task::process::process_for_task(task).ok_or_else(|| {
+        let _ = SCHEDULER.lock().terminate_task(task, -1);
+        "service process identity missing"
+    })?;
+    if let Err(_) = crate::task::process::set_limits(process, resource_limits(id)) {
+        let mut scheduler = SCHEDULER.lock();
+        let _ = scheduler.terminate_task(task, -1);
+        let _ = scheduler.reap_child(parent_id, task);
+        SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Failed, generation });
+        return Err("service resource limits rejected");
+    }
     let now = crate::interrupts::get_system_ticks();
     SERVICE_HEARTBEATS[id as usize].store(now, Ordering::Release);
     SERVICE_STARTED_AT[id as usize].store(now, Ordering::Release);
@@ -261,6 +307,14 @@ pub fn launch_verified_package(
     };
 
     crate::ipc::IPC_ROUTER.lock().register_task(task);
+    let process = crate::task::process::process_for_task(task).ok_or("service process identity missing")?;
+    if crate::task::process::set_limits(process, resource_limits(id)).is_err() {
+        let mut scheduler = SCHEDULER.lock();
+        let _ = scheduler.terminate_task(task, -1);
+        let _ = scheduler.reap_child(parent_id, task);
+        SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Failed, generation });
+        return Err("service resource limits rejected");
+    }
     SERVICE_HEARTBEATS[id as usize].store(crate::interrupts::get_system_ticks(), Ordering::Release);
     // Reuse the generation computed for the Starting transition; a successful
     // launch is one lifecycle transition, not a second generation bump.
@@ -274,6 +328,12 @@ pub fn stop(id: ServiceId, parent_id: TaskId) -> Result<(), &'static str> {
     if id == ServiceId::Init { return Err("init cannot be stopped"); }
     let record = SERVICE_RECORDS.lock()[id as usize].ok_or("service not declared")?;
     if record.task == TaskId(0) { return Ok(()); }
+    for dependent in 1..SERVICE_RECORDS.lock().len() {
+        let Some(other) = SERVICE_RECORDS.lock()[dependent] else { continue; };
+        if other.state == ServiceState::Running && descriptor(other.id).dependencies.iter().any(|dep| *dep == id) {
+            return Err("service has running dependents");
+        }
+    }
     // Services are children of the PID1 task that started them. Stopping a
     // service must remain parent-scoped even when the caller has the manager
     // capability; never allow the manager to terminate another owner's task.
@@ -359,6 +419,9 @@ pub fn supervise() {
     let mut registry = SERVICE_RECORDS.lock();
     for idx in 1..registry.len() {
         if let (Some(record), Some(state)) = (records[idx], states[idx]) {
+            if record.state == ServiceState::Running && state == ServiceState::Failed {
+                SERVICE_FAILURES[idx].fetch_add(1, Ordering::Relaxed);
+            }
             registry[idx] = Some(ServiceRecord { id: record.id, task: record.task, state, generation: record.generation });
         }
     }
@@ -376,10 +439,11 @@ pub fn snapshot(out: &mut [u8]) -> usize {
         }
     }
     let mut w = W { b: out, n: 0 };
-    for id in 0u8..=10u8 {
+    for id in 0u8..=11u8 {
         if let Some(info) = lookup(id) {
             let state = match info.state { ServiceState::Declared => "declared", ServiceState::Starting => "starting", ServiceState::Running => "running", ServiceState::Stopped => "stopped", ServiceState::Failed => "failed" };
-            let _ = writeln!(w, "{}|{}|{}|{}|{}|{}", info.id as u8, info.abi_version, state, info.restart as u8, info.critical as u8, info.generation);
+            let age = crate::interrupts::get_system_ticks().saturating_sub(last_heartbeat(info.id));
+            let _ = writeln!(w, "{}|{}|{}|{}|{}|{}|{}|{}", info.id as u8, info.abi_version, state, info.restart as u8, info.critical as u8, info.generation, age, SERVICE_FAILURES[id as usize].load(Ordering::Relaxed));
         }
     }
     w.n
@@ -397,6 +461,7 @@ pub fn record_exit(task_id: TaskId, _exit_code: i32) {
     for idx in 1..records.len() {
         if let Some(record) = records[idx] {
             if record.task == task_id {
+                SERVICE_FAILURES[idx].fetch_add(1, Ordering::Relaxed);
                 records[idx] = Some(ServiceRecord { id: record.id, task: task_id, state: ServiceState::Failed, generation: record.generation });
                 return;
             }
@@ -415,6 +480,10 @@ pub fn recover_failed(id: ServiceId, parent_id: TaskId) -> Result<(), &'static s
     if now < SERVICE_RETRY_AFTER[idx].load(Ordering::Acquire) { return Err("service recovery backoff active"); }
     SERVICE_RETRY_AFTER[idx].store(now.saturating_add(SERVICE_RESTART_BACKOFF_TICKS), Ordering::Release);
     if record.task != TaskId(0) {
+        let scheduler = SCHEDULER.lock();
+        let task = scheduler.get_task(record.task).ok_or("failed service task not found")?;
+        if task.parent_id != parent_id { return Err("failed service is owned by another parent"); }
+        drop(scheduler);
         let mut scheduler = SCHEDULER.lock();
         let _ = scheduler.terminate_task(record.task, -1);
         let _ = scheduler.reap_child(parent_id, record.task);
