@@ -478,7 +478,7 @@ def start_websockify_if_needed():
     try:
         ws_subproc = subprocess.Popen([
             sys.executable, "-m", "websockify",
-            str(WS_PORT), "127.0.0.1:5900"
+            str(WS_PORT), "127.0.0.1:5901"
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(0.3)
         latest_telemetry["websockify_alive"] = True
@@ -541,7 +541,10 @@ SUPPORTED_PROFILES = {
         "ram": 1024,
         "boot_type": "BIOS/MBR Bootloader",
         "image": os.path.join(WORKSPACE_ROOT, "target", "inter-os-bios.img"),
-        "status": "Verified in QEMU",
+        "status": "Primary QEMU Phone contract",
+        "display": {"backend": "vnc", "host": "127.0.0.1", "port": 5901, "websocket_port": 6081, "guest_width": 1280, "guest_height": 720},
+        "serial": {"host": "127.0.0.1", "port": 4301},
+        "monitor": {"host": "127.0.0.1", "port": 44445},
     },
     "aarch64": {
         "name": "InterOS AArch64 Virt Mobile",
@@ -706,6 +709,7 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
         "-monitor", "tcp:127.0.0.1:44445,server,nowait",
         "-serial", "tcp:127.0.0.1:4301,server,nowait",
         "-display", "none",
+        "-vnc", "127.0.0.1:1",
         "-no-reboot"
     ]
     if arch == "x86_64":
@@ -741,7 +745,7 @@ def start_qemu_backend():
     latest_telemetry["cpu"]["rip"] = "Offline"
     latest_telemetry["cpu"]["thread_id"] = "Offline"
     latest_telemetry["cpu"]["registers"] = {}
-    return False, "QEMU Microkernel Standby (Launch via Studio or 'interos run')"
+    return False, "QEMU Microkernel Standby (Launch via 'interos run qemu')"
 
 
 last_telemetry_query = 0.0
