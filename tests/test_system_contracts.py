@@ -46,6 +46,25 @@ class SystemContractTests(unittest.TestCase):
         self.assertIn('p_run.add_argument("name", help="demo/qemu or app name")', cli)
         self.assertIn("_build_x86_userspace()", cli)
 
+    def test_qemu_userspace_manifest_sources_exist(self):
+        manifest = json.loads((ROOT / "platform/x86_64/userspace-manifest.json").read_text(encoding="utf-8"))
+        for item in manifest["required"]:
+            self.assertTrue((ROOT / item["manifest"]).is_file(), item["manifest"])
+
+    def test_guest_rapp_lifecycle_transport_is_wired(self):
+        serial = (ROOT / "kernel/src/serial.rs").read_text(encoding="utf-8")
+        studio = (ROOT / "emulator/server.py").read_text(encoding="utf-8")
+        store = (ROOT / "kernel/src/package/store.rs").read_text(encoding="utf-8")
+        syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
+        sdk = (ROOT / "sdk/rust/interos-std/src/lib.rs").read_text(encoding="utf-8")
+        for command in ("RAPP_BEGIN", "RAPP_CHUNK", "RAPP_COMMIT", "RAPP_TRUST", "RAPP_LAUNCH", "RAPP_UNINSTALL"):
+            self.assertIn(command, serial)
+        for route in ("/api/rapp/install", "/api/rapp/trust", "/api/rapp/launch", "/api/rapp/uninstall"):
+            self.assertIn(route, studio)
+        self.assertIn("pub fn put(&mut self,package_id:&str", store)
+        self.assertIn("PACKAGE_BLOB_STORE.lock().get(app_id)", syscall)
+        self.assertIn("pub fn app_launch", sdk)
+
     def test_update_is_fail_closed_and_monotonic(self):
         src = (ROOT / "kernel/src/update.rs").read_text(encoding="utf-8")
         self.assertIn("manifest.version <= current_version", src)
