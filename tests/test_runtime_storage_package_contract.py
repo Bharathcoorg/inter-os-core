@@ -244,3 +244,10 @@ def test_power_suspend_requires_wake_source_and_has_explicit_resume_state():
     assert "if self.wake_mask == 0" in source
     assert "self.state=SuspendState::Suspended" in source
     assert "resume_complete" in source
+
+def test_verified_boot_policy_rejects_rollback_and_gates_update_installation():
+    source = (ROOT / "kernel/src/update.rs").read_text(encoding="utf-8")
+    assert "struct VerifiedBootPolicy" in source
+    assert "rollback_index" in source
+    assert "install_with_boot_policy" in source
+    assert "policy.accept_version(tx.manifest.version)" in source

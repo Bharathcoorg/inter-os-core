@@ -208,6 +208,18 @@ pub trait UpdateBackend {
 
 pub struct VerifiedUpdate<'a, B: UpdateBackend> { backend: &'a mut B }
 impl<'a, B: UpdateBackend> VerifiedUpdate<'a, B> {
+    pub fn install_with_boot_policy(
+        backend:&'a mut B,
+        slot:UpdateSlot,
+        tx:&mut UpdateTransaction,
+        payload:&[u8],
+        policy:&mut VerifiedBootPolicy,
+    )->Result<(),UpdateError>{
+        policy.accept_version(tx.manifest.version)?;
+        Self::install(backend,slot,tx,payload)?;
+        policy.advance(tx.manifest.version)
+    }
+
     pub fn install(backend:&'a mut B, slot:UpdateSlot, tx:&mut UpdateTransaction, payload:&[u8])->Result<(),UpdateError>{
         if tx.state != UpdateState::Verified { return Err(UpdateError::InvalidFormat); }
         {
