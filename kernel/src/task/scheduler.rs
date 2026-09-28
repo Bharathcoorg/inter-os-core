@@ -290,6 +290,24 @@ impl Scheduler {
         // An exiting task remains a Zombie until its parent reaps it. Terminated
         // is reserved for the post-waitpid state so resources are not reclaimed
         // before the parent observes the exit status.
+        // A non-leader userspace thread owns only its dedicated guarded stack.
+        // Reclaim that mapping before the TCB can be reaped, while the shared
+        // process address space remains alive for sibling threads.
+        if task_id != TaskId(0) {
+            if let Some(process_id) = self.tasks[current_idx].process_id {
+                if !crate::task::process::is_leader(task_id) {
+                    if let Some(ref shared_space) = self.tasks[current_idx].page_table {
+                        let mut pt = shared_space.lock();
+                        let _ = crate::task::user::unmap_user_thread_stack(&mut pt, task_id);
+                    }
+                    crate::task::process::release_address_space(
+                        process_id,
+                        crate::task::user::USER_STACK_SIZE,
+                    );
+                }
+            }
+        }
+
         self.tasks[current_idx].state = TaskState::Zombie;
         if task_id != TaskId(0) {
             crate::task::process::mark_zombie(task_id, self.tasks[current_idx].exit_code);
