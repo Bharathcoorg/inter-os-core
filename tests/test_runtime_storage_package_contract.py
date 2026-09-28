@@ -422,3 +422,10 @@ def test_task_teardown_releases_network_ownership():
     assert "SOCKET_TABLE.lock().release_owner(task_id.0)" in net
     assert "TCP_TABLE.lock().release_owner(task_id.0)" in net
     assert "crate::net::cleanup_task(task_id)" in scheduler
+
+def test_verified_service_launch_reuses_one_generation_transition():
+    services = (ROOT / "kernel/src/services.rs").read_text(encoding="utf-8")
+    launch = services[services.index("pub fn launch_verified_package"):services.index("/// Stops a service task", services.index("pub fn launch_verified_package"))]
+    assert "let generation = existing.map(|r| r.generation.saturating_add(1)).unwrap_or(1);" in launch
+    assert "a successful" in launch
+    assert "ServiceRecord { id, task, state: ServiceState::Running, generation }" in launch

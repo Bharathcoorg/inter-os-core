@@ -262,7 +262,8 @@ pub fn launch_verified_package(
 
     crate::ipc::IPC_ROUTER.lock().register_task(task);
     SERVICE_HEARTBEATS[id as usize].store(crate::interrupts::get_system_ticks(), Ordering::Release);
-    let generation = existing.map(|r| r.generation.saturating_add(1)).unwrap_or(1);
+    // Reuse the generation computed for the Starting transition; a successful
+    // launch is one lifecycle transition, not a second generation bump.
     SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task, state: ServiceState::Running, generation });
     Ok(task)
 }
