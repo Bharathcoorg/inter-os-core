@@ -397,6 +397,7 @@ pub fn task_id(id: ServiceId) -> Option<TaskId> {
 
 /// Records a service heartbeat. Service workers call this before yielding so
 /// the supervisor can distinguish a live worker from a dead/stopped task.
+#[allow(dead_code)]
 pub(crate) fn heartbeat(id: ServiceId) {
     SERVICE_HEARTBEATS[id as usize].store(crate::interrupts::get_system_ticks(), Ordering::Release);
 }

@@ -1,6 +1,6 @@
 /* ==========================================================================
    INTER OS — POST-APP ERA DESIGN SYSTEM
-   Liquid Glassmorphism, Living Companion AI Orb, and Pure OLED Contrast
+   Liquid Glassmorphism, Responsive Hardware Surface, and Pure OLED Contrast
    ========================================================================== */
 
 :root {
@@ -9,7 +9,7 @@
   --bg-panel: #0A0A0A;
   --bg-card: rgba(255, 255, 255, 0.035);
   --bg-card-hover: rgba(255, 255, 255, 0.08);
-  --bg-phone: #000000; /* Pure pitch OLED black matching orb perfectly */
+  --bg-phone: #000000; /* Pure pitch OLED black */
   --border-glass: rgba(255, 255, 255, 0.1);
   --border-glass-hover: rgba(255, 255, 255, 0.25);
   
@@ -1368,7 +1368,7 @@ html, body.dark-theme {
 }
 
 /* --------------------------------------------------------------------------
-   Center: Futuristic Smartphone Device with Living Companion Orb
+   Center: Futuristic Smartphone Device Chassis
    -------------------------------------------------------------------------- */
 .device-stage {
   display: flex;
@@ -1557,7 +1557,7 @@ html, body.dark-theme {
 }
 
 /* --------------------------------------------------------------------------
-   THE CUTE LIVING AI ROBOT IN FLOATING CRYSTAL ORB (STRICT WHITE & BLACK THEME)
+   HARDWARE SENSOR SPHERE (STRICT WHITE & BLACK THEME)
    3D Spherical Volume, High-Feedback Tactile Haptics, Pure Monochrome Aesthetics
    -------------------------------------------------------------------------- */
 .robot-orb-stage {

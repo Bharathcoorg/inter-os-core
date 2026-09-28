@@ -35,8 +35,11 @@ const BORDER_SUBTLE: u32 = 0xFF222E42;
 const TEXT_PRIMARY: u32 = 0xFFF8FAFC;
 const TEXT_MUTED: u32 = 0xFF94A3B8;
 const ACCENT_SKY: u32 = 0xFF31C4FF;
+#[allow(dead_code)]
 const ACCENT_AMBER: u32 = 0xFFF59E0B;
+#[allow(dead_code)]
 const SUCCESS_EMERALD: u32 = 0xFF10B981;
+#[allow(dead_code)]
 const DANGER_CRIMSON: u32 = 0xFFFF6B6B;
 
 // -----------------------------------------------------------------------------

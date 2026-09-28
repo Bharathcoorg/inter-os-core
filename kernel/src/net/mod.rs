@@ -181,6 +181,7 @@ pub fn transmit_tcp_segment_with_window(src_ip: Ipv4Address, src_port: u16, dst_
     NETWORK_DEVICE.lock().transmit(&eth_buf[..len])
 }
 
+#[allow(dead_code)]
 fn transmit_tcp_payload(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address, dst_port: u16, seq: u32, ack: u32, payload: &[u8]) -> Result<usize, NetError> {
     transmit_tcp_payload_with_window(src_ip, src_port, dst_ip, dst_port, seq, ack, payload, 65535)
 }
@@ -208,6 +209,7 @@ pub fn send_tcp_payload_with_window(src_ip: Ipv4Address, src_port: u16, dst_ip: 
     transmit_tcp_payload_with_window(src_ip, src_port, dst_ip, dst_port, seq, ack, payload, window)
 }
 
+#[allow(dead_code)]
 fn transmit_tcp_syn(
     src_ip: Ipv4Address,
     src_port: u16,

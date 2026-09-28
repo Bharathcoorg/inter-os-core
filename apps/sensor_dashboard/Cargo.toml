@@ -5,3 +5,6 @@ edition = "2021"
 
 [dependencies]
 interos-std = { path = "../../sdk/rust/interos-std" }
+
+[lints.cargo]
+non_kebab_case_bins = "allow"

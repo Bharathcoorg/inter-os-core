@@ -159,7 +159,6 @@ pub enum ViewMode {
     PowerMenu,
     AppDrawer,
     Notifications,
-    AiCompanion,
     LiveWidgets,
 }
 
@@ -171,7 +170,6 @@ pub struct LauncherState {
     pub dark_mode: bool,
     pub media_playing: bool,
     pub flashlight_on: bool,
-    pub ai_listening: bool,
     pub app_drawer_tab: usize,
     pub notif_tab: usize,
     pub recent_apps: [&'static str; 3],
@@ -188,7 +186,6 @@ impl LauncherState {
             dark_mode: true,
             media_playing: true,
             flashlight_on: false,
-            ai_listening: false,
             app_drawer_tab: 0,
             notif_tab: 0,
             recent_apps: [
@@ -491,7 +488,7 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return BG_DARK;
     }
 
-    // 6. Universal "Ask anything..." Command Bar (x: 40..680, y: 1290..1365)
+    // 6. Universal Search Command Bar (x: 40..680, y: 1290..1365)
     if x >= 40 && x < 680 && y >= 1290 && y < 1365 {
         if y == 1290 || y == 1364 || x == 40 || x == 679 { return BORDER_SUBTLE; }
 
@@ -503,16 +500,15 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return TEXT_MUTED;
         }
 
-        // Placeholder text
+        // Search placeholder text
         if y >= 1320 && y < 1336 {
-            if let Some(c) = test_text(x, y, 96, 1320, 2, b"Ask anything...", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 96, 1320, 2, b"Search apps and files...", TEXT_MUTED) { return c; }
         }
 
-        // Cyan microphone icon right
-        let dx_m = (x as i32) - 644;
-        let dy_m = (y as i32) - 1327;
-        if dx_m >= -4 && dx_m <= 4 && dy_m >= -8 && dy_m <= 4 { return ACCENT_SKY; }
-        if dy_m >= 6 && dy_m <= 8 && dx_m >= -6 && dx_m <= 6 { return ACCENT_SKY; }
+        // Right arrow icon
+        if y >= 1320 && y < 1336 {
+            if let Some(c) = test_text(x, y, 644, 1320, 2, b">", TEXT_MUTED) { return c; }
+        }
         return SURFACE_RAISED;
     }
 
@@ -1451,212 +1447,6 @@ fn resolve_app_in_drawer(x: usize, y: usize) -> Option<&'static str> {
 }
 
 #[inline(never)]
-fn get_ai_companion_color(x: usize, y: usize, state: &LauncherState) -> u32 {
-    // 1. Status Bar (y: 0..48)
-    if y < 48 {
-        if y == 47 { return BORDER_SUBTLE; }
-        if y >= 16 && y < 32 {
-            if let Some(c) = test_text(x, y, 48, 16, 2, b"--:--", TEXT_PRIMARY) { return c; }
-        }
-        // Cellular
-        if x >= 590 && x <= 608 && y >= 16 && y <= 32 {
-            if x <= 593 && y >= 28 { return TEXT_PRIMARY; }
-            if x >= 595 && x <= 598 && y >= 24 { return TEXT_PRIMARY; }
-            if x >= 600 && x <= 603 && y >= 20 { return TEXT_PRIMARY; }
-            if x >= 605 && x <= 608 && y >= 16 { return TEXT_PRIMARY; }
-        }
-        // Wi-Fi
-        if x >= 626 && x <= 644 && y >= 18 && y <= 32 {
-            let dx = (x as i32) - 635;
-            let dy = (y as i32) - 30;
-            let d2 = dx * dx + dy * dy;
-            if (d2 >= 100 && d2 <= 144 && dy <= -2) || (d2 >= 36 && d2 <= 64 && dy <= -1) || d2 <= 9 {
-                return TEXT_PRIMARY;
-            }
-        }
-        // Battery
-        if x >= 658 && x <= 686 && y >= 18 && y <= 32 {
-            if x == 658 || x == 684 || y == 18 || y == 32 { return TEXT_PRIMARY; }
-            if x >= 685 && x <= 686 && y >= 22 && y <= 28 { return TEXT_PRIMARY; }
-            // Synthetic battery fill removed; hardware telemetry must supply the level.
-        }
-        return BG_DARK;
-    }
-
-    // 2. Header (y: 50..120)
-    if y >= 50 && y < 120 {
-        if y >= 64 && y < 88 {
-            if let Some(c) = test_text(x, y, 48, 64, 3, b"InterOS AI", TEXT_PRIMARY) { return c; }
-        }
-        if y >= 94 && y < 102 {
-            if let Some(c) = test_text(x, y, 48, 94, 1, b"Sovereign Intelligence & Companion", TEXT_MUTED) { return c; }
-        }
-        // Options circle at (644, 76, r: 18)
-        let dx = (x as i32) - 644;
-        let dy = (y as i32) - 76;
-        let d2 = dx * dx + dy * dy;
-        if d2 <= 324 {
-            if d2 >= 289 { return BORDER_SUBTLE; }
-            if y >= 72 && y < 80 {
-                if let Some(c) = test_text(x, y, 640, 72, 1, b"*", ACCENT_SKY) { return c; }
-            }
-            return SURFACE_RAISED;
-        }
-        return BG_DARK;
-    }
-
-    // 3. 3D Procedural Raytraced Dynamic Sphere / Orb (y: 130..320)
-    if y >= 130 && y < 320 {
-        let dx = (x as i32) - 360;
-        let dy = (y as i32) - 225;
-        let d2 = dx * dx + dy * dy;
-        let r_sq = 72 * 72;
-        if d2 <= r_sq {
-            let s1_dx = dx + 24;
-            let s1_dy = dy + 24;
-            if s1_dx * s1_dx + s1_dy * s1_dy <= 120 {
-                return 0xFFFFFFFF;
-            }
-            if s1_dx * s1_dx + s1_dy * s1_dy <= 380 {
-                return ACCENT_SKY;
-            }
-            if state.ai_listening && d2 >= r_sq - 500 {
-                return SUCCESS_EMERALD;
-            } else if d2 >= r_sq - 320 {
-                return 0xFF24608A;
-            }
-            return 0xFF0D1829;
-        }
-        return BG_DARK;
-    }
-
-    // 4. Greeting text (y: 335..375)
-    if y >= 335 && y < 375 {
-        if y >= 345 && y < 361 {
-            let label = if state.ai_listening { &b"Listening to prompt..."[..] } else { &b"How can I help you?"[..] };
-            let fg = if state.ai_listening { SUCCESS_EMERALD } else { TEXT_PRIMARY };
-            let ox = 360usize.saturating_sub((label.len() * 16) / 2);
-            if let Some(c) = test_text(x, y, ox, 345, 2, label, fg) { return c; }
-        }
-        return BG_DARK;
-    }
-
-    // 5. 4 Full-Width Action Cards (y: 390..735, x: 40..680)
-    // Card 0: Summarize (y: 390..465)
-    if y >= 390 && y < 465 && x >= 40 && x < 680 {
-        if y == 390 || y == 464 || x == 40 || x == 679 { return BORDER_SUBTLE; }
-        let b_dx = (x as i32) - 75;
-        let b_dy = (y as i32) - 427;
-        if b_dx * b_dx + b_dy * b_dy <= 324 {
-            if y >= 423 && y < 431 {
-                if let Some(c) = test_text(x, y, 63, 423, 1, b"DOC", ACCENT_SKY) { return c; }
-            }
-            return 0xFF0E1A2C;
-        }
-        if y >= 408 && y < 424 {
-            if let Some(c) = test_text(x, y, 110, 408, 2, b"Summarize", TEXT_PRIMARY) { return c; }
-            if let Some(c) = test_text(x, y, 645, 408, 2, b">", TEXT_MUTED) { return c; }
-        }
-        if y >= 432 && y < 440 {
-            if let Some(c) = test_text(x, y, 110, 432, 1, b"Analyze active screen, document or link", TEXT_MUTED) { return c; }
-        }
-        return SURFACE_RAISED;
-    }
-
-    // Card 1: Create (y: 480..555)
-    if y >= 480 && y < 555 && x >= 40 && x < 680 {
-        if y == 480 || y == 554 || x == 40 || x == 679 { return BORDER_SUBTLE; }
-        let b_dx = (x as i32) - 75;
-        let b_dy = (y as i32) - 517;
-        if b_dx * b_dx + b_dy * b_dy <= 324 {
-            if y >= 513 && y < 521 {
-                if let Some(c) = test_text(x, y, 63, 513, 1, b"GEN", 0xFFA78BFA) { return c; }
-            }
-            return 0xFF181228;
-        }
-        if y >= 498 && y < 514 {
-            if let Some(c) = test_text(x, y, 110, 498, 2, b"Create", TEXT_PRIMARY) { return c; }
-            if let Some(c) = test_text(x, y, 645, 498, 2, b">", TEXT_MUTED) { return c; }
-        }
-        if y >= 522 && y < 530 {
-            if let Some(c) = test_text(x, y, 110, 522, 1, b"Draft notes, code tasks or ideas", TEXT_MUTED) { return c; }
-        }
-        return SURFACE_RAISED;
-    }
-
-    // Card 2: Find (y: 570..645)
-    if y >= 570 && y < 645 && x >= 40 && x < 680 {
-        if y == 570 || y == 644 || x == 40 || x == 679 { return BORDER_SUBTLE; }
-        let b_dx = (x as i32) - 75;
-        let b_dy = (y as i32) - 607;
-        if b_dx * b_dx + b_dy * b_dy <= 324 {
-            if y >= 603 && y < 611 {
-                if let Some(c) = test_text(x, y, 63, 603, 1, b"FND", SUCCESS_EMERALD) { return c; }
-            }
-            return 0xFF0E2218;
-        }
-        if y >= 588 && y < 604 {
-            if let Some(c) = test_text(x, y, 110, 588, 2, b"Find", TEXT_PRIMARY) { return c; }
-            if let Some(c) = test_text(x, y, 645, 588, 2, b">", TEXT_MUTED) { return c; }
-        }
-        if y >= 612 && y < 620 {
-            if let Some(c) = test_text(x, y, 110, 612, 1, b"Locate files, apps, settings and history", TEXT_MUTED) { return c; }
-        }
-        return SURFACE_RAISED;
-    }
-
-    // Card 3: Do (y: 660..735)
-    if y >= 660 && y < 735 && x >= 40 && x < 680 {
-        if y == 660 || y == 734 || x == 40 || x == 679 { return BORDER_SUBTLE; }
-        let b_dx = (x as i32) - 75;
-        let b_dy = (y as i32) - 697;
-        if b_dx * b_dx + b_dy * b_dy <= 324 {
-            if y >= 693 && y < 701 {
-                if let Some(c) = test_text(x, y, 63, 693, 1, b"ACT", ACCENT_AMBER) { return c; }
-            }
-            return 0xFF241C0E;
-        }
-        if y >= 678 && y < 694 {
-            if let Some(c) = test_text(x, y, 110, 678, 2, b"Do", TEXT_PRIMARY) { return c; }
-            if let Some(c) = test_text(x, y, 645, 678, 2, b">", TEXT_MUTED) { return c; }
-        }
-        if y >= 702 && y < 710 {
-            if let Some(c) = test_text(x, y, 110, 702, 1, b"Run system actions with capability consent", TEXT_MUTED) { return c; }
-        }
-        return SURFACE_RAISED;
-    }
-
-    // 6. Bottom Prompt Input Pill (x: 40..680, y: 1290..1365)
-    if y >= 1290 && y < 1365 && x >= 40 && x < 680 {
-        if y == 1290 || y == 1364 || x == 40 || x == 679 { return BORDER_SUBTLE; }
-        let dx_s = (x as i32) - 68;
-        let dy_s = (y as i32) - 1327;
-        let d_s = dx_s * dx_s + dy_s * dy_s;
-        if (d_s >= 25 && d_s <= 64) || (dx_s >= 5 && dx_s <= 9 && dx_s == dy_s) { return TEXT_MUTED; }
-
-        if y >= 1320 && y < 1336 {
-            let label = if state.ai_listening { &b"Listening..."[..] } else { &b"Ask anything..."[..] };
-            let fg = if state.ai_listening { SUCCESS_EMERALD } else { TEXT_MUTED };
-            if let Some(c) = test_text(x, y, 104, 1320, 2, label, fg) { return c; }
-        }
-
-        let dx_m = (x as i32) - 644;
-        let dy_m = (y as i32) - 1327;
-        let mic_fg = if state.ai_listening { SUCCESS_EMERALD } else { ACCENT_SKY };
-        if dx_m >= -4 && dx_m <= 4 && dy_m >= -8 && dy_m <= 4 { return mic_fg; }
-        if dy_m >= 6 && dy_m <= 8 && dx_m >= -6 && dx_m <= 6 { return mic_fg; }
-        return SURFACE_RAISED;
-    }
-
-    // 7. Bottom Home Gesture Pill (x: 260..460, y: 1418..1424)
-    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
-        return TEXT_MUTED;
-    }
-
-    BG_DARK
-}
-
-#[inline(never)]
 fn get_live_widgets_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
     // 1. Status Bar (y: 0..48)
     if y < 48 {
@@ -1855,7 +1645,6 @@ fn render_view(surface: u32, state: &LauncherState) {
                 ViewMode::PowerMenu => get_power_menu_color(x, y, state),
                 ViewMode::AppDrawer => get_app_drawer_color(x, y, state),
                 ViewMode::Notifications => get_notifications_color(x, y, state),
-                ViewMode::AiCompanion => get_ai_companion_color(x, y, state),
                 ViewMode::LiveWidgets => get_live_widgets_color(x, y, state),
             };
             x += 1;
@@ -1891,9 +1680,6 @@ fn render_view(surface: u32, state: &LauncherState) {
         }
         ViewMode::Notifications => {
             std::log(0, "[LAUNCHER] render_notifications complete: Notifications & events presented.").ok();
-        }
-        ViewMode::AiCompanion => {
-            std::log(0, "[LAUNCHER] render_ai_companion complete: Sovereign AI assistant presented.").ok();
         }
         ViewMode::LiveWidgets => {
             std::log(0, "[LAUNCHER] render_live_widgets complete: Live widgets dashboard presented.").ok();
@@ -2209,6 +1995,7 @@ pub extern "C" fn _start() -> ! {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
                                 let _ = std::surface_flip(4);
+                                std::log(0, "[LAUNCHER] Returned to Home from System Space.").ok();
                                 let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
                                 while std::input_event_poll(&mut drain).is_ok() {}
                                 break;
@@ -2520,79 +2307,6 @@ pub extern "C" fn _start() -> ! {
                                 }
                             }
                         }
-                        ViewMode::AiCompanion => {
-                            // Swipe right or swipe down returns to HomeScreen
-                            if (input.kind == 4 && (input.dx >= 60 || input.dy >= 60)) || (input.kind == 1 && input.y >= 1400) {
-                                state.current_view = ViewMode::HomeScreen;
-                                render_view(surface, &state);
-                                let _ = std::surface_flip(4);
-                                std::log(0, "[LAUNCHER] Returned to Home from AI Companion.").ok();
-                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                while std::input_event_poll(&mut drain).is_ok() {}
-                                break;
-                            }
-                            if input.kind == 1 {
-                                let x = input.x as usize;
-                                let y = input.y as usize;
-
-                                // Mic icon tap (x: 620..670, y: 1290..1365)
-                                if (1290..1365).contains(&y) && x >= 620 {
-                                    state.ai_listening = !state.ai_listening;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] AI voice listening toggled.").ok();
-                                    break;
-                                }
-
-                                // Card 0: Summarize (390..465)
-                                if (390..465).contains(&y) && (40..680).contains(&x) {
-                                    state.push_recent("org.interos.browser");
-                                    if let Ok(task_id) = std::app_launch("org.interos.browser") {
-                                        state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
-                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-
-                                // Card 1: Create (480..555)
-                                if (480..555).contains(&y) && (40..680).contains(&x) {
-                                    state.push_recent("org.interos.test_app");
-                                    if let Ok(task_id) = std::app_launch("org.interos.test_app") {
-                                        state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
-                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-
-                                // Card 2: Find (570..645)
-                                if (570..645).contains(&y) && (40..680).contains(&x) {
-                                    state.push_recent("org.interos.file_manager");
-                                    if let Ok(task_id) = std::app_launch("org.interos.file_manager") {
-                                        state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
-                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-
-                                // Card 3: Do (660..735)
-                                if (660..735).contains(&y) && (40..680).contains(&x) {
-                                    state.push_recent("org.interos.settings");
-                                    if let Ok(task_id) = std::app_launch("org.interos.settings") {
-                                        state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
-                                        let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-                            }
-                        }
                         ViewMode::LiveWidgets => {
                             // Swipe right returns to HomeScreen
                             if (input.kind == 4 && input.dx >= 60) || (input.kind == 1 && input.y >= 1400) {
@@ -2793,33 +2507,29 @@ pub extern "C" fn _start() -> ! {
                                         state.task_done[0] = !state.task_done[0];
                                         render_view(surface, &state);
                                         let _ = std::surface_flip(4);
+                                        std::log(0, "[LAUNCHER] Contextual task 0 toggled.").ok();
                                         break;
                                     } else if (355..=380).contains(&y) {
                                         state.task_done[1] = !state.task_done[1];
                                         render_view(surface, &state);
                                         let _ = std::surface_flip(4);
+                                        std::log(0, "[LAUNCHER] Contextual task 1 toggled.").ok();
                                         break;
                                     } else if (405..=430).contains(&y) {
                                         state.task_done[2] = !state.task_done[2];
                                         render_view(surface, &state);
                                         let _ = std::surface_flip(4);
+                                        std::log(0, "[LAUNCHER] Contextual task 2 toggled.").ok();
                                         break;
                                     }
                                 }
 
-                                // Tapping "Ask anything..." search pill: mic opens AI companion, body opens System Space
+                                // Universal search bar tap: opens System Space
                                 if (1290..1365).contains(&y) && (40..680).contains(&x) {
-                                    if x >= 620 {
-                                        state.current_view = ViewMode::AiCompanion;
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
-                                        std::log(0, "[LAUNCHER] AI Companion opened via mic tap.").ok();
-                                    } else {
-                                        state.current_view = ViewMode::SystemSpace;
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
-                                        std::log(0, "[LAUNCHER] System Space opened via universal search bar tap.").ok();
-                                    }
+                                    state.current_view = ViewMode::SystemSpace;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] System Space opened via universal search bar tap.").ok();
                                     let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
                                     while std::input_event_poll(&mut drain).is_ok() {}
                                     break;

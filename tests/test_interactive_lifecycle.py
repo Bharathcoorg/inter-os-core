@@ -570,41 +570,31 @@ def main():
         assert drawer_returned, "Failed to return to Home from App Drawer"
         print("[LIFECYCLE TEST] [OK] Returned to Home from App Drawer.")
 
-        # Phase 17: Testing AI Companion
-        print("\n[LIFECYCLE TEST] === Phase 17: Testing AI Companion ===")
+        # Phase 17: Testing Contextual Today Tasks
+        print("\n[LIFECYCLE TEST] === Phase 17: Testing Contextual Today Tasks ===")
         time.sleep(0.5)
-        print("[LIFECYCLE TEST] Opening AI Companion via mic tap on search bar (650, 1330)...")
-        reader.sock.sendall(b"TAP 650 1330\n")
-        ai_ready = reader.wait_for(
-            "render_ai_companion complete: Sovereign AI assistant presented.",
+        print("[LIFECYCLE TEST] Toggling Today card task 0 checkbox at (78, 318)...")
+        reader.sock.sendall(b"TAP 78 318\n")
+        task0_toggled = reader.wait_for(
+            "Contextual task 0 toggled.",
             timeout=10.0,
-            print_keywords=["LAUNCHER", "AI", "Companion", "render_ai_companion"]
+            print_keywords=["LAUNCHER", "task", "toggled"]
         )
-        assert ai_ready, "Failed to open AI Companion"
-        print("[LIFECYCLE TEST] [OK] AI Companion opened.")
-        ppm_ai = os.path.abspath(r"target\test_ai_companion.ppm").replace("\\", "/")
-        _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_ai}")
-        print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_ai}")
+        assert task0_toggled, "Failed to toggle contextual task 0"
+        print("[LIFECYCLE TEST] [OK] Contextual task 0 toggled.")
+        ppm_tasks = os.path.abspath(r"target\test_contextual_tasks.ppm").replace("\\", "/")
+        _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_tasks}")
+        print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_tasks}")
         time.sleep(0.5)
-        print("[LIFECYCLE TEST] Toggling AI listening via mic tap...")
-        reader.sock.sendall(b"TAP 650 1330\n")
-        ai_toggled = reader.wait_for(
-            "render_ai_companion complete: Sovereign AI assistant presented.",
+        print("[LIFECYCLE TEST] Toggling Today card task 1 checkbox at (78, 368)...")
+        reader.sock.sendall(b"TAP 78 368\n")
+        task1_toggled = reader.wait_for(
+            "Contextual task 1 toggled.",
             timeout=10.0,
-            print_keywords=["LAUNCHER", "render_ai_companion"]
+            print_keywords=["LAUNCHER", "task", "toggled"]
         )
-        assert ai_toggled, "Failed to toggle AI voice listening"
-        print("[LIFECYCLE TEST] [OK] AI voice listening toggled.")
-        time.sleep(0.5)
-        print("[LIFECYCLE TEST] Returning to Home from AI Companion via bottom tap...")
-        reader.sock.sendall(b"TAP 360 1410\n")
-        ai_returned = reader.wait_for(
-            "render_full complete: 10-app home screen canvas initialized.",
-            timeout=10.0,
-            print_keywords=["LAUNCHER", "render_full"]
-        )
-        assert ai_returned, "Failed to return to Home from AI Companion"
-        print("[LIFECYCLE TEST] [OK] Returned to Home from AI Companion.")
+        assert task1_toggled, "Failed to toggle contextual task 1"
+        print("[LIFECYCLE TEST] [OK] Contextual task 1 toggled.")
 
         # Phase 18: Testing Live Widgets
         print("\n[LIFECYCLE TEST] === Phase 18: Testing Live Widgets ===")

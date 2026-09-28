@@ -226,6 +226,7 @@ pub trait UpdateBackend {
     fn activate_slot(&mut self, slot: UpdateSlot, version: u64) -> Result<(), UpdateError>;
 }
 
+#[allow(dead_code)]
 pub struct VerifiedUpdate<'a, B: UpdateBackend> { backend: &'a mut B }
 impl<'a, B: UpdateBackend> VerifiedUpdate<'a, B> {
     pub fn install_with_boot_policy(
