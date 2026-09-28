@@ -262,10 +262,10 @@ def cmd_doctor(args):
 USERSPACE_MANIFEST = WORKSPACE_ROOT / "platform" / "x86_64" / "userspace-manifest.json"
 
 def _load_x86_userspace_manifest():
-    if not USERSpace_MANIFEST.exists():
-        raise RuntimeError(f"Canonical userspace manifest missing: {USERSpace_MANIFEST}")
+    if not USERSPACE_MANIFEST.exists():
+        raise RuntimeError(f"Canonical userspace manifest missing: {USERSPACE_MANIFEST}")
     try:
-        data = json.loads(USERSpace_MANIFEST.read_text(encoding="utf-8"))
+        data = json.loads(USERSPACE_MANIFEST.read_text(encoding="utf-8"))
     except Exception as exc:
         raise RuntimeError(f"Invalid userspace manifest: {exc}") from exc
     required = data.get("required")
@@ -1250,8 +1250,8 @@ def main():
 
     # run
     p_run = subparsers.add_parser("run", help="Build and launch the canonical QEMU demo or deploy an application")
-    p_run.add_argument("name", help="App name")
-    p_run.add_argument("--target", default="aarch64-unknown-none", help="Target triple")
+    p_run.add_argument("name", help="demo/qemu or app name")
+    p_run.add_argument("--target", default="x86_64-unknown-none", help="Application target triple")
     p_run.add_argument("--port", type=int, default=4300, help="Studio port")
     p_run.set_defaults(func=cmd_run)
 
