@@ -225,6 +225,32 @@ impl Vfs {
         self.persist_data_snapshot()?; self.persist_metadata_snapshot()?; Ok(())
     }
 
+    /// Installs a kernel-owned package blob transactionally into the package namespace.
+    ///
+    /// The caller must have already performed cryptographic package verification.
+    pub fn install_package_blob(&mut self, package_id: &str, content: &[u8]) -> Result<InodeId, FsError> {
+        if package_id.is_empty() || package_id.len() > 128 || package_id.contains('/') || package_id.contains('\\') || package_id.contains("..") {
+            return Err(FsError::InvalidPath);
+        }
+        if content.len() > MAX_FILE_SIZE {
+            return Err(FsError::FileTooLarge);
+        }
+        let path = alloc::format!("/packages/{}.rapp", package_id);
+        let previous = self.lookup(&path).and_then(|id| self.inodes.get(&id).cloned());
+        let id = self.create_file(&path, content, false);
+        if let Err(err) = self.persist_data_snapshot().and_then(|_| self.persist_metadata_snapshot()) {
+            if let Some(old) = previous {
+                self.inodes.insert(old.id, old);
+                self.path_to_inode.insert(path.clone(), old.id);
+            } else if let Some(new_id) = self.path_to_inode.remove(&path) {
+                self.inodes.remove(&new_id);
+            }
+            self.rebuild_children();
+            return Err(err);
+        }
+        Ok(id)
+    }
+
     /// Creates or updates a file node with content.
     pub fn create_file(
         &mut self,
