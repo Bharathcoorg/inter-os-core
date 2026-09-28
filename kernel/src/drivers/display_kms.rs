@@ -24,6 +24,9 @@ pub enum DisplayOrientation { Portrait, LandscapeRight, PortraitInverted, Landsc
 
 /// A hardware plane / application graphics surface managed by KMS.
 #[derive(Debug, Clone)]
+pub const MAX_CLIENT_SURFACES: usize = 32;
+pub const MAX_SURFACE_PIXELS: usize = 1280 * 720;
+
 pub struct DrmSurface {
     pub id: u32,
     pub x: i32,
@@ -121,8 +124,19 @@ impl DrmKmsController {
 
     /// Allocates a new client surface for application rendering.
     pub fn create_surface(&mut self, width: u32, height: u32, z_order: u32, owner_task: u64) -> u32 {
+        let pixels = match (width as usize).checked_mul(height as usize) {
+            Some(value) if value > 0 && value <= MAX_SURFACE_PIXELS => value,
+            _ => return 0,
+        };
+        if self.surfaces.len() >= MAX_CLIENT_SURFACES {
+            return 0;
+        }
         let id = self.next_surface_id;
-        self.next_surface_id += 1;
+        self.next_surface_id = match self.next_surface_id.checked_add(1) {
+            Some(next) if next != 0 => next,
+            _ => return 0,
+        };
+        debug_assert_eq!(pixels, width as usize * height as usize);
         self.surfaces.push(DrmSurface::new(id, width, height, z_order, owner_task));
         self.focused_surface = Some(id);
         id
