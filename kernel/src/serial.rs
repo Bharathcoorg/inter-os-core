@@ -174,13 +174,20 @@ fn handle_rapp_command(s: &str) -> bool {
             Ok(_) => { serial_println!("[RAPP_HOST] REJECT package id mismatch"); return true; }
             Err(err) => { serial_println!("[RAPP_HOST] REJECT verification failed: {:?}", err); return true; }
         };
-        let path = alloc::format!("/packages/{}.rapp", verified.package_id);
-        match crate::fs::VFS.lock().install_package_blob(&verified.package_id, &state.bytes) {
-            Ok(_) => {
-                serial_println!("[RAPP_HOST] INSTALLED id={} version={}.{}.{} path={}",
-                    verified.package_id, verified.version.0, verified.version.1, verified.version.2, path);
+        match crate::package::PACKAGE_BLOB_STORE.lock().put(&verified.package_id, verified.version, &state.bytes) {
+            Ok(()) => {
+                let registry_ok = {
+                    let mut registry = crate::package::PACKAGE_REGISTRY.lock();
+                    registry.stage_verified(&verified).is_ok() && registry.activate(&verified.package_id).is_ok()
+                };
+                if registry_ok {
+                    serial_println!("[RAPP_HOST] INSTALLED id={} version={}.{}.{}",
+                        verified.package_id, verified.version.0, verified.version.1, verified.version.2);
+                } else {
+                    serial_println!("[RAPP_HOST] REJECT registry activation failed");
+                }
             }
-            Err(err) => serial_println!("[RAPP_HOST] REJECT persistence failed: {:?}", err),
+            Err(_) => serial_println!("[RAPP_HOST] REJECT package store persistence failed"),
         }
         return true;
     }
