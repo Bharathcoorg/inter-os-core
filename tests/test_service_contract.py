@@ -16,4 +16,4 @@ def test_recovery_is_single_service_operation():
     assert "recover_failed(id: ServiceId, parent_id: TaskId)" in SERVICES
     assert "sys_service_recover_failed(service_id: u8)" in SYSCALL
     assert "ServiceRecoverFailed,service_id as u64" in STD
-    assert "for service_id in 1u8..=10u8" in INIT
+    assert "for service_id in [1u8,2,3,4,5,6,7,8,9,10,11]" in INIT
