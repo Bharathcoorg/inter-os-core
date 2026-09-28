@@ -314,3 +314,16 @@ def test_power_suspend_tracks_domain_ownership():
     assert "pub struct PowerDomainMask" in source
     assert "suspended_domains:PowerDomainMask" in source
     assert "PowerDomainMask::all()" in source
+
+def test_shared_process_thread_creation_is_transactional_and_reuses_cr3():
+    scheduler = (ROOT / "kernel/src/task/scheduler.rs").read_text(encoding="utf-8")
+    process = (ROOT / "kernel/src/task/process.rs").read_text(encoding="utf-8")
+    user = (ROOT / "kernel/src/task/user.rs").read_text(encoding="utf-8")
+    assert "pub fn spawn_user_thread" in scheduler
+    assert "let shared_space = match self.tasks.iter()" in scheduler
+    assert "cancel_thread_reservation(process_id)" in scheduler
+    assert "tcb.page_table = Some(shared_space)" in scheduler
+    assert "pub fn reserve_thread" in process
+    assert "pub fn bind_reserved_thread" in process
+    assert "pub fn map_user_thread_stack" in user
+    assert "1024 * 1024usize" in user
