@@ -307,3 +307,10 @@ def test_tcp_receive_path_uses_strict_sequence_validation():
     assert "pub fn valid_established_segment" in tcp
     assert "valid_syn_ack(&segment, conn.send_seq.wrapping_add(1))" in net
     assert "valid_established_segment(&segment, conn.recv_seq, conn.snd_una, conn.send_seq)" in net
+
+def test_power_suspend_tracks_domain_ownership():
+    source = (ROOT / "kernel/src/resource/power.rs").read_text(encoding="utf-8")
+    assert "pub trait PowerDomain" in source
+    assert "pub struct PowerDomainMask" in source
+    assert "suspended_domains:PowerDomainMask" in source
+    assert "PowerDomainMask::all()" in source
