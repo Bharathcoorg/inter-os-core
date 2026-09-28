@@ -141,6 +141,16 @@ impl DrmKmsController {
         };
         debug_assert_eq!(pixels, width as usize * height as usize);
         self.surfaces.push(DrmSurface::new(id, width, height, z_order, owner_task));
+        if crate::gui::WINDOW_MANAGER.lock().create_with_id(
+            crate::gui::WindowId(id),
+            owner_task,
+            crate::gui::WindowRect { x: 0, y: 0, width, height },
+            crate::gui::WindowKind::Application,
+            false,
+        ).is_err() {
+            self.surfaces.pop();
+            return 0;
+        }
         self.focused_surface = Some(id);
         id
     }
@@ -160,6 +170,7 @@ impl DrmKmsController {
     pub fn destroy_surface(&mut self, id: u32) -> bool {
         if let Some(pos) = self.surfaces.iter().position(|s| s.id == id) {
             self.surfaces.remove(pos);
+            let _ = crate::gui::WINDOW_MANAGER.lock().destroy_owned(crate::gui::WindowId(id), owner_task.unwrap_or(0));
             if self.focused_surface == Some(id) {
                 self.focused_surface = self.surfaces.iter().filter(|s| s.visible).max_by_key(|s| s.z_order).map(|s| s.id);
             }
@@ -186,8 +197,15 @@ impl DrmKmsController {
 
     /// Removes every surface owned by a terminating userspace task.
     pub fn destroy_surfaces_owned_by(&mut self, owner_task: u64) -> usize {
+        let removed: alloc::vec::Vec<u32> = self.surfaces.iter().filter(|s| s.owner_task == owner_task).map(|s| s.id).collect();
         let before = self.surfaces.len();
         self.surfaces.retain(|s| s.owner_task != owner_task);
+        {
+            let mut wm = crate::gui::WINDOW_MANAGER.lock();
+            for id in &removed {
+                let _ = wm.destroy_owned(crate::gui::WindowId(*id), owner_task);
+            }
+        }
         if let Some(focused) = self.focused_surface {
             if !self.surfaces.iter().any(|s| s.id == focused) {
                 self.focused_surface = self.surfaces.iter().filter(|s| s.visible).max_by_key(|s| s.z_order).map(|s| s.id);
