@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 const MAX_BLOBS:usize=32;
-const MAX_BLOB_SIZE:usize=60000;
+pub const MAX_BLOB_SIZE:usize=60000;
 
 #[derive(Clone)]
 pub struct PackageBlob { pub package_id:String, pub version:(u16,u16,u16), pub bytes:Vec<u8> }
