@@ -384,7 +384,14 @@ def cmd_build(args):
         if res.returncode != 0:
             log_error(f"Application build failed for {target_lower}")
             return res.returncode
-        bin_dir = app_dir / "bin"
+        # Packaging is reproducible from a clean app tree: build the canonical
+    # x86_64 artifact when no ELF has been produced yet.
+    bin_dir = app_dir / "bin"
+    elf_candidates = list(bin_dir.glob("*.elf")) if bin_dir.exists() else []
+    if not elf_candidates:
+        build_ret = cmd_build(argparse.Namespace(name=app_name, target=None, arch="x86_64-unknown-none"))
+        if build_ret != 0:
+            return build_ret
         bin_dir.mkdir(exist_ok=True)
         out_elf = bin_dir / f"{target_lower}.elf"
         elf_src = WORKSPACE_ROOT / "target" / arch_target / "debug" / target_lower
@@ -556,7 +563,7 @@ def cmd_pack(args):
     bin_dir = app_dir / "bin"
     elf_candidates = list(bin_dir.glob("*.elf")) if bin_dir.exists() else []
     if not elf_candidates:
-        log_error("No ELF payload found in app/bin")
+        log_error("No ELF payload found in app/bin after the automatic build")
         return 1
     payload = elf_candidates[0].read_bytes()
     try:
@@ -774,6 +781,13 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {{
 }}
 """
     (app_dir / "src" / "main.rs").write_text(main_rs, encoding="utf-8")
+    (app_dir / "ui" / "index.html").write_text("""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>InterOS App</title>
+<style>html,body{margin:0;min-height:100%;font-family:system-ui,sans-serif;background:#101318;color:#f5f7fa}main{max-width:720px;margin:12vh auto;padding:32px}button{padding:10px 16px;border-radius:10px;border:0}</style>
+</head><body><main><h1>InterOS App</h1><p>InterOS application scaffold. Build the Ring-3 backend and implement UI behavior here.</p></main></body></html>
+""", encoding="utf-8")
+    (app_dir / "ui" / "icon.svg").write_text("""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128"><rect width="128" height="128" rx="28" fill="#151922"/><path d="M32 36h64v56H32z" fill="none" stroke="#fff" stroke-width="8"/><circle cx="48" cy="60" r="6" fill="#fff"/><circle cx="80" cy="60" r="6" fill="#fff"/></svg>
+""", encoding="utf-8")
 
     root_cargo = WORKSPACE_ROOT / "Cargo.toml"
     if root_cargo.exists():
