@@ -1004,6 +1004,36 @@ def cmd_install(args):
         return 1
 
 
+def cmd_trust(args):
+    pkg_path = Path(args.package_path)
+    if not pkg_path.exists():
+        log_error(f"Package file not found: {pkg_path}")
+        return 1
+    data = pkg_path.read_bytes()
+    if len(data) < 0xB0 or data[:4] != b"RAPP":
+        log_error("Invalid RAPP package")
+        return 1
+    public_key = data[0x28:0x48].hex()
+    publisher = getattr(args, "publisher", "developer")
+    port = getattr(args, "port", 4300)
+    if not _ensure_studio(port):
+        return 1
+    url = f"http://127.0.0.1:{port}/api/rapp/trust"
+    payload = json.dumps({"public_key": public_key, "publisher": publisher}).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+        if result.get("success"):
+            log_success(f"Publisher trust root provisioned in QEMU guest: {public_key}")
+            return 0
+        log_error(f"Guest trust provisioning failed: {result.get('message', result.get('error'))}")
+        return 1
+    except Exception as e:
+        log_error(f"Could not provision guest trust root: {e}")
+        return 1
+
+
 # =============================================================================
 # COMMANDS: sign, stop, restart, logs, shell, snapshot, trace
 # =============================================================================
@@ -1267,6 +1297,13 @@ def main():
     p_lst = subparsers.add_parser("list", help="List installed packages on emulator")
     p_lst.add_argument("--port", type=int, default=4300, help="Studio port")
     p_lst.set_defaults(func=cmd_list)
+
+    # trust
+    p_trust = subparsers.add_parser("trust", help="Explicitly provision an RAPP publisher key into the live QEMU developer guest")
+    p_trust.add_argument("package_path", help="RAPP package whose publisher key should be trusted")
+    p_trust.add_argument("--publisher", default="developer", help="Publisher label stored with the trust root")
+    p_trust.add_argument("--port", type=int, default=4300, help="Studio port")
+    p_trust.set_defaults(func=cmd_trust)
 
     # install
     p_inst = subparsers.add_parser("install", help="Verify and install package onto emulator")
