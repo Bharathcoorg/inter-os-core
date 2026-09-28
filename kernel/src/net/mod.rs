@@ -153,6 +153,7 @@ pub fn transmit_tcp_segment(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Addr
 }
 
 pub fn transmit_tcp_segment_with_window(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address, dst_port: u16, seq: u32, ack: u32, flags: u16, window: u16) -> Result<(), NetError> {
+    if flags & 0x02 != 0 && flags & 0x10 == 0 && window == 0 { return Err(NetError::InvalidPacket); }
     let segment = TcpSegment { src_port, dst_port, seq, ack, flags, window, payload: &[] };
     let mut tcp_buf = [0u8; 64];
     let tcp_len = crate::net::tcp::serialize_with_checksum(&segment, src_ip.0, dst_ip.0, &mut tcp_buf)
