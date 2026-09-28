@@ -236,3 +236,11 @@ def test_ipv6_nd_and_router_advertisement_parsers_validate_control_messages():
     assert "Icmpv6Neighbor" in source
     assert "Icmpv6RouterAdvertisement" in source
     assert "invalid ICMPv6 RA option" in source
+
+def test_power_suspend_requires_wake_source_and_has_explicit_resume_state():
+    source = (ROOT / "kernel/src/resource/power.rs").read_text(encoding="utf-8")
+    assert "enum SuspendState" in source
+    assert "enum WakeSource" in source
+    assert "if self.wake_mask == 0" in source
+    assert "self.state=SuspendState::Suspended" in source
+    assert "resume_complete" in source

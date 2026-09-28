@@ -173,3 +173,43 @@ impl PowerManager {
         }
     }
 }
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SuspendState { Active=0, Preparing=1, Suspended=2, Resuming=3 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum WakeSource { Timer=0, PowerButton=1, Touch=2, Network=3, Modem=4, Alarm=5 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PowerTransition {
+    pub state: SuspendState,
+    pub wake_mask: u32,
+    pub entered_at: u64,
+}
+
+impl PowerTransition {
+    pub const fn new() -> Self { Self { state:SuspendState::Active, wake_mask:0, entered_at:0 } }
+    pub fn enable_wake(&mut self, source:WakeSource) { self.wake_mask |= 1u32 << source as u8; }
+    pub fn disable_wake(&mut self, source:WakeSource) { self.wake_mask &= !(1u32 << source as u8); }
+    pub fn wake_enabled(&self, source:WakeSource)->bool { self.wake_mask & (1u32 << source as u8) != 0 }
+    pub fn prepare_suspend(&mut self, now:u64)->Result<(),&'static str>{
+        if self.state != SuspendState::Active { return Err("power transition already active"); }
+        if self.wake_mask == 0 { return Err("no wake source configured"); }
+        self.state=SuspendState::Preparing; self.entered_at=now; Ok(())
+    }
+    pub fn enter_suspend(&mut self)->Result<(),&'static str>{
+        if self.state != SuspendState::Preparing { return Err("suspend not prepared"); }
+        self.state=SuspendState::Suspended; Ok(())
+    }
+    pub fn wake(&mut self, source:WakeSource)->Result<(),&'static str>{
+        if self.state != SuspendState::Suspended || !self.wake_enabled(source) { return Err("wake source not armed"); }
+        self.state=SuspendState::Resuming; Ok(())
+    }
+    pub fn resume_complete(&mut self)->Result<(),&'static str>{
+        if self.state != SuspendState::Resuming { return Err("resume not pending"); }
+        self.state=SuspendState::Active; Ok(())
+    }
+}
