@@ -282,3 +282,20 @@ def test_tcp_acks_advertise_current_receive_window():
     assert "to_ack_syn: Option<(u16, u16, u32, u32, u16)>" in source
     assert "c.rcv_wnd.min(u16::MAX as u32) as u16" in source
     assert "transmit_tcp_segment_with_window" in source
+
+def test_shared_process_thread_creation_has_dedicated_guarded_stack():
+    process = (ROOT / "kernel/src/task/process.rs").read_text(encoding="utf-8")
+    scheduler = (ROOT / "kernel/src/task/scheduler.rs").read_text(encoding="utf-8")
+    user = (ROOT / "kernel/src/task/user.rs").read_text(encoding="utf-8")
+    assert "pub fn reserve_thread" in process
+    assert "pub fn bind_reserved_thread" in process
+    assert "pub fn spawn_user_thread" in scheduler
+    assert "map_user_thread_stack" in scheduler
+    assert "THREAD_STACK" not in user or "map_user_thread_stack" in user
+    assert "guard-page stride" in user
+
+def test_process_reap_rejects_live_sibling_threads():
+    process = (ROOT / "kernel/src/task/process.rs").read_text(encoding="utf-8")
+    scheduler = (ROOT / "kernel/src/task/scheduler.rs").read_text(encoding="utf-8")
+    assert "process still has live threads" in process
+    assert "process::reap(child_id)?" in scheduler
