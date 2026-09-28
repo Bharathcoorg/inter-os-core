@@ -5,8 +5,10 @@ hardware-facing KMS adapter.
 
 ## Contract
 
-A window is represented by an owned display surface. The kernel remains the
-authority for:
+A window is represented by an owned display surface. The GUI `WindowManager`
+and KMS surface registry share the same stable window ID; KMS creation,
+geometry, focus and destruction are synchronized with the GUI registry. The
+kernel remains the authority for:
 
 - window ownership and lifecycle;
 - geometry, z-order and visibility;
@@ -22,7 +24,8 @@ performed through capability-checked display service calls.
 ## Input isolation
 
 Normalized touch/gesture events are routed to the focused window owner's
-task. Application input polling removes only events addressed to the calling
+task. Tap-like events perform authoritative hit-testing; pan/pinch gestures
+retain the captured focused owner instead of switching applications mid-gesture. Application input polling removes only events addressed to the calling
 task. The display/input service retains its separate service queue.
 
 This prevents an unrelated application from consuming another application's
