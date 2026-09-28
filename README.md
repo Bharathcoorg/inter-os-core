@@ -79,7 +79,7 @@ Verify that your toolchains, QEMU binaries, and canonical demo manifest are dete
 ```bash
 python tools/interos.py doctor
 ```
-*(On Windows, you can also run `.`\\interos.ps1 doctor` or `interos.cmd doctor`)*
+*(On Windows, you can also run `.\interos.ps1 doctor` or `interos.cmd doctor`)*
 
 ### 2. Build the canonical QEMU Phone demo
 This is the authoritative clean-checkout build. It resolves every userspace ELF embedded by the x86_64 kernel before creating the BIOS image:
