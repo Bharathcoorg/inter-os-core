@@ -259,7 +259,7 @@ def cmd_doctor(args):
 # =============================================================================
 # COMMAND: build
 # =============================================================================
-USERSpace_MANIFEST = WORKSPACE_ROOT / "platform" / "x86_64" / "userspace-manifest.json"
+USERSPACE_MANIFEST = WORKSPACE_ROOT / "platform" / "x86_64" / "userspace-manifest.json"
 
 def _load_x86_userspace_manifest():
     if not USERSpace_MANIFEST.exists():
@@ -783,6 +783,39 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {{
 # =============================================================================
 # COMMAND: run
 # =============================================================================
+def _ensure_studio(port):
+    """Return True when Device Studio is reachable, starting it when necessary."""
+    url = f"http://127.0.0.1:{port}/api/status"
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, method="GET"), timeout=1):
+            return True
+    except Exception:
+        pass
+
+    server = WORKSPACE_ROOT / "emulator" / "server.py"
+    if not server.exists():
+        log_error(f"Device Studio server missing: {server}")
+        return False
+
+    log("Device Studio is offline; starting the local server...")
+    kwargs = {"cwd": str(WORKSPACE_ROOT)}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    subprocess.Popen([sys.executable, str(server)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kwargs)
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, method="GET"), timeout=1):
+                log_success(f"Device Studio is ready on port {port}.")
+                return True
+        except Exception:
+            time.sleep(0.25)
+
+    log_error(f"Device Studio did not become ready on port {port}.")
+    return False
+
+
 def cmd_run(args):
     target_name = args.name.lower().replace("-", "_")
     target = getattr(args, "target", "x86_64-unknown-none")
@@ -794,6 +827,8 @@ def cmd_run(args):
         log(f"Building {arch} microkernel...")
         b_args = argparse.Namespace(name=arch, target=None)
         if cmd_build(b_args) != 0:
+            return 1
+        if not _ensure_studio(port):
             return 1
         url = f"http://127.0.0.1:{port}/api/qemu/launch"
         log(f"Launching QEMU {arch} microkernel via Device Studio API...")
