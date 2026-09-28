@@ -18,7 +18,7 @@ pub extern "C" fn _start() -> ! {
     std::log(0, "[PID1] Inter OS userspace init started in Ring 3.").ok();
     // Service-manager bootstrap. PID 1, not kernel_main, owns the
     // startup ordering of the userspace service set.
-    const SERVICES: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+    const SERVICES: [u8; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 11];
     for service_id in SERVICES {
         match std::service_start(service_id) {
             Ok(_) => { let _ = std::log(0, "[PID1] Service started through lifecycle ABI."); },
@@ -70,7 +70,7 @@ pub extern "C" fn _start() -> ! {
                     std::log(0, "[PID1] Service registry returned no active services.").ok();
                 }
             }
-            for service_id in 1u8..=10u8 {
+            for service_id in [1u8,2,3,4,5,6,7,8,9,10,11] {
                 if std::service_recover_failed(service_id).is_ok() {
                     std::log(0, "[PID1] Recovered a failed service through the lifecycle ABI.").ok();
                 }
@@ -110,7 +110,7 @@ fn registry_has_all_running_services(buf: &[u8]) -> bool {
         let Some(task_bytes) = fields.next() else { continue; };
         let Some(state) = fields.next() else { continue; };
         if state != b"running" || task_bytes == b"0" { continue; }
-        if id_bytes.len() == 1 && (b'1'..=b'8').contains(&id_bytes[0]) {
+        if id_bytes.len() == 1 && (b'1'..=b'8').contains(&id_bytes[0]) || id_bytes == b"11" {
             seen |= 1 << (id_bytes[0] - b'1');
         }
     }
