@@ -681,12 +681,38 @@ def main():
         assert unlocked, "Failed to unlock device"
         print("[LIFECYCLE TEST] [OK] Device unlocked, returned to Home grid.")
 
+        # Phase 20: Testing System Space
+        print("\n[LIFECYCLE TEST] === Phase 20: Testing System Space ===")
+        time.sleep(0.5)
+        print("[LIFECYCLE TEST] Opening System Space via universal search bar tap (360, 1330)...")
+        reader.sock.sendall(b"TAP 360 1330\n")
+        sys_space_ready = reader.wait_for(
+            "render_system_space complete: Visual system space presented.",
+            timeout=10.0,
+            print_keywords=["LAUNCHER", "System Space", "render_system_space"]
+        )
+        assert sys_space_ready, "Failed to open System Space"
+        print("[LIFECYCLE TEST] [OK] System Space opened.")
+        ppm_sys_space = os.path.abspath(r"target\test_system_space.ppm").replace("\\", "/")
+        _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_sys_space}")
+        print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_sys_space}")
+        time.sleep(0.5)
+        print("[LIFECYCLE TEST] Returning to Home from System Space via bottom tap...")
+        reader.sock.sendall(b"TAP 360 1410\n")
+        sys_space_returned = reader.wait_for(
+            "render_full complete: 10-app home screen canvas initialized.",
+            timeout=10.0,
+            print_keywords=["LAUNCHER", "render_full"]
+        )
+        assert sys_space_returned, "Failed to return to Home from System Space"
+        print("[LIFECYCLE TEST] [OK] Returned to Home from System Space.")
+
         ppm_final = os.path.abspath(r"target\test_launcher_final.ppm").replace("\\", "/")
         _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_final}")
         print(f"[LIFECYCLE TEST] Final screendump recorded: {ppm_final}")
 
         print("\n============================================================")
-        print("  INTEROS CORE ALL 19 PHASES (10 APPS + 10 SCREENS): PASSED (100%)")
+        print("  INTEROS CORE ALL 20 PHASES (10 APPS + 10 SCREENS): PASSED (100%)")
         print("============================================================")
 
     except Exception as e:
