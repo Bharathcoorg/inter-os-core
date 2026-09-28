@@ -10,6 +10,8 @@ pub mod scheduler;
 pub mod user;
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
+use spin::Mutex;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 pub use context::{switch_context, TaskContext};
@@ -72,6 +74,8 @@ pub enum TaskState {
 }
 
 /// Task Control Block (TCB) maintaining complete execution state and security capabilities.
+pub type SharedAddressSpace = Arc<Mutex<crate::memory::TaskPageTable>>;
+
 pub struct TaskControlBlock {
     /// Unique task ID.
     pub id: TaskId,
@@ -90,7 +94,7 @@ pub struct TaskControlBlock {
     /// Priority level (higher numbers run with precedence).
     pub priority: u8,
     /// Dedicated hardware virtual memory address space (CR3 Page Table).
-    pub page_table: Option<crate::memory::TaskPageTable>,
+    pub page_table: Option<SharedAddressSpace>,
     /// Virtual address of userspace entry point (Ring 3 RIP).
     pub user_entry: usize,
     /// Virtual address of userspace stack top (Ring 3 RSP).
@@ -149,7 +153,7 @@ impl TaskControlBlock {
 
     /// Attaches an isolated hardware page table to this task.
     pub fn with_page_table(mut self, pt: crate::memory::TaskPageTable) -> Self {
-        self.page_table = Some(pt);
+        self.page_table = Some(Arc::new(Mutex::new(pt)));
         self
     }
 

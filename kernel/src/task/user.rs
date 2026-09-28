@@ -343,7 +343,7 @@ pub fn spawn_user_process_with_parent(
     let (user_entry, user_stack_top) = load_user_elf_into_page_table(elf_data, &mut pt, stack_top)?;
 
     let mut tcb = crate::task::TaskControlBlock::new(name, user_process_entry, caps, priority);
-    tcb.page_table = Some(pt);
+    tcb.page_table = Some(alloc::sync::Arc::new(spin::Mutex::new(pt)));
     tcb.user_entry = user_entry;
     tcb.user_stack_top = user_stack_top;
     tcb.parent_id = parent_id;

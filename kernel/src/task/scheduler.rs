@@ -217,7 +217,7 @@ impl Scheduler {
 
         // Switch to incoming task's isolated hardware address space (CR3)
         if let Some(ref pt) = self.tasks[next_idx].page_table {
-            pt.switch_to();
+            pt.lock().switch_to();
         } else {
             // Kernel task: switch back to clean kernel PML4
             crate::memory::switch_to_kernel_page_table();
