@@ -414,3 +414,11 @@ def test_ipc_task_cleanup_releases_share_and_shm_ownership():
     assert "p.producer == task_id || p.consumer == task_id" in shm
     assert "SHARE_SHEET_MANAGER.lock().cleanup_task(task_id)" in ipc
     assert "SHM_PIPE_MANAGER.lock().cleanup_task(task_id)" in ipc
+
+def test_task_teardown_releases_network_ownership():
+    net = (ROOT / "kernel/src/net/mod.rs").read_text(encoding="utf-8")
+    scheduler = (ROOT / "kernel/src/task/scheduler.rs").read_text(encoding="utf-8")
+    assert "pub fn cleanup_task(task_id: TaskId)" in net
+    assert "SOCKET_TABLE.lock().release_owner(task_id.0)" in net
+    assert "TCP_TABLE.lock().release_owner(task_id.0)" in net
+    assert "crate::net::cleanup_task(task_id)" in scheduler

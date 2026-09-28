@@ -59,6 +59,15 @@ static ARP_REQUESTS: Mutex<[ArpRequestState; 8]> = Mutex::new([ArpRequestState::
 pub static SOCKET_TABLE: Mutex<SocketTable> = Mutex::new(SocketTable::new());
 pub static TCP_TABLE: Mutex<TcpConnectionTable> = Mutex::new(TcpConnectionTable::new());
 
+/// Releases network endpoints owned by a terminating task.
+///
+/// Global routing, ARP, and DNS cache state is intentionally preserved because
+/// those resources are system-wide rather than task-owned.
+pub fn cleanup_task(task_id: TaskId) {
+    SOCKET_TABLE.lock().release_owner(task_id.0);
+    TCP_TABLE.lock().release_owner(task_id.0);
+}
+
 /// Global bounded DNS resolver state. Keeping this state at network-subsystem
 /// scope makes the resolver cache effective across syscall invocations while
 /// preserving the fixed in-flight query and cache bounds.
