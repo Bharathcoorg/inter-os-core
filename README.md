@@ -32,6 +32,8 @@ The launcher and developer tooling do not treat fixed demonstration values as li
 
 See [Platform Reality Contract](docs/PLATFORM_REALITY_CONTRACT.md) and run `python tools/interos.py reality` for the current runtime contract.
 
+The syscall userspace-memory boundary is defined in [Syscall Pointer Safety](docs/SYSCALL_POINTER_SAFETY.md), including page mapping, permissions, ownership, alignment, overflow, and raw-pointer elimination rules.
+
 ## 📊 Feature Status & Reality Matrix
 
 In accordance with our engineering integrity policy, every subsystem is classified into an explicit verification tier:
