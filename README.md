@@ -36,6 +36,8 @@ The syscall userspace-memory boundary is defined in [Syscall Pointer Safety](doc
 
 The end-to-end runtime lifecycle is defined in [Phase 5 Runtime Stability](docs/PHASE5_RUNTIME_STABILITY.md), covering task teardown, event/input fan-out, process accounting, surface bounds, and launcher recovery.
 
+The userspace hardware-service boundary is defined in [System Services](docs/SYSTEM_SERVICES.md), covering isolated service capabilities, dependency-aware lifecycle, bounded resource budgets, service health diagnostics, and QEMU-vs-hardware separation.
+
 ## 📊 Feature Status & Reality Matrix
 
 In accordance with our engineering integrity policy, every subsystem is classified into an explicit verification tier:
