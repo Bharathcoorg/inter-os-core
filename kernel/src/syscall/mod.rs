@@ -1345,8 +1345,15 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             if validate_user_buffer(a4, byte_len).is_err() {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let user_slice = unsafe { core::slice::from_raw_parts(a4 as *const u32, count) };
-            match sys_surface_write(a1 as usize, a2 as u32, a3 as usize, user_slice) {
+            let user_slice = match UserSlice::new(a4, byte_len) {
+                Ok(slice) => slice,
+                Err(_) => return SyscallResult::InvalidArguments as i64,
+            };
+            let mut pixels = alloc::vec![0u32; count];
+            if user_slice.copy_to_kernel_typed(&mut pixels).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            match sys_surface_write(a1 as usize, a2 as u32, a3 as usize, &pixels) {
                 Ok(n) => n as i64,
                 Err(e) => e as i64,
             }
