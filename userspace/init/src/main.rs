@@ -18,7 +18,7 @@ pub extern "C" fn _start() -> ! {
     std::log(0, "[PID1] Inter OS userspace init started in Ring 3.").ok();
     // Service-manager bootstrap. PID 1, not kernel_main, owns the
     // startup ordering of the userspace service set.
-    const SERVICES: [u8; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 11];
+    const SERVICES: [u8; 11] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
     for service_id in SERVICES {
         match std::service_start(service_id) {
             Ok(_) => { let _ = std::log(0, "[PID1] Service started through lifecycle ABI."); },
@@ -51,11 +51,6 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // Launch UI subsystem services: Compositor (9) and Launcher (10)
-    const UI_SERVICES: [u8; 2] = [9, 10];
-    for service_id in UI_SERVICES {
-        let _ = std::service_start(service_id);
-    }
     let mut last_poll = 0u64;
     let mut ipc_buf = [0u8; 64];
 
@@ -99,9 +94,7 @@ pub extern "C" fn _start() -> ! {
 }
 
 fn registry_has_all_running_services(buf: &[u8]) -> bool {
-    // Registry records are newline-delimited. The required bootstrap set is
-    // services 1-8 plus sensord (11); UI services 9-10 are validated separately.
-    let mut seen = 0u16;
+    let mut seen: u16 = 0;
     for line in buf.split(|b| *b == b'\n') {
         if line.is_empty() { continue; }
         let mut fields = line.split(|b| *b == b'|');
@@ -109,21 +102,14 @@ fn registry_has_all_running_services(buf: &[u8]) -> bool {
         let Some(task_bytes) = fields.next() else { continue; };
         let Some(state) = fields.next() else { continue; };
         if state != b"running" || task_bytes == b"0" { continue; }
-        let bit = match id_bytes {
-            b"1" => 0,
-            b"2" => 1,
-            b"3" => 2,
-            b"4" => 3,
-            b"5" => 4,
-            b"6" => 5,
-            b"7" => 6,
-            b"8" => 7,
-            b"11" => 8,
+        let id = match id_bytes {
+            b"1" => 1u8, b"2" => 2, b"3" => 3, b"4" => 4, b"5" => 5,
+            b"6" => 6, b"7" => 7, b"8" => 8, b"9" => 9, b"10" => 10, b"11" => 11,
             _ => continue,
         };
-        seen |= 1u16 << bit;
+        seen |= 1u16 << (id - 1);
     }
-    seen == 0x01ff
+    seen == 0x07ff
 }
 
 #[panic_handler]
