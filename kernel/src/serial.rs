@@ -201,6 +201,22 @@ fn handle_rapp_command(s: &str) -> bool {
         return true;
     }
 
+    if verb.eq_ignore_ascii_case("RAPP_UNINSTALL") {
+        let Some(id) = parts.next() else { return true; };
+        if id.is_empty() || id.len() > 128 || id.contains('/') || id.contains('\\') || id.contains("..") {
+            serial_println!("[RAPP_HOST] REJECT invalid package id");
+            return true;
+        }
+        let registry_ok = crate::package::PACKAGE_REGISTRY.lock().rollback(id).is_ok();
+        match crate::package::PACKAGE_BLOB_STORE.lock().remove(id) {
+            Ok(true) if registry_ok => serial_println!("[RAPP_HOST] UNINSTALLED id={}", id),
+            Ok(false) => serial_println!("[RAPP_HOST] UNINSTALL_FAILED id={} not found", id),
+            Ok(true) => serial_println!("[RAPP_HOST] UNINSTALL_FAILED id={} registry transition failed", id),
+            Err(_) => serial_println!("[RAPP_HOST] UNINSTALL_FAILED id={} persistence failed", id),
+        }
+        return true;
+    }
+
     if verb.eq_ignore_ascii_case("RAPP_TRUST") {
         let Some(key_hex) = parts.next() else { return true; };
         let Some(publisher) = parts.next() else { return true; };
