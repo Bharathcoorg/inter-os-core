@@ -221,3 +221,10 @@ def test_tcp_retransmission_uses_bounded_exponential_backoff():
     assert "TCP_RETRANSMIT_MAX_TIMEOUT" in source
     assert "r.rto=(r.rto.saturating_mul(2)).min(TCP_RETRANSMIT_MAX_TIMEOUT)" in source
     assert "now.saturating_sub(r.sent_at)>=r.rto" in source
+
+def test_dhcp_wire_message_parser_validates_cookie_and_core_options():
+    source = (ROOT / "kernel/src/net/dhcp.rs").read_text(encoding="utf-8")
+    assert "DHCP_COOKIE" in source
+    assert "pub struct DhcpMessage" in source
+    assert "invalid DHCP magic cookie" in source
+    assert "lease_seconds=Some" in source
