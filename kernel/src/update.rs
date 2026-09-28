@@ -130,6 +130,26 @@ impl ActivationRecord {
     pub const fn recovery_required(&self) -> bool { self.pending.is_some() && self.boot_attempts >= self.boot_attempt_limit() }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifiedBootPolicy { pub minimum_version: u64 }
+
+impl VerifiedBootPolicy {
+    pub const fn new(minimum_version: u64) -> Self { Self { minimum_version } }
+    pub fn accept_version(&self, version: u64) -> Result<(), UpdateError> {
+        if version < self.minimum_version { Err(UpdateError::Downgrade) } else { Ok(()) }
+    }
+    pub fn advance(&mut self, version: u64) -> Result<(), UpdateError> {
+        if version < self.minimum_version { return Err(UpdateError::Downgrade); }
+        let previous = *self;
+        self.minimum_version = version;
+        if persistent::commit_kind(&version.to_le_bytes(), 9).is_err() {
+            *self = previous;
+            return Err(UpdateError::PersistenceFailed);
+        }
+        Ok(())
+    }
+}
+
 pub struct UpdateTransaction {
     pub manifest: UpdateManifest,
     pub state: UpdateState,
