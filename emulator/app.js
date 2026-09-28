@@ -1308,8 +1308,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const rect = img.getBoundingClientRect();
         const relX = (ev.clientX - rect.left) / rect.width;
         const relY = (ev.clientY - rect.top) / rect.height;
-        startX = Math.max(0, Math.min(720, Math.round(relX * 720)));
-        startY = Math.max(0, Math.min(1440, Math.round(relY * 1440)));
+        startX = Math.max(0, Math.min(1279, Math.round(relX * 1280)));
+        startY = Math.max(0, Math.min(719, Math.round(relY * 720)));
         try { img.setPointerCapture(ev.pointerId); } catch (_) {}
       });
 
@@ -1319,8 +1319,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const rect = img.getBoundingClientRect();
         const relX = (ev.clientX - rect.left) / rect.width;
         const relY = (ev.clientY - rect.top) / rect.height;
-        const endX = Math.max(0, Math.min(720, Math.round(relX * 720)));
-        const endY = Math.max(0, Math.min(1440, Math.round(relY * 1440)));
+        const endX = Math.max(0, Math.min(1279, Math.round(relX * 1280)));
+        const endY = Math.max(0, Math.min(719, Math.round(relY * 720)));
         const dx = endX - startX;
         const dy = endY - startY;
         const dist = Math.hypot(dx, dy);
@@ -2967,6 +2967,47 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     showToast(e.target.checked ? 'Layout bounds enabled' : 'Layout bounds disabled');
     logConsole('info', `[DEV_OPTIONS] Layout bounding boxes: ${state.layoutBoundsEnabled ? 'ENABLED' : 'DISABLED'}`);
+  });
+
+  // QEMU guest input bridge for the synthetic phone stage. The guest remains
+  // authoritative; this UI only translates browser pointer events into the
+  // canonical 1280x720 virtual touchscreen coordinate space.
+  let guestPointerActive = false;
+  let guestPointerId = null;
+  async function sendGuestTouch(action, event) {
+    if (!deviceScreen) return;
+    const rect = deviceScreen.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const x = Math.max(0, Math.min(1279, Math.round(((event.clientX - rect.left) / rect.width) * 1280)));
+    const y = Math.max(0, Math.min(719, Math.round(((event.clientY - rect.top) / rect.height) * 720)));
+    try {
+      await fetch('/api/touch/event', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, x, y })
+      });
+    } catch (_) {}
+  }
+  deviceScreen?.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('button,input,textarea,a')) return;
+    guestPointerActive = true;
+    guestPointerId = e.pointerId;
+    try { deviceScreen.setPointerCapture(e.pointerId); } catch (_) {}
+    sendGuestTouch('down', e);
+  });
+  deviceScreen?.addEventListener('pointermove', (e) => {
+    if (!guestPointerActive || e.pointerId !== guestPointerId) return;
+    sendGuestTouch('move', e);
+  });
+  deviceScreen?.addEventListener('pointerup', (e) => {
+    if (!guestPointerActive || e.pointerId !== guestPointerId) return;
+    guestPointerActive = false;
+    sendGuestTouch('up', e);
+  });
+  deviceScreen?.addEventListener('pointercancel', (e) => {
+    if (!guestPointerActive || e.pointerId !== guestPointerId) return;
+    guestPointerActive = false;
+    sendGuestTouch('up', e);
   });
 
   // Touch ripple effect on phone screen

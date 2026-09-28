@@ -65,6 +65,27 @@ class SystemContractTests(unittest.TestCase):
         self.assertIn("PACKAGE_BLOB_STORE.lock().get(app_id)", syscall)
         self.assertIn("pub fn app_launch", sdk)
 
+    def test_phase3_qemu_input_contract_is_canonical(self):
+        contract = json.loads((ROOT / "platform/x86_64/qemu-phone.json").read_text(encoding="utf-8"))
+        server = (ROOT / "emulator/server.py").read_text(encoding="utf-8")
+        serial = (ROOT / "kernel/src/serial.rs").read_text(encoding="utf-8")
+        app = (ROOT / "emulator/app.js").read_text(encoding="utf-8")
+        self.assertEqual(contract["display"]["width"], 1280)
+        self.assertEqual(contract["display"]["height"], 720)
+        self.assertEqual(contract["input"]["coordinate_space"], "display-pixels")
+        self.assertIn("INPUT_TOUCH", serial)
+        self.assertIn("INPUT_KEY", serial)
+        self.assertIn("INPUT_TOUCH DOWN", server)
+        self.assertIn("Math.min(1279", app)
+        self.assertIn("/api/touch/event", app)
+
+    def test_phase2_dev_launch_has_explicit_qemu_boundary(self):
+        syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
+        serial = (ROOT / "kernel/src/serial.rs").read_text(encoding="utf-8")
+        self.assertIn("pub fn dev_launch_verified_rapp", syscall)
+        self.assertIn("VerificationLevel::QemuVerified", syscall)
+        self.assertIn("dev_launch_verified_rapp(id)", serial)
+
     def test_update_is_fail_closed_and_monotonic(self):
         src = (ROOT / "kernel/src/update.rs").read_text(encoding="utf-8")
         self.assertIn("manifest.version <= current_version", src)

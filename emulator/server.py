@@ -614,7 +614,7 @@ SUPPORTED_PROFILES = {
         "ram": 512,
         "boot_type": "Direct Kernel ELF",
         "image": os.path.join(WORKSPACE_ROOT, "target", "aarch64-unknown-none", "debug", "kernel-aarch64"),
-        "status": "Verified in QEMU",
+        "status": "Source-level architecture target; runtime validation pending",
     },
     "riscv64": {
         "name": "InterOS RISC-V Virt Mobile",
@@ -1830,26 +1830,31 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             y = int(data.get('y', 0))
             action = str(data.get('action', 'tap')).strip().lower()
 
-            x = max(0, min(720, x))
-            y = max(0, min(1440, y))
+            x = max(0, min(1279, x))
+            y = max(0, min(719, y))
 
             sent = False
             with serial_socket_lock:
                 if serial_socket_conn:
                     try:
                         if action == 'down':
-                            serial_socket_conn.sendall(f"DOWN {x} {y}\n".encode('utf-8'))
+                            serial_socket_conn.sendall(f"INPUT_TOUCH DOWN {x} {y} 0\n".encode('utf-8'))
                         elif action == 'up':
-                            serial_socket_conn.sendall(f"UP {x} {y}\n".encode('utf-8'))
+                            serial_socket_conn.sendall(f"INPUT_TOUCH UP {x} {y} 0\n".encode('utf-8'))
                         elif action == 'move':
-                            serial_socket_conn.sendall(f"MOVE {x} {y}\n".encode('utf-8'))
+                            serial_socket_conn.sendall(f"INPUT_TOUCH MOVE {x} {y} 0\n".encode('utf-8'))
                         elif action == 'swipe':
                             x2 = int(data.get('x2', x))
                             y2 = int(data.get('y2', y))
-                            x2 = max(0, min(720, x2))
-                            y2 = max(0, min(1440, y2))
+                            x2 = max(0, min(1279, x2))
+                            y2 = max(0, min(719, y2))
                             steps = int(data.get('steps', 5))
-                            serial_socket_conn.sendall(f"SWIPE {x} {y} {x2} {y2} {steps}\n".encode('utf-8'))
+                            serial_socket_conn.sendall(f"INPUT_TOUCH DOWN {x} {y} 0\n".encode('utf-8'))
+                            for step in range(1, max(2, min(20, steps))):
+                                cur_x = x + ((x2 - x) * step) // max(2, min(20, steps))
+                                cur_y = y + ((y2 - y) * step) // max(2, min(20, steps))
+                                serial_socket_conn.sendall(f"INPUT_TOUCH MOVE {cur_x} {cur_y} 0\n".encode('utf-8'))
+                            serial_socket_conn.sendall(f"INPUT_TOUCH UP {x2} {y2} 0\n".encode('utf-8'))
                         else:
                             serial_socket_conn.sendall(f"TAP {x} {y}\n".encode('utf-8'))
                         sent = True

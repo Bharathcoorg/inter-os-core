@@ -194,7 +194,7 @@ fn handle_rapp_command(s: &str) -> bool {
 
     if verb.eq_ignore_ascii_case("RAPP_LAUNCH") {
         let Some(id) = parts.next() else { return true; };
-        match crate::syscall::sys_app_launch(id) {
+        match crate::syscall::dev_launch_verified_rapp(id) {
             Ok(tid) => serial_println!("[RAPP_HOST] LAUNCHED id={} task={}", id, tid.0),
             Err(err) => serial_println!("[RAPP_HOST] LAUNCH_FAILED id={} error={:?}", id, err),
         }
@@ -213,6 +213,36 @@ fn handle_rapp_command(s: &str) -> bool {
             Ok(false) => serial_println!("[RAPP_HOST] UNINSTALL_FAILED id={} not found", id),
             Ok(true) => serial_println!("[RAPP_HOST] UNINSTALL_FAILED id={} registry transition failed", id),
             Err(_) => serial_println!("[RAPP_HOST] UNINSTALL_FAILED id={} persistence failed", id),
+        }
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("INPUT_TOUCH") {
+        let phase = match parts.next().map(|v| v.to_ascii_uppercase()).as_deref() {
+            Some("DOWN") => crate::input::TouchPhase::Down,
+            Some("MOVE") => crate::input::TouchPhase::Move,
+            Some("UP") => crate::input::TouchPhase::Up,
+            Some("CANCEL") => crate::input::TouchPhase::Cancel,
+            _ => { serial_println!("[COM1 INPUT] REJECT invalid touch phase"); return true; }
+        };
+        let Some(x) = parts.next().and_then(|v| v.parse::<u32>().ok()) else { return true; };
+        let Some(y) = parts.next().and_then(|v| v.parse::<u32>().ok()) else { return true; };
+        let Some(slot) = parts.next().and_then(|v| v.parse::<u8>().ok()) else { return true; };
+        if x >= 1280 || y >= 720 || slot >= crate::input::MAX_TOUCH_SLOTS as u8 {
+            serial_println!("[COM1 INPUT] REJECT touch bounds");
+            return true;
+        }
+        crate::input::post_touch_event(slot, x, y, if phase == crate::input::TouchPhase::Up { 0 } else { 512 }, phase);
+        serial_println!("[COM1 INPUT] TOUCH phase={:?} slot={} x={} y={}", phase, slot, x, y);
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("INPUT_KEY") {
+        let Some(code) = parts.next().and_then(|v| v.parse::<u32>().ok()) else { return true; };
+        if code > 0x10FFFF { serial_println!("[COM1 INPUT] REJECT key code"); return true; }
+        if let Some(c) = core::char::from_u32(code) {
+            crate::input::post_char_event(c);
+            serial_println!("[COM1 INPUT] KEY code={} char={:?}", code, c);
         }
         return true;
     }

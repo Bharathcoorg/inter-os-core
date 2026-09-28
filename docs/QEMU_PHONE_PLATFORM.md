@@ -64,3 +64,24 @@ The UART transport is deliberately bounded to the kernel's development command p
 The current persistent package store accepts RAPP blobs up to 60 KiB per package and is bounded by the kernel's persistent storage record capacity. Packages that exceed the configured store limits are rejected rather than truncated.
 
 No host-side package catalog entry is treated as proof of guest installation. Device Studio reports guest transfer failures as installation failures.
+
+
+## Phase 3 — Interactive virtual hardware contract
+
+The canonical QEMU input/display coordinate space is the guest scanout itself:
+
+- Display: 1280x720 pixels, origin at the top-left.
+- Touch coordinates: unsigned display pixels, X 0–1279 and Y 0–719.
+- Touch transport: INPUT_TOUCH <DOWN|MOVE|UP|CANCEL> <x> <y> <slot>.
+- Keyboard transport: INPUT_KEY <Unicode scalar>.
+- Device Studio /api/touch/event is only a host-to-guest transport adapter; it does not synthesize guest state.
+- VNC/WebSocket carries the real QEMU framebuffer and native RFB input when the direct VBE view is active.
+- The synthetic phone shell may also forward pointer events to the same guest touch transport, but its visual overlays are not evidence of guest rendering.
+
+All guest-facing input is bounded and rejected outside the virtual display coordinate space. Physical touchscreen/I2C remains a separate hardware backend and must consume the same normalized input contract.
+
+## Phase 3 verification language
+
+- "Interactive QEMU" means browser input reaches the guest input subsystem through the documented virtual transport.
+- "Guest framebuffer" means the VNC/RFB surface exposed by QEMU.
+- "Physical touchscreen ready" requires a real board/controller validation and is not implied by this phase.

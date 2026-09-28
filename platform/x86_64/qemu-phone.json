@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "profile": "qemu-phone",
+  "architecture": "x86_64",
+  "machine": "q35",
+  "cpu": "qemu64",
+  "memory_mb": 1024,
+  "display": {
+    "width": 1280,
+    "height": 720,
+    "pixel_format": "ARGB8888",
+    "backend": "vga-vnc"
+  },
+  "input": {
+    "coordinate_space": "display-pixels",
+    "max_slots": 5,
+    "touch_protocol": "INPUT_TOUCH",
+    "keyboard_protocol": "INPUT_KEY"
+  },
+  "endpoints": {
+    "serial": "127.0.0.1:4301",
+    "hmp": "127.0.0.1:44445",
+    "vnc": "127.0.0.1:5901",
+    "websocket": "127.0.0.1:6081"
+  },
+  "verification": "qemu-development-only"
+}

@@ -3353,6 +3353,34 @@ pub fn sys_service_stop(service_id: u8) -> Result<(), SyscallResult> {
 }
 
 /// Launches a first-party application in Ring 3 on behalf of PID 1 / service manager.
+/// Launches a verified persistent RAPP from the QEMU development bridge.
+/// COM1 has no userspace task/capability context, so this is intentionally
+/// separate from the normal userspace syscall path and gated to QEMU.
+pub fn dev_launch_verified_rapp(app_id: &str) -> Result<crate::task::TaskId, SyscallResult> {
+    if crate::platform::PLATFORM_CONTRACT.verification != crate::platform::VerificationLevel::QemuVerified {
+        return Err(SyscallResult::PermissionDenied);
+    }
+    let app_id = app_id.trim_matches(|c: char| c.is_whitespace() || c == '\0');
+    if app_id.is_empty() || app_id.len() > 128 || app_id.contains('/') || app_id.contains('\\') || app_id.contains("..") {
+        return Err(SyscallResult::InvalidArguments);
+    }
+    let blob = crate::package::PACKAGE_BLOB_STORE.lock().get(app_id).cloned()
+        .ok_or(SyscallResult::FileNotFound)?;
+    let verified = crate::package::parse_rapp(&blob.bytes)
+        .map_err(|_| SyscallResult::IntegrityViolation)?;
+    if verified.package_id != app_id || verified.version != blob.version {
+        return Err(SyscallResult::IntegrityViolation);
+    }
+    let payload_end = verified.payload_offset.checked_add(verified.payload_len)
+        .ok_or(SyscallResult::InvalidArguments)?;
+    let payload = &blob.bytes[verified.payload_offset..payload_end];
+    let tid = crate::task::user::spawn_verified_rapp_process(&verified, payload, crate::task::TaskId(0))
+        .map_err(|_| SyscallResult::DeviceError)?;
+    crate::ipc::IPC_ROUTER.lock().register_task(tid);
+    serial_println!("[APP] QEMU dev bridge launched persistent RAPP '{}' as Task {}", verified.package_id, tid.0);
+    Ok(tid)
+}
+
 pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult> {
     if let Err(e) = require_app_launcher_or_service_manager() {
         crate::serial_println!("[APP_LAUNCH DEBUG] require_app_launcher_or_service_manager error: {:?}", e);
