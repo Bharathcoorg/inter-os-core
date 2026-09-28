@@ -429,3 +429,9 @@ def test_verified_service_launch_reuses_one_generation_transition():
     assert "let generation = existing.map(|r| r.generation.saturating_add(1)).unwrap_or(1);" in launch
     assert "a successful" in launch
     assert "ServiceRecord { id, task, state: ServiceState::Running, generation }" in launch
+
+def test_userspace_thread_creation_registers_its_ipc_mailbox():
+    scheduler = (ROOT / "kernel/src/task/scheduler.rs").read_text(encoding="utf-8")
+    block = scheduler[scheduler.index("pub fn spawn_user_thread"):scheduler.index("/// Returns a reference to the currently running task.")]
+    assert "self.tasks.push(tcb);" in block
+    assert "crate::ipc::IPC_ROUTER.lock().register_task(id);" in block

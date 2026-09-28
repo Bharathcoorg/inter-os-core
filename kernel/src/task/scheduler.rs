@@ -151,6 +151,7 @@ impl Scheduler {
             return Err(e);
         }
         self.tasks.push(tcb);
+        crate::ipc::IPC_ROUTER.lock().register_task(id);
         Ok(id)
     }
 
