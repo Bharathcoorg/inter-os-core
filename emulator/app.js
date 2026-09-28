@@ -3010,6 +3010,22 @@ document.addEventListener('DOMContentLoaded', () => {
     sendGuestTouch('up', e);
   });
 
+  // Forward browser keyboard input to the same guest input contract when
+  // the native RFB client is not active. Text fields remain Studio-local.
+  window.addEventListener('keydown', async (e) => {
+    if (state.rfbClient) return;
+    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable)) return;
+    if (e.key === 'Tab' || e.key === 'Enter' || e.key === 'Backspace' || e.key.length === 1) {
+      try {
+        await fetch('/api/serial/write', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: `INPUT_KEY ${e.key.codePointAt(0)}` })
+        });
+      } catch (_) {}
+    }
+  });
+
   // Touch ripple effect on phone screen
   deviceScreen?.addEventListener('click', (e) => {
     if (!state.touchRipplesEnabled) return;
