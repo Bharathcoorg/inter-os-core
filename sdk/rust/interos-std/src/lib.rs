@@ -135,6 +135,7 @@ pub enum SyscallNumber {
     TcpClose = 100,
     AppLaunch = 101,
     ServiceQuery = 102,
+    IpcRecvMeta = 103,
 }
 
 // -----------------------------------------------------------------------------
@@ -554,8 +555,23 @@ pub mod ipc {
     }
 
     pub fn receive_any(out_buf: &mut [u8]) -> Result<(u64, u32, usize), i64> {
-        let n = crate::ipc_recv(0, out_buf)?;
-        Ok((0, 0, n))
+        let mut sender = 0u64;
+        let mut msg_type = 0u32;
+        let ret = unsafe {
+            crate::syscall5(
+                crate::SyscallNumber::IpcRecvMeta,
+                0,
+                out_buf.as_mut_ptr() as u64,
+                out_buf.len() as u64,
+                &mut sender as *mut u64 as u64,
+                &mut msg_type as *mut u32 as u64,
+            )
+        };
+        if ret >= 0 {
+            Ok((sender, msg_type, ret as usize))
+        } else {
+            Err(ret)
+        }
     }
 }
 
