@@ -3,7 +3,9 @@ $log = "$PSScriptRoot\..\target\test_aarch64_v6_1.log"
 if (Test-Path $log) { Remove-Item -Force $log }
 $k1 = "$PSScriptRoot\..\target\aarch64-unknown-none\debug\kernel-aarch64"
 $k2 = "$PSScriptRoot\..\kernel-aarch64\target\aarch64-unknown-none\debug\kernel-aarch64"
-$kernel = if (Test-Path $k1) { $k1 } else { $k2 }
+$kernel = if ((Test-Path $k1) -and (Test-Path $k2)) {
+    if ((Get-Item $k1).LastWriteTime -ge (Get-Item $k2).LastWriteTime) { $k1 } else { $k2 }
+} elseif (Test-Path $k1) { $k1 } else { $k2 }
 $rootDir = (Resolve-Path "$PSScriptRoot\..").Path
 . (Join-Path $rootDir "tools\qemu_env.ps1")
 $qemuBin = Resolve-QemuPath "qemu-system-aarch64.exe"
