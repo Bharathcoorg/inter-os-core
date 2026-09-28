@@ -71,7 +71,8 @@ impl<T> UserPtr<T> {
     /// Creates a new `UserPtr` from a raw address after validating user space bounds.
     pub fn new(addr: u64) -> Result<Self, UserAccessError> {
         let size = core::mem::size_of::<T>();
-        let align = core::mem::align_of::<T>();\n        if align > 1 && addr % align as u64 != 0 { return Err(UserAccessError::Misaligned); }\n        validate_current_user_buffer(addr, size, false)?;
+        let align = core::mem::align_of::<T>();
+        if align > 1 && addr % align as u64 != 0 { return Err(UserAccessError::Misaligned); }\n        validate_current_user_buffer(addr, size, false)?;
         Ok(Self {
             addr,
             _marker: PhantomData,
@@ -84,7 +85,7 @@ impl<T> UserPtr<T> {
     }
 
     /// Safely copies the value from userspace memory into a kernel-local `T`.
-    pub unsafe fn read(&self) -> Result<T, UserAccessError> {
+    pub fn read(&self) -> Result<T, UserAccessError> {
         let size = core::mem::size_of::<T>();
         validate_current_user_buffer(self.addr, size, false)?;
         let ptr = self.addr as *const T;
@@ -102,7 +103,7 @@ pub struct UserSlice {
 impl UserSlice {
     /// Creates and validates a `UserSlice` from a raw address and length.
     pub fn new(addr: u64, len: usize) -> Result<Self, UserAccessError> {
-        validate_user_buffer(addr, len)?;
+        validate_current_user_buffer(addr, len, false)?;
         Ok(Self { addr, len })
     }
 
@@ -167,7 +168,7 @@ pub struct UserSliceMut {
 impl UserSliceMut {
     /// Creates and validates a mutable userspace slice.
     pub fn new(addr: u64, len: usize) -> Result<Self, UserAccessError> {
-        validate_user_buffer(addr, len)?;
+        validate_current_user_buffer(addr, len, true)?;
         Ok(Self { addr, len })
     }
 
