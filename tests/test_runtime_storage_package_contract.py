@@ -327,3 +327,11 @@ def test_shared_process_thread_creation_is_transactional_and_reuses_cr3():
     assert "pub fn bind_reserved_thread" in process
     assert "pub fn map_user_thread_stack" in user
     assert "1024 * 1024usize" in user
+
+def test_vfs_hard_links_share_inode_and_persist_aliases():
+    source = (ROOT / "kernel/src/fs/vfs.rs").read_text(encoding="utf-8")
+    assert "hard_links: BTreeMap<String, InodeId>" in source
+    assert "pub fn link(&mut self, old_path: &str, new_path: &str)" in source
+    assert "pub fn unlink(&mut self, path: &str)" in source
+    assert "buf[pos] = 3" in source
+    assert "self.hard_links.insert(path.to_string(), InodeId(id))" in source
