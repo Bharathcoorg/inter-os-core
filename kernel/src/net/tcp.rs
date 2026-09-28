@@ -113,6 +113,30 @@ pub fn serialize_with_checksum(
     Ok(n)
 }
 
+pub fn valid_syn_ack(segment: &TcpSegment<'_>, expected_ack: u32) -> bool {
+    const SYN: u16 = 0x02;
+    const ACK: u16 = 0x10;
+    const RST: u16 = 0x04;
+    segment.flags & RST == 0
+        && segment.flags & (SYN | ACK) == (SYN | ACK)
+        && segment.ack == expected_ack
+        && segment.payload.is_empty()
+}
+
+pub fn valid_established_segment(
+    segment: &TcpSegment<'_>,
+    expected_seq: u32,
+    snd_una: u32,
+    snd_nxt: u32,
+) -> bool {
+    const RST: u16 = 0x04;
+    const ACK: u16 = 0x10;
+    if segment.flags & RST != 0 || segment.flags & ACK == 0 { return false; }
+    if segment.seq != expected_seq { return false; }
+    if seq_lt(segment.ack, snd_una) || seq_gt(segment.ack, snd_nxt) { return false; }
+    true
+}
+
 pub fn next_state(state: TcpState, flags: u16) -> TcpState {
     const SYN: u16 = 0x02;
     const ACK: u16 = 0x10;
