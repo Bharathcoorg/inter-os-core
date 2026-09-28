@@ -113,15 +113,24 @@ def init_default_vfs():
 init_default_vfs()
 
 def resolve_vfs_path(req_path):
-    clean = (req_path or "/").lstrip("/").replace("\\", "/")
+    clean = str(req_path or "/").replace("\\", "/")
+    if len(clean) >= 2 and clean[1] == ":":
+        clean = clean[2:]
+    clean = clean.lstrip("/")
     parts = [p for p in clean.split("/") if p and p != "."]
     safe_parts = []
     for p in parts:
         if p == "..":
             if safe_parts: safe_parts.pop()
+        elif ":" in p:
+            continue
         else:
             safe_parts.append(p)
-    return os.path.join(VFS_ROOT, *safe_parts)
+    target = os.path.abspath(os.path.join(VFS_ROOT, *safe_parts))
+    common = os.path.commonpath([target, os.path.abspath(VFS_ROOT)])
+    if common != os.path.abspath(VFS_ROOT):
+        return os.path.abspath(VFS_ROOT)
+    return target
 
 DEFAULT_APPS = []
 
@@ -2230,20 +2239,70 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
 
         if self.path == '/api/qemu/cmd':
             content_length = int(self.headers.get('Content-Length', 0))
+            if content_length > 4096:
+                self.send_response(413)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Payload too large'}).encode())
+                return
             body = self.rfile.read(content_length) if content_length > 0 else b'{}'
             try:
                 data = json.loads(body.decode('utf-8')) if body else {}
             except Exception:
-                data = {}
-            raw_cmd = str(data.get('cmd', '')).strip()
-            allowed_prefixes = ('info ', 'help', 'p ', 'x ', 'pmemsave', 'memsave')
-            if not any(raw_cmd.lower().startswith(p) for p in allowed_prefixes):
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Malformed JSON'}).encode())
+                return
+
+            if not isinstance(data, dict) or 'cmd' not in data:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Missing cmd field'}).encode())
+                return
+
+            raw_cmd = data.get('cmd')
+            if not isinstance(raw_cmd, str):
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'cmd must be a string'}).encode())
+                return
+
+            raw_cmd = raw_cmd.strip()
+            if len(raw_cmd) > 256:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'cmd exceeds maximum length (256 chars)'}).encode())
+                return
+
+            # Reject command chaining, newlines, semicolons, pipes, redirection
+            if any(c in raw_cmd for c in ('\n', '\r', ';', '|', '&', '`', '$', '>', '<')):
+                self.send_response(403)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Command injection or chaining detected.'}).encode())
+                return
+
+            # Whitelist strictly read-only inspection prefixes
+            allowed_prefixes = ('info ', 'help', 'p ', 'x ')
+            lowered = raw_cmd.lower()
+            if not any(lowered.startswith(p) or lowered == p.strip() for p in allowed_prefixes):
                 self.send_response(403)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': 'Command restricted in Studio security sandbox.'}).encode())
                 return
+
             ok, resp = send_qemu_monitor_cmd(raw_cmd)
             self.send_response(200 if ok else 500)
             self.send_header('Content-Type', 'application/json')
@@ -2450,12 +2509,13 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             body = self.rfile.read(content_length)
             try:
                 data = json.loads(body.decode('utf-8'))
-                theme_id = data.get('theme_id') or data.get('id')
-                if not theme_id:
+                raw_id = str(data.get('theme_id') or data.get('id') or '').strip()
+                if not raw_id:
                     self.send_response(400)
                     self.end_headers()
                     self.wfile.write(json.dumps({'success': False, 'error': 'Missing theme_id'}).encode())
                     return
+                theme_id = re.sub(r'[^a-zA-Z0-9_-]', '_', raw_id).lower()
                 target_file = os.path.join(THEMES_DIR, f"{theme_id}.theme")
                 if not os.path.exists(target_file):
                     self.send_response(404)
