@@ -82,6 +82,7 @@ class StudioSecurityTests(unittest.TestCase):
             "stop",
             "c",
             "cont",
+            "info unauthorized_subcmd",
         ]
         for cmd in forbidden:
             status, res = self._post("/api/qemu/cmd", {"cmd": cmd})

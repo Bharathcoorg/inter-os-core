@@ -2292,16 +2292,56 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(json.dumps({'success': False, 'error': 'Command injection or chaining detected.'}).encode())
                 return
 
-            # Whitelist strictly read-only inspection prefixes
-            allowed_prefixes = ('info ', 'help', 'p ', 'x ')
-            lowered = raw_cmd.lower()
-            if not any(lowered.startswith(p) or lowered == p.strip() for p in allowed_prefixes):
+            # Structured allowlist validation: base operation and allowed subcommands/arguments
+            tokens = raw_cmd.split()
+            if not tokens:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Empty command'}).encode())
+                return
+
+            base_op = tokens[0].lower()
+            ALLOWED_BASE_OPS = {'info', 'help', 'p', 'x'}
+            if base_op not in ALLOWED_BASE_OPS:
                 self.send_response(403)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
-                self.wfile.write(json.dumps({'success': False, 'error': 'Command restricted in Studio security sandbox.'}).encode())
+                self.wfile.write(json.dumps({'success': False, 'error': f'Command operation \'{base_op}\' restricted in Studio security sandbox.'}).encode())
                 return
+
+            # Validate subcommands and arguments for allowed operations
+            if base_op == 'info':
+                ALLOWED_INFO_SUBCMDS = {
+                    'registers', 'cpus', 'mem', 'status', 'version', 'block',
+                    'chardev', 'network', 'usb', 'pci', 'lapic', 'tlb',
+                    'profile', 'mtree', 'jit', 'history'
+                }
+                if len(tokens) > 1 and tokens[1].lower() not in ALLOWED_INFO_SUBCMDS:
+                    self.send_response(403)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': False, 'error': f'Subcommand \'info {tokens[1]}\' restricted in Studio security sandbox.'}).encode())
+                    return
+            elif base_op == 'help':
+                if len(tokens) > 2:
+                    self.send_response(403)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': False, 'error': 'Malformed help query.'}).encode())
+                    return
+            elif base_op in ('p', 'x'):
+                if len(tokens) < 2:
+                    self.send_response(400)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': False, 'error': f'Missing argument for \'{base_op}\' operation'}).encode())
+                    return
 
             ok, resp = send_qemu_monitor_cmd(raw_cmd)
             self.send_response(200 if ok else 500)
