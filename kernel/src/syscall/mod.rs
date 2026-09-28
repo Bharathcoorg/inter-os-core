@@ -2698,7 +2698,7 @@ pub fn sys_camera_capture(
     out_buf: &mut [u8],
     meta_buf: Option<&mut [u32]>,
 ) -> Result<usize, SyscallResult> {
-    // 1. Verify capability: current task must possess HardwarePortIo or FrameBufferDirect
+    // 1. Verify the scoped camera service authority or the legacy physical-camera hardware capability
     let sched = crate::task::scheduler::SCHEDULER.lock();
     let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
     if !current.cap_table.authorize_object(
