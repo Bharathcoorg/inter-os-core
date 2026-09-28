@@ -624,7 +624,7 @@ SUPPORTED_PROFILES = {
         "ram": 256,
         "boot_type": "OpenSBI / Direct Kernel ELF",
         "image": os.path.join(WORKSPACE_ROOT, "target", "riscv64gc-unknown-none-elf", "debug", "kernel-riscv64"),
-        "status": "Verified in QEMU",
+        "status": "Source-level architecture target; runtime validation pending",
     },
 }
 active_profile_key = "x86_64"
@@ -1856,7 +1856,8 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                                 serial_socket_conn.sendall(f"INPUT_TOUCH MOVE {cur_x} {cur_y} 0\n".encode('utf-8'))
                             serial_socket_conn.sendall(f"INPUT_TOUCH UP {x2} {y2} 0\n".encode('utf-8'))
                         else:
-                            serial_socket_conn.sendall(f"TAP {x} {y}\n".encode('utf-8'))
+                            serial_socket_conn.sendall(f"INPUT_TOUCH DOWN {x} {y} 0\n".encode('utf-8'))
+                            serial_socket_conn.sendall(f"INPUT_TOUCH UP {x} {y} 0\n".encode('utf-8'))
                         sent = True
                     except Exception:
                         sent = False
