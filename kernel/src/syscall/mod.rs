@@ -3585,7 +3585,7 @@ pub fn sys_window_list(out_buf:&mut [u8])->Result<usize,SyscallResult>{
         }
     }
     use core::fmt::Write;
-    let mut snaps=[crate::drivers::display_kms::SurfaceSnapshot{id:0,owner_task:0,x:0,y:0,width:0,height:0,z_order:0,opacity:0,visible:false,dirty:false};32];
+    let mut snaps=[crate::drivers::display_kms::SurfaceSnapshot{id:0,owner_task:0,x:0,y:0,width:0,height:0,z_order:0,opacity:0,visible:false,dirty:false,input_enabled:false};32];
     let count={let kms=crate::drivers::display_kms::DRM_KMS.lock();kms.surface_snapshot(&mut snaps)};
     let sched=SCHEDULER.lock();
     struct W<'a>{b:&'a mut[u8],n:usize}
