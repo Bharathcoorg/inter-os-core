@@ -118,7 +118,7 @@ pub fn valid_syn_ack(segment: &TcpSegment<'_>, expected_ack: u32) -> bool {
     const ACK: u16 = 0x10;
     const RST: u16 = 0x04;
     segment.flags & RST == 0
-        && segment.flags & (SYN | ACK) == (SYN | ACK)
+        && segment.flags == (SYN | ACK)
         && segment.ack == expected_ack
         && segment.payload.is_empty()
 }
