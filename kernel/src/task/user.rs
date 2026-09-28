@@ -112,10 +112,13 @@ pub fn load_user_elf_into_page_table(
         return Err("ELF machine is not x86_64");
     }
 
-    // Verify type: ET_EXEC (2) or ET_DYN (3)
+    // This loader intentionally implements a fixed-address static ELF ABI.
+    // ET_DYN requires load-bias/relocation processing, which is not part of this
+    // loader contract; accepting it would execute relocation-bearing images with
+    // unrelocated addresses.
     let e_type = u16::from_le_bytes(elf_data[16..18].try_into().unwrap());
-    if e_type != 2 && e_type != 3 {
-        return Err("ELF type is not executable or shared object");
+    if e_type != 2 {
+        return Err("ELF must be ET_EXEC; dynamic/shared objects are unsupported");
     }
 
     // 2. Extract entry point and program header table offset
