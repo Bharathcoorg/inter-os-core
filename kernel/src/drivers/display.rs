@@ -29,10 +29,14 @@ impl<'a> KmsDisplayDriver<'a> {
 
 impl DisplayDriver for KmsDisplayDriver<'_> {
     fn create_surface(&mut self, width: u32, height: u32, z_order: u32, owner_task: u64) -> Result<u32, &'static str> {
-        if width == 0 || height == 0 {
+        if width == 0 || height == 0 ||
+            width as usize > 1280 || height as usize > 720 ||
+            (width as usize).checked_mul(height as usize).map_or(true, |pixels| pixels > crate::drivers::display_kms::MAX_SURFACE_PIXELS) {
             return Err("invalid display surface dimensions");
         }
-        Ok(self.controller.create_surface(width, height, z_order, owner_task))
+        let id = self.controller.create_surface(width, height, z_order, owner_task);
+        if id == 0 { return Err("display surface capacity exhausted"); }
+        Ok(id)
     }
 
     fn write_surface_pixels(&mut self, id: u32, owner_task: u64, offset: usize, pixels: &[u32]) -> Result<usize, &'static str> {
