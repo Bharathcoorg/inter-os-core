@@ -204,3 +204,14 @@ def test_tcp_receive_reopens_advertised_window_and_emits_update_ack():
     assert "conn.rcv_wnd = TCP_RX_BUF_SIZE.saturating_sub(conn.rx_len) as u32" in socket
     assert "transmit_tcp_segment_with_window" in syscall
     assert "conn.rcv_wnd.min(u16::MAX as u32) as u16" in syscall
+
+def test_rapp_v3_carries_signed_dependency_metadata_without_overloading_v2():
+    source = (ROOT / "kernel/src/package/rapp.rs").read_text(encoding="utf-8")
+    assert "RAPP_FORMAT_VERSION_V3" in source
+    assert "RAPP_V3_HEADER_SIZE" in source
+    assert "pub dependencies:Vec<Dependency>" in source
+    assert "VersionRequirement::Exact" in source
+    assert "VersionRequirement::Minimum" in source
+    assert "VersionRequirement::Major" in source
+    assert "policy.dependencies=dependencies.clone()" in source
+    assert "build_rapp_v3" in source
