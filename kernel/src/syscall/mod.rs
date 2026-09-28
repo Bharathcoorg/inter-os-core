@@ -118,6 +118,7 @@ pub enum SyscallNumber {
     AppLaunch = 101,
     ServiceQuery = 102,
     IpcRecvMeta = 103,
+    WindowSetInput = 104,
 }
 
 /// System call result status codes.
@@ -1429,6 +1430,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         }
         79 => { let z=(a5 & 0x7FFF_FFFF) as u32; let visible=(a5 >> 63)!=0; sys_window_set_geometry(a1 as usize,a2 as u32,a3 as i64 as i32,a4 as i64 as i32,z,visible) as i64 }
         80 => { sys_window_focus(a1 as usize, a2 as u32, a3 as u32) as i64 }
+        104 => { sys_window_set_input(a1 as usize, a2 as u32, a3 != 0) as i64 }
         81 => {
             let (user_ptr, user_len) = if a3 > 0 { (a2, a3 as usize) } else { (a1, a2 as usize) };
             if user_len == 0 || user_len > 4096 { return SyscallResult::InvalidArguments as i64; }
@@ -3122,6 +3124,15 @@ pub fn sys_window_set_geometry(cap_slot: usize, id: u32, x: i32, y: i32, z: u32,
     if crate::drivers::display_kms::DRM_KMS.lock().set_surface_geometry_owned(id, owner, x, y, z, visible) {
         SyscallResult::Success
     } else { SyscallResult::PermissionDenied }
+}
+
+pub fn sys_window_set_input(cap_slot: usize, id: u32, enabled: bool) -> SyscallResult {
+    let owner = match require_display_service(cap_slot) { Ok(id) => id.0, Err(e) => return e };
+    if crate::drivers::display_kms::DRM_KMS.lock().set_input_enabled_owned(id, owner, enabled) {
+        SyscallResult::Success
+    } else {
+        SyscallResult::PermissionDenied
+    }
 }
 
 pub fn sys_window_focus(cap_slot: usize, x: u32, y: u32) -> SyscallResult {
