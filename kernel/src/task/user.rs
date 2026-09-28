@@ -297,6 +297,29 @@ pub fn load_user_elf_into_page_table(
     Ok((e_entry, user_stack_top))
 }
 
+/// Maps a distinct guarded stack for a thread in an existing userspace address space.
+pub fn map_user_thread_stack(
+    page_table: &mut crate::memory::TaskPageTable,
+    task_id: TaskId,
+) -> Result<usize, &'static str> {
+    let stride = 1024 * 1024usize;
+    let base = 0x0000_7000_0000_0000usize;
+    let offset = (task_id.0 as usize).checked_mul(stride).ok_or("thread stack address overflow")?;
+    let top = base.checked_sub(offset).ok_or("thread stack address underflow")?;
+    if top <= USER_STACK_SIZE + 4096 || top >= 0x0000_8000_0000_0000 { return Err("thread stack outside user range"); }
+    let bottom = top - USER_STACK_SIZE;
+    let start = Page::<Size4KiB>::containing_address(VirtAddr::new(bottom as u64));
+    let end = Page::<Size4KiB>::containing_address(VirtAddr::new((top - 1) as u64));
+    let flags = PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::NO_EXECUTE;
+    for page in Page::range_inclusive(start, end) {
+        let frame = crate::memory::allocate_frame().ok_or("out of memory for thread stack")?;
+        page_table.map_user_page(page, frame, flags)?;
+        let virt = crate::memory::phys_mem_offset() + frame.start_address().as_u64();
+        unsafe { core::ptr::write_bytes(virt.as_mut_ptr::<u8>(), 0, 4096); }
+    }
+    Ok(top - 8)
+}
+
 /// Universal entry point for userspace processes launched in Ring 3.
 pub extern "C" fn user_process_entry() -> ! {
     let (user_entry, user_stack_top) = {
