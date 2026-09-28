@@ -76,7 +76,9 @@ The canonical QEMU input/display coordinate space is the guest scanout itself:
 - Keyboard transport: INPUT_KEY <Unicode scalar>.
 - Device Studio /api/touch/event is only a host-to-guest transport adapter; it does not synthesize guest state.
 - VNC/WebSocket carries the real QEMU framebuffer and native RFB input when the direct VBE view is active.
+- If the noVNC module cannot be loaded, Device Studio falls back to a bounded HTTP screendump stream and uses `/api/touch/event` plus `/api/input/key` to feed the same guest UART input contract.
 - The synthetic phone shell may also forward pointer events to the same guest touch transport, but its visual overlays are not evidence of guest rendering.
+- The HTTP scanout fallback is a development transport, not a replacement for RFB or physical display hardware.
 
 All guest-facing input is bounded and rejected outside the virtual display coordinate space. The kernel KMS default matches the same 1280x720 scanout contract, so surface composition, framebuffer capture, and input coordinates share one authoritative virtual display space. Physical touchscreen/I2C remains a separate hardware backend and must consume the same normalized input contract.
 
