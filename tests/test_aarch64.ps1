@@ -11,6 +11,35 @@ Start-Sleep -Seconds 15
 if (-not $p.HasExited) {
     $p.Kill()
 }
-$content = Get-Content $log
+$content = if (Test-Path $log) { Get-Content $log } else { @() }
 Write-Host "=== Output Preview (Last 50 lines) ===" -ForegroundColor Cyan
 $content | Select-Object -Last 50
+
+$requiredMilestones = @(
+    "SimpleFB: 720x1440 RGB565 mobile display splash rasterized",
+    "SDHCI / eMMC 5.1",
+    "Goodix GT911",
+    "AArch64 Context Switch",
+    "AArch64 Multi-Tasking Scheduler",
+    "AArch64 Capability-Guarded IPC",
+    "AArch64 Vector Table (VBAR_EL1)",
+    "AArch64 MMU",
+    "AArch64 EL0 Userspace",
+    "AArch64 Sovereign Smartphone Microkernel"
+)
+
+$missing = @()
+$rawText = ($content -join "`n")
+foreach ($m in $requiredMilestones) {
+    if (-not ($rawText -match [regex]::Escape($m))) {
+        $missing += $m
+    }
+}
+
+if ($missing.Count -gt 0) {
+    Write-Error "AArch64 boot verification FAILED: Missing milestones: $($missing -join ', ')"
+    exit 1
+}
+
+Write-Host "[OK] All AArch64 hardware drivers, security, and runtime milestones verified!" -ForegroundColor Green
+exit 0

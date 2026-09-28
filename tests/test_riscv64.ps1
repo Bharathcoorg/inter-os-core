@@ -11,8 +11,32 @@ Start-Sleep -Seconds 4
 if (-not $p.HasExited) {
     $p.Kill()
 }
-if (Test-Path $log) {
-    Get-Content $log
-} else {
-    Write-Error "Log file not found!"
+$content = if (Test-Path $log) { Get-Content $log } else { @() }
+Write-Host "=== Output Preview (Last 50 lines) ===" -ForegroundColor Cyan
+$content | Select-Object -Last 50
+
+$requiredMilestones = @(
+    "OpenSBI",
+    "Inter OS",
+    "MMU: Sv39 3-level page tables active",
+    "Traps: stvec vector table online",
+    "RISC-V Security Invariant: Kernel address pointer rejected",
+    "RISC-V Userspace Syscall: SYS_GET_TASK_ID returned valid Task ID",
+    "System state: Userspace Ready"
+)
+
+$missing = @()
+$rawText = ($content -join "`n")
+foreach ($m in $requiredMilestones) {
+    if (-not ($rawText -match [regex]::Escape($m))) {
+        $missing += $m
+    }
 }
+
+if ($missing.Count -gt 0) {
+    Write-Error "RISC-V64 boot verification FAILED: Missing milestones: $($missing -join ', ')"
+    exit 1
+}
+
+Write-Host "[OK] All RISC-V 64 hardware drivers, security, and runtime milestones verified!" -ForegroundColor Green
+exit 0
