@@ -253,3 +253,4 @@ InterOS Core is dual-licensed under:
 * **MIT License** ([LICENSE-MIT](LICENSE-MIT))
 * **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE-APACHE))
 - [Phase 7 — Display & Window System](docs/PHASE7_DISPLAY_WINDOW_SYSTEM.md)
+- [Phase 8 — MMU Isolation](docs/PHASE8_MMU_ISOLATION.md)
