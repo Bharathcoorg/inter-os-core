@@ -2273,13 +2273,14 @@ pub fn sys_input_event_poll(out_buf: &mut [u8]) -> Result<usize, SyscallResult> 
         return Err(SyscallResult::PermissionDenied);
     }
     let is_inputd = task.name == "inputd";
+    let task_id = task.id;
     drop(sched);
 
     crate::drivers::input::pump_touch_events();
     let event = if is_inputd {
         crate::drivers::input::INPUT_PIPELINE.lock().pop_service().ok_or(SyscallResult::NotReady)?
     } else {
-        crate::drivers::input::INPUT_PIPELINE.lock().pop().ok_or(SyscallResult::NotReady)?
+        crate::drivers::input::INPUT_PIPELINE.lock().pop_for_task(task_id).ok_or(SyscallResult::NotReady)?
     };
     if out_buf.len() < 24 { return Err(SyscallResult::InvalidArguments); }
 
