@@ -345,6 +345,7 @@ impl Scheduler {
         crate::ipc::cleanup_task(id);
         crate::fs::cleanup_task(id);
         crate::event::cleanup_task(id);
+        crate::net::cleanup_task(id);
         crate::drivers::display_kms::DRM_KMS.lock().destroy_surfaces_owned_by(id.0);
         // Do not update the service registry while holding the scheduler lock.
         // The registry's supervision path deliberately acquires scheduler -> registry;
