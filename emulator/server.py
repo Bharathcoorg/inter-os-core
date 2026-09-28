@@ -533,6 +533,8 @@ def serial_stream_worker():
 def send_guest_serial_command(command, wait_for=None, timeout=12):
     """Send a development command through the live QEMU COM1 TCP connection."""
     deadline = time.time() + timeout
+    with telemetry_lock:
+        response_start = len(serial_lines)
     while time.time() < deadline:
         with serial_socket_lock:
             conn = serial_socket_conn
@@ -549,7 +551,7 @@ def send_guest_serial_command(command, wait_for=None, timeout=12):
     if not wait_for:
         return True, "sent"
 
-    start = len(serial_lines)
+    start = response_start
     while time.time() < deadline:
         with telemetry_lock:
             recent = serial_lines[start:]
