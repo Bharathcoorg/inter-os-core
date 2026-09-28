@@ -79,7 +79,7 @@ class SystemContractTests(unittest.TestCase):
         self.assertIn("Math.min(1279", app)
         self.assertIn("/api/touch/event", app)
         self.assertIn("/api/input/key", app)
-        self.assertIn("x < 1280 and y < 720", server)
+        self.assertIn("0 <= x < 1280 and 0 <= y < 720", server)
         self.assertIn("scanout_width: 1280", (ROOT / "kernel/src/drivers/display_kms.rs").read_text(encoding="utf-8"))
         self.assertIn("scanout_height: 720", (ROOT / "kernel/src/drivers/display_kms.rs").read_text(encoding="utf-8"))
 
