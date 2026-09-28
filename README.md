@@ -75,26 +75,33 @@ In accordance with our engineering integrity policy, every subsystem is classifi
 - **Python**: Python 3.8+ with `cryptography` package (`pip install cryptography`)
 
 ### 1. Run Environment Diagnostics
-Verify that your toolchains and emulator paths are correctly detected:
+Verify that your toolchains, QEMU binaries, and canonical demo manifest are detected:
 ```bash
 python tools/interos.py doctor
 ```
-*(On Windows, you can also run `.\interos.ps1 doctor` or `interos.cmd doctor`)*
+*(On Windows, you can also run `.`\\interos.ps1 doctor` or `interos.cmd doctor`)*
 
-### 2. Run the Adversarial Security Test Suite
-Validate zero-trust invariants including SSRF filters, package signature checks, and sandbox constraints:
+### 2. Build the canonical QEMU Phone demo
+This is the authoritative clean-checkout build. It resolves every userspace ELF embedded by the x86_64 kernel before creating the BIOS image:
+```bash
+python tools/interos.py build demo
+```
+
+### 3. Launch the canonical demo
+The CLI starts Device Studio when it is not already running, launches the real QEMU backend, and exposes the guest UART:
+```bash
+python tools/interos.py run qemu
+python tools/interos.py logs -f
+```
+Open `http://localhost:4300` for Device Studio.
+
+### 4. Run the adversarial security suite
 ```bash
 python tools/interos.py test --target security
 ```
 
-### 3. Launch Device Studio
-Start the local development server and digital twin interface:
-```bash
-python emulator/server.py
-```
-Open your browser to **`http://localhost:4300`**.
+See [QEMU Phone Platform Contract](docs/QEMU_PHONE_PLATFORM.md) for the exact virtual hardware and transport contract.
 
----
 
 ## 🏛 System Architecture
 
