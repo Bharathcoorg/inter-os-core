@@ -335,3 +335,15 @@ def test_vfs_hard_links_share_inode_and_persist_aliases():
     assert "pub fn unlink(&mut self, path: &str)" in source
     assert "buf[pos] = 3" in source
     assert "self.hard_links.insert(path.to_string(), InodeId(id))" in source
+
+def test_userspace_thread_creation_uses_shared_address_space_and_guarded_stack():
+    scheduler = (ROOT / "kernel/src/task/scheduler.rs").read_text(encoding="utf-8")
+    user = (ROOT / "kernel/src/task/user.rs").read_text(encoding="utf-8")
+    process = (ROOT / "kernel/src/task/process.rs").read_text(encoding="utf-8")
+    assert "spawn_user_thread" in scheduler
+    assert "shared_space.lock()" in scheduler
+    assert "map_user_thread_stack" in scheduler
+    assert "reserve_thread(process_id)" in scheduler
+    assert "bind_reserved_thread(process_id, id)" in scheduler
+    assert "USER_STACK_SIZE + 4096" in user
+    assert "pub fn bind_reserved_thread" in process
