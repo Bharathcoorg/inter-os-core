@@ -368,7 +368,7 @@ pub fn info(id: ServiceId) -> Option<ServiceInfo> {
 }
 
 pub fn lookup(service_id: u8) -> Option<ServiceInfo> {
-    let id = match service_id { 0 => ServiceId::Init, 1 => ServiceId::Display, 2 => ServiceId::Input, 3 => ServiceId::Storage, 4 => ServiceId::Network, 5 => ServiceId::Power, 6 => ServiceId::Modem, 7 => ServiceId::Audio, 8 => ServiceId::Camera, 9 => ServiceId::Compositor, 10 => ServiceId::Launcher, _ => return None };
+    let id = match service_id { 0 => ServiceId::Init, 1 => ServiceId::Display, 2 => ServiceId::Input, 3 => ServiceId::Storage, 4 => ServiceId::Network, 5 => ServiceId::Power, 6 => ServiceId::Modem, 7 => ServiceId::Audio, 8 => ServiceId::Camera, 9 => ServiceId::Compositor, 10 => ServiceId::Launcher, 11 => ServiceId::Sensor, _ => return None };
     info(id)
 }
 
@@ -400,7 +400,7 @@ pub fn supervise() {
     // Lock order is scheduler -> registry. Exit paths already follow this
     // order, so supervision must never acquire registry before scheduler.
     let sched = SCHEDULER.lock();
-    let mut states = [None; 11];
+    let mut states = [None; 12];
     let records = *SERVICE_RECORDS.lock();
     for idx in 1..records.len() {
         let Some(record) = records[idx] else { continue; };
