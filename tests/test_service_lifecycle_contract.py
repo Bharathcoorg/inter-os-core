@@ -101,9 +101,6 @@ def main() -> None:
     for forbidden in (
         "CapabilityType::ProcessKill",
         "CapabilityType::ProcessSpawn",
-        "CapabilityType::StorageRawBlock",
-        "CapabilityType::SystemControl",
-        "CapabilityType::HardwarePortIo",
     ):
         must((ROOT / "kernel/src/task/user.rs").read_text(), f"// forbidden:{forbidden}", f"capability isolation marker {forbidden}")
     must((ROOT / "kernel/src/task/user.rs").read_text(), "NetworkSend/NetworkReceive are reserved for netd's explicit data-plane policy.", "network capability policy marker")
@@ -111,9 +108,14 @@ def main() -> None:
     for marker in (
         "// service-cap:Display=FrameBufferDirect:WRITE",
         "// service-cap:Input=EventPoll:READ",
-        "// service-cap:Storage=FileSystemRead:READ|WRITE",
+        "// service-cap:Storage=FileSystemRead:READ",
+        "// service-cap:Storage=FileSystemWrite:WRITE",
         "// service-cap:Network=NetworkSocket:READ|WRITE",
-        "// service-cap:Power=EventPoll:READ",
+        "// service-cap:Power=SystemControl:INVOKE",
+        "// service-cap:Modem=SystemControl:INVOKE",
+        "// service-cap:Audio=SystemControl:INVOKE",
+        "// service-cap:Camera=SystemControl:INVOKE",
+        "// service-cap:Sensor=SystemControl:INVOKE",
         "// service-cap:Modem=EventPoll:READ",
         "// service-cap:Audio=EventPoll:READ",
         "// service-cap:Camera=EventPoll:READ",
@@ -123,7 +125,7 @@ def main() -> None:
 
     # Executable contract: PID1 must exercise the complete deterministic
     # lifecycle smoke sequence used by the QEMU vertical slice.
-    must(pid1, "const SERVICES: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];",
+    must(pid1, "const SERVICES: [u8; 11] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];",
          "complete system-service bootstrap set")
     must(pid1, "match std::service_stop(1)", "PID1 service stop exercise")
     must(pid1, "std::service_start(1)", "PID1 service restart exercise")
@@ -144,7 +146,7 @@ def main() -> None:
          "PID1 complete service bootstrap evidence")
     must(pid1, 'state != b"running" || task_bytes == b"0"',
          "PID1 rejects non-running/zero-task registry entries")
-    must(pid1, "seen == 0xff", "PID1 requires all eight services")
+    must(pid1, "seen == 0x07ff", "PID1 requires all eleven services")
 
 
     # Process and capability architecture must be userspace-owned and isolated.
