@@ -3073,9 +3073,10 @@ document.addEventListener('DOMContentLoaded', () => {
   // Forward browser keyboard input to the same guest input contract when
   // the native RFB client is not active. Text fields remain Studio-local.
   window.addEventListener('keydown', async (e) => {
-    if (state.rfbClient) return;
     if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable)) return;
-    if (e.key.length === 1) {
+    if (Array.from(e.key).length === 1) {
+      e.preventDefault();
+      e.stopPropagation();
       try {
         await fetch('/api/input/key', {
           method: 'POST',
