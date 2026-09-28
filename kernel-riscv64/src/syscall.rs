@@ -38,6 +38,7 @@ fn copy_from_user(dst: &mut [u8], addr: usize, len: usize) -> Result<(), i64> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn copy_to_user(addr: usize, src: &[u8]) -> Result<(), i64> {
     validate_user_range(addr, src.len(), true)?;
     unsafe {
