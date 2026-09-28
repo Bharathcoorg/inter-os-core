@@ -40,7 +40,7 @@ A missing artifact is a hard build error. The build must never manufacture an em
 
 ## Display/input boundary
 
-Device Studio exposes the real QEMU VNC framebuffer through websockify. Browser pointer/keyboard events are sent to the VNC session. This Phase 1 contract establishes the transport boundary; a native virtual touchscreen driver is a later platform phase and must not be represented as present until the guest consumes it.
+Device Studio exposes the real QEMU VNC framebuffer through websockify. The guest KMS scanout is 1280x720 ARGB8888. Browser pointer events use the explicit INPUT_TOUCH transport and Unicode text input uses INPUT_KEY; neither path fabricates guest state. QEMU's legacy VNC mouse/keyboard channels are not treated as a touchscreen or guest keyboard device unless the guest consumes them.
 
 ## Verification language
 
@@ -78,7 +78,7 @@ The canonical QEMU input/display coordinate space is the guest scanout itself:
 - VNC/WebSocket carries the real QEMU framebuffer and native RFB input when the direct VBE view is active.
 - The synthetic phone shell may also forward pointer events to the same guest touch transport, but its visual overlays are not evidence of guest rendering.
 
-All guest-facing input is bounded and rejected outside the virtual display coordinate space. Physical touchscreen/I2C remains a separate hardware backend and must consume the same normalized input contract.
+All guest-facing input is bounded and rejected outside the virtual display coordinate space. The kernel KMS default matches the same 1280x720 scanout contract, so surface composition, framebuffer capture, and input coordinates share one authoritative virtual display space. Physical touchscreen/I2C remains a separate hardware backend and must consume the same normalized input contract.
 
 ## Phase 3 verification language
 

@@ -1826,12 +1826,35 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             except Exception:
                 data = {}
 
-            x = int(data.get('x', 0))
-            y = int(data.get('y', 0))
-            action = str(data.get('action', 'tap')).strip().lower()
+            try:
+                x = int(data['x'])
+                y = int(data['y'])
+            except (KeyError, TypeError, ValueError):
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'x and y must be integers'}).encode())
+                return
 
-            x = max(0, min(1279, x))
-            y = max(0, min(719, y))
+            action = str(data.get('action', 'tap')).strip().lower()
+            if action not in ('down', 'move', 'up', 'cancel', 'tap', 'swipe'):
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'unsupported touch action'}).encode())
+                return
+
+            if not (0 <= x < 1280 and 0 <= y < 720):
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'status': 'REJECTED',
+                    'source': 'QEMU_VIRTUAL_INPUT_CONTRACT',
+                    'error': 'touch coordinates must be within 1280x720 guest scanout'
+                }).encode())
+                return
 
             sent = False
             with serial_socket_lock:
@@ -1844,11 +1867,25 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                         elif action == 'move':
                             serial_socket_conn.sendall(f"INPUT_TOUCH MOVE {x} {y} 0\n".encode('utf-8'))
                         elif action == 'swipe':
-                            x2 = int(data.get('x2', x))
-                            y2 = int(data.get('y2', y))
-                            x2 = max(0, min(1279, x2))
-                            y2 = max(0, min(719, y2))
-                            steps = int(data.get('steps', 5))
+                            try:
+                                x2 = int(data['x2'])
+                                y2 = int(data['y2'])
+                            except (KeyError, TypeError, ValueError):
+                                self.send_response(400)
+                                self.send_header('Content-Type', 'application/json')
+                                self.end_headers()
+                                self.wfile.write(json.dumps({'success': False, 'error': 'swipe requires integer x2 and y2'}).encode())
+                                return
+                            if not (0 <= x2 < 1280 and 0 <= y2 < 720):
+                                self.send_response(400)
+                                self.send_header('Content-Type', 'application/json')
+                                self.end_headers()
+                                self.wfile.write(json.dumps({'success': False, 'status': 'REJECTED', 'error': 'swipe endpoint must remain inside 1280x720 guest scanout'}).encode())
+                                return
+                            try:
+                                steps = int(data.get('steps', 5))
+                            except (TypeError, ValueError):
+                                steps = 5
                             serial_socket_conn.sendall(f"INPUT_TOUCH DOWN {x} {y} 0\n".encode('utf-8'))
                             for step in range(1, max(2, min(20, steps))):
                                 cur_x = x + ((x2 - x) * step) // max(2, min(20, steps))
@@ -2283,67 +2320,89 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
             return
 
+        if self.path == '/api/input/key':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+                key = str(data.get('key', ''))
+                if len(key) != 1:
+                    raise ValueError('key must contain exactly one Unicode scalar')
+                codepoint = ord(key)
+                if codepoint > 0x10FFFF:
+                    raise ValueError('invalid Unicode scalar')
+            except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': str(exc)}).encode())
+                return
+
+            sent = False
+            with serial_socket_lock:
+                if serial_socket_conn:
+                    try:
+                        serial_socket_conn.sendall(f"INPUT_KEY {codepoint}\n".encode('utf-8'))
+                        sent = True
+                    except Exception:
+                        sent = False
+
+            if not sent:
+                self.send_response(503)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'status': 'UNAVAILABLE', 'source': 'UART_COM1'}).encode())
+                return
+
+            serial_lines.append(f"[STUDIO_INPUT] KEY codepoint={codepoint}")
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': True, 'status': 'DISPATCHED', 'source': 'UART_COM1', 'codepoint': codepoint}).encode())
+            return
+
         if self.path == '/api/serial/write':
             content_length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(content_length)
             try:
                 data = json.loads(body.decode('utf-8'))
-                cmd = data.get('command', '').strip()
-                if cmd:
-                    # Forward directly to active QEMU UART COM1 socket
-                    with serial_socket_lock:
-                        if serial_socket_conn:
-                            try:
-                                serial_socket_conn.sendall((cmd + '\n').encode('utf-8'))
-                            except Exception:
-                                pass
+                cmd = str(data.get('command', '')).strip()
+            except (json.JSONDecodeError, TypeError):
+                cmd = ''
 
-                    serial_lines.append(f"interos@mobile:~$ {cmd}")
-                    cmd_lower = cmd.lower()
-                    if cmd_lower == "uname -a":
-                        serial_lines.append("InterOS 1.3.0-sovereign x86_64 SMP Pure-Rust Microkernel GNU/Interlayer")
-                    elif cmd_lower in ("ps", "tasks"):
-                        serial_lines.append("  TID  PRIO  STATE    HEAP(KiB)  CAPABILITIES  NAME")
-                        serial_lines.append("    0     0  RUNNING        512  [All/Ring0]   kernel_core")
-                        serial_lines.append("    1     1  SLEEPING       256  [Sec,IPC]     userspace_init")
-                        serial_lines.append("    2     2  WAIT_IPC       128  [Crypto,DID]  security_daemon")
-                        serial_lines.append("    3     3  READY          384  [VFS,Render]  display_compositor")
-                    elif cmd_lower in ("vfs ls", "vfs ls /", "ls"):
-                        serial_lines.append("  dr-xr-xr-x  4 root root   0 Sep 23 02:00 dev/")
-                        serial_lines.append("  dr-xr-xr-x  2 root root   0 Sep 23 02:00 sys/")
-                        serial_lines.append("  drwxr-xr-x  3 user user 512 Sep 23 02:00 data/")
-                    elif cmd_lower in ("mem", "heap"):
-                        serial_lines.append("[MEM] Kernel Dynamic Heap: 8.00 MiB total, 1.42 MiB active, 6.58 MiB available.")
-                        serial_lines.append("[MEM] Physical Frame Allocator: 2048 pages committed (8192 KiB).")
-                    elif cmd_lower == "dmesg":
-                        serial_lines.append("[DMESG] [    0.000000] GDT & TSS loaded with Ring 3 segments.")
-                        serial_lines.append("[DMESG] [    0.004120] Dual 8259 PIC remapped (IRQs 32-47).")
-                        serial_lines.append("[DMESG] [    0.012050] Kernel 8 MiB dynamic heap allocator online.")
-                        serial_lines.append("[DMESG] [    0.021000] dm-verity Merkle tree attestation: VALIDATED.")
-                        serial_lines.append("[DMESG] [    0.035400] Fast Syscall MSRs programmed (SCE enabled).")
-                    elif cmd_lower == "help":
-                        serial_lines.append("Built-in Microkernel Diagnostic Commands:")
-                        serial_lines.append("  uname -a     - Display microkernel architecture & release")
-                        serial_lines.append("  ps / tasks   - Enumerate active kernel tasks & memory capabilities")
-                        serial_lines.append("  vfs ls       - List capability-scoped virtual filesystem")
-                        serial_lines.append("  mem / heap   - Inspect 8 MiB physical frame & heap allocator")
-                        serial_lines.append("  dmesg        - Dump kernel ring buffer diagnostics")
-                        serial_lines.append("  ping         - Test loopback IPC round-trip latency")
-                        serial_lines.append("  clear        - Clear console output screen")
-                    else:
-                        serial_lines.append(f"interos-shell: command executed: '{cmd}' (exit 0)")
+            if not cmd or len(cmd) > 256 or any(ord(ch) < 0x20 and ch not in '\t' for ch in cmd):
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'invalid serial command'}).encode())
+                return
 
-                self.send_response(200)
+            sent = False
+            with serial_socket_lock:
+                if serial_socket_conn:
+                    try:
+                        serial_socket_conn.sendall((cmd + '\n').encode('utf-8'))
+                        sent = True
+                    except Exception:
+                        sent = False
+
+            if not sent:
+                self.send_response(503)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
-                self.wfile.write(json.dumps({'success': True, 'command': cmd}).encode())
-            except Exception as e:
-                self.send_response(500)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'status': 'UNAVAILABLE',
+                    'source': 'UART_COM1',
+                    'error': 'QEMU COM1 serial input socket is offline or not connected'
+                }).encode())
+                return
+
+            serial_lines.append(f"[STUDIO_COMMAND] {cmd}")
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': True, 'status': 'DISPATCHED', 'source': 'UART_COM1', 'command': cmd}).encode())
             return
 
         if self.path == '/api/themes/apply':

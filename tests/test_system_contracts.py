@@ -78,6 +78,17 @@ class SystemContractTests(unittest.TestCase):
         self.assertIn("INPUT_TOUCH DOWN", server)
         self.assertIn("Math.min(1279", app)
         self.assertIn("/api/touch/event", app)
+        self.assertIn("/api/input/key", app)
+        self.assertIn("x < 1280 and y < 720", server)
+        self.assertIn("scanout_width: 1280", (ROOT / "kernel/src/drivers/display_kms.rs").read_text(encoding="utf-8"))
+        self.assertIn("scanout_height: 720", (ROOT / "kernel/src/drivers/display_kms.rs").read_text(encoding="utf-8"))
+
+    def test_studio_does_not_fabricate_serial_command_results(self):
+        server = (ROOT / "emulator/server.py").read_text(encoding="utf-8")
+        serial_route = server[server.index("if self.path == '/api/serial/write':"):server.index("if self.path == '/api/themes/apply':")]
+        self.assertNotIn('uname -a', serial_route)
+        self.assertNotIn('ps / tasks', serial_route)
+        self.assertIn("UART_COM1", serial_route)
 
     def test_phase2_dev_launch_has_explicit_qemu_boundary(self):
         syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")

@@ -1268,6 +1268,53 @@ document.addEventListener('DOMContentLoaded', () => {
       });
 
       state.rfbClient = rfb;
+
+      // The RFB canvas is the real guest framebuffer. Forward touch-like
+      // pointer events through the canonical guest input contract as well;
+      // QEMU's legacy mouse device is not treated as a touchscreen.
+      const rfbInputTarget = vbeScreenTarget;
+      if (rfbInputTarget && !rfbInputTarget.dataset.guestInputBound) {
+        rfbInputTarget.dataset.guestInputBound = '1';
+        let activePointer = null;
+        const toGuestPoint = (ev) => {
+          const rect = rfbInputTarget.getBoundingClientRect();
+          if (!rect.width || !rect.height) return null;
+          return {
+            x: Math.max(0, Math.min(1279, Math.round(((ev.clientX - rect.left) / rect.width) * 1280))),
+            y: Math.max(0, Math.min(719, Math.round(((ev.clientY - rect.top) / rect.height) * 720)))
+          };
+        };
+        const dispatchGuestTouch = async (action, ev) => {
+          const point = toGuestPoint(ev);
+          if (!point) return;
+          try {
+            await fetch('/api/touch/event', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action, ...point })
+            });
+          } catch (_) {}
+        };
+        rfbInputTarget.addEventListener('pointerdown', (ev) => {
+          if (!state.rfbClient) return;
+          activePointer = ev.pointerId;
+          dispatchGuestTouch('down', ev);
+        }, true);
+        rfbInputTarget.addEventListener('pointermove', (ev) => {
+          if (!state.rfbClient || ev.pointerId !== activePointer) return;
+          dispatchGuestTouch('move', ev);
+        }, true);
+        rfbInputTarget.addEventListener('pointerup', (ev) => {
+          if (!state.rfbClient || ev.pointerId !== activePointer) return;
+          activePointer = null;
+          dispatchGuestTouch('up', ev);
+        }, true);
+        rfbInputTarget.addEventListener('pointercancel', (ev) => {
+          if (!state.rfbClient || ev.pointerId !== activePointer) return;
+          activePointer = null;
+          dispatchGuestTouch('cancel', ev);
+        }, true);
+      }
     } catch (err) {
       logConsole('warn', `[VBE_RFB] RFB module unavailable (${err.message}); using HTTP live scanout fallback.`);
       if (vbeStatusLabel) vbeStatusLabel.textContent = 'QEMU Scanout (HTTP Stream)';
@@ -3015,12 +3062,12 @@ document.addEventListener('DOMContentLoaded', () => {
   window.addEventListener('keydown', async (e) => {
     if (state.rfbClient) return;
     if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable)) return;
-    if (e.key === 'Tab' || e.key === 'Enter' || e.key === 'Backspace' || e.key.length === 1) {
+    if (e.key.length === 1) {
       try {
-        await fetch('/api/serial/write', {
+        await fetch('/api/input/key', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ command: `INPUT_KEY ${e.key.codePointAt(0)}` })
+          body: JSON.stringify({ key: e.key })
         });
       } catch (_) {}
     }

@@ -359,9 +359,10 @@ impl DrmKmsController {
 }
 
 /// Global static instance of the DRM/KMS Controller.
+/// Canonical x86_64 QEMU scanout: 1280x720 ARGB8888.
 pub static DRM_KMS: Mutex<DrmKmsController> = Mutex::new(DrmKmsController {
-    scanout_width: 720,
-    scanout_height: 1440,
+    scanout_width: 1280,
+    scanout_height: 720,
     format: DrmPixelFormat::Argb8888,
     front_buffer: Vec::new(),
     back_buffer: Vec::new(),
@@ -370,7 +371,7 @@ pub static DRM_KMS: Mutex<DrmKmsController> = Mutex::new(DrmKmsController {
     vsync_counter: 0,
     page_flips_completed: 0,
     focused_surface: None,
-    orientation: DisplayOrientation::Portrait,
+    orientation: DisplayOrientation::LandscapeRight,
     refresh_hz: 60,
     frame_deadline_ticks: 0,
 });
