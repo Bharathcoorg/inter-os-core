@@ -1150,6 +1150,12 @@ pub fn surface_destroy(display_cap_slot: usize, surface_id: u32) -> Result<(), i
 }
 
 /// Composites and atomically flips the display scanout.
+/// Enables or disables pointer/touch hit-testing for an owned window.
+pub fn window_set_input(display_cap_slot: usize, window_id: u32, enabled: bool) -> Result<(), i64> {
+    let ret = unsafe { syscall3(SyscallNumber::WindowSetInput, display_cap_slot as u64, window_id as u64, enabled as u64) };
+    if ret == 0 { Ok(()) } else { Err(ret) }
+}
+
 pub fn surface_flip(display_cap_slot: usize) -> Result<u64, i64> {
     let ret = unsafe { syscall1(SyscallNumber::SurfaceFlip, display_cap_slot as u64) };
     if ret >= 0 { Ok(ret as u64) } else { Err(ret) }
