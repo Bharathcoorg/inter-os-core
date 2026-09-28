@@ -237,6 +237,14 @@ def cmd_doctor(args):
         log_error("boot/Cargo.toml missing")
         all_passed = False
 
+    # 7. Canonical QEMU Phone manifest
+    manifest = WORKSPACE_ROOT / "platform" / "x86_64" / "userspace-manifest.json"
+    if manifest.exists():
+        log_success(f"Canonical QEMU userspace manifest: {manifest.relative_to(WORKSPACE_ROOT)}")
+    else:
+        log_error(f"Canonical QEMU userspace manifest missing: {manifest}")
+        all_passed = False
+
     # 7. Device Studio Port Status
     port = getattr(args, "port", 4300)
     try:
