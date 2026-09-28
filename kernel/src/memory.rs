@@ -362,7 +362,6 @@ impl TaskPageTable {
         }
 
         let frame = p1[p1_idx].frame().map_err(|_| "userspace leaf frame missing")?;
-        let original_flags = p1[p1_idx].flags();
         let Some(pos) = self.allocated_frames.iter().position(|candidate| *candidate == frame) else {
             return Err("userspace frame ownership missing");
         };

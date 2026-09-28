@@ -390,6 +390,8 @@ def test_page_table_mapping_rollback_unlinks_new_intermediate_tables():
     assert "pml4[p4_idx].set_unused()" in memory
     assert "caller retains ownership of the leaf frame" in memory
 
-def test_unmap_preserves_leaf_flags_on_ownership_failure():
+def test_unmap_checks_frame_ownership_before_clearing_the_leaf():
     memory = (ROOT / "kernel/src/memory.rs").read_text(encoding="utf-8")
-    assert "let original_flags = p1[p1_idx].flags()" in memory
+    ownership = memory[memory.index("let frame = p1[p1_idx].frame()"):memory.index("let (active_cr3", memory.index("let frame = p1[p1_idx].frame()"))]
+    assert "let Some(pos) = self.allocated_frames.iter().position" in ownership
+    assert "p1[p1_idx].set_unused();" in ownership
