@@ -168,14 +168,27 @@ impl UserSlice {
     /// Validates that the userspace slice represents a valid UTF-8 string and executes
     /// the provided closure with the kernel-borrowed string slice.
     pub fn copy_to_kernel_typed<T: Copy>(&self, dst: &mut [T]) -> Result<usize, UserAccessError> {
+        let size = core::mem::size_of::<T>();
         let align = core::mem::align_of::<T>();
-        if align > 1 && self.addr % align as u64 != 0 { return Err(UserAccessError::Misaligned); }
-        let byte_len = self.len.checked_mul(core::mem::size_of::<T>()).ok_or(UserAccessError::Overflow)?;
-        let dst_bytes = dst.len().checked_mul(core::mem::size_of::<T>()).ok_or(UserAccessError::Overflow)?;
-        if byte_len > MAX_USER_TRANSFER_LEN || dst_bytes < byte_len { return Err(UserAccessError::OutOfBounds); }
-        validate_current_user_buffer(self.addr, byte_len, false)?;
-        unsafe { core::ptr::copy_nonoverlapping(self.addr as *const T, dst.as_mut_ptr(), self.len); }
-        Ok(self.len)
+        if size == 0 || self.len % size != 0 {
+            return Err(UserAccessError::OutOfBounds);
+        }
+        if align > 1 && self.addr % align as u64 != 0 {
+            return Err(UserAccessError::Misaligned);
+        }
+        let count = self.len / size;
+        if count > dst.len() || self.len > MAX_USER_TRANSFER_LEN {
+            return Err(UserAccessError::OutOfBounds);
+        }
+        validate_current_user_buffer(self.addr, self.len, false)?;
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                self.addr as *const T,
+                dst.as_mut_ptr(),
+                count,
+            );
+        }
+        Ok(count)
     }
 
     pub fn with_str<R, F: FnOnce(&str) -> R>(&self, kernel_buf: &mut [u8], f: F) -> Result<R, UserAccessError> {
