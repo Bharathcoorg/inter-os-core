@@ -18,6 +18,9 @@ use crate::task::TaskId;
 pub const MAX_FD_PER_TASK: usize = 16;
 pub const MAX_FILE_SIZE: usize = 8192;
 pub const MAX_PATH_LEN: usize = 256;
+pub const DEFAULT_FILE_MODE: u16 = 0o644;
+pub const DEFAULT_DIR_MODE: u16 = 0o755;
+pub const ROOT_UID: u32 = 0;
 
 /// Unique Inode identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -40,6 +43,13 @@ pub enum FileType {
 #[derive(Debug, Clone)]
 pub struct FileStat {
     pub inode: InodeId,
+    pub uid: u32,
+    pub gid: u32,
+    pub mode: u16,
+    pub nlink: u16,
+    pub atime: u64,
+    pub mtime: u64,
+    pub ctime: u64,
     pub file_type: FileType,
     pub size: usize,
     pub read_only: bool,
@@ -72,6 +82,13 @@ impl InodeData {
 #[derive(Debug, Clone)]
 pub struct Inode {
     pub id: InodeId,
+    pub uid: u32,
+    pub gid: u32,
+    pub mode: u16,
+    pub nlink: u16,
+    pub atime: u64,
+    pub mtime: u64,
+    pub ctime: u64,
     pub name: String,
     pub path: String,
     pub file_type: FileType,
@@ -150,6 +167,13 @@ impl Vfs {
 
         let inode = Inode {
             id: inode_id,
+            uid: ROOT_UID,
+            gid: ROOT_UID,
+            mode: DEFAULT_DIR_MODE,
+            nlink: 1,
+            atime: 0,
+            mtime: 0,
+            ctime: 0,
             name,
             path: norm_path.clone(),
             file_type: FileType::Directory,
@@ -226,6 +250,13 @@ impl Vfs {
 
         let inode = Inode {
             id: inode_id,
+            uid: ROOT_UID,
+            gid: ROOT_UID,
+            mode: if read_only { 0o444 } else { DEFAULT_FILE_MODE },
+            nlink: 1,
+            atime: 0,
+            mtime: 0,
+            ctime: 0,
             name,
             path: norm_path.clone(),
             file_type: if read_only { FileType::ReadOnlySystem } else { FileType::RegularFile },
@@ -368,11 +399,37 @@ impl Vfs {
 
         Ok(FileStat {
             inode: inode.id,
+            uid: inode.uid,
+            gid: inode.gid,
+            mode: inode.mode,
+            nlink: inode.nlink,
+            atime: inode.atime,
+            mtime: inode.mtime,
+            ctime: inode.ctime,
             file_type: inode.file_type,
             size: inode.size,
             read_only: inode.file_type == FileType::ReadOnlySystem,
             sha256_digest: inode.sha256_digest,
         })
+    }
+
+    pub fn chmod(&mut self, task_caps: &CapabilityTable, cap_slot: usize, path: &str, mode: u16) -> Result<(), FsError> {
+        task_caps.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE).map_err(FsError::CapabilityError)?;
+        let id = self.lookup(path).ok_or(FsError::FileNotFound)?;
+        let inode = self.inodes.get_mut(&id).ok_or(FsError::FileNotFound)?;
+        inode.mode = mode & 0o7777;
+        inode.ctime = crate::interrupts::get_system_ticks();
+        self.persist_metadata_snapshot().map_err(|_| FsError::IntegrityViolation)
+    }
+
+    pub fn chown(&mut self, task_caps: &CapabilityTable, cap_slot: usize, path: &str, uid: u32, gid: u32) -> Result<(), FsError> {
+        task_caps.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE).map_err(FsError::CapabilityError)?;
+        let id = self.lookup(path).ok_or(FsError::FileNotFound)?;
+        let inode = self.inodes.get_mut(&id).ok_or(FsError::FileNotFound)?;
+        inode.uid = uid;
+        inode.gid = gid;
+        inode.ctime = crate::interrupts::get_system_ticks();
+        self.persist_metadata_snapshot().map_err(|_| FsError::IntegrityViolation)
     }
 
     /// Opens a file, creating a task-specific FileDescriptor guarded by capability tokens.
@@ -609,13 +666,13 @@ impl Vfs {
     /// Paths and metadata are durable; file bytes remain in InterFS data files.
     fn persist_metadata_snapshot(&self) -> Result<(), FsError> {
         let mut buf = alloc::vec![0u8; 32768];
-        buf[..4].copy_from_slice(b"IVM1");
+        buf[..4].copy_from_slice(b"IVM2");
         let mut pos = 6usize;
         let mut count = 0u16;
         for inode in self.inodes.values() {
             if !inode.path.starts_with("/data/") && inode.path != "/data" { continue; }
             let path = inode.path.as_bytes();
-            if path.len() > 255 || pos + 8 + 1 + 2 + path.len() + 4 + 32 > buf.len() { continue; }
+            if path.len() > 255 || pos + 8 + 1 + 2 + path.len() + 4 + 32 + 4 + 4 + 2 + 2 + 24 > buf.len() { continue; }
             buf[pos..pos + 8].copy_from_slice(&inode.id.0.to_le_bytes()); pos += 8;
             let kind = match inode.file_type { FileType::Directory => 1u8, FileType::RegularFile => 2u8, _ => continue };
             buf[pos] = kind; pos += 1;
@@ -623,14 +680,19 @@ impl Vfs {
             buf[pos..pos + path.len()].copy_from_slice(path); pos += path.len();
             buf[pos..pos + 4].copy_from_slice(&(inode.size as u32).to_le_bytes()); pos += 4;
             buf[pos..pos + 32].copy_from_slice(&inode.sha256_digest); pos += 32;
+            buf[pos..pos + 4].copy_from_slice(&inode.uid.to_le_bytes()); pos += 4;
+            buf[pos..pos + 4].copy_from_slice(&inode.gid.to_le_bytes()); pos += 4;
+            buf[pos..pos + 2].copy_from_slice(&inode.mode.to_le_bytes()); pos += 2;
+            buf[pos..pos + 2].copy_from_slice(&inode.nlink.to_le_bytes()); pos += 2;
+            buf[pos..pos + 8].copy_from_slice(&inode.atime.to_le_bytes()); pos += 8;
+            buf[pos..pos + 8].copy_from_slice(&inode.mtime.to_le_bytes()); pos += 8;
+            buf[pos..pos + 8].copy_from_slice(&inode.ctime.to_le_bytes()); pos += 8;
             count = count.saturating_add(1);
         }
         buf[4..6].copy_from_slice(&count.to_le_bytes());
         let mut sealed = Vec::new();
-        crate::storage::encrypted::seal(&buf[..pos], &mut sealed)
-            .map_err(|_| FsError::IntegrityViolation)?;
-        crate::storage::filesystem::store_data_file("/data/.vfs.metadata", &sealed)
-            .map_err(|_| FsError::IntegrityViolation)
+        crate::storage::encrypted::seal(&buf[..pos], &mut sealed).map_err(|_| FsError::IntegrityViolation)?;
+        crate::storage::filesystem::store_data_file("/data/.vfs.metadata", &sealed).map_err(|_| FsError::IntegrityViolation)
     }
 
     /// Restores the persistent /data inode tree before restoring file payloads.
@@ -640,38 +702,46 @@ impl Vfs {
         let mut buf = alloc::vec![0u8; 32768];
         let len = match crate::storage::encrypted::open(&sealed[..len], &mut buf) {
             Ok(plain_len) => plain_len,
-            Err(_) => {
-                if len <= buf.len() { buf[..len].copy_from_slice(&sealed[..len]); len } else { return; }
-            }
+            Err(_) => { if len <= buf.len() { buf[..len].copy_from_slice(&sealed[..len]); len } else { return; } }
         };
-        if len < 6 || &buf[..4] != b"IVM1" { return; }
+        if len < 6 || (&buf[..4] != b"IVM2" && &buf[..4] != b"IVM1") { return; }
+        let v2 = &buf[..4] == b"IVM2";
         let count = u16::from_le_bytes([buf[4], buf[5]]) as usize;
         let mut pos = 6usize;
         for _ in 0..count {
             if pos + 11 > len { break; }
-            let id = u64::from_le_bytes([buf[pos],buf[pos+1],buf[pos+2],buf[pos+3],buf[pos+4],buf[pos+5],buf[pos+6],buf[pos+7]]); pos += 8;
+            let id = u64::from_le_bytes(buf[pos..pos+8].try_into().unwrap()); pos += 8;
             let kind = buf[pos]; pos += 1;
             let plen = u16::from_le_bytes([buf[pos],buf[pos+1]]) as usize; pos += 2;
-            if plen == 0 || plen > 255 || pos + plen + 36 > len { break; }
+            let extra = if v2 { 68 } else { 36 };
+            if plen == 0 || plen > 255 || pos + plen + extra > len { break; }
             let path = match core::str::from_utf8(&buf[pos..pos+plen]).ok() { Some(v) => v, None => break };
             pos += plen;
             let size = u32::from_le_bytes([buf[pos],buf[pos+1],buf[pos+2],buf[pos+3]]) as usize; pos += 4;
-            let mut digest = [0u8; 32]; digest.copy_from_slice(&buf[pos..pos+32]); pos += 32;
+            let mut digest=[0u8;32]; digest.copy_from_slice(&buf[pos..pos+32]); pos += 32;
+            let (uid,gid,mode,nlink,atime,mtime,ctime) = if v2 {
+                let uid=u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap()); pos+=4;
+                let gid=u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap()); pos+=4;
+                let mode=u16::from_le_bytes(buf[pos..pos+2].try_into().unwrap()); pos+=2;
+                let nlink=u16::from_le_bytes(buf[pos..pos+2].try_into().unwrap()); pos+=2;
+                let atime=u64::from_le_bytes(buf[pos..pos+8].try_into().unwrap()); pos+=8;
+                let mtime=u64::from_le_bytes(buf[pos..pos+8].try_into().unwrap()); pos+=8;
+                let ctime=u64::from_le_bytes(buf[pos..pos+8].try_into().unwrap()); pos+=8;
+                (uid,gid,mode,nlink,atime,mtime,ctime)
+            } else { (ROOT_UID,ROOT_UID,if kind==1 {DEFAULT_DIR_MODE} else {DEFAULT_FILE_MODE},1,0,0,0) };
             if !path.starts_with("/data/") && path != "/data" { continue; }
             if kind == 1 {
-                self.mkdir(path);
+                let created=self.mkdir(path);
+                if let Some(inode)=self.inodes.get_mut(&created) { inode.id=InodeId(id); inode.uid=uid; inode.gid=gid; inode.mode=mode; inode.nlink=nlink; inode.atime=atime; inode.mtime=mtime; inode.ctime=ctime; }
             } else if kind == 2 {
-                let created = self.create_file(path, &[], false);
-                if let Some(mut inode) = self.inodes.remove(&created) {
-                    inode.id = InodeId(id);
-                    inode.size = size;
-                    inode.sha256_digest = digest;
-                    inode.data = InodeData::Dynamic(Vec::new());
-                    self.inodes.insert(InodeId(id), inode);
-                    self.path_to_inode.insert(path.to_string(), InodeId(id));
+                let created=self.create_file(path,&[],false);
+                if let Some(mut inode)=self.inodes.remove(&created) {
+                    inode.id=InodeId(id); inode.size=size; inode.sha256_digest=digest; inode.data=InodeData::Dynamic(Vec::new());
+                    inode.uid=uid; inode.gid=gid; inode.mode=mode; inode.nlink=nlink; inode.atime=atime; inode.mtime=mtime; inode.ctime=ctime;
+                    self.inodes.insert(InodeId(id),inode); self.path_to_inode.insert(path.to_string(),InodeId(id));
                 }
             }
-            if id >= self.next_inode { self.next_inode = id.saturating_add(1); }
+            if id>=self.next_inode { self.next_inode=id.saturating_add(1); }
         }
     }
 
