@@ -1,5 +1,6 @@
 //! Persistent package payload store.
 //! Payloads are kept separate from registry metadata and addressed by package ID.
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use spin::Mutex;
 
