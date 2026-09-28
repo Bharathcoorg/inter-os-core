@@ -239,10 +239,16 @@ fn start_locked(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str
         }
     };
     crate::ipc::IPC_ROUTER.lock().register_task(task);
-    let process = crate::task::process::process_for_task(task).ok_or_else(|| {
-        let _ = SCHEDULER.lock().terminate_task(task, -1);
-        "service process identity missing"
-    })?;
+    let process = match crate::task::process::process_for_task(task) {
+        Some(process) => process,
+        None => {
+            let mut scheduler = SCHEDULER.lock();
+            let _ = scheduler.terminate_task(task, -1);
+            let _ = scheduler.reap_child(parent_id, task);
+            SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Failed, generation });
+            return Err("service process identity missing");
+        }
+    };
     if let Err(_) = crate::task::process::set_limits(process, resource_limits(id)) {
         let mut scheduler = SCHEDULER.lock();
         let _ = scheduler.terminate_task(task, -1);
