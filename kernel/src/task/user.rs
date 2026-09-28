@@ -124,7 +124,8 @@ pub fn load_user_elf_into_page_table(
     let e_phentsize = u16::from_le_bytes(elf_data[54..56].try_into().unwrap()) as usize;
     let e_phnum = u16::from_le_bytes(elf_data[56..58].try_into().unwrap()) as usize;
 
-    if e_phentsize < 56 || e_phnum == 0 {
+    // ELF64 program headers are exactly 56 bytes in this static loader ABI.
+    if e_phentsize != 56 || e_phnum == 0 {
         return Err("Invalid program header table size or count");
     }
 
@@ -137,6 +138,9 @@ pub fn load_user_elf_into_page_table(
 
     let phys_offset = crate::memory::phys_mem_offset();
     let mut entry_in_executable_segment = false;
+    if e_entry < 0x1000 || e_entry >= 0x0000_8000_0000_0000 {
+        return Err("ELF entry point is outside the canonical user range");
+    }
     let mut mapped_address_space = 0usize;
     let mut load_ranges: alloc::vec::Vec<(usize, usize, bool, bool)> = alloc::vec::Vec::new();
 
@@ -173,6 +177,7 @@ pub fn load_user_elf_into_page_table(
         let p_vaddr = u64::from_le_bytes(elf_data[ph_start + 16..ph_start + 24].try_into().unwrap()) as usize;
         let p_filesz = u64::from_le_bytes(elf_data[ph_start + 32..ph_start + 40].try_into().unwrap()) as usize;
         let p_memsz = u64::from_le_bytes(elf_data[ph_start + 40..ph_start + 48].try_into().unwrap()) as usize;
+        let p_align = u64::from_le_bytes(elf_data[ph_start + 48..ph_start + 56].try_into().unwrap());
 
         if p_memsz == 0 {
             continue;
@@ -184,6 +189,15 @@ pub fn load_user_elf_into_page_table(
         }
         if p_filesz > p_memsz {
             return Err("Segment file size exceeds memory size");
+        }
+        if p_vaddr < 0x1000 {
+            return Err("ELF segment overlaps the reserved null page");
+        }
+        if p_align != 0 && (p_align & (p_align - 1)) != 0 {
+            return Err("ELF segment alignment is not a power of two");
+        }
+        if p_align > 1 && (p_vaddr as u64) % p_align != (p_offset as u64) % p_align {
+            return Err("ELF segment virtual/file alignment mismatch");
         }
         let seg_end_vaddr = p_vaddr.checked_add(p_memsz).ok_or("Segment memory range overflow")?;
         if p_vaddr >= seg_end_vaddr || seg_end_vaddr > 0x0000_8000_0000_0000 {
