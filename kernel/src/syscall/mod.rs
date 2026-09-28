@@ -3333,6 +3333,9 @@ pub fn sys_service_package_launch(cap_slot: usize, path: &str) -> Result<crate::
         6 => crate::services::ServiceId::Modem,
         7 => crate::services::ServiceId::Audio,
         8 => crate::services::ServiceId::Camera,
+        9 => crate::services::ServiceId::Compositor,
+        10 => crate::services::ServiceId::Launcher,
+        11 => crate::services::ServiceId::Sensor,
         _ => return Err(SyscallResult::PermissionDenied),
     };
     let task_id = crate::services::launch_verified_package(service, parent_id, &verified, payload)
