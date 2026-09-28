@@ -939,9 +939,17 @@ impl Vfs {
     ///
     /// Descriptors are kernel-owned resources and must not survive task death.
     pub fn cleanup_task(&mut self, task_id: TaskId) -> usize {
-        self.task_file_tables.remove(&task_id)
+        let closed = self.task_file_tables.remove(&task_id)
             .map(|table| table.iter().filter(|slot| slot.is_some()).count())
-            .unwrap_or(0)
+            .unwrap_or(0);
+        if closed > 0 {
+            if let Some(process) = crate::task::process::process_for_task(task_id) {
+                for _ in 0..closed {
+                    crate::task::process::release_open_file(process);
+                }
+            }
+        }
+        closed
     }
 
     /// Closes an open file descriptor.
