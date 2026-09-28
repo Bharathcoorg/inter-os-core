@@ -351,9 +351,13 @@ pub fn stop(id: ServiceId, parent_id: TaskId) -> Result<(), &'static str> {
             return Err("service is not owned by caller");
         }
     }
-    let mut scheduler = SCHEDULER.lock();
-    scheduler.terminate_task(service_task, 0).map_err(|_| "service termination failed")?;
-    let _ = scheduler.reap_child(parent_id, record.task);
+    let termination_result = {
+        let mut scheduler = SCHEDULER.lock();
+        let result = scheduler.terminate_task(service_task, 0);
+        if result.is_ok() { let _ = scheduler.reap_child(parent_id, record.task); }
+        result
+    };
+    termination_result.map_err(|_| "service termination failed")?;
     let generation = record.generation.saturating_add(1);
     SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Stopped, generation });
     Ok(())
