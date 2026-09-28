@@ -234,10 +234,10 @@ impl ShmPipeManager {
     pub const fn new() -> Self {
         Self {
             pipes: [
-                Some(ShmRingBuffer::new(0, TaskId(21), TaskId(22), "camera.raw_stream")),
-                Some(ShmRingBuffer::new(1, TaskId(26), TaskId(19), "audio.pcm_stream")),
-                Some(ShmRingBuffer::new(2, TaskId(20), TaskId(4), "vault.bulk_crypt")),
-                Some(ShmRingBuffer::new(3, TaskId(9), TaskId(9), "mesh.dma_pipe")),
+                Some(ShmRingBuffer::new(0, TaskId(9), TaskId(10), "camera.raw_stream")),
+                Some(ShmRingBuffer::new(1, TaskId(8), TaskId(10), "audio.pcm_stream")),
+                Some(ShmRingBuffer::new(2, TaskId(4), TaskId(1), "vault.bulk_crypt")),
+                Some(ShmRingBuffer::new(3, TaskId(5), TaskId(5), "mesh.dma_pipe")),
                 None,
                 None,
                 None,
@@ -333,6 +333,8 @@ impl ShmPipeManager {
     /// Executes thorough self-tests on the Zero-Copy DMA ring buffer implementation.
     pub fn self_test(&mut self) {
         let pipe = self.pipes[0].as_mut().expect("Pipe 0 must exist");
+        let producer = pipe.producer;
+        let consumer = pipe.consumer;
 
         // 1. Single packet round-trip transfer
         let mut test_payload = [0u8; 1024];
@@ -341,13 +343,13 @@ impl ShmPipeManager {
         test_payload[1020..1024].copy_from_slice(&0xDEADBEEFu32.to_le_bytes());
 
         let seq1 = pipe
-            .write(TaskId(21), &test_payload, DMA_FLAG_ACCEL, 100)
+            .write(producer, &test_payload, DMA_FLAG_ACCEL, 100)
             .expect("Failed to write to empty ring buffer");
         assert_eq!(seq1, 1, "First sequence must be 1");
 
         let mut rx_buf = [0u8; 1024];
         let (rx_len, rx_seq) = pipe
-            .read(TaskId(22), &mut rx_buf)
+            .read(consumer, &mut rx_buf)
             .expect("Failed to read from ring buffer");
         assert_eq!(rx_len, 1024);
         assert_eq!(rx_seq, 1);
@@ -364,13 +366,13 @@ impl ShmPipeManager {
             chunk[0] = i as u8;
             chunk[511] = (i * 3) as u8;
             let seq = pipe
-                .write(TaskId(21), &chunk, DMA_FLAG_ACCEL, 101 + i as u64)
+                .write(producer, &chunk, DMA_FLAG_ACCEL, 101 + i as u64)
                 .expect("Streaming write failed");
             assert_eq!(seq, 2 + i as u64);
         }
 
         // 3. Ring buffer full / overflow protection test
-        let overflow_attempt = pipe.write(TaskId(21), b"OVERFLOW", DMA_FLAG_ACCEL, 200);
+        let overflow_attempt = pipe.write(producer, b"OVERFLOW", DMA_FLAG_ACCEL, 200);
         assert_eq!(
             overflow_attempt,
             Err(ShmError::RingFull),
@@ -381,7 +383,7 @@ impl ShmPipeManager {
         for i in 0..7 {
             let mut drain_buf = [0u8; 512];
             let (len, seq) = pipe
-                .read(TaskId(22), &mut drain_buf)
+                .read(consumer, &mut drain_buf)
                 .expect("Failed to drain stream");
             assert_eq!(len, 512);
             assert_eq!(seq, 2 + i as u64);
@@ -390,7 +392,7 @@ impl ShmPipeManager {
         }
 
         // 5. Verify empty condition
-        let empty_attempt = pipe.read(TaskId(22), &mut rx_buf);
+        let empty_attempt = pipe.read(consumer, &mut rx_buf);
         assert_eq!(
             empty_attempt,
             Err(ShmError::RingEmpty),
