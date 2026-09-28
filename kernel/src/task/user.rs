@@ -561,7 +561,7 @@ pub fn spawn_user_init(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
-    let id = spawn_user_process(
+    let id = spawn_user_process_with_parent(
         "user_init",
         USER_INIT_ELF,
         user_caps,
@@ -628,10 +628,8 @@ pub fn spawn_app_settings(id_security: TaskId) -> TaskId {
         APP_SETTINGS_ELF,
         caps,
         1,
+        id_security,
     ).expect("Failed to spawn Settings app");
-    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
-        task.parent_id = id_security;
-    }
     serial_println!("[OK] Spawned Task 17: app_settings (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
@@ -687,15 +685,13 @@ pub fn spawn_app_terminal(id_security: TaskId) -> TaskId {
         object_id: 1,
     }).ok();
 
-    let id = spawn_user_process(
+    let id = spawn_user_process_with_parent(
         "app_terminal",
         APP_TERMINAL_ELF,
         caps,
         1,
+        id_security,
     ).expect("Failed to spawn Terminal app");
-    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
-        task.parent_id = id_security;
-    }
     serial_println!("[OK] Spawned Task 18: app_terminal (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
@@ -751,15 +747,13 @@ pub fn spawn_app_dialer(id_security: TaskId) -> TaskId {
         object_id: 1,
     }).ok();
 
-    let id = spawn_user_process(
+    let id = spawn_user_process_with_parent(
         "app_dialer",
         APP_DIALER_ELF,
         caps,
         1,
+        id_security,
     ).expect("Failed to spawn Dialer app");
-    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
-        task.parent_id = id_security;
-    }
     serial_println!("[OK] Spawned Task 19: app_dialer (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
@@ -815,15 +809,13 @@ pub fn spawn_app_vault(id_security: TaskId) -> TaskId {
         object_id: 1,
     }).ok();
 
-    let id = spawn_user_process(
+    let id = spawn_user_process_with_parent(
         "app_vault",
         APP_VAULT_ELF,
         caps,
         1,
+        id_security,
     ).expect("Failed to spawn Vault app");
-    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
-        task.parent_id = id_security;
-    }
     serial_println!("[OK] Spawned Task 20: app_vault (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
@@ -879,15 +871,13 @@ pub fn spawn_app_camera(id_security: TaskId) -> TaskId {
         object_id: 1,
     }).ok();
 
-    let id = spawn_user_process(
+    let id = spawn_user_process_with_parent(
         "app_camera",
         APP_CAMERA_ELF,
         caps,
         1,
+        id_security,
     ).expect("Failed to spawn Camera app");
-    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
-        task.parent_id = id_security;
-    }
     serial_println!("[OK] Spawned Task 21: app_camera (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
@@ -943,15 +933,13 @@ pub fn spawn_app_calculator(id_security: TaskId) -> TaskId {
         object_id: 1,
     }).ok();
 
-    let id = spawn_user_process(
+    let id = spawn_user_process_with_parent(
         "app_calculator",
         APP_CALCULATOR_ELF,
         caps,
         1,
+        id_security,
     ).expect("Failed to spawn Calculator app");
-    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
-        task.parent_id = id_security;
-    }
     serial_println!("[OK] Spawned Task 22: app_calculator (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
@@ -1013,15 +1001,13 @@ pub fn spawn_app_browser(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
-    let id = spawn_user_process(
+    let id = spawn_user_process_with_parent(
         "app_browser",
         APP_BROWSER_ELF,
         caps,
         1,
+        id_security,
     ).expect("Failed to spawn Browser app");
-    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
-        task.parent_id = id_security;
-    }
     serial_println!("[OK] Spawned Task 23: app_browser (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
@@ -1083,15 +1069,13 @@ pub fn spawn_app_messages(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
-    let id = spawn_user_process(
+    let id = spawn_user_process_with_parent(
         "app_messages",
         APP_MESSAGES_ELF,
         caps,
         1,
+        id_security,
     ).expect("Failed to spawn Messages app");
-    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
-        task.parent_id = id_security;
-    }
     serial_println!("[OK] Spawned Task 24: app_messages (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
@@ -1153,15 +1137,13 @@ pub fn spawn_app_calendar(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
-    let id = spawn_user_process(
+    let id = spawn_user_process_with_parent(
         "app_calendar",
         APP_CALENDAR_ELF,
         caps,
         1,
+        id_security,
     ).expect("Failed to spawn Calendar app");
-    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
-        task.parent_id = id_security;
-    }
     serial_println!("[OK] Spawned Task 25: app_calendar (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
@@ -1223,15 +1205,13 @@ pub fn spawn_app_music(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
-    let id = spawn_user_process(
+    let id = spawn_user_process_with_parent(
         "app_music",
         APP_MUSIC_ELF,
         caps,
         1,
+        id_security,
     ).expect("Failed to spawn Music app");
-    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
-        task.parent_id = id_security;
-    }
     serial_println!("[OK] Spawned Task 26: app_music (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
@@ -1293,15 +1273,13 @@ pub fn spawn_app_file_manager(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
-    let id = spawn_user_process(
+    let id = spawn_user_process_with_parent(
         "app_file_manager",
         APP_FILE_MANAGER_ELF,
         caps,
         1,
+        id_security,
     ).expect("Failed to spawn File Manager app");
-    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
-        task.parent_id = id_security;
-    }
     serial_println!("[OK] Spawned Task 27: app_file_manager (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
@@ -1363,15 +1341,13 @@ pub fn spawn_app_gallery(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
-    let id = spawn_user_process(
+    let id = spawn_user_process_with_parent(
         "app_gallery",
         APP_GALLERY_ELF,
         caps,
         1,
+        id_security,
     ).expect("Failed to spawn Gallery app");
-    if let Some(task) = SCHEDULER.lock().get_task_mut(id) {
-        task.parent_id = id_security;
-    }
     serial_println!("[OK] Spawned Task 28: app_gallery (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }

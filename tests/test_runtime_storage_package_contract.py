@@ -132,3 +132,20 @@ def test_platform_documentation_does_not_claim_unverified_qemu_or_hardware_valid
     assert "Runtime execution is actively verified across three primary emulation targets" not in readme
     assert "| Primary emulation contract; runtime validation pending |" in readme
     assert "| Source-level architecture target; runtime validation pending |" in readme
+
+
+
+def test_process_thread_registry_binds_task_identity_to_process():
+    source = (ROOT / "kernel/src/task/process.rs").read_text(encoding="utf-8")
+    assert "pub const MAX_THREADS: usize = 1024;" in source
+    assert "pub struct ThreadRecord" in source
+    assert "pub static THREAD_TABLE" in source
+    assert "THREAD_TABLE.lock().iter().flatten().find(|r| r.task == task)" in source
+    assert "pub fn register_thread(process: ProcessId, task: TaskId)" in source
+    assert "leader_binding" in source
+
+
+def test_native_apps_use_atomic_parent_assignment_at_spawn():
+    source = (ROOT / "kernel/src/task/user.rs").read_text(encoding="utf-8")
+    assert "task.parent_id = id_security" not in source
+    assert source.count("spawn_user_process_with_parent(") >= 13

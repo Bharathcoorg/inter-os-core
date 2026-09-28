@@ -10,6 +10,7 @@ use spin::Mutex;
 use crate::task::TaskId;
 
 pub const MAX_PROCESSES: usize = 128;
+pub const MAX_THREADS: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -33,6 +34,12 @@ impl Default for ResourceLimits {
 pub struct ProcessId(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThreadRecord {
+    pub task: TaskId,
+    pub process: ProcessId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessRecord {
     pub id: ProcessId,
     pub leader_task: TaskId,
@@ -45,17 +52,23 @@ pub struct ProcessRecord {
 
 static NEXT_PROCESS_ID: AtomicU64 = AtomicU64::new(1);
 pub static PROCESS_TABLE: Mutex<[Option<ProcessRecord>; MAX_PROCESSES]> = Mutex::new([None; MAX_PROCESSES]);
+pub static THREAD_TABLE: Mutex<[Option<ThreadRecord>; MAX_THREADS]> = Mutex::new([None; MAX_THREADS]);
 
 pub fn register_leader(task: TaskId, parent_task: TaskId) -> Option<ProcessId> {
     if task == TaskId(0) { return None; }
     let id = ProcessId(NEXT_PROCESS_ID.fetch_add(1, Ordering::Relaxed));
     let record = ProcessRecord { id, leader_task: task, parent_task, state: ProcessState::Running, exit_code: 0, thread_count: 1, limits: ResourceLimits::default() };
     let mut table = PROCESS_TABLE.lock();
-    if let Some(slot) = table.iter_mut().find(|slot| slot.is_none()) { *slot = Some(record); Some(id) } else { None }
+    let Some(slot) = table.iter_mut().find(|slot| slot.is_none()) else { return None; };
+    let mut threads = THREAD_TABLE.lock();
+    let Some(thread_slot) = threads.iter_mut().find(|slot| slot.is_none()) else { return None; };
+    *slot = Some(record);
+    *thread_slot = Some(ThreadRecord { task, process: id });
+    Some(id)
 }
 
 pub fn process_for_task(task: TaskId) -> Option<ProcessId> {
-    PROCESS_TABLE.lock().iter().flatten().find(|r| r.leader_task == task).map(|r| r.id)
+    THREAD_TABLE.lock().iter().flatten().find(|r| r.task == task).map(|r| r.process)
 }
 
 pub fn record_for_process(process: ProcessId) -> Option<ProcessRecord> {
@@ -70,9 +83,20 @@ pub fn can_create_thread(process: ProcessId) -> Result<(), &'static str> {
     Ok(())
 }
 
-pub fn thread_started(process: ProcessId) -> Result<(), &'static str> {
-    account_thread(process)
+pub fn register_thread(process: ProcessId, task: TaskId) -> Result<(), &'static str> {
+    if task == TaskId(0) { return Err("invalid thread task"); }
+    account_thread(process)?;
+    let mut threads = THREAD_TABLE.lock();
+    if let Some(slot) = threads.iter_mut().find(|slot| slot.is_none()) {
+        *slot = Some(ThreadRecord { task, process });
+        Ok(())
+    } else {
+        release_thread(process);
+        Err("thread table full")
+    }
 }
+
+pub fn thread_started(process: ProcessId) -> Result<(), &'static str> { account_thread(process) }
 
 pub fn mark_zombie(task: TaskId, exit_code: i32) {
     let mut table = PROCESS_TABLE.lock();
@@ -83,6 +107,8 @@ pub fn mark_zombie(task: TaskId, exit_code: i32) {
 }
 
 pub fn reap(task: TaskId) {
+    let mut threads = THREAD_TABLE.lock();
+    threads.iter_mut().for_each(|slot| if slot.as_ref().map(|r| r.task == task).unwrap_or(false) { *slot = None; });
     let mut table = PROCESS_TABLE.lock();
     if let Some(slot) = table.iter_mut().find(|slot| slot.as_ref().map(|r| r.leader_task == task).unwrap_or(false)) {
         *slot = None;
@@ -118,6 +144,8 @@ pub fn validate() -> bool {
     let mut count = 0;
     for record in table.iter().flatten() {
         if record.leader_task == TaskId(0) || record.thread_count == 0 || record.thread_count > record.limits.max_threads { return false; }
+        let leader_binding = THREAD_TABLE.lock().iter().flatten().any(|t| t.task == record.leader_task && t.process == record.id);
+        if !leader_binding { return false; }
         if seen[..count].contains(&record.leader_task) { return false; }
         seen[count] = record.leader_task;
         count += 1;
