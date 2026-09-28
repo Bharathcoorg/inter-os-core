@@ -102,26 +102,25 @@ impl EventReactor {
 
     /// Broadcasts an event to all tasks registered with interest in the event mask.
     pub fn broadcast_event(&mut self, event_mask: u32) {
-        let mut to_unblock = [None; 16];
-        let mut count = 0;
+        // Mark every matching waiter before taking the scheduler lock. There is
+        // deliberately no fixed-size wake list: event fan-out must not strand
+        // the 17th+ waiter in a permanently blocked state.
+        let mut should_wake = false;
         for sub in self.subscriptions.iter_mut() {
             let matched = event_mask & sub.interest_mask;
             if matched != 0 {
                 sub.pending_mask |= matched;
-                if sub.is_waiting && count < 16 {
-                    to_unblock[count] = Some(sub.task_id);
-                    count += 1;
+                if sub.is_waiting {
+                    sub.is_waiting = false;
+                    should_wake = true;
                 }
             }
         }
-        if count > 0 {
+        if should_wake {
             if let Some(mut sched) = SCHEDULER.try_lock() {
-                for i in 0..count {
-                    if let Some(task_id) = to_unblock[i] {
-                        if let Some(sub) = self.subscriptions.iter_mut().find(|s| s.task_id == task_id) {
-                            sub.is_waiting = false;
-                        }
-                        sched.unblock_task(task_id);
+                for sub in &self.subscriptions {
+                    if sub.interest_mask & event_mask != 0 {
+                        sched.unblock_task(sub.task_id);
                     }
                 }
             }
