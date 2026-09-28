@@ -2369,6 +2369,7 @@ pub fn sys_audio_control(action: u32, param: u32) -> Result<u32, SyscallResult> 
             audio.set_volume((param.min(100)) as u8);
             Ok(audio.volume_percent as u32)
         }
+        8 => Ok(audio.volume_percent as u32),
         _ => Err(SyscallResult::InvalidArguments),
     }
 }
