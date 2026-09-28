@@ -323,6 +323,16 @@ fn handle_serial_command(cmd: &[u8]) {
         return;
     }
 
+    if verb.eq_ignore_ascii_case("SHUTDOWN") || verb.eq_ignore_ascii_case("POWEROFF") {
+        crate::serial_println!("[SYSTEM] Clean shutdown requested via COM1 serial.");
+        crate::hal::traits::PowerController::shutdown(&crate::hal::platform::POWER);
+    }
+
+    if verb.eq_ignore_ascii_case("REBOOT") || verb.eq_ignore_ascii_case("RESET") {
+        crate::serial_println!("[SYSTEM] System reboot requested via COM1 serial.");
+        crate::hal::traits::PowerController::reset(&crate::hal::platform::POWER);
+    }
+
     if verb.eq_ignore_ascii_case("TAP") || verb.eq_ignore_ascii_case("TOUCH") {
         if let (Some(x_str), Some(y_str)) = (parts.next(), parts.next()) {
             if let (Ok(x), Ok(y)) = (x_str.parse::<u32>(), y_str.parse::<u32>()) {

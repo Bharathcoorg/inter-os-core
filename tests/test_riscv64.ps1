@@ -38,5 +38,5 @@ if ($missing.Count -gt 0) {
     exit 1
 }
 
-Write-Host "[OK] All RISC-V 64 hardware drivers, security, and runtime milestones verified!" -ForegroundColor Green
+Write-Host "[OK] RISC-V64 QEMU virt platform execution verified for tested OpenSBI, Sv39 MMU, trap, and U-mode syscall invariants." -ForegroundColor Green
 exit 0

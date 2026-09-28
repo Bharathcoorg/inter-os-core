@@ -58,6 +58,7 @@ def main():
     print(f"QEMU Executable: {qemu_exe}")
     print(f"Disk Image:      {kernel_img}")
     print("Launching guest virtual machine...")
+    sys._run_start_time = time.time()
 
     proc = subprocess.Popen(args)
     time.sleep(0.5)
@@ -119,12 +120,18 @@ def main():
                 print(f"  [FAIL] Missing required milestone: {name}")
                 all_passed = False
 
+        run_start_time = getattr(sys, "_run_start_time", 0)
         if os.path.exists(ppm_path):
-            sz = os.path.getsize(ppm_path)
-            print(f"  [OK] Framebuffer PPM generated: {ppm_path} ({sz} bytes)")
-            if sz < 1000000:
-                print(f"  [FAIL] Framebuffer PPM is abnormally small ({sz} bytes)")
+            mtime = os.path.getmtime(ppm_path)
+            if run_start_time > 0 and mtime < run_start_time - 1.0:
+                print(f"  [FAIL] Stale framebuffer artifact detected: {ppm_path} (mtime={mtime} < run_start={run_start_time})")
                 all_passed = False
+            else:
+                sz = os.path.getsize(ppm_path)
+                print(f"  [OK] Framebuffer PPM verified for current run: {ppm_path} ({sz} bytes, mtime={mtime})")
+                if sz < 1000000:
+                    print(f"  [FAIL] Framebuffer PPM is abnormally small ({sz} bytes)")
+                    all_passed = False
         else:
             print(f"  [FAIL] Framebuffer PPM not found at {ppm_path}")
             all_passed = False

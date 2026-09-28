@@ -41,5 +41,5 @@ if ($missing.Count -gt 0) {
     exit 1
 }
 
-Write-Host "[OK] All AArch64 hardware drivers, security, and runtime milestones verified!" -ForegroundColor Green
+Write-Host "[OK] AArch64 QEMU virt platform execution verified for tested microkernel, MMU, and EL0 userspace invariants." -ForegroundColor Green
 exit 0
