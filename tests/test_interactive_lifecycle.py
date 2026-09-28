@@ -105,16 +105,19 @@ def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_co
     assert presented, f"{app_name} failed to present frame within timeout"
     print(f"[LIFECYCLE TEST] [OK] {app_name} launched and presented application frame.")
 
-    time.sleep(1.0)
-    ppm_app = os.path.abspath(rf"target\{dump_prefix}.ppm").replace("\\", "/")
-    if os.path.exists(ppm_app):
-        try: os.remove(ppm_app)
-        except: pass
-    _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_app}")
-    time.sleep(0.5)
-    sz = os.path.getsize(ppm_app) if os.path.exists(ppm_app) else 0
-    print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_app} ({sz} bytes)")
-    time.sleep(0.5)
+    if monitor_sock:
+        time.sleep(1.0)
+        ppm_app = os.path.abspath(rf"target\{dump_prefix}.ppm").replace("\\", "/")
+        if os.path.exists(ppm_app):
+            try: os.remove(ppm_app)
+            except: pass
+        _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_app}")
+        time.sleep(0.5)
+        sz = os.path.getsize(ppm_app) if os.path.exists(ppm_app) else 0
+        print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_app} ({sz} bytes)")
+        time.sleep(0.5)
+    else:
+        time.sleep(0.1)
 
     # Perform in-app functional interactions if specified
     if in_app_interactions:
@@ -129,16 +132,19 @@ def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_co
                 )
                 assert action_ok, f"{app_name} failed to process interaction '{action_name}'"
                 print(f"[LIFECYCLE TEST] [OK] Interaction '{action_name}' verified.")
-            time.sleep(0.8)
-            if dump_suffix:
-                ppm_inter = os.path.abspath(rf"target\{dump_prefix}_{dump_suffix}.ppm").replace("\\", "/")
-                if os.path.exists(ppm_inter):
-                    try: os.remove(ppm_inter)
-                    except: pass
-                _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_inter}")
-                time.sleep(0.4)
-                sz_inter = os.path.getsize(ppm_inter) if os.path.exists(ppm_inter) else 0
-                print(f"[LIFECYCLE TEST] In-app interaction screendump recorded: {ppm_inter} ({sz_inter} bytes)")
+            if monitor_sock:
+                time.sleep(0.8)
+                if dump_suffix:
+                    ppm_inter = os.path.abspath(rf"target\{dump_prefix}_{dump_suffix}.ppm").replace("\\", "/")
+                    if os.path.exists(ppm_inter):
+                        try: os.remove(ppm_inter)
+                        except: pass
+                    _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_inter}")
+                    time.sleep(0.4)
+                    sz_inter = os.path.getsize(ppm_inter) if os.path.exists(ppm_inter) else 0
+                    print(f"[LIFECYCLE TEST] In-app interaction screendump recorded: {ppm_inter} ({sz_inter} bytes)")
+            else:
+                time.sleep(0.1)
 
     # Dispatch touch tap on Back button, Home Gesture Bar, or Swipe Up
     if exit_gesture == "home_bar":
@@ -160,16 +166,19 @@ def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_co
     assert reaped, f"{app_name} exit / Launcher waitpid reaping was not observed"
     print(f"[LIFECYCLE TEST] [OK] {exit_gesture.capitalize()} navigation successfully triggered child exit, surface teardown, and parent waitpid reaping.")
 
-    time.sleep(1.2)
-    ppm_reaped = os.path.abspath(rf"target\test_launcher_after_{dump_prefix}.ppm").replace("\\", "/")
-    if os.path.exists(ppm_reaped):
-        try: os.remove(ppm_reaped)
-        except: pass
-    _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_reaped}")
-    time.sleep(0.5)
-    sz_reaped = os.path.getsize(ppm_reaped) if os.path.exists(ppm_reaped) else 0
-    print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_reaped} ({sz_reaped} bytes)")
-    time.sleep(0.5)
+    if monitor_sock:
+        time.sleep(1.2)
+        ppm_reaped = os.path.abspath(rf"target\test_launcher_after_{dump_prefix}.ppm").replace("\\", "/")
+        if os.path.exists(ppm_reaped):
+            try: os.remove(ppm_reaped)
+            except: pass
+        _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_reaped}")
+        time.sleep(0.5)
+        sz_reaped = os.path.getsize(ppm_reaped) if os.path.exists(ppm_reaped) else 0
+        print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_reaped} ({sz_reaped} bytes)")
+        time.sleep(0.5)
+    else:
+        time.sleep(0.1)
 
 def main():
     qemu_exe = find_qemu("qemu-system-x86_64.exe")
