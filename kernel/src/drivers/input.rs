@@ -101,10 +101,10 @@ pub static INPUT_PIPELINE: Mutex<InputPipeline> = Mutex::new(InputPipeline::new(
 /// Moves recognized hardware gestures into the stable userspace event queue.
 /// Routes normalized input events to the currently focused surface owner.
 pub fn dispatch_to_focused_window(event: InputEvent) {
-    let owner = {
-        let kms = crate::drivers::display_kms::DRM_KMS.lock();
-        kms.focused_surface().and_then(|id| kms.surfaces.iter().find(|s| s.id == id).map(|s| s.owner_task))
-    };
+    let owner = crate::gui::WINDOW_MANAGER
+        .lock()
+        .hit_test(event.x, event.y)
+        .map(|(_, owner)| owner);
     if let Some(owner) = owner {
         INPUT_PIPELINE.lock().route_to_task(TaskId(owner), event);
         let mut msg = [0u8; 24];
