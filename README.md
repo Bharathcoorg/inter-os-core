@@ -213,7 +213,12 @@ interos devices
 interos inspect dist/my_app.rapp
 
 # Run Application or Launch Microkernel in QEMU
-interos run --target aarch64
+interos build demo
+interos run qemu
+interos trust dist/my_app.rapp
+interos install dist/my_app.rapp
+interos run my_app
+interos uninstall org.interos.my_app
 ```
 
 ---
