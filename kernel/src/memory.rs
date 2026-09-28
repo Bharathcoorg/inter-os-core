@@ -426,6 +426,54 @@ impl TaskPageTable {
         let phys_addr = leaf_frame.start_address() + offset;
         Some((phys_addr, p1_entry.flags()))
     }
+
+    /// Validates a complete userspace byte range against this address space.
+    /// Every touched leaf must be present, userspace-accessible, have the
+    /// requested write permission, and resolve to a frame owned by this task.
+    pub fn validate_user_range(
+        &self,
+        addr: u64,
+        len: usize,
+        write: bool,
+    ) -> Result<(), &'static str> {
+        if addr < 0x1000 {
+            return Err("null or guard page");
+        }
+        if len == 0 {
+            return Ok(());
+        }
+        let end = addr.checked_add(len as u64).ok_or("address overflow")?;
+        if end > 0x0000_8000_0000_0000 {
+            return Err("kernel address range");
+        }
+
+        let first_page = addr & !0xFFF;
+        let last_page = (end - 1) & !0xFFF;
+        let mut page = first_page;
+        loop {
+            let (physical, flags) = self
+                .translate(VirtAddr::new(page))
+                .ok_or("user page is not mapped")?;
+
+            if !flags.contains(PageTableFlags::USER_ACCESSIBLE) {
+                return Err("user page is not accessible");
+            }
+            if write && !flags.contains(PageTableFlags::WRITABLE) {
+                return Err("user page is not writable");
+            }
+
+            let frame = PhysFrame::containing_address(physical);
+            if !self.allocated_frames.iter().any(|owned| *owned == frame) {
+                return Err("user frame is not owned by task");
+            }
+
+            if page == last_page {
+                break;
+            }
+            page = page.checked_add(4096).ok_or("page iteration overflow")?;
+        }
+        Ok(())
+    }
 }
 
 impl Drop for TaskPageTable {
