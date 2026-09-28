@@ -723,6 +723,8 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
         serial_lines.clear()
         qemu_subproc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         active_profile_key = profile_key
+        # QEMU owns the VNC listener; bridge startup must happen after the VM exists.
+        start_websockify_if_needed()
         serial_lines.append(f"[STUDIO] Launched QEMU {arch} microkernel instance (PID {qemu_subproc.pid}).")
         return True, f"QEMU {arch} started (PID {qemu_subproc.pid})"
     except Exception as e:
@@ -841,7 +843,7 @@ def query_qemu_monitor(host='127.0.0.1', port=44445, timeout=0.35):
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s_vnc:
                     s_vnc.settimeout(0.15)
-                    s_vnc.connect(('127.0.0.1', 5900))
+                    s_vnc.connect(('127.0.0.1', VNC_PORT))
                     latest_telemetry["qemu_alive"] = True
                     latest_telemetry["status"] = "running"
                     latest_telemetry["mode"] = "qemu_vnc_only"
