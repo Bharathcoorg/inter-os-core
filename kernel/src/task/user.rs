@@ -473,8 +473,21 @@ pub fn spawn_user_process_with_parent(
     if spawned == TaskId(0) {
         return Err("process registration failed");
     }
-    let process = crate::task::process::process_for_task(spawned).ok_or("process identity missing after spawn")?;
-    crate::task::process::set_address_space_usage(process, address_space_bytes)?;
+    let process = match crate::task::process::process_for_task(spawned) {
+        Some(process) => process,
+        None => {
+            let mut scheduler = SCHEDULER.lock();
+            let _ = scheduler.terminate_task(spawned, -1);
+            let _ = scheduler.reap_child(parent_id, spawned);
+            return Err("process identity missing after spawn");
+        }
+    };
+    if let Err(error) = crate::task::process::set_address_space_usage(process, address_space_bytes) {
+        let mut scheduler = SCHEDULER.lock();
+        let _ = scheduler.terminate_task(spawned, -1);
+        let _ = scheduler.reap_child(parent_id, spawned);
+        return Err(error);
+    }
     Ok(spawned)
 }
 
