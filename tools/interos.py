@@ -385,14 +385,7 @@ def cmd_build(args):
         if res.returncode != 0:
             log_error(f"Application build failed for {target_lower}")
             return res.returncode
-        # Packaging is reproducible from a clean app tree: build the canonical
-    # x86_64 artifact when no ELF has been produced yet.
-    bin_dir = app_dir / "bin"
-    elf_candidates = list(bin_dir.glob("*.elf")) if bin_dir.exists() else []
-    if not elf_candidates:
-        build_ret = cmd_build(argparse.Namespace(name=app_name, target=None, arch="x86_64-unknown-none"))
-        if build_ret != 0:
-            return build_ret
+        bin_dir = app_dir / "bin"
         bin_dir.mkdir(exist_ok=True)
         out_elf = bin_dir / f"{target_lower}.elf"
         elf_src = WORKSPACE_ROOT / "target" / arch_target / "debug" / target_lower
@@ -564,8 +557,13 @@ def cmd_pack(args):
     bin_dir = app_dir / "bin"
     elf_candidates = list(bin_dir.glob("*.elf")) if bin_dir.exists() else []
     if not elf_candidates:
-        log_error("No ELF payload found in app/bin after the automatic build")
-        return 1
+        build_ret = cmd_build(argparse.Namespace(name=app_name, target=None, arch="x86_64-unknown-none"))
+        if build_ret != 0:
+            return build_ret
+        elf_candidates = list(bin_dir.glob("*.elf")) if bin_dir.exists() else []
+        if not elf_candidates:
+            log_error("No ELF payload found in app/bin after the automatic build")
+            return 1
     payload = elf_candidates[0].read_bytes()
     try:
         from cryptography.hazmat.primitives.asymmetric import ed25519
