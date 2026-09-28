@@ -169,3 +169,10 @@ def test_tcp_partial_acknowledgements_trim_retransmission_buffer():
     assert "conn.tx.copy_within(acknowledged..conn.tx_len, 0)" in source
     assert "conn.tx_seq = ack" in source
     assert "conn.tx_len -= acknowledged" in source
+
+
+def test_service_public_snapshot_does_not_expose_scheduler_task_ids():
+    source = (ROOT / "kernel/src/services.rs").read_text(encoding="utf-8")
+    snapshot = source[source.index("pub fn snapshot"):source.index("/// Returns the most recent heartbeat")]
+    assert "record.task.0" not in snapshot
+    assert '"{}|{}|{}|{}|{}|{}"' in snapshot

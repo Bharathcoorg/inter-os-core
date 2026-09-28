@@ -374,17 +374,12 @@ pub fn snapshot(out: &mut [u8]) -> usize {
             Ok(())
         }
     }
-    let records = SERVICE_RECORDS.lock();
     let mut w = W { b: out, n: 0 };
-    for record in records.iter().flatten() {
-        let state = match record.state {
-            ServiceState::Declared => "declared",
-            ServiceState::Starting => "starting",
-            ServiceState::Running => "running",
-            ServiceState::Stopped => "stopped",
-            ServiceState::Failed => "failed",
-        };
-        let _ = write!(w, "{}|{}|{}\n", record.id as u8, record.task.0, state);
+    for id in 0u8..=10u8 {
+        if let Some(info) = lookup(id) {
+            let state = match info.state { ServiceState::Declared => "declared", ServiceState::Starting => "starting", ServiceState::Running => "running", ServiceState::Stopped => "stopped", ServiceState::Failed => "failed" };
+            let _ = writeln!(w, "{}|{}|{}|{}|{}|{}", info.id as u8, info.abi_version, state, info.restart as u8, info.critical as u8, info.generation);
+        }
     }
     w.n
 }
