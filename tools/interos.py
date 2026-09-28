@@ -94,7 +94,7 @@ SUPPORTED_DEVICES = {
         "cpu": "qemu64",
         "boot_type": "BIOS/MBR Bootloader",
         "image": "target/inter-os-bios.img",
-        "status": "Primary emulation contract; runtime validation pending",
+        "status": "Canonical QEMU Phone contract; build/runtime validation is explicit and evidence-based",
     },
     "aarch64": {
         "name": "InterOS AArch64 Virt Mobile",
