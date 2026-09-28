@@ -49,3 +49,18 @@ Device Studio exposes the real QEMU VNC framebuffer through websockify. Browser 
 - "hardware-ready" is reserved for a physical board with verified drivers.
 
 The profile deliberately separates those claims.
+
+## Phase 2 package lifecycle
+
+The QEMU developer transport now provides a real guest package lifecycle:
+
+1. `interos trust <package.rapp>` explicitly provisions that package's publisher public key into the guest trust store.
+2. `interos install <package.rapp>` verifies the RAPP on the host, transfers the exact signed bytes over QEMU COM1, verifies the RAPP again inside the guest, persists the package blob and activates its registry entry.
+3. `interos run <package-id>` uses the guest package launcher to create a Ring-3 process from the persistent verified blob.
+4. `interos uninstall <package-id>` revokes the active registry entry and removes the persistent package blob.
+
+The UART transport is deliberately bounded to the kernel's development command protocol. It is a QEMU development bridge, not a replacement for a physical-device package transport.
+
+The current persistent package store accepts RAPP blobs up to 60 KiB per package and is bounded by the kernel's persistent storage record capacity. Packages that exceed the configured store limits are rejected rather than truncated.
+
+No host-side package catalog entry is treated as proof of guest installation. Device Studio reports guest transfer failures as installation failures.
