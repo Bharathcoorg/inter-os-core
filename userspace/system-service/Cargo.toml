@@ -40,3 +40,7 @@ path = "src/bin/audiod.rs"
 [[bin]]
 name = "camerad"
 path = "src/bin/camerad.rs"
+
+[[bin]]
+name = "sensord"
+path = "src/bin/sensord.rs"
