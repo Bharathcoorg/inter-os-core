@@ -138,6 +138,37 @@ impl GravityGlassCompositor {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompositorFrame {
+    pub buffer: crate::gui::buffer::BufferId,
+    pub sequence: u64,
+}
+
+impl GravityGlassCompositor {
+    pub fn begin_frame(&mut self, owner: u64, width: u32, height: u32) -> Result<CompositorFrame, &'static str> {
+        let mut buffers = crate::gui::BUFFER_MANAGER.lock();
+        let id = buffers.allocate(owner, width, height).ok_or("display buffer allocation failed")?;
+        buffers.begin_frame(id, owner)?;
+        Ok(CompositorFrame { buffer: id, sequence: 0 })
+    }
+
+    pub fn publish_frame(&mut self, owner: u64, frame: CompositorFrame) -> Result<u64, &'static str> {
+        let mut buffers = crate::gui::BUFFER_MANAGER.lock();
+        if frame.buffer.0 == 0 { return Err("invalid frame buffer"); }
+        let fence = buffers.publish(frame.buffer, owner)?;
+        buffers.signal(frame.buffer, owner)?;
+        Ok(fence.sequence)
+    }
+
+    pub fn display_frame(&mut self, frame: CompositorFrame) -> Result<(), &'static str> {
+        crate::gui::BUFFER_MANAGER.lock().display(frame.buffer)
+    }
+
+    pub fn release_frame(&mut self, owner: u64, frame: CompositorFrame) -> Result<(), &'static str> {
+        crate::gui::BUFFER_MANAGER.lock().release(frame.buffer, owner)
+    }
+}
+
 /// Global thread-safe instance of the Gravity Glass Compositor.
 pub static GRAVITY_COMPOSITOR: Mutex<GravityGlassCompositor> =
     Mutex::new(GravityGlassCompositor::new());
