@@ -122,6 +122,11 @@ impl WindowManager {
 
     pub fn focused(&self) -> Option<WindowId> { self.focused }
 
+    pub fn focused_owner(&self) -> Option<u64> {
+        let id = self.focused?;
+        self.windows.iter().find(|w| w.id == id && w.visible).map(|w| w.owner)
+    }
+
     pub fn top_visible(&self) -> Option<WindowId> {
         self.windows.iter().filter(|w| w.visible).max_by_key(|w| w.z).map(|w| w.id)
     }
