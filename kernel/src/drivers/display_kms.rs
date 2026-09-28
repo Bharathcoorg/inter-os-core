@@ -23,7 +23,6 @@ pub enum DrmPixelFormat {
 pub enum DisplayOrientation { Portrait, LandscapeRight, PortraitInverted, LandscapeLeft }
 
 /// A hardware plane / application graphics surface managed by KMS.
-#[derive(Debug, Clone)]
 pub const MAX_CLIENT_SURFACES: usize = 32;
 pub const MAX_SURFACE_PIXELS: usize = 1280 * 720;
 
@@ -212,6 +211,7 @@ impl DrmKmsController {
                 opacity: src.opacity,
                 visible: src.visible,
                 dirty: src.dirty,
+                input_enabled: src.input_enabled,
             };
         }
         count
