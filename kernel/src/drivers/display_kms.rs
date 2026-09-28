@@ -36,6 +36,8 @@ pub struct DrmSurface {
     pub z_order: u32,
     pub opacity: u8, // 0 = fully transparent, 255 = fully opaque
     pub visible: bool,
+    /// Whether this window participates in pointer/touch focus hit-testing.
+    pub input_enabled: bool,
     pub pixels: Vec<u32>, // 32-bit ARGB pixels
     pub dirty: bool,
     /// Owning userspace task. Surface mutation is restricted to the creator.
@@ -54,6 +56,7 @@ pub struct SurfaceSnapshot {
     pub opacity: u8,
     pub visible: bool,
     pub dirty: bool,
+    pub input_enabled: bool,
 }
 
 impl DrmSurface {
@@ -68,6 +71,7 @@ impl DrmSurface {
             z_order,
             opacity: 255,
             visible: true,
+            input_enabled: true,
             pixels: vec![0xFF000000; size], // default opaque black
             dirty: true,
             owner_task,
@@ -239,7 +243,7 @@ impl DrmKmsController {
     pub fn focus_at(&mut self, x: u32, y: u32) -> Option<(u32,u64)> {
         let mut best: Option<(u32,u32,u64)> = None;
         for s in &self.surfaces {
-            if !s.visible || x < s.x.max(0) as u32 || y < s.y.max(0) as u32 {
+            if !s.visible || !s.input_enabled || x < s.x.max(0) as u32 || y < s.y.max(0) as u32 {
                 continue;
             }
             if x >= (s.x.max(0) as u32).saturating_add(s.width) ||
@@ -256,6 +260,21 @@ impl DrmKmsController {
     }
 
     pub fn focused_surface(&self) -> Option<u32> { self.focused_surface }
+
+    /// Enables or disables pointer/touch hit-testing for an owned window.
+    pub fn set_input_enabled_owned(&mut self, id: u32, owner: u64, enabled: bool) -> bool {
+        if let Some(surface) = self.surfaces.iter_mut().find(|s| s.id == id && s.owner_task == owner) {
+            surface.input_enabled = enabled;
+            if !enabled && self.focused_surface == Some(id) {
+                self.focused_surface = self.surfaces.iter()
+                    .filter(|s| s.visible && s.input_enabled)
+                    .max_by_key(|s| s.z_order)
+                    .map(|s| s.id);
+            }
+            return true;
+        }
+        false
+    }
 
     /// Ensures that front and back scanout buffers are allocated to match scanout dimensions.
     pub fn ensure_buffers(&mut self) {
