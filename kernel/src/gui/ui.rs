@@ -159,3 +159,19 @@ impl UiTree {
     pub fn len(&self) -> usize { self.nodes.iter().filter(|n| n.is_some()).count() }
     pub fn is_empty(&self) -> bool { self.len() == 0 }
 }
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    #[test]
+    fn horizontal_layout_places_children_without_overlap() {
+        let mut layout = UiLayout::new(Axis::Horizontal);
+        layout.spacing = 4;
+        let parent = UiBounds { x: 0, y: 0, width: 100, height: 20 };
+        let a = layout.layout_child_bounds(parent, 2, 40, 0).unwrap();
+        let b = layout.layout_child_bounds(parent, 2, 40, 1).unwrap();
+        assert_eq!(a.width, 40);
+        assert_eq!(b.x, 44);
+        assert!(a.x + a.width <= b.x);
+    }
+}
