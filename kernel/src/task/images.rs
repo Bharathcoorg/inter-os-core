@@ -21,6 +21,7 @@ pub static POWERD_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR")
 pub static MODEMD_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/modemd"));
 pub static AUDIOD_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/audiod"));
 pub static CAMERAD_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/camerad"));
+pub static SENSORD_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/sensord"));
 pub static COMPOSITOR_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/compositor"));
 pub static LAUNCHER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/launcher"));
 pub static APP_DIALER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/dialer"));
@@ -46,6 +47,7 @@ pub fn service_image(service_id: u8) -> Option<UserImage> {
         8 => UserImage { name: "camerad", elf: CAMERAD_ELF },
         9 => UserImage { name: "compositor", elf: COMPOSITOR_ELF },
         10 => UserImage { name: "launcher", elf: LAUNCHER_ELF },
+        11 => UserImage { name: "sensord", elf: SENSORD_ELF },
         _ => return None,
     })
 }
