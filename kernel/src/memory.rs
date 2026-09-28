@@ -156,7 +156,7 @@ impl TaskPageTable {
             let kernel_pml4_ptr = (phys_offset + kernel_pml4_frame.start_address().as_u64()).as_ptr::<PageTable>();
             let kernel_pml4 = &*kernel_pml4_ptr;
 
-            for i in 1..512 {
+            for i in 256..512 {
                 new_pml4[i] = kernel_pml4[i].clone();
             }
         }
@@ -266,6 +266,9 @@ impl TaskPageTable {
         }
         if self.allocated_frames.iter().any(|owned| *owned == frame) {
             return Err("physical frame already owned by address space");
+        }
+        if flags.contains(PageTableFlags::WRITABLE) && !flags.contains(PageTableFlags::NO_EXECUTE) {
+            return Err("W^X violation: writable user mapping must be non-executable");
         }
 
         let table_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
