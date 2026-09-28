@@ -34,6 +34,8 @@ See [Platform Reality Contract](docs/PLATFORM_REALITY_CONTRACT.md) and run `pyth
 
 The syscall userspace-memory boundary is defined in [Syscall Pointer Safety](docs/SYSCALL_POINTER_SAFETY.md), including page mapping, permissions, ownership, alignment, overflow, and raw-pointer elimination rules.
 
+The end-to-end runtime lifecycle is defined in [Phase 5 Runtime Stability](docs/PHASE5_RUNTIME_STABILITY.md), covering task teardown, event/input fan-out, process accounting, surface bounds, and launcher recovery.
+
 ## 📊 Feature Status & Reality Matrix
 
 In accordance with our engineering integrity policy, every subsystem is classified into an explicit verification tier:
