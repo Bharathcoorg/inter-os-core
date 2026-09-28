@@ -403,3 +403,14 @@ def test_register_thread_rolls_back_reservation_when_binding_fails():
     assert "if let Err(error) = bind_reserved_thread(process, task)" in block
     assert "cancel_thread_reservation(process)" in block
     assert "return Err(error)" in block
+
+def test_ipc_task_cleanup_releases_share_and_shm_ownership():
+    share = (ROOT / "kernel/src/ipc/share.rs").read_text(encoding="utf-8")
+    shm = (ROOT / "kernel/src/ipc/shm_pipe.rs").read_text(encoding="utf-8")
+    ipc = (ROOT / "kernel/src/ipc/mod.rs").read_text(encoding="utf-8")
+    assert "pub fn cleanup_task(&mut self, task_id: TaskId) -> usize" in share
+    assert "target.target_task != task_id" in share
+    assert "pub fn cleanup_task(&mut self, task_id: TaskId) -> usize" in shm
+    assert "p.producer == task_id || p.consumer == task_id" in shm
+    assert "SHARE_SHEET_MANAGER.lock().cleanup_task(task_id)" in ipc
+    assert "SHM_PIPE_MANAGER.lock().cleanup_task(task_id)" in ipc

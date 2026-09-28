@@ -267,6 +267,8 @@ pub static IPC_ROUTER: Mutex<IpcRouter> = Mutex::new(IpcRouter::new());
 pub fn cleanup_task(task_id: TaskId) {
     IPC_ROUTER.lock().cleanup_task(task_id);
     SECURE_IPC.lock().cleanup_task(task_id);
+    SHARE_SHEET_MANAGER.lock().cleanup_task(task_id);
+    SHM_PIPE_MANAGER.lock().cleanup_task(task_id);
 }
 
 /// Initializes the IPC subsystem, secure channels, share bus, and zero-copy SHM pipes.

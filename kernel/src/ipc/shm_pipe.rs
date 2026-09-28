@@ -299,6 +299,21 @@ impl ShmPipeManager {
         Ok(res)
     }
 
+    /// Removes shared-memory channels owned by or connected to a dead task.
+    ///
+    /// This prevents stale TaskIds from retaining producer/consumer authority
+    /// after task teardown and makes fixed pipe slots reusable.
+    pub fn cleanup_task(&mut self, task_id: TaskId) -> usize {
+        let mut removed = 0;
+        for pipe in self.pipes.iter_mut() {
+            if pipe.as_ref().map(|p| p.producer == task_id || p.consumer == task_id).unwrap_or(false) {
+                *pipe = None;
+                removed += 1;
+            }
+        }
+        removed
+    }
+
     /// Returns performance statistics for a given pipe.
     pub fn get_stats(&self, pipe_id: u32) -> Option<(usize, u64, usize, usize)> {
         let idx = pipe_id as usize;

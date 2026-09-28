@@ -74,6 +74,19 @@ impl ShareSheetManager {
         self.targets.iter().find(|t| t.app_id == app_id)
     }
 
+    /// Removes registrations and in-flight share state tied to a dead task.
+    ///
+    /// Historical transactions remain available for diagnostics, but active
+    /// delivery state and target registrations cannot survive task teardown.
+    pub fn cleanup_task(&mut self, task_id: TaskId) -> usize {
+        let before = self.targets.len();
+        self.targets.retain(|target| target.target_task != task_id);
+        if self.active_tx.as_ref().map(|tx| tx.sender_task == task_id || tx.target_task == task_id).unwrap_or(false) {
+            self.active_tx = None;
+        }
+        before - self.targets.len()
+    }
+
     /// Finds a registered target by task ID.
     pub fn find_target_by_task(&self, task_id: TaskId) -> Option<&ShareTarget> {
         self.targets.iter().find(|t| t.target_task == task_id)
