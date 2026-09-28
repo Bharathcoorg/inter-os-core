@@ -416,32 +416,77 @@ impl Vfs {
     }
 
     pub fn link(&mut self, old_path: &str, new_path: &str) -> Result<(), FsError> {
-        let old = normalize_path(old_path); let new = normalize_path(new_path);
-        if old == "/" || new == "/" || old == new || self.path_to_inode.contains_key(&new) || self.hard_links.contains_key(&new) { return Err(FsError::InvalidPath); }
+        let old = normalize_path(old_path);
+        let new = normalize_path(new_path);
+        if old == "/" || new == "/" || old == new
+            || self.path_to_inode.contains_key(&new)
+            || self.hard_links.contains_key(&new)
+        {
+            return Err(FsError::InvalidPath);
+        }
+
         let inode_id = self.lookup(&old).ok_or(FsError::FileNotFound)?;
         let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
         if inode.file_type != FileType::RegularFile { return Err(FsError::InvalidPath); }
+
         let parent_id = self.path_to_inode.get(parent_path(&new)).copied().ok_or(FsError::FileNotFound)?;
-        if self.inodes.get(&parent_id).map(|i| i.file_type != FileType::Directory).unwrap_or(true) { return Err(FsError::NotADirectory); }
-        self.hard_links.insert(new, inode_id);
-        if let Some(inode) = self.inodes.get_mut(&inode_id) { inode.nlink = inode.nlink.saturating_add(1); inode.ctime = crate::interrupts::get_system_ticks(); }
-        self.persist_metadata_snapshot().map_err(|_| FsError::IntegrityViolation)
+        if self.inodes.get(&parent_id).map(|i| i.file_type != FileType::Directory).unwrap_or(true) {
+            return Err(FsError::NotADirectory);
+        }
+
+        let previous_ctime = inode.ctime;
+        self.hard_links.insert(new.clone(), inode_id);
+        if let Some(inode) = self.inodes.get_mut(&inode_id) {
+            inode.nlink = inode.nlink.saturating_add(1);
+            inode.ctime = crate::interrupts::get_system_ticks();
+        }
+
+        if self.persist_metadata_snapshot().is_err() {
+            self.hard_links.remove(&new);
+            if let Some(inode) = self.inodes.get_mut(&inode_id) {
+                inode.nlink = inode.nlink.saturating_sub(1);
+                inode.ctime = previous_ctime;
+            }
+            return Err(FsError::IntegrityViolation);
+        }
+        Ok(())
     }
 
     pub fn unlink(&mut self, path: &str) -> Result<(), FsError> {
         let norm = normalize_path(path);
         if let Some(inode_id) = self.hard_links.remove(&norm) {
-            if let Some(inode) = self.inodes.get_mut(&inode_id) { inode.nlink = inode.nlink.saturating_sub(1); inode.ctime = crate::interrupts::get_system_ticks(); }
-            self.persist_metadata_snapshot().map_err(|_| FsError::IntegrityViolation)?;
+            let previous = self.inodes.get(&inode_id).cloned().ok_or(FsError::FileNotFound)?;
+            if let Some(inode) = self.inodes.get_mut(&inode_id) {
+                inode.nlink = inode.nlink.saturating_sub(1);
+                inode.ctime = crate::interrupts::get_system_ticks();
+            }
+            if self.persist_metadata_snapshot().is_err() {
+                self.hard_links.insert(norm, inode_id);
+                self.inodes.insert(inode_id, previous);
+                return Err(FsError::IntegrityViolation);
+            }
             return Ok(());
         }
+
         let inode_id = self.path_to_inode.get(&norm).copied().ok_or(FsError::FileNotFound)?;
-        let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
-        if inode.file_type == FileType::Directory { return Err(FsError::InvalidPath); }
+        let previous = self.inodes.get(&inode_id).cloned().ok_or(FsError::FileNotFound)?;
+        if previous.file_type == FileType::Directory { return Err(FsError::InvalidPath); }
+
         self.path_to_inode.remove(&norm);
-        if let Some(inode) = self.inodes.get_mut(&inode_id) { inode.nlink = inode.nlink.saturating_sub(1); inode.ctime = crate::interrupts::get_system_ticks(); }
-        if self.inodes.get(&inode_id).map(|i| i.nlink == 0).unwrap_or(false) { self.inodes.remove(&inode_id); }
-        self.persist_metadata_snapshot().map_err(|_| FsError::IntegrityViolation)
+        if let Some(inode) = self.inodes.get_mut(&inode_id) {
+            inode.nlink = inode.nlink.saturating_sub(1);
+            inode.ctime = crate::interrupts::get_system_ticks();
+        }
+        if self.inodes.get(&inode_id).map(|i| i.nlink == 0).unwrap_or(false) {
+            self.inodes.remove(&inode_id);
+        }
+
+        if self.persist_metadata_snapshot().is_err() {
+            self.path_to_inode.insert(norm, inode_id);
+            self.inodes.insert(inode_id, previous);
+            return Err(FsError::IntegrityViolation);
+        }
+        Ok(())
     }
 
     pub fn chmod(&mut self, task_caps: &CapabilityTable, cap_slot: usize, path: &str, mode: u16) -> Result<(), FsError> {
@@ -759,8 +804,10 @@ impl Vfs {
             pos += plen;
             if kind == 3 {
                 if self.inodes.contains_key(&InodeId(id)) {
+                    // The primary inode record already persists the complete nlink
+                    // count. Alias records restore path identity only; incrementing
+                    // again here would double-count links after every reboot.
                     self.hard_links.insert(path.to_string(), InodeId(id));
-                    if let Some(inode) = self.inodes.get_mut(&InodeId(id)) { inode.nlink = inode.nlink.saturating_add(1); }
                 }
                 continue;
             }
