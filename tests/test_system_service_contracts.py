@@ -20,6 +20,8 @@ def main():
     must(services,"set_limits(process, resource_limits(id))","resource-limit enforcement")
     must(services,"service has running dependents","dependency-aware shutdown")
     must(services,"SERVICE_FAILURES","service failure diagnostics")
+    must(services,"let mut states = [None; 12]","full service supervision state table")
+    must(services,"11 => ServiceId::Sensor","sensor service lookup")
     must(services,"heartbeat_for_task","task-bound heartbeat")
     for token in ("SERVICE_POWER_CONTROL_OBJECT","SERVICE_TELEPHONY_CONTROL_OBJECT","SERVICE_AUDIO_CONTROL_OBJECT","SERVICE_CAMERA_CONTROL_OBJECT","SERVICE_SENSOR_CONTROL_OBJECT"):
         must(syscall,token,f"scoped authority {token}")
@@ -33,6 +35,7 @@ def main():
     must(manifest,'"name": "sensord"',"QEMU sensor service manifest")
     must(cargo,'name = "sensord"',"sensor service binary")
     must(pid1,"11u8","PID1 starts sensor service")
+    must(pid1,"seen == 0x01ff","PID1 validates services 1-8 and 11")
     must(service_lib,"pub fn run_sensor()","sensor userspace service loop")
     print("system service boundary contract: PASS")
 if __name__=="__main__":
