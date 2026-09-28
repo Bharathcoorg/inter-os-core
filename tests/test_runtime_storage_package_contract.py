@@ -162,3 +162,10 @@ def test_tcp_transport_tracks_peer_window_and_congestion_state():
     assert "pub fn send_window" in source
     source2 = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
     assert "send_window(connection_id)" in source2
+
+
+def test_tcp_partial_acknowledgements_trim_retransmission_buffer():
+    source = (ROOT / "kernel/src/net/socket.rs").read_text(encoding="utf-8")
+    assert "conn.tx.copy_within(acknowledged..conn.tx_len, 0)" in source
+    assert "conn.tx_seq = ack" in source
+    assert "conn.tx_len -= acknowledged" in source

@@ -400,8 +400,20 @@ impl TcpConnectionTable {
         conn.dup_acks = 0;
         if conn.cwnd < conn.ssthresh { conn.cwnd = conn.cwnd.saturating_add(crate::net::tcp::TCP_MAX_SEGMENT as u32).min(65535); }
         else { let increment = ((crate::net::tcp::TCP_MAX_SEGMENT as u32).saturating_mul(crate::net::tcp::TCP_MAX_SEGMENT as u32) / conn.cwnd.max(1)).max(1); conn.cwnd = conn.cwnd.saturating_add(increment).min(65535); }
-        if conn.tx_pending && crate::net::tcp::seq_ge(ack, conn.tx_seq.wrapping_add(conn.tx_len as u32)) {
-            conn.tx_pending = false; conn.tx_len = 0; conn.tx_retries = 0;
+        if conn.tx_pending {
+            let end = conn.tx_seq.wrapping_add(conn.tx_len as u32);
+            if crate::net::tcp::seq_ge(ack, end) {
+                conn.tx_pending = false; conn.tx_len = 0; conn.tx_retries = 0;
+            } else if crate::net::tcp::seq_gt(ack, conn.tx_seq) {
+                let acknowledged = ack.wrapping_sub(conn.tx_seq) as usize;
+                if acknowledged < conn.tx_len {
+                    conn.tx.copy_within(acknowledged..conn.tx_len, 0);
+                    conn.tx_len -= acknowledged;
+                    conn.tx_seq = ack;
+                    conn.tx_retries = 0;
+                    conn.tx_deadline = crate::interrupts::get_system_ticks().saturating_add(TCP_RETRANSMIT_TICKS);
+                }
+            }
         }
         true
     }
