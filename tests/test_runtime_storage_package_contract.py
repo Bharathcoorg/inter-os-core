@@ -256,3 +256,16 @@ def test_graphics_exposes_authoritative_global_buffer_manager():
     source = (ROOT / "kernel/src/gui/mod.rs").read_text(encoding="utf-8")
     assert "pub static BUFFER_MANAGER: Mutex<BufferManager>" in source
     assert "BufferManager::new()" in source
+
+def test_vfs_persists_ownership_and_mode_metadata():
+    source = (ROOT / "kernel/src/fs/vfs.rs").read_text(encoding="utf-8")
+    assert "pub uid: u32" in source
+    assert "pub mode: u16" in source
+    assert 'buf[..4].copy_from_slice(b"IVM2")' in source
+    assert "pub fn chmod" in source
+    assert "pub fn chown" in source
+
+def test_interfs_integrity_checker_validates_bitmap_and_extents():
+    source = (ROOT / "kernel/src/storage/interfs.rs").read_text(encoding="utf-8")
+    assert "pub fn check_integrity" in source
+    assert "marked != referenced[block as usize]" in source
