@@ -48,6 +48,7 @@ pub struct ProcessRecord {
     pub exit_code: i32,
     pub thread_count: u16,
     pub open_file_count: u16,
+    pub address_space_bytes: u64,
     pub limits: ResourceLimits,
 }
 
@@ -58,7 +59,7 @@ pub static THREAD_TABLE: Mutex<[Option<ThreadRecord>; MAX_THREADS]> = Mutex::new
 pub fn register_leader(task: TaskId, parent_task: TaskId) -> Option<ProcessId> {
     if task == TaskId(0) { return None; }
     let id = ProcessId(NEXT_PROCESS_ID.fetch_add(1, Ordering::Relaxed));
-    let record = ProcessRecord { id, leader_task: task, parent_task, state: ProcessState::Running, exit_code: 0, thread_count: 1, open_file_count: 0, limits: ResourceLimits::default() };
+    let record = ProcessRecord { id, leader_task: task, parent_task, state: ProcessState::Running, exit_code: 0, thread_count: 1, open_file_count: 0, address_space_bytes: 0, limits: ResourceLimits::default() };
     let mut table = PROCESS_TABLE.lock();
     let Some(slot) = table.iter_mut().find(|slot| slot.is_none()) else { return None; };
     let mut threads = THREAD_TABLE.lock();
@@ -97,6 +98,33 @@ pub fn release_open_file(process: ProcessId) {
     let mut table = PROCESS_TABLE.lock();
     if let Some(record) = table.iter_mut().flatten().find(|r| r.id == process) {
         record.open_file_count = record.open_file_count.saturating_sub(1);
+    }
+}
+
+pub fn set_address_space_usage(process: ProcessId, bytes: usize) -> Result<(), &'static str> {
+    let mut table = PROCESS_TABLE.lock();
+    let record = table.iter_mut().flatten().find(|r| r.id == process).ok_or("process not found")?;
+    if bytes as u64 > record.limits.max_address_space_bytes {
+        return Err("address-space limit exceeded");
+    }
+    record.address_space_bytes = bytes as u64;
+    Ok(())
+}
+
+pub fn reserve_address_space(process: ProcessId, bytes: usize) -> Result<(), &'static str> {
+    let mut table = PROCESS_TABLE.lock();
+    let record = table.iter_mut().flatten().find(|r| r.id == process).ok_or("process not found")?;
+    if record.state != ProcessState::Running { return Err("process is not running"); }
+    let next = record.address_space_bytes.checked_add(bytes as u64).ok_or("address-space counter overflow")?;
+    if next > record.limits.max_address_space_bytes { return Err("address-space limit exceeded"); }
+    record.address_space_bytes = next;
+    Ok(())
+}
+
+pub fn release_address_space(process: ProcessId, bytes: usize) {
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(record) = table.iter_mut().flatten().find(|r| r.id == process) {
+        record.address_space_bytes = record.address_space_bytes.saturating_sub(bytes as u64);
     }
 }
 
@@ -199,6 +227,8 @@ pub fn set_limits(process: ProcessId, limits: ResourceLimits) -> Result<(), &'st
     let record = table.iter_mut().flatten().find(|r| r.id == process).ok_or("process not found")?;
     if limits.max_threads == 0 || limits.max_open_files == 0 || limits.max_ipc_endpoints == 0 || limits.max_address_space_bytes < 4096 { return Err("invalid resource limits"); }
     if record.thread_count > limits.max_threads { return Err("limits below current usage"); }
+    if record.open_file_count as u16 > limits.max_open_files { return Err("limits below current open-file usage"); }
+    if record.address_space_bytes > limits.max_address_space_bytes { return Err("limits below current address-space usage"); }
     record.limits = limits;
     Ok(())
 }
@@ -225,6 +255,7 @@ pub fn validate() -> bool {
     for record in table.iter().flatten() {
         if record.thread_count == 0 || record.thread_count > record.limits.max_threads { return false; }
         if record.open_file_count > record.limits.max_open_files { return false; }
+        if record.address_space_bytes > record.limits.max_address_space_bytes { return false; }
         let actual_threads = threads.iter().flatten().filter(|t| t.process == record.id).count();
         if actual_threads != record.thread_count as usize { return false; }
         if record.leader_task != TaskId(0) {
@@ -252,6 +283,6 @@ pub fn snapshot(out: &mut [u8]) -> usize {
     struct W<'a> { b: &'a mut [u8], n: usize }
     impl<'a> Write for W<'a> { fn write_str(&mut self, s: &str) -> core::fmt::Result { let k=s.len().min(self.b.len().saturating_sub(self.n)); self.b[self.n..self.n+k].copy_from_slice(&s.as_bytes()[..k]); self.n+=k; Ok(()) } }
     let table=PROCESS_TABLE.lock(); let mut w=W{b:out,n:0};
-    for r in table.iter().flatten() { let _=writeln!(w,"{}|{}|{}|{}|{}|{}\n",r.id.0,r.leader_task.0,r.parent_task.0,r.state as u8,r.thread_count,r.open_file_count); }
+    for r in table.iter().flatten() { let _=writeln!(w,"{}|{}|{}|{}|{}|{}|{}\n",r.id.0,r.leader_task.0,r.parent_task.0,r.state as u8,r.thread_count,r.open_file_count,r.address_space_bytes); }
     w.n
 }
