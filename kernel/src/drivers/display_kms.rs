@@ -170,7 +170,7 @@ impl DrmKmsController {
     pub fn destroy_surface(&mut self, id: u32) -> bool {
         if let Some(pos) = self.surfaces.iter().position(|s| s.id == id) {
             self.surfaces.remove(pos);
-            let _ = crate::gui::WINDOW_MANAGER.lock().destroy_owned(crate::gui::WindowId(id), owner_task.unwrap_or(0));
+            let _ = crate::gui::WINDOW_MANAGER.lock().destroy_if(crate::gui::WindowId(id), owner_task);
             if self.focused_surface == Some(id) {
                 self.focused_surface = self.surfaces.iter().filter(|s| s.visible).max_by_key(|s| s.z_order).map(|s| s.id);
             }
