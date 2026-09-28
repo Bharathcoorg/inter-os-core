@@ -63,7 +63,7 @@ impl InputEvent {
 }
 
 pub struct InputPipeline {
-    queue: VecDeque<InputEvent>,
+    queue: VecDeque<(TaskId, InputEvent)>,
     service_queue: VecDeque<InputEvent>,
 }
 
@@ -76,11 +76,17 @@ impl InputPipeline {
     }
 
     pub fn push(&mut self, event: InputEvent) {
-        if self.queue.len() < 128 { self.queue.push_back(event); }
         if self.service_queue.len() < 128 { self.service_queue.push_back(event); }
     }
 
-    pub fn pop(&mut self) -> Option<InputEvent> { self.queue.pop_front() }
+    pub fn route_to_task(&mut self, task: TaskId, event: InputEvent) {
+        if self.queue.len() < 128 { self.queue.push_back((task, event)); }
+    }
+
+    pub fn pop_for_task(&mut self, task: TaskId) -> Option<InputEvent> {
+        let index = self.queue.iter().position(|(owner, _)| *owner == task)?;
+        self.queue.remove(index).map(|(_, event)| event)
+    }
 
     pub fn pop_service(&mut self) -> Option<InputEvent> { self.service_queue.pop_front() }
 
@@ -95,12 +101,12 @@ pub static INPUT_PIPELINE: Mutex<InputPipeline> = Mutex::new(InputPipeline::new(
 /// Moves recognized hardware gestures into the stable userspace event queue.
 /// Routes normalized input events to the currently focused surface owner.
 pub fn dispatch_to_focused_window(event: InputEvent) {
-    let target = crate::drivers::display_kms::DRM_KMS.lock().focused_surface();
-    let owner = match target {
-        Some(id) => crate::drivers::display_kms::DRM_KMS.lock().surfaces.iter().find(|s| s.id == id).map(|s| s.owner_task),
-        None => None,
+    let owner = {
+        let kms = crate::drivers::display_kms::DRM_KMS.lock();
+        kms.focused_surface().and_then(|id| kms.surfaces.iter().find(|s| s.id == id).map(|s| s.owner_task))
     };
     if let Some(owner) = owner {
+        INPUT_PIPELINE.lock().route_to_task(TaskId(owner), event);
         let mut msg = [0u8; 24];
         msg[0] = event.kind as u8;
         msg[4..8].copy_from_slice(&event.x.to_le_bytes());
