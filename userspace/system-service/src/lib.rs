@@ -104,7 +104,7 @@ pub fn run_network() -> ! {
 
 pub fn run_power() -> ! {
     let _ = std::log(0, "[powerd] userspace power manager online.");
-    let mut telemetry = [0u8; 128];
+    let mut telemetry = [0u8; 256];
     loop {
         let _ = std::service_heartbeat(5);
         let _ = std::battery_query(&mut telemetry);
