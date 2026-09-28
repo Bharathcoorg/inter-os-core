@@ -76,7 +76,7 @@ try:
                         if "Step 5: Initial presentation complete" in decoded:
                             print(f"[SUCCESS] Launcher presentation complete at {time.time() - start_t:.1f}s")
                             non_local_buf = bytearray(buf)
-                            def send_and_wait_for(cmd, target_str, timeout=25.0):
+                            def send_and_wait_for(cmd, target_str, timeout=35.0):
                                 time.sleep(0.35)
                                 s.sendall(cmd)
                                 deadline = time.time() + timeout

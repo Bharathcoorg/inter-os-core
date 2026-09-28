@@ -255,97 +255,95 @@ fn render_calculator_ui(surface: u32, calc: &CalculatorState) {
                     }
                 }
             } else {
-                // Keypad grid hit detection for rendering
-                let mut hit_btn = false;
-                for row in 0..5 {
+                let active_row = if (440..580).contains(&y) { Some(0) }
+                else if (610..750).contains(&y) { Some(1) }
+                else if (780..920).contains(&y) { Some(2) }
+                else if (950..1090).contains(&y) { Some(3) }
+                else if (1120..1260).contains(&y) { Some(4) }
+                else { None };
+
+                let active_col = if (28..172).contains(&x) { Some(0) }
+                else if (194..338).contains(&x) { Some(1) }
+                else if (360..504).contains(&x) { Some(2) }
+                else if (526..670).contains(&x) { Some(3) }
+                else { None };
+
+                if let (Some(row), Some(col)) = (active_row, active_col) {
+                    let bx = COL_X[col];
                     let by = ROW_Y[row];
-                    if y >= by && y < by + BTN_H {
-                        for col in 0..4 {
-                            let bx = COL_X[col];
-                            if x >= bx && x < bx + BTN_W {
-                                hit_btn = true;
-                                let center_x = bx + BTN_W / 2;
-                                let center_y = by + BTN_H / 2;
+                    let center_x = bx + BTN_W / 2;
+                    let center_y = by + BTN_H / 2;
 
-                                // Determine button base color
-                                let btn_color = match (row, col) {
-                                    (0, 0) => std::design::color::DANGER,
-                                    (4, 3) => std::design::color::SUCCESS,
-                                    (_, 3) => std::design::color::ACCENT,
-                                    (0, _) => std::design::color::SURFACE,
-                                    _ => std::design::color::SURFACE_RAISED,
-                                };
+                    // Determine button base color
+                    let btn_color = match (row, col) {
+                        (0, 0) => std::design::color::DANGER,
+                        (4, 3) => std::design::color::SUCCESS,
+                        (_, 3) => std::design::color::ACCENT,
+                        (0, _) => std::design::color::SURFACE,
+                        _ => std::design::color::SURFACE_RAISED,
+                    };
 
-                                // Render button glyph icon / symbol at center
-                                let mut is_glyph = false;
-                                let action = get_button_action(row, col).unwrap_or(' ');
-                                if ('0'..='9').contains(&action) {
-                                    let d = (action as u8 - b'0') as i64;
-                                    let mask = get_7segment_mask(d);
-                                    let gx_start = center_x.saturating_sub(18);
-                                    let gy_start = center_y.saturating_sub(32);
-                                    if x >= gx_start && x < gx_start + 36 && y >= gy_start && y < gy_start + 64 {
-                                        is_glyph = is_segment_pixel(mask, x - gx_start, y - gy_start);
-                                    }
-                                } else if action == '+' {
-                                    // Cross +
-                                    if (x >= center_x - 16 && x < center_x + 16 && y >= center_y - 3 && y < center_y + 3)
-                                        || (x >= center_x - 3 && x < center_x + 3 && y >= center_y - 16 && y < center_y + 16) {
-                                        is_glyph = true;
-                                    }
-                                } else if action == '-' {
-                                    // Minus -
-                                    if x >= center_x - 16 && x < center_x + 16 && y >= center_y - 3 && y < center_y + 3 {
-                                        is_glyph = true;
-                                    }
-                                } else if action == '=' {
-                                    // Equals =
-                                    if (x >= center_x - 16 && x < center_x + 16 && y >= center_y - 8 && y < center_y - 2)
-                                        || (x >= center_x - 16 && x < center_x + 16 && y >= center_y + 2 && y < center_y + 8) {
-                                        is_glyph = true;
-                                    }
-                                } else if action == 'C' {
-                                    // Clear C (arc)
-                                    let gx_start = center_x.saturating_sub(18);
-                                    let gy_start = center_y.saturating_sub(32);
-                                    if x >= gx_start && x < gx_start + 36 && y >= gy_start && y < gy_start + 64 {
-                                        let mask = 0b0011_1001; // a, d, e, f
-                                        is_glyph = is_segment_pixel(mask, x - gx_start, y - gy_start);
-                                    }
-                                } else if action == '/' {
-                                    // Slash /
-                                    let rel_x = x as i32 - center_x as i32;
-                                    let rel_y = y as i32 - center_y as i32;
-                                    if (-16..=16).contains(&rel_y) && (rel_x + rel_y).abs() <= 2 {
-                                        is_glyph = true;
-                                    }
-                                } else if action == '*' {
-                                    // Star *
-                                    let rel_x = x as i32 - center_x as i32;
-                                    let rel_y = y as i32 - center_y as i32;
-                                    if (rel_x.abs() <= 12 && rel_y.abs() <= 2)
-                                        || (rel_x.abs() <= 2 && rel_y.abs() <= 12)
-                                        || ((rel_x + rel_y).abs() <= 2 && rel_x.abs() <= 10)
-                                        || ((rel_x - rel_y).abs() <= 2 && rel_x.abs() <= 10) {
-                                        is_glyph = true;
-                                    }
-                                }
-
-                                if is_glyph {
-                                    chunk[i] = std::design::color::TEXT;
-                                } else {
-                                    chunk[i] = btn_color;
-                                }
-                                break;
-                            }
+                    // Render button glyph icon / symbol at center
+                    let mut is_glyph = false;
+                    let action = get_button_action(row, col).unwrap_or(' ');
+                    if ('0'..='9').contains(&action) {
+                        let d = (action as u8 - b'0') as i64;
+                        let mask = get_7segment_mask(d);
+                        let gx_start = center_x.saturating_sub(18);
+                        let gy_start = center_y.saturating_sub(32);
+                        if x >= gx_start && x < gx_start + 36 && y >= gy_start && y < gy_start + 64 {
+                            is_glyph = is_segment_pixel(mask, x - gx_start, y - gy_start);
+                        }
+                    } else if action == '+' {
+                        // Cross +
+                        if (x >= center_x - 16 && x < center_x + 16 && y >= center_y - 3 && y < center_y + 3)
+                            || (x >= center_x - 3 && x < center_x + 3 && y >= center_y - 16 && y < center_y + 16) {
+                            is_glyph = true;
+                        }
+                    } else if action == '-' {
+                        // Minus -
+                        if x >= center_x - 16 && x < center_x + 16 && y >= center_y - 3 && y < center_y + 3 {
+                            is_glyph = true;
+                        }
+                    } else if action == '=' {
+                        // Equals =
+                        if (x >= center_x - 16 && x < center_x + 16 && y >= center_y - 8 && y < center_y - 2)
+                            || (x >= center_x - 16 && x < center_x + 16 && y >= center_y + 2 && y < center_y + 8) {
+                            is_glyph = true;
+                        }
+                    } else if action == 'C' {
+                        // Clear C (arc)
+                        let gx_start = center_x.saturating_sub(18);
+                        let gy_start = center_y.saturating_sub(32);
+                        if x >= gx_start && x < gx_start + 36 && y >= gy_start && y < gy_start + 64 {
+                            let mask = 0b0011_1001; // a, d, e, f
+                            is_glyph = is_segment_pixel(mask, x - gx_start, y - gy_start);
+                        }
+                    } else if action == '/' {
+                        // Slash /
+                        let rel_x = x as i32 - center_x as i32;
+                        let rel_y = y as i32 - center_y as i32;
+                        if (-16..=16).contains(&rel_y) && (rel_x + rel_y).abs() <= 2 {
+                            is_glyph = true;
+                        }
+                    } else if action == '*' {
+                        // Star *
+                        let rel_x = x as i32 - center_x as i32;
+                        let rel_y = y as i32 - center_y as i32;
+                        if (rel_x.abs() <= 12 && rel_y.abs() <= 2)
+                            || (rel_x.abs() <= 2 && rel_y.abs() <= 12)
+                            || ((rel_x + rel_y).abs() <= 2 && rel_x.abs() <= 10)
+                            || ((rel_x - rel_y).abs() <= 2 && rel_x.abs() <= 10) {
+                            is_glyph = true;
                         }
                     }
-                    if hit_btn {
-                        break;
-                    }
-                }
 
-                if !hit_btn {
+                    if is_glyph {
+                        chunk[i] = std::design::color::TEXT;
+                    } else {
+                        chunk[i] = btn_color;
+                    }
+                } else {
                     if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
                         chunk[i] = std::design::color::TEXT_MUTED;
                     } else {
@@ -465,15 +463,15 @@ pub extern "C" fn _start() -> ! {
                     }
                     if input.kind == 1 {
                         let (should_exit, action_logged) = handle_touch_point(&mut calc, input.x, input.y);
+                        if let Some(msg) = action_logged {
+                            std::log(0, msg).ok();
+                        }
                         if should_exit {
                             let _ = std::surface_destroy(6, surface);
                             std::exit_with_code(0);
                         }
                         render_calculator_ui(surface, &calc);
                         let _ = std::surface_flip(6);
-                        if let Some(msg) = action_logged {
-                            std::log(0, msg).ok();
-                        }
                     }
                 }
             }

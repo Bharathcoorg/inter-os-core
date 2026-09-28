@@ -129,7 +129,7 @@ impl DrmKmsController {
     /// Allocates a new client surface for application rendering.
     pub fn create_surface(&mut self, width: u32, height: u32, z_order: u32, owner_task: u64) -> u32 {
         let pixels = match (width as usize).checked_mul(height as usize) {
-            Some(value) if value > 0 && value <= MAX_SURFACE_PIXELS => value,
+            Some(value) if value > 0 && value <= MAX_SCANOUT_PIXELS => value,
             _ => return 0,
         };
         if self.surfaces.len() >= MAX_CLIENT_SURFACES {
@@ -141,18 +141,26 @@ impl DrmKmsController {
             _ => return 0,
         };
         debug_assert_eq!(pixels, width as usize * height as usize);
-        self.surfaces.push(DrmSurface::new(id, width, height, z_order, owner_task));
+        let is_overlay = z_order == 100
+            || owner_task == crate::services::task_id(crate::services::ServiceId::Display).map(|t| t.0).unwrap_or(u64::MAX)
+            || owner_task == crate::services::task_id(crate::services::ServiceId::Compositor).map(|t| t.0).unwrap_or(u64::MAX);
+        let kind = if is_overlay { crate::gui::WindowKind::SystemOverlay } else { crate::gui::WindowKind::Application };
+        let mut surface = DrmSurface::new(id, width, height, z_order, owner_task);
+        surface.input_enabled = !is_overlay;
+        self.surfaces.push(surface);
         if crate::gui::WINDOW_MANAGER.lock().create_with_id(
             crate::gui::WindowId(id),
             owner_task,
             crate::gui::WindowRect { x: 0, y: 0, width, height },
-            crate::gui::WindowKind::Application,
+            kind,
             false,
         ).is_err() {
             self.surfaces.pop();
             return 0;
         }
-        self.focused_surface = Some(id);
+        if !is_overlay {
+            self.focused_surface = Some(id);
+        }
         id
     }
 
@@ -174,7 +182,7 @@ impl DrmKmsController {
             self.surfaces.remove(pos);
             let _ = crate::gui::WINDOW_MANAGER.lock().destroy_if(crate::gui::WindowId(id), Some(owner));
             if self.focused_surface == Some(id) {
-                self.focused_surface = self.surfaces.iter().filter(|s| s.visible).max_by_key(|s| s.z_order).map(|s| s.id);
+                self.focused_surface = self.surfaces.iter().filter(|s| s.visible && s.input_enabled).max_by_key(|s| s.z_order).map(|s| s.id);
             }
             true
         } else {
@@ -192,7 +200,7 @@ impl DrmKmsController {
             let gui_owner = owner_task.map(|_| owner);
             let _ = crate::gui::WINDOW_MANAGER.lock().destroy_if(crate::gui::WindowId(id), gui_owner);
             if self.focused_surface == Some(id) {
-                self.focused_surface = self.surfaces.iter().filter(|s| s.visible).max_by_key(|s| s.z_order).map(|s| s.id);
+                self.focused_surface = self.surfaces.iter().filter(|s| s.visible && s.input_enabled).max_by_key(|s| s.z_order).map(|s| s.id);
             }
             true
         } else {
@@ -213,7 +221,7 @@ impl DrmKmsController {
         }
         if let Some(focused) = self.focused_surface {
             if !self.surfaces.iter().any(|s| s.id == focused) {
-                self.focused_surface = self.surfaces.iter().filter(|s| s.visible).max_by_key(|s| s.z_order).map(|s| s.id);
+                self.focused_surface = self.surfaces.iter().filter(|s| s.visible && s.input_enabled).max_by_key(|s| s.z_order).map(|s| s.id);
             }
         }
         before - self.surfaces.len()
@@ -257,7 +265,17 @@ impl DrmKmsController {
     /// Moves an owned surface and updates its visibility.
     pub fn set_surface_geometry_owned(&mut self, id: u32, owner: u64, x: i32, y: i32, z: u32, visible: bool) -> bool {
         if let Some(s) = self.surfaces.iter_mut().find(|s| s.id == id && s.owner_task == owner) {
-            s.x=x; s.y=y; s.z_order=z; s.visible=visible; s.dirty=true; return true;
+            s.x = x;
+            s.y = y;
+            s.z_order = z;
+            s.visible = visible;
+            s.dirty = true;
+            let _ = crate::gui::WINDOW_MANAGER.lock().set_geometry_owned(
+                crate::gui::WindowId(id),
+                owner,
+                crate::gui::WindowRect { x, y, width: s.width, height: s.height },
+            );
+            return true;
         }
         false
     }
@@ -459,6 +477,8 @@ pub fn test_drm_kms() {
     let flips = kms.page_flip();
     assert_eq!(flips, 1);
     assert_eq!(kms.vsync_counter, 1);
+    crate::gui::WINDOW_MANAGER.lock().destroy_if(crate::gui::WindowId(s1), None);
+    crate::gui::WINDOW_MANAGER.lock().destroy_if(crate::gui::WindowId(s2), None);
 
     crate::serial_println!("[TEST] DRM/KMS: Multi-surface alpha composition & page flip verified.");
 }

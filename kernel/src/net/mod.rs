@@ -23,6 +23,7 @@ pub use device::{LoopbackDevice, NetDeviceInfo, NetError, NetworkBackend, Networ
 pub use e1000::E1000Device;
 pub use dns::{encode_query as dns_encode_query, parse_a_answer, DnsAnswer, DnsQuestion, DnsResolver, DNS_SERVER};
 pub use tcp::{next_state as tcp_next_state, seq_ge, seq_gt, seq_le, seq_lt, valid_established_segment, valid_syn_ack, TcpSegment, TcpState};
+use crate::task::TaskId;
 pub use tls::{ContentType as TlsContentType, TlsRecord};
 pub use ethernet::{EtherType, EthernetFrame, MacAddress};
 pub use ipv4::{calculate_ipv4_checksum, verify_ipv4_checksum, IpProtocol, Ipv4Address, Ipv4Packet};
@@ -64,8 +65,8 @@ pub static TCP_TABLE: Mutex<TcpConnectionTable> = Mutex::new(TcpConnectionTable:
 /// Global routing, ARP, and DNS cache state is intentionally preserved because
 /// those resources are system-wide rather than task-owned.
 pub fn cleanup_task(task_id: TaskId) {
-    SOCKET_TABLE.lock().release_owner(task_id.0);
-    TCP_TABLE.lock().release_owner(task_id.0);
+    SOCKET_TABLE.lock().release_owner(task_id.0 as u32);
+    TCP_TABLE.lock().release_owner(task_id.0 as u32);
 }
 
 /// Global bounded DNS resolver state. Keeping this state at network-subsystem
@@ -341,7 +342,7 @@ pub fn poll_network_interface() -> usize {
                                             }
                                         }
                                         if let Some((ack_local_port, ack_remote_port, ack_seq, ack_recv_seq, ack_window)) = to_ack_syn {
-                                            let _ = transmit_tcp_segment(
+                                            let _ = transmit_tcp_segment_with_window(
                                                 ip_pkt.dst,
                                                 ack_local_port,
                                                 ip_pkt.src,

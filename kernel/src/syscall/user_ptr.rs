@@ -74,7 +74,7 @@ fn validate_current_user_buffer(addr: u64, len: usize, write: bool) -> Result<()
         task.page_table.clone().ok_or(UserAccessError::NotMapped)?
     };
 
-    page_table
+    let res = page_table
         .lock()
         .validate_user_range(addr, len, write)
         .map_err(|reason| match reason {
@@ -83,7 +83,8 @@ fn validate_current_user_buffer(addr: u64, len: usize, write: bool) -> Result<()
             "user frame is not owned by task" => UserAccessError::PermissionDenied,
             "address overflow" | "page iteration overflow" => UserAccessError::Overflow,
             _ => UserAccessError::OutOfBounds,
-        })
+        });
+    res
 }
 
 /// A strongly typed wrapper around an unvalidated userspace pointer `T`.
@@ -116,7 +117,7 @@ impl<T> UserPtr<T> {
         let size = core::mem::size_of::<T>();
         validate_current_user_buffer(self.addr, size, false)?;
         let ptr = self.addr as *const T;
-        Ok(core::ptr::read_unaligned(ptr))
+        Ok(unsafe { core::ptr::read_unaligned(ptr) })
     }
 }
 

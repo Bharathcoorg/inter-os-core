@@ -136,6 +136,7 @@ pub enum SyscallNumber {
     AppLaunch = 101,
     ServiceQuery = 102,
     IpcRecvMeta = 103,
+    WindowSetInput = 104,
 }
 
 // -----------------------------------------------------------------------------

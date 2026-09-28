@@ -4,6 +4,9 @@
 //! metadata is supplied by the platform/update layer, while this module owns
 //! the bounded retry and slot-selection policy.
 
+use spin::Mutex;
+use crate::storage::persistent;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum BootSlot { A = 0, B = 1 }

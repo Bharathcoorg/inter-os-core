@@ -39,29 +39,6 @@ const STATUS_DF: u8 = 1 << 5;   // Device Fault
 const STATUS_RDY: u8 = 1 << 6;  // Drive Ready
 const STATUS_BSY: u8 = 1 << 7;  // Drive Busy
 
-/// ATA Block Driver Errors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AtaError {
-    DeviceNotFound,
-    DeviceFault,
-    Timeout,
-    ReadError,
-    WriteError,
-    LbaOutOfRange,
-}
-
-/// Abstract block device trait.
-pub trait BlockDevice: Send + Sync {
-    /// Reads a 512-byte sector at the specified LBA.
-    fn read_sector(&mut self, lba: u32, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), AtaError>;
-    /// Writes a 512-byte sector to the specified LBA.
-    fn write_sector(&mut self, lba: u32, buf: &[u8; SECTOR_SIZE]) -> Result<(), AtaError>;
-    /// Returns the total addressable sector count.
-    fn sector_count(&self) -> u32;
-    /// Returns the model identifier string.
-    fn model(&self) -> &str;
-}
-
 /// Primary ATA Controller Hardware Driver.
 pub struct AtaDrive {
     data_port: Port<u16>,

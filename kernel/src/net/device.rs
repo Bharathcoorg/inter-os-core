@@ -17,6 +17,7 @@ pub enum NetError {
     DeviceDown,
     CapabilityDenied,
     InvalidPort,
+    InvalidPacket,
     PortInUse,
     NotReady,
 }

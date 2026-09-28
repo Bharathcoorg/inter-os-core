@@ -171,6 +171,7 @@ impl TaskControlBlock {
             page_table: None,
             user_entry: 0,
             user_stack_top: 0,
+            process_id: None,
             parent_id: TaskId(0),
             exit_code: 0,
         }

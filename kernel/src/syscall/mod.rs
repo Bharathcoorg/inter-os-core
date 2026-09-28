@@ -1557,7 +1557,37 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                     e as i64
                 }
             }
-        }
+        },
+        102 => {
+            if a2 < 12 { return SyscallResult::InvalidArguments as i64; }
+            let mut out = [0u8; 12];
+            match sys_service_query(a1 as u8, &mut out) {
+                Ok(n) => { if copy_to_user(a2, &out[..n]).is_err() { SyscallResult::InvalidArguments as i64 } else { n as i64 } }
+                Err(e) => e as i64,
+            }
+        },
+        103 => {
+            // IpcRecvMeta: a1=cap_slot, a2=payload_ptr, a3=payload_capacity,
+            // a4=sender_out_ptr, a5=msg_type_out_ptr.
+            let cap_slot = a1 as usize;
+            let capacity = a3 as usize;
+            if capacity > 1024 || a4 == 0 || a5 == 0 {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            match sys_ipc_recv(cap_slot) {
+                Ok(msg) => {
+                    let copy_len = core::cmp::min(capacity, msg.len);
+                    if copy_to_user(a2, &msg.payload[..copy_len]).is_err()
+                        || write_user_value(a4, &msg.sender.0).is_err()
+                        || write_user_value(a5, &msg.msg_type).is_err()
+                    {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    copy_len as i64
+                }
+                Err(err) => err as i64,
+            }
+        },
         _ => SyscallResult::UnknownSyscall as i64,
     }
 }
@@ -2213,8 +2243,15 @@ pub fn sys_telephony_set_data(enabled: bool) -> Result<bool, SyscallResult> {
 fn require_display_service(cap_slot: usize) -> Result<TaskId, SyscallResult> {
     let sched = SCHEDULER.lock();
     let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    let effective_slot = if task.cap_table.verify_object(cap_slot, CapabilityType::FrameBufferDirect, Rights::WRITE, 1).is_ok() {
+        cap_slot
+    } else if let Some(s) = task.cap_table.find_slot(CapabilityType::FrameBufferDirect, Rights::WRITE) {
+        s
+    } else {
+        cap_slot
+    };
     task.cap_table
-        .verify_object(cap_slot, CapabilityType::FrameBufferDirect, Rights::WRITE, 1)
+        .verify_object(effective_slot, CapabilityType::FrameBufferDirect, Rights::WRITE, 1)
         .map_err(|_| SyscallResult::PermissionDenied)?;
     Ok(task.id)
 }
@@ -2272,10 +2309,12 @@ pub fn sys_input_event_poll(out_buf: &mut [u8]) -> Result<usize, SyscallResult> 
     let sched = SCHEDULER.lock();
     let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
     if !task.cap_table.authorize_capability(CapabilityType::EventPoll, Rights::READ) {
+        crate::serial_println!("[INPUT POLL DENIED] Task {} has no EventPoll cap", task.id.0);
         return Err(SyscallResult::PermissionDenied);
     }
     let is_inputd = task.name == "inputd";
     let task_id = task.id;
+    let task_name = task.name;
     drop(sched);
 
     crate::drivers::input::pump_touch_events();
@@ -2284,6 +2323,7 @@ pub fn sys_input_event_poll(out_buf: &mut [u8]) -> Result<usize, SyscallResult> 
     } else {
         crate::drivers::input::INPUT_PIPELINE.lock().pop_for_task(task_id).ok_or(SyscallResult::NotReady)?
     };
+    crate::serial_println!("[INPUT POLL SUCCESS] Task {} ({}) got {:?}", task_id.0, task_name, event.kind);
     if out_buf.len() < 24 { return Err(SyscallResult::InvalidArguments); }
 
     out_buf[..24].fill(0);
@@ -2585,7 +2625,7 @@ pub fn sys_revocation_audit(
         1 => {
             // Revoke package
             let ticks = crate::interrupts::get_system_ticks();
-            reg.revoke_package(
+            let _ = reg.revoke_package(
                 target,
                 crate::package::RevocationReason::MaliciousBehavior,
                 ticks,
@@ -3058,6 +3098,7 @@ pub fn sys_event_poll(interest_mask: u32, timeout_ticks: u32) -> Result<u32, Sys
         || current_task.cap_table.authorize_capability(CapabilityType::EventPoll, Rights::READ);
 
     if !has_cap {
+        crate::serial_println!("[EVENT REACTOR DENIED] Task {} has no EventPoll cap!", current_id.0);
         return Err(SyscallResult::PermissionDenied);
     }
     drop(sched);
@@ -3153,16 +3194,23 @@ pub fn sys_window_focus(cap_slot: usize, x: u32, y: u32) -> SyscallResult {
         None => SyscallResult::NotReady,
     }
 }
-pub fn sys_fs_list(cap_slot:usize,path_ptr:u64,path_len:usize,out:&mut[u8])->Result<usize,SyscallResult>{
- if path_len==0||path_len>256||out.len()>4096{return Err(SyscallResult::InvalidArguments);}
- let sched=SCHEDULER.lock();let current=sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
- current.cap_table.verify(cap_slot,CapabilityType::FileSystemRead,Rights::READ).map_err(|_|SyscallResult::PermissionDenied)?;
- let mut path=[0u8;256];copy_from_user(&mut path[..path_len],path_ptr,path_len).map_err(|_|SyscallResult::InvalidArguments)?;drop(sched);
- let path=core::str::from_utf8(&path[..path_len]).map_err(|_|SyscallResult::InvalidArguments)?;
- let sched=SCHEDULER.lock();let current=sched.current_task().ok_or(SyscallResult::PermissionDenied)?;let n=crate::fs::VFS.lock().list_dir(&current.cap_table,cap_slot,path,out).map_err(|_|SyscallResult::FileNotFound)?;Ok(n)
+pub fn sys_fs_list(cap_slot: usize, path_ptr: u64, path_len: usize, out: &mut [u8]) -> Result<usize, SyscallResult> {
+    if path_len == 0 || path_len > 256 || out.len() > 4096 { return Err(SyscallResult::InvalidArguments); }
+    {
+        let sched = SCHEDULER.lock();
+        let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+        current.cap_table.verify(cap_slot, CapabilityType::FileSystemRead, Rights::READ).map_err(|_| SyscallResult::PermissionDenied)?;
+    }
+    let mut path = [0u8; 256];
+    copy_from_user(&mut path[..path_len], path_ptr, path_len).map_err(|_| SyscallResult::InvalidArguments)?;
+    let path = core::str::from_utf8(&path[..path_len]).map_err(|_| SyscallResult::InvalidArguments)?;
+    let sched = SCHEDULER.lock();
+    let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    let n = crate::fs::VFS.lock().list_dir(&current.cap_table, cap_slot, path, out).map_err(|_| SyscallResult::FileNotFound)?;
+    Ok(n)
 }
 
-pub fn sys_storage_query() -> Result<u64,SyscallResult>{
+pub fn sys_storage_query() -> Result<u64, SyscallResult> {
     {
         let sched = SCHEDULER.lock();
         let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
@@ -3170,39 +3218,41 @@ pub fn sys_storage_query() -> Result<u64,SyscallResult>{
             return Err(SyscallResult::PermissionDenied);
         }
     }
-    let guard=crate::drivers::ATA_PRIMARY.lock();
-    let drive=guard.as_ref().ok_or(SyscallResult::DeviceError)?;
+    let guard = crate::drivers::ATA_PRIMARY.lock();
+    let drive = guard.as_ref().ok_or(SyscallResult::DeviceError)?;
     Ok((drive.sector_count() as u64).saturating_mul(crate::drivers::SECTOR_SIZE as u64))
 }
 
 pub fn sys_settings_get(cap_slot: usize, key_ptr: u64, key_len: usize, out: &mut [u8]) -> Result<usize, SyscallResult> {
     if key_len == 0 || key_len > 96 || out.len() > 512 { return Err(SyscallResult::InvalidArguments); }
-    let sched=SCHEDULER.lock();
-    let current=sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    let has_read = current.cap_table.verify(cap_slot, CapabilityType::FileSystemRead, Rights::READ).is_ok()
-        || current.cap_table.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok();
-    if !has_read {
-        return Err(SyscallResult::PermissionDenied);
+    {
+        let sched = SCHEDULER.lock();
+        let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+        let has_read = current.cap_table.verify(cap_slot, CapabilityType::FileSystemRead, Rights::READ).is_ok()
+            || current.cap_table.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::READ).is_ok();
+        if !has_read {
+            return Err(SyscallResult::PermissionDenied);
+        }
     }
-    let mut key=[0u8;96];
+    let mut key = [0u8; 96];
     copy_from_user(&mut key[..key_len], key_ptr, key_len).map_err(|_| SyscallResult::InvalidArguments)?;
-    drop(sched);
     let key = core::str::from_utf8(&key[..key_len]).map_err(|_| SyscallResult::InvalidArguments)?;
     Ok(crate::settings::SETTINGS.lock().get(key, out))
 }
 
 pub fn sys_settings_set(cap_slot: usize, key_ptr: u64, key_len: usize, val_ptr: u64, val_len: usize) -> Result<(), SyscallResult> {
     if key_len == 0 || key_len > 96 || val_len > 512 { return Err(SyscallResult::InvalidArguments); }
-    let sched = SCHEDULER.lock();
-    let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    current.cap_table.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE).map_err(|_| SyscallResult::PermissionDenied)?;
+    {
+        let sched = SCHEDULER.lock();
+        let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+        current.cap_table.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE).map_err(|_| SyscallResult::PermissionDenied)?;
+    }
     let mut key = [0u8; 96];
     let mut val = [0u8; 512];
     copy_from_user(&mut key[..key_len], key_ptr, key_len).map_err(|_| SyscallResult::InvalidArguments)?;
     copy_from_user(&mut val[..val_len], val_ptr, val_len).map_err(|_| SyscallResult::InvalidArguments)?;
-    drop(sched);
-    let key=core::str::from_utf8(&key[..key_len]).map_err(|_|SyscallResult::InvalidArguments)?;
-    crate::settings::SETTINGS.lock().set(key,&val[..val_len]).map_err(|_|SyscallResult::DeviceError)
+    let key = core::str::from_utf8(&key[..key_len]).map_err(|_| SyscallResult::InvalidArguments)?;
+    crate::settings::SETTINGS.lock().set(key, &val[..val_len]).map_err(|_| SyscallResult::DeviceError)
 }
 
 pub fn sys_service_list(out: &mut [u8]) -> Result<usize, SyscallResult> {
@@ -3547,36 +3597,6 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         "org.interos.gallery" | "gallery" | "photos" => {
             crate::task::user::spawn_app_gallery(parent_id)
         }
-        103 => {
-            // IpcRecvMeta: a1=cap_slot, a2=payload_ptr, a3=payload_capacity,
-            // a4=sender_out_ptr, a5=msg_type_out_ptr.
-            let cap_slot = a1 as usize;
-            let capacity = a3 as usize;
-            if capacity > 1024 || a4 == 0 || a5 == 0 {
-                return SyscallResult::InvalidArguments as i64;
-            }
-            match sys_ipc_recv(cap_slot) {
-                Ok(msg) => {
-                    let copy_len = core::cmp::min(capacity, msg.len);
-                    if copy_to_user(a2, &msg.payload[..copy_len]).is_err()
-                        || write_user_value(a4, &msg.sender.0).is_err()
-                        || write_user_value(a5, &msg.msg_type).is_err()
-                    {
-                        return SyscallResult::InvalidArguments as i64;
-                    }
-                    copy_len as i64
-                }
-                Err(err) => err as i64,
-            }
-        }
-        102 => {
-            if a2 < 12 { return SyscallResult::InvalidArguments as i64; }
-            let mut out = [0u8; 12];
-            match sys_service_query(a1 as u8, &mut out) {
-                Ok(n) => { if copy_to_user(a2, &out[..n]).is_err() { SyscallResult::InvalidArguments as i64 } else { n as i64 } }
-                Err(e) => e as i64,
-            }
-        }
         _ => {
             crate::serial_println!("[APP_LAUNCH DEBUG] unknown app_id: '{}'", app_id);
             return Err(SyscallResult::InvalidArguments);
@@ -3605,7 +3625,7 @@ pub fn sys_window_list(out_buf:&mut [u8])->Result<usize,SyscallResult>{
     let mut w=W{b:out_buf,n:0};
     for s in &snaps[..count]{
         let name=sched.get_task(TaskId(s.owner_task)).map(|t|t.name).unwrap_or("unknown");
-        let _=write!(w,"{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",s.id,s.owner_task,name,s.x,s.y,s.width,s.height,s.z_order,s.opacity,s.visible as u8,s.input_enabled as u8);
+        let _=write!(w,"{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",s.id,s.owner_task,name,s.x,s.y,s.width,s.height,s.z_order,s.opacity,s.visible as u8,s.input_enabled as u8);
         if w.n>=capacity{break;}
     }
     Ok(w.n)

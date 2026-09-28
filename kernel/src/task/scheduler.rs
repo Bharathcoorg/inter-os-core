@@ -86,7 +86,7 @@ impl Scheduler {
     }
 
     /// Spawns an existing TaskControlBlock (e.g. userspace process with isolated page table).
-    pub fn spawn_task(&mut self, tcb: TaskControlBlock) -> TaskId {
+    pub fn spawn_task(&mut self, mut tcb: TaskControlBlock) -> TaskId {
         let id = tcb.id;
         if id == TaskId(0) {
             self.tasks.push(tcb);
@@ -144,7 +144,7 @@ impl Scheduler {
         tcb.process_id = Some(process_id);
         tcb.user_entry = user_entry;
         tcb.user_stack_top = user_stack_top;
-        tcb.page_table = Some(shared_space);
+        tcb.page_table = Some(shared_space.clone());
         if let Err(e) = crate::task::process::bind_reserved_thread(process_id, id) {
             let rollback = {
                 let mut pt = shared_space.lock();

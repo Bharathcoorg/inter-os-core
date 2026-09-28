@@ -41,7 +41,7 @@ def main():
     must(syscall, "sys_window_set_input", "owned input syscall handler")
     must(syscall, "set_input_enabled_owned", "kernel ownership enforcement")
     must(syscall, "pop_for_task(task_id)", "caller-scoped input polling")
-    must(syscall, "Compatibility API, but it must not bypass", "legacy touch isolation")
+    must(syscall, "compatibility API, but it must not bypass", "legacy touch isolation")
     must(syscall, "INPUT_PIPELINE.lock().pop_for_task(task_id)", "touch polling task isolation")
     must(syscall, "WindowList", "window inspection ABI")
     must(syscall, "WindowSetGeometry", "window geometry ABI")

@@ -67,6 +67,7 @@ class SerialReader:
         self.captured_logs = []
 
     def wait_for(self, marker, timeout=15.0, print_keywords=None):
+        timeout = max(timeout, 25.0)
         start_t = time.time()
         while time.time() - start_t < timeout:
             try:

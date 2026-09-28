@@ -34,7 +34,7 @@ def main():
     must(user, "Stack guard address underflow", "stack guard validation")
     must(user, "USER_STACK_SIZE", "dedicated user stack")
     must(user, "set_address_space_usage", "process address-space accounting")
-    must(user, "reserve_address_space", "thread stack budget reservation")
+    must(scheduler, "reserve_address_space", "thread stack budget reservation")
 
     must(process, "address_space_bytes: u64", "process address-space counter")
     must(process, "max_address_space_bytes", "address-space resource limit")

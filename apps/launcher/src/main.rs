@@ -2016,9 +2016,9 @@ pub extern "C" fn _start() -> ! {
                         scale_milli: 1000,
                     };
                     while std::input_event_poll(&mut discard).is_ok() {}
+                    std::log(0, "[LAUNCHER] Foreground application exited and was reaped.").ok();
                     render_view(surface, &state);
                     let _ = std::surface_flip(4);
-                    std::log(0, "[LAUNCHER] Foreground application exited and was reaped.").ok();
                 }
             }
 

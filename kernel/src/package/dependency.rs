@@ -9,9 +9,15 @@ impl PackageVersion { pub const fn new(major:u16,minor:u16,patch:u16)->Self{Self
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VersionRequirement { Exact(PackageVersion), Minimum(PackageVersion), Major(u16) }
-impl VersionRequirement {
- pub fn matches(&self,v:PackageVersion)->bool{match self{Self::Exact(x)=>v==*x,Self::Minimum(x)=>v.major>*x.major||(v.major==x.major&&(v.minor>x.minor||(v.minor==x.minor&&v.patch>=x.patch))),Self::Major(m)=>v.major==*m}}
-}
+ impl VersionRequirement {
+  pub fn matches(&self, v: PackageVersion) -> bool {
+    match self {
+      Self::Exact(x) => v == *x,
+      Self::Minimum(x) => v.major > x.major || (v.major == x.major && (v.minor > x.minor || (v.minor == x.minor && v.patch >= x.patch))),
+      Self::Major(m) => v.major == *m,
+    }
+  }
+ }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dependency { pub package_id:String, pub requirement:VersionRequirement }

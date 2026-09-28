@@ -154,7 +154,7 @@ impl PowerManager {
                         self.display_refresh_hz = 90;
                     }
                     ThermalTrip::Nominal => {
-                        if !self.is_charging && self.battery_percent < 15 {
+                        if self.battery_valid && !self.is_charging && self.battery_percent < 15 {
                             // Low-power battery saver
                             self.current_freq_mhz = self.base_freq_mhz / 2;
                             self.display_refresh_hz = 60;

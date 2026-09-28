@@ -468,7 +468,7 @@ pub fn spawn_user_process_with_parent(
     tcb.user_stack_top = user_stack_top;
     tcb.parent_id = parent_id;
 
-    let id = tcb.id;
+    let _id = tcb.id;
     let spawned = SCHEDULER.lock().spawn_task(tcb);
     if spawned == TaskId(0) {
         return Err("process registration failed");
@@ -707,6 +707,7 @@ pub fn spawn_user_init(id_security: TaskId) -> TaskId {
         USER_INIT_ELF,
         user_caps,
         1, // Normal priority
+        TaskId(0),
     ).expect("Failed to spawn userspace init process");
 
     serial_println!("[OK] Spawned Task 9: user_init (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
@@ -764,7 +765,7 @@ pub fn spawn_app_settings(id_security: TaskId) -> TaskId {
         object_id: 1,
     }).ok();
 
-    let id = spawn_user_process(
+    let id = spawn_user_process_with_parent(
         "app_settings",
         APP_SETTINGS_ELF,
         caps,

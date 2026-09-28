@@ -103,14 +103,18 @@ pub static INPUT_PIPELINE: Mutex<InputPipeline> = Mutex::new(InputPipeline::new(
 pub fn dispatch_to_focused_window(event: InputEvent) {
     let owner = {
         let mut wm = crate::gui::WINDOW_MANAGER.lock();
-        match event.kind {
+        let target = match event.kind {
             InputEventKind::Tap | InputEventKind::DoubleTap | InputEventKind::LongPress =>
                 wm.hit_test(event.x, event.y).map(|(_, owner)| owner),
             InputEventKind::Pan | InputEventKind::Pinch =>
                 wm.focused_owner(),
-        }
+        };
+        crate::serial_println!("[INPUT DISPATCH] event={:?} (x={}, y={}) target={:?} focused={:?}",
+            event.kind, event.x, event.y, target, wm.focused());
+        target
     };
     if let Some(owner) = owner {
+        crate::serial_println!("[INPUT DISPATCH] Routing to task {}", owner);
         INPUT_PIPELINE.lock().route_to_task(TaskId(owner), event);
         let mut msg = [0u8; 24];
         msg[0] = event.kind as u8;
@@ -120,22 +124,25 @@ pub fn dispatch_to_focused_window(event: InputEvent) {
         msg[16..20].copy_from_slice(&event.dy.to_le_bytes());
         msg[20..24].copy_from_slice(&event.scale_milli.to_le_bytes());
         let _ = crate::ipc::IPC_ROUTER.lock().send_direct(TaskId(0), TaskId(owner), 0x494E_5054, &msg);
+        crate::event::post_event(TaskId(owner), crate::event::EVENT_TOUCH_INPUT);
     }
 }
 
 pub fn pump_touch_events() {
-    let mut touch = crate::drivers::touch_gestures::TOUCH_ENGINE.lock();
-    let mut pipeline = INPUT_PIPELINE.lock();
-    let mut pumped = false;
-    while let Some(gesture) = touch.gesture_queue.pop_front() {
+    let gestures: alloc::vec::Vec<_> = {
+        let mut touch = crate::drivers::touch_gestures::TOUCH_ENGINE.lock();
+        touch.gesture_queue.drain(..).collect()
+    };
+    if gestures.is_empty() {
+        return;
+    }
+    for gesture in gestures {
+        crate::serial_println!("[INPUT PUMP] gesture={:?}", gesture);
         let event = InputEvent::from_gesture(gesture);
-        pipeline.push(event);
+        INPUT_PIPELINE.lock().push(event);
         dispatch_to_focused_window(event);
-        pumped = true;
     }
-    if pumped {
-        crate::event::broadcast_event(crate::event::EVENT_TOUCH_INPUT);
-    }
+    crate::event::broadcast_event(crate::event::EVENT_TOUCH_INPUT);
 }
 
 #[cfg(test)]

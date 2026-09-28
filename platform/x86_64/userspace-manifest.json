@@ -49,12 +49,12 @@
       "name": "camerad",
       "kind": "system-service",
       "manifest": "userspace/system-service/Cargo.toml"
-    },,
+    },
     {
       "name": "sensord",
       "kind": "system-service",
       "manifest": "userspace/system-service/Cargo.toml"
-    }
+    },
     {
       "name": "compositor",
       "kind": "application",

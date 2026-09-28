@@ -29,12 +29,14 @@ def main() -> None:
     interfs = INTERFS.read_text()
     filesystem = FILESYSTEM.read_text()
 
+    block = (ROOT / "kernel/src/storage/block.rs").read_text()
+
     # Hardware implementations share one sector-level abstraction.
-    must(ata, "pub trait BlockDevice: Send + Sync", "canonical block-device trait")
-    must(ata, "fn read_sector", "block read operation")
-    must(ata, "fn write_sector", "block write operation")
-    must(ata, "fn sector_count", "block geometry")
-    must(ata, "fn model", "device identity")
+    must(block, "pub trait BlockDevice: Send + Sync", "canonical block-device trait")
+    must(block, "fn read_sector", "block read operation")
+    must(block, "fn write_sector", "block write operation")
+    must(block, "fn sector_count", "block geometry")
+    must(block, "fn model", "device identity")
     must(ata, "impl BlockDevice for AtaDrive", "ATA block-device implementation")
     must(sdhci, "impl BlockDevice for SdhciController", "SDHCI block-device implementation")
     must(storage, "pub mod persistent;", "storage subsystem persistence boundary")
@@ -52,14 +54,14 @@ def main() -> None:
     must(vfs, 'crate::storage::persistent::commit_kind(&sealed,4)', "VFS snapshot persistence")
     must(vfs, 'path.starts_with("/data/")', "persistent mutable-data boundary")
     # VFS persists and reconstructs the mutable inode tree, not only payload bytes.
-    must(vfs, 'buf[..4].copy_from_slice(b"IVM1")', "persistent inode metadata format")
+    must(vfs, 'buf[..4].copy_from_slice(b"IVM2")', "persistent inode metadata format")
     must(vfs, 'persist_metadata_snapshot', "inode metadata persistence routine")
     must(vfs, 'restore_metadata_snapshot', "inode metadata restore routine")
     must(vfs, 'vfs.restore_metadata_snapshot();', "inode metadata restoration before payload restoration")
     must(vfs, 'vfs.rebuild_children();', "persistent parent-child inode reconstruction")
     must(vfs, 'fn parent_path(path: &str)', "hierarchical parent path helper")
-    must(vfs, 'inode.id = InodeId(id);', "stable persisted inode identity")
-    must(vfs, 'inode.sha256_digest = digest;', "persisted inode integrity metadata")
+    must(vfs, 'inode.id=InodeId(id);', "stable persisted inode identity")
+    must(vfs, 'inode.sha256_digest=digest;', "persisted inode integrity metadata")
 
     # A real on-disk filesystem backend exists above BlockDevice.
     must(interfs, "pub struct InterFs", "block-backed filesystem controller")

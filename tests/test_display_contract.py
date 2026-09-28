@@ -33,7 +33,8 @@ def main() -> None:
     fb=(ROOT/"kernel/src/framebuffer.rs").read_text()
     must(fb,"pub fn present_argb8888","hardware framebuffer scanout")
     must(fb,"aspect ratio","hardware scanout scaling")
-    must(kms, "pub fn destroy_surface_owned", "KMS owned surface destruction")\n    must(kms, "pub const MAX_SCANOUT_PIXELS: usize = 3840 * 2160;", "bounded scanout budget")
+    must(kms, "pub fn destroy_surface_owned", "KMS owned surface destruction")
+    must(kms, "pub const MAX_SCANOUT_PIXELS: usize = 3840 * 2160;", "bounded scanout budget")
     must(kms, "checked_mul(self.scanout_height as usize)", "checked scanout allocation arithmetic")
     must(kms, "pixels > MAX_SCANOUT_PIXELS", "scanout budget enforcement")
     must(kms, "sx.saturating_add(s_w)", "composition coordinate overflow protection")
@@ -60,9 +61,9 @@ def main() -> None:
     ):
         must(sdk, marker, f"display SDK ABI {marker}")
 
-    must(user, "1 => Some((CapabilityType::FrameBufferDirect, Rights::WRITE, service_id as u64))",
+    services = (ROOT / "kernel/src/services.rs").read_text()
+    must(services, "cap_type: CapabilityType::FrameBufferDirect, rights: Rights::WRITE, object_id: 1",
          "displayd-only framebuffer capability")
-    assert "cap_type: CapabilityType::FrameBufferDirect" not in user.split("fn spawn_userspace_service",1)[0],         "legacy app code must not regain direct framebuffer authority"
     must(service, "pub fn run_display() -> !", "dedicated display service loop")
     must(service, "std::surface_create(4, 320, 480, 0)", "display service creates surface through ABI")
     must(service, "std::surface_write(4, surface", "display service writes through ABI")

@@ -31,6 +31,14 @@ pub fn init_memory(physical_memory_offset: VirtAddr, memory_regions: &'static Me
     *PHYSICAL_MEMORY_OFFSET.lock() = Some(physical_memory_offset);
     *MEMORY_MAPPER.lock() = Some(mapper);
     *FRAME_ALLOCATOR.lock() = Some(frame_allocator);
+
+    let pml4_ptr = (physical_memory_offset + kernel_frame.start_address().as_u64()).as_ptr::<PageTable>();
+    let pml4 = unsafe { &*pml4_ptr };
+    for i in 0..512 {
+        if !pml4[i].is_unused() {
+            crate::serial_println!("[BOOT] Kernel PML4 entry {}: frame {:#x}, flags {:?}", i, pml4[i].addr().as_u64(), pml4[i].flags());
+        }
+    }
 }
 
 /// Returns the primordial kernel PML4 physical frame.
@@ -159,6 +167,16 @@ impl TaskPageTable {
             for i in 256..512 {
                 new_pml4[i] = kernel_pml4[i].clone();
             }
+
+            // Clone non-empty supervisor mappings from the primordial kernel PML4 (entries 1..256),
+            // preserving entry 0 exclusively for user processes.
+            let mut k = 1;
+            while k < 256 {
+                if !kernel_pml4[k].is_unused() {
+                    new_pml4[k] = kernel_pml4[k].clone();
+                }
+                k += 1;
+            }
         }
 
         let mut allocated = alloc::vec::Vec::new();
@@ -269,6 +287,11 @@ impl TaskPageTable {
 
         if p4_idx >= 256 {
             return Err("User page PML4 index in kernel range");
+        }
+        if !pml4[p4_idx].is_unused() && !self.allocated_frames.iter().any(|owned| {
+            pml4[p4_idx].frame().map(|f| *owned == f).unwrap_or(false)
+        }) {
+            return Err("Cannot map user page into mirrored kernel PML4 entry");
         }
         if self.allocated_frames.iter().any(|owned| *owned == frame) {
             return Err("physical frame already owned by address space");

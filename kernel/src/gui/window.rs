@@ -63,10 +63,12 @@ impl WindowManager {
     pub fn create_with_id(&mut self, id: WindowId, owner: u64, rect: WindowRect, kind: WindowKind, modal: bool) -> Result<(), &'static str> {
         if id.0 == 0 || rect.width == 0 || rect.height == 0 { return Err("invalid window identity or bounds"); }
         if self.windows.len() >= 128 { return Err("window limit reached"); }
-        if self.windows.iter().any(|w| w.id == id) { return Err("window identity already registered"); }
+        self.windows.retain(|w| w.id != id);
         let z = self.windows.iter().map(|w| w.z).max().unwrap_or(0).saturating_add(1);
         self.windows.push(Window { id, owner, rect, kind, visible: true, modal, z });
-        self.focused = Some(id);
+        if kind != WindowKind::SystemOverlay {
+            self.focused = Some(id);
+        }
         if id.0 >= self.next_id {
             self.next_id = id.0.checked_add(1).filter(|v| *v != 0).unwrap_or(1);
         }
@@ -103,7 +105,7 @@ impl WindowManager {
     }
 
     pub fn focus_owned(&mut self, id: WindowId, owner: u64) -> bool {
-        let Some(pos) = self.windows.iter().position(|w| w.id == id && w.owner == owner && w.visible) else { return false; };
+        let Some(pos) = self.windows.iter().position(|w| w.id == id && w.owner == owner && w.visible && w.kind != WindowKind::SystemOverlay) else { return false; };
         let next_z = self.windows.iter().map(|w| w.z).max().unwrap_or(0).saturating_add(1);
         self.windows[pos].z = next_z;
         self.focused = Some(id);
@@ -112,7 +114,7 @@ impl WindowManager {
 
     pub fn hit_test(&mut self, x: u32, y: u32) -> Option<(WindowId, u64)> {
         let target = self.windows.iter()
-            .filter(|w| w.visible && w.rect.contains(x, y))
+            .filter(|w| w.visible && w.kind != WindowKind::SystemOverlay && w.rect.contains(x, y))
             .filter(|w| w.modal || !self.windows.iter().any(|m| m.visible && m.modal && m.z > w.z))
             .max_by_key(|w| w.z)
             .map(|w| (w.id, w.owner));
@@ -124,11 +126,11 @@ impl WindowManager {
 
     pub fn focused_owner(&self) -> Option<u64> {
         let id = self.focused?;
-        self.windows.iter().find(|w| w.id == id && w.visible).map(|w| w.owner)
+        self.windows.iter().find(|w| w.id == id && w.visible && w.kind != WindowKind::SystemOverlay).map(|w| w.owner)
     }
 
     pub fn top_visible(&self) -> Option<WindowId> {
-        self.windows.iter().filter(|w| w.visible).max_by_key(|w| w.z).map(|w| w.id)
+        self.windows.iter().filter(|w| w.visible && w.kind != WindowKind::SystemOverlay).max_by_key(|w| w.z).map(|w| w.id)
     }
 
     pub fn snapshot(&self, out: &mut [Window]) -> usize {
@@ -154,5 +156,15 @@ mod tests {
         assert_eq!(wm.hit_test(5, 5), None);
         assert_eq!(wm.hit_test(20, 20).map(|v| v.0), Some(WindowId(2)));
         assert!(wm.focus_owned(app, 1));
+    }
+
+    #[test]
+    fn system_overlay_passes_through_input() {
+        let mut wm = WindowManager::new();
+        let app = wm.create(11, WindowRect{x:0, y:0, width:720, height:1440}, WindowKind::Application, false).unwrap();
+        let _overlay = wm.create(10, WindowRect{x:0, y:0, width:720, height:96}, WindowKind::SystemOverlay, false).unwrap();
+        assert_eq!(wm.focused(), Some(app));
+        assert_eq!(wm.focused_owner(), Some(11));
+        assert_eq!(wm.hit_test(670, 25), Some((app, 11)));
     }
 }

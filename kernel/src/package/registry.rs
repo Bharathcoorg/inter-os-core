@@ -1,4 +1,5 @@
 use alloc::vec::Vec;
+use alloc::string::{String, ToString};
 use crate::package::dependency::{PackagePolicy, PackageVersion};
 use crate::package::transaction::{InstallStage, InstallTransaction};
 use spin::Mutex;

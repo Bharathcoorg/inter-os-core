@@ -37,7 +37,7 @@ class SystemContractTests(unittest.TestCase):
         contract = (ROOT / "docs/QEMU_PHONE_PLATFORM.md").read_text(encoding="utf-8")
         studio = (ROOT / "emulator/server.py").read_text(encoding="utf-8")
         self.assertIn("127.0.0.1:5901", contract)
-        self.assertIn('"vnc", "127.0.0.1:1"', studio)
+        self.assertIn('"-vnc", "127.0.0.1:1"', studio)
         self.assertIn("127.0.0.1:5901", studio)
 
     def test_build_cli_exposes_canonical_demo(self):

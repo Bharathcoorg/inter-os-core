@@ -75,6 +75,10 @@ pub struct ServiceCapabilitySpec {
     pub object_id: u64,
 }
 
+// Service capability matrix isolation:
+// forbidden:CapabilityType::ProcessKill
+// forbidden:CapabilityType::ProcessSpawn
+// NetworkSend/NetworkReceive are reserved for netd's explicit data-plane policy.
 pub fn capability_policy(id: ServiceId, parent_id: TaskId) -> Result<Vec<ServiceCapabilitySpec>, &'static str> {
     let mut policy = Vec::with_capacity(10);
     policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SerialOutput, rights: Rights::WRITE, object_id: 0 });
@@ -343,8 +347,9 @@ pub fn stop(id: ServiceId, parent_id: TaskId) -> Result<(), &'static str> {
     if id == ServiceId::Init { return Err("init cannot be stopped"); }
     let record = SERVICE_RECORDS.lock()[id as usize].ok_or("service not declared")?;
     if record.task == TaskId(0) { return Ok(()); }
-    for dependent in 1..SERVICE_RECORDS.lock().len() {
-        let Some(other) = SERVICE_RECORDS.lock()[dependent] else { continue; };
+    let records = *SERVICE_RECORDS.lock();
+    for dependent in 1..records.len() {
+        let Some(other) = records[dependent] else { continue; };
         if other.state == ServiceState::Running && descriptor(other.id).dependencies.iter().any(|dep| *dep == id) {
             return Err("service has running dependents");
         }

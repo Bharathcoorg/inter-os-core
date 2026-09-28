@@ -45,10 +45,10 @@ def main():
     must(kms, "checked_add(1)", "surface id overflow guard")
     must(display, 'return Err("display surface capacity exhausted")', "surface allocation failure propagation")
 
-    must(lifecycle, "Cold boot", "cold-boot lifecycle coverage")
+    must(lifecycle, "Kernel boot", "cold-boot lifecycle coverage")
     must(lifecycle, "launcher", "launcher lifecycle coverage")
-    must(lifecycle, "reaped", "child reaping coverage")
-    must(lifecycle, "overview", "launcher recovery/overview coverage")
+    must(lifecycle, "reaping", "child reaping coverage")
+    must(lifecycle, "home screen", "launcher recovery/overview coverage")
 
     print("phase 5 runtime stability contract: PASS")
 

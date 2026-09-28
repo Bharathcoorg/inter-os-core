@@ -955,12 +955,12 @@ def cmd_run(args):
 # =============================================================================
 def cmd_contracts(args):
     """Run fast static system-contract checks without building the kernel."""
-    test_file = ROOT_DIR / "tests" / "test_system_contracts.py"
+    test_file = WORKSPACE_ROOT / "tests" / "test_system_contracts.py"
     if not test_file.exists():
         log_error("System contract test file is missing.")
         return 1
     log("Running InterOS system contract checks...")
-    result = subprocess.run([sys.executable, str(test_file)], cwd=str(ROOT_DIR))
+    result = subprocess.run([sys.executable, str(test_file)], cwd=str(WORKSPACE_ROOT))
     if result.returncode == 0:
         log_success("System contract checks passed.")
     else:

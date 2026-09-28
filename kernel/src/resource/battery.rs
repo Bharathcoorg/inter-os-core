@@ -46,7 +46,8 @@ impl BatteryFuelGauge {
             soc_percent: 0,
             temperature_c: 0,
             cycle_count: 0,
-            charging_status: ChargingStatus::Disconnected,
+            charging_status: ChargingStatus::Discharging,
+            telemetry_valid: false,
         }
     }
 

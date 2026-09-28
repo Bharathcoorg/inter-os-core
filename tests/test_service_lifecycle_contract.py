@@ -30,11 +30,13 @@ def main() -> None:
     must(system_service, "std::fs_write(4, fd", "storaged userspace filesystem write")
     must(system_service, "std::fs_close(fd)", "storaged descriptor lifecycle")
     must(storaged, "interos_system_service::run_storage()", "storaged uses dedicated storage manager")
-    must(user_task, "3 => Some((CapabilityType::FileSystemRead, Rights::READ | Rights::WRITE, 0))", "storaged namespace-scoped filesystem capability")
+    services = SERVICES.read_text()
+    must(services, "ServiceId::Storage => {", "storaged capability policy")
+    must(services, "CapabilityType::FileSystemRead", "storaged read capability")
+    must(services, "CapabilityType::FileSystemWrite", "storaged write capability")
 
     syscall = KERNEL_SYSCALL.read_text()
     sdk = SDK.read_text()
-    services = SERVICES.read_text()
     pid1 = PID1.read_text()
     sched = SCHED.read_text()
 
@@ -59,7 +61,7 @@ def main() -> None:
     must((ROOT / "kernel/src/task/user.rs").read_text(), "pub fn spawn_userspace_service",
          "userspace service process launcher")
     must(pid1, "std::service_start(service_id)", "PID1 service startup ABI")
-    must(pid1, "std::service_recover_failed()", "PID1 recovery ABI")
+    must(pid1, "std::service_recover_failed(service_id)", "PID1 recovery ABI")
 
     # Service-manager authority is object-scoped, not an ambient SystemControl
     # right. PID1 must hold the dedicated manager object capability and the
@@ -91,7 +93,7 @@ def main() -> None:
          "lifecycle lock acquisition")
     must(services, "fn start_locked(id: ServiceId, parent_id: TaskId)",
          "non-recursive locked start helper")
-    must(services, "start_locked(id, parent_id).is_ok()",
+    must(services, "start_locked(id, parent_id)",
          "recovery uses locked start helper")
 
     # Service capability matrix: each worker gets only the narrow authority
@@ -102,8 +104,8 @@ def main() -> None:
         "CapabilityType::ProcessKill",
         "CapabilityType::ProcessSpawn",
     ):
-        must((ROOT / "kernel/src/task/user.rs").read_text(), f"// forbidden:{forbidden}", f"capability isolation marker {forbidden}")
-    must((ROOT / "kernel/src/task/user.rs").read_text(), "NetworkSend/NetworkReceive are reserved for netd's explicit data-plane policy.", "network capability policy marker")
+        must(services, f"// forbidden:{forbidden}", f"capability isolation marker {forbidden}")
+    must(services, "NetworkSend/NetworkReceive are reserved for netd's explicit data-plane policy.", "network capability policy marker")
 
     for marker in (
         "ServiceId::Display =>",

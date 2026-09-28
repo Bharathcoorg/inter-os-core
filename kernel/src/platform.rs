@@ -1,6 +1,6 @@
 //! Truthful platform capability and verification contract.
 //!
-//! Gate D makes one rule explicit in the kernel: a feature may only be
+//! This module makes one rule explicit in the kernel: a feature may only be
 //! presented as hardware-backed when the platform has an actual backend.
 //! Emulators and unavailable devices remain explicit states.
 

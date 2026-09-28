@@ -102,11 +102,16 @@ impl EventReactor {
 
     /// Broadcasts an event to all tasks registered with interest in the event mask.
     pub fn broadcast_event(&mut self, event_mask: u32) {
-        let has_waiters = self.subscriptions.iter_mut().any(|sub| {
+        let mut has_waiters = false;
+        for sub in self.subscriptions.iter_mut() {
             let matched = event_mask & sub.interest_mask;
-            if matched != 0 { sub.pending_mask |= matched; }
-            matched != 0 && sub.is_waiting
-        });
+            if matched != 0 {
+                sub.pending_mask |= matched;
+                if sub.is_waiting {
+                    has_waiters = true;
+                }
+            }
+        }
         if has_waiters {
             if let Some(mut sched) = SCHEDULER.try_lock() {
                 for sub in self.subscriptions.iter_mut() {
@@ -178,14 +183,15 @@ impl EventReactor {
 
     /// Invoked on hardware timer tick to evaluate deadlines and wake timed-out tasks.
     pub fn on_tick(&mut self, current_ticks: u64) {
-        let has_expired = self.subscriptions.iter_mut().any(|sub| {
+        let mut has_expired = false;
+        for sub in self.subscriptions.iter_mut() {
             if sub.is_waiting && sub.wait_until_tick > 0 && current_ticks >= sub.wait_until_tick {
                 if (sub.interest_mask & EVENT_TIMER_TICK) != 0 {
                     sub.pending_mask |= EVENT_TIMER_TICK;
                 }
-                true
-            } else { false }
-        });
+                has_expired = true;
+            }
+        }
         if has_expired {
             if let Some(mut sched) = SCHEDULER.try_lock() {
                 for sub in self.subscriptions.iter_mut() {

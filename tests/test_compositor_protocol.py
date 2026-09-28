@@ -22,7 +22,8 @@ def main():
     must(sys,"pub fn sys_window_set_geometry(cap_slot: usize","window geometry capability boundary")
     must(sys,"pub fn sys_window_focus(cap_slot: usize","window focus capability boundary")
     must(sys,"require_display_service(cap_slot)","window operations require display service")
-    must(user,"FrameBufferDirect, Rights::WRITE, service_id as u64","display service framebuffer capability")
+    services=(ROOT/"kernel/src/services.rs").read_text()
+    must(services,"CapabilityType::FrameBufferDirect, rights: Rights::WRITE, object_id: 1","display service framebuffer capability")
     print("compositor/window protocol contract: PASS")
 if __name__=="__main__":
     main()

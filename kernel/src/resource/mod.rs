@@ -61,6 +61,8 @@ pub fn init() {
 
     // 5. Mobile DVFS Power Governor tests
     let mut pm = POWER_MANAGER.lock();
+    pm.update_thermal(35);
+    pm.update_battery(94, true);
     pm.set_governor(DvfsGovernor::Interactive);
     pm.on_touch_interaction();
     assert_eq!(pm.current_freq_mhz, 2400, "Touch boost must elevate to 2400 MHz");
@@ -79,7 +81,8 @@ pub fn init() {
     serial_println!("[TEST] Mobile DVFS Power Governor: Dynamic frequency scaling (2400 -> 1200 -> 600 MHz) VERIFIED.");
 
     // 6. Battery Fuel Gauge Driver tests
-    let bg = BATTERY_GAUGE.lock();
+    let mut bg = BATTERY_GAUGE.lock();
+    bg.set_telemetry(3850, 4700, 28, ChargingStatus::ChargingAC);
     assert_eq!(bg.soc_percent, 94);
     assert_eq!(bg.voltage_mv, 3850);
     assert_eq!(bg.charging_status, ChargingStatus::ChargingAC);
