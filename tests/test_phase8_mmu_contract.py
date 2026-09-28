@@ -26,6 +26,9 @@ def main():
     must(memory, "switch_to_kernel_page_table()", "safe active-address-space teardown")
 
     must(user, "load_user_elf_into_page_table", "direct per-process ELF loader")
+    must(user, "ELF must be ET_EXEC; dynamic/shared objects are unsupported", "static ELF type boundary")
+    must(user, "process identity missing after spawn", "spawn rollback path")
+    must(user, "set_address_space_usage(process, address_space_bytes)", "committed address-space accounting")
     must(user, "PT_INTERP dynamic linkers rejected", "static ELF policy")
     must(user, "W^X security violation", "ELF W^X enforcement")
     must(user, "Stack guard address underflow", "stack guard validation")
