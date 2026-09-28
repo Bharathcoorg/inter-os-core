@@ -530,6 +530,64 @@ def serial_stream_worker():
             time.sleep(1.5)
 
 
+def send_guest_serial_command(command, wait_for=None, timeout=12):
+    """Send a development command through the live QEMU COM1 TCP connection."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with serial_socket_lock:
+            conn = serial_socket_conn
+            if conn is not None:
+                try:
+                    conn.sendall((command.rstrip("\n") + "\n").encode("utf-8"))
+                    break
+                except OSError:
+                    pass
+        time.sleep(0.1)
+    else:
+        return False, "guest serial transport unavailable"
+
+    if not wait_for:
+        return True, "sent"
+
+    start = len(serial_lines)
+    while time.time() < deadline:
+        with telemetry_lock:
+            recent = serial_lines[start:]
+        for line in recent:
+            if wait_for in line:
+                if "REJECT" in line or "FAILED" in line:
+                    return False, line
+                return True, line
+        time.sleep(0.05)
+    return False, f"timeout waiting for guest response: {wait_for}"
+
+
+def transfer_rapp_to_guest(package_bytes, package_id, timeout=30):
+    if len(package_bytes) > 60000:
+        return False, "RAPP exceeds guest package blob limit"
+    ok, msg = send_guest_serial_command(
+        f"RAPP_BEGIN {package_id} {len(package_bytes)}",
+        "[RAPP_HOST] READY",
+        timeout=5,
+    )
+    if not ok:
+        return False, msg
+
+    # COM1 command lines are deliberately bounded. 24 bytes -> 48 hex chars,
+    # plus command framing, stays below the kernel RX command buffer.
+    for offset in range(0, len(package_bytes), 24):
+        chunk = package_bytes[offset:offset + 24]
+        ok, msg = send_guest_serial_command(
+            f"RAPP_CHUNK {offset} {chunk.hex()}",
+            "[RAPP_HOST] CHUNK",
+            timeout=5,
+        )
+        if not ok:
+            return False, msg
+
+    return send_guest_serial_command("RAPP_COMMIT", "[RAPP_HOST] INSTALLED", timeout=timeout)
+
+
 WORKSPACE_ROOT = os.path.dirname(DIRECTORY)
 
 SUPPORTED_PROFILES = {
@@ -1418,6 +1476,35 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
     def do_POST(self):
         global serial_lines
 
+        if self.path == '/api/rapp/trust':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            try:
+                data = json.loads(body.decode('utf-8'))
+                public_key = str(data.get("public_key", "")).strip().lower()
+                publisher = str(data.get("publisher", "developer")).strip()
+                if len(public_key) != 64 or len(publisher) == 0 or len(publisher) > 32:
+                    raise ValueError("public_key must be 32-byte hex and publisher <= 32 chars")
+                if any(ch not in "0123456789abcdef" for ch in public_key):
+                    raise ValueError("public_key is not hexadecimal")
+                ok, msg = send_guest_serial_command(
+                    f"RAPP_TRUST {public_key} {publisher}",
+                    "[RAPP_HOST] TRUSTED",
+                    timeout=10,
+                )
+                self.send_response(200 if ok else 409)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": ok, "message": msg, "source": "QEMU_COM1"}).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": False, "error": str(e)}).encode())
+            return
+
         if self.path == '/api/rapp/install':
             content_length = int(self.headers.get('Content-Length', 0))
             pkg_name = self.headers.get('X-Package-Name', 'unnamed.rapp')
@@ -1437,6 +1524,21 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             app_name = app_entry["name"]
             version = app_entry["version"]
             perms = app_entry["capabilities"]
+
+            guest_ok, guest_msg = transfer_rapp_to_guest(body, app_id)
+            if not guest_ok:
+                serial_lines.append(f"[RAPP_REJECT] Guest install failed for '{pkg_name}': {guest_msg}")
+                self.send_response(409)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'status': 'GUEST_REJECTED',
+                    'error': guest_msg,
+                    'package': app_entry,
+                }).encode())
+                return
 
             # Replace existing or append
             sideloaded_apps[:] = [a for a in sideloaded_apps if a.get("id") != app_id]
@@ -1514,16 +1616,23 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if self.path == '/api/rapp/launch':
-            self.send_response(409)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps({
-                'success': False,
-                'status': 'UNAVAILABLE',
-                'source': 'UNAVAILABLE',
-                'error': 'RAPP launch requires a live guest package-launch endpoint; Device Studio does not simulate process creation'
-            }).encode())
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            try:
+                data = json.loads(body.decode('utf-8'))
+                app_id = str(data.get("app_id", "")).strip()
+                if not app_id or "/" in app_id or "\\" in app_id or ".." in app_id:
+                    raise ValueError("invalid app_id")
+                ok, msg = send_guest_serial_command(f"RAPP_LAUNCH {app_id}", "[RAPP_HOST] LAUNCHED", timeout=12)
+                self.send_response(200 if ok else 409)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": ok, "message": msg, "app_id": app_id, "source": "QEMU_COM1"}).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": False, "error": str(e)}).encode())
             return
         if self.path == '/api/rapp/ipc':
             self.send_response(409)
