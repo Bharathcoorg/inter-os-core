@@ -188,18 +188,57 @@ impl TaskPageTable {
         frame: PhysFrame<Size4KiB>,
         flags: PageTableFlags,
     ) -> Result<(), &'static str> {
-        // Mapping is transactional: if any intermediate table allocation fails,
-        // or the target leaf is already occupied, return every frame allocated
-        // during this call to the global allocator. This prevents partial mappings
-        // from leaking physical memory on failed process setup.
+        // Mapping is transactional: any page-table frames allocated by this
+        // operation are unlinked before their frames are recycled. The caller
+        // retains ownership of the leaf frame on failure.
         let allocated_before = self.allocated_frames.len();
-        let rollback = |table: &mut Self| {
+        let rollback = |
+            table: &mut Self,
+            phys_offset: VirtAddr,
+            p4_idx: usize,
+            p3_idx: usize,
+            p2_idx: usize,
+            new_p3: bool,
+            new_p2: bool,
+            new_p1: bool,
+        | {
+            // Unlink newly-created tables before recycling them. Otherwise a
+            // later mapping could follow a recycled physical frame.
+            if new_p1 {
+                let pml4_ptr = (phys_offset + table.pml4_frame.start_address().as_u64()).as_mut_ptr::<PageTable>();
+                let pml4 = unsafe { &mut *pml4_ptr };
+                if let Ok(p3_frame) = pml4[p4_idx].frame() {
+                    let p3_ptr = (phys_offset + p3_frame.start_address().as_u64()).as_mut_ptr::<PageTable>();
+                    let p3 = unsafe { &mut *p3_ptr };
+                    if let Ok(p2_frame) = p3[p3_idx].frame() {
+                        let p2_ptr = (phys_offset + p2_frame.start_address().as_u64()).as_mut_ptr::<PageTable>();
+                        let p2 = unsafe { &mut *p2_ptr };
+                        p2[p2_idx].set_unused();
+                    }
+                }
+            }
+            if new_p2 {
+                let pml4_ptr = (phys_offset + table.pml4_frame.start_address().as_u64()).as_mut_ptr::<PageTable>();
+                let pml4 = unsafe { &mut *pml4_ptr };
+                if let Ok(p3_frame) = pml4[p4_idx].frame() {
+                    let p3_ptr = (phys_offset + p3_frame.start_address().as_u64()).as_mut_ptr::<PageTable>();
+                    let p3 = unsafe { &mut *p3_ptr };
+                    p3[p3_idx].set_unused();
+                }
+            }
+            if new_p3 {
+                let pml4_ptr = (phys_offset + table.pml4_frame.start_address().as_u64()).as_mut_ptr::<PageTable>();
+                let pml4 = unsafe { &mut *pml4_ptr };
+                pml4[p4_idx].set_unused();
+            }
+
             while table.allocated_frames.len() > allocated_before {
-                if let Some(frame) = table.allocated_frames.pop() {
-                    recycle_frame(frame);
+                if let Some(owned) = table.allocated_frames.pop() {
+                    recycle_frame(owned);
                 }
             }
         };
+
         let vaddr = page.start_address().as_u64();
         if vaddr >= 0x0000_8000_0000_0000 {
             return Err("Cannot map user page into kernel address space");
@@ -220,54 +259,62 @@ impl TaskPageTable {
 
         let table_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
 
-        // Level 4 -> Level 3 (PDPT)
+        let mut new_p3 = false;
         let p3_frame = if pml4[p4_idx].flags().contains(PageTableFlags::PRESENT) {
             pml4[p4_idx].frame().map_err(|_| "Huge page at PML4")?
         } else {
-            let Some(f) = allocate_frame() else { rollback(self); return Err("Out of memory for PDPT"); };
+            let Some(f) = allocate_frame() else {
+                rollback(self, phys_offset, p4_idx, p3_idx, p2_idx, false, false, false);
+                return Err("Out of memory for PDPT");
+            };
             self.allocated_frames.push(f);
             let ptr = (phys_offset + f.start_address().as_u64()).as_mut_ptr::<PageTable>();
             unsafe { (*ptr).zero(); }
             pml4[p4_idx].set_frame(f, table_flags);
+            new_p3 = true;
             f
         };
 
-        // Level 3 -> Level 2 (PD)
+        let mut new_p2 = false;
         let pdpt_ptr = (phys_offset + p3_frame.start_address().as_u64()).as_mut_ptr::<PageTable>();
         let pdpt = unsafe { &mut *pdpt_ptr };
-
         let p2_frame = if pdpt[p3_idx].flags().contains(PageTableFlags::PRESENT) {
             pdpt[p3_idx].frame().map_err(|_| "Huge page at PDPT")?
         } else {
-            let Some(f) = allocate_frame() else { rollback(self); return Err("Out of memory for PD"); };
+            let Some(f) = allocate_frame() else {
+                rollback(self, phys_offset, p4_idx, p3_idx, p2_idx, new_p3, false, false);
+                return Err("Out of memory for PD");
+            };
             self.allocated_frames.push(f);
             let ptr = (phys_offset + f.start_address().as_u64()).as_mut_ptr::<PageTable>();
             unsafe { (*ptr).zero(); }
             pdpt[p3_idx].set_frame(f, table_flags);
+            new_p2 = true;
             f
         };
 
-        // Level 2 -> Level 1 (PT)
+        let mut new_p1 = false;
         let pd_ptr = (phys_offset + p2_frame.start_address().as_u64()).as_mut_ptr::<PageTable>();
         let pd = unsafe { &mut *pd_ptr };
-
         let p1_frame = if pd[p2_idx].flags().contains(PageTableFlags::PRESENT) {
             pd[p2_idx].frame().map_err(|_| "Huge page at PD")?
         } else {
-            let Some(f) = allocate_frame() else { rollback(self); return Err("Out of memory for PT"); };
+            let Some(f) = allocate_frame() else {
+                rollback(self, phys_offset, p4_idx, p3_idx, p2_idx, new_p3, new_p2, false);
+                return Err("Out of memory for PT");
+            };
             self.allocated_frames.push(f);
             let ptr = (phys_offset + f.start_address().as_u64()).as_mut_ptr::<PageTable>();
             unsafe { (*ptr).zero(); }
             pd[p2_idx].set_frame(f, table_flags);
+            new_p1 = true;
             f
         };
 
-        // Level 1: Leaf PTE. Refuse remapping a live virtual page so a retry
-        // cannot orphan the old physical frame or create an ownership ambiguity.
         let pt_ptr = (phys_offset + p1_frame.start_address().as_u64()).as_mut_ptr::<PageTable>();
         let pt = unsafe { &mut *pt_ptr };
         if pt[p1_idx].flags().contains(PageTableFlags::PRESENT) {
-            rollback(self);
+            rollback(self, phys_offset, p4_idx, p3_idx, p2_idx, new_p3, new_p2, new_p1);
             return Err("Virtual page already mapped");
         }
 
@@ -275,7 +322,6 @@ impl TaskPageTable {
         pt[p1_idx].set_frame(frame, leaf_flags);
         self.allocated_frames.push(frame);
 
-        // If this page table is currently active, flush TLB
         let (active_cr3, _) = Cr3::read();
         if active_cr3 == self.pml4_frame {
             x86_64::instructions::tlb::flush(VirtAddr::new(vaddr));
@@ -316,11 +362,11 @@ impl TaskPageTable {
         }
 
         let frame = p1[p1_idx].frame().map_err(|_| "userspace leaf frame missing")?;
-        p1[p1_idx].set_unused();
+        let original_flags = p1[p1_idx].flags();
         let Some(pos) = self.allocated_frames.iter().position(|candidate| *candidate == frame) else {
-            p1[p1_idx].set_frame(frame, PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE);
             return Err("userspace frame ownership missing");
         };
+        p1[p1_idx].set_unused();
         self.allocated_frames.swap_remove(pos);
 
         let (active_cr3, _) = Cr3::read();

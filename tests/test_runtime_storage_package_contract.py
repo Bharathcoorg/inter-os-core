@@ -301,11 +301,11 @@ def test_reserved_thread_binding_failure_does_not_hide_scheduler_rollback():
     assert "THREAD_STACK" not in user or "map_user_thread_stack" in user
     assert "guard-page stride" in user
 
-def test_process_reap_rejects_live_sibling_threads():
+def test_process_leader_reap_preserves_zombie_until_sibling_threads_exit():
     process = (ROOT / "kernel/src/task/process.rs").read_text(encoding="utf-8")
-    scheduler = (ROOT / "kernel/src/task/scheduler.rs").read_text(encoding="utf-8")
-    assert "process still has live threads" in process
-    assert "process::reap(child_id)?" in scheduler
+    assert "record.leader_task = TaskId(0)" in process
+    assert "record.state = ProcessState::Zombie" in process
+    assert "remaining == 0 && record.state == ProcessState::Zombie" in process
 
 def test_tcp_receive_path_uses_strict_sequence_validation():
     tcp = (ROOT / "kernel/src/net/tcp.rs").read_text(encoding="utf-8")
@@ -372,3 +372,24 @@ def test_process_leader_reap_preserves_zombie_until_sibling_threads_exit():
     assert "record.leader_task = TaskId(0)" in process
     assert "remaining == 0 && record.state == ProcessState::Zombie" in process
     assert "record.state != ProcessState::Zombie" in process
+
+def test_thread_stack_binding_failure_rolls_back_mapped_stack():
+    user = (ROOT / "kernel/src/task/user.rs").read_text(encoding="utf-8")
+    scheduler = (ROOT / "kernel/src/task/scheduler.rs").read_text(encoding="utf-8")
+    assert "pub fn unmap_user_thread_stack" in user
+    assert "unmap_user_thread_stack(&mut pt, id)" in scheduler
+    assert 'return Err("thread stack rollback failed")' in scheduler
+
+def test_page_table_mapping_rollback_unlinks_new_intermediate_tables():
+    memory = (ROOT / "kernel/src/memory.rs").read_text(encoding="utf-8")
+    assert "let mut new_p3 = false" in memory
+    assert "let mut new_p2 = false" in memory
+    assert "let mut new_p1 = false" in memory
+    assert "p2[p2_idx].set_unused()" in memory
+    assert "p3[p3_idx].set_unused()" in memory
+    assert "pml4[p4_idx].set_unused()" in memory
+    assert "caller retains ownership of the leaf frame" in memory
+
+def test_unmap_preserves_leaf_flags_on_ownership_failure():
+    memory = (ROOT / "kernel/src/memory.rs").read_text(encoding="utf-8")
+    assert "let original_flags = p1[p1_idx].flags()" in memory

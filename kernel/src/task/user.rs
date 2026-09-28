@@ -350,6 +350,45 @@ pub fn map_user_thread_stack(
     Ok(top - 8)
 }
 
+/// Unmaps every page owned by a userspace thread stack.
+///
+/// Rollback attempts the complete deterministic stack range even if one mapping
+/// is already missing or corrupted. The first unexpected error is returned
+/// after all pages have been attempted.
+pub fn unmap_user_thread_stack(
+    page_table: &mut crate::memory::TaskPageTable,
+    task_id: TaskId,
+) -> Result<(), &'static str> {
+    let stride = 1024 * 1024usize;
+    let base = 0x0000_7000_0000_0000usize;
+    let offset = (task_id.0 as usize).checked_mul(stride).ok_or("thread stack address overflow")?;
+    let top = base.checked_sub(offset).ok_or("thread stack address underflow")?;
+    if top <= USER_STACK_SIZE + 4096 || top >= 0x0000_8000_0000_0000 {
+        return Err("thread stack outside user range");
+    }
+
+    let bottom = top - USER_STACK_SIZE;
+    let start = Page::<Size4KiB>::containing_address(VirtAddr::new(bottom as u64));
+    let end = Page::<Size4KiB>::containing_address(VirtAddr::new((top - 1) as u64));
+    let mut first_error = None;
+
+    for page in Page::range_inclusive(start, end) {
+        match page_table.unmap_user_page(page) {
+            Ok(()) | Err("userspace page is not mapped") => {}
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
 /// Universal entry point for userspace processes launched in Ring 3.
 pub extern "C" fn user_process_entry() -> ! {
     let (user_entry, user_stack_top) = {

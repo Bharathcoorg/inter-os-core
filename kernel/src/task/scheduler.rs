@@ -140,7 +140,14 @@ impl Scheduler {
         tcb.user_stack_top = user_stack_top;
         tcb.page_table = Some(shared_space);
         if let Err(e) = crate::task::process::bind_reserved_thread(process_id, id) {
+            let rollback = {
+                let mut pt = shared_space.lock();
+                crate::task::user::unmap_user_thread_stack(&mut pt, id)
+            };
             crate::task::process::cancel_thread_reservation(process_id);
+            if rollback.is_err() {
+                return Err("thread stack rollback failed");
+            }
             return Err(e);
         }
         self.tasks.push(tcb);
