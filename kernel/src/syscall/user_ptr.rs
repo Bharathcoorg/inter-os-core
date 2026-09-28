@@ -71,7 +71,7 @@ impl<T> UserPtr<T> {
     /// Creates a new `UserPtr` from a raw address after validating user space bounds.
     pub fn new(addr: u64) -> Result<Self, UserAccessError> {
         let size = core::mem::size_of::<T>();
-        validate_user_buffer(addr, size)?;
+        let align = core::mem::align_of::<T>();\n        if align > 1 && addr % align as u64 != 0 { return Err(UserAccessError::Misaligned); }\n        validate_current_user_buffer(addr, size, false)?;
         Ok(Self {
             addr,
             _marker: PhantomData,
@@ -86,7 +86,7 @@ impl<T> UserPtr<T> {
     /// Safely copies the value from userspace memory into a kernel-local `T`.
     pub unsafe fn read(&self) -> Result<T, UserAccessError> {
         let size = core::mem::size_of::<T>();
-        validate_user_buffer(self.addr, size)?;
+        validate_current_user_buffer(self.addr, size, false)?;
         let ptr = self.addr as *const T;
         Ok(core::ptr::read_unaligned(ptr))
     }
@@ -126,7 +126,7 @@ impl UserSlice {
         if self.len == 0 {
             return Ok(0);
         }
-        validate_user_buffer(self.addr, self.len)?;
+        validate_current_user_buffer(self.addr, self.len, false)?;
         unsafe {
             core::ptr::copy_nonoverlapping(
                 self.addr as *const u8,
@@ -139,6 +139,17 @@ impl UserSlice {
 
     /// Validates that the userspace slice represents a valid UTF-8 string and executes
     /// the provided closure with the kernel-borrowed string slice.
+    pub fn copy_to_kernel_typed<T: Copy>(&self, dst: &mut [T]) -> Result<usize, UserAccessError> {
+        let align = core::mem::align_of::<T>();
+        if align > 1 && self.addr % align as u64 != 0 { return Err(UserAccessError::Misaligned); }
+        let byte_len = self.len.checked_mul(core::mem::size_of::<T>()).ok_or(UserAccessError::Overflow)?;
+        let dst_bytes = dst.len().checked_mul(core::mem::size_of::<T>()).ok_or(UserAccessError::Overflow)?;
+        if byte_len > MAX_USER_TRANSFER_LEN || dst_bytes < byte_len { return Err(UserAccessError::OutOfBounds); }
+        validate_current_user_buffer(self.addr, byte_len, false)?;
+        unsafe { core::ptr::copy_nonoverlapping(self.addr as *const T, dst.as_mut_ptr(), self.len); }
+        Ok(self.len)
+    }
+
     pub fn with_str<R, F: FnOnce(&str) -> R>(&self, kernel_buf: &mut [u8], f: F) -> Result<R, UserAccessError> {
         let n = self.copy_to_kernel(kernel_buf)?;
         let s = core::str::from_utf8(&kernel_buf[..n]).map_err(|_| UserAccessError::InvalidUtf8)?;
@@ -178,7 +189,7 @@ impl UserSliceMut {
         if to_copy == 0 {
             return Ok(0);
         }
-        validate_user_buffer(self.addr, to_copy)?;
+        validate_current_user_buffer(self.addr, to_copy, true)?;
         unsafe {
             core::ptr::copy_nonoverlapping(
                 src.as_ptr(),
@@ -199,7 +210,7 @@ pub fn copy_from_user(dst: &mut [u8], src_addr: u64, len: usize) -> Result<usize
     if len == 0 {
         return Ok(0);
     }
-    validate_user_buffer(src_addr, len)?;
+    validate_current_user_buffer(src_addr, len, false)?;
     unsafe {
         core::ptr::copy_nonoverlapping(src_addr as *const u8, dst.as_mut_ptr(), len);
     }
@@ -213,7 +224,7 @@ pub fn copy_to_user(dst_addr: u64, src: &[u8]) -> Result<usize, UserAccessError>
     if len == 0 {
         return Ok(0);
     }
-    validate_user_buffer(dst_addr, len)?;
+    validate_current_user_buffer(dst_addr, len, true)?;
     unsafe {
         core::ptr::copy_nonoverlapping(src.as_ptr(), dst_addr as *mut u8, len);
     }
@@ -228,7 +239,7 @@ pub fn read_user_value<T: Copy>(addr: u64) -> Result<T, UserAccessError> {
     if addr % (align as u64) != 0 {
         return Err(UserAccessError::OutOfBounds);
     }
-    validate_user_buffer(addr, size)?;
+    validate_current_user_buffer(addr, size, false)?;
     unsafe {
         Ok(core::ptr::read_unaligned(addr as *const T))
     }
@@ -242,7 +253,7 @@ pub fn write_user_value<T: Copy>(dst_addr: u64, val: &T) -> Result<(), UserAcces
     if dst_addr % (align as u64) != 0 {
         return Err(UserAccessError::OutOfBounds);
     }
-    validate_user_buffer(dst_addr, size)?;
+    validate_current_user_buffer(dst_addr, size, true)?;
     unsafe {
         core::ptr::write_unaligned(dst_addr as *mut T, *val);
     }
