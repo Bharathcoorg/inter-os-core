@@ -527,6 +527,7 @@ pub fn spawn_userspace_service(service_id: u8, parent_id: TaskId) -> Result<Task
         8 => crate::services::ServiceId::Camera,
         9 => crate::services::ServiceId::Compositor,
         10 => crate::services::ServiceId::Launcher,
+        11 => crate::services::ServiceId::Sensor,
         _ => return Err("unknown userspace service"),
     };
     let image = service_image(service_id).ok_or("unknown userspace service image")?;
