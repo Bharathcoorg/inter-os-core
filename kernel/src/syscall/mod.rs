@@ -3373,6 +3373,27 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
     // kernel verifies the package, derives capabilities only from its manifest,
     // and loads the signed ELF payload into a Ring-3 child. First-party
     // built-in apps continue through the native launcher table below.
+    // External applications installed through the QEMU developer transport are
+    // loaded from the persistent package blob store. This keeps launch independent
+    // from the mutable VFS namespace while retaining kernel-side verification.
+    if !app_id.is_empty() && !app_id.contains('/') && !app_id.contains('\\') && !app_id.contains("..") {
+        if let Some(blob) = crate::package::PACKAGE_BLOB_STORE.lock().get(app_id).cloned() {
+            let verified = crate::package::parse_rapp(&blob.bytes)
+                .map_err(|_| SyscallResult::IntegrityViolation)?;
+            if verified.package_id != app_id || verified.version != blob.version {
+                return Err(SyscallResult::IntegrityViolation);
+            }
+            let payload_end = verified.payload_offset.checked_add(verified.payload_len)
+                .ok_or(SyscallResult::InvalidArguments)?;
+            let payload = &blob.bytes[verified.payload_offset..payload_end];
+            let tid = crate::task::user::spawn_verified_rapp_process(&verified, payload, parent_id)
+                .map_err(|_| SyscallResult::DeviceError)?;
+            crate::ipc::IPC_ROUTER.lock().register_task(tid);
+            serial_println!("[APP] Launched persistent RAPP '{}' as Task {}", verified.package_id, tid.0);
+            return Ok(tid);
+        }
+    }
+
     if !app_id.is_empty()
         && !app_id.contains('/')
         && !app_id.contains('\\')
