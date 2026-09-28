@@ -14,7 +14,8 @@ Usage:
   python tools/interos.py sign <package_or_file> [--key <key_path>]
   python tools/interos.py verify <package.rapp>
   python tools/interos.py install <package_path> [--port 4300]
-  python tools/interos.py run <app_name> [--target aarch64-unknown-none] [--port 4300]
+  python tools/interos.py trust <package.rapp> [--publisher developer] [--port 4300]
+  python tools/interos.py run <app_name> [--target x86_64-unknown-none] [--port 4300]
   python tools/interos.py stop <app_name> [--port 4300]
   python tools/interos.py restart <app_name> [--port 4300]
   python tools/interos.py logs [--port 4300] [--serial]
