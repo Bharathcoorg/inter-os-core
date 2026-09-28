@@ -1,5 +1,6 @@
 Stop-Process -Name "qemu-system-aarch64" -Force -ErrorAction SilentlyContinue
 $log = "$PSScriptRoot\..\target\test_aarch64_v6_1.log"
+if (Test-Path $log) { Remove-Item -Force $log }
 $k1 = "$PSScriptRoot\..\target\aarch64-unknown-none\debug\kernel-aarch64"
 $k2 = "$PSScriptRoot\..\kernel-aarch64\target\aarch64-unknown-none\debug\kernel-aarch64"
 $kernel = if (Test-Path $k1) { $k1 } else { $k2 }

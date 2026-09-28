@@ -1,5 +1,6 @@
 Stop-Process -Name "qemu-system-riscv64" -Force -ErrorAction SilentlyContinue
 $log = "$PSScriptRoot\..\target\riscv64_boot.log"
+if (Test-Path $log) { Remove-Item -Force $log }
 $k1 = "$PSScriptRoot\..\target\riscv64gc-unknown-none-elf\debug\kernel-riscv64"
 $k2 = "$PSScriptRoot\..\kernel-riscv64\target\riscv64gc-unknown-none-elf\debug\kernel-riscv64"
 $kernel = if (Test-Path $k1) { $k1 } else { $k2 }
