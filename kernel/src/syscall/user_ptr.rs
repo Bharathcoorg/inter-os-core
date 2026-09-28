@@ -35,6 +35,10 @@ pub enum UserAccessError {
     InvalidUtf8,
     /// Page table validation failed (not mapped or insufficient permissions).
     NotMapped,
+    /// The page is mapped but is not accessible from userspace with the requested access.
+    PermissionDenied,
+    /// A typed userspace pointer does not satisfy its required alignment.
+    Misaligned,
 }
 
 /// Validates that the memory range `[addr, addr + len)` resides entirely within
@@ -60,6 +64,28 @@ pub fn validate_user_buffer(addr: u64, len: usize) -> Result<(), UserAccessError
     Ok(())
 }
 
+fn validate_current_user_buffer(addr: u64, len: usize, write: bool) -> Result<(), UserAccessError> {
+    validate_user_buffer(addr, len)?;
+    if len == 0 { return Ok(()); }
+
+    let page_table = {
+        let sched = crate::task::SCHEDULER.lock();
+        let task = sched.current_task().ok_or(UserAccessError::NotMapped)?;
+        task.page_table.clone().ok_or(UserAccessError::NotMapped)?
+    };
+
+    page_table
+        .lock()
+        .validate_user_range(addr, len, write)
+        .map_err(|reason| match reason {
+            "user page is not mapped" => UserAccessError::NotMapped,
+            "user page is not accessible" | "user page is not writable" |
+            "user frame is not owned by task" => UserAccessError::PermissionDenied,
+            "address overflow" | "page iteration overflow" => UserAccessError::Overflow,
+            _ => UserAccessError::OutOfBounds,
+        })
+}
+
 /// A strongly typed wrapper around an unvalidated userspace pointer `T`.
 #[derive(Debug, Clone, Copy)]
 pub struct UserPtr<T> {
@@ -72,7 +98,8 @@ impl<T> UserPtr<T> {
     pub fn new(addr: u64) -> Result<Self, UserAccessError> {
         let size = core::mem::size_of::<T>();
         let align = core::mem::align_of::<T>();
-        if align > 1 && addr % align as u64 != 0 { return Err(UserAccessError::Misaligned); }\n        validate_current_user_buffer(addr, size, false)?;
+        if align > 1 && addr % align as u64 != 0 { return Err(UserAccessError::Misaligned); }
+        validate_current_user_buffer(addr, size, false)?;
         Ok(Self {
             addr,
             _marker: PhantomData,
