@@ -150,8 +150,8 @@ impl TaskPageTable {
             let new_pml4 = &mut *new_pml4_ptr;
             new_pml4.zero();
 
-            // Mirror all kernel and supervisor entries (1..512) from kernel PML4.
-            // Index 0 is reserved exclusively for isolated Ring 3 user memory (text, stack, heap).
+            // Mirror only the kernel/supervisor higher half (256..512) from the kernel PML4.
+            // The entire lower half remains private to this Ring-3 address space.
             let kernel_pml4_frame = kernel_pml4();
             let kernel_pml4_ptr = (phys_offset + kernel_pml4_frame.start_address().as_u64()).as_ptr::<PageTable>();
             let kernel_pml4 = &*kernel_pml4_ptr;
