@@ -131,6 +131,15 @@ pub fn run_camera() -> ! {
     }
 }
 
+pub fn run_audio() -> ! {
+    let _ = std::log(0, "[audiod] userspace audio manager online.");
+    loop {
+        let _ = std::service_heartbeat(7);
+        let _ = std::audio_query_volume();
+        let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 20);
+    }
+}
+
 pub fn run_sensor() -> ! {
     let _ = std::log(0, "[sensord] userspace sensor manager online.");
     let mut status = [0u8; 128];
