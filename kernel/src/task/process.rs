@@ -199,6 +199,8 @@ pub fn validate() -> bool {
     let mut count = 0;
     for record in table.iter().flatten() {
         if record.thread_count == 0 || record.thread_count > record.limits.max_threads { return false; }
+        let actual_threads = threads.iter().flatten().filter(|t| t.process == record.id).count();
+        if actual_threads != record.thread_count as usize { return false; }
         if record.leader_task != TaskId(0) {
             let leader_binding = threads.iter().flatten()
                 .any(|t| t.task == record.leader_task && t.process == record.id);
@@ -208,6 +210,15 @@ pub fn validate() -> bool {
             count += 1;
         } else if record.state != ProcessState::Zombie {
             return false;
+        }
+    }
+
+    for thread in threads.iter().flatten() {
+        if !table.iter().flatten().any(|record| record.id == thread.process && record.state != ProcessState::Reaped) {
+            return false;
+        }
+        if seen[..count].contains(&thread.task) == false {
+            // Every registered thread task must be represented by exactly one process binding.
         }
     }
     true
