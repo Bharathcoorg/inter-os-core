@@ -1321,6 +1321,20 @@ pub fn camera_capture(preview_buf: &mut [u8], meta_out: &mut [u32; 4]) -> Result
 }
 
 /// Toggles the mobile camera LED flash torch state.
+pub fn camera_autofocus_state() -> Result<bool, i64> {
+    let mut dummy = [0u8; 1];
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::CameraCapture,
+            2,
+            dummy.as_mut_ptr() as u64,
+            dummy.len() as u64,
+            0,
+        )
+    };
+    if ret >= 0 { Ok(ret != 0) } else { Err(ret) }
+}
+
 pub fn camera_toggle_flash() -> Result<bool, i64> {
     let mut dummy = [0u8; 1];
     let ret = unsafe {
