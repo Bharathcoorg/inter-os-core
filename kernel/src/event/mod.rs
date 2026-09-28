@@ -186,27 +186,21 @@ impl EventReactor {
 
     /// Invoked on hardware timer tick to evaluate deadlines and wake timed-out tasks.
     pub fn on_tick(&mut self, current_ticks: u64) {
-        let mut to_unblock = [None; 16];
-        let mut count = 0;
+        let mut should_wake = false;
         for sub in self.subscriptions.iter_mut() {
             if sub.is_waiting && sub.wait_until_tick > 0 && current_ticks >= sub.wait_until_tick {
                 if (sub.interest_mask & EVENT_TIMER_TICK) != 0 {
                     sub.pending_mask |= EVENT_TIMER_TICK;
                 }
-                if count < 16 {
-                    to_unblock[count] = Some(sub.task_id);
-                    count += 1;
-                }
+                sub.is_waiting = false;
+                should_wake = true;
             }
         }
-        if count > 0 {
+        if should_wake {
             if let Some(mut sched) = SCHEDULER.try_lock() {
-                for i in 0..count {
-                    if let Some(task_id) = to_unblock[i] {
-                        if let Some(sub) = self.subscriptions.iter_mut().find(|s| s.task_id == task_id) {
-                            sub.is_waiting = false;
-                        }
-                        sched.unblock_task(task_id);
+                for sub in &self.subscriptions {
+                    if sub.pending_mask & EVENT_TIMER_TICK != 0 {
+                        sched.unblock_task(sub.task_id);
                     }
                 }
             }
