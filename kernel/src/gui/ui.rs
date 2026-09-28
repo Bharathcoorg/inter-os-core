@@ -63,6 +63,27 @@ impl UiLayout {
         Self { axis, alignment: Alignment::Start, spacing: 0, padding: UiInsets { left:0, top:0, right:0, bottom:0 } }
     }
 
+    pub fn layout_child_bounds(&self, parent: UiBounds, count: usize, child_main: u32, index: usize) -> Option<UiBounds> {
+        if count == 0 || index >= count { return None; }
+        let area = parent.inset(self.padding);
+        let spacing_total = self.spacing.saturating_mul(count.saturating_sub(1) as u32);
+        let main = match self.axis { Axis::Horizontal => area.width, Axis::Vertical => area.height };
+        let cross = match self.axis { Axis::Horizontal => area.height, Axis::Vertical => area.width };
+        let fixed = child_main.min(main.saturating_sub(spacing_total));
+        let used = fixed.saturating_mul(count as u32).saturating_add(spacing_total);
+        let start_offset = match self.alignment {
+            Alignment::Start | Alignment::Stretch => 0,
+            Alignment::Center => main.saturating_sub(used) / 2,
+            Alignment::End => main.saturating_sub(used),
+        };
+        let main_pos = start_offset.saturating_add(index as u32 * fixed.saturating_add(self.spacing));
+        let (w,h,x,y) = match self.axis {
+            Axis::Horizontal => (fixed, cross, area.x.saturating_add(main_pos as i32), area.y),
+            Axis::Vertical => (cross, fixed, area.x, area.y.saturating_add(main_pos as i32)),
+        };
+        Some(UiBounds { x, y, width: w, height: h })
+    }
+
     pub fn place(&self, parent: UiBounds, count: usize, child_main: u32) -> (UiBounds, usize) {
         if count == 0 { return (parent.inset(self.padding), 0); }
         let area = parent.inset(self.padding);
