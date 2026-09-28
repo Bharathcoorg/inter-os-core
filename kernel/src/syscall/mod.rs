@@ -3489,8 +3489,8 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
                 Ok(msg) => {
                     let copy_len = core::cmp::min(capacity, msg.len);
                     if copy_to_user(a2, &msg.payload[..copy_len]).is_err()
-                        || write_user_value(a4, msg.sender.0).is_err()
-                        || write_user_value(a5, msg.msg_type).is_err()
+                        || write_user_value(a4, &msg.sender.0).is_err()
+                        || write_user_value(a5, &msg.msg_type).is_err()
                     {
                         return SyscallResult::InvalidArguments as i64;
                     }
