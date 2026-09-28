@@ -81,6 +81,7 @@ class SystemContractTests(unittest.TestCase):
         self.assertIn("INPUT_TOUCH DOWN", server)
         self.assertIn("/api/input/key", server)
         self.assertIn("INPUT_KEY", server)
+        self.assertIn("codePointAt(0)", app)
         self.assertIn("Math.min(1279", app)
         self.assertIn("/api/touch/event", app)
         self.assertIn("/api/input/key", app)
