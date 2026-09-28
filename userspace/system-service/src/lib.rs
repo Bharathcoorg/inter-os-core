@@ -102,6 +102,45 @@ pub fn run_network() -> ! {
     }
 }
 
+pub fn run_power() -> ! {
+    let _ = std::log(0, "[powerd] userspace power manager online.");
+    let mut telemetry = [0u8; 128];
+    loop {
+        let _ = std::service_heartbeat(5);
+        let _ = std::battery_query(&mut telemetry);
+        let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 20);
+    }
+}
+
+pub fn run_modem() -> ! {
+    let _ = std::log(0, "[modemd] userspace telephony manager online.");
+    let mut status = [0u8; 256];
+    loop {
+        let _ = std::service_heartbeat(6);
+        let _ = std::telephony_query(&mut status);
+        let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK | std::EVENT_MODEM_URC, 20);
+    }
+}
+
+pub fn run_camera() -> ! {
+    let _ = std::log(0, "[camerad] userspace camera manager online.");
+    loop {
+        let _ = std::service_heartbeat(8);
+        let _ = std::camera_autofocus_state();
+        let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 20);
+    }
+}
+
+pub fn run_sensor() -> ! {
+    let _ = std::log(0, "[sensord] userspace sensor manager online.");
+    let mut status = [0u8; 128];
+    loop {
+        let _ = std::service_heartbeat(11);
+        let _ = std::sensor_read(&mut status);
+        let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 20);
+    }
+}
+
 pub fn run_storage() -> ! {
     let _ = std::log(0, "[storaged] userspace storage manager online.");
     let mut last_tick = 0u64;
