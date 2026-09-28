@@ -175,6 +175,28 @@ impl PowerManager {
 }
 
 
+pub trait PowerDomain {
+    fn prepare_suspend(&mut self) -> Result<(), &'static str>;
+    fn suspend(&mut self) -> Result<(), &'static str>;
+    fn resume(&mut self) -> Result<(), &'static str>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PowerDomainMask(pub u32);
+
+impl PowerDomainMask {
+    pub const CPU: u32 = 1 << 0;
+    pub const GPU: u32 = 1 << 1;
+    pub const DISPLAY: u32 = 1 << 2;
+    pub const MODEM: u32 = 1 << 3;
+    pub const WIFI: u32 = 1 << 4;
+    pub const BLUETOOTH: u32 = 1 << 5;
+    pub const SENSORS: u32 = 1 << 6;
+    pub const AUDIO: u32 = 1 << 7;
+    pub const fn all() -> Self { Self(Self::CPU|Self::GPU|Self::DISPLAY|Self::MODEM|Self::WIFI|Self::BLUETOOTH|Self::SENSORS|Self::AUDIO) }
+    pub const fn contains(self, bit:u32)->bool { self.0 & bit != 0 }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum SuspendState { Active=0, Preparing=1, Suspended=2, Resuming=3 }
@@ -188,10 +210,11 @@ pub struct PowerTransition {
     pub state: SuspendState,
     pub wake_mask: u32,
     pub entered_at: u64,
+    pub suspended_domains: PowerDomainMask,
 }
 
 impl PowerTransition {
-    pub const fn new() -> Self { Self { state:SuspendState::Active, wake_mask:0, entered_at:0 } }
+    pub const fn new() -> Self { Self { state:SuspendState::Active, wake_mask:0, entered_at:0, suspended_domains:PowerDomainMask(0) } }
     pub fn enable_wake(&mut self, source:WakeSource) { self.wake_mask |= 1u32 << source as u8; }
     pub fn disable_wake(&mut self, source:WakeSource) { self.wake_mask &= !(1u32 << source as u8); }
     pub fn wake_enabled(&self, source:WakeSource)->bool { self.wake_mask & (1u32 << source as u8) != 0 }
@@ -202,7 +225,7 @@ impl PowerTransition {
     }
     pub fn enter_suspend(&mut self)->Result<(),&'static str>{
         if self.state != SuspendState::Preparing { return Err("suspend not prepared"); }
-        self.state=SuspendState::Suspended; Ok(())
+        self.state=SuspendState::Suspended; self.suspended_domains=PowerDomainMask::all(); Ok(())
     }
     pub fn wake(&mut self, source:WakeSource)->Result<(),&'static str>{
         if self.state != SuspendState::Suspended || !self.wake_enabled(source) { return Err("wake source not armed"); }
@@ -210,6 +233,6 @@ impl PowerTransition {
     }
     pub fn resume_complete(&mut self)->Result<(),&'static str>{
         if self.state != SuspendState::Resuming { return Err("resume not pending"); }
-        self.state=SuspendState::Active; Ok(())
+        self.state=SuspendState::Active; self.suspended_domains=PowerDomainMask(0); Ok(())
     }
 }
