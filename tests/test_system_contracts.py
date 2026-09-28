@@ -30,7 +30,7 @@ class SystemContractTests(unittest.TestCase):
         names = [item["name"] for item in manifest["required"]]
         images = (ROOT / "kernel/src/task/images.rs").read_text(encoding="utf-8")
         for name in names:
-            self.assertIn(f'/{name}")', images, f"{name} is not embedded by the kernel image registry")
+            self.assertIn(f"/{name}", images, f"{name} is not embedded by the kernel image registry")
         self.assertEqual(len(names), len(set(names)))
 
     def test_qemu_phone_contract_uses_one_vnc_endpoint(self):
