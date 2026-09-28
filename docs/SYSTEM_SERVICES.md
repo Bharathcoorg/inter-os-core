@@ -36,7 +36,7 @@ A running dependency cannot be stopped while a registered dependent service is s
 
 ## Resource isolation
 
-Each first-party service receives a process-level budget for threads, open files, IPC endpoints, and userspace address space. These limits are applied immediately after process registration and before the service is published as running.
+Each first-party service receives process-level budgets. Thread and open-file limits are enforced at the process/VFS boundaries and are applied immediately after process registration, before the service is published as running. IPC-endpoint and address-space budget fields are reserved in the process resource contract for the next resource-accounting layer; they are not represented as fully enforced counters yet.
 
 Service diagnostics expose lifecycle state, generation, heartbeat age, and cumulative failure count through the existing bounded service-list ABI.
 
