@@ -38,7 +38,7 @@ In accordance with our engineering integrity policy, every subsystem is classifi
 
 | Subsystem / Feature | Implementation State | Verification Level | Verification Evidence / Mechanism |
 | :--- | :--- | :--- | :--- |
-| **x86_64 Virtual Address Isolation** | Real 4-Level PML4 CR3 per-process paging, W^X, stack guard pages | **Implemented; QEMU validation pending** | Kernel page-table and loader contracts are present; this pass does not claim a fresh runtime boot validation |
+| **x86_64 Virtual Address Isolation** | Real 4-Level PML4 CR3 per-process paging, W^X, stack guard pages | **Implemented; runtime evidence not claimed by this phase** | Kernel page-table and loader contracts are present; this pass does not claim a fresh runtime boot validation |
 | **AArch64 Virtual Address Isolation** | Architecture/platform work in progress | **Source-level only** | No current runtime evidence is claimed in this repository state |
 | **RISC-V 64 MMU & U-Mode** | Architecture/platform work in progress | **Source-level only** | No current runtime evidence is claimed in this repository state |
 | **Syscall Pointer Validation** | `UserPtr<T>`, `UserSlice`, `copy_from_user`, `copy_to_user` | **Implemented & Adversarially Tested** | Null exclusion (<0x1000), integer overflow prevention, kernel address range rejection |
@@ -46,9 +46,9 @@ In accordance with our engineering integrity policy, every subsystem is classifi
 | **Capability Security Model** | Per-process capability token table, rights bitmask, generation tags | **Implemented & Tested** | Non-forgeable object handles; cross-process handle sharing prevented without delegation |
 | **Shared-Memory IPC** | Bounded ring buffers, atomic synchronization primitives | **Implemented & Tested** | Capability-gated endpoints; process termination cleans up and closes endpoints |
 | **Cryptographic `.rapp` Packages** | ZIP archives with canonical manifest, SHA-256 digests, Ed25519 signatures | **Implemented & Adversarially Tested** | Unsigned packages rejected; altered files trigger hash mismatch; zip-slip traversal blocked |
-| **Device Studio QEMU Backend** | Multi-arch process manager (`x86_64`, `aarch64`, `riscv64`) | **Implemented & Tested** | Real QEMU lifecycle management, live HMP/QMP register queries, dashes (`—`) when offline |
+| **Device Studio QEMU Backend** | Multi-arch process manager (`x86_64`, `aarch64`, `riscv64`) | **Implemented; runtime evidence is target-specific** | Real QEMU lifecycle management, live HMP/QMP register queries, dashes (`—`) when offline |
 | **Studio Adversarial Hardening** | SSRF filters, path traversal sanitization, command sandbox | **Implemented & Adversarially Tested** | `tests/test_adversarial_security.py` passes 6/6 tests (loopback, RFC1918, metadata rejection) |
-| **Unified Developer CLI (`interos`)** | Cross-platform CLI (`tools/interos.py`, `interos.ps1`, `interos.cmd`) | **Implemented & Tested** | `doctor`, `build`, `test`, `new`, `pack`, `sign`, `verify`, `devices`, `run`, `stop` |
+| **Unified Developer CLI (`interos`)** | Cross-platform CLI (`tools/interos.py`, `interos.ps1`, `interos.cmd`) | **Implemented; static contracts present** | `doctor`, `build`, `test`, `new`, `pack`, `sign`, `verify`, `devices`, `run`, `stop` |
 | **Userspace Reference Shell** | Surface, System Line, Activity Space, Events, Objects | **Implemented (Web/Studio)** | Modular consumer UX decoupled from kernel; honest telemetry from guest |
 | **Fastboot v2 Android Boot Image** | `boot-aarch64.img` (Android v2 header embedding ARM64 microkernel) | **Experimental Bring-Up** | Standard header validated; target bring-up on PinePhone (Allwinner A64) |
 | **DRM/KMS Multi-Surface Compositor** | Double-buffered scanout, z-order multi-plane composition, Porter-Duff blending | **Implemented & Kernel-Tested** | `kernel/src/drivers/display_kms.rs`; page flips & alpha-blended overlay composition; Syscalls 69-70 |
@@ -222,9 +222,9 @@ interos run --target aarch64
 
 | Architecture | Microkernel Crate | Target Triple | Target Platform | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **x86_64** | `kernel` | `x86_64-unknown-none` | QEMU PC (`pc-q35`), UEFI/BIOS | Verified in QEMU |
-| **AArch64** | `kernel-aarch64` | `aarch64-unknown-none` | QEMU `virt` (Cortex-A53), PinePhone | Verified in QEMU / Exp. Bring-Up |
-| **RISC-V 64** | `kernel-riscv64` | `riscv64gc-unknown-none-elf` | QEMU `virt` (RV64), VisionFive 2 | Verified in QEMU / Exp. Bring-Up |
+| **x86_64** | `kernel` | `x86_64-unknown-none` | QEMU PC (`pc-q35`), BIOS | Canonical QEMU contract; runtime verification is evidence-gated |
+| **AArch64** | `kernel-aarch64` | `aarch64-unknown-none` | QEMU `virt` (Cortex-A53), PinePhone | Source-level target; runtime validation pending |
+| **RISC-V 64** | `kernel-riscv64` | `riscv64gc-unknown-none-elf` | QEMU `virt` (RV64), VisionFive 2 | Source-level target; runtime validation pending |
 
 For experimental physical device deployment, see [docs/PHYSICAL_HARDWARE_FLASHING.md](docs/PHYSICAL_HARDWARE_FLASHING.md).
 
