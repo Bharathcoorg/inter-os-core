@@ -106,22 +106,24 @@ def main() -> None:
     must((ROOT / "kernel/src/task/user.rs").read_text(), "NetworkSend/NetworkReceive are reserved for netd's explicit data-plane policy.", "network capability policy marker")
 
     for marker in (
-        "// service-cap:Display=FrameBufferDirect:WRITE",
-        "// service-cap:Input=EventPoll:READ",
-        "// service-cap:Storage=FileSystemRead:READ",
-        "// service-cap:Storage=FileSystemWrite:WRITE",
-        "// service-cap:Network=NetworkSocket:READ|WRITE",
-        "// service-cap:Power=SystemControl:INVOKE",
-        "// service-cap:Modem=SystemControl:INVOKE",
-        "// service-cap:Audio=SystemControl:INVOKE",
-        "// service-cap:Camera=SystemControl:INVOKE",
-        "// service-cap:Sensor=SystemControl:INVOKE",
-        "// service-cap:Modem=EventPoll:READ",
-        "// service-cap:Audio=EventPoll:READ",
-        "// service-cap:Camera=EventPoll:READ",
-        "// service-cap:Init=ProcessSpawn:GRANT",
+        "ServiceId::Display =>",
+        "ServiceId::Storage =>",
+        "ServiceId::Network =>",
+        "ServiceId::Power =>",
+        "ServiceId::Modem =>",
+        "ServiceId::Audio =>",
+        "ServiceId::Camera =>",
+        "ServiceId::Sensor =>",
     ):
-        must((ROOT / "kernel/src/task/user.rs").read_text(), marker, f"service capability matrix {marker}")
+        must(services, marker, f"service capability policy {marker}")
+    must(services, "CapabilityType::FrameBufferDirect", "display capability policy")
+    must(services, "CapabilityType::FileSystemWrite", "storage write capability")
+    must(services, "CapabilityType::NetworkSend", "network send capability")
+    must(services, "SERVICE_POWER_CONTROL_OBJECT", "power scoped capability")
+    must(services, "SERVICE_TELEPHONY_CONTROL_OBJECT", "modem scoped capability")
+    must(services, "SERVICE_AUDIO_CONTROL_OBJECT", "audio scoped capability")
+    must(services, "SERVICE_CAMERA_CONTROL_OBJECT", "camera scoped capability")
+    must(services, "SERVICE_SENSOR_CONTROL_OBJECT", "sensor scoped capability")
 
     # Executable contract: PID1 must exercise the complete deterministic
     # lifecycle smoke sequence used by the QEMU vertical slice.
