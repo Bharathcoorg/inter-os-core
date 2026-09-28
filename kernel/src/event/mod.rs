@@ -178,26 +178,26 @@ impl EventReactor {
 
     /// Invoked on hardware timer tick to evaluate deadlines and wake timed-out tasks.
     pub fn on_tick(&mut self, current_ticks: u64) {
-        let mut should_wake = false;
-        for sub in self.subscriptions.iter_mut() {
+        let has_expired = self.subscriptions.iter_mut().any(|sub| {
             if sub.is_waiting && sub.wait_until_tick > 0 && current_ticks >= sub.wait_until_tick {
                 if (sub.interest_mask & EVENT_TIMER_TICK) != 0 {
                     sub.pending_mask |= EVENT_TIMER_TICK;
                 }
-                sub.is_waiting = false;
-                should_wake = true;
-            }
-        }
-        if should_wake {
+                true
+            } else { false }
+        });
+        if has_expired {
             if let Some(mut sched) = SCHEDULER.try_lock() {
-                for sub in &self.subscriptions {
-                    if sub.pending_mask & EVENT_TIMER_TICK != 0 {
+                for sub in self.subscriptions.iter_mut() {
+                    if sub.is_waiting && sub.wait_until_tick > 0 && current_ticks >= sub.wait_until_tick {
+                        sub.is_waiting = false;
                         sched.unblock_task(sub.task_id);
                     }
                 }
             }
         }
     }
+
 }
 
 /// Global system-wide Sovereign Event Reactor.
