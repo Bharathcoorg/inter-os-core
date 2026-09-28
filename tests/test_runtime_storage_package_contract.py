@@ -395,3 +395,11 @@ def test_unmap_checks_frame_ownership_before_clearing_the_leaf():
     ownership = memory[memory.index("let frame = p1[p1_idx].frame()"):memory.index("let (active_cr3", memory.index("let frame = p1[p1_idx].frame()"))]
     assert "let Some(pos) = self.allocated_frames.iter().position" in ownership
     assert "p1[p1_idx].set_unused();" in ownership
+
+def test_register_thread_rolls_back_reservation_when_binding_fails():
+    process = (ROOT / "kernel/src/task/process.rs").read_text(encoding="utf-8")
+    block = process[process.index("pub fn register_thread"):process.index("pub fn thread_started")]
+    assert "reserve_thread(process)?" in block
+    assert "if let Err(error) = bind_reserved_thread(process, task)" in block
+    assert "cancel_thread_reservation(process)" in block
+    assert "return Err(error)" in block

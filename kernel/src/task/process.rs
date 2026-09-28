@@ -106,7 +106,13 @@ pub fn bind_reserved_thread(process: ProcessId, task: TaskId) -> Result<(), &'st
 
 pub fn register_thread(process: ProcessId, task: TaskId) -> Result<(), &'static str> {
     reserve_thread(process)?;
-    bind_reserved_thread(process, task)
+    if let Err(error) = bind_reserved_thread(process, task) {
+        // The reservation is owned by this transactional helper. Do not leave
+        // thread accounting elevated when the identity binding cannot commit.
+        cancel_thread_reservation(process);
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub fn thread_started(process: ProcessId) -> Result<(), &'static str> { account_thread(process) }
