@@ -149,3 +149,16 @@ def test_native_apps_use_atomic_parent_assignment_at_spawn():
     source = (ROOT / "kernel/src/task/user.rs").read_text(encoding="utf-8")
     assert "task.parent_id = id_security" not in source
     assert source.count("spawn_user_process_with_parent(") >= 13
+
+
+def test_tcp_transport_tracks_peer_window_and_congestion_state():
+    source = (ROOT / "kernel/src/net/socket.rs").read_text(encoding="utf-8")
+    assert "snd_una" in source
+    assert "snd_wnd" in source
+    assert "cwnd" in source
+    assert "ssthresh" in source
+    assert "dup_acks" in source
+    assert "pub fn update_peer_window" in source
+    assert "pub fn send_window" in source
+    source2 = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
+    assert "send_window(connection_id)" in source2

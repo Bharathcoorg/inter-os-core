@@ -1643,6 +1643,8 @@ pub fn sys_tcp_send(connection_id: u32, payload: &[u8]) -> SyscallResult {
         (if conn.remote_ip.is_loopback() { crate::net::Ipv4Address::LOCALHOST } else { crate::net::DEFAULT_HOST_IP }, conn.local_port, conn.remote_ip, conn.remote_port, conn.send_seq, conn.recv_seq, conn.state)
     };
     if state != crate::net::TcpState::Established { return SyscallResult::NotReady; }
+    let available = crate::net::TCP_TABLE.lock().send_window(connection_id).unwrap_or(0) as usize;
+    if payload.len() > available { return SyscallResult::NotReady; }
     crate::net::send_tcp_payload(src_ip, src_port, dst_ip, dst_port, seq, ack, payload, &caps)
         .map(|n| {
             let now = crate::interrupts::get_system_ticks();

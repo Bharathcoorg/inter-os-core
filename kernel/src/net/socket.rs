@@ -235,7 +235,13 @@ pub struct TcpConnection {
     pub remote_port: u16,
     pub state: crate::net::TcpState,
     pub send_seq: u32,
+    pub snd_una: u32,
+    pub snd_wnd: u32,
+    pub cwnd: u32,
+    pub ssthresh: u32,
+    pub dup_acks: u8,
     pub recv_seq: u32,
+    pub rcv_wnd: u32,
     pub rx: [u8; TCP_RX_BUF_SIZE],
     pub rx_len: usize,
     pub tx: [u8; TCP_TX_BUF_SIZE],
@@ -297,7 +303,13 @@ impl TcpConnectionTable {
                     remote_port,
                     state: crate::net::TcpState::SynSent,
                     send_seq: initial_seq,
+                    snd_una: initial_seq,
+                    snd_wnd: 65535,
+                    cwnd: crate::net::tcp::TCP_MAX_SEGMENT as u32,
+                    ssthresh: 65535,
+                    dup_acks: 0,
                     recv_seq: 0,
+                    rcv_wnd: TCP_RX_BUF_SIZE as u32,
                     rx: [0u8; TCP_RX_BUF_SIZE],
                     rx_len: 0,
                     tx: [0u8; TCP_TX_BUF_SIZE],
@@ -356,6 +368,7 @@ impl TcpConnectionTable {
         conn.rx[conn.rx_len..conn.rx_len + n].copy_from_slice(payload);
         conn.rx_len += n;
         conn.recv_seq = conn.recv_seq.wrapping_add(n as u32);
+        conn.rcv_wnd = TCP_RX_BUF_SIZE.saturating_sub(conn.rx_len) as u32;
         if fin && n == payload.len() {
             conn.recv_seq = conn.recv_seq.wrapping_add(1);
             conn.state = crate::net::TcpState::CloseWait;
@@ -377,15 +390,32 @@ impl TcpConnectionTable {
 
     pub fn acknowledge_tx(&mut self, id: u32, ack: u32) -> bool {
         let conn = match self.get_mut(id) { Some(c) => c, None => return false };
-        if !conn.tx_pending { return false; }
-        let end = conn.tx_seq.wrapping_add(conn.tx_len as u32);
-        if crate::net::tcp::seq_ge(ack, end) {
-            conn.tx_pending = false;
-            conn.tx_len = 0;
-            conn.tx_retries = 0;
-            return true;
+        let end = conn.send_seq;
+        if crate::net::tcp::seq_lt(ack, conn.snd_una) || crate::net::tcp::seq_gt(ack, end) { return false; }
+        if ack == conn.snd_una {
+            if conn.tx_pending { conn.dup_acks = conn.dup_acks.saturating_add(1); if conn.dup_acks >= 3 { conn.ssthresh = (conn.cwnd / 2).max(crate::net::tcp::TCP_MAX_SEGMENT as u32); conn.cwnd = conn.ssthresh; } }
+            return false;
         }
-        false
+        conn.snd_una = ack;
+        conn.dup_acks = 0;
+        if conn.cwnd < conn.ssthresh { conn.cwnd = conn.cwnd.saturating_add(crate::net::tcp::TCP_MAX_SEGMENT as u32).min(65535); }
+        else { let increment = ((crate::net::tcp::TCP_MAX_SEGMENT as u32).saturating_mul(crate::net::tcp::TCP_MAX_SEGMENT as u32) / conn.cwnd.max(1)).max(1); conn.cwnd = conn.cwnd.saturating_add(increment).min(65535); }
+        if conn.tx_pending && crate::net::tcp::seq_ge(ack, conn.tx_seq.wrapping_add(conn.tx_len as u32)) {
+            conn.tx_pending = false; conn.tx_len = 0; conn.tx_retries = 0;
+        }
+        true
+    }
+
+    pub fn update_peer_window(&mut self, id: u32, advertised: u16) -> Result<(), NetError> {
+        let conn = self.get_mut(id).ok_or(NetError::NoPacketAvailable)?;
+        conn.snd_wnd = advertised as u32;
+        Ok(())
+    }
+
+    pub fn send_window(&self, id: u32) -> Option<u32> {
+        let conn = self.get(id)?;
+        let in_flight = conn.send_seq.wrapping_sub(conn.snd_una);
+        Some(conn.cwnd.min(conn.snd_wnd).saturating_sub(in_flight))
     }
 
     pub fn due_retransmit(&mut self, now: u64) -> Option<(u32, Ipv4Address, u16, u16, u32, u32, usize)> {

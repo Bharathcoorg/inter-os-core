@@ -290,6 +290,7 @@ pub fn poll_network_interface() -> usize {
                                             let mut table = TCP_TABLE.lock();
                                             if let Some(conn) = table.get_mut(id) {
                                                 let old_state = conn.state;
+                                                let _ = table.update_peer_window(id, segment.window);
                                                 if segment.flags & 0x12 == 0x12 && old_state == TcpState::SynSent {
                                                     if segment.ack != conn.send_seq.wrapping_add(1) {
                                                         // SYN consumes one sequence number; the ACK must
