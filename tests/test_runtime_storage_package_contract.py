@@ -195,4 +195,5 @@ def test_tcp_syn_ack_requires_exact_ack_and_nonempty_sequence_space():
     assert "let expected_ack = conn.send_seq.wrapping_add(1);" in source
     assert "segment.ack == expected_ack" in source
     assert "segment.payload.is_empty()" in source
-    assert "segment.seq != 0" in source
+    assert "segment.flags & 0x13 == 0x12" in source
+    assert "segment.payload.is_empty()" in source
