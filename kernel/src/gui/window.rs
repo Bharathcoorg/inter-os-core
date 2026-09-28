@@ -52,14 +52,35 @@ impl WindowManager {
     }
 
     pub fn create(&mut self, owner: u64, rect: WindowRect, kind: WindowKind, modal: bool) -> Result<WindowId, &'static str> {
-        if rect.width == 0 || rect.height == 0 { return Err("window has empty bounds"); }
-        if self.windows.len() >= 128 { return Err("window limit reached"); }
         let id = WindowId(self.next_id);
-        self.next_id = self.next_id.wrapping_add(1).max(1);
+        self.create_with_id(id, owner, rect, kind, modal)?;
+        self.next_id = self.next_id.checked_add(1).filter(|v| *v != 0).unwrap_or(1);
+        Ok(id)
+    }
+
+    /// Registers a display-backed window using the KMS surface ID as its stable
+    /// cross-layer identity. This keeps the GUI and display registries coherent.
+    pub fn create_with_id(&mut self, id: WindowId, owner: u64, rect: WindowRect, kind: WindowKind, modal: bool) -> Result<(), &'static str> {
+        if id.0 == 0 || rect.width == 0 || rect.height == 0 { return Err("invalid window identity or bounds"); }
+        if self.windows.len() >= 128 { return Err("window limit reached"); }
+        if self.windows.iter().any(|w| w.id == id) { return Err("window identity already registered"); }
         let z = self.windows.iter().map(|w| w.z).max().unwrap_or(0).saturating_add(1);
         self.windows.push(Window { id, owner, rect, kind, visible: true, modal, z });
         self.focused = Some(id);
-        Ok(id)
+        if id.0 >= self.next_id {
+            self.next_id = id.0.checked_add(1).filter(|v| *v != 0).unwrap_or(1);
+        }
+        Ok(())
+    }
+
+    pub fn set_geometry_owned(&mut self, id: WindowId, owner: u64, rect: WindowRect) -> bool {
+        if rect.width == 0 || rect.height == 0 { return false; }
+        if let Some(window) = self.windows.iter_mut().find(|w| w.id == id && w.owner == owner) {
+            window.rect = rect;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn destroy_owned(&mut self, id: WindowId, owner: u64) -> bool {
