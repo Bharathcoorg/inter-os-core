@@ -83,7 +83,30 @@ pub fn can_create_thread(process: ProcessId) -> Result<(), &'static str> {
     Ok(())
 }
 
+pub fn reserve_thread(process: ProcessId) -> Result<(), &'static str> {
+    account_thread(process)
+}
+
+pub fn cancel_thread_reservation(process: ProcessId) {
+    release_thread(process)
+}
+
+pub fn bind_reserved_thread(process: ProcessId, task: TaskId) -> Result<(), &'static str> {
+    if task == TaskId(0) { return Err("invalid thread task"); }
+    let mut threads = THREAD_TABLE.lock();
+    if let Some(slot) = threads.iter_mut().find(|slot| slot.is_none()) {
+        *slot = Some(ThreadRecord { task, process });
+        Ok(())
+    } else {
+        release_thread(process);
+        Err("thread table full")
+    }
+}
+
 pub fn register_thread(process: ProcessId, task: TaskId) -> Result<(), &'static str> {
+    reserve_thread(process)?;
+    bind_reserved_thread(process, task)
+}
     if task == TaskId(0) { return Err("invalid thread task"); }
     account_thread(process)?;
     let mut threads = THREAD_TABLE.lock();
@@ -106,13 +129,33 @@ pub fn mark_zombie(task: TaskId, exit_code: i32) {
     }
 }
 
-pub fn reap(task: TaskId) {
+pub fn reap(task: TaskId) -> Result<(), &'static str> {
+    let process = process_for_task(task).ok_or("thread not registered")?;
+    let is_leader = record_for_process(process).map(|r| r.leader_task == task).unwrap_or(false);
     let mut threads = THREAD_TABLE.lock();
-    threads.iter_mut().for_each(|slot| if slot.as_ref().map(|r| r.task == task).unwrap_or(false) { *slot = None; });
-    let mut table = PROCESS_TABLE.lock();
-    if let Some(slot) = table.iter_mut().find(|slot| slot.as_ref().map(|r| r.leader_task == task).unwrap_or(false)) {
+    if let Some(slot) = threads.iter_mut().find(|slot| slot.as_ref().map(|r| r.task == task).unwrap_or(false)) {
         *slot = None;
+    } else {
+        return Err("thread not registered");
     }
+    let remaining = threads.iter().flatten().filter(|r| r.process == process).count();
+    drop(threads);
+    if is_leader {
+        if remaining != 0 { return Err("process still has live threads"); }
+        let mut table = PROCESS_TABLE.lock();
+        if let Some(slot) = table.iter_mut().find(|slot| slot.as_ref().map(|r| r.id == process).unwrap_or(false)) {
+            *slot = None;
+            return Ok(());
+        }
+        Err("process record missing")
+    } else {
+        release_thread(process);
+        Ok(())
+    }
+}
+
+pub fn is_leader(task: TaskId) -> bool {
+    process_for_task(task).and_then(record_for_process).map(|r| r.leader_task == task).unwrap_or(false)
 }
 
 pub fn set_limits(process: ProcessId, limits: ResourceLimits) -> Result<(), &'static str> {
