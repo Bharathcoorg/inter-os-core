@@ -80,7 +80,7 @@ class SerialReader:
                     decoded = line.decode('utf-8', errors='replace').strip()
                     if decoded:
                         self.captured_logs.append(decoded)
-                        if print_keywords and any(k in decoded for k in print_keywords):
+                        if (print_keywords and any(k in decoded for k in print_keywords)) or any(k in decoded for k in ["PANIC", "Origin:", "Details:", "FAULT", "EXCEPTION", "AssertionError", "failed"]):
                             print(f"  [GUEST] {decoded}")
                         if marker in decoded:
                             return True
@@ -107,8 +107,13 @@ def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_co
 
     time.sleep(1.0)
     ppm_app = os.path.abspath(rf"target\{dump_prefix}.ppm").replace("\\", "/")
+    if os.path.exists(ppm_app):
+        try: os.remove(ppm_app)
+        except: pass
     _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_app}")
-    print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_app}")
+    time.sleep(0.5)
+    sz = os.path.getsize(ppm_app) if os.path.exists(ppm_app) else 0
+    print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_app} ({sz} bytes)")
     time.sleep(0.5)
 
     # Perform in-app functional interactions if specified
@@ -127,9 +132,13 @@ def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_co
             time.sleep(0.8)
             if dump_suffix:
                 ppm_inter = os.path.abspath(rf"target\{dump_prefix}_{dump_suffix}.ppm").replace("\\", "/")
+                if os.path.exists(ppm_inter):
+                    try: os.remove(ppm_inter)
+                    except: pass
                 _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_inter}")
-                print(f"[LIFECYCLE TEST] In-app interaction screendump recorded: {ppm_inter}")
                 time.sleep(0.4)
+                sz_inter = os.path.getsize(ppm_inter) if os.path.exists(ppm_inter) else 0
+                print(f"[LIFECYCLE TEST] In-app interaction screendump recorded: {ppm_inter} ({sz_inter} bytes)")
 
     # Dispatch touch tap on Back button, Home Gesture Bar, or Swipe Up
     if exit_gesture == "home_bar":
@@ -153,8 +162,13 @@ def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_co
 
     time.sleep(1.2)
     ppm_reaped = os.path.abspath(rf"target\test_launcher_after_{dump_prefix}.ppm").replace("\\", "/")
+    if os.path.exists(ppm_reaped):
+        try: os.remove(ppm_reaped)
+        except: pass
     _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_reaped}")
-    print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_reaped}")
+    time.sleep(0.5)
+    sz_reaped = os.path.getsize(ppm_reaped) if os.path.exists(ppm_reaped) else 0
+    print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_reaped} ({sz_reaped} bytes)")
     time.sleep(0.5)
 
 def main():
@@ -175,6 +189,7 @@ def main():
     time.sleep(1.0)
 
     ser_port = 5555
+    mon_port = 5556
 
     args = [
         qemu_exe,
@@ -184,6 +199,8 @@ def main():
         "-display", "none",
         "-chardev", f"socket,id=ser0,host=127.0.0.1,port={ser_port},server=on,wait=off",
         "-serial", "chardev:ser0",
+        "-chardev", f"socket,id=mon0,host=127.0.0.1,port={mon_port},server=on,wait=off",
+        "-mon", "chardev=mon0,mode=readline",
         "-no-reboot"
     ]
 
@@ -202,6 +219,17 @@ def main():
         serial_sock.settimeout(0.5)
         print("[LIFECYCLE TEST] Connected to QEMU serial socket.")
         reader = SerialReader(serial_sock)
+
+        # Connect to monitor socket for real hardware framebuffer screendumps
+        try:
+            monitor_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            monitor_sock.settimeout(5.0)
+            monitor_sock.connect(('127.0.0.1', mon_port))
+            monitor_sock.settimeout(0.5)
+            print("[LIFECYCLE TEST] Connected to QEMU monitor socket.")
+        except Exception as e:
+            print(f"[LIFECYCLE TEST] Warning: Monitor socket connection failed: {e}")
+            monitor_sock = None
 
         # 1. Wait for launcher presentation
         print("[LIFECYCLE TEST] Phase 1: Awaiting Launcher homescreen presentation...")
@@ -223,8 +251,13 @@ def main():
 
         # Take screendump of launcher homescreen
         ppm_launcher = os.path.abspath(r"target\test_launcher.ppm").replace("\\", "/")
+        if os.path.exists(ppm_launcher):
+            try: os.remove(ppm_launcher)
+            except: pass
         _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_launcher}")
-        print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_launcher}")
+        time.sleep(0.5)
+        sz_launcher = os.path.getsize(ppm_launcher) if os.path.exists(ppm_launcher) else 0
+        print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_launcher} ({sz_launcher} bytes)")
 
         # 2. Multi-App Roundtrips:
         # App 1: Calculator (Row 1, Card 0: x=180, y=520)

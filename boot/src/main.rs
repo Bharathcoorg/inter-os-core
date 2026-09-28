@@ -10,30 +10,50 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
     let kernel_path = {
-        let p1 = PathBuf::from("target/x86_64-unknown-none/debug/kernel");
-        let p2 = PathBuf::from("kernel/target/x86_64-unknown-none/debug/kernel");
         let arg_path = if args.len() > 1 {
             Some(PathBuf::from(&args[1]))
         } else {
             None
         };
-        let mut candidates = vec![p1, p2];
         if let Some(ap) = arg_path {
-            candidates.insert(0, ap);
-        }
-        let mut best: Option<PathBuf> = None;
-        let mut best_mtime = None;
-        for c in candidates {
-            if c.exists() {
-                if let Ok(m) = std::fs::metadata(&c).and_then(|m| m.modified()) {
-                    if best_mtime.is_none() || Some(m) > best_mtime {
-                        best_mtime = Some(m);
-                        best = Some(c);
+            if ap.exists() {
+                ap
+            } else {
+                let p1 = PathBuf::from("target/x86_64-unknown-none/debug/kernel");
+                let p2 = PathBuf::from("kernel/target/x86_64-unknown-none/debug/kernel");
+                let candidates = vec![p1, p2];
+                let mut best: Option<PathBuf> = None;
+                let mut best_mtime = None;
+                for c in candidates {
+                    if c.exists() {
+                        if let Ok(m) = std::fs::metadata(&c).and_then(|m| m.modified()) {
+                            if best_mtime.is_none() || Some(m) > best_mtime {
+                                best_mtime = Some(m);
+                                best = Some(c);
+                            }
+                        }
+                    }
+                }
+                best.unwrap_or(ap)
+            }
+        } else {
+            let p1 = PathBuf::from("target/x86_64-unknown-none/debug/kernel");
+            let p2 = PathBuf::from("kernel/target/x86_64-unknown-none/debug/kernel");
+            let candidates = vec![p1, p2];
+            let mut best: Option<PathBuf> = None;
+            let mut best_mtime = None;
+            for c in candidates {
+                if c.exists() {
+                    if let Ok(m) = std::fs::metadata(&c).and_then(|m| m.modified()) {
+                        if best_mtime.is_none() || Some(m) > best_mtime {
+                            best_mtime = Some(m);
+                            best = Some(c);
+                        }
                     }
                 }
             }
+            best.unwrap_or_else(|| PathBuf::from("kernel/target/x86_64-unknown-none/debug/kernel"))
         }
-        best.unwrap_or_else(|| PathBuf::from("kernel/target/x86_64-unknown-none/debug/kernel"))
     };
 
     let out_path = if args.len() > 2 {

@@ -292,7 +292,10 @@ def _cargo_build_manifest(manifest_path, target, bin_name=None):
     if bin_name:
         cmd.extend(["--bin", bin_name])
     log(f"Building {bin_name or manifest_path} [{target}]...")
-    return subprocess.run(cmd, cwd=str(WORKSPACE_ROOT)).returncode
+    env = dict(os.environ)
+    if target == "x86_64-unknown-none":
+        env["RUSTFLAGS"] = "-C relocation-model=static -C link-arg=-Ttext=0x00400000 -C link-arg=-z -C link-arg=norelro --cfg curve25519_dalek_backend=\"fiat\""
+    return subprocess.run(cmd, cwd=str(WORKSPACE_ROOT), env=env).returncode
 
 
 def _build_x86_userspace():
@@ -346,10 +349,18 @@ def _build_x86_kernel_and_image():
         log_error("x86_64 kernel build failed")
         return res.returncode
 
-    kernel_path = WORKSPACE_ROOT / "target" / "x86_64-unknown-none" / "debug" / "kernel"
+    k1 = WORKSPACE_ROOT / "kernel" / "target" / "x86_64-unknown-none" / "debug" / "kernel"
+    k2 = WORKSPACE_ROOT / "target" / "x86_64-unknown-none" / "debug" / "kernel"
+    kernel_path = k1 if (k1.exists() and (not k2.exists() or k1.stat().st_mtime >= k2.stat().st_mtime)) else k2
     if not kernel_path.exists():
         log_error(f"Kernel artifact missing after successful cargo build: {kernel_path}")
         return 1
+
+    if kernel_path == k1:
+        k2.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(k1, k2)
+    elif kernel_path == k2 and k1.parent.exists():
+        shutil.copy2(k2, k1)
 
     log("Packaging canonical QEMU Phone BIOS image...")
     res = subprocess.run([
@@ -378,10 +389,13 @@ def cmd_build(args):
     if app_dir.exists():
         arch_target = getattr(args, "arch", None) or "x86_64-unknown-none"
         log(f"Compiling application '{target_lower}' for target {arch_target}...")
+        env = dict(os.environ)
+        if arch_target == "x86_64-unknown-none":
+            env["RUSTFLAGS"] = "-C relocation-model=static -C link-arg=-Ttext=0x00400000 -C link-arg=-z -C link-arg=norelro --cfg curve25519_dalek_backend=\"fiat\""
         res = subprocess.run([
             "cargo", "build", "--manifest-path", str(app_dir / "Cargo.toml"),
             "--target", arch_target
-        ], cwd=str(WORKSPACE_ROOT))
+        ], cwd=str(WORKSPACE_ROOT), env=env)
         if res.returncode != 0:
             log_error(f"Application build failed for {target_lower}")
             return res.returncode
@@ -447,7 +461,20 @@ def cmd_build(args):
 # =============================================================================
 def cmd_test(args):
     test_target = getattr(args, "target", "all").lower()
+    valid_targets = ["unit", "x86_64", "x86", "aarch64", "riscv64", "security", "adversarial", "qemu", "lifecycle", "contracts", "all"]
+    if test_target not in valid_targets:
+        log_error(f"Unknown test target: '{test_target}'. Valid targets: {', '.join(valid_targets)}")
+        return 1
+
     log(f"Executing InterOS test suite (Target: {test_target})...")
+
+    if test_target in ["contracts", "all"]:
+        contracts_script = WORKSPACE_ROOT / "tests" / "run_all_contracts.py"
+        if contracts_script.exists():
+            log("Executing InterOS Core Contract Test Suite...")
+            res = subprocess.run([sys.executable, str(contracts_script)], cwd=str(WORKSPACE_ROOT))
+            if res.returncode != 0 and test_target == "contracts":
+                return res.returncode
 
     if test_target in ["unit", "all"]:
         log("Running cargo test on host-compatible crates...")
@@ -463,6 +490,14 @@ def cmd_test(args):
             log("Executing QEMU x86_64 boot and serial verification...")
             res = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(x86_script)])
             if res.returncode != 0 and test_target == "x86_64":
+                return res.returncode
+
+    if test_target in ["qemu", "lifecycle", "all"]:
+        lifecycle_script = WORKSPACE_ROOT / "tests" / "test_interactive_lifecycle.py"
+        if lifecycle_script.exists():
+            log("Executing QEMU full interactive smartphone lifecycle verification...")
+            res = subprocess.run([sys.executable, "-u", str(lifecycle_script)], cwd=str(WORKSPACE_ROOT))
+            if res.returncode != 0 and test_target in ["qemu", "lifecycle"]:
                 return res.returncode
 
     if test_target in ["aarch64", "all"]:
