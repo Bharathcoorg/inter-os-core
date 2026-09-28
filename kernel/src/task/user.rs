@@ -477,6 +477,11 @@ fn capabilities_from_rapp(ids: &[u16], ipc_target: u64) -> Result<CapabilityTabl
             16 => (CapabilityType::ShmConsumer, Rights::READ, 0),
             17 => (CapabilityType::EventPoll, Rights::READ | Rights::INVOKE, 0),
             18 => (CapabilityType::SystemControl, Rights::INVOKE, 0),
+            19 => (CapabilityType::SystemControl, Rights::INVOKE, crate::services::SERVICE_POWER_CONTROL_OBJECT),
+            20 => (CapabilityType::SystemControl, Rights::INVOKE, crate::services::SERVICE_TELEPHONY_CONTROL_OBJECT),
+            21 => (CapabilityType::SystemControl, Rights::INVOKE, crate::services::SERVICE_AUDIO_CONTROL_OBJECT),
+            22 => (CapabilityType::SystemControl, Rights::INVOKE, crate::services::SERVICE_CAMERA_CONTROL_OBJECT),
+            23 => (CapabilityType::SystemControl, Rights::INVOKE, crate::services::SERVICE_SENSOR_CONTROL_OBJECT),
             _ => return Err("Unknown RAPP v2 capability"),
         };
         caps.insert(Capability {
