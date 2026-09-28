@@ -105,6 +105,48 @@ impl Scheduler {
         id
     }
 
+    /// Creates a userspace thread in an existing process and shared address space.
+    pub fn spawn_user_thread(
+        &mut self,
+        process_id: crate::task::ProcessId,
+        user_entry: usize,
+        cap_table: CapabilityTable,
+        priority: u8,
+    ) -> Result<TaskId, &'static str> {
+        crate::task::process::reserve_thread(process_id)?;
+        let shared_space = match self.tasks.iter()
+            .find(|t| t.process_id == Some(process_id))
+            .and_then(|t| t.page_table.clone()) {
+            Some(space) => space,
+            None => {
+                crate::task::process::cancel_thread_reservation(process_id);
+                return Err("process has no userspace address space");
+            }
+        };
+        let mut tcb = TaskControlBlock::new("user_thread", crate::task::user::user_process_entry, cap_table, priority);
+        let id = tcb.id;
+        let user_stack_top = {
+            let mut pt = shared_space.lock();
+            match crate::task::user::map_user_thread_stack(&mut pt, id) {
+                Ok(top) => top,
+                Err(e) => {
+                    crate::task::process::cancel_thread_reservation(process_id);
+                    return Err(e);
+                }
+            }
+        };
+        tcb.process_id = Some(process_id);
+        tcb.user_entry = user_entry;
+        tcb.user_stack_top = user_stack_top;
+        tcb.page_table = Some(shared_space);
+        if let Err(e) = crate::task::process::bind_reserved_thread(process_id, id) {
+            crate::task::process::cancel_thread_reservation(process_id);
+            return Err(e);
+        }
+        self.tasks.push(tcb);
+        Ok(id)
+    }
+
     /// Returns a reference to the currently running task.
     pub fn current_task(&self) -> Option<&TaskControlBlock> {
         self.tasks.get(self.current_idx)
