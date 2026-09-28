@@ -82,9 +82,8 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
             } else {
                 let mut kbuf = [0u8; 1024];
                 if copy_from_user(&mut kbuf, msg_ptr, msg_len).is_err() {
-                    return -14;
-                }
-                if let Ok(s) = core::str::from_utf8(&kbuf[..msg_len]) {
+                    -14
+                } else if let Ok(s) = core::str::from_utf8(&kbuf[..msg_len]) {
                     println!("[USER:LOG] {}", s);
                     0
                 } else {
