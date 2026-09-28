@@ -1574,6 +1574,23 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                     self.wfile.write(json.dumps({'success': False, 'error': 'Missing target app_id'}).encode())
                     return
 
+                guest_ok, guest_msg = send_guest_serial_command(
+                    f"RAPP_UNINSTALL {target_id}",
+                    "[RAPP_HOST] UNINSTALLED",
+                    timeout=12,
+                )
+                if not guest_ok:
+                    self.send_response(409)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({
+                        'success': False,
+                        'status': 'GUEST_REJECTED',
+                        'error': guest_msg,
+                    }).encode())
+                    return
+
                 uninstalled_app_ids.add(target_id)
                 for a in list(DEFAULT_APPS) + list(sideloaded_apps):
                     if target_id in (a.get("id"), a.get("filename"), a.get("name")):
