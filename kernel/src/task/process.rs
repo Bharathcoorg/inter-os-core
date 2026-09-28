@@ -107,17 +107,6 @@ pub fn register_thread(process: ProcessId, task: TaskId) -> Result<(), &'static 
     reserve_thread(process)?;
     bind_reserved_thread(process, task)
 }
-    if task == TaskId(0) { return Err("invalid thread task"); }
-    account_thread(process)?;
-    let mut threads = THREAD_TABLE.lock();
-    if let Some(slot) = threads.iter_mut().find(|slot| slot.is_none()) {
-        *slot = Some(ThreadRecord { task, process });
-        Ok(())
-    } else {
-        release_thread(process);
-        Err("thread table full")
-    }
-}
 
 pub fn thread_started(process: ProcessId) -> Result<(), &'static str> { account_thread(process) }
 
