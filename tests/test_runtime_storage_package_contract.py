@@ -228,3 +228,11 @@ def test_dhcp_wire_message_parser_validates_cookie_and_core_options():
     assert "pub struct DhcpMessage" in source
     assert "invalid DHCP magic cookie" in source
     assert "lease_seconds=Some" in source
+
+def test_ipv6_nd_and_router_advertisement_parsers_validate_control_messages():
+    source = (ROOT / "kernel/src/net/ipv6.rs").read_text(encoding="utf-8")
+    assert "ICMPV6_NEIGHBOR_SOLICITATION" in source
+    assert "ICMPV6_NEIGHBOR_ADVERTISEMENT" in source
+    assert "Icmpv6Neighbor" in source
+    assert "Icmpv6RouterAdvertisement" in source
+    assert "invalid ICMPv6 RA option" in source

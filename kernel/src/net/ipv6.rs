@@ -106,3 +106,69 @@ impl Ipv6Autoconfig {
   Some(Ipv6Address(a))
  }
 }
+
+
+pub const ICMPV6_NEIGHBOR_SOLICITATION: u8 = 135;
+pub const ICMPV6_NEIGHBOR_ADVERTISEMENT: u8 = 136;
+pub const ICMPV6_ROUTER_SOLICITATION: u8 = 133;
+pub const ICMPV6_ROUTER_ADVERTISEMENT: u8 = 134;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Icmpv6Neighbor {
+    pub kind: u8,
+    pub target: Ipv6Address,
+    pub router: bool,
+    pub solicited: bool,
+    pub override_flag: bool,
+}
+
+impl Icmpv6Neighbor {
+    pub fn parse(buf: &[u8]) -> Result<Self, &'static str> {
+        if buf.len() < 24 { return Err("ICMPv6 neighbor message too short"); }
+        let kind=buf[0];
+        if kind != ICMPV6_NEIGHBOR_SOLICITATION && kind != ICMPV6_NEIGHBOR_ADVERTISEMENT {
+            return Err("unsupported ICMPv6 neighbor message");
+        }
+        if buf[1] != 0 { return Err("invalid ICMPv6 neighbor code"); }
+        let target=Ipv6Address(buf[8..24].try_into().map_err(|_| "invalid ICMPv6 target")?);
+        let flags=if kind==ICMPV6_NEIGHBOR_ADVERTISEMENT { buf[4] } else { 0 };
+        Ok(Self{kind,target,router:flags&0x80!=0,solicited:flags&0x40!=0,override_flag:flags&0x20!=0})
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Icmpv6RouterAdvertisement {
+    pub hop_limit: u8,
+    pub router_lifetime: u16,
+    pub reachable_time: u32,
+    pub retrans_timer: u32,
+    pub prefix: Option<Ipv6Prefix>,
+}
+
+impl Icmpv6RouterAdvertisement {
+    pub fn parse(buf: &[u8]) -> Result<Self, &'static str> {
+        if buf.len() < 16 || buf[0] != ICMPV6_ROUTER_ADVERTISEMENT || buf[1] != 0 {
+            return Err("invalid ICMPv6 router advertisement");
+        }
+        let mut prefix=None;
+        let mut p=16usize;
+        while p+2<=buf.len() {
+            let typ=buf[p]; let len=(buf[p+1] as usize)*8;
+            if len<8 || p+len>buf.len() { return Err("invalid ICMPv6 RA option"); }
+            if typ==3 && len>=32 {
+                let plen=buf[p+2];
+                if plen>128 { return Err("invalid IPv6 prefix length"); }
+                let mut a=[0u8;16]; a.copy_from_slice(&buf[p+16..p+32]);
+                prefix=Some(Ipv6Prefix{address:Ipv6Address(a),prefix_len:plen});
+            }
+            p+=len;
+        }
+        Ok(Self{
+            hop_limit:buf[4],
+            router_lifetime:u16::from_be_bytes([buf[6],buf[7]]),
+            reachable_time:u32::from_be_bytes([buf[8],buf[9],buf[10],buf[11]]),
+            retrans_timer:u32::from_be_bytes([buf[12],buf[13],buf[14],buf[15]]),
+            prefix,
+        })
+    }
+}
