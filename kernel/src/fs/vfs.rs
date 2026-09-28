@@ -565,7 +565,15 @@ impl Vfs {
                 return Err(FsError::PermissionDenied);
             }
 
-            self.allocate_fd(task_id, inode_id, requested_rights)
+            let process = crate::task::process::process_for_task(task_id).ok_or(FsError::PermissionDenied)?;
+        crate::task::process::reserve_open_file(process).map_err(|_| FsError::TableFull)?;
+        match self.allocate_fd(task_id, inode_id, requested_rights) {
+            Ok(fd) => Ok(fd),
+            Err(err) => {
+                crate::task::process::release_open_file(process);
+                Err(err)
+            }
+        }
         } else {
             let cap = if let Ok(c) = task_caps.verify(cap_slot, CapabilityType::FileSystemRead, Rights::READ) {
                 c
@@ -586,7 +594,15 @@ impl Vfs {
                 return Err(FsError::PermissionDenied);
             }
 
-            self.allocate_fd(task_id, inode_id, requested_rights)
+            let process = crate::task::process::process_for_task(task_id).ok_or(FsError::PermissionDenied)?;
+        crate::task::process::reserve_open_file(process).map_err(|_| FsError::TableFull)?;
+        match self.allocate_fd(task_id, inode_id, requested_rights) {
+            Ok(fd) => Ok(fd),
+            Err(err) => {
+                crate::task::process::release_open_file(process);
+                Err(err)
+            }
+        }
         }
     }
 
@@ -948,6 +964,9 @@ impl Vfs {
         };
         if !closed {
             return Err(FsError::InvalidFd);
+        }
+        if let Some(process) = crate::task::process::process_for_task(task_id) {
+            crate::task::process::release_open_file(process);
         }
         if self.persist_data_snapshot().is_err() {
             crate::serial_println!("[VFS] persistent data snapshot unavailable; keeping live state.");
