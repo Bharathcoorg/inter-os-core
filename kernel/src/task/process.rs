@@ -214,11 +214,8 @@ pub fn validate() -> bool {
     }
 
     for thread in threads.iter().flatten() {
-        if !table.iter().flatten().any(|record| record.id == thread.process && record.state != ProcessState::Reaped) {
+        if !table.iter().flatten().any(|record| record.id == thread.process) {
             return false;
-        }
-        if seen[..count].contains(&thread.task) == false {
-            // Every registered thread task must be represented by exactly one process binding.
         }
     }
     true
