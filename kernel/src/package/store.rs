@@ -23,7 +23,13 @@ impl PackageBlobStore {
   }
   Ok(())
  }
- pub fn get(&self,id:&str)->Option<&PackageBlob>{self.blobs.iter().find(|b|b.package_id==id)}
+ pub fn get(&self,id:&str)->Option<&PackageBlob>{self.blobs.iter().find(|b|b.package_id==id)} pub fn remove(&mut self,id:&str)->Result<bool,()>{
+  let Some(pos)=self.blobs.iter().position(|b|b.package_id==id) else {return Ok(false);};
+  let previous=self.blobs.clone();
+  self.blobs.remove(pos);
+  if self.persist().is_err(){self.blobs=previous;return Err(());}
+  Ok(true)
+ }
  fn persist(&self)->Result<(),()>{
   let mut out=[0u8;32768];out[..4].copy_from_slice(b"PKG1");out[4]=self.blobs.len()as u8;let mut p=5;
   for b in &self.blobs{let id=b.package_id.as_bytes();if id.len()>63||p+1+id.len()+6+4+b.bytes.len()>out.len(){return Err(());}
