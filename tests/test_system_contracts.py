@@ -64,6 +64,9 @@ class SystemContractTests(unittest.TestCase):
         self.assertIn("pub fn put(&mut self,package_id:&str", store)
         self.assertIn("PACKAGE_BLOB_STORE.lock().get(app_id)", syscall)
         self.assertIn("pub fn app_launch", sdk)
+        self.assertIn("parse_rapp(&state.bytes)", serial)
+        self.assertIn("stage_verified", serial)
+        self.assertIn("activate(&verified.package_id)", serial)
 
     def test_phase3_qemu_input_contract_is_canonical(self):
         contract = json.loads((ROOT / "platform/x86_64/qemu-phone.json").read_text(encoding="utf-8"))
@@ -76,6 +79,8 @@ class SystemContractTests(unittest.TestCase):
         self.assertIn("INPUT_TOUCH", serial)
         self.assertIn("INPUT_KEY", serial)
         self.assertIn("INPUT_TOUCH DOWN", server)
+        self.assertIn("/api/input/key", server)
+        self.assertIn("INPUT_KEY", server)
         self.assertIn("Math.min(1279", app)
         self.assertIn("/api/touch/event", app)
         self.assertIn("/api/input/key", app)
