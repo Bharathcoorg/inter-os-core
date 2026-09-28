@@ -135,6 +135,8 @@ pub fn init_kernel_heap() -> Result<(), MapToError<Size4KiB>> {
 pub struct TaskPageTable {
     pub pml4_frame: PhysFrame<Size4KiB>,
     pub allocated_frames: alloc::vec::Vec<PhysFrame<Size4KiB>>,
+    /// Bytes of user virtual memory currently backed by leaf mappings.
+    pub user_mapped_bytes: usize,
 }
 
 impl TaskPageTable {
@@ -164,6 +166,7 @@ impl TaskPageTable {
         Ok(Self {
             pml4_frame,
             allocated_frames: allocated,
+            user_mapped_bytes: 0,
         })
     }
 
@@ -178,6 +181,11 @@ impl TaskPageTable {
     /// Returns the physical PML4 frame.
     pub fn frame(&self) -> PhysFrame<Size4KiB> {
         self.pml4_frame
+    }
+
+    /// Returns the currently mapped user virtual-memory footprint.
+    pub fn user_mapped_bytes(&self) -> usize {
+        self.user_mapped_bytes
     }
 
     /// Maps a virtual page to a physical frame in this process's isolated page table.
@@ -256,6 +264,9 @@ impl TaskPageTable {
         if p4_idx >= 256 {
             return Err("User page PML4 index in kernel range");
         }
+        if self.allocated_frames.iter().any(|owned| *owned == frame) {
+            return Err("physical frame already owned by address space");
+        }
 
         let table_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
 
@@ -321,6 +332,7 @@ impl TaskPageTable {
         let leaf_flags = flags | PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
         pt[p1_idx].set_frame(frame, leaf_flags);
         self.allocated_frames.push(frame);
+        self.user_mapped_bytes = self.user_mapped_bytes.saturating_add(4096);
 
         let (active_cr3, _) = Cr3::read();
         if active_cr3 == self.pml4_frame {
@@ -367,6 +379,7 @@ impl TaskPageTable {
         };
         p1[p1_idx].set_unused();
         self.allocated_frames.swap_remove(pos);
+        self.user_mapped_bytes = self.user_mapped_bytes.saturating_sub(4096);
 
         let (active_cr3, _) = Cr3::read();
         if active_cr3 == self.pml4_frame {
