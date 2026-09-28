@@ -99,10 +99,9 @@ pub extern "C" fn _start() -> ! {
 }
 
 fn registry_has_all_running_services(buf: &[u8]) -> bool {
-    // Registry records are newline-delimited: service_id|task_id|state. PID 1
-    // only accepts the exact eight non-init system services as healthy when all
-    // have a non-zero task ID and the literal running state.
-    let mut seen = 0u8;
+    // Registry records are newline-delimited. The required bootstrap set is
+    // services 1-8 plus sensord (11); UI services 9-10 are validated separately.
+    let mut seen = 0u16;
     for line in buf.split(|b| *b == b'\n') {
         if line.is_empty() { continue; }
         let mut fields = line.split(|b| *b == b'|');
@@ -110,11 +109,21 @@ fn registry_has_all_running_services(buf: &[u8]) -> bool {
         let Some(task_bytes) = fields.next() else { continue; };
         let Some(state) = fields.next() else { continue; };
         if state != b"running" || task_bytes == b"0" { continue; }
-        if id_bytes.len() == 1 && (b'1'..=b'8').contains(&id_bytes[0]) || id_bytes == b"11" {
-            seen |= 1 << (id_bytes[0] - b'1');
-        }
+        let bit = match id_bytes {
+            b"1" => 0,
+            b"2" => 1,
+            b"3" => 2,
+            b"4" => 3,
+            b"5" => 4,
+            b"6" => 5,
+            b"7" => 6,
+            b"8" => 7,
+            b"11" => 8,
+            _ => continue,
+        };
+        seen |= 1u16 << bit;
     }
-    seen == 0xff
+    seen == 0x01ff
 }
 
 #[panic_handler]
