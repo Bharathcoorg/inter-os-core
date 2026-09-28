@@ -5,11 +5,22 @@
 
 use core::fmt;
 use spin::Mutex;
+use alloc::string::String;
+use alloc::vec::Vec;
 use uart_16550::backend::PioBackend;
 use uart_16550::{Config, Uart16550Tty};
 
 /// Global spinlock-protected COM1 serial port interface.
 pub static SERIAL1: Mutex<Option<Uart16550Tty<PioBackend>>> = Mutex::new(None);
+
+struct RappTransfer {
+    package_id: String,
+    expected_len: usize,
+    bytes: Vec<u8>,
+    received: Vec<bool>,
+}
+
+static RAPP_TRANSFER: Mutex<Option<RappTransfer>> = Mutex::new(None);
 
 /// Initializes the primary COM1 serial port (I/O port 0x3F8).
 pub fn init() {
@@ -97,6 +108,113 @@ pub fn poll_serial_rx() {
     }
 }
 
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn handle_rapp_command(s: &str) -> bool {
+    let mut parts = s.split_ascii_whitespace();
+    let Some(verb) = parts.next() else { return false; };
+
+    if verb.eq_ignore_ascii_case("RAPP_BEGIN") {
+        let Some(id) = parts.next() else { return true; };
+        let Some(len) = parts.next().and_then(|v| v.parse::<usize>().ok()) else { return true; };
+        if id.is_empty() || id.len() > 128 || len == 0 || len > crate::fs::MAX_FILE_SIZE {
+            serial_println!("[RAPP_HOST] REJECT invalid package dimensions");
+            return true;
+        }
+        *RAPP_TRANSFER.lock() = Some(RappTransfer {
+            package_id: String::from(id),
+            expected_len: len,
+            bytes: alloc::vec![0u8; len],
+            received: alloc::vec![false; len],
+        });
+        serial_println!("[RAPP_HOST] READY package={} bytes={}", id, len);
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("RAPP_CHUNK") {
+        let Some(offset) = parts.next().and_then(|v| v.parse::<usize>().ok()) else { return true; };
+        let Some(hex) = parts.next() else { return true; };
+        if hex.len() == 0 || hex.len() > 48 || hex.len() % 2 != 0 { serial_println!("[RAPP_HOST] REJECT chunk"); return true; }
+        let mut transfer = RAPP_TRANSFER.lock();
+        let Some(ref mut state) = *transfer else { serial_println!("[RAPP_HOST] REJECT no transfer"); return true; };
+        let chunk_len = hex.len() / 2;
+        if offset.checked_add(chunk_len).map(|end| end <= state.expected_len) != Some(true) {
+            serial_println!("[RAPP_HOST] REJECT chunk bounds");
+            return true;
+        }
+        let raw = hex.as_bytes();
+        for i in 0..chunk_len {
+            let hi = hex_nibble(raw[i * 2]);
+            let lo = hex_nibble(raw[i * 2 + 1]);
+            let Some(hi) = hi else { serial_println!("[RAPP_HOST] REJECT hex"); return true; };
+            let Some(lo) = lo else { serial_println!("[RAPP_HOST] REJECT hex"); return true; };
+            state.bytes[offset + i] = (hi << 4) | lo;
+            state.received[offset + i] = true;
+        }
+        serial_println!("[RAPP_HOST] CHUNK offset={} len={}", offset, chunk_len);
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("RAPP_COMMIT") {
+        let mut transfer = RAPP_TRANSFER.lock();
+        let Some(state) = transfer.take() else { serial_println!("[RAPP_HOST] REJECT no transfer"); return true; };
+        if state.received.iter().any(|v| !*v) {
+            serial_println!("[RAPP_HOST] REJECT incomplete transfer");
+            return true;
+        }
+        let verified = match crate::package::parse_rapp(&state.bytes) {
+            Ok(manifest) if manifest.package_id == state.package_id => manifest,
+            Ok(_) => { serial_println!("[RAPP_HOST] REJECT package id mismatch"); return true; }
+            Err(err) => { serial_println!("[RAPP_HOST] REJECT verification failed: {:?}", err); return true; }
+        };
+        let path = alloc::format!("/packages/{}.rapp", verified.package_id);
+        match crate::fs::VFS.lock().install_package_blob(&verified.package_id, &state.bytes) {
+            Ok(_) => {
+                serial_println!("[RAPP_HOST] INSTALLED id={} version={}.{}.{} path={}",
+                    verified.package_id, verified.version.0, verified.version.1, verified.version.2, path);
+            }
+            Err(err) => serial_println!("[RAPP_HOST] REJECT persistence failed: {:?}", err),
+        }
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("RAPP_LAUNCH") {
+        let Some(id) = parts.next() else { return true; };
+        match crate::syscall::sys_app_launch(id) {
+            Ok(tid) => serial_println!("[RAPP_HOST] LAUNCHED id={} task={}", id, tid.0),
+            Err(err) => serial_println!("[RAPP_HOST] LAUNCH_FAILED id={} error={:?}", id, err),
+        }
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("RAPP_TRUST") {
+        let Some(key_hex) = parts.next() else { return true; };
+        let Some(publisher) = parts.next() else { return true; };
+        if key_hex.len() != 64 || publisher.len() > 32 { serial_println!("[RAPP_HOST] REJECT trust key"); return true; }
+        let raw = key_hex.as_bytes();
+        let mut key = [0u8; 32];
+        for i in 0..32 {
+            let Some(hi) = hex_nibble(raw[i * 2]) else { serial_println!("[RAPP_HOST] REJECT trust hex"); return true; };
+            let Some(lo) = hex_nibble(raw[i * 2 + 1]) else { serial_println!("[RAPP_HOST] REJECT trust hex"); return true; };
+            key[i] = (hi << 4) | lo;
+        }
+        match crate::package::REVOCATION_REGISTRY.lock().trust_key(key, publisher) {
+            Ok(()) => serial_println!("[RAPP_HOST] TRUSTED publisher={}", publisher),
+            Err(err) => serial_println!("[RAPP_HOST] TRUST_FAILED {}", err),
+        }
+        return true;
+    }
+
+    false
+}
+
 fn handle_serial_command(cmd: &[u8]) {
     let s = if let Ok(s) = core::str::from_utf8(cmd) {
         s.trim()
@@ -104,6 +222,9 @@ fn handle_serial_command(cmd: &[u8]) {
         return;
     };
     if s.is_empty() {
+        return;
+    }
+    if handle_rapp_command(s) {
         return;
     }
 
