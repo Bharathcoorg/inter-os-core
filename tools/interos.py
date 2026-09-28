@@ -31,6 +31,8 @@ import json
 import os
 import shutil
 import subprocess
+import socket
+import time
 import sys
 import urllib.error
 import urllib.parse
@@ -257,16 +259,120 @@ def cmd_doctor(args):
 # =============================================================================
 # COMMAND: build
 # =============================================================================
+USERSpace_MANIFEST = WORKSPACE_ROOT / "platform" / "x86_64" / "userspace-manifest.json"
+
+def _load_x86_userspace_manifest():
+    if not USERSpace_MANIFEST.exists():
+        raise RuntimeError(f"Canonical userspace manifest missing: {USERSpace_MANIFEST}")
+    try:
+        data = json.loads(USERSpace_MANIFEST.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"Invalid userspace manifest: {exc}") from exc
+    required = data.get("required")
+    if not isinstance(required, list) or not required:
+        raise RuntimeError("Canonical userspace manifest has no required artifacts")
+    return data
+
+
+def _cargo_build_manifest(manifest_path, target, bin_name=None):
+    cmd = [
+        "cargo", "build",
+        "--manifest-path", str(WORKSPACE_ROOT / manifest_path),
+        "--target", target,
+    ]
+    if bin_name:
+        cmd.extend(["--bin", bin_name])
+    log(f"Building {bin_name or manifest_path} [{target}]...")
+    return subprocess.run(cmd, cwd=str(WORKSPACE_ROOT)).returncode
+
+
+def _build_x86_userspace():
+    manifest = _load_x86_userspace_manifest()
+    target = manifest["target_triple"]
+    output_root = WORKSPACE_ROOT / manifest["output_root"]
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    for item in manifest["required"]:
+        name = item["name"]
+        if item["kind"] == "system-service":
+            rc = _cargo_build_manifest(item["manifest"], target, name)
+        else:
+            rc = _cargo_build_manifest(item["manifest"], target)
+        if rc != 0:
+            log_error(f"Userspace artifact build failed: {name}")
+            return False
+
+        built = output_root / name
+        if not built.exists():
+            alt = output_root / f"{name}.elf"
+            if alt.exists():
+                built = alt
+        if not built.exists():
+            log_error(f"Expected userspace ELF was not produced: {built}")
+            return False
+
+        # Keep the exact path consumed by kernel/src/task/images.rs.
+        if built != output_root / name:
+            shutil.copy2(built, output_root / name)
+
+    missing = [item["name"] for item in manifest["required"] if not (output_root / item["name"]).is_file()]
+    if missing:
+        log_error("Canonical userspace graph is incomplete: " + ", ".join(missing))
+        return False
+    log_success(f"Canonical x86_64 userspace graph ready ({len(manifest['required'])} ELF artifacts).")
+    return True
+
+
+def _build_x86_kernel_and_image():
+    if not _build_x86_userspace():
+        return 1
+
+    log("Building InterOS Kernel [x86_64-unknown-none]...")
+    res = subprocess.run([
+        "cargo", "build",
+        "--manifest-path", "kernel/Cargo.toml",
+        "--target", "x86_64-unknown-none"
+    ], cwd=str(WORKSPACE_ROOT))
+    if res.returncode != 0:
+        log_error("x86_64 kernel build failed")
+        return res.returncode
+
+    kernel_path = WORKSPACE_ROOT / "target" / "x86_64-unknown-none" / "debug" / "kernel"
+    if not kernel_path.exists():
+        log_error(f"Kernel artifact missing after successful cargo build: {kernel_path}")
+        return 1
+
+    log("Packaging canonical QEMU Phone BIOS image...")
+    res = subprocess.run([
+        "cargo", "run",
+        "--manifest-path", "boot/Cargo.toml",
+        "--", str(kernel_path), "target/inter-os-bios.img"
+    ], cwd=str(WORKSPACE_ROOT))
+    if res.returncode != 0:
+        log_error("BIOS disk image packaging failed")
+        return res.returncode
+
+    img_path = TARGET_DIR / "inter-os-bios.img"
+    if not img_path.exists():
+        log_error(f"Boot image missing after packaging: {img_path}")
+        return 1
+    log_success(f"x86_64 QEMU Phone image ready: {img_path.relative_to(WORKSPACE_ROOT)} ({img_path.stat().st_size} bytes)")
+    return 0
+
+
 def cmd_build(args):
     target_arg = getattr(args, "target", None) or getattr(args, "name", "all")
     target_lower = target_arg.lower().replace("-", "_")
 
-    # If it's a known application name
+    # Known application: build it for the explicitly selected architecture.
     app_dir = APPS_DIR / target_lower
     if app_dir.exists():
-        arch_target = getattr(args, "arch", "aarch64-unknown-none")
+        arch_target = getattr(args, "arch", None) or "x86_64-unknown-none"
         log(f"Compiling application '{target_lower}' for target {arch_target}...")
-        res = subprocess.run(["cargo", "build", "--manifest-path", str(app_dir / "Cargo.toml"), "--target", arch_target])
+        res = subprocess.run([
+            "cargo", "build", "--manifest-path", str(app_dir / "Cargo.toml"),
+            "--target", arch_target
+        ], cwd=str(WORKSPACE_ROOT))
         if res.returncode != 0:
             log_error(f"Application build failed for {target_lower}")
             return res.returncode
@@ -276,12 +382,16 @@ def cmd_build(args):
         elf_src = WORKSPACE_ROOT / "target" / arch_target / "debug" / target_lower
         if not elf_src.exists():
             elf_src = WORKSPACE_ROOT / "target" / arch_target / "debug" / f"{target_lower}.exe"
-        if elf_src.exists():
-            shutil.copy2(elf_src, out_elf)
-            log_success(f"Built ELF binary: {out_elf.relative_to(WORKSPACE_ROOT)} ({out_elf.stat().st_size} bytes)")
+        if not elf_src.exists():
+            log_error(f"Cargo completed but ELF output was not found: {elf_src}")
+            return 1
+        shutil.copy2(elf_src, out_elf)
+        log_success(f"Built ELF binary: {out_elf.relative_to(WORKSPACE_ROOT)} ({out_elf.stat().st_size} bytes)")
         return 0
 
-    # Kernel builds
+    if target_lower in ("demo", "qemu", "phone"):
+        return _build_x86_kernel_and_image()
+
     targets_to_build = []
     if target_lower in ["x86_64", "x86", "pc"]:
         targets_to_build.append("x86_64")
@@ -297,58 +407,27 @@ def cmd_build(args):
 
     for t in targets_to_build:
         if t == "x86_64":
-            log("Building InterOS Kernel [x86_64-unknown-none]...")
-            res = subprocess.run([
-                "cargo", "build",
-                "--manifest-path", "kernel/Cargo.toml",
-                "--target", "x86_64-unknown-none"
-            ], cwd=str(WORKSPACE_ROOT))
-            if res.returncode != 0:
-                log_error("x86_64 kernel build failed")
-                return res.returncode
-            log("Packaging bootable BIOS disk image via bootloader crate...")
-            res = subprocess.run([
-                "cargo", "run",
-                "--manifest-path", "boot/Cargo.toml"
-            ], cwd=str(WORKSPACE_ROOT))
-            if res.returncode != 0:
-                log_error("BIOS disk image packaging failed")
-                return res.returncode
-            img_path = TARGET_DIR / "inter-os-bios.img"
-            if img_path.exists():
-                log_success(f"x86_64 bootable image created: {img_path.relative_to(WORKSPACE_ROOT)} ({img_path.stat().st_size} bytes)")
-
+            rc = _build_x86_kernel_and_image()
+            if rc != 0:
+                return rc
         elif t == "aarch64":
             log("Building InterOS Kernel [aarch64-unknown-none]...")
             res = subprocess.run([
-                "cargo", "build",
-                "--manifest-path", "kernel-aarch64/Cargo.toml",
+                "cargo", "build", "--manifest-path", "kernel-aarch64/Cargo.toml",
                 "--target", "aarch64-unknown-none"
             ], cwd=str(WORKSPACE_ROOT))
             if res.returncode != 0:
                 log_error("aarch64 kernel build failed")
                 return res.returncode
-            bin_path = WORKSPACE_ROOT / "target" / "aarch64-unknown-none" / "debug" / "kernel-aarch64"
-            if not bin_path.exists():
-                bin_path = WORKSPACE_ROOT / "kernel-aarch64" / "target" / "aarch64-unknown-none" / "debug" / "kernel-aarch64"
-            if bin_path.exists():
-                log_success(f"AArch64 kernel ELF created: {bin_path} ({bin_path.stat().st_size} bytes)")
-
         elif t == "riscv64":
             log("Building InterOS Kernel [riscv64gc-unknown-none-elf]...")
             res = subprocess.run([
-                "cargo", "build",
-                "--manifest-path", "kernel-riscv64/Cargo.toml",
+                "cargo", "build", "--manifest-path", "kernel-riscv64/Cargo.toml",
                 "--target", "riscv64gc-unknown-none-elf"
             ], cwd=str(WORKSPACE_ROOT))
             if res.returncode != 0:
                 log_error("riscv64 kernel build failed")
                 return res.returncode
-            bin_path = WORKSPACE_ROOT / "target" / "riscv64gc-unknown-none-elf" / "debug" / "kernel-riscv64"
-            if not bin_path.exists():
-                bin_path = WORKSPACE_ROOT / "kernel-riscv64" / "target" / "riscv64gc-unknown-none-elf" / "debug" / "kernel-riscv64"
-            if bin_path.exists():
-                log_success(f"RISC-V kernel ELF created: {bin_path} ({bin_path.stat().st_size} bytes)")
 
     log_success("Requested build(s) completed successfully.")
     return 0
@@ -706,12 +785,12 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {{
 # =============================================================================
 def cmd_run(args):
     target_name = args.name.lower().replace("-", "_")
-    target = getattr(args, "target", "aarch64-unknown-none")
+    target = getattr(args, "target", "x86_64-unknown-none")
     port = getattr(args, "port", 4300)
 
     # Architecture profile boot mode
-    if target_name in ("x86_64", "aarch64", "riscv64", "qemu", "kernel"):
-        arch = "x86_64" if target_name in ("qemu", "kernel") else target_name
+    if target_name in ("x86_64", "aarch64", "riscv64", "qemu", "phone", "demo", "kernel"):
+        arch = "x86_64" if target_name in ("qemu", "phone", "demo", "kernel") else target_name
         log(f"Building {arch} microkernel...")
         b_args = argparse.Namespace(name=arch, target=None)
         if cmd_build(b_args) != 0:
@@ -1087,9 +1166,10 @@ def main():
     p_doc.set_defaults(func=cmd_doctor)
 
     # build
-    p_bld = subparsers.add_parser("build", help="Build kernels (x86_64, aarch64, riscv64, all) or app")
-    p_bld.add_argument("name", nargs="?", default="all", help="Target architecture or app name")
+    p_bld = subparsers.add_parser("build", help="Build the canonical QEMU demo, kernels, or an application")
+    p_bld.add_argument("name", nargs="?", default="all", help="demo/qemu, architecture, or app name")
     p_bld.add_argument("--target", default=None, help="Target architecture or triple")
+    p_bld.add_argument("--arch", default=None, help="Application Rust target triple")
     p_bld.set_defaults(func=cmd_build)
 
     # test
@@ -1134,7 +1214,7 @@ def main():
     p_insp.set_defaults(func=cmd_inspect)
 
     # run
-    p_run = subparsers.add_parser("run", help="Build, pack, and hot-deploy to emulator")
+    p_run = subparsers.add_parser("run", help="Build and launch the canonical QEMU demo or deploy an application")
     p_run.add_argument("name", help="App name")
     p_run.add_argument("--target", default="aarch64-unknown-none", help="Target triple")
     p_run.add_argument("--port", type=int, default=4300, help="Studio port")
