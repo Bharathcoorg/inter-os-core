@@ -272,6 +272,7 @@ impl DrmKmsController {
         }
         if let Some((id,_,owner))=best {
             self.focused_surface=Some(id);
+            let _ = crate::gui::WINDOW_MANAGER.lock().focus_owned(crate::gui::WindowId(id), owner);
             return Some((id,owner));
         }
         None
