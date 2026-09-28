@@ -1405,6 +1405,19 @@ document.addEventListener('DOMContentLoaded', () => {
         isPointerDown = false;
       });
 
+      // HTTP scanout has no RFB keyboard channel, so provide the same bounded
+      // guest input contract explicitly. When noVNC is active it owns keyboard
+      // input; this handler is only used by the screenshot fallback.
+      img.tabIndex = 0;
+      img.addEventListener('keydown', (ev) => {
+        if (!state.vbeActive || !ev.key || ev.key.length !== 1) return;
+        fetch('/api/input/key', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: ev.key.codePointAt(0) })
+        }).catch(() => {});
+      });
+
       httpScanoutTimer = setInterval(() => {
         if (!state.vbeActive) {
           stopHttpScanoutViewer();
