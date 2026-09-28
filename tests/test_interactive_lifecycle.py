@@ -117,7 +117,7 @@ def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_co
         print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_app} ({sz} bytes)")
         time.sleep(0.5)
     else:
-        time.sleep(0.1)
+        time.sleep(0.6)
 
     # Perform in-app functional interactions if specified
     if in_app_interactions:
@@ -144,7 +144,7 @@ def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_co
                     sz_inter = os.path.getsize(ppm_inter) if os.path.exists(ppm_inter) else 0
                     print(f"[LIFECYCLE TEST] In-app interaction screendump recorded: {ppm_inter} ({sz_inter} bytes)")
             else:
-                time.sleep(0.1)
+                time.sleep(0.3)
 
     # Dispatch touch tap on Back button, Home Gesture Bar, or Swipe Up
     if exit_gesture == "home_bar":
@@ -178,7 +178,7 @@ def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_co
         print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_reaped} ({sz_reaped} bytes)")
         time.sleep(0.5)
     else:
-        time.sleep(0.1)
+        time.sleep(0.4)
 
 def main():
     qemu_exe = find_qemu("qemu-system-x86_64.exe")

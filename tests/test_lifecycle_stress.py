@@ -246,7 +246,7 @@ def execute_iteration_phases(reader, monitor_sock, iter_num):
     # Phase 12: Overview / Recent Apps Switcher Test
     reader.sock.sendall(b"SWIPE 360 1420 360 1100 5\n")
     assert reader.wait_for("render_overview complete: Recent apps overview deck displayed.", timeout=15.0), "Overview deck open failed"
-    time.sleep(0.2)
+    time.sleep(0.3)
     reader.sock.sendall(b"TAP 360 340\n")
     assert reader.wait_for("Switched to recent app from overview card 0", timeout=15.0), "Switch recent app failed"
     assert reader.wait_for("Music canvas presented to scanout buffer.", timeout=15.0), "Recent app present failed"
