@@ -114,6 +114,10 @@ impl Scheduler {
         priority: u8,
     ) -> Result<TaskId, &'static str> {
         crate::task::process::reserve_thread(process_id)?;
+        crate::task::process::reserve_address_space(process_id, crate::task::user::USER_STACK_SIZE).map_err(|e| {
+            crate::task::process::cancel_thread_reservation(process_id);
+            e
+        })?;
         let shared_space = match self.tasks.iter()
             .find(|t| t.process_id == Some(process_id))
             .and_then(|t| t.page_table.clone()) {
@@ -131,6 +135,7 @@ impl Scheduler {
                 Ok(top) => top,
                 Err(e) => {
                     crate::task::process::cancel_thread_reservation(process_id);
+                    crate::task::process::release_address_space(process_id, crate::task::user::USER_STACK_SIZE);
                     return Err(e);
                 }
             }
@@ -145,6 +150,7 @@ impl Scheduler {
                 crate::task::user::unmap_user_thread_stack(&mut pt, id)
             };
             crate::task::process::cancel_thread_reservation(process_id);
+            crate::task::process::release_address_space(process_id, crate::task::user::USER_STACK_SIZE);
             if rollback.is_err() {
                 return Err("thread stack rollback failed");
             }
