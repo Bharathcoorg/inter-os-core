@@ -10,7 +10,7 @@ pub const SERVICE_ABI_MAGIC: [u8; 4] = *b"ISVC";
 pub const SERVICE_ABI_VERSION: u16 = 1;
 pub const SERVICE_ABI_HEADER_SIZE: usize = 16;
 pub const SERVICE_ID_MIN: u8 = 1;
-pub const SERVICE_ID_MAX: u8 = 10;
+pub const SERVICE_ID_MAX: u8 = 11;
 
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +89,7 @@ pub fn service_id_from_package_id(package_id: &str) -> Option<u8> {
         "org.interos.service.camerad" => Some(8),
         "org.interos.compositor" | "org.interos.service.compositor" => Some(9),
         "org.interos.launcher" | "org.interos.service.launcher" => Some(10),
+        "org.interos.service.sensord" => Some(11),
         _ => None,
     }
 }
