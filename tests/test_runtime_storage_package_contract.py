@@ -299,3 +299,11 @@ def test_process_reap_rejects_live_sibling_threads():
     scheduler = (ROOT / "kernel/src/task/scheduler.rs").read_text(encoding="utf-8")
     assert "process still has live threads" in process
     assert "process::reap(child_id)?" in scheduler
+
+def test_tcp_receive_path_uses_strict_sequence_validation():
+    tcp = (ROOT / "kernel/src/net/tcp.rs").read_text(encoding="utf-8")
+    net = (ROOT / "kernel/src/net/mod.rs").read_text(encoding="utf-8")
+    assert "pub fn valid_syn_ack" in tcp
+    assert "pub fn valid_established_segment" in tcp
+    assert "valid_syn_ack(&segment, conn.send_seq.wrapping_add(1))" in net
+    assert "valid_established_segment(&segment, conn.recv_seq, conn.snd_una, conn.send_seq)" in net
