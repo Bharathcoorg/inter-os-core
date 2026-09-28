@@ -540,7 +540,7 @@ impl TcpConnectionTable {
         false
     }
 
-    pub fn due_fin_retransmit(&mut self, now: u64) -> Option<(u32, Ipv4Address, u16, u16, u32, u32)> {
+    pub fn due_fin_retransmit(&mut self, now: u64) -> Option<(u32, Ipv4Address, u16, u16, u32, u32, u16)> {
         for slot in self.entries.iter_mut() {
             if let Some(conn) = slot.as_mut() {
                 if conn.fin_pending && now >= conn.fin_deadline {
@@ -551,7 +551,7 @@ impl TcpConnectionTable {
                     }
                     conn.fin_retries += 1;
                     conn.fin_deadline = now.saturating_add(TCP_RETRANSMIT_TICKS << conn.fin_retries);
-                    return Some((conn.id, conn.remote_ip, conn.local_port, conn.remote_port, conn.fin_seq, conn.recv_seq));
+                    return Some((conn.id, conn.remote_ip, conn.local_port, conn.remote_port, conn.fin_seq, conn.recv_seq, conn.rcv_wnd.min(u16::MAX as u32) as u16));
                 }
             }
         }
@@ -634,6 +634,7 @@ impl TcpConnectionTable {
         out[..n].copy_from_slice(&conn.rx[..n]);
         conn.rx.copy_within(n..conn.rx_len, 0);
         conn.rx_len -= n;
+        conn.rcv_wnd = TCP_RX_BUF_SIZE.saturating_sub(conn.rx_len) as u32;
         Ok(n)
     }
 

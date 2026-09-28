@@ -197,3 +197,10 @@ def test_tcp_syn_ack_requires_exact_ack_and_nonempty_sequence_space():
     assert "segment.payload.is_empty()" in source
     assert "segment.flags & 0x13 == 0x12" in source
     assert "segment.payload.is_empty()" in source
+
+def test_tcp_receive_reopens_advertised_window_and_emits_update_ack():
+    socket = (ROOT / "kernel/src/net/socket.rs").read_text(encoding="utf-8")
+    syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
+    assert "conn.rcv_wnd = TCP_RX_BUF_SIZE.saturating_sub(conn.rx_len) as u32" in socket
+    assert "transmit_tcp_segment_with_window" in syscall
+    assert "conn.rcv_wnd.min(u16::MAX as u32) as u16" in syscall

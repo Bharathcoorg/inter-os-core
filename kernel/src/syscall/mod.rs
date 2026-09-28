@@ -1660,11 +1660,30 @@ pub fn sys_tcp_send(connection_id: u32, payload: &[u8]) -> SyscallResult {
 
 pub fn sys_tcp_recv(connection_id: u32, out: &mut [u8]) -> Result<usize, SyscallResult> {
     let owner = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?.0 as u32;
-    crate::net::TCP_TABLE.lock().recv_owned(connection_id, owner, out).map_err(|e| match e {
+    let n = crate::net::TCP_TABLE.lock().recv_owned(connection_id, owner, out).map_err(|e| match e {
         NetError::CapabilityDenied => SyscallResult::PermissionDenied,
         NetError::NoPacketAvailable => SyscallResult::NotReady,
         _ => SyscallResult::NetworkError,
-    })
+    })?;
+    if n > 0 {
+        let (src_ip, local_port, dst_ip, remote_port, seq, ack, window) = {
+            let table = crate::net::TCP_TABLE.lock();
+            let conn = table.get(connection_id).ok_or(SyscallResult::InvalidArguments)?;
+            (
+                if conn.remote_ip.is_loopback() { crate::net::Ipv4Address::LOCALHOST } else { crate::net::DEFAULT_HOST_IP },
+                conn.local_port,
+                conn.remote_ip,
+                conn.remote_port,
+                conn.send_seq,
+                conn.recv_seq,
+                conn.rcv_wnd.min(u16::MAX as u32) as u16,
+            )
+        };
+        let _ = crate::net::transmit_tcp_segment_with_window(
+            src_ip, local_port, dst_ip, remote_port, seq, ack, 0x10, window
+        );
+    }
+    Ok(n)
 }
 
 /// Sends a DNS UDP query while allowing the network stack to resolve ARP.

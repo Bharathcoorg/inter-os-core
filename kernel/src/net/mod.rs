@@ -389,8 +389,8 @@ pub fn poll_tcp_retransmissions(now: u64) -> usize {
         ).is_ok() { 1 } else { 0 };
     }
     let due_fin = TCP_TABLE.lock().due_fin_retransmit(now);
-    if let Some((_id, remote_ip, local_port, remote_port, seq, ack)) = due_fin {
-        return reaped + if transmit_tcp_segment(if remote_ip.is_loopback() { Ipv4Address::LOCALHOST } else { DEFAULT_HOST_IP }, local_port, remote_ip, remote_port, seq, ack, 0x11).is_ok() { 1 } else { 0 };
+    if let Some((_id, remote_ip, local_port, remote_port, seq, ack, window)) = due_fin {
+        return reaped + if transmit_tcp_segment_with_window(if remote_ip.is_loopback() { Ipv4Address::LOCALHOST } else { DEFAULT_HOST_IP }, local_port, remote_ip, remote_port, seq, ack, 0x11, window).is_ok() { 1 } else { 0 };
     }
     let due = TCP_TABLE.lock().due_retransmit(now);
     let Some((id, remote_ip, local_port, remote_port, seq, ack, len)) = due else { return reaped; };
