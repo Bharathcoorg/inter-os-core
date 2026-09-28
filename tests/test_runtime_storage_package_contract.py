@@ -269,3 +269,10 @@ def test_interfs_integrity_checker_validates_bitmap_and_extents():
     source = (ROOT / "kernel/src/storage/interfs.rs").read_text(encoding="utf-8")
     assert "pub fn check_integrity" in source
     assert "marked != referenced[block as usize]" in source
+
+def test_verified_boot_policy_is_monotonic_and_persistent():
+    source = (ROOT / "kernel/src/update.rs").read_text(encoding="utf-8")
+    assert "pub struct VerifiedBootPolicy" in source
+    assert "pub fn accept_version" in source
+    assert "pub fn advance" in source
+    assert "commit_kind(&version.to_le_bytes(), 9)" in source
