@@ -251,3 +251,8 @@ def test_verified_boot_policy_rejects_rollback_and_gates_update_installation():
     assert "rollback_index" in source
     assert "install_with_boot_policy" in source
     assert "policy.accept_version(tx.manifest.version)" in source
+
+def test_graphics_exposes_authoritative_global_buffer_manager():
+    source = (ROOT / "kernel/src/gui/mod.rs").read_text(encoding="utf-8")
+    assert "pub static BUFFER_MANAGER: Mutex<BufferManager>" in source
+    assert "BufferManager::new()" in source

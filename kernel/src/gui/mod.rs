@@ -32,6 +32,8 @@ use crate::serial_println;
 pub static MOBILE_SHELL: Mutex<MobileShell> = Mutex::new(MobileShell::new());
 /// Authoritative application window registry used by input routing and composition.
 pub static WINDOW_MANAGER: Mutex<WindowManager> = Mutex::new(WindowManager::new());
+/// Global display-buffer lifecycle owner. Compositor publication must pass through explicit fences.
+pub static BUFFER_MANAGER: Mutex<BufferManager> = Mutex::new(BufferManager::new());
 
 /// Initializes the GUI subsystem and verifies capacitive touch hit testing via self-tests.
 pub fn init() {
