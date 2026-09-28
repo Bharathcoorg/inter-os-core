@@ -1818,6 +1818,46 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 'error': 'Hardware sensor injection is disabled; Device Studio only displays guest-reported telemetry'
             }).encode())
             return
+        if self.path == '/api/input/key':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+                code = int(data.get('code', -1))
+            except (ValueError, TypeError, json.JSONDecodeError):
+                code = -1
+
+            if code < 0 or code > 0x10FFFF or (0xD800 <= code <= 0xDFFF):
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'status': 'REJECTED',
+                    'error': 'Unicode scalar is outside the guest input contract'
+                }).encode())
+                return
+
+            sent = False
+            with serial_socket_lock:
+                if serial_socket_conn:
+                    try:
+                        serial_socket_conn.sendall(f"INPUT_KEY {code}\n".encode('utf-8'))
+                        sent = True
+                    except OSError:
+                        sent = False
+
+            self.send_response(200 if sent else 503)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': sent,
+                'status': 'DISPATCHED' if sent else 'UNAVAILABLE',
+                'source': 'UART_COM1' if sent else 'UNAVAILABLE',
+                'code': code,
+            }).encode())
+            return
         if self.path == '/api/touch/event':
             content_length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(content_length) if content_length > 0 else b'{}'
