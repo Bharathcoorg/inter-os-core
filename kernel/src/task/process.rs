@@ -47,6 +47,7 @@ pub struct ProcessRecord {
     pub state: ProcessState,
     pub exit_code: i32,
     pub thread_count: u16,
+    pub open_file_count: u16,
     pub limits: ResourceLimits,
 }
 
@@ -57,7 +58,7 @@ pub static THREAD_TABLE: Mutex<[Option<ThreadRecord>; MAX_THREADS]> = Mutex::new
 pub fn register_leader(task: TaskId, parent_task: TaskId) -> Option<ProcessId> {
     if task == TaskId(0) { return None; }
     let id = ProcessId(NEXT_PROCESS_ID.fetch_add(1, Ordering::Relaxed));
-    let record = ProcessRecord { id, leader_task: task, parent_task, state: ProcessState::Running, exit_code: 0, thread_count: 1, limits: ResourceLimits::default() };
+    let record = ProcessRecord { id, leader_task: task, parent_task, state: ProcessState::Running, exit_code: 0, thread_count: 1, open_file_count: 0, limits: ResourceLimits::default() };
     let mut table = PROCESS_TABLE.lock();
     let Some(slot) = table.iter_mut().find(|slot| slot.is_none()) else { return None; };
     let mut threads = THREAD_TABLE.lock();
@@ -73,6 +74,30 @@ pub fn process_for_task(task: TaskId) -> Option<ProcessId> {
 
 pub fn record_for_process(process: ProcessId) -> Option<ProcessRecord> {
     PROCESS_TABLE.lock().iter().flatten().find(|r| r.id == process).copied()
+}
+
+pub fn can_open_file(process: ProcessId) -> Result<(), &'static str> {
+    let table = PROCESS_TABLE.lock();
+    let record = table.iter().flatten().find(|r| r.id == process).ok_or("process not found")?;
+    if record.state != ProcessState::Running { return Err("process is not running"); }
+    if record.open_file_count >= record.limits.max_open_files { return Err("open file limit exceeded"); }
+    Ok(())
+}
+
+pub fn reserve_open_file(process: ProcessId) -> Result<(), &'static str> {
+    let mut table = PROCESS_TABLE.lock();
+    let record = table.iter_mut().flatten().find(|r| r.id == process).ok_or("process not found")?;
+    if record.state != ProcessState::Running { return Err("process is not running"); }
+    if record.open_file_count >= record.limits.max_open_files { return Err("open file limit exceeded"); }
+    record.open_file_count += 1;
+    Ok(())
+}
+
+pub fn release_open_file(process: ProcessId) {
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(record) = table.iter_mut().flatten().find(|r| r.id == process) {
+        record.open_file_count = record.open_file_count.saturating_sub(1);
+    }
 }
 
 pub fn can_create_thread(process: ProcessId) -> Result<(), &'static str> {
@@ -199,6 +224,7 @@ pub fn validate() -> bool {
     let mut count = 0;
     for record in table.iter().flatten() {
         if record.thread_count == 0 || record.thread_count > record.limits.max_threads { return false; }
+        if record.open_file_count > record.limits.max_open_files { return false; }
         let actual_threads = threads.iter().flatten().filter(|t| t.process == record.id).count();
         if actual_threads != record.thread_count as usize { return false; }
         if record.leader_task != TaskId(0) {
@@ -226,6 +252,6 @@ pub fn snapshot(out: &mut [u8]) -> usize {
     struct W<'a> { b: &'a mut [u8], n: usize }
     impl<'a> Write for W<'a> { fn write_str(&mut self, s: &str) -> core::fmt::Result { let k=s.len().min(self.b.len().saturating_sub(self.n)); self.b[self.n..self.n+k].copy_from_slice(&s.as_bytes()[..k]); self.n+=k; Ok(()) } }
     let table=PROCESS_TABLE.lock(); let mut w=W{b:out,n:0};
-    for r in table.iter().flatten() { let _=writeln!(w,"{}|{}|{}|{}|{}\n",r.id.0,r.leader_task.0,r.parent_task.0,r.state as u8,r.thread_count); }
+    for r in table.iter().flatten() { let _=writeln!(w,"{}|{}|{}|{}|{}\n",r.id.0,r.leader_task.0,r.parent_task.0,r.state as u8,r.thread_count,r.open_file_count); }
     w.n
 }
