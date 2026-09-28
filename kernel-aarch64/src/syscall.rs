@@ -19,6 +19,37 @@ pub const SYS_IPC_SEND: u64 = 5;
 pub const SYS_IPC_RECV: u64 = 6;
 pub const SYS_GET_TASK_ID: u64 = 7;
 
+fn validate_user_range(addr: u64, len: usize, write: bool) -> Result<(), i64> {
+    const START: u64 = 0x0000_1000;
+    const END: u64 = 0x0000_8000_0000_0000;
+    const CODE_START: u64 = 0x0040_0000;
+    const CODE_END: u64 = CODE_START + 0x0020_0000;
+    const STACK_START: u64 = 0x0080_0000;
+    const STACK_END: u64 = STACK_START + 0x0020_0000;
+    if addr < START || len == 0 { return if len == 0 { Ok(()) } else { Err(-14) }; }
+    let end = addr.checked_add(len as u64).ok_or(-14)?;
+    if end > END { return Err(-14); }
+    let in_code = addr >= CODE_START && end <= CODE_END;
+    let in_stack = addr >= STACK_START && end <= STACK_END;
+    if !(in_code || in_stack) { return Err(-14); }
+    if write && in_code { return Err(-13); }
+    Ok(())
+}
+
+fn copy_from_user(dst: &mut [u8], addr: u64, len: usize) -> Result<(), i64> {
+    if len > dst.len() { return Err(-22); }
+    validate_user_range(addr, len, false)?;
+    unsafe { core::ptr::copy_nonoverlapping(addr as *const u8, dst.as_mut_ptr(), len); }
+    Ok(())
+}
+
+fn copy_to_user(addr: u64, src: &[u8]) -> Result<(), i64> {
+    validate_user_range(addr, src.len(), true)?;
+    unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len()); }
+    Ok(())
+}
+
+
 pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, _a4: u64) -> i64 {
     match syscall_nr {
         SYS_YIELD => {
@@ -34,7 +65,7 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, _a4: u6
         SYS_LOG => {
             let addr = a0 as u64;
             let len = (a1 as usize).min(256);
-            if addr < 0x1000 || addr >= 0x0000_8000_0000_0000 || len == 0 {
+            if validate_user_range(addr, len, false).is_err() {
                 return -14; // -EFAULT
             }
 
@@ -49,8 +80,8 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, _a4: u6
             drop(sched);
 
             let mut kbuf = [0u8; 256];
-            unsafe {
-                core::ptr::copy_nonoverlapping(addr as *const u8, kbuf.as_mut_ptr(), len);
+            if copy_from_user(&mut kbuf, addr, len).is_err() {
+                return -14;
             }
             if let Ok(s) = core::str::from_utf8(&kbuf[..len]) {
                 crate::kprintln!("[LOG] {}", s);
@@ -90,11 +121,8 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, _a4: u6
 
             let mut kbuf = [0u8; IPC_MAX_PAYLOAD];
             if len > 0 {
-                if addr < 0x1000 || addr >= 0x0000_8000_0000_0000 {
+                if copy_from_user(&mut kbuf, addr, len).is_err() {
                     return -14; // -EFAULT
-                }
-                unsafe {
-                    core::ptr::copy_nonoverlapping(addr as *const u8, kbuf.as_mut_ptr(), len);
                 }
             }
 
@@ -121,12 +149,9 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, _a4: u6
             match router.receive(&caps, receiver) {
                 Ok(msg) => {
                     if max_len > 0 {
-                        if out_addr < 0x1000 || out_addr >= 0x0000_8000_0000_0000 {
-                            return -14; // -EFAULT
-                        }
                         let copy_len = msg.len.min(max_len);
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(msg.payload.as_ptr(), out_addr as *mut u8, copy_len);
+                        if copy_to_user(out_addr, &msg.payload[..copy_len]).is_err() {
+                            return -14; // -EFAULT
                         }
                     }
                     msg.len as i64
