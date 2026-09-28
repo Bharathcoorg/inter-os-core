@@ -25,6 +25,7 @@ pub enum DisplayOrientation { Portrait, LandscapeRight, PortraitInverted, Landsc
 /// A hardware plane / application graphics surface managed by KMS.
 pub const MAX_CLIENT_SURFACES: usize = 32;
 pub const MAX_SURFACE_PIXELS: usize = 1280 * 720;
+pub const MAX_SCANOUT_PIXELS: usize = 3840 * 2160;
 
 pub struct DrmSurface {
     pub id: u32,
@@ -301,7 +302,8 @@ impl DrmKmsController {
 
     /// Ensures that front and back scanout buffers are allocated to match scanout dimensions.
     pub fn ensure_buffers(&mut self) {
-        let size = (self.scanout_width as usize) * (self.scanout_height as usize);
+        let Some(size) = (self.scanout_width as usize).checked_mul(self.scanout_height as usize) else { return; };
+        if size == 0 || size > MAX_SCANOUT_PIXELS { return; }
         if self.front_buffer.len() != size {
             self.front_buffer.resize(size, 0xFF000000);
         }
@@ -336,8 +338,8 @@ impl DrmKmsController {
             // Compute clipped intersection bounds
             let x0 = sx.max(0);
             let y0 = sy.max(0);
-            let x1 = (sx + s_w).min(sw);
-            let y1 = (sy + s_h).min(sh);
+            let x1 = sx.saturating_add(s_w).min(sw);
+            let y1 = sy.saturating_add(s_h).min(sh);
 
             if x0 >= x1 || y0 >= y1 {
                 continue;
@@ -388,6 +390,10 @@ impl DrmKmsController {
     pub fn set_display_mode(&mut self, width: u32, height: u32, refresh_hz: u16) -> Result<(), &'static str> {
         if width == 0 || height == 0 || refresh_hz == 0 || refresh_hz > 240 {
             return Err("invalid display mode");
+        }
+        let pixels = (width as usize).checked_mul(height as usize).ok_or("display mode size overflow")?;
+        if pixels > MAX_SCANOUT_PIXELS {
+            return Err("display mode exceeds bounded scanout budget");
         }
         self.scanout_width = width;
         self.scanout_height = height;
