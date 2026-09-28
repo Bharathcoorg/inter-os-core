@@ -235,7 +235,11 @@ pub fn load_user_elf_into_page_table(
 
         for page in Page::range_inclusive(start_page, end_page) {
             let frame = crate::memory::allocate_frame().ok_or("Out of physical memory frames for user segment")?;
-            page_table.map_user_page(page, frame, page_flags)?;
+            if let Err(error) = page_table.map_user_page(page, frame, page_flags) {
+                // map_user_page does not consume the leaf frame on failure.
+                crate::memory::recycle_frame(frame);
+                return Err(error);
+            }
 
             // Zero entire physical frame via kernel physical memory offset
             let virt_frame = phys_offset + frame.start_address().as_u64();
@@ -281,7 +285,10 @@ pub fn load_user_elf_into_page_table(
 
     for page in Page::range_inclusive(start_stack_page, end_stack_page) {
         let frame = crate::memory::allocate_frame().ok_or("Out of memory for user stack")?;
-        page_table.map_user_page(page, frame, stack_flags)?;
+        if let Err(error) = page_table.map_user_page(page, frame, stack_flags) {
+            crate::memory::recycle_frame(frame);
+            return Err(error);
+        }
 
         let virt_frame = phys_offset + frame.start_address().as_u64();
         unsafe {
