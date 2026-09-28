@@ -994,6 +994,8 @@ def cmd_list(args):
 def cmd_uninstall(args):
     target = args.name
     port = getattr(args, "port", 4300)
+    if not _ensure_studio(port):
+        return 1
     url = f"http://127.0.0.1:{port}/api/apps/uninstall"
     payload = json.dumps({"app_id": target, "name": target}).encode("utf-8")
     req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
@@ -1024,6 +1026,8 @@ def cmd_install(args):
         return ver_ret
 
     port = getattr(args, "port", 4300)
+    if not _ensure_studio(port):
+        return 1
     filename = pkg_path.name
     log(f"Uploading verified package '{filename}' to InterOS Studio (port {port})...")
     data = pkg_path.read_bytes()
