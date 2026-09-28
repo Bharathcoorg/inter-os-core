@@ -461,43 +461,70 @@ def cmd_build(args):
 # =============================================================================
 def cmd_test(args):
     test_target = getattr(args, "target", "all").lower()
-    valid_targets = ["unit", "x86_64", "x86", "aarch64", "riscv64", "security", "adversarial", "qemu", "lifecycle", "contracts", "all"]
+    valid_targets = ["unit", "x86_64", "x86", "aarch64", "riscv64", "security", "adversarial", "qemu", "lifecycle", "contracts", "stress", "recovery", "all"]
     if test_target not in valid_targets:
         log_error(f"Unknown test target: '{test_target}'. Valid targets: {', '.join(valid_targets)}")
         return 1
 
     log(f"Executing InterOS test suite (Target: {test_target})...")
+    overall_rc = 0
 
     if test_target in ["contracts", "all"]:
         contracts_script = WORKSPACE_ROOT / "tests" / "run_all_contracts.py"
         if contracts_script.exists():
             log("Executing InterOS Core Contract Test Suite...")
             res = subprocess.run([sys.executable, str(contracts_script)], cwd=str(WORKSPACE_ROOT))
-            if res.returncode != 0 and test_target == "contracts":
-                return res.returncode
+            if res.returncode != 0:
+                overall_rc = res.returncode
+                if test_target == "contracts":
+                    return res.returncode
 
     if test_target in ["unit", "all"]:
         log("Running cargo test on host-compatible crates...")
         res = subprocess.run(["cargo", "test", "-p", "interos-std"], cwd=str(WORKSPACE_ROOT))
-        if res.returncode != 0 and test_target == "unit":
-            return res.returncode
+        if res.returncode != 0:
+            overall_rc = res.returncode
+            if test_target == "unit":
+                return res.returncode
         if (WORKSPACE_ROOT / "boot" / "Cargo.toml").exists():
-            subprocess.run(["cargo", "test", "--manifest-path", "boot/Cargo.toml"], cwd=str(WORKSPACE_ROOT))
+            res_boot = subprocess.run(["cargo", "test", "--manifest-path", "boot/Cargo.toml"], cwd=str(WORKSPACE_ROOT))
+            if res_boot.returncode != 0:
+                overall_rc = res_boot.returncode
 
     if test_target in ["x86_64", "x86", "all"]:
         x86_script = WORKSPACE_ROOT / "tests" / "verify_x86_boot.ps1"
         if x86_script.exists() and sys.platform == "win32":
             log("Executing QEMU x86_64 boot and serial verification...")
             res = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(x86_script)])
-            if res.returncode != 0 and test_target == "x86_64":
-                return res.returncode
+            if res.returncode != 0:
+                overall_rc = res.returncode
+                if test_target in ["x86_64", "x86"]:
+                    return res.returncode
 
     if test_target in ["qemu", "lifecycle", "all"]:
         lifecycle_script = WORKSPACE_ROOT / "tests" / "test_interactive_lifecycle.py"
         if lifecycle_script.exists():
             log("Executing QEMU full interactive smartphone lifecycle verification...")
             res = subprocess.run([sys.executable, "-u", str(lifecycle_script)], cwd=str(WORKSPACE_ROOT))
-            if res.returncode != 0 and test_target in ["qemu", "lifecycle"]:
+            if res.returncode != 0:
+                overall_rc = res.returncode
+                if test_target in ["qemu", "lifecycle"]:
+                    return res.returncode
+
+    if test_target in ["stress"]:
+        stress_script = WORKSPACE_ROOT / "tests" / "test_lifecycle_stress.py"
+        if stress_script.exists():
+            log("Executing QEMU multi-round lifecycle stress & resource verification...")
+            res = subprocess.run([sys.executable, "-u", str(stress_script)], cwd=str(WORKSPACE_ROOT))
+            if res.returncode != 0:
+                return res.returncode
+
+    if test_target in ["recovery"]:
+        rec_script = WORKSPACE_ROOT / "tests" / "test_reboot_recovery.py"
+        if rec_script.exists():
+            log("Executing QEMU clean reboot recovery verification...")
+            res = subprocess.run([sys.executable, "-u", str(rec_script)], cwd=str(WORKSPACE_ROOT))
+            if res.returncode != 0:
                 return res.returncode
 
     if test_target in ["aarch64", "all"]:
@@ -505,16 +532,20 @@ def cmd_test(args):
         if arm_script.exists() and sys.platform == "win32":
             log("Executing QEMU AArch64 boot verification...")
             res = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(arm_script)])
-            if res.returncode != 0 and test_target == "aarch64":
-                return res.returncode
+            if res.returncode != 0:
+                overall_rc = res.returncode
+                if test_target == "aarch64":
+                    return res.returncode
 
     if test_target in ["riscv64", "all"]:
         riscv_script = WORKSPACE_ROOT / "tests" / "test_riscv64.ps1"
         if riscv_script.exists() and sys.platform == "win32":
             log("Executing QEMU RISC-V boot verification...")
             res = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(riscv_script)])
-            if res.returncode != 0 and test_target == "riscv64":
-                return res.returncode
+            if res.returncode != 0:
+                overall_rc = res.returncode
+                if test_target == "riscv64":
+                    return res.returncode
 
     if test_target in ["security", "adversarial", "all"]:
         sec_script = WORKSPACE_ROOT / "tests" / "test_adversarial_security.py"
@@ -523,10 +554,29 @@ def cmd_test(args):
             res = subprocess.run([sys.executable, str(sec_script)])
             if res.returncode != 0:
                 log_error("Adversarial security test suite failed!")
-                return res.returncode
-            log_success("All adversarial security invariants validated.")
+                overall_rc = res.returncode
+                if test_target in ["security", "adversarial"]:
+                    return res.returncode
+            else:
+                log_success("All adversarial security invariants validated.")
 
-    log_success("Test execution finished.")
+        studio_sec_script = WORKSPACE_ROOT / "tests" / "test_studio_security.py"
+        if studio_sec_script.exists():
+            log("Executing Studio Adversarial Security Verification Suite...")
+            res = subprocess.run([sys.executable, str(studio_sec_script)])
+            if res.returncode != 0:
+                log_error("Studio security test suite failed!")
+                overall_rc = res.returncode
+                if test_target in ["security", "adversarial"]:
+                    return res.returncode
+            else:
+                log_success("Studio adversarial security invariants validated.")
+
+    if overall_rc != 0:
+        log_error(f"Test execution finished with failure (code: {overall_rc}).")
+        return overall_rc
+
+    log_success("Test execution finished successfully.")
     return 0
 
 
@@ -717,14 +767,38 @@ def cmd_devices(args):
 # COMMAND: inspect
 # =============================================================================
 def cmd_inspect(args):
-    target = args.target
+    target = getattr(args, "target", "").strip()
+    if not target:
+        log_error("Missing target argument for inspect (expected package path or host[:port])")
+        return 1
+
     p = Path(target)
-    if p.exists() and p.suffix == ".rapp":
-        return cmd_verify(argparse.Namespace(package_path=str(p)))
+    if p.suffix == ".rapp" or (not ":" in target and not target.replace(".", "").isdigit() and target not in ("localhost", "127.0.0.1") and not target.startswith("http")):
+        if p.exists() and p.suffix == ".rapp":
+            return cmd_verify(argparse.Namespace(package_path=str(p)))
+        log_error(f"Package or file not found: {target}")
+        return 1
 
     # Otherwise query running studio
     port = getattr(args, "port", 4300)
-    url = f"http://127.0.0.1:{port}/api/status"
+    host = "127.0.0.1"
+    if target.startswith("http://") or target.startswith("https://"):
+        parsed = urllib.parse.urlparse(target)
+        host = parsed.hostname or host
+        if parsed.port:
+            port = parsed.port
+    elif ":" in target:
+        parts = target.split(":", 1)
+        host = parts[0]
+        try:
+            port = int(parts[1])
+        except ValueError:
+            log_error(f"Invalid port in inspect target: {target}")
+            return 1
+    elif target in ("localhost", "127.0.0.1") or target.replace(".", "").isdigit():
+        host = target
+
+    url = f"http://{host}:{port}/api/status"
     log(f"Inspecting running InterOS Studio instance at {url}...")
     try:
         req = urllib.request.Request(url, method="GET")
@@ -733,7 +807,7 @@ def cmd_inspect(args):
             print(json.dumps(data, indent=2))
             return 0
     except Exception as e:
-        log_error(f"Failed to query Studio: {e}")
+        log_error(f"Failed to query Studio at {url}: {e}")
         return 1
 
 
