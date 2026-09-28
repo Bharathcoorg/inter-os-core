@@ -85,6 +85,9 @@ impl FsTransaction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FsCheckReport { pub used_inodes: u32, pub allocated_sectors: u32, pub referenced_sectors: u32 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsBackendError {
     Io(BlockDeviceError),
     InvalidFormat,
@@ -558,6 +561,38 @@ impl<'a, D: BlockDevice + ?Sized> InterFs<'a, D> {
             self.read_file(path, &mut data[..copy_len])?;
         }
         self.write_file(path, &data)
+    }
+
+    pub fn check_integrity(&mut self) -> Result<FsCheckReport, FsBackendError> {
+        let mut report = FsCheckReport { used_inodes: 0, allocated_sectors: 0, referenced_sectors: 0 };
+        let mut referenced = alloc::vec![false; self.superblock.data_sectors as usize];
+        for index in 0..MAX_INODES {
+            let inode = self.read_inode(index)?;
+            if !inode.used { continue; }
+            report.used_inodes = report.used_inodes.saturating_add(1);
+            if inode.path_len == 0 || inode.path_len as usize > MAX_PATH { return Err(FsBackendError::CorruptMetadata); }
+            let _ = inode.path()?;
+            if inode.file_size == 0 {
+                if inode.sector_count != 0 { return Err(FsBackendError::CorruptMetadata); }
+                continue;
+            }
+            let end = inode.start_sector.checked_add(inode.sector_count).ok_or(FsBackendError::CorruptMetadata)?;
+            if inode.sector_count == 0 || end > self.superblock.data_sectors { return Err(FsBackendError::CorruptMetadata); }
+            let required = ((inode.file_size as u64 + SECTOR_SIZE as u64 - 1) / SECTOR_SIZE as u64) as u32;
+            if inode.sector_count != required { return Err(FsBackendError::CorruptMetadata); }
+            for block in inode.start_sector..end {
+                let slot = &mut referenced[block as usize];
+                if *slot { return Err(FsBackendError::CorruptMetadata); }
+                *slot = true;
+                report.referenced_sectors = report.referenced_sectors.saturating_add(1);
+            }
+        }
+        for block in 0..self.superblock.data_sectors {
+            let marked = self.bitmap_bit(block)?;
+            if marked != referenced[block as usize] { return Err(FsBackendError::CorruptMetadata); }
+            if marked { report.allocated_sectors = report.allocated_sectors.saturating_add(1); }
+        }
+        Ok(report)
     }
 
     pub fn delete_file(&mut self, path: &str) -> Result<(), FsBackendError> {
