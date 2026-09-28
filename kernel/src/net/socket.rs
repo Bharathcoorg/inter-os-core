@@ -472,7 +472,7 @@ impl TcpConnectionTable {
         false
     }
 
-    pub fn due_syn_retransmit(&mut self, now: u64) -> Option<(u32, Ipv4Address, u16, u16, u32)> {
+    pub fn due_syn_retransmit(&mut self, now: u64) -> Option<(u32, Ipv4Address, u16, u16, u32, u16)> {
         for slot in self.entries.iter_mut() {
             if let Some(conn) = slot.as_mut() {
                 if conn.syn_pending && conn.state == crate::net::TcpState::SynSent && now >= conn.syn_deadline {
@@ -483,7 +483,7 @@ impl TcpConnectionTable {
                     }
                     conn.syn_retries += 1;
                     conn.syn_deadline = now.saturating_add(TCP_RETRANSMIT_TICKS << conn.syn_retries);
-                    return Some((conn.id, conn.remote_ip, conn.local_port, conn.remote_port, conn.syn_seq));
+                    return Some((conn.id, conn.remote_ip, conn.local_port, conn.remote_port, conn.syn_seq, conn.rcv_wnd.min(u16::MAX as u32) as u16));
                 }
             }
         }

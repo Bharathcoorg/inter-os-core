@@ -149,7 +149,11 @@ pub fn send_udp_datagram(
 }
 
 pub fn transmit_tcp_segment(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address, dst_port: u16, seq: u32, ack: u32, flags: u16) -> Result<(), NetError> {
-    let segment = TcpSegment { src_port, dst_port, seq, ack, flags, window: 65535, payload: &[] };
+    transmit_tcp_segment_with_window(src_ip, src_port, dst_ip, dst_port, seq, ack, flags, 65535)
+}
+
+pub fn transmit_tcp_segment_with_window(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address, dst_port: u16, seq: u32, ack: u32, flags: u16, window: u16) -> Result<(), NetError> {
+    let segment = TcpSegment { src_port, dst_port, seq, ack, flags, window, payload: &[] };
     let mut tcp_buf = [0u8; 64];
     let tcp_len = crate::net::tcp::serialize_with_checksum(&segment, src_ip.0, dst_ip.0, &mut tcp_buf)
         .map_err(|_| NetError::BufferTooSmall)?;
@@ -167,7 +171,11 @@ pub fn transmit_tcp_segment(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Addr
 }
 
 fn transmit_tcp_payload(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address, dst_port: u16, seq: u32, ack: u32, payload: &[u8]) -> Result<usize, NetError> {
-    let segment = TcpSegment { src_port, dst_port, seq, ack, flags: 0x18, window: 65535, payload };
+    transmit_tcp_payload_with_window(src_ip, src_port, dst_ip, dst_port, seq, ack, payload, 65535)
+}
+
+fn transmit_tcp_payload_with_window(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address, dst_port: u16, seq: u32, ack: u32, payload: &[u8], window: u16) -> Result<usize, NetError> {
+    let segment = TcpSegment { src_port, dst_port, seq, ack, flags: 0x18, window, payload };
     let mut tcp_buf = [0u8; 1480];
     let tcp_len = crate::net::tcp::serialize_with_checksum(&segment, src_ip.0, dst_ip.0, &mut tcp_buf).map_err(|_| NetError::BufferTooSmall)?;
     let mut ip_buf = [0u8; 1514];
@@ -181,8 +189,12 @@ fn transmit_tcp_payload(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address,
 }
 
 pub fn send_tcp_payload(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address, dst_port: u16, seq: u32, ack: u32, payload: &[u8], caps: &CapabilityTable) -> Result<usize, NetError> {
+    send_tcp_payload_with_window(src_ip, src_port, dst_ip, dst_port, seq, ack, payload, 65535, caps)
+}
+
+pub fn send_tcp_payload_with_window(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address, dst_port: u16, seq: u32, ack: u32, payload: &[u8], window: u16, caps: &CapabilityTable) -> Result<usize, NetError> {
     if !caps.has_capability(CapabilityType::NetworkSend, Rights::WRITE) { return Err(NetError::CapabilityDenied); }
-    transmit_tcp_payload(src_ip, src_port, dst_ip, dst_port, seq, ack, payload)
+    transmit_tcp_payload_with_window(src_ip, src_port, dst_ip, dst_port, seq, ack, payload, window)
 }
 
 fn transmit_tcp_syn(
@@ -192,8 +204,12 @@ fn transmit_tcp_syn(
     dst_port: u16,
     seq: u32,
 ) -> Result<(), NetError> {
+    transmit_tcp_syn_with_window(src_ip, src_port, dst_ip, dst_port, seq, 65535)
+}
+
+fn transmit_tcp_syn_with_window(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address, dst_port: u16, seq: u32, window: u16) -> Result<(), NetError> {
     let segment = TcpSegment {
-        src_port, dst_port, seq, ack: 0, flags: 0x02, window: 65535, payload: &[],
+        src_port, dst_port, seq, ack: 0, flags: 0x02, window, payload: &[],
     };
     let mut tcp_buf = [0u8; 64];
     let tcp_len = crate::net::tcp::serialize_with_checksum(&segment, src_ip.0, dst_ip.0, &mut tcp_buf)
@@ -210,18 +226,13 @@ fn transmit_tcp_syn(
     NETWORK_DEVICE.lock().transmit(&eth_buf[..len])
 }
 
-pub fn send_tcp_syn(
-    src_ip: Ipv4Address,
-    src_port: u16,
-    dst_ip: Ipv4Address,
-    dst_port: u16,
-    seq: u32,
-    caps: &CapabilityTable,
-) -> Result<(), NetError> {
-    if !caps.has_capability(CapabilityType::NetworkSend, Rights::WRITE) {
-        return Err(NetError::CapabilityDenied);
-    }
-    transmit_tcp_syn(src_ip, src_port, dst_ip, dst_port, seq)
+pub fn send_tcp_syn(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address, dst_port: u16, seq: u32, caps: &CapabilityTable) -> Result<(), NetError> {
+    send_tcp_syn_with_window(src_ip, src_port, dst_ip, dst_port, seq, 65535, caps)
+}
+
+pub fn send_tcp_syn_with_window(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address, dst_port: u16, seq: u32, window: u16, caps: &CapabilityTable) -> Result<(), NetError> {
+    if !caps.has_capability(CapabilityType::NetworkSend, Rights::WRITE) { return Err(NetError::CapabilityDenied); }
+    transmit_tcp_syn_with_window(src_ip, src_port, dst_ip, dst_port, seq, window)
 }
 
 /// Polls the network device and processes all inbound packets.
@@ -371,10 +382,10 @@ pub fn poll_tcp_retransmissions(now: u64) -> usize {
         let expired = table.reap_time_wait(crate::interrupts::get_system_ticks());
         expired + table.reap_closed()
     };
-    if let Some((_id, remote_ip, local_port, remote_port, seq)) = TCP_TABLE.lock().due_syn_retransmit(now) {
-        return reaped + if transmit_tcp_syn(
+    if let Some((_id, remote_ip, local_port, remote_port, seq, window)) = TCP_TABLE.lock().due_syn_retransmit(now) {
+        return reaped + if transmit_tcp_syn_with_window(
             if remote_ip.is_loopback() { Ipv4Address::LOCALHOST } else { DEFAULT_HOST_IP },
-            local_port, remote_ip, remote_port, seq,
+            local_port, remote_ip, remote_port, seq, window,
         ).is_ok() { 1 } else { 0 };
     }
     let due_fin = TCP_TABLE.lock().due_fin_retransmit(now);
@@ -383,6 +394,7 @@ pub fn poll_tcp_retransmissions(now: u64) -> usize {
     }
     let due = TCP_TABLE.lock().due_retransmit(now);
     let Some((id, remote_ip, local_port, remote_port, seq, ack, len)) = due else { return reaped; };
+    let window = TCP_TABLE.lock().get(id).map(|c| c.rcv_wnd.min(u16::MAX as u32) as u16).unwrap_or(0);
     let payload = {
         let table = TCP_TABLE.lock();
         let Some(c) = table.get(id) else { return reaped; };
@@ -390,7 +402,7 @@ pub fn poll_tcp_retransmissions(now: u64) -> usize {
         buf[..len].copy_from_slice(&c.tx[..len]);
         buf
     };
-    reaped + if transmit_tcp_payload(if remote_ip.is_loopback() { Ipv4Address::LOCALHOST } else { DEFAULT_HOST_IP }, local_port, remote_ip, remote_port, seq, ack, &payload[..len]).is_ok() { 1 } else { 0 }
+    reaped + if transmit_tcp_payload_with_window(if remote_ip.is_loopback() { Ipv4Address::LOCALHOST } else { DEFAULT_HOST_IP }, local_port, remote_ip, remote_port, seq, ack, &payload[..len], window).is_ok() { 1 } else { 0 }
 }
 
 /// Initializes the network stack and executes comprehensive in-kernel self-tests.

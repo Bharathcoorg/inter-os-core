@@ -1637,15 +1637,15 @@ pub fn sys_tcp_send(connection_id: u32, payload: &[u8]) -> SyscallResult {
     let caps = current.cap_table.clone();
     drop(sched);
     if payload.len() > crate::net::tcp::TCP_MAX_SEGMENT { return SyscallResult::InvalidArguments; }
-    let (src_ip, src_port, dst_ip, dst_port, seq, ack, state) = {
+    let (src_ip, src_port, dst_ip, dst_port, seq, ack, state, window) = {
         let table = crate::net::TCP_TABLE.lock();
         let conn = match table.get(connection_id) { Some(c) if c.owner_task_id == owner => c, Some(_) => return SyscallResult::PermissionDenied, None => return SyscallResult::InvalidArguments };
-        (if conn.remote_ip.is_loopback() { crate::net::Ipv4Address::LOCALHOST } else { crate::net::DEFAULT_HOST_IP }, conn.local_port, conn.remote_ip, conn.remote_port, conn.send_seq, conn.recv_seq, conn.state)
+        (if conn.remote_ip.is_loopback() { crate::net::Ipv4Address::LOCALHOST } else { crate::net::DEFAULT_HOST_IP }, conn.local_port, conn.remote_ip, conn.remote_port, conn.send_seq, conn.recv_seq, conn.state, conn.rcv_wnd.min(u16::MAX as u32) as u16)
     };
     if state != crate::net::TcpState::Established { return SyscallResult::NotReady; }
     let available = crate::net::TCP_TABLE.lock().send_window(connection_id).unwrap_or(0) as usize;
     if payload.len() > available { return SyscallResult::NotReady; }
-    crate::net::send_tcp_payload(src_ip, src_port, dst_ip, dst_port, seq, ack, payload, &caps)
+    crate::net::send_tcp_payload_with_window(src_ip, src_port, dst_ip, dst_port, seq, ack, payload, window, &caps)
         .map(|n| {
             let now = crate::interrupts::get_system_ticks();
             let mut table = crate::net::TCP_TABLE.lock();
@@ -1831,6 +1831,7 @@ pub fn sys_tcp_close(connection_id: u32) -> Result<(), SyscallResult> {
     let dst_ip;
     let remote_port;
     let ack;
+    let window;
     {
         let table = crate::net::TCP_TABLE.lock();
         let conn = table.get(connection_id).ok_or(SyscallResult::InvalidArguments)?;
@@ -1843,11 +1844,12 @@ pub fn sys_tcp_close(connection_id: u32) -> Result<(), SyscallResult> {
         dst_ip = conn.remote_ip;
         remote_port = conn.remote_port;
         ack = conn.recv_seq;
+        window = conn.rcv_wnd.min(u16::MAX as u32) as u16;
     }
     let seq = crate::net::TCP_TABLE.lock()
         .arm_fin(connection_id, crate::interrupts::get_system_ticks())
         .map_err(|_| SyscallResult::NotReady)?;
-    if crate::net::transmit_tcp_segment(src_ip, local_port, dst_ip, remote_port, seq, ack, 0x11).is_err() {
+    if crate::net::transmit_tcp_segment_with_window(src_ip, local_port, dst_ip, remote_port, seq, ack, 0x11, window).is_err() {
         let _ = crate::net::TCP_TABLE.lock().rollback_fin(connection_id);
         return Err(SyscallResult::NetworkError);
     }
@@ -1867,9 +1869,10 @@ pub fn sys_tcp_connect(dst_ip: crate::net::Ipv4Address, dst_port: u16, local_por
     let id = crate::net::TCP_TABLE.lock()
         .open(owner, local_port, dst_ip, dst_port, seq)
         .map_err(|_| SyscallResult::NetworkError)?;
-    if crate::net::send_tcp_syn(
+    let window = crate::net::TCP_TABLE.lock().get(id).map(|c| c.rcv_wnd.min(u16::MAX as u32) as u16).unwrap_or(0);
+    if crate::net::send_tcp_syn_with_window(
         if dst_ip.is_loopback() { crate::net::Ipv4Address::LOCALHOST } else { crate::net::DEFAULT_HOST_IP },
-        local_port, dst_ip, dst_port, seq, &caps,
+        local_port, dst_ip, dst_port, seq, window, &caps,
     ).is_err() {
         let _ = crate::net::TCP_TABLE.lock().close_owned(id, owner);
         return Err(SyscallResult::NetworkError);

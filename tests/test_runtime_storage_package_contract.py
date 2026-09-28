@@ -176,3 +176,23 @@ def test_service_public_snapshot_does_not_expose_scheduler_task_ids():
     snapshot = source[source.index("pub fn snapshot"):source.index("/// Returns the most recent heartbeat")]
     assert "record.task.0" not in snapshot
     assert '"{}|{}|{}|{}|{}|{}"' in snapshot
+
+
+def test_tcp_transport_advertises_actual_receive_window_on_handshake_data_and_retransmit():
+    net = (ROOT / "kernel/src/net/mod.rs").read_text(encoding="utf-8")
+    syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
+    assert "transmit_tcp_segment_with_window" in net
+    assert "transmit_tcp_syn_with_window" in net
+    assert "send_tcp_payload_with_window" in net
+    assert "rcv_wnd.min(u16::MAX as u32) as u16" in net
+    assert "send_tcp_syn_with_window" in syscall
+    assert "send_tcp_payload_with_window" in syscall
+    assert "transmit_tcp_segment_with_window" in syscall
+
+
+def test_tcp_syn_ack_requires_exact_ack_and_nonempty_sequence_space():
+    source = (ROOT / "kernel/src/net/mod.rs").read_text(encoding="utf-8")
+    assert "let expected_ack = conn.send_seq.wrapping_add(1);" in source
+    assert "segment.ack == expected_ack" in source
+    assert "segment.payload.is_empty()" in source
+    assert "segment.seq != 0" in source
