@@ -196,6 +196,12 @@ impl TaskPageTable {
         frame: PhysFrame<Size4KiB>,
         flags: PageTableFlags,
     ) -> Result<(), &'static str> {
+        // Reject impossible user permissions before allocating any page-table
+        // frames. This keeps W^X failures side-effect free.
+        if flags.contains(PageTableFlags::WRITABLE) && !flags.contains(PageTableFlags::NO_EXECUTE) {
+            return Err("W^X violation: writable user mapping must be non-executable");
+        }
+
         // Mapping is transactional: any page-table frames allocated by this
         // operation are unlinked before their frames are recycled. The caller
         // retains ownership of the leaf frame on failure.
@@ -335,9 +341,6 @@ impl TaskPageTable {
         // User mappings are never allowed to be simultaneously writable and executable.
         // Enforce W^X at the single mapping primitive so callers cannot bypass the
         // ELF loader's segment-level policy by constructing a mapping directly.
-        if flags.contains(PageTableFlags::WRITABLE) && !flags.contains(PageTableFlags::NO_EXECUTE) {
-            return Err("W^X violation: writable user mapping must be non-executable");
-        }
         let leaf_flags = (flags & !PageTableFlags::PRESENT) | PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
         pt[p1_idx].set_frame(frame, leaf_flags);
         self.allocated_frames.push(frame);
