@@ -312,8 +312,8 @@ impl Scheduler {
                 && matches!(task.state, TaskState::Zombie | TaskState::Terminated)
         }).ok_or("child not ready or not owned by caller")?;
         let exit_code = self.tasks[index].exit_code;
+        crate::task::process::reap(child_id)?;
         self.tasks.remove(index);
-        crate::task::process::reap(child_id);
         if index < self.current_idx {
             self.current_idx -= 1;
         }
