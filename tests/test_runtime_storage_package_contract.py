@@ -340,10 +340,19 @@ def test_userspace_thread_creation_uses_shared_address_space_and_guarded_stack()
     scheduler = (ROOT / "kernel/src/task/scheduler.rs").read_text(encoding="utf-8")
     user = (ROOT / "kernel/src/task/user.rs").read_text(encoding="utf-8")
     process = (ROOT / "kernel/src/task/process.rs").read_text(encoding="utf-8")
-    assert "spawn_user_thread" in scheduler
+    memory = (ROOT / "kernel/src/memory.rs").read_text(encoding="utf-8")
+    assert scheduler.count("pub fn spawn_user_thread(") == 1
     assert "shared_space.lock()" in scheduler
     assert "map_user_thread_stack" in scheduler
     assert "reserve_thread(process_id)" in scheduler
     assert "bind_reserved_thread(process_id, id)" in scheduler
     assert "USER_STACK_SIZE + 4096" in user
+    assert "pub fn unmap_user_page" in memory
+    assert "mapped.drain(..)" in user
     assert "pub fn bind_reserved_thread" in process
+
+def test_process_leader_reap_preserves_zombie_until_sibling_threads_exit():
+    process = (ROOT / "kernel/src/task/process.rs").read_text(encoding="utf-8")
+    assert "record.leader_task = TaskId(0)" in process
+    assert "remaining == 0 && record.state == ProcessState::Zombie" in process
+    assert "record.state != ProcessState::Zombie" in process

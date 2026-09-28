@@ -306,17 +306,47 @@ pub fn map_user_thread_stack(
     let base = 0x0000_7000_0000_0000usize;
     let offset = (task_id.0 as usize).checked_mul(stride).ok_or("thread stack address overflow")?;
     let top = base.checked_sub(offset).ok_or("thread stack address underflow")?;
-    if top <= USER_STACK_SIZE + 4096 || top >= 0x0000_8000_0000_0000 { return Err("thread stack outside user range"); }
+    if top <= USER_STACK_SIZE + 4096 || top >= 0x0000_8000_0000_0000 {
+        return Err("thread stack outside user range");
+    }
+
     let bottom = top - USER_STACK_SIZE;
     let start = Page::<Size4KiB>::containing_address(VirtAddr::new(bottom as u64));
     let end = Page::<Size4KiB>::containing_address(VirtAddr::new((top - 1) as u64));
     let flags = PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::NO_EXECUTE;
+    let mut mapped = alloc::vec::Vec::new();
+
     for page in Page::range_inclusive(start, end) {
-        let frame = crate::memory::allocate_frame().ok_or("out of memory for thread stack")?;
-        page_table.map_user_page(page, frame, flags)?;
+        if page_table.translate(page.start_address()).is_some() {
+            for mapped_page in mapped.drain(..) {
+                let _ = page_table.unmap_user_page(mapped_page);
+            }
+            return Err("thread stack virtual range already mapped");
+        }
+
+        let frame = match crate::memory::allocate_frame() {
+            Some(frame) => frame,
+            None => {
+                for mapped_page in mapped.drain(..) {
+                    let _ = page_table.unmap_user_page(mapped_page);
+                }
+                return Err("out of memory for thread stack");
+            }
+        };
+
+        if let Err(error) = page_table.map_user_page(page, frame, flags) {
+            crate::memory::recycle_frame(frame);
+            for mapped_page in mapped.drain(..) {
+                let _ = page_table.unmap_user_page(mapped_page);
+            }
+            return Err(error);
+        }
+
         let virt = crate::memory::phys_mem_offset() + frame.start_address().as_u64();
         unsafe { core::ptr::write_bytes(virt.as_mut_ptr::<u8>(), 0, 4096); }
+        mapped.push(page);
     }
+
     Ok(top - 8)
 }
 

@@ -121,6 +121,7 @@ pub fn mark_zombie(task: TaskId, exit_code: i32) {
 pub fn reap(task: TaskId) -> Result<(), &'static str> {
     let process = process_for_task(task).ok_or("thread not registered")?;
     let is_leader = record_for_process(process).map(|r| r.leader_task == task).unwrap_or(false);
+
     let mut threads = THREAD_TABLE.lock();
     if let Some(slot) = threads.iter_mut().find(|slot| slot.as_ref().map(|r| r.task == task).unwrap_or(false)) {
         *slot = None;
@@ -129,18 +130,32 @@ pub fn reap(task: TaskId) -> Result<(), &'static str> {
     }
     let remaining = threads.iter().flatten().filter(|r| r.process == process).count();
     drop(threads);
+
+    let mut table = PROCESS_TABLE.lock();
+    let Some(slot) = table.iter_mut().find(|slot| slot.as_ref().map(|r| r.id == process).unwrap_or(false)) else {
+        return Err("process record missing");
+    };
+
     if is_leader {
-        if remaining != 0 { return Err("process still has live threads"); }
-        let mut table = PROCESS_TABLE.lock();
-        if let Some(slot) = table.iter_mut().find(|slot| slot.as_ref().map(|r| r.id == process).unwrap_or(false)) {
+        if remaining == 0 {
             *slot = None;
-            return Ok(());
+        } else if let Some(record) = slot.as_mut() {
+            // A process leader may be reaped before sibling threads finish.
+            // Preserve the zombie record for lifecycle accounting while clearing
+            // the stale task identity that no longer has a thread-table binding.
+            record.leader_task = TaskId(0);
+            record.state = ProcessState::Zombie;
         }
-        Err("process record missing")
-    } else {
-        release_thread(process);
-        Ok(())
+        return Ok(());
     }
+
+    if let Some(record) = slot.as_mut() {
+        record.thread_count = record.thread_count.saturating_sub(1).max(1);
+        if remaining == 0 && record.state == ProcessState::Zombie {
+            *slot = None;
+        }
+    }
+    Ok(())
 }
 
 pub fn is_leader(task: TaskId) -> bool {
@@ -172,15 +187,21 @@ pub fn release_thread(process: ProcessId) {
 
 pub fn validate() -> bool {
     let table = PROCESS_TABLE.lock();
+    let threads = THREAD_TABLE.lock();
     let mut seen = [TaskId(0); MAX_PROCESSES];
     let mut count = 0;
     for record in table.iter().flatten() {
-        if record.leader_task == TaskId(0) || record.thread_count == 0 || record.thread_count > record.limits.max_threads { return false; }
-        let leader_binding = THREAD_TABLE.lock().iter().flatten().any(|t| t.task == record.leader_task && t.process == record.id);
-        if !leader_binding { return false; }
-        if seen[..count].contains(&record.leader_task) { return false; }
-        seen[count] = record.leader_task;
-        count += 1;
+        if record.thread_count == 0 || record.thread_count > record.limits.max_threads { return false; }
+        if record.leader_task != TaskId(0) {
+            let leader_binding = threads.iter().flatten()
+                .any(|t| t.task == record.leader_task && t.process == record.id);
+            if !leader_binding { return false; }
+            if seen[..count].contains(&record.leader_task) { return false; }
+            seen[count] = record.leader_task;
+            count += 1;
+        } else if record.state != ProcessState::Zombie {
+            return false;
+        }
     }
     true
 }

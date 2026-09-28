@@ -284,6 +284,53 @@ impl TaskPageTable {
         Ok(())
     }
 
+    /// Removes one userspace leaf mapping and returns its physical frame to the allocator.
+    ///
+    /// Intermediate page-table frames remain owned by this address space so future
+    /// mappings in the same region can reuse them without changing ownership.
+    pub fn unmap_user_page(&mut self, page: Page<Size4KiB>) -> Result<(), &'static str> {
+        let vaddr = page.start_address().as_u64();
+        if vaddr >= 0x0000_8000_0000_0000 {
+            return Err("Cannot unmap a kernel address from a user page table");
+        }
+
+        let phys_offset = phys_mem_offset();
+        let pml4_ptr = (phys_offset + self.pml4_frame.start_address().as_u64()).as_ptr::<PageTable>();
+        let pml4 = unsafe { &*pml4_ptr };
+        let p4_idx = ((vaddr >> 39) & 0x1FF) as usize;
+        let p3_idx = ((vaddr >> 30) & 0x1FF) as usize;
+        let p2_idx = ((vaddr >> 21) & 0x1FF) as usize;
+        let p1_idx = ((vaddr >> 12) & 0x1FF) as usize;
+
+        let p3_frame = pml4[p4_idx].frame().map_err(|_| "userspace PML4 entry missing")?;
+        let p3_ptr = (phys_offset + p3_frame.start_address().as_u64()).as_ptr::<PageTable>();
+        let p3 = unsafe { &*p3_ptr };
+        let p2_frame = p3[p3_idx].frame().map_err(|_| "userspace PDPT entry missing")?;
+        let p2_ptr = (phys_offset + p2_frame.start_address().as_u64()).as_ptr::<PageTable>();
+        let p2 = unsafe { &*p2_ptr };
+        let p1_frame = p2[p2_idx].frame().map_err(|_| "userspace PD entry missing")?;
+        let p1_ptr = (phys_offset + p1_frame.start_address().as_u64()).as_mut_ptr::<PageTable>();
+        let p1 = unsafe { &mut *p1_ptr };
+        if !p1[p1_idx].flags().contains(PageTableFlags::PRESENT) {
+            return Err("userspace page is not mapped");
+        }
+
+        let frame = p1[p1_idx].frame().map_err(|_| "userspace leaf frame missing")?;
+        p1[p1_idx].set_unused();
+        let Some(pos) = self.allocated_frames.iter().position(|candidate| *candidate == frame) else {
+            p1[p1_idx].set_frame(frame, PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE);
+            return Err("userspace frame ownership missing");
+        };
+        self.allocated_frames.swap_remove(pos);
+
+        let (active_cr3, _) = Cr3::read();
+        if active_cr3 == self.pml4_frame {
+            x86_64::instructions::tlb::flush(VirtAddr::new(vaddr));
+        }
+        recycle_frame(frame);
+        Ok(())
+    }
+
     /// Looks up a virtual address in this process's page table.
     /// Returns the translated physical address and leaf page table flags if mapped.
     pub fn translate(&self, vaddr: VirtAddr) -> Option<(PhysAddr, PageTableFlags)> {
