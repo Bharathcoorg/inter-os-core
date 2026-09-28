@@ -13,6 +13,7 @@ pub struct InputQueue {
     head: usize,
     tail: usize,
     count: usize,
+    dropped: u64,
 }
 
 impl InputQueue {
@@ -23,12 +24,14 @@ impl InputQueue {
             head: 0,
             tail: 0,
             count: 0,
+            dropped: 0,
         }
     }
 
     /// Pushes an event into the queue. Returns true if queued, false if dropped (overflow).
     pub fn push(&mut self, event: InputEvent) -> bool {
         if self.count >= INPUT_QUEUE_CAPACITY {
+            self.dropped = self.dropped.saturating_add(1);
             return false;
         }
 
@@ -54,6 +57,9 @@ impl InputQueue {
     pub fn len(&self) -> usize {
         self.count
     }
+
+    /// Returns the cumulative number of events rejected because the queue was full.
+    pub fn dropped_count(&self) -> u64 { self.dropped }
 
     /// Returns true if the queue contains no events.
     pub fn is_empty(&self) -> bool {
