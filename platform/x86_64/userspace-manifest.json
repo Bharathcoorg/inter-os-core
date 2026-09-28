@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "platform": "x86_64",
+  "profile": "qemu-phone",
+  "target_triple": "x86_64-unknown-none",
+  "output_root": "target/x86_64-unknown-none/debug",
+  "required": [
+    {
+      "name": "init",
+      "kind": "binary",
+      "manifest": "userspace/init/Cargo.toml"
+    },
+    {
+      "name": "displayd",
+      "kind": "system-service",
+      "manifest": "userspace/system-service/Cargo.toml"
+    },
+    {
+      "name": "inputd",
+      "kind": "system-service",
+      "manifest": "userspace/system-service/Cargo.toml"
+    },
+    {
+      "name": "storaged",
+      "kind": "system-service",
+      "manifest": "userspace/system-service/Cargo.toml"
+    },
+    {
+      "name": "netd",
+      "kind": "system-service",
+      "manifest": "userspace/system-service/Cargo.toml"
+    },
+    {
+      "name": "powerd",
+      "kind": "system-service",
+      "manifest": "userspace/system-service/Cargo.toml"
+    },
+    {
+      "name": "modemd",
+      "kind": "system-service",
+      "manifest": "userspace/system-service/Cargo.toml"
+    },
+    {
+      "name": "audiod",
+      "kind": "system-service",
+      "manifest": "userspace/system-service/Cargo.toml"
+    },
+    {
+      "name": "camerad",
+      "kind": "system-service",
+      "manifest": "userspace/system-service/Cargo.toml"
+    },
+    {
+      "name": "compositor",
+      "kind": "application",
+      "manifest": "apps/compositor/Cargo.toml"
+    },
+    {
+      "name": "launcher",
+      "kind": "application",
+      "manifest": "apps/launcher/Cargo.toml"
+    },
+    {
+      "name": "settings",
+      "kind": "application",
+      "manifest": "apps/settings/Cargo.toml"
+    },
+    {
+      "name": "terminal",
+      "kind": "application",
+      "manifest": "apps/terminal/Cargo.toml"
+    },
+    {
+      "name": "dialer",
+      "kind": "application",
+      "manifest": "apps/dialer/Cargo.toml"
+    },
+    {
+      "name": "vault",
+      "kind": "application",
+      "manifest": "apps/vault/Cargo.toml"
+    },
+    {
+      "name": "camera",
+      "kind": "application",
+      "manifest": "apps/camera/Cargo.toml"
+    },
+    {
+      "name": "calculator",
+      "kind": "application",
+      "manifest": "apps/calculator/Cargo.toml"
+    },
+    {
+      "name": "browser",
+      "kind": "application",
+      "manifest": "apps/browser/Cargo.toml"
+    },
+    {
+      "name": "messages",
+      "kind": "application",
+      "manifest": "apps/messages/Cargo.toml"
+    },
+    {
+      "name": "calendar",
+      "kind": "application",
+      "manifest": "apps/calendar/Cargo.toml"
+    },
+    {
+      "name": "music",
+      "kind": "application",
+      "manifest": "apps/music/Cargo.toml"
+    },
+    {
+      "name": "file_manager",
+      "kind": "application",
+      "manifest": "apps/file_manager/Cargo.toml"
+    },
+    {
+      "name": "gallery",
+      "kind": "application",
+      "manifest": "apps/gallery/Cargo.toml"
+    }
+  ],
+  "kernel": {
+    "manifest": "kernel/Cargo.toml",
+    "target": "x86_64-unknown-none"
+  },
+  "boot": {
+    "manifest": "boot/Cargo.toml",
+    "image": "target/inter-os-bios.img"
+  }
+}
