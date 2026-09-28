@@ -874,6 +874,11 @@ pub fn sensor_read(out: &mut [u8]) -> Result<usize, i64> {
 }
 
 /// Queries mobile battery fuel gauge telemetry (voltage, SoC %, capacity, charging status).
+pub fn audio_query_volume() -> Result<u32, i64> {
+    let ret = unsafe { syscall2(SyscallNumber::AudioControl, 8, 0) };
+    if ret >= 0 { Ok(ret as u32) } else { Err(ret) }
+}
+
 pub fn battery_query(out_buf: &mut [u8]) -> Result<usize, i64> {
     let ret = unsafe {
         syscall2(
