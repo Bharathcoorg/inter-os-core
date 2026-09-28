@@ -433,6 +433,10 @@ pub fn spawn_user_process_with_parent(
     let mut pt = crate::memory::TaskPageTable::create_user_page_table()?;
     let stack_top = 0x0080_0000;
     let (user_entry, user_stack_top) = load_user_elf_into_page_table(elf_data, &mut pt, stack_top)?;
+    let address_space_bytes = pt.user_mapped_bytes();
+    if address_space_bytes as u64 > crate::task::process::ResourceLimits::default().max_address_space_bytes {
+        return Err("userspace address-space budget exceeded");
+    }
 
     let mut tcb = crate::task::TaskControlBlock::new(name, user_process_entry, caps, priority);
     tcb.page_table = Some(alloc::sync::Arc::new(spin::Mutex::new(pt)));
@@ -445,6 +449,8 @@ pub fn spawn_user_process_with_parent(
     if spawned == TaskId(0) {
         return Err("process registration failed");
     }
+    let process = crate::task::process::process_for_task(spawned).ok_or("process identity missing after spawn")?;
+    crate::task::process::set_address_space_usage(process, address_space_bytes)?;
     Ok(spawned)
 }
 
