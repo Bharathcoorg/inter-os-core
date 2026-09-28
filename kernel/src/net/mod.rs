@@ -294,7 +294,7 @@ pub fn poll_network_interface() -> usize {
                                         }).map(|c| c.id)
                                     };
                                     if let Some(id) = conn_id {
-                                        let mut to_ack_syn: Option<(u16, u16, u32, u32)> = None;
+                                        let mut to_ack_syn: Option<(u16, u16, u32, u32, u16)> = None;
                                         let mut to_process_est: Option<(u32, bool, u32)> = None;
                                         let mut need_ack: Option<u32> = None;
                                         {
@@ -312,7 +312,7 @@ pub fn poll_network_interface() -> usize {
                                                         conn.state = TcpState::Established;
                                                         conn.syn_pending = false;
                                                         conn.syn_retries = 0;
-                                                        to_ack_syn = Some((conn.local_port, conn.remote_port, conn.send_seq, conn.recv_seq));
+                                                        to_ack_syn = Some((conn.local_port, conn.remote_port, conn.send_seq, conn.recv_seq, conn.rcv_wnd.min(u16::MAX as u32) as u16));
                                                     }
                                                 } else if old_state == TcpState::Established {
                                                     if !crate::net::tcp::seq_gt(segment.ack, conn.send_seq) {
@@ -332,7 +332,7 @@ pub fn poll_network_interface() -> usize {
                                                 let _ = table.acknowledge_fin(id, ack);
                                             }
                                         }
-                                        if let Some((ack_local_port, ack_remote_port, ack_seq, ack_recv_seq)) = to_ack_syn {
+                                        if let Some((ack_local_port, ack_remote_port, ack_seq, ack_recv_seq, ack_window)) = to_ack_syn {
                                             let _ = transmit_tcp_segment(
                                                 ip_pkt.dst,
                                                 ack_local_port,
@@ -341,13 +341,14 @@ pub fn poll_network_interface() -> usize {
                                                 ack_seq,
                                                 ack_recv_seq,
                                                 0x10,
+                                                ack_window,
                                             );
                                         } else if let Some((c_id, fin, before)) = to_process_est {
                                             let accepted = TCP_TABLE.lock().accept_rx_segment(c_id, segment.seq, segment.payload, fin).unwrap_or(0);
                                             let table2 = TCP_TABLE.lock();
                                             if let Some(c) = table2.get(c_id) {
                                                 if accepted > 0 || (fin && c.recv_seq != before) {
-                                                    let _ = transmit_tcp_segment(ip_pkt.dst, c.local_port, ip_pkt.src, c.remote_port, c.send_seq, c.recv_seq, 0x10);
+                                                    let _ = transmit_tcp_segment_with_window(ip_pkt.dst, c.local_port, ip_pkt.src, c.remote_port, c.send_seq, c.recv_seq, 0x10, c.rcv_wnd.min(u16::MAX as u32) as u16);
                                                 }
                                             }
                                         }
