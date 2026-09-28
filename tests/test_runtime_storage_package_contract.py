@@ -289,6 +289,13 @@ def test_shared_process_thread_creation_has_dedicated_guarded_stack():
     user = (ROOT / "kernel/src/task/user.rs").read_text(encoding="utf-8")
     assert "pub fn reserve_thread" in process
     assert "pub fn bind_reserved_thread" in process
+    assert "Reservation ownership stays with the caller" in process
+
+def test_reserved_thread_binding_failure_does_not_hide_scheduler_rollback():
+    process = (ROOT / "kernel/src/task/process.rs").read_text(encoding="utf-8")
+    scheduler = (ROOT / "kernel/src/task/scheduler.rs").read_text(encoding="utf-8")
+    assert "Reservation ownership stays with the caller" in process
+    assert "cancel_thread_reservation(process_id)" in scheduler
     assert "pub fn spawn_user_thread" in scheduler
     assert "map_user_thread_stack" in scheduler
     assert "THREAD_STACK" not in user or "map_user_thread_stack" in user

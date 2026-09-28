@@ -98,7 +98,8 @@ pub fn bind_reserved_thread(process: ProcessId, task: TaskId) -> Result<(), &'st
         *slot = Some(ThreadRecord { task, process });
         Ok(())
     } else {
-        release_thread(process);
+        // Reservation ownership stays with the caller on failure. The scheduler
+        // decides whether to cancel it after all task-local rollback is complete.
         Err("thread table full")
     }
 }
