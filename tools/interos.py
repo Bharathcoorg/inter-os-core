@@ -876,6 +876,33 @@ def cmd_run(args):
             return 1
 
     app_name = target_name
+    if not _ensure_studio(port):
+        return 1
+
+    # The application path requires a live canonical x86 QEMU guest. Start one
+    # only when Studio reports that no guest is currently active.
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(f"http://127.0.0.1:{port}/api/status", method="GET"),
+            timeout=3,
+        ) as resp:
+            studio_status = json.loads(resp.read().decode("utf-8"))
+        if not studio_status.get("qemu_alive", False):
+            launch_req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/qemu/launch",
+                data=json.dumps({"profile": "x86_64"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(launch_req, timeout=10) as resp:
+                launch_data = json.loads(resp.read().decode("utf-8"))
+            if not launch_data.get("success"):
+                log_error(f"Unable to start canonical QEMU guest: {launch_data.get('message')}")
+                return 1
+    except Exception as e:
+        log_error(f"Unable to prepare QEMU guest: {e}")
+        return 1
+
     # 1. Build
     build_args = argparse.Namespace(name=app_name, arch=target)
     ret = cmd_build(build_args)
