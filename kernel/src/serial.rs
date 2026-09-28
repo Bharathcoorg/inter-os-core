@@ -287,6 +287,42 @@ fn handle_serial_command(cmd: &[u8]) {
         None => return,
     };
 
+    if verb.eq_ignore_ascii_case("DIAG_STATE") || verb.eq_ignore_ascii_case("STATS") {
+        let (tasks_tot, tasks_act) = {
+            if let Some(s) = crate::task::SCHEDULER.try_lock() {
+                (s.task_count(), s.active_task_count())
+            } else {
+                (0, 0)
+            }
+        };
+        let surfaces = {
+            if let Some(kms) = crate::drivers::display_kms::DRM_KMS.try_lock() {
+                kms.surfaces.len()
+            } else {
+                0
+            }
+        };
+        let (heap_used, heap_free) = crate::allocator::heap_stats();
+        let (mailboxes, endpoints, shm_pipes) = {
+            let (mb, ep) = if let Some(r) = crate::ipc::IPC_ROUTER.try_lock() {
+                (r.mailbox_count(), r.endpoint_count())
+            } else {
+                (0, 0)
+            };
+            let shm = if let Some(p) = crate::ipc::shm_pipe::SHM_PIPE_MANAGER.try_lock() {
+                p.pipes.iter().filter(|x| x.is_some()).count()
+            } else {
+                0
+            };
+            (mb, ep, shm)
+        };
+        crate::serial_println!(
+            "[DIAG_STATE] tasks_total={} tasks_active={} surfaces={} mailboxes={} endpoints={} shm_pipes={} heap_used={} heap_free={}",
+            tasks_tot, tasks_act, surfaces, mailboxes, endpoints, shm_pipes, heap_used, heap_free
+        );
+        return;
+    }
+
     if verb.eq_ignore_ascii_case("TAP") || verb.eq_ignore_ascii_case("TOUCH") {
         if let (Some(x_str), Some(y_str)) = (parts.next(), parts.next()) {
             if let (Ok(x), Ok(y)) = (x_str.parse::<u32>(), y_str.parse::<u32>()) {

@@ -45,3 +45,9 @@ pub fn init_heap(
 
     Ok(())
 }
+
+/// Returns (used_bytes, free_bytes) from the locked kernel heap.
+pub fn heap_stats() -> (usize, usize) {
+    let heap = ALLOCATOR.lock();
+    (heap.used(), heap.free())
+}

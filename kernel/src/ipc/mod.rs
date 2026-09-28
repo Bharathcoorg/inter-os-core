@@ -258,6 +258,16 @@ impl IpcRouter {
 
         Ok(mailbox.queue.pop_front())
     }
+
+    /// Returns the number of registered task mailboxes.
+    pub fn mailbox_count(&self) -> usize {
+        self.mailboxes.len()
+    }
+
+    /// Returns the number of active IPC endpoints.
+    pub fn endpoint_count(&self) -> usize {
+        self.endpoints.len()
+    }
 }
 
 /// Global system-wide IPC message router.
