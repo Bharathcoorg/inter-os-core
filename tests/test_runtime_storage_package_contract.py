@@ -215,3 +215,9 @@ def test_rapp_v3_carries_signed_dependency_metadata_without_overloading_v2():
     assert "VersionRequirement::Major" in source
     assert "policy.dependencies=dependencies.clone()" in source
     assert "build_rapp_v3" in source
+
+def test_tcp_retransmission_uses_bounded_exponential_backoff():
+    source = (ROOT / "kernel/src/net/tcp.rs").read_text(encoding="utf-8")
+    assert "TCP_RETRANSMIT_MAX_TIMEOUT" in source
+    assert "r.rto=(r.rto.saturating_mul(2)).min(TCP_RETRANSMIT_MAX_TIMEOUT)" in source
+    assert "now.saturating_sub(r.sent_at)>=r.rto" in source

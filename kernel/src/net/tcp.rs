@@ -160,10 +160,11 @@ mod tests {
 
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct Retransmission { pub seq:u32, pub len:u16, pub sent_at:u64, pub attempts:u8 }
+pub struct Retransmission { pub seq:u32, pub len:u16, pub sent_at:u64, pub attempts:u8, pub rto:u64 }
 
 pub const MAX_RETRANSMISSIONS: usize = 16;
 pub const TCP_RETRANSMIT_TIMEOUT: u64 = 100;
+pub const TCP_RETRANSMIT_MAX_TIMEOUT: u64 = 1600;
 pub const TCP_TIME_WAIT: u64 = 200;
 pub const TCP_MAX_RETRANSMISSIONS: u8 = 8;
 
@@ -171,10 +172,10 @@ pub struct TcpReliability { pending:[Option<Retransmission>;MAX_RETRANSMISSIONS]
 impl TcpReliability {
  pub const fn new()->Self{Self{pending:[None;MAX_RETRANSMISSIONS],time_wait_until:0}}
  pub fn track(&mut self,seq:u32,len:u16,now:u64)->Result<(),&'static str>{
-  if let Some(slot)=self.pending.iter_mut().find(|x|x.is_none()){*slot=Some(Retransmission{seq,len,sent_at:now,attempts:0});Ok(())}else{Err("TCP retransmission queue full")}
+  if let Some(slot)=self.pending.iter_mut().find(|x|x.is_none()){*slot=Some(Retransmission{seq,len,sent_at:now,attempts:0,rto:TCP_RETRANSMIT_TIMEOUT});Ok(())}else{Err("TCP retransmission queue full")}
  }
  pub fn acknowledge(&mut self,ack:u32){for slot in &mut self.pending{if let Some(r)=*slot{if seq_ge(ack,r.seq.wrapping_add(r.len as u32)){*slot=None;}}}}
- pub fn due(&mut self,now:u64)->Option<Retransmission>{for slot in &mut self.pending{if let Some(mut r)=*slot{if now.saturating_sub(r.sent_at)>=TCP_RETRANSMIT_TIMEOUT{if r.attempts>=TCP_MAX_RETRANSMISSIONS{*slot=None;return None;}r.sent_at=now;r.attempts=r.attempts.saturating_add(1);*slot=Some(r);return Some(r);}}}None}
+ pub fn due(&mut self,now:u64)->Option<Retransmission>{for slot in &mut self.pending{if let Some(mut r)=*slot{if now.saturating_sub(r.sent_at)>=r.rto{if r.attempts>=TCP_MAX_RETRANSMISSIONS{*slot=None;return None;}r.sent_at=now;r.attempts=r.attempts.saturating_add(1);r.rto=(r.rto.saturating_mul(2)).min(TCP_RETRANSMIT_MAX_TIMEOUT);*slot=Some(r);return Some(r);}}}None}
  pub fn enter_time_wait(&mut self,now:u64){self.time_wait_until=now.saturating_add(TCP_TIME_WAIT)}
  pub fn time_wait_expired(&self,now:u64)->bool{self.time_wait_until!=0&&now>=self.time_wait_until}
  pub fn in_time_wait(&self,now:u64)->bool{self.time_wait_until!=0&&now<self.time_wait_until}
