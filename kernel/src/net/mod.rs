@@ -22,7 +22,7 @@ pub use arp::{ArpOpcode, ArpPacket, ArpTable};
 pub use device::{LoopbackDevice, NetDeviceInfo, NetError, NetworkBackend, NetworkDevice, NetworkDeviceManager, NETWORK_DEVICE};
 pub use e1000::E1000Device;
 pub use dns::{encode_query as dns_encode_query, parse_a_answer, DnsAnswer, DnsQuestion, DnsResolver, DNS_SERVER};
-pub use tcp::{next_state as tcp_next_state, seq_ge, seq_gt, seq_le, seq_lt, TcpSegment, TcpState};
+pub use tcp::{next_state as tcp_next_state, seq_ge, seq_gt, seq_le, seq_lt, valid_established_segment, valid_syn_ack, TcpSegment, TcpState};
 pub use tls::{ContentType as TlsContentType, TlsRecord};
 pub use ethernet::{EtherType, EthernetFrame, MacAddress};
 pub use ipv4::{calculate_ipv4_checksum, verify_ipv4_checksum, IpProtocol, Ipv4Address, Ipv4Packet};
@@ -302,20 +302,18 @@ pub fn poll_network_interface() -> usize {
                                             let _ = table.update_peer_window(id, segment.window);
                                             if let Some(conn) = table.get_mut(id) {
                                                 let old_state = conn.state;
-                                                if segment.flags & 0x13 == 0x12 && old_state == TcpState::SynSent {
-                                                    if segment.ack != conn.send_seq.wrapping_add(1) {
-                                                        // SYN consumes one sequence number; the ACK must
-                                                        // acknowledge exactly that SYN before we enter Established.
-                                                    } else {
+                                                if old_state == TcpState::SynSent {
+                                                    if valid_syn_ack(&segment, conn.send_seq.wrapping_add(1)) {
                                                         conn.recv_seq = segment.seq.wrapping_add(1);
                                                         conn.send_seq = conn.send_seq.wrapping_add(1);
+                                                        conn.snd_una = conn.send_seq;
                                                         conn.state = TcpState::Established;
                                                         conn.syn_pending = false;
                                                         conn.syn_retries = 0;
                                                         to_ack_syn = Some((conn.local_port, conn.remote_port, conn.send_seq, conn.recv_seq, conn.rcv_wnd.min(u16::MAX as u32) as u16));
                                                     }
                                                 } else if old_state == TcpState::Established {
-                                                    if !crate::net::tcp::seq_gt(segment.ack, conn.send_seq) {
+                                                    if valid_established_segment(&segment, conn.recv_seq, conn.snd_una, conn.send_seq) {
                                                         need_ack = Some(segment.ack);
                                                         let fin = segment.flags & 0x01 != 0;
                                                         if !segment.payload.is_empty() || fin {
