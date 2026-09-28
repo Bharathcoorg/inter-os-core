@@ -33,7 +33,11 @@ def main() -> None:
     fb=(ROOT/"kernel/src/framebuffer.rs").read_text()
     must(fb,"pub fn present_argb8888","hardware framebuffer scanout")
     must(fb,"aspect ratio","hardware scanout scaling")
-    must(kms, "pub fn destroy_surface_owned", "KMS owned surface destruction")
+    must(kms, "pub fn destroy_surface_owned", "KMS owned surface destruction")\n    must(kms, "pub const MAX_SCANOUT_PIXELS: usize = 3840 * 2160;", "bounded scanout budget")
+    must(kms, "checked_mul(self.scanout_height as usize)", "checked scanout allocation arithmetic")
+    must(kms, "pixels > MAX_SCANOUT_PIXELS", "scanout budget enforcement")
+    must(kms, "sx.saturating_add(s_w)", "composition coordinate overflow protection")
+    must(kms, "sy.saturating_add(s_h)", "composition coordinate overflow protection")
 
     must(syscall, "fn require_display_service", "display capability gate")
     must(syscall, "verify_object(cap_slot, CapabilityType::FrameBufferDirect, Rights::WRITE, 1)",
