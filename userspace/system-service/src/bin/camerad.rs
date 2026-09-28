@@ -3,5 +3,5 @@
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    interos_system_service::run(8, "[camerad] userspace service online.");
+    interos_system_service::run_camera();
 }
