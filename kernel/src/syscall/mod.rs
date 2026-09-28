@@ -3594,7 +3594,7 @@ pub fn sys_window_list(out_buf:&mut [u8])->Result<usize,SyscallResult>{
     let mut w=W{b:out_buf,n:0};
     for s in &snaps[..count]{
         let name=sched.get_task(TaskId(s.owner_task)).map(|t|t.name).unwrap_or("unknown");
-        let _=write!(w,"{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",s.id,s.owner_task,name,s.x,s.y,s.width,s.height,s.z_order,s.opacity,s.visible as u8);
+        let _=write!(w,"{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",s.id,s.owner_task,name,s.x,s.y,s.width,s.height,s.z_order,s.opacity,s.visible as u8,s.input_enabled as u8);
         if w.n>=capacity{break;}
     }
     Ok(w.n)
