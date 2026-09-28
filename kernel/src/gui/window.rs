@@ -84,7 +84,12 @@ impl WindowManager {
     }
 
     pub fn destroy_owned(&mut self, id: WindowId, owner: u64) -> bool {
-        let Some(pos) = self.windows.iter().position(|w| w.id == id && w.owner == owner) else { return false; };
+        self.destroy_if(id, Some(owner))
+    }
+
+    /// Removes a window by identity for trusted kernel/display lifecycle cleanup.
+    pub fn destroy_if(&mut self, id: WindowId, owner: Option<u64>) -> bool {
+        let Some(pos) = self.windows.iter().position(|w| w.id == id && owner.map(|v| w.owner == v).unwrap_or(true)) else { return false; };
         self.windows.remove(pos);
         if self.focused == Some(id) { self.focused = self.top_visible(); }
         true
