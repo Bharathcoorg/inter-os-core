@@ -103,6 +103,35 @@ class SystemContractTests(unittest.TestCase):
         self.assertIn("VerificationLevel::QemuVerified", syscall)
         self.assertIn("dev_launch_verified_rapp(id)", serial)
 
+    def test_phase4_syscall_pointer_safety_is_enforced(self):
+        user_ptr = (ROOT / "kernel/src/syscall/user_ptr.rs").read_text(encoding="utf-8")
+        memory = (ROOT / "kernel/src/memory.rs").read_text(encoding="utf-8")
+        syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
+        self.assertIn("validate_current_user_buffer", user_ptr)
+        self.assertIn("validate_user_range(addr, len, write)", user_ptr)
+        self.assertIn("PermissionDenied", user_ptr)
+        self.assertIn("Misaligned", user_ptr)
+        self.assertIn("copy_to_kernel_typed", user_ptr)
+        self.assertIn("user frame is not owned by task", memory)
+        self.assertIn("flags.contains(PageTableFlags::USER_ACCESSIBLE)", memory)
+        self.assertIn("flags.contains(PageTableFlags::WRITABLE)", memory)
+        self.assertNotIn("core::slice::from_raw_parts(a4 as *const u32", syscall)
+        self.assertNotIn("from_raw_parts_mut", syscall)
+        self.assertNotIn("core::ptr::copy_nonoverlapping", syscall)
+
+    def test_phase4_arch_syscalls_do_not_directly_dereference_unvalidated_pointers(self):
+        aarch = (ROOT / "kernel-aarch64/src/syscall.rs").read_text(encoding="utf-8")
+        riscv = (ROOT / "kernel-riscv64/src/syscall.rs").read_text(encoding="utf-8")
+        self.assertIn("fn validate_user_range", aarch)
+        self.assertIn("fn copy_from_user", aarch)
+        self.assertIn("fn copy_to_user", aarch)
+        self.assertIn("fn validate_user_range", riscv)
+        self.assertIn("fn copy_from_user", riscv)
+        self.assertNotIn("core::slice::from_raw_parts", aarch)
+        self.assertNotIn("core::slice::from_raw_parts", riscv)
+        self.assertIn("checked_add", aarch)
+        self.assertIn("checked_add", riscv)
+
     def test_update_is_fail_closed_and_monotonic(self):
         src = (ROOT / "kernel/src/update.rs").read_text(encoding="utf-8")
         self.assertIn("manifest.version <= current_version", src)
