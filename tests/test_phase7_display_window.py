@@ -13,6 +13,8 @@ def must(text, needle, label):
 
 def main():
     kms = (ROOT / "kernel/src/drivers/display_kms.rs").read_text()
+    gui = (ROOT / "kernel/src/gui/window.rs").read_text()
+    guimod = (ROOT / "kernel/src/gui/mod.rs").read_text()
     inputd = (ROOT / "kernel/src/drivers/input.rs").read_text()
     syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text()
     sdk = (ROOT / "sdk/rust/interos-std/src/lib.rs").read_text()
@@ -24,11 +26,16 @@ def main():
     must(kms, "set_surface_geometry_owned", "owned geometry mutation")
     must(kms, "destroy_surfaces_owned_by", "window lifecycle cleanup")
     must(kms, "surface_snapshot", "window metadata snapshot")
+    must(kms, "WINDOW_MANAGER.lock().create_with_id", "KMS-to-GUI window registration")
+    must(kms, "WINDOW_MANAGER.lock().destroy_if", "KMS-to-GUI window cleanup")
+    must(kms, "WINDOW_MANAGER.lock().set_geometry_owned", "KMS-to-GUI geometry synchronization")
+    must(kms, "WINDOW_MANAGER.lock().focus_owned", "KMS-to-GUI focus synchronization")
 
     must(inputd, "VecDeque<(TaskId, InputEvent)>", "per-task input queue")
     must(inputd, "route_to_task", "focused-window input routing")
     must(inputd, "pop_for_task", "task-scoped input consumption")
     must(inputd, "dispatch_to_focused_window", "focus-based dispatch")
+    must(inputd, "WINDOW_MANAGER", "unified GUI window hit testing")
 
     must(syscall, "WindowSetInput = 104", "window input syscall")
     must(syscall, "sys_window_set_input", "owned input syscall handler")
@@ -37,6 +44,9 @@ def main():
     must(syscall, "WindowList", "window inspection ABI")
     must(syscall, "WindowSetGeometry", "window geometry ABI")
     must(syscall, "WindowFocus", "window focus ABI")
+    must(gui, "create_with_id", "stable cross-layer window identity")
+    must(gui, "destroy_if", "trusted window cleanup")
+    must(guimod, "pub static WINDOW_MANAGER", "authoritative GUI window registry")
 
     must(sdk, "pub fn window_set_input", "SDK window input API")
     must(sdk, "SyscallNumber::WindowSetInput", "SDK syscall binding")
