@@ -332,7 +332,13 @@ impl TaskPageTable {
             return Err("Virtual page already mapped");
         }
 
-        let leaf_flags = flags | PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+        // User mappings are never allowed to be simultaneously writable and executable.
+        // Enforce W^X at the single mapping primitive so callers cannot bypass the
+        // ELF loader's segment-level policy by constructing a mapping directly.
+        if flags.contains(PageTableFlags::WRITABLE) && !flags.contains(PageTableFlags::NO_EXECUTE) {
+            return Err("W^X violation: writable user mapping must be non-executable");
+        }
+        let leaf_flags = (flags & !PageTableFlags::PRESENT) | PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
         pt[p1_idx].set_frame(frame, leaf_flags);
         self.allocated_frames.push(frame);
         self.user_mapped_bytes = self.user_mapped_bytes.saturating_add(4096);
