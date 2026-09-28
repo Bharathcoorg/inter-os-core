@@ -2300,15 +2300,23 @@ pub fn sys_input_event_poll(out_buf: &mut [u8]) -> Result<usize, SyscallResult> 
 pub fn sys_touch_poll() -> Result<u32, SyscallResult> {
     let sched = SCHEDULER.lock();
     let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    if !task.cap_table.authorize_capability(CapabilityType::EventPoll, Rights::READ) { return Err(SyscallResult::PermissionDenied); }
+    if !task.cap_table.authorize_capability(CapabilityType::EventPoll, Rights::READ) {
+        return Err(SyscallResult::PermissionDenied);
+    }
+    let is_inputd = task.name == "inputd";
+    let task_id = task.id;
     drop(sched);
-    let mut engine = crate::drivers::touch_gestures::TOUCH_ENGINE.lock();
-    match engine.gesture_queue.pop_front() {
-        Some(crate::drivers::touch_gestures::RecognizedGesture::Tap { .. }) => Ok(1),
-        Some(crate::drivers::touch_gestures::RecognizedGesture::DoubleTap { .. }) => Ok(2),
-        Some(crate::drivers::touch_gestures::RecognizedGesture::LongPress { .. }) => Ok(3),
-        Some(crate::drivers::touch_gestures::RecognizedGesture::Pan { .. }) => Ok(4),
-        Some(crate::drivers::touch_gestures::RecognizedGesture::Pinch { .. }) => Ok(5),
+
+    // TouchPoll is a compatibility API, but it must not bypass the same
+    // focused-window/task isolation used by InputEventPoll.
+    crate::drivers::input::pump_touch_events();
+    let event = if is_inputd {
+        crate::drivers::input::INPUT_PIPELINE.lock().pop_service()
+    } else {
+        crate::drivers::input::INPUT_PIPELINE.lock().pop_for_task(task_id)
+    };
+    match event {
+        Some(event) => Ok(event.kind as u32),
         None => Ok(0),
     }
 }
