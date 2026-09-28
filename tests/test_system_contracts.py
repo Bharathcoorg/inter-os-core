@@ -2,6 +2,7 @@
 """Static contract checks for core reliability/developer surfaces."""
 
 from pathlib import Path
+import json
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +22,29 @@ class SystemContractTests(unittest.TestCase):
         main = (ROOT / "kernel/src/main.rs").read_text(encoding="utf-8")
         for name in ("recovery", "update", "diagnostics", "performance", "watchdog"):
             self.assertIn(f"pub mod {name};", main)
+
+    def test_qemu_phone_userspace_manifest_matches_kernel_image_registry(self):
+        manifest_path = ROOT / "platform/x86_64/userspace-manifest.json"
+        self.assertTrue(manifest_path.is_file())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        names = [item["name"] for item in manifest["required"]]
+        images = (ROOT / "kernel/src/task/images.rs").read_text(encoding="utf-8")
+        for name in names:
+            self.assertIn(f'/{name}")', images, f"{name} is not embedded by the kernel image registry")
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_qemu_phone_contract_uses_one_vnc_endpoint(self):
+        contract = (ROOT / "docs/QEMU_PHONE_PLATFORM.md").read_text(encoding="utf-8")
+        studio = (ROOT / "emulator/server.py").read_text(encoding="utf-8")
+        self.assertIn("127.0.0.1:5901", contract)
+        self.assertIn('"vnc", "127.0.0.1:1"', studio)
+        self.assertIn("127.0.0.1:5901", studio)
+
+    def test_build_cli_exposes_canonical_demo(self):
+        cli = (ROOT / "tools/interos.py").read_text(encoding="utf-8")
+        self.assertIn('target_lower in ("demo", "qemu", "phone")', cli)
+        self.assertIn('p_run.add_argument("name", help="demo/qemu or app name")', cli)
+        self.assertIn("_build_x86_userspace()", cli)
 
     def test_update_is_fail_closed_and_monotonic(self):
         src = (ROOT / "kernel/src/update.rs").read_text(encoding="utf-8")
