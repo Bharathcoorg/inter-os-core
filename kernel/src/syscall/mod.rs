@@ -485,11 +485,12 @@ pub fn sys_fs_stat(cap_slot: usize, path: &str) -> Result<FileStat, SyscallResul
         Some(t) => t,
         None => return Err(SyscallResult::PermissionDenied),
     };
+    let task_id = current.id;
     let cap_table = current.cap_table.clone();
     drop(sched);
 
     let vfs = VFS.lock();
-    vfs.stat(&cap_table, cap_slot, path)
+    vfs.stat_for_task(task_id, &cap_table, cap_slot, path)
         .map_err(|e| match e {
             FsError::CapabilityError(_) | FsError::PermissionDenied => SyscallResult::PermissionDenied,
             FsError::FileNotFound => SyscallResult::FileNotFound,
@@ -3446,7 +3447,12 @@ pub fn sys_fs_list(cap_slot: usize, path_ptr: u64, path_len: usize, out: &mut [u
     let path = core::str::from_utf8(&path[..path_len]).map_err(|_| SyscallResult::InvalidArguments)?;
     let sched = SCHEDULER.lock();
     let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    let n = crate::fs::VFS.lock().list_dir(&current.cap_table, cap_slot, path, out).map_err(|_| SyscallResult::FileNotFound)?;
+    let task_id = current.id;
+    let n = crate::fs::VFS.lock().list_dir_for_task(task_id, &current.cap_table, cap_slot, path, out).map_err(|e| match e {
+        FsError::PermissionDenied | FsError::CapabilityError(_) => SyscallResult::PermissionDenied,
+        FsError::FileNotFound => SyscallResult::FileNotFound,
+        _ => SyscallResult::InvalidArguments,
+    })?;
     Ok(n)
 }
 
