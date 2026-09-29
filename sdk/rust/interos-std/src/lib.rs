@@ -6,8 +6,8 @@
 //! (`syscall` instruction) executing in Ring 3 User Mode.
 
 pub mod app;
-pub mod service;
 pub mod design;
+pub mod service;
 pub mod compositor {
     pub const MAGIC: [u8; 4] = *b"ICMP";
     pub const VERSION: u8 = 1;
@@ -16,17 +16,33 @@ pub mod compositor {
 
     #[repr(u8)]
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum Op { CreateSurface = 1, WritePixels = 2, SetGeometry = 3, DestroySurface = 4, Commit = 5, Focus = 6 }
+    pub enum Op {
+        CreateSurface = 1,
+        WritePixels = 2,
+        SetGeometry = 3,
+        DestroySurface = 4,
+        Commit = 5,
+        Focus = 6,
+    }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct Request {
-        pub op: Op, pub surface_id: u32, pub width: u32, pub height: u32,
-        pub x: i32, pub y: i32, pub z_order: u32, pub visible: bool, pub pixel_offset: u32,
+        pub op: Op,
+        pub surface_id: u32,
+        pub width: u32,
+        pub height: u32,
+        pub x: i32,
+        pub y: i32,
+        pub z_order: u32,
+        pub visible: bool,
+        pub pixel_offset: u32,
     }
 
     impl Request {
         pub fn encode(&self, out: &mut [u8]) -> Result<usize, ()> {
-            if out.len() < HEADER_SIZE { return Err(()); }
+            if out.len() < HEADER_SIZE {
+                return Err(());
+            }
             out[..HEADER_SIZE].fill(0);
             out[..4].copy_from_slice(&MAGIC);
             out[4] = VERSION;
@@ -190,8 +206,15 @@ pub unsafe fn syscall0(num: SyscallNumber) -> i64 {
         lateout("a0") ret,
         options(nostack)
     );
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
-    { let _ = num; ret = 0; }
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )))]
+    {
+        let _ = num;
+        ret = 0;
+    }
     ret
 }
 
@@ -224,8 +247,15 @@ pub unsafe fn syscall1(num: SyscallNumber, a1: u64) -> i64 {
         lateout("a0") ret,
         options(nostack)
     );
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
-    { let _ = (num, a1); ret = 0; }
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )))]
+    {
+        let _ = (num, a1);
+        ret = 0;
+    }
     ret
 }
 
@@ -261,8 +291,15 @@ pub unsafe fn syscall2(num: SyscallNumber, a1: u64, a2: u64) -> i64 {
         lateout("a0") ret,
         options(nostack)
     );
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
-    { let _ = (num, a1, a2); ret = 0; }
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )))]
+    {
+        let _ = (num, a1, a2);
+        ret = 0;
+    }
     ret
 }
 
@@ -301,8 +338,15 @@ pub unsafe fn syscall3(num: SyscallNumber, a1: u64, a2: u64, a3: u64) -> i64 {
         lateout("a0") ret,
         options(nostack)
     );
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
-    { let _ = (num, a1, a2, a3); ret = 0; }
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )))]
+    {
+        let _ = (num, a1, a2, a3);
+        ret = 0;
+    }
     ret
 }
 
@@ -344,8 +388,15 @@ pub unsafe fn syscall4(num: SyscallNumber, a1: u64, a2: u64, a3: u64, a4: u64) -
         lateout("a0") ret,
         options(nostack)
     );
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
-    { let _ = (num, a1, a2, a3, a4); ret = 0; }
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )))]
+    {
+        let _ = (num, a1, a2, a3, a4);
+        ret = 0;
+    }
     ret
 }
 
@@ -390,13 +441,28 @@ pub unsafe fn syscall5(num: SyscallNumber, a1: u64, a2: u64, a3: u64, a4: u64, a
         lateout("a0") ret,
         options(nostack)
     );
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
-    { let _ = (num, a1, a2, a3, a4, a5); ret = 0; }
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )))]
+    {
+        let _ = (num, a1, a2, a3, a4, a5);
+        ret = 0;
+    }
     ret
 }
 
 #[inline(always)]
-pub unsafe fn syscall6(num: SyscallNumber, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> i64 {
+pub unsafe fn syscall6(
+    num: SyscallNumber,
+    a1: u64,
+    a2: u64,
+    a3: u64,
+    a4: u64,
+    a5: u64,
+    a6: u64,
+) -> i64 {
     let ret: i64;
     #[cfg(target_arch = "x86_64")]
     core::arch::asm!(
@@ -439,11 +505,17 @@ pub unsafe fn syscall6(num: SyscallNumber, a1: u64, a2: u64, a3: u64, a4: u64, a
         lateout("a0") ret,
         options(nostack)
     );
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
-    { let _ = (num, a1, a2, a3, a4, a5, a6); ret = 0; }
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )))]
+    {
+        let _ = (num, a1, a2, a3, a4, a5, a6);
+        ret = 0;
+    }
     ret
 }
-
 
 // -----------------------------------------------------------------------------
 // High-Level Safe Userspace APIs
@@ -502,8 +574,19 @@ pub fn log(cap_slot: usize, msg: &str) -> Result<(), i64> {
 /// Requires the caller to hold a `TimerTickRead` capability in `cap_slot`.
 /// Launches a signed trusted system-service RAPP after kernel verification.
 pub fn service_package_launch(cap_slot: usize, path: &str) -> Result<u64, i64> {
-    let ret = unsafe { syscall3(SyscallNumber::ServicePackageLaunch, cap_slot as u64, path.as_ptr() as u64, path.len() as u64) };
-    if ret >= 0 { Ok(ret as u64) } else { Err(ret) }
+    let ret = unsafe {
+        syscall3(
+            SyscallNumber::ServicePackageLaunch,
+            cap_slot as u64,
+            path.as_ptr() as u64,
+            path.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as u64)
+    } else {
+        Err(ret)
+    }
 }
 
 pub fn get_ticks(cap_slot: usize) -> Result<u64, i64> {
@@ -521,7 +604,12 @@ pub fn get_task_id() -> u64 {
 }
 
 /// Transmits a message through zero-trust IPC.
-pub fn ipc_send(cap_slot: usize, target_task_id: u64, msg_type: u32, payload: &[u8]) -> Result<(), i64> {
+pub fn ipc_send(
+    cap_slot: usize,
+    target_task_id: u64,
+    msg_type: u32,
+    payload: &[u8],
+) -> Result<(), i64> {
     let ret = unsafe {
         syscall5(
             SyscallNumber::IpcSend,
@@ -628,42 +716,120 @@ pub fn net_sendto(dst_ip: [u8; 4], dst_port: u16, payload: &[u8]) -> Result<(), 
 
 /// Receives a packet from a UDP socket.
 /// Drives the userspace network service receive path.
-pub fn net_send_socket(socket_id: u32, dst_ip: [u8; 4], dst_port: u16, payload: &[u8]) -> Result<(), i64> {
+pub fn net_send_socket(
+    socket_id: u32,
+    dst_ip: [u8; 4],
+    dst_port: u16,
+    payload: &[u8],
+) -> Result<(), i64> {
     let ip = u32::from_be_bytes(dst_ip) as u64;
-    let ret = unsafe { syscall5(SyscallNumber::NetSendSocket, socket_id as u64, ip, dst_port as u64, payload.as_ptr() as u64, payload.len() as u64) };
-    if ret == 0 { Ok(()) } else { Err(ret) }
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::NetSendSocket,
+            socket_id as u64,
+            ip,
+            dst_port as u64,
+            payload.as_ptr() as u64,
+            payload.len() as u64,
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
 }
-
 
 /// Closes a UDP socket owned by the current task.
 pub fn net_close_socket(socket_id: u32) -> Result<(), i64> {
     let ret = unsafe { syscall1(SyscallNumber::NetCloseSocket, socket_id as u64) };
-    if ret == 0 { Ok(()) } else { Err(ret) }
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
 }
 
-
-pub fn tcp_send(connection_id: u32, payload: &[u8]) -> Result<(), i64> { let r=unsafe{syscall3(SyscallNumber::TcpSend,connection_id as u64,payload.as_ptr() as u64,payload.len() as u64)}; if r==0{Ok(())}else{Err(r)} }
-pub fn tcp_recv(connection_id: u32, out: &mut [u8]) -> Result<usize, i64> { let r=unsafe{syscall3(SyscallNumber::TcpRecv,connection_id as u64,out.as_mut_ptr() as u64,out.len() as u64)}; if r>=0{Ok(r as usize)}else{Err(r)} }
+pub fn tcp_send(connection_id: u32, payload: &[u8]) -> Result<(), i64> {
+    let r = unsafe {
+        syscall3(
+            SyscallNumber::TcpSend,
+            connection_id as u64,
+            payload.as_ptr() as u64,
+            payload.len() as u64,
+        )
+    };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(r)
+    }
+}
+pub fn tcp_recv(connection_id: u32, out: &mut [u8]) -> Result<usize, i64> {
+    let r = unsafe {
+        syscall3(
+            SyscallNumber::TcpRecv,
+            connection_id as u64,
+            out.as_mut_ptr() as u64,
+            out.len() as u64,
+        )
+    };
+    if r >= 0 {
+        Ok(r as usize)
+    } else {
+        Err(r)
+    }
+}
 pub fn tcp_close(connection_id: u32) -> Result<(), i64> {
     let ret = unsafe { syscall1(SyscallNumber::TcpClose, connection_id as u64) };
-    if ret == 0 { Ok(()) } else { Err(ret) }
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
 }
 
 pub fn tcp_connect(dst_ip: [u8; 4], dst_port: u16, local_port: u16, seq: u32) -> Result<u32, i64> {
     let ip = u32::from_be_bytes(dst_ip) as u64;
-    let ret = unsafe { syscall4(SyscallNumber::TcpConnect, ip, dst_port as u64, local_port as u64, seq as u64) };
-    if ret >= 0 { Ok(ret as u32) } else { Err(ret) }
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::TcpConnect,
+            ip,
+            dst_port as u64,
+            local_port as u64,
+            seq as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as u32)
+    } else {
+        Err(ret)
+    }
 }
 
 /// Resolves an IPv4 hostname through the capability-governed system DNS service.
 pub fn dns_resolve(host: &str) -> Result<[u8; 4], i64> {
-    let ret = unsafe { syscall2(SyscallNumber::DnsResolve, host.as_ptr() as u64, host.len() as u64) };
-    if ret >= 0 { Ok((ret as u32).to_be_bytes()) } else { Err(ret) }
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::DnsResolve,
+            host.as_ptr() as u64,
+            host.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok((ret as u32).to_be_bytes())
+    } else {
+        Err(ret)
+    }
 }
 
 pub fn network_poll() -> Result<usize, i64> {
     let ret = unsafe { syscall0(SyscallNumber::NetworkPoll) };
-    if ret >= 0 { Ok(ret as usize) } else { Err(ret) }
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
 }
 
 pub fn net_recvfrom(sock_id: u32, out_buf: &mut [u8]) -> Result<usize, i64> {
@@ -682,7 +848,6 @@ pub fn net_recvfrom(sock_id: u32, out_buf: &mut [u8]) -> Result<usize, i64> {
     }
 }
 
-
 /// Queries hardware battery, thermals, and throttling status.
 pub fn resource_query() -> (u8, u8, bool) {
     let mut battery = 0u8;
@@ -698,7 +863,6 @@ pub fn resource_query() -> (u8, u8, bool) {
     }
     (battery, temp, throttling)
 }
-
 
 /// Performs a zero-trust pre-flight capability audit for a marketplace package.
 /// Returns audit verdict (0 = Approved, 1 = RequiresConsent, 2 = BlockedForbidden, 3 = SignatureInvalid).
@@ -737,21 +901,54 @@ pub fn package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) -> Res
 }
 
 /// Rolls back a first-party package registry activation transaction.
-pub fn package_rollback(cap_slot:usize,pkg_id:&str,user_consent:bool)->Result<(),i64>{
-    let ret=unsafe{syscall4(SyscallNumber::PackageRollback,cap_slot as u64,pkg_id.as_ptr() as u64,pkg_id.len() as u64,user_consent as u64)};
-    if ret>=0{Ok(())}else{Err(ret)}
+pub fn package_rollback(cap_slot: usize, pkg_id: &str, user_consent: bool) -> Result<(), i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::PackageRollback,
+            cap_slot as u64,
+            pkg_id.as_ptr() as u64,
+            pkg_id.len() as u64,
+            user_consent as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
 }
 
 /// Reads the live compositor window registry.
-pub fn window_list(out_buf:&mut [u8])->Result<usize,i64>{
-    let ret=unsafe{syscall2(SyscallNumber::WindowList,out_buf.as_mut_ptr() as u64,out_buf.len() as u64)};
-    if ret>=0{Ok(ret as usize)}else{Err(ret)}
+pub fn window_list(out_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::WindowList,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
 }
 
 /// Reads the kernel package lifecycle registry. Requires FileSystemRead capability in cap_slot.
 pub fn package_registry(cap_slot: usize, out_buf: &mut [u8]) -> Result<usize, i64> {
-    let ret=unsafe{syscall3(SyscallNumber::PackageRegistry,cap_slot as u64,out_buf.as_mut_ptr() as u64,out_buf.len() as u64)};
-    if ret>=0{Ok(ret as usize)}else{Err(ret)}
+    let ret = unsafe {
+        syscall3(
+            SyscallNumber::PackageRegistry,
+            cap_slot as u64,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
 }
 
 /// Queries active mobile SoC platform parameters into `out_buf` JSON string.
@@ -898,7 +1095,11 @@ pub fn sensor_read(out: &mut [u8]) -> Result<usize, i64> {
 /// Queries mobile battery fuel gauge telemetry (voltage, SoC %, capacity, charging status).
 pub fn audio_query_volume() -> Result<u32, i64> {
     let ret = unsafe { syscall2(SyscallNumber::AudioControl, 8, 0) };
-    if ret >= 0 { Ok(ret as u32) } else { Err(ret) }
+    if ret >= 0 {
+        Ok(ret as u32)
+    } else {
+        Err(ret)
+    }
 }
 
 pub fn battery_query(out_buf: &mut [u8]) -> Result<usize, i64> {
@@ -917,7 +1118,11 @@ pub fn battery_query(out_buf: &mut [u8]) -> Result<usize, i64> {
 }
 
 /// Dispatches an Android cross-zone intent through the ACR mediator.
-pub fn android_bridge_intent(action: &str, data_uri: &str, out_buf: &mut [u8]) -> Result<usize, i64> {
+pub fn android_bridge_intent(
+    action: &str,
+    data_uri: &str,
+    out_buf: &mut [u8],
+) -> Result<usize, i64> {
     let ret = unsafe {
         syscall5(
             SyscallNumber::AndroidBridgeIntent,
@@ -951,7 +1156,6 @@ pub fn rtc_get_time(out_buf: &mut [u8]) -> Result<usize, i64> {
     }
 }
 
-
 /// Queries multi-zone mobile thermal temperatures and cooling policy JSON string.
 pub fn thermal_query(out_buf: &mut [u8]) -> Result<usize, i64> {
     let ret = unsafe {
@@ -984,9 +1188,12 @@ pub fn secure_ipc_session(peer_task: u64, out_session_id: &mut u64) -> Result<()
     }
 }
 
-
 /// Encrypts a 512-byte sector using the sovereign encrypted storage vault.
-pub fn vault_encrypt_sector(block_index: u64, buf: &mut [u8; 512], iv: &[u8; 16]) -> Result<(), i64> {
+pub fn vault_encrypt_sector(
+    block_index: u64,
+    buf: &mut [u8; 512],
+    iv: &[u8; 16],
+) -> Result<(), i64> {
     let ret = unsafe {
         syscall5(
             SyscallNumber::VaultCrypt,
@@ -1005,7 +1212,11 @@ pub fn vault_encrypt_sector(block_index: u64, buf: &mut [u8; 512], iv: &[u8; 16]
 }
 
 /// Decrypts a 512-byte sector using the sovereign encrypted storage vault.
-pub fn vault_decrypt_sector(block_index: u64, buf: &mut [u8; 512], iv: &[u8; 16]) -> Result<(), i64> {
+pub fn vault_decrypt_sector(
+    block_index: u64,
+    buf: &mut [u8; 512],
+    iv: &[u8; 16],
+) -> Result<(), i64> {
     let ret = unsafe {
         syscall5(
             SyscallNumber::VaultCrypt,
@@ -1022,7 +1233,6 @@ pub fn vault_decrypt_sector(block_index: u64, buf: &mut [u8; 512], iv: &[u8; 16]
         Err(ret)
     }
 }
-
 
 /// Queries mobile wireless HAL status (Wi-Fi and BLE beacon) into `out_buf` JSON string.
 pub fn wireless_query(out_buf: &mut [u8]) -> Result<usize, i64> {
@@ -1077,7 +1287,6 @@ pub fn devfs_write(path: &str, buf: &[u8]) -> Result<usize, i64> {
         Err(ret)
     }
 }
-
 
 /// Checks if a package is revoked on the sovereign Certificate Revocation List (CRL).
 pub fn revocation_is_package_revoked(package_id: &str) -> Result<bool, i64> {
@@ -1142,16 +1351,38 @@ pub fn cap_delegate(
     }
 }
 
-
 /// Interacts with the microkernel fluid inertial physics scroller (0=down, 1=move, 2=up, 3=tick).
 /// Creates a surface through the privileged Ring-3 display service boundary.
-pub fn surface_create(display_cap_slot: usize, width: u32, height: u32, z_order: u32) -> Result<u32, i64> {
-    let ret = unsafe { syscall5(SyscallNumber::SurfaceCreate, display_cap_slot as u64, width as u64, height as u64, z_order as u64, 0) };
-    if ret >= 0 { Ok(ret as u32) } else { Err(ret) }
+pub fn surface_create(
+    display_cap_slot: usize,
+    width: u32,
+    height: u32,
+    z_order: u32,
+) -> Result<u32, i64> {
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::SurfaceCreate,
+            display_cap_slot as u64,
+            width as u64,
+            height as u64,
+            z_order as u64,
+            0,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as u32)
+    } else {
+        Err(ret)
+    }
 }
 
 /// Writes ARGB8888 pixels through the display service boundary.
-pub fn surface_write(display_cap_slot: usize, surface_id: u32, offset: usize, pixels: &[u32]) -> Result<usize, i64> {
+pub fn surface_write(
+    display_cap_slot: usize,
+    surface_id: u32,
+    offset: usize,
+    pixels: &[u32],
+) -> Result<usize, i64> {
     let ret = unsafe {
         syscall5(
             SyscallNumber::SurfaceWrite,
@@ -1162,25 +1393,54 @@ pub fn surface_write(display_cap_slot: usize, surface_id: u32, offset: usize, pi
             pixels.len() as u64,
         )
     };
-    if ret >= 0 { Ok(ret as usize) } else { Err(ret) }
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
 }
 
 /// Destroys a surface owned by the display service.
 pub fn surface_destroy(display_cap_slot: usize, surface_id: u32) -> Result<(), i64> {
-    let ret = unsafe { syscall2(SyscallNumber::SurfaceDestroy, display_cap_slot as u64, surface_id as u64) };
-    if ret == 0 { Ok(()) } else { Err(ret) }
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::SurfaceDestroy,
+            display_cap_slot as u64,
+            surface_id as u64,
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
 }
 
 /// Composites and atomically flips the display scanout.
 /// Enables or disables pointer/touch hit-testing for an owned window.
 pub fn window_set_input(display_cap_slot: usize, window_id: u32, enabled: bool) -> Result<(), i64> {
-    let ret = unsafe { syscall3(SyscallNumber::WindowSetInput, display_cap_slot as u64, window_id as u64, enabled as u64) };
-    if ret == 0 { Ok(()) } else { Err(ret) }
+    let ret = unsafe {
+        syscall3(
+            SyscallNumber::WindowSetInput,
+            display_cap_slot as u64,
+            window_id as u64,
+            enabled as u64,
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
 }
 
 pub fn surface_flip(display_cap_slot: usize) -> Result<u64, i64> {
     let ret = unsafe { syscall1(SyscallNumber::SurfaceFlip, display_cap_slot as u64) };
-    if ret >= 0 { Ok(ret as u64) } else { Err(ret) }
+    if ret >= 0 {
+        Ok(ret as u64)
+    } else {
+        Err(ret)
+    }
 }
 
 /// Normalized input event returned by the kernel input pipeline.
@@ -1197,9 +1457,19 @@ pub struct InputEvent {
 /// Polls the normalized touch/input event pipeline.
 pub fn input_event_poll(out: &mut InputEvent) -> Result<(), i64> {
     let mut buf = [0u8; 24];
-    let ret = unsafe { syscall2(SyscallNumber::InputEventPoll, buf.as_mut_ptr() as u64, buf.len() as u64) };
-    if ret < 0 { return Err(ret); }
-    if ret != 24 { return Err(-3); }
+    let ret = unsafe {
+        syscall2(
+            SyscallNumber::InputEventPoll,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        )
+    };
+    if ret < 0 {
+        return Err(ret);
+    }
+    if ret != 24 {
+        return Err(-3);
+    }
     out.kind = buf[0];
     out.x = u32::from_le_bytes(buf[4..8].try_into().unwrap());
     out.y = u32::from_le_bytes(buf[8..12].try_into().unwrap());
@@ -1250,7 +1520,11 @@ pub fn fs_open(cap_slot: usize, path: &str, rights: u32) -> Result<u32, i64> {
 /// Moves the calling application to background execution.
 pub fn app_focus(task_id: u64) -> Result<(), i64> {
     let ret = unsafe { syscall4(SyscallNumber::AppFocus, task_id, 0, 0, 0) };
-    if ret == 0 { Ok(()) } else { Err(ret) }
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
 }
 
 pub fn app_runtime_list(out: &mut [u8]) -> Result<usize, i64> {
@@ -1263,12 +1537,20 @@ pub fn app_runtime_list(out: &mut [u8]) -> Result<usize, i64> {
             0,
         )
     };
-    if ret >= 0 { Ok(ret as usize) } else { Err(ret) }
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
 }
 
 pub fn app_stop(task_id: u64) -> Result<(), i64> {
     let ret = unsafe { syscall4(SyscallNumber::AppStop, task_id, 0, 0, 0) };
-    if ret == 0 { Ok(()) } else { Err(ret) }
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
 }
 
 pub fn app_restart(package_id: &str) -> Result<u64, i64> {
@@ -1281,7 +1563,11 @@ pub fn app_restart(package_id: &str) -> Result<u64, i64> {
             0,
         )
     };
-    if ret >= 0 { Ok(ret as u64) } else { Err(ret) }
+    if ret >= 0 {
+        Ok(ret as u64)
+    } else {
+        Err(ret)
+    }
 }
 
 pub fn package_uninstall(cap_slot: usize, package_id: &str, user_consent: bool) -> Result<(), i64> {
@@ -1294,30 +1580,50 @@ pub fn package_uninstall(cap_slot: usize, package_id: &str, user_consent: bool) 
             user_consent as u64,
         )
     };
-    if ret == 0 { Ok(()) } else { Err(ret) }
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
 }
 
 pub fn app_background() -> Result<(), i64> {
     let ret = unsafe { syscall4(SyscallNumber::AppBackground, 0, 0, 0, 0) };
-    if ret == 0 { Ok(()) } else { Err(ret) }
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
 }
 
 /// Returns the calling application to foreground execution.
 pub fn app_foreground() -> Result<(), i64> {
     let ret = unsafe { syscall4(SyscallNumber::AppForeground, 0, 0, 0, 0) };
-    if ret == 0 { Ok(()) } else { Err(ret) }
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
 }
 
 /// Suspends the calling application until an explicit wake event.
 pub fn app_suspend() -> Result<(), i64> {
     let ret = unsafe { syscall4(SyscallNumber::AppSuspend, 0, 0, 0, 0) };
-    if ret == 0 { Ok(()) } else { Err(ret) }
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
 }
 
 /// Requests wake of the calling application.
 pub fn app_wake() -> Result<(), i64> {
     let ret = unsafe { syscall4(SyscallNumber::AppWake, 0, 0, 0, 0) };
-    if ret == 0 { Ok(()) } else { Err(ret) }
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
 }
 
 /// Opens a file inside the calling application's private storage namespace.
@@ -1331,7 +1637,11 @@ pub fn app_storage_open(cap_slot: usize, relative_path: &str, rights: u32) -> Re
             rights as u64,
         )
     };
-    if ret >= 0 { Ok(ret as u32) } else { Err(ret) }
+    if ret >= 0 {
+        Ok(ret as u32)
+    } else {
+        Err(ret)
+    }
 }
 
 /// Reads data from an open file descriptor.
@@ -1372,12 +1682,7 @@ pub fn fs_write(cap_slot: usize, fd: u32, buf: &[u8]) -> Result<usize, i64> {
 
 /// Closes an open file descriptor.
 pub fn fs_close(fd: u32) -> Result<(), i64> {
-    let ret = unsafe {
-        syscall1(
-            SyscallNumber::FsClose,
-            fd as u64,
-        )
-    };
+    let ret = unsafe { syscall1(SyscallNumber::FsClose, fd as u64) };
     if ret == 0 {
         Ok(())
     } else {
@@ -1452,7 +1757,11 @@ pub fn camera_autofocus_state() -> Result<bool, i64> {
             0,
         )
     };
-    if ret >= 0 { Ok(ret != 0) } else { Err(ret) }
+    if ret >= 0 {
+        Ok(ret != 0)
+    } else {
+        Err(ret)
+    }
 }
 
 pub fn camera_toggle_flash() -> Result<bool, i64> {
@@ -1491,7 +1800,6 @@ pub fn dex_invoke_method(dex_data: &[u8], method_spec: &str) -> Result<u32, i64>
         Err(ret)
     }
 }
-
 
 /// Sensitive hardware and system resource categories requiring user capability consent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1618,19 +1926,19 @@ pub fn shm_pipe_receive(pipe_id: u32, out_buf: &mut [u8]) -> Result<usize, i64> 
 // -----------------------------------------------------------------------------
 
 /// Inbound IPC mailbox message available.
-pub const EVENT_IPC_MSG: u32        = 1 << 0; // 0x01
+pub const EVENT_IPC_MSG: u32 = 1 << 0; // 0x01
 /// Zero-Copy DMA Shared Memory pipe has data available to consume.
-pub const EVENT_SHM_READABLE: u32   = 1 << 1; // 0x02
+pub const EVENT_SHM_READABLE: u32 = 1 << 1; // 0x02
 /// Zero-Copy DMA Shared Memory pipe has free slots available to stream.
-pub const EVENT_SHM_WRITABLE: u32   = 1 << 2; // 0x04
+pub const EVENT_SHM_WRITABLE: u32 = 1 << 2; // 0x04
 /// Hardware system timer interval tick or deadline elapsed.
-pub const EVENT_TIMER_TICK: u32     = 1 << 3; // 0x08
+pub const EVENT_TIMER_TICK: u32 = 1 << 3; // 0x08
 /// Capacitive touch digitizer input event frame available.
-pub const EVENT_TOUCH_INPUT: u32    = 1 << 4; // 0x10
+pub const EVENT_TOUCH_INPUT: u32 = 1 << 4; // 0x10
 /// Inbound network socket datagram or packet received.
 pub const EVENT_NETWORK_PACKET: u32 = 1 << 5; // 0x20
 /// Cellular baseband modem unsolicited result code (URC) arrived.
-pub const EVENT_MODEM_URC: u32      = 1 << 6; // 0x40
+pub const EVENT_MODEM_URC: u32 = 1 << 6; // 0x40
 
 /// Polls for asynchronous system events with cooperative wait-queue blocking.
 pub fn event_poll(interest_mask: u32, timeout_ticks: u32) -> Result<u32, i64> {
@@ -1694,12 +2002,7 @@ pub fn telephony_send_sms(destination: &str, body: &str) -> Result<u32, i64> {
 
 /// Toggles cellular packet data connection (PDP context attach/detach).
 pub fn telephony_set_data(enabled: bool) -> Result<bool, i64> {
-    let ret = unsafe {
-        syscall1(
-            SyscallNumber::TelephonySetData,
-            if enabled { 1 } else { 0 },
-        )
-    };
+    let ret = unsafe { syscall1(SyscallNumber::TelephonySetData, if enabled { 1 } else { 0 }) };
     if ret >= 0 {
         Ok(ret != 0)
     } else {
@@ -1727,28 +2030,64 @@ pub fn power_set_profile(profile_idx: u32) -> Result<u32, i64> {
     }
 }
 
-
-
-
-
-
-
-
-
-
-
 pub fn package_list(cap_slot: usize, out_buf: &mut [u8]) -> Result<usize, i64> {
-    let ret=unsafe{syscall3(SyscallNumber::PackageList,cap_slot as u64,out_buf.as_mut_ptr() as u64,out_buf.len() as u64)};
-    if ret>=0{Ok(ret as usize)}else{Err(ret)}
+    let ret = unsafe {
+        syscall3(
+            SyscallNumber::PackageList,
+            cap_slot as u64,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
 }
 
 /// Moves an owned window in the compositor.
-pub fn window_set_geometry(display_cap_slot: usize, id:u32,x:i32,y:i32,z:u32,visible:bool)->Result<(),i64>{
- let packed=(z as u64)|if visible{1u64<<63}else{0};
- let r=unsafe{syscall5(SyscallNumber::WindowSetGeometry,display_cap_slot as u64,id as u64,x as i64 as u64,y as i64 as u64,packed)};if r==0{Ok(())}else{Err(r)}
+pub fn window_set_geometry(
+    display_cap_slot: usize,
+    id: u32,
+    x: i32,
+    y: i32,
+    z: u32,
+    visible: bool,
+) -> Result<(), i64> {
+    let packed = (z as u64) | if visible { 1u64 << 63 } else { 0 };
+    let r = unsafe {
+        syscall5(
+            SyscallNumber::WindowSetGeometry,
+            display_cap_slot as u64,
+            id as u64,
+            x as i64 as u64,
+            y as i64 as u64,
+            packed,
+        )
+    };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(r)
+    }
 }
 /// Focuses the topmost live surface through the display service.
-pub fn window_focus(display_cap_slot: usize,x:u32,y:u32)->Result<(),i64>{let r=unsafe{syscall3(SyscallNumber::WindowFocus,display_cap_slot as u64,x as u64,y as u64)};if r==0{Ok(())}else{Err(r)}}
+pub fn window_focus(display_cap_slot: usize, x: u32, y: u32) -> Result<(), i64> {
+    let r = unsafe {
+        syscall3(
+            SyscallNumber::WindowFocus,
+            display_cap_slot as u64,
+            x as u64,
+            y as u64,
+        )
+    };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(r)
+    }
+}
 
 /// Verifies a signed Ring-3 system-service RAPP and returns its service ID.
 /// Requires the PID1 service-manager authority and a FileSystemRead capability.
@@ -1761,49 +2100,161 @@ pub fn service_package_verify(cap_slot: usize, path: &str) -> Result<u8, i64> {
             path.len() as u64,
         )
     };
-    if r >= 0 { Ok(r as u8) } else { Err(r) }
+    if r >= 0 {
+        Ok(r as u8)
+    } else {
+        Err(r)
+    }
 }
 
 /// Publishes a heartbeat for the current registered userspace service.
 pub fn service_heartbeat(service_id: u8) -> Result<(), i64> {
     let r = unsafe { syscall1(SyscallNumber::ServiceHeartbeat, service_id as u64) };
-    if r == 0 { Ok(()) } else { Err(r) }
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(r)
+    }
 }
 
 /// Reads service lifecycle state.
 pub fn service_list(out: &mut [u8]) -> Result<usize, i64> {
-    let r = unsafe { syscall2(SyscallNumber::ServiceList, out.as_mut_ptr() as u64, out.len() as u64) };
-    if r >= 0 { Ok(r as usize) } else { Err(r) }
+    let r = unsafe {
+        syscall2(
+            SyscallNumber::ServiceList,
+            out.as_mut_ptr() as u64,
+            out.len() as u64,
+        )
+    };
+    if r >= 0 {
+        Ok(r as usize)
+    } else {
+        Err(r)
+    }
 }
 /// Queries stable service metadata. The response is a 12-byte ABI record.
 pub fn service_query(service_id: u8, out: &mut [u8; 12]) -> Result<usize, i64> {
-    let r = unsafe { syscall2(SyscallNumber::ServiceQuery, service_id as u64, out.as_mut_ptr() as u64) };
-    if r >= 0 { Ok(r as usize) } else { Err(r) }
+    let r = unsafe {
+        syscall2(
+            SyscallNumber::ServiceQuery,
+            service_id as u64,
+            out.as_mut_ptr() as u64,
+        )
+    };
+    if r >= 0 {
+        Ok(r as usize)
+    } else {
+        Err(r)
+    }
 }
 
 /// Starts a declared system service. Only PID1/service-manager capability domains may invoke this.
-pub fn service_start(service_id:u8)->Result<u64,i64>{let r=unsafe{syscall1(SyscallNumber::ServiceStart,service_id as u64)};if r>=0{Ok(r as u64)}else{Err(r)}}
+pub fn service_start(service_id: u8) -> Result<u64, i64> {
+    let r = unsafe { syscall1(SyscallNumber::ServiceStart, service_id as u64) };
+    if r >= 0 {
+        Ok(r as u64)
+    } else {
+        Err(r)
+    }
+}
 /// Stops a declared system service. Only PID1/service-manager capability domains may invoke this.
-pub fn service_stop(service_id:u8)->Result<(),i64>{let r=unsafe{syscall1(SyscallNumber::ServiceStop,service_id as u64)};if r==0{Ok(())}else{Err(r)}}
+pub fn service_stop(service_id: u8) -> Result<(), i64> {
+    let r = unsafe { syscall1(SyscallNumber::ServiceStop, service_id as u64) };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(r)
+    }
+}
 /// Requests recovery of services currently marked failed.
-pub fn service_recover_failed(service_id:u8)->Result<u64,i64>{let r=unsafe{syscall1(SyscallNumber::ServiceRecoverFailed,service_id as u64)};if r>=0{Ok(r as u64)}else{Err(r)}}
+pub fn service_recover_failed(service_id: u8) -> Result<u64, i64> {
+    let r = unsafe { syscall1(SyscallNumber::ServiceRecoverFailed, service_id as u64) };
+    if r >= 0 {
+        Ok(r as u64)
+    } else {
+        Err(r)
+    }
+}
 
 /// Reads a persistent setting.
-pub fn settings_get(cap_slot:usize,key:&str,out:&mut[u8])->Result<usize,i64>{let r=unsafe{syscall5(SyscallNumber::SettingsGet,cap_slot as u64,key.as_ptr() as u64,key.len() as u64,out.len() as u64,out.as_mut_ptr() as u64)};if r>=0{Ok(r as usize)}else{Err(r)}}
+pub fn settings_get(cap_slot: usize, key: &str, out: &mut [u8]) -> Result<usize, i64> {
+    let r = unsafe {
+        syscall5(
+            SyscallNumber::SettingsGet,
+            cap_slot as u64,
+            key.as_ptr() as u64,
+            key.len() as u64,
+            out.len() as u64,
+            out.as_mut_ptr() as u64,
+        )
+    };
+    if r >= 0 {
+        Ok(r as usize)
+    } else {
+        Err(r)
+    }
+}
 /// Updates a persistent setting.
-pub fn settings_set(cap_slot:usize,key:&str,value:&[u8])->Result<(),i64>{let r=unsafe{syscall5(SyscallNumber::SettingsSet,cap_slot as u64,key.as_ptr() as u64,key.len() as u64,value.as_ptr() as u64,value.len() as u64)};if r==0{Ok(())}else{Err(r)}}
-
+pub fn settings_set(cap_slot: usize, key: &str, value: &[u8]) -> Result<(), i64> {
+    let r = unsafe {
+        syscall5(
+            SyscallNumber::SettingsSet,
+            cap_slot as u64,
+            key.as_ptr() as u64,
+            key.len() as u64,
+            value.as_ptr() as u64,
+            value.len() as u64,
+        )
+    };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(r)
+    }
+}
 
 /// Returns live block-device capacity in bytes.
-pub fn storage_query()->Result<u64,i64>{let r=unsafe{syscall0(SyscallNumber::StorageQuery)};if r>=0{Ok(r as u64)}else{Err(r)}}
+pub fn storage_query() -> Result<u64, i64> {
+    let r = unsafe { syscall0(SyscallNumber::StorageQuery) };
+    if r >= 0 {
+        Ok(r as u64)
+    } else {
+        Err(r)
+    }
+}
 
 /// Lists immediate VFS directory children using a read capability.
-pub fn fs_list(cap_slot:usize,path:&str,out:&mut[u8])->Result<usize,i64>{let r=unsafe{syscall4(SyscallNumber::FsList,cap_slot as u64,path.as_ptr() as u64,path.len() as u64,out.as_mut_ptr() as u64)};if r>=0{Ok(r as usize)}else{Err(r)}}
+pub fn fs_list(cap_slot: usize, path: &str, out: &mut [u8]) -> Result<usize, i64> {
+    let r = unsafe {
+        syscall4(
+            SyscallNumber::FsList,
+            cap_slot as u64,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            out.as_mut_ptr() as u64,
+        )
+    };
+    if r >= 0 {
+        Ok(r as usize)
+    } else {
+        Err(r)
+    }
+}
 
 /// Launches an application or verified package in Ring 3.
 pub fn app_launch(app_id: &str) -> Result<u64, i64> {
-    let r = unsafe { syscall2(SyscallNumber::AppLaunch, app_id.as_ptr() as u64, app_id.len() as u64) };
-    if r >= 0 { Ok(r as u64) } else { Err(r) }
+    let r = unsafe {
+        syscall2(
+            SyscallNumber::AppLaunch,
+            app_id.as_ptr() as u64,
+            app_id.len() as u64,
+        )
+    };
+    if r >= 0 {
+        Ok(r as u64)
+    } else {
+        Err(r)
+    }
 }
 
 /// Queries the active foreground user ID.
@@ -1814,53 +2265,123 @@ pub fn user_get_current() -> u32 {
 /// Requests switching the active foreground user.
 pub fn user_switch(target_uid: u32) -> Result<(), i64> {
     let r = unsafe { syscall1(SyscallNumber::UserSwitch, target_uid as u64) };
-    if r == 0 { Ok(()) } else { Err(r) }
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(r)
+    }
 }
 
 /// Queries user lock state. Returns 0=Unlocked, 1=Locked, 2=Uninitialized, negative=Lockout ticks.
 pub fn user_get_lock_state(uid: u32) -> Result<i64, i64> {
     let r = unsafe { syscall1(SyscallNumber::UserLockState, uid as u64) };
-    if r >= -6 { Ok(r) } else { Err(r) }
+    if r >= -6 {
+        Ok(r)
+    } else {
+        Err(r)
+    }
 }
 
 /// Unlocks a user account with candidate credentials.
 pub fn user_unlock(uid: u32, secret: &[u8]) -> Result<(), i64> {
-    let r = unsafe { syscall3(SyscallNumber::UserUnlock, uid as u64, secret.as_ptr() as u64, secret.len() as u64) };
-    if r == 0 { Ok(()) } else { Err(r) }
+    let r = unsafe {
+        syscall3(
+            SyscallNumber::UserUnlock,
+            uid as u64,
+            secret.as_ptr() as u64,
+            secret.len() as u64,
+        )
+    };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(r)
+    }
 }
 
 /// Locks a user account.
 pub fn user_lock(uid: u32) -> Result<(), i64> {
     let r = unsafe { syscall1(SyscallNumber::UserLock, uid as u64) };
-    if r == 0 { Ok(()) } else { Err(r) }
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(r)
+    }
 }
 
 /// Posts a notification from the calling application.
 pub fn notification_post(pkg: &str, channel: &str) -> Result<u64, i64> {
-    let r = unsafe { syscall4(SyscallNumber::NotificationPost, pkg.as_ptr() as u64, pkg.len() as u64, channel.as_ptr() as u64, channel.len() as u64) };
-    if r >= 0 { Ok(r as u64) } else { Err(r) }
+    let r = unsafe {
+        syscall4(
+            SyscallNumber::NotificationPost,
+            pkg.as_ptr() as u64,
+            pkg.len() as u64,
+            channel.as_ptr() as u64,
+            channel.len() as u64,
+        )
+    };
+    if r >= 0 {
+        Ok(r as u64)
+    } else {
+        Err(r)
+    }
 }
 
 /// Cancels an active notification.
 pub fn notification_cancel(pkg: &str, notif_id: u64) -> Result<(), i64> {
-    let r = unsafe { syscall3(SyscallNumber::NotificationCancel, pkg.as_ptr() as u64, pkg.len() as u64, notif_id) };
-    if r == 0 { Ok(()) } else { Err(r) }
+    let r = unsafe {
+        syscall3(
+            SyscallNumber::NotificationCancel,
+            pkg.as_ptr() as u64,
+            pkg.len() as u64,
+            notif_id,
+        )
+    };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(r)
+    }
 }
 
 /// Queries count of active notifications for a user.
 pub fn notification_query(user_id: u32, is_locked: bool) -> Result<usize, i64> {
-    let r = unsafe { syscall2(SyscallNumber::NotificationQuery, user_id as u64, if is_locked { 1 } else { 0 }) };
-    if r >= 0 { Ok(r as usize) } else { Err(r) }
+    let r = unsafe {
+        syscall2(
+            SyscallNumber::NotificationQuery,
+            user_id as u64,
+            if is_locked { 1 } else { 0 },
+        )
+    };
+    if r >= 0 {
+        Ok(r as usize)
+    } else {
+        Err(r)
+    }
 }
 
 /// Revokes a granted sensitive permission from a task.
 pub fn permission_revoke(task_id: u64, perm_id: u32) -> Result<(), i64> {
     let r = unsafe { syscall2(SyscallNumber::PermissionRevoke, task_id, perm_id as u64) };
-    if r == 0 { Ok(()) } else { Err(r) }
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(r)
+    }
 }
 
 /// Queries hardware availability status for a setting/hardware category (0=available, 1=simulated, 2=unavailable).
 pub fn settings_hardware_status(category: &str) -> Result<i64, i64> {
-    let r = unsafe { syscall2(SyscallNumber::SettingsHardwareStatus, category.as_ptr() as u64, category.len() as u64) };
-    if r >= 0 { Ok(r) } else { Err(r) }
+    let r = unsafe {
+        syscall2(
+            SyscallNumber::SettingsHardwareStatus,
+            category.as_ptr() as u64,
+            category.len() as u64,
+        )
+    };
+    if r >= 0 {
+        Ok(r)
+    } else {
+        Err(r)
+    }
 }

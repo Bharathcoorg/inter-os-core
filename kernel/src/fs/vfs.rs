@@ -668,6 +668,45 @@ impl Vfs {
         self.ensure_app_storage(task_id)
     }
 
+    pub fn remove_app_storage(&mut self, pkg_id: &str) -> Result<(), FsError> {
+        if pkg_id.is_empty() || pkg_id.contains('/') || pkg_id.contains('\\') || pkg_id.contains("..") {
+            return Err(FsError::InvalidPath);
+        }
+        let needle = alloc::format!("/apps/{}", pkg_id);
+        let targets: Vec<String> = self.path_to_inode.keys()
+            .filter(|p| p.ends_with(&needle) || p.contains(&alloc::format!("{}/", needle)))
+            .cloned()
+            .collect();
+
+        let link_targets: Vec<String> = self.hard_links.keys()
+            .filter(|p| p.ends_with(&needle) || p.contains(&alloc::format!("{}/", needle)))
+            .cloned()
+            .collect();
+
+        for link in link_targets {
+            self.hard_links.remove(&link);
+        }
+
+        let mut sorted_targets = targets;
+        sorted_targets.sort_by(|a, b| b.len().cmp(&a.len()));
+
+        for target in sorted_targets {
+            if let Some(inode_id) = self.path_to_inode.remove(&target) {
+                if let Some(inode) = self.inodes.get_mut(&inode_id) {
+                    inode.nlink = inode.nlink.saturating_sub(1);
+                    inode.ctime = crate::interrupts::get_system_ticks();
+                }
+                if self.inodes.get(&inode_id).map(|i| i.nlink == 0).unwrap_or(false) {
+                    self.inodes.remove(&inode_id);
+                }
+            }
+        }
+
+        self.persist_metadata_snapshot().map_err(|_| FsError::IntegrityViolation)?;
+        let _ = self.persist_data_snapshot();
+        Ok(())
+    }
+
     pub fn stat_for_task(
         &self,
         task_id: TaskId,

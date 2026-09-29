@@ -23,14 +23,6 @@ struct RappTransfer {
 
 static RAPP_TRANSFER: Mutex<Option<RappTransfer>> = Mutex::new(None);
 
-struct StudioFileTransfer {
-    path: String,
-    expected_len: usize,
-    bytes: Vec<u8>,
-    received: Vec<bool>,
-}
-static STUDIO_FILE_TRANSFER: Mutex<Option<StudioFileTransfer>> = Mutex::new(None);
-
 /// Initializes the primary COM1 serial port (I/O port 0x3F8).
 pub fn init() {
     let serial = unsafe {

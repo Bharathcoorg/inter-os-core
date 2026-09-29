@@ -49,7 +49,13 @@ pub fn is_leap_year(year: u32) -> bool {
 pub fn days_in_month(year: u32, month: u8) -> u8 {
     match month {
         1 => 31,
-        2 => if is_leap_year(year) { 29 } else { 28 },
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
         3 => 31,
         4 => 30,
         5 => 31,
@@ -114,15 +120,28 @@ impl CalendarApp {
         false
     }
 
-
     #[allow(dead_code)]
-    fn parse_rtc_date(&mut self, buf:&[u8], n:usize) {
-        if n<10{return;}
-        let d=|a:u8|if a.is_ascii_digit(){(a-b'0')as u32}else{10};
-        let y=[buf[0],buf[1],buf[2],buf[3]].iter().fold(0u32,|v,b|v*10+d(*b));
-        let m=d(buf[5]) as u8*10+d(buf[6]) as u8;
-        let day=d(buf[8]) as u8*10+d(buf[9]) as u8;
-        if y>1970&&m>=1&&m<=12&&day>=1&&day<=31{self.current_year=y;self.current_month=m;self.current_day=day;}
+    fn parse_rtc_date(&mut self, buf: &[u8], n: usize) {
+        if n < 10 {
+            return;
+        }
+        let d = |a: u8| {
+            if a.is_ascii_digit() {
+                (a - b'0') as u32
+            } else {
+                10
+            }
+        };
+        let y = [buf[0], buf[1], buf[2], buf[3]]
+            .iter()
+            .fold(0u32, |v, b| v * 10 + d(*b));
+        let m = d(buf[5]) as u8 * 10 + d(buf[6]) as u8;
+        let day = d(buf[8]) as u8 * 10 + d(buf[9]) as u8;
+        if y > 1970 && m >= 1 && m <= 12 && day >= 1 && day <= 31 {
+            self.current_year = y;
+            self.current_month = m;
+            self.current_day = day;
+        }
     }
 
     /// Inserts a scheduled event and encrypts in persistent storage.
@@ -134,7 +153,11 @@ impl CalendarApp {
         let iv = [0x77u8; 16];
         if std::vault_encrypt_sector(203, &mut agenda_sector, &iv).is_ok() {
             self.sector_encrypted = true;
-            std::log(0, "[CALENDAR APP] Sector 203: Updated agenda encrypted with AES-XTS/HMAC.").ok();
+            std::log(
+                0,
+                "[CALENDAR APP] Sector 203: Updated agenda encrypted with AES-XTS/HMAC.",
+            )
+            .ok();
         }
 
         // 2. Acoustic Reminder Chime (A-Major: 440Hz -> 554Hz -> 659Hz)
@@ -143,7 +166,11 @@ impl CalendarApp {
         std::audio_play_tone(659).ok();
         std::audio_silence().ok();
         std::audio_haptic_click().ok();
-        std::log(0, "[CALENDAR APP] Agenda reminder chime emitted (A-Major: 440Hz -> 554Hz -> 659Hz).").ok();
+        std::log(
+            0,
+            "[CALENDAR APP] Agenda reminder chime emitted (A-Major: 440Hz -> 554Hz -> 659Hz).",
+        )
+        .ok();
     }
 }
 
@@ -169,7 +196,9 @@ fn render_calendar_ui(surface: u32, _app: &CalendarApp) {
                     let center_y = 48;
                     let dx = (x as isize - center_x as isize).abs();
                     let dy = (y as isize - center_y as isize).abs();
-                    if (dx + dy <= 12 && x <= center_x) || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99)) {
+                    if (dx + dy <= 12 && x <= center_x)
+                        || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
+                    {
                         chunk[i] = std::design::color::TEXT;
                     } else {
                         chunk[i] = std::design::color::SURFACE_RAISED;
@@ -237,7 +266,11 @@ pub extern "C" fn _start() -> ! {
     // 2. Allocate DRM/KMS Client Surface (z=200)
     let surface = match std::surface_create(6, W as u32, H as u32, 200) {
         Ok(id) => {
-            std::log(0, "[CALENDAR APP] DRM/KMS Client Surface allocated (z=200).").ok();
+            std::log(
+                0,
+                "[CALENDAR APP] DRM/KMS Client Surface allocated (z=200).",
+            )
+            .ok();
             id
         }
         Err(_) => 0,
@@ -253,7 +286,11 @@ pub extern "C" fn _start() -> ! {
     if surface > 0 {
         render_calendar_ui(surface, &calendar);
         let _ = std::surface_flip(6);
-        std::log(0, "[CALENDAR APP] Calendar canvas presented to scanout buffer.").ok();
+        std::log(
+            0,
+            "[CALENDAR APP] Calendar canvas presented to scanout buffer.",
+        )
+        .ok();
     }
 
     // 4. Sovereign Asynchronous Event Reactor Loop
@@ -263,7 +300,12 @@ pub extern "C" fn _start() -> ! {
             Ok(events) => {
                 if events & std::EVENT_TOUCH_INPUT != 0 {
                     let mut input = std::InputEvent {
-                        kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000,
+                        kind: 0,
+                        x: 0,
+                        y: 0,
+                        dx: 0,
+                        dy: 0,
+                        scale_milli: 1000,
                     };
                     while std::input_event_poll(&mut input).is_ok() {
                         if input.kind == 4 && input.dy <= -60 && input.y <= 1380 {
@@ -288,7 +330,11 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 if events & std::EVENT_IPC_MSG != 0 {
-                    std::log(0, "[CALENDAR APP] Incoming schedule intent parsed from Intent IPC bus.").ok();
+                    std::log(
+                        0,
+                        "[CALENDAR APP] Incoming schedule intent parsed from Intent IPC bus.",
+                    )
+                    .ok();
                 }
                 if events & std::EVENT_TIMER_TICK != 0 {
                     // Periodic alarm & reminder monitor

@@ -122,7 +122,11 @@ impl VaultApp {
         if let Ok(len) = std::keystore_derive(0, &mut key0) {
             if len == 32 {
                 self.master_key_derived = true;
-                std::log(0, "[VAULT APP] Hardware Keystore Slot 0 derived: Root Master Key online.").ok();
+                std::log(
+                    0,
+                    "[VAULT APP] Hardware Keystore Slot 0 derived: Root Master Key online.",
+                )
+                .ok();
             }
         }
 
@@ -130,7 +134,11 @@ impl VaultApp {
         if let Ok(len) = std::keystore_derive(1, &mut key1) {
             if len == 32 {
                 self.media_key_derived = true;
-                std::log(0, "[VAULT APP] Hardware Keystore Slot 1 derived: Storage Encryption Key online.").ok();
+                std::log(
+                    0,
+                    "[VAULT APP] Hardware Keystore Slot 1 derived: Storage Encryption Key online.",
+                )
+                .ok();
             }
         }
     }
@@ -199,7 +207,11 @@ impl VaultApp {
         header[36..40].copy_from_slice(&checksum.to_le_bytes());
 
         self.backup_export_valid = true;
-        std::log(0, "[VAULT APP] Sovereign Backup Export generated & verified (Fletcher-32 valid).").ok();
+        std::log(
+            0,
+            "[VAULT APP] Sovereign Backup Export generated & verified (Fletcher-32 valid).",
+        )
+        .ok();
         true
     }
 }
@@ -228,7 +240,9 @@ fn render_vault_ui(surface: u32, vault: &VaultApp) {
                     let center_y = 48;
                     let dx = (x as isize - center_x as isize).abs();
                     let dy = (y as isize - center_y as isize).abs();
-                    if (dx + dy <= 12 && x <= center_x) || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99)) {
+                    if (dx + dy <= 12 && x <= center_x)
+                        || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
+                    {
                         chunk[i] = std::design::color::TEXT;
                     } else {
                         chunk[i] = std::design::color::SURFACE_RAISED;
@@ -254,35 +268,45 @@ fn render_vault_ui(surface: u32, vault: &VaultApp) {
                     let seg_w = (W - 88) / 6;
                     let seg_idx = (rel_x / seg_w).min(5);
                     let seg_color = match seg_idx {
-                        0 => std::design::color::ACCENT,       // Sector 100
-                        1 => std::design::color::SUCCESS,      // Sector 200
-                        2 => 0xFF8B5CF6,                       // Sector 201 (Purple)
-                        3 => std::design::color::WARNING,      // Sector 202
-                        4 => 0xFFF43F5E,                       // Sector 203 (Rose)
-                        _ => 0xFF06B6D4,                       // Sector 204 (Teal)
+                        0 => std::design::color::ACCENT,  // Sector 100
+                        1 => std::design::color::SUCCESS, // Sector 200
+                        2 => 0xFF8B5CF6,                  // Sector 201 (Purple)
+                        3 => std::design::color::WARNING, // Sector 202
+                        4 => 0xFFF43F5E,                  // Sector 203 (Rose)
+                        _ => 0xFF06B6D4,                  // Sector 204 (Teal)
                     };
                     chunk[i] = seg_color;
                 } else {
                     chunk[i] = std::design::color::SURFACE;
                 }
             } else {
-                let card_idx = if (290..290 + SECTOR_CARD_H).contains(&y) { Some(0) }
-                else if (420..420 + SECTOR_CARD_H).contains(&y) { Some(1) }
-                else if (550..550 + SECTOR_CARD_H).contains(&y) { Some(2) }
-                else if (680..680 + SECTOR_CARD_H).contains(&y) { Some(3) }
-                else if (810..810 + SECTOR_CARD_H).contains(&y) { Some(4) }
-                else if (940..940 + SECTOR_CARD_H).contains(&y) { Some(5) }
-                else { None };
+                let card_idx = if (290..290 + SECTOR_CARD_H).contains(&y) {
+                    Some(0)
+                } else if (420..420 + SECTOR_CARD_H).contains(&y) {
+                    Some(1)
+                } else if (550..550 + SECTOR_CARD_H).contains(&y) {
+                    Some(2)
+                } else if (680..680 + SECTOR_CARD_H).contains(&y) {
+                    Some(3)
+                } else if (810..810 + SECTOR_CARD_H).contains(&y) {
+                    Some(4)
+                } else if (940..940 + SECTOR_CARD_H).contains(&y) {
+                    Some(5)
+                } else {
+                    None
+                };
 
                 if let Some(idx) = card_idx {
                     let cy = SECTOR_CARD_Y[idx];
                     if x >= 24 && x < W - 24 {
                         if y >= cy + SECTOR_CARD_H - 2 {
                             chunk[i] = std::design::color::SURFACE_RAISED;
-                        } else if x >= 40 && x < 150 && y >= cy + 18 && y < cy + SECTOR_CARD_H - 18 {
+                        } else if x >= 40 && x < 150 && y >= cy + 18 && y < cy + SECTOR_CARD_H - 18
+                        {
                             // Sector Badge Box
                             chunk[i] = std::design::color::SURFACE_RAISED;
-                        } else if x >= 560 && x < 676 && y >= cy + 24 && y < cy + SECTOR_CARD_H - 24 {
+                        } else if x >= 560 && x < 676 && y >= cy + 24 && y < cy + SECTOR_CARD_H - 24
+                        {
                             // Padlock Status Pill
                             let is_auth = vault.sectors[idx].map_or(false, |s| s.authenticated);
                             if is_auth {
@@ -348,7 +372,11 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> bool {
 
     // 1. Back button in header or Home gesture bar: exit to Launcher
     if (x >= 24 && x < 100 && y >= 28 && y < 68) || (x >= 240 && x <= 480 && y >= 1400) {
-        std::log(0, "[VAULT] Back button or home gesture pressed. Exiting to launcher.").ok();
+        std::log(
+            0,
+            "[VAULT] Back button or home gesture pressed. Exiting to launcher.",
+        )
+        .ok();
         return true;
     }
 
@@ -387,7 +415,11 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> bool {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    std::log(0, "[VAULT APP (Ring 3)] Sovereign Multi-Sector Storage Manager & Keystore online.").ok();
+    std::log(
+        0,
+        "[VAULT APP (Ring 3)] Sovereign Multi-Sector Storage Manager & Keystore online.",
+    )
+    .ok();
 
     let mut vault = VaultApp::new();
 
@@ -395,14 +427,22 @@ pub extern "C" fn _start() -> ! {
     vault.derive_keys();
 
     // 2. Allocate dedicated KMS Client Surface (z=200)
-    std::log(0, "[VAULT APP] Step 1: Allocating application surface (z=200)...").ok();
+    std::log(
+        0,
+        "[VAULT APP] Step 1: Allocating application surface (z=200)...",
+    )
+    .ok();
     let surface = match std::surface_create(6, W as u32, H as u32, 200) {
         Ok(s) => {
             std::log(0, "[VAULT APP] Step 2: Surface created successfully.").ok();
             s
         }
         Err(_) => {
-            std::log(0, "[VAULT APP] Display surface unavailable; refusing headless execution.").ok();
+            std::log(
+                0,
+                "[VAULT APP] Display surface unavailable; refusing headless execution.",
+            )
+            .ok();
             std::exit_with_code(1);
         }
     };
@@ -411,7 +451,11 @@ pub extern "C" fn _start() -> ! {
     render_vault_ui(surface, &vault);
     let _ = std::surface_flip(6);
     std::audio_haptic_click().ok();
-    std::log(0, "[VAULT APP] Step 3: Initial frame presented to hardware scanout.").ok();
+    std::log(
+        0,
+        "[VAULT APP] Step 3: Initial frame presented to hardware scanout.",
+    )
+    .ok();
 
     // Verification and backup export are user-triggered actions.
 
@@ -420,7 +464,11 @@ pub extern "C" fn _start() -> ! {
         let mut dev_buf = [0u8; 64];
         if let Ok(n) = std::fs_read(3, fd, &mut dev_buf) {
             if n > 0 && &dev_buf[..4] == b"DID:" {
-                std::log(0, "[VAULT APP] Sovereign device identity partition authenticated.").ok();
+                std::log(
+                    0,
+                    "[VAULT APP] Sovereign device identity partition authenticated.",
+                )
+                .ok();
             }
         }
         let _ = std::fs_close(fd);
@@ -428,21 +476,27 @@ pub extern "C" fn _start() -> ! {
 
     // Interactive Event Reactor Loop
     loop {
-        if let Ok(events) = std::event_poll(
-            std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK,
-            100,
-        ) {
+        if let Ok(events) = std::event_poll(std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK, 100) {
             if (events & std::EVENT_TIMER_TICK) != 0 {
                 let _ = std::surface_flip(6);
             }
 
             if (events & std::EVENT_TOUCH_INPUT) != 0 {
                 let mut input = std::InputEvent {
-                    kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000,
+                    kind: 0,
+                    x: 0,
+                    y: 0,
+                    dx: 0,
+                    dy: 0,
+                    scale_milli: 1000,
                 };
                 while std::input_event_poll(&mut input).is_ok() {
                     if input.kind == 4 && input.dy <= -60 && input.y <= 1380 {
-                        std::log(0, "[VAULT APP] Swipe-up home gesture recognized. Returning to launcher.").ok();
+                        std::log(
+                            0,
+                            "[VAULT APP] Swipe-up home gesture recognized. Returning to launcher.",
+                        )
+                        .ok();
                         let _ = std::surface_destroy(6, surface);
                         std::exit_with_code(0);
                     }

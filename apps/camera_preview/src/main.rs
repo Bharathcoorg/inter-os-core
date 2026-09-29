@@ -27,7 +27,11 @@ pub extern "C" fn _start() -> ! {
     };
 
     if result >= 0 {
-        std::log(0, "[CAMERA PREVIEW] Frame grab successful! Ingested bytes from hardware ISP.").ok();
+        std::log(
+            0,
+            "[CAMERA PREVIEW] Frame grab successful! Ingested bytes from hardware ISP.",
+        )
+        .ok();
     } else {
         std::log(0, "[CAMERA PREVIEW] Camera access denied or hardware busy.").ok();
     }

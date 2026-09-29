@@ -5,3 +5,8 @@ edition = "2021"
 
 [dependencies]
 interos-std = { path = "../../sdk/rust/interos-std" }
+
+[[bin]]
+name = "vault"
+path = "src/main.rs"
+test = false

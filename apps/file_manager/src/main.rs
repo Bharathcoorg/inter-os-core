@@ -30,8 +30,11 @@ const BORDER_SUBTLE: u32 = 0xFF222E42;
 const TEXT_PRIMARY: u32 = 0xFFF8FAFC;
 const TEXT_MUTED: u32 = 0xFF94A3B8;
 const ACCENT_SKY: u32 = 0xFF31C4FF;
+#[allow(dead_code)]
 const ACCENT_AMBER: u32 = 0xFFF59E0B;
+#[allow(dead_code)]
 const SUCCESS_EMERALD: u32 = 0xFF10B981;
+#[allow(dead_code)]
 const DANGER_CRIMSON: u32 = 0xFFFF6B6B;
 
 // -----------------------------------------------------------------------------
@@ -136,7 +139,15 @@ const FONT_8X8: [[u8; 8]; 95] = [
 ];
 
 #[inline(always)]
-fn test_text(x: usize, y: usize, x0: usize, y0: usize, scale: usize, text: &[u8], color: u32) -> Option<u32> {
+fn test_text(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    color: u32,
+) -> Option<u32> {
     let char_w = 8 * scale;
     let char_h = 8 * scale;
     let total_w = text.len() * char_w;
@@ -196,7 +207,9 @@ impl FileManagerApp {
 fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     // 1. Status Bar & Header (y: 0..96)
     if y < 96 {
-        if y >= 94 { return BORDER_SUBTLE; }
+        if y >= 94 {
+            return BORDER_SUBTLE;
+        }
 
         // Back button (<) at (x: 24..100, y: 28..68)
         if x >= 24 && x < 100 && y >= 28 && y < 68 {
@@ -204,7 +217,9 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             let center_y = 48;
             let dx = (x as isize - center_x as isize).abs();
             let dy = (y as isize - center_y as isize).abs();
-            if (dx + dy <= 12 && x <= center_x) || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99)) {
+            if (dx + dy <= 12 && x <= center_x)
+                || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
+            {
                 return TEXT_PRIMARY;
             }
             return SURFACE_RAISED;
@@ -212,16 +227,22 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
 
         // Header Title: "Files"
         if y >= 36 && y < 60 {
-            if let Some(c) = test_text(x, y, 120, 36, 3, b"Files", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 120, 36, 3, b"Files", TEXT_PRIMARY) {
+                return c;
+            }
         }
 
         // Search icon at (640, 48, r: 16)
         let s_dx = (x as i32) - 640;
         let s_dy = (y as i32) - 48;
         if s_dx * s_dx + s_dy * s_dy <= 256 {
-            if s_dx * s_dx + s_dy * s_dy >= 225 { return BORDER_SUBTLE; }
+            if s_dx * s_dx + s_dy * s_dy >= 225 {
+                return BORDER_SUBTLE;
+            }
             if y >= 44 && y < 52 {
-                if let Some(c) = test_text(x, y, 636, 44, 1, b"Q", ACCENT_SKY) { return c; }
+                if let Some(c) = test_text(x, y, 636, 44, 1, b"Q", ACCENT_SKY) {
+                    return c;
+                }
             }
             return SURFACE_RAISED;
         }
@@ -231,17 +252,25 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
 
     // 2. Internal Storage Bar Card (x: 24..696, y: 110..220, r: 24 px)
     if y >= 110 && y < 220 && x >= 24 && x < 696 {
-        if y == 110 || y == 219 || x == 24 || x == 695 { return BORDER_SUBTLE; }
+        if y == 110 || y == 219 || x == 24 || x == 695 {
+            return BORDER_SUBTLE;
+        }
 
         // Title: Internal Storage
         if y >= 126 && y < 142 {
-            if let Some(c) = test_text(x, y, 48, 126, 2, b"Internal Storage", TEXT_PRIMARY) { return c; }
-            if let Some(c) = test_text(x, y, 480, 126, 2, b"Usage unavailable", ACCENT_SKY) { return c; }
+            if let Some(c) = test_text(x, y, 48, 126, 2, b"Internal Storage", TEXT_PRIMARY) {
+                return c;
+            }
+            if let Some(c) = test_text(x, y, 480, 126, 2, b"Usage unavailable", ACCENT_SKY) {
+                return c;
+            }
         }
 
         // Horizontal Progress Gauge Track (x: 48..672, y: 156..170)
         if y >= 156 && y < 170 && x >= 48 && x < 672 {
-            if y == 156 || y == 169 || x == 48 || x == 671 { return BORDER_SUBTLE; }
+            if y == 156 || y == 169 || x == 48 || x == 671 {
+                return BORDER_SUBTLE;
+            }
             if x <= 254 {
                 return ACCENT_SKY; // 33% filled
             }
@@ -250,7 +279,10 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
 
         // Subtext: Free space & Partition format
         if y >= 184 && y < 192 {
-            if let Some(c) = test_text(x, y, 48, 184, 1, b"Usage telemetry unavailable", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 48, 184, 1, b"Usage telemetry unavailable", TEXT_MUTED)
+            {
+                return c;
+            }
         }
 
         return SURFACE_RAISED;
@@ -273,22 +305,52 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         if let Some((idx, x0, x1, label, count_lbl)) = slot {
             let is_selected = app.selected_shortcut == idx;
             if y == 235 || y == 334 || x == x0 || x == x1 - 1 {
-                return if is_selected { ACCENT_SKY } else { BORDER_SUBTLE };
+                return if is_selected {
+                    ACCENT_SKY
+                } else {
+                    BORDER_SUBTLE
+                };
             }
             // Category Icon Badge Circle at (x0 + 35, 265, r: 16)
             let b_dx = (x as i32) - (x0 as i32 + 35);
             let b_dy = (y as i32) - 265;
             if b_dx * b_dx + b_dy * b_dy <= 256 {
-                if is_selected { return ACCENT_SKY; }
+                if is_selected {
+                    return ACCENT_SKY;
+                }
                 return 0xFF142032;
             }
             // Count Pill
             if y >= 258 && y < 274 {
-                if let Some(c) = test_text(x, y, x1 - 42, 258, 2, count_lbl, if is_selected { ACCENT_SKY } else { TEXT_MUTED }) { return c; }
+                if let Some(c) = test_text(
+                    x,
+                    y,
+                    x1 - 42,
+                    258,
+                    2,
+                    count_lbl,
+                    if is_selected { ACCENT_SKY } else { TEXT_MUTED },
+                ) {
+                    return c;
+                }
             }
             // Title
             if y >= 295 && y < 311 {
-                if let Some(c) = test_text(x, y, x0 + 16, 295, 2, label, if is_selected { TEXT_PRIMARY } else { TEXT_MUTED }) { return c; }
+                if let Some(c) = test_text(
+                    x,
+                    y,
+                    x0 + 16,
+                    295,
+                    2,
+                    label,
+                    if is_selected {
+                        TEXT_PRIMARY
+                    } else {
+                        TEXT_MUTED
+                    },
+                ) {
+                    return c;
+                }
             }
             return SURFACE_RAISED;
         }
@@ -296,10 +358,16 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
 
     // 4. Current Path Banner (y: 350..395, x: 24..696)
     if y >= 350 && y < 395 && x >= 24 && x < 696 {
-        if y == 350 || y == 394 || x == 24 || x == 695 { return BORDER_SUBTLE; }
+        if y == 350 || y == 394 || x == 24 || x == 695 {
+            return BORDER_SUBTLE;
+        }
         if y >= 366 && y < 382 {
-            if let Some(c) = test_text(x, y, 48, 366, 2, b"Path:", TEXT_MUTED) { return c; }
-            if let Some(c) = test_text(x, y, 140, 366, 2, app.current_path.as_bytes(), ACCENT_SKY) { return c; }
+            if let Some(c) = test_text(x, y, 48, 366, 2, b"Path:", TEXT_MUTED) {
+                return c;
+            }
+            if let Some(c) = test_text(x, y, 140, 366, 2, app.current_path.as_bytes(), ACCENT_SKY) {
+                return c;
+            }
         }
         return SURFACE_DARK;
     }
@@ -313,7 +381,11 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             let is_hovered = app.selected_row == row_idx;
 
             if in_row_y == 0 || in_row_y == 89 || x == 24 || x == 695 {
-                return if is_hovered { ACCENT_SKY } else { BORDER_SUBTLE };
+                return if is_hovered {
+                    ACCENT_SKY
+                } else {
+                    BORDER_SUBTLE
+                };
             }
 
             // Folder/File Icon Squircle (x: 42..86, y: 18..62 inside row)
@@ -322,8 +394,14 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                     return item.color_accent;
                 }
                 if (34..42).contains(&in_row_y) {
-                    let label = if item.is_dir { &b"DIR"[..] } else { &b"DOC"[..] };
-                    if let Some(c) = test_text(x, in_row_y, 48, 34, 1, label, item.color_accent) { return c; }
+                    let label = if item.is_dir {
+                        &b"DIR"[..]
+                    } else {
+                        &b"DOC"[..]
+                    };
+                    if let Some(c) = test_text(x, in_row_y, 48, 34, 1, label, item.color_accent) {
+                        return c;
+                    }
                 }
                 return 0xFF0E1A2C;
             }
@@ -331,19 +409,33 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             // Filename
             let global_y = 410 + row_idx * 100 + 20;
             if y >= global_y && y < global_y + 16 {
-                if let Some(c) = test_text(x, y, 105, global_y, 2, item.name.as_bytes(), TEXT_PRIMARY) { return c; }
+                if let Some(c) =
+                    test_text(x, y, 105, global_y, 2, item.name.as_bytes(), TEXT_PRIMARY)
+                {
+                    return c;
+                }
             }
 
             // Metadata / Size
             let meta_y = global_y + 24;
             if y >= meta_y && y < meta_y + 8 {
-                if let Some(c) = test_text(x, y, 105, meta_y, 1, item.meta_str.as_bytes(), TEXT_MUTED) { return c; }
-                if let Some(c) = test_text(x, y, 520, meta_y, 1, item.size_str.as_bytes(), ACCENT_SKY) { return c; }
+                if let Some(c) =
+                    test_text(x, y, 105, meta_y, 1, item.meta_str.as_bytes(), TEXT_MUTED)
+                {
+                    return c;
+                }
+                if let Some(c) =
+                    test_text(x, y, 520, meta_y, 1, item.size_str.as_bytes(), ACCENT_SKY)
+                {
+                    return c;
+                }
             }
 
             // Chevron `>` on right
             if y >= global_y + 8 && y < global_y + 24 {
-                if let Some(c) = test_text(x, y, 660, global_y + 8, 2, b">", TEXT_MUTED) { return c; }
+                if let Some(c) = test_text(x, y, 660, global_y + 8, 2, b">", TEXT_MUTED) {
+                    return c;
+                }
             }
 
             return SURFACE_RAISED;
@@ -384,28 +476,44 @@ fn render_file_manager_ui(surface: u32, app: &FileManagerApp) {
 // -----------------------------------------------------------------------------
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    std::log(0, "[FILE_MANAGER (Ring 3)] Sovereign File Manager & VFS Explorer online.").ok();
+    std::log(
+        0,
+        "[FILE_MANAGER (Ring 3)] Sovereign File Manager & VFS Explorer online.",
+    )
+    .ok();
 
     let mut app = FileManagerApp::new();
 
     // Query physical block storage capacity from driver
     if let Ok(bytes) = std::storage_query() {
         app.storage_capacity_bytes = bytes;
-        std::log(0, "[FILE_MANAGER] Storage capacity validated from hardware service.").ok();
+        std::log(
+            0,
+            "[FILE_MANAGER] Storage capacity validated from hardware service.",
+        )
+        .ok();
     }
 
     // Enumerate initial VFS directory
     let mut entries = [0u8; 1024];
     if let Ok(n) = std::fs_list(3, "/data", &mut entries) {
         if n > 0 {
-            std::log(0, "[FILE_MANAGER] VFS directory '/data' parsed successfully.").ok();
+            std::log(
+                0,
+                "[FILE_MANAGER] VFS directory '/data' parsed successfully.",
+            )
+            .ok();
         }
     }
 
     // Allocate client surface (slot 6 = FrameBufferDirect, z=200)
     let surface = match std::surface_create(6, W as u32, H as u32, 200) {
         Ok(id) => {
-            std::log(0, "[FILE_MANAGER] DRM/KMS Client Surface allocated (z=200).").ok();
+            std::log(
+                0,
+                "[FILE_MANAGER] DRM/KMS Client Surface allocated (z=200).",
+            )
+            .ok();
             id
         }
         Err(_) => 0,
@@ -423,12 +531,21 @@ pub extern "C" fn _start() -> ! {
         if let Ok(triggered) = std::event_poll(interest, 100) {
             if (triggered & std::EVENT_TOUCH_INPUT) != 0 {
                 let mut input = std::InputEvent {
-                    kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000,
+                    kind: 0,
+                    x: 0,
+                    y: 0,
+                    dx: 0,
+                    dy: 0,
+                    scale_milli: 1000,
                 };
                 while std::input_event_poll(&mut input).is_ok() {
                     // Swipe up home gesture -> Return to launcher
                     if input.kind == 4 && input.dy <= -60 && input.y >= 1200 {
-                        std::log(0, "[FILE_MANAGER] Swipe-up home gesture recognized. Exiting to launcher.").ok();
+                        std::log(
+                            0,
+                            "[FILE_MANAGER] Swipe-up home gesture recognized. Exiting to launcher.",
+                        )
+                        .ok();
                         if surface > 0 {
                             let _ = std::surface_destroy(6, surface);
                         }
@@ -440,7 +557,9 @@ pub extern "C" fn _start() -> ! {
                         let y = input.y as usize;
 
                         // Check Back button (<) or bottom home pill
-                        if (x >= 24 && x < 100 && y >= 28 && y < 68) || (x >= 240 && x <= 480 && y >= 1400) {
+                        if (x >= 24 && x < 100 && y >= 28 && y < 68)
+                            || (x >= 240 && x <= 480 && y >= 1400)
+                        {
                             std::log(0, "[FILE_MANAGER] Back button or home gesture pressed. Exiting to launcher.").ok();
                             if surface > 0 {
                                 let _ = std::surface_destroy(6, surface);
@@ -488,7 +607,11 @@ pub extern "C" fn _start() -> ! {
                                     };
                                     std::log(0, "[FILE_MANAGER] Navigated to subdirectory.").ok();
                                 } else {
-                                    std::log(0, "[FILE_MANAGER] File selected: inspection modal requested.").ok();
+                                    std::log(
+                                        0,
+                                        "[FILE_MANAGER] File selected: inspection modal requested.",
+                                    )
+                                    .ok();
                                 }
                                 if surface > 0 {
                                     render_file_manager_ui(surface, &app);

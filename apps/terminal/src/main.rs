@@ -58,19 +58,35 @@ impl TerminalApp {
     /// Executes a built-in terminal command.
     pub fn execute_command(&mut self, cmd_line: &'static str) {
         if cmd_line == "help" {
-            std::log(0, "[TERMINAL] Commands: help, status, ps, mem, caps, share, dma, ping").ok();
+            std::log(
+                0,
+                "[TERMINAL] Commands: help, status, ps, mem, caps, share, dma, ping",
+            )
+            .ok();
             self.record_history("help", 0);
         } else if cmd_line == "status" {
             std::log(0, "[TERMINAL] Status: InterOS Core Mobile Platform | CPL=3 User Separation | Memory Isolated").ok();
             self.record_history("status", 0);
         } else if cmd_line == "ps" {
-            std::log(0, "[TERMINAL] ps: 16 tasks active in userspace (Ring 3 isolated).").ok();
+            std::log(
+                0,
+                "[TERMINAL] ps: 16 tasks active in userspace (Ring 3 isolated).",
+            )
+            .ok();
             self.record_history("ps", 0);
         } else if cmd_line == "mem" {
-            std::log(0, "[TERMINAL] mem: 4-level paging active, 1024 KiB dynamic kernel heap.").ok();
+            std::log(
+                0,
+                "[TERMINAL] mem: 4-level paging active, 1024 KiB dynamic kernel heap.",
+            )
+            .ok();
             self.record_history("mem", 0);
         } else if cmd_line == "caps" {
-            std::log(0, "[TERMINAL] caps: Capability token table enforced (zero ambient authority).").ok();
+            std::log(
+                0,
+                "[TERMINAL] caps: Capability token table enforced (zero ambient authority).",
+            )
+            .ok();
             self.record_history("caps", 0);
         } else if cmd_line.starts_with("share") {
             let _ = std::share_sheet_dispatch(
@@ -78,15 +94,27 @@ impl TerminalApp {
                 "interos://files/documents",
                 Some("interos.terminal"),
             );
-            std::log(0, "[TERMINAL APP] Share: Dispatched cross-app intent via Sovereign Share Bus.").ok();
+            std::log(
+                0,
+                "[TERMINAL APP] Share: Dispatched cross-app intent via Sovereign Share Bus.",
+            )
+            .ok();
             self.record_history("share", 0);
         } else if cmd_line.starts_with("dma") {
             let payload = b"DMA::TERMINAL::STREAM_PACKET";
             let _ = std::shm_pipe_transfer(3, payload, 0x01);
-            std::log(0, "[TERMINAL APP] DMA: High-throughput packet streamed via Pipe 3.").ok();
+            std::log(
+                0,
+                "[TERMINAL APP] DMA: High-throughput packet streamed via Pipe 3.",
+            )
+            .ok();
             self.record_history("dma", 0);
         } else if cmd_line == "ping" {
-            std::log(0, "[TERMINAL APP] ping: Loopback interface online (127.0.0.1).").ok();
+            std::log(
+                0,
+                "[TERMINAL APP] ping: Loopback interface online (127.0.0.1).",
+            )
+            .ok();
             self.record_history("ping", 0);
         }
     }
@@ -110,7 +138,9 @@ fn render_terminal_ui(surface: u32, lines_count: usize) {
                     let center_y = 48;
                     let dx = (x as isize - center_x as isize).abs();
                     let dy = (y as isize - center_y as isize).abs();
-                    if (dx + dy <= 12 && x <= center_x) || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99)) {
+                    if (dx + dy <= 12 && x <= center_x)
+                        || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
+                    {
                         chunk[i] = std::design::color::TEXT;
                     } else {
                         chunk[i] = std::design::color::SURFACE_RAISED;
@@ -150,12 +180,20 @@ fn render_terminal_ui(surface: u32, lines_count: usize) {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    std::log(0, "[TERMINAL APP (Ring 3)] InterOS Developer Terminal online.").ok();
+    std::log(
+        0,
+        "[TERMINAL APP (Ring 3)] InterOS Developer Terminal online.",
+    )
+    .ok();
 
     // Slot 6 is FrameBufferDirect
     let surface = match std::surface_create(6, W as u32, H as u32, 200) {
         Ok(id) => {
-            std::log(0, "[TERMINAL APP] DRM/KMS Client Surface allocated (z=200).").ok();
+            std::log(
+                0,
+                "[TERMINAL APP] DRM/KMS Client Surface allocated (z=200).",
+            )
+            .ok();
             id
         }
         Err(_) => 0,
@@ -170,7 +208,11 @@ pub extern "C" fn _start() -> ! {
     if surface > 0 {
         render_terminal_ui(surface, term.history_count);
         let _ = std::surface_flip(6);
-        std::log(0, "[TERMINAL APP] Terminal console presented to scanout buffer.").ok();
+        std::log(
+            0,
+            "[TERMINAL APP] Terminal console presented to scanout buffer.",
+        )
+        .ok();
     }
 
     // 8. Terminal Asynchronous Event Loop
@@ -179,11 +221,20 @@ pub extern "C" fn _start() -> ! {
         if let Ok(triggered) = std::event_poll(interest, 100) {
             if (triggered & std::EVENT_TOUCH_INPUT) != 0 {
                 let mut input = std::InputEvent {
-                    kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000,
+                    kind: 0,
+                    x: 0,
+                    y: 0,
+                    dx: 0,
+                    dy: 0,
+                    scale_milli: 1000,
                 };
                 while std::input_event_poll(&mut input).is_ok() {
                     if input.kind == 4 && input.dy <= -60 && input.y <= 1380 {
-                        std::log(0, "[TERMINAL APP] Swipe-up home gesture recognized. Exiting to launcher.").ok();
+                        std::log(
+                            0,
+                            "[TERMINAL APP] Swipe-up home gesture recognized. Exiting to launcher.",
+                        )
+                        .ok();
                         if surface > 0 {
                             let _ = std::surface_destroy(6, surface);
                         }

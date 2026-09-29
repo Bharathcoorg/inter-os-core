@@ -17,14 +17,22 @@ pub extern "C" fn _start() -> ! {
     let mut t_buf = [0u8; 128];
     if let Ok(len) = std::thermal_query(&mut t_buf) {
         if len > 0 {
-            std::log(0, "[SENSORS] Thermals: SoC temperature queried successfully.").ok();
+            std::log(
+                0,
+                "[SENSORS] Thermals: SoC temperature queried successfully.",
+            )
+            .ok();
         }
     }
 
     let mut s_buf = [0u8; 128];
     if let Ok(len) = std::sensor_read(&mut s_buf) {
         if len > 0 {
-            std::log(0, "[SENSORS] Sensors: Ambient lux & IMU orientation read successfully.").ok();
+            std::log(
+                0,
+                "[SENSORS] Sensors: Ambient lux & IMU orientation read successfully.",
+            )
+            .ok();
         }
     }
 

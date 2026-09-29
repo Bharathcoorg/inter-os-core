@@ -73,6 +73,19 @@ pub enum TaskState {
     Terminated,
 }
 
+impl TaskState {
+    pub const fn code(&self) -> u8 {
+        match self {
+            TaskState::Ready => 0,
+            TaskState::Running => 1,
+            TaskState::Blocked => 2,
+            TaskState::WaitPid(_) => 3,
+            TaskState::Zombie => 4,
+            TaskState::Terminated => 5,
+        }
+    }
+}
+
 /// Task Control Block (TCB) maintaining complete execution state and security capabilities.
 pub type SharedAddressSpace = Arc<Mutex<crate::memory::TaskPageTable>>;
 

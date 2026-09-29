@@ -39,16 +39,28 @@ impl Message {
     }
 
     pub fn decode(buf: &[u8]) -> Option<Self> {
-        if buf.len() < HEADER_SIZE || buf[..4] != MAGIC { return None; }
-        if u16::from_le_bytes([buf[4], buf[5]]) != VERSION { return None; }
+        if buf.len() < HEADER_SIZE || buf[..4] != MAGIC {
+            return None;
+        }
+        if u16::from_le_bytes([buf[4], buf[5]]) != VERSION {
+            return None;
+        }
         let op = match u16::from_le_bytes([buf[6], buf[7]]) {
-            1 => Op::Register, 2 => Op::Heartbeat, 3 => Op::Query,
-            4 => Op::Event, 5 => Op::Shutdown, _ => return None,
+            1 => Op::Register,
+            2 => Op::Heartbeat,
+            3 => Op::Query,
+            4 => Op::Event,
+            5 => Op::Shutdown,
+            _ => return None,
         };
         let service_id = buf[8];
-        if !(1..=11).contains(&service_id) { return None; }
+        if !(1..=11).contains(&service_id) {
+            return None;
+        }
         let payload_len = u16::from_le_bytes([buf[14], buf[15]]);
-        if payload_len > MAX_PAYLOAD { return None; }
+        if payload_len > MAX_PAYLOAD {
+            return None;
+        }
         Some(Self {
             op,
             service_id,

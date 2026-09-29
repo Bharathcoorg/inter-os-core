@@ -99,7 +99,11 @@ impl MusicApp {
         std::audio_play_tone(523).ok(); // C5
         std::audio_silence().ok();
         std::audio_haptic_click().ok();
-        std::log(0, "[MUSIC APP] Arpeggiated C-major melody synthesized (261Hz -> 523Hz).").ok();
+        std::log(
+            0,
+            "[MUSIC APP] Arpeggiated C-major melody synthesized (261Hz -> 523Hz).",
+        )
+        .ok();
     }
 
     /// Streams an uncompressed PCM audio block over Zero-Copy DMA SHM Pipe 1.
@@ -107,14 +111,19 @@ impl MusicApp {
         let pcm_packet = b"INTER_DMA_AUDIO_PCM_BLOCK_CH1_CH2_48000HZ";
         if std::shm_pipe_transfer(1, pcm_packet, 0x01).is_ok() {
             self.total_dma_buffers_streamed += 1;
-            std::log(0, "[MUSIC APP] Zero-Copy DMA: Streamed 48kHz audio buffer via SHM Pipe 1.").ok();
+            std::log(
+                0,
+                "[MUSIC APP] Zero-Copy DMA: Streamed 48kHz audio buffer via SHM Pipe 1.",
+            )
+            .ok();
         }
     }
 
     /// Encrypts track metadata in Sector 204.
     pub fn encrypt_track_record(&mut self) {
         let mut track_sector = [0u8; 512];
-        let track_meta = b"InterOS::AudioTrack{id:42,title:\"Sovereign Symphony in C\",bpm:120,codec:\"FLAC\"}";
+        let track_meta =
+            b"InterOS::AudioTrack{id:42,title:\"Sovereign Symphony in C\",bpm:120,codec:\"FLAC\"}";
         track_sector[..track_meta.len()].copy_from_slice(track_meta);
         let iv = [0x99u8; 16];
         if std::vault_encrypt_sector(204, &mut track_sector, &iv).is_ok() {
@@ -146,7 +155,9 @@ fn render_music_ui(surface: u32, app: &MusicApp) {
                     let center_y = 48;
                     let dx = (x as isize - center_x as isize).abs();
                     let dy = (y as isize - center_y as isize).abs();
-                    if (dx + dy <= 12 && x <= center_x) || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99)) {
+                    if (dx + dy <= 12 && x <= center_x)
+                        || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
+                    {
                         chunk[i] = std::design::color::TEXT;
                     } else {
                         chunk[i] = std::design::color::SURFACE_RAISED;
@@ -212,7 +223,11 @@ fn render_music_ui(surface: u32, app: &MusicApp) {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    std::log(0, "[MUSIC APP (Ring 3)] Sovereign Hi-Fi Audio Studio & Synthesizer online.").ok();
+    std::log(
+        0,
+        "[MUSIC APP (Ring 3)] Sovereign Hi-Fi Audio Studio & Synthesizer online.",
+    )
+    .ok();
 
     let mut music = MusicApp::new();
 
@@ -251,7 +266,12 @@ pub extern "C" fn _start() -> ! {
             Ok(events) => {
                 if events & std::EVENT_TOUCH_INPUT != 0 {
                     let mut input = std::InputEvent {
-                        kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000,
+                        kind: 0,
+                        x: 0,
+                        y: 0,
+                        dx: 0,
+                        dy: 0,
+                        scale_milli: 1000,
                     };
                     while std::input_event_poll(&mut input).is_ok() {
                         if input.kind == 4 && input.dy <= -60 && input.y <= 1380 {
@@ -276,7 +296,8 @@ pub extern "C" fn _start() -> ! {
                             // Check Play / Pause center button
                             let center_x = (W / 2) as isize;
                             let center_y = 880isize;
-                            let dist_sq = (input.x as isize - center_x).pow(2) + (input.y as isize - center_y).pow(2);
+                            let dist_sq = (input.x as isize - center_x).pow(2)
+                                + (input.y as isize - center_y).pow(2);
                             if dist_sq < 56 * 56 {
                                 music.state = match music.state {
                                     PlaybackState::Playing => PlaybackState::Paused,
@@ -292,7 +313,11 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 if events & std::EVENT_IPC_MSG != 0 {
-                    std::log(0, "[MUSIC APP] Audio playback IPC command received (Play/Pause/Skip).").ok();
+                    std::log(
+                        0,
+                        "[MUSIC APP] Audio playback IPC command received (Play/Pause/Skip).",
+                    )
+                    .ok();
                 }
                 if events & std::EVENT_TIMER_TICK != 0 {
                     // Periodic DMA audio ring buffer refill

@@ -41,18 +41,54 @@ pub struct DtmfPair {
 /// Resolves standard CCITT dual-tone frequencies for telephone keypad keys.
 pub fn get_dtmf_frequencies(key: char) -> Option<DtmfPair> {
     match key {
-        '1' => Some(DtmfPair { low_freq: 697, high_freq: 1209 }),
-        '2' => Some(DtmfPair { low_freq: 697, high_freq: 1336 }),
-        '3' => Some(DtmfPair { low_freq: 697, high_freq: 1477 }),
-        '4' => Some(DtmfPair { low_freq: 770, high_freq: 1209 }),
-        '5' => Some(DtmfPair { low_freq: 770, high_freq: 1336 }),
-        '6' => Some(DtmfPair { low_freq: 770, high_freq: 1477 }),
-        '7' => Some(DtmfPair { low_freq: 852, high_freq: 1209 }),
-        '8' => Some(DtmfPair { low_freq: 852, high_freq: 1336 }),
-        '9' => Some(DtmfPair { low_freq: 852, high_freq: 1477 }),
-        '0' => Some(DtmfPair { low_freq: 941, high_freq: 1336 }),
-        '*' => Some(DtmfPair { low_freq: 941, high_freq: 1209 }),
-        '#' => Some(DtmfPair { low_freq: 941, high_freq: 1477 }),
+        '1' => Some(DtmfPair {
+            low_freq: 697,
+            high_freq: 1209,
+        }),
+        '2' => Some(DtmfPair {
+            low_freq: 697,
+            high_freq: 1336,
+        }),
+        '3' => Some(DtmfPair {
+            low_freq: 697,
+            high_freq: 1477,
+        }),
+        '4' => Some(DtmfPair {
+            low_freq: 770,
+            high_freq: 1209,
+        }),
+        '5' => Some(DtmfPair {
+            low_freq: 770,
+            high_freq: 1336,
+        }),
+        '6' => Some(DtmfPair {
+            low_freq: 770,
+            high_freq: 1477,
+        }),
+        '7' => Some(DtmfPair {
+            low_freq: 852,
+            high_freq: 1209,
+        }),
+        '8' => Some(DtmfPair {
+            low_freq: 852,
+            high_freq: 1336,
+        }),
+        '9' => Some(DtmfPair {
+            low_freq: 852,
+            high_freq: 1477,
+        }),
+        '0' => Some(DtmfPair {
+            low_freq: 941,
+            high_freq: 1336,
+        }),
+        '*' => Some(DtmfPair {
+            low_freq: 941,
+            high_freq: 1209,
+        }),
+        '#' => Some(DtmfPair {
+            low_freq: 941,
+            high_freq: 1477,
+        }),
         _ => None,
     }
 }
@@ -134,7 +170,11 @@ impl DialerApp {
 
         // Transition to active call
         self.state = CallState::ActiveCall;
-        std::log(0, "[DIALER APP] Call Connected: Voice bearer active (4G/5G Sovereign VoLTE).").ok();
+        std::log(
+            0,
+            "[DIALER APP] Call Connected: Voice bearer active (4G/5G Sovereign VoLTE).",
+        )
+        .ok();
 
         Ok(())
     }
@@ -146,7 +186,11 @@ impl DialerApp {
         self.calls_completed += 1;
         self.state = CallState::Idle;
         self.active_len = 0;
-        std::log(0, "[DIALER APP] Call Terminated: Channel released to modem pool.").ok();
+        std::log(
+            0,
+            "[DIALER APP] Call Terminated: Channel released to modem pool.",
+        )
+        .ok();
     }
 }
 
@@ -196,7 +240,12 @@ fn is_segment_pixel(mask: u8, dx: usize, dy: usize, w: usize, h: usize) -> bool 
     }
     // g: middle horizontal
     let mid_y = h / 2;
-    if (mask & 0b0100_0000) != 0 && dy >= mid_y - thick / 2 && dy < mid_y + thick / 2 && dx >= thick && dx < w - thick {
+    if (mask & 0b0100_0000) != 0
+        && dy >= mid_y - thick / 2
+        && dy < mid_y + thick / 2
+        && dx >= thick
+        && dx < w - thick
+    {
         return true;
     }
     false
@@ -265,7 +314,9 @@ fn render_dialer_ui(surface: u32, dialer: &DialerApp) {
                     let dx = (x as isize - center_x as isize).abs();
                     let dy = (y as isize - center_y as isize).abs();
                     // Left arrow chevron <
-                    if (dx + dy <= 12 && x <= center_x) || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99)) {
+                    if (dx + dy <= 12 && x <= center_x)
+                        || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
+                    {
                         chunk[i] = std::design::color::TEXT;
                     } else {
                         chunk[i] = std::design::color::SURFACE_RAISED;
@@ -282,7 +333,8 @@ fn render_dialer_ui(surface: u32, dialer: &DialerApp) {
                     }
                 } else if x >= 678 && x < 706 && y >= 44 && y < 58 {
                     // Battery indicator (fail closed outline when PMIC telemetry unavailable)
-                    if x == 678 || x == 702 || y == 44 || y == 57 || (x >= 703 && y >= 48 && y < 54) {
+                    if x == 678 || x == 702 || y == 44 || y == 57 || (x >= 703 && y >= 48 && y < 54)
+                    {
                         chunk[i] = std::design::color::TEXT_MUTED;
                     } else {
                         chunk[i] = std::design::color::SURFACE;
@@ -322,20 +374,36 @@ fn render_dialer_ui(surface: u32, dialer: &DialerApp) {
                         if c.is_ascii_digit() {
                             let d = (c as u8 - b'0') as i64;
                             let mask = get_7segment_mask(d);
-                            is_digit_px = is_segment_pixel(mask, in_digit_x, y - display_y_start, digit_w, digit_h);
+                            is_digit_px = is_segment_pixel(
+                                mask,
+                                in_digit_x,
+                                y - display_y_start,
+                                digit_w,
+                                digit_h,
+                            );
                         } else if c == '+' || c == '*' {
                             let cx = digit_w / 2;
                             let cy = digit_h / 2;
                             let rel_y = y - display_y_start;
-                            if (rel_y >= cy - 2 && rel_y <= cy + 2 && in_digit_x >= 2 && in_digit_x < digit_w - 2)
-                                || (in_digit_x >= cx - 2 && in_digit_x <= cx + 2 && rel_y >= 4 && rel_y < digit_h - 4)
+                            if (rel_y >= cy - 2
+                                && rel_y <= cy + 2
+                                && in_digit_x >= 2
+                                && in_digit_x < digit_w - 2)
+                                || (in_digit_x >= cx - 2
+                                    && in_digit_x <= cx + 2
+                                    && rel_y >= 4
+                                    && rel_y < digit_h - 4)
                             {
                                 is_digit_px = true;
                             }
                         } else if c == '-' {
                             let cy = digit_h / 2;
                             let rel_y = y - display_y_start;
-                            if rel_y >= cy - 2 && rel_y <= cy + 2 && in_digit_x >= 2 && in_digit_x < digit_w - 2 {
+                            if rel_y >= cy - 2
+                                && rel_y <= cy + 2
+                                && in_digit_x >= 2
+                                && in_digit_x < digit_w - 2
+                            {
                                 is_digit_px = true;
                             }
                         }
@@ -384,19 +452,34 @@ fn render_dialer_ui(surface: u32, dialer: &DialerApp) {
                                         let gh = 64usize;
                                         let gx_start = center_x.saturating_sub(gw / 2);
                                         let gy_start = center_y.saturating_sub(gh / 2);
-                                        if x >= gx_start && x < gx_start + gw && y >= gy_start && y < gy_start + gh {
-                                            is_glyph = is_segment_pixel(mask, x - gx_start, y - gy_start, gw, gh);
+                                        if x >= gx_start
+                                            && x < gx_start + gw
+                                            && y >= gy_start
+                                            && y < gy_start + gh
+                                        {
+                                            is_glyph = is_segment_pixel(
+                                                mask,
+                                                x - gx_start,
+                                                y - gy_start,
+                                                gw,
+                                                gh,
+                                            );
                                         }
                                     } else if action == '*' {
                                         let dx = (x as isize - center_x as isize).abs();
                                         let dy = (y as isize - center_y as isize).abs();
-                                        if (dx <= 14 && dy <= 3) || (dx <= 3 && dy <= 14) || (dx == dy && dx <= 12) {
+                                        if (dx <= 14 && dy <= 3)
+                                            || (dx <= 3 && dy <= 14)
+                                            || (dx == dy && dx <= 12)
+                                        {
                                             is_glyph = true;
                                         }
                                     } else if action == '#' {
                                         let dx = (x as isize - center_x as isize).abs();
                                         let dy = (y as isize - center_y as isize).abs();
-                                        if ((dx == 6 || dx == 7) && dy <= 16) || ((dy == 6 || dy == 7) && dx <= 16) {
+                                        if ((dx == 6 || dx == 7) && dy <= 16)
+                                            || ((dy == 6 || dy == 7) && dx <= 16)
+                                        {
                                             is_glyph = true;
                                         }
                                     }
@@ -477,7 +560,11 @@ fn handle_touch_point(dialer: &mut DialerApp, x: u32, y: u32) -> bool {
 
     // 1. Back button in header or Home gesture bar: exit to Launcher
     if (x >= 24 && x < 100 && y >= 28 && y < 68) || (x >= 240 && x <= 480 && y >= 1400) {
-        std::log(0, "[DIALER] Back button or home gesture pressed. Exiting to launcher.").ok();
+        std::log(
+            0,
+            "[DIALER] Back button or home gesture pressed. Exiting to launcher.",
+        )
+        .ok();
         return true;
     }
 
@@ -541,7 +628,11 @@ fn handle_touch_point(dialer: &mut DialerApp, x: u32, y: u32) -> bool {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    std::log(0, "[DIALER APP (Ring 3)] Sovereign Dialer & Telephony online.").ok();
+    std::log(
+        0,
+        "[DIALER APP (Ring 3)] Sovereign Dialer & Telephony online.",
+    )
+    .ok();
 
     let mut dialer = DialerApp::new();
 
@@ -551,7 +642,11 @@ pub extern "C" fn _start() -> ! {
         if len > 0 {
             if let Ok(json_str) = core::str::from_utf8(&modem_buf[..len]) {
                 if json_str.contains("\"present\":true") {
-                    std::log(0, "[DIALER APP] Baseband Modem: Hardware detected and online.").ok();
+                    std::log(
+                        0,
+                        "[DIALER APP] Baseband Modem: Hardware detected and online.",
+                    )
+                    .ok();
                 } else {
                     std::log(0, "[DIALER APP] Baseband Modem: Offline (No hardware modem backend detected).").ok();
                 }
@@ -562,14 +657,22 @@ pub extern "C" fn _start() -> ! {
     // Emergency contacts are provided by the real contacts/modem subsystem when available.
 
     // 3. Allocate dedicated KMS Client Surface (z=200)
-    std::log(0, "[DIALER APP] Step 1: Allocating application surface (z=200)...").ok();
+    std::log(
+        0,
+        "[DIALER APP] Step 1: Allocating application surface (z=200)...",
+    )
+    .ok();
     let surface = match std::surface_create(6, W as u32, H as u32, 200) {
         Ok(s) => {
             std::log(0, "[DIALER APP] Step 2: Surface created successfully.").ok();
             s
         }
         Err(_) => {
-            std::log(0, "[DIALER APP] Display surface unavailable; refusing headless call simulation.").ok();
+            std::log(
+                0,
+                "[DIALER APP] Display surface unavailable; refusing headless call simulation.",
+            )
+            .ok();
             std::exit_with_code(1);
         }
     };
@@ -577,10 +680,13 @@ pub extern "C" fn _start() -> ! {
     // 4. Render an empty dialer; numbers are entered by the user.
     render_dialer_ui(surface, &dialer);
     let _ = std::surface_flip(6);
-    std::log(0, "[DIALER APP] Step 3: Initial frame presented to hardware scanout.").ok();
+    std::log(
+        0,
+        "[DIALER APP] Step 3: Initial frame presented to hardware scanout.",
+    )
+    .ok();
 
     // 5. Calls are initiated only from user input; no automatic call is placed at startup.
-
 
     // 6. Interactive Event Reactor Loop
     loop {
@@ -596,16 +702,29 @@ pub extern "C" fn _start() -> ! {
             }
 
             if (events & std::EVENT_MODEM_URC) != 0 {
-                std::log(0, "[DIALER APP] Inbound Call: Tower alert received via 3GPP baseband URC.").ok();
+                std::log(
+                    0,
+                    "[DIALER APP] Inbound Call: Tower alert received via 3GPP baseband URC.",
+                )
+                .ok();
             }
 
             if (events & std::EVENT_TOUCH_INPUT) != 0 {
                 let mut input = std::InputEvent {
-                    kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000,
+                    kind: 0,
+                    x: 0,
+                    y: 0,
+                    dx: 0,
+                    dy: 0,
+                    scale_milli: 1000,
                 };
                 while std::input_event_poll(&mut input).is_ok() {
                     if input.kind == 4 && input.dy <= -60 && input.y <= 1380 {
-                        std::log(0, "[DIALER APP] Swipe-up home gesture recognized. Returning to launcher.").ok();
+                        std::log(
+                            0,
+                            "[DIALER APP] Swipe-up home gesture recognized. Returning to launcher.",
+                        )
+                        .ok();
                         let _ = std::surface_destroy(6, surface);
                         std::exit_with_code(0);
                     }

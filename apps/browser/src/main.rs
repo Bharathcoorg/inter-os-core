@@ -123,7 +123,11 @@ impl BrowserApp {
             self.active_socket_id = Some(sock_id as u64);
             let req = b"GET /catalog.json HTTP/1.1\r\nHost: sovereign.mesh\r\nSec-Inter-Attest: DID\r\n\r\n";
             if std::net_sendto([127, 0, 0, 1], 8443, req).is_ok() {
-                std::log(0, "[BROWSER APP] Network socket bound: port 8080, HTTP/1.1 request transmitted.").ok();
+                std::log(
+                    0,
+                    "[BROWSER APP] Network socket bound: port 8080, HTTP/1.1 request transmitted.",
+                )
+                .ok();
             }
         }
 
@@ -163,7 +167,9 @@ fn render_browser_ui(surface: u32, _app: &BrowserApp) {
                     let center_y = 48;
                     let dx = (x as isize - center_x as isize).abs();
                     let dy = (y as isize - center_y as isize).abs();
-                    if (dx + dy <= 12 && x <= center_x) || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99)) {
+                    if (dx + dy <= 12 && x <= center_x)
+                        || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
+                    {
                         chunk[i] = std::design::color::TEXT;
                     } else {
                         chunk[i] = std::design::color::SURFACE_RAISED;
@@ -233,7 +239,11 @@ fn render_browser_ui(surface: u32, _app: &BrowserApp) {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    std::log(0, "[BROWSER APP (Ring 3)] Sovereign Decentralized Web & InterLayer Browser online.").ok();
+    std::log(
+        0,
+        "[BROWSER APP (Ring 3)] Sovereign Decentralized Web & InterLayer Browser online.",
+    )
+    .ok();
 
     let mut browser = BrowserApp::new();
 
@@ -252,17 +262,29 @@ pub extern "C" fn _start() -> ! {
     if surface > 0 {
         render_browser_ui(surface, &browser);
         let _ = std::surface_flip(6);
-        std::log(0, "[BROWSER APP] Browser canvas presented to scanout buffer.").ok();
+        std::log(
+            0,
+            "[BROWSER APP] Browser canvas presented to scanout buffer.",
+        )
+        .ok();
     }
 
     // Sovereign Asynchronous Event Reactor Loop
-    let interest_mask = std::EVENT_TOUCH_INPUT | std::EVENT_IPC_MSG | std::EVENT_NETWORK_PACKET | std::EVENT_TIMER_TICK;
+    let interest_mask = std::EVENT_TOUCH_INPUT
+        | std::EVENT_IPC_MSG
+        | std::EVENT_NETWORK_PACKET
+        | std::EVENT_TIMER_TICK;
     loop {
         match std::event_poll(interest_mask, 150) {
             Ok(events) => {
                 if events & std::EVENT_TOUCH_INPUT != 0 {
                     let mut input = std::InputEvent {
-                        kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000,
+                        kind: 0,
+                        x: 0,
+                        y: 0,
+                        dx: 0,
+                        dy: 0,
+                        scale_milli: 1000,
                     };
                     while std::input_event_poll(&mut input).is_ok() {
                         if input.kind == 4 && input.dy <= -60 && input.y <= 1380 {
@@ -285,7 +307,11 @@ pub extern "C" fn _start() -> ! {
                             }
 
                             // Check bookmark card taps
-                            if input.y >= 120 && input.y < 380 && input.x >= 32 && input.x < (W as u32) - 32 {
+                            if input.y >= 120
+                                && input.y < 380
+                                && input.x >= 32
+                                && input.x < (W as u32) - 32
+                            {
                                 let card_idx = ((input.y - 120) / 80) as usize;
                                 if card_idx < BOOKMARKS.len() {
                                     browser.navigate(BOOKMARKS[card_idx].url);

@@ -94,7 +94,11 @@ impl SettingsApp {
                     PowerProfile::Balanced => "[SETTINGS APP] Power Profile: Interactive DVFS Governor set to Balanced (1.2 GHz).",
                     PowerProfile::PowerSaver => "[SETTINGS APP] Power Profile: Interactive DVFS Governor set to Power Saver (600 MHz).",
                 };
-                std::log(0, "[SETTINGS APP] Power telemetry available from the hardware service.").ok();
+                std::log(
+                    0,
+                    "[SETTINGS APP] Power telemetry available from the hardware service.",
+                )
+                .ok();
                 std::log(0, profile_str).ok();
             }
         }
@@ -105,14 +109,22 @@ impl SettingsApp {
         let mut t_buf = [0u8; 128];
         if let Ok(len) = std::thermal_query(&mut t_buf) {
             if len > 0 {
-                std::log(0, "[SETTINGS APP] Thermal telemetry available from the hardware service.").ok();
+                std::log(
+                    0,
+                    "[SETTINGS APP] Thermal telemetry available from the hardware service.",
+                )
+                .ok();
             }
         }
 
         let mut s_buf = [0u8; 128];
         if let Ok(len) = std::sensor_read(&mut s_buf) {
             if len > 0 {
-                std::log(0, "[SETTINGS APP] Sensor telemetry available from the hardware service.").ok();
+                std::log(
+                    0,
+                    "[SETTINGS APP] Sensor telemetry available from the hardware service.",
+                )
+                .ok();
             }
         }
     }
@@ -121,7 +133,11 @@ impl SettingsApp {
     pub fn audit_security(&mut self) {
         let mut key_buf = [0u8; 32];
         if let Ok(32) = std::keystore_derive(0, &mut key_buf) {
-            std::log(0, "[SETTINGS APP] Keystore: Master hardware root of trust (Slot 0) ONLINE.").ok();
+            std::log(
+                0,
+                "[SETTINGS APP] Keystore: Master hardware root of trust (Slot 0) ONLINE.",
+            )
+            .ok();
         }
     }
 
@@ -130,10 +146,18 @@ impl SettingsApp {
         let mut rtc_buf = [0u8; 64];
         if let Ok(len) = std::rtc_get_time(&mut rtc_buf) {
             if len > 0 {
-                std::log(0, "[SETTINGS APP] System Time: Hardware RTC synchronized with UTC civil clock.").ok();
+                std::log(
+                    0,
+                    "[SETTINGS APP] System Time: Hardware RTC synchronized with UTC civil clock.",
+                )
+                .ok();
             }
         }
-        std::log(0, "[SETTINGS APP] About: Inter OS Core (x86_64, Ring 0/Ring 3 User Separation).").ok();
+        std::log(
+            0,
+            "[SETTINGS APP] About: Inter OS Core (x86_64, Ring 0/Ring 3 User Separation).",
+        )
+        .ok();
     }
 }
 
@@ -156,7 +180,9 @@ fn render_settings_ui(surface: u32, tab: SettingsTab) {
                     let center_y = 48;
                     let dx = (x as isize - center_x as isize).abs();
                     let dy = (y as isize - center_y as isize).abs();
-                    if (dx + dy <= 12 && x <= center_x) || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99)) {
+                    if (dx + dy <= 12 && x <= center_x)
+                        || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
+                    {
                         chunk[i] = std::design::color::TEXT;
                     } else {
                         chunk[i] = std::design::color::SURFACE_RAISED;
@@ -166,7 +192,11 @@ fn render_settings_ui(surface: u32, tab: SettingsTab) {
                 }
             } else if (110..170).contains(&y) {
                 let t = x.saturating_sub(24) / 136;
-                chunk[i] = if t == tab_idx && (x % 136) < 120 { std::design::color::ACCENT } else { std::design::color::SURFACE_RAISED };
+                chunk[i] = if t == tab_idx && (x % 136) < 120 {
+                    std::design::color::ACCENT
+                } else {
+                    std::design::color::SURFACE_RAISED
+                };
             } else if (200..1200).contains(&y) {
                 let card = (y - 200) / 210;
                 let card_y = (y - 200) % 210;
@@ -202,12 +232,20 @@ fn render_settings_ui(surface: u32, tab: SettingsTab) {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    std::log(0, "[SETTINGS APP (Ring 3)] Sovereign Settings & Diagnostics online.").ok();
+    std::log(
+        0,
+        "[SETTINGS APP (Ring 3)] Sovereign Settings & Diagnostics online.",
+    )
+    .ok();
 
     // Slot 6 is FrameBufferDirect
     let surface = match std::surface_create(6, W as u32, H as u32, 200) {
         Ok(id) => {
-            std::log(0, "[SETTINGS APP] DRM/KMS Client Surface allocated (z=200).").ok();
+            std::log(
+                0,
+                "[SETTINGS APP] DRM/KMS Client Surface allocated (z=200).",
+            )
+            .ok();
             id
         }
         Err(_) => 0,
@@ -248,11 +286,20 @@ pub extern "C" fn _start() -> ! {
         if let Ok(triggered) = std::event_poll(interest, 100) {
             if (triggered & std::EVENT_TOUCH_INPUT) != 0 {
                 let mut input = std::InputEvent {
-                    kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000,
+                    kind: 0,
+                    x: 0,
+                    y: 0,
+                    dx: 0,
+                    dy: 0,
+                    scale_milli: 1000,
                 };
                 while std::input_event_poll(&mut input).is_ok() {
                     if input.kind == 4 && input.dy <= -60 && input.y <= 1380 {
-                        std::log(0, "[SETTINGS APP] Swipe-up home gesture recognized. Exiting to launcher.").ok();
+                        std::log(
+                            0,
+                            "[SETTINGS APP] Swipe-up home gesture recognized. Exiting to launcher.",
+                        )
+                        .ok();
                         if surface > 0 {
                             let _ = std::surface_destroy(6, surface);
                         }
@@ -292,7 +339,11 @@ pub extern "C" fn _start() -> ! {
                             render_settings_ui(surface, settings.current_tab);
                             let _ = std::surface_flip(6);
                         }
-                        std::log(0, "[SETTINGS APP] Normalized touch event processed; tab switched.").ok();
+                        std::log(
+                            0,
+                            "[SETTINGS APP] Normalized touch event processed; tab switched.",
+                        )
+                        .ok();
                     }
                 }
             }

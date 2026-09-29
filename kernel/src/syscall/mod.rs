@@ -2526,7 +2526,7 @@ pub fn sys_app_runtime_list(out_buf: &mut [u8]) -> Result<usize, SyscallResult> 
         for task in sched.tasks_iter() {
             if count >= task_snapshot.len() || task.id == current { continue; }
             if task.name == "compositor" || task.name == "launcher" { continue; }
-            task_snapshot[count] = (task.id, task.name, task.state as u8);
+            task_snapshot[count] = (task.id, task.name, task.state.code());
             count += 1;
         }
     }
@@ -2551,7 +2551,7 @@ pub fn sys_app_runtime_list(out_buf: &mut [u8]) -> Result<usize, SyscallResult> 
             .unwrap_or(name);
         let process_state = record.state as u8;
         let _ = writeln!(w, "{}|{}|{}|{}|{}\n", task_id.0, package_id, process_state, task_state, record.parent_task.0);
-        if w.n >= out_buf.len() { break; }
+        if w.n >= w.b.len() { break; }
     }
     Ok(w.n)
 }
@@ -3768,7 +3768,7 @@ pub fn sys_package_registry(out_buf:&mut [u8])->Result<usize,SyscallResult>{
         let icon = descriptor.map(|p| p.icon).unwrap_or("APP");
         let _=writeln!(w,"{}|{}|{}.{}.{}|{}|{}|{}|{}\n",
             e.package_id,process,e.version.0,e.version.1,e.version.2,state,path,display_name,icon);
-        if w.n>=out_buf.len(){break;}
+        if w.n >= w.b.len() { break; }
     }
     Ok(w.n)
 }

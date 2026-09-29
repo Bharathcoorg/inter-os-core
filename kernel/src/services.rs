@@ -191,11 +191,41 @@ pub fn init() {
 /// the same address-space, IPC, descriptor, or thread budget as an unrestricted app.
 pub fn resource_limits(id: ServiceId) -> ResourceLimits {
     match id {
-        ServiceId::Display | ServiceId::Compositor => ResourceLimits { max_threads: 8, max_open_files: 64, max_ipc_endpoints: 32, max_address_space_bytes: 64 * 1024 * 1024 },
-        ServiceId::Storage => ResourceLimits { max_threads: 4, max_open_files: 128, max_ipc_endpoints: 32, max_address_space_bytes: 48 * 1024 * 1024 },
-        ServiceId::Network => ResourceLimits { max_threads: 8, max_open_files: 64, max_ipc_endpoints: 32, max_address_space_bytes: 64 * 1024 * 1024 },
-        ServiceId::Launcher => ResourceLimits { max_threads: 8, max_open_files: 64, max_ipc_endpoints: 48, max_address_space_bytes: 64 * 1024 * 1024 },
-        _ => ResourceLimits { max_threads: 4, max_open_files: 32, max_ipc_endpoints: 16, max_address_space_bytes: 32 * 1024 * 1024 },
+        ServiceId::Display | ServiceId::Compositor => ResourceLimits {
+            max_threads: 8,
+            max_open_files: 64,
+            max_ipc_endpoints: 32,
+            max_address_space_bytes: 64 * 1024 * 1024,
+            ..ResourceLimits::default()
+        },
+        ServiceId::Storage => ResourceLimits {
+            max_threads: 4,
+            max_open_files: 128,
+            max_ipc_endpoints: 32,
+            max_address_space_bytes: 48 * 1024 * 1024,
+            ..ResourceLimits::default()
+        },
+        ServiceId::Network => ResourceLimits {
+            max_threads: 8,
+            max_open_files: 64,
+            max_ipc_endpoints: 32,
+            max_address_space_bytes: 64 * 1024 * 1024,
+            ..ResourceLimits::default()
+        },
+        ServiceId::Launcher => ResourceLimits {
+            max_threads: 8,
+            max_open_files: 64,
+            max_ipc_endpoints: 48,
+            max_address_space_bytes: 64 * 1024 * 1024,
+            ..ResourceLimits::default()
+        },
+        _ => ResourceLimits {
+            max_threads: 4,
+            max_open_files: 32,
+            max_ipc_endpoints: 16,
+            max_address_space_bytes: 32 * 1024 * 1024,
+            ..ResourceLimits::default()
+        },
     }
 }
 

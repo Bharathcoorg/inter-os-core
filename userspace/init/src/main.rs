@@ -7,8 +7,8 @@
 #![no_std]
 #![no_main]
 
-use interos_std as std;
 use core::panic::PanicInfo;
+use interos_std as std;
 
 const SERVICE_BUFFER: usize = 512;
 const POLL_INTERVAL_TICKS: u64 = 100;
@@ -21,11 +21,14 @@ pub extern "C" fn _start() -> ! {
     const SERVICES: [u8; 11] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
     for service_id in SERVICES {
         match std::service_start(service_id) {
-            Ok(_) => { let _ = std::log(0, "[PID1] Service started through lifecycle ABI."); },
-            Err(_) => { let _ = std::log(0, "[PID1] Service start request rejected."); },
+            Ok(_) => {
+                let _ = std::log(0, "[PID1] Service started through lifecycle ABI.");
+            }
+            Err(_) => {
+                let _ = std::log(0, "[PID1] Service start request rejected.");
+            }
         }
     }
-
 
     // Deterministic lifecycle smoke: exercise the real stop -> start path
     // once after bootstrap. This makes QEMU validate more than initial spawning.
@@ -33,11 +36,17 @@ pub extern "C" fn _start() -> ! {
         Ok(_) => {
             let _ = std::log(0, "[PID1] Service stop lifecycle contract exercised.");
             match std::service_start(1) {
-                Ok(_) => { let _ = std::log(0, "[PID1] Service restart lifecycle contract exercised."); }
-                Err(_) => { let _ = std::log(0, "[PID1] Service restart lifecycle contract failed."); }
+                Ok(_) => {
+                    let _ = std::log(0, "[PID1] Service restart lifecycle contract exercised.");
+                }
+                Err(_) => {
+                    let _ = std::log(0, "[PID1] Service restart lifecycle contract failed.");
+                }
             }
         }
-        Err(_) => { let _ = std::log(0, "[PID1] Service stop lifecycle contract failed."); }
+        Err(_) => {
+            let _ = std::log(0, "[PID1] Service stop lifecycle contract failed.");
+        }
     }
 
     // Establish the first userspace service-manager contract: PID 1 observes
@@ -60,14 +69,22 @@ pub extern "C" fn _start() -> ! {
         if now.saturating_sub(last_poll) >= POLL_INTERVAL_TICKS || last_poll == 0 {
             if let Ok(len) = std::service_list(&mut service_buf) {
                 if len > 0 {
-                    std::log(0, "[PID1] Service registry observed; userspace lifecycle loop active.").ok();
+                    std::log(
+                        0,
+                        "[PID1] Service registry observed; userspace lifecycle loop active.",
+                    )
+                    .ok();
                 } else {
                     std::log(0, "[PID1] Service registry returned no active services.").ok();
                 }
             }
-            for service_id in [1u8,2,3,4,5,6,7,8,9,10,11] {
+            for service_id in [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] {
                 if std::service_recover_failed(service_id).is_ok() {
-                    std::log(0, "[PID1] Recovered a failed service through the lifecycle ABI.").ok();
+                    std::log(
+                        0,
+                        "[PID1] Recovered a failed service through the lifecycle ABI.",
+                    )
+                    .ok();
                 }
             }
             last_poll = now;
@@ -76,12 +93,24 @@ pub extern "C" fn _start() -> ! {
         // Check for incoming IPC requests from launcher
         if let Ok(msg_len) = std::ipc_recv(10, &mut ipc_buf) {
             if msg_len > 0 {
-                let _ = std::log(0, "[PID1] Application launch request received via IPC from launcher.");
-                let app_id = core::str::from_utf8(&ipc_buf[..msg_len]).unwrap_or("").trim_matches(|c: char| c.is_whitespace() || c == '\0');
+                let _ = std::log(
+                    0,
+                    "[PID1] Application launch request received via IPC from launcher.",
+                );
+                let app_id = core::str::from_utf8(&ipc_buf[..msg_len])
+                    .unwrap_or("")
+                    .trim_matches(|c: char| c.is_whitespace() || c == '\0');
                 if !app_id.is_empty() {
                     match std::app_launch(app_id) {
-                        Ok(_) => { let _ = std::log(0, "[PID1] Target application launched successfully in Ring 3."); }
-                        Err(_) => { let _ = std::log(0, "[PID1] Target application launch rejected."); }
+                        Ok(_) => {
+                            let _ = std::log(
+                                0,
+                                "[PID1] Target application launched successfully in Ring 3.",
+                            );
+                        }
+                        Err(_) => {
+                            let _ = std::log(0, "[PID1] Target application launch rejected.");
+                        }
                     }
                 }
             }
@@ -96,15 +125,34 @@ pub extern "C" fn _start() -> ! {
 fn registry_has_all_running_services(buf: &[u8]) -> bool {
     let mut seen: u16 = 0;
     for line in buf.split(|b| *b == b'\n') {
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         let mut fields = line.split(|b| *b == b'|');
-        let Some(id_bytes) = fields.next() else { continue; };
-        let Some(task_bytes) = fields.next() else { continue; };
-        let Some(state) = fields.next() else { continue; };
-        if state != b"running" || task_bytes == b"0" { continue; }
+        let Some(id_bytes) = fields.next() else {
+            continue;
+        };
+        let Some(task_bytes) = fields.next() else {
+            continue;
+        };
+        let Some(state) = fields.next() else {
+            continue;
+        };
+        if state != b"running" || task_bytes == b"0" {
+            continue;
+        }
         let id = match id_bytes {
-            b"1" => 1u8, b"2" => 2, b"3" => 3, b"4" => 4, b"5" => 5,
-            b"6" => 6, b"7" => 7, b"8" => 8, b"9" => 9, b"10" => 10, b"11" => 11,
+            b"1" => 1u8,
+            b"2" => 2,
+            b"3" => 3,
+            b"4" => 4,
+            b"5" => 5,
+            b"6" => 6,
+            b"7" => 7,
+            b"8" => 8,
+            b"9" => 9,
+            b"10" => 10,
+            b"11" => 11,
             _ => continue,
         };
         seen |= 1u16 << (id - 1);

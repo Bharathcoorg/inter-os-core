@@ -139,7 +139,15 @@ const FONT_8X8: [[u8; 8]; 95] = [
 ];
 
 #[inline(always)]
-fn test_text(x: usize, y: usize, x0: usize, y0: usize, scale: usize, text: &[u8], color: u32) -> Option<u32> {
+fn test_text(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    color: u32,
+) -> Option<u32> {
     let char_w = 8 * scale;
     let char_h = 8 * scale;
     let total_w = text.len() * char_w;
@@ -196,7 +204,9 @@ impl GalleryApp {
 fn get_gallery_color(x: usize, y: usize, app: &GalleryApp) -> u32 {
     // 1. Status Bar & Header (y: 0..96)
     if y < 96 {
-        if y >= 94 { return BORDER_SUBTLE; }
+        if y >= 94 {
+            return BORDER_SUBTLE;
+        }
 
         // Back button (<) at (x: 24..100, y: 28..68)
         if x >= 24 && x < 100 && y >= 28 && y < 68 {
@@ -204,7 +214,9 @@ fn get_gallery_color(x: usize, y: usize, app: &GalleryApp) -> u32 {
             let center_y = 48;
             let dx = (x as isize - center_x as isize).abs();
             let dy = (y as isize - center_y as isize).abs();
-            if (dx + dy <= 12 && x <= center_x) || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99)) {
+            if (dx + dy <= 12 && x <= center_x)
+                || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
+            {
                 return TEXT_PRIMARY;
             }
             return SURFACE_RAISED;
@@ -212,16 +224,22 @@ fn get_gallery_color(x: usize, y: usize, app: &GalleryApp) -> u32 {
 
         // Header Title: "Gallery"
         if y >= 36 && y < 60 {
-            if let Some(c) = test_text(x, y, 120, 36, 3, b"Gallery", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 120, 36, 3, b"Gallery", TEXT_PRIMARY) {
+                return c;
+            }
         }
 
         // Options icon at (640, 48, r: 16)
         let s_dx = (x as i32) - 640;
         let s_dy = (y as i32) - 48;
         if s_dx * s_dx + s_dy * s_dy <= 256 {
-            if s_dx * s_dx + s_dy * s_dy >= 225 { return BORDER_SUBTLE; }
+            if s_dx * s_dx + s_dy * s_dy >= 225 {
+                return BORDER_SUBTLE;
+            }
             if y >= 44 && y < 52 {
-                if let Some(c) = test_text(x, y, 636, 44, 1, b"O", ACCENT_SKY) { return c; }
+                if let Some(c) = test_text(x, y, 636, 44, 1, b"O", ACCENT_SKY) {
+                    return c;
+                }
             }
             return SURFACE_RAISED;
         }
@@ -236,17 +254,23 @@ fn get_gallery_color(x: usize, y: usize, app: &GalleryApp) -> u32 {
         // Header Bar (y: 110..180)
         if y >= 110 && y < 180 && x >= 30 && x < 690 {
             if y >= 125 && y < 141 {
-                if let Some(c) = test_text(x, y, 50, 125, 2, photo.title.as_bytes(), TEXT_PRIMARY) { return c; }
+                if let Some(c) = test_text(x, y, 50, 125, 2, photo.title.as_bytes(), TEXT_PRIMARY) {
+                    return c;
+                }
             }
             if y >= 150 && y < 158 {
-                if let Some(c) = test_text(x, y, 50, 150, 1, photo.meta.as_bytes(), ACCENT_SKY) { return c; }
+                if let Some(c) = test_text(x, y, 50, 150, 1, photo.meta.as_bytes(), ACCENT_SKY) {
+                    return c;
+                }
             }
             return SURFACE_RAISED;
         }
 
         // Large Photo Viewport (y: 200..1100, x: 30..690)
         if y >= 200 && y < 1100 && x >= 30 && x < 690 {
-            if y == 200 || y == 1099 || x == 30 || x == 689 { return BORDER_SUBTLE; }
+            if y == 200 || y == 1099 || x == 30 || x == 689 {
+                return BORDER_SUBTLE;
+            }
 
             // Procedural landscape shader for selected photo
             let rel_y = y - 200;
@@ -256,15 +280,23 @@ fn get_gallery_color(x: usize, y: usize, app: &GalleryApp) -> u32 {
             if idx == 0 {
                 // Mountain sunrise gradient with horizon
                 if ratio < 50 {
-                    return if ratio < 25 { 0xFF141A28 } else { photo.primary_color };
+                    return if ratio < 25 {
+                        0xFF141A28
+                    } else {
+                        photo.primary_color
+                    };
                 } else {
                     let peak = 500 + (((rel_x as i32 - 330) * (rel_x as i32 - 330)) / 450) as usize;
-                    if rel_y >= peak { return 0xFF080D14; }
+                    if rel_y >= peak {
+                        return 0xFF080D14;
+                    }
                     return photo.secondary_color;
                 }
             } else if idx == 1 {
                 // Cyber city grid
-                if rel_x % 40 < 2 || rel_y % 40 < 2 { return ACCENT_SKY; }
+                if rel_x % 40 < 2 || rel_y % 40 < 2 {
+                    return ACCENT_SKY;
+                }
                 return photo.secondary_color;
             } else {
                 // Smooth celestial gradient
@@ -277,15 +309,21 @@ fn get_gallery_color(x: usize, y: usize, app: &GalleryApp) -> u32 {
 
         // Inspection Bottom Close Pill (x: 230..490, y: 1140..1200)
         if y >= 1140 && y < 1200 && x >= 230 && x < 490 {
-            if y == 1140 || y == 1199 || x == 230 || x == 489 { return BORDER_SUBTLE; }
+            if y == 1140 || y == 1199 || x == 230 || x == 489 {
+                return BORDER_SUBTLE;
+            }
             if y >= 1162 && y < 1178 {
-                if let Some(c) = test_text(x, y, 310, 1162, 2, b"Close", TEXT_PRIMARY) { return c; }
+                if let Some(c) = test_text(x, y, 310, 1162, 2, b"Close", TEXT_PRIMARY) {
+                    return c;
+                }
             }
             return SURFACE_RAISED;
         }
 
         // Home Gesture Indicator Pill
-        if y >= 1418 && y < 1424 && x >= 260 && x < 460 { return TEXT_MUTED; }
+        if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
+            return TEXT_MUTED;
+        }
         return BG_DARK;
     }
 
@@ -308,7 +346,17 @@ fn get_gallery_color(x: usize, y: usize, app: &GalleryApp) -> u32 {
             }
             if y >= 126 && y < 142 {
                 let ox = x0 + (x1 - x0).saturating_sub(label.len() * 16) / 2;
-                if let Some(c) = test_text(x, y, ox, 126, 2, label, if is_sel { TEXT_PRIMARY } else { TEXT_MUTED }) { return c; }
+                if let Some(c) = test_text(
+                    x,
+                    y,
+                    ox,
+                    126,
+                    2,
+                    label,
+                    if is_sel { TEXT_PRIMARY } else { TEXT_MUTED },
+                ) {
+                    return c;
+                }
             }
             return if is_sel { 0xFF14243A } else { SURFACE_RAISED };
         }
@@ -360,10 +408,30 @@ fn get_gallery_color(x: usize, y: usize, app: &GalleryApp) -> u32 {
 
                     // Bottom info label banner (y: row_y1 - 50 .. row_y1)
                     if y >= row_y1 - 40 && y < row_y1 - 24 {
-                        if let Some(c) = test_text(x, y, x0 + 12, row_y1 - 40, 2, photo.title.as_bytes(), TEXT_PRIMARY) { return c; }
+                        if let Some(c) = test_text(
+                            x,
+                            y,
+                            x0 + 12,
+                            row_y1 - 40,
+                            2,
+                            photo.title.as_bytes(),
+                            TEXT_PRIMARY,
+                        ) {
+                            return c;
+                        }
                     }
                     if y >= row_y1 - 20 && y < row_y1 - 12 {
-                        if let Some(c) = test_text(x, y, x0 + 12, row_y1 - 20, 1, photo.date.as_bytes(), TEXT_MUTED) { return c; }
+                        if let Some(c) = test_text(
+                            x,
+                            y,
+                            x0 + 12,
+                            row_y1 - 20,
+                            1,
+                            photo.date.as_bytes(),
+                            TEXT_MUTED,
+                        ) {
+                            return c;
+                        }
                     }
 
                     return SURFACE_RAISED;
@@ -374,7 +442,9 @@ fn get_gallery_color(x: usize, y: usize, app: &GalleryApp) -> u32 {
 
     // 4. Bottom Navigation Bar (y: 1330..1400)
     if y >= 1330 && y < 1400 {
-        if y == 1330 { return BORDER_SUBTLE; }
+        if y == 1330 {
+            return BORDER_SUBTLE;
+        }
         let nav: Option<(usize, usize, usize, &'static [u8])> = if (40..220).contains(&x) {
             Some((0, 40, 220, &b"Photos"[..]))
         } else if (270..450).contains(&x) {
@@ -389,7 +459,17 @@ fn get_gallery_color(x: usize, y: usize, app: &GalleryApp) -> u32 {
             let is_sel = app.bottom_nav == idx;
             if y >= 1355 && y < 1371 {
                 let ox = x0 + (x1 - x0).saturating_sub(label.len() * 16) / 2;
-                if let Some(c) = test_text(x, y, ox, 1355, 2, label, if is_sel { ACCENT_SKY } else { TEXT_MUTED }) { return c; }
+                if let Some(c) = test_text(
+                    x,
+                    y,
+                    ox,
+                    1355,
+                    2,
+                    label,
+                    if is_sel { ACCENT_SKY } else { TEXT_MUTED },
+                ) {
+                    return c;
+                }
             }
         }
         return SURFACE_DARK;
@@ -429,7 +509,11 @@ fn render_gallery_ui(surface: u32, app: &GalleryApp) {
 // -----------------------------------------------------------------------------
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    std::log(0, "[GALLERY (Ring 3)] Sovereign Gallery & Photo Studio online.").ok();
+    std::log(
+        0,
+        "[GALLERY (Ring 3)] Sovereign Gallery & Photo Studio online.",
+    )
+    .ok();
 
     let mut app = GalleryApp::new();
 
@@ -454,12 +538,21 @@ pub extern "C" fn _start() -> ! {
         if let Ok(triggered) = std::event_poll(interest, 100) {
             if (triggered & std::EVENT_TOUCH_INPUT) != 0 {
                 let mut input = std::InputEvent {
-                    kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000,
+                    kind: 0,
+                    x: 0,
+                    y: 0,
+                    dx: 0,
+                    dy: 0,
+                    scale_milli: 1000,
                 };
                 while std::input_event_poll(&mut input).is_ok() {
                     // Swipe up home gesture -> Return to launcher
                     if input.kind == 4 && input.dy <= -60 && input.y >= 1200 {
-                        std::log(0, "[GALLERY] Swipe-up home gesture recognized. Exiting to launcher.").ok();
+                        std::log(
+                            0,
+                            "[GALLERY] Swipe-up home gesture recognized. Exiting to launcher.",
+                        )
+                        .ok();
                         if surface > 0 {
                             let _ = std::surface_destroy(6, surface);
                         }
@@ -471,7 +564,9 @@ pub extern "C" fn _start() -> ! {
                         let y = input.y as usize;
 
                         // Check Back button (<) or bottom home pill
-                        if (x >= 24 && x < 100 && y >= 28 && y < 68) || (x >= 240 && x <= 480 && y >= 1400) {
+                        if (x >= 24 && x < 100 && y >= 28 && y < 68)
+                            || (x >= 240 && x <= 480 && y >= 1400)
+                        {
                             if app.inspecting_photo.is_some() {
                                 app.inspecting_photo = None;
                                 std::log(0, "[GALLERY] Exited photo inspection modal.").ok();
@@ -538,7 +633,11 @@ pub extern "C" fn _start() -> ! {
                                     let p_idx = row * 2 + c;
                                     if p_idx < PHOTOS.len() {
                                         app.inspecting_photo = Some(p_idx);
-                                        std::log(0, "[GALLERY] Photo tapped: inspection modal opened.").ok();
+                                        std::log(
+                                            0,
+                                            "[GALLERY] Photo tapped: inspection modal opened.",
+                                        )
+                                        .ok();
                                         if surface > 0 {
                                             render_gallery_ui(surface, &app);
                                             let _ = std::surface_flip(6);

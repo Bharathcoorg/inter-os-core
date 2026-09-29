@@ -11,7 +11,11 @@ pub extern "C" fn _start() -> ! {
 
     let mut key = [0u8; 32];
     if std::keystore_derive(1, &mut key).is_ok() {
-        std::log(0, "[AUTHENTICATOR APP] Hardware Keystore Slot 1 root secret derived.").ok();
+        std::log(
+            0,
+            "[AUTHENTICATOR APP] Hardware Keystore Slot 1 root secret derived.",
+        )
+        .ok();
     }
 
     let interest_mask = std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK;

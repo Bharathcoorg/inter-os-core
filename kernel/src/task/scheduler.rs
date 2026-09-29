@@ -403,6 +403,18 @@ impl Scheduler {
         if matches!(task.state, TaskState::Terminated | TaskState::Zombie) {
             return Ok(());
         }
+        if let Some(process_id) = task.process_id {
+            if !crate::task::process::is_leader(id) {
+                if let Some(ref shared_space) = task.page_table {
+                    let mut pt = shared_space.lock();
+                    let _ = crate::task::user::unmap_user_thread_stack(&mut pt, id);
+                }
+                crate::task::process::release_address_space(
+                    process_id,
+                    crate::task::user::USER_STACK_SIZE,
+                );
+            }
+        }
         task.exit_code = exit_code;
         task.state = TaskState::Zombie;
         crate::task::process::mark_zombie(id, exit_code);
@@ -411,6 +423,14 @@ impl Scheduler {
         crate::event::cleanup_task(id);
         crate::net::cleanup_task(id);
         crate::drivers::display_kms::DRM_KMS.lock().destroy_surfaces_owned_by(id.0);
+
+        // Reparent live children to primordial init so a dead parent cannot leave
+        // an unreapable child/zombie subtree behind.
+        for t in &mut self.tasks {
+            if t.id != id && t.parent_id == id {
+                t.parent_id = TaskId(0);
+            }
+        }
         // Do not update the service registry while holding the scheduler lock.
         // The registry's supervision path deliberately acquires scheduler -> registry;
         // taking the inverse order here would deadlock recovery.

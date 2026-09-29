@@ -9,7 +9,6 @@
 //! - Active Conversation Thread Store:
 //!   * Conversations are populated only from the real messaging backend.
 
-
 //! - Dual-tone acoustic incoming/outgoing message bubble chime and capacitive haptics
 //! - Asynchronous event reactor loop handling modem URCs, incoming P2P packets, and touch events
 
@@ -66,7 +65,11 @@ impl MessagesApp {
         if let Ok(len) = std::keystore_derive(3, &mut key) {
             if len == 32 {
                 self.keystore_derived = true;
-                std::log(0, "[MESSAGES APP] Hardware Keystore Slot 3: Ingested 256-bit P2P messaging key.").ok();
+                std::log(
+                    0,
+                    "[MESSAGES APP] Hardware Keystore Slot 3: Ingested 256-bit P2P messaging key.",
+                )
+                .ok();
                 return true;
             }
         }
@@ -77,7 +80,6 @@ impl MessagesApp {
     pub fn send_message(&mut self, peer_did: &'static str, raw_body: &'static str) {
         self.total_sent += 1;
 
-
         // 2. Persist Encrypted Message in Sovereign Vault (Sector 202)
         let mut sector_buf = [0u8; 512];
         let copy_len = raw_body.len().min(128);
@@ -85,7 +87,11 @@ impl MessagesApp {
         let iv = [0x42u8; 16];
         if std::vault_encrypt_sector(202, &mut sector_buf, &iv).is_ok() {
             self.sector_encrypted = true;
-            std::log(0, "[MESSAGES APP] Sector 202: Message persisted with ChaCha20-Poly1305 encryption.").ok();
+            std::log(
+                0,
+                "[MESSAGES APP] Sector 202: Message persisted with ChaCha20-Poly1305 encryption.",
+            )
+            .ok();
         }
 
         // 3. Acoustic Notification Bubble Chime (E5: 659Hz -> B5: 988Hz)
@@ -93,7 +99,11 @@ impl MessagesApp {
         std::audio_play_tone(988).ok();
         std::audio_silence().ok();
         std::audio_haptic_click().ok();
-        std::log(0, "[MESSAGES APP] Outgoing message bubble chime emitted (659Hz -> 988Hz).").ok();
+        std::log(
+            0,
+            "[MESSAGES APP] Outgoing message bubble chime emitted (659Hz -> 988Hz).",
+        )
+        .ok();
 
         let _ = peer_did;
     }
@@ -121,7 +131,9 @@ fn render_messages_ui(surface: u32, active_idx: usize) {
                     let center_y = 48;
                     let dx = (x as isize - center_x as isize).abs();
                     let dy = (y as isize - center_y as isize).abs();
-                    if (dx + dy <= 12 && x <= center_x) || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99)) {
+                    if (dx + dy <= 12 && x <= center_x)
+                        || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
+                    {
                         chunk[i] = std::design::color::TEXT;
                     } else {
                         chunk[i] = std::design::color::SURFACE_RAISED;
@@ -194,7 +206,11 @@ fn render_messages_ui(surface: u32, active_idx: usize) {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    std::log(0, "[MESSAGES APP (Ring 3)] Sovereign Encrypted Messaging & P2P Wire Protocol online.").ok();
+    std::log(
+        0,
+        "[MESSAGES APP (Ring 3)] Sovereign Encrypted Messaging & P2P Wire Protocol online.",
+    )
+    .ok();
 
     let mut messages = MessagesApp::new();
 
@@ -204,7 +220,11 @@ pub extern "C" fn _start() -> ! {
     // 2. Allocate DRM/KMS Client Surface (z=200)
     let surface = match std::surface_create(6, W as u32, H as u32, 200) {
         Ok(id) => {
-            std::log(0, "[MESSAGES APP] DRM/KMS Client Surface allocated (z=200).").ok();
+            std::log(
+                0,
+                "[MESSAGES APP] DRM/KMS Client Surface allocated (z=200).",
+            )
+            .ok();
             id
         }
         Err(_) => 0,
@@ -217,26 +237,44 @@ pub extern "C" fn _start() -> ! {
             .map(|s| s.contains("\"present\":true"))
             .unwrap_or(false);
         if is_present {
-            std::log(0, "[MESSAGES APP] Telephony modem active: P2P cellular wire channel online.").ok();
+            std::log(
+                0,
+                "[MESSAGES APP] Telephony modem active: P2P cellular wire channel online.",
+            )
+            .ok();
         } else {
-            std::log(0, "[MESSAGES APP] Cellular modem in standby (No hardware modem detected).").ok();
+            std::log(
+                0,
+                "[MESSAGES APP] Cellular modem in standby (No hardware modem detected).",
+            )
+            .ok();
         }
     }
 
     if surface > 0 {
         render_messages_ui(surface, messages.active_thread_idx);
         let _ = std::surface_flip(6);
-        std::log(0, "[MESSAGES APP] Messages canvas presented to scanout buffer.").ok();
+        std::log(
+            0,
+            "[MESSAGES APP] Messages canvas presented to scanout buffer.",
+        )
+        .ok();
     }
 
     // 4. Sovereign Asynchronous Event Reactor Loop
-    let interest_mask = std::EVENT_TOUCH_INPUT | std::EVENT_IPC_MSG | std::EVENT_MODEM_URC | std::EVENT_TIMER_TICK;
+    let interest_mask =
+        std::EVENT_TOUCH_INPUT | std::EVENT_IPC_MSG | std::EVENT_MODEM_URC | std::EVENT_TIMER_TICK;
     loop {
         match std::event_poll(interest_mask, 150) {
             Ok(events) => {
                 if events & std::EVENT_TOUCH_INPUT != 0 {
                     let mut input = std::InputEvent {
-                        kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000,
+                        kind: 0,
+                        x: 0,
+                        y: 0,
+                        dx: 0,
+                        dy: 0,
+                        scale_milli: 1000,
                     };
                     while std::input_event_poll(&mut input).is_ok() {
                         if input.kind == 4 && input.dy <= -60 && input.y <= 1380 {
@@ -259,7 +297,11 @@ pub extern "C" fn _start() -> ! {
                             }
 
                             // Check conversation thread card taps
-                            if input.y >= 110 && input.y < 470 && input.x >= 24 && input.x < (W as u32) - 24 {
+                            if input.y >= 110
+                                && input.y < 470
+                                && input.x >= 24
+                                && input.x < (W as u32) - 24
+                            {
                                 let card_idx = ((input.y - 110) / 120) as usize;
                                 if card_idx < THREADS.len() {
                                     messages.active_thread_idx = card_idx;
@@ -274,7 +316,11 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 if events & std::EVENT_MODEM_URC != 0 {
-                    std::log(0, "[MESSAGES APP] Cellular Baseband URC: Inbound SMS packet received.").ok();
+                    std::log(
+                        0,
+                        "[MESSAGES APP] Cellular Baseband URC: Inbound SMS packet received.",
+                    )
+                    .ok();
                 }
                 if events & std::EVENT_IPC_MSG != 0 {
                     std::log(0, "[MESSAGES APP] Inbound P2P message decrypted and delivered to active thread.").ok();

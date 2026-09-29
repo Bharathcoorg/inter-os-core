@@ -3,9 +3,9 @@
 This guide details the complete deployment process for running **Inter OS Sovereign Microkernel v4.8+** on physical mobile ARM64 hardware (Allwinner A64 PinePhone, Rockchip RK3399 PinePhone Pro, Qualcomm Snapdragon, and Google Pixel / Tensor smartphones).
 
 > [!WARNING]
-> **Status: Experimental Bring-Up / Research Roadmap**  
-> Physical hardware flashing is currently an experimental research roadmap. It is not yet verified for end-user production deployment.  
-> Verified runtime execution is established on QEMU emulation targets (`qemu-system-x86_64`, `qemu-system-aarch64`, `qemu-system-riscv64`).  
+> **Status: Experimental Bring-Up / Research Roadmap**
+> Physical hardware flashing is currently an experimental research roadmap. It is not yet verified for end-user production deployment.
+> Verified runtime execution is established on QEMU emulation targets (`qemu-system-x86_64`, `qemu-system-aarch64`, `qemu-system-riscv64`).
 > Use these instructions only for development boards (e.g. PinePhone Allwinner A64) in laboratory environments.
 
 ---

@@ -49,7 +49,14 @@ pub fn run_display() -> ! {
 /// by the kernel into a bounded event ABI before reaching userspace.
 pub fn run_input() -> ! {
     let _ = std::log(0, "[inputd] userspace input manager online.");
-    let mut event = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+    let mut event = std::InputEvent {
+        kind: 0,
+        x: 0,
+        y: 0,
+        dx: 0,
+        dy: 0,
+        scale_milli: 1000,
+    };
     loop {
         let _ = std::service_heartbeat(2);
         if std::input_event_poll(&mut event).is_ok() {
@@ -89,7 +96,10 @@ pub fn run_network() -> ! {
             let _ = std::net_send_socket(socket, [127, 0, 0, 1], 4242, b"INTEROS_NETD_HEARTBEAT");
             if let Ok(len) = std::net_recvfrom(socket, &mut rx) {
                 if len > 0 {
-                    let _ = std::log(0, "[netd] External UDP packet received through userspace network service.");
+                    let _ = std::log(
+                        0,
+                        "[netd] External UDP packet received through userspace network service.",
+                    );
                 }
             }
             last_tick = now;
@@ -118,7 +128,10 @@ pub fn run_modem() -> ! {
     loop {
         let _ = std::service_heartbeat(6);
         let _ = std::telephony_query(&mut status);
-        let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK | std::EVENT_MODEM_URC, 20);
+        let _ = std::event_poll(
+            std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK | std::EVENT_MODEM_URC,
+            20,
+        );
     }
 }
 
@@ -173,7 +186,10 @@ pub fn run_storage() -> ! {
     }
 }
 
+#[cfg(not(test))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    loop { core::hint::spin_loop(); }
+    loop {
+        core::hint::spin_loop();
+    }
 }

@@ -5,7 +5,7 @@
 //! glue. They do not provide fake platform state; callers must handle
 //! unavailable hardware/services explicitly.
 
-use crate::{InputEvent};
+use crate::InputEvent;
 
 pub struct AppSession {
     package_id: &'static str,
@@ -15,10 +15,16 @@ pub struct AppSession {
 
 impl AppSession {
     pub const fn new(package_id: &'static str, display_cap_slot: usize) -> Self {
-        Self { package_id, surface: None, display_cap_slot }
+        Self {
+            package_id,
+            surface: None,
+            display_cap_slot,
+        }
     }
 
-    pub fn package_id(&self) -> &'static str { self.package_id }
+    pub fn package_id(&self) -> &'static str {
+        self.package_id
+    }
 
     pub fn open_window(&mut self, width: u32, height: u32, z_order: u32) -> Result<u32, i64> {
         let surface = crate::surface_create(self.display_cap_slot, width, height, z_order)?;
@@ -26,7 +32,9 @@ impl AppSession {
         Ok(surface)
     }
 
-    pub fn surface(&self) -> Option<u32> { self.surface }
+    pub fn surface(&self) -> Option<u32> {
+        self.surface
+    }
 
     pub fn present(&self) -> Result<u64, i64> {
         crate::surface_flip(self.display_cap_slot)
@@ -47,17 +55,36 @@ impl AppSession {
         crate::event_poll(interest_mask, timeout_ticks)
     }
 
-    pub fn enter_background(&self) -> Result<(), i64> { crate::app_background() }
-    pub fn enter_foreground(&self) -> Result<(), i64> { crate::app_foreground() }
-    pub fn suspend(&self) -> Result<(), i64> { crate::app_suspend() }
-    pub fn wake(&self) -> Result<(), i64> { crate::app_wake() }
+    pub fn enter_background(&self) -> Result<(), i64> {
+        crate::app_background()
+    }
+    pub fn enter_foreground(&self) -> Result<(), i64> {
+        crate::app_foreground()
+    }
+    pub fn suspend(&self) -> Result<(), i64> {
+        crate::app_suspend()
+    }
+    pub fn wake(&self) -> Result<(), i64> {
+        crate::app_wake()
+    }
 
-    pub fn open_private_file(&self, fs_cap_slot: usize, relative_path: &str, rights: u32) -> Result<u32, i64> {
+    pub fn open_private_file(
+        &self,
+        fs_cap_slot: usize,
+        relative_path: &str,
+        rights: u32,
+    ) -> Result<u32, i64> {
         crate::app_storage_open(fs_cap_slot, relative_path, rights)
     }
 
     /// Sends a bounded IPC message using an explicitly supplied capability slot.
-    pub fn send_ipc(&self, ipc_cap_slot: usize, target_task_id: u64, msg_type: u32, payload: &[u8]) -> Result<(), i64> {
+    pub fn send_ipc(
+        &self,
+        ipc_cap_slot: usize,
+        target_task_id: u64,
+        msg_type: u32,
+        payload: &[u8],
+    ) -> Result<(), i64> {
         crate::ipc_send(ipc_cap_slot, target_task_id, msg_type, payload)
     }
 

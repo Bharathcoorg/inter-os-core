@@ -236,13 +236,20 @@ fn render_calculator_ui(surface: u32, calc: &CalculatorState) {
                 } else {
                     // Check if inside active 7-segment digit
                     let mut is_digit_pixel = false;
-                    if (display_y_start..display_y_start + 64).contains(&y) && x >= display_start_x && x < display_start_x + total_digits_w {
+                    if (display_y_start..display_y_start + 64).contains(&y)
+                        && x >= display_start_x
+                        && x < display_start_x + total_digits_w
+                    {
                         let rel_x = x - display_start_x;
                         let digit_slot = rel_x / (digit_w + digit_gap);
                         let in_digit_x = rel_x % (digit_w + digit_gap);
                         if digit_slot < digit_count && in_digit_x < digit_w {
                             let d_val = digits[digit_count - 1 - digit_slot];
-                            let mask = if d_val == 255 { get_7segment_mask(-1) } else { get_7segment_mask(d_val as i64) };
+                            let mask = if d_val == 255 {
+                                get_7segment_mask(-1)
+                            } else {
+                                get_7segment_mask(d_val as i64)
+                            };
                             if is_segment_pixel(mask, in_digit_x, y - display_y_start) {
                                 is_digit_pixel = true;
                             }
@@ -255,18 +262,31 @@ fn render_calculator_ui(surface: u32, calc: &CalculatorState) {
                     }
                 }
             } else {
-                let active_row = if (440..580).contains(&y) { Some(0) }
-                else if (610..750).contains(&y) { Some(1) }
-                else if (780..920).contains(&y) { Some(2) }
-                else if (950..1090).contains(&y) { Some(3) }
-                else if (1120..1260).contains(&y) { Some(4) }
-                else { None };
+                let active_row = if (440..580).contains(&y) {
+                    Some(0)
+                } else if (610..750).contains(&y) {
+                    Some(1)
+                } else if (780..920).contains(&y) {
+                    Some(2)
+                } else if (950..1090).contains(&y) {
+                    Some(3)
+                } else if (1120..1260).contains(&y) {
+                    Some(4)
+                } else {
+                    None
+                };
 
-                let active_col = if (28..172).contains(&x) { Some(0) }
-                else if (194..338).contains(&x) { Some(1) }
-                else if (360..504).contains(&x) { Some(2) }
-                else if (526..670).contains(&x) { Some(3) }
-                else { None };
+                let active_col = if (28..172).contains(&x) {
+                    Some(0)
+                } else if (194..338).contains(&x) {
+                    Some(1)
+                } else if (360..504).contains(&x) {
+                    Some(2)
+                } else if (526..670).contains(&x) {
+                    Some(3)
+                } else {
+                    None
+                };
 
                 if let (Some(row), Some(col)) = (active_row, active_col) {
                     let bx = COL_X[col];
@@ -291,31 +311,51 @@ fn render_calculator_ui(surface: u32, calc: &CalculatorState) {
                         let mask = get_7segment_mask(d);
                         let gx_start = center_x.saturating_sub(18);
                         let gy_start = center_y.saturating_sub(32);
-                        if x >= gx_start && x < gx_start + 36 && y >= gy_start && y < gy_start + 64 {
+                        if x >= gx_start && x < gx_start + 36 && y >= gy_start && y < gy_start + 64
+                        {
                             is_glyph = is_segment_pixel(mask, x - gx_start, y - gy_start);
                         }
                     } else if action == '+' {
                         // Cross +
-                        if (x >= center_x - 16 && x < center_x + 16 && y >= center_y - 3 && y < center_y + 3)
-                            || (x >= center_x - 3 && x < center_x + 3 && y >= center_y - 16 && y < center_y + 16) {
+                        if (x >= center_x - 16
+                            && x < center_x + 16
+                            && y >= center_y - 3
+                            && y < center_y + 3)
+                            || (x >= center_x - 3
+                                && x < center_x + 3
+                                && y >= center_y - 16
+                                && y < center_y + 16)
+                        {
                             is_glyph = true;
                         }
                     } else if action == '-' {
                         // Minus -
-                        if x >= center_x - 16 && x < center_x + 16 && y >= center_y - 3 && y < center_y + 3 {
+                        if x >= center_x - 16
+                            && x < center_x + 16
+                            && y >= center_y - 3
+                            && y < center_y + 3
+                        {
                             is_glyph = true;
                         }
                     } else if action == '=' {
                         // Equals =
-                        if (x >= center_x - 16 && x < center_x + 16 && y >= center_y - 8 && y < center_y - 2)
-                            || (x >= center_x - 16 && x < center_x + 16 && y >= center_y + 2 && y < center_y + 8) {
+                        if (x >= center_x - 16
+                            && x < center_x + 16
+                            && y >= center_y - 8
+                            && y < center_y - 2)
+                            || (x >= center_x - 16
+                                && x < center_x + 16
+                                && y >= center_y + 2
+                                && y < center_y + 8)
+                        {
                             is_glyph = true;
                         }
                     } else if action == 'C' {
                         // Clear C (arc)
                         let gx_start = center_x.saturating_sub(18);
                         let gy_start = center_y.saturating_sub(32);
-                        if x >= gx_start && x < gx_start + 36 && y >= gy_start && y < gy_start + 64 {
+                        if x >= gx_start && x < gx_start + 36 && y >= gy_start && y < gy_start + 64
+                        {
                             let mask = 0b0011_1001; // a, d, e, f
                             is_glyph = is_segment_pixel(mask, x - gx_start, y - gy_start);
                         }
@@ -333,7 +373,8 @@ fn render_calculator_ui(surface: u32, calc: &CalculatorState) {
                         if (rel_x.abs() <= 12 && rel_y.abs() <= 2)
                             || (rel_x.abs() <= 2 && rel_y.abs() <= 12)
                             || ((rel_x + rel_y).abs() <= 2 && rel_x.abs() <= 10)
-                            || ((rel_x - rel_y).abs() <= 2 && rel_x.abs() <= 10) {
+                            || ((rel_x - rel_y).abs() <= 2 && rel_x.abs() <= 10)
+                        {
                             is_glyph = true;
                         }
                     }
@@ -367,7 +408,11 @@ fn render_calculator_ui(surface: u32, calc: &CalculatorState) {
 fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> (bool, Option<&'static str>) {
     // Check if exit / back button or home gesture bar pressed
     if (x >= 24 && x < 100 && y >= 28 && y < 68) || (x >= 240 && x <= 480 && y >= 1400) {
-        std::log(0, "[CALCULATOR] Exit button or home gesture tapped. Returning to launcher.").ok();
+        std::log(
+            0,
+            "[CALCULATOR] Exit button or home gesture tapped. Returning to launcher.",
+        )
+        .ok();
         return (true, None);
     }
 
@@ -415,19 +460,31 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> (bool, Opti
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    std::log(0, "[CALCULATOR (Ring 3)] Open-Source Touch Calculator online.").ok();
+    std::log(
+        0,
+        "[CALCULATOR (Ring 3)] Open-Source Touch Calculator online.",
+    )
+    .ok();
 
     let mut calc = CalculatorState::new();
 
     // 1. Allocate dedicated KMS Client Surface (z=200)
-    std::log(0, "[CALCULATOR] Step 1: Allocating application surface (z=200)...").ok();
+    std::log(
+        0,
+        "[CALCULATOR] Step 1: Allocating application surface (z=200)...",
+    )
+    .ok();
     let surface = match std::surface_create(6, W as u32, H as u32, 200) {
         Ok(s) => {
             std::log(0, "[CALCULATOR] Step 2: Surface created successfully.").ok();
             s
         }
         Err(_) => {
-            std::log(0, "[CALCULATOR] Display surface unavailable; refusing headless execution.").ok();
+            std::log(
+                0,
+                "[CALCULATOR] Display surface unavailable; refusing headless execution.",
+            )
+            .ok();
             std::exit_with_code(1);
         }
     };
@@ -438,31 +495,41 @@ pub extern "C" fn _start() -> ! {
     // 3. Render initial Calculator UI frame and present
     render_calculator_ui(surface, &calc);
     let _ = std::surface_flip(6);
-    std::log(0, "[CALCULATOR] Initial frame presented to hardware scanout.").ok();
-
+    std::log(
+        0,
+        "[CALCULATOR] Initial frame presented to hardware scanout.",
+    )
+    .ok();
 
     // 4. Interactive Event Reactor Loop
     loop {
-        if let Ok(events) = std::event_poll(
-            std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK,
-            100,
-        ) {
+        if let Ok(events) = std::event_poll(std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK, 100) {
             if (events & std::EVENT_TIMER_TICK) != 0 {
                 let _ = std::surface_flip(6);
             }
 
             if (events & std::EVENT_TOUCH_INPUT) != 0 {
                 let mut input = std::InputEvent {
-                    kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000,
+                    kind: 0,
+                    x: 0,
+                    y: 0,
+                    dx: 0,
+                    dy: 0,
+                    scale_milli: 1000,
                 };
                 while std::input_event_poll(&mut input).is_ok() {
                     if input.kind == 4 && input.dy <= -60 && input.y <= 1380 {
-                        std::log(0, "[CALCULATOR] Swipe-up home gesture recognized. Returning to launcher.").ok();
+                        std::log(
+                            0,
+                            "[CALCULATOR] Swipe-up home gesture recognized. Returning to launcher.",
+                        )
+                        .ok();
                         let _ = std::surface_destroy(6, surface);
                         std::exit_with_code(0);
                     }
                     if input.kind == 1 {
-                        let (should_exit, action_logged) = handle_touch_point(&mut calc, input.x, input.y);
+                        let (should_exit, action_logged) =
+                            handle_touch_point(&mut calc, input.x, input.y);
                         if let Some(msg) = action_logged {
                             std::log(0, msg).ok();
                         }

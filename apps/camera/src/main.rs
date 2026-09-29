@@ -102,9 +102,12 @@ impl CameraApp {
                     pixel[2] = high;
                 }
                 CameraFilter::Sepia => {
-                    pixel[0] = ((r as u32 * 393 + g as u32 * 769 + b as u32 * 189) / 1000).min(255) as u8;
-                    pixel[1] = ((r as u32 * 349 + g as u32 * 686 + b as u32 * 168) / 1000).min(255) as u8;
-                    pixel[2] = ((r as u32 * 272 + g as u32 * 534 + b as u32 * 131) / 1000).min(255) as u8;
+                    pixel[0] =
+                        ((r as u32 * 393 + g as u32 * 769 + b as u32 * 189) / 1000).min(255) as u8;
+                    pixel[1] =
+                        ((r as u32 * 349 + g as u32 * 686 + b as u32 * 168) / 1000).min(255) as u8;
+                    pixel[2] =
+                        ((r as u32 * 272 + g as u32 * 534 + b as u32 * 131) / 1000).min(255) as u8;
                 }
                 CameraFilter::NeuralHeatmap => {
                     pixel[0] = 255 - r;
@@ -132,7 +135,11 @@ impl CameraApp {
         if count == 0 {
             (0, 0, 0)
         } else {
-            ((r_acc / count) as u8, (g_acc / count) as u8, (b_acc / count) as u8)
+            (
+                (r_acc / count) as u8,
+                (g_acc / count) as u8,
+                (b_acc / count) as u8,
+            )
         }
     }
 
@@ -201,7 +208,9 @@ fn render_camera_ui(surface: u32, camera: &CameraApp) {
                     let center_y = 48;
                     let dx = (x as isize - center_x as isize).abs();
                     let dy = (y as isize - center_y as isize).abs();
-                    if (dx + dy <= 12 && x <= center_x) || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99)) {
+                    if (dx + dy <= 12 && x <= center_x)
+                        || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
+                    {
                         chunk[i] = std::design::color::TEXT;
                     } else {
                         chunk[i] = std::design::color::SURFACE_RAISED;
@@ -241,7 +250,8 @@ fn render_camera_ui(surface: u32, camera: &CameraApp) {
                 let center_y = 500;
                 let dx = (rel_x as isize - center_x as isize).abs();
                 let dy = (rel_y as isize - center_y as isize).abs();
-                let is_reticle = (dx <= 40 && dy <= 40) && ((dx >= 36 && dy <= 12) || (dy >= 36 && dx <= 12));
+                let is_reticle =
+                    (dx <= 40 && dy <= 40) && ((dx >= 36 && dy <= 12) || (dy >= 36 && dx <= 12));
 
                 // 3x3 Rule-of-Thirds Grid Lines
                 let is_grid = (rel_x == 226 || rel_x == 453) || (rel_y == 333 || rel_y == 666);
@@ -346,7 +356,11 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> bool {
 
     // 1. Back button in header or Home gesture bar: exit to Launcher
     if (x >= 24 && x < 100 && y >= 28 && y < 68) || (x >= 240 && x <= 480 && y >= 1400) {
-        std::log(0, "[CAMERA] Back button or home gesture pressed. Exiting to launcher.").ok();
+        std::log(
+            0,
+            "[CAMERA] Back button or home gesture pressed. Exiting to launcher.",
+        )
+        .ok();
         return true;
     }
 
@@ -415,7 +429,11 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> bool {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    std::log(0, "[CAMERA APP (Ring 3)] Sovereign Camera & Neural Vision online.").ok();
+    std::log(
+        0,
+        "[CAMERA APP (Ring 3)] Sovereign Camera & Neural Vision online.",
+    )
+    .ok();
 
     let mut camera = CameraApp::new();
 
@@ -423,14 +441,22 @@ pub extern "C" fn _start() -> ! {
     // Capture, mode changes and flash controls are driven only by user input.
 
     // Allocate dedicated KMS Client Surface (z=200)
-    std::log(0, "[CAMERA APP] Step 1: Allocating application surface (z=200)...").ok();
+    std::log(
+        0,
+        "[CAMERA APP] Step 1: Allocating application surface (z=200)...",
+    )
+    .ok();
     let surface = match std::surface_create(6, W as u32, H as u32, 200) {
         Ok(s) => {
             std::log(0, "[CAMERA APP] Step 2: Surface created successfully.").ok();
             s
         }
         Err(_) => {
-            std::log(0, "[CAMERA APP] Surface allocation unavailable; falling back to headless execution.").ok();
+            std::log(
+                0,
+                "[CAMERA APP] Surface allocation unavailable; falling back to headless execution.",
+            )
+            .ok();
             std::exit_with_code(0);
         }
     };
@@ -439,15 +465,15 @@ pub extern "C" fn _start() -> ! {
     camera.mode = CameraMode::Photo;
     render_camera_ui(surface, &camera);
     let _ = std::surface_flip(6);
-    std::log(0, "[CAMERA APP] Step 3: Initial frame presented to hardware scanout.").ok();
-
+    std::log(
+        0,
+        "[CAMERA APP] Step 3: Initial frame presented to hardware scanout.",
+    )
+    .ok();
 
     // Interactive Event Reactor Loop
     loop {
-        if let Ok(events) = std::event_poll(
-            std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK,
-            100,
-        ) {
+        if let Ok(events) = std::event_poll(std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK, 100) {
             if (events & std::EVENT_TIMER_TICK) != 0 {
                 if camera.mode == CameraMode::Video {
                     let _ = camera.stream_video_frame();
@@ -457,11 +483,20 @@ pub extern "C" fn _start() -> ! {
 
             if (events & std::EVENT_TOUCH_INPUT) != 0 {
                 let mut input = std::InputEvent {
-                    kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000,
+                    kind: 0,
+                    x: 0,
+                    y: 0,
+                    dx: 0,
+                    dy: 0,
+                    scale_milli: 1000,
                 };
                 while std::input_event_poll(&mut input).is_ok() {
                     if input.kind == 4 && input.dy <= -60 && input.y <= 1380 {
-                        std::log(0, "[CAMERA APP] Swipe-up home gesture recognized. Returning to launcher.").ok();
+                        std::log(
+                            0,
+                            "[CAMERA APP] Swipe-up home gesture recognized. Returning to launcher.",
+                        )
+                        .ok();
                         let _ = std::surface_destroy(6, surface);
                         std::exit_with_code(0);
                     }

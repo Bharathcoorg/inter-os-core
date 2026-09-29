@@ -12,35 +12,44 @@ interos-std = { path = "../../sdk/rust/interos-std" }
 [[bin]]
 name = "displayd"
 path = "src/bin/displayd.rs"
+test = false
 
 [[bin]]
 name = "inputd"
 path = "src/bin/inputd.rs"
+test = false
 
 [[bin]]
 name = "storaged"
 path = "src/bin/storaged.rs"
+test = false
 
 [[bin]]
 name = "netd"
 path = "src/bin/netd.rs"
+test = false
 
 [[bin]]
 name = "powerd"
 path = "src/bin/powerd.rs"
+test = false
 
 [[bin]]
 name = "modemd"
 path = "src/bin/modemd.rs"
+test = false
 
 [[bin]]
 name = "audiod"
 path = "src/bin/audiod.rs"
+test = false
 
 [[bin]]
 name = "camerad"
 path = "src/bin/camerad.rs"
+test = false
 
 [[bin]]
 name = "sensord"
 path = "src/bin/sensord.rs"
+test = false
