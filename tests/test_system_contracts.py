@@ -132,6 +132,22 @@ class SystemContractTests(unittest.TestCase):
         self.assertIn("checked_add", aarch)
         self.assertIn("checked_add", riscv)
 
+    def test_service_memory_budget_is_enforced_before_scheduler_registration(self):
+        user = (ROOT / "kernel/src/task/user.rs").read_text(encoding="utf-8")
+        services = (ROOT / "kernel/src/services.rs").read_text(encoding="utf-8")
+        self.assertIn("spawn_user_process_with_limits", user)
+        self.assertIn("resource_limits(service)", user)
+        self.assertIn("address_space_bytes as u64 > limits.max_address_space_bytes", user)
+        self.assertIn("set_limits(process, resource_limits(id))", services)
+
+    def test_package_install_is_a_real_transaction(self):
+        syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
+        self.assertIn("stage_verified(&verified)", syscall)
+        self.assertIn("PACKAGE_BLOB_STORE", syscall)
+        self.assertIn("activate_version_with_policy(pkg_id, verified.version, &verified.policy)", syscall)
+        self.assertIn("store.remove(pkg_id)", syscall)
+        self.assertIn("PACKAGE_REGISTRY.lock().rollback(pkg_id)", syscall)
+
     def test_update_is_fail_closed_and_monotonic(self):
         src = (ROOT / "kernel/src/update.rs").read_text(encoding="utf-8")
         self.assertIn("manifest.version <= current_version", src)
