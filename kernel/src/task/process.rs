@@ -148,18 +148,37 @@ pub fn wake(task: TaskId) -> Result<(), &'static str> {
 }
 
 pub fn wake_package(package_id: &str, user_id: u32) -> usize {
-    let mut table = PROCESS_TABLE.lock();
-    let mut count = 0;
-    for r in table.iter_mut().flatten() {
-        if r.user_id != user_id || !matches!(r.state, ProcessState::Suspended | ProcessState::Background) { continue; }
-        if let Some(task) = THREAD_TABLE.lock().iter().flatten().find(|t| t.process == r.id) {
-            let name = crate::task::SCHEDULER.lock().get_task(task.task).map(|t| t.name).unwrap_or("");
-            if name == package_id {
+    let mut targets = [TaskId(0); MAX_PROCESSES];
+    let mut target_count = 0usize;
+    {
+        let table = PROCESS_TABLE.lock();
+        let threads = THREAD_TABLE.lock();
+        let sched = crate::task::SCHEDULER.lock();
+        for r in table.iter().flatten() {
+            if r.user_id != user_id || !matches!(r.state, ProcessState::Suspended | ProcessState::Background) { continue; }
+            if let Some(thread) = threads.iter().flatten().find(|t| t.process == r.id) {
+                let name = sched.get_task(thread.task).map(|t| t.name).unwrap_or("");
+                if name == package_id && target_count < targets.len() {
+                    targets[target_count] = thread.task;
+                    target_count += 1;
+                }
+            }
+        }
+    }
+    let mut count = 0usize;
+    for task in targets[..target_count].iter().copied() {
+        let process = match process_for_task(task) { Some(p) => p, None => continue };
+        let mut table = PROCESS_TABLE.lock();
+        if let Some(r) = table.iter_mut().flatten().find(|r| r.id == process) {
+            if r.user_id == user_id && r.state == ProcessState::Suspended {
                 r.state = ProcessState::Background;
                 r.background_started_ticks = crate::interrupts::get_system_ticks();
-                crate::task::SCHEDULER.lock().unblock_task(task.task);
                 count += 1;
             }
+        }
+        drop(table);
+        if count > 0 {
+            crate::task::SCHEDULER.lock().unblock_task(task);
         }
     }
     count
