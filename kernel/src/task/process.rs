@@ -55,6 +55,7 @@ pub struct ProcessRecord {
     pub limits: ResourceLimits,
     pub user_id: u32,
     pub background_started_ticks: u64,
+    pub background_cpu_ticks: u64,
     pub background_ipc: u16,
     pub background_network_bytes: u32,
 }
@@ -66,7 +67,7 @@ pub static THREAD_TABLE: Mutex<[Option<ThreadRecord>; MAX_THREADS]> = Mutex::new
 pub fn register_leader(task: TaskId, parent_task: TaskId) -> Option<ProcessId> {
     if task == TaskId(0) { return None; }
     let id = ProcessId(NEXT_PROCESS_ID.fetch_add(1, Ordering::Relaxed));
-    let record = ProcessRecord { id, leader_task: task, parent_task, state: ProcessState::Running, exit_code: 0, thread_count: 1, open_file_count: 0, address_space_bytes: 0, limits: ResourceLimits::default(), user_id: 0, background_started_ticks: 0, background_ipc: 0, background_network_bytes: 0 };
+    let record = ProcessRecord { id, leader_task: task, parent_task, state: ProcessState::Running, exit_code: 0, thread_count: 1, open_file_count: 0, address_space_bytes: 0, limits: ResourceLimits::default(), user_id: 0, background_started_ticks: 0, background_cpu_ticks: 0, background_ipc: 0, background_network_bytes: 0 };
     let mut table = PROCESS_TABLE.lock();
     let Some(slot) = table.iter_mut().find(|slot| slot.is_none()) else { return None; };
     let mut threads = THREAD_TABLE.lock();
@@ -104,6 +105,7 @@ pub fn set_background(task: TaskId, now: u64) -> Result<(), &'static str> {
     if r.state == ProcessState::Running {
         r.state = ProcessState::Background;
         r.background_started_ticks = now;
+        r.background_cpu_ticks = 0;
         r.background_ipc = 0;
         r.background_network_bytes = 0;
         Ok(())
@@ -119,6 +121,7 @@ pub fn set_foreground(task: TaskId) -> Result<(), &'static str> {
     if matches!(r.state, ProcessState::Background | ProcessState::Suspended) {
         r.state = ProcessState::Running;
         r.background_started_ticks = 0;
+        r.background_cpu_ticks = 0;
         r.background_ipc = 0;
         r.background_network_bytes = 0;
         Ok(())
@@ -132,6 +135,7 @@ pub fn suspend(task: TaskId, now: u64) -> Result<(), &'static str> {
     if matches!(r.state, ProcessState::Running | ProcessState::Background) {
         r.state = ProcessState::Suspended;
         r.background_started_ticks = now;
+        r.background_cpu_ticks = 0;
         Ok(())
     } else { Err("process cannot be suspended") }
 }
@@ -143,6 +147,7 @@ pub fn wake(task: TaskId) -> Result<(), &'static str> {
     if r.state == ProcessState::Suspended {
         r.state = ProcessState::Background;
         r.background_started_ticks = crate::interrupts::get_system_ticks();
+        r.background_cpu_ticks = 0;
         Ok(())
     } else { Err("process is not suspended") }
 }
@@ -212,12 +217,22 @@ pub fn consume_background_network(task: TaskId, bytes: usize) -> Result<(), &'st
     Ok(())
 }
 
-pub fn enforce_background_budget(now: u64) -> usize {
+pub fn account_background_cpu_tick(task: TaskId) {
+    let Some(process) = process_for_task(task) else { return; };
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(r) = table.iter_mut().flatten().find(|r| r.id == process) {
+        if r.state == ProcessState::Background {
+            r.background_cpu_ticks = r.background_cpu_ticks.saturating_add(1);
+        }
+    }
+}
+
+pub fn enforce_background_budget() -> usize {
     let mut table = PROCESS_TABLE.lock();
     let mut suspended = 0;
     for r in table.iter_mut().flatten() {
-        if r.state == ProcessState::Background && r.background_started_ticks != 0
-            && now.saturating_sub(r.background_started_ticks) >= r.limits.max_background_cpu_ticks
+        if r.state == ProcessState::Background
+            && r.background_cpu_ticks >= r.limits.max_background_cpu_ticks
         {
             r.state = ProcessState::Suspended;
             suspended += 1;
