@@ -1,6 +1,6 @@
 //! Inter OS Native Sovereign Music & Hi-Fi Audio Synthesizer
 //!
-//! Full production on-device audio studio & media player executing in Ring 3 (User Mode):
+//! Native on-device audio studio & media player executing in Ring 3 (User Mode):
 //! - Multi-waveform programmable audio synthesizer:
 //!   * Waveform::Sine: Pure fundamental acoustic tone
 //!   * Waveform::Square: Retro chiptune synthesizer
