@@ -2588,6 +2588,46 @@ pub fn sys_app_restart(app_id: &str) -> Result<TaskId, SyscallResult> {
     sys_app_launch(app_id)
 }
 
+pub fn dev_uninstall_verified_rapp(pkg_id: &str) -> Result<(), SyscallResult> {
+    if pkg_id.is_empty() || pkg_id.len() > crate::package::rapp::RAPP_MAX_PACKAGE_ID_LEN
+        || pkg_id.contains('/') || pkg_id.contains('\\') || pkg_id.contains("..") {
+        return Err(SyscallResult::InvalidArguments);
+    }
+    if crate::package::first_party_package(pkg_id).is_some() {
+        return Err(SyscallResult::PermissionDenied);
+    }
+    let previous_entry = {
+        let registry = crate::package::PACKAGE_REGISTRY.lock();
+        registry.entries().iter().find(|e| e.package_id == pkg_id).cloned()
+    }.ok_or(SyscallResult::FileNotFound)?;
+    {
+        let sched = SCHEDULER.lock();
+        if sched.has_live_task_named(pkg_id) {
+            return Err(SyscallResult::NotReady);
+        }
+    }
+    {
+        let mut registry = crate::package::PACKAGE_REGISTRY.lock();
+        registry.uninstall(pkg_id).map_err(|_| SyscallResult::DeviceError)?;
+    }
+    let previous_blob = {
+        let store = crate::package::PACKAGE_BLOB_STORE.lock();
+        store.get(pkg_id).cloned()
+    };
+    if crate::package::PACKAGE_BLOB_STORE.lock().remove(pkg_id).is_err() {
+        let _ = crate::package::PACKAGE_REGISTRY.lock().restore_entry(previous_entry);
+        return Err(SyscallResult::DeviceError);
+    }
+    if crate::fs::VFS.lock().remove_app_storage(pkg_id).is_err() {
+        if let Some(blob) = previous_blob {
+            let _ = crate::package::PACKAGE_BLOB_STORE.lock().put(&blob.package_id, blob.version, &blob.bytes);
+        }
+        let _ = crate::package::PACKAGE_REGISTRY.lock().restore_entry(previous_entry);
+        return Err(SyscallResult::DeviceError);
+    }
+    Ok(())
+}
+
 pub fn sys_package_uninstall(cap_slot: usize, pkg_id: &str, user_consent: bool) -> Result<(), SyscallResult> {
     if !user_consent { return Err(SyscallResult::PermissionDenied); }
     let current = {
