@@ -121,7 +121,7 @@ impl PackageRegistry {
             self.entries.push(PackageEntry {
                 package_id: String::from(pkg.package_id),
                 generation: 0,
-                state: PackageState::Staged,
+                state: PackageState::Active,
                 version: (1, 0, 0),
             });
         }
@@ -270,6 +270,14 @@ impl PackageRegistry {
     }
 
     pub fn entries(&self) -> &[PackageEntry] { &self.entries }
+
+    pub fn active_entries(&self) -> Vec<PackageEntry> {
+        self.entries
+            .iter()
+            .filter(|entry| matches!(entry.state, PackageState::Active))
+            .cloned()
+            .collect()
+    }
 }
 
 pub static PACKAGE_REGISTRY: Mutex<PackageRegistry> = Mutex::new(PackageRegistry::new());
