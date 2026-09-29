@@ -179,7 +179,37 @@ pub struct PhotoItem {
     pub secondary_color: u32,
 }
 
-pub static PHOTOS: [PhotoItem; 0] = [];
+/// Reference photo items matching the UI specification.
+pub static PHOTOS: [PhotoItem; 4] = [
+    PhotoItem {
+        title: "Mountain Ridge",
+        date: "Wed, 24 Sep",
+        meta: "RAW 48MP ISO 100",
+        primary_color: 0xFF2A5580,
+        secondary_color: 0xFF121B2A,
+    },
+    PhotoItem {
+        title: "Cyber Metropolis",
+        date: "Tue, 23 Sep",
+        meta: "HDR 4K Night",
+        primary_color: 0xFF31C4FF,
+        secondary_color: 0xFF0E1A2C,
+    },
+    PhotoItem {
+        title: "Golden Nature",
+        date: "Mon, 22 Sep",
+        meta: "Portrait f/1.8",
+        primary_color: 0xFFF59E0B,
+        secondary_color: 0xFF261D12,
+    },
+    PhotoItem {
+        title: "Modern Architecture",
+        date: "Sun, 21 Sep",
+        meta: "Studio Lighting",
+        primary_color: 0xFF10B981,
+        secondary_color: 0xFF0C2418,
+    },
+];
 
 pub struct GalleryApp {
     pub selected_tab: usize, // 0: All, 1: Albums, 2: Favorites

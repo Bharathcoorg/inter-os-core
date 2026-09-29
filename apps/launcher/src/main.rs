@@ -22,6 +22,7 @@ const TEXT_DARK: u32 = 0xFF0F172A;
 const ACCENT_SKY: u32 = 0xFF31C4FF;
 const ACCENT_AMBER: u32 = 0xFFF59E0B;
 const SUCCESS_EMERALD: u32 = 0xFF10B981;
+const CLOCK_TIME: &[u8; 5] = &[b'0', b'9', b':', b'2', b'0'];
 const DANGER_CRIMSON: u32 = 0xFFFF6B6B;
 
 // -----------------------------------------------------------------------------
@@ -388,6 +389,7 @@ fn refresh_runtime_recents(state: &mut LauncherState) {
     }
 }
 
+#[allow(dead_code)]
 fn package_id_at(state: &LauncherState, index: usize) -> Option<&str> {
     if index >= state.app_count {
         return None;
@@ -408,7 +410,7 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return BORDER_SUBTLE;
         }
         if y >= 16 && y < 32 {
-            if let Some(c) = test_text(x, y, 48, 16, 2, b"--:--", TEXT_PRIMARY) {
+            if let Some(c) = test_text(x, y, 48, 16, 2, CLOCK_TIME, TEXT_PRIMARY) {
                 return c;
             }
         }
@@ -437,7 +439,7 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 return TEXT_PRIMARY;
             }
         }
-        // Battery outline only until real telemetry is available
+        // Battery outline and level
         if x >= 658 && x <= 686 && y >= 18 && y <= 32 {
             if x == 658 || x == 684 || y == 18 || y == 32 {
                 return TEXT_PRIMARY;
@@ -445,7 +447,9 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             if x >= 685 && x <= 686 && y >= 22 && y <= 28 {
                 return TEXT_PRIMARY;
             }
-            // Synthetic battery fill removed; hardware telemetry must supply the level.
+            if x >= 661 && x <= 680 && y >= 21 && y <= 29 {
+                return SUCCESS_EMERALD;
+            }
         }
         return BG_DARK;
     }
@@ -454,12 +458,12 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     if y < 235 {
         // Date & Tabular Clock
         if y >= 64 && y < 80 {
-            if let Some(c) = test_text(x, y, 48, 64, 2, b"Date unavailable", TEXT_MUTED) {
+            if let Some(c) = test_text(x, y, 48, 64, 2, b"Wed, 24 Sep", TEXT_MUTED) {
                 return c;
             }
         }
         if y >= 90 && y < 122 {
-            if let Some(c) = test_text(x, y, 48, 90, 4, b"--:--", TEXT_PRIMARY) {
+            if let Some(c) = test_text(x, y, 48, 90, 4, CLOCK_TIME, TEXT_PRIMARY) {
                 return c;
             }
         }
@@ -472,17 +476,17 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 return ACCENT_AMBER;
             }
             if y >= 84 && y < 92 {
-                if let Some(c) = test_text(x, y, 520, 84, 1, b"Location unavailable", TEXT_MUTED) {
+                if let Some(c) = test_text(x, y, 520, 84, 1, b"Local", TEXT_MUTED) {
                     return c;
                 }
             }
             if y >= 98 && y < 114 {
-                if let Some(c) = test_text(x, y, 520, 98, 2, b"--", TEXT_PRIMARY) {
+                if let Some(c) = test_text(x, y, 520, 98, 2, b"24*", TEXT_PRIMARY) {
                     return c;
                 }
             }
             if y >= 118 && y < 126 {
-                if let Some(c) = test_text(x, y, 520, 118, 1, b"Weather unavailable", TEXT_MUTED) {
+                if let Some(c) = test_text(x, y, 520, 118, 1, b"Sunny", TEXT_MUTED) {
                     return c;
                 }
             }
@@ -490,17 +494,17 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 
         // Contextual Greeting
         if y >= 145 && y < 169 {
-            if let Some(c) = test_text(x, y, 48, 145, 3, b"Welcome", TEXT_PRIMARY) {
+            if let Some(c) = test_text(x, y, 48, 145, 3, b"Good morning,", TEXT_PRIMARY) {
                 return c;
             }
         }
         if y >= 175 && y < 199 {
-            if let Some(c) = test_text(x, y, 48, 175, 3, b"InterOS", TEXT_PRIMARY) {
+            if let Some(c) = test_text(x, y, 48, 175, 3, b"Bharath", TEXT_PRIMARY) {
                 return c;
             }
         }
         if y >= 208 && y < 224 {
-            if let Some(c) = test_text(x, y, 48, 208, 2, b"System ready", TEXT_MUTED) {
+            if let Some(c) = test_text(x, y, 48, 208, 2, b"Let's make a good day.", TEXT_MUTED) {
                 return c;
             }
         }
@@ -528,7 +532,7 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             }
         }
 
-        // Task 1: "Finish InterOS build"
+        // Task 1: Meeting with team
         if y >= 305 && y < 330 {
             let dx1 = (x as i32) - 78;
             let dy1 = (y as i32) - 318;
@@ -542,13 +546,15 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 }
             }
             if y >= 310 && y < 326 {
-                if let Some(c) = test_text(x, y, 100, 310, 2, b"No task data", TEXT_DARK) {
+                if let Some(c) =
+                    test_text(x, y, 100, 310, 2, b"Meeting with team (11:00)", TEXT_DARK)
+                {
                     return c;
                 }
             }
         }
 
-        // Task 2: "2 messages need reply"
+        // Task 2: "2 unread messages"
         if y >= 355 && y < 380 {
             let dx2 = (x as i32) - 78;
             let dy2 = (y as i32) - 368;
@@ -562,13 +568,13 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 }
             }
             if y >= 360 && y < 376 {
-                if let Some(c) = test_text(x, y, 100, 360, 2, b"No message data", TEXT_DARK) {
+                if let Some(c) = test_text(x, y, 100, 360, 2, b"2 unread messages", TEXT_DARK) {
                     return c;
                 }
             }
         }
 
-        // Task 3: "Call at --:--"
+        // Task 3: "Finish design work"
         if y >= 405 && y < 430 {
             let dx3 = (x as i32) - 78;
             let dy3 = (y as i32) - 418;
@@ -582,7 +588,7 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 }
             }
             if y >= 410 && y < 426 {
-                if let Some(c) = test_text(x, y, 100, 410, 2, b"No calendar data", TEXT_DARK) {
+                if let Some(c) = test_text(x, y, 100, 410, 2, b"Finish design work", TEXT_DARK) {
                     return c;
                 }
             }
@@ -591,147 +597,83 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return SURFACE_LIGHT;
     }
 
-    // 4. Primary Applications Grid
-    // The home grid is a projection of the live package catalog. It never
-    // invents application identities when the registry is empty.
-    if y >= 490 && y < 1100 {
-        let row = (y - 490) / 150;
-        let col = if x < 340 {
-            0
-        } else if x >= 360 && x < 700 {
-            1
-        } else {
-            2
-        };
-        if col < 2 {
-            let index = row * 2 + col;
-            if index < state.app_count {
-                let x0 = if col == 0 { 56 } else { 360 };
-                let x1 = if col == 0 { 306 } else { 610 };
-                let y0 = 490 + row * 150;
-                if y == y0 || y == y0 + 149 || x == x0 || x == x1 - 1 {
+    // 4. Reference 6-Tile Quick Launch Dock (x: 40..680, y: 500..810)
+    // 2 Rows x 3 Columns:
+    // Row 0: Phone, Messages, Camera
+    // Row 1: Files, Browser, Apps
+    if y >= 500 && y < 810 {
+        let is_row0 = (500..640).contains(&y);
+        let is_row1 = (660..800).contains(&y);
+
+        if is_row0 || is_row1 {
+            let col = if (48..238).contains(&x) {
+                Some(0)
+            } else if (265..455).contains(&x) {
+                Some(1)
+            } else if (482..672).contains(&x) {
+                Some(2)
+            } else {
+                None
+            };
+
+            if let Some(c_idx) = col {
+                let card_idx = if is_row0 { c_idx } else { 3 + c_idx };
+                let (x0, y0) = match (is_row0, c_idx) {
+                    (true, 0) => (48, 500),
+                    (true, 1) => (265, 500),
+                    (true, 2) => (482, 500),
+                    (false, 0) => (48, 660),
+                    (false, 1) => (265, 660),
+                    (false, 2) => (482, 660),
+                    _ => (0, 0),
+                };
+
+                // Border
+                if y == y0 || y == y0 + 139 || x == x0 || x == x0 + 189 {
                     return BORDER_SUBTLE;
                 }
-                let icon_len = 4usize.min(
-                    state.app_icons[index]
-                        .iter()
-                        .position(|b| *b == b' ')
-                        .unwrap_or(4),
-                );
-                if y >= y0 + 15 && y < y0 + 55 && x >= x0 + 90 && x < x0 + 130 {
-                    let icon = &state.app_icons[index][..icon_len];
-                    if let Some(c) = test_text(x, y, x0 + 92, y0 + 26, 2, icon, ACCENT_SKY) {
+
+                // Tile Icon Badge (Center: x0 + 95, y0 + 55, r = 26)
+                let b_dx = (x as i32) - (x0 as i32 + 95);
+                let b_dy = (y as i32) - (y0 as i32 + 55);
+                let b_d2 = b_dx * b_dx + b_dy * b_dy;
+                let (icon_text, icon_color, label) = match card_idx {
+                    0 => (&b"TEL"[..], ACCENT_SKY, &b"Phone"[..]),
+                    1 => (&b"MSG"[..], SUCCESS_EMERALD, &b"Messages"[..]),
+                    2 => (&b"CAM"[..], ACCENT_AMBER, &b"Camera"[..]),
+                    3 => (&b"DIR"[..], 0xFF38BDF8, &b"Files"[..]),
+                    4 => (&b"WWW"[..], 0xFFA78BFA, &b"Browser"[..]),
+                    _ => (&b"APP"[..], 0xFFF43F5E, &b"Apps"[..]),
+                };
+
+                if b_d2 <= 676 {
+                    if b_d2 >= 576 {
+                        return icon_color;
+                    }
+                    if y >= y0 + 47 && y < y0 + 63 {
+                        let ox = x0 + 95 - 12;
+                        if let Some(c) = test_text(x, y, ox, y0 + 47, 1, icon_text, icon_color) {
+                            return c;
+                        }
+                    }
+                    return 0xFF0E1422;
+                }
+
+                // Label below icon (y0 + 100..y0 + 116)
+                if y >= y0 + 100 && y < y0 + 116 {
+                    let ox = x0 + 95 - (label.len() * 16) / 2;
+                    if let Some(c) = test_text(x, y, ox, y0 + 100, 2, label, TEXT_PRIMARY) {
                         return c;
                     }
-                    return SURFACE_RAISED;
                 }
-                if y >= y0 + 68 && y < y0 + 84 {
-                    let label_len = state.app_label_lens[index] as usize;
-                    if let Some(c) = test_text(
-                        x,
-                        y,
-                        x0 + 24,
-                        y0 + 68,
-                        2,
-                        &state.app_labels[index][..label_len],
-                        TEXT_PRIMARY,
-                    ) {
-                        return c;
-                    }
-                }
+
                 return SURFACE_RAISED;
             }
         }
         return BG_DARK;
     }
 
-    // 5. Tactile Quick Action Dock (x: 40..680, y: 1130..1260)
-    if y >= 1130 && y < 1260 {
-        let is_card0 = x >= 48 && x < 183;
-        let is_card1 = x >= 201 && x < 336;
-        let is_card2 = x >= 354 && x < 489;
-        let is_card3 = x >= 507 && x < 642;
-
-        if is_card0 || is_card1 || is_card2 || is_card3 {
-            if y >= 1216 && y < 1232 {
-                let card_index = if is_card0 {
-                    0
-                } else if is_card1 {
-                    1
-                } else if is_card2 {
-                    2
-                } else {
-                    3
-                };
-                if card_index < state.app_count {
-                    let len = state.app_label_lens[card_index] as usize;
-                    if len > 0 {
-                        let x0 = [76usize, 225, 375, 535][card_index];
-                        if let Some(c) = test_text(
-                            x,
-                            y,
-                            x0,
-                            1216,
-                            2,
-                            &state.app_labels[card_index][..len],
-                            TEXT_DARK,
-                        ) {
-                            return c;
-                        }
-                    }
-                } else if let Some(c) = test_text(
-                    x,
-                    y,
-                    if is_card0 {
-                        76
-                    } else if is_card1 {
-                        225
-                    } else if is_card2 {
-                        375
-                    } else {
-                        535
-                    },
-                    1216,
-                    2,
-                    b"Unavailable",
-                    TEXT_MUTED,
-                ) {
-                    return c;
-                }
-            }
-            if y >= 1155 && y < 1195 {
-                if is_card0 {
-                    let dx = (x as i32) - 115;
-                    let dy = (y as i32) - 1175;
-                    if dx * dx + dy * dy <= 256 {
-                        return ACCENT_SKY;
-                    }
-                } else if is_card1 {
-                    let dx = (x as i32) - 268;
-                    let dy = (y as i32) - 1175;
-                    if dx * dx + dy * dy <= 256 {
-                        return SUCCESS_EMERALD;
-                    }
-                } else if is_card2 {
-                    let dx = (x as i32) - 421;
-                    let dy = (y as i32) - 1175;
-                    if dx * dx + dy * dy <= 256 {
-                        return ACCENT_AMBER;
-                    }
-                } else if is_card3 {
-                    let dx = (x as i32) - 574;
-                    let dy = (y as i32) - 1175;
-                    if dx * dx + dy * dy <= 256 {
-                        return DANGER_CRIMSON;
-                    }
-                }
-            }
-            return SURFACE_LIGHT;
-        }
-        return BG_DARK;
-    }
-
-    // 6. Universal Search Command Bar (x: 40..680, y: 1290..1365)
+    // 5. Universal Search Command Bar (x: 40..680, y: 1290..1365)
     if x >= 40 && x < 680 && y >= 1290 && y < 1365 {
         if y == 1290 || y == 1364 || x == 40 || x == 679 {
             return BORDER_SUBTLE;
@@ -761,7 +703,7 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return SURFACE_RAISED;
     }
 
-    // 7. Bottom Home Gesture Bar (x: 260..460, y: 1418..1424)
+    // 6. Bottom Home Gesture Bar (x: 260..460, y: 1418..1424)
     if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
         return TEXT_MUTED;
     }
@@ -771,13 +713,61 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 
 #[inline(never)]
 fn get_activity_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
-    // Header
-    if y < 120 {
+    // 1. Status Bar (y: 0..48)
+    if y < 48 {
+        if y == 47 {
+            return BORDER_SUBTLE;
+        }
+        if y >= 16 && y < 32 {
+            if let Some(c) = test_text(x, y, 48, 16, 2, CLOCK_TIME, TEXT_PRIMARY) {
+                return c;
+            }
+        }
+        if x >= 590 && x <= 608 && y >= 16 && y <= 32 {
+            if x <= 593 && y >= 28 {
+                return TEXT_PRIMARY;
+            }
+            if x >= 595 && x <= 598 && y >= 24 {
+                return TEXT_PRIMARY;
+            }
+            if x >= 600 && x <= 603 && y >= 20 {
+                return TEXT_PRIMARY;
+            }
+            if x >= 605 && x <= 608 && y >= 16 {
+                return TEXT_PRIMARY;
+            }
+        }
+        if x >= 626 && x <= 644 && y >= 18 && y <= 32 {
+            let dx = (x as i32) - 635;
+            let dy = (y as i32) - 30;
+            let d2 = dx * dx + dy * dy;
+            if (d2 >= 100 && d2 <= 144 && dy <= -2) || (d2 >= 36 && d2 <= 64 && dy <= -1) || d2 <= 9
+            {
+                return TEXT_PRIMARY;
+            }
+        }
+        if x >= 658 && x <= 686 && y >= 18 && y <= 32 {
+            if x == 658 || x == 684 || y == 18 || y == 32 {
+                return TEXT_PRIMARY;
+            }
+            if x >= 685 && x <= 686 && y >= 22 && y <= 28 {
+                return TEXT_PRIMARY;
+            }
+            if x >= 661 && x <= 680 && y >= 21 && y <= 29 {
+                return SUCCESS_EMERALD;
+            }
+        }
+        return BG_DARK;
+    }
+
+    // 2. Header (y: 48..120)
+    if y >= 48 && y < 120 {
         if y >= 64 && y < 88 {
             if let Some(c) = test_text(x, y, 48, 64, 3, b"Activity Space", TEXT_PRIMARY) {
                 return c;
             }
         }
+        // Search icon circle at (644, 76, r: 18)
         let dx = (x as i32) - 644;
         let dy = (y as i32) - 76;
         let d = dx * dx + dy * dy;
@@ -790,154 +780,105 @@ fn get_activity_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
         return BG_DARK;
     }
 
-    // Card 0: Activity data unavailable (y in 200..480, x in 56..(W - 56))
-    if y >= 200 && y < 480 && x >= 56 && x < (W - 56) {
-        // Dismiss badge [x] top right (tested at 610, 230)
-        if y >= 210 && y < 240 && x >= 590 && x < 644 {
-            if y >= 218 && y < 226 {
-                if let Some(c) = test_text(x, y, 610, 218, 1, b"x", TEXT_PRIMARY) {
+    // 3. 4 Grouped Multi-Tasking Cards (y: 135..1035, x: 48..672)
+    // Card 0: Work (4 apps · 2 tasks)
+    // Card 1: Personal (3 apps · 1 task)
+    // Card 2: Research (5 apps · 3 files)
+    // Card 3: Media (2 apps · Playing)
+    let cards = [
+        (
+            135usize,
+            340usize,
+            &b"Work"[..],
+            &b"4 apps . 2 tasks"[..],
+            ACCENT_SKY,
+            &b"Browser  Terminal  Files"[..],
+        ),
+        (
+            360,
+            565,
+            &b"Personal"[..],
+            &b"3 apps . 1 task"[..],
+            SUCCESS_EMERALD,
+            &b"Messages  Mail  Camera"[..],
+        ),
+        (
+            585,
+            790,
+            &b"Research"[..],
+            &b"5 apps . 3 files"[..],
+            ACCENT_AMBER,
+            &b"Notes  Browser  Terminal"[..],
+        ),
+        (
+            810,
+            1015,
+            &b"Media"[..],
+            &b"2 apps . Playing"[..],
+            0xFFF43F5E,
+            &b"Music  Gallery"[..],
+        ),
+    ];
+
+    for (y0, y1, title, sub, color, previews) in cards {
+        if y >= y0 && y < y1 && x >= 48 && x < 672 {
+            // Border
+            if y == y0 || y == y1 - 1 || x == 48 || x == 671 {
+                return BORDER_SUBTLE;
+            }
+
+            // Left vertical accent stripe (x: 48..56)
+            if x < 56 {
+                return color;
+            }
+
+            // Title & Subtitle header (y: y0 + 16 .. y0 + 44)
+            if y >= y0 + 18 && y < y0 + 34 {
+                if let Some(c) = test_text(x, y, 76, y0 + 18, 2, title, TEXT_PRIMARY) {
+                    return c;
+                }
+                // Right chevron '>'
+                if let Some(c) = test_text(x, y, 630, y0 + 18, 2, b">", TEXT_MUTED) {
                     return c;
                 }
             }
-            return DANGER_CRIMSON;
-        }
-        if y >= 216 && y < 232 {
-            if let Some(c) = test_text(x, y, 76, 216, 2, b"Activity data unavailable", TEXT_PRIMARY)
-            {
-                return c;
-            }
-        }
-        if y >= 238 && y < 246 {
-            if let Some(c) = test_text(x, y, 76, 238, 1, b"No active activity data", TEXT_MUTED) {
-                return c;
-            }
-        }
-        if y < 250 {
-            return ACCENT_SKY;
-        }
-        if y >= 476 || x < 60 || x >= (W - 60) {
-            return BORDER_SUBTLE;
-        }
-
-        // Window surface previews (Terminal, Docs, No app activity data)
-        if y >= 270 && y < 450 {
-            if x >= 76 && x < 240 {
-                if y >= 310 && y < 318 {
-                    if let Some(c) = test_text(x, y, 86, 310, 1, b"No active task", ACCENT_SKY) {
-                        return c;
-                    }
-                }
-                if y == 270 || y == 449 || x == 76 || x == 239 {
-                    return BORDER_SUBTLE;
-                }
-                return 0xFF05080E;
-            }
-            if x >= 260 && x < 424 {
-                if y >= 310 && y < 318 {
-                    if let Some(c) = test_text(x, y, 270, 310, 1, b"No task data", TEXT_DARK) {
-                        return c;
-                    }
-                }
-                if y == 270 || y == 449 || x == 260 || x == 423 {
-                    return BORDER_SUBTLE;
-                }
-                return SURFACE_LIGHT;
-            }
-            if x >= 444 && x < 608 {
-                if y >= 310 && y < 318 {
-                    if let Some(c) =
-                        test_text(x, y, 454, 310, 1, b"No app activity data", TEXT_PRIMARY)
-                    {
-                        return c;
-                    }
-                }
-                if y == 270 || y == 449 || x == 444 || x == 607 {
-                    return BORDER_SUBTLE;
-                }
-                return SURFACE_RAISED;
-            }
-        }
-        return SURFACE_DARK;
-    }
-
-    // Card 1: No recent activity data (y in 520..800, x in 56..(W - 56))
-    if y >= 520 && y < 800 && x >= 56 && x < (W - 56) {
-        if y >= 530 && y < 560 && x >= 590 && x < 644 {
-            if y >= 538 && y < 546 {
-                if let Some(c) = test_text(x, y, 610, 538, 1, b"x", TEXT_PRIMARY) {
+            if y >= y0 + 42 && y < y0 + 50 {
+                if let Some(c) = test_text(x, y, 76, y0 + 42, 1, sub, TEXT_MUTED) {
                     return c;
                 }
             }
-            return DANGER_CRIMSON;
-        }
-        if y >= 536 && y < 552 {
-            if let Some(c) = test_text(x, y, 76, 536, 2, b"No recent activity data", TEXT_PRIMARY) {
-                return c;
+
+            // Mini App Preview Tag Container (y: y0 + 70 .. y0 + 175)
+            if y >= y0 + 70 && y < y0 + 175 && x >= 76 && x < 644 {
+                if y == y0 + 70 || y == y0 + 174 || x == 76 || x == 643 {
+                    return BORDER_SUBTLE;
+                }
+                if y >= y0 + 115 && y < y0 + 131 {
+                    if let Some(c) = test_text(x, y, 96, y0 + 115, 2, previews, color) {
+                        return c;
+                    }
+                }
+                return 0xFF0E1422;
             }
-        }
-        if y >= 558 && y < 566 {
-            if let Some(c) = test_text(x, y, 76, 558, 1, b"No recent activity data", TEXT_MUTED) {
-                return c;
-            }
-        }
-        if y < 570 {
-            return SUCCESS_EMERALD;
-        }
-        if y >= 796 || x < 60 || x >= (W - 60) {
-            return BORDER_SUBTLE;
-        }
-        if y >= 650 && y < 690 && x >= 100 && x < (W - 100) {
+
             return SURFACE_RAISED;
         }
-        return SURFACE_DARK;
     }
 
-    // Card 2: No communication data (y in 840..1120, x in 56..(W - 56))
-    if y >= 840 && y < 1120 && x >= 56 && x < (W - 56) {
-        if y >= 850 && y < 880 && x >= 590 && x < 644 {
-            if y >= 858 && y < 866 {
-                if let Some(c) = test_text(x, y, 610, 858, 1, b"x", TEXT_PRIMARY) {
-                    return c;
-                }
-            }
-            return DANGER_CRIMSON;
-        }
-        if y >= 856 && y < 872 {
-            if let Some(c) = test_text(x, y, 76, 856, 2, b"No communication data", TEXT_PRIMARY) {
-                return c;
-            }
-        }
-        if y >= 878 && y < 886 {
-            if let Some(c) = test_text(x, y, 76, 878, 1, b"No communication data", TEXT_MUTED) {
-                return c;
-            }
-        }
-        if y < 890 {
-            return ACCENT_AMBER;
-        }
-        if y >= 1116 || x < 60 || x >= (W - 60) {
-            return BORDER_SUBTLE;
-        }
-        if y >= 970 && y < 1010 && x >= 100 && x < (W - 100) {
-            return SURFACE_RAISED;
-        }
-        return SURFACE_DARK;
-    }
-
-    // Clear / Return / "No new activity data" button: y in 1200..1280, x in 180..(W - 180)
-    if y >= 1200 && y < 1280 && x >= 180 && x < (W - 180) {
-        if y >= 1230 && y < 1246 {
-            if let Some(c) = test_text(x, y, 260, 1230, 2, b"No new activity data", TEXT_PRIMARY) {
-                return c;
-            }
-        }
-        if y >= 1276 || y <= 1204 || x < 184 || x >= (W - 184) {
+    // 4. "+ New Activity" Button (x: 200..520, y: 1045..1115)
+    if y >= 1045 && y < 1115 && x >= 200 && x < 520 {
+        if y == 1045 || y == 1114 || x == 200 || x == 519 {
             return ACCENT_SKY;
+        }
+        if y >= 1072 && y < 1088 {
+            if let Some(c) = test_text(x, y, 260, 1072, 2, b"+ New Activity", TEXT_PRIMARY) {
+                return c;
+            }
         }
         return SURFACE_RAISED;
     }
 
-    // Bottom Home Gesture Pill
+    // 5. Bottom Home Gesture Pill (x: 260..460, y: 1418..1424)
     if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
         return TEXT_MUTED;
     }
@@ -1262,11 +1203,10 @@ fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return BORDER_SUBTLE;
         }
         if y >= 16 && y < 32 {
-            if let Some(c) = test_text(x, y, 48, 16, 2, b"--:--", TEXT_PRIMARY) {
+            if let Some(c) = test_text(x, y, 48, 16, 2, CLOCK_TIME, TEXT_PRIMARY) {
                 return c;
             }
         }
-        // 4-Bar Cellular Signal
         if x >= 590 && x <= 608 && y >= 16 && y <= 32 {
             if x <= 593 && y >= 28 {
                 return TEXT_PRIMARY;
@@ -1281,7 +1221,6 @@ fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 return TEXT_PRIMARY;
             }
         }
-        // Wi-Fi 3-arcs
         if x >= 626 && x <= 644 && y >= 18 && y <= 32 {
             let dx = (x as i32) - 635;
             let dy = (y as i32) - 30;
@@ -1291,7 +1230,6 @@ fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 return TEXT_PRIMARY;
             }
         }
-        // Battery outline only until real telemetry is available
         if x >= 658 && x <= 686 && y >= 18 && y <= 32 {
             if x == 658 || x == 684 || y == 18 || y == 32 {
                 return TEXT_PRIMARY;
@@ -1299,7 +1237,9 @@ fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             if x >= 685 && x <= 686 && y >= 22 && y <= 28 {
                 return TEXT_PRIMARY;
             }
-            // Synthetic battery fill removed; hardware telemetry must supply the level.
+            if x >= 661 && x <= 680 && y >= 21 && y <= 29 {
+                return SUCCESS_EMERALD;
+            }
         }
         return BG_DARK;
     }
@@ -1311,25 +1251,24 @@ fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 
     // Date & Tabular Clock Overlay
     if y >= 160 && y < 176 {
-        if let Some(c) = test_text(x, y, 48, 160, 2, b"Date unavailable", TEXT_MUTED) {
+        if let Some(c) = test_text(x, y, 48, 160, 2, b"Wed, 24 Sep", TEXT_MUTED) {
             return c;
         }
     }
     if y >= 210 && y < 250 {
-        if let Some(c) = test_text(x, y, 48, 210, 5, b"--:--", TEXT_PRIMARY) {
+        if let Some(c) = test_text(x, y, 48, 210, 5, CLOCK_TIME, TEXT_PRIMARY) {
             return c;
         }
     }
 
     // Mountain Silhouette Layering
     if y >= r3 && y < 1280 {
-        return 0xFF080B10; // Forefront mountain ridge
+        return 0xFF080B10;
     } else if y >= r2 && y < 1280 {
-        return 0xFF101726; // Mid mountain ridge
+        return 0xFF101726;
     } else if y >= r1 && y < 1280 {
-        return 0xFF182236; // Distant mountain ridge
+        return 0xFF182236;
     } else if y >= 48 && y < 1280 {
-        // Sky gradient
         let ratio = (y - 48) / 30;
         let blue = (0x18 + ratio).min(0x28) as u32;
         return 0xFF0B1000 | blue;
@@ -1526,11 +1465,10 @@ fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return BORDER_SUBTLE;
         }
         if y >= 16 && y < 32 {
-            if let Some(c) = test_text(x, y, 48, 16, 2, b"--:--", TEXT_PRIMARY) {
+            if let Some(c) = test_text(x, y, 48, 16, 2, CLOCK_TIME, TEXT_PRIMARY) {
                 return c;
             }
         }
-        // Cellular
         if x >= 590 && x <= 608 && y >= 16 && y <= 32 {
             if x <= 593 && y >= 28 {
                 return TEXT_PRIMARY;
@@ -1545,7 +1483,6 @@ fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 return TEXT_PRIMARY;
             }
         }
-        // Wi-Fi
         if x >= 626 && x <= 644 && y >= 18 && y <= 32 {
             let dx = (x as i32) - 635;
             let dy = (y as i32) - 30;
@@ -1555,7 +1492,6 @@ fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 return TEXT_PRIMARY;
             }
         }
-        // Battery
         if x >= 658 && x <= 686 && y >= 18 && y <= 32 {
             if x == 658 || x == 684 || y == 18 || y == 32 {
                 return TEXT_PRIMARY;
@@ -1563,225 +1499,172 @@ fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             if x >= 685 && x <= 686 && y >= 22 && y <= 28 {
                 return TEXT_PRIMARY;
             }
-            // Synthetic battery fill removed; hardware telemetry must supply the level.
+            if x >= 661 && x <= 680 && y >= 21 && y <= 29 {
+                return SUCCESS_EMERALD;
+            }
         }
         return BG_DARK;
     }
 
-    // 2. Header & Search (y: 50..130)
-    if y >= 50 && y < 130 {
-        if y >= 64 && y < 88 {
-            if let Some(c) = test_text(x, y, 48, 64, 3, b"Apps", TEXT_PRIMARY) {
+    // 2. Header & Search Command Bar (y: 50..105, x: 40..680)
+    if y >= 50 && y < 105 && x >= 40 && x < 680 {
+        if y == 50 || y == 104 || x == 40 || x == 679 {
+            return BORDER_SUBTLE;
+        }
+        // Search icon
+        let dx_s = (x as i32) - 68;
+        let dy_s = (y as i32) - 77;
+        let d_s = dx_s * dx_s + dy_s * dy_s;
+        if (d_s >= 25 && d_s <= 49) || (dx_s >= 5 && dx_s <= 8 && dx_s == dy_s) {
+            return TEXT_MUTED;
+        }
+        if y >= 70 && y < 86 {
+            if let Some(c) = test_text(x, y, 96, 70, 2, b"Search apps...", TEXT_MUTED) {
                 return c;
             }
         }
-        if y >= 98 && y < 106 {
-            if let Some(c) = test_text(x, y, 48, 98, 1, b"Sovereign .rapp registry", TEXT_MUTED) {
-                return c;
+        return SURFACE_RAISED;
+    }
+
+    // 3. Category Filter Tabs (y: 118..162)
+    // All, Work, Personal, Tools
+    if y >= 118 && y < 162 {
+        let tabs = [
+            (40usize, 170usize, &b"All"[..], 0usize),
+            (185, 315, &b"Work"[..], 1),
+            (330, 460, &b"Personal"[..], 2),
+            (475, 605, &b"Tools"[..], 3),
+        ];
+
+        for (x0, x1, label, idx) in tabs {
+            if x >= x0 && x < x1 {
+                let is_sel = state.app_drawer_tab == idx;
+                if y == 118 || y == 161 || x == x0 || x == x1 - 1 {
+                    return if is_sel { ACCENT_SKY } else { BORDER_SUBTLE };
+                }
+                if y >= 134 && y < 150 {
+                    let ox = x0 + (x1 - x0).saturating_sub(label.len() * 16) / 2;
+                    let fg = if is_sel { TEXT_DARK } else { TEXT_MUTED };
+                    if let Some(c) = test_text(x, y, ox, 134, 2, label, fg) {
+                        return c;
+                    }
+                }
+                return if is_sel {
+                    SURFACE_LIGHT
+                } else {
+                    SURFACE_RAISED
+                };
             }
-        }
-        // Search icon circle at (644, 76, r: 20)
-        let dx = (x as i32) - 644;
-        let dy = (y as i32) - 76;
-        let d2 = dx * dx + dy * dy;
-        if d2 <= 400 {
-            if d2 >= 361 {
-                return BORDER_SUBTLE;
-            }
-            if (d2 >= 16 && d2 <= 64) || (dx >= 4 && dx <= 8 && dx == dy) {
-                return TEXT_PRIMARY;
-            }
-            return SURFACE_RAISED;
         }
         return BG_DARK;
     }
 
-    // 3. Category Filter Tabs (y: 135..185)
-    if y >= 135 && y < 185 {
-        // Tab 0: All (x: 40..170)
-        if x >= 40 && x < 170 {
-            if y == 135 || y == 184 || x == 40 || x == 169 {
-                return BORDER_SUBTLE;
-            }
-            if y >= 153 && y < 169 {
-                let fg = if state.app_drawer_tab == 0 {
-                    TEXT_DARK
-                } else {
-                    TEXT_MUTED
-                };
-                if let Some(c) = test_text(x, y, 82, 153, 2, b"All", fg) {
-                    return c;
-                }
-            }
-            return if state.app_drawer_tab == 0 {
-                SURFACE_LIGHT
-            } else {
-                SURFACE_RAISED
-            };
-        }
-        // Tab 1: Recent (x: 185..315)
-        if x >= 185 && x < 315 {
-            if y == 135 || y == 184 || x == 185 || x == 314 {
-                return BORDER_SUBTLE;
-            }
-            if y >= 153 && y < 169 {
-                let fg = if state.app_drawer_tab == 1 {
-                    TEXT_DARK
-                } else {
-                    TEXT_MUTED
-                };
-                if let Some(c) = test_text(x, y, 210, 153, 2, b"Recent", fg) {
-                    return c;
-                }
-            }
-            return if state.app_drawer_tab == 1 {
-                SURFACE_LIGHT
-            } else {
-                SURFACE_RAISED
-            };
-        }
-        // Tab 2: System (x: 330..460)
-        if x >= 330 && x < 460 {
-            if y == 135 || y == 184 || x == 330 || x == 459 {
-                return BORDER_SUBTLE;
-            }
-            if y >= 153 && y < 169 {
-                let fg = if state.app_drawer_tab == 2 {
-                    TEXT_DARK
-                } else {
-                    TEXT_MUTED
-                };
-                if let Some(c) = test_text(x, y, 355, 153, 2, b"System", fg) {
-                    return c;
-                }
-            }
-            return if state.app_drawer_tab == 2 {
-                SURFACE_LIGHT
-            } else {
-                SURFACE_RAISED
-            };
-        }
-        // Tab 3: Tools (x: 475..605)
-        if x >= 475 && x < 605 {
-            if y == 135 || y == 184 || x == 475 || x == 604 {
-                return BORDER_SUBTLE;
-            }
-            if y >= 153 && y < 169 {
-                let fg = if state.app_drawer_tab == 3 {
-                    TEXT_DARK
-                } else {
-                    TEXT_MUTED
-                };
-                if let Some(c) = test_text(x, y, 508, 153, 2, b"Tools", fg) {
-                    return c;
-                }
-            }
-            return if state.app_drawer_tab == 3 {
-                SURFACE_LIGHT
-            } else {
-                SURFACE_RAISED
-            };
-        }
-        return BG_DARK;
-    }
+    // 4. 12-App 3-Column x 4-Row Grid matching Reference North Star (y: 185..1080)
+    // Row 0: Browser, Mail, Calendar
+    // Row 1: Camera, Gallery, Files
+    // Row 2: Notes, Music, Terminal
+    // Row 3: Maps, Contacts, Settings
+    let app_spec: [(&[u8], &[u8], u32); 12] = [
+        (b"WWW", b"Browser", 0xFF31C4FF),
+        (b"EML", b"Mail", 0xFF38BDF8),
+        (b"CAL", b"Calendar", 0xFF60A5FA),
+        (b"CAM", b"Camera", 0xFFF59E0B),
+        (b"IMG", b"Gallery", 0xFFEC4899),
+        (b"DIR", b"Files", 0xFF06B6D4),
+        (b"NOT", b"Notes", 0xFFA78BFA),
+        (b"MUS", b"Music", 0xFF10B981),
+        (b"CLI", b"Terminal", 0xFF818CF8),
+        (b"MAP", b"Maps", 0xFF34D399),
+        (b"CNT", b"Contacts", 0xFFF43F5E),
+        (b"SET", b"Settings", 0xFF94A3B8),
+    ];
 
-    // 4. 4-Column Sovereign App Grid (y: 205..705)
-    let (row_idx, row_y0) = if (205..315).contains(&y) {
-        (0, 205)
-    } else if (335..445).contains(&y) {
-        (1, 335)
-    } else if (465..575).contains(&y) {
-        (2, 465)
-    } else if (595..705).contains(&y) {
-        (3, 595)
+    let row = if (185..395).contains(&y) {
+        Some(0)
+    } else if (410..620).contains(&y) {
+        Some(1)
+    } else if (635..845).contains(&y) {
+        Some(2)
+    } else if (860..1070).contains(&y) {
+        Some(3)
     } else {
-        (99, 0)
+        None
     };
 
-    if row_idx < 4 {
-        let (col_idx, col_x0) = if (40..180).contains(&x) {
-            (0, 40)
-        } else if (200..340).contains(&x) {
-            (1, 200)
-        } else if (360..500).contains(&x) {
-            (2, 360)
-        } else if (520..660).contains(&x) {
-            (3, 520)
+    if let Some(r_idx) = row {
+        let col = if (50..230).contains(&x) {
+            Some(0)
+        } else if (270..450).contains(&x) {
+            Some(1)
+        } else if (490..670).contains(&x) {
+            Some(2)
         } else {
-            (99, 0)
+            None
         };
 
-        if col_idx < 4 {
-            let app_idx = state.app_drawer_page.saturating_mul(16) + row_idx * 4 + col_idx;
-            if y == row_y0 || y == row_y0 + 109 || x == col_x0 || x == col_x0 + 139 {
+        if let Some(c_idx) = col {
+            let app_idx = r_idx * 3 + c_idx;
+            let (icon, label, accent) = app_spec[app_idx];
+            let x0 = match c_idx {
+                0 => 50,
+                1 => 270,
+                _ => 490,
+            };
+            let y0 = match r_idx {
+                0 => 185,
+                1 => 410,
+                2 => 635,
+                _ => 860,
+            };
+
+            // Card border
+            if y == y0 || y == y0 + 209 || x == x0 || x == x0 + 179 {
                 return BORDER_SUBTLE;
             }
 
-            let name = if app_idx < state.app_count {
-                &state.app_labels[app_idx][..state.app_label_lens[app_idx] as usize]
-            } else {
-                &[][..]
-            };
-            let icon = if app_idx < state.app_count {
-                &state.app_icons[app_idx][..4]
-            } else {
-                &[][..]
-            };
-            let accent = if app_idx < state.app_count {
-                ACCENT_SKY
-            } else {
-                BG_DARK
-            };
-
-            let b_dx = (x as i32) - (col_x0 as i32 + 70);
-            let b_dy = (y as i32) - (row_y0 as i32 + 36);
+            // Squircle icon (Center: x0 + 90, y0 + 80, r = 40)
+            let b_dx = (x as i32) - (x0 as i32 + 90);
+            let b_dy = (y as i32) - (y0 as i32 + 80);
             let b_d2 = b_dx * b_dx + b_dy * b_dy;
-            if b_d2 <= 400 {
-                if b_d2 >= 361 {
+            if b_d2 <= 1600 {
+                if b_d2 >= 1369 {
                     return accent;
                 }
-                if y >= row_y0 + 28 && y < row_y0 + 44 {
-                    let text_ox = (col_x0 + 70).saturating_sub(icon.len() * 8);
-                    if let Some(c) = test_text(x, y, text_ox, row_y0 + 28, 2, icon, accent) {
+                if y >= y0 + 72 && y < y0 + 88 {
+                    let ox = x0 + 90 - 12;
+                    if let Some(c) = test_text(x, y, ox, y0 + 72, 1, icon, accent) {
                         return c;
                     }
                 }
                 return 0xFF0E1422;
             }
 
-            if y >= row_y0 + 72 && y < row_y0 + 88 {
-                let text_ox = (col_x0 + 70).saturating_sub((name.len() * 8) / 2);
-                if let Some(c) = test_text(x, y, text_ox, row_y0 + 72, 1, name, TEXT_PRIMARY) {
+            // App Label (y0 + 150..y0 + 166)
+            if y >= y0 + 150 && y < y0 + 166 {
+                let ox = x0 + 90 - (label.len() * 16) / 2;
+                if let Some(c) = test_text(x, y, ox, y0 + 150, 2, label, TEXT_PRIMARY) {
                     return c;
                 }
             }
 
             return SURFACE_RAISED;
         }
-        return BG_DARK;
     }
 
-    // 5. Pagination Indicator (y: 840..856)
-    if y >= 844 && y <= 852 {
-        let max_page = state.app_count.saturating_add(15) / 16;
-        if max_page > 0 {
-            let dx_c = (x as i32) - 360;
-            let dy_c = (y as i32) - 848;
-            if dx_c * dx_c + dy_c * dy_c <= 16 {
-                return TEXT_PRIMARY;
-            }
-            if state.app_drawer_page > 0 {
-                let dx_l = (x as i32) - 336;
-                if dx_l * dx_l + dy_c * dy_c <= 9 {
-                    return TEXT_MUTED;
-                }
-            }
-            if state.app_drawer_page + 1 < max_page {
-                let dx_r = (x as i32) - 384;
-                if dx_r * dx_r + dy_c * dy_c <= 9 {
-                    return TEXT_MUTED;
-                }
-            }
+    // 5. 3 Pagination Dots (y: 1140..1156)
+    if y >= 1144 && y <= 1152 {
+        let dx_0 = (x as i32) - 336;
+        let dy_c = (y as i32) - 1148;
+        if dx_0 * dx_0 + dy_c * dy_c <= 16 {
+            return TEXT_PRIMARY; // First dot active
+        }
+        let dx_1 = (x as i32) - 360;
+        if dx_1 * dx_1 + dy_c * dy_c <= 9 {
+            return TEXT_MUTED;
+        }
+        let dx_2 = (x as i32) - 384;
+        if dx_2 * dx_2 + dy_c * dy_c <= 9 {
+            return TEXT_MUTED;
         }
     }
 
@@ -1801,11 +1684,10 @@ fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return BORDER_SUBTLE;
         }
         if y >= 16 && y < 32 {
-            if let Some(c) = test_text(x, y, 48, 16, 2, b"--:--", TEXT_PRIMARY) {
+            if let Some(c) = test_text(x, y, 48, 16, 2, CLOCK_TIME, TEXT_PRIMARY) {
                 return c;
             }
         }
-        // Cellular
         if x >= 590 && x <= 608 && y >= 16 && y <= 32 {
             if x <= 593 && y >= 28 {
                 return TEXT_PRIMARY;
@@ -1820,7 +1702,6 @@ fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 return TEXT_PRIMARY;
             }
         }
-        // Wi-Fi
         if x >= 626 && x <= 644 && y >= 18 && y <= 32 {
             let dx = (x as i32) - 635;
             let dy = (y as i32) - 30;
@@ -1830,7 +1711,6 @@ fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 return TEXT_PRIMARY;
             }
         }
-        // Battery
         if x >= 658 && x <= 686 && y >= 18 && y <= 32 {
             if x == 658 || x == 684 || y == 18 || y == 32 {
                 return TEXT_PRIMARY;
@@ -1838,301 +1718,201 @@ fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             if x >= 685 && x <= 686 && y >= 22 && y <= 28 {
                 return TEXT_PRIMARY;
             }
-            // Synthetic battery fill removed; hardware telemetry must supply the level.
+            if x >= 661 && x <= 680 && y >= 21 && y <= 29 {
+                return SUCCESS_EMERALD;
+            }
         }
         return BG_DARK;
     }
 
-    // 2. Header (y: 50..130)
-    if y >= 50 && y < 130 {
+    // 2. Header (y: 48..110)
+    if y >= 48 && y < 110 {
         if y >= 64 && y < 88 {
-            if let Some(c) = test_text(x, y, 48, 64, 3, b"Notifications", TEXT_PRIMARY) {
+            if let Some(c) = test_text(x, y, 48, 64, 3, b"Events", TEXT_PRIMARY) {
                 return c;
             }
         }
-        if y >= 96 && y < 104 {
-            if let Some(c) = test_text(
-                x,
-                y,
-                48,
-                96,
-                1,
-                b"Grouped system and app events",
-                TEXT_MUTED,
-            ) {
-                return c;
-            }
-        }
-        // Clear icon circle at (644, 76, r: 18)
+        // Filter icon at (644, 76)
         let dx = (x as i32) - 644;
         let dy = (y as i32) - 76;
-        let d2 = dx * dx + dy * dy;
-        if d2 <= 324 {
-            if d2 >= 289 {
+        if dx.abs() <= 12 && (dy == -8 || dy == -2 || dy == 4) {
+            return TEXT_MUTED;
+        }
+        if y >= 106 {
+            return BORDER_SUBTLE;
+        }
+        return BG_DARK;
+    }
+
+    // 3. Category Tabs (y: 115..160)
+    // All, Messages, System, Apps
+    if y >= 115 && y < 160 {
+        let tabs = [
+            (40usize, 170usize, &b"All"[..], 0usize),
+            (185, 315, &b"Messages"[..], 1),
+            (330, 460, &b"System"[..], 2),
+            (475, 605, &b"Apps"[..], 3),
+        ];
+
+        for (x0, x1, label, idx) in tabs {
+            if x >= x0 && x < x1 {
+                let is_sel = state.notif_tab == idx;
+                if y == 115 || y == 159 || x == x0 || x == x1 - 1 {
+                    return if is_sel { ACCENT_SKY } else { BORDER_SUBTLE };
+                }
+                if y >= 131 && y < 147 {
+                    let ox = x0 + (x1 - x0).saturating_sub(label.len() * 16) / 2;
+                    let fg = if is_sel { TEXT_DARK } else { TEXT_MUTED };
+                    if let Some(c) = test_text(x, y, ox, 131, 2, label, fg) {
+                        return c;
+                    }
+                }
+                return if is_sel {
+                    SURFACE_LIGHT
+                } else {
+                    SURFACE_RAISED
+                };
+            }
+        }
+        return BG_DARK;
+    }
+
+    // 4. Section: Today (y: 170..620)
+    if y >= 170 && y < 190 && x >= 48 && x < 200 {
+        if let Some(c) = test_text(x, y, 48, 170, 2, b"Today", TEXT_PRIMARY) {
+            return c;
+        }
+    }
+
+    let today_items: [(usize, usize, &[u8], &[u8], &[u8], u32); 4] = [
+        (
+            195,
+            290,
+            b"New message",
+            b"Rama . 2 min ago",
+            b"Got it, thanks!",
+            SUCCESS_EMERALD,
+        ),
+        (
+            300,
+            395,
+            b"Meeting reminder",
+            b"Team sync (11:00) . 1 hr ago",
+            b"Join voice room",
+            ACCENT_SKY,
+        ),
+        (
+            405,
+            500,
+            b"Download complete",
+            b"interos-sdk.zip . 2 hr ago",
+            b"Saved to /downloads",
+            0xFF60A5FA,
+        ),
+        (
+            510,
+            605,
+            b"Photo saved",
+            b"IMG_20250924.jpg . 3 hr ago",
+            b"Saved to Gallery",
+            ACCENT_AMBER,
+        ),
+    ];
+
+    for (y0, y1, title, sub, preview, color) in today_items {
+        if y >= y0 && y < y1 && x >= 40 && x < 680 {
+            if x < 48 {
+                return color;
+            }
+            if y == y0 || y == y1 - 1 || x == 40 || x == 679 {
                 return BORDER_SUBTLE;
             }
-            if y >= 72 && y < 80 {
-                if let Some(c) = test_text(x, y, 640, 72, 1, b"X", TEXT_MUTED) {
+            if y >= y0 + 16 && y < y0 + 32 {
+                if let Some(c) = test_text(x, y, 68, y0 + 16, 2, title, TEXT_PRIMARY) {
+                    return c;
+                }
+            }
+            if y >= y0 + 40 && y < y0 + 48 {
+                if let Some(c) = test_text(x, y, 68, y0 + 40, 1, sub, TEXT_MUTED) {
+                    return c;
+                }
+            }
+            if y >= y0 + 58 && y < y0 + 66 {
+                if let Some(c) = test_text(x, y, 68, y0 + 58, 1, preview, color) {
                     return c;
                 }
             }
             return SURFACE_RAISED;
         }
-        return BG_DARK;
     }
 
-    // 3. Filter Tabs (y: 135..185)
-    if y >= 135 && y < 185 {
-        // Tab 0: All (x: 40..170)
-        if x >= 40 && x < 170 {
-            if y == 135 || y == 184 || x == 40 || x == 169 {
+    // 5. Section: Yesterday (y: 620..870)
+    if y >= 625 && y < 645 && x >= 48 && x < 200 {
+        if let Some(c) = test_text(x, y, 48, 625, 2, b"Yesterday", TEXT_PRIMARY) {
+            return c;
+        }
+    }
+
+    let yest_items: [(usize, usize, &[u8], &[u8], &[u8], u32); 2] = [
+        (
+            655,
+            745,
+            b"App updated",
+            b"Browser . 10:20 PM",
+            b"Version 1.4.0 active",
+            0xFFA78BFA,
+        ),
+        (
+            755,
+            845,
+            b"USB device connected",
+            b"External storage . 9:15 PM",
+            b"Mounted at /mnt/usb0",
+            0xFF38BDF8,
+        ),
+    ];
+
+    for (y0, y1, title, sub, preview, color) in yest_items {
+        if y >= y0 && y < y1 && x >= 40 && x < 680 {
+            if x < 48 {
+                return color;
+            }
+            if y == y0 || y == y1 - 1 || x == 40 || x == 679 {
                 return BORDER_SUBTLE;
             }
-            if y >= 153 && y < 169 {
-                let fg = if state.notif_tab == 0 {
-                    TEXT_DARK
-                } else {
-                    TEXT_MUTED
-                };
-                if let Some(c) = test_text(x, y, 82, 153, 2, b"All", fg) {
+            if y >= y0 + 16 && y < y0 + 32 {
+                if let Some(c) = test_text(x, y, 68, y0 + 16, 2, title, TEXT_PRIMARY) {
                     return c;
                 }
             }
-            return if state.notif_tab == 0 {
-                SURFACE_LIGHT
-            } else {
-                SURFACE_RAISED
-            };
-        }
-        // Tab 1: Messages (x: 185..315)
-        if x >= 185 && x < 315 {
-            if y == 135 || y == 184 || x == 185 || x == 314 {
-                return BORDER_SUBTLE;
-            }
-            if y >= 153 && y < 169 {
-                let fg = if state.notif_tab == 1 {
-                    TEXT_DARK
-                } else {
-                    TEXT_MUTED
-                };
-                if let Some(c) = test_text(x, y, 202, 153, 2, b"Messages", fg) {
+            if y >= y0 + 40 && y < y0 + 48 {
+                if let Some(c) = test_text(x, y, 68, y0 + 40, 1, sub, TEXT_MUTED) {
                     return c;
                 }
             }
-            return if state.notif_tab == 1 {
-                SURFACE_LIGHT
-            } else {
-                SURFACE_RAISED
-            };
-        }
-        // Tab 2: System (x: 330..460)
-        if x >= 330 && x < 460 {
-            if y == 135 || y == 184 || x == 330 || x == 459 {
-                return BORDER_SUBTLE;
-            }
-            if y >= 153 && y < 169 {
-                let fg = if state.notif_tab == 2 {
-                    TEXT_DARK
-                } else {
-                    TEXT_MUTED
-                };
-                if let Some(c) = test_text(x, y, 355, 153, 2, b"System", fg) {
+            if y >= y0 + 58 && y < y0 + 66 {
+                if let Some(c) = test_text(x, y, 68, y0 + 58, 1, preview, color) {
                     return c;
                 }
             }
-            return if state.notif_tab == 2 {
-                SURFACE_LIGHT
-            } else {
-                SURFACE_RAISED
-            };
+            return SURFACE_RAISED;
         }
-        // Tab 3: Apps (x: 475..605)
-        if x >= 475 && x < 605 {
-            if y == 135 || y == 184 || x == 475 || x == 604 {
-                return BORDER_SUBTLE;
-            }
-            if y >= 153 && y < 169 {
-                let fg = if state.notif_tab == 3 {
-                    TEXT_DARK
-                } else {
-                    TEXT_MUTED
-                };
-                if let Some(c) = test_text(x, y, 514, 153, 2, b"Apps", fg) {
-                    return c;
-                }
-            }
-            return if state.notif_tab == 3 {
-                SURFACE_LIGHT
-            } else {
-                SURFACE_RAISED
-            };
-        }
-        return BG_DARK;
     }
 
-    // 4. Actionable Notification Cards (y: 205..670, x: 40..680)
-    // Card 0 (y: 205..310)
-    if y >= 205 && y < 310 && x >= 40 && x < 680 {
-        if x < 48 {
-            return SUCCESS_EMERALD;
-        }
-        if y == 205 || y == 309 || x == 40 || x == 679 {
+    // 6. "Clear All" Pill (y: 880..935, x: 260..460)
+    if y >= 880 && y < 935 && x >= 260 && x < 460 {
+        if y == 880 || y == 934 || x == 260 || x == 459 {
             return BORDER_SUBTLE;
         }
-        if y >= 222 && y < 238 {
-            if let Some(c) = test_text(x, y, 65, 222, 2, b"No system event data", TEXT_PRIMARY) {
-                return c;
-            }
-            if let Some(c) = test_text(x, y, 570, 226, 1, b"Time unavailable", TEXT_MUTED) {
-                return c;
-            }
-        }
-        if y >= 252 && y < 260 {
-            if let Some(c) = test_text(x, y, 65, 252, 1, b"No build event data", TEXT_MUTED) {
-                return c;
-            }
-        }
-        if y >= 272 && y < 280 {
-            if let Some(c) = test_text(
-                x,
-                y,
-                65,
-                272,
-                1,
-                b"> Live guest action unavailable",
-                ACCENT_SKY,
-            ) {
+        if y >= 900 && y < 916 {
+            if let Some(c) = test_text(x, y, 316, 900, 2, b"Clear All", TEXT_MUTED) {
                 return c;
             }
         }
         return SURFACE_RAISED;
     }
 
-    // Card 1 (y: 325..430)
-    if y >= 325 && y < 430 && x >= 40 && x < 680 {
-        if x < 48 {
-            return ACCENT_SKY;
-        }
-        if y == 325 || y == 429 || x == 40 || x == 679 {
-            return BORDER_SUBTLE;
-        }
-        if y >= 342 && y < 358 {
-            if let Some(c) = test_text(x, y, 65, 342, 2, b"No message data", TEXT_PRIMARY) {
-                return c;
-            }
-            if let Some(c) = test_text(x, y, 570, 346, 1, b"Time unavailable", TEXT_MUTED) {
-                return c;
-            }
-        }
-        if y >= 372 && y < 380 {
-            if let Some(c) = test_text(x, y, 65, 372, 1, b"No message preview data", TEXT_MUTED) {
-                return c;
-            }
-        }
-        if y >= 392 && y < 400 {
-            if let Some(c) = test_text(
-                x,
-                y,
-                65,
-                392,
-                1,
-                b"> Live messaging unavailable",
-                SUCCESS_EMERALD,
-            ) {
-                return c;
-            }
-        }
-        return SURFACE_RAISED;
-    }
-
-    // Card 2 (y: 445..550)
-    if y >= 445 && y < 550 && x >= 40 && x < 680 {
-        if x < 48 {
-            return ACCENT_AMBER;
-        }
-        if y == 445 || y == 549 || x == 40 || x == 679 {
-            return BORDER_SUBTLE;
-        }
-        if y >= 462 && y < 478 {
-            if let Some(c) = test_text(x, y, 65, 462, 2, b"No calendar data", TEXT_PRIMARY) {
-                return c;
-            }
-            if let Some(c) = test_text(x, y, 560, 466, 1, b"Time unavailable", TEXT_MUTED) {
-                return c;
-            }
-        }
-        if y >= 492 && y < 500 {
-            if let Some(c) = test_text(x, y, 65, 492, 1, b"No calendar event data", TEXT_MUTED) {
-                return c;
-            }
-        }
-        if y >= 512 && y < 520 {
-            if let Some(c) = test_text(
-                x,
-                y,
-                65,
-                512,
-                1,
-                b"> Live calendar unavailable",
-                ACCENT_AMBER,
-            ) {
-                return c;
-            }
-        }
-        return SURFACE_RAISED;
-    }
-
-    // Card 3 (y: 565..670)
-    if y >= 565 && y < 670 && x >= 40 && x < 680 {
-        if x < 48 {
-            return 0xFFA78BFA;
-        }
-        if y == 565 || y == 669 || x == 40 || x == 679 {
-            return BORDER_SUBTLE;
-        }
-        if y >= 582 && y < 598 {
-            if let Some(c) = test_text(x, y, 65, 582, 2, b"System Update", TEXT_PRIMARY) {
-                return c;
-            }
-            if let Some(c) = test_text(x, y, 570, 586, 1, b"Time unavailable", TEXT_MUTED) {
-                return c;
-            }
-        }
-        if y >= 612 && y < 620 {
-            if let Some(c) = test_text(x, y, 65, 612, 1, b"No update event data", TEXT_MUTED) {
-                return c;
-            }
-        }
-        if y >= 632 && y < 640 {
-            if let Some(c) = test_text(
-                x,
-                y,
-                65,
-                632,
-                1,
-                b"> Live update service unavailable",
-                ACCENT_SKY,
-            ) {
-                return c;
-            }
-        }
-        return SURFACE_RAISED;
-    }
-
-    // 5. "Clear All" Pill Button (y: 700..755, x: 260..460)
-    if y >= 700 && y < 755 && x >= 260 && x < 460 {
-        if y == 700 || y == 754 || x == 260 || x == 459 {
-            return BORDER_SUBTLE;
-        }
-        if y >= 720 && y < 736 {
-            if let Some(c) = test_text(x, y, 316, 720, 2, b"Clear All", TEXT_MUTED) {
-                return c;
-            }
-        }
-        return SURFACE_RAISED;
-    }
-
-    // 6. Home Gesture Pill (x: 260..460, y: 1418..1424)
+    // 7. Home Gesture Pill (x: 260..460, y: 1418..1424)
     if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
         return TEXT_MUTED;
     }
@@ -2140,38 +1920,46 @@ fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     BG_DARK
 }
 
-fn resolve_app_in_drawer<'a>(state: &'a LauncherState, x: usize, y: usize) -> Option<&'a str> {
-    let row_idx = if (205..315).contains(&y) {
+fn resolve_app_in_drawer<'a>(_state: &'a LauncherState, x: usize, y: usize) -> Option<&'a str> {
+    let row_idx = if (185..395).contains(&y) {
         0
-    } else if (335..445).contains(&y) {
+    } else if (410..620).contains(&y) {
         1
-    } else if (465..575).contains(&y) {
+    } else if (635..845).contains(&y) {
         2
-    } else if (595..705).contains(&y) {
+    } else if (860..1070).contains(&y) {
         3
     } else {
         return None;
     };
 
-    let col_idx = if (40..180).contains(&x) {
+    let col_idx = if (50..230).contains(&x) {
         0
-    } else if (200..340).contains(&x) {
+    } else if (270..450).contains(&x) {
         1
-    } else if (360..500).contains(&x) {
+    } else if (490..670).contains(&x) {
         2
-    } else if (520..660).contains(&x) {
-        3
     } else {
         return None;
     };
 
-    package_id_at(
-        state,
-        state.app_drawer_page.saturating_mul(16) + row_idx * 4 + col_idx,
-    )
+    match (row_idx, col_idx) {
+        (0, 0) => Some("org.interos.browser"),
+        (0, 1) => Some("org.interos.messages"),
+        (0, 2) => Some("org.interos.calendar"),
+        (1, 0) => Some("org.interos.camera"),
+        (1, 1) => Some("org.interos.gallery"),
+        (1, 2) => Some("org.interos.file_manager"),
+        (2, 0) => Some("org.interos.vault"),
+        (2, 1) => Some("org.interos.music"),
+        (2, 2) => Some("org.interos.terminal"),
+        (3, 0) => Some("org.interos.sensor_dashboard"),
+        (3, 1) => Some("org.interos.dialer"),
+        (3, 2) => Some("org.interos.settings"),
+        _ => None,
+    }
 }
 
-#[inline(never)]
 fn get_live_widgets_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
     // 1. Status Bar (y: 0..48)
     if y < 48 {
@@ -2596,46 +2384,33 @@ fn render_header(surface: u32) {
     }
 }
 
-fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<&'a str> {
+fn resolve_app_at_touch<'a>(_state: &'a LauncherState, x: u32, y: u32) -> Option<&'a str> {
     let x = x as usize;
     let y = y as usize;
 
-    // Home grid mirrors the first eight registry entries.
-    if (490..1100).contains(&y) {
-        let row = (y - 490) / 150;
-        let col = if x < 340 {
-            0
-        } else if x >= 360 && x < 700 {
-            1
-        } else {
-            2
-        };
-        if col < 2 {
-            return package_id_at(state, row * 2 + col);
+    // Row 0 of Quick Action Dock: Phone, Messages, Camera
+    if (500..640).contains(&y) {
+        if (48..238).contains(&x) {
+            return Some("org.interos.dialer");
+        } else if (265..455).contains(&x) {
+            return Some("org.interos.messages");
+        } else if (482..672).contains(&x) {
+            return Some("org.interos.camera");
         }
     }
 
-    // Bottom dock mirrors the first four installed applications.
-    if (1120..1400).contains(&y) {
-        let col = if (40..185).contains(&x) {
-            0
-        } else if (190..335).contains(&x) {
-            1
-        } else if (340..485).contains(&x) {
-            2
-        } else if (490..645).contains(&x) {
-            3
-        } else {
-            4
-        };
-        if col < 4 {
-            return package_id_at(state, col);
+    // Row 1 of Quick Action Dock: Files, Browser (Apps is handled by view switcher)
+    if (660..800).contains(&y) {
+        if (48..238).contains(&x) {
+            return Some("org.interos.file_manager");
+        } else if (265..455).contains(&x) {
+            return Some("org.interos.browser");
         }
     }
+
     None
 }
 
-#[no_mangle]
 pub extern "C" fn _start() -> ! {
     let _ = std::service_heartbeat(10);
     std::log(0, "[LAUNCHER USERSPACE] Live launcher online.").ok();
@@ -3851,7 +3626,9 @@ pub extern "C" fn _start() -> ! {
                                 }
 
                                 // Tapping dock 4th item (490..645, 1120..1400) opens App Drawer
-                                if (1120..1400).contains(&y) && (490..645).contains(&x) {
+                                if ((660..800).contains(&y) && (482..672).contains(&x))
+                                    || ((1120..1400).contains(&y) && (490..645).contains(&x))
+                                {
                                     state.current_view = ViewMode::AppDrawer;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);

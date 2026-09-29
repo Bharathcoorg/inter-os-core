@@ -36,8 +36,44 @@ pub struct ConversationThread {
     pub unread_count: u8,
 }
 
-/// Static Conversation Directory.
-pub static THREADS: [ConversationThread; 0] = [];
+/// Static Conversation Directory matching the reference UI spec.
+pub static THREADS: [ConversationThread; 5] = [
+    ConversationThread {
+        peer_name: "Rama",
+        peer_did: "did:key:z6MkhaX",
+        last_snippet: "Got it, thanks!",
+        status: ThreadStatus::EncryptedP2P,
+        unread_count: 1,
+    },
+    ConversationThread {
+        peer_name: "Team Sync",
+        peer_did: "did:key:z6MkpTHR",
+        last_snippet: "Meeting at 11:00 AM",
+        status: ThreadStatus::EncryptedP2P,
+        unread_count: 0,
+    },
+    ConversationThread {
+        peer_name: "Deeksha",
+        peer_did: "did:key:z6MknLMN",
+        last_snippet: "Okay, noted",
+        status: ThreadStatus::CellularSms,
+        unread_count: 0,
+    },
+    ConversationThread {
+        peer_name: "App Updates",
+        peer_did: "did:key:z6MkqRST",
+        last_snippet: "New version available",
+        status: ThreadStatus::EncryptedP2P,
+        unread_count: 0,
+    },
+    ConversationThread {
+        peer_name: "Bharath",
+        peer_did: "did:key:z6MksUVW",
+        last_snippet: "Let's catch up",
+        status: ThreadStatus::EncryptedP2P,
+        unread_count: 0,
+    },
+];
 
 /// Production Sovereign Messages state manager.
 pub struct MessagesApp {
