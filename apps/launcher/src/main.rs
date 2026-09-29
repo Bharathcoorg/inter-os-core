@@ -451,7 +451,7 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             }
         }
 
-        // Task 3: "Call at 11:00 AM"
+        // Task 3: "Call at --:--"
         if y >= 405 && y < 430 {
             let dx3 = (x as i32) - 78;
             let dy3 = (y as i32) - 418;
@@ -508,14 +508,15 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 
         if is_card0 || is_card1 || is_card2 || is_card3 {
             if y >= 1216 && y < 1232 {
-                if is_card0 {
-                    if let Some(c) = test_text(x, y, 76, 1216, 2, b"Chat", TEXT_DARK) { return c; }
-                } else if is_card1 {
-                    if let Some(c) = test_text(x, y, 225, 1216, 2, b"Camera", TEXT_DARK) { return c; }
-                } else if is_card2 {
-                    if let Some(c) = test_text(x, y, 375, 1216, 2, b"Gallery", TEXT_DARK) { return c; }
-                } else if is_card3 {
-                    if let Some(c) = test_text(x, y, 535, 1216, 2, b"Files", TEXT_DARK) { return c; }
+                let card_index = if is_card0 { 0 } else if is_card1 { 1 } else if is_card2 { 2 } else { 3 };
+                if card_index < state.app_count {
+                    let len = state.app_label_lens[card_index] as usize;
+                    if len > 0 {
+                        let x0 = [76usize, 225, 375, 535][card_index];
+                        if let Some(c) = test_text(x, y, x0, 1216, 2, &state.app_labels[card_index][..len], TEXT_DARK) { return c; }
+                    }
+                } else if let Some(c) = test_text(x, y, if is_card0 { 76 } else if is_card1 { 225 } else if is_card2 { 375 } else { 535 }, 1216, 2, b"Unavailable", TEXT_MUTED) {
+                    return c;
                 }
             }
             if y >= 1155 && y < 1195 {
@@ -589,7 +590,7 @@ fn get_activity_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
         return BG_DARK;
     }
 
-    // Card 0: InterOS Development (y in 200..480, x in 56..(W - 56))
+    // Card 0: Activity data unavailable (y in 200..480, x in 56..(W - 56))
     if y >= 200 && y < 480 && x >= 56 && x < (W - 56) {
         // Dismiss badge [x] top right (tested at 610, 230)
         if y >= 210 && y < 240 && x >= 590 && x < 644 {
@@ -599,33 +600,33 @@ fn get_activity_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
             return DANGER_CRIMSON;
         }
         if y >= 216 && y < 232 {
-            if let Some(c) = test_text(x, y, 76, 216, 2, b"InterOS Development", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 76, 216, 2, b"Activity data unavailable", TEXT_PRIMARY) { return c; }
         }
         if y >= 238 && y < 246 {
-            if let Some(c) = test_text(x, y, 76, 238, 1, b"3 apps - 1h 14m", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 76, 238, 1, b"No active activity data", TEXT_MUTED) { return c; }
         }
         if y < 250 { return ACCENT_SKY; }
         if y >= 476 || x < 60 || x >= (W - 60) { return BORDER_SUBTLE; }
 
-        // Window surface previews (Terminal, Docs, Browser)
+        // Window surface previews (Terminal, Docs, No app activity data)
         if y >= 270 && y < 450 {
             if x >= 76 && x < 240 {
                 if y >= 310 && y < 318 {
-                    if let Some(c) = test_text(x, y, 86, 310, 1, b">_ terminal", ACCENT_SKY) { return c; }
+                    if let Some(c) = test_text(x, y, 86, 310, 1, b"No active task", ACCENT_SKY) { return c; }
                 }
                 if y == 270 || y == 449 || x == 76 || x == 239 { return BORDER_SUBTLE; }
                 return 0xFF05080E;
             }
             if x >= 260 && x < 424 {
                 if y >= 310 && y < 318 {
-                    if let Some(c) = test_text(x, y, 270, 310, 1, b"# Docs", TEXT_DARK) { return c; }
+                    if let Some(c) = test_text(x, y, 270, 310, 1, b"No task data", TEXT_DARK) { return c; }
                 }
                 if y == 270 || y == 449 || x == 260 || x == 423 { return BORDER_SUBTLE; }
                 return SURFACE_LIGHT;
             }
             if x >= 444 && x < 608 {
                 if y >= 310 && y < 318 {
-                    if let Some(c) = test_text(x, y, 454, 310, 1, b"Browser", TEXT_PRIMARY) { return c; }
+                    if let Some(c) = test_text(x, y, 454, 310, 1, b"No app activity data", TEXT_PRIMARY) { return c; }
                 }
                 if y == 270 || y == 449 || x == 444 || x == 607 { return BORDER_SUBTLE; }
                 return SURFACE_RAISED;
@@ -634,7 +635,7 @@ fn get_activity_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
         return SURFACE_DARK;
     }
 
-    // Card 1: Research (y in 520..800, x in 56..(W - 56))
+    // Card 1: No recent activity data (y in 520..800, x in 56..(W - 56))
     if y >= 520 && y < 800 && x >= 56 && x < (W - 56) {
         if y >= 530 && y < 560 && x >= 590 && x < 644 {
             if y >= 538 && y < 546 {
@@ -643,10 +644,10 @@ fn get_activity_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
             return DANGER_CRIMSON;
         }
         if y >= 536 && y < 552 {
-            if let Some(c) = test_text(x, y, 76, 536, 2, b"Research", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 76, 536, 2, b"No recent activity data", TEXT_PRIMARY) { return c; }
         }
         if y >= 558 && y < 566 {
-            if let Some(c) = test_text(x, y, 76, 558, 1, b"2 apps - 42m", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 76, 558, 1, b"No recent activity data", TEXT_MUTED) { return c; }
         }
         if y < 570 { return SUCCESS_EMERALD; }
         if y >= 796 || x < 60 || x >= (W - 60) { return BORDER_SUBTLE; }
@@ -654,7 +655,7 @@ fn get_activity_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
         return SURFACE_DARK;
     }
 
-    // Card 2: Communication (y in 840..1120, x in 56..(W - 56))
+    // Card 2: No communication data (y in 840..1120, x in 56..(W - 56))
     if y >= 840 && y < 1120 && x >= 56 && x < (W - 56) {
         if y >= 850 && y < 880 && x >= 590 && x < 644 {
             if y >= 858 && y < 866 {
@@ -663,10 +664,10 @@ fn get_activity_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
             return DANGER_CRIMSON;
         }
         if y >= 856 && y < 872 {
-            if let Some(c) = test_text(x, y, 76, 856, 2, b"Communication", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 76, 856, 2, b"No communication data", TEXT_PRIMARY) { return c; }
         }
         if y >= 878 && y < 886 {
-            if let Some(c) = test_text(x, y, 76, 878, 1, b"4 apps - 28m", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 76, 878, 1, b"No communication data", TEXT_MUTED) { return c; }
         }
         if y < 890 { return ACCENT_AMBER; }
         if y >= 1116 || x < 60 || x >= (W - 60) { return BORDER_SUBTLE; }
@@ -674,10 +675,10 @@ fn get_activity_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
         return SURFACE_DARK;
     }
 
-    // Clear / Return / "+ New Activity" button: y in 1200..1280, x in 180..(W - 180)
+    // Clear / Return / "No new activity data" button: y in 1200..1280, x in 180..(W - 180)
     if y >= 1200 && y < 1280 && x >= 180 && x < (W - 180) {
         if y >= 1230 && y < 1246 {
-            if let Some(c) = test_text(x, y, 260, 1230, 2, b"+ New Activity", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 260, 1230, 2, b"No new activity data", TEXT_PRIMARY) { return c; }
         }
         if y >= 1276 || y <= 1204 || x < 184 || x >= (W - 184) { return ACCENT_SKY; }
         return SURFACE_RAISED;
@@ -696,7 +697,7 @@ fn get_quick_controls_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
     // Header
     if y < 120 {
         if y >= 64 && y < 80 {
-            if let Some(c) = test_text(x, y, 48, 64, 2, b"09:20  Mon, 12 Jan", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 48, 64, 2, b"Date unavailable", TEXT_PRIMARY) { return c; }
         }
         let dx = (x as i32) - 640;
         let dy = (y as i32) - 76;
@@ -781,10 +782,10 @@ fn get_quick_controls_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
             return 0xFF05070D;
         }
         if y >= 785 && y < 801 {
-            if let Some(c) = test_text(x, y, 170, 785, 2, b"Interstellar", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 170, 785, 2, b"No active media", TEXT_PRIMARY) { return c; }
         }
         if y >= 815 && y < 831 {
-            if let Some(c) = test_text(x, y, 170, 815, 2, b"Hans Zimmer", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 170, 815, 2, b"Media data unavailable", TEXT_MUTED) { return c; }
         }
 
         // Transport: |<<, ||, >>|
@@ -1372,14 +1373,14 @@ fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         if x < 48 { return SUCCESS_EMERALD; }
         if y == 205 || y == 309 || x == 40 || x == 679 { return BORDER_SUBTLE; }
         if y >= 222 && y < 238 {
-            if let Some(c) = test_text(x, y, 65, 222, 2, b"Build Complete", TEXT_PRIMARY) { return c; }
-            if let Some(c) = test_text(x, y, 570, 226, 1, b"5m ago", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 65, 222, 2, b"No system event data", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 570, 226, 1, b"Time unavailable", TEXT_MUTED) { return c; }
         }
         if y >= 252 && y < 260 {
-            if let Some(c) = test_text(x, y, 65, 252, 1, b"InterOS kernel compiled successfully", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 65, 252, 1, b"No build event data", TEXT_MUTED) { return c; }
         }
         if y >= 272 && y < 280 {
-            if let Some(c) = test_text(x, y, 65, 272, 1, b"> Tap to launch terminal console", ACCENT_SKY) { return c; }
+            if let Some(c) = test_text(x, y, 65, 272, 1, b"> Live guest action unavailable", ACCENT_SKY) { return c; }
         }
         return SURFACE_RAISED;
     }
@@ -1389,14 +1390,14 @@ fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         if x < 48 { return ACCENT_SKY; }
         if y == 325 || y == 429 || x == 40 || x == 679 { return BORDER_SUBTLE; }
         if y >= 342 && y < 358 {
-            if let Some(c) = test_text(x, y, 65, 342, 2, b"2 new messages", TEXT_PRIMARY) { return c; }
-            if let Some(c) = test_text(x, y, 570, 346, 1, b"7m ago", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 65, 342, 2, b"No message data", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 570, 346, 1, b"Time unavailable", TEXT_MUTED) { return c; }
         }
         if y >= 372 && y < 380 {
-            if let Some(c) = test_text(x, y, 65, 372, 1, b"Bharath, Team: Ready for device sync", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 65, 372, 1, b"No message preview data", TEXT_MUTED) { return c; }
         }
         if y >= 392 && y < 400 {
-            if let Some(c) = test_text(x, y, 65, 392, 1, b"> Tap to view conversation threads", SUCCESS_EMERALD) { return c; }
+            if let Some(c) = test_text(x, y, 65, 392, 1, b"> Live messaging unavailable", SUCCESS_EMERALD) { return c; }
         }
         return SURFACE_RAISED;
     }
@@ -1406,14 +1407,14 @@ fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         if x < 48 { return ACCENT_AMBER; }
         if y == 445 || y == 549 || x == 40 || x == 679 { return BORDER_SUBTLE; }
         if y >= 462 && y < 478 {
-            if let Some(c) = test_text(x, y, 65, 462, 2, b"Meeting at 11:00 AM", TEXT_PRIMARY) { return c; }
-            if let Some(c) = test_text(x, y, 560, 466, 1, b"12m ago", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 65, 462, 2, b"No calendar data", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 560, 466, 1, b"Time unavailable", TEXT_MUTED) { return c; }
         }
         if y >= 492 && y < 500 {
-            if let Some(c) = test_text(x, y, 65, 492, 1, b"InterOS Sync (Google Meet)", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 65, 492, 1, b"No calendar event data", TEXT_MUTED) { return c; }
         }
         if y >= 512 && y < 520 {
-            if let Some(c) = test_text(x, y, 65, 512, 1, b"> Tap to open calendar schedule", ACCENT_AMBER) { return c; }
+            if let Some(c) = test_text(x, y, 65, 512, 1, b"> Live calendar unavailable", ACCENT_AMBER) { return c; }
         }
         return SURFACE_RAISED;
     }
@@ -1424,13 +1425,13 @@ fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         if y == 565 || y == 669 || x == 40 || x == 679 { return BORDER_SUBTLE; }
         if y >= 582 && y < 598 {
             if let Some(c) = test_text(x, y, 65, 582, 2, b"System Update", TEXT_PRIMARY) { return c; }
-            if let Some(c) = test_text(x, y, 570, 586, 1, b"1h ago", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 570, 586, 1, b"Time unavailable", TEXT_MUTED) { return c; }
         }
         if y >= 612 && y < 620 {
-            if let Some(c) = test_text(x, y, 65, 612, 1, b"InterOS v0.2.1 available for deployment", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 65, 612, 1, b"No update event data", TEXT_MUTED) { return c; }
         }
         if y >= 632 && y < 640 {
-            if let Some(c) = test_text(x, y, 65, 632, 1, b"> Tap to review and install update", ACCENT_SKY) { return c; }
+            if let Some(c) = test_text(x, y, 65, 632, 1, b"> Live update service unavailable", ACCENT_SKY) { return c; }
         }
         return SURFACE_RAISED;
     }
@@ -1532,7 +1533,7 @@ fn get_live_widgets_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
             if let Some(c) = test_text(x, y, 65, 155, 2, b"Location unavailable", TEXT_PRIMARY) { return c; }
         }
         if y >= 190 && y < 214 {
-            if let Some(c) = test_text(x, y, 65, 190, 3, b"24*C", ACCENT_AMBER) { return c; }
+            if let Some(c) = test_text(x, y, 65, 190, 3, b"--", ACCENT_AMBER) { return c; }
         }
         let s_dx = (x as i32) - 300;
         let s_dy = (y as i32) - 180;
@@ -1542,7 +1543,7 @@ fn get_live_widgets_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
             if (s_dx == 0 || s_dy == 0 || s_dx == s_dy || s_dx == -s_dy) && s_d2 >= 196 { return ACCENT_AMBER; }
         }
         if y >= 250 && y < 258 {
-            if let Some(c) = test_text(x, y, 65, 250, 1, b"Cloudy - Humidity 64%", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 65, 250, 1, b"Weather data unavailable", TEXT_MUTED) { return c; }
         }
         return SURFACE_RAISED;
     }
@@ -1552,14 +1553,14 @@ fn get_live_widgets_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
         if y == 135 || y == 314 || x == 375 || x == 679 { return BORDER_SUBTLE; }
         if y >= 155 && y < 171 {
             if let Some(c) = test_text(x, y, 400, 155, 2, b"Build Status", TEXT_PRIMARY) { return c; }
-            if let Some(c) = test_text(x, y, 610, 155, 2, b"82%", ACCENT_SKY) { return c; }
+            if let Some(c) = test_text(x, y, 610, 155, 2, b"--", ACCENT_SKY) { return c; }
         }
         if y >= 200 && y < 216 && x >= 400 && x < 655 {
             if x <= 609 { return ACCENT_SKY; }
             return 0xFF0E1A2C;
         }
         if y >= 250 && y < 258 {
-            if let Some(c) = test_text(x, y, 400, 250, 1, b"Compiling kernel... 12m left", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 400, 250, 1, b"Build progress unavailable", TEXT_MUTED) { return c; }
         }
         return SURFACE_RAISED;
     }
@@ -1576,17 +1577,17 @@ fn get_live_widgets_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
             return 0xFF05070D;
         }
         if y >= 380 && y < 396 {
-            if let Some(c) = test_text(x, y, 155, 380, 2, b"Interstellar", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 155, 380, 2, b"No active media", TEXT_PRIMARY) { return c; }
         }
         if y >= 406 && y < 414 {
-            if let Some(c) = test_text(x, y, 155, 406, 1, b"Hans Zimmer - Soundtrack", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 155, 406, 1, b"Media data unavailable - Soundtrack", TEXT_MUTED) { return c; }
         }
         if y >= 430 && y < 436 && x >= 155 && x < 450 {
             if x <= 265 { return ACCENT_SKY; }
             return 0xFF142032;
         }
         if y >= 445 && y < 453 {
-            if let Some(c) = test_text(x, y, 155, 445, 1, b"02:15 / 04:32", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 155, 445, 1, b"--:-- / --:--", TEXT_MUTED) { return c; }
         }
         if y >= 400 && y < 416 {
             if let Some(c) = test_text(x, y, 500, 400, 2, b"|<", TEXT_PRIMARY) { return c; }
@@ -1604,13 +1605,13 @@ fn get_live_widgets_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
             if let Some(c) = test_text(x, y, 65, 525, 2, b"Next Meeting", TEXT_PRIMARY) { return c; }
         }
         if y >= 560 && y < 576 {
-            if let Some(c) = test_text(x, y, 65, 560, 2, b"11:00 AM", ACCENT_SKY) { return c; }
+            if let Some(c) = test_text(x, y, 65, 560, 2, b"--:--", ACCENT_SKY) { return c; }
         }
         if y >= 595 && y < 603 {
-            if let Some(c) = test_text(x, y, 65, 595, 1, b"InterOS Sync (Meet)", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 65, 595, 1, b"No calendar data", TEXT_PRIMARY) { return c; }
         }
         if y >= 620 && y < 628 {
-            if let Some(c) = test_text(x, y, 65, 620, 1, b"Starts in 1h 40m", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 65, 620, 1, b"Schedule data unavailable", TEXT_MUTED) { return c; }
         }
         return SURFACE_RAISED;
     }
@@ -1622,10 +1623,10 @@ fn get_live_widgets_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
             if let Some(c) = test_text(x, y, 400, 525, 2, b"Activity Rings", TEXT_PRIMARY) { return c; }
         }
         if y >= 560 && y < 584 {
-            if let Some(c) = test_text(x, y, 400, 560, 3, b"3,482", SUCCESS_EMERALD) { return c; }
+            if let Some(c) = test_text(x, y, 400, 560, 3, b"--", SUCCESS_EMERALD) { return c; }
         }
         if y >= 605 && y < 613 {
-            if let Some(c) = test_text(x, y, 400, 605, 1, b"steps today / 10k goal", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 400, 605, 1, b"Activity data unavailable", TEXT_MUTED) { return c; }
         }
         if y >= 630 && y < 638 && x >= 400 && x < 655 {
             if x <= 490 { return SUCCESS_EMERALD; }
@@ -1641,7 +1642,7 @@ fn get_live_widgets_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
             if let Some(c) = test_text(x, y, 65, 725, 2, b"Sovereign Hardware Telemetry", TEXT_PRIMARY) { return c; }
         }
         if y >= 755 && y < 763 {
-            if let Some(c) = test_text(x, y, 65, 755, 1, b"RAM: 18/64 MB | InterFS: 42/128 GB | 2.4 GHz", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 65, 755, 1, b"Hardware telemetry unavailable", TEXT_MUTED) { return c; }
         }
         if y >= 785 && y < 797 && x >= 65 && x < 655 {
             if x <= 220 { return ACCENT_SKY; }
