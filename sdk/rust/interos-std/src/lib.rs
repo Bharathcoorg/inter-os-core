@@ -1,3 +1,4 @@
+pub mod app;
 #![no_std]
 
 //! Inter OS Userspace Standard Library (interos-std)
