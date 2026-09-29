@@ -2085,6 +2085,7 @@ pub fn sys_package_audit(pkg_id: &str) -> Result<u32, SyscallResult> {
 /// Requires the caller to hold a `FileSystemWrite` capability in `cap_slot`.
 pub fn sys_package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) -> Result<(), SyscallResult> {
     if !user_consent { return Err(SyscallResult::PermissionDenied); }
+
     let (read_slot, task_id) = {
         let sched = SCHEDULER.lock();
         let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
@@ -2094,18 +2095,99 @@ pub fn sys_package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) ->
             .ok_or(SyscallResult::PermissionDenied)?;
         (read_slot, current.id)
     };
-    if pkg_id.is_empty() || pkg_id.contains('/') || pkg_id.contains('\\') || pkg_id.contains("..") {
+
+    if pkg_id.is_empty()
+        || pkg_id.len() > crate::package::rapp::RAPP_MAX_PACKAGE_ID_LEN
+        || pkg_id.contains('/')
+        || pkg_id.contains('\\')
+        || pkg_id.contains("..")
+    {
         return Err(SyscallResult::InvalidArguments);
     }
+
     let path = alloc::format!("/packages/{}.rapp", pkg_id);
     let manifest = sys_verify_package(read_slot, &path)?;
-    if manifest.package_id != pkg_id { return Err(SyscallResult::IntegrityViolation); }
-    let reg = crate::package::REVOCATION_REGISTRY.lock();
-    if reg.is_package_revoked(pkg_id) || reg.is_key_revoked(&manifest.publisher_key) {
+    if manifest.package_id != pkg_id || manifest.payload_len == 0 {
         return Err(SyscallResult::IntegrityViolation);
     }
-    drop(reg);
-    serial_println!("[PACKAGE] Task {} verified and authorized installation of '{}'", task_id.0, pkg_id);
+
+    {
+        let reg = crate::package::REVOCATION_REGISTRY.lock();
+        if reg.is_package_revoked(pkg_id) || reg.is_key_revoked(&manifest.publisher_key) {
+            return Err(SyscallResult::IntegrityViolation);
+        }
+    }
+
+    let stat = sys_fs_stat(read_slot, &path)?;
+    if stat.size == 0 || stat.size > crate::package::store::MAX_BLOB_SIZE {
+        return Err(SyscallResult::InvalidArguments);
+    }
+    let fd = sys_fs_open(read_slot, &path, Rights::READ)?;
+    let mut rapp = alloc::vec![0u8; stat.size];
+    let read_bytes = sys_fs_read(read_slot, fd, &mut rapp)?;
+    sys_fs_close(fd);
+    if read_bytes != stat.size {
+        return Err(SyscallResult::DeviceError);
+    }
+
+    // Re-parse the exact bytes that will be persisted so the installed blob is
+    // identical to the verified filesystem payload.
+    let verified = parse_rapp(&rapp).map_err(|_| SyscallResult::IntegrityViolation)?;
+    if verified.package_id != manifest.package_id
+        || verified.version != manifest.version
+        || verified.payload_len != manifest.payload_len
+        || verified.payload_digest != manifest.payload_digest
+    {
+        return Err(SyscallResult::IntegrityViolation);
+    }
+
+    // Stage the registry first. If payload persistence or activation fails, the
+    // registry transaction is rolled back and no partially installed package is
+    // left launchable.
+    {
+        let mut registry = crate::package::PACKAGE_REGISTRY.lock();
+        registry
+            .stage_verified(&verified)
+            .map_err(|_| SyscallResult::DeviceError)?;
+    }
+
+    let previous_blob = {
+        let store = crate::package::PACKAGE_BLOB_STORE.lock();
+        store.get(pkg_id).cloned()
+    };
+
+    let blob_result = crate::package::PACKAGE_BLOB_STORE
+        .lock()
+        .put(pkg_id, verified.version, &rapp);
+
+    if blob_result.is_err() {
+        let _ = crate::package::PACKAGE_REGISTRY.lock().rollback(pkg_id);
+        return Err(SyscallResult::DeviceError);
+    }
+
+    let activation_result = crate::package::PACKAGE_REGISTRY
+        .lock()
+        .activate_version_with_policy(pkg_id, verified.version, &verified.policy);
+
+    if activation_result.is_err() {
+        let mut store = crate::package::PACKAGE_BLOB_STORE.lock();
+        if let Some(previous) = previous_blob {
+            let _ = store.put(&previous.package_id, previous.version, &previous.bytes);
+        } else {
+            let _ = store.remove(pkg_id);
+        }
+        let _ = crate::package::PACKAGE_REGISTRY.lock().rollback(pkg_id);
+        return Err(SyscallResult::DeviceError);
+    }
+
+    serial_println!(
+        "[PACKAGE] Task {} installed verified package '{}' version {}.{}.{}",
+        task_id.0,
+        pkg_id,
+        verified.version.0,
+        verified.version.1,
+        verified.version.2
+    );
     Ok(())
 }
 
