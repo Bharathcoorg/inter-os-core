@@ -67,32 +67,7 @@ pub struct Contact {
 }
 
 /// Embedded Sovereign Contacts Directory.
-pub static CONTACTS_BOOK: [Contact; 4] = [
-    Contact {
-        name: "Alice (Sovereign Core)",
-        number: "+1-555-0199",
-        did: "did:inter:user:alice001",
-        is_emergency: false,
-    },
-    Contact {
-        name: "Bob (Mesh Validator)",
-        number: "+1-555-0142",
-        did: "did:inter:user:bob002",
-        is_emergency: false,
-    },
-    Contact {
-        name: "Carol (InterLayer Lab)",
-        number: "+1-555-0188",
-        did: "did:inter:user:carol003",
-        is_emergency: false,
-    },
-    Contact {
-        name: "Emergency Services (E911)",
-        number: "911",
-        did: "did:inter:system:e911",
-        is_emergency: true,
-    },
-];
+pub static CONTACTS_BOOK: [Contact; 0] = [];
 
 /// Production Telephony Dialer state manager.
 pub struct DialerApp {
