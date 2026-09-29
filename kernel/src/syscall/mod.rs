@@ -3380,24 +3380,34 @@ pub fn sys_event_poll(interest_mask: u32, timeout_ticks: u32) -> Result<u32, Sys
 
 
 pub fn sys_package_registry(out_buf:&mut [u8])->Result<usize,SyscallResult>{
-    let reg=crate::package::PACKAGE_REGISTRY.lock();
-    let mut pos=0usize;
-    for e in reg.entries(){
-        let state=match e.state{crate::package::PackageState::Staged=>"staged",crate::package::PackageState::Active=>"active",crate::package::PackageState::RolledBack=>"rolled-back"};
-        let mut line=[0u8;192]; let mut n=0usize;
-        for b in e.package_id.as_bytes(){if n<line.len(){line[n]=*b;n+=1;}}
-        if n<line.len(){line[n]=b'|';n+=1;}
-        let mut digits=[0u8;20]; let mut x=e.generation; let mut d=0usize;
-        if x==0{digits[0]=b'0';d=1;}else{while x>0{digits[d]=b'0'+(x%10)as u8;d+=1;x/=10;}for j in 0..d/2{digits.swap(j,d-1-j);}}
-        for j in 0..d{if n<line.len(){line[n]=digits[j];n+=1;}}
-        if n<line.len(){line[n]=b'|';n+=1;}
-        for b in state.as_bytes(){if n<line.len(){line[n]=*b;n+=1;}}
-        if n<line.len(){line[n]=b'\n';n+=1;}
-        if pos+n>out_buf.len(){break;} out_buf[pos..pos+n].copy_from_slice(&line[..n]);pos+=n;
+    use core::fmt::Write;
+    crate::package::PACKAGE_REGISTRY.lock().seed();
+    let entries=crate::package::PACKAGE_REGISTRY.lock().active_entries();
+    struct W<'a>{b:&'a mut[u8],n:usize}
+    impl<'a> Write for W<'a>{
+        fn write_str(&mut self,s:&str)->core::fmt::Result{
+            let k=s.len().min(self.b.len().saturating_sub(self.n));
+            self.b[self.n..self.n+k].copy_from_slice(&s.as_bytes()[..k]);
+            self.n+=k;
+            Ok(())
+        }
     }
-    Ok(pos)
+    let mut w=W{b:out_buf,n:0};
+    for e in &entries{
+        let descriptor=crate::package::first_party_package(&e.package_id);
+        let process=descriptor.map(|p|p.process_name).unwrap_or("rapp_process");
+        let path=descriptor.map(|p|p.path).unwrap_or("");
+        let state=match e.state{
+            crate::package::PackageState::Staged=>"staged",
+            crate::package::PackageState::Active=>"active",
+            crate::package::PackageState::RolledBack=>"rolled-back",
+        };
+        let _=writeln!(w,"{}|{}|{}.{}.{}|{}|{}\n",
+            e.package_id,process,e.version.0,e.version.1,e.version.2,state,path);
+        if w.n>=out_buf.len(){break;}
+    }
+    Ok(w.n)
 }
-
 pub fn sys_window_set_geometry(cap_slot: usize, id: u32, x: i32, y: i32, z: u32, visible: bool) -> SyscallResult {
     let owner = match require_display_service(cap_slot) { Ok(id) => id.0, Err(e) => return e };
     if crate::drivers::display_kms::DRM_KMS.lock().set_surface_geometry_owned(id, owner, x, y, z, visible) {
