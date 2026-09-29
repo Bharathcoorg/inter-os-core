@@ -4,10 +4,40 @@
 from pathlib import Path
 import json
 import unittest
+import re
 
 ROOT = Path(__file__).resolve().parents[1]
 
 class SystemContractTests(unittest.TestCase):
+    def test_studio_guest_authority_has_no_host_vfs_shadow(self):
+        server = (ROOT / "emulator/server.py").read_text(encoding="utf-8")
+        self.assertNotIn("VFS_ROOT", server)
+        self.assertNotIn("resolve_vfs_path", server)
+        self.assertIn('source": "GUEST_VFS"', server)
+        self.assertIn('source": "GUEST_REGISTRY"', server)
+        self.assertIn("def is_safe_guest_path", server)
+        self.assertIn("def is_safe_package_id", server)
+        self.assertIn("guest command rejected by transport bounds", server)
+
+    def test_launcher_uses_guest_catalog_and_does_not_render_fixed_demo_telemetry(self):
+        launcher = (ROOT / "apps/launcher/src/main.rs").read_text(encoding="utf-8")
+        self.assertIn("package_registry", launcher)
+        self.assertIn("app_runtime_list", launcher)
+        for literal in (
+            "24*C", "Cloudy - Humidity 64%", "82%", "Compiling kernel... 12m left",
+            "Interstellar", "Hans Zimmer - Soundtrack", "11:00 AM", "3,482",
+            "steps today / 10k goal", "RAM: 18/64 MB | InterFS: 42/128 GB | 2.4 GHz",
+        ):
+            self.assertNotIn(literal, launcher)
+
+    def test_sdk_and_kernel_syscall_tables_match(self):
+        kernel = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
+        sdk = (ROOT / "sdk/rust/interos-std/src/lib.rs").read_text(encoding="utf-8")
+        pattern = re.compile(r"^\\s*([A-Za-z][A-Za-z0-9_]*)\\s*=\\s*(\\d+),", re.MULTILINE)
+        kernel_ids = dict(pattern.findall(kernel.split("pub enum SyscallNumber", 1)[1]))
+        sdk_ids = dict(pattern.findall(sdk.split("pub enum SyscallNumber", 1)[1]))
+        self.assertEqual(kernel_ids, sdk_ids)
+
     def test_reliability_modules_exist(self):
         for rel in (
             "kernel/src/recovery.rs",
@@ -68,7 +98,7 @@ class SystemContractTests(unittest.TestCase):
         self.assertIn("stage_verified", serial)
         self.assertIn("activate(&verified.package_id)", serial)
 
-    def test_phase3_qemu_input_contract_is_canonical(self):
+    def test_qemu_phone_input_contract_is_canonical(self):
         contract = json.loads((ROOT / "platform/x86_64/qemu-phone.json").read_text(encoding="utf-8"))
         server = (ROOT / "emulator/server.py").read_text(encoding="utf-8")
         serial = (ROOT / "kernel/src/serial.rs").read_text(encoding="utf-8")
@@ -96,14 +126,14 @@ class SystemContractTests(unittest.TestCase):
         self.assertNotIn('ps / tasks', serial_route)
         self.assertIn("UART_COM1", serial_route)
 
-    def test_phase2_dev_launch_has_explicit_qemu_boundary(self):
+    def test_dev_launch_has_explicit_qemu_boundary(self):
         syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
         serial = (ROOT / "kernel/src/serial.rs").read_text(encoding="utf-8")
         self.assertIn("pub fn dev_launch_verified_rapp", syscall)
         self.assertIn("VerificationLevel::QemuVerified", syscall)
         self.assertIn("dev_launch_verified_rapp(id)", serial)
 
-    def test_phase4_syscall_pointer_safety_is_enforced(self):
+    def test_syscall_pointer_safety_is_enforced(self):
         user_ptr = (ROOT / "kernel/src/syscall/user_ptr.rs").read_text(encoding="utf-8")
         memory = (ROOT / "kernel/src/memory.rs").read_text(encoding="utf-8")
         syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
@@ -119,7 +149,7 @@ class SystemContractTests(unittest.TestCase):
         self.assertNotIn("from_raw_parts_mut", syscall)
         self.assertNotIn("core::ptr::copy_nonoverlapping", syscall)
 
-    def test_phase4_arch_syscalls_do_not_directly_dereference_unvalidated_pointers(self):
+    def test_arch_syscalls_do_not_directly_dereference_unvalidated_pointers(self):
         aarch = (ROOT / "kernel-aarch64/src/syscall.rs").read_text(encoding="utf-8")
         riscv = (ROOT / "kernel-riscv64/src/syscall.rs").read_text(encoding="utf-8")
         self.assertIn("fn validate_user_range", aarch)
