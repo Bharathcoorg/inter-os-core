@@ -503,18 +503,23 @@ pub fn recover_failed(id: ServiceId, parent_id: TaskId) -> Result<(), &'static s
     if record.state != ServiceState::Failed { return Err("service is not failed"); }
     let now = crate::interrupts::get_system_ticks();
     if now < SERVICE_RETRY_AFTER[idx].load(Ordering::Acquire) { return Err("service recovery backoff active"); }
-    SERVICE_RETRY_AFTER[idx].store(now.saturating_add(SERVICE_RESTART_BACKOFF_TICKS), Ordering::Release);
     if record.task != TaskId(0) {
         let scheduler = SCHEDULER.lock();
-        let task_parent = scheduler.get_task(record.task).map(|task| task.parent_id);
-        drop(scheduler);
-        if let Some(task_parent) = task_parent {
-            if task_parent != parent_id { return Err("failed service is owned by another parent"); }
-            let mut scheduler = SCHEDULER.lock();
-            let _ = scheduler.terminate_task(record.task, -1);
-            let _ = scheduler.reap_child(parent_id, record.task);
+        let task = scheduler.get_task(record.task).ok_or("failed service task not found")?;
+        if task.parent_id != parent_id {
+            return Err("failed service is owned by another parent");
         }
+        if !matches!(task.state, crate::task::TaskState::Zombie | crate::task::TaskState::Terminated) {
+            return Err("failed service task is not terminal");
+        }
+        drop(scheduler);
+        let mut scheduler = SCHEDULER.lock();
+        let _ = scheduler.reap_child(parent_id, record.task);
     }
+    // Consume one bounded recovery attempt only after ownership and terminal-state
+    // checks succeed. A rejected cross-parent recovery must not penalize PID1's
+    // retry budget.
+    SERVICE_RETRY_AFTER[idx].store(now.saturating_add(SERVICE_RESTART_BACKOFF_TICKS), Ordering::Release);
     SERVICE_RECORDS.lock()[idx] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Declared, generation: record.generation });
     start_locked(id, parent_id).map(|_| ())
 }
