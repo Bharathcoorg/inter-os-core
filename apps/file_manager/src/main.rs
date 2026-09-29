@@ -158,6 +158,7 @@ fn test_text(x: usize, y: usize, x0: usize, y0: usize, scale: usize, text: &[u8]
 
 // -----------------------------------------------------------------------------
 // VFS Entry Representation
+// Runtime entries must come from the kernel VFS; no synthetic inventory is embedded.
 // -----------------------------------------------------------------------------
 #[derive(Debug, Clone, Copy)]
 pub struct VfsItem {
