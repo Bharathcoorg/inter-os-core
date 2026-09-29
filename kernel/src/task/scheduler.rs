@@ -235,7 +235,12 @@ impl Scheduler {
         let mut best_idx = None;
         let mut best_priority = 0u8;
         while next_idx != current_idx {
-            if self.tasks[next_idx].state == TaskState::Ready {
+            if self.tasks[next_idx].state == TaskState::Ready
+                && self.tasks[next_idx].process_id.map(|pid| {
+                    crate::task::process::record_for_process(pid)
+                        .map(|r| matches!(r.state, crate::task::process::ProcessState::Running | crate::task::process::ProcessState::Background))
+                        .unwrap_or(false)
+                }).unwrap_or(true) {
                 let p = self.tasks[next_idx].priority;
                 if best_idx.is_none() || p > best_priority {
                     best_idx = Some(next_idx);
@@ -345,6 +350,10 @@ impl Scheduler {
         self.ticks_in_slice = self.ticks_in_slice.saturating_add(1);
 
         if self.ticks_in_slice >= TIME_SLICE_TICKS {
+            let suspended = crate::task::process::enforce_background_budget(crate::interrupts::get_system_ticks());
+            if suspended > 0 {
+                crate::serial_println!("[LIFECYCLE] Suspended {} background application(s) after budget exhaustion.", suspended);
+            }
             self.prepare_switch()
         } else {
             (None, None)
