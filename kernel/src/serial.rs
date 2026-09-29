@@ -23,6 +23,14 @@ struct RappTransfer {
 
 static RAPP_TRANSFER: Mutex<Option<RappTransfer>> = Mutex::new(None);
 
+struct StudioFileTransfer {
+    path: String,
+    expected_len: usize,
+    bytes: Vec<u8>,
+    received: Vec<bool>,
+}
+static STUDIO_FILE_TRANSFER: Mutex<Option<StudioFileTransfer>> = Mutex::new(None);
+
 /// Initializes the primary COM1 serial port (I/O port 0x3F8).
 pub fn init() {
     let serial = unsafe {
@@ -214,6 +222,131 @@ fn handle_rapp_command(s: &str) -> bool {
             Ok(false) => serial_println!("[RAPP_HOST] UNINSTALL_FAILED id={} not found", id),
             Ok(true) => serial_println!("[RAPP_HOST] UNINSTALL_FAILED id={} registry transition failed", id),
             Err(_) => serial_println!("[RAPP_HOST] UNINSTALL_FAILED id={} persistence failed", id),
+        }
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("STUDIO_PKG_LIST") {
+        let registry = crate::package::PACKAGE_REGISTRY.lock();
+        for entry in registry.active_entries() {
+            if let Some(descriptor) = crate::package::first_party_package(&entry.package_id) {
+                serial_println!("[STUDIO_PKG] id={} version={}.{}.{} state=active process={} name={} icon={}",
+                    entry.package_id, entry.version.0, entry.version.1, entry.version.2,
+                    descriptor.process_name, descriptor.display_name, descriptor.icon);
+            } else {
+                serial_println!("[STUDIO_PKG] id={} version={}.{}.{} state=active process={} name={} icon={}",
+                    entry.package_id, entry.version.0, entry.version.1, entry.version.2,
+                    entry.package_id, entry.package_id, "APP");
+            }
+        }
+        serial_println!("[STUDIO_PKG] END");
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("STUDIO_FS_LIST") {
+        let Some(path) = parts.next() else { return true; };
+        if path.len() > 256 || path.contains("..") || path.contains("//") || !path.starts_with('/') {
+            serial_println!("[STUDIO_FS] REJECT invalid path");
+            return true;
+        }
+        let mut out = [0u8; 4096];
+        let result = crate::fs::vfs::VFS.try_lock().and_then(|vfs| {
+            match vfs.list_dir_by_path(path, &mut out) {
+                Ok(n) => Some((n, true)),
+                Err(_) => Some((0, false)),
+            }
+        });
+        match result {
+            Some((n, true)) => {
+                for line in core::str::from_utf8(&out[..n]).unwrap_or("").lines() {
+                    serial_println!("[STUDIO_FS_ENTRY] path={} {}", path, line);
+                }
+                serial_println!("[STUDIO_FS] LIST_OK path={}", path);
+            }
+            _ => serial_println!("[STUDIO_FS] LIST_FAILED path={}", path),
+        }
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("STUDIO_FS_READ") {
+        let Some(path) = parts.next() else { return true; };
+        let Some(offset) = parts.next().and_then(|v| v.parse::<usize>().ok()) else { return true; };
+        let Some(length) = parts.next().and_then(|v| v.parse::<usize>().ok()) else { return true; };
+        if path.len() > 256 || offset > 16 * 1024 * 1024 || length == 0 || length > 192 || path.contains("..") || path.contains("//") || !path.starts_with('/') {
+            serial_println!("[STUDIO_FS] READ_REJECTED");
+            return true;
+        }
+        let mut out = [0u8; 192];
+        if let Some(vfs) = crate::fs::vfs::VFS.try_lock() {
+            let mut full = [0u8; 192];
+            match vfs.read_file_by_path(path, &mut full) {
+                Ok(n) if offset < n => {
+                    let end = core::cmp::min(n, offset + length);
+                    let slice = &full[offset..end];
+                    let mut hex = String::new();
+                    for byte in slice { use core::fmt::Write; let _ = write!(&mut hex, "{:02x}", byte); }
+                    serial_println!("[STUDIO_FS_READ] path={} offset={} len={} hex={}", path, offset, slice.len(), hex);
+                }
+                Ok(_) => serial_println!("[STUDIO_FS_READ] path={} offset={} len=0 hex=", path, offset),
+                Err(_) => serial_println!("[STUDIO_FS] READ_FAILED path={}", path),
+            }
+        } else {
+            serial_println!("[STUDIO_FS] READ_LOCKED path={}", path);
+        }
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("STUDIO_FS_BEGIN") {
+        let Some(path) = parts.next() else { return true; };
+        let Some(len) = parts.next().and_then(|v| v.parse::<usize>().ok()) else { return true; };
+        if path.len() > 256 || len > crate::fs::vfs::MAX_FILE_SIZE || !path.starts_with("/data/") || path.contains("..") || path.contains("//") {
+            serial_println!("[STUDIO_FS] WRITE_REJECTED");
+            return true;
+        }
+        *STUDIO_FILE_TRANSFER.lock() = Some(StudioFileTransfer {
+            path: String::from(path),
+            expected_len: len,
+            bytes: alloc::vec![0u8; len],
+            received: alloc::vec![false; len],
+        });
+        serial_println!("[STUDIO_FS] WRITE_READY path={} bytes={}", path, len);
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("STUDIO_FS_CHUNK") {
+        let Some(offset) = parts.next().and_then(|v| v.parse::<usize>().ok()) else { return true; };
+        let Some(hex) = parts.next() else { return true; };
+        if hex.is_empty() || hex.len() > 384 || hex.len() % 2 != 0 { serial_println!("[STUDIO_FS] CHUNK_REJECTED"); return true; }
+        let mut transfer = STUDIO_FILE_TRANSFER.lock();
+        let Some(ref mut state) = *transfer else { serial_println!("[STUDIO_FS] NO_TRANSFER"); return true; };
+        let chunk_len = hex.len() / 2;
+        if offset.checked_add(chunk_len).map(|end| end <= state.expected_len) != Some(true) { serial_println!("[STUDIO_FS] CHUNK_BOUNDS"); return true; }
+        let raw = hex.as_bytes();
+        for i in 0..chunk_len {
+            let Some(hi) = hex_nibble(raw[i * 2]) else { serial_println!("[STUDIO_FS] CHUNK_HEX"); return true; };
+            let Some(lo) = hex_nibble(raw[i * 2 + 1]) else { serial_println!("[STUDIO_FS] CHUNK_HEX"); return true; };
+            state.bytes[offset + i] = (hi << 4) | lo;
+            state.received[offset + i] = true;
+        }
+        serial_println!("[STUDIO_FS] CHUNK_OK offset={} len={}", offset, chunk_len);
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("STUDIO_FS_COMMIT") {
+        let mut transfer = STUDIO_FILE_TRANSFER.lock();
+        let Some(state) = transfer.take() else { serial_println!("[STUDIO_FS] NO_TRANSFER"); return true; };
+        if state.received.iter().any(|v| !*v) {
+            serial_println!("[STUDIO_FS] INCOMPLETE");
+            return true;
+        }
+        if let Some(mut vfs) = crate::fs::vfs::VFS.try_lock() {
+            vfs.create_file(&state.path, &state.bytes, false);
+            match vfs.sync() {
+                Ok(_) => serial_println!("[STUDIO_FS] WRITE_OK path={} bytes={}", state.path, state.expected_len),
+                Err(_) => serial_println!("[STUDIO_FS] WRITE_SYNC_FAILED path={}", state.path),
+            }
+        } else {
+            serial_println!("[STUDIO_FS] WRITE_LOCKED path={}", state.path);
         }
         return true;
     }
