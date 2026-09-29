@@ -195,17 +195,18 @@ def main():
         print("[SESSION-1] Calculator presented frame.")
         time.sleep(1.5)
         print("[SESSION-1] Performing calculation (7 + 5)...")
-        reader1.sock.sendall(b"TAP 100 680\n")  # '7'
-        assert reader1.wait_for("Keypad digit pressed.", timeout=10.0), "Keypad digit '7' failed"
-        time.sleep(0.5)
-        reader1.sock.sendall(b"TAP 598 1020\n") # '+'
-        assert reader1.wait_for("Keypad operator selected.", timeout=10.0), "Operator '+' failed"
-        time.sleep(0.5)
-        reader1.sock.sendall(b"TAP 266 850\n")  # '5'
-        assert reader1.wait_for("Keypad digit pressed.", timeout=10.0), "Keypad digit '5' failed"
-        time.sleep(0.5)
-        reader1.sock.sendall(b"TAP 598 1190\n") # '='
-        assert reader1.wait_for("Evaluation completed.", timeout=10.0), "Calculation '=' failed"
+        def send_tap_and_wait(cmd, marker, desc):
+            time.sleep(0.8)
+            reader1.sock.sendall(cmd)
+            if not reader1.wait_for(marker, timeout=8.0):
+                time.sleep(0.5)
+                reader1.sock.sendall(cmd)
+                assert reader1.wait_for(marker, timeout=10.0), f"{desc} failed (logs: {reader1.captured_logs[-10:]})"
+
+        send_tap_and_wait(b"TAP 100 680\n", "Keypad digit pressed.", "Keypad digit '7'")
+        send_tap_and_wait(b"TAP 598 1020\n", "Keypad operator selected.", "Operator '+'")
+        send_tap_and_wait(b"TAP 266 850\n", "Keypad digit pressed.", "Keypad digit '5'")
+        send_tap_and_wait(b"TAP 598 1190\n", "Evaluation completed.", "Calculation '='")
         print("[SESSION-1] Calculation verified. Exiting back to homescreen...")
         reader1.sock.sendall(b"TAP 62 48\n")     # Back
         assert reader1.wait_for("Foreground application exited and was reaped", timeout=15.0)

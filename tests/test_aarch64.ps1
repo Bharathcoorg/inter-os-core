@@ -27,6 +27,11 @@ $requiredMilestones = @(
     "AArch64 Capability-Guarded IPC",
     "AArch64 Vector Table (VBAR_EL1)",
     "AArch64 MMU",
+    "Dropping CPU execution privilege from EL1 to EL0 via hardware eret",
+    "AArch64 EL0 Privilege Isolation: Attempted 'mrs CurrentEL' from EL0 trapped (EC=0x00) VERIFIED.",
+    "AArch64 EL0 MMU Memory Isolation: Unauthorized read of kernel DRAM @ 0x40000000 trapped (EC=0x24) VERIFIED.",
+    "Task exited with code: 42",
+    "AArch64 Hardware EL0 Privilege Drop: Real eret transition, native SVC syscall loop, privilege trap, and MMU isolation VERIFIED.",
     "AArch64 EL0 Userspace",
     "AArch64 Sovereign Smartphone Microkernel"
 )
