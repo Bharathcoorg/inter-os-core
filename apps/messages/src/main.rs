@@ -7,9 +7,9 @@
 //! - Sovereign Vault Sector 202 encryption for authenticated persistent chat logs
 //! - Sovereign Privacy Shield message payload scrubbing to prevent metadata leakage
 //! - Active Conversation Thread Store:
-//!   * Peer 0: Alice (Sovereign Core Developer)
-//!   * Peer 1: Bob (Mesh Validator)
-//!   * Peer 2: Blinkit Delivery Concierge (Autonomous Commerce)
+//!   * Conversations are populated only from the real messaging backend.
+
+
 //! - Dual-tone acoustic incoming/outgoing message bubble chime and capacitive haptics
 //! - Asynchronous event reactor loop handling modem URCs, incoming P2P packets, and touch events
 
