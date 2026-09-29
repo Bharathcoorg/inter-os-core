@@ -1,6 +1,6 @@
 //! Inter OS Native Sovereign Encrypted Messaging & P2P Wire Client
 //!
-//! Full production decentralized encrypted messaging client executing in Ring 3 (User Mode):
+//! Native decentralized encrypted messaging client executing in Ring 3 (User Mode):
 //! - Secure Hardware Keystore key derivation (Slot 3: P2P Messaging Key)
 //! - Sovereign peer DID attestation & contact public identity verification
 //! - Cellular Baseband SMS modem & P2P wire framing
