@@ -1,6 +1,6 @@
 //! Inter OS Native Sovereign Telephony & Dialer App
 //!
-//! Full production telephony dialer executing in Ring 3 (User Mode):
+//! Native telephony dialer executing in Ring 3 (User Mode):
 //! - Dual-Tone Multi-Frequency (DTMF) acoustic tone synthesis for keypad keys (0-9, *, #)
 //! - Call State Machine: Idle, Dialing, Ringing, ActiveCall, CallHeld, CallEnded
 //! - Cellular Baseband Modem HAL telemetry: 5G Carrier, RSSI, Cell ID, 3GPP AT state
