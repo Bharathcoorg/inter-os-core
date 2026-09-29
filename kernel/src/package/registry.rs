@@ -291,8 +291,23 @@ impl PackageRegistry {
         Ok(())
     }
 
+    /// Explicitly disables the currently active package without deleting its
+    /// payload. This is the public rollback/quarantine operation; install
+    /// transaction failures use rollback_install() instead.
     pub fn rollback(&mut self, package_id: &str) -> Result<(), ()> {
-        self.rollback_install(package_id, self.entries.iter().find(|e| e.package_id == package_id).cloned())
+        let idx = self.entries.iter().position(|e| e.package_id == package_id).ok_or(())?;
+        let old = self.entries.clone();
+        let old_generation = self.generation;
+        let next_generation = self.generation.saturating_add(1);
+        self.generation = next_generation;
+        self.entries[idx].generation = next_generation;
+        self.entries[idx].state = PackageState::RolledBack;
+        if self.persist().is_err() {
+            self.entries = old;
+            self.generation = old_generation;
+            return Err(());
+        }
+        Ok(())
     }
 
 
