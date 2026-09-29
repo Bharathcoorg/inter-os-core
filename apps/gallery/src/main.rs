@@ -4,9 +4,9 @@
 //! - DRM/KMS Client Surface allocation (z=200) and double-buffered scanout presentation
 //! - High-contrast responsive 2-column masonry photo tile layout
 //! - Photo metadata and thumbnails are populated only from real media storage; no sample photos are injected.
-//!   * Mountain Sunrise (Amber/Violet dawn gradient & jagged silhouette)
-//!   * Cyber Skyline (Electric cyan/magenta neon reflection)
-//!   * Cosmic Nebula (Deep celestial indigo with star clusters)
+//!   * No sample photos are embedded; media entries come from real storage.
+
+lusters)
 //!   * Emerald Forest (Lush canopy & sunbeam shafts)
 //!   * Ocean Crest (Aquamarine wave & white seafoam)
 //!   * Minimalist Architecture (Geometric slate monoliths)
