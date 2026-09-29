@@ -70,10 +70,18 @@ impl PackageRegistry {
             if pos + RECORD_SIZE > len { self.entries.clear(); return false; }
             let raw_id = &buf[pos..pos + 32];
             let end = raw_id.iter().position(|b| *b == 0).unwrap_or(32);
+            if end == 0 || end > crate::package::rapp::RAPP_MAX_PACKAGE_ID_LEN {
+                self.entries.clear();
+                return false;
+            }
             let id = match core::str::from_utf8(&raw_id[..end]).ok() {
-                Some(v) => v,
-                None => { self.entries.clear(); return false; }
+                Some(v) if !v.contains('/') && !v.contains('\\') && !v.contains("..") => v,
+                _ => { self.entries.clear(); return false; }
             };
+            if self.entries.iter().any(|entry| entry.package_id == id) {
+                self.entries.clear();
+                return false;
+            }
             pos += 32;
             let generation = u64::from_le_bytes([
                 buf[pos],buf[pos+1],buf[pos+2],buf[pos+3],
@@ -98,6 +106,11 @@ impl PackageRegistry {
                 state,
                 version:(major,minor,patch),
             });
+        }
+        if pos != len {
+            self.entries.clear();
+            self.generation = 0;
+            return false;
         }
         count > 0
     }
@@ -254,25 +267,32 @@ impl PackageRegistry {
         self.activate_version(package_id, version)
     }
 
-    pub fn rollback(&mut self, package_id: &str) -> Result<(), ()> {
-        let idx=self.entries.iter().position(|e| e.package_id==package_id).ok_or(())?;
-        let previous=self.entries[idx].clone();
-        let old=self.entries.clone();
-        let next_generation=self.generation.saturating_add(1);
-        self.generation=next_generation;
-        self.entries[idx]=PackageEntry {
-            package_id: previous.package_id.clone(),
-            generation:next_generation,
-            state:PackageState::RolledBack,
-            version:previous.version,
-        };
-
+    /// Restores the exact registry record that existed before an install attempt.
+    /// If there was no previous record, the failed candidate is removed entirely.
+    pub fn rollback_install(&mut self, package_id: &str, previous: Option<PackageEntry>) -> Result<(), ()> {
+        let old = self.entries.clone();
+        let old_generation = self.generation;
+        match previous {
+            Some(previous) => {
+                let idx = self.entries.iter().position(|e| e.package_id == package_id).ok_or(())?;
+                self.entries[idx] = previous;
+            }
+            None => {
+                let idx = self.entries.iter().position(|e| e.package_id == package_id).ok_or(())?;
+                self.entries.remove(idx);
+            }
+        }
         if self.persist().is_err() {
-            self.entries=old;
-            self.generation=self.entries.iter().map(|e| e.generation).max().unwrap_or(0);
+            self.entries = old;
+            self.generation = old_generation;
             return Err(());
         }
+        self.generation = self.entries.iter().map(|e| e.generation).max().unwrap_or(0);
         Ok(())
+    }
+
+    pub fn rollback(&mut self, package_id: &str) -> Result<(), ()> {
+        self.rollback_install(package_id, self.entries.iter().find(|e| e.package_id == package_id).cloned())
     }
 
 
