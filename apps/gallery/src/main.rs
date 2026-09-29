@@ -3,7 +3,7 @@
 //! Full production Ring-3 graphical application executing in User Mode:
 //! - DRM/KMS Client Surface allocation (z=200) and double-buffered scanout presentation
 //! - High-contrast responsive 2-column masonry photo tile layout
-//! - Procedural high-fidelity scenery rendering:
+//! - Photo metadata and thumbnails are populated only from real media storage; no sample photos are injected.
 //!   * Mountain Sunrise (Amber/Violet dawn gradient & jagged silhouette)
 //!   * Cyber Skyline (Electric cyan/magenta neon reflection)
 //!   * Cosmic Nebula (Deep celestial indigo with star clusters)
