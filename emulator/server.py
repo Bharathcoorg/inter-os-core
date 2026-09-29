@@ -1048,23 +1048,6 @@ def verify_and_install_rapp(body, pkg_name):
     if not safe_name.endswith(".rapp"):
         safe_name = f"{safe_name}.rapp"
     filename = safe_name
-    packages_dir = os.path.join(os.path.dirname(DIRECTORY), "packages")
-    os.makedirs(packages_dir, exist_ok=True)
-
-    for target_dir in (packages_dir, INSTALLED_APPS_DIR):
-        target = os.path.join(target_dir, filename)
-        staging = target + ".staging"
-        try:
-            with open(staging, "wb") as f:
-                f.write(body)
-            os.replace(staging, target)
-        except Exception as exc:
-            try:
-                if os.path.exists(staging):
-                    os.remove(staging)
-            except Exception:
-                pass
-            return False, f"RAPP atomic install failed: {exc}", None
 
     sha256 = hashlib.sha256(body).hexdigest()
     version_text = ".".join(str(v) for v in version)
