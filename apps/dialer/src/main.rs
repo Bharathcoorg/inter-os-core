@@ -66,7 +66,7 @@ pub struct Contact {
     pub is_emergency: bool,
 }
 
-/// Embedded Sovereign Contacts Directory.
+/// Contacts are populated only from real user/contact state.
 pub static CONTACTS_BOOK: [Contact; 0] = [];
 
 /// Production Telephony Dialer state manager.
