@@ -41,29 +41,7 @@ pub struct CalendarEvent {
 }
 
 /// Static Built-in Agenda.
-pub static AGENDA: [CalendarEvent; 3] = [
-    CalendarEvent {
-        id: 101,
-        title: "Microkernel Architecture Sync",
-        time_str: "15:00 UTC",
-        category: "Engineering",
-        status: EventStatus::Confirmed,
-    },
-    CalendarEvent {
-        id: 102,
-        title: "Hardware Keystore Root Key Audit",
-        time_str: "10:00 UTC",
-        category: "Security",
-        status: EventStatus::Confirmed,
-    },
-    CalendarEvent {
-        id: 103,
-        title: "Autonomous Blinkit Grocery Restock",
-        time_str: "18:30 UTC",
-        category: "Agentic",
-        status: EventStatus::Confirmed,
-    },
-];
+pub static AGENDA: [CalendarEvent; 0] = [];
 
 /// Returns true if a Gregorian year is a leap year.
 pub fn is_leap_year(year: u32) -> bool {
@@ -120,7 +98,7 @@ impl CalendarApp {
             current_year: 2026,
             current_month: 9,
             current_day: 21,
-            total_events: 3,
+            total_events: 0,
             rtc_synchronized: false,
             sector_encrypted: false,
         }
