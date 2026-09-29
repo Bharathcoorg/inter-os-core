@@ -19,7 +19,7 @@
 
 > **Status Notice: Engineering Reality & Verification Status**  
 > InterOS Core is an open-source, bare-metal Rust microkernel and mobile operating system foundation. All user processes execute in isolated virtual address spaces with hardware MMU enforcement (CR3 / TTBR0_EL1 / SATP), capability-based access control, safe syscall memory copies (`UserPtr`), and mandatory Ed25519 cryptographic package attestation.  
-> The current repository features verified local QEMU execution across all three target architectures: canonical x86_64 smartphone QEMU gate with 20-phase lifecycle stress verification, AArch64 QEMU virt platform (Cortex-A53, EL0 userspace), and RISC-V64 QEMU virt platform (OpenSBI, Sv39 MMU, U-mode syscall ABI). Physical smartphone deployment remains experimental bring-up.
+> The current repository includes runtime verification coverage for the canonical x86_64 QEMU smartphone platform and QEMU virt targets for AArch64 and RISC-V64. Physical smartphone deployment remains experimental bring-up.
 
 ---
 
@@ -34,7 +34,7 @@ See [Platform Reality Contract](docs/PLATFORM_REALITY_CONTRACT.md) and run `pyth
 
 The syscall userspace-memory boundary is defined in [Syscall Pointer Safety](docs/SYSCALL_POINTER_SAFETY.md), including page mapping, permissions, ownership, alignment, overflow, and raw-pointer elimination rules.
 
-The end-to-end runtime lifecycle is defined in [Phase 5 Runtime Stability](docs/PHASE5_RUNTIME_STABILITY.md), covering task teardown, event/input fan-out, process accounting, surface bounds, and launcher recovery.
+The end-to-end runtime lifecycle is defined in [Runtime Stability](docs/PHASE5_RUNTIME_STABILITY.md), covering task teardown, event/input fan-out, process accounting, surface bounds, and launcher recovery.
 
 The userspace hardware-service boundary is defined in [System Services](docs/SYSTEM_SERVICES.md), covering isolated service capabilities, dependency-aware lifecycle, bounded resource budgets, service health diagnostics, and QEMU-vs-hardware separation.
 
@@ -45,9 +45,9 @@ In accordance with our engineering integrity policy, every subsystem is classifi
 | Subsystem / Feature | Implementation State | Verification Level | Verification Evidence / Mechanism |
 | :--- | :--- | :--- | :--- |
 | **x86_64 Virtual Address Isolation** | Real 4-Level PML4 CR3 per-process paging, W^X, Ring 3 isolation | **Verified via QEMU Runtime Gate** | `tests/verify_x86_boot.py` & `tests/test_interactive_lifecycle.py`; boot milestones, DRM/KMS scanout, and 10-app lifecycle verified |
-| **AArch64 Virtual Address Isolation** | Cortex-A53 EL1 kernel, MMU, VBAR_EL1, EL0 userspace | **Verified on QEMU Virt Platform** | `tests/test_aarch64.ps1`; microkernel boot, capability IPC, and EL0 userspace execution verified on QEMU `virt` |
-| **RISC-V 64 MMU & U-Mode** | Sv39 3-level page tables, stvec trap vector, U-mode syscall ABI | **Verified on QEMU Virt Platform** | `tests/test_riscv64.ps1`; OpenSBI v1.0+, kernel address protection (-EFAULT), and SYS_GET_TASK_ID verified on QEMU `virt` |
-| **Lifecycle Stress & Zero-Leak** | Repeated 20-phase smartphone app/window lifecycles | **Verified via Stress Gate (60 phases)** | `tests/test_lifecycle_stress.py`; 0 monotonic task/surface/pipe/mailbox leaks; 0 B heap drift across post-stress iterations |
+| **AArch64 Virtual Address Isolation** | Cortex-A53 EL1 kernel, MMU, VBAR_EL1, EL0 userspace | **QEMU verification available** | `tests/test_aarch64.ps1`; QEMU virt boot, userspace execution, and isolation checks are exercised locally |
+| **RISC-V 64 MMU & U-Mode** | Sv39 3-level page tables, stvec trap vector, U-mode syscall ABI | **QEMU verification available** | `tests/test_riscv64.ps1`; QEMU virt boot, userspace execution, and pointer/isolation checks are exercised locally |
+| **Lifecycle Stress & Resource Stability** | Repeated smartphone app/window lifecycles | **Locally verified stress coverage** | `tests/test_lifecycle_stress.py`; resource counters and bounded growth are checked across repeated iterations |
 | **Clean Reboot Recovery** | Dual-boot lifecycle with guest ACPI shutdown | **Verified Clean Dual-Boot** | `tests/test_reboot_recovery.py`; Session 1 ACPI shutdown (port 0x604) exit 0 -> Session 2 reboot milestone & app responsiveness |
 | **Syscall Pointer Validation** | `UserPtr<T>`, `UserSlice`, `copy_from_user`, `copy_to_user` | **Implemented & Adversarially Tested** | Null exclusion (<0x1000), integer overflow prevention, kernel address range rejection |
 | **Process Lifecycle & Multitasking** | PID assignment, Zombie states, parent tracking, exit codes | **Implemented & Tested** | `WaitPid` (Syscall 63) & `ExitWithCode` (Syscall 64) in kernel and `interos-std` |
@@ -254,5 +254,5 @@ For experimental physical device deployment, see [docs/PHYSICAL_HARDWARE_FLASHIN
 InterOS Core is dual-licensed under:
 * **MIT License** ([LICENSE-MIT](LICENSE-MIT))
 * **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE-APACHE))
-- [Phase 7 — Display & Window System](docs/PHASE7_DISPLAY_WINDOW_SYSTEM.md)
-- [Phase 8 — MMU Isolation](docs/PHASE8_MMU_ISOLATION.md)
+- [Display & Window System](docs/PHASE7_DISPLAY_WINDOW_SYSTEM.md)
+- [MMU Isolation](docs/PHASE8_MMU_ISOLATION.md)
