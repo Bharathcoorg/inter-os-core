@@ -3,7 +3,7 @@ Inter OS — Device Studio Server
 
 Serves the browser studio UI on port 4300 for Rust mobile application
 development, package sideloading (.app, .rap, .wasm, .apk), real-time UART
-telemetry, and hardware digital twin simulation (battery, lux, SIM, killswitch).
+telemetry, and guest-backed QEMU telemetry and development controls.
 """
 
 import http.server
