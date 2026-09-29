@@ -3886,7 +3886,9 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         if let Some(read_slot) = read_slot {
             let path = alloc::format!("/packages/{}.rapp", app_id);
             if let Ok(manifest) = sys_verify_package(read_slot, &path) {
-                if manifest.package_id == app_id && manifest.payload_len > 0 {
+                if manifest.package_id == app_id
+                    && manifest.payload_len > 0
+                    && crate::package::PACKAGE_REGISTRY.lock().launch_allowed(app_id, manifest.version) {
                     let stat = sys_fs_stat(read_slot, &path)?;
                     let fd = sys_fs_open(read_slot, &path, Rights::READ)?;
                     let mut rapp = alloc::vec![0u8; stat.size];
