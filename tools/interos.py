@@ -461,7 +461,7 @@ def cmd_build(args):
 # =============================================================================
 def cmd_test(args):
     test_target = getattr(args, "target", "all").lower()
-    valid_targets = ["unit", "x86_64", "x86", "aarch64", "riscv64", "security", "adversarial", "qemu", "lifecycle", "contracts", "stress", "recovery", "persistence", "storage_recovery", "crash", "watchdog", "panic", "all"]
+    valid_targets = ["unit", "x86_64", "x86", "aarch64", "riscv64", "security", "adversarial", "qemu", "lifecycle", "contracts", "m10_m12", "stress", "recovery", "persistence", "storage_recovery", "crash", "watchdog", "panic", "all"]
     if test_target not in valid_targets:
         log_error(f"Unknown test target: '{test_target}'. Valid targets: {', '.join(valid_targets)}")
         return 1
@@ -501,7 +501,25 @@ def cmd_test(args):
                 if test_target in ["x86_64", "x86"]:
                     return res.returncode
 
+    if test_target == "m10_m12":
+        gate = WORKSPACE_ROOT / "tests" / "verify_m10_m12.py"
+        if not gate.exists():
+            log_error("M10-M12 evidence gate is missing")
+            return 1
+        res = subprocess.run([sys.executable, str(gate)], cwd=str(WORKSPACE_ROOT))
+        return res.returncode
+
     if test_target in ["qemu", "lifecycle", "all"]:
+        if test_target in ["qemu", "all"]:
+            boot_script = WORKSPACE_ROOT / "tests" / "verify_x86_boot.py"
+            if boot_script.exists():
+                log("Executing canonical x86_64 QEMU boot verification...")
+                res_boot = subprocess.run([sys.executable, "-u", str(boot_script)], cwd=str(WORKSPACE_ROOT))
+                if res_boot.returncode != 0:
+                    overall_rc = res_boot.returncode
+                    if test_target == "qemu":
+                        return res_boot.returncode
+
         lifecycle_script = WORKSPACE_ROOT / "tests" / "test_interactive_lifecycle.py"
         if lifecycle_script.exists():
             log("Executing QEMU full interactive smartphone lifecycle verification...")
@@ -1424,7 +1442,7 @@ def main():
 
     # test
     p_tst = subparsers.add_parser("test", help="Execute automated test suite across targets")
-    p_tst.add_argument("--target", choices=["unit", "x86_64", "x86", "aarch64", "riscv64", "security", "adversarial", "qemu", "lifecycle", "contracts", "stress", "recovery", "persistence", "storage_recovery", "crash", "watchdog", "panic", "all"], default="all", help="Select a specific local test suite")
+    p_tst.add_argument("--target", choices=["unit", "x86_64", "x86", "aarch64", "riscv64", "security", "adversarial", "qemu", "lifecycle", "contracts", "m10_m12", "stress", "recovery", "persistence", "storage_recovery", "crash", "watchdog", "panic", "all"], default="all", help="Select a specific local test suite")
     p_tst.set_defaults(func=cmd_test)
 
     # new
