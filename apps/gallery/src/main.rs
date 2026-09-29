@@ -176,50 +176,7 @@ pub struct PhotoItem {
     pub secondary_color: u32,
 }
 
-pub static PHOTOS: [PhotoItem; 6] = [
-    PhotoItem {
-        title: "Mountain Sunrise",
-        date: "24 Sep 2026",
-        meta: "Sony IMX586 - 48 MP - ISO 100",
-        primary_color: 0xFFF59E0B, // Golden Amber
-        secondary_color: 0xFF182236, // Deep Mountain Indigo
-    },
-    PhotoItem {
-        title: "Cyber Skyline",
-        date: "22 Sep 2026",
-        meta: "Sony IMX586 - f/1.8 - 1/250s",
-        primary_color: 0xFF31C4FF, // Electric Cyan
-        secondary_color: 0xFF1B0F2A, // Midnight Neon Violet
-    },
-    PhotoItem {
-        title: "Cosmic Nebula",
-        date: "19 Sep 2026",
-        meta: "Astro Exposure - 30s - ISO 800",
-        primary_color: 0xFFA78BFA, // Celestial Purple
-        secondary_color: 0xFF080D1A, // Deep Cosmos
-    },
-    PhotoItem {
-        title: "Emerald Forest",
-        date: "15 Sep 2026",
-        meta: "Sony IMX586 - 48 MP - Macro",
-        primary_color: 0xFF10B981, // Emerald Green
-        secondary_color: 0xFF0E2218, // Dense Foliage
-    },
-    PhotoItem {
-        title: "Ocean Wave Crest",
-        date: "10 Sep 2026",
-        meta: "Action Capture - 1/1000s",
-        primary_color: 0xFF38BDF8, // Aquamarine
-        secondary_color: 0xFF0D253A, // Deep Sea
-    },
-    PhotoItem {
-        title: "Slate Architecture",
-        date: "04 Sep 2026",
-        meta: "Monochrome - f/2.2 - ISO 64",
-        primary_color: 0xFF94A3B8, // Slate Silver
-        secondary_color: 0xFF1E293B, // Monolith Shadow
-    },
-];
+pub static PHOTOS: [PhotoItem; 0] = [];
 
 pub struct GalleryApp {
     pub selected_tab: usize, // 0: All, 1: Albums, 2: Favorites
