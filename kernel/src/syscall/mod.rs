@@ -320,8 +320,10 @@ pub fn sys_app_background() -> SyscallResult {
 pub fn sys_app_foreground() -> SyscallResult {
     let task = sys_get_task_id();
     if task == TaskId(0) { return SyscallResult::PermissionDenied; }
-    crate::task::process::set_foreground(task)
-        .map(|_| SyscallResult::Success).unwrap_or(SyscallResult::InvalidArgument)
+    match crate::task::process::set_foreground(task) {
+        Ok(()) => { crate::task::SCHEDULER.lock().unblock_task(task); SyscallResult::Success }
+        Err(_) => SyscallResult::InvalidArgument,
+    }
 }
 
 pub fn sys_app_suspend() -> SyscallResult {
@@ -334,8 +336,10 @@ pub fn sys_app_suspend() -> SyscallResult {
 pub fn sys_app_wake() -> SyscallResult {
     let task = sys_get_task_id();
     if task == TaskId(0) { return SyscallResult::PermissionDenied; }
-    crate::task::process::wake(task)
-        .map(|_| SyscallResult::Success).unwrap_or(SyscallResult::InvalidArgument)
+    match crate::task::process::wake(task) {
+        Ok(()) => { crate::task::SCHEDULER.lock().unblock_task(task); SyscallResult::Success }
+        Err(_) => SyscallResult::InvalidArgument,
+    }
 }
 
 /// Enforces an explicit capability for privileged kernel controls.
@@ -2256,6 +2260,13 @@ pub fn sys_net_send_socket(
 }
 
 pub fn sys_net_sendto(dst_ip: crate::net::Ipv4Address, dst_port: u16, payload: &[u8]) -> SyscallResult {
+    let current_id = match SCHEDULER.lock().current_task_id() {
+        Some(id) => id,
+        None => return SyscallResult::PermissionDenied,
+    };
+    if crate::task::process::consume_background_network(current_id, payload.len()).is_err() {
+        return SyscallResult::NotReady;
+    }
     let sched = SCHEDULER.lock();
     let current = match sched.current_task() {
         Some(t) => t,
