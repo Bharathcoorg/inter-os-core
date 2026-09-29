@@ -4,7 +4,7 @@
 //! - DRM/KMS Client Surface allocation (z=200) and double-buffered scanout presentation
 //! - Real-time block device capacity query via microkernel storage driver
 //! - Dynamic VFS directory traversal & file system exploration
-//! - Internal Storage health & usage progress gauge (42 GB / 128 GB)
+//! - Internal Storage capacity queried from the storage service; usage is shown only when real telemetry is available.
 //! - Tactile Category Shortcuts (Recent, Images, Docs, Downloads)
 //! - Interactive directory navigation with hierarchical path breadcrumbs
 //! - Asynchronous event reactor loop handling touch interactions and home gestures
@@ -236,7 +236,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         // Title: Internal Storage
         if y >= 126 && y < 142 {
             if let Some(c) = test_text(x, y, 48, 126, 2, b"Internal Storage", TEXT_PRIMARY) { return c; }
-            if let Some(c) = test_text(x, y, 480, 126, 2, b"42 GB / 128 GB", ACCENT_SKY) { return c; }
+            if let Some(c) = test_text(x, y, 480, 126, 2, b"Usage unavailable", ACCENT_SKY) { return c; }
         }
 
         // Horizontal Progress Gauge Track (x: 48..672, y: 156..170)
@@ -250,7 +250,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
 
         // Subtext: Free space & Partition format
         if y >= 184 && y < 192 {
-            if let Some(c) = test_text(x, y, 48, 184, 1, b"86 GB Free - InterFS Zero-Trust Journaled Partition", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 48, 184, 1, b"Usage telemetry unavailable", TEXT_MUTED) { return c; }
         }
 
         return SURFACE_RAISED;
@@ -259,13 +259,13 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     // 3. Grid Shortcuts (y: 235..335, 4 categories)
     if y >= 235 && y < 335 {
         let slot = if (24..176).contains(&x) {
-            Some((0, 24, 176, &b"Recent"[..], &b"18"[..]))
+            Some((0, 24, 176, &b"Recent"[..], &b"--"[..]))
         } else if (197..349).contains(&x) {
-            Some((1, 197, 349, &b"Images"[..], &b"124"[..]))
+            Some((1, 197, 349, &b"Images"[..], &b"--"[..]))
         } else if (370..522).contains(&x) {
-            Some((2, 370, 522, &b"Docs"[..], &b"42"[..]))
+            Some((2, 370, 522, &b"Docs"[..], &b"--"[..]))
         } else if (543..695).contains(&x) {
-            Some((3, 543, 695, &b"Download"[..], &b"9"[..]))
+            Some((3, 543, 695, &b"Download"[..], &b"--"[..]))
         } else {
             None
         };
