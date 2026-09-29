@@ -168,6 +168,10 @@ impl Scheduler {
     }
 
     /// Returns a mutable reference to the currently running task.
+    pub fn tasks_iter(&self) -> core::slice::Iter<'_, TaskControlBlock> {
+        self.tasks.iter()
+    }
+
     pub fn current_task_mut(&mut self) -> Option<&mut TaskControlBlock> {
         self.tasks.get_mut(self.current_idx)
     }
