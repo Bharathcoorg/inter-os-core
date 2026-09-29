@@ -3832,6 +3832,19 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
 
     let app_id = app_id.trim_matches(|c: char| c.is_whitespace() || c == '\0');
 
+    // The persistent registry is the launch authority. A package blob or
+    // native built-in is not executable merely because a caller knows its ID.
+    crate::package::PACKAGE_REGISTRY.lock().seed();
+    let registry = crate::package::PACKAGE_REGISTRY.lock();
+    let registered = registry.entries().iter().find(|e| e.package_id == app_id).cloned();
+    drop(registry);
+    let Some(registered) = registered else {
+        return Err(SyscallResult::FileNotFound);
+    };
+    if !matches!(registered.state, crate::package::PackageState::Active) {
+        return Err(SyscallResult::PermissionDenied);
+    }
+
     // External applications use the canonical RAPP v2 execution path. The
     // kernel verifies the package, derives capabilities only from its manifest,
     // and loads the signed ELF payload into a Ring-3 child. First-party
@@ -3845,6 +3858,9 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
                 .map_err(|_| SyscallResult::IntegrityViolation)?;
             if verified.package_id != app_id || verified.version != blob.version {
                 return Err(SyscallResult::IntegrityViolation);
+            }
+            if !crate::package::PACKAGE_REGISTRY.lock().launch_allowed(app_id, blob.version) {
+                return Err(SyscallResult::PermissionDenied);
             }
             let payload_end = verified.payload_offset.checked_add(verified.payload_len)
                 .ok_or(SyscallResult::InvalidArguments)?;
@@ -3900,6 +3916,12 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
                 }
             }
         }
+    }
+
+    if !crate::package::first_party_package(app_id).is_some()
+        || !crate::package::PACKAGE_REGISTRY.lock().launch_allowed(app_id, (1, 0, 0))
+    {
+        return Err(SyscallResult::PermissionDenied);
     }
 
     let tid = match app_id {
