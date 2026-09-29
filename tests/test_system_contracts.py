@@ -13,7 +13,7 @@ class SystemContractTests(unittest.TestCase):
         server = (ROOT / "emulator/server.py").read_text(encoding="utf-8")
         self.assertNotIn("VFS_ROOT", server)
         self.assertNotIn("resolve_vfs_path", server)
-        self.assertIn('source": "GUEST_VFS"', server)
+        self.assertIn("'source': 'GUEST_VFS'", server)
         self.assertIn('source": "GUEST_REGISTRY"', server)
         self.assertIn("def is_safe_guest_path", server)
         self.assertIn("def is_safe_package_id", server)
@@ -242,7 +242,7 @@ class SystemContractTests(unittest.TestCase):
         self.assertIn("PACKAGE_BLOB_STORE", syscall)
         self.assertIn("activate_version_with_policy(pkg_id, verified.version, &verified.policy)", syscall)
         self.assertIn("store.remove(pkg_id)", syscall)
-        self.assertIn("PACKAGE_REGISTRY.lock().rollback(pkg_id)", syscall)
+        self.assertIn("PACKAGE_REGISTRY.lock().rollback_install(pkg_id", syscall)
 
     def test_package_blob_restore_fails_closed(self):
         store = (ROOT / "kernel/src/package/store.rs").read_text(encoding="utf-8")

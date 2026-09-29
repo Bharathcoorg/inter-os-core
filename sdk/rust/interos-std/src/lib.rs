@@ -1,4 +1,3 @@
-pub mod app;
 #![no_std]
 
 //! Inter OS Userspace Standard Library (interos-std)
@@ -6,6 +5,7 @@ pub mod app;
 //! Provides safe, ergonomic Rust bindings for Inter OS hardware fast system calls
 //! (`syscall` instruction) executing in Ring 3 User Mode.
 
+pub mod app;
 pub mod service;
 pub mod design;
 pub mod compositor {

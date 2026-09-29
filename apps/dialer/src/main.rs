@@ -529,11 +529,8 @@ fn handle_touch_point(dialer: &mut DialerApp, x: u32, y: u32) -> bool {
             } else {
                 dialer.hangup();
             }
-            return false;
         } else if x >= 500 && x < 672 && y >= 1005 && y < 1125 {
             // Contacts are loaded from real persisted contact state; no synthetic entries are injected.
-                }
-            }
             std::audio_haptic_click().ok();
             return false;
         }

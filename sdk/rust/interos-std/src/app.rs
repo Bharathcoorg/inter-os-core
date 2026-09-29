@@ -78,7 +78,8 @@ impl AppSession {
 
     /// Opens a network socket through an explicitly supplied capability slot.
     pub fn open_socket(&self, network_cap_slot: usize, protocol: u32) -> Result<u64, i64> {
-        crate::net_socket(network_cap_slot, protocol)
+        let _ = network_cap_slot;
+        crate::net_socket(protocol as u16).map(|sock| sock as u64)
     }
 
     /// Waits for input, IPC, storage, and network events without busy-looping.

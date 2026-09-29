@@ -5,11 +5,6 @@
 //! - High-contrast responsive 2-column masonry photo tile layout
 //! - Photo metadata and thumbnails are populated only from real media storage; no sample photos are injected.
 //!   * No sample photos are embedded; media entries come from real storage.
-
-lusters)
-//!   * Emerald Forest (Lush canopy & sunbeam shafts)
-//!   * Ocean Crest (Aquamarine wave & white seafoam)
-//!   * Minimalist Architecture (Geometric slate monoliths)
 //! - Interactive full-screen photo inspection modal with optical telemetry
 //! - Segmented Filter Tabs (All, Albums, Favorites) & Bottom Navigation Bar
 //! - Asynchronous event reactor loop handling touch interactions and home gestures

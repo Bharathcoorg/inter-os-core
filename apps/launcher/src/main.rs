@@ -316,12 +316,12 @@ fn refresh_runtime_recents(state: &mut LauncherState) {
         if state.recent_app_lens.iter().any(|len| *len != 0) {
             if (0..3).any(|i| {
                 let len = state.recent_app_lens[i] as usize;
-                &state.recent_apps[i][..len] == package_id.as_bytes()
+                &state.recent_apps[i][..len] == package_id
             }) { continue; }
         }
 
         if let Some(slot) = state.recent_app_lens.iter().position(|len| *len == 0) {
-            state.recent_apps[slot][..package_id.len()].copy_from_slice(package_id.as_bytes());
+            state.recent_apps[slot][..package_id.len()].copy_from_slice(package_id);
             state.recent_app_lens[slot] = package_id.len() as u8;
             state.recent_task_ids[slot] = task_id;
         }
@@ -471,7 +471,7 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     // 4. Primary Applications Grid
     // The home grid is a projection of the live package catalog. It never
     // invents application identities when the registry is empty.
-    if (y >= 490 && y < 1100) {
+    if y >= 490 && y < 1100 {
         let row = (y - 490) / 150;
         let col = if x < 340 { 0 } else if x >= 360 && x < 700 { 1 } else { 2 };
         if col < 2 {
@@ -1924,7 +1924,7 @@ pub extern "C" fn _start() -> ! {
                                 }
                                 // Tap Card 0 body to switch
                                 else if (200..480).contains(&y) && (56..580).contains(&x) {
-                                    let Some(target) = state.recent_id(0) else { break; };
+                                    let Some(_target) = state.recent_id(0) else { break; };
                                     if let Ok(()) = std::app_focus(state.recent_task_ids[0]) {
                                         state.active_child = Some(state.recent_task_ids[0]);
                                         state.current_view = ViewMode::HomeScreen;
@@ -1946,7 +1946,7 @@ pub extern "C" fn _start() -> ! {
                                 }
                                 // Tap Card 1 body to switch
                                 else if (520..800).contains(&y) && (56..580).contains(&x) {
-                                    let Some(target) = state.recent_id(1) else { break; };
+                                    let Some(_target) = state.recent_id(1) else { break; };
                                     if let Ok(()) = std::app_focus(state.recent_task_ids[1]) {
                                         state.active_child = Some(state.recent_task_ids[1]);
                                         state.current_view = ViewMode::HomeScreen;
@@ -1968,7 +1968,7 @@ pub extern "C" fn _start() -> ! {
                                 }
                                 // Tap Card 2 body to switch
                                 else if (840..1120).contains(&y) && (56..580).contains(&x) {
-                                    let Some(target) = state.recent_id(2) else { break; };
+                                    let Some(_target) = state.recent_id(2) else { break; };
                                     if let Ok(()) = std::app_focus(state.recent_task_ids[2]) {
                                         state.active_child = Some(state.recent_task_ids[2]);
                                         state.current_view = ViewMode::HomeScreen;
@@ -2237,19 +2237,27 @@ pub extern "C" fn _start() -> ! {
                                 }
 
                                 // Launch application from the registry-backed grid.
-                                if let Some(target_app) = resolve_app_in_drawer(&state, x, y) {
-                                    state.push_recent(target_app);
-                                    match std::app_launch(target_app) {
-                                        Ok(task_id) => {
-                                            state.active_child = Some(task_id);
-                                            state.current_view = ViewMode::HomeScreen;
-                                            std::log(0, "[LAUNCHER] App launched from drawer.").ok();
-                                            let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
-                                            while std::input_event_poll(&mut drain).is_ok() {}
-                                            break;
-                                        }
-                                        Err(_) => {
-                                            std::log(0, "[LAUNCHER] Application launch rejected by kernel.").ok();
+                                let target_desc = resolve_app_in_drawer(&state, x, y).map(|s| {
+                                    let mut buf = [0u8; 32];
+                                    let len = s.len().min(32);
+                                    buf[..len].copy_from_slice(&s.as_bytes()[..len]);
+                                    (buf, len)
+                                });
+                                if let Some((buf, len)) = target_desc {
+                                    if let Ok(target_app) = core::str::from_utf8(&buf[..len]) {
+                                        state.push_recent(target_app);
+                                        match std::app_launch(target_app) {
+                                            Ok(task_id) => {
+                                                state.active_child = Some(task_id);
+                                                state.current_view = ViewMode::HomeScreen;
+                                                std::log(0, "[LAUNCHER] App launched from drawer.").ok();
+                                                let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
+                                                while std::input_event_poll(&mut drain).is_ok() {}
+                                                break;
+                                            }
+                                            Err(_) => {
+                                                std::log(0, "[LAUNCHER] Application launch rejected by kernel.").ok();
+                                            }
                                         }
                                     }
                                 }
@@ -2596,16 +2604,24 @@ pub extern "C" fn _start() -> ! {
                                 }
 
                                 // Launch application
-                                if let Some(target_app) = resolve_app_at_touch(&state, input.x, input.y) {
-                                    match std::app_launch(target_app) {
-                                        Ok(task_id) => {
-                                            state.push_recent(target_app);
-                                            state.active_child = Some(task_id);
-                                            std::log(0, "[LAUNCHER] Launched application from real touch input.").ok();
-                                            break;
-                                        }
-                                        Err(_) => {
-                                            std::log(0, "[LAUNCHER] Application launch rejected by kernel.").ok();
+                                let target_desc = resolve_app_at_touch(&state, input.x, input.y).map(|s| {
+                                    let mut buf = [0u8; 32];
+                                    let len = s.len().min(32);
+                                    buf[..len].copy_from_slice(&s.as_bytes()[..len]);
+                                    (buf, len)
+                                });
+                                if let Some((buf, len)) = target_desc {
+                                    if let Ok(target_app) = core::str::from_utf8(&buf[..len]) {
+                                        match std::app_launch(target_app) {
+                                            Ok(task_id) => {
+                                                state.push_recent(target_app);
+                                                state.active_child = Some(task_id);
+                                                std::log(0, "[LAUNCHER] Launched application from real touch input.").ok();
+                                                break;
+                                            }
+                                            Err(_) => {
+                                                std::log(0, "[LAUNCHER] Application launch rejected by kernel.").ok();
+                                            }
                                         }
                                     }
                                 }

@@ -144,7 +144,7 @@ class StudioSecurityTests(unittest.TestCase):
         self.assertEqual(status, 413)
 
     def test_06_vfs_path_traversal_rejection(self):
-        """Verify /api/fs/read and write cannot escape VFS_ROOT via dot-dot or drive letters."""
+        """Verify /api/fs/read and write reject traversal paths via dot-dot or drive letters."""
         traversal_paths = [
             "../../../../etc/passwd",
             "../../../Windows/System32/drivers/etc/hosts",
@@ -153,15 +153,10 @@ class StudioSecurityTests(unittest.TestCase):
             "D:\\secret.txt",
         ]
         for p in traversal_paths:
-            # Test read
+            self.assertFalse(server.is_safe_guest_path(p), f"Path '{p}' should not be considered safe")
             status, res = self._post("/api/fs/read", {"path": p})
-            # Must either return 404 (file not found in VFS_ROOT) or confine path to VFS_ROOT
-            self.assertIn(status, [200, 404])
-            resolved = server.resolve_vfs_path(p)
-            self.assertTrue(
-                resolved.startswith(os.path.abspath(server.VFS_ROOT)),
-                f"Path '{p}' escaped VFS_ROOT! Resolved to: {resolved}"
-            )
+            self.assertEqual(status, 400)
+            self.assertFalse(res.get("success", True))
 
     def test_07_theme_traversal_rejection(self):
         """Verify /api/themes/apply sanitizes theme_id and blocks directory traversal."""

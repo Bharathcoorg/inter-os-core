@@ -1,6 +1,6 @@
-# Phase 4 — Syscall Pointer Safety
+# Syscall Pointer Safety
 
-Phase 4 defines the userspace-memory trust boundary for InterOS system calls.
+This specification defines the userspace-memory trust boundary for InterOS system calls.
 
 ## Required invariants
 
@@ -49,4 +49,4 @@ Static contract tests assert:
 - the x86 syscall dispatcher contains no raw userspace slice construction;
 - AArch64/RISC-V syscall paths use checked range validation and copy helpers.
 
-This phase does not claim a fresh kernel build, CI result, QEMU boot, or physical-device validation.
+This specification requires explicit validation evidence for kernel builds, CI results, QEMU boot, or physical-device verification.

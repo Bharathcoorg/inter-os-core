@@ -50,7 +50,7 @@ Device Studio exposes the real QEMU VNC framebuffer through websockify. The gues
 
 The profile deliberately separates those claims.
 
-## Phase 2 package lifecycle
+## Package lifecycle
 
 The QEMU developer transport now provides a real guest package lifecycle:
 
@@ -66,7 +66,7 @@ The current persistent package store accepts RAPP blobs up to 60 KiB per package
 No host-side package catalog entry is treated as proof of guest installation. Device Studio reports guest transfer failures as installation failures.
 
 
-## Phase 3 — Interactive virtual hardware contract
+## Interactive virtual hardware contract
 
 The canonical QEMU input/display coordinate space is the guest scanout itself:
 
@@ -82,7 +82,7 @@ The canonical QEMU input/display coordinate space is the guest scanout itself:
 
 All guest-facing input is bounded and rejected outside the virtual display coordinate space. The kernel KMS default matches the same 1280x720 scanout contract, so surface composition, framebuffer capture, and input coordinates share one authoritative virtual display space. Physical touchscreen/I2C remains a separate hardware backend and must consume the same normalized input contract.
 
-## Phase 3 verification language
+## Verification language
 
 - "Interactive QEMU" means browser input reaches the guest input subsystem through the documented virtual transport.
 - "Guest framebuffer" means the VNC/RFB surface exposed by QEMU.
