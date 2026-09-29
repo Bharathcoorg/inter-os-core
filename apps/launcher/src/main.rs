@@ -1939,7 +1939,6 @@ pub extern "C" fn _start() -> ! {
                                 // Tap Card 0 body to switch
                                 else if (200..480).contains(&y) && (56..580).contains(&x) {
                                     let Some(target) = state.recent_id(0) else { break; };
-                                    state.push_recent(target);
                                     if let Ok(task_id) = std::app_launch(target) {
                                         state.active_child = Some(task_id);
                                         state.current_view = ViewMode::HomeScreen;
@@ -1962,7 +1961,6 @@ pub extern "C" fn _start() -> ! {
                                 // Tap Card 1 body to switch
                                 else if (520..800).contains(&y) && (56..580).contains(&x) {
                                     let Some(target) = state.recent_id(1) else { break; };
-                                    state.push_recent(target);
                                     if let Ok(task_id) = std::app_launch(target) {
                                         state.active_child = Some(task_id);
                                         state.current_view = ViewMode::HomeScreen;
@@ -1985,7 +1983,6 @@ pub extern "C" fn _start() -> ! {
                                 // Tap Card 2 body to switch
                                 else if (840..1120).contains(&y) && (56..580).contains(&x) {
                                     let Some(target) = state.recent_id(2) else { break; };
-                                    state.push_recent(target);
                                     if let Ok(task_id) = std::app_launch(target) {
                                         state.active_child = Some(task_id);
                                         state.current_view = ViewMode::HomeScreen;
