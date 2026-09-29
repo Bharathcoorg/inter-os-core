@@ -531,15 +531,7 @@ fn handle_touch_point(dialer: &mut DialerApp, x: u32, y: u32) -> bool {
             }
             return false;
         } else if x >= 500 && x < 672 && y >= 1005 && y < 1125 {
-            // Load Alice contact
-            dialer.active_len = 0;
-            let num = CONTACTS_BOOK[0].number;
-            for c in num.chars() {
-                if c.is_ascii_digit() || c == '*' || c == '#' || c == '+' {
-                    if dialer.active_len < dialer.active_number.len() {
-                        dialer.active_number[dialer.active_len] = c as u8;
-                        dialer.active_len += 1;
-                    }
+            // Contacts are loaded from real persisted contact state; no synthetic entries are injected.
                 }
             }
             std::audio_haptic_click().ok();
@@ -570,11 +562,7 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // 2. Query Emergency Profile
-    let emergency_contact = &CONTACTS_BOOK[3];
-    if emergency_contact.is_emergency {
-        std::log(0, "[DIALER APP] Emergency Engine: E911 fast-dispatch bypass ready.").ok();
-    }
+    // Emergency contacts are provided by the real contacts/modem subsystem when available.
 
     // 3. Allocate dedicated KMS Client Surface (z=200)
     std::log(0, "[DIALER APP] Step 1: Allocating application surface (z=200)...").ok();
