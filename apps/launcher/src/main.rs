@@ -427,84 +427,33 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return SURFACE_LIGHT;
     }
 
-    // 4. Primary Applications Grid (Rows 0 to 4: y: 480..1110)
-    // Row 1 (y: 490..590)
-    if y >= 490 && y < 590 {
-        if x >= 56 && x < 306 {
-            if y >= 522 && y < 538 {
-                if let Some(c) = test_text(x, y, 80, 522, 2, b"Calculator", TEXT_PRIMARY) { return c; }
+    // 4. Primary Applications Grid
+    // The home grid is a projection of the live package catalog. It never
+    // invents application identities when the registry is empty.
+    if (y >= 490 && y < 1100) {
+        let row = (y - 490) / 150;
+        let col = if x < 340 { 0 } else if x >= 360 && x < 700 { 1 } else { 2 };
+        if col < 2 {
+            let index = row * 2 + col;
+            if index < state.app_count {
+                let x0 = if col == 0 { 56 } else { 360 };
+                let x1 = if col == 0 { 306 } else { 610 };
+                let y0 = 490 + row * 150;
+                if y == y0 || y == y0 + 149 || x == x0 || x == x1 - 1 {
+                    return BORDER_SUBTLE;
+                }
+                let icon_len = 4usize.min(state.app_icons[index].iter().position(|b| *b == b' ').unwrap_or(4));
+                if y >= y0 + 15 && y < y0 + 55 && x >= x0 + 90 && x < x0 + 130 {
+                    let icon = &state.app_icons[index][..icon_len];
+                    if let Some(c) = test_text(x, y, x0 + 92, y0 + 26, 2, icon, ACCENT_SKY) { return c; }
+                    return SURFACE_RAISED;
+                }
+                if y >= y0 + 68 && y < y0 + 84 {
+                    let label_len = state.app_label_lens[index] as usize;
+                    if let Some(c) = test_text(x, y, x0 + 24, y0 + 68, 2, &state.app_labels[index][..label_len], TEXT_PRIMARY) { return c; }
+                }
+                return SURFACE_RAISED;
             }
-            if y >= 505 && y < 545 && x >= 240 && x < 280 { return ACCENT_SKY; }
-            if y >= 586 || x < 60 || x >= 302 { return BORDER_SUBTLE; }
-            return SURFACE_RAISED;
-        }
-        if x >= 360 && x < 610 {
-            if y >= 522 && y < 538 {
-                if let Some(c) = test_text(x, y, 384, 522, 2, b"Vault", TEXT_PRIMARY) { return c; }
-            }
-            if y >= 505 && y < 545 && x >= 544 && x < 584 { return SUCCESS_EMERALD; }
-            if y >= 586 || x < 364 || x >= 606 { return BORDER_SUBTLE; }
-            return SURFACE_RAISED;
-        }
-        return BG_DARK;
-    }
-    // Row 2 (y: 620..760)
-    if y >= 620 && y < 760 {
-        if x >= 56 && x < 306 {
-            if y >= 674 && y < 690 {
-                if let Some(c) = test_text(x, y, 80, 674, 2, b"Camera", TEXT_PRIMARY) { return c; }
-            }
-            if y >= 670 && y < 734 && x >= 149 && x < 213 { return ACCENT_SKY; }
-            if y >= 756 || x < 60 || x >= 302 { return BORDER_SUBTLE; }
-            return SURFACE_RAISED;
-        }
-        if x >= 360 && x < 610 {
-            if y >= 674 && y < 690 {
-                if let Some(c) = test_text(x, y, 384, 674, 2, b"Dialer", TEXT_PRIMARY) { return c; }
-            }
-            if y >= 670 && y < 734 && x >= 453 && x < 517 { return SUCCESS_EMERALD; }
-            if y >= 756 || x < 364 || x >= 606 { return BORDER_SUBTLE; }
-            return SURFACE_RAISED;
-        }
-        return BG_DARK;
-    }
-    // Row 3 (y: 790..930)
-    if y >= 790 && y < 930 {
-        if x >= 56 && x < 306 {
-            if y >= 844 && y < 860 {
-                if let Some(c) = test_text(x, y, 80, 844, 2, b"Browser", TEXT_PRIMARY) { return c; }
-            }
-            if y >= 840 && y < 904 && x >= 149 && x < 213 { return TEXT_MUTED; }
-            if y >= 926 || x < 60 || x >= 302 { return BORDER_SUBTLE; }
-            return SURFACE_RAISED;
-        }
-        if x >= 360 && x < 610 {
-            if y >= 844 && y < 860 {
-                if let Some(c) = test_text(x, y, 384, 844, 2, b"Messages", TEXT_PRIMARY) { return c; }
-            }
-            if y >= 840 && y < 904 && x >= 453 && x < 517 { return ACCENT_AMBER; }
-            if y >= 926 || x < 364 || x >= 606 { return BORDER_SUBTLE; }
-            return SURFACE_RAISED;
-        }
-        return BG_DARK;
-    }
-    // Row 4 (y: 960..1100)
-    if y >= 960 && y < 1100 {
-        if x >= 56 && x < 306 {
-            if y >= 1014 && y < 1030 {
-                if let Some(c) = test_text(x, y, 80, 1014, 2, b"Calendar", TEXT_PRIMARY) { return c; }
-            }
-            if y >= 1010 && y < 1074 && x >= 149 && x < 213 { return ACCENT_SKY; }
-            if y >= 1096 || x < 60 || x >= 302 { return BORDER_SUBTLE; }
-            return SURFACE_RAISED;
-        }
-        if x >= 360 && x < 610 {
-            if y >= 1014 && y < 1030 {
-                if let Some(c) = test_text(x, y, 384, 1014, 2, b"Music", TEXT_PRIMARY) { return c; }
-            }
-            if y >= 1010 && y < 1074 && x >= 453 && x < 517 { return SUCCESS_EMERALD; }
-            if y >= 1096 || x < 364 || x >= 606 { return BORDER_SUBTLE; }
-            return SURFACE_RAISED;
         }
         return BG_DARK;
     }
