@@ -281,6 +281,24 @@ impl Vfs {
         Ok(())
     }
 
+    pub fn list_dir_by_path(&self, path: &str, out: &mut [u8]) -> Result<usize, FsError> {
+        let norm = normalize_path(path);
+        let inode_id = self.path_to_inode.get(&norm).copied().ok_or(FsError::FileNotFound)?;
+        let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
+        if !matches!(inode.file_type, FileType::Directory) { return Err(FsError::NotADirectory); }
+        let mut pos = 0usize;
+        for child_id in inode.children.iter().copied() {
+            let Some(child) = self.inodes.get(&child_id) else { continue; };
+            let name = child.name.as_str();
+            let line = alloc::format!("{}|{}|{}\n", name, if matches!(child.file_type, FileType::Directory) { "dir" } else { "file" }, child.size);
+            let bytes = line.as_bytes();
+            if pos + bytes.len() > out.len() { break; }
+            out[pos..pos + bytes.len()].copy_from_slice(bytes);
+            pos += bytes.len();
+        }
+        Ok(pos)
+    }
+
     /// Reads content of a file directly by canonical path (for kernel/diagnostic inspection).
     pub fn read_file_by_path(&self, path: &str, out: &mut [u8]) -> Result<usize, FsError> {
         let inode_id = self.path_to_inode.get(path).copied().ok_or(FsError::FileNotFound)?;
