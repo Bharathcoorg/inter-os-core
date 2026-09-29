@@ -148,37 +148,44 @@ pub fn wake(task: TaskId) -> Result<(), &'static str> {
 }
 
 pub fn wake_package(package_id: &str, user_id: u32) -> usize {
-    let mut targets = [TaskId(0); MAX_PROCESSES];
-    let mut target_count = 0usize;
+    let mut candidates = [TaskId(0); MAX_PROCESSES];
+    let mut candidate_count = 0usize;
     {
         let table = PROCESS_TABLE.lock();
         let threads = THREAD_TABLE.lock();
-        let sched = crate::task::SCHEDULER.lock();
         for r in table.iter().flatten() {
             if r.user_id != user_id || !matches!(r.state, ProcessState::Suspended | ProcessState::Background) { continue; }
             if let Some(thread) = threads.iter().flatten().find(|t| t.process == r.id) {
-                let name = sched.get_task(thread.task).map(|t| t.name).unwrap_or("");
-                if name == package_id && target_count < targets.len() {
-                    targets[target_count] = thread.task;
-                    target_count += 1;
+                if candidate_count < candidates.len() {
+                    candidates[candidate_count] = thread.task;
+                    candidate_count += 1;
                 }
             }
         }
     }
+
     let mut count = 0usize;
-    for task in targets[..target_count].iter().copied() {
+    for task in candidates[..candidate_count].iter().copied() {
+        let is_target = crate::task::SCHEDULER.lock()
+            .get_task(task)
+            .map(|t| t.name == package_id)
+            .unwrap_or(false);
+        if !is_target { continue; }
+
         let process = match process_for_task(task) { Some(p) => p, None => continue };
-        let mut table = PROCESS_TABLE.lock();
-        if let Some(r) = table.iter_mut().flatten().find(|r| r.id == process) {
-            if r.user_id == user_id && r.state == ProcessState::Suspended {
-                r.state = ProcessState::Background;
-                r.background_started_ticks = crate::interrupts::get_system_ticks();
-                count += 1;
-            }
-        }
-        drop(table);
-        if count > 0 {
+        let woke = {
+            let mut table = PROCESS_TABLE.lock();
+            if let Some(r) = table.iter_mut().flatten().find(|r| r.id == process) {
+                if r.user_id == user_id && r.state == ProcessState::Suspended {
+                    r.state = ProcessState::Background;
+                    r.background_started_ticks = crate::interrupts::get_system_ticks();
+                    true
+                } else { false }
+            } else { false }
+        };
+        if woke {
             crate::task::SCHEDULER.lock().unblock_task(task);
+            count += 1;
         }
     }
     count
