@@ -1638,67 +1638,27 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             post_body = self.rfile.read(content_length)
             try:
                 data = json.loads(post_body.decode('utf-8'))
-                target_id = data.get("app_id") or data.get("filename") or data.get("name")
-                if not target_id:
-                    self.send_response(400)
-                    self.end_headers()
-                    self.wfile.write(json.dumps({'success': False, 'error': 'Missing target app_id'}).encode())
-                    return
-
+                target_id = str(data.get("app_id") or data.get("filename") or data.get("name") or "").strip()
+                if not target_id or any(ch in target_id for ch in '/\\') or '..' in target_id:
+                    raise ValueError('invalid target package id')
                 guest_ok, guest_msg = send_guest_serial_command(
                     f"RAPP_UNINSTALL {target_id}",
-                    "[RAPP_HOST] UNINSTALLED",
+                    f"[RAPP_HOST] UNINSTALLED id={target_id}",
                     timeout=12,
                 )
-                if not guest_ok:
-                    self.send_response(409)
-                    self.send_header('Content-Type', 'application/json')
-                    self.send_header('Access-Control-Allow-Origin', '*')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({
-                        'success': False,
-                        'status': 'GUEST_REJECTED',
-                        'error': guest_msg,
-                    }).encode())
-                    return
-
-                uninstalled_app_ids.add(target_id)
-                for a in list(DEFAULT_APPS) + list(sideloaded_apps):
-                    if target_id in (a.get("id"), a.get("filename"), a.get("name")):
-                        uninstalled_app_ids.add(a.get("id", ""))
-                        uninstalled_app_ids.add(a.get("filename", ""))
-
-                found_app = None
-                for a in list(sideloaded_apps):
-                    if target_id in (a.get("id"), a.get("filename"), a.get("name")):
-                        found_app = a
-                        sideloaded_apps.remove(a)
-                        break
-
-                # Also delete file or extracted directory from /data/apps/
-                if found_app:
-                    app_file = os.path.join(INSTALLED_APPS_DIR, found_app.get("filename", ""))
-                    app_dir = os.path.join(INSTALLED_APPS_DIR, found_app.get("id", ""))
-                    if os.path.exists(app_file) and os.path.isfile(app_file):
-                        try: os.remove(app_file)
-                        except Exception: pass
-                    if os.path.exists(app_dir) and os.path.isdir(app_dir):
-                        try: shutil.rmtree(app_dir)
-                        except Exception: pass
-
-                name = found_app.get("name", target_id) if found_app else target_id
-                serial_lines.append(f"[PACKAGE_MGR] Uninstalled package '{name}' ({target_id}).")
-                serial_lines.append(f"[SECURITY_HAL] Revoked Ring 3 capability tokens. Memory reclaimed from /data/apps/.")
-
-                self.send_response(200)
+                self.send_response(200 if guest_ok else 409)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
-                self.wfile.write(json.dumps({'success': True, 'uninstalled': target_id, 'name': name}).encode())
+                self.wfile.write(json.dumps({
+                    'success': guest_ok,
+                    'source': 'GUEST_PACKAGE_MANAGER',
+                    'uninstalled': target_id,
+                    **({} if guest_ok else {'error': guest_msg})
+                }).encode())
             except Exception as e:
-                self.send_response(500)
+                self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
             return
