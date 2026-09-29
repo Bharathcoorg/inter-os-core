@@ -130,6 +130,10 @@ pub enum SyscallNumber {
     PermissionRevoke = 113,
     SettingsHardwareStatus = 114,
     AppStorageOpen = 115,
+    AppBackground = 116,
+    AppForeground = 117,
+    AppSuspend = 118,
+    AppWake = 119,
 }
 
 /// System call result status codes.
@@ -304,6 +308,34 @@ pub fn sys_get_ticks(cap_slot: usize) -> Result<u64, SyscallResult> {
 /// Returns the TaskId of the caller.
 pub fn sys_get_task_id() -> TaskId {
     SCHEDULER.lock().current_task_id().unwrap_or(TaskId(0))
+}
+
+pub fn sys_app_background() -> SyscallResult {
+    let task = sys_get_task_id();
+    if task == TaskId(0) { return SyscallResult::PermissionDenied; }
+    crate::task::process::set_background(task, crate::interrupts::get_system_ticks())
+        .map(|_| SyscallResult::Success).unwrap_or(SyscallResult::InvalidArgument)
+}
+
+pub fn sys_app_foreground() -> SyscallResult {
+    let task = sys_get_task_id();
+    if task == TaskId(0) { return SyscallResult::PermissionDenied; }
+    crate::task::process::set_foreground(task)
+        .map(|_| SyscallResult::Success).unwrap_or(SyscallResult::InvalidArgument)
+}
+
+pub fn sys_app_suspend() -> SyscallResult {
+    let task = sys_get_task_id();
+    if task == TaskId(0) { return SyscallResult::PermissionDenied; }
+    crate::task::process::suspend(task, crate::interrupts::get_system_ticks())
+        .map(|_| SyscallResult::Success).unwrap_or(SyscallResult::InvalidArgument)
+}
+
+pub fn sys_app_wake() -> SyscallResult {
+    let task = sys_get_task_id();
+    if task == TaskId(0) { return SyscallResult::PermissionDenied; }
+    crate::task::process::wake(task)
+        .map(|_| SyscallResult::Success).unwrap_or(SyscallResult::InvalidArgument)
 }
 
 /// Enforces an explicit capability for privileged kernel controls.
@@ -643,6 +675,10 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             // GetTaskId
             sys_get_task_id().0 as i64
         }
+        119 => crate::syscall::sys_app_wake() as i64,
+        118 => crate::syscall::sys_app_suspend() as i64,
+        117 => crate::syscall::sys_app_foreground() as i64,
+        116 => crate::syscall::sys_app_background() as i64,
         115 => {
             // AppStorageOpen: a1 = cap_slot, a2 = relative_path_ptr, a3 = path_len, a4 = rights_bits.
             let cap_slot = a1 as usize;
