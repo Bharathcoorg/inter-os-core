@@ -509,6 +509,21 @@ pub fn spawn_user_process_with_limits(
         let _ = scheduler.reap_child(parent_id, spawned);
         return Err(error);
     }
+
+    let is_application = crate::package::first_party_package_by_process_name(name).is_some()
+        || name.starts_with("org.interos.");
+    if is_application {
+        let user_id = crate::user::USER_MANAGER.lock().active_user().0;
+        if user_id == crate::user::UserId::SYSTEM.0
+            || crate::task::process::bind_user_for_task(spawned, user_id).is_err()
+        {
+            let mut scheduler = SCHEDULER.lock();
+            let _ = scheduler.terminate_task(spawned, -1);
+            let _ = scheduler.reap_child(parent_id, spawned);
+            return Err("application user identity unavailable");
+        }
+    }
+
     Ok(spawned)
 }
 
