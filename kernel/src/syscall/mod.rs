@@ -134,6 +134,7 @@ pub enum SyscallNumber {
     AppForeground = 117,
     AppSuspend = 118,
     AppWake = 119,
+    PackageUninstall = 120,
 }
 
 /// System call result status codes.
@@ -1637,6 +1638,19 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 &payload[..len],
             ) as i64
         },
+        120 => {
+            let len = a3 as usize;
+            if len == 0 || len > 128 { return SyscallResult::InvalidArguments as i64; }
+            let mut name_buf = [0u8; 128];
+            let pkg_id = match read_user_string(a2, len, &mut name_buf) {
+                Ok(s) => s,
+                Err(_) => return SyscallResult::InvalidArguments as i64,
+            };
+            match sys_package_uninstall(a1 as usize, pkg_id, a4 != 0) {
+                Ok(()) => 0,
+                Err(e) => e as i64,
+            }
+        },
         101 => {
             let len = a2 as usize;
             if len == 0 || len > 128 {
@@ -2450,6 +2464,59 @@ pub fn sys_package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) ->
 }
 
 /// Queries the active mobile hardware platform description.
+pub fn sys_package_uninstall(cap_slot: usize, pkg_id: &str, user_consent: bool) -> Result<(), SyscallResult> {
+    if !user_consent { return Err(SyscallResult::PermissionDenied); }
+    let current = {
+        let sched = SCHEDULER.lock();
+        let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+        task.cap_table.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE)
+            .map_err(|_| SyscallResult::PermissionDenied)?;
+        task.id
+    };
+    if pkg_id.is_empty() || pkg_id.len() > crate::package::rapp::RAPP_MAX_PACKAGE_ID_LEN
+        || pkg_id.contains('/') || pkg_id.contains('\\') || pkg_id.contains("..") {
+        return Err(SyscallResult::InvalidArguments);
+    }
+    if crate::package::first_party_package(pkg_id).is_some() {
+        return Err(SyscallResult::PermissionDenied);
+    }
+
+    let previous_entry = {
+        let registry = crate::package::PACKAGE_REGISTRY.lock();
+        registry.entries().iter().find(|e| e.package_id == pkg_id).cloned()
+    }.ok_or(SyscallResult::FileNotFound)?;
+
+    // Refuse removal while an installed package process is still alive.
+    {
+        let sched = SCHEDULER.lock();
+        if sched.tasks_named(pkg_id).iter().any(|task| !matches!(task.state, crate::task::TaskState::Zombie | crate::task::TaskState::Terminated)) {
+            return Err(SyscallResult::NotReady);
+        }
+    }
+
+    {
+        let mut registry = crate::package::PACKAGE_REGISTRY.lock();
+        registry.uninstall(pkg_id).map_err(|_| SyscallResult::DeviceError)?;
+    }
+
+    let previous_blob = crate::package::PACKAGE_BLOB_STORE.lock().get(pkg_id).cloned();
+    if crate::package::PACKAGE_BLOB_STORE.lock().remove(pkg_id).is_err() {
+        let _ = crate::package::PACKAGE_REGISTRY.lock().restore_entry(previous_entry);
+        return Err(SyscallResult::DeviceError);
+    }
+
+    if crate::fs::VFS.lock().remove_app_storage(pkg_id).is_err() {
+        if let Some(blob) = previous_blob {
+            let _ = crate::package::PACKAGE_BLOB_STORE.lock().put(&blob.package_id, blob.version, &blob.bytes);
+        }
+        let _ = crate::package::PACKAGE_REGISTRY.lock().restore_entry(previous_entry);
+        return Err(SyscallResult::DeviceError);
+    }
+
+    serial_println!("[PACKAGE] Task {} uninstalled package '{}' and removed private app data.", current.0, pkg_id);
+    Ok(())
+}
+
 pub fn sys_hal_query_platform(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
     let info = crate::hal::PLATFORM.info();
     let arch_str = match info.arch {
