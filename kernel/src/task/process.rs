@@ -191,6 +191,27 @@ pub fn wake_package(package_id: &str, user_id: u32) -> usize {
     count
 }
 
+pub fn consume_background_ipc(task: TaskId) -> Result<(), &'static str> {
+    let process = process_for_task(task).ok_or("process not found")?;
+    let mut table = PROCESS_TABLE.lock();
+    let r = table.iter_mut().flatten().find(|r| r.id == process).ok_or("process not found")?;
+    if r.state != ProcessState::Background { return Ok(()); }
+    if r.background_ipc >= r.limits.max_background_ipc { return Err("background IPC quota exceeded"); }
+    r.background_ipc += 1;
+    Ok(())
+}
+
+pub fn consume_background_network(task: TaskId, bytes: usize) -> Result<(), &'static str> {
+    let process = process_for_task(task).ok_or("process not found")?;
+    let mut table = PROCESS_TABLE.lock();
+    let r = table.iter_mut().flatten().find(|r| r.id == process).ok_or("process not found")?;
+    if r.state != ProcessState::Background { return Ok(()); }
+    let next = r.background_network_bytes.saturating_add(bytes as u32);
+    if next > r.limits.max_background_network_bytes { return Err("background network quota exceeded"); }
+    r.background_network_bytes = next;
+    Ok(())
+}
+
 pub fn enforce_background_budget(now: u64) -> usize {
     let mut table = PROCESS_TABLE.lock();
     let mut suspended = 0;
