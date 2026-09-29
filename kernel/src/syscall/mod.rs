@@ -135,6 +135,8 @@ pub enum SyscallNumber {
     AppSuspend = 118,
     AppWake = 119,
     PackageUninstall = 120,
+    AppStop = 121,
+    AppRestart = 122,
 }
 
 /// System call result status codes.
@@ -1638,6 +1640,23 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 &payload[..len],
             ) as i64
         },
+        121 => match sys_app_stop(crate::task::TaskId(a1 as u64)) {
+            SyscallResult::Success => 0,
+            e => e as i64,
+        },
+        122 => {
+            let len = a2 as usize;
+            if len == 0 || len > 128 { return SyscallResult::InvalidArguments as i64; }
+            let mut buf = [0u8; 128];
+            let app_id = match read_user_string(a1, len, &mut buf) {
+                Ok(v) => v,
+                Err(_) => return SyscallResult::InvalidArguments as i64,
+            };
+            match sys_app_restart(app_id) {
+                Ok(tid) => tid.0 as i64,
+                Err(e) => e as i64,
+            }
+        },
         120 => {
             let len = a3 as usize;
             if len == 0 || len > 128 { return SyscallResult::InvalidArguments as i64; }
@@ -2464,6 +2483,38 @@ pub fn sys_package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) ->
 }
 
 /// Queries the active mobile hardware platform description.
+pub fn sys_app_stop(child_id: TaskId) -> SyscallResult {
+    if require_app_launcher_or_service_manager().is_err() {
+        return SyscallResult::PermissionDenied;
+    }
+    let parent = match SCHEDULER.lock().current_task_id() {
+        Some(id) => id,
+        None => return SyscallResult::PermissionDenied,
+    };
+    match SCHEDULER.lock().terminate_child(parent, child_id, -9) {
+        Ok(()) => SyscallResult::Success,
+        Err(_) => SyscallResult::TargetNotFound,
+    }
+}
+
+pub fn sys_app_restart(app_id: &str) -> Result<TaskId, SyscallResult> {
+    require_app_launcher_or_service_manager()?;
+    let parent = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?;
+    if app_id.is_empty() || app_id.len() > 128 || app_id.contains('/') || app_id.contains('\\') || app_id.contains("..") {
+        return Err(SyscallResult::InvalidArguments);
+    }
+
+    // Stop the caller's existing child instance of this package, if present.
+    let child = {
+        let sched = SCHEDULER.lock();
+        sched.find_child_by_name(parent, app_id)
+    };
+    if let Some(child) = child {
+        SCHEDULER.lock().terminate_child(parent, child, -9).map_err(|_| SyscallResult::NotReady)?;
+    }
+    sys_app_launch(app_id)
+}
+
 pub fn sys_package_uninstall(cap_slot: usize, pkg_id: &str, user_consent: bool) -> Result<(), SyscallResult> {
     if !user_consent { return Err(SyscallResult::PermissionDenied); }
     let current = {
