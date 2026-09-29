@@ -112,6 +112,20 @@ impl PackageRegistry {
         if self.restored { return; }
         self.restored = true;
         if self.restore() {
+            let mut migrated = false;
+            for entry in self.entries.iter_mut() {
+                if entry.generation == 0
+                    && matches!(entry.state, PackageState::Staged)
+                    && crate::package::first_party_package(&entry.package_id).is_some()
+                {
+                    entry.state = PackageState::Active;
+                    migrated = true;
+                }
+            }
+            if migrated {
+                let _ = self.persist();
+                crate::serial_println!("[PACKAGE] migrated first-party registry entries to active state.");
+            }
             crate::serial_println!("[PACKAGE] persistent registry restored from disk.");
             return;
         }
