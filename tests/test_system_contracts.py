@@ -65,6 +65,45 @@ class SystemContractTests(unittest.TestCase):
         sdk_ids = dict(pattern.findall(sdk_body))
         self.assertEqual(kernel_ids, sdk_ids)
 
+    def test_m10_service_abi_is_bounded_and_sdk_parity_is_present(self):
+        kernel = (ROOT / "kernel/src/service_abi.rs").read_text(encoding="utf-8")
+        sdk = (ROOT / "sdk/rust/interos-std/src/service.rs").read_text(encoding="utf-8")
+        for source, tokens in (
+            (kernel, (
+                'SERVICE_ABI_MAGIC: [u8; 4] = *b"ISVC"',
+                "SERVICE_ABI_VERSION: u16 = 1",
+                "SERVICE_ABI_MAX_PAYLOAD: u16 = 4096",
+                "pub fn decode",
+            )),
+            (sdk, (
+                'MAGIC: [u8; 4] = *b"ISVC"',
+                "VERSION: u16 = 1",
+                "MAX_PAYLOAD: u16 = 4096",
+                "pub fn encode",
+                "pub fn decode",
+            )),
+        ):
+            for token in tokens:
+                self.assertIn(token, source)
+
+    def test_m11_service_recovery_is_parent_scoped_and_terminal_only(self):
+        services = (ROOT / "kernel/src/services.rs").read_text(encoding="utf-8")
+        self.assertIn("recover_failed(id: ServiceId, parent_id: TaskId)", services)
+        self.assertIn("failed service task is not terminal", services)
+        self.assertIn("failed service is owned by another parent", services)
+        self.assertIn("SERVICE_RETRY_AFTER[idx].store", services)
+        self.assertIn("spawn_verified_rapp_process", services)
+        self.assertIn("SERVICE_LIFECYCLE_LOCK", services)
+
+    def test_m12_qemu_gate_is_wired_into_cli(self):
+        cli = (ROOT / "tools/interos.py").read_text(encoding="utf-8")
+        gate = (ROOT / "tests/verify_m10_m12.py").read_text(encoding="utf-8")
+        self.assertIn('"m10_m12"', cli)
+        self.assertIn("verify_m10_m12.py", cli)
+        self.assertIn("verify_x86_boot.py", cli)
+        self.assertIn("test_interactive_lifecycle.py", gate)
+        self.assertIn("Framebuffer PPM verified for current run", gate)
+
     def test_reliability_modules_exist(self):
         for rel in (
             "kernel/src/recovery.rs",
