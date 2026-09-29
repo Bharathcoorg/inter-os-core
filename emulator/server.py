@@ -1807,6 +1807,10 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(json.dumps({'success': False, 'error': 'unsupported touch action'}).encode())
                 return
 
+            if data.get('coords') == 'portrait' or (0 <= x <= 720 and 720 < y <= 1440):
+                x = 460 + int(x * 360 / 720)
+                y = int(y * 720 / 1440)
+
             if not (0 <= x < 1280 and 0 <= y < 720):
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
@@ -1839,6 +1843,9 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                                 self.end_headers()
                                 self.wfile.write(json.dumps({'success': False, 'error': 'swipe requires integer x2 and y2'}).encode())
                                 return
+                            if data.get('coords') == 'portrait' or (0 <= x2 <= 720 and 720 < y2 <= 1440):
+                                x2 = 460 + int(x2 * 360 / 720)
+                                y2 = int(y2 * 720 / 1440)
                             if not (0 <= x2 < 1280 and 0 <= y2 < 720):
                                 self.send_response(400)
                                 self.send_header('Content-Type', 'application/json')
@@ -2154,6 +2161,8 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         if self.path == '/api/qemu/cmd':
             content_length = int(self.headers.get('Content-Length', 0))
             if content_length > 4096:
+                if content_length > 0:
+                    _ = self.rfile.read(content_length)
                 self.send_response(413)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')

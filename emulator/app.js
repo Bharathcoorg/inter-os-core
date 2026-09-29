@@ -341,6 +341,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function updateHardwareProfilerUI(data) {
     if (!data) return;
     const isAlive = !!data.qemu_alive;
+    updateDeviceDisplay(isAlive);
 
     // 1. Header Global Status (Simple & Clean: Online vs Standby)
     if (qemuGlobalText) {
@@ -484,6 +485,323 @@ document.addEventListener('DOMContentLoaded', () => {
       if (span) span.textContent = originalText;
       btnRebootKernel.style.pointerEvents = 'auto';
     }, 1200);
+  });
+
+  // =========================================================================
+  // Authentic Microkernel Display & Live Scanout Controller
+  // =========================================================================
+  const screenLiveScanout = document.getElementById('screen-live-scanout');
+  const screenStandby = document.getElementById('screen-standby');
+  const liveScanoutImg = document.getElementById('live-scanout-img');
+  const scanoutResText = document.getElementById('scanout-res-text');
+  const btnToggleScanoutCrop = document.getElementById('btn-toggle-scanout-crop');
+  const scanoutModeLabel = document.getElementById('scanout-mode-label');
+  const btnRefreshScanout = document.getElementById('btn-refresh-scanout');
+  const btnBootMicrokernel = document.getElementById('btn-boot-microkernel');
+
+  // Gestures
+  const btnGestureActivity = document.getElementById('btn-gesture-activity');
+  const btnGestureBack = document.getElementById('btn-gesture-back');
+  const btnGestureHome = document.getElementById('btn-gesture-home');
+  const btnGestureQuick = document.getElementById('btn-gesture-quick');
+  const btnGestureSystem = document.getElementById('btn-gesture-system');
+
+  let cropMode = 'portrait'; // 'portrait' (720x1440 cropped) or 'full' (1280x720 complete scanout)
+  let scanoutTimer = null;
+  let isBooting = false;
+
+  function setScanoutMode(mode) {
+    cropMode = mode;
+    if (scanoutModeLabel) {
+      scanoutModeLabel.textContent = cropMode === 'portrait' ? 'Portrait' : 'Full 720p';
+    }
+    if (scanoutResText) {
+      scanoutResText.innerHTML = cropMode === 'portrait' 
+        ? 'LIVE SCANOUT &bull; 720&times;1440' 
+        : 'LIVE SCANOUT &bull; 1280&times;720';
+    }
+    refreshScanoutFrame();
+  }
+
+  btnToggleScanoutCrop?.addEventListener('click', () => {
+    setScanoutMode(cropMode === 'portrait' ? 'full' : 'portrait');
+  });
+
+  btnRefreshScanout?.addEventListener('click', () => {
+    refreshScanoutFrame();
+  });
+
+  function refreshScanoutFrame() {
+    if (!liveScanoutImg) return;
+    const url = `/api/screen/frame?t=${Date.now()}${cropMode === 'full' ? '&full=1' : ''}`;
+    liveScanoutImg.src = url;
+  }
+
+  function startScanoutStream() {
+    if (scanoutTimer) return;
+    refreshScanoutFrame();
+    scanoutTimer = setInterval(() => {
+      refreshScanoutFrame();
+    }, 400);
+  }
+
+  function stopScanoutStream() {
+    if (scanoutTimer) {
+      clearInterval(scanoutTimer);
+      scanoutTimer = null;
+    }
+  }
+
+  function updateDeviceDisplay(isAlive) {
+    if (isBooting) {
+      if (screenBootSplash) screenBootSplash.style.display = 'flex';
+      if (screenLiveScanout) screenLiveScanout.style.display = 'none';
+      if (screenStandby) screenStandby.style.display = 'none';
+      return;
+    }
+
+    if (isAlive) {
+      if (screenBootSplash) screenBootSplash.style.display = 'none';
+      if (screenStandby) screenStandby.style.display = 'none';
+      if (screenLiveScanout) screenLiveScanout.style.display = 'flex';
+      startScanoutStream();
+    } else {
+      stopScanoutStream();
+      if (screenBootSplash) screenBootSplash.style.display = 'none';
+      if (screenLiveScanout) screenLiveScanout.style.display = 'none';
+      if (screenStandby) screenStandby.style.display = 'flex';
+    }
+  }
+
+  // Interactive touch and gesture dispatch directly to microkernel
+  if (liveScanoutImg) {
+    let isPointerDown = false;
+    let startX = 0, startY = 0;
+    let startTime = 0;
+
+    liveScanoutImg.addEventListener('pointerdown', (ev) => {
+      isPointerDown = true;
+      startTime = Date.now();
+      const rect = liveScanoutImg.getBoundingClientRect();
+      startX = (ev.clientX - rect.left) / rect.width;
+      startY = (ev.clientY - rect.top) / rect.height;
+      try { liveScanoutImg.setPointerCapture(ev.pointerId); } catch (_) {}
+    });
+
+    liveScanoutImg.addEventListener('pointerup', async (ev) => {
+      if (!isPointerDown) return;
+      isPointerDown = false;
+      const rect = liveScanoutImg.getBoundingClientRect();
+      const endX = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
+      const endY = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
+      const dx = endX - startX;
+      const dy = endY - startY;
+      const dist = Math.hypot(dx * rect.width, dy * rect.height);
+
+      // Coordinate mapping
+      let startGX, startGY, endGX, endGY;
+      if (cropMode === 'portrait') {
+        startGX = 460 + Math.round(startX * 360);
+        startGY = Math.round(startY * 720);
+        endGX = 460 + Math.round(endX * 360);
+        endGY = Math.round(endY * 720);
+      } else {
+        startGX = Math.round(startX * 1280);
+        startGY = Math.round(startY * 720);
+        endGX = Math.round(endX * 1280);
+        endGY = Math.round(endY * 720);
+      }
+
+      if (dist > 28) {
+        // Swipe gesture
+        try {
+          await fetch('/api/touch/event', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              action: 'swipe',
+              x: startGX,
+              y: startGY,
+              x2: endGX,
+              y2: endGY,
+              steps: 6
+            })
+          });
+          logConsole('ok', `[TOUCH] Injected swipe gesture: (${startGX}, ${startGY}) -> (${endGX}, ${endGY})`);
+        } catch (_) {}
+      } else {
+        // Tap gesture
+        try {
+          await fetch('/api/touch/event', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              action: 'tap',
+              x: endGX,
+              y: endGY
+            })
+          });
+          logConsole('ok', `[TOUCH] Injected hardware tap: (${endGX}, ${endGY})`);
+        } catch (_) {}
+      }
+
+      // Schedule fast visual refresh
+      setTimeout(refreshScanoutFrame, 70);
+      setTimeout(refreshScanoutFrame, 200);
+    });
+
+    liveScanoutImg.addEventListener('pointercancel', () => {
+      isPointerDown = false;
+    });
+  }
+
+  // Canonical Navigation Gestures (Matching 16-Surface North Star Reference)
+  async function dispatchHardwareGesture(gestureName, payload) {
+    try {
+      const resp = await fetch('/api/touch/event', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await resp.json();
+      if (data.success) {
+        logConsole('ok', `[GESTURE] ${gestureName} dispatched to microkernel.`);
+      }
+    } catch (_) {}
+    setTimeout(refreshScanoutFrame, 80);
+    setTimeout(refreshScanoutFrame, 220);
+  }
+
+  // 1. Swipe Up -> Activity Space (Multitasking)
+  btnGestureActivity?.addEventListener('click', () => {
+    dispatchHardwareGesture('Activity Space (Swipe Up)', {
+      action: 'swipe',
+      x: 640,
+      y: 670,
+      x2: 640,
+      y2: 280,
+      steps: 8
+    });
+  });
+
+  // 2. Swipe Left -> Go Back
+  btnGestureBack?.addEventListener('click', () => {
+    dispatchHardwareGesture('Back (Swipe Left)', {
+      action: 'swipe',
+      x: 790,
+      y: 360,
+      x2: 480,
+      y2: 360,
+      steps: 6
+    });
+  });
+
+  // 3. Home -> Tap Home Bar
+  btnGestureHome?.addEventListener('click', () => {
+    dispatchHardwareGesture('Home (Tap Home Bar)', {
+      action: 'tap',
+      x: 640,
+      y: 710
+    });
+  });
+
+  // 4. Swipe Right -> Quick Controls
+  btnGestureQuick?.addEventListener('click', () => {
+    dispatchHardwareGesture('Quick Controls (Swipe Right)', {
+      action: 'swipe',
+      x: 480,
+      y: 360,
+      x2: 800,
+      y2: 360,
+      steps: 6
+    });
+  });
+
+  // 5. Tap Top -> System Space / Settings
+  btnGestureSystem?.addEventListener('click', () => {
+    dispatchHardwareGesture('System Space (Tap Top Bar)', {
+      action: 'tap',
+      x: 640,
+      y: 15
+    });
+  });
+
+  // Power On / Boot Microkernel
+  async function bootMicrokernel() {
+    isBooting = true;
+    updateDeviceDisplay(false);
+    logConsole('warn', '[BOOT] Launching QEMU InterOS microkernel instance...');
+    showToast('Booting InterOS Microkernel...');
+
+    try {
+      const resp = await fetch('/api/qemu/launch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile: 'x86_64' })
+      });
+      const data = await resp.json();
+      if (data.success) {
+        logConsole('ok', `[BOOT_OK] ${data.message}`);
+      } else {
+        logConsole('err', `[BOOT_FAIL] ${data.message || 'Failed to start QEMU'}`);
+      }
+    } catch (e) {
+      logConsole('err', `[BOOT_ERROR] ${e.message}`);
+    }
+
+    setTimeout(() => {
+      isBooting = false;
+      fetchHardwareTelemetry();
+    }, 3500);
+  }
+
+  btnBootMicrokernel?.addEventListener('click', bootMicrokernel);
+
+  // Hardware Power Button on Chassis
+  hwBtnPower?.addEventListener('click', async () => {
+    const isAlive = qemuGlobalStatus?.classList.contains('online');
+    if (!isAlive) {
+      bootMicrokernel();
+    } else {
+      dispatchHardwareGesture('Power / Lock Screen', {
+        action: 'tap',
+        x: 640,
+        y: 15
+      });
+    }
+  });
+
+  // Hardware Volume Buttons
+  hwBtnVolup?.addEventListener('click', async () => {
+    try {
+      await fetch('/api/hardware/volume', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ delta: 5 })
+      });
+    } catch (_) {}
+    showToast('Volume Up');
+  });
+
+  hwBtnVoldown?.addEventListener('click', async () => {
+    try {
+      await fetch('/api/hardware/volume', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ delta: -5 })
+      });
+    } catch (_) {}
+    showToast('Volume Down');
+  });
+
+  // Screenshot Capture Button
+  emuBtnScreenshot?.addEventListener('click', () => {
+    const link = document.createElement('a');
+    link.href = `/api/screen/frame?full=1&t=${Date.now()}`;
+    link.download = `interos_microkernel_scanout_${Date.now()}.png`;
+    link.click();
+    logConsole('ok', '[SCREENSHOT] Authentic microkernel scanout captured and exported.');
+    showToast('Microkernel Scanout Screenshot Saved');
   });
 
 

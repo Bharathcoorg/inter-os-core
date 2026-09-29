@@ -20,12 +20,47 @@ import zipfile
 import io
 import hashlib
 import sys
+import os
+import socketserver
+import threading
+import time
 from pathlib import Path
+
+WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(WORKSPACE_ROOT, "emulator"))
+import server
 
 STUDIO_PORT = 4300
 STUDIO_URL = f"http://127.0.0.1:{STUDIO_PORT}"
 
 class AdversarialSecurityTests(unittest.TestCase):
+    _server = None
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            with urllib.request.urlopen(f"{STUDIO_URL}/api/status", timeout=0.5):
+                return
+        except Exception:
+            pass
+
+        try:
+            socketserver.TCPServer.allow_reuse_address = True
+            cls._server = socketserver.TCPServer(("127.0.0.1", STUDIO_PORT), server.StudioAPIHandler)
+            cls._server_thread = threading.Thread(target=cls._server.serve_forever, daemon=True)
+            cls._server_thread.start()
+            time.sleep(0.3)
+        except Exception as e:
+            print(f"Warning: Could not bind studio test server: {e}")
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._server:
+            try:
+                cls._server.shutdown()
+                cls._server.server_close()
+            except Exception:
+                pass
 
     def test_01_ssrf_loopback_rejection(self):
         """Verify SSRF filters reject loopback/localhost requests."""

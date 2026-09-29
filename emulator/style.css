@@ -12420,3 +12420,256 @@ body[data-theme="cyberdeck_hud"] .device-screen {
     font-size: 0.67rem;
   }
 }
+
+/* --------------------------------------------------------------------------
+   Authentic Microkernel Live Scanout & Standby Screen Styles
+   -------------------------------------------------------------------------- */
+.screen-live-scanout {
+  width: 100%;
+  height: 100%;
+  background: #000000;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#live-scanout-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  cursor: crosshair;
+  user-select: none;
+  -webkit-user-drag: none;
+  touch-action: none;
+}
+
+.scanout-live-pill {
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.62rem;
+  color: #10B981;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.scanout-live-pill .live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #10B981;
+  box-shadow: 0 0 6px #10B981;
+  animation: pulse-dot 1.5s infinite;
+}
+
+.scanout-quick-controls {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  display: flex;
+  gap: 6px;
+  z-index: 10;
+}
+
+.scanout-ctrl-btn {
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #E2E8F0;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 0.62rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s ease;
+}
+
+.scanout-ctrl-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: #00F2FE;
+  color: #00F2FE;
+}
+
+/* Authentic Microkernel Standby Screen */
+.screen-standby {
+  width: 100%;
+  height: 100%;
+  background: radial-gradient(circle at 50% 25%, #182030 0%, #0B0F19 80%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 20px;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.standby-chassis-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+}
+
+.standby-logo-wrap {
+  width: 64px;
+  height: 64px;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  filter: drop-shadow(0 0 16px rgba(0, 242, 254, 0.35));
+}
+
+.standby-logo-svg {
+  width: 100%;
+  height: 100%;
+}
+
+.standby-title {
+  font-family: var(--font-display, sans-serif);
+  font-size: 1.15rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  color: #FFFFFF;
+  margin: 0 0 4px 0;
+}
+
+.standby-subtitle {
+  font-size: 0.72rem;
+  color: #94A3B8;
+  margin: 0 0 16px 0;
+}
+
+.standby-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 0.65rem;
+  font-family: var(--font-mono, monospace);
+  color: #94A3B8;
+  margin-bottom: 20px;
+}
+
+.standby-status-pill .standby-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #71717A;
+}
+
+.standby-spec-card {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 22px;
+  box-sizing: border-box;
+}
+
+.standby-spec-card .spec-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.64rem;
+  padding: 3px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.standby-spec-card .spec-row:last-child {
+  border-bottom: none;
+}
+
+.standby-spec-card .lbl {
+  color: #64748B;
+}
+
+.standby-spec-card .val {
+  color: #CBD5E1;
+  font-family: var(--font-mono, monospace);
+}
+
+.btn-boot-microkernel {
+  width: 100%;
+  background: linear-gradient(135deg, #0284C7 0%, #00F2FE 100%);
+  color: #030712;
+  font-weight: 700;
+  font-size: 0.8rem;
+  padding: 11px 16px;
+  border-radius: 8px;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  box-shadow: 0 4px 16px rgba(0, 242, 254, 0.3);
+  transition: all 0.18s ease;
+}
+
+.btn-boot-microkernel:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 22px rgba(0, 242, 254, 0.45);
+}
+
+.standby-hint {
+  font-size: 0.6rem;
+  color: #64748B;
+  margin-top: 14px;
+  line-height: 1.4;
+}
+
+/* Device Navigation Gestures Bar */
+.device-gesture-guide {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+  max-width: 380px;
+}
+
+.gesture-btn {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #CBD5E1;
+  padding: 5px 9px;
+  border-radius: 6px;
+  font-size: 0.66rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: all 0.15s ease;
+}
+
+.gesture-btn:hover {
+  background: rgba(0, 242, 254, 0.12);
+  border-color: #00F2FE;
+  color: #00F2FE;
+}
+
+.gesture-btn:active {
+  transform: scale(0.96);
+}
+
