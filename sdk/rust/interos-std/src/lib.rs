@@ -137,6 +137,16 @@ pub enum SyscallNumber {
     ServiceQuery = 102,
     IpcRecvMeta = 103,
     WindowSetInput = 104,
+    UserGetCurrent = 105,
+    UserSwitch = 106,
+    UserLockState = 107,
+    UserUnlock = 108,
+    UserLock = 109,
+    NotificationPost = 110,
+    NotificationCancel = 111,
+    NotificationQuery = 112,
+    PermissionRevoke = 113,
+    SettingsHardwareStatus = 114,
 }
 
 // -----------------------------------------------------------------------------
@@ -1696,4 +1706,63 @@ pub fn fs_list(cap_slot:usize,path:&str,out:&mut[u8])->Result<usize,i64>{let r=u
 pub fn app_launch(app_id: &str) -> Result<u64, i64> {
     let r = unsafe { syscall2(SyscallNumber::AppLaunch, app_id.as_ptr() as u64, app_id.len() as u64) };
     if r >= 0 { Ok(r as u64) } else { Err(r) }
+}
+
+/// Queries the active foreground user ID.
+pub fn user_get_current() -> u32 {
+    unsafe { syscall0(SyscallNumber::UserGetCurrent) as u32 }
+}
+
+/// Requests switching the active foreground user.
+pub fn user_switch(target_uid: u32) -> Result<(), i64> {
+    let r = unsafe { syscall1(SyscallNumber::UserSwitch, target_uid as u64) };
+    if r == 0 { Ok(()) } else { Err(r) }
+}
+
+/// Queries user lock state. Returns 0=Unlocked, 1=Locked, 2=Uninitialized, negative=Lockout ticks.
+pub fn user_get_lock_state(uid: u32) -> Result<i64, i64> {
+    let r = unsafe { syscall1(SyscallNumber::UserLockState, uid as u64) };
+    if r >= -6 { Ok(r) } else { Err(r) }
+}
+
+/// Unlocks a user account with candidate credentials.
+pub fn user_unlock(uid: u32, secret: &[u8]) -> Result<(), i64> {
+    let r = unsafe { syscall3(SyscallNumber::UserUnlock, uid as u64, secret.as_ptr() as u64, secret.len() as u64) };
+    if r == 0 { Ok(()) } else { Err(r) }
+}
+
+/// Locks a user account.
+pub fn user_lock(uid: u32) -> Result<(), i64> {
+    let r = unsafe { syscall1(SyscallNumber::UserLock, uid as u64) };
+    if r == 0 { Ok(()) } else { Err(r) }
+}
+
+/// Posts a notification from the calling application.
+pub fn notification_post(pkg: &str, channel: &str) -> Result<u64, i64> {
+    let r = unsafe { syscall4(SyscallNumber::NotificationPost, pkg.as_ptr() as u64, pkg.len() as u64, channel.as_ptr() as u64, channel.len() as u64) };
+    if r >= 0 { Ok(r as u64) } else { Err(r) }
+}
+
+/// Cancels an active notification.
+pub fn notification_cancel(pkg: &str, notif_id: u64) -> Result<(), i64> {
+    let r = unsafe { syscall3(SyscallNumber::NotificationCancel, pkg.as_ptr() as u64, pkg.len() as u64, notif_id) };
+    if r == 0 { Ok(()) } else { Err(r) }
+}
+
+/// Queries count of active notifications for a user.
+pub fn notification_query(user_id: u32, is_locked: bool) -> Result<usize, i64> {
+    let r = unsafe { syscall2(SyscallNumber::NotificationQuery, user_id as u64, if is_locked { 1 } else { 0 }) };
+    if r >= 0 { Ok(r as usize) } else { Err(r) }
+}
+
+/// Revokes a granted sensitive permission from a task.
+pub fn permission_revoke(task_id: u64, perm_id: u32) -> Result<(), i64> {
+    let r = unsafe { syscall2(SyscallNumber::PermissionRevoke, task_id, perm_id as u64) };
+    if r == 0 { Ok(()) } else { Err(r) }
+}
+
+/// Queries hardware availability status for a setting/hardware category (0=available, 1=simulated, 2=unavailable).
+pub fn settings_hardware_status(category: &str) -> Result<i64, i64> {
+    let r = unsafe { syscall2(SyscallNumber::SettingsHardwareStatus, category.as_ptr() as u64, category.len() as u64) };
+    if r >= 0 { Ok(r) } else { Err(r) }
 }

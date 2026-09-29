@@ -32,6 +32,7 @@ pub mod interrupts;
 pub mod ipc;
 pub mod memory;
 pub mod net;
+pub mod notification;
 pub mod package;
 pub mod panic;
 pub mod platform;
@@ -50,6 +51,7 @@ pub mod storage;
 pub mod syscall;
 pub mod task;
 pub mod telephony;
+pub mod user;
 pub mod wasm;
 
 use alloc::boxed::Box;
@@ -438,6 +440,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // owns service startup, recovery and lifecycle policy.
     services::init();
     settings::init();
+    user::init();
+    notification::init();
 
     // Primordial userspace init/service-manager. It owns service lifecycle
     // through the object-scoped ServiceStart/Stop/Recover ABI.

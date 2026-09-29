@@ -119,6 +119,16 @@ pub enum SyscallNumber {
     ServiceQuery = 102,
     IpcRecvMeta = 103,
     WindowSetInput = 104,
+    UserGetCurrent = 105,
+    UserSwitch = 106,
+    UserLockState = 107,
+    UserUnlock = 108,
+    UserLock = 109,
+    NotificationPost = 110,
+    NotificationCancel = 111,
+    NotificationQuery = 112,
+    PermissionRevoke = 113,
+    SettingsHardwareStatus = 114,
 }
 
 /// System call result status codes.
@@ -1586,6 +1596,144 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                     copy_len as i64
                 }
                 Err(err) => err as i64,
+            }
+        },
+        105 => {
+            // UserGetCurrent
+            crate::user::USER_MANAGER.lock().active_user().0 as i64
+        },
+        106 => {
+            // UserSwitch: a1 = target_uid
+            let mut mgr = crate::user::USER_MANAGER.lock();
+            match mgr.switch_user(crate::user::UserId(a1 as u32)) {
+                Ok(()) => SyscallResult::Success as i64,
+                Err(crate::user::UserError::UserNotFound) => SyscallResult::TargetNotFound as i64,
+                Err(_) => SyscallResult::PermissionDenied as i64,
+            }
+        },
+        107 => {
+            // UserLockState: a1 = uid
+            let mgr = crate::user::USER_MANAGER.lock();
+            match mgr.get_lock_state(crate::user::UserId(a1 as u32)) {
+                Ok(crate::user::UserLockState::Unlocked) => 0,
+                Ok(crate::user::UserLockState::Locked) => 1,
+                Ok(crate::user::UserLockState::Uninitialized) => 2,
+                Ok(crate::user::UserLockState::Lockout { locked_until_tick }) => -(locked_until_tick as i64),
+                Err(_) => SyscallResult::TargetNotFound as i64,
+            }
+        },
+        108 => {
+            // UserUnlock: a1 = uid, a2 = secret_ptr, a3 = secret_len
+            let len = a3 as usize;
+            if len == 0 || len > 64 { return SyscallResult::InvalidArguments as i64; }
+            let mut secret_buf = [0u8; 64];
+            if copy_from_user(&mut secret_buf[..len], a2, len).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let current_ticks = crate::interrupts::get_system_ticks();
+            let mut mgr = crate::user::USER_MANAGER.lock();
+            match mgr.unlock(crate::user::UserId(a1 as u32), &secret_buf[..len], current_ticks) {
+                Ok(()) => SyscallResult::Success as i64,
+                Err(crate::user::UserError::LockoutActive) => SyscallResult::PermissionDenied as i64,
+                Err(crate::user::UserError::AuthenticationFailed) => SyscallResult::PermissionDenied as i64,
+                Err(_) => SyscallResult::InvalidArguments as i64,
+            }
+        },
+        109 => {
+            // UserLock: a1 = uid
+            let mut mgr = crate::user::USER_MANAGER.lock();
+            match mgr.lock(crate::user::UserId(a1 as u32)) {
+                Ok(()) => SyscallResult::Success as i64,
+                Err(_) => SyscallResult::TargetNotFound as i64,
+            }
+        },
+        110 => {
+            // NotificationPost: a1 = pkg_ptr, a2 = pkg_len, a3 = channel_ptr, a4 = channel_len
+            let pkg_len = (a2 & 0xFF) as usize;
+            if pkg_len == 0 || pkg_len > 64 { return SyscallResult::InvalidArguments as i64; }
+            let mut pkg_buf = [0u8; 64];
+            let pkg = match read_user_string(a1, pkg_len, &mut pkg_buf) {
+                Ok(s) => s,
+                Err(_) => return SyscallResult::InvalidArguments as i64,
+            };
+            let channel_len = (a4 & 0xFF) as usize;
+            if channel_len == 0 || channel_len > 32 { return SyscallResult::InvalidArguments as i64; }
+            let mut chan_buf = [0u8; 32];
+            let chan = match read_user_string(a3, channel_len, &mut chan_buf) {
+                Ok(s) => s,
+                Err(_) => return SyscallResult::InvalidArguments as i64,
+            };
+            let user_id = crate::user::USER_MANAGER.lock().active_user().0;
+            let current_ticks = crate::interrupts::get_system_ticks();
+            let mut nm = crate::notification::NOTIFICATION_MANAGER.lock();
+            match nm.post(
+                pkg,
+                user_id,
+                chan,
+                "Notification",
+                "New alert",
+                crate::notification::NotificationPriority::Default,
+                crate::notification::LockscreenVisibility::Public,
+                1,
+                current_ticks,
+            ) {
+                Ok(id) => id as i64,
+                Err(_) => SyscallResult::PermissionDenied as i64,
+            }
+        },
+        111 => {
+            // NotificationCancel: a1 = pkg_ptr, a2 = pkg_len, a3 = notif_id
+            let pkg_len = a2 as usize;
+            if pkg_len == 0 || pkg_len > 64 { return SyscallResult::InvalidArguments as i64; }
+            let mut pkg_buf = [0u8; 64];
+            let pkg = match read_user_string(a1, pkg_len, &mut pkg_buf) {
+                Ok(s) => s,
+                Err(_) => return SyscallResult::InvalidArguments as i64,
+            };
+            let mut nm = crate::notification::NOTIFICATION_MANAGER.lock();
+            match nm.cancel(pkg, a3) {
+                Ok(()) => SyscallResult::Success as i64,
+                Err(_) => SyscallResult::TargetNotFound as i64,
+            }
+        },
+        112 => {
+            // NotificationQuery: a1 = user_id, a2 = is_locked
+            let nm = crate::notification::NOTIFICATION_MANAGER.lock();
+            let active = nm.query_active(a1 as u32, a2 != 0);
+            active.len() as i64
+        },
+        113 => {
+            // PermissionRevoke: a1 = task_id, a2 = perm_id
+            let task_id = TaskId(a1);
+            let perm = match crate::capability::permission::SensitivePermission::from_u32(a2 as u32) {
+                Some(p) => p,
+                None => return SyscallResult::InvalidArguments as i64,
+            };
+            let mut pm = crate::capability::permission::PERMISSION_MANAGER.lock();
+            if pm.revoke_permission(task_id, perm) {
+                let mut sched = SCHEDULER.lock();
+                if let Some(task) = sched.get_task_mut(task_id) {
+                    let cap_id = crate::capability::CapabilityId(0x9000_0000_0000_0000 | ((task_id.0 as u64) << 16) | (perm as u64));
+                    task.cap_table.revoke_by_id(cap_id);
+                }
+                SyscallResult::Success as i64
+            } else {
+                SyscallResult::TargetNotFound as i64
+            }
+        },
+        114 => {
+            // SettingsHardwareStatus: a1 = category_str_ptr, a2 = category_str_len
+            let len = a2 as usize;
+            if len == 0 || len > 32 { return SyscallResult::InvalidArguments as i64; }
+            let mut cat_buf = [0u8; 32];
+            let cat = match read_user_string(a1, len, &mut cat_buf) {
+                Ok(s) => s,
+                Err(_) => return SyscallResult::InvalidArguments as i64,
+            };
+            match crate::settings::get_hardware_status(cat) {
+                crate::settings::HardwareAvailability::Available => 0,
+                crate::settings::HardwareAvailability::SimulatedVirtual => 1,
+                crate::settings::HardwareAvailability::Unavailable => 2,
             }
         },
         _ => SyscallResult::UnknownSyscall as i64,
