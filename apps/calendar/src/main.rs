@@ -9,10 +9,7 @@
 //! - Natural language scheduling intent parser ("schedule dev sync tomorrow at 3pm")
 //! - Sovereign Privacy Shield scrubbing to prevent calendar metadata leakage
 //! - Sovereign Vault sector encryption for agenda events (Sector 203)
-//! - Persistent Agenda Directory:
-//!   * Event 0: Microkernel Architecture Sync (15:00 UTC)
-//!   * Event 1: Hardware Keystore Root Key Audit (10:00 UTC)
-//!   * Event 2: Autonomous Blinkit Grocery Restock (18:30 UTC)
+//! - Persistent agenda state is populated only from real stored calendar data.
 //! - Ascending A-major chord acoustic reminder chime (440Hz -> 554Hz -> 659Hz) and capacitive haptics
 //! - Asynchronous event reactor loop handling reminder alarms, user intent schedules, and tick updates
 
