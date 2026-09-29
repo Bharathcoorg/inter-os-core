@@ -9,7 +9,11 @@ pub mod fdt;
 pub mod rtc;
 pub mod camera;
 
-pub use traits::{PlatformArch, PlatformInfo, PlatformTimer, SerialConsole, PowerController};
+pub use traits::{
+    PlatformArch, PlatformInfo, PlatformTimer, SerialConsole, PowerController,
+    DriverKind, DisplayHal, TouchInputHal, StorageHal, NetworkHal, BluetoothHal,
+    AudioHal, CameraHal, SensorHal, ModemHal, PmicHal,
+};
 pub use platform::{PLATFORM, TIMER, CONSOLE, POWER, ACTIVE_SOC_NAME};
 pub use fdt::{FdtParser, FdtNode, FdtProperty, FdtError, build_synthetic_dtb};
 pub use rtc::{DateTime, RTC};
