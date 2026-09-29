@@ -1,6 +1,6 @@
 //! Inter OS Native Sovereign Browser & Decentralized Web Client
 //!
-//! Full production decentralized browser client executing in Ring 3 (User Mode):
+//! Native decentralized browser client executing in Ring 3 (User Mode):
 //! - Multi-protocol URL parser & sovereign scheme dispatcher:
 //!   * `http://` and `https://`: Standard HTTP/1.1 wire framing
 //!   * `interlayer://`: Sovereign P2P mesh & content-addressed IPFS routing
