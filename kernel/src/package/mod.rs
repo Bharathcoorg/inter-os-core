@@ -58,3 +58,7 @@ pub const FIRST_PARTY_PACKAGES: &[PackageDescriptor] = &[
 pub fn first_party_package(package_id: &str) -> Option<&'static PackageDescriptor> {
     FIRST_PARTY_PACKAGES.iter().find(|pkg| pkg.package_id == package_id)
 }
+
+pub fn first_party_package_by_process_name(process_name: &str) -> Option<&'static PackageDescriptor> {
+    FIRST_PARTY_PACKAGES.iter().find(|pkg| pkg.process_name == process_name)
+}
