@@ -148,6 +148,10 @@ pub enum SyscallNumber {
     PermissionRevoke = 113,
     SettingsHardwareStatus = 114,
     AppStorageOpen = 115,
+    AppBackground = 116,
+    AppForeground = 117,
+    AppSuspend = 118,
+    AppWake = 119,
 }
 
 // -----------------------------------------------------------------------------
@@ -1235,6 +1239,30 @@ pub fn fs_open(cap_slot: usize, path: &str, rights: u32) -> Result<u32, i64> {
     } else {
         Err(ret)
     }
+}
+
+/// Moves the calling application to background execution.
+pub fn app_background() -> Result<(), i64> {
+    let ret = unsafe { syscall4(SyscallNumber::AppBackground, 0, 0, 0, 0) };
+    if ret == 0 { Ok(()) } else { Err(ret) }
+}
+
+/// Returns the calling application to foreground execution.
+pub fn app_foreground() -> Result<(), i64> {
+    let ret = unsafe { syscall4(SyscallNumber::AppForeground, 0, 0, 0, 0) };
+    if ret == 0 { Ok(()) } else { Err(ret) }
+}
+
+/// Suspends the calling application until an explicit wake event.
+pub fn app_suspend() -> Result<(), i64> {
+    let ret = unsafe { syscall4(SyscallNumber::AppSuspend, 0, 0, 0, 0) };
+    if ret == 0 { Ok(()) } else { Err(ret) }
+}
+
+/// Requests wake of the calling application.
+pub fn app_wake() -> Result<(), i64> {
+    let ret = unsafe { syscall4(SyscallNumber::AppWake, 0, 0, 0, 0) };
+    if ret == 0 { Ok(()) } else { Err(ret) }
 }
 
 /// Opens a file inside the calling application's private storage namespace.
