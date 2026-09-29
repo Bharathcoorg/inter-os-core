@@ -909,7 +909,7 @@ def verify_and_install_rapp(body, pkg_name):
     if len(body) < HEADER_SIZE:
         return False, "RAPP v2 package is shorter than the canonical header.", None
     if int.from_bytes(body[6:8], "little") != 0:
-        return False, "Current Phase 2 guest transport accepts x86_64 RAPP packages only.", None
+        return False, "The current guest transport accepts x86_64 RAPP packages only.", None
     if body[:4] != b"RAPP":
         return False, "Invalid RAPP magic.", None
     if int.from_bytes(body[4:6], "little") != 2:
