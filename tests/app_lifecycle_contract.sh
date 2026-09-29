@@ -15,3 +15,7 @@ grep -q 'app_suspend' sdk/rust/interos-std/src/lib.rs
 grep -q 'wake_package' kernel/src/notification/mod.rs
 
 echo "application lifecycle contract: PASS"
+
+grep -q 'account_background_cpu_tick' kernel/src/task/scheduler.rs
+grep -q 'consume_background_network' kernel/src/syscall/mod.rs
+grep -q 'unblock_task(task)' kernel/src/syscall/mod.rs
