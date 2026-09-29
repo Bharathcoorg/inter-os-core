@@ -674,23 +674,6 @@ impl Vfs {
         if path.len() == 0 || path.len() > MAX_PATH_LEN { return Err(FsError::PathTooLong); }
         self.enforce_app_path(task_id, path, requested_rights.contains(Rights::WRITE))?;
 
-        if requested_rights.contains(Rights::WRITE) && self.lookup(path).is_none() {
-            let Some(root) = Self::app_storage_root(task_id) else {
-                return Err(FsError::FileNotFound);
-            };
-            let normalized = normalize_path(path);
-            if normalized == root || !normalized.starts_with(&(root.clone() + "/")) {
-                return Err(FsError::PermissionDenied);
-            }
-            let parent = parent_path(&normalized);
-            let parent_inode = self.lookup(parent).ok_or(FsError::FileNotFound)?;
-            if self.inodes.get(&parent_inode).map(|inode| inode.file_type != FileType::Directory).unwrap_or(true) {
-                return Err(FsError::NotADirectory);
-            }
-            self.create_file(&normalized, &[], false);
-            self.persist_metadata_snapshot().map_err(|_| FsError::IntegrityViolation)?;
-            self.persist_data_snapshot().map_err(|_| FsError::IntegrityViolation)?;
-        }
         // Enforce capability validation based on requested access
         if requested_rights.contains(Rights::WRITE) {
             let eff_slot = if task_caps.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE).is_ok()
@@ -711,7 +694,26 @@ impl Vfs {
                     .map_err(FsError::CapabilityError)?
             };
 
-            let inode_id = self.lookup(path).ok_or(FsError::FileNotFound)?;
+            let inode_id = if let Some(existing) = self.lookup(path) {
+                existing
+            } else {
+                let Some(root) = Self::app_storage_root(task_id) else {
+                    return Err(FsError::FileNotFound);
+                };
+                let normalized = normalize_path(path);
+                if normalized == root || !normalized.starts_with(&(root.clone() + "/")) {
+                    return Err(FsError::PermissionDenied);
+                }
+                let parent = parent_path(&normalized);
+                let parent_inode = self.lookup(parent).ok_or(FsError::FileNotFound)?;
+                if self.inodes.get(&parent_inode).map(|inode| inode.file_type != FileType::Directory).unwrap_or(true) {
+                    return Err(FsError::NotADirectory);
+                }
+                let created = self.create_file(&normalized, &[], false);
+                self.persist_metadata_snapshot().map_err(|_| FsError::IntegrityViolation)?;
+                self.persist_data_snapshot().map_err(|_| FsError::IntegrityViolation)?;
+                created
+            };
             let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
 
             if inode.file_type == FileType::ReadOnlySystem {
