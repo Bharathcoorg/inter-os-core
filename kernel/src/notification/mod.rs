@@ -198,6 +198,12 @@ impl NotificationManager {
         };
 
         self.records.push(record);
+        if let Some(task) = crate::task::SCHEDULER.lock().get_task(crate::task::SCHEDULER.lock().current_task_id().unwrap_or(crate::task::TaskId(0))) {
+            let _ = task.id;
+        }
+        // A suspended package is eligible for notification-driven wakeup. The
+        // scheduler still enforces its background CPU quota after delivery.
+        let _ = crate::task::process::wake_package(package_id, user_id);
         crate::serial_println!(
             "[NOTIFICATION] Posted #{} from '{}' on channel '{}' (priority={:?})",
             id,
