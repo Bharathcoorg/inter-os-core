@@ -106,11 +106,6 @@ def resolve_vfs_path(req_path):
         return os.path.abspath(VFS_ROOT)
     return target
 
-DEFAULT_APPS = []
-
-sideloaded_apps = []
-uninstalled_app_ids = set()
-
 # -----------------------------------------------------------------------------
 # Real-Time Mobile Subsystems State (Cellular Baseband, PMIC/DVFS, KMS, Touch)
 # -----------------------------------------------------------------------------
@@ -1309,31 +1304,25 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         if self.path.startswith('/api/apps/audit'):
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             target = query.get('id', [''])[0] or query.get('filename', [''])[0]
-            catalog = DEFAULT_APPS + sideloaded_apps
-            found = next((a for a in catalog if a.get('id') == target or a.get('filename') == target or a.get('name') == target), None)
-            
-            self.send_response(200)
+            ok, error, catalog = guest_package_catalog()
+            found = next((a for a in catalog if a.get('id') == target), None)
+            self.send_response(200 if ok else 503)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-
             if found:
-                audit_report = {
-                    "package": found,
-                    "security_policy": {
-                        "ambient_authority": "DENIED (Zero Ambient Authority Enforced)",
-                        "ring_isolation": "Ring 3 Userspace Micro-HAL",
-                        "sandbox_directory": f"/data/app/{found.get('id')}-1",
-                        "storage_enclave": "Scoped VFS Boundary Active",
-                        "socket_access": "Sandboxed TCP/UDP Socket Gateway",
-                        "display_scanout": "Wayland Zero-Copy Direct Scanout",
-                        "capabilities": found.get("capabilities", [])
-                    },
-                    "audit_status": "PASSED"
-                }
-                self.wfile.write(json.dumps({'success': True, 'report': audit_report}).encode())
+                self.wfile.write(json.dumps({
+                    'success': True,
+                    'source': 'GUEST_REGISTRY',
+                    'package': found,
+                    'authority': 'guest'
+                }).encode())
             else:
-                self.wfile.write(json.dumps({'success': False, 'error': 'Package not found'}).encode())
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'source': 'GUEST_REGISTRY',
+                    'error': error or 'Package not present in guest registry'
+                }).encode())
             return
 
         if self.path == '/api/apps/list':
