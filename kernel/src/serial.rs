@@ -183,20 +183,37 @@ fn handle_rapp_command(s: &str) -> bool {
             Ok(_) => { serial_println!("[RAPP_HOST] REJECT package id mismatch"); return true; }
             Err(err) => { serial_println!("[RAPP_HOST] REJECT verification failed: {:?}", err); return true; }
         };
-        match crate::package::PACKAGE_BLOB_STORE.lock().put(&verified.package_id, verified.version, &state.bytes) {
-            Ok(()) => {
-                let registry_ok = {
-                    let mut registry = crate::package::PACKAGE_REGISTRY.lock();
-                    registry.stage_verified(&verified).is_ok() && registry.activate(&verified.package_id).is_ok()
-                };
-                if registry_ok {
-                    serial_println!("[RAPP_HOST] INSTALLED id={} version={}.{}.{}",
-                        verified.package_id, verified.version.0, verified.version.1, verified.version.2);
-                } else {
-                    serial_println!("[RAPP_HOST] REJECT registry activation failed");
-                }
+        let previous_entry = {
+            let registry = crate::package::PACKAGE_REGISTRY.lock();
+            registry.entries().iter().find(|e| e.package_id == verified.package_id).cloned()
+        };
+        let previous_blob = {
+            let store = crate::package::PACKAGE_BLOB_STORE.lock();
+            store.get(&verified.package_id).cloned()
+        };
+        if crate::package::PACKAGE_BLOB_STORE.lock().put(&verified.package_id, verified.version, &state.bytes).is_err() {
+            serial_println!("[RAPP_HOST] REJECT package store persistence failed");
+            return true;
+        }
+        let registry_ok = {
+            let mut registry = crate::package::PACKAGE_REGISTRY.lock();
+            registry.stage_verified(&verified).is_ok() && registry.activate(&verified.package_id).is_ok()
+        };
+        if registry_ok {
+            serial_println!("[RAPP_HOST] INSTALLED id={} version={}.{}.{}",
+                verified.package_id, verified.version.0, verified.version.1, verified.version.2);
+        } else {
+            if let Some(previous) = previous_blob {
+                let _ = crate::package::PACKAGE_BLOB_STORE.lock().put(&previous.package_id, previous.version, &previous.bytes);
+            } else {
+                let _ = crate::package::PACKAGE_BLOB_STORE.lock().remove(&verified.package_id);
             }
-            Err(_) => serial_println!("[RAPP_HOST] REJECT package store persistence failed"),
+            if let Some(previous) = previous_entry {
+                let _ = crate::package::PACKAGE_REGISTRY.lock().restore_entry(previous);
+            } else {
+                let _ = crate::package::PACKAGE_REGISTRY.lock().rollback_install(&verified.package_id, None);
+            }
+            serial_println!("[RAPP_HOST] REJECT registry activation failed");
         }
         return true;
     }
