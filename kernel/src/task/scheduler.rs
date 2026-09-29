@@ -177,9 +177,9 @@ impl Scheduler {
         self.tasks.get(self.current_idx).map(|t| t.id)
     }
 
-    pub fn tasks_named(&self, name: &str) -> [TaskControlBlock; 0] {
-        let _ = name;
-        []
+    pub fn has_live_task_named(&self, name: &str) -> bool {
+        self.tasks.iter().any(|task| task.name == name
+            && !matches!(task.state, TaskState::Zombie | TaskState::Terminated))
     }
 
     /// Returns a reference to a task by its TaskId.
