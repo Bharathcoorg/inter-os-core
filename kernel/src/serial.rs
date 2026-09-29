@@ -426,6 +426,37 @@ fn handle_serial_command(cmd: &[u8]) {
         crate::hal::traits::PowerController::reset(&crate::hal::platform::POWER);
     }
 
+    if verb.eq_ignore_ascii_case("PANIC_POLICY") {
+        match parts.next() {
+            Some("GET") | None => {
+                let p = crate::panic::get_panic_policy();
+                crate::serial_println!("[PANIC_POLICY] current={}", p.as_str());
+            }
+            Some("SET") => {
+                if let Some(val) = parts.next() {
+                    if val.eq_ignore_ascii_case("REBOOT") {
+                        crate::panic::set_panic_policy(crate::panic::PanicPolicy::Reboot);
+                        crate::serial_println!("[PANIC_POLICY] updated=REBOOT");
+                    } else if val.eq_ignore_ascii_case("HALT") {
+                        crate::panic::set_panic_policy(crate::panic::PanicPolicy::Halt);
+                        crate::serial_println!("[PANIC_POLICY] updated=HALT");
+                    } else {
+                        crate::serial_println!("[PANIC_POLICY] err=UNKNOWN_POLICY");
+                    }
+                }
+            }
+            _ => {
+                crate::serial_println!("[PANIC_POLICY] err=SYNTAX");
+            }
+        }
+        return;
+    }
+
+    if verb.eq_ignore_ascii_case("TRIGGER_KERNEL_PANIC") {
+        let reason = parts.next().unwrap_or("Manual_Diagnostic_Panic_Test");
+        panic!("Controlled diagnostic fault: {}", reason);
+    }
+
     if verb.eq_ignore_ascii_case("TAP") || verb.eq_ignore_ascii_case("TOUCH") {
         if let (Some(x_str), Some(y_str)) = (parts.next(), parts.next()) {
             if let (Ok(x), Ok(y)) = (x_str.parse::<u32>(), y_str.parse::<u32>()) {
