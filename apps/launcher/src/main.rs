@@ -1709,40 +1709,29 @@ fn render_header(surface: u32) {
     }
 }
 
-fn resolve_app_at_touch(x: u32, y: u32) -> Option<&'static str> {
+fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<&'a str> {
     let x = x as usize;
     let y = y as usize;
-    // Row 0
-    if (280..420).contains(&y) {
-        if (56..306).contains(&x) { return Some("org.interos.settings"); }
-        if (360..610).contains(&x) { return Some("org.interos.terminal"); }
+
+    // Home grid mirrors the first eight registry entries.
+    if (490..1100).contains(&y) {
+        let row = (y - 490) / 150;
+        let col = if x < 340 { 0 } else if x >= 360 && x < 700 { 1 } else { 2 };
+        if col < 2 {
+            return package_id_at(state, row * 2 + col);
+        }
     }
-    // Row 1
-    if (450..590).contains(&y) {
-        if (56..306).contains(&x) { return Some("org.interos.calculator"); }
-        if (360..610).contains(&x) { return Some("org.interos.vault"); }
-    }
-    // Row 2
-    if (620..760).contains(&y) {
-        if (56..306).contains(&x) { return Some("org.interos.camera"); }
-        if (360..610).contains(&x) { return Some("org.interos.dialer"); }
-    }
-    // Row 3
-    if (790..930).contains(&y) {
-        if (56..306).contains(&x) { return Some("org.interos.browser"); }
-        if (360..610).contains(&x) { return Some("org.interos.messages"); }
-    }
-    // Row 4
-    if (960..1100).contains(&y) {
-        if (56..306).contains(&x) { return Some("org.interos.calendar"); }
-        if (360..610).contains(&x) { return Some("org.interos.music"); }
-    }
-    // Bottom Dock (y in 1120..1400)
+
+    // Bottom dock mirrors the first four installed applications.
     if (1120..1400).contains(&y) {
-        if (40..185).contains(&x) { return Some("org.interos.messages"); }
-        if (190..335).contains(&x) { return Some("org.interos.camera"); }
-        if (340..485).contains(&x) { return Some("org.interos.gallery"); }
-        if (490..645).contains(&x) { return Some("org.interos.vault"); }
+        let col = if (40..185).contains(&x) { 0 }
+            else if (190..335).contains(&x) { 1 }
+            else if (340..485).contains(&x) { 2 }
+            else if (490..645).contains(&x) { 3 }
+            else { 4 };
+        if col < 4 {
+            return package_id_at(state, col);
+        }
     }
     None
 }
@@ -2559,7 +2548,7 @@ pub extern "C" fn _start() -> ! {
                                 }
 
                                 // Launch application
-                                if let Some(target_app) = resolve_app_at_touch(input.x, input.y) {
+                                if let Some(target_app) = resolve_app_at_touch(&state, input.x, input.y) {
                                     state.push_recent(target_app);
                                     match std::app_launch(target_app) {
                                         Ok(task_id) => {
