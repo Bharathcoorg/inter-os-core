@@ -364,52 +364,6 @@ def inspect_apk(file_bytes):
 
     return metadata
 
-def scan_packages_dir():
-    """Scans packages directory and data/apps directory on startup for genuine APKs and RAPPs."""
-    global sideloaded_apps
-    packages_dir = os.path.join(os.path.dirname(DIRECTORY), "packages")
-    search_dirs = [packages_dir, INSTALLED_APPS_DIR]
-
-    for sdir in search_dirs:
-        if not os.path.exists(sdir):
-            continue
-        for fname in os.listdir(sdir):
-            fpath = os.path.join(sdir, fname)
-            if not os.path.isfile(fpath):
-                continue
-
-            if fname.endswith(".apk"):
-                try:
-                    with open(fpath, "rb") as f:
-                        apk_data = f.read()
-                    if apk_data.startswith(b"PK\x03\x04"):
-                        meta = inspect_apk(apk_data)
-                        if meta.get("is_valid_apk"):
-                            sha256 = hashlib.sha256(apk_data).hexdigest()
-                            entry = {
-                                "id": meta["package_id"],
-                                "name": meta["app_name"],
-                                "filename": fname,
-                                "format": "Android Package (.apk)",
-                                "type": "Android ACR Sandbox",
-                                "size": len(apk_data),
-                                "sha256": sha256[:16] + "...",
-                                "status": "Verified & Sandboxed",
-                                "version": meta["version_name"],
-                                "dex_classes": meta["dex_classes"],
-                                "dex_size": meta["dex_size"],
-                                "capabilities": meta["permissions"],
-                                "signature": meta["signature_scheme"],
-                                "entrypoint": meta["main_activity"],
-                                "acr": True
-                            }
-                            # Avoid duplicates
-                            sideloaded_apps[:] = [a for a in sideloaded_apps if a.get("id") != entry["id"] and a.get("filename") != fname]
-                            sideloaded_apps.append(entry)
-                except Exception as ex:
-                    print(f"[WARN] Error inspecting APK {fname}: {ex}")
-
-
 # Real-time hardware telemetry captured from QEMU QMP + Serial
 latest_telemetry = {
     "qemu_alive": False,
@@ -1746,16 +1700,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 signature = apk_meta.get("signature_scheme", "Verified")
                 entrypoint = apk_meta.get("main_activity", "")
 
-            # Save to packages and INSTALLED_APPS_DIR
-            packages_dir = os.path.join(os.path.dirname(DIRECTORY), "packages")
-            os.makedirs(packages_dir, exist_ok=True)
-            for target_dir in (packages_dir, INSTALLED_APPS_DIR):
-                save_path = os.path.join(target_dir, filename)
-                try:
-                    with open(save_path, "wb") as f:
-                        f.write(body)
-                except Exception:
-                    pass
+            # Uploaded artifacts are analyzed/transferred only; installation is guest-owned.
 
             app_entry = {
                 "id": app_id,
@@ -1775,10 +1720,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 "acr": is_apk
             }
 
-            # Avoid duplicate entries
-            sideloaded_apps[:] = [a for a in sideloaded_apps if a.get("filename") != filename and a.get("id") != app_id]
-            sideloaded_apps.append(app_entry)
-
+            # Guest package registry remains the only installed-app authority.
             # Log strict security audit to live UART telemetry console
             serial_lines.append(f"[APP_SIDELOAD] Ingested package '{filename}' (Format: {fmt_str}, Size: {len(body)} bytes).")
             serial_lines.append(f"[SECURITY_AUDIT] Cryptographic Hash: SHA-256 [{sha256[:16]}...] verified against root.")
