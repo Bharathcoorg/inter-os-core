@@ -1534,41 +1534,18 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         if self.path.startswith('/api/fs/list'):
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             rel_path = query.get('path', ['/'])[0]
-            real_path = resolve_vfs_path(rel_path)
-
-            self.send_response(200)
+            ok, error, entries = guest_fs_list('/' + rel_path.strip('/'))
+            self.send_response(200 if ok else 503)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-
-            if not os.path.exists(real_path):
-                self.wfile.write(json.dumps({'success': False, 'error': f'Path not found: {rel_path}'}).encode())
-                return
-
-            if not os.path.isdir(real_path):
-                self.wfile.write(json.dumps({'success': False, 'error': f'Not a directory: {rel_path}'}).encode())
-                return
-
-            entries = []
-            try:
-                for name in sorted(os.listdir(real_path)):
-                    item_path = os.path.join(real_path, name)
-                    is_dir = os.path.isdir(item_path)
-                    size = os.path.getsize(item_path) if not is_dir else 0
-                    mtime = os.path.getmtime(item_path)
-                    entries.append({
-                        'name': name,
-                        'isDir': is_dir,
-                        'size': size,
-                        'mtime': mtime
-                    })
-                self.wfile.write(json.dumps({
-                    'success': True,
-                    'path': '/' + rel_path.strip('/'),
-                    'entries': entries
-                }).encode())
-            except Exception as e:
-                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            self.wfile.write(json.dumps({
+                'success': ok,
+                'source': 'GUEST_VFS',
+                'path': '/' + rel_path.strip('/'),
+                'entries': entries,
+                **({'error': error} if error else {})
+            }).encode())
             return
 
         super().do_GET()
