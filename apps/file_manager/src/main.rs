@@ -168,17 +168,7 @@ pub struct VfsItem {
     pub color_accent: u32,
 }
 
-const ITEMS_ALL: [VfsItem; 9] = [
-    VfsItem { name: "system", is_dir: true, size_str: "4.2 MB", meta_str: "Core OS binaries & drivers", color_accent: ACCENT_SKY },
-    VfsItem { name: "apps", is_dir: true, size_str: "12.8 MB", meta_str: "Installed .rapp packages", color_accent: ACCENT_SKY },
-    VfsItem { name: "docs", is_dir: true, size_str: "512 KB", meta_str: "Architecture & manual", color_accent: ACCENT_SKY },
-    VfsItem { name: "media", is_dir: true, size_str: "24.1 MB", meta_str: "Photos & audio tracks", color_accent: ACCENT_SKY },
-    VfsItem { name: "packages", is_dir: true, size_str: "8.5 MB", meta_str: "Signed deployment archives", color_accent: ACCENT_SKY },
-    VfsItem { name: "kernel.elf", is_dir: false, size_str: "3.8 MB", meta_str: "x86_64 microkernel", color_accent: SUCCESS_EMERALD },
-    VfsItem { name: "policy.json", is_dir: false, size_str: "12 KB", meta_str: "Security capabilities", color_accent: ACCENT_AMBER },
-    VfsItem { name: "hosts", is_dir: false, size_str: "1.2 KB", meta_str: "Sovereign mesh node table", color_accent: TEXT_PRIMARY },
-    VfsItem { name: "keystore.bin", is_dir: false, size_str: "4.4 KB", meta_str: "Protected slot records", color_accent: DANGER_CRIMSON },
-];
+const ITEMS_ALL: [VfsItem; 0] = [];
 
 pub struct FileManagerApp {
     pub selected_shortcut: usize,
