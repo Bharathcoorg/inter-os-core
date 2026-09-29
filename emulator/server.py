@@ -1719,8 +1719,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 serial_lines.append(f"[ACR_SECURITY] Strict Zero Ambient Authority enforced on '{app_id}'. Ambient root DENIED.")
                 serial_lines.append(f"[ACR_SECURITY] Bound {len(capabilities)} declared permissions to Ring 3 Micro-HAL isolated sandbox.")
             else:
-                serial_lines.append(f"[SECURITY_AUDIT] Enforcing Zero Ambient Authority: '{app_name}' assigned isolated Ring 3 namespace.")
-            serial_lines.append(f"[OK] Application successfully mounted into /data/app/{app_id}-1.")
+                serial_lines.append(f"[SECURITY_AUDIT] Uploaded artifact '{app_name}' analyzed; guest installation remains authoritative.")
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
