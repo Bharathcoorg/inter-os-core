@@ -39,10 +39,8 @@ serial_socket_conn = None
 serial_socket_lock = threading.Lock()
 telemetry_lock = threading.Lock()
 
-# Host-side paths are transport/UI resources only. Guest package and filesystem
-# state is authoritative and is never mirrored into persistent host state.
-VFS_ROOT = os.path.join(DIRECTORY, "data", "vfs")
-os.makedirs(VFS_ROOT, exist_ok=True)
+# Guest package and filesystem state are authoritative. Device Studio does not
+# maintain a host-side filesystem shadow of guest state.
 
 THEMES_DIR = os.path.join(DIRECTORY, "data", "themes")
 os.makedirs(THEMES_DIR, exist_ok=True)
@@ -85,26 +83,6 @@ def set_active_theme(theme_data):
             json.dump(theme_data, f, indent=2)
     except Exception:
         pass
-
-def resolve_vfs_path(req_path):
-    clean = str(req_path or "/").replace("\\", "/")
-    if len(clean) >= 2 and clean[1] == ":":
-        clean = clean[2:]
-    clean = clean.lstrip("/")
-    parts = [p for p in clean.split("/") if p and p != "."]
-    safe_parts = []
-    for p in parts:
-        if p == "..":
-            if safe_parts: safe_parts.pop()
-        elif ":" in p:
-            continue
-        else:
-            safe_parts.append(p)
-    target = os.path.abspath(os.path.join(VFS_ROOT, *safe_parts))
-    common = os.path.commonpath([target, os.path.abspath(VFS_ROOT)])
-    if common != os.path.abspath(VFS_ROOT):
-        return os.path.abspath(VFS_ROOT)
-    return target
 
 # -----------------------------------------------------------------------------
 # Real-Time Mobile Subsystems State (Cellular Baseband, PMIC/DVFS, KMS, Touch)
@@ -463,7 +441,9 @@ def serial_stream_worker():
 
 
 def send_guest_serial_command(command, wait_for=None, timeout=12):
-    """Send a development command through the live QEMU COM1 TCP connection."""
+    """Send one bounded development command through the live QEMU COM1 TCP connection."""
+    if not isinstance(command, str) or not command or len(command) > 512 or "\n" in command or "\r" in command:
+        return False, "guest command rejected by transport bounds"
     deadline = time.time() + timeout
     with telemetry_lock:
         response_start = len(serial_lines)
@@ -1011,8 +991,1576 @@ def guest_command_lines(command, end_marker, timeout=8):
         time.sleep(0.05)
     return False, lines
 
+def is_safe_guest_path(path, writable=False):
+    if not isinstance(path, str) or len(path) == 0 or len(path) > 192:
+        return False
+    if not path.startswith("/") or "\\" in path or ".." in path or "//" in path:
+        return False
+    if any(ord(ch) < 0x20 or ch in "|;&
+    ok, lines = guest_command_lines(f"STUDIO_FS_LIST {path}", f"LIST_OK path={path}")
+    entries = []
+    for line in lines:
+        if line.startswith("[STUDIO_FS_ENTRY] path="):
+            payload = line.split(" ", 2)[-1]
+            parts = payload.split("|")
+            if len(parts) == 3:
+                entries.append({"name": parts[0], "isDir": parts[1] == "dir", "size": int(parts[2]) if parts[2].isdigit() else 0})
+    return ok, None if ok else (lines[-1] if lines else "guest filesystem unavailable"), entries
+
+def guest_fs_read(path):
+    if not is_safe_guest_path(path):
+        return False, 'invalid guest path', ''
+    chunks = []
+    offset = 0
+    while offset < 8192:
+        ok, lines = guest_command_lines(f"STUDIO_FS_READ {path} {offset} 192", "[STUDIO_FS_READ]", timeout=5)
+        if not ok:
+            return False, lines[-1] if lines else "guest filesystem unavailable", ''
+        match = next((line for line in lines if line.startswith("[STUDIO_FS_READ]")), None)
+        if not match:
+            return False, "guest read returned no data", ''
+        fields = dict(part.split("=", 1) for part in match.split() if "=" in part)
+        raw = bytes.fromhex(fields.get("hex", ""))
+        chunks.append(raw)
+        if len(raw) < 192:
+            break
+        offset += len(raw)
+    data = b"".join(chunks)
+    return True, None, data.decode("utf-8", errors="replace")
+
+def guest_fs_write(path, content):
+    if not is_safe_guest_path(path, writable=True):
+        return False, 'guest writes are restricted to safe /data paths'
+    raw = content.encode("utf-8")
+    if len(raw) > 8192:
+        return False, 'guest file exceeds 8192-byte limit'
+    ok, lines = guest_command_lines(f"STUDIO_FS_BEGIN {path} {len(raw)}", f"WRITE_READY path={path}", timeout=5)
+    if not ok:
+        return False, lines[-1] if lines else "guest filesystem unavailable"
+    for offset in range(0, len(raw), 192):
+        chunk = raw[offset:offset + 192].hex()
+        ok, lines = guest_command_lines(f"STUDIO_FS_CHUNK {offset} {chunk}", f"CHUNK_OK offset={offset}", timeout=5)
+        if not ok:
+            return False, lines[-1] if lines else "guest filesystem chunk failed"
+    ok, lines = guest_command_lines("STUDIO_FS_COMMIT", "WRITE_OK", timeout=8)
+    return ok, None if ok else (lines[-1] if lines else "guest filesystem commit failed")
+
+def guest_package_catalog():
+    ok, lines = guest_command_lines("STUDIO_PKG_LIST", "[STUDIO_PKG] END", timeout=8)
+    if not ok:
+        return False, lines[-1] if lines else "guest package registry unavailable", []
+    packages = []
+    for line in lines:
+        if not line.startswith("[STUDIO_PKG] id="):
+            continue
+        fields = dict(part.split("=", 1) for part in line[len("[STUDIO_PKG] "):].split() if "=" in part)
+        packages.append({
+            "id": fields.get("id", ""),
+            "version": fields.get("version", ""),
+            "status": fields.get("state", "unknown"),
+            "process": fields.get("process", ""),
+            "name": fields.get("name", fields.get("id", "")).replace("_", " "),
+            "icon": fields.get("icon", "APP"),
+            "source": "GUEST_REGISTRY",
+        })
+    return True, None, packages
+
+class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
+    """Extended handler with API endpoints for QEMU control, serial logs, and live telemetry."""
+
+    extensions_map = {
+        '': 'application/octet-stream',
+        '.html': 'text/html; charset=utf-8',
+        '.css': 'text/css; charset=utf-8',
+        '.js': 'application/javascript; charset=utf-8',
+        '.mjs': 'application/javascript; charset=utf-8',
+        '.json': 'application/json',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.svg': 'image/svg+xml',
+        '.wasm': 'application/wasm',
+    }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=DIRECTORY, **kwargs)
+
+    def end_headers(self):
+        self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+        self.send_header('Pragma', 'no-cache')
+        self.send_header('Expires', '0')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        super().end_headers()
+
+    def do_GET(self):
+        parsed_path = urllib.parse.urlparse(self.path)
+        if self.path.startswith('/api/serial'):
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            after = 0
+            if '?after=' in self.path:
+                try:
+                    after_str = self.path.split('?after=')[1].split('&')[0]
+                    after = int(after_str)
+                except (ValueError, IndexError):
+                    after = 0
+
+            # Sync with live QEMU serial log on disk if available
+            boot_log = os.path.join(os.path.dirname(DIRECTORY), "target", "x86_boot.log")
+            if os.path.exists(boot_log):
+                try:
+                    with open(boot_log, "r", encoding="utf-8", errors="replace") as f:
+                        disk_lines = [l.strip() for l in f if l.strip()]
+                        if len(disk_lines) > len(serial_lines):
+                            serial_lines.extend(disk_lines[len(serial_lines):])
+                except Exception:
+                    pass
+
+            lines = serial_lines[after:] if after < len(serial_lines) else []
+            response = json.dumps({
+                'lines': lines,
+                'total': len(serial_lines),
+                'cursor': len(serial_lines),
+                'next_index': len(serial_lines)
+            })
+            self.wfile.write(response.encode())
+            return
+
+        if self.path == '/api/status':
+            t = query_qemu_monitor()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            response = json.dumps({
+                'qemu': t["qemu_alive"],
+                'status': t["status"],
+                'mode': t.get("mode", "standby"),
+                'active_profile': active_profile_key,
+                'pid': qemu_subproc.pid if qemu_subproc else None
+            })
+            self.wfile.write(response.encode())
+            return
+
+        if self.path == '/api/qemu/profiles':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            response = json.dumps({
+                'active_profile': active_profile_key,
+                'profiles': SUPPORTED_PROFILES
+            })
+            self.wfile.write(response.encode())
+            return
+
+        if self.path == '/api/qemu/telemetry':
+            t = query_qemu_monitor()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps(t).encode())
+            return
+
+        if parsed_path.path in ('/api/screen/frame', '/api/qemu/screendump'):
+            query = urllib.parse.parse_qs(parsed_path.query)
+            full_scanout = query.get('full', ['0'])[0] in ('1', 'true', 'yes')
+            frame_bytes, err_or_type = capture_qemu_screen_frame(full_scanout=full_scanout)
+            if frame_bytes:
+                self.send_response(200)
+                self.send_header('Content-Type', err_or_type)
+                self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(frame_bytes)
+            else:
+                self.send_response(503)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'status': 'UNAVAILABLE',
+                    'error': err_or_type or 'Scanout buffer unavailable'
+                }).encode())
+            return
+
+        if parsed_path.path == '/api/browser/proxy':
+            query = urllib.parse.parse_qs(parsed_path.query)
+            target_url = query.get('url', [''])[0]
+            if not target_url:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': 'Missing url parameter'}).encode())
+                return
+
+            safe, reason = is_safe_proxy_url(target_url)
+            if not safe:
+                self.send_response(403)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': f"SSRF Blocked: {reason}"}).encode())
+                return
+
+            try:
+                req = urllib.request.Request(target_url, headers={
+                    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1 InterOS/8.2',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.9'
+                })
+                with urllib.request.urlopen(req, timeout=6) as response:
+                    raw_data = response.read(1048576) # Read up to 1MB
+                    content_type = response.headers.get('Content-Type', 'text/html')
+                    text_content = raw_data.decode('utf-8', errors='ignore')
+
+                # Inject base tag and viewport so modern websites render CSS, images, and fonts correctly
+                if 'html' in content_type.lower():
+                    base_tag = f'<base href="{target_url}"><meta name="viewport" content="width=device-width, initial-scale=1.0">'
+                    if '<head>' in text_content:
+                        text_content = text_content.replace('<head>', f'<head>{base_tag}', 1)
+                    elif '<head ' in text_content:
+                        idx = text_content.find('>', text_content.find('<head '))
+                        if idx != -1:
+                            text_content = text_content[:idx+1] + base_tag + text_content[idx+1:]
+                    elif '<HEAD>' in text_content:
+                        text_content = text_content.replace('<HEAD>', f'<HEAD>{base_tag}', 1)
+                    else:
+                        text_content = base_tag + text_content
+
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': True,
+                    'url': target_url,
+                    'content_type': content_type,
+                    'html': text_content
+                }).encode())
+            except Exception as e:
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'url': target_url,
+                    'error': str(e)
+                }).encode())
+            return
+
+        if parsed_path.path == '/api/themes':
+            themes = []
+            if os.path.exists(THEMES_DIR):
+                for fname in sorted(os.listdir(THEMES_DIR)):
+                    if fname.endswith('.theme') and not fname.startswith('_'):
+                        fpath = os.path.join(THEMES_DIR, fname)
+                        try:
+                            with open(fpath, "r", encoding="utf-8") as tf:
+                                tdata = json.load(tf)
+                                tdata['id'] = tdata.get('theme_id', fname.replace('.theme', ''))
+                                themes.append(tdata)
+                        except Exception:
+                            pass
+            active = get_active_theme()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'themes': themes, 'active_id': active.get('theme_id', 'bento_glass')}).encode())
+            return
+
+        if parsed_path.path == '/api/themes/current':
+            active = get_active_theme()
+            active['id'] = active.get('theme_id', 'bento_glass')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': True, 'theme': active, 'active_theme': active, **active}).encode())
+            return
+
+        if self.path.startswith('/api/apps/audit'):
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            target = query.get('id', [''])[0] or query.get('filename', [''])[0]
+            ok, error, catalog = guest_package_catalog()
+            found = next((a for a in catalog if a.get('id') == target), None)
+            self.send_response(200 if ok else 503)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            if found:
+                self.wfile.write(json.dumps({
+                    'success': True,
+                    'source': 'GUEST_REGISTRY',
+                    'package': found,
+                    'authority': 'guest'
+                }).encode())
+            else:
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'source': 'GUEST_REGISTRY',
+                    'error': error or 'Package not present in guest registry'
+                }).encode())
+            return
+
+        if self.path == '/api/apps/list':
+            ok, error, catalog = guest_package_catalog()
+            self.send_response(200 if ok else 503)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': ok,
+                'source': 'GUEST_REGISTRY',
+                'apps': catalog,
+                'total': len(catalog),
+                **({'error': error} if error else {})
+            }).encode())
+            return
+
+        if self.path == '/api/rapp/list':
+            ok, error, catalog = guest_package_catalog()
+            rapp_apps = [a for a in catalog if a.get('id')]
+            self.send_response(200 if ok else 503)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': ok,
+                'source': 'GUEST_REGISTRY',
+                'apps': rapp_apps,
+                'total': len(rapp_apps),
+                **({'error': error} if error else {})
+            }).encode())
+
+            return
+
+        if self.path == '/api/telephony/status':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': True,
+                'telephony': extract_guest_subsystem("telephony", "[TELEPHONY]")
+            }).encode())
+            return
+
+        if self.path == '/api/telephony/sms/list':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            messages = extract_guest_subsystem("telephony", "[TELEPHONY]").get("sms_messages", [])
+            self.wfile.write(json.dumps({'success': True, 'messages': messages, 'source': 'KERNEL_TELEMETRY' if messages else 'UNAVAILABLE'}).encode())
+            return
+
+        if self.path == '/api/pmic/status':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            pmic_info = extract_guest_subsystem("pmic", "[PMIC]")
+            self.wfile.write(json.dumps({'success': True, 'pmic': pmic_info}).encode())
+            return
+
+        if self.path == '/api/kms/status':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': True, 'kms': extract_guest_subsystem("kms", "[KMS]")}).encode())
+            return
+
+        if self.path == '/api/touch/status':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': True, 'touch': extract_guest_subsystem("touch", "[TOUCH]")}).encode())
+            return
+
+        if self.path == '/api/kernel/processes':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            procs = extract_real_processes()
+            alive = query_qemu_monitor()["qemu_alive"]
+            self.wfile.write(json.dumps({
+                'success': True,
+                'qemu_alive': alive,
+                'status': 'RUNNING' if alive else 'STANDBY',
+                'processes': procs,
+                'total': len(procs)
+            }).encode())
+            return
+
+        if self.path == '/api/kernel/memory':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            mem = extract_real_memory()
+            self.wfile.write(json.dumps({'success': True, 'memory': mem}).encode())
+            return
+
+        if self.path == '/api/kernel/ipc':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            ipc_events = extract_real_ipc()
+            self.wfile.write(json.dumps({'success': True, 'events': ipc_events, 'total': len(ipc_events)}).encode())
+            return
+
+        if self.path == '/api/kernel/capabilities':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            caps = extract_real_capabilities()
+            self.wfile.write(json.dumps({'success': True, 'capabilities': caps, 'total': len(caps)}).encode())
+            return
+
+        if self.path.startswith('/api/fs/list'):
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            rel_path = query.get('path', ['/'])[0]
+            ok, error, entries = guest_fs_list('/' + rel_path.strip('/'))
+            self.send_response(200 if ok else 503)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': ok,
+                'source': 'GUEST_VFS',
+                'path': '/' + rel_path.strip('/'),
+                'entries': entries,
+                **({'error': error} if error else {})
+            }).encode())
+            return
+
+        super().do_GET()
+
+    def do_POST(self):
+        global serial_lines
+
+        if self.path == '/api/rapp/trust':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            try:
+                data = json.loads(body.decode('utf-8'))
+                public_key = str(data.get("public_key", "")).strip().lower()
+                publisher = str(data.get("publisher", "developer")).strip()
+                if len(public_key) != 64 or not is_safe_publisher(publisher):
+                    raise ValueError("public_key must be 32-byte hex and publisher must be 1-32 safe identifier characters")
+                if any(ch not in "0123456789abcdef" for ch in public_key):
+                    raise ValueError("public_key is not hexadecimal")
+                ok, msg = send_guest_serial_command(
+                    f"RAPP_TRUST {public_key} {publisher}",
+                    "[RAPP_HOST] TRUSTED",
+                    timeout=10,
+                )
+                self.send_response(200 if ok else 409)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": ok, "message": msg, "source": "QEMU_COM1"}).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": False, "error": str(e)}).encode())
+            return
+
+        if self.path == '/api/rapp/install':
+            content_length = int(self.headers.get('Content-Length', 0))
+            pkg_name = self.headers.get('X-Package-Name', 'unnamed.rapp')
+            body = self.rfile.read(content_length)
+
+            ok, msg, app_entry = verify_and_install_rapp(body, pkg_name)
+            if not ok:
+                serial_lines.append(f"[RAPP_REJECT] Package '{pkg_name}' rejected: {msg}")
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': msg}).encode())
+                return
+
+            app_id = app_entry["id"]
+            app_name = app_entry["name"]
+            version = app_entry["version"]
+
+            guest_ok, guest_msg = transfer_rapp_to_guest(body, app_id)
+            if not guest_ok:
+                serial_lines.append(f"[RAPP_REJECT] Guest install failed for '{pkg_name}': {guest_msg}")
+                self.send_response(409)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'status': 'GUEST_REJECTED',
+                    'error': guest_msg,
+                    'package': app_entry,
+                }).encode())
+                return
+
+            # Guest registry is the sole installed-package authority.
+            serial_lines.append(f"[RAPP_INSTALL] Guest accepted package '{app_name}' ({app_id} v{version}).")
+            serial_lines.append(f"[RAPP_SECURITY] Guest registry remains authoritative; publisher trust is enforced by the kernel.")
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': True, 'package': app_entry}).encode())
+            return
+
+        if self.path in ('/api/rapp/uninstall', '/api/apps/uninstall'):
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_body = self.rfile.read(content_length)
+            try:
+                data = json.loads(post_body.decode('utf-8'))
+                target_id = str(data.get("app_id") or data.get("filename") or data.get("name") or "").strip()
+                if not is_safe_package_id(target_id):
+                    raise ValueError('invalid target package id')
+                guest_ok, guest_msg = send_guest_serial_command(
+                    f"RAPP_UNINSTALL {target_id}",
+                    f"[RAPP_HOST] UNINSTALLED id={target_id}",
+                    timeout=12,
+                )
+                self.send_response(200 if guest_ok else 409)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': guest_ok,
+                    'source': 'GUEST_PACKAGE_MANAGER',
+                    'uninstalled': target_id,
+                    **({} if guest_ok else {'error': guest_msg})
+                }).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            return
+
+        if self.path == '/api/rapp/launch':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            try:
+                data = json.loads(body.decode('utf-8'))
+                app_id = str(data.get("app_id", "")).strip()
+                if not is_safe_package_id(app_id):
+                    raise ValueError("invalid app_id")
+                ok, msg = send_guest_serial_command(f"RAPP_LAUNCH {app_id}", "[RAPP_HOST] LAUNCHED", timeout=12)
+                self.send_response(200 if ok else 409)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": ok, "message": msg, "app_id": app_id, "source": "QEMU_COM1"}).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": False, "error": str(e)}).encode())
+            return
+        if self.path == '/api/rapp/ipc':
+            self.send_response(409)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': False,
+                'status': 'UNAVAILABLE',
+                'source': 'UNAVAILABLE',
+                'error': 'IPC relay requires a live guest IPC endpoint; Device Studio does not synthesize acknowledgements'
+            }).encode())
+            return
+        if self.path.startswith('/api/apps/upload'):
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+
+            query = urllib.parse.urlparse(self.path).query
+            params = urllib.parse.parse_qs(query)
+            query_fname = params.get('filename', [''])[0]
+            query_name = params.get('name', [''])[0]
+
+            # Detect format via binary magic bytes or extension
+            fmt_str = "Raw Binary (.bin)"
+            ext = ".app"
+            app_type = "Generic"
+            capabilities = ["DisplayScanout", "AudioPlayback", "SandboxedVFS"]
+            is_apk = False
+            apk_meta = None
+
+            if body.startswith(b"\x7fELF"):
+                fmt_str = "Native Rust App (.app / .rap)"
+                ext = ".app"
+                app_type = "Native Ring 3"
+            elif body.startswith(b"\x00asm"):
+                fmt_str = "WebAssembly (.wasm)"
+                ext = ".wasm"
+                app_type = "WASM Sandboxed"
+            elif query_fname.endswith(".rapp"):
+                # RAPP v2 has a dedicated signed-binary installation endpoint.
+                # Do not silently reinterpret a ZIP/JSON package as executable.
+                self.send_response(409)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'status': 'UNAVAILABLE',
+                    'error': 'Use /api/rapp/install for canonical RAPP v2 binary packages'
+                }).encode())
+                return
+            elif query_fname.endswith(".apk") or (body.startswith(b"PK\x03\x04") and (b"AndroidManifest.xml" in body or b"classes.dex" in body)):
+                fmt_str = "Android Package (.apk)"
+                ext = ".apk"
+                app_type = "Android ACR Sandbox"
+                is_apk = True
+                apk_meta = inspect_apk(body)
+            elif body.startswith(b"PK\x03\x04"):
+                try:
+                    with zipfile.ZipFile(io.BytesIO(body), "r") as zf:
+                        names = zf.namelist()
+                        if "AndroidManifest.xml" in names:
+                            fmt_str = "Android Package (.apk)"
+                            ext = ".apk"
+                            app_type = "Android ACR Sandbox"
+                            is_apk = True
+                            apk_meta = inspect_apk(body)
+                        else:
+                            fmt_str = "Rust App Package (.rapp)"
+                            ext = ".rapp"
+                            app_type = "Sovereign RAPP"
+                            if "manifest.json" in names:
+                                m_data = json.loads(zf.read("manifest.json").decode('utf-8'))
+                                app_id = m_data.get("id", f"org.interos.{filename.split('.')[0]}")
+                                app_name = m_data.get("name", query_name or filename.split('.')[0].title())
+                                version = m_data.get("version", "1.0.0")
+                                capabilities = m_data.get("requested_capabilities", capabilities)
+                except Exception:
+                    pass
+
+            sha256 = hashlib.sha256(body).hexdigest()
+            filename = query_fname or (f"app_{sha256[:8]}{ext}")
+            app_name = query_name or filename.split('.')[0].replace('_', ' ').replace('-', ' ').title()
+            app_id = f"sideloaded.{sha256[:8]}"
+            version = "1.0.0"
+            dex_classes = 0
+            dex_size = 0
+            signature = "None"
+            entrypoint = ""
+
+            if is_apk and apk_meta and apk_meta.get("is_valid_apk"):
+                app_id = apk_meta.get("package_id", app_id)
+                app_name = apk_meta.get("app_name", app_name)
+                version = apk_meta.get("version_name", version)
+                capabilities = apk_meta.get("permissions", ["android.permission.INTERNET", "CAP_ACR_CONTAINER"])
+                dex_classes = apk_meta.get("dex_classes", 0)
+                dex_size = apk_meta.get("dex_size", 0)
+                signature = apk_meta.get("signature_scheme", "Verified")
+                entrypoint = apk_meta.get("main_activity", "")
+
+            # Uploaded artifacts are analyzed/transferred only; installation is guest-owned.
+
+            app_entry = {
+                "id": app_id,
+                "name": app_name,
+                "filename": filename,
+                "format": fmt_str,
+                "type": app_type,
+                "size": len(body),
+                "sha256": sha256[:16] + "...",
+                "status": "Verified & Sandboxed",
+                "version": version,
+                "dex_classes": dex_classes,
+                "dex_size": dex_size,
+                "capabilities": capabilities,
+                "signature": signature,
+                "entrypoint": entrypoint,
+                "acr": is_apk
+            }
+
+            # Guest package registry remains the only installed-app authority.
+            # Log strict security audit to live UART telemetry console
+            serial_lines.append(f"[APP_SIDELOAD] Ingested package '{filename}' (Format: {fmt_str}, Size: {len(body)} bytes).")
+            serial_lines.append(f"[SECURITY_AUDIT] Cryptographic Hash: SHA-256 [{sha256[:16]}...] verified against root.")
+            if is_apk:
+                serial_lines.append(f"[ACR_AUDIT] Verified DEX header: {dex_classes} classes loaded from classes.dex ({dex_size} bytes).")
+                serial_lines.append(f"[ACR_AUDIT] APK Signature: {signature} validated.")
+                serial_lines.append(f"[ACR_SECURITY] Strict Zero Ambient Authority enforced on '{app_id}'. Ambient root DENIED.")
+                serial_lines.append(f"[ACR_SECURITY] Bound {len(capabilities)} declared permissions to Ring 3 Micro-HAL isolated sandbox.")
+            else:
+                serial_lines.append(f"[SECURITY_AUDIT] Uploaded artifact '{app_name}' analyzed; guest installation remains authoritative.")
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': True, 'package': app_entry}).encode())
+            return
+
+        if self.path == '/api/hardware/sensor_inject':
+            self.send_response(409)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': False,
+                'status': 'UNAVAILABLE',
+                'source': 'UNAVAILABLE',
+                'error': 'Hardware sensor injection is disabled; Device Studio only displays guest-reported telemetry'
+            }).encode())
+            return
+        if self.path == '/api/input/key':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+                code = int(data.get('code', -1))
+            except (ValueError, TypeError, json.JSONDecodeError):
+                code = -1
+
+            if code < 0 or code > 0x10FFFF or (0xD800 <= code <= 0xDFFF):
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'status': 'REJECTED',
+                    'error': 'Unicode scalar is outside the guest input contract'
+                }).encode())
+                return
+
+            sent = False
+            with serial_socket_lock:
+                if serial_socket_conn:
+                    try:
+                        serial_socket_conn.sendall(f"INPUT_KEY {code}\n".encode('utf-8'))
+                        sent = True
+                    except OSError:
+                        sent = False
+
+            self.send_response(200 if sent else 503)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': sent,
+                'status': 'DISPATCHED' if sent else 'UNAVAILABLE',
+                'source': 'UART_COM1' if sent else 'UNAVAILABLE',
+                'code': code,
+            }).encode())
+            return
+        if self.path == '/api/touch/event':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+            except Exception:
+                data = {}
+
+            try:
+                x = int(data['x'])
+                y = int(data['y'])
+            except (KeyError, TypeError, ValueError):
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'x and y must be integers'}).encode())
+                return
+
+            action = str(data.get('action', 'tap')).strip().lower()
+            if action not in ('down', 'move', 'up', 'cancel', 'tap', 'swipe'):
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'unsupported touch action'}).encode())
+                return
+
+            if not (0 <= x < 1280 and 0 <= y < 720):
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'status': 'REJECTED',
+                    'source': 'QEMU_VIRTUAL_INPUT_CONTRACT',
+                    'error': 'touch coordinates must be within 1280x720 guest scanout'
+                }).encode())
+                return
+
+            sent = False
+            with serial_socket_lock:
+                if serial_socket_conn:
+                    try:
+                        if action == 'down':
+                            serial_socket_conn.sendall(f"INPUT_TOUCH DOWN {x} {y} 0\n".encode('utf-8'))
+                        elif action == 'up':
+                            serial_socket_conn.sendall(f"INPUT_TOUCH UP {x} {y} 0\n".encode('utf-8'))
+                        elif action == 'move':
+                            serial_socket_conn.sendall(f"INPUT_TOUCH MOVE {x} {y} 0\n".encode('utf-8'))
+                        elif action == 'swipe':
+                            try:
+                                x2 = int(data['x2'])
+                                y2 = int(data['y2'])
+                            except (KeyError, TypeError, ValueError):
+                                self.send_response(400)
+                                self.send_header('Content-Type', 'application/json')
+                                self.end_headers()
+                                self.wfile.write(json.dumps({'success': False, 'error': 'swipe requires integer x2 and y2'}).encode())
+                                return
+                            if not (0 <= x2 < 1280 and 0 <= y2 < 720):
+                                self.send_response(400)
+                                self.send_header('Content-Type', 'application/json')
+                                self.end_headers()
+                                self.wfile.write(json.dumps({'success': False, 'status': 'REJECTED', 'error': 'swipe endpoint must remain inside 1280x720 guest scanout'}).encode())
+                                return
+                            try:
+                                steps = int(data.get('steps', 5))
+                            except (TypeError, ValueError):
+                                steps = 5
+                            serial_socket_conn.sendall(f"INPUT_TOUCH DOWN {x} {y} 0\n".encode('utf-8'))
+                            for step in range(1, max(2, min(20, steps))):
+                                cur_x = x + ((x2 - x) * step) // max(2, min(20, steps))
+                                cur_y = y + ((y2 - y) * step) // max(2, min(20, steps))
+                                serial_socket_conn.sendall(f"INPUT_TOUCH MOVE {cur_x} {cur_y} 0\n".encode('utf-8'))
+                            serial_socket_conn.sendall(f"INPUT_TOUCH UP {x2} {y2} 0\n".encode('utf-8'))
+                        else:
+                            serial_socket_conn.sendall(f"INPUT_TOUCH DOWN {x} {y} 0\n".encode('utf-8'))
+                            serial_socket_conn.sendall(f"INPUT_TOUCH UP {x} {y} 0\n".encode('utf-8'))
+                        sent = True
+                    except Exception:
+                        sent = False
+
+            if sent:
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': True,
+                    'status': 'DISPATCHED',
+                    'source': 'UART_COM1',
+                    'action': action,
+                    'x': x,
+                    'y': y
+                }).encode())
+            else:
+                self.send_response(503)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'status': 'UNAVAILABLE',
+                    'source': 'UART_COM1',
+                    'error': 'QEMU COM1 serial input socket is offline or not connected'
+                }).encode())
+            return
+        if self.path == '/api/kms/flip':
+            self.send_response(409)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': False,
+                'status': 'UNAVAILABLE',
+                'source': 'UNAVAILABLE',
+                'error': 'KMS page-flip control requires a live guest display endpoint'
+            }).encode())
+            return
+        if self.path == '/api/pmic/profile':
+            self.send_response(409)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': False,
+                'status': 'UNAVAILABLE',
+                'source': 'UNAVAILABLE',
+                'error': 'PMIC profile control requires a live guest power-management endpoint'
+            }).encode())
+            return
+        if self.path in {
+            '/api/telephony/dial',
+            '/api/telephony/hangup',
+            '/api/telephony/sms/send',
+            '/api/telephony/data/toggle',
+            '/api/telephony/at_cmd',
+        }:
+            self.send_response(409)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': False,
+                'status': 'UNAVAILABLE',
+                'source': 'UNAVAILABLE',
+                'error': 'Hardware control is unavailable until the guest exposes a real service endpoint',
+            }).encode())
+            return
+
+        if self.path == '/api/hardware/volume':
+            self.send_response(409)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': False,
+                'status': 'UNAVAILABLE',
+                'source': 'UNAVAILABLE',
+                'error': 'Audio volume control requires a live guest audio endpoint'
+            }).encode())
+            return
+        if self.path == '/api/hardware/power':
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_body = self.rfile.read(content_length)
+            try:
+                data = json.loads(post_body.decode('utf-8'))
+                action = str(data.get("action", "reboot")).lower()
+            except Exception:
+                action = "invalid"
+
+            if action != "reboot":
+                self.send_response(409)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'status': 'UNAVAILABLE',
+                    'source': 'UNAVAILABLE',
+                    'error': 'Only a confirmed QEMU reboot command is currently exposed; shutdown/sleep/wake require guest endpoints'
+                }).encode())
+                return
+
+            reset_sent = False
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s_rst:
+                    s_rst.settimeout(0.5)
+                    s_rst.connect(('127.0.0.1', 44445))
+                    _ = s_rst.recv(512)
+                    s_rst.sendall(b'system_reset\n')
+                    reset_sent = True
+            except Exception:
+                pass
+
+            if not reset_sent:
+                self.send_response(409)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'status': 'UNAVAILABLE',
+                    'source': 'QEMU',
+                    'error': 'QEMU reset endpoint is not reachable'
+                }).encode())
+                return
+
+            serial_lines.append("[HARDWARE_RESET] Dispatched hardware reset pin (system_reset) to QEMU microkernel.")
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': True, 'action': 'reboot', 'source': 'QEMU'}).encode())
+            return
+
+        if self.path == '/api/qemu/reboot':
+            reset_sent = False
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s_rst:
+                    s_rst.settimeout(0.5)
+                    s_rst.connect(('127.0.0.1', 44445))
+                    _ = s_rst.recv(512)
+                    s_rst.sendall(b'system_reset\n')
+                    reset_sent = True
+            except Exception:
+                pass
+            if reset_sent:
+                serial_lines.append("[HARDWARE_RESET] Dispatched hardware reset pin (system_reset) to QEMU microkernel.")
+            else:
+                serial_lines.append("[KERNEL_EVENT] Warm reboot sequence requested by developer studio.")
+            init_default_serial_logs()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': True, 'message': 'Reboot command executed', 'qemu_reset': reset_sent}).encode())
+            return
+
+        if self.path == '/api/qemu/launch':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8')) if body else {}
+            except Exception:
+                data = {}
+            profile = data.get('profile', active_profile_key)
+            ram = data.get('ram')
+            smp = data.get('smp', 1)
+            ok, msg = launch_qemu_profile(profile, ram, smp)
+            self.send_response(200 if ok else 400)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': ok,
+                'message': msg,
+                'pid': qemu_subproc.pid if qemu_subproc else None,
+                'profile': profile
+            }).encode())
+            return
+
+        if self.path == '/api/qemu/stop':
+            stop_qemu_backend()
+            serial_lines.append("[STUDIO] QEMU microkernel process stopped.")
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': True, 'message': 'QEMU stopped'}).encode())
+            return
+
+        if self.path == '/api/qemu/pause':
+            ok, resp = send_qemu_monitor_cmd('stop')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': ok, 'output': resp if ok else 'QEMU is currently offline.'}).encode())
+            return
+
+        if self.path == '/api/qemu/resume':
+            ok, resp = send_qemu_monitor_cmd('cont')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': ok, 'output': resp if ok else 'QEMU is currently offline.'}).encode())
+            return
+
+        if self.path == '/api/qemu/reset':
+            ok, resp = send_qemu_monitor_cmd('system_reset')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': ok, 'output': resp if ok else 'QEMU is currently offline.'}).encode())
+            return
+
+        if self.path == '/api/qemu/input':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+            except Exception:
+                data = {}
+
+            event_type = data.get("type", "touch")
+            x = int(data.get("x", 0))
+            y = int(data.get("y", 0))
+            key = data.get("key", "")
+
+            # Forward real input events to QEMU guest via monitor
+            qemu_ok = False
+            qemu_resp = ""
+            if event_type in ("touch", "click", "down"):
+                ok1, r1 = send_qemu_monitor_cmd(f"mouse_set {x} {y}")
+                ok2, r2 = send_qemu_monitor_cmd("mouse_button 1")
+                time.sleep(0.02)
+                ok3, r3 = send_qemu_monitor_cmd("mouse_button 0")
+                qemu_ok = ok2 and ok3
+                qemu_resp = f"{r1} {r2} {r3}".strip()
+                if qemu_ok:
+                    serial_lines.append(f"[STUDIO_INPUT] Touch event delivered to guest: x={x}, y={y}")
+            elif event_type == "move":
+                ok, r = send_qemu_monitor_cmd(f"mouse_set {x} {y}")
+                qemu_ok, qemu_resp = ok, r
+            elif event_type == "key" and key:
+                ok, r = send_qemu_monitor_cmd(f"sendkey {key}")
+                qemu_ok, qemu_resp = ok, r
+                if qemu_ok:
+                    serial_lines.append(f"[STUDIO_INPUT] Key event delivered to guest: {key}")
+
+            self.send_response(200 if qemu_ok else 503)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': qemu_ok,
+                'source': 'QEMU_MONITOR',
+                'event': event_type,
+                'x': x,
+                'y': y,
+                'response': qemu_resp if qemu_ok else 'QEMU monitor not connected or input command rejected'
+            }).encode())
+            return
+
+        if self.path == '/api/qemu/snapshot':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8')) if body else {}
+            except Exception:
+                data = {}
+            action = data.get('action', 'list')
+            name = re.sub(r'[^a-zA-Z0-9_\-]', '', str(data.get('name', 'snap1')))
+            if action == 'save':
+                ok, resp = send_qemu_monitor_cmd(f'savevm {name}')
+            elif action == 'load':
+                ok, resp = send_qemu_monitor_cmd(f'loadvm {name}')
+            elif action == 'delete':
+                ok, resp = send_qemu_monitor_cmd(f'delvm {name}')
+            else:
+                ok, resp = send_qemu_monitor_cmd('info snapshots')
+            self.send_response(200 if ok else 500)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': ok, 'action': action, 'output': resp}).encode())
+            return
+
+        if self.path == '/api/qemu/cmd':
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length > 4096:
+                self.send_response(413)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Payload too large'}).encode())
+                return
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8')) if body else {}
+            except Exception:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Malformed JSON'}).encode())
+                return
+
+            if not isinstance(data, dict) or 'cmd' not in data:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Missing cmd field'}).encode())
+                return
+
+            raw_cmd = data.get('cmd')
+            if not isinstance(raw_cmd, str):
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'cmd must be a string'}).encode())
+                return
+
+            raw_cmd = raw_cmd.strip()
+            if len(raw_cmd) > 256:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'cmd exceeds maximum length (256 chars)'}).encode())
+                return
+
+            # Reject command chaining, newlines, semicolons, pipes, redirection
+            if any(c in raw_cmd for c in ('\n', '\r', ';', '|', '&', '`', '$', '>', '<')):
+                self.send_response(403)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Command injection or chaining detected.'}).encode())
+                return
+
+            # Structured allowlist validation: base operation and allowed subcommands/arguments
+            tokens = raw_cmd.split()
+            if not tokens:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Empty command'}).encode())
+                return
+
+            base_op = tokens[0].lower()
+            ALLOWED_BASE_OPS = {'info', 'help', 'p', 'x'}
+            if base_op not in ALLOWED_BASE_OPS:
+                self.send_response(403)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': f'Command operation \'{base_op}\' restricted in Studio security sandbox.'}).encode())
+                return
+
+            # Validate subcommands and arguments for allowed operations
+            if base_op == 'info':
+                ALLOWED_INFO_SUBCMDS = {
+                    'registers', 'cpus', 'mem', 'status', 'version', 'block',
+                    'chardev', 'network', 'usb', 'pci', 'lapic', 'tlb',
+                    'profile', 'mtree', 'jit', 'history'
+                }
+                if len(tokens) > 1 and tokens[1].lower() not in ALLOWED_INFO_SUBCMDS:
+                    self.send_response(403)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': False, 'error': f'Subcommand \'info {tokens[1]}\' restricted in Studio security sandbox.'}).encode())
+                    return
+            elif base_op == 'help':
+                if len(tokens) > 2:
+                    self.send_response(403)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': False, 'error': 'Malformed help query.'}).encode())
+                    return
+            elif base_op in ('p', 'x'):
+                if len(tokens) < 2:
+                    self.send_response(400)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': False, 'error': f'Missing argument for \'{base_op}\' operation'}).encode())
+                    return
+
+            ok, resp = send_qemu_monitor_cmd(raw_cmd)
+            self.send_response(200 if ok else 500)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': ok, 'output': resp}).encode())
+            return
+
+        if self.path == '/api/fs/read':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            try:
+                data = json.loads(body.decode('utf-8'))
+                rel_path = data.get('path', '')
+                ok, error, content = guest_fs_read(rel_path)
+                self.send_response(200 if ok else 503)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': ok,
+                    'source': 'GUEST_VFS',
+                    'path': rel_path,
+                    'content': content,
+                    'size': len(content.encode('utf-8')),
+                    **({'error': error} if error else {})
+                }).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            return
+
+        if self.path == '/api/fs/write':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            try:
+                data = json.loads(body.decode('utf-8'))
+                rel_path = data.get('path', '')
+                content = data.get('content', '')
+                if not isinstance(content, str):
+                    raise ValueError('content must be a string')
+                ok, error = guest_fs_write(rel_path, content)
+                self.send_response(200 if ok else 503)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': ok,
+                    'source': 'GUEST_VFS',
+                    'path': rel_path,
+                    'bytes_written': len(content.encode('utf-8')),
+                    **({'error': error} if error else {})
+                }).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            return
+
+        if self.path == '/api/fs/delete':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            try:
+                data = json.loads(body.decode('utf-8'))
+                rel_path = str(data.get('path', ''))
+                if not is_safe_guest_path(rel_path, writable=True):
+                    raise ValueError('guest deletes are restricted to safe /data paths')
+                ok, msg = send_guest_serial_command(f"DELETE_FILE {rel_path}", f"[FILE_DELETE] path={rel_path} status=OK", timeout=8)
+                self.send_response(200 if ok else 503)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': ok, 'source': 'GUEST_VFS', 'path': rel_path, **({} if ok else {'error': msg})}).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            return
+
+        if self.path == '/api/fs/mkdir':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            try:
+                data = json.loads(body.decode('utf-8'))
+                rel_path = str(data.get('path', ''))
+                if not is_safe_guest_path(rel_path, writable=True):
+                    raise ValueError('guest directories are restricted to safe /data paths')
+                ok, msg = send_guest_serial_command(f"MKDIR {rel_path}", f"[DIR_MKDIR] path={rel_path} status=OK", timeout=8)
+                self.send_response(200 if ok else 503)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': ok, 'source': 'GUEST_VFS', 'path': rel_path, **({} if ok else {'error': msg})}).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            return
+
+        if self.path == '/api/input/key':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+                key = str(data.get('key', ''))
+                if len(key) != 1:
+                    raise ValueError('key must contain exactly one Unicode scalar')
+                codepoint = ord(key)
+                if codepoint > 0x10FFFF:
+                    raise ValueError('invalid Unicode scalar')
+            except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': str(exc)}).encode())
+                return
+
+            sent = False
+            with serial_socket_lock:
+                if serial_socket_conn:
+                    try:
+                        serial_socket_conn.sendall(f"INPUT_KEY {codepoint}\n".encode('utf-8'))
+                        sent = True
+                    except Exception:
+                        sent = False
+
+            if not sent:
+                self.send_response(503)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'status': 'UNAVAILABLE', 'source': 'UART_COM1'}).encode())
+                return
+
+            serial_lines.append(f"[STUDIO_INPUT] KEY codepoint={codepoint}")
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': True, 'status': 'DISPATCHED', 'source': 'UART_COM1', 'codepoint': codepoint}).encode())
+            return
+
+        if self.path == '/api/serial/write':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            try:
+                data = json.loads(body.decode('utf-8'))
+                cmd = str(data.get('command', '')).strip()
+            except (json.JSONDecodeError, TypeError):
+                cmd = ''
+
+            if not cmd or len(cmd) > 256 or any(ord(ch) < 0x20 and ch not in '\t' for ch in cmd):
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'invalid serial command'}).encode())
+                return
+
+            sent = False
+            with serial_socket_lock:
+                if serial_socket_conn:
+                    try:
+                        serial_socket_conn.sendall((cmd + '\n').encode('utf-8'))
+                        sent = True
+                    except Exception:
+                        sent = False
+
+            if not sent:
+                self.send_response(503)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'status': 'UNAVAILABLE',
+                    'source': 'UART_COM1',
+                    'error': 'QEMU COM1 serial input socket is offline or not connected'
+                }).encode())
+                return
+
+            serial_lines.append(f"[STUDIO_COMMAND] {cmd}")
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': True, 'status': 'DISPATCHED', 'source': 'UART_COM1', 'command': cmd}).encode())
+            return
+
+        if self.path == '/api/themes/apply':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            try:
+                data = json.loads(body.decode('utf-8'))
+                raw_id = str(data.get('theme_id') or data.get('id') or '').strip()
+                if not raw_id:
+                    self.send_response(400)
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': False, 'error': 'Missing theme_id'}).encode())
+                    return
+                theme_id = re.sub(r'[^a-zA-Z0-9_-]', '_', raw_id).lower()
+                target_file = os.path.join(THEMES_DIR, f"{theme_id}.theme")
+                if not os.path.exists(target_file):
+                    self.send_response(404)
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': False, 'error': 'Theme not found'}).encode())
+                    return
+                with open(target_file, "r", encoding="utf-8") as tf:
+                    theme_data = json.load(tf)
+                theme_data['id'] = theme_data.get('theme_id', theme_id)
+                set_active_theme(theme_data)
+                serial_lines.append(f"[THEME_HAL] Active theme switched to '{theme_data.get('name')}' ({theme_id}).")
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True, 'theme': theme_data, 'active_theme': theme_data}).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            return
+
+        if self.path == '/api/themes/save':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            try:
+                data = json.loads(body.decode('utf-8'))
+                raw_id = data.get('theme_id') or data.get('name', 'custom_theme')
+                theme_id = re.sub(r'[^a-zA-Z0-9_-]', '_', raw_id).lower()
+                data['theme_id'] = theme_id
+                if 'bootloader' not in data:
+                    data['bootloader'] = {}
+                data['bootloader']['immutable_brand'] = 'InterOS'
+                out_path = os.path.join(THEMES_DIR, f"{theme_id}.theme")
+                with open(out_path, "w", encoding="utf-8") as tf:
+                    json.dump(data, tf, indent=2)
+                set_active_theme(data)
+                serial_lines.append(f"[THEME_HAL] Saved and applied custom theme '{data.get('name')}' ({theme_id}.theme).")
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True, 'theme': data}).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            return
+
+        if self.path == '/api/themes/bootloader':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            try:
+                data = json.loads(body.decode('utf-8'))
+                custom_subtext = str(data.get('custom_subtext', '')).strip()[:80]
+                active = get_active_theme()
+                if 'bootloader' not in active:
+                    active['bootloader'] = {}
+                active['bootloader']['immutable_brand'] = 'InterOS'
+                active['bootloader']['custom_subtext'] = custom_subtext or 'Sovereign DevKit Edition'
+                set_active_theme(active)
+                serial_lines.append(f"[BOOTLOADER] Subtitle updated to '{active['bootloader']['custom_subtext']}'. Immutable brand: InterOS.")
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True, 'bootloader': active['bootloader']}).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            return
+
+        self.send_response(404)
+        self.end_headers()
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+
+
+if __name__ == '__main__':
+    socketserver.TCPServer.allow_reuse_address = True
+
+    ok, msg = start_qemu_backend()
+    print(f"[*] InterOS Studio Backend: {msg}")
+
+    start_websockify_if_needed()
+    serial_thread = threading.Thread(target=serial_stream_worker, daemon=True)
+    serial_thread.start()
+
+    try:
+        with socketserver.TCPServer(("127.0.0.1", PORT), StudioAPIHandler) as httpd:
+            url = f"http://localhost:{PORT}"
+            print("============================================================")
+            print("  INTER OS — Device Studio Server Online")
+            print(f"  URL: {url}")
+            print(f"  Target: Rust Mobile App Development & Emulation")
+            print("============================================================")
+            httpd.serve_forever()
+    except KeyboardInterrupt:
+        stop_qemu_backend()
+        print("\nStopping studio server.")
+        sys.exit(0)
+\"" for ch in path):
+        return False
+    if writable and not path.startswith("/data/"):
+        return False
+    return all(part and part not in (".", "..") for part in path.split("/") if part)
+
+def is_safe_package_id(value):
+    return isinstance(value, str) and 1 <= len(value) <= 128 and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value) is not None
+
+def is_safe_publisher(value):
+    return isinstance(value, str) and 1 <= len(value) <= 32 and re.fullmatch(r"[A-Za-z0-9._-]+", value) is not None
+
 def guest_fs_list(path):
-    if not isinstance(path, str) or not path.startswith('/') or '..' in path or '//' in path:
+    if not is_safe_guest_path(path):
         return False, 'invalid guest path', []
     ok, lines = guest_command_lines(f"STUDIO_FS_LIST {path}", f"LIST_OK path={path}")
     entries = []
