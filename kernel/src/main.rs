@@ -436,7 +436,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     SCHEDULER.lock().init(main_caps);
     serial_println!("[OK] Primordial Kernel Thread registered as Task 0.");
 
-    // Phase B: kernel registers service definitions only. Ring-3 PID 1
+    // Kernel registers service definitions only. Ring-3 PID 1
     // owns service startup, recovery and lifecycle policy.
     services::init();
     settings::init();
