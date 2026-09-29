@@ -157,6 +157,7 @@ pub fn wake_package(package_id: &str, user_id: u32) -> usize {
             if name == package_id {
                 r.state = ProcessState::Background;
                 r.background_started_ticks = crate::interrupts::get_system_ticks();
+                crate::task::SCHEDULER.lock().unblock_task(task.task);
                 count += 1;
             }
         }
