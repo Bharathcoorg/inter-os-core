@@ -715,7 +715,7 @@ fn get_quick_controls_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
                 if let Some(c) = test_text(x, y, 100, 175, 2, b"Wi-Fi", TEXT_PRIMARY) { return c; }
             }
             if y >= 205 && y < 213 {
-                if let Some(c) = test_text(x, y, 100, 205, 1, b"Connected", SUCCESS_EMERALD) { return c; }
+                if let Some(c) = test_text(x, y, 100, 205, 1, b"Status unavailable", SUCCESS_EMERALD) { return c; }
             }
             let dx = (x as i32) - 72;
             let dy = (y as i32) - 195;
@@ -944,7 +944,7 @@ fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 
     // Date & Tabular Clock Overlay
     if y >= 160 && y < 176 {
-        if let Some(c) = test_text(x, y, 48, 160, 2, b"Wed, 24 Sep", TEXT_MUTED) { return c; }
+        if let Some(c) = test_text(x, y, 48, 160, 2, b"Date unavailable", TEXT_MUTED) { return c; }
     }
     if y >= 210 && y < 250 {
         if let Some(c) = test_text(x, y, 48, 210, 5, b"--:--", TEXT_PRIMARY) { return c; }
@@ -1580,7 +1580,7 @@ fn get_live_widgets_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
             if let Some(c) = test_text(x, y, 155, 380, 2, b"No active media", TEXT_PRIMARY) { return c; }
         }
         if y >= 406 && y < 414 {
-            if let Some(c) = test_text(x, y, 155, 406, 1, b"Media data unavailable - Soundtrack", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 155, 406, 1, b"Media data unavailable", TEXT_MUTED) { return c; }
         }
         if y >= 430 && y < 436 && x >= 155 && x < 450 {
             if x <= 265 { return ACCENT_SKY; }
