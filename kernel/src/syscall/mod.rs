@@ -3442,7 +3442,7 @@ pub fn sys_package_registry(out_buf:&mut [u8])->Result<usize,SyscallResult>{
     let mut w=W{b:out_buf,n:0};
     for e in &entries{
         let descriptor=crate::package::first_party_package(&e.package_id);
-        let process=descriptor.map(|p|p.process_name).unwrap_or("rapp_process");
+        let process=descriptor.map(|p|p.process_name).unwrap_or(&e.package_id);
         let path=descriptor.map(|p|p.path).unwrap_or("");
         let state=match e.state{
             crate::package::PackageState::Staged=>"staged",
