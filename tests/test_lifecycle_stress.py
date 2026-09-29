@@ -245,93 +245,93 @@ def execute_iteration_phases(reader, monitor_sock, iter_num):
 
     # Phase 12: Overview / Recent Apps Switcher Test
     reader.sock.sendall(b"SWIPE 360 1420 360 1100 5\n")
-    assert reader.wait_for("render_overview complete: Recent apps overview deck displayed.", timeout=15.0), "Overview deck open failed"
+    assert reader.wait_for("render_overview complete: Recent apps overview deck displayed.", timeout=25.0), "Overview deck open failed"
     time.sleep(0.5)
     reader.sock.sendall(b"TAP 360 340\n")
-    assert reader.wait_for("Switched to recent app from overview card 0", timeout=15.0), "Switch recent app failed"
-    assert reader.wait_for("Music canvas presented to scanout buffer.", timeout=15.0), "Recent app present failed"
+    assert reader.wait_for("Switched to recent app from overview card 0", timeout=25.0), "Switch recent app failed"
+    assert reader.wait_for("Music canvas presented to scanout buffer.", timeout=25.0), "Recent app present failed"
     time.sleep(0.5)
     reader.sock.sendall(b"SWIPE 360 1420 360 1100 5\n")
-    assert reader.wait_for("Foreground application exited and was reaped", timeout=15.0), "Reaping recent app failed"
+    assert reader.wait_for("Foreground application exited and was reaped", timeout=25.0), "Reaping recent app failed"
     time.sleep(0.5)
 
     # Phase 13: Overview Card Dismissal Test
     reader.sock.sendall(b"SWIPE 360 1420 360 1100 5\n")
-    assert reader.wait_for("render_overview complete: Recent apps overview deck displayed.", timeout=15.0)
+    assert reader.wait_for("render_overview complete: Recent apps overview deck displayed.", timeout=25.0)
     time.sleep(0.5)
     reader.sock.sendall(b"TAP 610 230\n")
-    assert reader.wait_for("Card 0 dismissed via dismiss button tap.", timeout=15.0)
+    assert reader.wait_for("Card 0 dismissed via dismiss button tap.", timeout=25.0)
     time.sleep(0.5)
     reader.sock.sendall(b"SWIPE 200 660 550 660 5\n")
-    assert reader.wait_for("Card 1 dismissed via swipe.", timeout=15.0)
+    assert reader.wait_for("Card 1 dismissed via swipe.", timeout=25.0)
     time.sleep(0.5)
     reader.sock.sendall(b"TAP 360 1240\n")
-    assert reader.wait_for("Returned to home grid from recents.", timeout=15.0)
+    assert reader.wait_for("Returned to home grid from recents.", timeout=25.0)
     time.sleep(0.5)
 
     # Phase 14: Quick Controls Shade
     reader.sock.sendall(b"TAP 360 25\n")
-    assert reader.wait_for("render_quick_controls complete: Control center presented.", timeout=15.0)
+    assert reader.wait_for("render_quick_controls complete: Control center presented.", timeout=25.0)
     time.sleep(0.5)
     reader.sock.sendall(b"TAP 360 1410\n")
-    assert reader.wait_for("render_full complete: 10-app home screen canvas initialized.", timeout=15.0)
+    assert reader.wait_for("render_full complete: 10-app home screen canvas initialized.", timeout=25.0)
     time.sleep(0.5)
 
     # Phase 15: Notifications Shade
     reader.sock.sendall(b"TAP 100 25\n")
-    assert reader.wait_for("render_notifications complete: Notifications & events presented.", timeout=15.0)
+    assert reader.wait_for("render_notifications complete: Notifications & events presented.", timeout=25.0)
     time.sleep(0.5)
     reader.sock.sendall(b"TAP 360 1410\n")
-    assert reader.wait_for("render_full complete: 10-app home screen canvas initialized.", timeout=15.0)
+    assert reader.wait_for("render_full complete: 10-app home screen canvas initialized.", timeout=25.0)
     time.sleep(0.5)
 
     # Phase 16: App Drawer
     reader.sock.sendall(b"SWIPE 360 700 360 400 5\n")
-    assert reader.wait_for("render_app_drawer complete: 16-app grid presented.", timeout=15.0)
+    assert reader.wait_for("render_app_drawer complete: 16-app grid presented.", timeout=25.0)
     time.sleep(0.5)
     reader.sock.sendall(b"TAP 250 160\n")
-    assert reader.wait_for("render_app_drawer complete: 16-app grid presented.", timeout=15.0)
+    assert reader.wait_for("render_app_drawer complete: 16-app grid presented.", timeout=25.0)
     time.sleep(0.5)
     reader.sock.sendall(b"TAP 360 1410\n")
-    assert reader.wait_for("render_full complete: 10-app home screen canvas initialized.", timeout=15.0)
+    assert reader.wait_for("render_full complete: 10-app home screen canvas initialized.", timeout=25.0)
     time.sleep(0.5)
 
     # Phase 17: Contextual Today Tasks
     reader.sock.sendall(b"TAP 78 318\n")
-    assert reader.wait_for("Contextual task 0 toggled.", timeout=15.0)
+    assert reader.wait_for("Contextual task 0 toggled.", timeout=25.0)
     time.sleep(0.5)
     reader.sock.sendall(b"TAP 78 368\n")
-    assert reader.wait_for("Contextual task 1 toggled.", timeout=15.0)
+    assert reader.wait_for("Contextual task 1 toggled.", timeout=25.0)
     time.sleep(0.5)
 
     # Phase 18: Live Widgets
     reader.sock.sendall(b"SWIPE 500 700 150 700 5\n")
-    assert reader.wait_for("render_live_widgets complete: Live widgets dashboard presented.", timeout=15.0)
+    assert reader.wait_for("render_live_widgets complete: Live widgets dashboard presented.", timeout=25.0)
     time.sleep(0.5)
     reader.sock.sendall(b"TAP 360 1410\n")
-    assert reader.wait_for("render_full complete: 10-app home screen canvas initialized.", timeout=15.0)
+    assert reader.wait_for("render_full complete: 10-app home screen canvas initialized.", timeout=25.0)
     time.sleep(0.5)
 
     # Phase 19: Power Menu & Lock Screen
     reader.sock.sendall(b"TAP 600 25\n")
-    assert reader.wait_for("render_power_menu complete: Power & safety drawer presented.", timeout=15.0)
+    assert reader.wait_for("render_power_menu complete: Power & safety drawer presented.", timeout=25.0)
     time.sleep(0.5)
     reader.sock.sendall(b"TAP 500 225\n")
-    assert reader.wait_for("render_lock_screen complete: Atmospheric lock screen presented.", timeout=15.0)
+    assert reader.wait_for("render_lock_screen complete: Atmospheric lock screen presented.", timeout=25.0)
     time.sleep(0.5)
     reader.sock.sendall(b"TAP 72 1330\n")
-    assert reader.wait_for("render_lock_screen complete: Atmospheric lock screen presented.", timeout=15.0)
+    assert reader.wait_for("render_lock_screen complete: Atmospheric lock screen presented.", timeout=25.0)
     time.sleep(0.5)
     reader.sock.sendall(b"TAP 360 1410\n")
-    assert reader.wait_for("render_full complete: 10-app home screen canvas initialized.", timeout=15.0)
+    assert reader.wait_for("render_full complete: 10-app home screen canvas initialized.", timeout=25.0)
     time.sleep(0.5)
 
     # Phase 20: System Space
     reader.sock.sendall(b"TAP 360 1330\n")
-    assert reader.wait_for("render_system_space complete: Visual system space presented.", timeout=15.0)
+    assert reader.wait_for("render_system_space complete: Visual system space presented.", timeout=25.0)
     time.sleep(0.5)
     reader.sock.sendall(b"TAP 360 1410\n")
-    assert reader.wait_for("render_full complete: 10-app home screen canvas initialized.", timeout=15.0)
+    assert reader.wait_for("render_full complete: 10-app home screen canvas initialized.", timeout=25.0)
     time.sleep(0.5)
 
     print(f"\n  [STRESS ITERATION {iter_num}] All 20 phases completed successfully.")

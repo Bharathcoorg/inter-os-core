@@ -9,7 +9,7 @@ $kernel = if ((Test-Path $k1) -and (Test-Path $k2)) {
 $rootDir = (Resolve-Path "$PSScriptRoot\..").Path
 . (Join-Path $rootDir "tools\qemu_env.ps1")
 $qemuBin = Resolve-QemuPath "qemu-system-aarch64.exe"
-$p = Start-Process -FilePath $qemuBin -ArgumentList "-M virt -cpu cortex-a53 -m 1024M -kernel `"$kernel`" -serial file:`"$log`" -display none" -PassThru
+$p = Start-Process -FilePath $qemuBin -ArgumentList "-M virt -cpu cortex-a53 -m 512M -kernel `"$kernel`" -serial file:`"$log`" -display none" -PassThru
 Start-Sleep -Seconds 15
 if (-not $p.HasExited) {
     $p.Kill()

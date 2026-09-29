@@ -527,6 +527,30 @@ def cmd_test(args):
             if res.returncode != 0:
                 return res.returncode
 
+    if test_target in ["persistence"]:
+        pers_script = WORKSPACE_ROOT / "tests" / "test_persistence.py"
+        if pers_script.exists():
+            log("Executing QEMU cross-process persistent storage verification...")
+            res = subprocess.run([sys.executable, "-u", str(pers_script)], cwd=str(WORKSPACE_ROOT))
+            if res.returncode != 0:
+                return res.returncode
+
+    if test_target in ["storage_recovery", "crash"]:
+        sr_script = WORKSPACE_ROOT / "tests" / "test_storage_recovery.py"
+        if sr_script.exists():
+            log("Executing QEMU power-loss crash recovery & transactional rollback verification...")
+            res = subprocess.run([sys.executable, "-u", str(sr_script)], cwd=str(WORKSPACE_ROOT))
+            if res.returncode != 0:
+                return res.returncode
+
+    if test_target in ["watchdog", "panic"]:
+        wd_script = WORKSPACE_ROOT / "tests" / "test_crash_watchdog.py"
+        if wd_script.exists():
+            log("Executing QEMU controlled panic & watchdog recovery verification...")
+            res = subprocess.run([sys.executable, "-u", str(wd_script)], cwd=str(WORKSPACE_ROOT))
+            if res.returncode != 0:
+                return res.returncode
+
     if test_target in ["aarch64", "all"]:
         arm_script = WORKSPACE_ROOT / "tests" / "test_aarch64.ps1"
         if arm_script.exists() and sys.platform == "win32":

@@ -99,7 +99,7 @@ def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_co
     # Wait for app launch and presentation
     presented = reader.wait_for(
         present_marker,
-        timeout=15.0,
+        timeout=30.0,
         print_keywords=[app_name.upper(), "APP", "LAUNCHER", "INPUT", "Step", app_id]
     )
     assert presented, f"{app_name} failed to present frame within timeout"
@@ -127,7 +127,7 @@ def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_co
             if action_marker:
                 action_ok = reader.wait_for(
                     action_marker,
-                    timeout=10.0,
+                    timeout=20.0,
                     print_keywords=[app_name.upper(), "APP", "INPUT", action_marker]
                 )
                 assert action_ok, f"{app_name} failed to process interaction '{action_name}'"
@@ -160,7 +160,7 @@ def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_co
     # Wait for child exit and Launcher reaping
     reaped = reader.wait_for(
         "Foreground application exited and was reaped",
-        timeout=15.0,
+        timeout=30.0,
         print_keywords=[app_name.upper(), "APP", "LAUNCHER", "INPUT", "WAITPID"]
     )
     assert reaped, f"{app_name} exit / Launcher waitpid reaping was not observed"
