@@ -154,6 +154,8 @@ pub enum SyscallNumber {
     AppSuspend = 118,
     AppWake = 119,
     PackageUninstall = 120,
+    AppStop = 121,
+    AppRestart = 122,
 }
 
 // -----------------------------------------------------------------------------
@@ -1244,6 +1246,24 @@ pub fn fs_open(cap_slot: usize, path: &str, rights: u32) -> Result<u32, i64> {
 }
 
 /// Moves the calling application to background execution.
+pub fn app_stop(task_id: u64) -> Result<(), i64> {
+    let ret = unsafe { syscall4(SyscallNumber::AppStop, task_id, 0, 0, 0) };
+    if ret == 0 { Ok(()) } else { Err(ret) }
+}
+
+pub fn app_restart(package_id: &str) -> Result<u64, i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::AppRestart,
+            package_id.as_ptr() as u64,
+            package_id.len() as u64,
+            0,
+            0,
+        )
+    };
+    if ret >= 0 { Ok(ret as u64) } else { Err(ret) }
+}
+
 pub fn package_uninstall(cap_slot: usize, package_id: &str, user_consent: bool) -> Result<(), i64> {
     let ret = unsafe {
         syscall4(
