@@ -147,6 +147,7 @@ pub enum SyscallNumber {
     NotificationQuery = 112,
     PermissionRevoke = 113,
     SettingsHardwareStatus = 114,
+    AppStorageOpen = 115,
 }
 
 // -----------------------------------------------------------------------------
@@ -1234,6 +1235,20 @@ pub fn fs_open(cap_slot: usize, path: &str, rights: u32) -> Result<u32, i64> {
     } else {
         Err(ret)
     }
+}
+
+/// Opens a file inside the calling application's private storage namespace.
+pub fn app_storage_open(cap_slot: usize, relative_path: &str, rights: u32) -> Result<u32, i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::AppStorageOpen,
+            cap_slot as u64,
+            relative_path.as_ptr() as u64,
+            relative_path.len() as u64,
+            rights as u64,
+        )
+    };
+    if ret >= 0 { Ok(ret as u32) } else { Err(ret) }
 }
 
 /// Reads data from an open file descriptor.
