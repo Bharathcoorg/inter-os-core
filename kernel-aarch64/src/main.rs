@@ -345,24 +345,32 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     kprintln!("[OK] AArch64 Per-Task MMU: Dedicated TTBR0_EL1 tree allocated at 0x{:08X} (AP_RW_EL0 user isolation active).", user_ttbr0);
 
     let user_proc = user::UserProcess::new(user::USER_CODE_VADDR, user::USER_STACK_VADDR + user::USER_STACK_SIZE);
-    let payload = user::generate_el0_test_payload();
-    let payload_bytes = unsafe {
-        core::slice::from_raw_parts(payload.as_ptr() as *const u8, payload.len() * 4)
-    };
+    let payload_bytes = user::get_el0_payload();
     unsafe {
         user_proc.load_code(payload_bytes);
     }
-    kprintln!("[OK] AArch64 EL0 Userspace: Loaded 40-byte native binary at VA 0x{:08X} (PA 0x{:08X}).", user::USER_CODE_VADDR, user::USER_CODE_PADDR);
+    kprintln!("[OK] AArch64 EL0 Userspace: Loaded {}-byte native binary at VA 0x{:08X} (PA 0x{:08X}).", payload_bytes.len(), user::USER_CODE_VADDR, user::USER_CODE_PADDR);
 
-    // Verify EL0 execution: dispatch test payload through user syscall dispatcher
-    let user_sim_ticks = syscall::sys_dispatch(syscall::SYS_GET_TICKS, 0, 0, 0, 0, 0);
-    assert!(user_sim_ticks >= 0);
-    let user_sim_task = syscall::sys_dispatch(syscall::SYS_GET_TASK_ID, 0, 0, 0, 0, 0);
-    assert_eq!(user_sim_task, 0);
-    let user_exit = syscall::sys_dispatch(syscall::SYS_EXIT, 42, 0, 0, 0, 0);
-    assert_eq!(user_exit, 0);
-    assert_eq!(unsafe { user::EL0_EXIT_CODE }, 42);
-    kprintln!("[TEST] AArch64 EL0 Userspace Syscall Loop: sys_get_ticks (x0={}), sys_get_task_id (x0={}), sys_exit (code=42) VERIFIED.", user_sim_ticks, user_sim_task);
+    kprintln!("[INIT] Dropping CPU execution privilege from EL1 to EL0 via hardware eret...");
+
+    // Execute real hardware privilege transition to EL0
+    unsafe {
+        user::enter_user_mode(user::USER_CODE_VADDR, user::USER_STACK_VADDR + user::USER_STACK_SIZE);
+    }
+
+    // After return_to_kernel_mode(), verify all hardware EL0 invariants
+    assert!(unsafe { user::EL0_HARDWARE_ENTERED }, "EL0 hardware entry not observed");
+    assert!(unsafe { user::EL0_PRIVILEGE_TRAP_VERIFIED }, "EL0 CurrentEL privilege trap not observed");
+    assert!(unsafe { user::EL0_MMU_TRAP_VERIFIED }, "EL0 MMU kernel memory trap not observed");
+    assert_eq!(unsafe { user::EL0_EXIT_CODE }, 42, "EL0 exit code mismatch");
+    assert!(unsafe { user::EL0_TEST_COMPLETED }, "EL0 test loop incomplete");
+
+    kprintln!(
+        "[TEST] AArch64 EL0 Userspace Syscall Loop: sys_get_ticks (x0={}), sys_get_task_id (x0={}), sys_exit (code=42) VERIFIED.",
+        unsafe { user::EL0_TICKS_CAPTURED },
+        unsafe { user::EL0_TASK_ID_CAPTURED }
+    );
+    kprintln!("[OK] AArch64 Hardware EL0 Privilege Drop: Real eret transition, native SVC syscall loop, privilege trap, and MMU isolation VERIFIED.");
 
     // 18. Physical Smartphone Battery, Thermal & DVFS Power Governor Driver
     kprintln!("--- [Initializing Mobile Battery Fuel Gauge & DVFS Thermal Governor] ---");

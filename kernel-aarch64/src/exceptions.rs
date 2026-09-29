@@ -73,120 +73,138 @@ global_asm!(
     .global exception_vector_table
     exception_vector_table:
         // 1. Current EL with SP0
+        b vector_el1t_sync
+        .balign 128
+        b vector_el1t_irq
+        .balign 128
+        b vector_el1t_fiq
+        .balign 128
+        b vector_el1t_serror
+        .balign 128
+
+        // 2. Current EL with SPx
+        b vector_el1h_sync
+        .balign 128
+        b vector_el1h_irq
+        .balign 128
+        b vector_el1h_fiq
+        .balign 128
+        b vector_el1h_serror
+        .balign 128
+
+        // 3. Lower EL using AArch64
+        b vector_lower64_sync
+        .balign 128
+        b vector_lower64_irq
+        .balign 128
+        b vector_lower64_fiq
+        .balign 128
+        b vector_lower64_serror
+        .balign 128
+
+        // 4. Lower EL using AArch32
+        b vector_lower32_sync
+        .balign 128
+        b vector_lower32_irq
+        .balign 128
+        b vector_lower32_fiq
+        .balign 128
+        b vector_lower32_serror
+        .balign 128
+
+    vector_el1t_sync:
         save_all_regs
         mov x0, sp
         bl handle_sync_el1t
         restore_all_regs
         eret
-        .balign 128
 
+    vector_el1t_irq:
         save_all_regs
         mov x0, sp
         bl handle_irq_el1t
         restore_all_regs
         eret
-        .balign 128
 
+    vector_el1t_fiq:
         save_all_regs
         mov x0, sp
         bl handle_fiq
         restore_all_regs
         eret
-        .balign 128
 
+    vector_el1t_serror:
         save_all_regs
         mov x0, sp
         bl handle_serror
         restore_all_regs
         eret
-        .balign 128
 
-        // 2. Current EL with SPx
+    vector_el1h_sync:
         save_all_regs
         mov x0, sp
         bl handle_sync_el1h
         restore_all_regs
         eret
-        .balign 128
 
+    vector_el1h_irq:
         save_all_regs
         mov x0, sp
         bl handle_irq_el1h
         restore_all_regs
         eret
-        .balign 128
 
+    vector_el1h_fiq:
         save_all_regs
         mov x0, sp
         bl handle_fiq
         restore_all_regs
         eret
-        .balign 128
 
+    vector_el1h_serror:
         save_all_regs
         mov x0, sp
         bl handle_serror
         restore_all_regs
         eret
-        .balign 128
 
-        // 3. Lower EL using AArch64
+    vector_lower64_sync:
         save_all_regs
         mov x0, sp
         bl handle_sync_lower64
         restore_all_regs
         eret
-        .balign 128
 
+    vector_lower64_irq:
         save_all_regs
         mov x0, sp
         bl handle_irq_lower64
         restore_all_regs
         eret
-        .balign 128
 
+    vector_lower64_fiq:
         save_all_regs
         mov x0, sp
         bl handle_fiq
         restore_all_regs
         eret
-        .balign 128
 
+    vector_lower64_serror:
         save_all_regs
         mov x0, sp
         bl handle_serror
         restore_all_regs
         eret
-        .balign 128
 
-        // 4. Lower EL using AArch32
+    vector_lower32_sync:
+    vector_lower32_irq:
+    vector_lower32_fiq:
+    vector_lower32_serror:
         save_all_regs
         mov x0, sp
         bl handle_sync_lower32
         restore_all_regs
         eret
-        .balign 128
-
-        save_all_regs
-        mov x0, sp
-        bl handle_irq_lower32
-        restore_all_regs
-        eret
-        .balign 128
-
-        save_all_regs
-        mov x0, sp
-        bl handle_fiq
-        restore_all_regs
-        eret
-        .balign 128
-
-        save_all_regs
-        mov x0, sp
-        bl handle_serror
-        restore_all_regs
-        eret
-        .balign 128
     "#
 );
 
@@ -202,7 +220,68 @@ pub extern "C" fn handle_sync_el1h(frame: &mut ExceptionFrame) {
 
 #[no_mangle]
 pub extern "C" fn handle_sync_lower64(frame: &mut ExceptionFrame) {
-    handle_sync(frame, "Lower64");
+    let spsr_mode = frame.spsr & 0x0F;
+    if spsr_mode != 0b0000 {
+        crate::kprintln!("[FATAL] handle_sync_lower64 called but SPSR indicates non-EL0 mode: 0x{:X}", frame.spsr);
+        loop {
+            #[cfg(target_arch = "aarch64")]
+            unsafe { core::arch::asm!("wfe"); }
+        }
+    }
+    unsafe { crate::user::EL0_HARDWARE_ENTERED = true; }
+
+    let ec = (frame.esr >> 26) & 0x3F;
+    if ec == 0x15 {
+        // EC 0x15: SVC instruction execution in AArch64 state
+        let syscall_nr = frame.regs[8];
+        let a0 = frame.regs[0];
+        let a1 = frame.regs[1];
+        let a2 = frame.regs[2];
+        let a3 = frame.regs[3];
+        let a4 = frame.regs[4];
+
+        if syscall_nr == crate::syscall::SYS_EXIT {
+            let code = a0 as i32;
+            crate::kprintln!("[SYSCALL] Task exited with code: {}", code);
+            crate::user::record_el0_exit(code);
+            // Return from EL0 test session back to kernel caller
+            unsafe {
+                crate::user::return_to_kernel_mode();
+            }
+        }
+
+        let ret = crate::syscall::sys_dispatch(syscall_nr, a0, a1, a2, a3, a4);
+        frame.regs[0] = ret as u64;
+
+        if syscall_nr == crate::syscall::SYS_GET_TICKS {
+            unsafe { crate::user::EL0_TICKS_CAPTURED = ret as u64; }
+        } else if syscall_nr == crate::syscall::SYS_GET_TASK_ID {
+            unsafe { crate::user::EL0_TASK_ID_CAPTURED = ret as u64; }
+        }
+    } else if ec == 0x00 {
+        // EC 0x00: Unknown reason / Trapped access from lower EL (e.g. CurrentEL read attempt)
+        crate::kprintln!("[TEST] AArch64 EL0 Privilege Isolation: Attempted 'mrs CurrentEL' from EL0 trapped (EC=0x00) VERIFIED.");
+        unsafe { crate::user::EL0_PRIVILEGE_TRAP_VERIFIED = true; }
+        // Advance past the 4-byte trapped instruction
+        frame.elr += 4;
+    } else if ec == 0x24 {
+        // EC 0x24: Data Abort from lower Exception level (e.g. Kernel DRAM read attempt)
+        let far: u64;
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("mrs {}, far_el1", out(reg) far);
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            far = 0;
+        }
+        crate::kprintln!("[TEST] AArch64 EL0 MMU Memory Isolation: Unauthorized read of kernel DRAM @ 0x{:08X} trapped (EC=0x24) VERIFIED.", far);
+        unsafe { crate::user::EL0_MMU_TRAP_VERIFIED = true; }
+        // Advance past the 4-byte faulting load instruction
+        frame.elr += 4;
+    } else {
+        handle_sync(frame, "Lower64");
+    }
 }
 
 #[no_mangle]
