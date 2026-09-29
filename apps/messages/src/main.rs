@@ -38,29 +38,7 @@ pub struct ConversationThread {
 }
 
 /// Static Conversation Directory.
-pub static THREADS: [ConversationThread; 3] = [
-    ConversationThread {
-        peer_name: "Alice",
-        peer_did: "did:inter:user:alice001",
-        last_snippet: "Zero-trust microkernel build passed all tests!",
-        status: ThreadStatus::EncryptedP2P,
-        unread_count: 0,
-    },
-    ConversationThread {
-        peer_name: "Bob",
-        peer_did: "did:inter:user:bob002",
-        last_snippet: "P2P mesh relay latency is under 12ms.",
-        status: ThreadStatus::EncryptedP2P,
-        unread_count: 1,
-    },
-    ConversationThread {
-        peer_name: "Blinkit Concierge",
-        peer_did: "did:inter:service:blinkit",
-        last_snippet: "Your organic groceries order was authorized.",
-        status: ThreadStatus::EncryptedP2P,
-        unread_count: 0,
-    },
-];
+pub static THREADS: [ConversationThread; 0] = [];
 
 /// Production Sovereign Messages state manager.
 pub struct MessagesApp {
