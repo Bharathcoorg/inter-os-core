@@ -3474,6 +3474,24 @@ pub fn sys_event_poll(interest_mask: u32, timeout_ticks: u32) -> Result<u32, Sys
 
 
 
+fn native_first_party_app_available(package_id: &str) -> bool {
+    matches!(
+        package_id,
+        "org.interos.settings"
+            | "org.interos.terminal"
+            | "org.interos.calculator"
+            | "org.interos.dialer"
+            | "org.interos.vault"
+            | "org.interos.camera"
+            | "org.interos.browser"
+            | "org.interos.messages"
+            | "org.interos.calendar"
+            | "org.interos.music"
+            | "org.interos.file_manager"
+            | "org.interos.gallery"
+    )
+}
+
 pub fn sys_package_registry(out_buf:&mut [u8])->Result<usize,SyscallResult>{
     use core::fmt::Write;
     crate::package::PACKAGE_REGISTRY.lock().seed();
@@ -3489,6 +3507,9 @@ pub fn sys_package_registry(out_buf:&mut [u8])->Result<usize,SyscallResult>{
     }
     let mut w=W{b:out_buf,n:0};
     for e in &entries{
+        let launchable = native_first_party_app_available(&e.package_id)
+            || crate::package::PACKAGE_BLOB_STORE.lock().get(&e.package_id).is_some();
+        if !launchable { continue; }
         let descriptor=crate::package::first_party_package(&e.package_id);
         let process=descriptor.map(|p|p.process_name).unwrap_or(&e.package_id);
         let path=descriptor.map(|p|p.path).unwrap_or("");
