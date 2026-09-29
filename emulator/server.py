@@ -2421,30 +2421,22 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             try:
                 data = json.loads(body.decode('utf-8'))
                 rel_path = data.get('path', '')
-                real_path = resolve_vfs_path(rel_path)
-                if not os.path.exists(real_path) or os.path.isdir(real_path):
-                    self.send_response(404)
-                    self.send_header('Content-Type', 'application/json')
-                    self.send_header('Access-Control-Allow-Origin', '*')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({'success': False, 'error': 'File not found'}).encode())
-                    return
-                with open(real_path, 'r', encoding='utf-8', errors='replace') as f:
-                    content = f.read()
-                self.send_response(200)
+                ok, error, content = guest_fs_read(rel_path)
+                self.send_response(200 if ok else 503)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({
-                    'success': True,
+                    'success': ok,
+                    'source': 'GUEST_VFS',
                     'path': rel_path,
                     'content': content,
-                    'size': len(content)
+                    'size': len(content.encode('utf-8')),
+                    **({'error': error} if error else {})
                 }).encode())
             except Exception as e:
-                self.send_response(500)
+                self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
             return
@@ -2456,23 +2448,23 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 data = json.loads(body.decode('utf-8'))
                 rel_path = data.get('path', '')
                 content = data.get('content', '')
-                real_path = resolve_vfs_path(rel_path)
-                os.makedirs(os.path.dirname(real_path), exist_ok=True)
-                with open(real_path, 'w', encoding='utf-8') as f:
-                    f.write(content)
-                self.send_response(200)
+                if not isinstance(content, str):
+                    raise ValueError('content must be a string')
+                ok, error = guest_fs_write(rel_path, content)
+                self.send_response(200 if ok else 503)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({
-                    'success': True,
+                    'success': ok,
+                    'source': 'GUEST_VFS',
                     'path': rel_path,
-                    'bytes_written': len(content)
+                    'bytes_written': len(content.encode('utf-8')),
+                    **({'error': error} if error else {})
                 }).encode())
             except Exception as e:
-                self.send_response(500)
+                self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
             return
@@ -2482,22 +2474,18 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             body = self.rfile.read(content_length)
             try:
                 data = json.loads(body.decode('utf-8'))
-                rel_path = data.get('path', '')
-                real_path = resolve_vfs_path(rel_path)
-                if os.path.exists(real_path):
-                    if os.path.isdir(real_path):
-                        shutil.rmtree(real_path)
-                    else:
-                        os.remove(real_path)
-                self.send_response(200)
+                rel_path = str(data.get('path', ''))
+                if not rel_path.startswith('/data/') or '..' in rel_path or '//' in rel_path:
+                    raise ValueError('guest deletes are restricted to /data')
+                ok, msg = send_guest_serial_command(f"DELETE_FILE {rel_path}", f"[FILE_DELETE] path={rel_path} status=OK", timeout=8)
+                self.send_response(200 if ok else 503)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
-                self.wfile.write(json.dumps({'success': True, 'path': rel_path}).encode())
+                self.wfile.write(json.dumps({'success': ok, 'source': 'GUEST_VFS', 'path': rel_path, **({} if ok else {'error': msg})}).encode())
             except Exception as e:
-                self.send_response(500)
+                self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
             return
@@ -2507,18 +2495,18 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             body = self.rfile.read(content_length)
             try:
                 data = json.loads(body.decode('utf-8'))
-                rel_path = data.get('path', '')
-                real_path = resolve_vfs_path(rel_path)
-                os.makedirs(real_path, exist_ok=True)
-                self.send_response(200)
+                rel_path = str(data.get('path', ''))
+                if not rel_path.startswith('/data/') or '..' in rel_path or '//' in rel_path:
+                    raise ValueError('guest directories are restricted to /data')
+                ok, msg = send_guest_serial_command(f"MKDIR {rel_path}", f"[DIR_MKDIR] path={rel_path} status=OK", timeout=8)
+                self.send_response(200 if ok else 503)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
-                self.wfile.write(json.dumps({'success': True, 'path': rel_path}).encode())
+                self.wfile.write(json.dumps({'success': ok, 'source': 'GUEST_VFS', 'path': rel_path, **({} if ok else {'error': msg})}).encode())
             except Exception as e:
-                self.send_response(500)
+                self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
             return
