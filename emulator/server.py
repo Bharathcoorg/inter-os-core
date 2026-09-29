@@ -1089,6 +1089,93 @@ def verify_and_install_rapp(body, pkg_name):
     return True, "RAPP v2 signature and integrity verified; guest trust remains authoritative", app_entry
 
 
+def guest_command_lines(command, end_marker, timeout=8):
+    """Run a development command in the guest and return only its response lines."""
+    with telemetry_lock:
+        start = len(serial_lines)
+    ok, msg = send_guest_serial_command(command, None, timeout=timeout)
+    if not ok:
+        return False, [msg]
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with telemetry_lock:
+            lines = list(serial_lines[start:])
+        if any(end_marker in line for line in lines):
+            return True, lines
+        time.sleep(0.05)
+    return False, lines
+
+def guest_fs_list(path):
+    if not isinstance(path, str) or not path.startswith('/') or '..' in path or '//' in path:
+        return False, 'invalid guest path', []
+    ok, lines = guest_command_lines(f"STUDIO_FS_LIST {path}", f"LIST_OK path={path}")
+    entries = []
+    for line in lines:
+        if line.startswith("[STUDIO_FS_ENTRY] path="):
+            payload = line.split(" ", 2)[-1]
+            parts = payload.split("|")
+            if len(parts) == 3:
+                entries.append({"name": parts[0], "isDir": parts[1] == "dir", "size": int(parts[2]) if parts[2].isdigit() else 0})
+    return ok, None if ok else (lines[-1] if lines else "guest filesystem unavailable"), entries
+
+def guest_fs_read(path):
+    if not isinstance(path, str) or not path.startswith('/') or '..' in path or '//' in path:
+        return False, 'invalid guest path', ''
+    chunks = []
+    offset = 0
+    while offset < 8192:
+        ok, lines = guest_command_lines(f"STUDIO_FS_READ {path} {offset} 192", "[STUDIO_FS_READ]", timeout=5)
+        if not ok:
+            return False, lines[-1] if lines else "guest filesystem unavailable", ''
+        match = next((line for line in lines if line.startswith("[STUDIO_FS_READ]")), None)
+        if not match:
+            return False, "guest read returned no data", ''
+        fields = dict(part.split("=", 1) for part in match.split() if "=" in part)
+        raw = bytes.fromhex(fields.get("hex", ""))
+        chunks.append(raw)
+        if len(raw) < 192:
+            break
+        offset += len(raw)
+    data = b"".join(chunks)
+    return True, None, data.decode("utf-8", errors="replace")
+
+def guest_fs_write(path, content):
+    if not isinstance(path, str) or not path.startswith('/data/') or '..' in path or '//' in path:
+        return False, 'guest writes are restricted to /data'
+    raw = content.encode("utf-8")
+    if len(raw) > 8192:
+        return False, 'guest file exceeds 8192-byte limit'
+    ok, lines = guest_command_lines(f"STUDIO_FS_BEGIN {path} {len(raw)}", f"WRITE_READY path={path}", timeout=5)
+    if not ok:
+        return False, lines[-1] if lines else "guest filesystem unavailable"
+    for offset in range(0, len(raw), 192):
+        chunk = raw[offset:offset + 192].hex()
+        ok, lines = guest_command_lines(f"STUDIO_FS_CHUNK {offset} {chunk}", f"CHUNK_OK offset={offset}", timeout=5)
+        if not ok:
+            return False, lines[-1] if lines else "guest filesystem chunk failed"
+    ok, lines = guest_command_lines("STUDIO_FS_COMMIT", "WRITE_OK", timeout=8)
+    return ok, None if ok else (lines[-1] if lines else "guest filesystem commit failed")
+
+def guest_package_catalog():
+    ok, lines = guest_command_lines("STUDIO_PKG_LIST", "[STUDIO_PKG] END", timeout=8)
+    if not ok:
+        return False, lines[-1] if lines else "guest package registry unavailable", []
+    packages = []
+    for line in lines:
+        if not line.startswith("[STUDIO_PKG] id="):
+            continue
+        fields = dict(part.split("=", 1) for part in line[len("[STUDIO_PKG] "):].split() if "=" in part)
+        packages.append({
+            "id": fields.get("id", ""),
+            "version": fields.get("version", ""),
+            "status": fields.get("state", "unknown"),
+            "process": fields.get("process", ""),
+            "name": fields.get("name", fields.get("id", "")),
+            "icon": fields.get("icon", "APP"),
+            "source": "GUEST_REGISTRY",
+        })
+    return True, None, packages
+
 class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
     """Extended handler with API endpoints for QEMU control, serial logs, and live telemetry."""
 
