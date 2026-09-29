@@ -1589,18 +1589,10 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 return
 
             # Guest registry is the sole installed-package authority.
-            serial_lines.append(f"[RAPP_INSTALL] Installed sovereign package '{app_name}' ({app_id} v{version}).")
-            serial_lines.append(f"[RAPP_SECURITY] Bound capability tokens: {', '.join(perms)}.")
-            if app_entry.get("signature_verified"):
-                serial_lines.append(f"[RAPP_CRYPTO] Ed25519 signature cryptographically verified (Publisher: {app_entry.get('public_key')}).")
-            serial_lines.append(f"[OK] Application successfully mounted in /data/apps/{app_id}.")
+            serial_lines.append(f"[RAPP_INSTALL] Guest accepted package '{app_name}' ({app_id} v{version}).")
+            serial_lines.append(f"[RAPP_SECURITY] Guest registry remains authoritative; publisher trust is enforced by the kernel.")
 
             self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps({'success': True, 'package': app_entry}).encode())
-            return
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
