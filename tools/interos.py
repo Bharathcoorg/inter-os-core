@@ -1424,7 +1424,7 @@ def main():
 
     # test
     p_tst = subparsers.add_parser("test", help="Execute automated test suite across targets")
-    p_tst.add_argument("--target", default="all", help="Target: x86_64, aarch64, riscv64, unit, all")
+    p_tst.add_argument("--target", choices=["unit", "x86_64", "x86", "aarch64", "riscv64", "security", "adversarial", "qemu", "lifecycle", "contracts", "stress", "recovery", "persistence", "storage_recovery", "crash", "watchdog", "panic", "all"], default="all", help="Select a specific local test suite")
     p_tst.set_defaults(func=cmd_test)
 
     # new
