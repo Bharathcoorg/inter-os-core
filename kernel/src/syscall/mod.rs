@@ -137,6 +137,7 @@ pub enum SyscallNumber {
     PackageUninstall = 120,
     AppStop = 121,
     AppRestart = 122,
+    AppRuntimeList = 123,
 }
 
 /// System call result status codes.
@@ -1644,6 +1645,17 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             SyscallResult::Success => 0,
             e => e as i64,
         },
+        123 => {
+            let out_len = a2 as usize;
+            if out_len == 0 || out_len > 4096 { return SyscallResult::InvalidArguments as i64; }
+            let mut out = [0u8; 4096];
+            match sys_app_runtime_list(&mut out[..out_len]) {
+                Ok(n) => {
+                    if copy_to_user(a1, &out[..n]).is_err() { SyscallResult::InvalidArguments as i64 } else { n as i64 }
+                }
+                Err(e) => e as i64,
+            }
+        },
         122 => {
             let len = a2 as usize;
             if len == 0 || len > 128 { return SyscallResult::InvalidArguments as i64; }
@@ -2483,6 +2495,48 @@ pub fn sys_package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) ->
 }
 
 /// Queries the active mobile hardware platform description.
+pub fn sys_app_runtime_list(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    use core::fmt::Write;
+    let current = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?;
+    let user_id = crate::task::process::user_for_task(current).ok_or(SyscallResult::PermissionDenied)?;
+
+    let mut task_snapshot = [(TaskId(0), "", 0u8); crate::task::process::MAX_PROCESSES];
+    let mut count = 0usize;
+    {
+        let sched = SCHEDULER.lock();
+        for task in sched.tasks_iter() {
+            if count >= task_snapshot.len() || task.id == current { continue; }
+            if task.name == "compositor" || task.name == "launcher" { continue; }
+            task_snapshot[count] = (task.id, task.name, task.state as u8);
+            count += 1;
+        }
+    }
+
+    struct W<'a> { b: &'a mut [u8], n: usize }
+    impl<'a> Write for W<'a> {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            let k = s.len().min(self.b.len().saturating_sub(self.n));
+            self.b[self.n..self.n + k].copy_from_slice(&s.as_bytes()[..k]);
+            self.n += k;
+            Ok(())
+        }
+    }
+
+    let mut w = W { b: out_buf, n: 0 };
+    for (task_id, name, task_state) in task_snapshot[..count].iter().copied() {
+        let Some(process_id) = crate::task::process::process_for_task(task_id) else { continue; };
+        let Some(record) = crate::task::process::record_for_process(process_id) else { continue; };
+        if record.user_id != user_id { continue; }
+        let package_id = crate::package::first_party_package_by_process_name(name)
+            .map(|p| p.package_id)
+            .unwrap_or(name);
+        let process_state = record.state as u8;
+        let _ = writeln!(w, "{}|{}|{}|{}|{}\n", task_id.0, package_id, process_state, task_state, record.parent_task.0);
+        if w.n >= out_buf.len() { break; }
+    }
+    Ok(w.n)
+}
+
 pub fn sys_app_stop(child_id: TaskId) -> SyscallResult {
     if require_app_launcher_or_service_manager().is_err() {
         return SyscallResult::PermissionDenied;
