@@ -177,6 +177,13 @@ impl Scheduler {
         self.tasks.get(self.current_idx).map(|t| t.id)
     }
 
+    pub fn find_child_by_name(&self, parent_id: TaskId, name: &str) -> Option<TaskId> {
+        self.tasks.iter()
+            .find(|task| task.parent_id == parent_id && task.name == name
+                && !matches!(task.state, TaskState::Zombie | TaskState::Terminated))
+            .map(|task| task.id)
+    }
+
     pub fn has_live_task_named(&self, name: &str) -> bool {
         self.tasks.iter().any(|task| task.name == name
             && !matches!(task.state, TaskState::Zombie | TaskState::Terminated))
