@@ -1409,21 +1409,35 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if self.path == '/api/apps/list':
-            self.send_response(200)
+            ok, error, catalog = guest_package_catalog()
+            self.send_response(200 if ok else 503)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            catalog = [a for a in DEFAULT_APPS if a.get('id') not in uninstalled_app_ids and a.get('filename') not in uninstalled_app_ids] + [a for a in sideloaded_apps if a.get('id') not in uninstalled_app_ids and a.get('filename') not in uninstalled_app_ids]
-            self.wfile.write(json.dumps({'apps': catalog, 'total': len(catalog)}).encode())
+            self.wfile.write(json.dumps({
+                'success': ok,
+                'source': 'GUEST_REGISTRY',
+                'apps': catalog,
+                'total': len(catalog),
+                **({'error': error} if error else {})
+            }).encode())
             return
 
         if self.path == '/api/rapp/list':
-            self.send_response(200)
+            ok, error, catalog = guest_package_catalog()
+            rapp_apps = [a for a in catalog if a.get('id')]
+            self.send_response(200 if ok else 503)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            rapp_apps = [a for a in (DEFAULT_APPS + sideloaded_apps) if a.get('filename', '').endswith('.rapp')]
-            self.wfile.write(json.dumps({'apps': rapp_apps, 'total': len(rapp_apps)}).encode())
+            self.wfile.write(json.dumps({
+                'success': ok,
+                'source': 'GUEST_REGISTRY',
+                'apps': rapp_apps,
+                'total': len(rapp_apps),
+                **({'error': error} if error else {})
+            }).encode())
+
             return
 
         if self.path == '/api/telephony/status':
@@ -1600,10 +1614,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 }).encode())
                 return
 
-            # Replace existing or append
-            sideloaded_apps[:] = [a for a in sideloaded_apps if a.get("id") != app_id]
-            sideloaded_apps.append(app_entry)
-
+            # Guest registry is the sole installed-package authority.
             serial_lines.append(f"[RAPP_INSTALL] Installed sovereign package '{app_name}' ({app_id} v{version}).")
             serial_lines.append(f"[RAPP_SECURITY] Bound capability tokens: {', '.join(perms)}.")
             if app_entry.get("signature_verified"):
