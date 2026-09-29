@@ -52,29 +52,7 @@ pub struct AudioTrack {
 }
 
 /// Sovereign Music Playlist.
-pub static PLAYLIST: [AudioTrack; 3] = [
-    AudioTrack {
-        id: 42,
-        title: "Sovereign Symphony in C",
-        artist: "InterLayer Ensemble",
-        bpm: 120,
-        codec: "FLAC 24-bit",
-    },
-    AudioTrack {
-        id: 43,
-        title: "Cybernetic Sunrise",
-        artist: "Astro Sentinel",
-        bpm: 95,
-        codec: "Opus 48kHz",
-    },
-    AudioTrack {
-        id: 44,
-        title: "Mesh Harmony",
-        artist: "Ring 3 Synthesizer",
-        bpm: 130,
-        codec: "FLAC 24-bit",
-    },
-];
+pub static PLAYLIST: [AudioTrack; 0] = [];
 
 /// Production Sovereign Music state manager.
 pub struct MusicApp {
