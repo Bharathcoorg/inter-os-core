@@ -297,6 +297,18 @@ impl PackageRegistry {
 
 
     /// Removes an installed package record transactionally.
+    pub fn restore_entry(&mut self, entry: PackageEntry) -> Result<(), ()> {
+        if let Some(existing) = self.entries.iter_mut().find(|e| e.package_id == entry.package_id) {
+            *existing = entry;
+        } else {
+            if self.entries.len() >= MAX_ENTRIES { return Err(()); }
+            self.entries.push(entry);
+        }
+        if self.persist().is_err() { return Err(()); }
+        self.generation = self.entries.iter().map(|e| e.generation).max().unwrap_or(0);
+        Ok(())
+    }
+
     pub fn uninstall(&mut self, package_id: &str) -> Result<(), ()> {
         let idx = self.entries.iter().position(|entry| entry.package_id == package_id).ok_or(())?;
         if crate::package::first_party_package(package_id).is_some() {
