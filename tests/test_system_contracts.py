@@ -30,6 +30,31 @@ class SystemContractTests(unittest.TestCase):
         ):
             self.assertNotIn(literal, launcher)
 
+    def test_sdk_application_session_exposes_supported_platform_services(self):
+        app = (ROOT / "sdk/rust/interos-std/src/app.rs").read_text(encoding="utf-8")
+        for method in (
+            "send_ipc", "receive_ipc", "post_notification", "cancel_notification",
+            "open_socket", "wait_for_events",
+        ):
+            self.assertIn(f"pub fn {method}", app)
+
+    def test_developer_cli_exposes_reproducible_core_workflow(self):
+        cli = (ROOT / "tools/interos.py").read_text(encoding="utf-8")
+        for command in (
+            'subparsers.add_parser("doctor"',
+            'subparsers.add_parser("build"',
+            'subparsers.add_parser("test"',
+            'subparsers.add_parser("contracts"',
+            'subparsers.add_parser("package"',
+            'subparsers.add_parser("verify"',
+            'subparsers.add_parser("run"',
+            'subparsers.add_parser("inspect"',
+            'subparsers.add_parser("install"',
+            'subparsers.add_parser("uninstall"',
+        ):
+            self.assertIn(command, cli)
+        self.assertIn("target_lower in (\"demo\", \"qemu\", \"phone\")", cli)
+
     def test_sdk_and_kernel_syscall_tables_match(self):
         kernel = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
         sdk = (ROOT / "sdk/rust/interos-std/src/lib.rs").read_text(encoding="utf-8")
