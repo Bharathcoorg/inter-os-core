@@ -589,6 +589,83 @@ impl Vfs {
     }
 
     /// Opens a file, creating a task-specific FileDescriptor guarded by capability tokens.
+    fn app_package_for_task(task_id: TaskId) -> Option<String> {
+        let name = crate::task::SCHEDULER.lock().get_task(task_id).map(|task| task.name)?;
+        if let Some(pkg) = crate::package::first_party_package_by_process_name(name) {
+            return Some(pkg.package_id.to_string());
+        }
+        if name.starts_with("org.interos.") && !name.contains('/') && !name.contains('\\') && !name.contains("..") {
+            return Some(name.to_string());
+        }
+        None
+    }
+
+    fn app_storage_root(task_id: TaskId) -> Option<String> {
+        let package_id = Self::app_package_for_task(task_id)?;
+        let uid = crate::user::USER_MANAGER.lock().active_user().0;
+        if uid == crate::user::UserId::SYSTEM.0 {
+            return None;
+        }
+        Some(alloc::format!("/user/{}/apps/{}", uid, package_id))
+    }
+
+    fn ensure_app_storage(&mut self, task_id: TaskId) -> Result<String, FsError> {
+        let root = Self::app_storage_root(task_id).ok_or(FsError::PermissionDenied)?;
+        let paths = [
+            root.clone(),
+            alloc::format!("{}/data", root),
+            alloc::format!("{}/cache", root),
+            alloc::format!("{}/files", root),
+            alloc::format!("{}/databases", root),
+        ];
+        for path in paths {
+            self.mkdir(&path);
+        }
+        self.persist_metadata_snapshot().map_err(|_| FsError::IntegrityViolation)?;
+        Ok(root)
+    }
+
+    fn enforce_app_path(&self, task_id: TaskId, path: &str, write: bool) -> Result<(), FsError> {
+        let Some(root) = Self::app_storage_root(task_id) else {
+            return Ok(());
+        };
+        let normalized = normalize_path(path);
+        if normalized == root || normalized.starts_with(&(root.clone() + "/")) {
+            return Ok(());
+        }
+        if !write && (normalized == "/system" || normalized.starts_with("/system/") || normalized == "/packages" || normalized.starts_with("/packages/")) {
+            return Ok(());
+        }
+        Err(FsError::PermissionDenied)
+    }
+
+    pub fn app_storage_root_for_task(&mut self, task_id: TaskId) -> Result<String, FsError> {
+        self.ensure_app_storage(task_id)
+    }
+
+    pub fn stat_for_task(
+        &self,
+        task_id: TaskId,
+        task_caps: &CapabilityTable,
+        cap_slot: usize,
+        path: &str,
+    ) -> Result<FileStat, FsError> {
+        self.enforce_app_path(task_id, path, false)?;
+        self.stat(task_caps, cap_slot, path)
+    }
+
+    pub fn list_dir_for_task(
+        &self,
+        task_id: TaskId,
+        task_caps: &CapabilityTable,
+        cap_slot: usize,
+        path: &str,
+        out: &mut [u8],
+    ) -> Result<usize, FsError> {
+        self.enforce_app_path(task_id, path, false)?;
+        self.list_dir(task_caps, cap_slot, path, out)
+    }
+
     pub fn open(
         &mut self,
         task_id: TaskId,
@@ -598,6 +675,25 @@ impl Vfs {
         requested_rights: Rights,
     ) -> Result<FileDescriptor, FsError> {
         if path.len() == 0 || path.len() > MAX_PATH_LEN { return Err(FsError::PathTooLong); }
+        self.enforce_app_path(task_id, path, requested_rights.contains(Rights::WRITE))?;
+
+        if requested_rights.contains(Rights::WRITE) && self.lookup(path).is_none() {
+            let Some(root) = Self::app_storage_root(task_id) else {
+                return Err(FsError::FileNotFound);
+            };
+            let normalized = normalize_path(path);
+            if normalized == root || !normalized.starts_with(&(root.clone() + "/")) {
+                return Err(FsError::PermissionDenied);
+            }
+            let parent = parent_path(&normalized);
+            let parent_inode = self.lookup(parent).ok_or(FsError::FileNotFound)?;
+            if self.inodes.get(&parent_inode).map(|inode| inode.file_type != FileType::Directory).unwrap_or(true) {
+                return Err(FsError::NotADirectory);
+            }
+            self.create_file(&normalized, &[], false);
+            self.persist_metadata_snapshot().map_err(|_| FsError::IntegrityViolation)?;
+            self.persist_data_snapshot().map_err(|_| FsError::IntegrityViolation)?;
+        }
         // Enforce capability validation based on requested access
         if requested_rights.contains(Rights::WRITE) {
             let eff_slot = if task_caps.verify(cap_slot, CapabilityType::FileSystemWrite, Rights::WRITE).is_ok()
@@ -853,7 +949,7 @@ impl Vfs {
         let mut pos=6usize;
         let mut count=0u16;
         for inode in self.inodes.values() {
-            if inode.file_type != FileType::RegularFile || !inode.path.starts_with("/data/") { continue; }
+            if inode.file_type != FileType::RegularFile || !(inode.path.starts_with("/data/") || inode.path.starts_with("/user/")) { continue; }
             let path=inode.path.as_bytes();
             let data=inode.data.as_slice();
             if path.len()>255 || data.len()>8192 { continue; }
@@ -882,7 +978,7 @@ impl Vfs {
         let mut pos = 6usize;
         let mut count = 0u16;
         for inode in self.inodes.values() {
-            if !inode.path.starts_with("/data/") && inode.path != "/data" { continue; }
+            if !(inode.path.starts_with("/data/") || inode.path.starts_with("/user/")) && inode.path != "/data" && inode.path != "/user" { continue; }
             let path = inode.path.as_bytes();
             if path.len() > 255 || pos + 8 + 1 + 2 + path.len() + 4 + 32 + 4 + 4 + 2 + 2 + 24 > buf.len() { continue; }
             buf[pos..pos + 8].copy_from_slice(&inode.id.0.to_le_bytes()); pos += 8;
@@ -972,7 +1068,7 @@ impl Vfs {
                 let ctime = match buf[pos..pos+8].try_into() { Ok(b) => u64::from_le_bytes(b), Err(_) => break }; pos += 8;
                 (uid,gid,mode,nlink,atime,mtime,ctime)
             } else { (ROOT_UID,ROOT_UID,if kind==1 {DEFAULT_DIR_MODE} else {DEFAULT_FILE_MODE},1,0,0,0) };
-            if !path.starts_with("/data/") && path != "/data" { continue; }
+            if !(path.starts_with("/data/") || path.starts_with("/user/")) && path != "/data" && path != "/user" { continue; }
             if kind == 1 {
                 let created=self.mkdir(path);
                 if let Some(inode)=self.inodes.get_mut(&created) { inode.id=InodeId(id); inode.uid=uid; inode.gid=gid; inode.mode=mode; inode.nlink=nlink; inode.atime=atime; inode.mtime=mtime; inode.ctime=ctime; }
@@ -1158,6 +1254,7 @@ pub fn init() {
     vfs.mkdir("/system/etc");
     vfs.mkdir("/packages");
     vfs.mkdir("/data");
+    vfs.mkdir("/user");
 
     // 1. System Policy Configuration (Read-Only)
     let policy_content = br#"{
