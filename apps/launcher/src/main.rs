@@ -259,20 +259,23 @@ fn refresh_package_catalog(state: &mut LauncherState) {
         let Some(_process) = fields.next() else { continue; };
         let Some(_version) = fields.next() else { continue; };
         let Some(status) = fields.next() else { continue; };
-        if status != b"active" || id.is_empty() || id.len() > 32 { continue; }
+        let _path = fields.next();
+        let Some(display_name) = fields.next() else { continue; };
+        let Some(icon) = fields.next() else { continue; };
+        if status != b"active" || id.is_empty() || id.len() > 32 || display_name.is_empty() { continue; }
 
         let idx = state.app_count;
         state.app_ids[idx][..id.len()].copy_from_slice(id);
         state.app_id_lens[idx] = id.len() as u8;
 
-        let suffix = id.rsplit(|b| *b == b'.').next().unwrap_or(id);
-        let label_len = suffix.len().min(16);
-        state.app_labels[idx][..label_len].copy_from_slice(&suffix[..label_len]);
+        let label_len = display_name.len().min(16);
+        state.app_labels[idx][..label_len].copy_from_slice(&display_name[..label_len]);
         state.app_label_lens[idx] = label_len as u8;
 
-        let icon_len = label_len.min(4);
-        state.app_icons[idx][..icon_len].copy_from_slice(&suffix[..icon_len]);
+        let icon_len = icon.len().min(4);
+        state.app_icons[idx][..icon_len].copy_from_slice(&icon[..icon_len]);
         state.app_icons[idx][icon_len..].fill(b' ');
+
         state.app_count += 1;
     }
 }
