@@ -823,9 +823,25 @@ document.addEventListener('DOMContentLoaded', () => {
     if (lockClockDate) lockClockDate.textContent = dateStr;
     if (homeBigClock) homeBigClock.textContent = timeStr;
     if (homeBigDate) homeBigDate.textContent = dateStr;
+
+    const aodTime = document.getElementById('aod-time');
+    const aodDate = document.getElementById('aod-date');
+    const statusBarTime = document.getElementById('status-bar-time');
+    if (aodTime) aodTime.textContent = timeStr;
+    if (aodDate) aodDate.textContent = dateStr;
+    if (statusBarTime) statusBarTime.textContent = timeStr;
   }
   updateTime();
   setInterval(updateTime, 1000);
+
+  const phoneGestureBarPill = document.getElementById('phone-gesture-bar-pill');
+  phoneGestureBarPill?.addEventListener('click', () => {
+    dispatchHardwareGesture('Home (Gesture Bar Pill)', {
+      action: 'tap',
+      x: 640,
+      y: 710
+    });
+  });
 
   // =========================================================================
   // 4. UART CONSOLE LOGGER

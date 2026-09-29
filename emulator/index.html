@@ -106,127 +106,147 @@
     <section class="device-stage ide-device-pane" id="ide-left-pane">
       <div class="emulator-stage-wrapper" id="emulator-stage-wrapper">
         
-        <!-- Physical Smartphone Chassis -->
-        <div class="device-chassis" id="device-chassis">
-          <!-- Physical Side Buttons -->
-          <div class="btn-volume-up" id="hw-btn-volup" title="Hardware Volume Up"></div>
-          <div class="btn-volume-down" id="hw-btn-voldown" title="Hardware Volume Down"></div>
-          <div class="btn-power" id="hw-btn-power" title="Hardware Power / Lock"></div>
+        <div class="phone-and-nav-container">
+          <!-- Physical Smartphone Chassis (Pixel Style Flagship Frame) -->
+          <div class="device-chassis" id="device-chassis">
+            <!-- Physical Side Buttons -->
+            <div class="btn-volume-up" id="hw-btn-volup" title="Hardware Volume Up"></div>
+            <div class="btn-volume-down" id="hw-btn-voldown" title="Hardware Volume Down"></div>
+            <div class="btn-power" id="hw-btn-power" title="Hardware Power / Lock"></div>
 
-          <!-- Phone Display Bezel -->
-          <div class="device-screen" id="device-screen">
-            <div class="screen-glare"></div>
+            <!-- Phone Display Glass -->
+            <div class="device-screen" id="device-screen">
+              <div class="screen-glare"></div>
 
-            <!-- Authentic Live Microkernel Scanout Display -->
-            <div class="screen-live-scanout" id="screen-live-scanout" style="display: none;">
-              <img id="live-scanout-img" src="/api/screen/frame" alt="InterOS Microkernel Scanout" draggable="false" />
-              
-              <!-- Scanout Live Status Overlay Pill -->
-              <div class="scanout-live-pill" id="scanout-live-pill">
-                <span class="live-dot"></span>
-                <span class="live-txt" id="scanout-res-text">LIVE SCANOUT &bull; 720&times;1440</span>
-              </div>
-
-              <!-- Quick Frame Refresh & Mode Controls -->
-              <div class="scanout-quick-controls">
-                <button class="scanout-ctrl-btn" id="btn-toggle-scanout-crop" title="Toggle Portrait (720x1440) / Full Scanout (1280x720)">
-                  <span id="scanout-mode-label">Portrait</span>
-                </button>
-                <button class="scanout-ctrl-btn" id="btn-refresh-scanout" title="Force Framebuffer Capture">
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-                </button>
-              </div>
-            </div>
-
-            <!-- Authentic Microkernel Standby Screen -->
-            <div class="screen-standby" id="screen-standby">
-              <div class="standby-chassis-content">
-                <div class="standby-logo-wrap">
-                  <svg class="standby-logo-svg" viewBox="0 0 48 48" fill="none">
-                    <path d="M24 4.5L6 14.5V33.5L24 43.5L42 33.5V14.5L24 4.5Z" stroke="#00F2FE" stroke-width="2.5" stroke-linejoin="round"/>
-                    <path d="M24 13L13.5 19V31L24 37L34.5 31V19L24 13Z" stroke="rgba(0, 242, 254, 0.45)" stroke-width="1.8" stroke-linejoin="round"/>
-                    <circle cx="24" cy="25" r="4" fill="#00F2FE"/>
-                    <path d="M24 4.5V13M24 37V43.5" stroke="rgba(0, 242, 254, 0.6)" stroke-width="2" stroke-linecap="round"/>
-                  </svg>
+              <!-- Top Consumer Status Bar -->
+              <div class="phone-status-bar" id="phone-status-bar">
+                <span class="status-time" id="status-bar-time">09:20</span>
+                <div class="camera-punch-hole" id="camera-punch-hole">
+                  <span class="camera-lens"></span>
                 </div>
-                <h2 class="standby-title">INTER OS CORE</h2>
-                <div class="standby-subtitle">Zero-Trust Capability Microkernel</div>
+                <div class="status-icons">
+                  <span class="status-icon icon-5g">5G</span>
+                  <span class="status-icon icon-wifi">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.55a11 11 0 0 1 14.08 0M1.42 9a16 16 0 0 1 21.16 0M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01"/></svg>
+                  </span>
+                  <span class="status-icon icon-battery">
+                    <span class="battery-pct">98%</span>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="6" width="18" height="12" rx="2"/><line x1="23" y1="11" x2="23" y2="13"/><rect x="3" y="8" width="13" height="8" rx="1" fill="currentColor"/></svg>
+                  </span>
+                </div>
+              </div>
+
+              <!-- Authentic Live Microkernel Scanout Display -->
+              <div class="screen-live-scanout" id="screen-live-scanout" style="display: none;">
+                <img id="live-scanout-img" src="/api/screen/frame" alt="InterOS Microkernel Scanout" draggable="false" />
                 
-                <div class="standby-status-pill">
-                  <span class="standby-dot"></span>
-                  <span id="standby-status-text">STANDBY &bull; OFFLINE</span>
+                <!-- Scanout Live Status Overlay Pill -->
+                <div class="scanout-live-pill" id="scanout-live-pill">
+                  <span class="live-dot"></span>
+                  <span class="live-txt" id="scanout-res-text">LIVE SCANOUT &bull; 720&times;1440</span>
                 </div>
 
-                <div class="standby-spec-card">
-                  <div class="spec-row"><span class="lbl">Platform:</span><span class="val">x86_64 Virtual Device</span></div>
-                  <div class="spec-row"><span class="lbl">Display:</span><span class="val">720&times;1440 DRM Scanout</span></div>
-                  <div class="spec-row"><span class="lbl">Security:</span><span class="val">Zero Ambient Authority</span></div>
-                  <div class="spec-row"><span class="lbl">Input:</span><span class="val">COM1 Touch Digitizer</span></div>
-                </div>
-
-                <button class="btn-boot-microkernel" id="btn-boot-microkernel">
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18.36 6.64a9 9 0 1 1-12.73 0M12 2v10"/></svg>
-                  <span>Power On Microkernel</span>
-                </button>
-
-                <div class="standby-hint">
-                  Press the Power button on the right edge or click above to boot QEMU.
+                <!-- Quick Frame Refresh & Mode Controls -->
+                <div class="scanout-quick-controls">
+                  <button class="scanout-ctrl-btn" id="btn-toggle-scanout-crop" title="Toggle Portrait / Full Scanout">
+                    <span id="scanout-mode-label">Portrait</span>
+                  </button>
+                  <button class="scanout-ctrl-btn" id="btn-refresh-scanout" title="Force Framebuffer Capture">
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                  </button>
                 </div>
               </div>
+
+              <!-- Pure Consumer Smartphone Standby Screen (Pixel Always-On Display, Zero Internal Texts) -->
+              <div class="screen-standby" id="screen-standby">
+                <div class="consumer-aod-content">
+                  <div class="aod-clock-box">
+                    <div class="aod-time" id="aod-time">09:20</div>
+                    <div class="aod-date" id="aod-date">Wednesday, Sep 24</div>
+                    <div class="aod-weather"><span class="aod-weather-icon">☀️</span> 24° Sunny</div>
+                  </div>
+
+                  <div class="aod-notification-card">
+                    <div class="aod-notif-header">
+                      <span class="aod-notif-app">Messages</span>
+                      <span class="aod-notif-time">Just now</span>
+                    </div>
+                    <div class="aod-notif-body">
+                      <strong>Rama:</strong> Hey, let's review the new design.
+                    </div>
+                  </div>
+
+                  <div class="aod-bottom-action">
+                    <button class="btn-consumer-wake" id="btn-boot-microkernel" title="Wake / Power On Smartphone">
+                      <div class="wake-icon-ring">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18.36 6.64a9 9 0 1 1-12.73 0M12 2v10"/></svg>
+                      </div>
+                      <span class="wake-label">Tap to Power On</span>
+                    </button>
+                    <div class="aod-swipe-hint">
+                      <span>Swipe up or press Power button</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Screen Overlay: Bootloader Splash Screen -->
+              <div class="screen-boot-splash" id="screen-boot-splash" style="display: none;">
+                <div class="boot-branding-box">
+                  <div class="boot-logo-wrapper">
+                    <div class="boot-quantum-ring ring-outer"></div>
+                    <div class="boot-quantum-ring ring-mid"></div>
+                    <div class="boot-core-glow"></div>
+                    <svg class="boot-logo-svg" viewBox="0 0 48 48" fill="none">
+                      <circle cx="24" cy="24" r="20" stroke="#FFFFFF" stroke-width="2"/>
+                      <circle cx="24" cy="24" r="10" stroke="rgba(255, 255, 255, 0.4)" stroke-width="1.5"/>
+                      <circle cx="24" cy="24" r="4" fill="#FFFFFF"/>
+                    </svg>
+                  </div>
+                  <h1 class="boot-title">InterOS</h1>
+                  <div class="boot-subtitle">Starting Smartphone...</div>
+                </div>
+
+                <div class="boot-minimal-indicator">
+                  <div class="boot-progress-bar">
+                    <div class="boot-progress-fill" id="boot-progress-fill"></div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Integrated Bottom Gesture Pill Bar -->
+              <div class="phone-gesture-bar-pill" id="phone-gesture-bar-pill" title="Tap: Home • Swipe Up: Activity Space">
+                <div class="gesture-pill-handle"></div>
+              </div>
+
+              <!-- Screen Overlay: Floating Glass Toast Capsule -->
+              <div class="interos-toast-container" id="interos-toast-container" aria-live="polite"></div>
             </div>
-
-            <!-- Screen Overlay: Bootloader Splash Screen -->
-            <div class="screen-boot-splash" id="screen-boot-splash" style="display: none;">
-              <div class="boot-branding-box">
-                <div class="boot-logo-wrapper">
-                  <div class="boot-quantum-ring ring-outer"></div>
-                  <div class="boot-quantum-ring ring-mid"></div>
-                  <div class="boot-core-glow"></div>
-                  <svg class="boot-logo-svg" viewBox="0 0 48 48" fill="none">
-                    <circle cx="24" cy="24" r="20" stroke="#00F2FE" stroke-width="2"/>
-                    <circle cx="24" cy="24" r="10" stroke="rgba(255, 255, 255, 0.4)" stroke-width="1.5"/>
-                    <circle cx="24" cy="24" r="4" fill="#00F2FE"/>
-                  </svg>
-                </div>
-                <h1 class="boot-title">INTER OS</h1>
-                <div class="boot-subtitle" id="boot-custom-subtitle">Booting Microkernel...</div>
-              </div>
-
-              <div class="boot-minimal-indicator">
-                <div class="boot-progress-bar">
-                  <div class="boot-progress-fill" id="boot-progress-fill"></div>
-                </div>
-                <div class="boot-step-label" id="boot-step-label">Initializing GDT, Paging &amp; Heap...</div>
-              </div>
-            </div>
-
-            <!-- Screen Overlay: Floating Glass Toast Capsule -->
-            <div class="interos-toast-container" id="interos-toast-container" aria-live="polite"></div>
           </div>
-        </div>
 
-        <!-- Authentic Navigation Gestures Bar (Matching the 16-Surface North Star Reference) -->
-        <div class="device-gesture-guide" id="device-gesture-guide">
-          <button class="gesture-btn" id="btn-gesture-activity" title="Swipe Up: Activity Space / Multitasking">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="18 15 12 9 6 15"/></svg>
-            <span>Activity Space</span>
-          </button>
-          <button class="gesture-btn" id="btn-gesture-back" title="Swipe Left: Go Back">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
-            <span>Back</span>
-          </button>
-          <button class="gesture-btn" id="btn-gesture-home" title="Tap Bottom: Return Home">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="7"/></svg>
-            <span>Home</span>
-          </button>
-          <button class="gesture-btn" id="btn-gesture-quick" title="Swipe Right: Quick Controls">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
-            <span>Quick Controls</span>
-          </button>
-          <button class="gesture-btn" id="btn-gesture-system" title="Tap Top: System Space / Settings">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-            <span>System</span>
-          </button>
+          <!-- Bottom Navigation Gestures (Cleanly stacked beneath phone) -->
+          <div class="device-gesture-guide" id="device-gesture-guide">
+            <button class="gesture-btn" id="btn-gesture-activity" title="Activity Space / Overview">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="18 15 12 9 6 15"/></svg>
+              <span>Activity</span>
+            </button>
+            <button class="gesture-btn" id="btn-gesture-back" title="Back">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+              <span>Back</span>
+            </button>
+            <button class="gesture-btn active" id="btn-gesture-home" title="Home">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="7"/></svg>
+              <span>Home</span>
+            </button>
+            <button class="gesture-btn" id="btn-gesture-quick" title="Quick Controls">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+              <span>Controls</span>
+            </button>
+            <button class="gesture-btn" id="btn-gesture-system" title="System Settings">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+              <span>Settings</span>
+            </button>
+          </div>
         </div>
 
         <!-- Android Emulator Quick-Action Floating Hardware Toolbar -->
