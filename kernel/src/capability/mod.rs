@@ -428,6 +428,18 @@ impl CapabilityTable {
         self.revoke(slot_idx)
     }
 
+    /// Revokes a capability by its unique 64-bit CapabilityId.
+    pub fn revoke_by_id(&mut self, cap_id: CapabilityId) -> bool {
+        let slot_idx = self.slots.iter().position(|s| s.cap.as_ref().map(|c| c.id == cap_id).unwrap_or(false));
+        if let Some(idx) = slot_idx {
+            self.slots[idx].cap = None;
+            self.slots[idx].generation = self.slots[idx].generation.wrapping_add(1);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Finds the first slot containing a capability with the requested type and rights.
     pub fn find_slot(&self, expected_type: CapabilityType, required_rights: Rights) -> Option<usize> {
         self.slots.iter().enumerate().find_map(|(idx, slot)| {

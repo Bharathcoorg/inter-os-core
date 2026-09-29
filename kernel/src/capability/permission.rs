@@ -29,6 +29,22 @@ pub enum SensitivePermission {
     AudioSynthesis = 5,
     /// Permission to read real hardware RTC civil wall-clock time and calendar metrics.
     RtcClock = 6,
+    /// Permission to capture live microphone audio.
+    Microphone = 7,
+    /// Permission to query precise GNSS / GPS geographical location.
+    Location = 8,
+    /// Permission to read and write user contacts and address book.
+    Contacts = 9,
+    /// Permission to access user files and private document storage.
+    Files = 10,
+    /// Permission to send and receive cellular SMS messages.
+    Sms = 11,
+    /// Permission to poll hardware motion, environmental, and biometric sensors.
+    Sensors = 12,
+    /// Permission to communicate over Bluetooth and BLE controllers.
+    Bluetooth = 13,
+    /// Permission to post system notifications and badges.
+    Notifications = 14,
 }
 
 impl SensitivePermission {
@@ -41,6 +57,14 @@ impl SensitivePermission {
             4 => Some(Self::CameraCapture),
             5 => Some(Self::AudioSynthesis),
             6 => Some(Self::RtcClock),
+            7 => Some(Self::Microphone),
+            8 => Some(Self::Location),
+            9 => Some(Self::Contacts),
+            10 => Some(Self::Files),
+            11 => Some(Self::Sms),
+            12 => Some(Self::Sensors),
+            13 => Some(Self::Bluetooth),
+            14 => Some(Self::Notifications),
             _ => None,
         }
     }
@@ -54,6 +78,14 @@ impl SensitivePermission {
             Self::CameraCapture => "Camera Sensor & Computer Vision",
             Self::AudioSynthesis => "Hardware Audio Synthesizer",
             Self::RtcClock => "Hardware Real-Time Clock",
+            Self::Microphone => "Microphone & Audio Recording",
+            Self::Location => "Precise GNSS Location",
+            Self::Contacts => "Contacts & Address Book",
+            Self::Files => "User Storage & Files",
+            Self::Sms => "Cellular SMS Messaging",
+            Self::Sensors => "Sensors & Biometrics",
+            Self::Bluetooth => "Bluetooth & BLE Controller",
+            Self::Notifications => "System Notifications",
         }
     }
 
@@ -66,6 +98,14 @@ impl SensitivePermission {
             Self::CameraCapture => "Allows capturing live video frames from the camera sensor.",
             Self::AudioSynthesis => "Allows synthesizing audio frequencies on the hardware speaker.",
             Self::RtcClock => "Allows reading real hardware calendar time and wall-clock RTC.",
+            Self::Microphone => "Allows capturing audio from the built-in microphone.",
+            Self::Location => "Allows querying precise GPS/GNSS device coordinates.",
+            Self::Contacts => "Allows reading and modifying stored contact information.",
+            Self::Files => "Allows reading and writing files in user storage.",
+            Self::Sms => "Allows composing and sending cellular text messages.",
+            Self::Sensors => "Allows reading accelerometer, gyroscope, and biometric sensors.",
+            Self::Bluetooth => "Allows pairing and transferring data over Bluetooth/BLE.",
+            Self::Notifications => "Allows dispatching status and alert notifications to the user.",
         }
     }
 
@@ -102,6 +142,46 @@ impl SensitivePermission {
                 Rights::READ.union(Rights::INVOKE),
                 0x70, // CMOS RTC port
             ),
+            Self::Microphone => (
+                CapabilityType::HardwarePortIo,
+                Rights::READ.union(Rights::INVOKE),
+                0xCA01, // Microphone audio input object
+            ),
+            Self::Location => (
+                CapabilityType::HardwarePortIo,
+                Rights::READ.union(Rights::INVOKE),
+                0xCA02, // GNSS location controller object
+            ),
+            Self::Contacts => (
+                CapabilityType::FileSystemRead,
+                Rights::READ.union(Rights::WRITE),
+                0xC001, // Contacts storage partition
+            ),
+            Self::Files => (
+                CapabilityType::FileSystemRead,
+                Rights::READ.union(Rights::WRITE),
+                0xF11E, // User files storage partition
+            ),
+            Self::Sms => (
+                CapabilityType::HardwarePortIo,
+                Rights::WRITE.union(Rights::INVOKE),
+                0x3F9, // Cellular SMS modem interface
+            ),
+            Self::Sensors => (
+                CapabilityType::HardwarePortIo,
+                Rights::READ.union(Rights::INVOKE),
+                0x5E45, // Sensor bus controller object
+            ),
+            Self::Bluetooth => (
+                CapabilityType::HardwarePortIo,
+                Rights::READ.union(Rights::WRITE).union(Rights::INVOKE),
+                0xB700, // Bluetooth HCI controller object
+            ),
+            Self::Notifications => (
+                CapabilityType::IpcSend,
+                Rights::WRITE.union(Rights::INVOKE),
+                0x9071, // Notification manager IPC object
+            ),
         };
 
         Capability {
@@ -113,6 +193,14 @@ impl SensitivePermission {
     }
 }
 
+/// Scope of a granted permission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionScope {
+    OneTime,
+    WhileInUse,
+    Always,
+}
+
 /// Status of user consent for a permission request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -121,6 +209,7 @@ pub enum ConsentDecision {
     Granted = 1,
     Denied = 2,
     GrantedOnce = 3,
+    Revoked = 4,
 }
 
 /// Audit record for a requested capability.
@@ -218,6 +307,43 @@ impl PermissionManager {
                 && r.permission == permission
                 && (r.decision == ConsentDecision::Granted || r.decision == ConsentDecision::GrantedOnce)
         })
+    }
+
+    /// Dynamically revokes a granted permission from a task.
+    pub fn revoke_permission(&mut self, task_id: TaskId, permission: SensitivePermission) -> bool {
+        let mut revoked = false;
+        for record in self.records.iter_mut() {
+            if record.task_id == task_id && record.permission == permission {
+                if record.decision == ConsentDecision::Granted || record.decision == ConsentDecision::GrantedOnce {
+                    record.decision = ConsentDecision::Revoked;
+                    revoked = true;
+                }
+            }
+        }
+        if revoked {
+            crate::serial_println!(
+                "[PERMISSION] Revoked permission {:?} from Task {}",
+                permission,
+                task_id.0
+            );
+        }
+        revoked
+    }
+
+    /// Consumes a one-time permission grant after single use.
+    pub fn consume_one_time_permission(&mut self, task_id: TaskId, permission: SensitivePermission) -> bool {
+        for record in self.records.iter_mut() {
+            if record.task_id == task_id && record.permission == permission && record.decision == ConsentDecision::GrantedOnce {
+                record.decision = ConsentDecision::Revoked;
+                crate::serial_println!(
+                    "[PERMISSION] Consumed one-time permission {:?} for Task {}",
+                    permission,
+                    task_id.0
+                );
+                return true;
+            }
+        }
+        false
     }
 }
 
