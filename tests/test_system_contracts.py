@@ -59,8 +59,10 @@ class SystemContractTests(unittest.TestCase):
         kernel = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
         sdk = (ROOT / "sdk/rust/interos-std/src/lib.rs").read_text(encoding="utf-8")
         pattern = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_]*)\s*=\s*(\d+),", re.MULTILINE)
-        kernel_ids = dict(pattern.findall(kernel.split("pub enum SyscallNumber", 1)[1]))
-        sdk_ids = dict(pattern.findall(sdk.split("pub enum SyscallNumber", 1)[1]))
+        kernel_body = kernel.split("pub enum SyscallNumber", 1)[1].split("}", 1)[0]
+        sdk_body = sdk.split("pub enum SyscallNumber", 1)[1].split("}", 1)[0]
+        kernel_ids = dict(pattern.findall(kernel_body))
+        sdk_ids = dict(pattern.findall(sdk_body))
         self.assertEqual(kernel_ids, sdk_ids)
 
     def test_reliability_modules_exist(self):
