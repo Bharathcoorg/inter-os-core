@@ -996,7 +996,21 @@ def is_safe_guest_path(path, writable=False):
         return False
     if not path.startswith("/") or "\\" in path or ".." in path or "//" in path:
         return False
-    if any(ord(ch) < 0x20 or ch in "|;&
+    if any(ord(ch) < 0x20 or ch in "|;&$'\\\"" for ch in path):
+        return False
+    if writable and not path.startswith("/data/"):
+        return False
+    return all(part and part not in (".", "..") for part in path.split("/") if part)
+
+def is_safe_package_id(value):
+    return isinstance(value, str) and 1 <= len(value) <= 128 and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value) is not None
+
+def is_safe_publisher(value):
+    return isinstance(value, str) and 1 <= len(value) <= 32 and re.fullmatch(r"[A-Za-z0-9._-]+", value) is not None
+
+def guest_fs_list(path):
+    if not is_safe_guest_path(path):
+        return False, "invalid guest path", []
     ok, lines = guest_command_lines(f"STUDIO_FS_LIST {path}", f"LIST_OK path={path}")
     entries = []
     for line in lines:
@@ -1004,7 +1018,11 @@ def is_safe_guest_path(path, writable=False):
             payload = line.split(" ", 2)[-1]
             parts = payload.split("|")
             if len(parts) == 3:
-                entries.append({"name": parts[0], "isDir": parts[1] == "dir", "size": int(parts[2]) if parts[2].isdigit() else 0})
+                entries.append({
+                    "name": parts[0],
+                    "isDir": parts[1] == "dir",
+                    "size": int(parts[2]) if parts[2].isdigit() else 0,
+                })
     return ok, None if ok else (lines[-1] if lines else "guest filesystem unavailable"), entries
 
 def guest_fs_read(path):
