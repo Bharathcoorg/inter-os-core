@@ -216,11 +216,22 @@ fn handle_rapp_command(s: &str) -> bool {
             serial_println!("[RAPP_HOST] REJECT invalid package id");
             return true;
         }
-        let registry_ok = crate::package::PACKAGE_REGISTRY.lock().rollback(id).is_ok();
+        let registry_ok = crate::package::PACKAGE_REGISTRY.lock().uninstall(id).is_ok();
+        if !registry_ok {
+            serial_println!("[RAPP_HOST] UNINSTALL_FAILED id={} registry removal rejected", id);
+            return true;
+        }
         match crate::package::PACKAGE_BLOB_STORE.lock().remove(id) {
-            Ok(true) if registry_ok => serial_println!("[RAPP_HOST] UNINSTALLED id={}", id),
+            Ok(true) => {
+                match crate::fs::vfs::VFS.try_lock() {
+                    Some(mut vfs) => match vfs.remove_app_storage(id) {
+                        Ok(_) => serial_println!("[RAPP_HOST] UNINSTALLED id={}", id),
+                        Err(_) => serial_println!("[RAPP_HOST] UNINSTALL_FAILED id={} app-data cleanup failed", id),
+                    },
+                    None => serial_println!("[RAPP_HOST] UNINSTALL_FAILED id={} VFS locked", id),
+                }
+            }
             Ok(false) => serial_println!("[RAPP_HOST] UNINSTALL_FAILED id={} not found", id),
-            Ok(true) => serial_println!("[RAPP_HOST] UNINSTALL_FAILED id={} registry transition failed", id),
             Err(_) => serial_println!("[RAPP_HOST] UNINSTALL_FAILED id={} persistence failed", id),
         }
         return true;
