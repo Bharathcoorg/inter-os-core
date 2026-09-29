@@ -345,12 +345,13 @@ impl Scheduler {
 
         if let Some(current) = self.tasks.get_mut(self.current_idx) {
             current.cpu_ticks = current.cpu_ticks.saturating_add(1);
+            crate::task::process::account_background_cpu_tick(current.id);
         }
 
         self.ticks_in_slice = self.ticks_in_slice.saturating_add(1);
 
         if self.ticks_in_slice >= TIME_SLICE_TICKS {
-            let suspended = crate::task::process::enforce_background_budget(crate::interrupts::get_system_ticks());
+            let suspended = crate::task::process::enforce_background_budget();
             if suspended > 0 {
                 crate::serial_println!("[LIFECYCLE] Suspended {} background application(s) after budget exhaustion.", suspended);
             }
