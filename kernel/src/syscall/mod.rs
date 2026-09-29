@@ -2489,7 +2489,7 @@ pub fn sys_package_uninstall(cap_slot: usize, pkg_id: &str, user_consent: bool) 
     // Refuse removal while an installed package process is still alive.
     {
         let sched = SCHEDULER.lock();
-        if sched.tasks_named(pkg_id).iter().any(|task| !matches!(task.state, crate::task::TaskState::Zombie | crate::task::TaskState::Terminated)) {
+        if sched.has_live_task_named(pkg_id) {
             return Err(SyscallResult::NotReady);
         }
     }
