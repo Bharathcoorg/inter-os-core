@@ -2387,6 +2387,10 @@ pub fn sys_package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) ->
     // Stage the registry first. If payload persistence or activation fails, the
     // registry transaction is rolled back and no partially installed package is
     // left launchable.
+    let previous_registry_entry = {
+        let registry = crate::package::PACKAGE_REGISTRY.lock();
+        registry.entries().iter().find(|entry| entry.package_id == pkg_id).cloned()
+    };
     {
         let mut registry = crate::package::PACKAGE_REGISTRY.lock();
         registry
@@ -2404,7 +2408,7 @@ pub fn sys_package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) ->
         .put(pkg_id, verified.version, &rapp);
 
     if blob_result.is_err() {
-        let _ = crate::package::PACKAGE_REGISTRY.lock().rollback(pkg_id);
+        let _ = crate::package::PACKAGE_REGISTRY.lock().rollback_install(pkg_id, previous_registry_entry.clone());
         return Err(SyscallResult::DeviceError);
     }
 
