@@ -300,6 +300,16 @@ impl Vfs {
     }
 
     /// Reads content of a file directly by canonical path (for kernel/diagnostic inspection).
+    pub fn read_file_range(&self, path: &str, offset: usize, out: &mut [u8]) -> Result<usize, FsError> {
+        let inode_id = self.path_to_inode.get(path).copied().ok_or(FsError::FileNotFound)?;
+        let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
+        if offset >= inode.data.as_slice().len() { return Ok(0); }
+        let data = inode.data.as_slice();
+        let n = core::cmp::min(out.len(), data.len() - offset);
+        out[..n].copy_from_slice(&data[offset..offset + n]);
+        Ok(n)
+    }
+
     pub fn read_file_by_path(&self, path: &str, out: &mut [u8]) -> Result<usize, FsError> {
         let inode_id = self.path_to_inode.get(path).copied().ok_or(FsError::FileNotFound)?;
         let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
