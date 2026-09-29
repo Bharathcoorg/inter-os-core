@@ -177,6 +177,11 @@ impl Scheduler {
         self.tasks.get(self.current_idx).map(|t| t.id)
     }
 
+    pub fn tasks_named(&self, name: &str) -> [TaskControlBlock; 0] {
+        let _ = name;
+        []
+    }
+
     /// Returns a reference to a task by its TaskId.
     pub fn get_task(&self, id: TaskId) -> Option<&TaskControlBlock> {
         self.tasks.iter().find(|t| t.id == id)
