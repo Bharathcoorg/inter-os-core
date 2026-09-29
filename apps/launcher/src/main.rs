@@ -172,7 +172,8 @@ pub struct LauncherState {
     pub flashlight_on: bool,
     pub app_drawer_tab: usize,
     pub notif_tab: usize,
-    pub recent_apps: [&'static str; 3],
+    pub recent_apps: [[u8; 32]; 3],
+    pub recent_app_lens: [u8; 3],
     pub app_ids: [[u8; 32]; 32],
     pub app_id_lens: [u8; 32],
     pub app_labels: [[u8; 16]; 32],
@@ -195,11 +196,8 @@ impl LauncherState {
             flashlight_on: false,
             app_drawer_tab: 0,
             notif_tab: 0,
-            recent_apps: [
-                "",
-                "",
-                "",
-            ],
+            recent_apps: [[0u8; 32]; 3],
+            recent_app_lens: [0; 3],
             app_ids: [[0u8; 32]; 32],
             app_id_lens: [0u8; 32],
             app_labels: [[0u8; 16]; 32],
@@ -211,35 +209,44 @@ impl LauncherState {
         }
     }
 
-    pub fn push_recent(&mut self, app: &'static str) {
-        if self.recent_apps[0] == app { return; }
-        if self.recent_apps[1] == app {
-            self.recent_apps.swap(0, 1);
-            return;
+    pub fn push_recent(&mut self, app: &str) {
+        if app.is_empty() || app.len() > 32 { return; }
+        if self.recent_app_lens[0] > 0
+            && core::str::from_utf8(&self.recent_apps[0][..self.recent_app_lens[0] as usize]).ok() == Some(app) { return; }
+
+        let mut next = [[0u8; 32]; 3];
+        let mut lens = [0u8; 3];
+        next[0][..app.len()].copy_from_slice(app.as_bytes());
+        lens[0] = app.len() as u8;
+
+        for src in 0..3 {
+            let src_len = self.recent_app_lens[src] as usize;
+            if src_len == 0 || src >= 2 { continue; }
+            let value = &self.recent_apps[src][..src_len];
+            if value == app.as_bytes() { continue; }
+            let dst = if src == 0 { 1 } else { 2 };
+            next[dst][..src_len].copy_from_slice(value);
+            lens[dst] = src_len as u8;
         }
-        if self.recent_apps[2] == app {
-            let temp = self.recent_apps[2];
-            self.recent_apps[2] = self.recent_apps[1];
-            self.recent_apps[1] = self.recent_apps[0];
-            self.recent_apps[0] = temp;
-            return;
-        }
-        self.recent_apps[2] = self.recent_apps[1];
-        self.recent_apps[1] = self.recent_apps[0];
-        self.recent_apps[0] = app;
+        self.recent_apps = next;
+        self.recent_app_lens = lens;
+    }
+
+    fn recent_id(&self, index: usize) -> Option<&str> {
+        if index >= 3 { return None; }
+        let len = self.recent_app_lens[index] as usize;
+        if len == 0 { return None; }
+        core::str::from_utf8(&self.recent_apps[index][..len]).ok()
     }
 
     pub fn dismiss_recent(&mut self, index: usize) {
-        if index == 0 {
-            self.recent_apps[0] = self.recent_apps[1];
-            self.recent_apps[1] = self.recent_apps[2];
-            self.recent_apps[2] = "";
-        } else if index == 1 {
-            self.recent_apps[1] = self.recent_apps[2];
-            self.recent_apps[2] = "";
-        } else if index == 2 {
-            self.recent_apps[2] = "";
+        if index >= 3 { return; }
+        for i in index..2 {
+            self.recent_apps[i] = self.recent_apps[i + 1];
+            self.recent_app_lens[i] = self.recent_app_lens[i + 1];
         }
+        self.recent_apps[2] = [0u8; 32];
+        self.recent_app_lens[2] = 0;
     }
 }
 
@@ -1931,7 +1938,7 @@ pub extern "C" fn _start() -> ! {
                                 }
                                 // Tap Card 0 body to switch
                                 else if (200..480).contains(&y) && (56..580).contains(&x) {
-                                    let target = state.recent_apps[0];
+                                    let Some(target) = state.recent_id(0) else { break; };
                                     state.push_recent(target);
                                     if let Ok(task_id) = std::app_launch(target) {
                                         state.active_child = Some(task_id);
@@ -1954,7 +1961,7 @@ pub extern "C" fn _start() -> ! {
                                 }
                                 // Tap Card 1 body to switch
                                 else if (520..800).contains(&y) && (56..580).contains(&x) {
-                                    let target = state.recent_apps[1];
+                                    let Some(target) = state.recent_id(1) else { break; };
                                     state.push_recent(target);
                                     if let Ok(task_id) = std::app_launch(target) {
                                         state.active_child = Some(task_id);
@@ -1977,7 +1984,7 @@ pub extern "C" fn _start() -> ! {
                                 }
                                 // Tap Card 2 body to switch
                                 else if (840..1120).contains(&y) && (56..580).contains(&x) {
-                                    let target = state.recent_apps[2];
+                                    let Some(target) = state.recent_id(2) else { break; };
                                     state.push_recent(target);
                                     if let Ok(task_id) = std::app_launch(target) {
                                         state.active_child = Some(task_id);
