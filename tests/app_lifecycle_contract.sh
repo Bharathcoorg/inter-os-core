@@ -19,3 +19,8 @@ echo "application lifecycle contract: PASS"
 grep -q 'account_background_cpu_tick' kernel/src/task/scheduler.rs
 grep -q 'consume_background_network' kernel/src/syscall/mod.rs
 grep -q 'unblock_task(task)' kernel/src/syscall/mod.rs
+grep -q 'AppStop = 121' kernel/src/syscall/mod.rs
+grep -q 'AppRestart = 122' kernel/src/syscall/mod.rs
+grep -q 'terminate_child' kernel/src/task/scheduler.rs
+grep -q 'find_child_by_name' kernel/src/task/scheduler.rs
+grep -q 'pub fn app_restart' sdk/rust/interos-std/src/lib.rs
