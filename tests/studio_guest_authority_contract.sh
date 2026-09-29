@@ -19,3 +19,9 @@ grep -q "'source': 'GUEST_REGISTRY'" emulator/server.py
 ! grep -q 'os.remove(app_file)' emulator/server.py
 ! grep -q 'open(real_path' emulator/server.py
 echo "Device Studio guest-authority contract: PASS"
+grep -q 'RAPP_UNINSTALL' kernel/src/serial.rs
+grep -q 'remove_app_storage' kernel/src/serial.rs
+grep -q 'GUEST_PACKAGE_MANAGER' emulator/server.py
+! grep -q 'mounted into /data/app/' emulator/server.py
+! grep -q 'sideloaded_apps' emulator/server.py
+! grep -q 'DEFAULT_APPS' emulator/server.py
