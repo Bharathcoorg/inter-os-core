@@ -29,6 +29,8 @@ pub struct PackageDescriptor {
     pub package_id: &'static str,
     pub path: &'static str,
     pub process_name: &'static str,
+    pub display_name: &'static str,
+    pub icon: &'static str,
 }
 
 pub const FIRST_PARTY_PACKAGES: &[PackageDescriptor] = &[
