@@ -138,6 +138,7 @@ pub enum SyscallNumber {
     AppStop = 121,
     AppRestart = 122,
     AppRuntimeList = 123,
+    AppFocus = 124,
 }
 
 /// System call result status codes.
@@ -1645,6 +1646,10 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             SyscallResult::Success => 0,
             e => e as i64,
         },
+        124 => match sys_app_focus(TaskId(a1 as u64)) {
+            SyscallResult::Success => 0,
+            e => e as i64,
+        },
         123 => {
             let out_len = a2 as usize;
             if out_len == 0 || out_len > 4096 { return SyscallResult::InvalidArguments as i64; }
@@ -2495,6 +2500,20 @@ pub fn sys_package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) ->
 }
 
 /// Queries the active mobile hardware platform description.
+pub fn sys_app_focus(task_id: TaskId) -> SyscallResult {
+    if require_app_launcher_or_service_manager().is_err() {
+        return SyscallResult::PermissionDenied;
+    }
+    if task_id == TaskId(0) { return SyscallResult::InvalidArguments; }
+    match crate::task::process::set_foreground(task_id) {
+        Ok(()) => {
+            SCHEDULER.lock().unblock_task(task_id);
+            SyscallResult::Success
+        }
+        Err(_) => SyscallResult::TargetNotFound,
+    }
+}
+
 pub fn sys_app_runtime_list(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
     use core::fmt::Write;
     let current = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?;
