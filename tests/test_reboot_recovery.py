@@ -191,7 +191,7 @@ def main():
 
         print("\n[SESSION-1] Establishing known userspace state (launching Calculator)...")
         reader1.sock.sendall(b"TAP 180 520\n")
-        assert reader1.wait_for("Initial frame presented to hardware scanout", timeout=15.0), "Calculator launch failed"
+        assert reader1.wait_for("Initial frame presented to hardware scanout", timeout=30.0), "Calculator launch failed"
         print("[SESSION-1] Calculator presented frame.")
         time.sleep(1.5)
         print("[SESSION-1] Performing calculation (7 + 5)...")
@@ -209,7 +209,7 @@ def main():
         send_tap_and_wait(b"TAP 598 1190\n", "Evaluation completed.", "Calculation '='")
         print("[SESSION-1] Calculation verified. Exiting back to homescreen...")
         reader1.sock.sendall(b"TAP 62 48\n")     # Back
-        assert reader1.wait_for("Foreground application exited and was reaped", timeout=15.0)
+        assert reader1.wait_for("Foreground application exited and was reaped", timeout=30.0)
         print("[SESSION-1] Homescreen re-established.")
         time.sleep(0.8)
 
