@@ -40,13 +40,40 @@ impl PackageBlobStore {
   }crate::storage::persistent::commit_kind(&out[..p],5).map(|_|()).map_err(|_|())
  }
  pub fn restore(&mut self){
-  let mut b=Vec::with_capacity(65472); b.resize(65472,0);let Ok(Some((_g,len)))=crate::storage::persistent::load_latest_kind(&mut b,5)else{return};
-  if len<5||&b[..4]!=b"PKG1"{return}let mut p=5;let n=b[4].min(MAX_BLOBS as u8)as usize;
-  for _ in 0..n{if p>=len{break}let il=b[p]as usize;p+=1;if il==0||p+il+10>len{break}let id=match core::str::from_utf8(&b[p..p+il]).ok(){Some(v)=>v,None=>break};p+=il;
-   let v=(u16::from_le_bytes([b[p],b[p+1]]),u16::from_le_bytes([b[p+2],b[p+3]]),u16::from_le_bytes([b[p+4],b[p+5]]));p+=6;
-   let dl=u32::from_le_bytes([b[p],b[p+1],b[p+2],b[p+3]])as usize;p+=4;if p+dl>len||dl>MAX_BLOB_SIZE{break}
-   if id.len() > 128 { break; } self.blobs.push(PackageBlob{package_id:id.to_string(),version:v,bytes:b[p..p+dl].to_vec()});p+=dl;
+  let mut b=Vec::with_capacity(65472);
+  b.resize(65472,0);
+  let Ok(Some((_g,len)))=crate::storage::persistent::load_latest_kind(&mut b,5) else{return};
+  if len<5||&b[..4]!=b"PKG1"{return}
+
+  let n=b[4] as usize;
+  if n>MAX_BLOBS { return; }
+
+  let mut restored=Vec::with_capacity(n);
+  let mut p=5usize;
+  for _ in 0..n {
+   if p>=len { return; }
+   let il=b[p] as usize; p+=1;
+   if il==0 || il>crate::package::rapp::RAPP_MAX_PACKAGE_ID_LEN { return; }
+   if p.checked_add(il+10).map(|end|end>len).unwrap_or(true) { return; }
+   let id=match core::str::from_utf8(&b[p..p+il]).ok(){Some(v)=>v,None=>return};
+   if id.contains('/') || id.contains('\\') || id.contains("..") { return; }
+   if restored.iter().any(|entry: &PackageBlob| entry.package_id==id) { return; }
+   p+=il;
+
+   let v=(
+    u16::from_le_bytes([b[p],b[p+1]]),
+    u16::from_le_bytes([b[p+2],b[p+3]]),
+    u16::from_le_bytes([b[p+4],b[p+5]])
+   ); p+=6;
+   let dl=u32::from_le_bytes([b[p],b[p+1],b[p+2],b[p+3]]) as usize; p+=4;
+   if dl==0 || dl>MAX_BLOB_SIZE || p.checked_add(dl).map(|end|end>len).unwrap_or(true) { return; }
+
+   restored.push(PackageBlob{package_id:id.to_string(),version:v,bytes:b[p..p+dl].to_vec()});
+   p+=dl;
   }
+
+  if p!=len { return; }
+  self.blobs=restored;
  }
 }
 pub static PACKAGE_BLOB_STORE:Mutex<PackageBlobStore>=Mutex::new(PackageBlobStore::new());
