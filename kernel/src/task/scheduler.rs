@@ -406,6 +406,17 @@ impl Scheduler {
         Ok(())
     }
 
+    pub fn terminate_child(&mut self, parent_id: TaskId, child_id: TaskId, exit_code: i32) -> Result<(), &'static str> {
+        if child_id == TaskId(0) || child_id == parent_id {
+            return Err("invalid child task");
+        }
+        let task = self.tasks.iter().find(|task| task.id == child_id).ok_or("task not found")?;
+        if task.parent_id != parent_id {
+            return Err("task is not owned by caller");
+        }
+        self.terminate_task(child_id, exit_code)
+    }
+
     pub fn reap_child(&mut self, parent_id: TaskId, child_id: TaskId) -> Result<i32, &'static str> {
         if child_id == TaskId(0) || child_id == self.tasks.get(self.current_idx).map(|t| t.id).unwrap_or(TaskId(0)) {
             return Err("child cannot be reaped");
