@@ -1,6 +1,6 @@
 //! InterOS Native Sovereign Gallery & Photo Studio App
 //!
-//! Full production Ring-3 graphical application executing in User Mode:
+//! Native Ring-3 graphical application executing in User Mode:
 //! - DRM/KMS Client Surface allocation (z=200) and double-buffered scanout presentation
 //! - High-contrast responsive 2-column masonry photo tile layout
 //! - Photo metadata and thumbnails are populated only from real media storage; no sample photos are injected.
