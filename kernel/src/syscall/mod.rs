@@ -129,6 +129,7 @@ pub enum SyscallNumber {
     NotificationQuery = 112,
     PermissionRevoke = 113,
     SettingsHardwareStatus = 114,
+    AppStorageOpen = 115,
 }
 
 /// System call result status codes.
@@ -381,6 +382,34 @@ pub fn sys_ipc_recv(cap_slot: usize) -> Result<IpcMessage, SyscallResult> {
 /// Opens a file in the Virtual Filesystem.
 ///
 /// Requires the caller to hold a matching `FileSystemRead` or `FileSystemWrite` capability token.
+pub fn sys_app_storage_open(
+    cap_slot: usize,
+    relative_path: &str,
+    requested_rights: Rights,
+) -> Result<FileDescriptor, SyscallResult> {
+    if relative_path.is_empty() || relative_path.len() > 128
+        || relative_path.starts_with('/')
+        || relative_path.contains('\\')
+        || relative_path.contains("..")
+    {
+        return Err(SyscallResult::InvalidArguments);
+    }
+    let sched = SCHEDULER.lock();
+    let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    let task_id = current.id;
+    drop(sched);
+    let mut vfs = VFS.lock();
+    let root = vfs.app_storage_root_for_task(task_id)
+        .map_err(|e| match e {
+            FsError::PermissionDenied => SyscallResult::PermissionDenied,
+            FsError::IntegrityViolation => SyscallResult::IntegrityViolation,
+            _ => SyscallResult::InvalidArguments,
+        })?;
+    let path = alloc::format!("{}/{}", root, relative_path);
+    drop(vfs);
+    sys_fs_open(cap_slot, &path, requested_rights)
+}
+
 pub fn sys_fs_open(
     cap_slot: usize,
     path: &str,
@@ -613,6 +642,23 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         7 => {
             // GetTaskId
             sys_get_task_id().0 as i64
+        }
+        115 => {
+            // AppStorageOpen: a1 = cap_slot, a2 = relative_path_ptr, a3 = path_len, a4 = rights_bits.
+            let cap_slot = a1 as usize;
+            let path_len = a3 as usize;
+            if path_len == 0 || path_len > 128 {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let mut path_buf = [0u8; 128];
+            let path = match read_user_string(a2, path_len, &mut path_buf) {
+                Ok(s) => s,
+                Err(_) => return SyscallResult::InvalidArguments as i64,
+            };
+            match sys_app_storage_open(cap_slot, path, Rights(a4 as u32)) {
+                Ok(fd) => fd.0 as i64,
+                Err(e) => e as i64,
+            }
         }
         8 => {
             // FsOpen: a1 = cap_slot, a2 = path_ptr, a3 = path_len, a4 = rights_bits
