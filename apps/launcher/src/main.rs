@@ -24,6 +24,8 @@ const ACCENT_AMBER: u32 = 0xFFF59E0B;
 const SUCCESS_EMERALD: u32 = 0xFF10B981;
 const CLOCK_TIME: &[u8; 5] = &[b'0', b'9', b':', b'2', b'0'];
 const DANGER_CRIMSON: u32 = 0xFFFF6B6B;
+const ACCENT_CYAN: u32 = 0xFF00F2FE;
+const ACCENT_VIOLET: u32 = 0xFF8A2BE2;
 
 // -----------------------------------------------------------------------------
 // Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')
@@ -179,6 +181,8 @@ pub struct LauncherState {
     pub dark_mode: bool,
     pub media_playing: bool,
     pub flashlight_on: bool,
+    pub wallpaper_id: usize,
+    pub anim_tick: u32,
     pub app_drawer_tab: usize,
     pub notif_tab: usize,
     pub recent_apps: [[u8; 32]; 3],
@@ -197,13 +201,15 @@ pub struct LauncherState {
 impl LauncherState {
     pub const fn new() -> Self {
         Self {
-            current_view: ViewMode::HomeScreen,
+            current_view: ViewMode::LockScreen,
             task_done: [false, false, false],
             wifi_on: false,
             bt_on: false,
             dark_mode: true,
             media_playing: false,
             flashlight_on: false,
+            wallpaper_id: 0,
+            anim_tick: 0,
             app_drawer_tab: 0,
             notif_tab: 0,
             recent_apps: [[0u8; 32]; 3],
@@ -402,6 +408,126 @@ fn package_id_at(state: &LauncherState, index: usize) -> Option<&str> {
 // Pixel-Accurate Screen Renderers
 // -----------------------------------------------------------------------------
 
+// -----------------------------------------------------------------------------
+// Procedural Signature Wallpaper Engine (Quantum Horizon, Solar Corona, Cyber Matrix, Live Plasma)
+// -----------------------------------------------------------------------------
+#[inline(always)]
+fn get_wallpaper_pixel(x: usize, y: usize, state: &LauncherState) -> u32 {
+    match state.wallpaper_id {
+        // Wallpaper 0: Quantum Horizon (Signature InterOS Cosmic Kinetic Lattice)
+        0 => {
+            let y_norm = (y as u32).min(1440);
+            let grad_val = (y_norm * 24) / 1440;
+            let base_r = 0x05 + grad_val / 3;
+            let base_g = 0x08 + grad_val / 2;
+            let base_b = 0x12 + grad_val;
+            let base = (0xFF << 24) | (base_r << 16) | (base_g << 8) | base_b;
+
+            // Primary Orbital Arc 1: Cyan resonance centered at (200, 760)
+            let dx1 = (x as i32) - 200;
+            let dy1 = (y as i32) - 760;
+            let d1 = ((dx1 * dx1 + dy1 * dy1) as u32) >> 6;
+            if d1 >= 2700 && d1 <= 2820 {
+                return ACCENT_CYAN;
+            }
+            if d1 >= 2650 && d1 <= 2870 {
+                return 0xFF0A2B3C;
+            }
+
+            // Secondary Orbital Arc 2: Violet resonance centered at (520, 640)
+            let dx2 = (x as i32) - 520;
+            let dy2 = (y as i32) - 640;
+            let d2 = ((dx2 * dx2 + dy2 * dy2) as u32) >> 6;
+            if d2 >= 2200 && d2 <= 2310 {
+                return ACCENT_VIOLET;
+            }
+            if d2 >= 2160 && d2 <= 2350 {
+                return 0xFF220D38;
+            }
+
+            // Horizon line
+            if y == 940 && x >= 80 && x <= 640 {
+                return 0xFF38BDF8;
+            }
+
+            // Starlight node coordinates
+            if ((x * 37 + y * 73) % 1847) == 42 && y > 100 && y < 1300 {
+                return 0xFFE0E7FF;
+            }
+
+            base
+        }
+
+        // Wallpaper 1: Solar Corona / Amber Aurora
+        1 => {
+            let y_norm = (y as u32).min(1440);
+            let grad_val = (y_norm * 30) / 1440;
+            let base_r = 0x14 + grad_val;
+            let base_g = 0x0A + grad_val / 2;
+            let base_b = 0x03;
+            let base = (0xFF << 24) | (base_r << 16) | (base_g << 8) | base_b;
+
+            let dx = (x as i32) - 360;
+            let dy = (y as i32) - 380;
+            let d = ((dx * dx + dy * dy) as u32) >> 6;
+            if d >= 1800 && d <= 1920 {
+                return ACCENT_AMBER;
+            }
+            if d >= 1700 && d <= 2020 {
+                return 0xFF3D2305;
+            }
+
+            let d_flare = (((dx - 80) * (dx - 80) + (dy - 400) * (dy - 400)) as u32) >> 6;
+            if d_flare >= 2400 && d_flare <= 2500 {
+                return DANGER_CRIMSON;
+            }
+
+            base
+        }
+
+        // Wallpaper 2: Cyber Emerald Matrix
+        2 => {
+            let y_norm = (y as u32).min(1440);
+            let grad_val = (y_norm * 20) / 1440;
+            let base_r = 0x03;
+            let base_g = 0x0D + grad_val;
+            let base_b = 0x08 + grad_val / 2;
+            let base = (0xFF << 24) | (base_r << 16) | (base_g << 8) | base_b;
+
+            let sum = (x + y) % 180;
+            let diff = ((x as i32) - (y as i32)).abs() as usize % 180;
+            if (sum == 0 || diff == 0) && y >= 250 && y <= 1200 {
+                return 0xFF0E3822;
+            }
+            if (sum == 0 && diff == 0) && y >= 250 && y <= 1200 {
+                return SUCCESS_EMERALD;
+            }
+
+            base
+        }
+
+        // Wallpaper 3: Live Kinetic Plasma (Animated procedural energy rings)
+        _ => {
+            let dx = (x as i32) - 360;
+            let dy = (y as i32) - 720;
+            let dist_sq = ((dx * dx + dy * dy) as u32) >> 7;
+            let phase = (dist_sq + state.anim_tick * 6) % 256;
+
+            let r = 10 + (phase / 16);
+            let g = 14 + (phase / 10);
+            let b = 28 + (phase / 6);
+
+            if phase >= 240 {
+                ACCENT_CYAN
+            } else if phase >= 220 {
+                0xFF1E3A5F
+            } else {
+                (0xFF << 24) | (r << 16) | (g << 8) | b
+            }
+        }
+    }
+}
+
 #[inline(never)]
 fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     // 1. Status Bar (y: 0..48)
@@ -454,7 +580,7 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return BG_DARK;
     }
 
-    // 2. Scenic Mountain Wallpaper & Header (y: 48..235)
+    // 2. Wallpaper & Header (y: 48..235)
     if y < 235 {
         // Date & Tabular Clock
         if y >= 64 && y < 80 {
@@ -509,12 +635,7 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             }
         }
 
-        // Mountain gradient background
-        let ridge = 210 + (((x * 13) % 29) as usize);
-        if y >= ridge {
-            return 0xFF141D2D;
-        }
-        return BG_DARK;
+        return get_wallpaper_pixel(x, y, state);
     }
 
     // 3. Interactive Contextual "Today" Card (x: 40..680, y: 240..470)
@@ -708,7 +829,7 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return TEXT_MUTED;
     }
 
-    BG_DARK
+    get_wallpaper_pixel(x, y, state)
 }
 
 #[inline(never)]
@@ -792,7 +913,7 @@ fn get_activity_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
             &b"Work"[..],
             &b"4 apps . 2 tasks"[..],
             ACCENT_SKY,
-            &b"Browser  Terminal  Files"[..],
+            &b"Browser  Files  Calc"[..],
         ),
         (
             360,
@@ -808,7 +929,7 @@ fn get_activity_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
             &b"Research"[..],
             &b"5 apps . 3 files"[..],
             ACCENT_AMBER,
-            &b"Notes  Browser  Terminal"[..],
+            &b"Notes  Browser  Docs"[..],
         ),
         (
             810,
@@ -1208,133 +1329,249 @@ fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             }
         }
         if x >= 590 && x <= 608 && y >= 16 && y <= 32 {
-            if x <= 593 && y >= 28 {
-                return TEXT_PRIMARY;
-            }
-            if x >= 595 && x <= 598 && y >= 24 {
-                return TEXT_PRIMARY;
-            }
-            if x >= 600 && x <= 603 && y >= 20 {
-                return TEXT_PRIMARY;
-            }
-            if x >= 605 && x <= 608 && y >= 16 {
-                return TEXT_PRIMARY;
-            }
+            if x <= 593 && y >= 28 { return TEXT_PRIMARY; }
+            if x >= 595 && x <= 598 && y >= 24 { return TEXT_PRIMARY; }
+            if x >= 600 && x <= 603 && y >= 20 { return TEXT_PRIMARY; }
+            if x >= 605 && x <= 608 && y >= 16 { return TEXT_PRIMARY; }
         }
         if x >= 626 && x <= 644 && y >= 18 && y <= 32 {
             let dx = (x as i32) - 635;
             let dy = (y as i32) - 30;
             let d2 = dx * dx + dy * dy;
-            if (d2 >= 100 && d2 <= 144 && dy <= -2) || (d2 >= 36 && d2 <= 64 && dy <= -1) || d2 <= 9
-            {
+            if (d2 >= 100 && d2 <= 144 && dy <= -2) || (d2 >= 36 && d2 <= 64 && dy <= -1) || d2 <= 9 {
                 return TEXT_PRIMARY;
             }
         }
         if x >= 658 && x <= 686 && y >= 18 && y <= 32 {
-            if x == 658 || x == 684 || y == 18 || y == 32 {
-                return TEXT_PRIMARY;
-            }
-            if x >= 685 && x <= 686 && y >= 22 && y <= 28 {
-                return TEXT_PRIMARY;
-            }
-            if x >= 661 && x <= 680 && y >= 21 && y <= 29 {
-                return SUCCESS_EMERALD;
-            }
+            if x == 658 || x == 684 || y == 18 || y == 32 { return TEXT_PRIMARY; }
+            if x >= 685 && x <= 686 && y >= 22 && y <= 28 { return TEXT_PRIMARY; }
+            if x >= 661 && x <= 680 && y >= 21 && y <= 29 { return SUCCESS_EMERALD; }
         }
         return BG_DARK;
     }
 
-    // 2. Scenic Mountain Atmospheric Backdrop (y: 48..1280)
-    let r1 = 620 + (((x as i32 - 360) * (x as i32 - 360)) / 1400) as usize;
-    let r2 = 780 + (((x as i32 - 180) * (x as i32 - 540)) / 1800).abs() as usize;
-    let r3 = 940 + (((x as i32 - 280) * (x as i32 - 440)) / 1200).abs() as usize;
+    // 2. Sovereign Enclave Pill (y: 70..106, x: 48..440)
+    if y >= 70 && y < 106 && x >= 48 && x < 440 {
+        if y == 70 || y == 105 || x == 48 || x == 439 {
+            return ACCENT_CYAN;
+        }
+        if y >= 80 && y < 96 {
+            if let Some(c) = test_text(x, y, 68, 80, 2, b"INTEROS 2.0  SOVEREIGN", TEXT_PRIMARY) {
+                return c;
+            }
+        }
+        return 0xFF081826;
+    }
 
-    // Date & Tabular Clock Overlay
-    if y >= 160 && y < 176 {
-        if let Some(c) = test_text(x, y, 48, 160, 2, b"Wed, 24 Sep", TEXT_MUTED) {
-            return c;
+    // 3. Distinct Architectural Large Clock Display (y: 125..275)
+    if y >= 125 && y < 275 && x >= 48 && x < 672 {
+        if x >= 48 && x <= 53 && y >= 135 && y <= 235 {
+            return ACCENT_CYAN;
+        }
+        if y >= 135 && y < 183 {
+            if let Some(c) = test_text(x, y, 72, 135, 6, CLOCK_TIME, TEXT_PRIMARY) {
+                return c;
+            }
+        }
+        if y >= 195 && y < 211 {
+            if let Some(c) = test_text(x, y, 72, 195, 2, b"Wednesday, 24 Sep", 0xFF94A3B8) {
+                return c;
+            }
+            if let Some(c) = test_text(x, y, 380, 195, 2, b"24 C  Sunny", 0xFFF59E0B) {
+                return c;
+            }
+        }
+        if y >= 220 && y < 228 {
+            if let Some(c) = test_text(x, y, 72, 220, 1, b"DM-VERITY VERIFIED  ZERO-TRUST MICROKERNEL", 0xFF10B981) {
+                return c;
+            }
         }
     }
-    if y >= 210 && y < 250 {
-        if let Some(c) = test_text(x, y, 48, 210, 5, CLOCK_TIME, TEXT_PRIMARY) {
-            return c;
+
+    // 4. Modular Lockscreen Widgets (y: 285..580)
+    // Widget 1: System Vitals Capsule (x: 48..345, y: 285..465)
+    if x >= 48 && x < 345 && y >= 285 && y < 465 {
+        if y == 285 || y == 464 || x == 48 || x == 344 {
+            return BORDER_SUBTLE;
         }
+        if y >= 305 && y < 321 {
+            if let Some(c) = test_text(x, y, 70, 305, 2, b"Core Vitals", ACCENT_CYAN) {
+                return c;
+            }
+        }
+        if y >= 335 && y < 343 {
+            if let Some(c) = test_text(x, y, 70, 335, 1, b"CPU  2.4 GHz [4 Cores]", TEXT_PRIMARY) {
+                return c;
+            }
+        }
+        if y >= 355 && y < 363 {
+            if let Some(c) = test_text(x, y, 70, 355, 1, b"RAM  1024 MB [38% Used]", TEXT_MUTED) {
+                return c;
+            }
+        }
+        // 4-segment kinetic gauge bar (x: 70..320, y: 375..385)
+        if y >= 375 && y <= 385 && x >= 70 && x <= 320 {
+            let seg = (x - 70) / 64;
+            let within = (x - 70) % 64;
+            if within <= 56 {
+                if seg < 2 {
+                    return 0xFF10B981;
+                } else if seg == 2 {
+                    return 0xFF31C4FF;
+                } else {
+                    return 0xFF1E293B;
+                }
+            }
+        }
+        if y >= 405 && y < 413 {
+            if let Some(c) = test_text(x, y, 70, 405, 1, b"Security: Hardware Root OK", 0xFF10B981) {
+                return c;
+            }
+        }
+        if y >= 425 && y < 433 {
+            if let Some(c) = test_text(x, y, 70, 425, 1, b"IPC Latency: 1.2 us", TEXT_MUTED) {
+                return c;
+            }
+        }
+        return 0xEE0A1220;
     }
 
-    // Mountain Silhouette Layering
-    if y >= r3 && y < 1280 {
-        return 0xFF080B10;
-    } else if y >= r2 && y < 1280 {
-        return 0xFF101726;
-    } else if y >= r1 && y < 1280 {
-        return 0xFF182236;
-    } else if y >= 48 && y < 1280 {
-        let ratio = (y - 48) / 30;
-        let blue = (0x18 + ratio).min(0x28) as u32;
-        return 0xFF0B1000 | blue;
+    // Widget 2: Ambient Horizon & Climate (x: 375..672, y: 285..465)
+    if x >= 375 && x < 672 && y >= 285 && y < 465 {
+        if y == 285 || y == 464 || x == 375 || x == 671 {
+            return BORDER_SUBTLE;
+        }
+        if y >= 305 && y < 321 {
+            if let Some(c) = test_text(x, y, 395, 305, 2, b"Atmosphere", 0xFFF59E0B) {
+                return c;
+            }
+        }
+        if y >= 335 && y < 343 {
+            if let Some(c) = test_text(x, y, 395, 335, 1, b"Weather: 24 C  Sunny", TEXT_PRIMARY) {
+                return c;
+            }
+        }
+        if y >= 355 && y < 363 {
+            if let Some(c) = test_text(x, y, 395, 355, 1, b"Geomagnetic: Kp 1 Quiet", 0xFF10B981) {
+                return c;
+            }
+        }
+        // Solar elevation arc indicator (x: 395..645, y: 375..385)
+        if y >= 375 && y <= 385 && x >= 395 && x <= 645 {
+            let prog = (x - 395) * 100 / 250;
+            if prog <= 65 {
+                return 0xFFF59E0B;
+            } else {
+                return 0xFF1E293B;
+            }
+        }
+        if y >= 405 && y < 413 {
+            if let Some(c) = test_text(x, y, 395, 405, 1, b"Solar Zenith: 42 deg", TEXT_MUTED) {
+                return c;
+            }
+        }
+        if y >= 425 && y < 433 {
+            if let Some(c) = test_text(x, y, 395, 425, 1, b"Sunset in: 4h 18m", TEXT_MUTED) {
+                return c;
+            }
+        }
+        return 0xEE0A1220;
     }
 
-    // 3. Bottom Shortcuts & Unlock Hint (y: 1280..1440)
-    // Flashlight Circular Button at (72, 1330, r: 30)
+    // Widget 3: Kinetic Agenda Capsule (x: 48..672, y: 480..570)
+    if x >= 48 && x < 672 && y >= 480 && y < 570 {
+        if y == 480 || y == 569 || x == 48 || x == 671 {
+            return BORDER_SUBTLE;
+        }
+        if y >= 500 && y < 516 {
+            if let Some(c) = test_text(x, y, 70, 500, 2, b"Next: Capability Engine Review", TEXT_PRIMARY) {
+                return c;
+            }
+        }
+        if y >= 530 && y < 538 {
+            if let Some(c) = test_text(x, y, 70, 530, 1, b"10:30 AM  Conf Room 4B  3 Tasks In Sandbox", TEXT_MUTED) {
+                return c;
+            }
+        }
+        return 0xEE0A1220;
+    }
+
+    // 5. Interactive Wallpaper Switcher Card (x: 80..640, y: 1120..1190)
+    if x >= 80 && x < 640 && y >= 1120 && y < 1190 {
+        if y == 1120 || y == 1189 || x == 80 || x == 639 {
+            return ACCENT_CYAN;
+        }
+        if y >= 1135 && y < 1151 {
+            let label = match state.wallpaper_id {
+                0 => &b"THEME: QUANTUM HORIZON [TAP TO CYCLE]"[..],
+                1 => &b"THEME: SOLAR CORONA   [TAP TO CYCLE]"[..],
+                2 => &b"THEME: CYBER MATRIX   [TAP TO CYCLE]"[..],
+                _ => &b"THEME: LIVE PLASMA    [TAP TO CYCLE]"[..],
+            };
+            if let Some(c) = test_text(x, y, 105, 1135, 2, label, ACCENT_CYAN) {
+                return c;
+            }
+        }
+        if y >= 1160 && y < 1168 {
+            if let Some(c) = test_text(x, y, 160, 1160, 1, b"Procedural bare-metal graphics engine", TEXT_MUTED) {
+                return c;
+            }
+        }
+        return 0xEE0A1628;
+    }
+
+    // 6. Flashlight Circular Button at (72, 1330, r: 35)
     let f_dx = (x as i32) - 72;
     let f_dy = (y as i32) - 1330;
     let f_d2 = f_dx * f_dx + f_dy * f_dy;
-    if f_d2 <= 900 {
-        if f_d2 >= 841 {
-            return BORDER_SUBTLE;
-        }
+    if f_d2 <= 1225 {
+        if f_d2 >= 1156 { return BORDER_SUBTLE; }
         if y >= 1324 && y < 1332 {
-            let label = if state.flashlight_on {
-                &b"ON"[..]
-            } else {
-                &b"LGT"[..]
-            };
-            let fg = if state.flashlight_on {
-                TEXT_DARK
-            } else {
-                TEXT_PRIMARY
-            };
+            let label = if state.flashlight_on { &b"ON"[..] } else { &b"LGT"[..] };
+            let fg = if state.flashlight_on { TEXT_DARK } else { TEXT_PRIMARY };
             let ox = if state.flashlight_on { 64 } else { 60 };
             if let Some(c) = test_text(x, y, ox, 1324, 1, label, fg) {
                 return c;
             }
         }
-        return if state.flashlight_on {
-            ACCENT_AMBER
-        } else {
-            SURFACE_RAISED
-        };
+        return if state.flashlight_on { ACCENT_AMBER } else { 0xEE142032 };
     }
 
-    // Camera Circular Button at (648, 1330, r: 30)
+    // Camera Circular Button at (648, 1330, r: 35)
     let c_dx = (x as i32) - 648;
     let c_dy = (y as i32) - 1330;
     let c_d2 = c_dx * c_dx + c_dy * c_dy;
-    if c_d2 <= 900 {
-        if c_d2 >= 841 {
-            return BORDER_SUBTLE;
-        }
+    if c_d2 <= 1225 {
+        if c_d2 >= 1156 { return BORDER_SUBTLE; }
         if y >= 1324 && y < 1332 {
             if let Some(c) = test_text(x, y, 636, 1324, 1, b"CAM", TEXT_PRIMARY) {
                 return c;
             }
         }
-        return SURFACE_RAISED;
+        return 0xEE142032;
     }
 
-    // Centered "Swipe up to unlock" Hint
-    if y >= 1374 && y < 1390 {
-        if let Some(c) = test_text(x, y, 208, 1374, 2, b"Swipe up to unlock", TEXT_MUTED) {
-            return c;
+    // 7. Kinetic Unlock Affordance (x: 200..520, y: 1330..1390)
+    if x >= 200 && x < 520 && y >= 1330 && y < 1390 {
+        if y >= 1340 && y < 1356 {
+            if let Some(c) = test_text(x, y, 310, 1340, 2, b"^ ^ ^", ACCENT_CYAN) {
+                return c;
+            }
+        }
+        if y >= 1365 && y < 1381 {
+            if let Some(c) = test_text(x, y, 240, 1365, 2, b"SWIPE UP TO UNLOCK", TEXT_PRIMARY) {
+                return c;
+            }
         }
     }
 
-    // Home Gesture Indicator Pill
+    // Home Gesture Indicator Pill at (x: 260..460, y: 1418..1424)
     if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
         return TEXT_MUTED;
     }
 
-    0xFF080B10
+    // 8. Foundational Wallpaper Backdrop
+    get_wallpaper_pixel(x, y, state)
 }
 
 #[inline(never)]
@@ -1562,7 +1799,7 @@ fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     // 4. 12-App 3-Column x 4-Row Grid matching Reference North Star (y: 185..1080)
     // Row 0: Browser, Mail, Calendar
     // Row 1: Camera, Gallery, Files
-    // Row 2: Notes, Music, Terminal
+    // Row 2: Notes, Music, Calculator
     // Row 3: Maps, Contacts, Settings
     let app_spec: [(&[u8], &[u8], u32); 12] = [
         (b"WWW", b"Browser", 0xFF31C4FF),
@@ -1573,7 +1810,7 @@ fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         (b"DIR", b"Files", 0xFF06B6D4),
         (b"NOT", b"Notes", 0xFFA78BFA),
         (b"MUS", b"Music", 0xFF10B981),
-        (b"CLI", b"Terminal", 0xFF818CF8),
+        (b"+-=", b"Calculator", 0xFFF59E0B),
         (b"MAP", b"Maps", 0xFF34D399),
         (b"CNT", b"Contacts", 0xFFF43F5E),
         (b"SET", b"Settings", 0xFF94A3B8),
@@ -1952,7 +2189,7 @@ fn resolve_app_in_drawer<'a>(_state: &'a LauncherState, x: usize, y: usize) -> O
         (1, 2) => Some("org.interos.file_manager"),
         (2, 0) => Some("org.interos.vault"),
         (2, 1) => Some("org.interos.music"),
-        (2, 2) => Some("org.interos.terminal"),
+        (2, 2) => Some("org.interos.calculator"),
         (3, 0) => Some("org.interos.sensor_dashboard"),
         (3, 1) => Some("org.interos.dialer"),
         (3, 2) => Some("org.interos.settings"),
@@ -1960,7 +2197,7 @@ fn resolve_app_in_drawer<'a>(_state: &'a LauncherState, x: usize, y: usize) -> O
     }
 }
 
-fn get_live_widgets_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
+fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     // 1. Status Bar (y: 0..48)
     if y < 48 {
         if y == 47 {
@@ -2249,7 +2486,91 @@ fn get_live_widgets_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
         return SURFACE_RAISED;
     }
 
-    // 7. Home Gesture Pill (x: 260..460, y: 1418..1424)
+    // 7. Personalization & Wallpaper Switcher Card (x: 40..680, y: 865..1100)
+    if y >= 865 && y < 1100 && x >= 40 && x < 680 {
+        if y == 865 || y == 1099 || x == 40 || x == 679 {
+            return BORDER_SUBTLE;
+        }
+        if y >= 885 && y < 901 {
+            if let Some(c) = test_text(x, y, 65, 885, 2, b"Wallpapers & Procedural Themes", ACCENT_CYAN) {
+                return c;
+            }
+        }
+        if y >= 910 && y < 918 {
+            if let Some(c) = test_text(x, y, 65, 910, 1, b"Tap any theme to apply across system", TEXT_MUTED) {
+                return c;
+            }
+        }
+
+        // 4 Theme Selection Buttons:
+        // [1. Quantum] (x: 65..335, y: 935..1005)
+        if x >= 65 && x < 335 && y >= 935 && y < 1005 {
+            let is_sel = state.wallpaper_id == 0;
+            if y == 935 || y == 1004 || x == 65 || x == 334 {
+                return if is_sel { ACCENT_CYAN } else { BORDER_SUBTLE };
+            }
+            if y >= 955 && y < 971 {
+                let col = if is_sel { ACCENT_CYAN } else { TEXT_PRIMARY };
+                if let Some(c) = test_text(x, y, 85, 955, 2, b"1. Quantum", col) { return c; }
+            }
+            if y >= 980 && y < 988 {
+                if let Some(c) = test_text(x, y, 85, 980, 1, b"Cosmic Orbital Arcs", TEXT_MUTED) { return c; }
+            }
+            return if is_sel { 0xFF0D253A } else { SURFACE_DARK };
+        }
+
+        // [2. Solar Corona] (x: 375..645, y: 935..1005)
+        if x >= 375 && x < 645 && y >= 935 && y < 1005 {
+            let is_sel = state.wallpaper_id == 1;
+            if y == 935 || y == 1004 || x == 375 || x == 644 {
+                return if is_sel { ACCENT_AMBER } else { BORDER_SUBTLE };
+            }
+            if y >= 955 && y < 971 {
+                let col = if is_sel { ACCENT_AMBER } else { TEXT_PRIMARY };
+                if let Some(c) = test_text(x, y, 395, 955, 2, b"2. Solar Corona", col) { return c; }
+            }
+            if y >= 980 && y < 988 {
+                if let Some(c) = test_text(x, y, 395, 980, 1, b"Amber Flare Radiance", TEXT_MUTED) { return c; }
+            }
+            return if is_sel { 0xFF28180A } else { SURFACE_DARK };
+        }
+
+        // [3. Cyber Matrix] (x: 65..335, y: 1020..1090)
+        if x >= 65 && x < 335 && y >= 1020 && y < 1090 {
+            let is_sel = state.wallpaper_id == 2;
+            if y == 1020 || y == 1089 || x == 65 || x == 334 {
+                return if is_sel { SUCCESS_EMERALD } else { BORDER_SUBTLE };
+            }
+            if y >= 1040 && y < 1056 {
+                let col = if is_sel { SUCCESS_EMERALD } else { TEXT_PRIMARY };
+                if let Some(c) = test_text(x, y, 85, 1040, 2, b"3. Cyber Matrix", col) { return c; }
+            }
+            if y >= 1065 && y < 1073 {
+                if let Some(c) = test_text(x, y, 85, 1065, 1, b"Tactical Bus Grid", TEXT_MUTED) { return c; }
+            }
+            return if is_sel { 0xFF0A2416 } else { SURFACE_DARK };
+        }
+
+        // [4. Live Plasma] (x: 375..645, y: 1020..1090)
+        if x >= 375 && x < 645 && y >= 1020 && y < 1090 {
+            let is_sel = state.wallpaper_id == 3;
+            if y == 1020 || y == 1089 || x == 375 || x == 644 {
+                return if is_sel { 0xFF8A2BE2 } else { BORDER_SUBTLE };
+            }
+            if y >= 1040 && y < 1056 {
+                let col = if is_sel { 0xFFB388FF } else { TEXT_PRIMARY };
+                if let Some(c) = test_text(x, y, 395, 1040, 2, b"4. Live Plasma", col) { return c; }
+            }
+            if y >= 1065 && y < 1073 {
+                if let Some(c) = test_text(x, y, 395, 1065, 1, b"Kinetic Animated Wave", TEXT_MUTED) { return c; }
+            }
+            return if is_sel { 0xFF220D38 } else { SURFACE_DARK };
+        }
+
+        return SURFACE_RAISED;
+    }
+
+    // 8. Home Gesture Pill (x: 260..460, y: 1418..1424)
     if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
         return TEXT_MUTED;
     }
@@ -2411,6 +2732,7 @@ fn resolve_app_at_touch<'a>(_state: &'a LauncherState, x: u32, y: u32) -> Option
     None
 }
 
+#[no_mangle]
 pub extern "C" fn _start() -> ! {
     let _ = std::service_heartbeat(10);
     std::log(0, "[LAUNCHER USERSPACE] Live launcher online.").ok();
@@ -2481,21 +2803,31 @@ pub extern "C" fn _start() -> ! {
             }
 
             if state.active_child.is_none()
-                && state.current_view == ViewMode::HomeScreen
                 && (events & std::EVENT_TIMER_TICK) != 0
             {
                 refresh_ticks += 1;
-                if refresh_ticks % 10 == 0 {
-                    let previous_count = state.app_count;
-                    refresh_package_catalog(&mut state);
-                    refresh_runtime_recents(&mut state);
-                    if previous_count != state.app_count
-                        && state.current_view == ViewMode::AppDrawer
-                    {
+                if state.wallpaper_id == 3
+                    && (state.current_view == ViewMode::HomeScreen
+                        || state.current_view == ViewMode::LockScreen)
+                {
+                    state.anim_tick = state.anim_tick.wrapping_add(1);
+                    if refresh_ticks % 2 == 0 {
                         render_view(surface, &state);
+                        let _ = std::surface_flip(4);
                     }
-                    render_header(surface);
-                    let _ = std::surface_flip(4);
+                } else if state.current_view == ViewMode::HomeScreen {
+                    if refresh_ticks % 10 == 0 {
+                        let previous_count = state.app_count;
+                        refresh_package_catalog(&mut state);
+                        refresh_runtime_recents(&mut state);
+                        if previous_count != state.app_count
+                            && state.current_view == ViewMode::AppDrawer
+                        {
+                            render_view(surface, &state);
+                        }
+                        render_header(surface);
+                        let _ = std::surface_flip(4);
+                    }
                 }
             }
 
@@ -2836,7 +3168,7 @@ pub extern "C" fn _start() -> ! {
                         }
                         ViewMode::LockScreen => {
                             // 1. Vertical swipe up to unlock
-                            if input.kind == 4 && input.dy <= -60 {
+                            if input.kind == 4 && input.dy <= -25 {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
                                 let _ = std::surface_flip(4);
@@ -2857,6 +3189,25 @@ pub extern "C" fn _start() -> ! {
                             if input.kind == 1 {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
+
+                                // Wallpaper cycle pill (x: 80..640, y: 1120..1195)
+                                if (1120..=1195).contains(&y) && (80..640).contains(&x) {
+                                    state.wallpaper_id = (state.wallpaper_id + 1) % 4;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Wallpaper cycled from lock screen.")
+                                        .ok();
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
 
                                 // Flashlight circle button at (72, 1330, r: 35)
                                 let f_dx = (x as i32) - 72;
@@ -2896,12 +3247,12 @@ pub extern "C" fn _start() -> ! {
                                     }
                                 }
 
-                                // Bottom home bar or hint area tap unlocks
-                                if y >= 1370 {
+                                // Tap anywhere in middle or bottom to unlock
+                                if y >= 250 {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Device unlocked via bottom tap.").ok();
+                                    std::log(0, "[LAUNCHER] Device unlocked via tap.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -3202,10 +3553,10 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
-                                // Card 0: Terminal
+                                // Card 0: Messages
                                 if (205..310).contains(&y) && (40..680).contains(&x) {
-                                    state.push_recent("org.interos.terminal");
-                                    if let Ok(task_id) = std::app_launch("org.interos.terminal") {
+                                    state.push_recent("org.interos.messages");
+                                    if let Ok(task_id) = std::app_launch("org.interos.messages") {
                                         state.active_child = Some(task_id);
                                         state.current_view = ViewMode::HomeScreen;
                                         let mut drain = std::InputEvent {
@@ -3322,8 +3673,8 @@ pub extern "C" fn _start() -> ! {
                                 }
                                 // Build status widget (135..315, 375..680)
                                 if (135..315).contains(&y) && (375..680).contains(&x) {
-                                    state.push_recent("org.interos.terminal");
-                                    if let Ok(task_id) = std::app_launch("org.interos.terminal") {
+                                    state.push_recent("org.interos.calculator");
+                                    if let Ok(task_id) = std::app_launch("org.interos.calculator") {
                                         state.active_child = Some(task_id);
                                         state.current_view = ViewMode::HomeScreen;
                                         let mut drain = std::InputEvent {
@@ -3391,6 +3742,76 @@ pub extern "C" fn _start() -> ! {
                                         while std::input_event_poll(&mut drain).is_ok() {}
                                         break;
                                     }
+                                }
+
+                                // Personalization & Wallpaper Switcher Theme Buttons:
+                                // [1. Quantum] (65..335, 935..1005)
+                                if (935..1005).contains(&y) && (65..335).contains(&x) {
+                                    state.wallpaper_id = 0;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Wallpaper theme changed to Quantum Horizon.").ok();
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
+                                // [2. Solar Corona] (375..645, 935..1005)
+                                if (935..1005).contains(&y) && (375..645).contains(&x) {
+                                    state.wallpaper_id = 1;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Wallpaper theme changed to Solar Corona.").ok();
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
+                                // [3. Cyber Matrix] (65..335, 1020..1090)
+                                if (1020..1090).contains(&y) && (65..335).contains(&x) {
+                                    state.wallpaper_id = 2;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Wallpaper theme changed to Cyber Matrix.").ok();
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
+                                // [4. Live Plasma] (375..645, 1020..1090)
+                                if (1020..1090).contains(&y) && (375..645).contains(&x) {
+                                    state.wallpaper_id = 3;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Wallpaper theme changed to Live Plasma.").ok();
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
                                 }
                             }
                         }
@@ -3511,6 +3932,24 @@ pub extern "C" fn _start() -> ! {
                             if input.kind == 1 {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
+
+                                // Weather / Live Widget card tap on HomeScreen opens Live Widgets
+                                if (64..235).contains(&y) && (460..680).contains(&x) {
+                                    state.current_view = ViewMode::LiveWidgets;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Live Widgets opened via top weather card tap.").ok();
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
 
                                 // Tapping bottom home pill opens Activity Space
                                 if (240..=480).contains(&x) && y >= 1400 {

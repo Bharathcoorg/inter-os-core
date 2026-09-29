@@ -341,7 +341,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function updateHardwareProfilerUI(data) {
     if (!data) return;
     const isAlive = !!data.qemu_alive;
-    updateDeviceDisplay(isAlive);
+    updateDeviceDisplay(isAlive, !!data.launcher_ready);
 
     // 1. Header Global Status (Simple & Clean: Online vs Standby)
     if (qemuGlobalText) {
@@ -552,7 +552,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  function updateDeviceDisplay(isAlive) {
+  let hasLauncherPresented = false;
+
+  function updateDeviceDisplay(isAlive, launcherReady = false) {
     if (isBooting) {
       if (screenBootSplash) screenBootSplash.style.display = 'flex';
       if (screenLiveScanout) screenLiveScanout.style.display = 'none';
@@ -560,12 +562,24 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
+    if (launcherReady) {
+      hasLauncherPresented = true;
+    }
+
     if (isAlive) {
-      if (screenBootSplash) screenBootSplash.style.display = 'none';
-      if (screenStandby) screenStandby.style.display = 'none';
-      if (screenLiveScanout) screenLiveScanout.style.display = 'flex';
-      startScanoutStream();
+      if (launcherReady || hasLauncherPresented) {
+        if (screenBootSplash) screenBootSplash.style.display = 'none';
+        if (screenStandby) screenStandby.style.display = 'none';
+        if (screenLiveScanout) screenLiveScanout.style.display = 'flex';
+        startScanoutStream();
+      } else {
+        // Still booting early BIOS/kernel: keep clean bootloader screen active
+        if (screenBootSplash) screenBootSplash.style.display = 'flex';
+        if (screenLiveScanout) screenLiveScanout.style.display = 'none';
+        if (screenStandby) screenStandby.style.display = 'none';
+      }
     } else {
+      hasLauncherPresented = false;
       stopScanoutStream();
       if (screenBootSplash) screenBootSplash.style.display = 'none';
       if (screenLiveScanout) screenLiveScanout.style.display = 'none';
@@ -726,12 +740,42 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
+  // =========================================================================
+  // Physical Side Buttons & Android Emulator Hardware Toolbar Controls
+  // =========================================================================
+  let bootCheckInterval = null;
+
+  async function checkLauncherBootReady() {
+    try {
+      const resp = await fetch('/api/qemu/status');
+      const data = await resp.json();
+      if (data.launcher_ready) {
+        if (bootCheckInterval) {
+          clearInterval(bootCheckInterval);
+          bootCheckInterval = null;
+        }
+        isBooting = false;
+        refreshScanoutFrame();
+        if (screenBootSplash) screenBootSplash.style.display = 'none';
+        if (screenStandby) screenStandby.style.display = 'none';
+        if (screenLiveScanout) screenLiveScanout.style.display = 'flex';
+        startScanoutStream();
+        logConsole('ok', '[LAUNCHER] Pristine Lock Screen scanout ready and presented.');
+        showToast('InterOS Ready • Swipe up to unlock');
+      }
+    } catch (_) {}
+  }
+
   // Power On / Boot Microkernel
   async function bootMicrokernel() {
     isBooting = true;
-    updateDeviceDisplay(false);
-    logConsole('warn', '[BOOT] Launching QEMU InterOS microkernel instance...');
-    showToast('Booting InterOS Microkernel...');
+    stopScanoutStream();
+    if (screenBootSplash) screenBootSplash.style.display = 'flex';
+    if (screenLiveScanout) screenLiveScanout.style.display = 'none';
+    if (screenStandby) screenStandby.style.display = 'none';
+
+    logConsole('warn', '[BOOT] Booting InterOS Sovereign Microkernel...');
+    showToast('Booting InterOS...');
 
     try {
       const resp = await fetch('/api/qemu/launch', {
@@ -749,16 +793,23 @@ document.addEventListener('DOMContentLoaded', () => {
       logConsole('err', `[BOOT_ERROR] ${e.message}`);
     }
 
+    if (bootCheckInterval) clearInterval(bootCheckInterval);
+    bootCheckInterval = setInterval(checkLauncherBootReady, 400);
+
     setTimeout(() => {
-      isBooting = false;
-      fetchHardwareTelemetry();
-    }, 3500);
+      if (isBooting) {
+        isBooting = false;
+        if (bootCheckInterval) clearInterval(bootCheckInterval);
+        refreshScanoutFrame();
+        if (screenBootSplash) screenBootSplash.style.display = 'none';
+        if (screenLiveScanout) screenLiveScanout.style.display = 'flex';
+        startScanoutStream();
+      }
+    }, 45000);
   }
 
-  btnBootMicrokernel?.addEventListener('click', bootMicrokernel);
-
-  // Hardware Power Button on Chassis
-  hwBtnPower?.addEventListener('click', async () => {
+  // Hardware Power Button Action
+  function handlePowerAction() {
     const isAlive = qemuGlobalStatus?.classList.contains('online');
     if (!isAlive) {
       bootMicrokernel();
@@ -769,30 +820,22 @@ document.addEventListener('DOMContentLoaded', () => {
         y: 15
       });
     }
-  });
+  }
 
-  // Hardware Volume Buttons
-  hwBtnVolup?.addEventListener('click', async () => {
-    try {
-      await fetch('/api/hardware/volume', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ delta: 5 })
-      });
-    } catch (_) {}
-    showToast('Volume Up');
-  });
+  hwBtnPower?.addEventListener('click', handlePowerAction);
+  emuBtnPower?.addEventListener('click', handlePowerAction);
 
-  hwBtnVoldown?.addEventListener('click', async () => {
-    try {
-      await fetch('/api/hardware/volume', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ delta: -5 })
-      });
-    } catch (_) {}
-    showToast('Volume Down');
-  });
+  // Hardware Volume Buttons Action
+  function handleVolume(delta) {
+    state.volume = Math.max(0, Math.min(100, state.volume + delta));
+    showToast(`Volume: ${state.volume}%`);
+    playBeep(delta > 0 ? 800 : 500, 0.04, 'sine');
+  }
+
+  hwBtnVolup?.addEventListener('click', () => handleVolume(5));
+  emuBtnVolup?.addEventListener('click', () => handleVolume(5));
+  hwBtnVoldown?.addEventListener('click', () => handleVolume(-5));
+  emuBtnVoldown?.addEventListener('click', () => handleVolume(-5));
 
   // Screenshot Capture Button
   emuBtnScreenshot?.addEventListener('click', () => {
@@ -800,8 +843,76 @@ document.addEventListener('DOMContentLoaded', () => {
     link.href = `/api/screen/frame?full=1&t=${Date.now()}`;
     link.download = `interos_microkernel_scanout_${Date.now()}.png`;
     link.click();
+    playShutterSound();
     logConsole('ok', '[SCREENSHOT] Authentic microkernel scanout captured and exported.');
-    showToast('Microkernel Scanout Screenshot Saved');
+    showToast('Scanout Screenshot Saved');
+  });
+
+  // Rotate Screen Button (Toggle Portrait Crop vs Full 720p)
+  emuBtnRotate?.addEventListener('click', () => {
+    setScanoutMode(cropMode === 'portrait' ? 'full' : 'portrait');
+    showToast(`Screen mode: ${cropMode === 'portrait' ? 'Portrait Phone' : 'Full Scanout'}`);
+  });
+
+  // Warm Reboot Microkernel Button
+  emuBtnReboot?.addEventListener('click', async () => {
+    isBooting = true;
+    stopScanoutStream();
+    if (screenBootSplash) screenBootSplash.style.display = 'flex';
+    if (screenLiveScanout) screenLiveScanout.style.display = 'none';
+    if (screenStandby) screenStandby.style.display = 'none';
+    logConsole('warn', '[REBOOT] Warm rebooting microkernel...');
+    showToast('Rebooting InterOS...');
+
+    try {
+      await fetch('/api/qemu/reboot', { method: 'POST' });
+    } catch (_) {}
+
+    if (bootCheckInterval) clearInterval(bootCheckInterval);
+    bootCheckInterval = setInterval(checkLauncherBootReady, 400);
+    setTimeout(() => {
+      if (isBooting) {
+        isBooting = false;
+        if (bootCheckInterval) clearInterval(bootCheckInterval);
+        refreshScanoutFrame();
+        if (screenBootSplash) screenBootSplash.style.display = 'none';
+        if (screenLiveScanout) screenLiveScanout.style.display = 'flex';
+        startScanoutStream();
+      }
+    }, 45000);
+  });
+
+  // Back Button (◁)
+  emuBtnBack?.addEventListener('click', () => {
+    dispatchHardwareGesture('Back (◁)', {
+      action: 'swipe',
+      x: 790,
+      y: 360,
+      x2: 480,
+      y2: 360,
+      steps: 6
+    });
+  });
+
+  // Home Button (○)
+  emuBtnHome?.addEventListener('click', () => {
+    dispatchHardwareGesture('Home (○)', {
+      action: 'tap',
+      x: 640,
+      y: 710
+    });
+  });
+
+  // Recents / App Switcher (▢) -> Activity Space
+  emuBtnRecents?.addEventListener('click', () => {
+    dispatchHardwareGesture('Recents / Activity Space (▢)', {
+      action: 'swipe',
+      x: 640,
+      y: 670,
+      x2: 640,
+      y2: 280,
+      steps: 8
+    });
   });
 
 

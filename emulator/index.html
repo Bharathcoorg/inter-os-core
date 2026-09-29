@@ -176,78 +176,36 @@
                     </div>
                   </div>
 
-                  <div class="aod-bottom-action">
-                    <button class="btn-consumer-wake" id="btn-boot-microkernel" title="Wake / Power On Smartphone">
-                      <div class="wake-icon-ring">
-                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18.36 6.64a9 9 0 1 1-12.73 0M12 2v10"/></svg>
-                      </div>
-                      <span class="wake-label">Tap to Power On</span>
-                    </button>
-                    <div class="aod-swipe-hint">
-                      <span>Swipe up or press Power button</span>
+                  </div>
+                </div>
+
+                <!-- Screen Overlay: Bootloader Splash Screen (Pure InterOS Branding & Quantum Ring Animation) -->
+                <div class="screen-boot-splash" id="screen-boot-splash" style="display: none;">
+                  <div class="boot-branding-box">
+                    <div class="boot-logo-wrapper">
+                      <div class="boot-quantum-ring ring-outer"></div>
+                      <div class="boot-quantum-ring ring-mid"></div>
+                      <div class="boot-core-glow"></div>
+                      <svg class="boot-logo-svg" viewBox="0 0 48 48" fill="none">
+                        <circle cx="24" cy="24" r="20" stroke="#FFFFFF" stroke-width="2"/>
+                        <circle cx="24" cy="24" r="10" stroke="rgba(255, 255, 255, 0.4)" stroke-width="1.5"/>
+                        <circle cx="24" cy="24" r="4" fill="#FFFFFF"/>
+                      </svg>
                     </div>
+                    <h1 class="boot-title">InterOS</h1>
                   </div>
                 </div>
-              </div>
 
-              <!-- Screen Overlay: Bootloader Splash Screen -->
-              <div class="screen-boot-splash" id="screen-boot-splash" style="display: none;">
-                <div class="boot-branding-box">
-                  <div class="boot-logo-wrapper">
-                    <div class="boot-quantum-ring ring-outer"></div>
-                    <div class="boot-quantum-ring ring-mid"></div>
-                    <div class="boot-core-glow"></div>
-                    <svg class="boot-logo-svg" viewBox="0 0 48 48" fill="none">
-                      <circle cx="24" cy="24" r="20" stroke="#FFFFFF" stroke-width="2"/>
-                      <circle cx="24" cy="24" r="10" stroke="rgba(255, 255, 255, 0.4)" stroke-width="1.5"/>
-                      <circle cx="24" cy="24" r="4" fill="#FFFFFF"/>
-                    </svg>
-                  </div>
-                  <h1 class="boot-title">InterOS</h1>
-                  <div class="boot-subtitle">Starting Smartphone...</div>
+                <!-- Integrated Bottom Gesture Pill Bar -->
+                <div class="phone-gesture-bar-pill" id="phone-gesture-bar-pill" title="Tap: Home • Swipe Up: Activity Space">
+                  <div class="gesture-pill-handle"></div>
                 </div>
 
-                <div class="boot-minimal-indicator">
-                  <div class="boot-progress-bar">
-                    <div class="boot-progress-fill" id="boot-progress-fill"></div>
-                  </div>
-                </div>
+                <!-- Screen Overlay: Floating Glass Toast Capsule -->
+                <div class="interos-toast-container" id="interos-toast-container" aria-live="polite"></div>
               </div>
-
-              <!-- Integrated Bottom Gesture Pill Bar -->
-              <div class="phone-gesture-bar-pill" id="phone-gesture-bar-pill" title="Tap: Home • Swipe Up: Activity Space">
-                <div class="gesture-pill-handle"></div>
-              </div>
-
-              <!-- Screen Overlay: Floating Glass Toast Capsule -->
-              <div class="interos-toast-container" id="interos-toast-container" aria-live="polite"></div>
             </div>
           </div>
-
-          <!-- Bottom Navigation Gestures (Cleanly stacked beneath phone) -->
-          <div class="device-gesture-guide" id="device-gesture-guide">
-            <button class="gesture-btn" id="btn-gesture-activity" title="Activity Space / Overview">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="18 15 12 9 6 15"/></svg>
-              <span>Activity</span>
-            </button>
-            <button class="gesture-btn" id="btn-gesture-back" title="Back">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
-              <span>Back</span>
-            </button>
-            <button class="gesture-btn active" id="btn-gesture-home" title="Home">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="7"/></svg>
-              <span>Home</span>
-            </button>
-            <button class="gesture-btn" id="btn-gesture-quick" title="Quick Controls">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
-              <span>Controls</span>
-            </button>
-            <button class="gesture-btn" id="btn-gesture-system" title="System Settings">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-              <span>Settings</span>
-            </button>
-          </div>
-        </div>
 
         <!-- Android Emulator Quick-Action Floating Hardware Toolbar -->
         <div class="emulator-side-toolbar" id="emulator-side-toolbar">

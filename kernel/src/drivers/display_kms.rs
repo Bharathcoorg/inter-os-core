@@ -343,8 +343,15 @@ impl DrmKmsController {
         let sw = self.scanout_width as i32;
         let sh = self.scanout_height as i32;
 
+        let has_mobile_portrait = self.surfaces.iter().any(|s| s.visible && s.width == 720 && s.height == 1440);
+
         for surface in self.surfaces.iter_mut() {
             if !surface.visible || surface.opacity == 0 {
+                continue;
+            }
+
+            if has_mobile_portrait && surface.height == 96 {
+                // Do not overlay legacy desktop banner on mobile portrait phone canvas
                 continue;
             }
 
@@ -358,6 +365,25 @@ impl DrmKmsController {
             let y0 = sy.max(0);
             let x1 = sx.saturating_add(s_w).min(sw);
             let y1 = sy.saturating_add(s_h).min(sh);
+
+            if s_w == 720 && s_h == 1440 && sw == 1280 && sh == 720 {
+                let dst_x_start = 460usize;
+                let dst_x_end = 820usize;
+                let dst_y_end = 720usize;
+                for y in 0..dst_y_end {
+                    let dst_y_offset = y * (self.scanout_width as usize);
+                    let src_y = y * 2;
+                    let src_y_offset = src_y * (surface.width as usize);
+                    for x in dst_x_start..dst_x_end {
+                        let dst_idx = dst_y_offset + x;
+                        let src_x = (x - dst_x_start) * 2;
+                        let src_idx = src_y_offset + src_x;
+                        self.back_buffer[dst_idx] = surface.pixels[src_idx];
+                    }
+                }
+                surface.dirty = false;
+                continue;
+            }
 
             if x0 >= x1 || y0 >= y1 {
                 continue;

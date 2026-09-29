@@ -38,6 +38,29 @@ serial_lines = []
 serial_socket_conn = None
 serial_socket_lock = threading.Lock()
 telemetry_lock = threading.Lock()
+launcher_has_booted = False
+
+
+def check_launcher_ready():
+    global launcher_has_booted
+    if launcher_has_booted:
+        return True
+    with telemetry_lock:
+        if any("[LAUNCHER]" in line for line in serial_lines):
+            launcher_has_booted = True
+            return True
+    # Disk boot log check if serial_lines memory buffer was rotated
+    boot_log = os.path.join(os.path.dirname(DIRECTORY), "target", "x86_boot.log")
+    if os.path.exists(boot_log):
+        try:
+            with open(boot_log, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+                if "[LAUNCHER] Step 5" in content or "[LAUNCHER]" in content:
+                    launcher_has_booted = True
+                    return True
+        except Exception:
+            pass
+    return False
 
 # Guest package and filesystem state are authoritative. Device Studio does not
 # maintain a host-side filesystem shadow of guest state.
@@ -586,7 +609,7 @@ def capture_qemu_screen_frame(full_scanout=False):
     os.makedirs(dump_dir, exist_ok=True)
     ppm_path = os.path.join(dump_dir, "live_scanout.ppm").replace("\\", "/")
 
-    ok, resp = send_qemu_monitor_cmd(f'screendump "{ppm_path}"')
+    ok, resp = send_qemu_monitor_cmd(f'screendump {ppm_path}')
     if not ok:
         return None, f"QEMU monitor screendump failed: {resp}"
 
@@ -620,7 +643,8 @@ def capture_qemu_screen_frame(full_scanout=False):
 
 def stop_qemu_backend():
     """Stops any running QEMU and websockify processes managed by this instance."""
-    global qemu_subproc, ws_subproc
+    global qemu_subproc, ws_subproc, launcher_has_booted
+    launcher_has_booted = False
     if ws_subproc:
         try:
             ws_subproc.terminate()
@@ -685,7 +709,7 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
         "-no-reboot"
     ]
     if arch == "x86_64":
-        cmd.extend(["-machine", "q35", "-drive", f"format=raw,file={img_path}"])
+        cmd.extend(["-drive", f"format=raw,file={img_path}"])
     elif arch == "aarch64":
         cmd.extend(["-machine", "virt", "-cpu", "cortex-a53", "-kernel", img_path])
     elif arch == "riscv64":
@@ -1145,16 +1169,18 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(response.encode())
             return
 
-        if self.path == '/api/status':
+        if self.path in ('/api/status', '/api/qemu/status'):
             t = query_qemu_monitor()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
+            launcher_ready = check_launcher_ready()
             response = json.dumps({
                 'qemu': t["qemu_alive"],
                 'status': t["status"],
                 'mode': t.get("mode", "standby"),
+                'launcher_ready': launcher_ready,
                 'active_profile': active_profile_key,
                 'pid': qemu_subproc.pid if qemu_subproc else None
             })
@@ -1174,7 +1200,8 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if self.path == '/api/qemu/telemetry':
-            t = query_qemu_monitor()
+            t = query_qemu_monitor().copy()
+            t["launcher_ready"] = check_launcher_ready()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
@@ -1995,6 +2022,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 }).encode())
                 return
 
+            serial_lines.clear()
             serial_lines.append("[HARDWARE_RESET] Dispatched hardware reset pin (system_reset) to QEMU microkernel.")
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
