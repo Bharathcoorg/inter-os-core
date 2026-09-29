@@ -34,7 +34,7 @@ See [Platform Reality Contract](docs/PLATFORM_REALITY_CONTRACT.md) and run `pyth
 
 The syscall userspace-memory boundary is defined in [Syscall Pointer Safety](docs/SYSCALL_POINTER_SAFETY.md), including page mapping, permissions, ownership, alignment, overflow, and raw-pointer elimination rules.
 
-The end-to-end runtime lifecycle is defined in [Runtime Stability](docs/PHASE5_RUNTIME_STABILITY.md), covering task teardown, event/input fan-out, process accounting, surface bounds, and launcher recovery.
+The end-to-end runtime lifecycle is covered by the repository lifecycle and recovery test suites, including task teardown, event/input fan-out, process accounting, surface bounds, launcher recovery, and repeated reboot validation.
 
 The userspace hardware-service boundary is defined in [System Services](docs/SYSTEM_SERVICES.md), covering isolated service capabilities, dependency-aware lifecycle, bounded resource budgets, service health diagnostics, and QEMU-vs-hardware separation.
 
@@ -254,5 +254,3 @@ For experimental physical device deployment, see [docs/PHYSICAL_HARDWARE_FLASHIN
 InterOS Core is dual-licensed under:
 * **MIT License** ([LICENSE-MIT](LICENSE-MIT))
 * **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE-APACHE))
-- [Display & Window System](docs/PHASE7_DISPLAY_WINDOW_SYSTEM.md)
-- [MMU Isolation](docs/PHASE8_MMU_ISOLATION.md)
