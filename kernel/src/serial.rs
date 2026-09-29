@@ -350,6 +350,44 @@ fn handle_rapp_command(s: &str) -> bool {
         return true;
     }
 
+    if verb.eq_ignore_ascii_case("DELETE_FILE") {
+        let Some(path) = parts.next() else { return true; };
+        if !path.starts_with("/data/") || path.len() > 256 || path.contains("..") || path.contains("//") {
+            serial_println!("[FILE_DELETE] path={} status=ERR_REJECTED", path);
+            return true;
+        }
+        if let Some(mut vfs) = crate::fs::vfs::VFS.try_lock() {
+            match vfs.unlink(path) {
+                Ok(_) => match vfs.sync() {
+                    Ok(_) => serial_println!("[FILE_DELETE] path={} status=OK", path),
+                    Err(_) => serial_println!("[FILE_DELETE] path={} status=ERR_SYNC", path),
+                },
+                Err(_) => serial_println!("[FILE_DELETE] path={} status=ERR_NOT_FOUND", path),
+            }
+        } else {
+            serial_println!("[FILE_DELETE] path={} status=ERR_LOCKED", path);
+        }
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("MKDIR") {
+        let Some(path) = parts.next() else { return true; };
+        if !path.starts_with("/data/") || path.len() > 256 || path.contains("..") || path.contains("//") {
+            serial_println!("[DIR_MKDIR] path={} status=ERR_REJECTED", path);
+            return true;
+        }
+        if let Some(mut vfs) = crate::fs::vfs::VFS.try_lock() {
+            vfs.mkdir(path);
+            match vfs.sync() {
+                Ok(_) => serial_println!("[DIR_MKDIR] path={} status=OK", path),
+                Err(_) => serial_println!("[DIR_MKDIR] path={} status=ERR_SYNC", path),
+            }
+        } else {
+            serial_println!("[DIR_MKDIR] path={} status=ERR_LOCKED", path);
+        }
+        return true;
+    }
+
     if verb.eq_ignore_ascii_case("INPUT_TOUCH") {
         let phase = match parts.next().map(|v| v.to_ascii_uppercase()).as_deref() {
             Some("DOWN") => crate::input::TouchPhase::Down,
