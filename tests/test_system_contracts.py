@@ -58,7 +58,7 @@ class SystemContractTests(unittest.TestCase):
     def test_sdk_and_kernel_syscall_tables_match(self):
         kernel = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
         sdk = (ROOT / "sdk/rust/interos-std/src/lib.rs").read_text(encoding="utf-8")
-        pattern = re.compile(r"^\\s*([A-Za-z][A-Za-z0-9_]*)\\s*=\\s*(\\d+),", re.MULTILINE)
+        pattern = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_]*)\s*=\s*(\d+),", re.MULTILINE)
         kernel_ids = dict(pattern.findall(kernel.split("pub enum SyscallNumber", 1)[1]))
         sdk_ids = dict(pattern.findall(sdk.split("pub enum SyscallNumber", 1)[1]))
         self.assertEqual(kernel_ids, sdk_ids)
