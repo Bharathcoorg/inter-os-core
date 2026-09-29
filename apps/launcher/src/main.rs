@@ -174,6 +174,7 @@ pub struct LauncherState {
     pub notif_tab: usize,
     pub recent_apps: [[u8; 32]; 3],
     pub recent_app_lens: [u8; 3],
+    pub recent_task_ids: [u64; 3],
     pub app_ids: [[u8; 32]; 32],
     pub app_id_lens: [u8; 32],
     pub app_labels: [[u8; 16]; 32],
@@ -198,6 +199,7 @@ impl LauncherState {
             notif_tab: 0,
             recent_apps: [[0u8; 32]; 3],
             recent_app_lens: [0; 3],
+            recent_task_ids: [0; 3],
             app_ids: [[0u8; 32]; 32],
             app_id_lens: [0u8; 32],
             app_labels: [[0u8; 16]; 32],
@@ -230,6 +232,9 @@ impl LauncherState {
         }
         self.recent_apps = next;
         self.recent_app_lens = lens;
+        self.recent_task_ids[1] = self.recent_task_ids[0];
+        self.recent_task_ids[2] = self.recent_task_ids[1];
+        self.recent_task_ids[0] = 0;
     }
 
     fn recent_id(&self, index: usize) -> Option<&str> {
@@ -247,6 +252,8 @@ impl LauncherState {
         }
         self.recent_apps[2] = [0u8; 32];
         self.recent_app_lens[2] = 0;
+        self.recent_task_ids[2] = 0;
+        self.recent_task_ids[index] = 0;
     }
 }
 
@@ -284,6 +291,40 @@ fn refresh_package_catalog(state: &mut LauncherState) {
         state.app_icons[idx][icon_len..].fill(b' ');
 
         state.app_count += 1;
+    }
+}
+
+fn refresh_runtime_recents(state: &mut LauncherState) {
+    let mut buf = [0u8; 4096];
+    let Ok(n) = std::app_runtime_list(&mut buf) else { return; };
+
+    state.recent_apps = [[0u8; 32]; 3];
+    state.recent_app_lens = [0; 3];
+    state.recent_task_ids = [0; 3];
+
+    for line in buf[..n].split(|b| *b == b'\n') {
+        if state.recent_app_lens.iter().all(|len| *len != 0) { break; }
+        let mut fields = line.split(|b| *b == b'|');
+        let Some(task_raw) = fields.next() else { continue; };
+        let Some(package_id) = fields.next() else { continue; };
+        let Some(process_state) = fields.next().and_then(|v| core::str::from_utf8(v).ok()).and_then(|v| v.parse::<u8>().ok()) else { continue; };
+        let Ok(task_id) = core::str::from_utf8(task_raw).unwrap_or("").parse::<u64>() else { continue; };
+
+        // Running/background/suspended applications are the live recent-task
+        // set. Launcher/compositor are filtered by the kernel authority layer.
+        if process_state > 2 || package_id.is_empty() || package_id.len() > 32 { continue; }
+        if state.recent_app_lens.iter().any(|len| *len != 0) {
+            if (0..3).any(|i| {
+                let len = state.recent_app_lens[i] as usize;
+                &state.recent_apps[i][..len] == package_id.as_bytes()
+            }) { continue; }
+        }
+
+        if let Some(slot) = state.recent_app_lens.iter().position(|len| *len == 0) {
+            state.recent_apps[slot][..package_id.len()].copy_from_slice(package_id.as_bytes());
+            state.recent_app_lens[slot] = package_id.len() as u8;
+            state.recent_task_ids[slot] = task_id;
+        }
     }
 }
 
@@ -1755,6 +1796,7 @@ pub extern "C" fn _start() -> ! {
 
     let mut state = LauncherState::new();
     refresh_package_catalog(&mut state);
+    refresh_runtime_recents(&mut state);
     std::log(0, "[LAUNCHER] Package catalog loaded from the kernel registry.").ok();
 
     std::log(0, "[LAUNCHER] Step 3: Rendering launcher UI canvas...").ok();
@@ -1797,6 +1839,7 @@ pub extern "C" fn _start() -> ! {
                 if refresh_ticks % 10 == 0 {
                     let previous_count = state.app_count;
                     refresh_package_catalog(&mut state);
+                    refresh_runtime_recents(&mut state);
                     if previous_count != state.app_count && state.current_view == ViewMode::AppDrawer {
                         render_view(surface, &state);
                     }
@@ -1834,7 +1877,8 @@ pub extern "C" fn _start() -> ! {
                                 if input.dx.abs() >= 60 {
                                     let y = input.y as usize;
                                     if (200..480).contains(&y) {
-                                        state.dismiss_recent(0);
+                                        let _ = std::app_stop(state.recent_task_ids[0]);
+                                    state.dismiss_recent(0);
                                         render_view(surface, &state);
                                         let _ = std::surface_flip(4);
                                         std::log(0, "[LAUNCHER] Card 0 dismissed via swipe.").ok();
@@ -1842,7 +1886,8 @@ pub extern "C" fn _start() -> ! {
                                         while std::input_event_poll(&mut drain).is_ok() {}
                                         break;
                                     } else if (520..800).contains(&y) {
-                                        state.dismiss_recent(1);
+                                        let _ = std::app_stop(state.recent_task_ids[1]);
+                                    state.dismiss_recent(1);
                                         render_view(surface, &state);
                                         let _ = std::surface_flip(4);
                                         std::log(0, "[LAUNCHER] Card 1 dismissed via swipe.").ok();
@@ -1850,7 +1895,8 @@ pub extern "C" fn _start() -> ! {
                                         while std::input_event_poll(&mut drain).is_ok() {}
                                         break;
                                     } else if (840..1120).contains(&y) {
-                                        state.dismiss_recent(2);
+                                        let _ = std::app_stop(state.recent_task_ids[2]);
+                                    state.dismiss_recent(2);
                                         render_view(surface, &state);
                                         let _ = std::surface_flip(4);
                                         std::log(0, "[LAUNCHER] Card 2 dismissed via swipe.").ok();
@@ -1877,8 +1923,8 @@ pub extern "C" fn _start() -> ! {
                                 // Tap Card 0 body to switch
                                 else if (200..480).contains(&y) && (56..580).contains(&x) {
                                     let Some(target) = state.recent_id(0) else { break; };
-                                    if let Ok(task_id) = std::app_launch(target) {
-                                        state.active_child = Some(task_id);
+                                    if let Ok(()) = std::app_focus(state.recent_task_ids[0]) {
+                                        state.active_child = Some(state.recent_task_ids[0]);
                                         state.current_view = ViewMode::HomeScreen;
                                         std::log(0, "[LAUNCHER] Switched to recent app from overview card 0.").ok();
                                         let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
@@ -1899,8 +1945,8 @@ pub extern "C" fn _start() -> ! {
                                 // Tap Card 1 body to switch
                                 else if (520..800).contains(&y) && (56..580).contains(&x) {
                                     let Some(target) = state.recent_id(1) else { break; };
-                                    if let Ok(task_id) = std::app_launch(target) {
-                                        state.active_child = Some(task_id);
+                                    if let Ok(()) = std::app_focus(state.recent_task_ids[1]) {
+                                        state.active_child = Some(state.recent_task_ids[1]);
                                         state.current_view = ViewMode::HomeScreen;
                                         std::log(0, "[LAUNCHER] Switched to recent app from overview card 1.").ok();
                                         let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
@@ -1921,8 +1967,8 @@ pub extern "C" fn _start() -> ! {
                                 // Tap Card 2 body to switch
                                 else if (840..1120).contains(&y) && (56..580).contains(&x) {
                                     let Some(target) = state.recent_id(2) else { break; };
-                                    if let Ok(task_id) = std::app_launch(target) {
-                                        state.active_child = Some(task_id);
+                                    if let Ok(()) = std::app_focus(state.recent_task_ids[2]) {
+                                        state.active_child = Some(state.recent_task_ids[2]);
                                         state.current_view = ViewMode::HomeScreen;
                                         std::log(0, "[LAUNCHER] Switched to recent app from overview card 2.").ok();
                                         let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
