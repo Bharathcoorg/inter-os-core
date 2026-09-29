@@ -110,12 +110,13 @@ impl AtaDrive {
 
     /// Waits until the drive clears the BSY status bit with a timeout counter.
     fn wait_not_busy(&mut self) -> Result<u8, AtaError> {
-        let mut timeout = 1_000_000;
+        let mut timeout = 10_000_000;
         while timeout > 0 {
             let status = unsafe { self.status_port.read() };
             if (status & STATUS_BSY) == 0 {
                 return Ok(status);
             }
+            core::hint::spin_loop();
             timeout -= 1;
         }
         Err(AtaError::Timeout)
@@ -123,7 +124,7 @@ impl AtaDrive {
 
     /// Waits until the drive asserts DRQ (Data Request Ready) or returns an error.
     fn wait_drq(&mut self) -> Result<(), AtaError> {
-        let mut timeout = 1_000_000;
+        let mut timeout = 10_000_000;
         while timeout > 0 {
             let status = unsafe { self.status_port.read() };
             if (status & STATUS_ERR) != 0 {
@@ -135,6 +136,7 @@ impl AtaDrive {
             if (status & STATUS_DRQ) != 0 {
                 return Ok(());
             }
+            core::hint::spin_loop();
             timeout -= 1;
         }
         Err(AtaError::Timeout)
@@ -218,12 +220,12 @@ impl BlockDevice for AtaDrive {
 
         unsafe {
             self._control_port.write(0x02);
-            self.wait_not_busy().map_err(map_block_error)?;
 
-            // Send Drive/Head with LBA mode enabled (0xE0 for Master, 0xF0 for Slave) + top 4 bits of LBA
+            // Select Drive/Head with LBA mode enabled (0xE0 for Master, 0xF0 for Slave) + top 4 bits of LBA
             let drive_head = (if self.is_master { 0xE0 } else { 0xF0 }) | ((lba >> 24) & 0x0F) as u8;
             self.drive_head_port.write(drive_head);
             self.delay_400ns();
+            self.wait_not_busy().map_err(map_block_error)?;
 
             // Write sector count = 1
             self.sector_count_port.write(1);
@@ -259,12 +261,12 @@ impl BlockDevice for AtaDrive {
 
         unsafe {
             self._control_port.write(0x02);
-            self.wait_not_busy().map_err(map_block_error)?;
 
-            // Send Drive/Head with LBA mode enabled (0xE0 for Master, 0xF0 for Slave) + top 4 bits of LBA
+            // Select Drive/Head with LBA mode enabled (0xE0 for Master, 0xF0 for Slave) + top 4 bits of LBA
             let drive_head = (if self.is_master { 0xE0 } else { 0xF0 }) | ((lba >> 24) & 0x0F) as u8;
             self.drive_head_port.write(drive_head);
             self.delay_400ns();
+            self.wait_not_busy().map_err(map_block_error)?;
 
             // Write sector count = 1
             self.sector_count_port.write(1);
@@ -298,10 +300,10 @@ impl BlockDevice for AtaDrive {
     fn flush(&mut self) -> Result<(), BlockDeviceError> {
         unsafe {
             self._control_port.write(0x02);
-            self.wait_not_busy().map_err(map_block_error)?;
             let select = if self.is_master { 0xA0 } else { 0xB0 };
             self.drive_head_port.write(select);
             self.delay_400ns();
+            self.wait_not_busy().map_err(map_block_error)?;
             self.cmd_port.write(CMD_CACHE_FLUSH);
             self.delay_400ns();
             self.wait_not_busy().map_err(map_block_error)?;

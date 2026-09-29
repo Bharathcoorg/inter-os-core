@@ -199,6 +199,22 @@ impl Vfs {
         inode_id
     }
 
+    /// Removes an empty directory node from the VFS.
+    pub fn rmdir(&mut self, path: &str) -> Result<(), FsError> {
+        let norm = normalize_path(path);
+        if norm == "/" { return Err(FsError::InvalidPath); }
+        let inode_id = self.path_to_inode.get(&norm).copied().ok_or(FsError::FileNotFound)?;
+        let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
+        if inode.file_type != FileType::Directory { return Err(FsError::NotADirectory); }
+        if !inode.children.is_empty() { return Err(FsError::DirectoryNotEmpty); }
+
+        self.path_to_inode.remove(&norm);
+        self.inodes.remove(&inode_id);
+        self.rebuild_children();
+        let _ = self.persist_metadata_snapshot();
+        Ok(())
+    }
+
     /// Atomically renames a regular file or empty directory within the VFS.
     pub fn rename(&mut self, old_path: &str, new_path: &str) -> Result<(), FsError> {
         let old = normalize_path(old_path); let new = normalize_path(new_path);
@@ -819,8 +835,8 @@ impl Vfs {
         }
 
         // Re-borrow handle to advance offset.
-        let table = self.task_file_tables.get_mut(&task_id).unwrap();
-        let handle = table.get_mut(fd.0 as usize).unwrap().as_mut().unwrap();
+        let table = self.task_file_tables.get_mut(&task_id).ok_or(FsError::InvalidFd)?;
+        let handle = table.get_mut(fd.0 as usize).and_then(|h| h.as_mut()).ok_or(FsError::InvalidFd)?;
         handle.offset += buf.len();
 
         // Publish the mutation immediately. Closing an FD is not the commit
@@ -928,7 +944,7 @@ impl Vfs {
         let mut pos = 6usize;
         for _ in 0..count {
             if pos + 11 > len { break; }
-            let id = u64::from_le_bytes(buf[pos..pos+8].try_into().unwrap()); pos += 8;
+            let id = match buf[pos..pos+8].try_into() { Ok(b) => u64::from_le_bytes(b), Err(_) => break }; pos += 8;
             let kind = buf[pos]; pos += 1;
             let plen = u16::from_le_bytes([buf[pos],buf[pos+1]]) as usize; pos += 2;
             let extra = if v2 { 68 } else { 36 };
@@ -947,13 +963,13 @@ impl Vfs {
             let size = u32::from_le_bytes([buf[pos],buf[pos+1],buf[pos+2],buf[pos+3]]) as usize; pos += 4;
             let mut digest=[0u8;32]; digest.copy_from_slice(&buf[pos..pos+32]); pos += 32;
             let (uid,gid,mode,nlink,atime,mtime,ctime) = if v2 {
-                let uid=u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap()); pos+=4;
-                let gid=u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap()); pos+=4;
-                let mode=u16::from_le_bytes(buf[pos..pos+2].try_into().unwrap()); pos+=2;
-                let nlink=u16::from_le_bytes(buf[pos..pos+2].try_into().unwrap()); pos+=2;
-                let atime=u64::from_le_bytes(buf[pos..pos+8].try_into().unwrap()); pos+=8;
-                let mtime=u64::from_le_bytes(buf[pos..pos+8].try_into().unwrap()); pos+=8;
-                let ctime=u64::from_le_bytes(buf[pos..pos+8].try_into().unwrap()); pos+=8;
+                let uid = match buf[pos..pos+4].try_into() { Ok(b) => u32::from_le_bytes(b), Err(_) => break }; pos += 4;
+                let gid = match buf[pos..pos+4].try_into() { Ok(b) => u32::from_le_bytes(b), Err(_) => break }; pos += 4;
+                let mode = match buf[pos..pos+2].try_into() { Ok(b) => u16::from_le_bytes(b), Err(_) => break }; pos += 2;
+                let nlink = match buf[pos..pos+2].try_into() { Ok(b) => u16::from_le_bytes(b), Err(_) => break }; pos += 2;
+                let atime = match buf[pos..pos+8].try_into() { Ok(b) => u64::from_le_bytes(b), Err(_) => break }; pos += 8;
+                let mtime = match buf[pos..pos+8].try_into() { Ok(b) => u64::from_le_bytes(b), Err(_) => break }; pos += 8;
+                let ctime = match buf[pos..pos+8].try_into() { Ok(b) => u64::from_le_bytes(b), Err(_) => break }; pos += 8;
                 (uid,gid,mode,nlink,atime,mtime,ctime)
             } else { (ROOT_UID,ROOT_UID,if kind==1 {DEFAULT_DIR_MODE} else {DEFAULT_FILE_MODE},1,0,0,0) };
             if !path.starts_with("/data/") && path != "/data" { continue; }
