@@ -188,17 +188,17 @@ impl LauncherState {
         Self {
             current_view: ViewMode::HomeScreen,
             task_done: [false, false, false],
-            wifi_on: true,
-            bt_on: true,
+            wifi_on: false,
+            bt_on: false,
             dark_mode: true,
-            media_playing: true,
+            media_playing: false,
             flashlight_on: false,
             app_drawer_tab: 0,
             notif_tab: 0,
             recent_apps: [
-                "org.interos.calculator",
-                "org.interos.settings",
-                "org.interos.terminal",
+                "",
+                "",
+                "",
             ],
             app_ids: [[0u8; 32]; 32],
             app_id_lens: [0u8; 32],
@@ -233,12 +233,12 @@ impl LauncherState {
         if index == 0 {
             self.recent_apps[0] = self.recent_apps[1];
             self.recent_apps[1] = self.recent_apps[2];
-            self.recent_apps[2] = "org.interos.calculator";
+            self.recent_apps[2] = "";
         } else if index == 1 {
             self.recent_apps[1] = self.recent_apps[2];
-            self.recent_apps[2] = "org.interos.settings";
+            self.recent_apps[2] = "";
         } else if index == 2 {
-            self.recent_apps[2] = "org.interos.terminal";
+            self.recent_apps[2] = "";
         }
     }
 }
@@ -339,22 +339,22 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 if let Some(c) = test_text(x, y, 520, 84, 1, b"Location unavailable", TEXT_MUTED) { return c; }
             }
             if y >= 98 && y < 114 {
-                if let Some(c) = test_text(x, y, 520, 98, 2, b"24*", TEXT_PRIMARY) { return c; }
+                if let Some(c) = test_text(x, y, 520, 98, 2, b"--", TEXT_PRIMARY) { return c; }
             }
             if y >= 118 && y < 126 {
-                if let Some(c) = test_text(x, y, 520, 118, 1, b"Cloudy", TEXT_MUTED) { return c; }
+                if let Some(c) = test_text(x, y, 520, 118, 1, b"Weather unavailable", TEXT_MUTED) { return c; }
             }
         }
 
         // Contextual Greeting
         if y >= 145 && y < 169 {
-            if let Some(c) = test_text(x, y, 48, 145, 3, b"Good morning,", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 48, 145, 3, b"Welcome", TEXT_PRIMARY) { return c; }
         }
         if y >= 175 && y < 199 {
-            if let Some(c) = test_text(x, y, 48, 175, 3, b"Bharath", TEXT_PRIMARY) { return c; }
+            if let Some(c) = test_text(x, y, 48, 175, 3, b"InterOS", TEXT_PRIMARY) { return c; }
         }
         if y >= 208 && y < 224 {
-            if let Some(c) = test_text(x, y, 48, 208, 2, b"Let's make a productive day", TEXT_MUTED) { return c; }
+            if let Some(c) = test_text(x, y, 48, 208, 2, b"System ready", TEXT_MUTED) { return c; }
         }
 
         // Mountain gradient background
@@ -382,7 +382,7 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 if d1_sq >= 36 { return 0xFF64748B; }
             }
             if y >= 310 && y < 326 {
-                if let Some(c) = test_text(x, y, 100, 310, 2, b"Finish InterOS build", TEXT_DARK) { return c; }
+                if let Some(c) = test_text(x, y, 100, 310, 2, b"No task data", TEXT_DARK) { return c; }
             }
         }
 
@@ -396,7 +396,7 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 if d2_sq >= 36 { return 0xFF64748B; }
             }
             if y >= 360 && y < 376 {
-                if let Some(c) = test_text(x, y, 100, 360, 2, b"2 messages need reply", TEXT_DARK) { return c; }
+                if let Some(c) = test_text(x, y, 100, 360, 2, b"No message data", TEXT_DARK) { return c; }
             }
         }
 
@@ -410,7 +410,7 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 if d3_sq >= 36 { return 0xFF64748B; }
             }
             if y >= 410 && y < 426 {
-                if let Some(c) = test_text(x, y, 100, 410, 2, b"Call at 11:00 AM", TEXT_DARK) { return c; }
+                if let Some(c) = test_text(x, y, 100, 410, 2, b"No calendar data", TEXT_DARK) { return c; }
             }
         }
 
