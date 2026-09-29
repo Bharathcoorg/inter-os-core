@@ -1127,7 +1127,7 @@ def guest_package_catalog():
             "version": fields.get("version", ""),
             "status": fields.get("state", "unknown"),
             "process": fields.get("process", ""),
-            "name": fields.get("name", fields.get("id", "")),
+            "name": fields.get("name", fields.get("id", "")).replace("_", " "),
             "icon": fields.get("icon", "APP"),
             "source": "GUEST_REGISTRY",
         })
