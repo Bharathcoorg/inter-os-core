@@ -243,7 +243,7 @@ fn handle_rapp_command(s: &str) -> bool {
             if let Some(descriptor) = crate::package::first_party_package(&entry.package_id) {
                 serial_println!("[STUDIO_PKG] id={} version={}.{}.{} state=active process={} name={} icon={}",
                     entry.package_id, entry.version.0, entry.version.1, entry.version.2,
-                    descriptor.process_name, descriptor.display_name, descriptor.icon);
+                    descriptor.process_name, descriptor.display_name.replace(' ', '_'), descriptor.icon);
             } else {
                 serial_println!("[STUDIO_PKG] id={} version={}.{}.{} state=active process={} name={} icon={}",
                     entry.package_id, entry.version.0, entry.version.1, entry.version.2,
