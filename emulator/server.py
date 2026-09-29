@@ -1571,7 +1571,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             app_id = app_entry["id"]
             app_name = app_entry["name"]
             version = app_entry["version"]
-            perms = app_entry["capabilities"]
 
             guest_ok, guest_msg = transfer_rapp_to_guest(body, app_id)
             if not guest_ok:
