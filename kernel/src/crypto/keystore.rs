@@ -224,9 +224,10 @@ pub fn init() {
     let loaded = crate::storage::persistent::load_latest_kind(&mut seed_record, 6)
         .ok()
         .flatten();
-    if let Some((_generation, len)) = loaded {
+    if let Some((generation, len)) = loaded {
         if len == 40 && &seed_record[..4] == b"IKS1" {
             ks.master_seed.copy_from_slice(&seed_record[8..40]);
+            crate::serial_println!("[KEYSTORE] Restored persistent storage key generation {} (len={})", generation, len);
         }
     }
     if ks.master_seed == [0u8; 32] {
@@ -236,6 +237,7 @@ pub fn init() {
         record[4..8].copy_from_slice(&1u32.to_le_bytes());
         record[8..40].copy_from_slice(&ks.master_seed);
         let _ = crate::storage::persistent::commit_kind(&record, 6);
+        crate::serial_println!("[KEYSTORE] Generated new persistent device key seed.");
     }
 
     // 1. Derive keys across pre-defined slots and verify uniqueness

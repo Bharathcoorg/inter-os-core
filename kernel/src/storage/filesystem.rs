@@ -21,14 +21,20 @@ impl FilesystemLayout {
     pub const fn canonical() -> Self { Self { base_lba: BLOCK_FS_BASE_LBA, tail_reserved_sectors: BLOCK_FS_TAIL_RESERVED } }
 }
 
+/// Maximum filesystem region supported by the 8-sector allocation bitmap
+/// (32768 data sectors + 41 metadata sectors: 1 superblock + 8 bitmap + 32 inode).
+pub const MAX_INTERFS_REGION_SECTORS: u32 = 32768 + 41;
+
 fn region_for_layout(total: u32, layout: FilesystemLayout) -> Result<u32, FsBackendError> {
     let end = total.checked_sub(layout.tail_reserved_sectors).ok_or(FsBackendError::NoSpace)?;
-    end.checked_sub(layout.base_lba).filter(|v| *v > 42).ok_or(FsBackendError::NoSpace)
+    let available = end.checked_sub(layout.base_lba).filter(|v| *v > 42).ok_or(FsBackendError::NoSpace)?;
+    Ok(available.min(MAX_INTERFS_REGION_SECTORS))
 }
 
 fn filesystem_region_sectors(total: u32) -> Result<u32, FsBackendError> {
     let end = total.checked_sub(BLOCK_FS_TAIL_RESERVED).ok_or(FsBackendError::NoSpace)?;
-    end.checked_sub(BLOCK_FS_BASE_LBA).filter(|v| *v > 42).ok_or(FsBackendError::NoSpace)
+    let available = end.checked_sub(BLOCK_FS_BASE_LBA).filter(|v| *v > 42).ok_or(FsBackendError::NoSpace)?;
+    Ok(available.min(MAX_INTERFS_REGION_SECTORS))
 }
 
 /// Mount the canonical InterFS region, formatting it only when no valid

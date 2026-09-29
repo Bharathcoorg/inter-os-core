@@ -21,7 +21,7 @@ pub mod sdhci;
 pub mod touch_gestures;
 pub mod touch_i2c;
 
-pub use ata::{AtaDrive, AtaError, BlockDevice, ATA_PRIMARY, SECTOR_SIZE};
+pub use ata::{AtaDrive, AtaError, BlockDevice, ATA_BOOT, ATA_PRIMARY, SECTOR_SIZE};
 pub use audio::{PciAudioController, PciAudioDevice};
 pub use display::{DisplayDriver, KmsDisplayDriver};
 pub use display_kms::{DrmKmsController, DrmPixelFormat, DrmSurface, DRM_KMS, test_drm_kms};

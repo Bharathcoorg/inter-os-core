@@ -9,6 +9,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use uart_16550::backend::PioBackend;
 use uart_16550::{Config, Uart16550Tty};
+use crate::storage::block::BlockDevice;
 
 /// Global spinlock-protected COM1 serial port interface.
 pub static SERIAL1: Mutex<Option<Uart16550Tty<PioBackend>>> = Mutex::new(None);
@@ -65,14 +66,14 @@ use x86_64::instructions::port::Port;
 static RX_BUF: Mutex<RxState> = Mutex::new(RxState::new());
 
 struct RxState {
-    buf: [u8; 64],
+    buf: [u8; 512],
     len: usize,
 }
 
 impl RxState {
     const fn new() -> Self {
         Self {
-            buf: [0u8; 64],
+            buf: [0u8; 512],
             len: 0,
         }
     }
@@ -84,7 +85,7 @@ pub fn poll_serial_rx() {
     let mut rbr = Port::<u8>::new(0x3F8);
 
     let mut count = 0;
-    while count < 32 {
+    while count < 64 {
         let status = unsafe { lsr.read() };
         if (status & 1) == 0 {
             break;
@@ -100,7 +101,7 @@ pub fn poll_serial_rx() {
                 let slice = &state.buf[..len];
                 handle_serial_command(slice);
             }
-        } else if state.len < 63 {
+        } else if state.len < 511 {
             let idx = state.len;
             state.buf[idx] = byte;
             state.len += 1;
@@ -320,6 +321,98 @@ fn handle_serial_command(cmd: &[u8]) {
             "[DIAG_STATE] tasks_total={} tasks_active={} surfaces={} mailboxes={} endpoints={} shm_pipes={} heap_used={} heap_free={}",
             tasks_tot, tasks_act, surfaces, mailboxes, endpoints, shm_pipes, heap_used, heap_free
         );
+        return;
+    }
+
+    if verb.eq_ignore_ascii_case("WRITE_FILE") {
+        let path = parts.next();
+        let content = path.and_then(|p| {
+            let prefix_len = verb.len();
+            let after_verb = s[prefix_len..].trim_start();
+            let after_path = after_verb[p.len()..].trim_start();
+            if after_path.is_empty() { None } else { Some(after_path) }
+        });
+        if let (Some(path), Some(content)) = (path, content) {
+            if !path.starts_with("/data/") || path.contains("..") || path.contains("//") {
+                crate::serial_println!("[FILE_WRITE] path={} status=ERR_REJECTED", path);
+            } else if let Some(mut vfs) = crate::fs::vfs::VFS.try_lock() {
+                vfs.create_file(path, content.as_bytes(), false);
+                match vfs.sync() {
+                    Ok(_) => crate::serial_println!("[FILE_WRITE] path={} status=OK bytes={}", path, content.len()),
+                    Err(_) => crate::serial_println!("[FILE_WRITE] path={} status=ERR_SYNC", path),
+                }
+            } else {
+                crate::serial_println!("[FILE_WRITE] path={} status=ERR_LOCKED", path);
+            }
+        }
+        return;
+    }
+
+    if verb.eq_ignore_ascii_case("READ_FILE") {
+        if let Some(path) = parts.next() {
+            if path.contains("..") || path.contains("//") {
+                crate::serial_println!("[FILE_READ] path={} status=ERR_REJECTED", path);
+            } else if let Some(vfs) = crate::fs::vfs::VFS.try_lock() {
+                let mut out = [0u8; 1024];
+                match vfs.read_file_by_path(path, &mut out) {
+                    Ok(n) => {
+                        let content = core::str::from_utf8(&out[..n]).unwrap_or("<binary>");
+                        crate::serial_println!("[FILE_READ] path={} status=OK content={}", path, content);
+                    }
+                    Err(_) => {
+                        crate::serial_println!("[FILE_READ] path={} status=NOT_FOUND", path);
+                    }
+                }
+            } else {
+                crate::serial_println!("[FILE_READ] path={} status=ERR_LOCKED", path);
+            }
+        }
+        return;
+    }
+
+    if verb.eq_ignore_ascii_case("SYNC") || verb.eq_ignore_ascii_case("FLUSH") {
+        if let Some(vfs) = crate::fs::vfs::VFS.try_lock() {
+            match vfs.sync() {
+                Ok(_) => crate::serial_println!("[SYNC] status=OK"),
+                Err(_) => crate::serial_println!("[SYNC] status=ERR"),
+            }
+        }
+        return;
+    }
+
+    if verb.eq_ignore_ascii_case("FSCK") || verb.eq_ignore_ascii_case("FS_CHECK") {
+        if let Some(mut ata) = crate::drivers::ATA_PRIMARY.try_lock() {
+            if let Some(drive) = ata.as_mut() {
+                let total = drive.sector_count();
+                let layout = crate::storage::filesystem::FilesystemLayout::canonical();
+                let end = total.saturating_sub(layout.tail_reserved_sectors);
+                let region = end.saturating_sub(layout.base_lba).min(crate::storage::filesystem::MAX_INTERFS_REGION_SECTORS);
+                if region > 42 {
+                    match crate::storage::interfs::InterFs::mount_region(drive, layout.base_lba, region) {
+                        Ok(mut fs) => match fs.check_integrity() {
+                            Ok(report) => {
+                                crate::serial_println!(
+                                    "[FSCK] status=CLEAN used_inodes={} alloc_sectors={} ref_sectors={}",
+                                    report.used_inodes, report.allocated_sectors, report.referenced_sectors
+                                );
+                            }
+                            Err(e) => {
+                                crate::serial_println!("[FSCK] status=CORRUPT error={:?}", e);
+                            }
+                        },
+                        Err(e) => {
+                            crate::serial_println!("[FSCK] status=MOUNT_ERR error={:?}", e);
+                        }
+                    }
+                } else {
+                    crate::serial_println!("[FSCK] status=REGION_TOO_SMALL sectors={}", region);
+                }
+            } else {
+                crate::serial_println!("[FSCK] status=NO_DRIVE");
+            }
+        } else {
+            crate::serial_println!("[FSCK] status=DRIVE_LOCKED");
+        }
         return;
     }
 

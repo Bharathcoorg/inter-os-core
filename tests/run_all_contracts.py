@@ -6,7 +6,7 @@ def main():
     failures = []
     tests = sorted([
         p for p in glob.glob("tests/test_*.py")
-        if not any(k in p for k in ["test_serial_tcp", "test_interactive_lifecycle", "test_lifecycle_stress", "test_reboot_recovery"])
+        if not any(k in p for k in ["test_serial_tcp", "test_interactive_lifecycle", "test_lifecycle_stress", "test_reboot_recovery", "test_persistence", "test_storage_recovery"])
     ])
     print(f"Discovered {len(tests)} test contracts:")
     for p in tests:

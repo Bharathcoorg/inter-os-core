@@ -12,6 +12,7 @@ use spin::Mutex;
 
 use crate::capability::{CapError, CapabilityTable, CapabilityType, Rights};
 use crate::crypto::Sha256;
+use crate::storage::block::BlockDevice;
 use crate::task::TaskId;
 
 /// Maximum number of file descriptors per task.
@@ -250,6 +251,28 @@ impl Vfs {
             return Err(err);
         }
         Ok(id)
+    }
+
+    /// Explicitly flushes dirty VFS data and metadata snapshots to persistent storage media.
+    pub fn sync(&self) -> Result<(), FsError> {
+        self.persist_data_snapshot()?;
+        self.persist_metadata_snapshot()?;
+        if let Some(mut ata) = crate::drivers::ATA_PRIMARY.try_lock() {
+            if let Some(drive) = ata.as_mut() {
+                let _ = drive.flush();
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads content of a file directly by canonical path (for kernel/diagnostic inspection).
+    pub fn read_file_by_path(&self, path: &str, out: &mut [u8]) -> Result<usize, FsError> {
+        let inode_id = self.path_to_inode.get(path).copied().ok_or(FsError::FileNotFound)?;
+        let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
+        let slice = inode.data.as_slice();
+        let to_copy = slice.len().min(out.len());
+        out[..to_copy].copy_from_slice(&slice[..to_copy]);
+        Ok(to_copy)
     }
 
     /// Creates or updates a file node with content.
@@ -880,13 +903,26 @@ impl Vfs {
     /// Restores the persistent /data inode tree before restoring file payloads.
     fn restore_metadata_snapshot(&mut self) {
         let mut sealed = alloc::vec![0u8; 32768 + crate::storage::encrypted::ENCRYPTED_OVERHEAD];
-        let Ok(len) = crate::storage::filesystem::load_data_file("/data/.vfs.metadata", &mut sealed) else { return; };
+        let Ok(len) = crate::storage::filesystem::load_data_file("/data/.vfs.metadata", &mut sealed) else {
+            crate::serial_println!("[VFS RESTORE] No /data/.vfs.metadata found.");
+            return;
+        };
+        crate::serial_println!("[VFS RESTORE] Loaded /data/.vfs.metadata: {} bytes", len);
         let mut buf = alloc::vec![0u8; 32768];
         let len = match crate::storage::encrypted::open(&sealed[..len], &mut buf) {
-            Ok(plain_len) => plain_len,
-            Err(_) => { if len <= buf.len() { buf[..len].copy_from_slice(&sealed[..len]); len } else { return; } }
+            Ok(plain_len) => {
+                crate::serial_println!("[VFS RESTORE] Decrypted metadata: {} bytes", plain_len);
+                plain_len
+            }
+            Err(e) => {
+                crate::serial_println!("[VFS RESTORE] Metadata decrypt error: {:?}", e);
+                if len <= buf.len() { buf[..len].copy_from_slice(&sealed[..len]); len } else { return; }
+            }
         };
-        if len < 6 || (&buf[..4] != b"IVM2" && &buf[..4] != b"IVM1") { return; }
+        if len < 6 || (&buf[..4] != b"IVM2" && &buf[..4] != b"IVM1") {
+            crate::serial_println!("[VFS RESTORE] Invalid metadata header magic.");
+            return;
+        }
         let v2 = &buf[..4] == b"IVM2";
         let count = u16::from_le_bytes([buf[4], buf[5]]) as usize;
         let mut pos = 6usize;
@@ -942,19 +978,30 @@ impl Vfs {
     fn restore_data_snapshot(&mut self) {
         let mut sealed = alloc::vec![0u8; 32768 + crate::storage::encrypted::ENCRYPTED_OVERHEAD];
         let block_len = match crate::storage::filesystem::load_data_file("/data/.vfs.snapshot", &mut sealed) {
-            Ok(len) => Some(len),
+            Ok(len) => {
+                crate::serial_println!("[VFS RESTORE] Loaded /data/.vfs.snapshot from block fs: {} bytes", len);
+                Some(len)
+            }
             Err(_) => None,
         };
         let len = if let Some(len) = block_len {
             len
         } else {
-            let Ok(Some((_generation,len)))=crate::storage::persistent::load_latest_kind(&mut sealed,4) else { return; };
+            let Ok(Some((generation,len)))=crate::storage::persistent::load_latest_kind(&mut sealed,4) else {
+                crate::serial_println!("[VFS RESTORE] No persistent snapshot found in block fs or journal.");
+                return;
+            };
+            crate::serial_println!("[VFS RESTORE] Loaded snapshot from journal gen {}: {} bytes", generation, len);
             len
         };
         let mut buf = alloc::vec![0u8; 32768];
         let len = match crate::storage::encrypted::open(&sealed[..len], &mut buf) {
-            Ok(plain_len) => plain_len,
-            Err(_) => {
+            Ok(plain_len) => {
+                crate::serial_println!("[VFS RESTORE] Decrypted data snapshot: {} bytes", plain_len);
+                plain_len
+            }
+            Err(e) => {
+                crate::serial_println!("[VFS RESTORE] Data snapshot decrypt error: {:?}", e);
                 // One-time compatibility with legacy unencrypted plaintext snapshots.
                 if len <= buf.len() {
                     buf[..len].copy_from_slice(&sealed[..len]);
@@ -962,9 +1009,13 @@ impl Vfs {
                 } else { return; }
             }
         };
-        if len<6 || &buf[..4]!=b"DTA1" { return; }
+        if len<6 || &buf[..4]!=b"DTA1" {
+            crate::serial_println!("[VFS RESTORE] Invalid data snapshot header magic.");
+            return;
+        }
         let count=u16::from_le_bytes([buf[4],buf[5]]) as usize;
         let mut pos=6usize;
+        crate::serial_println!("[VFS RESTORE] Restoring {} data files from snapshot...", count);
         for _ in 0..count {
             if pos+2>len { break; }
             let plen=u16::from_le_bytes([buf[pos],buf[pos+1]]) as usize; pos+=2;
@@ -972,6 +1023,7 @@ impl Vfs {
             let path=match core::str::from_utf8(&buf[pos..pos+plen]).ok(){Some(v)=>v, None=>break}; pos+=plen;
             let dlen=u32::from_le_bytes([buf[pos],buf[pos+1],buf[pos+2],buf[pos+3]]) as usize; pos+=4;
             if dlen>8192 || pos+dlen>len { break; }
+            crate::serial_println!("[VFS RESTORE] Restored file: {} ({} bytes)", path, dlen);
             self.create_file(path,&buf[pos..pos+dlen],false); pos+=dlen;
         }
     }

@@ -78,6 +78,26 @@ impl AtaDrive {
         }
     }
 
+    /// Creates and initializes the primary ATA controller for the slave drive.
+    pub fn new_primary_slave() -> Self {
+        Self {
+            data_port: Port::new(ATA_DATA_PORT),
+            _error_port: PortReadOnly::new(ATA_ERROR_PORT),
+            sector_count_port: Port::new(ATA_SECTOR_COUNT_PORT),
+            lba_low_port: Port::new(ATA_LBA_LOW_PORT),
+            lba_mid_port: Port::new(ATA_LBA_MID_PORT),
+            lba_high_port: Port::new(ATA_LBA_HIGH_PORT),
+            drive_head_port: Port::new(ATA_DRIVE_HEAD_PORT),
+            status_port: PortReadOnly::new(ATA_STATUS_CMD_PORT),
+            cmd_port: PortWriteOnly::new(ATA_STATUS_CMD_PORT),
+            _control_port: PortWriteOnly::new(ATA_CONTROL_PORT),
+            alt_status_port: PortReadOnly::new(ATA_CONTROL_PORT),
+            total_sectors: 0,
+            model_name: String::new(),
+            is_master: false,
+        }
+    }
+
     /// Performs bus delay by reading the alternate status register 4 times (~400ns).
     fn delay_400ns(&mut self) {
         unsafe {
@@ -90,7 +110,7 @@ impl AtaDrive {
 
     /// Waits until the drive clears the BSY status bit with a timeout counter.
     fn wait_not_busy(&mut self) -> Result<u8, AtaError> {
-        let mut timeout = 100_000;
+        let mut timeout = 1_000_000;
         while timeout > 0 {
             let status = unsafe { self.status_port.read() };
             if (status & STATUS_BSY) == 0 {
@@ -103,7 +123,7 @@ impl AtaDrive {
 
     /// Waits until the drive asserts DRQ (Data Request Ready) or returns an error.
     fn wait_drq(&mut self) -> Result<(), AtaError> {
-        let mut timeout = 100_000;
+        let mut timeout = 1_000_000;
         while timeout > 0 {
             let status = unsafe { self.status_port.read() };
             if (status & STATUS_ERR) != 0 {
@@ -200,8 +220,8 @@ impl BlockDevice for AtaDrive {
             self._control_port.write(0x02);
             self.wait_not_busy().map_err(map_block_error)?;
 
-            // Send Drive/Head with LBA mode enabled (0xE0) + top 4 bits of LBA
-            let drive_head = 0xE0 | ((lba >> 24) & 0x0F) as u8;
+            // Send Drive/Head with LBA mode enabled (0xE0 for Master, 0xF0 for Slave) + top 4 bits of LBA
+            let drive_head = (if self.is_master { 0xE0 } else { 0xF0 }) | ((lba >> 24) & 0x0F) as u8;
             self.drive_head_port.write(drive_head);
             self.delay_400ns();
 
@@ -241,8 +261,8 @@ impl BlockDevice for AtaDrive {
             self._control_port.write(0x02);
             self.wait_not_busy().map_err(map_block_error)?;
 
-            // Send Drive/Head with LBA mode enabled (0xE0) + top 4 bits of LBA
-            let drive_head = 0xE0 | ((lba >> 24) & 0x0F) as u8;
+            // Send Drive/Head with LBA mode enabled (0xE0 for Master, 0xF0 for Slave) + top 4 bits of LBA
+            let drive_head = (if self.is_master { 0xE0 } else { 0xF0 }) | ((lba >> 24) & 0x0F) as u8;
             self.drive_head_port.write(drive_head);
             self.delay_400ns();
 
@@ -268,11 +288,23 @@ impl BlockDevice for AtaDrive {
                 self.data_port.write(word);
             }
 
-            // Flush write cache
-            self.cmd_port.write(CMD_CACHE_FLUSH);
             self.delay_400ns();
             self.wait_not_busy().map_err(map_block_error)?;
 
+            Ok(())
+        }
+    }
+
+    fn flush(&mut self) -> Result<(), BlockDeviceError> {
+        unsafe {
+            self._control_port.write(0x02);
+            self.wait_not_busy().map_err(map_block_error)?;
+            let select = if self.is_master { 0xA0 } else { 0xB0 };
+            self.drive_head_port.write(select);
+            self.delay_400ns();
+            self.cmd_port.write(CMD_CACHE_FLUSH);
+            self.delay_400ns();
+            self.wait_not_busy().map_err(map_block_error)?;
             Ok(())
         }
     }
@@ -290,13 +322,37 @@ impl BlockDevice for AtaDrive {
     }
 }
 
-/// Global synchronized ATA controller instance.
+/// Global synchronized ATA controller instance for boot disk.
+pub static ATA_BOOT: Mutex<Option<AtaDrive>> = Mutex::new(None);
+
+/// Global synchronized ATA controller instance for persistent storage.
 pub static ATA_PRIMARY: Mutex<Option<AtaDrive>> = Mutex::new(None);
 
-/// Initializes and probes the primary ATA hard drive.
+/// Initializes and probes the ATA hard drives.
+/// If a dedicated secondary drive (Primary Slave) is present, it is mounted
+/// as the persistent storage disk (ATA_PRIMARY), separating persistent state
+/// from the read-only boot image on Primary Master (ATA_BOOT).
+/// If no secondary drive is detected, falls back to Primary Master.
 pub fn init() -> Result<(), AtaError> {
-    let mut drive = AtaDrive::new_primary_master();
-    drive.identify()?;
-    *ATA_PRIMARY.lock() = Some(drive);
-    Ok(())
+    let mut master = AtaDrive::new_primary_master();
+    let master_found = master.identify().is_ok();
+    if master_found {
+        *ATA_BOOT.lock() = Some(master);
+    }
+
+    let mut slave = AtaDrive::new_primary_slave();
+    let slave_found = slave.identify().is_ok();
+
+    if slave_found {
+        *ATA_PRIMARY.lock() = Some(slave);
+        Ok(())
+    } else if master_found {
+        // Fallback: use master as storage disk if slave is not attached
+        let mut master_primary = AtaDrive::new_primary_master();
+        master_primary.identify()?;
+        *ATA_PRIMARY.lock() = Some(master_primary);
+        Ok(())
+    } else {
+        Err(AtaError::DeviceNotFound)
+    }
 }
