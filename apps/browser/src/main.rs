@@ -50,7 +50,7 @@ pub struct Bookmark {
     pub is_sovereign: bool,
 }
 
-/// Built-in Sovereign Bookmarks.
+/// Bookmarks are populated only from real persisted browser state.
 pub static BOOKMARKS: [Bookmark; 0] = [];
 
 /// Production Sovereign Browser state engine.
