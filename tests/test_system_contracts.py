@@ -148,6 +148,13 @@ class SystemContractTests(unittest.TestCase):
         self.assertIn("store.remove(pkg_id)", syscall)
         self.assertIn("PACKAGE_REGISTRY.lock().rollback(pkg_id)", syscall)
 
+    def test_package_blob_restore_fails_closed(self):
+        store = (ROOT / "kernel/src/package/store.rs").read_text(encoding="utf-8")
+        self.assertIn("let n=b[4] as usize", store)
+        self.assertIn("if n>MAX_BLOBS { return; }", store)
+        self.assertIn("if p!=len { return; }", store)
+        self.assertIn("self.blobs=restored;", store)
+
     def test_update_is_fail_closed_and_monotonic(self):
         src = (ROOT / "kernel/src/update.rs").read_text(encoding="utf-8")
         self.assertIn("manifest.version <= current_version", src)
