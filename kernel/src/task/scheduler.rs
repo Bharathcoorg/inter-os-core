@@ -354,6 +354,18 @@ impl Scheduler {
             if suspended > 0 {
                 crate::serial_println!("[LIFECYCLE] Suspended {} background application(s) after budget exhaustion.", suspended);
             }
+            if let Some(current) = self.tasks.get(self.current_idx) {
+                let blocked = current.process_id
+                    .and_then(crate::task::process::record_for_process)
+                    .map(|r| r.state == crate::task::process::ProcessState::Suspended)
+                    .unwrap_or(false);
+                if blocked {
+                    let current_id = current.id;
+                    if let Some(task) = self.tasks.iter_mut().find(|t| t.id == current_id) {
+                        task.state = TaskState::Blocked;
+                    }
+                }
+            }
             self.prepare_switch()
         } else {
             (None, None)
