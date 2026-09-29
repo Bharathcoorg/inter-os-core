@@ -602,10 +602,7 @@ impl Vfs {
 
     fn app_storage_root(task_id: TaskId) -> Option<String> {
         let package_id = Self::app_package_for_task(task_id)?;
-        let uid = crate::user::USER_MANAGER.lock().active_user().0;
-        if uid == crate::user::UserId::SYSTEM.0 {
-            return None;
-        }
+        let uid = crate::task::process::user_for_task(task_id)?;
         Some(alloc::format!("/user/{}/apps/{}", uid, package_id))
     }
 
