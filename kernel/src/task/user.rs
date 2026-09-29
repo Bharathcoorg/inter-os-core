@@ -580,7 +580,10 @@ pub fn spawn_verified_rapp_process(
         return Err("RAPP payload length mismatch");
     }
     let caps = capabilities_from_rapp(&manifest.capabilities, parent_id.0)?;
-    spawn_user_process_with_parent("rapp_process", elf_payload, caps, 1, parent_id)
+    let process_name: &'static str = alloc::boxed::Box::leak(
+        manifest.package_id.clone().into_boxed_str()
+    );
+    spawn_user_process_with_parent(process_name, elf_payload, caps, 1, parent_id)
 }
 
 /// Spawns a first-party system service as an isolated Ring-3 process owned by PID1.
