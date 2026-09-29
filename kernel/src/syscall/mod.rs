@@ -2448,7 +2448,7 @@ pub fn sys_package_install(cap_slot: usize, pkg_id: &str, user_consent: bool) ->
         } else {
             let _ = store.remove(pkg_id);
         }
-        let _ = crate::package::PACKAGE_REGISTRY.lock().rollback(pkg_id);
+        let _ = crate::package::PACKAGE_REGISTRY.lock().rollback_install(pkg_id, previous_registry_entry);
         return Err(SyscallResult::DeviceError);
     }
 
