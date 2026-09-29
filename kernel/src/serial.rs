@@ -279,10 +279,9 @@ fn handle_rapp_command(s: &str) -> bool {
         let mut out = [0u8; 192];
         if let Some(vfs) = crate::fs::vfs::VFS.try_lock() {
             let mut full = [0u8; 192];
-            match vfs.read_file_by_path(path, &mut full) {
-                Ok(n) if offset < n => {
-                    let end = core::cmp::min(n, offset + length);
-                    let slice = &full[offset..end];
+            match vfs.read_file_range(path, offset, &mut full) {
+                Ok(n) if n > 0 => {
+                    let slice = &full[..core::cmp::min(n, length)];
                     let mut hex = String::new();
                     for byte in slice { use core::fmt::Write; let _ = write!(&mut hex, "{:02x}", byte); }
                     serial_println!("[STUDIO_FS_READ] path={} offset={} len={} hex={}", path, offset, slice.len(), hex);
