@@ -285,7 +285,7 @@ def _load_x86_userspace_manifest():
 
 def _cargo_build_manifest(manifest_path, target, bin_name=None):
     cmd = [
-        "cargo", "build",
+        "cargo", "build", "--locked",
         "--manifest-path", str(WORKSPACE_ROOT / manifest_path),
         "--target", target,
     ]
@@ -341,7 +341,7 @@ def _build_x86_kernel_and_image():
 
     log("Building InterOS Kernel [x86_64-unknown-none]...")
     res = subprocess.run([
-        "cargo", "build",
+        "cargo", "build", "--locked",
         "--manifest-path", "kernel/Cargo.toml",
         "--target", "x86_64-unknown-none"
     ], cwd=str(WORKSPACE_ROOT))
@@ -364,7 +364,7 @@ def _build_x86_kernel_and_image():
 
     log("Packaging canonical QEMU Phone BIOS image...")
     res = subprocess.run([
-        "cargo", "run",
+        "cargo", "run", "--locked",
         "--manifest-path", "boot/Cargo.toml",
         "--", str(kernel_path), "target/inter-os-bios.img"
     ], cwd=str(WORKSPACE_ROOT))
@@ -393,7 +393,7 @@ def cmd_build(args):
         if arch_target == "x86_64-unknown-none":
             env["RUSTFLAGS"] = "-C relocation-model=static -C link-arg=-Ttext=0x00400000 -C link-arg=-z -C link-arg=norelro --cfg curve25519_dalek_backend=\"fiat\""
         res = subprocess.run([
-            "cargo", "build", "--manifest-path", str(app_dir / "Cargo.toml"),
+            "cargo", "build", "--locked", "--manifest-path", str(app_dir / "Cargo.toml"),
             "--target", arch_target
         ], cwd=str(WORKSPACE_ROOT), env=env)
         if res.returncode != 0:
@@ -436,7 +436,7 @@ def cmd_build(args):
         elif t == "aarch64":
             log("Building InterOS Kernel [aarch64-unknown-none]...")
             res = subprocess.run([
-                "cargo", "build", "--manifest-path", "kernel-aarch64/Cargo.toml",
+                "cargo", "build", "--locked", "--manifest-path", "kernel-aarch64/Cargo.toml",
                 "--target", "aarch64-unknown-none"
             ], cwd=str(WORKSPACE_ROOT))
             if res.returncode != 0:
@@ -445,7 +445,7 @@ def cmd_build(args):
         elif t == "riscv64":
             log("Building InterOS Kernel [riscv64gc-unknown-none-elf]...")
             res = subprocess.run([
-                "cargo", "build", "--manifest-path", "kernel-riscv64/Cargo.toml",
+                "cargo", "build", "--locked", "--manifest-path", "kernel-riscv64/Cargo.toml",
                 "--target", "riscv64gc-unknown-none-elf"
             ], cwd=str(WORKSPACE_ROOT))
             if res.returncode != 0:
@@ -481,13 +481,13 @@ def cmd_test(args):
 
     if test_target in ["unit", "all"]:
         log("Running cargo test on host-compatible crates...")
-        res = subprocess.run(["cargo", "test", "-p", "interos-std"], cwd=str(WORKSPACE_ROOT))
+        res = subprocess.run(["cargo", "test", "--locked", "-p", "interos-std"], cwd=str(WORKSPACE_ROOT))
         if res.returncode != 0:
             overall_rc = res.returncode
             if test_target == "unit":
                 return res.returncode
         if (WORKSPACE_ROOT / "boot" / "Cargo.toml").exists():
-            res_boot = subprocess.run(["cargo", "test", "--manifest-path", "boot/Cargo.toml"], cwd=str(WORKSPACE_ROOT))
+            res_boot = subprocess.run(["cargo", "test", "--locked", "--manifest-path", "boot/Cargo.toml"], cwd=str(WORKSPACE_ROOT))
             if res_boot.returncode != 0:
                 overall_rc = res_boot.returncode
 
