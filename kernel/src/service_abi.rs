@@ -9,6 +9,7 @@
 pub const SERVICE_ABI_MAGIC: [u8; 4] = *b"ISVC";
 pub const SERVICE_ABI_VERSION: u16 = 1;
 pub const SERVICE_ABI_HEADER_SIZE: usize = 16;
+pub const SERVICE_ABI_MAX_PAYLOAD: u16 = 4096;
 pub const SERVICE_ID_MIN: u8 = 1;
 pub const SERVICE_ID_MAX: u8 = 11;
 
@@ -51,12 +52,14 @@ impl ServiceMessage {
         let op = ServiceOp::from_u16(u16::from_le_bytes([buf[6], buf[7]]))?;
         let service_id = buf[8];
         if !(SERVICE_ID_MIN..=SERVICE_ID_MAX).contains(&service_id) { return None; }
+        let payload_len = u16::from_le_bytes([buf[14], buf[15]]);
+        if payload_len > SERVICE_ABI_MAX_PAYLOAD { return None; }
         Some(Self {
             op,
             service_id,
             flags: buf[9],
             request_id: u32::from_le_bytes([buf[10], buf[11], buf[12], buf[13]]),
-            payload_len: u16::from_le_bytes([buf[14], buf[15]]),
+            payload_len,
         })
     }
 }
