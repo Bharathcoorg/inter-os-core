@@ -51,23 +51,7 @@ pub struct Bookmark {
 }
 
 /// Built-in Sovereign Bookmarks.
-pub static BOOKMARKS: [Bookmark; 3] = [
-    Bookmark {
-        title: "InterLayer Sovereign Mesh",
-        url: "interlayer://sovereign.mesh/catalog",
-        is_sovereign: true,
-    },
-    Bookmark {
-        title: "Localhost Microkernel Diagnostics",
-        url: "http://127.0.0.1:4200/telemetry",
-        is_sovereign: false,
-    },
-    Bookmark {
-        title: "Decentralized IPFS Explorer",
-        url: "interlayer://ipfs.mesh/explore",
-        is_sovereign: true,
-    },
-];
+pub static BOOKMARKS: [Bookmark; 0] = [];
 
 /// Production Sovereign Browser state engine.
 pub struct BrowserApp {
