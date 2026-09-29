@@ -179,6 +179,7 @@ pub struct LauncherState {
     pub app_label_lens: [u8; 32],
     pub app_icons: [[u8; 4]; 32],
     pub app_count: usize,
+    pub app_drawer_page: usize,
     pub active_child: Option<u64>,
 }
 
@@ -205,6 +206,7 @@ impl LauncherState {
             app_label_lens: [0u8; 32],
             app_icons: [[0u8; 4]; 32],
             app_count: 0,
+            app_drawer_page: 0,
             active_child: None,
         }
     }
@@ -249,6 +251,7 @@ fn refresh_package_catalog(state: &mut LauncherState) {
     };
 
     state.app_count = 0;
+    state.app_drawer_page = 0;
     for line in buf[..n].split(|b| *b == b'\n') {
         if state.app_count >= state.app_ids.len() { break; }
         let mut fields = line.split(|b| *b == b'|');
@@ -1202,7 +1205,7 @@ fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         };
 
         if col_idx < 4 {
-            let app_idx = row_idx * 4 + col_idx;
+            let app_idx = state.app_drawer_page.saturating_mul(16) + row_idx * 4 + col_idx;
             if y == row_y0 || y == row_y0 + 109 || x == col_x0 || x == col_x0 + 139 {
                 return BORDER_SUBTLE;
             }
@@ -1243,13 +1246,20 @@ fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 
     // 5. Pagination Indicator (y: 840..856)
     if y >= 844 && y <= 852 {
-        let dx_c = (x as i32) - 360;
-        let dy_c = (y as i32) - 848;
-        if dx_c * dx_c + dy_c * dy_c <= 16 { return TEXT_PRIMARY; }
-        let dx_l = (x as i32) - 336;
-        if dx_l * dx_l + dy_c * dy_c <= 9 { return TEXT_MUTED; }
-        let dx_r = (x as i32) - 384;
-        if dx_r * dx_r + dy_c * dy_c <= 9 { return TEXT_MUTED; }
+        let max_page = state.app_count.saturating_add(15) / 16;
+        if max_page > 0 {
+            let dx_c = (x as i32) - 360;
+            let dy_c = (y as i32) - 848;
+            if dx_c * dx_c + dy_c * dy_c <= 16 { return TEXT_PRIMARY; }
+            if state.app_drawer_page > 0 {
+                let dx_l = (x as i32) - 336;
+                if dx_l * dx_l + dy_c * dy_c <= 9 { return TEXT_MUTED; }
+            }
+            if state.app_drawer_page + 1 < max_page {
+                let dx_r = (x as i32) - 384;
+                if dx_r * dx_r + dy_c * dy_c <= 9 { return TEXT_MUTED; }
+            }
+        }
     }
 
     // 6. Home Gesture Pill (x: 260..460, y: 1418..1424)
@@ -1467,7 +1477,7 @@ fn resolve_app_in_drawer<'a>(state: &'a LauncherState, x: usize, y: usize) -> Op
         return None;
     };
 
-    package_id_at(state, row_idx * 4 + col_idx)
+    package_id_at(state, state.app_drawer_page.saturating_mul(16) + row_idx * 4 + col_idx)
 }
 
 #[inline(never)]
@@ -2213,7 +2223,22 @@ pub extern "C" fn _start() -> ! {
                                     }
                                 }
 
-                                // Launch application from 16-app grid
+                                // Page controls for registry-backed app catalog.
+                                if (820..880).contains(&y) && (300..420).contains(&x) {
+                                    let max_page = state.app_count.saturating_add(15) / 16;
+                                    if max_page > 0 {
+                                        if x < 360 {
+                                            state.app_drawer_page = state.app_drawer_page.saturating_sub(1);
+                                        } else if state.app_drawer_page + 1 < max_page {
+                                            state.app_drawer_page += 1;
+                                        }
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        break;
+                                    }
+                                }
+
+                                // Launch application from the registry-backed grid.
                                 if let Some(target_app) = resolve_app_in_drawer(&state, x, y) {
                                     state.push_recent(target_app);
                                     match std::app_launch(target_app) {
