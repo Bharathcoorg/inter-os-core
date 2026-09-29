@@ -296,6 +296,24 @@ impl PackageRegistry {
     }
 
 
+    /// Removes an installed package record transactionally.
+    pub fn uninstall(&mut self, package_id: &str) -> Result<(), ()> {
+        let idx = self.entries.iter().position(|entry| entry.package_id == package_id).ok_or(())?;
+        if crate::package::first_party_package(package_id).is_some() {
+            return Err(());
+        }
+        let old = self.entries.clone();
+        let old_generation = self.generation;
+        self.entries.remove(idx);
+        if self.persist().is_err() {
+            self.entries = old;
+            self.generation = old_generation;
+            return Err(());
+        }
+        self.generation = self.entries.iter().map(|entry| entry.generation).max().unwrap_or(0);
+        Ok(())
+    }
+
     pub fn launch_allowed(&self, package_id:&str, version:(u16,u16,u16))->bool {
         self.entries.iter()
             .find(|e| e.package_id == package_id)
