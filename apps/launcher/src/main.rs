@@ -173,6 +173,12 @@ pub struct LauncherState {
     pub app_drawer_tab: usize,
     pub notif_tab: usize,
     pub recent_apps: [&'static str; 3],
+    pub app_ids: [[u8; 32]; 32],
+    pub app_id_lens: [u8; 32],
+    pub app_labels: [[u8; 16]; 32],
+    pub app_label_lens: [u8; 32],
+    pub app_icons: [[u8; 4]; 32],
+    pub app_count: usize,
     pub active_child: Option<u64>,
 }
 
@@ -193,6 +199,12 @@ impl LauncherState {
                 "org.interos.settings",
                 "org.interos.terminal",
             ],
+            app_ids: [[0u8; 32]; 32],
+            app_id_lens: [0u8; 32],
+            app_labels: [[0u8; 16]; 32],
+            app_label_lens: [0u8; 32],
+            app_icons: [[0u8; 4]; 32],
+            app_count: 0,
             active_child: None,
         }
     }
@@ -227,6 +239,45 @@ impl LauncherState {
             self.recent_apps[2] = "org.interos.terminal";
         }
     }
+}
+
+fn refresh_package_catalog(state: &mut LauncherState) {
+    let mut buf = [0u8; 4096];
+    let Ok(n) = std::package_registry(0, &mut buf) else {
+        state.app_count = 0;
+        return;
+    };
+
+    state.app_count = 0;
+    for line in buf[..n].split(|b| *b == b'\n') {
+        if state.app_count >= state.app_ids.len() { break; }
+        let mut fields = line.split(|b| *b == b'|');
+        let Some(id) = fields.next() else { continue; };
+        let Some(_process) = fields.next() else { continue; };
+        let Some(_version) = fields.next() else { continue; };
+        let Some(status) = fields.next() else { continue; };
+        if status != b"active" || id.is_empty() || id.len() > 32 { continue; }
+
+        let idx = state.app_count;
+        state.app_ids[idx][..id.len()].copy_from_slice(id);
+        state.app_id_lens[idx] = id.len() as u8;
+
+        let suffix = id.rsplit(|b| *b == b'.').next().unwrap_or(id);
+        let label_len = suffix.len().min(16);
+        state.app_labels[idx][..label_len].copy_from_slice(&suffix[..label_len]);
+        state.app_label_lens[idx] = label_len as u8;
+
+        let icon_len = label_len.min(4);
+        state.app_icons[idx][..icon_len].copy_from_slice(&suffix[..icon_len]);
+        state.app_icons[idx][icon_len..].fill(b' ');
+        state.app_count += 1;
+    }
+}
+
+fn package_id_at(state: &LauncherState, index: usize) -> Option<&str> {
+    if index >= state.app_count { return None; }
+    let len = state.app_id_lens[index] as usize;
+    core::str::from_utf8(&state.app_ids[index][..len]).ok()
 }
 
 // -----------------------------------------------------------------------------
@@ -1156,25 +1207,17 @@ fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 return BORDER_SUBTLE;
             }
 
-            let (name, icon, accent): (&[u8], &[u8], u32) = match app_idx {
-                0 => (b"Terminal", b">_", ACCENT_SKY),
-                1 => (b"Browser", b"WWW", 0xFF4ADE80),
-                2 => (b"Files", b"DIR", 0xFF60A5FA),
-                3 => (b"Camera", b"CAM", 0xFFF472B6),
-                4 => (b"Notes", b"NOT", ACCENT_AMBER),
-                5 => (b"AI Studio", b"AI*", 0xFFA78BFA),
-                6 => (b"Gallery", b"IMG", 0xFF38BDF8),
-                7 => (b"Settings", b"SET", TEXT_MUTED),
-                8 => (b"Vault", b"KEY", 0xFFEAB308),
-                9 => (b"Health", b"FIT", SUCCESS_EMERALD),
-                10 => (b"Calendar", b"CAL", 0xFFFB7185),
-                11 => (b"Calc", b"+-=", 0xFFF97316),
-                12 => (b"Phone", b"TEL", SUCCESS_EMERALD),
-                13 => (b"Messages", b"MSG", ACCENT_SKY),
-                14 => (b"Music", b"AUD", 0xFFA855F7),
-                15 => (b"Sensors", b"SNS", 0xFF06B6D4),
-                _ => (b"", b"", BG_DARK),
+            let name = if app_idx < state.app_count {
+                &state.app_labels[app_idx][..state.app_label_lens[app_idx] as usize]
+            } else {
+                &[][..]
             };
+            let icon = if app_idx < state.app_count {
+                &state.app_icons[app_idx][..4]
+            } else {
+                &[][..]
+            };
+            let accent = if app_idx < state.app_count { ACCENT_SKY } else { BG_DARK };
 
             let b_dx = (x as i32) - (col_x0 as i32 + 70);
             let b_dy = (y as i32) - (row_y0 as i32 + 36);
@@ -1399,7 +1442,7 @@ fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     BG_DARK
 }
 
-fn resolve_app_in_drawer(x: usize, y: usize) -> Option<&'static str> {
+fn resolve_app_in_drawer<'a>(state: &'a LauncherState, x: usize, y: usize) -> Option<&'a str> {
     let row_idx = if (205..315).contains(&y) {
         0
     } else if (335..445).contains(&y) {
@@ -1424,26 +1467,7 @@ fn resolve_app_in_drawer(x: usize, y: usize) -> Option<&'static str> {
         return None;
     };
 
-    let app_idx = row_idx * 4 + col_idx;
-    match app_idx {
-        0 => Some("org.interos.terminal"),
-        1 => Some("org.interos.browser"),
-        2 => Some("org.interos.file_manager"),
-        3 => Some("org.interos.camera"),
-        4 => Some("org.interos.test_app"),
-        5 => Some("org.interos.aistudio"),
-        6 => Some("org.interos.gallery"),
-        7 => Some("org.interos.settings"),
-        8 => Some("org.interos.vault"),
-        9 => Some("org.interos.health"),
-        10 => Some("org.interos.calendar"),
-        11 => Some("org.interos.calculator"),
-        12 => Some("org.interos.dialer"),
-        13 => Some("org.interos.messages"),
-        14 => Some("org.interos.music"),
-        15 => Some("org.interos.sensor_dashboard"),
-        _ => None,
-    }
+    package_id_at(state, row_idx * 4 + col_idx)
 }
 
 #[inline(never)]
@@ -1772,6 +1796,8 @@ pub extern "C" fn _start() -> ! {
     };
 
     let mut state = LauncherState::new();
+    refresh_package_catalog(&mut state);
+    std::log(0, "[LAUNCHER] Package catalog loaded from the kernel registry.").ok();
 
     std::log(0, "[LAUNCHER] Step 3: Rendering launcher UI canvas...").ok();
     render_view(surface, &state);
@@ -2188,7 +2214,7 @@ pub extern "C" fn _start() -> ! {
                                 }
 
                                 // Launch application from 16-app grid
-                                if let Some(target_app) = resolve_app_in_drawer(x, y) {
+                                if let Some(target_app) = resolve_app_in_drawer(&state, x, y) {
                                     state.push_recent(target_app);
                                     match std::app_launch(target_app) {
                                         Ok(task_id) => {
