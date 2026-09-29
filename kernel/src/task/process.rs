@@ -14,7 +14,7 @@ pub const MAX_THREADS: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum ProcessState { Running = 0, Zombie = 1, Reaped = 2 }
+pub enum ProcessState { Running = 0, Background = 1, Suspended = 2, Killed = 3, Restarting = 4, Zombie = 5, Reaped = 6 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResourceLimits {
@@ -22,11 +22,14 @@ pub struct ResourceLimits {
     pub max_open_files: u16,
     pub max_ipc_endpoints: u16,
     pub max_address_space_bytes: u64,
+    pub max_background_cpu_ticks: u64,
+    pub max_background_ipc: u16,
+    pub max_background_network_bytes: u32,
 }
 
 impl Default for ResourceLimits {
     fn default() -> Self {
-        Self { max_threads: 64, max_open_files: 256, max_ipc_endpoints: 64, max_address_space_bytes: 256 * 1024 * 1024 }
+        Self { max_threads: 64, max_open_files: 256, max_ipc_endpoints: 64, max_address_space_bytes: 256 * 1024 * 1024, max_background_cpu_ticks: 500, max_background_ipc: 64, max_background_network_bytes: 1024 * 1024 }
     }
 }
 
@@ -51,6 +54,9 @@ pub struct ProcessRecord {
     pub address_space_bytes: u64,
     pub limits: ResourceLimits,
     pub user_id: u32,
+    pub background_started_ticks: u64,
+    pub background_ipc: u16,
+    pub background_network_bytes: u32,
 }
 
 static NEXT_PROCESS_ID: AtomicU64 = AtomicU64::new(1);
@@ -60,7 +66,7 @@ pub static THREAD_TABLE: Mutex<[Option<ThreadRecord>; MAX_THREADS]> = Mutex::new
 pub fn register_leader(task: TaskId, parent_task: TaskId) -> Option<ProcessId> {
     if task == TaskId(0) { return None; }
     let id = ProcessId(NEXT_PROCESS_ID.fetch_add(1, Ordering::Relaxed));
-    let record = ProcessRecord { id, leader_task: task, parent_task, state: ProcessState::Running, exit_code: 0, thread_count: 1, open_file_count: 0, address_space_bytes: 0, limits: ResourceLimits::default(), user_id: 0 };
+    let record = ProcessRecord { id, leader_task: task, parent_task, state: ProcessState::Running, exit_code: 0, thread_count: 1, open_file_count: 0, address_space_bytes: 0, limits: ResourceLimits::default(), user_id: 0, background_started_ticks: 0, background_ipc: 0, background_network_bytes: 0 };
     let mut table = PROCESS_TABLE.lock();
     let Some(slot) = table.iter_mut().find(|slot| slot.is_none()) else { return None; };
     let mut threads = THREAD_TABLE.lock();
@@ -91,10 +97,91 @@ pub fn record_for_process(process: ProcessId) -> Option<ProcessRecord> {
     PROCESS_TABLE.lock().iter().flatten().find(|r| r.id == process).copied()
 }
 
+pub fn set_background(task: TaskId, now: u64) -> Result<(), &'static str> {
+    let process = process_for_task(task).ok_or("process not found")?;
+    let mut table = PROCESS_TABLE.lock();
+    let r = table.iter_mut().flatten().find(|r| r.id == process).ok_or("process not found")?;
+    if r.state == ProcessState::Running {
+        r.state = ProcessState::Background;
+        r.background_started_ticks = now;
+        r.background_ipc = 0;
+        r.background_network_bytes = 0;
+        Ok(())
+    } else {
+        Err("process is not foreground")
+    }
+}
+
+pub fn set_foreground(task: TaskId) -> Result<(), &'static str> {
+    let process = process_for_task(task).ok_or("process not found")?;
+    let mut table = PROCESS_TABLE.lock();
+    let r = table.iter_mut().flatten().find(|r| r.id == process).ok_or("process not found")?;
+    if matches!(r.state, ProcessState::Background | ProcessState::Suspended) {
+        r.state = ProcessState::Running;
+        r.background_started_ticks = 0;
+        r.background_ipc = 0;
+        r.background_network_bytes = 0;
+        Ok(())
+    } else { Err("process is not backgrounded") }
+}
+
+pub fn suspend(task: TaskId, now: u64) -> Result<(), &'static str> {
+    let process = process_for_task(task).ok_or("process not found")?;
+    let mut table = PROCESS_TABLE.lock();
+    let r = table.iter_mut().flatten().find(|r| r.id == process).ok_or("process not found")?;
+    if matches!(r.state, ProcessState::Running | ProcessState::Background) {
+        r.state = ProcessState::Suspended;
+        r.background_started_ticks = now;
+        Ok(())
+    } else { Err("process cannot be suspended") }
+}
+
+pub fn wake(task: TaskId) -> Result<(), &'static str> {
+    let process = process_for_task(task).ok_or("process not found")?;
+    let mut table = PROCESS_TABLE.lock();
+    let r = table.iter_mut().flatten().find(|r| r.id == process).ok_or("process not found")?;
+    if r.state == ProcessState::Suspended {
+        r.state = ProcessState::Background;
+        r.background_started_ticks = crate::interrupts::get_system_ticks();
+        Ok(())
+    } else { Err("process is not suspended") }
+}
+
+pub fn wake_package(package_id: &str, user_id: u32) -> usize {
+    let mut table = PROCESS_TABLE.lock();
+    let mut count = 0;
+    for r in table.iter_mut().flatten() {
+        if r.user_id != user_id || !matches!(r.state, ProcessState::Suspended | ProcessState::Background) { continue; }
+        if let Some(task) = THREAD_TABLE.lock().iter().flatten().find(|t| t.process == r.id) {
+            let name = crate::task::SCHEDULER.lock().get_task(task.task).map(|t| t.name).unwrap_or("");
+            if name == package_id {
+                r.state = ProcessState::Background;
+                r.background_started_ticks = crate::interrupts::get_system_ticks();
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+pub fn enforce_background_budget(now: u64) -> usize {
+    let mut table = PROCESS_TABLE.lock();
+    let mut suspended = 0;
+    for r in table.iter_mut().flatten() {
+        if r.state == ProcessState::Background && r.background_started_ticks != 0
+            && now.saturating_sub(r.background_started_ticks) >= r.limits.max_background_cpu_ticks
+        {
+            r.state = ProcessState::Suspended;
+            suspended += 1;
+        }
+    }
+    suspended
+}
+
 pub fn can_open_file(process: ProcessId) -> Result<(), &'static str> {
     let table = PROCESS_TABLE.lock();
     let record = table.iter().flatten().find(|r| r.id == process).ok_or("process not found")?;
-    if record.state != ProcessState::Running { return Err("process is not running"); }
+    if !matches!(record.state, ProcessState::Running | ProcessState::Background) { return Err("process is not runnable"); }
     if record.open_file_count >= record.limits.max_open_files { return Err("open file limit exceeded"); }
     Ok(())
 }
@@ -102,7 +189,7 @@ pub fn can_open_file(process: ProcessId) -> Result<(), &'static str> {
 pub fn reserve_open_file(process: ProcessId) -> Result<(), &'static str> {
     let mut table = PROCESS_TABLE.lock();
     let record = table.iter_mut().flatten().find(|r| r.id == process).ok_or("process not found")?;
-    if record.state != ProcessState::Running { return Err("process is not running"); }
+    if !matches!(record.state, ProcessState::Running | ProcessState::Background) { return Err("process is not runnable"); }
     if record.open_file_count >= record.limits.max_open_files { return Err("open file limit exceeded"); }
     record.open_file_count += 1;
     Ok(())
