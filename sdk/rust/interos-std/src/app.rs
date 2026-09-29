@@ -56,6 +56,36 @@ impl AppSession {
         crate::app_storage_open(fs_cap_slot, relative_path, rights)
     }
 
+    /// Sends a bounded IPC message using an explicitly supplied capability slot.
+    pub fn send_ipc(&self, ipc_cap_slot: usize, target_task_id: u64, msg_type: u32, payload: &[u8]) -> Result<(), i64> {
+        crate::ipc_send(ipc_cap_slot, target_task_id, msg_type, payload)
+    }
+
+    /// Receives one IPC payload using an explicitly supplied capability slot.
+    pub fn receive_ipc(&self, ipc_cap_slot: usize, out: &mut [u8]) -> Result<usize, i64> {
+        crate::ipc_recv(ipc_cap_slot, out)
+    }
+
+    /// Posts an application notification through the kernel notification service.
+    pub fn post_notification(&self, channel: &str) -> Result<u64, i64> {
+        crate::notification_post(self.package_id, channel)
+    }
+
+    /// Cancels one notification belonging to this application.
+    pub fn cancel_notification(&self, notification_id: u64) -> Result<(), i64> {
+        crate::notification_cancel(self.package_id, notification_id)
+    }
+
+    /// Opens a network socket through an explicitly supplied capability slot.
+    pub fn open_socket(&self, network_cap_slot: usize, protocol: u32) -> Result<u64, i64> {
+        crate::net_socket(network_cap_slot, protocol)
+    }
+
+    /// Waits for input, IPC, storage, and network events without busy-looping.
+    pub fn wait_for_events(&self, interest_mask: u32, timeout_ticks: u32) -> Result<u32, i64> {
+        crate::event_poll(interest_mask, timeout_ticks)
+    }
+
     pub fn exit(&mut self, code: i32) -> ! {
         let _ = self.destroy_window();
         crate::exit_with_code(code)
