@@ -28,7 +28,7 @@ def static_gate():
     cli = (ROOT / "tools/interos.py").read_text(encoding="utf-8")
     qemu = (ROOT / "tests/verify_x86_boot.py").read_text(encoding="utf-8")
     lifecycle = (ROOT / "tests/test_interactive_lifecycle.py").read_text(encoding="utf-8")
-
+        ('SERVICE_ABI_MAGIC: [u8; 4] = *b"ISVC"', "kernel service ABI magic"),
     for needle, label in (
         ("SERVICE_ABI_MAGIC: [u8; 4] = *b"ISVC"", "kernel service ABI magic"),
         ("SERVICE_ABI_VERSION: u16 = 1", "kernel service ABI version"),
@@ -37,7 +37,7 @@ def static_gate():
         ("pub fn decode", "kernel service decoder"),
     ):
         must(abi, needle, label)
-
+        ('MAGIC: [u8; 4] = *b"ISVC"', "SDK service ABI magic"),
     for needle, label in (
         ('MAGIC: [u8; 4] = *b"ISVC""', "SDK service ABI magic"),
         ("VERSION: u16 = 1", "SDK service ABI version"),
