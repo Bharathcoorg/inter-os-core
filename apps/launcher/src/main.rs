@@ -1818,6 +1818,7 @@ pub extern "C" fn _start() -> ! {
             if let Some(child_id) = state.active_child {
                 if std::waitpid(child_id).is_ok() {
                     state.active_child = None;
+                    refresh_runtime_recents(&mut state);
                     state.current_view = ViewMode::HomeScreen;
                     let mut discard = std::InputEvent {
                         kind: 0,
@@ -2595,9 +2596,9 @@ pub extern "C" fn _start() -> ! {
 
                                 // Launch application
                                 if let Some(target_app) = resolve_app_at_touch(&state, input.x, input.y) {
-                                    state.push_recent(target_app);
                                     match std::app_launch(target_app) {
                                         Ok(task_id) => {
+                                            state.push_recent(target_app);
                                             state.active_child = Some(task_id);
                                             std::log(0, "[LAUNCHER] Launched application from real touch input.").ok();
                                             break;
