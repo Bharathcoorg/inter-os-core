@@ -6,7 +6,7 @@
 //!   * Waveform::Square: Retro chiptune synthesizer
 //!   * Waveform::Triangle: Warm mellow woodwind texture
 //!   * Waveform::Sawtooth: Rich harmonic brass/lead
-//! - Sovereign Playlist Directory:
+//! - Local playlist state is populated only from real media storage.
 //!   * Track 0: "Sovereign Symphony in C" (120 BPM, FLAC, 4:12)
 //!   * Track 1: "Cybernetic Sunrise" (95 BPM, Opus, 3:45)
 //!   * Track 2: "Mesh Harmony" (130 BPM, FLAC, 5:02)
