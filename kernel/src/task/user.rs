@@ -454,11 +454,32 @@ pub fn spawn_user_process_with_parent(
     priority: u8,
     parent_id: TaskId,
 ) -> Result<TaskId, &'static str> {
+    spawn_user_process_with_limits(
+        name,
+        elf_data,
+        caps,
+        priority,
+        parent_id,
+        crate::task::process::ResourceLimits::default(),
+    )
+}
+
+/// Creates a userspace process with an explicit resource budget. The budget is
+/// enforced before scheduler registration so oversized images cannot transiently
+/// enter the process table under a looser default policy.
+pub fn spawn_user_process_with_limits(
+    name: &'static str,
+    elf_data: &[u8],
+    caps: CapabilityTable,
+    priority: u8,
+    parent_id: TaskId,
+    limits: crate::task::process::ResourceLimits,
+) -> Result<TaskId, &'static str> {
     let mut pt = crate::memory::TaskPageTable::create_user_page_table()?;
     let stack_top = 0x0080_0000;
     let (user_entry, user_stack_top) = load_user_elf_into_page_table(elf_data, &mut pt, stack_top)?;
     let address_space_bytes = pt.user_mapped_bytes();
-    if address_space_bytes as u64 > crate::task::process::ResourceLimits::default().max_address_space_bytes {
+    if address_space_bytes as u64 > limits.max_address_space_bytes {
         return Err("userspace address-space budget exceeded");
     }
 
@@ -589,7 +610,14 @@ pub fn spawn_userspace_service(service_id: u8, parent_id: TaskId) -> Result<Task
             object_id: spec.object_id,
         }).map_err(|_| "service capability table full")?;
     }
-    spawn_user_process_with_parent(image.name, image.elf, caps, 5, parent_id)
+    spawn_user_process_with_limits(
+        image.name,
+        image.elf,
+        caps,
+        5,
+        parent_id,
+        crate::services::resource_limits(service),
+    )
 }
 
 /// Legacy packaged-process launcher retained for source compatibility. It no
