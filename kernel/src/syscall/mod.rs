@@ -374,6 +374,10 @@ pub fn sys_ipc_send(
         return SyscallResult::PermissionDenied;
     }
 
+    if crate::task::process::consume_background_ipc(sender_id).is_err() {
+        return SyscallResult::NotReady;
+    }
+
     let mut router = IPC_ROUTER.lock();
     match router.send_direct(sender_id, dest, msg_type, data) {
         Ok(()) => SyscallResult::Success,
@@ -1912,8 +1916,12 @@ pub fn sys_tcp_send(connection_id: u32, payload: &[u8]) -> SyscallResult {
         return SyscallResult::PermissionDenied;
     }
     let owner = current.id.0 as u32;
+    let task_id = current.id;
     let caps = current.cap_table.clone();
     drop(sched);
+    if crate::task::process::consume_background_network(task_id, payload.len()).is_err() {
+        return SyscallResult::NotReady;
+    }
     if payload.len() > crate::net::tcp::TCP_MAX_SEGMENT { return SyscallResult::InvalidArguments; }
     let (src_ip, src_port, dst_ip, dst_port, seq, ack, state, window) = {
         let table = crate::net::TCP_TABLE.lock();
@@ -2225,8 +2233,12 @@ pub fn sys_net_send_socket(
         return SyscallResult::PermissionDenied;
     }
     let owner = current.id.0 as u32;
+    let task_id = current.id;
     let caps = current.cap_table.clone();
     drop(sched);
+    if crate::task::process::consume_background_network(task_id, payload.len()).is_err() {
+        return SyscallResult::NotReady;
+    }
     let src_port = {
         let table = crate::net::SOCKET_TABLE.lock();
         match table.get(sock_id) {
