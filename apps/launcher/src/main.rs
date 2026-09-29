@@ -1847,6 +1847,11 @@ pub extern "C" fn _start() -> ! {
             if state.active_child.is_none() && state.current_view == ViewMode::HomeScreen && (events & std::EVENT_TIMER_TICK) != 0 {
                 refresh_ticks += 1;
                 if refresh_ticks % 10 == 0 {
+                    let previous_count = state.app_count;
+                    refresh_package_catalog(&mut state);
+                    if previous_count != state.app_count && state.current_view == ViewMode::AppDrawer {
+                        render_view(surface, &state);
+                    }
                     render_header(surface);
                     let _ = std::surface_flip(4);
                 }
