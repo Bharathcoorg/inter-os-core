@@ -1,6 +1,6 @@
 //! Inter OS Native Sovereign Calendar & Chrono-Planner
 //!
-//! Full production personal timeline & autonomous schedule planning engine executing in Ring 3 (User Mode):
+//! Native personal timeline & autonomous schedule planning engine executing in Ring 3 (User Mode):
 //! - Gregorian Civil Calendar date math:
 //!   * Astronomical leap year calculation
 //!   * Month duration tables
