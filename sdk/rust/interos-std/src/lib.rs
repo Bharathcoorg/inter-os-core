@@ -156,6 +156,7 @@ pub enum SyscallNumber {
     PackageUninstall = 120,
     AppStop = 121,
     AppRestart = 122,
+    AppRuntimeList = 123,
 }
 
 // -----------------------------------------------------------------------------
@@ -1246,6 +1247,19 @@ pub fn fs_open(cap_slot: usize, path: &str, rights: u32) -> Result<u32, i64> {
 }
 
 /// Moves the calling application to background execution.
+pub fn app_runtime_list(out: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::AppRuntimeList,
+            out.as_mut_ptr() as u64,
+            out.len() as u64,
+            0,
+            0,
+        )
+    };
+    if ret >= 0 { Ok(ret as usize) } else { Err(ret) }
+}
+
 pub fn app_stop(task_id: u64) -> Result<(), i64> {
     let ret = unsafe { syscall4(SyscallNumber::AppStop, task_id, 0, 0, 0) };
     if ret == 0 { Ok(()) } else { Err(ret) }
