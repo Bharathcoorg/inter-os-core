@@ -39,9 +39,8 @@ serial_socket_conn = None
 serial_socket_lock = threading.Lock()
 telemetry_lock = threading.Lock()
 
-INSTALLED_APPS_DIR = os.path.join(DIRECTORY, "data", "apps")
-os.makedirs(INSTALLED_APPS_DIR, exist_ok=True)
-
+# Host-side paths are transport/UI resources only. Guest package and filesystem
+# state is authoritative and is never mirrored into persistent host state.
 VFS_ROOT = os.path.join(DIRECTORY, "data", "vfs")
 os.makedirs(VFS_ROOT, exist_ok=True)
 
@@ -86,31 +85,6 @@ def set_active_theme(theme_data):
             json.dump(theme_data, f, indent=2)
     except Exception:
         pass
-
-def init_default_vfs():
-    folders = [
-        os.path.join(VFS_ROOT, "data", "user"),
-        os.path.join(VFS_ROOT, "data", "apps"),
-        os.path.join(VFS_ROOT, "sys"),
-        os.path.join(VFS_ROOT, "dev")
-    ]
-    for f in folders:
-        os.makedirs(f, exist_ok=True)
-    
-    defaults = {
-        os.path.join(VFS_ROOT, "data", "user", "notes.txt"): "InterOS user notes\n",
-        os.path.join(VFS_ROOT, "data", "user", "contacts.json"): json.dumps([], indent=2),
-        os.path.join(VFS_ROOT, "sys", "kernel_info.txt"): "InterOS kernel information is reported by the guest runtime.\n",
-        os.path.join(VFS_ROOT, "sys", "cpuinfo.txt"): "CPU information is reported by the guest runtime.\n",
-        os.path.join(VFS_ROOT, "dev", "urandom"): "",
-        os.path.join(VFS_ROOT, "dev", "tty0"): ""
-    }
-    for path, content in defaults.items():
-        if not os.path.exists(path):
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(content)
-
-init_default_vfs()
 
 def resolve_vfs_path(req_path):
     clean = str(req_path or "/").replace("\\", "/")
