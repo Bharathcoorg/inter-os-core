@@ -118,6 +118,9 @@ pub fn set_foreground(task: TaskId) -> Result<(), &'static str> {
     let process = process_for_task(task).ok_or("process not found")?;
     let mut table = PROCESS_TABLE.lock();
     let r = table.iter_mut().flatten().find(|r| r.id == process).ok_or("process not found")?;
+    if r.state == ProcessState::Running {
+        return Ok(());
+    }
     if matches!(r.state, ProcessState::Background | ProcessState::Suspended) {
         r.state = ProcessState::Running;
         r.background_started_ticks = 0;
