@@ -8,7 +8,7 @@ InterOS Core kernels and sovereign Rust Mobile Application Packages (.rapp).
 Usage:
   python tools/interos.py doctor
   python tools/interos.py build [--target x86_64|aarch64|riscv64|all|<app_name>]
-  python tools/interos.py test [--target x86_64|aarch64|riscv64|unit]
+  python tools/interos.py test [--target unit|x86_64|aarch64|riscv64|security|adversarial|qemu|lifecycle|contracts|stress|recovery|persistence|storage_recovery|crash|watchdog|panic|all]
   python tools/interos.py new <app_name> [--template basic|authenticator|sensor|meshchat]
   python tools/interos.py package <app_name> [--output dist/<app_name>.rapp]
   python tools/interos.py sign <package_or_file> [--key <key_path>]
@@ -461,7 +461,7 @@ def cmd_build(args):
 # =============================================================================
 def cmd_test(args):
     test_target = getattr(args, "target", "all").lower()
-    valid_targets = ["unit", "x86_64", "x86", "aarch64", "riscv64", "security", "adversarial", "qemu", "lifecycle", "contracts", "stress", "recovery", "all"]
+    valid_targets = ["unit", "x86_64", "x86", "aarch64", "riscv64", "security", "adversarial", "qemu", "lifecycle", "contracts", "stress", "recovery", "persistence", "storage_recovery", "crash", "watchdog", "panic", "all"]
     if test_target not in valid_targets:
         log_error(f"Unknown test target: '{test_target}'. Valid targets: {', '.join(valid_targets)}")
         return 1
