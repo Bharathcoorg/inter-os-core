@@ -427,7 +427,7 @@ pub extern "C" fn _start() -> ! {
             s
         }
         Err(_) => {
-            std::log(0, "[CALCULATOR] Display surface unavailable; refusing headless demo execution.").ok();
+            std::log(0, "[CALCULATOR] Display surface unavailable; refusing headless execution.").ok();
             std::exit_with_code(1);
         }
     };
