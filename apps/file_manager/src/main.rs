@@ -1,6 +1,6 @@
 //! InterOS Native Sovereign File Manager & VFS Explorer App
 //!
-//! Full production Ring-3 graphical application executing in User Mode:
+//! Native Ring-3 graphical application executing in User Mode:
 //! - DRM/KMS Client Surface allocation (z=200) and double-buffered scanout presentation
 //! - Real-time block device capacity query via microkernel storage driver
 //! - Dynamic VFS directory traversal & file system exploration
