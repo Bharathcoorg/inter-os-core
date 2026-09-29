@@ -50,6 +50,7 @@ pub struct ProcessRecord {
     pub open_file_count: u16,
     pub address_space_bytes: u64,
     pub limits: ResourceLimits,
+    pub user_id: u32,
 }
 
 static NEXT_PROCESS_ID: AtomicU64 = AtomicU64::new(1);
@@ -59,7 +60,7 @@ pub static THREAD_TABLE: Mutex<[Option<ThreadRecord>; MAX_THREADS]> = Mutex::new
 pub fn register_leader(task: TaskId, parent_task: TaskId) -> Option<ProcessId> {
     if task == TaskId(0) { return None; }
     let id = ProcessId(NEXT_PROCESS_ID.fetch_add(1, Ordering::Relaxed));
-    let record = ProcessRecord { id, leader_task: task, parent_task, state: ProcessState::Running, exit_code: 0, thread_count: 1, open_file_count: 0, address_space_bytes: 0, limits: ResourceLimits::default() };
+    let record = ProcessRecord { id, leader_task: task, parent_task, state: ProcessState::Running, exit_code: 0, thread_count: 1, open_file_count: 0, address_space_bytes: 0, limits: ResourceLimits::default(), user_id: 0 };
     let mut table = PROCESS_TABLE.lock();
     let Some(slot) = table.iter_mut().find(|slot| slot.is_none()) else { return None; };
     let mut threads = THREAD_TABLE.lock();
@@ -71,6 +72,19 @@ pub fn register_leader(task: TaskId, parent_task: TaskId) -> Option<ProcessId> {
 
 pub fn process_for_task(task: TaskId) -> Option<ProcessId> {
     THREAD_TABLE.lock().iter().flatten().find(|r| r.task == task).map(|r| r.process)
+}
+
+pub fn bind_user_for_task(task: TaskId, user_id: u32) -> Result<(), &'static str> {
+    let process = process_for_task(task).ok_or("process not found")?;
+    let mut table = PROCESS_TABLE.lock();
+    let record = table.iter_mut().flatten().find(|r| r.id == process).ok_or("process not found")?;
+    record.user_id = user_id;
+    Ok(())
+}
+
+pub fn user_for_task(task: TaskId) -> Option<u32> {
+    let process = process_for_task(task)?;
+    PROCESS_TABLE.lock().iter().flatten().find(|r| r.id == process).map(|r| r.user_id).filter(|uid| *uid != 0)
 }
 
 pub fn record_for_process(process: ProcessId) -> Option<ProcessRecord> {
