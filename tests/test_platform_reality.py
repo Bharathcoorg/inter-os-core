@@ -47,6 +47,24 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertIn("hardware_present: false", pmic)
         self.assertIn("sensor_model: \"unavailable\"", camera)
 
+    def test_pmic_self_test_exercises_hardware_backed_path(self):
+        pmic = self.read("kernel/src/drivers/pmic.rs")
+        self.assertIn("pmic.set_telemetry(", pmic)
+        self.assertIn("assert!(pmic.is_hardware_present());", pmic)
+        self.assertIn("assert_eq!(pmic.coulomb_counter_mah, 3150.0);", pmic)
+        self.assertIn("assert_eq!(pmic.telemetry.soc_percent, 78);", pmic)
+
+    def test_service_start_revalidates_parent_ownership(self):
+        services = self.read("kernel/src/services.rs")
+        self.assertIn("if task.parent_id != parent_id {", services)
+        self.assertIn('return Err("running service is not owned by caller");', services)
+
+    def test_pid1_parses_public_service_snapshot_contract(self):
+        init = self.read("userspace/init/src/main.rs")
+        self.assertIn("let Some(abi_bytes) = fields.next() else", init)
+        self.assertIn('if abi_bytes != b"1" || state != b"running"', init)
+        self.assertNotIn('task_bytes == b"0"', init)
+
     def test_no_internal_gate_labels_enter_public_source(self):
         for path in ["README.md", "kernel/src/platform.rs", "tests/test_platform_reality.py"]:
             text = self.read(path).lower()
