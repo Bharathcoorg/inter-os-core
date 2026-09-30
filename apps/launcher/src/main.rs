@@ -2518,63 +2518,63 @@ fn render_view(surface: u32, state: &LauncherState) {
         ViewMode::HomeScreen => {
             std::log(
                 0,
-                "[LAUNCHER] render_full complete: 10-app home screen canvas initialized.",
+                "[LAUNCHER] Home surface rendered.",
             )
             .ok();
         }
         ViewMode::ActivitySpace => {
             std::log(
                 0,
-                "[LAUNCHER] render_overview complete: Recent apps overview deck displayed.",
+                "[LAUNCHER] Recent apps surface rendered.",
             )
             .ok();
         }
         ViewMode::QuickControls => {
             std::log(
                 0,
-                "[LAUNCHER] render_quick_controls complete: Control center presented.",
+                "[LAUNCHER] Quick controls surface rendered.",
             )
             .ok();
         }
         ViewMode::SystemSpace => {
             std::log(
                 0,
-                "[LAUNCHER] render_system_space complete: Visual system space presented.",
+                "[LAUNCHER] System surface rendered.",
             )
             .ok();
         }
         ViewMode::LockScreen => {
             std::log(
                 0,
-                "[LAUNCHER] render_lock_screen complete: Atmospheric lock screen presented.",
+                "[LAUNCHER] Lock surface rendered.",
             )
             .ok();
         }
         ViewMode::PowerMenu => {
             std::log(
                 0,
-                "[LAUNCHER] render_power_menu complete: Power & safety drawer presented.",
+                "[LAUNCHER] Power surface rendered.",
             )
             .ok();
         }
         ViewMode::AppDrawer => {
             std::log(
                 0,
-                "[LAUNCHER] render_app_drawer complete: 16-app grid presented.",
+                "[LAUNCHER] App drawer surface rendered.",
             )
             .ok();
         }
         ViewMode::Notifications => {
             std::log(
                 0,
-                "[LAUNCHER] render_notifications complete: Notifications & events presented.",
+                "[LAUNCHER] Notifications surface rendered.",
             )
             .ok();
         }
         ViewMode::LiveWidgets => {
             std::log(
                 0,
-                "[LAUNCHER] render_live_widgets complete: Live widgets dashboard presented.",
+                "[LAUNCHER] Live widgets surface rendered.",
             )
             .ok();
         }
@@ -2690,6 +2690,7 @@ pub extern "C" fn _start() -> ! {
     let mut state = LauncherState::new();
     refresh_package_catalog(&mut state);
     refresh_runtime_recents(&mut state);
+    refresh_clock(&mut state);
     std::log(
         0,
         "[LAUNCHER] Package catalog loaded from the kernel registry.",
@@ -2742,6 +2743,7 @@ pub extern "C" fn _start() -> ! {
 
             if state.active_child.is_none() && (events & std::EVENT_TIMER_TICK) != 0 {
                 refresh_ticks += 1;
+                refresh_clock(&mut state);
                 if state.wallpaper_id == 3
                     && (state.current_view == ViewMode::HomeScreen
                         || state.current_view == ViewMode::LockScreen)
