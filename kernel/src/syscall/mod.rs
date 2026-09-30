@@ -2766,10 +2766,11 @@ pub fn sys_telephony_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
         }
     }
     let mut writer = SliceWriter { buf: out_buf, pos: 0 };
-    // Honest hardware detection: check if modem is actively registered (not PowerDown)
+    // Hardware truth comes from an explicitly registered modem backend. A
+    // simulated state must never make the system claim cellular hardware exists.
     let modem = crate::telephony::CELLULAR_MODEM.lock();
     let sim = crate::telephony::SOVEREIGN_SIM.lock();
-    let is_present = modem.state != crate::telephony::ModemRadioState::PowerDown;
+    let is_present = modem.hardware_present;
     let _ = write!(
         writer,
         r#"{{"present":{},"operator":"{}","rssi":{},"bars":{},"dbm":{},"state":"{:?}","call_state":"{:?}","pdp_active":{},"ip":"{}.{}.{}.{}"}}"#,
@@ -2789,6 +2790,9 @@ pub fn sys_telephony_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
 /// Initiates an outgoing cellular call.
 pub fn sys_telephony_dial(dest: &str) -> Result<(), SyscallResult> {
     if require_system_control_object(crate::services::SERVICE_TELEPHONY_CONTROL_OBJECT).is_err() { require_system_control()?; }
+    if !crate::telephony::CELLULAR_MODEM.lock().hardware_present {
+        return Err(SyscallResult::DeviceError);
+    }
     let ticks = crate::interrupts::get_system_ticks();
     crate::telephony::CELLULAR_MODEM.lock()
         .dial(dest, ticks)
@@ -2806,6 +2810,9 @@ pub fn sys_telephony_hangup() -> Result<(), SyscallResult> {
 /// Transmits an SMS message to a destination phone number.
 pub fn sys_telephony_send_sms(dest: &str, body: &str) -> Result<u32, SyscallResult> {
     if require_system_control_object(crate::services::SERVICE_TELEPHONY_CONTROL_OBJECT).is_err() { require_system_control()?; }
+    if !crate::telephony::CELLULAR_MODEM.lock().hardware_present {
+        return Err(SyscallResult::DeviceError);
+    }
     let ticks = crate::interrupts::get_system_ticks();
     crate::telephony::CELLULAR_MODEM.lock()
         .send_sms(dest, body, ticks)
@@ -2815,6 +2822,9 @@ pub fn sys_telephony_send_sms(dest: &str, body: &str) -> Result<u32, SyscallResu
 /// Toggles cellular packet data (PDP context).
 pub fn sys_telephony_set_data(enabled: bool) -> Result<bool, SyscallResult> {
     if require_system_control_object(crate::services::SERVICE_TELEPHONY_CONTROL_OBJECT).is_err() { require_system_control()?; }
+    if !crate::telephony::CELLULAR_MODEM.lock().hardware_present {
+        return Err(SyscallResult::DeviceError);
+    }
     Ok(crate::telephony::CELLULAR_MODEM.lock().set_data_enabled(enabled))
 }
 
