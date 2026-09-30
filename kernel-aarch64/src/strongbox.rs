@@ -117,59 +117,27 @@ impl StrongBoxHal {
     /// Issues a hardware key attestation proving key was minted in authentic silicon.
     pub fn attest_key(
         &self,
-        key_id: u32,
-        challenge: &[u8],
+        _key_id: u32,
+        _challenge: &[u8],
         caps: &CapabilityTable,
     ) -> Result<Vec<u8>, StrongBoxError> {
         caps.check(CapabilityType::StrongBoxSecureEnclave, Rights::READ)
             .map_err(|_| StrongBoxError::CapabilityDenied)?;
-
-        if !self.enabled {
-            return Err(StrongBoxError::HardwareDisabled);
-        }
-
-        let key = self.keys.iter().find(|k| k.key_id == key_id).ok_or(StrongBoxError::InvalidKeyId)?;
-
-        // Build authentic X.509 ASN.1 attestation record
-        let mut cert = alloc::vec![0x30, 0x42]; // SEQUENCE (66 bytes)
-        cert.extend_from_slice(&key.public_material);
-        cert.extend_from_slice(&self.monotonic_counter.to_be_bytes());
-        for byte in challenge.iter().take(16) {
-            cert.push(byte ^ 0xA5);
-        }
-
-        Ok(cert)
+        if !self.enabled || !self.hardware_present { return Err(StrongBoxError::HardwareDisabled); }
+        Err(StrongBoxError::HardwareBackendUnavailable)
     }
 
     /// Computes a cryptographic signature entirely inside the hardware enclave.
     pub fn sign_digest(
         &mut self,
-        key_id: u32,
-        digest: &[u8; 32],
+        _key_id: u32,
+        _digest: &[u8; 32],
         caps: &CapabilityTable,
     ) -> Result<[u8; 64], StrongBoxError> {
         caps.check(CapabilityType::StrongBoxSecureEnclave, Rights::INVOKE)
             .map_err(|_| StrongBoxError::CapabilityDenied)?;
-
-        if !self.enabled {
-            return Err(StrongBoxError::HardwareDisabled);
-        }
-
-        if self.tamper_detected {
-            return Err(StrongBoxError::TamperDetected);
-        }
-
-        let key = self.keys.iter_mut().find(|k| k.key_id == key_id).ok_or(StrongBoxError::InvalidKeyId)?;
-        key.usage_counter += 1;
-
-        let mut signature = [0u8; 64];
-        for i in 0..32 {
-            signature[i] = digest[i] ^ key.public_material[i];
-            signature[i + 32] = (digest[i] ^ 0x3C).wrapping_add(i as u8);
-        }
-
-        self.monotonic_counter += 1;
-        Ok(signature)
+        if !self.enabled || !self.hardware_present { return Err(StrongBoxError::HardwareDisabled); }
+        Err(StrongBoxError::HardwareBackendUnavailable)
     }
 
     /// Verifies monotonic counter progression against downgrade/replay attacks.
