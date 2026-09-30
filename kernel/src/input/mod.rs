@@ -25,6 +25,9 @@ pub static INPUT_QUEUE: Mutex<InputQueue> = Mutex::new(InputQueue::new());
 /// Global thread-safe capacitive touch digitizer.
 pub static TOUCH_DIGITIZER: Mutex<TouchDigitizer> = Mutex::new(TouchDigitizer::new());
 
+/// Canonical pointer/gesture router shared by hardware and Device Studio input.
+pub static INPUT_ROUTER: Mutex<InputRouter> = Mutex::new(InputRouter::new());
+
 /// Initializes the mobile touch and input subsystem, executing gesture self-tests.
 pub fn init() {
     let mut q = INPUT_QUEUE.lock();
@@ -143,27 +146,40 @@ pub fn post_touch_event(slot: u8, x: u32, y: u32, pressure: u16, phase: TouchPha
     }
 
     let ticks = crate::interrupts::get_system_ticks();
-    {
-        let mut engine = crate::drivers::touch_gestures::TOUCH_ENGINE.lock();
-        match phase {
-            TouchPhase::Down => engine.handle_down(slot as usize, slot, x, y, ticks),
-            TouchPhase::Move => engine.handle_move(slot as usize, x, y, ticks),
-            TouchPhase::Up | TouchPhase::Cancel => engine.handle_up(slot as usize, ticks),
-        }
-    }
-    crate::drivers::input::pump_touch_events();
+    let pointer_phase = match phase {
+        TouchPhase::Down => PointerPhase::Down,
+        TouchPhase::Move => PointerPhase::Move,
+        TouchPhase::Up => PointerPhase::Up,
+        TouchPhase::Cancel => PointerPhase::Cancel,
+    };
+    let pointer = PointerEvent::new(
+        InputSource::DeviceStudio,
+        CoordinateSpace::LogicalPortrait,
+        slot,
+        pointer_phase,
+        x as i32,
+        y as i32,
+    );
 
-    let gesture_opt = TOUCH_DIGITIZER.lock().update_touch(slot, x, y, pressure, phase);
-    let mut q = INPUT_QUEUE.lock();
-    q.push(InputEvent::Touch(TouchPoint {
+    // Preserve the raw hardware event for diagnostics/low-level consumers.
+    INPUT_QUEUE.lock().push(InputEvent::Touch(TouchPoint {
         slot,
         x,
         y,
         pressure,
         phase,
     }));
-    if let Some(gesture) = gesture_opt {
-        q.push(InputEvent::Gesture(gesture));
+
+    let gesture = INPUT_ROUTER
+        .lock()
+        .dispatch_pointer_at(pointer, PHONE_X as u32 * 0 + 720, 24, ticks);
+
+    if let Some(gesture) = gesture {
+        let event = crate::drivers::input::InputEvent::from_canonical(gesture);
+        crate::drivers::input::INPUT_PIPELINE.lock().push(event);
+        crate::drivers::input::dispatch_to_focused_window(event);
+        crate::event::broadcast_event(crate::event::EVENT_TOUCH_INPUT);
+    } else if phase == TouchPhase::Move || phase == TouchPhase::Down {
+        crate::event::broadcast_event(crate::event::EVENT_TOUCH_INPUT);
     }
-    crate::event::broadcast_event(crate::event::EVENT_TOUCH_INPUT);
 }
