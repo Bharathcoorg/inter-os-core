@@ -1256,235 +1256,54 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert_eq!(smp.online_core_count(), 2);
     kprintln!("[OK] Dynamic CPU Hotplug: Core 1 powered off via PSCI CPU_OFF -> Conserving idle battery.");
 
-    // 41. Sovereign Mobile Embedded SIM / eSIM & Dual-SIM Smartcard HAL
-    kprintln!("--- [Testing Sovereign Mobile Dual-SIM & eUICC eSIM Subsystem] ---");
-
+    // 41. SIM/eSIM backend boundary
+    kprintln!("--- [Testing AArch64 SIM/eSIM backend boundary] ---");
     let mut sim = sim::SimCardController::new(0x090D_0000);
     sim.init_hardware();
     assert!(sim.enabled);
-    assert!(sim.card_present[0]);
-    assert!(sim.card_present[1]);
-    kprintln!("[OK] SIM/UICC Controller: Initialized hardware @ 0x090D0000 (Dual SIM Dual Standby Ready).");
-
-    // Test 1: Zero Ambient Authority: Uncredentialed SIM access rejected
-    let unauth_sim = sim.read_iccid(&empty_caps);
-    assert_eq!(unauth_sim.err(), Some(sim::SimError::CapabilityDenied));
-    kprintln!("[TEST] Zero Ambient Authority: Uncredentialed SIM APDU command REJECTED (CapabilityDenied) VERIFIED.");
-
-    // Mint SIM READ/WRITE capability
+    assert!(!sim.hardware_present);
     let mut sim_caps = CapabilityTable::new();
-    sim_caps.mint(CapabilityType::SimCardSecureElement, Rights::READ | Rights::WRITE, None);
+    sim_caps.mint(CapabilityType::SimCardSecureElement, Rights::READ | Rights::WRITE | Rights::INVOKE, None);
+    assert_eq!(sim.read_iccid(&sim_caps).err(), Some(sim::SimError::HardwareDisabled));
+    kprintln!("[OK] SIM/eSIM: no fabricated ICCID or card presence.");
 
-    // Test 2: ISO 7816-4 APDU ICCID Read from Physical Nano-SIM (Slot 0)
-    let nano_iccid = sim.read_iccid(&sim_caps).expect("Read nano-SIM ICCID failed");
-    assert_eq!(nano_iccid.len(), 10);
-    kprintln!("[OK] Slot 0 (Physical Nano-SIM): Selected EF_ICCID via APDU -> Read ICCID (89014103211118990012).");
-
-    // Test 3: Dual-SIM Multiplexing: Switch to eUICC eSIM (Slot 1)
-    sim.select_slot(sim::SimSlot::EsimEuicc, &sim_caps).expect("Switch to eSIM failed");
-    let esim_iccid = sim.read_iccid(&sim_caps).expect("Read eSIM ICCID failed");
-    assert_eq!(esim_iccid.len(), 10);
-    assert_ne!(nano_iccid, esim_iccid);
-    kprintln!("[TEST] Dual-SIM Multiplexing: Switched to Slot 1 (eUICC eSIM Enclave) -> Read eSIM ICCID (89019999000123456789) VERIFIED.");
-
-    // Test 4: Milenage AKA 4G/5G Network Authentication
-    // Rejection without INVOKE rights
-    let auth_cmd = sim::ApduCommand {
-        cla: 0x00,
-        ins: 0x88,
-        p1: 0x00,
-        p2: 0x81,
-        data: alloc::vec![0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80], // RAND challenge
-        le: Some(8),
-    };
-    let unauth_milenage = sim.transmit_apdu(&auth_cmd, &sim_caps);
-    assert_eq!(unauth_milenage.err(), Some(sim::SimError::CapabilityDenied));
-
-    // Mint SIM INVOKE capability
-    let mut sim_invoke_caps = CapabilityTable::new();
-    sim_invoke_caps.mint(CapabilityType::SimCardSecureElement, Rights::READ | Rights::WRITE | Rights::INVOKE, None);
-
-    let auth_resp = sim.transmit_apdu(&auth_cmd, &sim_invoke_caps).expect("Milenage auth failed");
-    assert_eq!(auth_resp.sw1, 0x90);
-    assert_eq!(auth_resp.sw2, 0x00);
-    assert_eq!(auth_resp.data.len(), 8);
-    kprintln!("[TEST] Milenage 4G/5G AKA Authentication: Derived authentic 8-byte network response (RES: {:02X?}) VERIFIED.", auth_resp.data);
-
-    // 42. Sovereign Mobile Display Subsystem, Refresh Rate Governor & Ambient Dimming HAL
-    kprintln!("--- [Testing Sovereign Mobile Display & Refresh Rate Governor Subsystem] ---");
-
+    // 42. Display backend boundary
+    kprintln!("--- [Testing AArch64 display backend boundary] ---");
     let mut display_hal = display_hal::MobileDisplayHal::new(0x090E_0000);
     display_hal.init_hardware();
     assert!(display_hal.enabled);
-    assert_eq!(display_hal.width, 1080);
-    assert_eq!(display_hal.height, 2400);
-    kprintln!("[OK] Mobile Display Controller: Initialized hardware @ 0x090E0000 (1080x2400 OLED Panel).");
-
-    // Test 1: Zero Ambient Authority: Uncredentialed refresh rate modification rejected
-    let unauth_disp = display_hal.set_refresh_rate(display_hal::RefreshRateHz::Hz120, 100, &empty_caps);
-    assert_eq!(unauth_disp.err(), Some(display_hal::DisplayError::CapabilityDenied));
-    kprintln!("[TEST] Zero Ambient Authority: Uncredentialed display timing control REJECTED (CapabilityDenied) VERIFIED.");
-
-    // Mint Display WRITE capability
+    assert!(!display_hal.hardware_present);
     let mut disp_caps = CapabilityTable::new();
     disp_caps.mint(CapabilityType::DisplayControllerDirect, Rights::READ | Rights::WRITE, None);
+    assert_eq!(display_hal.set_refresh_rate(display_hal::RefreshRateHz::Hz120, 85, &disp_caps).err(), Some(display_hal::DisplayError::HardwareDisabled));
+    kprintln!("[OK] Display: panel timing is not exposed as physical hardware without a bound backend.");
 
-    // Test 2: Variable Refresh Rate (VRR) ProMotion 120Hz Fluid UI Ramp-Up
-    display_hal.set_refresh_rate(display_hal::RefreshRateHz::Hz120, 85, &disp_caps)
-        .expect("Set 120Hz failed");
-    assert_eq!(display_hal.current_hz, display_hal::RefreshRateHz::Hz120);
-    kprintln!("[OK] LTPO VRR Governor: Ramped up display to 120Hz (ProMotion Fluidity) for interactive touch UI.");
-
-    // Test 3: Battery Conservation Governor (Cap to 60Hz at low battery <= 20%)
-    let low_batt_res = display_hal.set_refresh_rate(display_hal::RefreshRateHz::Hz120, 15, &disp_caps);
-    assert_eq!(low_batt_res.err(), Some(display_hal::DisplayError::ThrottledByBatteryGovernor));
-    assert_eq!(display_hal.current_hz, display_hal::RefreshRateHz::Hz60);
-    kprintln!("[TEST] Battery Conservation Governor: 15% battery detected -> Throttled 120Hz down to 60Hz VERIFIED.");
-
-    // Test 4: Hardware DC Dimming & Ambient Light Sensor Nit Adaptation
-    let bright_sunlight_nits = display_hal.auto_adjust_from_ambient(12000, &disp_caps)
-        .expect("Auto ambient sunlight failed");
-    assert_eq!(bright_sunlight_nits, 1000);
-    assert!(display_hal.dc_dimming_active);
-    kprintln!("[OK] Hardware DC Dimming & Ambient Sensor: 12000 lux detected -> Engaged 1000 nits High Brightness Mode (HBM).");
-
-    let dark_room_nits = display_hal.auto_adjust_from_ambient(5, &disp_caps)
-        .expect("Auto ambient dark room failed");
-    assert_eq!(dark_room_nits, 50);
-    kprintln!("[OK] Hardware DC Dimming & Ambient Sensor: 5 lux detected -> Set 50 nits with flicker-free DC dimming.");
-
-    // Test 5: VSYNC-Synchronized Ping-Pong Double Buffering
-    let slot_a = display_hal.flip_buffer(&disp_caps).expect("Flip 1 failed");
-    let slot_b = display_hal.flip_buffer(&disp_caps).expect("Flip 2 failed");
-    assert_eq!(slot_a, 1);
-    assert_eq!(slot_b, 0);
-    assert_eq!(display_hal.frame_flips_count, 2);
-    kprintln!("[OK] Hardware VSYNC Pipeline: Swapped front and back scanout buffers (Slots: 0 -> 1 -> 0) VERIFIED.");
-
-    // 43. Sovereign Mobile Secure Element / StrongBox Hardware Crypto Enclave HAL
-    kprintln!("--- [Testing Sovereign Mobile StrongBox Hardware Crypto Enclave Subsystem] ---");
-
+    // 43. StrongBox backend boundary
+    kprintln!("--- [Testing AArch64 StrongBox backend boundary] ---");
     let mut strongbox = strongbox::StrongBoxHal::new(0x090F_0000);
     strongbox.init_hardware();
     assert!(strongbox.enabled);
-    assert!(strongbox.tamper_circuit_armed);
-    assert_eq!(strongbox.monotonic_counter, 1000);
-    kprintln!("[OK] StrongBox Hardware Crypto Enclave: Initialized hardware @ 0x090F0000 (Tamper Circuits Armed).");
-
-    // Test 1: Zero Ambient Authority: Uncredentialed key generation rejected
-    let unauth_sb = strongbox.generate_key(strongbox::KeyAlgorithm::Ed25519, &empty_caps);
-    assert_eq!(unauth_sb.err(), Some(strongbox::StrongBoxError::CapabilityDenied));
-    kprintln!("[TEST] Zero Ambient Authority: Uncredentialed StrongBox operation REJECTED (CapabilityDenied) VERIFIED.");
-
-    // Mint StrongBox capability
+    assert!(!strongbox.hardware_present);
     let mut sb_caps = CapabilityTable::new();
     sb_caps.mint(CapabilityType::StrongBoxSecureEnclave, Rights::READ | Rights::WRITE | Rights::INVOKE, None);
+    assert_eq!(strongbox.generate_key(strongbox::KeyAlgorithm::Ed25519, &sb_caps).err(), Some(strongbox::StrongBoxError::HardwareDisabled));
+    kprintln!("[OK] StrongBox: no software-generated secure-element keys or attestations.");
 
-    // Test 2: Isolated Hardware Key Generation
-    let key_id = strongbox.generate_key(strongbox::KeyAlgorithm::Ed25519, &sb_caps)
-        .expect("Generate key failed");
-    assert_eq!(key_id, 1);
-    assert_eq!(strongbox.monotonic_counter, 1001);
-    kprintln!("[OK] Isolated Silicon Keymaster: Generated hardware-rooted Ed25519 Key #1 inside tamper enclave.");
-
-    // Test 3: Hardware Key Attestation (X.509 Certificate Minting)
-    let challenge = b"SOVEREIGN_CHALLENGE";
-    let cert = strongbox.attest_key(key_id, challenge, &sb_caps)
-        .expect("Key attestation failed");
-    assert_eq!(cert[0], 0x30); // ASN.1 SEQUENCE
-    assert_eq!(cert.len(), 58);
-    kprintln!("[TEST] Hardware Key Attestation: Minted authentic 58-byte X.509 certificate bound to silicon master key VERIFIED.");
-
-    // Test 4: In-Enclave Cryptographic Signature (Zero Private Key Leakage)
-    let digest = [0x5Au8; 32];
-    let signature = strongbox.sign_digest(key_id, &digest, &sb_caps)
-        .expect("Sign digest failed");
-    assert_eq!(signature.len(), 64);
-    assert_eq!(strongbox.monotonic_counter, 1002);
-    kprintln!("[OK] Cryptographic Signing Engine: Executed in-enclave signature (64 bytes) without key leakage.");
-
-    // Test 5: Monotonic Anti-Rollback Protection
-    let rollback_res = strongbox.verify_monotonic_counter(999, &sb_caps);
-    assert_eq!(rollback_res.err(), Some(strongbox::StrongBoxError::AntiRollbackViolation));
-    let valid_counter = strongbox.verify_monotonic_counter(1005, &sb_caps).expect("Valid counter failed");
-    assert_eq!(valid_counter, 1005);
-    kprintln!("[TEST] Monotonic Anti-Rollback: Replay attack (counter 999 < 1002) REJECTED (AntiRollbackViolation) VERIFIED.");
-
-    // Test 6: Physical Tamper Sensor & Active Enclave Zeroization
-    strongbox.trigger_tamper_event();
-    assert!(strongbox.keys.is_empty());
-    let tamper_res = strongbox.generate_key(strongbox::KeyAlgorithm::Aes256Gcm, &sb_caps);
-    assert_eq!(tamper_res.err(), Some(strongbox::StrongBoxError::TamperDetected));
-    kprintln!("[TEST] Physical Tamper Defense: Glitch/intrusion trigger purged key store to 0 bytes & blocked execution VERIFIED.");
-
-    // 44. Sovereign Mobile Hardware Remote Kill Switch & Anti-Theft Protection HAL
-    kprintln!("--- [Testing Sovereign Mobile Remote Kill Switch Subsystem] ---");
-
-    let owner_pubkey = [0x42u8; 32];
-    let mut killswitch = killswitch::RemoteKillswitchHal::new(0x0910_0000, owner_pubkey);
+    // 44. Remote killswitch backend boundary
+    kprintln!("--- [Testing AArch64 remote killswitch backend boundary] ---");
+    let mut killswitch = killswitch::RemoteKillswitchHal::new(0x0910_0000, [0u8; 32]);
     killswitch.init_hardware();
     assert!(killswitch.enabled);
-    assert_eq!(killswitch.state, killswitch::KillswitchState::Armed);
-    kprintln!("[OK] Hardware Remote Killswitch: Initialized controller @ 0x09100000 (Armed with Anti-Theft Protection).");
-
-    // Test 1: Zero Ambient Authority: Uncredentialed kill command rejected
-    let dummy_sig = [0u8; 64];
-    let unauth_ks = killswitch.execute_kill_command(killswitch::KillAction::LockdownScreen, 0xDEAD_BEEF_0001, &dummy_sig, &empty_caps);
-    assert_eq!(unauth_ks.err(), Some(killswitch::KillswitchError::CapabilityDenied));
-    kprintln!("[TEST] Zero Ambient Authority: Uncredentialed remote killswitch command REJECTED (CapabilityDenied) VERIFIED.");
-
-    // Mint Killswitch capability
+    assert!(!killswitch.hardware_present);
     let mut ks_caps = CapabilityTable::new();
     ks_caps.mint(CapabilityType::RemoteKillSwitchDirect, Rights::READ | Rights::WRITE | Rights::INVOKE, None);
-
-    // Test 2: Anti-Replay Nonce Enforcement
-    let replay_res = killswitch.execute_kill_command(killswitch::KillAction::LockdownScreen, 0x1234_5678, &dummy_sig, &ks_caps);
-    assert_eq!(replay_res.err(), Some(killswitch::KillswitchError::ReplayNonceMismatch));
-    kprintln!("[TEST] Anti-Replay Security: Command with stale/invalid nonce (0x12345678) REJECTED VERIFIED.");
-
-    // Test 3: Tier 1 Remote Screen Lockdown (Reversible)
-    // Construct authentic signature: tag = nonce ^ action
-    let nonce1 = 0xDEAD_BEEF_0001;
-    let action1 = killswitch::KillAction::LockdownScreen;
-    let tag1 = (nonce1 ^ (action1 as u64)).to_be_bytes();
-    let mut sig1 = [0u8; 64];
-    for i in 0..8 {
-        sig1[i] = tag1[i] ^ owner_pubkey[i];
-    }
-
-    let state1 = killswitch.execute_kill_command(action1, nonce1, &sig1, &ks_caps)
-        .expect("Lockdown failed");
-    assert_eq!(state1, killswitch::KillswitchState::ScreenLocked);
-    kprintln!("[OK] Tier 1 Mitigation: Cryptographically verified ScreenLocked state (Display locked, USB data severed).");
-
-    // Reversible unlock via owner physical authorization
-    killswitch.unlock_screen_lockdown(&ks_caps).expect("Unlock failed");
-    assert_eq!(killswitch.state, killswitch::KillswitchState::Armed);
-    kprintln!("[OK] Master Physical Authorization: Reversible lockdown cleared -> Restored to Armed state.");
-
-    // Test 4: Tier 3 Permanent Emergency Wipe (Irreversible Zeroization)
-    let nonce2 = 0xDEAD_BEEF_0002;
-    let action2 = killswitch::KillAction::EmergencyEraseStorage;
-    let tag2 = (nonce2 ^ (action2 as u64)).to_be_bytes();
-    let mut sig2 = [0u8; 64];
-    for i in 0..8 {
-        sig2[i] = tag2[i] ^ owner_pubkey[i];
-    }
-
-    let state2 = killswitch.execute_kill_command(action2, nonce2, &sig2, &ks_caps)
-        .expect("Emergency erase failed");
-    assert_eq!(state2, killswitch::KillswitchState::DeviceWiped);
-    kprintln!("[TEST] Tier 3 Irreversible Wipe: Flash storage & partition superblocks zeroized -> DeviceWiped VERIFIED.");
-
-    // Verify further unlock permanently blocked
-    let unlock_blocked = killswitch.unlock_screen_lockdown(&ks_caps);
-    assert_eq!(unlock_blocked.err(), Some(killswitch::KillswitchError::DeviceAlreadyWiped));
-    kprintln!("[TEST] Tamper Lockout: Subsequent unlocking permanently blocked after emergency obliteration VERIFIED.");
+    assert_eq!(killswitch.execute_kill_command(killswitch::KillAction::LockdownScreen, killswitch.current_nonce, &[0u8; 64], &ks_caps).err(), Some(killswitch::KillswitchError::HardwareDisabled));
+    kprintln!("[OK] Remote killswitch: command execution requires a concrete hardware controller.");
 
     kprintln!();
     kprintln!("============================================================");
-    kprintln!("  [SUCCESS] AArch64 Sovereign Smartphone Microkernel v7.5");
-    kprintln!("  Camera ISP, SMS, NFC, Sensors, BLE, Wi-Fi 6, GNSS, Haptics, Biometrics, USB-PD, NPU, SMP, SIM, Display, StrongBox & Killswitch VERIFIED!");
+    kprintln!("  [READY] AArch64 Sovereign Smartphone Microkernel");
+    kprintln!("  Source-level backend boundaries validated; runtime hardware remains unbound until a concrete driver is attached.");
     kprintln!("============================================================");
 
     // Enter idle wait loop
