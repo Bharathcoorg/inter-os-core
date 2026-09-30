@@ -97,6 +97,7 @@ pub struct WifiController {
     pub current_mac: [u8; 6],
     pub channel: u8,
     pub active_bssid: Option<[u8; 6]>,
+    pub hardware_present: bool,
     pub derived_pmk: Option<[u8; 32]>,
     pub discovered_networks: Vec<DiscoveredNetwork>,
     pub frames_transmitted: u64,
@@ -109,6 +110,7 @@ impl WifiController {
         Self {
             mmio_base,
             enabled: false,
+            hardware_present: false,
             state: WifiStationState::Disconnected,
             current_mac: [0x54, 0x38, 0x12, 0x44, 0x55, 0x66],
             channel: 6,
@@ -122,7 +124,19 @@ impl WifiController {
     }
 
     pub fn init_hardware(&mut self) {
-        self.enabled = true;
+        // Configuration is not hardware discovery. A concrete Wi-Fi chipset
+        // probe must set hardware_present before radio operations are enabled.
+        self.enabled = false;
+    }
+
+    pub fn set_hardware_present(&mut self, present: bool) {
+        self.hardware_present = present;
+        self.enabled = present;
+        if !present {
+            self.state = WifiStationState::Disconnected;
+            self.derived_pmk = None;
+            self.active_bssid = None;
+        }
     }
 
     /// Rotates device MAC address to locally-administered randomized MAC (Anti-Tracking).
@@ -182,6 +196,10 @@ impl WifiController {
         caps.check(CapabilityType::WifiNetworkDirect, Rights::INVOKE)
             .map_err(|_| WifiError::CapabilityDenied)?;
 
+        if !self.hardware_present || !self.enabled {
+            return Err(WifiError::HardwareUnavailable);
+        }
+
         self.state = WifiStationState::AuthenticatingSae;
 
         // 1. Derive Password Element (PWE) via pure no_std hashing: PWE = SHA256(passphrase | min(MACs) | max(MACs))
@@ -196,8 +214,9 @@ impl WifiController {
         }
         let pwe = sha256(&pwe_material);
 
-        // 2. Commit Exchange Simulation: generate ephemeral scalar and element tokens
-        let ephemeral_rand = [0x55u8; 32];
+        // A production WPA3-SAE implementation must use the chipset/crypto
+        // backend's random scalar and the standardized Dragonfly group
+        // arithmetic. Never synthesize a deterministic handshake here.
         let mut commit_scalar = Vec::new();
         commit_scalar.extend_from_slice(b"SAE_COMMIT_SCALAR:");
         commit_scalar.extend_from_slice(&ephemeral_rand);
