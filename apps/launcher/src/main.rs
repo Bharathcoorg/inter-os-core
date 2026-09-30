@@ -160,12 +160,6 @@ pub enum ViewMode {
 pub struct LauncherState {
     pub current_view: ViewMode,
     pub clock_time: [u8; 5],
-    pub wifi_on: bool,
-    pub bt_on: bool,
-    pub dark_mode: bool,
-    pub media_playing: bool,
-    pub flashlight_on: bool,
-    pub wallpaper_id: usize,
     pub anim_tick: u32,
     pub app_drawer_tab: usize,
     pub notif_tab: usize,
@@ -188,12 +182,6 @@ impl LauncherState {
         Self {
             current_view: ViewMode::LockScreen,
             clock_time: *b"00:00",
-            wifi_on: false,
-            bt_on: false,
-            dark_mode: true,
-            media_playing: false,
-            flashlight_on: false,
-            wallpaper_id: 0,
             anim_tick: 0,
             app_drawer_tab: 0,
             notif_tab: 0,
@@ -278,21 +266,34 @@ fn refresh_clock(state: &mut LauncherState) {
     let mut buf = [0u8; 96];
     let Ok(n) = std::rtc_get_time(&mut buf) else { return; };
     let data = &buf[..n];
-    let mut hour = [b'0'; 2];
-    let mut minute = [b'0'; 2];
-    let mut digits = 0usize;
-    let mut seen_colon = false;
-    for &b in data {
-        if b.is_ascii_digit() {
-            if !seen_colon && digits < 2 { hour[digits] = b; digits += 1; }
-            else if seen_colon && digits < 4 { minute[digits - 2] = b; digits += 1; }
-        } else if b == b':' && digits >= 2 {
-            seen_colon = true;
-            if digits >= 4 { break; }
+
+    fn field(data: &[u8], key: &[u8]) -> Option<u8> {
+        let mut i = 0usize;
+        while i + key.len() < data.len() {
+            if &data[i..i + key.len()] == key {
+                let mut j = i + key.len();
+                while j < data.len() && data[j].is_ascii_whitespace() { j += 1; }
+                if j < data.len() && data[j] == b':' { j += 1; }
+                while j < data.len() && data[j].is_ascii_whitespace() { j += 1; }
+                if j + 1 < data.len() && data[j].is_ascii_digit() && data[j + 1].is_ascii_digit() {
+                    return Some((data[j] - b'0') * 10 + (data[j + 1] - b'0'));
+                }
+            }
+            i += 1;
         }
+        None
     }
-    if digits >= 4 {
-        state.clock_time = [hour[0], hour[1], b':', minute[0], minute[1]];
+
+    let Some(hour) = field(data, b"\"hour\"") else { return; };
+    let Some(minute) = field(data, b"\"minute\"") else { return; };
+    if hour < 24 && minute < 60 {
+        state.clock_time = [
+            b'0' + hour / 10,
+            b'0' + hour % 10,
+            b':',
+            b'0' + minute / 10,
+            b'0' + minute % 10,
+        ];
     }
 }
 
