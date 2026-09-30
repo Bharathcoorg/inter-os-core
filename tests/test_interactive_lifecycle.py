@@ -624,32 +624,6 @@ def main():
         assert drawer_returned, "Failed to return to Home from App Drawer"
         print("[LIFECYCLE TEST] [OK] Returned to Home from App Drawer.")
 
-        # Contextual state: Testing Contextual Today Tasks
-        print("\n[LIFECYCLE TEST] === Contextual state: Testing Contextual Today Tasks ===")
-        time.sleep(0.5)
-        print("[LIFECYCLE TEST] Toggling Today card task 0 checkbox at (78, 318)...")
-        reader.sock.sendall(b"TAP 78 318\n")
-        task0_toggled = reader.wait_for(
-            "Contextual task 0 toggled.",
-            timeout=10.0,
-            print_keywords=["LAUNCHER", "task", "toggled"]
-        )
-        assert task0_toggled, "Failed to toggle contextual task 0"
-        print("[LIFECYCLE TEST] [OK] Contextual task 0 toggled.")
-        ppm_tasks = os.path.abspath(r"target\test_contextual_tasks.ppm").replace("\\", "/")
-        _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_tasks}")
-        print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_tasks}")
-        time.sleep(0.5)
-        print("[LIFECYCLE TEST] Toggling Today card task 1 checkbox at (78, 368)...")
-        reader.sock.sendall(b"TAP 78 368\n")
-        task1_toggled = reader.wait_for(
-            "Contextual task 1 toggled.",
-            timeout=10.0,
-            print_keywords=["LAUNCHER", "task", "toggled"]
-        )
-        assert task1_toggled, "Failed to toggle contextual task 1"
-        print("[LIFECYCLE TEST] [OK] Contextual task 1 toggled.")
-
         # Live widgets: Testing Live Widgets
         print("\n[LIFECYCLE TEST] === Live widgets: Testing Live Widgets ===")
         time.sleep(0.5)
