@@ -2806,6 +2806,7 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
                             }
+                        }
                         ViewMode::LiveWidgets => {
                             // Swipe right returns to HomeScreen
                             if (input.kind == 4 && input.dx >= 60)
