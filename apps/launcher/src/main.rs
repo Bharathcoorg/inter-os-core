@@ -161,7 +161,6 @@ pub struct LauncherState {
     pub current_view: ViewMode,
     pub clock_time: [u8; 5],
     pub notification_count: usize,
-    pub flashlight_on: bool,
     pub app_drawer_tab: usize,
     pub recent_apps: [[u8; 32]; 3],
     pub recent_app_lens: [u8; 3],
@@ -182,7 +181,6 @@ impl LauncherState {
             current_view: ViewMode::LockScreen,
             clock_time: *b"00:00",
             notification_count: 0,
-            flashlight_on: false,
             app_drawer_tab: 0,
             recent_apps: [[0u8; 32]; 3],
             recent_app_lens: [0; 3],
@@ -1165,46 +1163,8 @@ fn get_system_space_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
 }
 
 #[inline(never)]
-fn get_lock_wallpaper_pixel(x: usize, y: usize) -> u32 {
-    let xi = x as i32;
-    let yi = y as i32;
-
-    // Mountain silhouettes matching Screen 1 reference UI:
-    // Peak 1 (Distant Ridge):
-    let m1 = 580 + ((xi - 340).abs() * 7) / 10;
-    // Peak 2 (Mid-range Ridge):
-    let m2 = 780 + ((xi - 180).abs() * 6) / 10;
-    // Peak 3 (Right Fore-peak):
-    let m3 = 920 + ((xi - 560).abs() * 8) / 10;
-    // Foreground ridge / ground:
-    let m4 = 1180 + ((xi - 300).abs() * 4) / 10;
-
-    if yi >= m4 {
-        return 0xFF050914; // Deepest foreground
-    } else if yi >= m3 {
-        return 0xFF0C1322;
-    } else if yi >= m2 {
-        return 0xFF141F36;
-    } else if yi >= m1 {
-        return 0xFF23324F;
-    }
-
-    // Sky Twilight Gradient (from dark blue down to warm rose/amber twilight glow near horizon):
-    if yi < 400 {
-        let t = (yi * 255) / 400;
-        let r = 10 + (t * 15) / 255;
-        let g = 16 + (t * 20) / 255;
-        let b = 38 + (t * 40) / 255;
-        (0xFF << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
-    } else if yi < 600 {
-        let t = ((yi - 400) * 255) / 200;
-        let r = 25 + (t * 50) / 255;
-        let g = 36 + (t * 30) / 255;
-        let b = 78 + (t * 10) / 255;
-        (0xFF << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
-    } else {
-        0xFF4A4E69
-    }
+fn get_stock_background_pixel(_x: usize, _y: usize) -> u32 {
+    BG_DARK
 }
 
 #[inline(never)]
@@ -1246,13 +1206,13 @@ fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 return SUCCESS_EMERALD;
             }
         }
-        return get_lock_wallpaper_pixel(x, y);
+        return get_stock_background_pixel(x, y);
     }
 
     // 2. Clean Architectural Clock & Date (Screen 1 Reference)
     if y >= 150 && y < 275 && x >= 48 && x < 672 {
         if y >= 160 && y < 184 {
-            if let Some(c) = test_text(x, y, 72, 160, 3, b"Wed, 24 Sep", 0xFFE2E8F0) {
+            if let Some(c) = test_text(x, y, 72, 160, 3, b"InterOS", 0xFFE2E8F0) {
                 return c;
             }
         }
@@ -1261,39 +1221,10 @@ fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 return c;
             }
         }
-        return get_lock_wallpaper_pixel(x, y);
+        return get_stock_background_pixel(x, y);
     }
 
-    // 3. Flashlight Circular Button at (72, 1330, r: 35)
-    let f_dx = (x as i32) - 72;
-    let f_dy = (y as i32) - 1330;
-    let f_d2 = f_dx * f_dx + f_dy * f_dy;
-    if f_d2 <= 1225 {
-        if f_d2 >= 1156 {
-            return 0x55FFFFFF;
-        }
-        if y >= 1324 && y < 1332 {
-            let label = if state.flashlight_on {
-                &b"ON"[..]
-            } else {
-                &b"FLS"[..]
-            };
-            let fg = if state.flashlight_on {
-                TEXT_DARK
-            } else {
-                0xFFFFFFFF
-            };
-            let ox = if state.flashlight_on { 64 } else { 60 };
-            if let Some(c) = test_text(x, y, ox, 1324, 1, label, fg) {
-                return c;
-            }
-        }
-        return if state.flashlight_on {
-            ACCENT_AMBER
-        } else {
-            0x77000000
-        };
-    }
+    // Flashlight is unavailable until a real hardware capability is present.
 
     // 4. Camera Circular Button at (648, 1330, r: 35)
     let c_dx = (x as i32) - 648;
@@ -1330,7 +1261,7 @@ fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     }
 
     // 7. Foundational Mountain Wallpaper
-    get_lock_wallpaper_pixel(x, y)
+    get_stock_background_pixel(x, y)
 }
 
 #[inline(never)]
@@ -2793,17 +2724,6 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
-                                // Flashlight circle button at (72, 1330, r: 35)
-                                let f_dx = (x as i32) - 72;
-                                let f_dy = (y as i32) - 1330;
-                                if f_dx * f_dx + f_dy * f_dy <= 1225 {
-                                    state.flashlight_on = !state.flashlight_on;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Flashlight toggled on lock screen.")
-                                        .ok();
-                                    break;
-                                }
 
                                 // Camera circle button at (648, 1330, r: 35)
                                 let c_dx = (x as i32) - 648;
@@ -3199,80 +3119,7 @@ pub extern "C" fn _start() -> ! {
                                     }
                                 }
 
-                                // Personalization & Wallpaper Switcher Theme Buttons:
-                                // [1. Midnight] (65..335, 935..1005)
-                                if (935..1005).contains(&y) && (65..335).contains(&x) {
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(
-                                        0,
-                                        "[LAUNCHER] Wallpaper theme changed to Midnight Slate.",
-                                    )
-                                    .ok();
-                                    let mut drain = std::InputEvent {
-                                        kind: 0,
-                                        x: 0,
-                                        y: 0,
-                                        dx: 0,
-                                        dy: 0,
-                                        scale_milli: 1000,
-                                    };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
-                                // [2. Deep Azure] (375..645, 935..1005)
-                                if (935..1005).contains(&y) && (375..645).contains(&x) {
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(
-                                        0,
-                                        "[LAUNCHER] Wallpaper theme changed to Deep Azure.",
-                                    )
-                                    .ok();
-                                    let mut drain = std::InputEvent {
-                                        kind: 0,
-                                        x: 0,
-                                        y: 0,
-                                        dx: 0,
-                                        dy: 0,
-                                        scale_milli: 1000,
-                                    };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
-                                // [3. Obsidian] (65..335, 1020..1090)
-                                if (1020..1090).contains(&y) && (65..335).contains(&x) {
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Wallpaper theme changed to Obsidian.")
-                                        .ok();
-                                    let mut drain = std::InputEvent {
-                                        kind: 0,
-                                        x: 0,
-                                        y: 0,
-                                        dx: 0,
-                                        dy: 0,
-                                        scale_milli: 1000,
-                                    };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
-                                // [4. Dusk] (375..645, 1020..1090)
-                                if (1020..1090).contains(&y) && (375..645).contains(&x) {
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Wallpaper theme changed to Dusk.").ok();
-                                    let mut drain = std::InputEvent {
-                                        kind: 0,
-                                        x: 0,
-                                        y: 0,
-                                        dx: 0,
-                                        dy: 0,
-                                        scale_milli: 1000,
-                                    };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
+
                             }
                         }
                         ViewMode::HomeScreen => {
