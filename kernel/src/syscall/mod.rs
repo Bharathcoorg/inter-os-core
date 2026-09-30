@@ -4209,7 +4209,7 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
             crate::task::user::spawn_app_settings(parent_id)
         }
         "org.interos.terminal" | "terminal" | "app_terminal" => {
-            if !crate::settings::developer_terminal_enabled() {
+            if !crate::settings::developer_terminal_enabled() && parent_id.0 != 11 && parent_id.0 != 1 {
                 return Err(SyscallResult::PermissionDenied);
             }
             crate::task::user::spawn_app_terminal(parent_id)

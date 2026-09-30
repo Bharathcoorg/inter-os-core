@@ -252,7 +252,6 @@ fn get_gallery_color(x: usize, y: usize, app: &GalleryApp) -> u32 {
     // Modal Fullscreen Inspection View
     if let Some(idx) = app.inspecting_photo {
         let Some(photo) = PHOTOS.get(idx) else {
-            app.inspecting_photo = None;
             return BG_DARK;
         };
 

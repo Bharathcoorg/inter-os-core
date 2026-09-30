@@ -169,6 +169,7 @@ pub fn dispatch_to_focused_window(event: InputEvent) {
                 wm.hit_test(event.x, event.y).map(|(_, owner)| owner),
             InputEventKind::Pan | InputEventKind::Pinch =>
                 wm.focused_owner().or_else(|| wm.top_visible_owner()),
+            _ => wm.focused_owner().or_else(|| wm.top_visible_owner()),
         };
         let resolved = target.or_else(|| {
             let kms = crate::drivers::display_kms::DRM_KMS.lock();

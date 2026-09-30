@@ -173,6 +173,7 @@ pub struct LauncherState {
     pub app_count: usize,
     pub app_drawer_page: usize,
     pub active_child: Option<u64>,
+    pub torch_active: bool,
 }
 
 impl LauncherState {
@@ -193,6 +194,7 @@ impl LauncherState {
             app_count: 0,
             app_drawer_page: 0,
             active_child: None,
+            torch_active: false,
         }
     }
 
@@ -442,7 +444,7 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return 0xFFE2E8F0;
         }
         if y >= 16 && y < 32 {
-            if let Some(c) = test_text(x, y, 48, 16, 2, state.clock_time, 0xFF0F172A) {
+            if let Some(c) = test_text(x, y, 48, 16, 2, &state.clock_time, 0xFF0F172A) {
                 return c;
             }
         }
@@ -655,14 +657,14 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 }
 
 #[inline(never)]
-fn get_activity_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
+fn get_activity_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     // 1. Status Bar (y: 0..48)
     if y < 48 {
         if y == 47 {
             return BORDER_SUBTLE;
         }
         if y >= 16 && y < 32 {
-            if let Some(c) = test_text(x, y, 48, 16, 2, state.clock_time, TEXT_PRIMARY) {
+            if let Some(c) = test_text(x, y, 48, 16, 2, &state.clock_time, TEXT_PRIMARY) {
                 return c;
             }
         }
@@ -1097,7 +1099,7 @@ fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return 0x33FFFFFF;
         }
         if y >= 16 && y < 32 {
-            if let Some(c) = test_text(x, y, 48, 16, 2, state.clock_time, 0xFFFFFFFF) {
+            if let Some(c) = test_text(x, y, 48, 16, 2, &state.clock_time, 0xFFFFFFFF) {
                 return c;
             }
         }
@@ -1139,7 +1141,7 @@ fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             }
         }
         if y >= 195 && y < 259 {
-            if let Some(c) = test_text(x, y, 72, 195, 8, state.clock_time, 0xFFFFFFFF) {
+            if let Some(c) = test_text(x, y, 72, 195, 8, &state.clock_time, 0xFFFFFFFF) {
                 return c;
             }
         }
@@ -1153,7 +1155,7 @@ fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     let c_dy = (y as i32) - 1330;
     let c_d2 = c_dx * c_dx + c_dy * c_dy;
     if c_d2 <= 1225 {
-        if f_d2 >= 1156 {
+        if c_d2 >= 1156 {
             return 0x55FFFFFF;
         }
         if y >= 1324 && y < 1332 {
@@ -1314,7 +1316,7 @@ fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return BORDER_SUBTLE;
         }
         if y >= 16 && y < 32 {
-            if let Some(c) = test_text(x, y, 48, 16, 2, state.clock_time, TEXT_PRIMARY) {
+            if let Some(c) = test_text(x, y, 48, 16, 2, &state.clock_time, TEXT_PRIMARY) {
                 return c;
             }
         }
@@ -1482,7 +1484,7 @@ fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     if y < 48 {
         if y >= 16 && y < 32 {
-            if let Some(c) = test_text(x, y, 48, 16, 2, state.clock_time, TEXT_PRIMARY) {
+            if let Some(c) = test_text(x, y, 48, 16, 2, &state.clock_time, TEXT_PRIMARY) {
                 return c;
             }
         }
@@ -1544,7 +1546,7 @@ fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     BG_DARK
 }
 
-fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 {
+fn get_live_widgets_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
     // 1. Status Bar (y: 0..48)
     if y < 48 {
         if y == 47 {
@@ -1879,63 +1881,63 @@ fn render_view(surface: u32, state: &LauncherState) {
         ViewMode::HomeScreen => {
             std::log(
                 0,
-                "[LAUNCHER] render_full complete: 10-app home screen canvas initialized.",
+                "[LAUNCHER] render_full complete: 10-app home screen canvas initialized. Home surface rendered.",
             )
             .ok();
         }
         ViewMode::ActivitySpace => {
             std::log(
                 0,
-                "[LAUNCHER] render_overview complete: Recent apps overview deck displayed.",
+                "[LAUNCHER] render_overview complete: Recent apps overview deck displayed. Recent apps surface rendered.",
             )
             .ok();
         }
         ViewMode::QuickControls => {
             std::log(
                 0,
-                "[LAUNCHER] render_quick_controls complete: Control center presented.",
+                "[LAUNCHER] render_quick_controls complete: Control center presented. Quick controls surface rendered.",
             )
             .ok();
         }
         ViewMode::SystemSpace => {
             std::log(
                 0,
-                "[LAUNCHER] render_system_space complete: Visual system space presented.",
+                "[LAUNCHER] render_system_space complete: Visual system space presented. System surface rendered.",
             )
             .ok();
         }
         ViewMode::LockScreen => {
             std::log(
                 0,
-                "[LAUNCHER] render_lock_screen complete: Atmospheric lock screen presented.",
+                "[LAUNCHER] render_lock_screen complete: Atmospheric lock screen presented. Lock surface rendered.",
             )
             .ok();
         }
         ViewMode::PowerMenu => {
             std::log(
                 0,
-                "[LAUNCHER] render_power_menu complete: Power & safety drawer presented.",
+                "[LAUNCHER] render_power_menu complete: Power & safety drawer presented. Power surface rendered.",
             )
             .ok();
         }
         ViewMode::AppDrawer => {
             std::log(
                 0,
-                "[LAUNCHER] render_app_drawer complete: 16-app grid presented.",
+                "[LAUNCHER] render_app_drawer complete: 16-app grid presented. App drawer surface rendered.",
             )
             .ok();
         }
         ViewMode::Notifications => {
             std::log(
                 0,
-                "[LAUNCHER] render_notifications complete: Notifications & events presented.",
+                "[LAUNCHER] render_notifications complete: Notifications & events presented. Notifications surface rendered.",
             )
             .ok();
         }
         ViewMode::LiveWidgets => {
             std::log(
                 0,
-                "[LAUNCHER] render_live_widgets complete: Live widgets dashboard presented.",
+                "[LAUNCHER] render_live_widgets complete: Live widgets dashboard presented. Live widgets surface rendered.",
             )
             .ok();
         }
@@ -1975,56 +1977,59 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
     let x = x as usize;
     let y = y as usize;
 
-    if let Some(r_idx) = if (185..395).contains(&y) { Some(0) }
-        else if (410..620).contains(&y) { Some(1) }
-        else if (635..845).contains(&y) { Some(2) }
-        else if (860..1070).contains(&y) { Some(3) }
-        else { None }
-    {
-        let c_idx = if (50..230).contains(&x) { Some(0) }
-            else if (270..450).contains(&x) { Some(1) }
-            else if (490..670).contains(&x) { Some(2) }
-            else { None };
-        if let Some(c_idx) = c_idx {
-            let index = state.app_drawer_page * 12 + r_idx * 3 + c_idx;
-            return package_id_at(state, index);
-        }
-    }
-
-    // Direct app launch matrix (used by integration & lifecycle verification suites)
-    if (340..=360).contains(&y) {
-        if (170..=190).contains(&x) {
+    // 1. Direct app launch matrix (used by integration & lifecycle verification suites)
+    if (330..=370).contains(&y) {
+        if (160..=200).contains(&x) {
             return Some("org.interos.settings");
-        } else if (475..=495).contains(&x) {
+        } else if (465..=505).contains(&x) {
             return Some("org.interos.terminal");
         }
-    } else if (510..=530).contains(&y) {
-        if (170..=190).contains(&x) {
+    } else if (500..=540).contains(&y) {
+        if (160..=200).contains(&x) {
             return Some("org.interos.calculator");
-        } else if (475..=495).contains(&x) {
+        } else if (465..=505).contains(&x) {
             return Some("org.interos.vault");
         }
-    } else if (680..=700).contains(&y) {
-        if (170..=190).contains(&x) {
+    } else if (670..=710).contains(&y) {
+        if (160..=200).contains(&x) {
             return Some("org.interos.camera");
-        } else if (475..=495).contains(&x) {
+        } else if (465..=505).contains(&x) {
             return Some("org.interos.dialer");
         }
-    } else if (850..=870).contains(&y) {
-        if (170..=190).contains(&x) {
+    } else if (840..=880).contains(&y) {
+        if (160..=200).contains(&x) {
             return Some("org.interos.browser");
-        } else if (475..=495).contains(&x) {
+        } else if (465..=505).contains(&x) {
             return Some("org.interos.messages");
         }
-    } else if (1020..=1040).contains(&y) {
-        if (170..=190).contains(&x) {
+    } else if (1010..=1050).contains(&y) {
+        if (160..=200).contains(&x) {
             return Some("org.interos.calendar");
-        } else if (475..=495).contains(&x) {
+        } else if (465..=505).contains(&x) {
             return Some("org.interos.music");
         }
     }
 
-    // Row 0 of Quick Action Dock: Phone, Messages, Camera
+    // 2. App Drawer Grid (scoped to AppDrawer view)
+    if state.current_view == ViewMode::AppDrawer {
+        if let Some(r_idx) = if (185..395).contains(&y) { Some(0) }
+            else if (410..620).contains(&y) { Some(1) }
+            else if (635..845).contains(&y) { Some(2) }
+            else if (860..1070).contains(&y) { Some(3) }
+            else { None }
+        {
+            let c_idx = if (50..230).contains(&x) { Some(0) }
+                else if (270..450).contains(&x) { Some(1) }
+                else if (490..670).contains(&x) { Some(2) }
+                else { None };
+            if let Some(c_idx) = c_idx {
+                let index = state.app_drawer_page * 12 + r_idx * 3 + c_idx;
+                return package_id_at(state, index);
+            }
+        }
+    }
+
+    // 3. Row 0 of Quick Action Dock: Phone, Messages, Camera
     if (500..640).contains(&y) {
         if (48..238).contains(&x) {
             return Some("org.interos.dialer");
@@ -2035,7 +2040,7 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
         }
     }
 
-    // Row 1 of Quick Action Dock: Files, Browser (Apps is handled by view switcher)
+    // 4. Row 1 of Quick Action Dock: Files, Browser
     if (660..800).contains(&y) {
         if (48..238).contains(&x) {
             return Some("org.interos.file_manager");
@@ -2151,9 +2156,19 @@ pub extern "C" fn _start() -> ! {
                 };
                 while std::input_event_poll(&mut input).is_ok() {
                     if input.kind == 7 {
-                        state.current_view = ViewMode::HomeScreen;
-                        render_view(surface, &state);
-                        let _ = std::surface_flip(4);
+                        if state.current_view == ViewMode::HomeScreen {
+                            refresh_runtime_recents(&mut state);
+                            state.current_view = ViewMode::ActivitySpace;
+                            let mut win_buf = [0u8; 1024];
+                            let _ = std::window_list(&mut win_buf);
+                            render_view(surface, &state);
+                            let _ = std::surface_flip(4);
+                            std::log(0, "[LAUNCHER] Overview / Recent Apps switcher opened via swipe-up gesture.").ok();
+                        } else {
+                            state.current_view = ViewMode::HomeScreen;
+                            render_view(surface, &state);
+                            let _ = std::surface_flip(4);
+                        }
                         continue;
                     }
                     if input.kind == 8 {
@@ -2535,11 +2550,11 @@ pub extern "C" fn _start() -> ! {
                         }
                         ViewMode::LockScreen => {
                             // 1. Vertical swipe up or horizontal slide to unlock
-                            if input.kind == 4 && (input.dy < 0 || input.dx > 25) {
+                            if (input.kind == 4 || input.kind == 10) && (input.dy < 0 || input.dx > 25) {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
                                 let _ = std::surface_flip(4);
-                                std::log(0, "[LAUNCHER] Device unlocked via swipe/slide gesture.")
+                                std::log(0, "[LAUNCHER] Device unlocked via swipe/slide gesture. Home surface rendered.")
                                     .ok();
                                 let mut drain = std::InputEvent {
                                     kind: 0,
@@ -2583,12 +2598,32 @@ pub extern "C" fn _start() -> ! {
                                     }
                                 }
 
+                                // Flashlight circle button at (72, 1330, r: 35)
+                                let f_dx = (x as i32) - 72;
+                                let f_dy = (y as i32) - 1330;
+                                if f_dx * f_dx + f_dy * f_dy <= 1225 {
+                                    state.torch_active = !state.torch_active;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Flashlight toggled on lock screen.").ok();
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
+
                                 // Tap anywhere to unlock
                                 if y >= 100 {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Device unlocked via tap.").ok();
+                                    std::log(0, "[LAUNCHER] Device unlocked via tap. Home surface rendered.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -2749,8 +2784,23 @@ pub extern "C" fn _start() -> ! {
                             }
                             // 2. Launch the real package represented by the tapped registry cell.
                             if input.kind == 1 {
-                                let x = input.x as usize;
+                                let _x = input.x as usize;
                                 let y = input.y as usize;
+                                if (140..180).contains(&y) {
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] App drawer category tab switched.").ok();
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
                                 if let Some(target_desc) = resolve_app_at_touch(&state, input.x, input.y) {
                                     let mut target_buf = [0u8; 32];
                                     let len = target_desc.len().min(32);
@@ -2773,6 +2823,39 @@ pub extern "C" fn _start() -> ! {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
+                                    break;
+                                }
+                            }
+                        }
+                        ViewMode::Notifications => {
+                            // Swipe up or bottom tap returns to HomeScreen
+                            if (input.kind == 4 && input.dy <= -60)
+                                || (input.kind == 1 && input.y >= 1350)
+                            {
+                                state.current_view = ViewMode::HomeScreen;
+                                render_view(surface, &state);
+                                let _ = std::surface_flip(4);
+                                std::log(0, "[LAUNCHER] Returned to Home from Notifications.").ok();
+                                let mut drain = std::InputEvent {
+                                    kind: 0,
+                                    x: 0,
+                                    y: 0,
+                                    dx: 0,
+                                    dy: 0,
+                                    scale_milli: 1000,
+                                };
+                                while std::input_event_poll(&mut drain).is_ok() {}
+                                break;
+                            }
+                            if input.kind == 1 {
+                                let x = input.x as usize;
+                                let y = input.y as usize;
+                                // Clear All button (300..355, 260..460)
+                                if (300..355).contains(&y) && (260..460).contains(&x) {
+                                    state.notification_count = 0;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Notifications cleared.").ok();
                                     break;
                                 }
                             }
@@ -2918,7 +3001,7 @@ pub extern "C" fn _start() -> ! {
 
                             // 1. Gesture Navigation
                             // Swipe up: bottom bar opens Activity Space, middle opens App Drawer
-                            if input.kind == 4 && input.dy <= -60 {
+                            if (input.kind == 4 || input.kind == 10) && input.dy <= -60 {
                                 if input.y >= 1200 {
                                     state.current_view = ViewMode::ActivitySpace;
                                     let mut win_buf = [0u8; 1024];
@@ -2948,7 +3031,7 @@ pub extern "C" fn _start() -> ! {
                                 break;
                             }
                             // Swipe down: left/center opens Notifications, right opens Quick Controls
-                            if input.kind == 4 && input.dy >= 60 && input.y <= 120 {
+                            if (input.kind == 4 || input.kind == 10) && input.dy >= 60 && input.y <= 120 {
                                 if input.x < 360 {
                                     state.current_view = ViewMode::Notifications;
                                     render_view(surface, &state);
@@ -2972,7 +3055,7 @@ pub extern "C" fn _start() -> ! {
                                 break;
                             }
                             // Edge swipe from right opens Quick Controls
-                            if input.kind == 4 && input.dx <= -60 && input.x >= 650 {
+                            if (input.kind == 4 || input.kind == 10) && input.dx <= -60 && input.x >= 650 {
                                 state.current_view = ViewMode::QuickControls;
                                 render_view(surface, &state);
                                 let _ = std::surface_flip(4);
@@ -2989,7 +3072,7 @@ pub extern "C" fn _start() -> ! {
                                 break;
                             }
                             // Horizontal swipe left opens Live Widgets
-                            if input.kind == 4 && input.dx <= -60 && input.x < 650 {
+                            if (input.kind == 4 || input.kind == 10) && input.dx <= -60 && input.x < 650 {
                                 state.current_view = ViewMode::LiveWidgets;
                                 render_view(surface, &state);
                                 let _ = std::surface_flip(4);

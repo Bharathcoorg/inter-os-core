@@ -133,7 +133,7 @@ pub fn init() {
         object_id: 0,
     };
 
-    let current_ticks = 1000u64;
+    let current_ticks = crate::interrupts::get_system_ticks();
 
     // 1. Valid Attenuation: Grant READ-only to subtask with 2 uses for 50 ticks
     let mut lease = DelegatedLease::new(
@@ -163,27 +163,28 @@ pub fn init() {
         TaskId(2),
         Rights::WRITE,
         1,
-        50,
+        1000,
         current_ticks,
     ).expect("object-scoped delegation must succeed");
+    register_lease(ipc_lease.clone());
     let derived_ipc = ipc_lease.to_capability();
     let mut ipc_table = crate::capability::CapabilityTable::new(2);
     let ipc_slot = ipc_table.insert(derived_ipc).expect("derived IPC capability must install");
     assert!(ipc_table.verify_object(ipc_slot, CapabilityType::IpcSend, Rights::WRITE, 42).is_ok());
     assert_eq!(ipc_table.verify_object(ipc_slot, CapabilityType::IpcSend, Rights::WRITE, 99), Err(CapError::TargetMismatch));
 
-    // 2. Consume invocation 1 (ticks = 1010)
-    let inv1 = lease.consume_invocation(1010, Rights::READ);
+    // 2. Consume invocation 1 (ticks = current_ticks + 10)
+    let inv1 = lease.consume_invocation(current_ticks + 10, Rights::READ);
     assert!(inv1.is_ok());
     assert_eq!(lease.remaining_invocations, 1);
 
-    // 3. Consume invocation 2 (ticks = 1020)
-    let inv2 = lease.consume_invocation(1020, Rights::READ);
+    // 3. Consume invocation 2 (ticks = current_ticks + 20)
+    let inv2 = lease.consume_invocation(current_ticks + 20, Rights::READ);
     assert!(inv2.is_ok());
     assert_eq!(lease.remaining_invocations, 0);
 
     // 4. Quota exhaustion: Invocation 3 must fail
-    let inv3 = lease.consume_invocation(1030, Rights::READ);
+    let inv3 = lease.consume_invocation(current_ticks + 30, Rights::READ);
     assert_eq!(inv3, Err(CapError::InvalidSlot));
 
     // 5. Illegal Privilege Escalation: Requesting WRITE when parent lacks it (or requesting GRANT)
@@ -200,6 +201,8 @@ pub fn init() {
         current_ticks,
     );
     assert_eq!(illegal, Err(CapError::InsufficientRights), "Deriving unheld rights must be rejected");
+
+    DELEGATION_REGISTRY.lock().clear();
 
     serial_println!(
         "[TEST] Attenuated Capability Delegation: Monotonic rights attenuation, tick lease, and quota enforcement VERIFIED."

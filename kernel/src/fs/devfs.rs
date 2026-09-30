@@ -79,6 +79,30 @@ pub fn device_read(path: &str, buf: &mut [u8]) -> Result<usize, FsError> {
                         record[6..8].copy_from_slice(&p_bytes);
                         record[8] = pt.phase as u8;
                     }
+                    InputEvent::KeyEvent(ke) => {
+                        record[0] = 1;
+                        record[1] = match ke.action {
+                            crate::input::event::KeyAction::Down => 1,
+                            crate::input::event::KeyAction::Up => 0,
+                        };
+                        record[2] = match ke.code {
+                            crate::input::event::KeyCode::Character(c) => (c as u32 & 0xFF) as u8,
+                            crate::input::event::KeyCode::Enter => 10,
+                            crate::input::event::KeyCode::Escape => 27,
+                            crate::input::event::KeyCode::Backspace => 8,
+                            crate::input::event::KeyCode::Tab => 9,
+                            _ => 0,
+                        };
+                    }
+                    InputEvent::Pointer(pe) => {
+                        record[0] = 2;
+                        record[1] = pe.pointer_id as u8;
+                        let x_bytes = (pe.position.x as u16).to_le_bytes();
+                        let y_bytes = (pe.position.y as u16).to_le_bytes();
+                        record[2..4].copy_from_slice(&x_bytes);
+                        record[4..6].copy_from_slice(&y_bytes);
+                        record[8] = pe.phase as u8;
+                    }
                     InputEvent::Gesture(g) => {
                         record[0] = 3;
                         match g {

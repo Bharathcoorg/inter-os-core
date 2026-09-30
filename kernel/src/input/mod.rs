@@ -177,14 +177,19 @@ pub fn post_touch_event(slot: u8, x: u32, y: u32, pressure: u16, phase: TouchPha
         y as i32,
     );
 
-    // Preserve the raw hardware event for diagnostics/low-level consumers.
-    INPUT_QUEUE.lock().push(InputEvent::Touch(TouchPoint {
+    let gesture_opt = TOUCH_DIGITIZER.lock().update_touch(slot, x, y, pressure, phase);
+    let mut q = INPUT_QUEUE.lock();
+    q.push(InputEvent::Touch(TouchPoint {
         slot,
         x,
         y,
         pressure,
         phase,
     }));
+    if let Some(gesture) = gesture_opt {
+        q.push(InputEvent::Gesture(gesture));
+    }
+    drop(q);
 
     let gesture = INPUT_ROUTER
         .lock()

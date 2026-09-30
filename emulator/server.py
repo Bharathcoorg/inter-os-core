@@ -1950,8 +1950,11 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         if self.path == '/api/qemu/cmd':
             content_length = int(self.headers.get('Content-Length', 0))
             if content_length > 4096:
+                if content_length > 0:
+                    _ = self.rfile.read(min(content_length, 1024 * 1024))
                 self.send_response(413)
                 self.send_header('Content-Type', 'application/json')
+                self.send_header('Connection', 'close')
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': 'Payload too large'}).encode())

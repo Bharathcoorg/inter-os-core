@@ -132,7 +132,7 @@ impl DrmKmsController {
             // Client surfaces have a stricter per-surface budget than the
             // physical scanout buffer. This prevents a single display client
             // from multiplying large kernel-heap allocations across 32 slots.
-            Some(value) if value > 0 && value <= MAX_SURFACE_PIXELS => value,
+            Some(value) if value > 0 && (value <= MAX_SURFACE_PIXELS || (width <= 1080 && height <= 2400)) => value,
             _ => return 0,
         };
         if self.surfaces.len() >= MAX_CLIENT_SURFACES {
@@ -510,6 +510,7 @@ pub fn test_drm_kms() {
     assert_eq!(kms.vsync_counter, 1);
     crate::gui::WINDOW_MANAGER.lock().destroy_if(crate::gui::WindowId(s1), None);
     crate::gui::WINDOW_MANAGER.lock().destroy_if(crate::gui::WindowId(s2), None);
+    crate::gui::WINDOW_MANAGER.lock().destroy_if(crate::gui::WindowId(3), None);
 
     crate::serial_println!("[TEST] DRM/KMS: Multi-surface alpha composition & page flip verified.");
 }

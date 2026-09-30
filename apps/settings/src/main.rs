@@ -156,6 +156,32 @@ impl SettingsApp {
         )
         .ok();
     }
+
+    /// Queries authoritative system settings for developer terminal availability.
+    pub fn refresh_developer_options(&mut self) {
+        let mut buf = [0u8; 16];
+        if let Ok(n) = std::settings_get(0, "developer.terminal_enabled", &mut buf) {
+            if let Ok(v) = core::str::from_utf8(&buf[..n]) {
+                self.terminal_enabled = v == "true";
+            }
+        }
+    }
+
+    /// Toggles the developer terminal setting and updates system configuration.
+    pub fn toggle_terminal(&mut self) {
+        self.terminal_enabled = !self.terminal_enabled;
+        let val: &[u8] = if self.terminal_enabled { b"true" } else { b"false" };
+        std::settings_set(0, "developer.terminal_enabled", val).ok();
+        std::log(
+            0,
+            if self.terminal_enabled {
+                "[SETTINGS APP] Developer terminal enabled (default was: Disabled by default)."
+            } else {
+                "[SETTINGS APP] Developer terminal disabled."
+            },
+        )
+        .ok();
+    }
 }
 
 fn render_settings_ui(surface: u32, tab: SettingsTab) {
@@ -198,13 +224,12 @@ fn render_settings_ui(surface: u32, tab: SettingsTab) {
                 let card = (y - 200) / 210;
                 let card_y = (y - 200) % 210;
                 if tab == SettingsTab::SecurityAndPrivacy && card == 3 && card_y >= 35 && card_y < 85 {
-                    if let Some(c) = test_text(x, y, 60, 200 + card * 210 + 35, 1, b"Developer terminal", std::design::color::TEXT) {
-                        chunk[i] = c;
-                    } else if let Some(c) = test_text(x, y, 60, 200 + card * 210 + 55, 1, b"Disabled by default", std::design::color::TEXT_MUTED) {
-                        chunk[i] = c;
+                    // "Developer terminal" / "Disabled by default" card preview
+                    chunk[i] = if card_y >= 60 {
+                        std::design::color::TEXT_MUTED
                     } else {
-                        chunk[i] = std::design::color::SURFACE;
-                    }
+                        std::design::color::TEXT
+                    };
                 } else if card < 4 && x >= 32 && x < W - 32 && card_y < 180 {
                     if card_y >= 100 && card_y < 140 && x >= 60 && x < W - 60 {
                         chunk[i] = match card {
@@ -327,7 +352,7 @@ pub extern "C" fn _start() -> ! {
                         }
                         if settings.current_tab == SettingsTab::SecurityAndPrivacy
                             && input.y >= 830 && input.y < 1010
-                            && input.x >= 32 && input.x < W - 32
+                            && input.x >= 32 && input.x < (W - 32) as u32
                         {
                             settings.toggle_terminal();
                         } else if input.y >= 110 && input.y < 170 && input.x >= 24 {
