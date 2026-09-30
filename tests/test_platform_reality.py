@@ -107,6 +107,12 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertIn("6 => -38", syscall)
         self.assertIn("SCHEDULER.lock().current_task_id()", syscall)
 
+    def test_riscv_trap_epilogue_preserves_kernel_stack(self):
+        trap = self.read("kernel-riscv64/src/trap.rs")
+        self.assertIn("csrw sscratch, sp", trap)
+        self.assertIn("mv sp, t0", trap)
+        self.assertNotIn('csrrw sp, sscratch, sp",\n        "sret"', trap)
+
     def test_riscv_faults_and_exit_update_scheduler_state(self):
         task = self.read("kernel-riscv64/src/task.rs")
         trap = self.read("kernel-riscv64/src/trap.rs")
