@@ -527,6 +527,9 @@ pub fn record_exit(task_id: TaskId, _exit_code: i32) {
         if let Some(record) = records[idx] {
             if record.task == task_id {
                 SERVICE_FAILURES[idx].fetch_add(1, Ordering::Relaxed);
+                // Keep the failed task identity until PID 1 explicitly reaps it.
+                // Recovery uses this identity to prove ownership and avoid spawning
+                // a replacement while the old process is still live.
                 records[idx] = Some(ServiceRecord { id: record.id, task: task_id, state: ServiceState::Failed, generation: record.generation });
                 return;
             }
