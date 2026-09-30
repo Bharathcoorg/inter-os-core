@@ -239,7 +239,17 @@ fn start_locked(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str
     if id == ServiceId::Init { return Ok(TaskId(0)); }
     let existing = SERVICE_RECORDS.lock()[id as usize];
     if let Some(record) = existing {
-        if record.state == ServiceState::Running && record.task != TaskId(0) { return Ok(record.task); }
+        if record.state == ServiceState::Running && record.task != TaskId(0) {
+            // A lifecycle manager may only observe/reuse services owned by the
+            // same PID1 parent. Never turn the idempotent start path into a
+            // cross-parent task-disclosure or control primitive.
+            let scheduler = SCHEDULER.lock();
+            let task = scheduler.get_task(record.task).ok_or("running service task not found")?;
+            if task.parent_id != parent_id {
+                return Err("running service is not owned by caller");
+            }
+            return Ok(record.task);
+        }
         if record.state == ServiceState::Starting { return Err("service already starting"); }
         // A failed userspace service still owns a scheduler task until the explicit
         // recovery path tears it down and reaps it. Do not spawn another
