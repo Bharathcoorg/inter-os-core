@@ -157,26 +157,30 @@ impl DialerApp {
 
     /// Initiates an outgoing cellular call.
     pub fn dial(&mut self, number: &str) -> Result<(), i64> {
+        if number.is_empty() || number.len() > self.active_number.len() {
+            return Err(-22);
+        }
+
         self.state = CallState::Dialing;
         self.call_duration_secs = 0;
 
-        // Emit dialing ringback acoustic sound
-        std::audio_play_tone(440).ok();
-        std::audio_silence().ok();
-
-        // Dispatch call intent through Android Compatibility Runtime (ACR)
-        let mut out_act = [0u8; 64];
-        let _ = std::android_bridge_intent("android.intent.action.CALL", number, &mut out_act);
-
-        // Transition to active call
-        self.state = CallState::ActiveCall;
-        std::log(
-            0,
-            "[DIALER APP] Call Connected: Voice bearer active (4G/5G Sovereign VoLTE).",
-        )
-        .ok();
-
-        Ok(())
+        // A call is connected only after the authoritative telephony service
+        // accepts the request. UI/ACR dispatch must never manufacture an
+        // ActiveCall state.
+        match std::telephony_dial(number) {
+            Ok(()) => {
+                self.state = CallState::ActiveCall;
+                std::audio_play_tone(440).ok();
+                std::audio_silence().ok();
+                std::log(0, "[DIALER APP] Telephony service accepted call request.").ok();
+                Ok(())
+            }
+            Err(err) => {
+                self.state = CallState::CallEnded;
+                std::log(0, "[DIALER APP] Call request rejected by telephony service.").ok();
+                Err(err)
+            }
+        }
     }
 
     /// Terminates an active call.
@@ -607,12 +611,13 @@ fn handle_touch_point(dialer: &mut DialerApp, x: u32, y: u32) -> bool {
                 let mut num_buf = [0u8; 32];
                 let len = dialer.active_len;
                 num_buf[..len].copy_from_slice(&dialer.active_number[..len]);
-                let target = if len > 0 {
-                    core::str::from_utf8(&num_buf[..len]).unwrap_or("+1-555-0199")
-                } else {
-                    "+1-555-0199"
+                let Ok(target) = core::str::from_utf8(&num_buf[..len]) else {
+                    std::log(0, "[DIALER] Invalid dial string.").ok();
+                    return false;
                 };
-                let _ = dialer.dial(target);
+                if let Err(_) = dialer.dial(target) {
+                    std::log(0, "[DIALER] Call could not be established.").ok();
+                }
             } else {
                 dialer.hangup();
             }
