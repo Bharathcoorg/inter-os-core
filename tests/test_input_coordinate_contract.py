@@ -43,3 +43,17 @@ def test_studio_exposes_only_stock_theme():
     assert "'themes': [active]" in source
     assert "Theme switching is disabled" in source
     assert "Custom themes are disabled" in source
+
+
+def test_launcher_clock_reads_named_rtc_fields():
+    source = (ROOT / "apps/launcher/src/main.rs").read_text()
+    assert 'field(data, b"\\\"hour\\\"")' in source
+    assert 'field(data, b"\\\"minute\\\"")' in source
+    assert 'for &b in data' not in source[source.index("fn refresh_clock"):source.index("fn refresh_notifications")]
+
+
+def test_serial_touch_protocol_matches_studio_transport():
+    source = (ROOT / "kernel/src/serial.rs").read_text()
+    assert 'INPUT_TOUCH' in source
+    assert 'let Some(slot) = parts.next().and_then(|v| v.parse::<u8>().ok())' in source
+    assert 'post_touch_event(slot, px, py' in source
