@@ -80,3 +80,12 @@ def test_canonical_gesture_kinds_have_wire_codes():
     assert "Recents = 8" in source
     assert "Cancel = 9" in source
     assert "Fling = 10" in source
+
+
+def test_launcher_has_no_runtime_wallpaper_switcher():
+    source = (ROOT / "apps/launcher/src/main.rs").read_text()
+    assert "wallpaper_id" not in source
+    assert "get_wallpaper_pixel" not in source
+    assert "Wallpapers & Procedural Themes" not in source
+    assert "Tap any theme to apply across system" not in source
+    assert "InterOS Stock" in source
