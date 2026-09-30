@@ -1281,24 +1281,15 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if parsed_path.path == '/api/themes':
-            themes = []
-            if os.path.exists(THEMES_DIR):
-                for fname in sorted(os.listdir(THEMES_DIR)):
-                    if fname.endswith('.theme') and not fname.startswith('_'):
-                        fpath = os.path.join(THEMES_DIR, fname)
-                        try:
-                            with open(fpath, "r", encoding="utf-8") as tf:
-                                tdata = json.load(tf)
-                                tdata['id'] = tdata.get('theme_id', fname.replace('.theme', ''))
-                                themes.append(tdata)
-                        except Exception:
-                            pass
             active = get_active_theme()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            self.wfile.write(json.dumps({'themes': themes, 'active_id': active.get('theme_id', 'bento_glass')}).encode())
+            self.wfile.write(json.dumps({
+                'themes': [active],
+                'active_id': active['theme_id']
+            }).encode())
             return
 
         if parsed_path.path == '/api/themes/current':
