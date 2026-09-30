@@ -358,6 +358,63 @@ mod tests {
     }
 
     #[test]
+    fn timed_tap_and_double_tap_are_semantic() {
+        let mut router = InputRouter::new();
+        let down = PointerEvent::new(
+            InputSource::Touch,
+            CoordinateSpace::LogicalPortrait,
+            0,
+            PointerPhase::Down,
+            200,
+            300,
+        );
+        let up = PointerEvent::new(
+            InputSource::Touch,
+            CoordinateSpace::LogicalPortrait,
+            0,
+            PointerPhase::Up,
+            200,
+            300,
+        );
+        router.dispatch_pointer_at(down, 720, 24, 100);
+        assert_eq!(
+            router.dispatch_pointer_at(up, 720, 24, 110).map(|g| g.kind),
+            Some(GestureKind::Tap)
+        );
+        router.dispatch_pointer_at(down, 720, 24, 115);
+        assert_eq!(
+            router.dispatch_pointer_at(up, 720, 24, 120).map(|g| g.kind),
+            Some(GestureKind::DoubleTap)
+        );
+    }
+
+    #[test]
+    fn timed_hold_becomes_long_press() {
+        let mut router = InputRouter::new();
+        let down = PointerEvent::new(
+            InputSource::Touch,
+            CoordinateSpace::LogicalPortrait,
+            0,
+            PointerPhase::Down,
+            200,
+            300,
+        );
+        let up = PointerEvent::new(
+            InputSource::Touch,
+            CoordinateSpace::LogicalPortrait,
+            0,
+            PointerPhase::Up,
+            200,
+            300,
+        );
+        router.dispatch_pointer_at(down, 720, 24, 100);
+        assert_eq!(
+            router.dispatch_pointer_at(up, 720, 24, 151).map(|g| g.kind),
+            Some(GestureKind::LongPress)
+        );
+    }
+
+    #[test]
     fn cancel_releases_capture() {
         let mut router = InputRouter::new();
         let down = PointerEvent::new(
