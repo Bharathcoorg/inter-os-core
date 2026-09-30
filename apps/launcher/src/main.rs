@@ -163,7 +163,6 @@ pub struct LauncherState {
     pub anim_tick: u32,
     pub app_drawer_tab: usize,
     pub flashlight_on: bool,
-    pub wallpaper_id: usize,
     pub notification_count: usize,
     pub recent_apps: [[u8; 32]; 3],
     pub recent_app_lens: [u8; 3],
@@ -186,7 +185,6 @@ impl LauncherState {
             anim_tick: 0,
             app_drawer_tab: 0,
             flashlight_on: false,
-            wallpaper_id: 0,
             notification_count: 0,
             recent_apps: [[0u8; 32]; 3],
             recent_app_lens: [0; 3],
@@ -2178,127 +2176,31 @@ fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return SURFACE_RAISED;
     }
 
-    // 7. Personalization & Wallpaper Switcher Card (x: 40..680, y: 865..1100)
-    if y >= 865 && y < 1100 && x >= 40 && x < 680 {
-        if y == 865 || y == 1099 || x == 40 || x == 679 {
+    // 7. Appearance: the stock system theme is immutable.
+    if y >= 865 && y < 1015 && x >= 40 && x < 680 {
+        if y == 865 || y == 1014 || x == 40 || x == 679 {
             return BORDER_SUBTLE;
         }
         if y >= 885 && y < 901 {
-            if let Some(c) = test_text(
-                x,
-                y,
-                65,
-                885,
-                2,
-                b"Wallpapers & Procedural Themes",
-                ACCENT_CYAN,
-            ) {
+            if let Some(c) = test_text(x, y, 65, 885, 2, b"Appearance", ACCENT_CYAN) {
                 return c;
             }
         }
-        if y >= 910 && y < 918 {
-            if let Some(c) = test_text(
-                x,
-                y,
-                65,
-                910,
-                1,
-                b"Tap any theme to apply across system",
-                TEXT_MUTED,
-            ) {
+        if y >= 915 && y < 923 {
+            if let Some(c) = test_text(x, y, 65, 915, 1, b"InterOS Stock", TEXT_PRIMARY) {
                 return c;
             }
         }
-
-        // 4 Theme Selection Buttons:
-        // [1. Midnight] (x: 65..335, y: 935..1005)
-        if x >= 65 && x < 335 && y >= 935 && y < 1005 {
-            let is_sel = state.wallpaper_id == 0;
-            if y == 935 || y == 1004 || x == 65 || x == 334 {
-                return if is_sel { ACCENT_SKY } else { BORDER_SUBTLE };
+        if y >= 940 && y < 948 {
+            if let Some(c) = test_text(x, y, 65, 940, 1, b"System theme is fixed for this device build", TEXT_MUTED) {
+                return c;
             }
-            if y >= 955 && y < 971 {
-                let col = if is_sel { ACCENT_SKY } else { TEXT_PRIMARY };
-                if let Some(c) = test_text(x, y, 85, 955, 2, b"1. Midnight", col) {
-                    return c;
-                }
-            }
-            if y >= 980 && y < 988 {
-                if let Some(c) = test_text(x, y, 85, 980, 1, b"Deep Slate Minimal", TEXT_MUTED) {
-                    return c;
-                }
-            }
-            return if is_sel { 0xFF0D253A } else { SURFACE_DARK };
         }
-
-        // [2. Deep Azure] (x: 375..645, y: 935..1005)
-        if x >= 375 && x < 645 && y >= 935 && y < 1005 {
-            let is_sel = state.wallpaper_id == 1;
-            if y == 935 || y == 1004 || x == 375 || x == 644 {
-                return if is_sel { ACCENT_SKY } else { BORDER_SUBTLE };
+        if y >= 970 && y < 978 {
+            if let Some(c) = test_text(x, y, 65, 970, 1, b"Personal themes are unavailable", TEXT_MUTED) {
+                return c;
             }
-            if y >= 955 && y < 971 {
-                let col = if is_sel { ACCENT_SKY } else { TEXT_PRIMARY };
-                if let Some(c) = test_text(x, y, 395, 955, 2, b"2. Deep Azure", col) {
-                    return c;
-                }
-            }
-            if y >= 980 && y < 988 {
-                if let Some(c) = test_text(x, y, 395, 980, 1, b"Subtle Ocean Navy", TEXT_MUTED) {
-                    return c;
-                }
-            }
-            return if is_sel { 0xFF0A1828 } else { SURFACE_DARK };
         }
-
-        // [3. Obsidian] (x: 65..335, y: 1020..1090)
-        if x >= 65 && x < 335 && y >= 1020 && y < 1090 {
-            let is_sel = state.wallpaper_id == 2;
-            if y == 1020 || y == 1089 || x == 65 || x == 334 {
-                return if is_sel {
-                    SUCCESS_EMERALD
-                } else {
-                    BORDER_SUBTLE
-                };
-            }
-            if y >= 1040 && y < 1056 {
-                let col = if is_sel {
-                    SUCCESS_EMERALD
-                } else {
-                    TEXT_PRIMARY
-                };
-                if let Some(c) = test_text(x, y, 85, 1040, 2, b"3. Obsidian", col) {
-                    return c;
-                }
-            }
-            if y >= 1065 && y < 1073 {
-                if let Some(c) = test_text(x, y, 85, 1065, 1, b"Monochrome Graphite", TEXT_MUTED) {
-                    return c;
-                }
-            }
-            return if is_sel { 0xFF141820 } else { SURFACE_DARK };
-        }
-
-        // [4. Dusk] (x: 375..645, y: 1020..1090)
-        if x >= 375 && x < 645 && y >= 1020 && y < 1090 {
-            let is_sel = state.wallpaper_id == 3;
-            if y == 1020 || y == 1089 || x == 375 || x == 644 {
-                return if is_sel { ACCENT_VIOLET } else { BORDER_SUBTLE };
-            }
-            if y >= 1040 && y < 1056 {
-                let col = if is_sel { 0xFFB388FF } else { TEXT_PRIMARY };
-                if let Some(c) = test_text(x, y, 395, 1040, 2, b"4. Dusk", col) {
-                    return c;
-                }
-            }
-            if y >= 1065 && y < 1073 {
-                if let Some(c) = test_text(x, y, 395, 1065, 1, b"Twilight Purple", TEXT_MUTED) {
-                    return c;
-                }
-            }
-            return if is_sel { 0xFF1C1428 } else { SURFACE_DARK };
-        }
-
         return SURFACE_RAISED;
     }
 
@@ -2573,16 +2475,7 @@ pub extern "C" fn _start() -> ! {
                 refresh_ticks += 1;
                 refresh_clock(&mut state);
                 refresh_notifications(&mut state);
-                if state.wallpaper_id == 3
-                    && (state.current_view == ViewMode::HomeScreen
-                        || state.current_view == ViewMode::LockScreen)
-                {
-                    state.anim_tick = state.anim_tick.wrapping_add(1);
-                    if refresh_ticks % 2 == 0 {
-                        render_view(surface, &state);
-                        let _ = std::surface_flip(4);
-                    }
-                } else if state.current_view == ViewMode::HomeScreen {
+                if state.current_view == ViewMode::HomeScreen {
                     if refresh_ticks % 10 == 0 {
                         let previous_count = state.app_count;
                         refresh_package_catalog(&mut state);
