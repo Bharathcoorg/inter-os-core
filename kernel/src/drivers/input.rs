@@ -178,7 +178,35 @@ pub fn pump_touch_events() {
 }
 
 #[cfg(test)]
-mod tests {
+mod tests {    #[test]
+    fn canonical_system_gesture_encoding_is_stable() {
+        let event = InputEvent::from_canonical(crate::input::GestureEvent {
+            kind: crate::input::GestureKind::Home,
+            position: crate::input::Point { x: 360, y: 1200 },
+            delta_x: 0,
+            delta_y: -300,
+            pointer_id: 0,
+            scale_milli: 1000,
+        });
+        assert_eq!(event.kind, InputEventKind::Home);
+        assert_eq!((event.x, event.y, event.dy), (360, 1200, -300));
+    }
+
+    #[test]
+    fn canonical_pinch_encoding_preserves_scale() {
+        let event = InputEvent::from_canonical(crate::input::GestureEvent {
+            kind: crate::input::GestureKind::Pinch,
+            position: crate::input::Point { x: 360, y: 720 },
+            delta_x: 40,
+            delta_y: 0,
+            pointer_id: 1,
+            scale_milli: 1250,
+        });
+        assert_eq!(event.kind, InputEventKind::Pinch);
+        assert_eq!(event.scale_milli, 1250);
+    }
+
+
     use super::{InputEvent, InputEventKind};
     use crate::drivers::touch_gestures::RecognizedGesture;
 
