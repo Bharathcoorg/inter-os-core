@@ -174,3 +174,20 @@ def test_first_party_media_and_browser_surfaces_do_not_bundle_demo_content():
     assert "pub static PLAYLIST: [AudioTrack; 0] = [];" in music
     assert "Sovereign Symphony" not in music
     assert "INTER_DMA_AUDIO_PCM_BLOCK" not in music
+
+
+def test_studio_touch_endpoint_routes_live_uart_input():
+    source = (ROOT / "emulator/server.py").read_text()
+    assert "if self.path == '/api/touch/event':" in source
+    assert "INPUT_TOUCH CANCEL" in source
+    assert "SWIPE {gx} {gy} {gx2} {gy2} {steps}" in source
+    assert "UART_COM1" in source
+
+
+def test_studio_bootloader_branding_is_not_synthetic():
+    source = (ROOT / "emulator/server.py").read_text()
+    start = source.index("if self.path == '/api/themes/bootloader':")
+    end = source.index("self.send_response(404)", start)
+    block = source[start:end]
+    assert "'status': 'DISABLED'" in block
+    assert "set_active_theme(active)" not in block
