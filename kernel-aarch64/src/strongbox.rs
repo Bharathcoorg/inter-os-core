@@ -48,6 +48,7 @@ pub struct EnclaveKey {
 pub struct StrongBoxHal {
     pub mmio_base: usize,
     pub enabled: bool,
+    pub hardware_present: bool,
     pub tamper_circuit_armed: bool,
     pub tamper_detected: bool,
     pub monotonic_counter: u64,
@@ -60,6 +61,7 @@ impl StrongBoxHal {
         Self {
             mmio_base,
             enabled: false,
+            hardware_present: false,
             tamper_circuit_armed: false,
             tamper_detected: false,
             monotonic_counter: 1000,
@@ -70,6 +72,7 @@ impl StrongBoxHal {
 
     pub fn init_hardware(&mut self) {
         self.enabled = true;
+        self.hardware_present = false;
         self.tamper_circuit_armed = true;
         self.tamper_detected = false;
     }
@@ -83,7 +86,7 @@ impl StrongBoxHal {
         caps.check(CapabilityType::StrongBoxSecureEnclave, Rights::WRITE)
             .map_err(|_| StrongBoxError::CapabilityDenied)?;
 
-        if !self.enabled {
+        if !self.enabled || !self.hardware_present {
             return Err(StrongBoxError::HardwareDisabled);
         }
 
@@ -184,6 +187,11 @@ impl StrongBoxHal {
     }
 
     /// Simulates physical tamper detection event triggering hardware cryptographic zeroization.
+    pub fn set_hardware_present(&mut self, present: bool) {
+        self.hardware_present = present;
+        if !present { self.keys.clear(); self.tamper_circuit_armed=false; }
+    }
+
     pub fn trigger_tamper_event(&mut self) {
         self.tamper_detected = true;
         self.keys.clear(); // Zeroize enclave key store immediately
