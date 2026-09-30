@@ -163,11 +163,10 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                 tf.sepc += 4; // Advance instruction pointer past ecall
                 crate::syscall::dispatch_syscall(tf);
                 if syscall_num == 2 {
-                    println!("[INIT] Userspace init process completed execution. Microkernel entering low-power state.");
+                    let exited = crate::task::SCHEDULER.lock().exit_current();
+                    println!("[INIT] Userspace exit recorded by scheduler: {}", exited);
                     loop {
-                        unsafe {
-                            core::arch::asm!("wfi");
-                        }
+                        unsafe { core::arch::asm!("wfi"); }
                     }
                 }
             }
@@ -182,13 +181,21 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                     "[TRAP:PAGE_FAULT] Fault at addr: 0x{:016x}, sepc: 0x{:016x}, cause: {}",
                     tf.stval, tf.sepc, code
                 );
-                // Gracefully kill user process or halt
                 tf.regs[10] = (-14isize) as usize; // -EFAULT
+                let exited = crate::task::SCHEDULER.lock().exit_current();
+                println!("[TRAP] Faulted userspace task marked exited: {}", exited);
+                loop {
+                    unsafe { core::arch::asm!("wfi"); }
+                }
             }
             // Illegal instruction
             2 => {
                 println!("[TRAP:ILLEGAL_INSN] sepc: 0x{:016x}, val: 0x{:016x}", tf.sepc, tf.stval);
-                tf.sepc += 4;
+                let exited = crate::task::SCHEDULER.lock().exit_current();
+                println!("[TRAP] Illegal-instruction task marked exited: {}", exited);
+                loop {
+                    unsafe { core::arch::asm!("wfi"); }
+                }
             }
             _ => {
                 println!(
