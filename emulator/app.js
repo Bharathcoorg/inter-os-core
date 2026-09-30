@@ -3611,14 +3611,19 @@ document.addEventListener('DOMContentLoaded', () => {
   // the native RFB client is not active. Text fields remain Studio-local.
   window.addEventListener('keydown', async (e) => {
     if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable)) return;
-    if (Array.from(e.key).length === 1) {
+    const navigationKeys = new Set([
+      'Enter', 'Escape', 'Backspace', 'Tab',
+      'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+      'Home', 'End', 'PageUp', 'PageDown'
+    ]);
+    if (Array.from(e.key).length === 1 || navigationKeys.has(e.key)) {
       e.preventDefault();
       e.stopPropagation();
       try {
         await fetch('/api/input/key', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code: e.key.codePointAt(0) })
+          body: JSON.stringify({ key: e.key })
         });
       } catch (_) {}
     }
