@@ -2609,10 +2609,38 @@ pub extern "C" fn _start() -> ! {
                     scale_milli: 1000,
                 };
                 while std::input_event_poll(&mut input).is_ok() {
+                    // Canonical system gestures are delivered independently of the
+                    // currently rendered launcher surface.
+                    if input.kind == 7 {
+                        state.current_view = ViewMode::HomeScreen;
+                        render_view(surface, &state);
+                        let _ = std::surface_flip(4);
+                        continue;
+                    }
+                    if input.kind == 8 {
+                        refresh_runtime_recents(&mut state);
+                        state.current_view = ViewMode::ActivitySpace;
+                        render_view(surface, &state);
+                        let _ = std::surface_flip(4);
+                        continue;
+                    }
+                    if input.kind == 6 {
+                        state.current_view = match state.current_view {
+                            ViewMode::HomeScreen | ViewMode::LockScreen => state.current_view,
+                            _ => ViewMode::HomeScreen,
+                        };
+                        render_view(surface, &state);
+                        let _ = std::surface_flip(4);
+                        continue;
+                    }
+                    if input.kind == 9 {
+                        continue;
+                    }
+
                     match state.current_view {
                         ViewMode::ActivitySpace => {
                             // 1. Swipe gestures
-                            if input.kind == 4 {
+                            if input.kind == 4 || input.kind == 10 {
                                 // Vertical swipe down returns to home
                                 if input.dy >= 60 {
                                     state.current_view = ViewMode::HomeScreen;
