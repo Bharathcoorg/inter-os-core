@@ -65,6 +65,10 @@ impl PointerState {
     }
 }
 
+const LONG_PRESS_TICKS: u64 = 500;
+const DOUBLE_TAP_WINDOW_TICKS: u64 = 300;
+const FLING_WINDOW_TICKS: u64 = 250;
+
 pub struct InputRouter {
     pointers: [PointerState; 5],
     last_tap_tick: u64,
@@ -216,10 +220,10 @@ impl InputRouter {
                 let distance = dx.abs().max(dy.abs());
                 if distance <= 12 {
                     let held = now_tick.saturating_sub(state.down_tick);
-                    let kind = if held >= 50 {
+                    let kind = if held >= LONG_PRESS_TICKS {
                         GestureKind::LongPress
                     } else if self.last_tap_tick != 0
-                        && now_tick.saturating_sub(self.last_tap_tick) <= 20
+                        && now_tick.saturating_sub(self.last_tap_tick) <= DOUBLE_TAP_WINDOW_TICKS
                         && (state.current.x - self.last_tap_position.x).abs() <= 24
                         && (state.current.y - self.last_tap_position.y).abs() <= 24
                     {
@@ -227,8 +231,10 @@ impl InputRouter {
                     } else {
                         GestureKind::Tap
                     };
-                    self.last_tap_tick = now_tick;
-                    self.last_tap_position = state.current;
+                    if kind == GestureKind::Tap || kind == GestureKind::DoubleTap {
+                        self.last_tap_tick = now_tick;
+                        self.last_tap_position = state.current;
+                    }
                     return Some(GestureEvent {
                         kind,
                         position: state.current,
@@ -255,7 +261,7 @@ impl InputRouter {
                     });
                 }
                 let held = now_tick.saturating_sub(state.down_tick);
-                let kind = if held <= 12 && distance >= 80 {
+                let kind = if held <= FLING_WINDOW_TICKS && distance >= 80 {
                     GestureKind::Fling
                 } else {
                     GestureKind::Scroll
@@ -511,7 +517,7 @@ mod tests {
         );
         router.dispatch_pointer_at(down, 720, 24, 100);
         assert_eq!(
-            router.dispatch_pointer_at(up, 720, 24, 151).map(|g| g.kind),
+            router.dispatch_pointer_at(up, 720, 24, 601).map(|g| g.kind),
             Some(GestureKind::LongPress)
         );
     }
