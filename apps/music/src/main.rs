@@ -104,31 +104,17 @@ impl MusicApp {
         .ok();
     }
 
-    /// Streams an uncompressed PCM audio block over Zero-Copy DMA SHM Pipe 1.
+    /// Streams media only when a real media payload is available.
     pub fn stream_dma_audio_block(&mut self) {
-        let pcm_packet = b"INTER_DMA_AUDIO_PCM_BLOCK_CH1_CH2_48000HZ";
-        if std::shm_pipe_transfer(1, pcm_packet, 0x01).is_ok() {
-            self.total_dma_buffers_streamed += 1;
-            std::log(
-                0,
-                "[MUSIC APP] Zero-Copy DMA: Streamed 48kHz audio buffer via SHM Pipe 1.",
-            )
-            .ok();
-        }
+        std::log(0, "[MUSIC APP] No media payload is available for DMA streaming.").ok();
     }
 
-    /// Encrypts track metadata in Sector 204.
+
+    /// Encrypts metadata only when a real media record exists.
     pub fn encrypt_track_record(&mut self) {
-        let mut track_sector = [0u8; 512];
-        let track_meta =
-            b"InterOS::AudioTrack{id:42,title:\"Sovereign Symphony in C\",bpm:120,codec:\"FLAC\"}";
-        track_sector[..track_meta.len()].copy_from_slice(track_meta);
-        let iv = [0x99u8; 16];
-        if std::vault_encrypt_sector(204, &mut track_sector, &iv).is_ok() {
-            self.sector_encrypted = true;
-            std::log(0, "[MUSIC APP] Sovereign Vault: Sector 204 authenticated track record encrypted with ChaCha20.").ok();
-        }
+        std::log(0, "[MUSIC APP] No media record is available for encryption.").ok();
     }
+
 }
 
 const W: usize = 720;
