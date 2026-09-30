@@ -160,8 +160,9 @@ pub enum ViewMode {
 pub struct LauncherState {
     pub current_view: ViewMode,
     pub clock_time: [u8; 5],
-    pub app_drawer_tab: usize,
     pub flashlight_on: bool,
+    pub anim_tick: u32,
+    pub app_drawer_tab: usize,
     pub notification_count: usize,
     pub recent_apps: [[u8; 32]; 3],
     pub recent_app_lens: [u8; 3],
@@ -181,8 +182,9 @@ impl LauncherState {
         Self {
             current_view: ViewMode::LockScreen,
             clock_time: *b"00:00",
-            app_drawer_tab: 0,
             flashlight_on: false,
+            anim_tick: 0,
+            app_drawer_tab: 0,
             notification_count: 0,
             recent_apps: [[0u8; 32]; 3],
             recent_app_lens: [0; 3],
@@ -2130,28 +2132,18 @@ fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 
     // 7. Appearance: the stock system theme is immutable.
     if y >= 865 && y < 1015 && x >= 40 && x < 680 {
-        if y == 865 || y == 1014 || x == 40 || x == 679 {
-            return BORDER_SUBTLE;
-        }
+        if y == 865 || y == 1014 || x == 40 || x == 679 { return BORDER_SUBTLE; }
         if y >= 885 && y < 901 {
-            if let Some(c) = test_text(x, y, 65, 885, 2, b"Appearance", ACCENT_CYAN) {
-                return c;
-            }
+            if let Some(c) = test_text(x, y, 65, 885, 2, b"Appearance", ACCENT_CYAN) { return c; }
         }
         if y >= 915 && y < 923 {
-            if let Some(c) = test_text(x, y, 65, 915, 1, b"InterOS Stock", TEXT_PRIMARY) {
-                return c;
-            }
+            if let Some(c) = test_text(x, y, 65, 915, 1, b"InterOS Stock", TEXT_PRIMARY) { return c; }
         }
         if y >= 940 && y < 948 {
-            if let Some(c) = test_text(x, y, 65, 940, 1, b"System theme is fixed for this device build", TEXT_MUTED) {
-                return c;
-            }
+            if let Some(c) = test_text(x, y, 65, 940, 1, b"System theme is fixed for this device build", TEXT_MUTED) { return c; }
         }
         if y >= 970 && y < 978 {
-            if let Some(c) = test_text(x, y, 65, 970, 1, b"Personal themes are unavailable", TEXT_MUTED) {
-                return c;
-            }
+            if let Some(c) = test_text(x, y, 65, 970, 1, b"Personal themes are unavailable", TEXT_MUTED) { return c; }
         }
         return SURFACE_RAISED;
     }
@@ -2454,8 +2446,6 @@ pub extern "C" fn _start() -> ! {
                     scale_milli: 1000,
                 };
                 while std::input_event_poll(&mut input).is_ok() {
-                    // Canonical system gestures are delivered independently of the
-                    // currently rendered launcher surface.
                     if input.kind == 7 {
                         state.current_view = ViewMode::HomeScreen;
                         render_view(surface, &state);
@@ -2478,9 +2468,7 @@ pub extern "C" fn _start() -> ! {
                         let _ = std::surface_flip(4);
                         continue;
                     }
-                    if input.kind == 9 {
-                        continue;
-                    }
+                    if input.kind == 9 { continue; }
 
                     match state.current_view {
                         ViewMode::ActivitySpace => {
