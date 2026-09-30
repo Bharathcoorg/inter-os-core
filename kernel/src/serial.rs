@@ -263,6 +263,36 @@ fn handle_rapp_command(s: &str) -> bool {
         return true;
     }
 
+    if verb.eq_ignore_ascii_case("INPUT_KEYCODE") {
+        let Some(name) = parts.next() else { return true; };
+        let code = match name.to_ascii_uppercase().as_str() {
+            "ENTER" => crate::input::KeyCode::Enter,
+            "ESCAPE" | "ESC" => crate::input::KeyCode::Escape,
+            "BACKSPACE" => crate::input::KeyCode::Backspace,
+            "TAB" => crate::input::KeyCode::Tab,
+            "ARROWUP" | "UP" => crate::input::KeyCode::ArrowUp,
+            "ARROWDOWN" | "DOWN" => crate::input::KeyCode::ArrowDown,
+            "ARROWLEFT" | "LEFT" => crate::input::KeyCode::ArrowLeft,
+            "ARROWRIGHT" | "RIGHT" => crate::input::KeyCode::ArrowRight,
+            "HOME" => crate::input::KeyCode::Home,
+            "END" => crate::input::KeyCode::End,
+            "PAGEUP" => crate::input::KeyCode::PageUp,
+            "PAGEDOWN" => crate::input::KeyCode::PageDown,
+            _ => { serial_println!("[COM1 INPUT] REJECT key code"); return true; }
+        };
+        crate::input::post_key_event(crate::input::KeyEvent {
+            source: crate::input::InputSource::DeviceStudio,
+            action: crate::input::KeyAction::Down,
+            code,
+            shift: false,
+            ctrl: false,
+            alt: false,
+            meta: false,
+        });
+        serial_println!("[COM1 INPUT] KEYCODE {:?}", code);
+        return true;
+    }
+
     if verb.eq_ignore_ascii_case("RAPP_TRUST") {
         let Some(key_hex) = parts.next() else { return true; };
         let Some(publisher) = parts.next() else { return true; };
