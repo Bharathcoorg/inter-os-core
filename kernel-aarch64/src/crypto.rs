@@ -456,5 +456,5 @@ pub fn verify_ed25519_signature(
         return false;
     };
     let sig = Signature::from_bytes(signature);
-    key.verify(message, &sig).is_ok()
+    key.verify_strict(message, &sig).is_ok()
 }
