@@ -79,39 +79,14 @@ impl StrongBoxHal {
     /// Generates a new hardware-isolated key inside the secure element.
     pub fn generate_key(
         &mut self,
-        algorithm: KeyAlgorithm,
+        _algorithm: KeyAlgorithm,
         caps: &CapabilityTable,
     ) -> Result<u32, StrongBoxError> {
         caps.check(CapabilityType::StrongBoxSecureEnclave, Rights::WRITE)
             .map_err(|_| StrongBoxError::CapabilityDenied)?;
-
-        if !self.enabled || !self.hardware_present {
-            return Err(StrongBoxError::HardwareDisabled);
-        }
-
-        if self.tamper_detected {
-            return Err(StrongBoxError::TamperDetected);
-        }
-
-        // Key generation requires a concrete secure-element implementation.
-        // The generic AArch64 target never fabricates key material in software.
-        return Err(StrongBoxError::HardwareBackendUnavailable);
-
-        let key_id = (self.keys.len() as u32) + 1;
-        let mut public_material = [0u8; 32];
-        for (i, byte) in public_material.iter_mut().enumerate() {
-            *byte = ((self.trng_seed ^ (i as u32 * 31 + key_id)) & 0xFF) as u8;
-        }
-
-        self.keys.push(EnclaveKey {
-            key_id,
-            algorithm,
-            public_material,
-            usage_counter: 0,
-        });
-
-        self.monotonic_counter += 1;
-        Ok(key_id)
+        if !self.enabled || !self.hardware_present { return Err(StrongBoxError::HardwareDisabled); }
+        if self.tamper_detected { return Err(StrongBoxError::TamperDetected); }
+        Err(StrongBoxError::HardwareBackendUnavailable)
     }
 
     /// Issues a hardware key attestation proving key was minted in authentic silicon.
