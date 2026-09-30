@@ -88,6 +88,7 @@ impl Scheduler {
     /// Spawns an existing TaskControlBlock (e.g. userspace process with isolated page table).
     pub fn spawn_task(&mut self, mut tcb: TaskControlBlock) -> TaskId {
         let id = tcb.id;
+        tcb.cap_table.set_owner_task(id);
         if id == TaskId(0) {
             self.tasks.push(tcb);
             return id;

@@ -206,6 +206,54 @@ class AdversarialSecurityTests(unittest.TestCase):
             except urllib.error.HTTPError as e:
                 self.assertEqual(e.code, 403)
 
+    def test_07_package_path_traversal_rejection(self):
+        """Verify package installer strictly rejects path traversal in X-Package-Name."""
+        traversal_names = [
+            "../../../etc/shadow",
+            "..\\..\\Windows\\System32\\cmd.exe",
+            "/absolute/root/exploit.rapp",
+            "normal/../../test.rapp",
+        ]
+        url = f"{STUDIO_URL}/api/rapp/install"
+        for name in traversal_names:
+            req = urllib.request.Request(
+                url,
+                data=b"INVALID_PAYLOAD",
+                headers={
+                    "Content-Type": "application/octet-stream",
+                    "X-Package-Name": name
+                },
+                method="POST"
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    self.assertFalse(data.get("success", False), f"Path traversal '{name}' was unexpectedly accepted!")
+            except urllib.error.HTTPError as e:
+                self.assertEqual(e.code, 400)
+
+    def test_08_upload_path_traversal_rejection(self):
+        """Verify upload endpoint strictly rejects path traversal in filename parameter."""
+        traversal_names = [
+            "../../../etc/passwd",
+            "..\\..\\cmd.exe",
+            "/var/run/secrets.bin"
+        ]
+        for name in traversal_names:
+            url = f"{STUDIO_URL}/api/apps/upload?filename={urllib.parse.quote(name)}"
+            req = urllib.request.Request(
+                url,
+                data=b"\x7fELF_DUMMY_BINARY",
+                headers={"Content-Type": "application/octet-stream"},
+                method="POST"
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    self.assertFalse(data.get("success", False), f"Upload path traversal '{name}' was accepted!")
+            except urllib.error.HTTPError as e:
+                self.assertEqual(e.code, 400)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

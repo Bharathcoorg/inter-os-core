@@ -1499,7 +1499,15 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
 
         if self.path == '/api/rapp/install':
             content_length = int(self.headers.get('Content-Length', 0))
-            pkg_name = self.headers.get('X-Package-Name', 'unnamed.rapp')
+            raw_pkg_name = self.headers.get('X-Package-Name', 'unnamed.rapp')
+            if '..' in raw_pkg_name or '/' in raw_pkg_name or '\\' in raw_pkg_name:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Path traversal in package name is strictly forbidden'}).encode())
+                return
+            pkg_name = os.path.basename(raw_pkg_name)
             body = self.rfile.read(content_length)
 
             ok, msg, app_entry = verify_and_install_rapp(body, pkg_name)
@@ -1609,7 +1617,15 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
 
             query = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(query)
-            query_fname = params.get('filename', [''])[0]
+            raw_query_fname = params.get('filename', [''])[0]
+            if '..' in raw_query_fname or '/' in raw_query_fname or '\\' in raw_query_fname:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Path traversal in filename is strictly forbidden'}).encode())
+                return
+            query_fname = os.path.basename(raw_query_fname)
             query_name = params.get('name', [''])[0]
 
             # Detect format via binary magic bytes or extension

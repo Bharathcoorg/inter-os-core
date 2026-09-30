@@ -146,8 +146,12 @@ impl TaskControlBlock {
         // Initialize stack frame for context switching
         let context = unsafe { TaskContext::create_initial(&mut stack, entry_point) };
 
+        let id = TaskId::new();
+        let mut cap_table = cap_table;
+        cap_table.set_owner_task(id);
+
         Self {
-            id: TaskId::new(),
+            id,
             name,
             state: TaskState::Ready,
             context,
@@ -172,6 +176,9 @@ impl TaskControlBlock {
 
     /// Creates an existing/current task representation (for the bootstrap main thread).
     pub fn from_current(name: &'static str, cap_table: CapabilityTable) -> Self {
+        let mut cap_table = cap_table;
+        cap_table.set_owner_task(TaskId(0));
+
         Self {
             id: TaskId(0), // Task 0 is the primordial kernel main thread
             name,

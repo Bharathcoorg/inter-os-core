@@ -28,7 +28,7 @@ impl RappArch { pub fn from_u16(v:u16)->Option<Self>{match v{0=>Some(Self::X86_6
 pub enum RappError {
     BufferTooShort, InvalidMagic, UnsupportedVersion, UnsupportedArch,
     InvalidPackageId, InvalidPublisherKey, DigestMismatch, SignatureInvalid,
-    PublisherUntrusted, PublisherRevoked, PayloadOverflow, UnknownCapability,
+    PublisherUntrusted, PublisherRevoked, PackageRevoked, PayloadOverflow, UnknownCapability,
     TooManyCapabilities, InvalidPayload, InvalidDependency, TooManyDependencies,
 }
 
@@ -139,6 +139,7 @@ pub fn parse_rapp(data:&[u8])->Result<RappManifest,RappError>{
     let computed=Sha256::digest(&data[payload_offset..payload_end]);
     if computed!=digest{return Err(RappError::DigestMismatch)}
     let reg=REVOCATION_REGISTRY.lock();
+    if reg.is_package_revoked(&package_id){return Err(RappError::PackageRevoked)}
     if reg.is_key_revoked(&publisher_key){return Err(RappError::PublisherRevoked)}
     if !reg.is_key_trusted(&publisher_key){return Err(RappError::PublisherUntrusted)}
     drop(reg);

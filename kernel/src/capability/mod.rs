@@ -205,6 +205,7 @@ pub enum CapError {
 pub struct CapabilityTable {
     slots: Vec<CapSlot>,
     max_slots: usize,
+    owner_task: Option<crate::task::TaskId>,
 }
 
 impl CapabilityTable {
@@ -214,7 +215,26 @@ impl CapabilityTable {
         for _ in 0..max_slots {
             slots.push(CapSlot::new());
         }
-        Self { slots, max_slots }
+        Self { slots, max_slots, owner_task: None }
+    }
+
+    /// Creates a new capability table explicitly bound to an owning task.
+    pub fn new_for_task(owner: crate::task::TaskId, max_slots: usize) -> Self {
+        let mut slots = Vec::with_capacity(max_slots);
+        for _ in 0..max_slots {
+            slots.push(CapSlot::new());
+        }
+        Self { slots, max_slots, owner_task: Some(owner) }
+    }
+
+    /// Associates an owning task with this capability table.
+    pub fn set_owner_task(&mut self, owner: crate::task::TaskId) {
+        self.owner_task = Some(owner);
+    }
+
+    /// Returns the owning task ID if explicitly bound.
+    pub fn owner_task(&self) -> Option<crate::task::TaskId> {
+        self.owner_task
     }
 
     /// Returns the maximum capacity of slots in this table.
@@ -279,6 +299,7 @@ impl CapabilityTable {
         if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
             delegation::consume_invocation(
                 cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF,
+                self.owner_task,
                 crate::interrupts::get_system_ticks(),
                 required_rights,
             )?;
@@ -303,6 +324,7 @@ impl CapabilityTable {
         if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
             delegation::consume_invocation(
                 cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF,
+                self.owner_task,
                 crate::interrupts::get_system_ticks(),
                 required_rights,
             )?;
@@ -337,6 +359,7 @@ impl CapabilityTable {
             if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
                 if delegation::consume_invocation(
                     cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF,
+                    self.owner_task,
                     crate::interrupts::get_system_ticks(),
                     required_rights,
                 ).is_err() {
@@ -367,6 +390,7 @@ impl CapabilityTable {
             if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
                 if delegation::consume_invocation(
                     cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF,
+                    self.owner_task,
                     crate::interrupts::get_system_ticks(),
                     required_rights,
                 ).is_err() {
@@ -399,6 +423,7 @@ impl CapabilityTable {
         if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
             delegation::consume_invocation(
                 cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF,
+                self.owner_task,
                 crate::interrupts::get_system_ticks(),
                 required_rights,
             )?;
@@ -526,6 +551,81 @@ pub fn run_adversarial_tests() {
     assert_eq!(table.verify_object(target_slot, CapabilityType::IpcSend, Rights::WRITE, 99), Err(CapError::TargetMismatch));
     assert!(table.validate_invariants());
     crate::serial_println!("[TEST] Capability Adversarial: Object Target Confusion Rejected [PASSED]");
+
+    // 7. Adversarial Test 6: Cross-Process Delegated Capability Use Attack
+    let parent_cap = Capability {
+        id: CapabilityId(10),
+        cap_type: CapabilityType::IpcSend,
+        rights: Rights::WRITE | Rights::GRANT,
+        object_id: 42,
+    };
+    let current_ticks = crate::interrupts::get_system_ticks();
+    let lease = delegation::DelegatedLease::new(
+        delegation::allocate_lease_id(),
+        &parent_cap,
+        crate::task::TaskId(1),
+        crate::task::TaskId(10),
+        Rights::WRITE,
+        2,
+        1000,
+        current_ticks,
+    ).expect("Delegated lease creation must succeed");
+    delegation::register_lease(lease.clone());
+    let derived_cap = lease.to_capability();
+
+    let mut valid_grantee_table = CapabilityTable::new_for_task(crate::task::TaskId(10), 4);
+    let valid_slot = valid_grantee_table.insert(derived_cap.clone()).expect("Insert into grantee table");
+    assert!(valid_grantee_table.verify_object(valid_slot, CapabilityType::IpcSend, Rights::WRITE, 42).is_ok());
+
+    let mut rogue_task_table = CapabilityTable::new_for_task(crate::task::TaskId(99), 4);
+    let rogue_slot = rogue_task_table.insert(derived_cap).expect("Insert into rogue table");
+    assert_eq!(
+        rogue_task_table.verify_object(rogue_slot, CapabilityType::IpcSend, Rights::WRITE, 42),
+        Err(CapError::TargetMismatch)
+    );
+    crate::serial_println!("[TEST] Capability Adversarial: Cross-Process Use Rejected [PASSED]");
+
+    // 8. Adversarial Test 7: Capability Delegation Escalation Attack
+    let read_only_parent = Capability {
+        id: CapabilityId(20),
+        cap_type: CapabilityType::FileSystemRead,
+        rights: Rights::READ | Rights::GRANT,
+        object_id: 0,
+    };
+    let escalation_attempt = delegation::DelegatedLease::new(
+        delegation::allocate_lease_id(),
+        &read_only_parent,
+        crate::task::TaskId(1),
+        crate::task::TaskId(2),
+        Rights::READ | Rights::WRITE, // Illegally requesting unheld WRITE right
+        1,
+        100,
+        current_ticks,
+    );
+    assert_eq!(escalation_attempt, Err(CapError::InsufficientRights));
+    crate::serial_println!("[TEST] Capability Adversarial: Delegation Escalation Rejected [PASSED]");
+
+    // 9. Adversarial Test 8: Delegated Quota Exhaustion Attack
+    let single_use_lease = delegation::DelegatedLease::new(
+        delegation::allocate_lease_id(),
+        &parent_cap,
+        crate::task::TaskId(1),
+        crate::task::TaskId(10),
+        Rights::WRITE,
+        1, // exactly 1 invocation
+        500,
+        current_ticks,
+    ).expect("Single use lease creation");
+    delegation::register_lease(single_use_lease.clone());
+    let single_cap = single_use_lease.to_capability();
+    let mut quota_table = CapabilityTable::new_for_task(crate::task::TaskId(10), 2);
+    let q_slot = quota_table.insert(single_cap).expect("Install single use cap");
+    assert!(quota_table.verify_object(q_slot, CapabilityType::IpcSend, Rights::WRITE, 42).is_ok());
+    assert_eq!(
+        quota_table.verify_object(q_slot, CapabilityType::IpcSend, Rights::WRITE, 42),
+        Err(CapError::InvalidSlot)
+    );
+    crate::serial_println!("[TEST] Capability Adversarial: Quota Exhaustion Enforced [PASSED]");
 
     crate::serial_println!("[TEST] Zero-Trust Capability Invariants: 100% Attested & Enforced.");
 }

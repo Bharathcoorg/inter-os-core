@@ -91,9 +91,17 @@ impl DelegatedLease {
     /// Verifies whether the lease is currently valid for an operation and consumes 1 invocation.
     pub fn consume_invocation(
         &mut self,
+        caller: Option<TaskId>,
         current_ticks: u64,
         required_rights: Rights,
     ) -> Result<(), CapError> {
+        // Enforce cross-process isolation: if caller is known, it must match grantee_task!
+        if let Some(caller_task) = caller {
+            if caller_task != self.grantee_task {
+                return Err(CapError::TargetMismatch);
+            }
+        }
+
         // 1. Check expiration
         if current_ticks >= self.expiry_ticks {
             return Err(CapError::InvalidSlot); // Expired
@@ -168,23 +176,36 @@ pub fn init() {
     ).expect("object-scoped delegation must succeed");
     register_lease(ipc_lease.clone());
     let derived_ipc = ipc_lease.to_capability();
-    let mut ipc_table = crate::capability::CapabilityTable::new(2);
-    let ipc_slot = ipc_table.insert(derived_ipc).expect("derived IPC capability must install");
+    let mut ipc_table = crate::capability::CapabilityTable::new_for_task(TaskId(2), 2);
+    let ipc_slot = ipc_table.insert(derived_ipc.clone()).expect("derived IPC capability must install");
     assert!(ipc_table.verify_object(ipc_slot, CapabilityType::IpcSend, Rights::WRITE, 42).is_ok());
     assert_eq!(ipc_table.verify_object(ipc_slot, CapabilityType::IpcSend, Rights::WRITE, 99), Err(CapError::TargetMismatch));
 
-    // 2. Consume invocation 1 (ticks = current_ticks + 10)
-    let inv1 = lease.consume_invocation(current_ticks + 10, Rights::READ);
+    // Adversarial: Cross-process invocation attempt by TaskId(3) on TaskId(2)'s delegated capability must be rejected
+    let mut rogue_table = crate::capability::CapabilityTable::new_for_task(TaskId(3), 2);
+    let rogue_slot = rogue_table.insert(derived_ipc).expect("capability slot insertion succeeds");
+    assert_eq!(
+        rogue_table.verify_object(rogue_slot, CapabilityType::IpcSend, Rights::WRITE, 42),
+        Err(CapError::TargetMismatch),
+        "Cross-process invocation of delegated capability must be strictly rejected"
+    );
+
+    // 2. Consume invocation 1 (ticks = current_ticks + 10) by authorized grantee TaskId(2)
+    let inv1 = lease.consume_invocation(Some(TaskId(2)), current_ticks + 10, Rights::READ);
     assert!(inv1.is_ok());
     assert_eq!(lease.remaining_invocations, 1);
 
-    // 3. Consume invocation 2 (ticks = current_ticks + 20)
-    let inv2 = lease.consume_invocation(current_ticks + 20, Rights::READ);
+    // Adversarial: Cross-process lease invocation by unauthorized caller TaskId(99)
+    let rogue_inv = lease.consume_invocation(Some(TaskId(99)), current_ticks + 15, Rights::READ);
+    assert_eq!(rogue_inv, Err(CapError::TargetMismatch), "Cross-process lease invocation must be rejected");
+
+    // 3. Consume invocation 2 (ticks = current_ticks + 20) by authorized grantee TaskId(2)
+    let inv2 = lease.consume_invocation(Some(TaskId(2)), current_ticks + 20, Rights::READ);
     assert!(inv2.is_ok());
     assert_eq!(lease.remaining_invocations, 0);
 
     // 4. Quota exhaustion: Invocation 3 must fail
-    let inv3 = lease.consume_invocation(current_ticks + 30, Rights::READ);
+    let inv3 = lease.consume_invocation(Some(TaskId(2)), current_ticks + 30, Rights::READ);
     assert_eq!(inv3, Err(CapError::InvalidSlot));
 
     // 5. Illegal Privilege Escalation: Requesting WRITE when parent lacks it (or requesting GRANT)
@@ -221,6 +242,7 @@ pub fn register_lease(lease: DelegatedLease) {
 /// Validates and consumes one invocation from a delegated lease.
 pub fn consume_invocation(
     lease_id: u64,
+    caller: Option<TaskId>,
     current_ticks: u64,
     required_rights: Rights,
 ) -> Result<(), CapError> {
@@ -229,7 +251,7 @@ pub fn consume_invocation(
         .iter_mut()
         .find(|lease| lease.lease_id == lease_id)
         .ok_or(CapError::InvalidSlot)?;
-    lease.consume_invocation(current_ticks, required_rights)
+    lease.consume_invocation(caller, current_ticks, required_rights)
 }
 
 /// Returns true while a registered delegated lease is active.

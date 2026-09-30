@@ -184,6 +184,9 @@ impl PackageRegistry {
     /// and keeps launch/rollback decisions deterministic across reboots.
     pub fn stage_verified(&mut self, manifest: &crate::package::RappManifest) -> Result<(), ()> {
         if !manifest.policy.validate() { return Err(()); }
+        if crate::package::REVOCATION_REGISTRY.lock().is_package_revoked(&manifest.package_id) {
+            return Err(());
+        }
 
         let old = self.entries.clone();
         let existing = self.entries.iter().position(|entry| entry.package_id == manifest.package_id);
@@ -191,8 +194,8 @@ impl PackageRegistry {
 
         if let Some(idx) = existing {
             let previous = self.entries[idx].clone();
-            if manifest.version < previous.version && previous.state == PackageState::Active {
-                return Err(());
+            if manifest.version < previous.version {
+                return Err(()); // Strict monotonic anti-rollback invariant
             }
             if manifest.version == previous.version && matches!(previous.state, PackageState::Staged | PackageState::Active) {
                 return Ok(());
@@ -228,9 +231,12 @@ impl PackageRegistry {
     /// the durable commit point: either the new Active record is persisted, or the
     /// previous snapshot is restored before returning an error.
     pub fn activate_version(&mut self, package_id: &str, version: (u16,u16,u16)) -> Result<(), ()> {
+        if crate::package::REVOCATION_REGISTRY.lock().is_package_revoked(package_id) {
+            return Err(());
+        }
         let idx = self.entries.iter().position(|entry| entry.package_id == package_id).ok_or(())?;
         let previous = self.entries[idx].clone();
-        if version < previous.version && previous.state == PackageState::Active {
+        if version < previous.version {
             return Err(());
         }
         if version != previous.version {

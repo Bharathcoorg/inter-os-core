@@ -616,7 +616,7 @@ pub fn sys_verify_package(
     sys_fs_close(fd);
 
     parse_rapp(&file_buf[..read_bytes]).map_err(|e| match e {
-        RappError::DigestMismatch | RappError::SignatureInvalid | RappError::PublisherUntrusted | RappError::PublisherRevoked | RappError::InvalidPublisherKey => SyscallResult::IntegrityViolation,
+        RappError::DigestMismatch | RappError::SignatureInvalid | RappError::PublisherUntrusted | RappError::PublisherRevoked | RappError::PackageRevoked | RappError::InvalidPublisherKey => SyscallResult::IntegrityViolation,
         _ => SyscallResult::InvalidArguments,
     })
 }
