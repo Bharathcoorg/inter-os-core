@@ -107,3 +107,21 @@ def test_input_event_poll_does_not_reactivate_legacy_touch_gesture_engine():
     start = source.index("pub fn sys_input_event_poll")
     end = source.index("pub fn sys_touch_poll", start)
     assert "pump_touch_events()" not in source[start:end]
+
+
+def test_studio_keyboard_contract_supports_text_and_navigation_keys():
+    server = (ROOT / "emulator/server.py").read_text()
+    app = (ROOT / "emulator/app.js").read_text()
+    assert "INPUT_KEYCODE" in server
+    assert "'ArrowUp'" in server and "'Escape'" in server
+    assert "JSON.stringify({ key: e.key })" in app
+    assert "ArrowDown" in app and "PageDown" in app
+
+
+def test_kernel_keyboard_contract_encodes_canonical_keys():
+    input_source = (ROOT / "kernel/src/input/mod.rs").read_text()
+    driver = (ROOT / "kernel/src/drivers/input.rs").read_text()
+    serial = (ROOT / "kernel/src/serial.rs").read_text()
+    assert "pub fn post_key_event" in input_source
+    assert "InputEventKind::Key" in driver
+    assert "INPUT_KEYCODE" in serial
