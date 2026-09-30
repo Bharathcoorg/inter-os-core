@@ -1415,59 +1415,20 @@ fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return SURFACE_RAISED;
     }
 
-    // 3. Category Filter Tabs (y: 118..162)
-    // All, Work, Personal, Tools
-    if y >= 118 && y < 162 {
-        let tabs = [
-            (40usize, 170usize, &b"All"[..], 0usize),
-            (185, 315, &b"Work"[..], 1),
-            (330, 460, &b"Personal"[..], 2),
-            (475, 605, &b"Tools"[..], 3),
-        ];
-
-        for (x0, x1, label, idx) in tabs {
-            if x >= x0 && x < x1 {
-                let is_sel = state.app_drawer_tab == idx;
-                if y == 118 || y == 161 || x == x0 || x == x1 - 1 {
-                    return if is_sel { ACCENT_SKY } else { BORDER_SUBTLE };
-                }
-                if y >= 134 && y < 150 {
-                    let ox = x0 + (x1 - x0).saturating_sub(label.len() * 16) / 2;
-                    let fg = if is_sel { TEXT_DARK } else { TEXT_MUTED };
-                    if let Some(c) = test_text(x, y, ox, 134, 2, label, fg) {
-                        return c;
-                    }
-                }
-                return if is_sel {
-                    SURFACE_LIGHT
-                } else {
-                    SURFACE_RAISED
-                };
+    // 3. Installed application filter.
+    if y >= 118 && y < 162 && x >= 40 && x < 680 {
+        if y == 118 || y == 161 || x == 40 || x == 679 {
+            return ACCENT_SKY;
+        }
+        if y >= 134 && y < 150 {
+            if let Some(c) = test_text(x, y, 300, 134, 2, b"Installed", TEXT_DARK) {
+                return c;
             }
         }
-        return BG_DARK;
+        return SURFACE_LIGHT;
     }
 
-    // 4. 12-App 3-Column x 4-Row Grid matching Reference North Star (y: 185..1080)
-    // Row 0: Browser, Mail, Calendar
-    // Row 1: Camera, Gallery, Files
-    // Row 2: Notes, Music, Calculator
-    // Row 3: Maps, Contacts, Settings
-    let app_spec: [(&[u8], &[u8], u32); 12] = [
-        (b"WWW", b"Browser", 0xFF31C4FF),
-        (b"EML", b"Mail", 0xFF38BDF8),
-        (b"CAL", b"Calendar", 0xFF60A5FA),
-        (b"CAM", b"Camera", 0xFFF59E0B),
-        (b"IMG", b"Gallery", 0xFFEC4899),
-        (b"DIR", b"Files", 0xFF06B6D4),
-        (b"NOT", b"Notes", 0xFFA78BFA),
-        (b"MUS", b"Music", 0xFF10B981),
-        (b"+-=", b"Calculator", 0xFFF59E0B),
-        (b"MAP", b"Maps", 0xFF34D399),
-        (b"CNT", b"Contacts", 0xFFF43F5E),
-        (b"SET", b"Settings", 0xFF94A3B8),
-    ];
-
+    // 4. Real application registry grid.
     let row = if (185..395).contains(&y) {
         Some(0)
     } else if (410..620).contains(&y) {
@@ -1492,50 +1453,46 @@ fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         };
 
         if let Some(c_idx) = col {
-            let app_idx = r_idx * 3 + c_idx;
-            let (icon, label, accent) = app_spec[app_idx];
-            let x0 = match c_idx {
-                0 => 50,
-                1 => 270,
-                _ => 490,
-            };
-            let y0 = match r_idx {
-                0 => 185,
-                1 => 410,
-                2 => 635,
-                _ => 860,
-            };
-
-            // Card border
+            let app_idx = state.app_drawer_page * 12 + r_idx * 3 + c_idx;
+            let x0 = match c_idx { 0 => 50, 1 => 270, _ => 490 };
+            let y0 = match r_idx { 0 => 185, 1 => 410, 2 => 635, _ => 860 };
             if y == y0 || y == y0 + 209 || x == x0 || x == x0 + 179 {
                 return BORDER_SUBTLE;
             }
-
-            // Squircle icon (Center: x0 + 90, y0 + 80, r = 40)
+            if app_idx >= state.app_count {
+                return SURFACE_RAISED;
+            }
+            let accent = match app_idx % 6 {
+                0 => ACCENT_SKY,
+                1 => SUCCESS_EMERALD,
+                2 => ACCENT_AMBER,
+                3 => ACCENT_VIOLET,
+                4 => ACCENT_CYAN,
+                _ => TEXT_MUTED,
+            };
             let b_dx = (x as i32) - (x0 as i32 + 90);
             let b_dy = (y as i32) - (y0 as i32 + 80);
             let b_d2 = b_dx * b_dx + b_dy * b_dy;
             if b_d2 <= 1600 {
-                if b_d2 >= 1369 {
-                    return accent;
-                }
-                if y >= y0 + 72 && y < y0 + 88 {
-                    let ox = x0 + 90 - 12;
-                    if let Some(c) = test_text(x, y, ox, y0 + 72, 1, icon, accent) {
+                if b_d2 >= 1369 { return accent; }
+                if y >= y0 + 72 && y < y0 + 80 {
+                    let icon = &state.app_icons[app_idx][..3];
+                    if let Some(c) = test_text(x, y, x0 + 78, y0 + 72, 1, icon, TEXT_DARK) {
                         return c;
                     }
                 }
-                return 0xFF0E1422;
+                return SURFACE_RAISED;
             }
-
-            // App Label (y0 + 150..y0 + 166)
             if y >= y0 + 150 && y < y0 + 166 {
-                let ox = x0 + 90 - (label.len() * 16) / 2;
-                if let Some(c) = test_text(x, y, ox, y0 + 150, 2, label, TEXT_PRIMARY) {
-                    return c;
+                let len = state.app_label_lens[app_idx] as usize;
+                if len > 0 {
+                    let label = &state.app_labels[app_idx][..len];
+                    let ox = x0 + 90 - (len * 16) / 2;
+                    if let Some(c) = test_text(x, y, ox, y0 + 150, 2, label, TEXT_PRIMARY) {
+                        return c;
+                    }
                 }
             }
-
             return SURFACE_RAISED;
         }
     }
