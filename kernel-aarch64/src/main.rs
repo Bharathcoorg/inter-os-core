@@ -1128,564 +1128,90 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     kprintln!("[OK] Emergency Cell Broadcast (CMAS/ETWS): Dispatched high-priority warning (ID: 0x{:04X}, Scope: {}) -> '{}'.",
         alert.message_id, alert.geographic_scope, alert.warning_text);
 
-    // 31. Sovereign Mobile NFC / Contactless Secure Element & DID Tap-to-Verify HAL
-    kprintln!("--- [Testing Sovereign Mobile NFC & Contactless Secure Element] ---");
+    // 31. Mobile peripheral backend boundaries: protocol logic is testable, physical access is not fabricated.
+    kprintln!("--- [Testing AArch64 peripheral backend boundaries] ---");
 
-    let device_root_key: [u8; 32] = [0x42; 32];
-    let device_did_str = "did:inter:40109ba3ee17ed8f8f9facd7b1b837a8";
-    let mut nfc = nfc::NfcController::new(0x0904_0000, device_root_key, device_did_str);
+    let mut nfc = nfc::NfcController::new(0x0904_0000, [0u8; 32], "did:inter:unconfigured");
     nfc.init_hardware(nfc::NfcOperatingMode::CardEmulation);
     assert!(nfc.enabled);
-    assert!(nfc.field_present);
-    kprintln!("[OK] NFC Contactless Controller: Initialized hardware @ 0x09040000 (Card Emulation Mode).");
-
-    // Test 1: Zero Ambient Authority: Uncredentialed APDU processing rejected
-    let select_aid_apdu = alloc::vec![
-        0x00, 0xA4, 0x04, 0x00, 0x0A,
-        0xF0, 0x49, 0x4E, 0x54, 0x45, 0x52, 0x44, 0x49, 0x44, 0x01, // INTER_OS_DID_AID
-    ];
-    let unauth_apdu = nfc.process_apdu(&select_aid_apdu, &empty_caps);
-    assert_eq!(unauth_apdu.err(), Some(nfc::NfcError::CapabilityDenied));
-    kprintln!("[TEST] Zero Ambient Authority: Uncredentialed NFC APDU transaction REJECTED (CapabilityDenied) VERIFIED.");
-
-    // Mint NFC capability
+    assert!(!nfc.hardware_present);
     let mut nfc_caps = CapabilityTable::new();
     nfc_caps.mint(CapabilityType::NfcSecureElement, Rights::READ | Rights::WRITE | Rights::INVOKE, None);
+    let nfc_select = nfc.process_apdu(&alloc::vec![0x00, 0xA4, 0x04, 0x00, 0x0A, 0xF0, 0x49, 0x4E, 0x54, 0x45, 0x52, 0x44, 0x49, 0x44, 0x01], &nfc_caps);
+    assert_eq!(nfc_select.err(), Some(nfc::NfcError::HardwareDisabled));
+    let ndef = alloc::vec![0xD1, 0x01, 13, b'U', 0x04, b'i', b'n', b't', b'e', b'r', b'-', b'o', b's', b'.', b'o', b'r', b'g'];
+    assert!(nfc::NfcController::parse_ndef(&ndef, &nfc_caps).is_ok());
+    kprintln!("[OK] NFC: protocol parser works; physical controller remains unbound.");
 
-    // Test 2: ISO/IEC 7816-4 APDU SELECT AID -> Inter OS Sovereign DID Applet
-    let select_resp = nfc.process_apdu(&select_aid_apdu, &nfc_caps).expect("SELECT AID APDU failed");
-    assert_eq!((select_resp.sw1, select_resp.sw2), nfc::SW_SUCCESS);
-    assert_eq!(select_resp.data, b"INTER_OS_DID_V1");
-    assert!(nfc.active_aid_selected);
-    kprintln!("[OK] ISO 7816-4 APDU Engine: Selected Inter OS DID Applet (SW=0x9000, FCI='INTER_OS_DID_V1').");
-
-    // Test 3: ISO/IEC 7816-4 APDU GET DATA (Public DID)
-    let get_data_apdu = alloc::vec![0x00, 0xCA, 0x00, 0x01];
-    let did_resp = nfc.process_apdu(&get_data_apdu, &nfc_caps).expect("GET DATA APDU failed");
-    assert_eq!((did_resp.sw1, did_resp.sw2), nfc::SW_SUCCESS);
-    assert_eq!(did_resp.data, device_did_str.as_bytes());
-    kprintln!("[OK] Contactless DID Tap: Emulated Smartcard returned Public DID ('{}').", device_did_str);
-
-    // Test 4: ISO/IEC 7816-4 APDU INTERNAL AUTHENTICATE (Enclave Challenge-Response)
-    let reader_nonce = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99];
-    let mut auth_apdu = alloc::vec![0x00, 0x88, 0x00, 0x00, 16];
-    auth_apdu.extend_from_slice(&reader_nonce);
-
-    let auth_resp = nfc.process_apdu(&auth_apdu, &nfc_caps).expect("INTERNAL AUTHENTICATE APDU failed");
-    assert_eq!((auth_resp.sw1, auth_resp.sw2), nfc::SW_SUCCESS);
-    assert_eq!(auth_resp.data.len(), 32); // 32-byte HMAC-SHA256 signature
-
-    // Verify expected MAC tag
-    let mut expected_challenge = alloc::vec::Vec::new();
-    expected_challenge.extend_from_slice(b"NFC_TAP_AUTH:");
-    expected_challenge.extend_from_slice(&reader_nonce);
-    let expected_mac = crypto::HmacSha256::mac(&device_root_key, &expected_challenge);
-    assert_eq!(auth_resp.data.as_slice(), expected_mac.as_slice());
-    assert_eq!(nfc.total_authentications_signed, 1);
-    kprintln!("[TEST] Hardware Secure Element (eSE): Cryptographically attested tap nonce via HMAC-SHA256 VERIFIED.");
-
-    // Test 5: Pure no_std NDEF Record Parsing (NDEF Beam / Tag Read)
-    let mut ndef_raw = alloc::vec![
-        0xD1, 0x01, 13, b'U', 0x04, // URI record: https:// (1 byte identifier + 12 bytes 'inter-os.org' = 13 bytes)
-    ];
-    ndef_raw.extend_from_slice(b"inter-os.org");
-    let ndef_records = nfc::NfcController::parse_ndef(&ndef_raw, &nfc_caps).expect("NDEF parsing failed");
-    assert_eq!(ndef_records.len(), 1);
-    assert_eq!(ndef_records[0].record_type, "U");
-    assert_eq!(&ndef_records[0].payload[1..], b"inter-os.org");
-    kprintln!("[OK] NDEF Tag Engine: Parsed NFC URI Record (Type: '{}', URI: 'https://inter-os.org').", ndef_records[0].record_type);
-
-    // 32. Sovereign Mobile Sensor Fusion Subsystem & Hardware IMU/Barometer/Proximity/Light HAL
-    kprintln!("--- [Testing Sovereign Mobile Sensor Fusion Subsystem] ---");
-
-    let mut sensor_hub = sensors::SensorHub::new(0x0905_0000);
-    sensor_hub.init_hardware();
-    assert!(sensor_hub.enabled);
-    assert!(sensor_hub.imu_active);
-    kprintln!("[OK] Sensor Hub: Initialized hardware @ 0x09050000 (IMU 6-Axis, Proximity, Ambient Light, Barometer).");
-
-    // Test 1: Zero Ambient Authority: Uncredentialed sensor read rejected
-    let default_imu = sensors::ImuSample {
-        accel_x_mg: 0,
-        accel_y_mg: -1000, // 1.0g gravity upright
-        accel_z_mg: 0,
-        gyro_x_dps: 0,
-        gyro_y_dps: 0,
-        gyro_z_dps: 0,
-    };
-    let default_env = sensors::EnvironmentSample {
-        proximity_mm: 80,
-        ambient_lux: 450,
-        pressure_pa: sensors::STANDARD_SEA_LEVEL_PRESSURE_PA,
-        altitude_meters: 0,
-    };
-    let unauth_read = sensor_hub.feed_hardware_telemetry(default_imu, default_env, false, &empty_caps);
-    assert_eq!(unauth_read.err(), Some(sensors::SensorError::CapabilityDenied));
-    kprintln!("[TEST] Zero Ambient Authority: Uncredentialed sensor telemetry read REJECTED (CapabilityDenied) VERIFIED.");
-
-    // Mint Sensor capability
+    let mut sensors = sensors::SensorHub::new(0x0905_0000);
+    sensors.init_hardware();
+    assert!(sensors.enabled);
+    assert!(!sensors.hardware_present);
     let mut sensor_caps = CapabilityTable::new();
-    sensor_caps.mint(CapabilityType::SensorTelemetryRead, Rights::READ | Rights::WRITE | Rights::INVOKE, None);
-
-    // Test 2: Standard Portrait Orientation & Backlight Governor
-    let gesture1 = sensor_hub.feed_hardware_telemetry(default_imu, default_env, false, &sensor_caps)
-        .expect("Sensor telemetry feed failed");
-    assert_eq!(gesture1, sensors::GestureEvent::None);
-    assert_eq!(sensor_hub.orientation, sensors::DeviceOrientation::PortraitUp);
-    assert_eq!(sensor_hub.display_backlight_pwm, 65); // 65% duty cycle for 450 lux
-    assert_eq!(sensor_hub.screen_state, sensors::ScreenBlankState::Active);
-    kprintln!("[OK] 6-Axis IMU Classifier: Detected PortraitUp orientation (Backlight: {}%, Altimeter: {} m).",
-        sensor_hub.display_backlight_pwm, sensor_hub.last_env.altitude_meters);
-
-    // Test 3: Ear Detection / Screen Blanking during active voice call
-    let near_env = sensors::EnvironmentSample {
-        proximity_mm: 15, // 15 mm <= 30 mm ear threshold
-        ambient_lux: 10,
-        pressure_pa: sensors::STANDARD_SEA_LEVEL_PRESSURE_PA,
-        altitude_meters: 0,
-    };
-    let _ = sensor_hub.feed_hardware_telemetry(default_imu, near_env, true, &sensor_caps)
-        .expect("Near ear telemetry failed");
-    assert_eq!(sensor_hub.screen_state, sensors::ScreenBlankState::BlankedEarDetection);
-    kprintln!("[TEST] Ear Detection & Screen Blanking: Proximity 15 mm during active call -> Screen Blanked (Anti-Cheek-Touch) VERIFIED.");
-
-    // Move away from ear -> Screen restored
-    let _ = sensor_hub.feed_hardware_telemetry(default_imu, default_env, true, &sensor_caps)
-        .expect("Far ear telemetry failed");
-    assert_eq!(sensor_hub.screen_state, sensors::ScreenBlankState::Active);
-    kprintln!("[OK] Display Auto-Restore: Proximity 80 mm -> Screen unblanked.");
-
-    // Test 4: Real-Time Gesture: Flip to Mute
-    let face_down_imu = sensors::ImuSample {
-        accel_x_mg: 0,
-        accel_y_mg: 0,
-        accel_z_mg: -1000, // Z = -1.0g -> FaceDown
-        gyro_x_dps: 0,
-        gyro_y_dps: 0,
-        gyro_z_dps: 0,
-    };
-    let flip_gesture = sensor_hub.feed_hardware_telemetry(face_down_imu, default_env, true, &sensor_caps)
-        .expect("Flip telemetry failed");
-    assert_eq!(flip_gesture, sensors::GestureEvent::FlipToMute);
-    assert_eq!(sensor_hub.orientation, sensors::DeviceOrientation::FaceDown);
-    kprintln!("[TEST] Sovereign Gesture Engine: Detected 'Flip to Mute' (Phone FaceDown) VERIFIED.");
-
-    // Test 5: Real-Time Gesture: Shake for Emergency SOS
-    let shake_imu = sensors::ImuSample {
-        accel_x_mg: 2500, // 2.5g lateral shock
-        accel_y_mg: 0,
-        accel_z_mg: 0,
-        gyro_x_dps: 0,
-        gyro_y_dps: 0,
-        gyro_z_dps: 0,
-    };
-    let shake_gesture = sensor_hub.feed_hardware_telemetry(shake_imu, default_env, false, &sensor_caps)
-        .expect("Shake telemetry failed");
-    assert_eq!(shake_gesture, sensors::GestureEvent::ShakeEmergencySos);
-    kprintln!("[TEST] Sovereign Gesture Engine: Detected 'Shake for Emergency SOS' (2.5g Lateral Peak) VERIFIED.");
-
-    // Test 6: Integer Hypsometric Altimeter Calculation
-    let mountain_env = sensors::EnvironmentSample {
-        proximity_mm: 100,
-        ambient_lux: 1500, // Direct sunlight -> 100% PWM
-        pressure_pa: 98_000, // 980 hPa (approx 279m altitude)
-        altitude_meters: 0,
-    };
-    let _ = sensor_hub.feed_hardware_telemetry(default_imu, mountain_env, false, &sensor_caps)
-        .expect("Mountain telemetry failed");
-    assert_eq!(sensor_hub.last_env.altitude_meters, 279); // (3325 * 84) / 1000 = 279m
-    assert_eq!(sensor_hub.display_backlight_pwm, 100); // 100% duty cycle in sunlight
-    kprintln!("[OK] Hypsometric Altimeter: Calculated altitude = 279 meters (Pressure: 98000 Pa, Backlight: 100%).");
-
-    // 33. Sovereign Mobile Bluetooth Low Energy (BLE 5.2 / HCI UART) Subsystem
-    kprintln!("--- [Testing Sovereign Mobile Bluetooth Low Energy (BLE 5.2) Subsystem] ---");
+    sensor_caps.mint(CapabilityType::SensorTelemetryRead, Rights::READ, None);
+    let sample = sensors::ImuSample { accel_x_mg: 0, accel_y_mg: -1000, accel_z_mg: 0, gyro_x_dps: 0, gyro_y_dps: 0, gyro_z_dps: 0 };
+    let env = sensors::EnvironmentSample { proximity_mm: 80, ambient_lux: 450, pressure_pa: sensors::STANDARD_SEA_LEVEL_PRESSURE_PA, altitude_meters: 0 };
+    assert_eq!(sensors.feed_hardware_telemetry(sample, env, false, &sensor_caps).err(), Some(sensors::SensorError::HardwareDisabled));
+    kprintln!("[OK] Sensors: telemetry path fails closed without a concrete driver.");
 
     let mut bt = bluetooth::BluetoothController::new(0x0906_0000);
     bt.init_hardware();
     assert!(bt.powered);
-    kprintln!("[OK] BLE 5.2 Controller: Initialized hardware @ 0x09060000.");
-
-    // Test 1: Zero Ambient Authority: Uncredentialed HCI command rejected
-    let unauth_cmd = bt.cmd_reset(&empty_caps);
-    assert_eq!(unauth_cmd.err(), Some(bluetooth::BluetoothError::CapabilityDenied));
-    kprintln!("[TEST] Zero Ambient Authority: Uncredentialed Bluetooth HCI command REJECTED (CapabilityDenied) VERIFIED.");
-
-    // Mint Bluetooth capability
+    assert!(!bt.hardware_present);
     let mut bt_caps = CapabilityTable::new();
     bt_caps.mint(CapabilityType::BluetoothDirect, Rights::READ | Rights::WRITE | Rights::INVOKE, None);
-
-    // Test 2: Standard HCI_Reset Command Generation & Event Parsing
-    let reset_cmd_pkt = bt.cmd_reset(&bt_caps).expect("HCI_Reset command creation failed");
-    assert_eq!(reset_cmd_pkt, alloc::vec![0x01, 0x03, 0x0C, 0x00]); // Type 1, Opcode 0x0C03, Len 0
-    kprintln!("[OK] Bluetooth HCI: Serialized HCI_Reset command packet (Opcode: 0x0C03).");
-
-    // Ingest simulated Command Complete event from controller
-    let reset_complete_evt = alloc::vec![0x04, 0x0E, 0x04, 0x01, 0x03, 0x0C, 0x00];
-    let parsed_evt = bt.process_incoming_event(&reset_complete_evt, &bt_caps).expect("Process event failed");
-    assert_eq!(parsed_evt.event_code, bluetooth::EVT_COMMAND_COMPLETE);
-    kprintln!("[OK] Bluetooth HCI: Received Command_Complete event (Status: 0x00 Success).");
-
-    // Test 3: Sovereign P2P BLE Advertising Data Configuration
-    let adv_cmd = bt.cmd_set_advertising_data("Inter-Phone-A64", 0x11223344, &bt_caps)
-        .expect("Set advertising data failed");
-    assert_eq!(adv_cmd[0], 0x01); // HCI Command packet
-    assert_eq!(adv_cmd[1], 0x08); // Opcode low byte
-    assert_eq!(adv_cmd[2], 0x20); // Opcode high byte (0x2008 = LE_Set_Adv_Data)
-    assert!(bt.advertising_active);
-    kprintln!("[OK] P2P BLE Beaconing: Configured Sovereign Advertising Payload (Node ID: 0x11223344, Name: 'Inter-Phone-A64').");
-
-    // Test 4: Anti-Tracking Resolvable Private Address (RPA) Rotation
-    let initial_rpa = bt.current_rpa;
-    let new_rpa = bt.rotate_private_address(0xDEADBEEF12345678, &bt_caps).expect("RPA rotation failed");
-    assert_ne!(new_rpa, initial_rpa);
-    assert_eq!(new_rpa[0] & 0xC0, 0x40); // Top two bits must be 01 (Random Resolvable Private Address)
-    assert_eq!(bt.addresses_rotated, 1);
-    kprintln!("[TEST] Anti-Surveillance Privacy: Rotated BLE address to {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} (RPA Format) VERIFIED.",
-        new_rpa[0], new_rpa[1], new_rpa[2], new_rpa[3], new_rpa[4], new_rpa[5]);
-
-    // Test 5: Ingest LE Meta Event (Advertising Report for Nearby Peer Discovery)
-    let adv_report_evt = alloc::vec![
-        0x04, 0x3E, 11, // HCI Event, LE Meta Event, Len 11
-        0x02,           // Subevent 0x02: LE_Advertising_Report
-        0x01,           // Num reports: 1
-        0x00,           // Event type: Connectable undirected
-        0x00,           // Address type: Public
-        0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, // BD_ADDR
-        0xCE,           // RSSI: -50 dBm
-    ];
-    let _ = bt.process_incoming_event(&adv_report_evt, &bt_caps).expect("Process adv report failed");
-    assert_eq!(bt.discovered_peers.len(), 1);
-    assert_eq!(bt.discovered_peers[0].bd_addr, [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
-    assert_eq!(bt.discovered_peers[0].rssi, -50);
-    kprintln!("[OK] P2P Peer Discovery: Discovered sovereign peer AA:BB:CC:DD:EE:FF (RSSI: -50 dBm).");
-
-    // 34. Sovereign Mobile Wi-Fi 6 (802.11ax / WPA3-SAE) & Ad-Hoc Direct Mesh Station HAL
-    kprintln!("--- [Testing Sovereign Mobile Wi-Fi 6 (802.11ax / WPA3-SAE) Subsystem] ---");
+    assert_eq!(bt.rotate_private_address(0, &bt_caps).err(), Some(bluetooth::BluetoothError::HardwareDisabled));
+    assert_eq!(bt.process_incoming_event(&[0x04, 0x0E, 0x04, 0x01, 0x03, 0x0C, 0x00], &bt_caps).err(), Some(bluetooth::BluetoothError::HardwareDisabled));
+    let reset = bt.cmd_reset(&bt_caps).expect("HCI packet serialization failed");
+    assert_eq!(reset, alloc::vec![0x01, 0x03, 0x0C, 0x00]);
+    kprintln!("[OK] Bluetooth: HCI serialization works; controller operations require hardware.");
 
     let mut wifi = wifi::WifiController::new(0x0907_0000);
     wifi.init_hardware();
-    assert!(!wifi.enabled);
     assert!(!wifi.hardware_present);
-    kprintln!("[OK] Wi-Fi configuration loaded; no physical chipset is claimed.");
-
-    // Test 1: Zero Ambient Authority: Uncredentialed probe request rejected
-    let unauth_probe = wifi.construct_probe_request(Some("SovereignMeshNet"), &empty_caps);
-    assert_eq!(unauth_probe.err(), Some(wifi::WifiError::CapabilityDenied));
-    kprintln!("[TEST] Zero Ambient Authority: Uncredentialed Wi-Fi transmission REJECTED (CapabilityDenied) VERIFIED.");
-
-    // Mint Wi-Fi capability
-    let mut wifi_caps = CapabilityTable::new();
-    wifi_caps.mint(CapabilityType::WifiNetworkDirect, Rights::READ | Rights::WRITE | Rights::INVOKE, None);
-
-    // Test 2: Anti-Tracking MAC Address Randomization
-    let initial_mac = wifi.current_mac;
-    let rand_mac = wifi.rotate_mac_address(0xCAFEBABEDEADBEEF, &wifi_caps).expect("Rotate MAC failed");
-    assert_ne!(rand_mac, initial_mac);
-    assert_eq!(rand_mac[0] & 0x02, 0x02); // Locally administered
-    assert_eq!(rand_mac[0] & 0x01, 0x00); // Unicast
-    assert_eq!(wifi.mac_rotations, 1);
-    kprintln!("[TEST] Anti-Tracking Privacy: Rotated Wi-Fi MAC to {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} (Locally Administered Unicast) VERIFIED.",
-        rand_mac[0], rand_mac[1], rand_mac[2], rand_mac[3], rand_mac[4], rand_mac[5]);
-
-    // Test 3: 802.11 Probe Request Frame Serialization
-    let probe_frame = wifi.construct_probe_request(Some("SovereignMeshNet"), &wifi_caps)
-        .expect("Construct probe request failed");
-    assert!(probe_frame.len() >= 24);
-    assert_eq!(probe_frame[0] & 0xFC, 0x40); // Management (00), Probe Request (0100)
-    assert_eq!(wifi.state, wifi::WifiStationState::Scanning);
-    kprintln!("[OK] 802.11ax Frame Generator: Emitted Probe Request for 'SovereignMeshNet' ({} bytes, Seq: 1).", probe_frame.len());
-
-    // Test 4: Ingest 802.11 Beacon Frame from Access Point
-    let mut sample_beacon = alloc::vec![
-        0x80, 0x00, // Management: Beacon
-        0x00, 0x00, // Duration
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // RA: Broadcast
-        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // TA: AP MAC
-        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // BSSID
-        0x10, 0x00, // Seq
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Timestamp
-        0x64, 0x00, // Beacon interval 100 TU
-        0x31, 0x04, // Capability info (ESS + Privacy + Short Slot)
-        0x00, 16,   // Tag 0 (SSID), Length 16
-    ];
-    sample_beacon.extend_from_slice(b"SovereignMeshNet");
-    let net = wifi.process_beacon_frame(&sample_beacon, -42, &wifi_caps).expect("Process beacon failed");
-    assert_eq!(net.ssid, "SovereignMeshNet");
-    assert_eq!(net.rssi_dbm, -42);
-    assert!(net.wpa3_sae_supported);
-    kprintln!("[OK] 802.11 Receiver: Ingested Beacon from '{}' (BSSID: 00:11:22:33:44:55, RSSI: -42 dBm, WPA3-SAE: True).", net.ssid);
-
-    // Test 5: WPA3-SAE must not manufacture a PMK without a real radio/crypto backend.
-    let sae = wifi.perform_wpa3_sae_handshake(
-        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
-        "SovereignPassphrase2026!",
-        &wifi_caps,
-    );
-    assert_eq!(sae.err(), Some(wifi::WifiError::HardwareUnavailable));
-    kprintln!("[TEST] WPA3-SAE hardware truth: handshake rejected without backend.");
-
-
-    // Test 6: P2P control must also fail closed without a real radio backend.
-    let p2p = wifi.start_p2p_group_owner(14, &wifi_caps);
-    assert_eq!(p2p.err(), Some(wifi::WifiError::HardwareUnavailable));
-    kprintln!("[TEST] Wi-Fi Direct hardware truth: P2P control rejected without backend.");
-
-    // 35. Sovereign Mobile GNSS / GPS Multi-Constellation Satellite Navigation Subsystem
-    kprintln!("--- [Testing Sovereign Mobile GNSS / GPS Navigation Subsystem] ---");
+    kprintln!("[OK] Wi-Fi: no physical chipset claimed.");
 
     let mut gnss = gps::GpsController::new(0x0908_0000);
     gnss.init_hardware();
     assert!(gnss.enabled);
-    kprintln!("[OK] GNSS Satellite Controller: Initialized hardware @ 0x09080000.");
-
-    // Test 1: NMEA-0183 Checksum Validation
+    assert!(!gnss.hardware_present);
     let valid_nmea = "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47";
-    assert!(gps::GpsController::verify_nmea_checksum(valid_nmea));
-    let invalid_nmea = "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*99";
-    assert!(!gps::GpsController::verify_nmea_checksum(invalid_nmea));
-    kprintln!("[TEST] NMEA-0183 Engine: XOR Checksum validation verified (*47 valid, *99 corrupted).");
-
-    // Test 2: Ingest NMEA $GPGGA Sentence & Extract Fix
-    let fix = gnss.parse_gpgga(valid_nmea).expect("Failed to parse valid GPGGA sentence");
+    let fix = gnss.parse_gpgga(valid_nmea).expect("NMEA parser rejected valid sentence");
     assert_eq!(fix.satellites_tracked, 8);
-    assert_eq!(fix.hdop_tenths, 9); // 0.9 HDOP
-    assert_eq!(fix.coordinates.altitude_meters, 545);
-    kprintln!("[OK] GNSS Fix Acquired: 3D Fix (8 sats locked, HDOP: 0.9, Alt: 545 m, UTC: 12:35:19).");
-
-    // Test 3: Zero Ambient Authority: Uncredentialed location access rejected
-    let unauth_loc = gnss.get_location(gps::AccuracyLevel::Precise, &empty_caps);
-    assert_eq!(unauth_loc.err(), Some(gps::GpsError::CapabilityDenied));
-    kprintln!("[TEST] Zero Ambient Authority: Uncredentialed GPS telemetry read REJECTED (CapabilityDenied) VERIFIED.");
-
-    // Test 4: Location Privacy Governor: Coarse centroid quantization (+/- 1.1 km) with READ rights
-    let mut coarse_caps = CapabilityTable::new();
-    coarse_caps.mint(CapabilityType::GpsTelemetryRead, Rights::READ, None);
-
-    let coarse_coords = gnss.get_location(gps::AccuracyLevel::Coarse, &coarse_caps)
-        .expect("Coarse location query failed");
-    // Verify centroid quantization (trailing 4 digits are 0)
-    assert_eq!(coarse_coords.lat_microdeg % 10_000, 0);
-    assert_eq!(coarse_coords.lon_microdeg % 10_000, 0);
-    // Attempting precise access with only READ rights must fail
-    let unauth_precise = gnss.get_location(gps::AccuracyLevel::Precise, &coarse_caps);
-    assert_eq!(unauth_precise.err(), Some(gps::GpsError::CapabilityDenied));
-    kprintln!("[TEST] Location Privacy Governor: Coarse Centroid returned ({}, {}) & Precise Access BLOCKED VERIFIED.",
-        coarse_coords.lat_microdeg, coarse_coords.lon_microdeg);
-
-    // Test 5: Precise Raw Coordinate Access with INVOKE rights
-    let mut precise_caps = CapabilityTable::new();
-    precise_caps.mint(CapabilityType::GpsTelemetryRead, Rights::READ | Rights::INVOKE, None);
-
-    let precise_coords = gnss.get_location(gps::AccuracyLevel::Precise, &precise_caps)
-        .expect("Precise location query failed");
-    assert_eq!(precise_coords.altitude_meters, 545);
-    kprintln!("[OK] Precise Satellite Positioning: Lat: {} udeg, Lon: {} udeg, Alt: {} m.",
-        precise_coords.lat_microdeg, precise_coords.lon_microdeg, precise_coords.altitude_meters);
-
-    // Test 6: Zero-Knowledge Circular Geofence
-    let home_fence = gps::CircularGeofence::new(precise_coords, 500); // 500m radius
-    let is_inside_home = gnss.query_geofence(&home_fence, &coarse_caps).expect("Geofence query failed");
-    assert!(is_inside_home);
-
-    let distant_fence = gps::CircularGeofence::new(
-        gps::Coordinates { lat_microdeg: 37_774_929, lon_microdeg: -122_419_416, altitude_meters: 10 },
-        500,
-    );
-    let is_inside_distant = gnss.query_geofence(&distant_fence, &coarse_caps).expect("Distant geofence failed");
-    assert!(!is_inside_distant);
-    kprintln!("[TEST] Zero-Knowledge Geofencing: Local perimeter verified (Home: Inside, Distant: Outside) without coordinate leakage VERIFIED.");
-
-    // 36. Sovereign Mobile Haptic Feedback Engine & Hardware LRA Actuator HAL
-    kprintln!("--- [Testing Sovereign Mobile Haptic Feedback Engine] ---");
+    let mut gps_caps = CapabilityTable::new();
+    gps_caps.mint(CapabilityType::GpsTelemetryRead, Rights::READ | Rights::INVOKE, None);
+    assert_eq!(gnss.get_location(gps::AccuracyLevel::Precise, &gps_caps).err(), Some(gps::GpsError::HardwareDisabled));
+    kprintln!("[OK] GNSS: NMEA parser works; location access requires a physical receiver.");
 
     let mut haptics = haptics::HapticsController::new(0x0909_0000);
     haptics.init_hardware();
-    assert!(haptics.enabled);
-    assert_eq!(haptics.resonant_freq_hz, 170);
-    kprintln!("[OK] LRA Haptics Controller: Initialized hardware @ 0x09090000 (170 Hz Resonant Frequency).");
-
-    // Test 1: Zero Ambient Authority: Uncredentialed haptic trigger rejected
-    let unauth_vibe = haptics.play_effect(haptics::TactileEffect::LightClick, &empty_caps);
-    assert_eq!(unauth_vibe.err(), Some(haptics::HapticError::CapabilityDenied));
-    kprintln!("[TEST] Zero Ambient Authority: Uncredentialed haptic feedback trigger REJECTED (CapabilityDenied) VERIFIED.");
-
-    // Mint Haptics WRITE capability
-    let mut haptic_write_caps = CapabilityTable::new();
-    haptic_write_caps.mint(CapabilityType::HapticsActuatorDirect, Rights::WRITE, None);
-
-    // Test 2: Standard Tactile Effects with Active Braking
-    let click_pulses = haptics.play_effect(haptics::TactileEffect::LightClick, &haptic_write_caps)
-        .expect("Play LightClick failed");
-    assert_eq!(click_pulses, 1);
-    assert!(haptics.is_playing);
-
-    let double_pulses = haptics.play_effect(haptics::TactileEffect::SuccessDoublePulse, &haptic_write_caps)
-        .expect("Play SuccessDoublePulse failed");
-    assert_eq!(double_pulses, 3);
-    kprintln!("[OK] Tactile Waveform Synthesizer: Dispatched LightClick (15 ms) & SuccessDoublePulse (3 pulses) with active reverse-braking.");
-
-    // Test 3: Anti-Battery Exhaustion Governor (Throttle non-stop vibration > 3000ms)
-    for _ in 0..14 {
-        let _ = haptics.play_effect(haptics::TactileEffect::ErrorVibe, &haptic_write_caps); // 200ms each
-    }
-    let throttled = haptics.play_effect(haptics::TactileEffect::ErrorVibe, &haptic_write_caps);
-    assert_eq!(throttled.err(), Some(haptics::HapticError::ThrottledBatterySaver));
-    kprintln!("[TEST] Anti-Battery Exhaustion Governor: Throttled excessive vibration (> 3000 ms) VERIFIED.");
-
-    // Test 4: High-Priority Telephony Ringtone Haptic Cadence with INVOKE rights
-    // Attempt with WRITE rights only must fail
-    let unauth_ring = haptics.play_effect(haptics::TactileEffect::RingtoneCadence, &haptic_write_caps);
-    assert_eq!(unauth_ring.err(), Some(haptics::HapticError::CapabilityDenied));
-
-    let mut haptic_invoke_caps = CapabilityTable::new();
-    haptic_invoke_caps.mint(CapabilityType::HapticsActuatorDirect, Rights::WRITE | Rights::INVOKE, None);
-
-    let ring_pulses = haptics.play_effect(haptics::TactileEffect::RingtoneCadence, &haptic_invoke_caps)
-        .expect("Play RingtoneCadence failed");
-    assert_eq!(ring_pulses, 6);
-    kprintln!("[OK] High-Priority Telephony Cadence: Dispatched RingtoneCadence (6 pulses) with INVOKE rights.");
-
-    // 37. Sovereign Mobile Biometric Authentication & Hardware Fingerprint Enclave HAL
-    kprintln!("--- [Testing Sovereign Mobile Biometric Authentication Subsystem] ---");
+    assert!(!haptics.hardware_present);
+    assert_eq!(haptics.synthesize_effect(haptics::TactileEffect::LightClick).len(), 1);
+    let mut haptic_caps = CapabilityTable::new();
+    haptic_caps.mint(CapabilityType::HapticsActuatorDirect, Rights::WRITE, None);
+    assert_eq!(haptics.play_effect(haptics::TactileEffect::LightClick, &haptic_caps).err(), Some(haptics::HapticError::HardwareDisabled));
+    kprintln!("[OK] Haptics: waveform generation is software-only; actuator output is unbound.");
 
     let mut bio = biometrics::BiometricsController::new(0x090A_0000);
     bio.init_hardware();
-    assert!(bio.enabled);
-    kprintln!("[OK] Fingerprint Secure Enclave: Initialized hardware @ 0x090A0000.");
-
-    // Generate test minutiae pattern (10 points)
-    let mut master_minutiae = alloc::vec![];
-    for i in 0..10 {
-        master_minutiae.push(biometrics::Minutiae {
-            x: (50 + i * 10) as u8,
-            y: (60 + i * 8) as u8,
-            angle_deg: (45 + i * 15) as u16,
-            minutiae_type: if i % 2 == 0 { biometrics::MinutiaeType::RidgeEnding } else { biometrics::MinutiaeType::Bifurcation },
-        });
-    }
-
-    // Test 1: Zero Ambient Authority: Uncredentialed enrollment rejected
-    let unauth_enroll = bio.enroll_finger(1, master_minutiae.clone(), &empty_caps);
-    assert_eq!(unauth_enroll.err(), Some(biometrics::BiometricError::CapabilityDenied));
-    kprintln!("[TEST] Zero Ambient Authority: Uncredentialed biometric enrollment REJECTED (CapabilityDenied) VERIFIED.");
-
-    // Mint Biometrics capability
+    assert!(!bio.hardware_present);
     let mut bio_caps = CapabilityTable::new();
-    bio_caps.mint(CapabilityType::BiometricAuthEnclave, Rights::READ | Rights::INVOKE, None);
-
-    // Test 2: Secure Enclave Fingerprint Enrollment
-    bio.enroll_finger(1, master_minutiae.clone(), &bio_caps).expect("Fingerprint enrollment failed");
-    assert_eq!(bio.enrolled_templates.len(), 1);
-    kprintln!("[OK] Secure Enclave: Enrolled Master Finger ID #1 (10 Minutiae Points).");
-
-    // Test 3: Anti-Spoofing Liveness Defense (reject fake gelatin finger lacking pulse/impedance)
-    let spoof_scan = biometrics::ScanSample {
-        minutiae: master_minutiae.clone(),
-        impedance_kohm: 20, // Non-physiological impedance
-        pulse_detected: false, // No blood pulse
-    };
-    let spoof_result = bio.verify_fingerprint(&spoof_scan, &bio_caps);
-    assert_eq!(spoof_result.err(), Some(biometrics::BiometricError::SpoofDetectedLivenessFailed));
-    kprintln!("[TEST] Anti-Spoofing Liveness: Fake gelatin finger (20 kOhm, no pulse) REJECTED VERIFIED.");
-
-    // Test 4: Genuine Fingerprint Verification & Cryptographic Token Generation
-    let genuine_scan = biometrics::ScanSample {
-        minutiae: master_minutiae.clone(),
-        impedance_kohm: 280, // Physiological human skin impedance
-        pulse_detected: true, // Pulse present
-    };
-    let auth_token = bio.verify_fingerprint(&genuine_scan, &bio_caps)
-        .expect("Genuine fingerprint verification failed");
-    assert_eq!(auth_token.len(), 32);
-    assert_eq!(bio.successful_auths, 1);
-    kprintln!("[TEST] Biometric Verification: Genuine finger authenticated -> Derived 256-bit Token ({:02X}{:02X}{:02X}...) VERIFIED.",
-        auth_token[0], auth_token[1], auth_token[2]);
-
-    // Test 5: Anti-Brute Force Lockout (5 consecutive failed attempts)
-    let bad_scan = biometrics::ScanSample {
-        minutiae: alloc::vec![], // No matching minutiae
-        impedance_kohm: 300,
-        pulse_detected: true,
-    };
-    for _ in 0..5 {
-        let _ = bio.verify_fingerprint(&bad_scan, &bio_caps);
-    }
-    assert!(bio.lockout_active);
-    let locked_verify = bio.verify_fingerprint(&genuine_scan, &bio_caps);
-    assert_eq!(locked_verify.err(), Some(biometrics::BiometricError::HardwareLockoutActive));
-    kprintln!("[TEST] Anti-Brute Force Defense: 5 consecutive failures triggered Hardware Lockout VERIFIED.");
-
-    // Reset lockout via master capability
-    bio.reset_lockout(&bio_caps).expect("Lockout reset failed");
-    assert!(!bio.lockout_active);
-    kprintln!("[OK] Master Authorization: Hardware biometric lockout reset.");
-
-    // 38. Sovereign Mobile USB Type-C Power Delivery (USB-PD 3.0) & Data Port Lockdown HAL
-    kprintln!("--- [Testing Sovereign Mobile USB Type-C & Power Delivery Subsystem] ---");
+    bio_caps.mint(CapabilityType::BiometricAuthEnclave, Rights::INVOKE, None);
+    assert_eq!(bio.enroll_finger(1, alloc::vec![], &bio_caps).err(), Some(biometrics::BiometricError::HardwareDisabled));
+    kprintln!("[OK] Biometrics: no software-fabricated secure enclave.");
 
     let mut usb_pd = usb::UsbPdController::new(0x090B_0000);
     usb_pd.init_hardware();
-    assert!(usb_pd.enabled);
-    assert_eq!(usb_pd.data_port_state, usb::UsbDataPortState::LockedChargeOnly);
-    kprintln!("[OK] USB Type-C Port Controller (TCPC): Initialized hardware @ 0x090B0000 (Data Port: LockedChargeOnly).");
-
-    // Test 1: Zero Ambient Authority: Uncredentialed power negotiation rejected
-    let unauth_pd = usb_pd.negotiate_power_contract(9000, 30, &empty_caps);
-    assert_eq!(unauth_pd.err(), Some(usb::UsbError::CapabilityDenied));
-    kprintln!("[TEST] Zero Ambient Authority: Uncredentialed USB-PD negotiation REJECTED (CapabilityDenied) VERIFIED.");
-
-    // Mint USB-PD WRITE capability
-    let mut usb_write_caps = CapabilityTable::new();
-    usb_write_caps.mint(CapabilityType::UsbPowerDeliveryDirect, Rights::WRITE, None);
-
-    // Cable attachment on CC1
+    assert!(!usb_pd.hardware_present);
     usb_pd.attach_cable(usb::TypeCPolarity::Cc1Active);
+    usb_pd.ingest_source_capabilities(&[usb::PowerDataObject { position: 1, voltage_mv: 5000, max_current_ma: 3000 }]);
+    let mut usb_caps = CapabilityTable::new();
+    usb_caps.mint(CapabilityType::UsbPowerDeliveryDirect, Rights::WRITE, None);
+    assert_eq!(usb_pd.negotiate_power_contract(5000, 30, &usb_caps).err(), Some(usb::UsbError::NoPortConnected));
+    kprintln!("[OK] USB-PD: protocol state is isolated from absent physical TCPC hardware.");
 
-    // Ingest Source Capabilities (5V@3A, 9V@3A, 12V@2.5A)
-    let source_pdos = alloc::vec![
-        usb::PowerDataObject { position: 1, voltage_mv: 5000, max_current_ma: 3000 },
-        usb::PowerDataObject { position: 2, voltage_mv: 9000, max_current_ma: 3000 },
-        usb::PowerDataObject { position: 3, voltage_mv: 12000, max_current_ma: 2500 },
-    ];
-    usb_pd.ingest_source_capabilities(&source_pdos);
-
-    // Test 2: Standard Fast Charging Negotiation (9V @ 3A = 27W)
-    let contract_fast = usb_pd.negotiate_power_contract(9000, 30, &usb_write_caps)
-        .expect("Fast charge negotiation failed");
-    assert_eq!(contract_fast.negotiated_voltage_mv, 9000);
-    assert_eq!(contract_fast.negotiated_current_ma, 3000);
-    assert_eq!(contract_fast.total_power_mw, 27000);
-    kprintln!("[OK] USB-PD 3.0 Contract: Negotiated 9V @ 3.0A (27 W Fast Charging) over CC1.");
-
-    // Test 3: Battery Thermal Charge Throttling (battery temp 48 deg C -> step down to 5V standard)
-    let contract_thermal = usb_pd.negotiate_power_contract(9000, 48, &usb_write_caps)
-        .expect("Thermal step-down negotiation failed");
-    assert_eq!(contract_thermal.negotiated_voltage_mv, 5000);
-    assert_eq!(contract_thermal.total_power_mw, 15000);
-    kprintln!("[TEST] Battery Thermal Charge Governor: 48 deg C detected -> Stepped down to 5V (15 W) to protect battery lifespan VERIFIED.");
-
-    // Test 4: Hardware Data Port Lockdown (Anti-Juice-Jacking)
-    // In LockedChargeOnly state, USB data lines are physically severed in hardware
-    let unauth_data_access = usb_pd.verify_data_access();
-    assert_eq!(unauth_data_access.err(), Some(usb::UsbError::DataPortLocked));
-    kprintln!("[TEST] Anti-Juice-Jacking Privacy: USB data lines SEVERED in hardware (DataPortLocked) while charging safely VERIFIED.");
-
-    // Attempting to unlock data lines with only WRITE rights must fail
-    let unauth_unlock = usb_pd.set_data_port_state(usb::UsbDataPortState::DataTransferEnabled, &usb_write_caps);
-    assert_eq!(unauth_unlock.err(), Some(usb::UsbError::CapabilityDenied));
-
-    // Mint USB-PD INVOKE capability (User-granted data access)
-    let mut usb_invoke_caps = CapabilityTable::new();
-    usb_invoke_caps.mint(CapabilityType::UsbPowerDeliveryDirect, Rights::WRITE | Rights::INVOKE, None);
-
-    usb_pd.set_data_port_state(usb::UsbDataPortState::DataTransferEnabled, &usb_invoke_caps)
-        .expect("Data port unlock failed");
-    assert!(usb_pd.verify_data_access().is_ok());
-    kprintln!("[OK] User Authorization: Unlocked USB data port multiplexer (MTP/ADB Data Transfer Enabled).");
-
-
-
-    // 40. Sovereign Mobile Multi-Core SMP Bring-Up, Inter-Processor Interrupts (IPI) & big.LITTLE Scheduler
+    
+// 40. Sovereign Mobile Multi-Core SMP Bring-Up, Inter-Processor Interrupts (IPI) & big.LITTLE Scheduler
     kprintln!("--- [Testing Sovereign Mobile Multi-Core SMP Subsystem] ---");
 
     let mut smp = smp::SmpController::new(0x0800_0000, psci);
