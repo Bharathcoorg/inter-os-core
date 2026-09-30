@@ -89,3 +89,14 @@ def test_launcher_has_no_runtime_wallpaper_switcher():
     assert "Wallpapers & Procedural Themes" not in source
     assert "Tap any theme to apply across system" not in source
     assert "InterOS Stock" in source
+
+
+def test_launcher_uses_live_system_state_not_fake_home_state():
+    source = (ROOT / "apps/launcher/src/main.rs").read_text()
+    for field in ("task_done", "wallpaper_id", "wifi_on", "bt_on", "dark_mode", "media_playing", "notif_tab"):
+        assert field not in source
+    assert "notification_count" in source
+    assert "refresh_notifications" in source
+    assert "std::rtc_get_time" in source
+    assert "System status" in source
+    assert "InterOS Stock" in source
