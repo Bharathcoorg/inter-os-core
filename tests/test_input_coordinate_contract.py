@@ -191,3 +191,15 @@ def test_studio_bootloader_branding_is_not_synthetic():
     block = source[start:end]
     assert "'status': 'DISABLED'" in block
     assert "set_active_theme(active)" not in block
+
+
+def test_first_party_apps_do_not_ship_synthetic_user_content():
+    browser = (ROOT / "apps/browser/src/main.rs").read_text()
+    messages = (ROOT / "apps/messages/src/main.rs").read_text()
+    music = (ROOT / "apps/music/src/main.rs").read_text()
+    assert 'interlayer://sovereign.mesh/catalog' not in browser
+    assert '127.0.0.1:4200/telemetry' not in browser
+    assert 'Meeting at 11:00 AM' not in messages
+    assert 'Security Kernel' not in messages
+    assert 'Sovereign Symphony in C' not in music
+    assert 'INTER_DMA_AUDIO_PCM_BLOCK' not in music
