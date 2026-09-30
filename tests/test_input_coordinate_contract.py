@@ -150,3 +150,10 @@ def test_launcher_uses_real_registry_for_drawer_and_recent_surfaces():
     assert "Mail" not in source
     assert "Maps" not in source
     assert "Contacts" not in source
+
+
+def test_launcher_drawer_pagination_is_registry_backed():
+    source = (ROOT / "apps/launcher/src/main.rs").read_text()
+    assert "let pages = (state.app_count + 11) / 12" in source
+    assert "state.app_drawer_page += 1" in source
+    assert "let app_idx = state.app_drawer_page * 12" in source
