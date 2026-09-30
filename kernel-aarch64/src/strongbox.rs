@@ -25,6 +25,7 @@ pub const STRONGBOX_REG_COUNTER: usize = 0x10;
 pub enum StrongBoxError {
     CapabilityDenied,
     HardwareDisabled,
+    HardwareBackendUnavailable,
     KeySlotFull,
     InvalidKeyId,
     TamperDetected,
@@ -53,7 +54,6 @@ pub struct StrongBoxHal {
     pub tamper_detected: bool,
     pub monotonic_counter: u64,
     pub keys: Vec<EnclaveKey>,
-    pub trng_seed: u32,
 }
 
 impl StrongBoxHal {
@@ -66,7 +66,6 @@ impl StrongBoxHal {
             tamper_detected: false,
             monotonic_counter: 1000,
             keys: Vec::new(),
-            trng_seed: 0x5A1F_C0DE,
         }
     }
 
@@ -93,6 +92,10 @@ impl StrongBoxHal {
         if self.tamper_detected {
             return Err(StrongBoxError::TamperDetected);
         }
+
+        // Key generation requires a concrete secure-element implementation.
+        // The generic AArch64 target never fabricates key material in software.
+        return Err(StrongBoxError::HardwareBackendUnavailable);
 
         let key_id = (self.keys.len() as u32) + 1;
         let mut public_material = [0u8; 32];
