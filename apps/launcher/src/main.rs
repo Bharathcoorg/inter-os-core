@@ -466,65 +466,27 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 return 0xFF0F172A;
             }
             if x >= 661 && x <= 680 && y >= 21 && y <= 29 {
-                return SUCCESS_EMERALD;
+                return TEXT_MUTED;
             }
         }
         return 0xFFF0F2F5;
     }
 
-    // 2. Contextual Greeting & Weather Header (y: 48..235)
+    // 2. Canonical stock header with truthful unavailable telemetry.
     if y < 235 {
-        // Left Greeting
         if y >= 64 && y < 80 {
-            if let Some(c) = test_text(x, y, 48, 64, 2, b"InterOS", 0xFF64748B) {
-                return c;
-            }
+            if let Some(c) = test_text(x, y, 48, 64, 2, b"InterOS", TEXT_MUTED) { return c; }
         }
         if y >= 88 && y < 120 {
-            if let Some(c) = test_text(x, y, 48, 88, 4, b"Device", 0xFF0F172A) {
-                return c;
-            }
+            if let Some(c) = test_text(x, y, 48, 88, 4, b"Device", TEXT_PRIMARY) { return c; }
         }
         if y >= 132 && y < 148 {
-            if let Some(c) = test_text(x, y, 48, 132, 2, b"System status", 0xFF64748B) {
-                return c;
-            }
+            if let Some(c) = test_text(x, y, 48, 132, 2, b"System status", TEXT_MUTED) { return c; }
         }
-
-        // Right Weather Widget (x: 480..680, y: 64..165)
-        // Weather Sun Icon (center: 520, 96, r = 14)
-        let s_dx = (x as i32) - 520;
-        let s_dy = (y as i32) - 96;
-        let s_d2 = s_dx * s_dx + s_dy * s_dy;
-        if s_d2 <= 196 {
-            return 0xFFF59E0B;
+        if y >= 80 && y < 112 && x >= 480 {
+            if let Some(c) = test_text(x, y, 480, 80, 2, b"Weather unavailable", TEXT_MUTED) { return c; }
         }
-        // Sun rays
-        if (s_d2 >= 289 && s_d2 <= 484)
-            && ((s_dx.abs() <= 2) || (s_dy.abs() <= 2) || (s_dx.abs() - s_dy.abs()).abs() <= 2)
-        {
-            return 0xFFF59E0B;
-        }
-        // Temperature "24"
-        if y >= 80 && y < 112 {
-            if let Some(c) = test_text(x, y, 552, 80, 4, b"24", 0xFF0F172A) {
-                return c;
-            }
-        }
-        // Vector degree symbol circle at (608, 86, r = 4)
-        let deg_dx = (x as i32) - 608;
-        let deg_dy = (y as i32) - 86;
-        let deg_d2 = deg_dx * deg_dx + deg_dy * deg_dy;
-        if deg_d2 <= 16 && deg_d2 >= 4 {
-            return 0xFF0F172A;
-        }
-        if y >= 126 && y < 142 {
-            if let Some(c) = test_text(x, y, 485, 126, 2, b"Weather unavailable", 0xFF64748B) {
-                return c;
-            }
-        }
-
-        return 0xFFF0F2F5;
+        return BG_DARK;
     }
 
     // 3. System Status Card (x: 40..680, y: 240..470)
