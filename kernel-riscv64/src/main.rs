@@ -109,6 +109,21 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
     unsafe {
         mmu::load_user_code(&payload);
     }
+
+    let satp = unsafe {
+        let value: usize;
+        core::arch::asm!("csrr {0}, satp", out(reg) value);
+        value
+    };
+    let registered = task::SCHEDULER.lock().add_task(
+        task::TaskId(1),
+        satp,
+        mmu::USER_CODE_VADDR,
+        mmu::USER_STACK_TOP,
+        trap::kernel_stack_top(),
+    );
+    assert!(registered, "RISC-V primordial userspace task must register with scheduler");
+
     println!("[INIT] Loaded native U-mode payload at VA 0x{:08x} (W^X RX code segment).", mmu::USER_CODE_VADDR);
     println!("[INIT] Initialized U-mode stack at VA 0x{:08x} (W^X RW stack segment).", mmu::USER_STACK_TOP);
     println!("[INIT] Dropping CPU execution privilege from S-mode to U-mode via sret...");
