@@ -13,6 +13,7 @@
 //! - Zero Ambient Authority: Killswitch execution requires `CapabilityType::RemoteKillSwitchDirect`.
 
 use crate::capability::{CapabilityTable, CapabilityType, Rights};
+use crate::crypto::verify_ed25519_signature;
 
 pub const KILLSWITCH_REG_CTRL: usize = 0x00;
 pub const KILLSWITCH_REG_STATUS: usize = 0x04;
@@ -46,6 +47,7 @@ pub enum KillswitchState {
 pub struct RemoteKillswitchHal {
     pub mmio_base: usize,
     pub enabled: bool,
+    pub hardware_present: bool,
     pub state: KillswitchState,
     pub current_nonce: u64,
     pub owner_pubkey: [u8; 32],
@@ -57,6 +59,7 @@ impl RemoteKillswitchHal {
         Self {
             mmio_base,
             enabled: false,
+            hardware_present: false,
             state: KillswitchState::Armed,
             current_nonce: 0xDEAD_BEEF_0001,
             owner_pubkey,
@@ -66,6 +69,7 @@ impl RemoteKillswitchHal {
 
     pub fn init_hardware(&mut self) {
         self.enabled = true;
+        self.hardware_present = false;
         self.state = KillswitchState::Armed;
     }
 
@@ -80,7 +84,7 @@ impl RemoteKillswitchHal {
         caps.check(CapabilityType::RemoteKillSwitchDirect, Rights::INVOKE)
             .map_err(|_| KillswitchError::CapabilityDenied)?;
 
-        if !self.enabled {
+        if !self.enabled || !self.hardware_present {
             return Err(KillswitchError::HardwareDisabled);
         }
 
@@ -93,18 +97,12 @@ impl RemoteKillswitchHal {
             return Err(KillswitchError::ReplayNonceMismatch);
         }
 
-        // 2. Ed25519 Cryptographic Signature Verification
-        // Compute expected signature digest = nonce ^ action ^ owner_pubkey[0..8]
-        let mut valid_sig = true;
-        let expected_tag = (nonce ^ (action as u64)).to_be_bytes();
-        for i in 0..8 {
-            if signature[i] != (expected_tag[i] ^ self.owner_pubkey[i]) {
-                valid_sig = false;
-                break;
-            }
-        }
-
-        if !valid_sig {
+        // 2. Verify the complete Ed25519 signature over the command domain.
+        let mut message = [0u8; 17];
+        message[..8].copy_from_slice(&nonce.to_be_bytes());
+        message[8] = action as u8;
+        message[9..].copy_from_slice(b"INTEROS-KILL");
+        if !verify_ed25519_signature(&message, &self.owner_pubkey, signature) {
             return Err(KillswitchError::InvalidSignature);
         }
 
@@ -126,6 +124,11 @@ impl RemoteKillswitchHal {
         }
 
         Ok(self.state)
+    }
+
+    pub fn set_hardware_present(&mut self, present: bool) {
+        self.hardware_present = present;
+        if !present { self.state = KillswitchState::Armed; }
     }
 
     /// Reverses screen lockdown state with master physical authorization.
