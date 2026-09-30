@@ -531,18 +531,24 @@ document.addEventListener('DOMContentLoaded', () => {
     refreshScanoutFrame();
   });
 
+  let scanoutInFlight = false;
+
   function refreshScanoutFrame() {
-    if (!liveScanoutImg) return;
+    if (!liveScanoutImg || scanoutInFlight) return;
+    scanoutInFlight = true;
     const url = `/api/screen/frame?t=${Date.now()}${cropMode === 'full' ? '&full=1' : ''}`;
+    const done = () => { scanoutInFlight = false; };
+    liveScanoutImg.addEventListener('load', done, { once: true });
+    liveScanoutImg.addEventListener('error', done, { once: true });
     liveScanoutImg.src = url;
   }
 
   function startScanoutStream() {
     if (scanoutTimer) return;
     refreshScanoutFrame();
-    scanoutTimer = setInterval(() => {
-      refreshScanoutFrame();
-    }, 400);
+    // QEMU screendump is transport-bound, so use a bounded 100 ms cadence
+    // rather than claiming a cosmetic 60 FPS stream.
+    scanoutTimer = setInterval(refreshScanoutFrame, 100);
   }
 
   function stopScanoutStream() {
