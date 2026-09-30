@@ -16,6 +16,7 @@ const POLL_INTERVAL_TICKS: u64 = 100;
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     std::log(0, "[PID1] Inter OS userspace init started in Ring 3.").ok();
+
     // Service-manager bootstrap. PID 1, not kernel_main, owns the
     // startup ordering of the userspace service set.
     // Ask the authoritative kernel registry to start every declared
@@ -150,9 +151,6 @@ fn registry_has_all_running_services(buf: &[u8]) -> bool {
         let Some(id_bytes) = fields.next() else {
             continue;
         };
-        // The public service snapshot exposes ABI version as field 2 and
-        // deliberately does not expose scheduler task IDs. Validate the
-        // published contract instead of interpreting ABI data as a task ID.
         let Some(abi_bytes) = fields.next() else {
             continue;
         };

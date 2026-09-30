@@ -1756,15 +1756,21 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                     if not (0 <= x2 < 720 and 0 <= y2 < 1440): raise ValueError('portrait end coordinates out of bounds')
                     gx2, gy2 = 460 + (x2 * 360 // 720), y2 * 720 // 1440
                 elif space in ('guest', 'guest_framebuffer', 'qemu', 'qemu_framebuffer'):
-                    gx, gy = int(data.get('x', 0)), int(data.get('y', 0))
+                    x, y = int(data.get('x', 0)), int(data.get('y', 0))
+                    if not (0 <= x < 1280 and 0 <= y < 720): raise ValueError('guest framebuffer coordinates out of bounds')
+                    gx, gy = x, y
                     gx2, gy2 = int(data.get('x2', gx)), int(data.get('y2', gy))
-                    if not (0 <= gx < 1280 and 0 <= gy < 720 and 0 <= gx2 < 1280 and 0 <= gy2 < 720): raise ValueError('guest framebuffer coordinates out of bounds')
+                    if not (0 <= gx2 < 1280 and 0 <= gy2 < 720): raise ValueError('guest framebuffer coordinates out of bounds')
                 else:
                     raise ValueError('unsupported coordinate space')
-                if action == 'tap':
+                if action == 'down':
+                    ok, msg = send_guest_serial_command(f'INPUT_TOUCH DOWN {gx} {gy} 0', '[COM1 INPUT]', timeout=4)
+                elif action == 'move':
+                    ok, msg = send_guest_serial_command(f'INPUT_TOUCH MOVE {gx} {gy} 0', '[COM1 INPUT]', timeout=4)
+                elif action == 'up':
+                    ok, msg = send_guest_serial_command(f'INPUT_TOUCH UP {gx} {gy} 0', '[COM1 INPUT]', timeout=4)
+                elif action == 'tap':
                     ok, msg = send_guest_serial_command(f'TAP {gx} {gy}', '[COM1 INPUT]', timeout=4)
-                elif action in ('down', 'move', 'up'):
-                    ok, msg = send_guest_serial_command(f'{action.upper()} {gx} {gy}', '[COM1 INPUT]', timeout=4)
                 elif action == 'cancel':
                     ok, msg = send_guest_serial_command(f'INPUT_TOUCH CANCEL {gx} {gy} 0', '[COM1 INPUT]', timeout=4)
                 elif action in ('swipe', 'drag'):
@@ -1879,6 +1885,33 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if self.path == '/api/themes/apply':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+                raw_id = str(data.get('theme_id') or data.get('id') or '').strip()
+            except Exception:
+                raw_id = ''
+
+            if not raw_id:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Missing theme_id'}).encode())
+                return
+
+            theme_id = re.sub(r'[^a-zA-Z0-9_-]', '_', raw_id).lower()
+            target_theme = os.path.join(THEMES_DIR, f"{theme_id}.theme")
+            target_json = os.path.join(THEMES_DIR, f"{theme_id}.json")
+            if not os.path.exists(target_theme) and not os.path.exists(target_json):
+                self.send_response(404)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Theme not found'}).encode())
+                return
+
             self.send_response(409)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
@@ -1912,6 +1945,168 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 'status': 'DISABLED',
                 'error': 'Bootloader branding is immutable in Device Studio'
             }).encode())
+            return
+
+        if self.path == '/api/qemu/cmd':
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length > 4096:
+                self.send_response(413)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Payload too large'}).encode())
+                return
+
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8')) if body else {}
+            except Exception:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Malformed JSON'}).encode())
+                return
+
+            if not isinstance(data, dict) or 'cmd' not in data:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Missing cmd field'}).encode())
+                return
+
+            raw_cmd = data.get('cmd')
+            if not isinstance(raw_cmd, str):
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'cmd must be a string'}).encode())
+                return
+
+            raw_cmd = raw_cmd.strip()
+            if len(raw_cmd) > 256:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'cmd exceeds maximum length (256 chars)'}).encode())
+                return
+
+            # Reject command chaining, newlines, semicolons, pipes, redirection
+            if any(c in raw_cmd for c in ('\n', '\r', ';', '|', '&', '`', '$', '>', '<')):
+                self.send_response(403)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Command injection or chaining detected.'}).encode())
+                return
+
+            # Structured allowlist validation: base operation and allowed subcommands/arguments
+            tokens = raw_cmd.split()
+            if not tokens:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Empty command'}).encode())
+                return
+
+            base_op = tokens[0].lower()
+            ALLOWED_BASE_OPS = {'info', 'help', 'p', 'x'}
+            if base_op not in ALLOWED_BASE_OPS:
+                self.send_response(403)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': f'Command operation \'{base_op}\' restricted in Studio security sandbox.'}).encode())
+                return
+
+            # Validate subcommands and arguments for allowed operations
+            if base_op == 'info':
+                ALLOWED_INFO_SUBCMDS = {
+                    'registers', 'cpus', 'mem', 'status', 'version', 'block',
+                    'chardev', 'network', 'usb', 'pci', 'lapic', 'tlb',
+                    'profile', 'mtree', 'jit', 'history'
+                }
+                if len(tokens) > 1 and tokens[1].lower() not in ALLOWED_INFO_SUBCMDS:
+                    self.send_response(403)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': False, 'error': f'Subcommand \'info {tokens[1]}\' restricted in Studio security sandbox.'}).encode())
+                    return
+            elif base_op == 'help':
+                if len(tokens) > 2:
+                    self.send_response(403)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': False, 'error': 'Malformed help query.'}).encode())
+                    return
+            elif base_op in ('p', 'x'):
+                if len(tokens) < 2:
+                    self.send_response(400)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': False, 'error': f'Missing argument for \'{base_op}\' operation'}).encode())
+                    return
+
+            ok, resp = send_qemu_monitor_cmd(raw_cmd)
+            self.send_response(200 if ok else 500)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': ok, 'output': resp}).encode())
+            return
+
+        if self.path == '/api/fs/read':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+                path = str(data.get('path', '')).strip()
+            except Exception:
+                path = ''
+            if not is_safe_guest_path(path):
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Invalid or unsafe guest path'}).encode())
+                return
+            ok, err, content = guest_fs_read(path)
+            self.send_response(200 if ok else 500)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': ok, 'path': path, 'content': content, 'error': err}).encode())
+            return
+
+        if self.path == '/api/fs/write':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+                path = str(data.get('path', '')).strip()
+                content = str(data.get('content', ''))
+            except Exception:
+                path, content = '', ''
+            if not is_safe_guest_path(path, writable=True):
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Invalid or unsafe guest write path'}).encode())
+                return
+            ok, err = guest_fs_write(path, content)
+            self.send_response(200 if ok else 500)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': ok, 'path': path, 'error': err}).encode())
             return
 
         self.send_response(404)

@@ -97,12 +97,10 @@ class SystemContractTests(unittest.TestCase):
 
     def test_m12_qemu_gate_is_wired_into_cli(self):
         cli = (ROOT / "tools/interos.py").read_text(encoding="utf-8")
-        gate = (ROOT / "tests/verify_m10_m12.py").read_text(encoding="utf-8")
-        self.assertIn('"m10_m12"', cli)
-        self.assertIn("verify_m10_m12.py", cli)
+        qemu = (ROOT / "tests/verify_x86_boot.py").read_text(encoding="utf-8")
         self.assertIn("verify_x86_boot.py", cli)
-        self.assertIn("test_interactive_lifecycle.py", gate)
-        self.assertIn("Framebuffer PPM verified for current run", gate)
+        self.assertIn("test_interactive_lifecycle.py", cli)
+        self.assertIn("Framebuffer PPM verified for current run", qemu)
 
     def test_reliability_modules_exist(self):
         for rel in (

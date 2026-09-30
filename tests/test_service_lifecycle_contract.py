@@ -129,10 +129,10 @@ def main() -> None:
 
     # Executable contract: PID1 must exercise the complete deterministic
     # lifecycle smoke sequence used by the QEMU vertical slice.
-    must(pid1, "const SERVICES: [u8; 11] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];",
+    must(pid1, "for service_id in 1u8..=11u8",
          "complete system-service bootstrap set")
-    must(pid1, "match std::service_stop(1)", "PID1 service stop exercise")
-    must(pid1, "std::service_start(1)", "PID1 service restart exercise")
+    must(pid1, "match std::service_stop(11)", "PID1 service stop exercise")
+    must(pid1, "std::service_start(11)", "PID1 service restart exercise")
     must(pid1, "[PID1] Service stop lifecycle contract exercised.",
          "PID1 successful stop evidence")
     must(pid1, "[PID1] Service restart lifecycle contract exercised.",
@@ -148,8 +148,8 @@ def main() -> None:
          "PID1 full service bootstrap validation")
     must(pid1, "[PID1] All system services running after bootstrap.",
          "PID1 complete service bootstrap evidence")
-    must(pid1, 'state != b"running" || task_bytes == b"0"',
-         "PID1 rejects non-running/zero-task registry entries")
+    must(pid1, 'abi_bytes != b"1" || state != b"running"',
+         "PID1 rejects non-running/invalid ABI registry entries")
     must(pid1, "seen == 0x07ff", "PID1 requires all eleven services")
 
 

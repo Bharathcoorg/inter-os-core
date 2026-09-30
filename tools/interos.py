@@ -501,13 +501,6 @@ def cmd_test(args):
                 if test_target in ["x86_64", "x86"]:
                     return res.returncode
 
-    if test_target == "m10_m12":
-        gate = WORKSPACE_ROOT / "tests" / "verify_m10_m12.py"
-        if not gate.exists():
-            log_error("M10-M12 evidence gate is missing")
-            return 1
-        res = subprocess.run([sys.executable, str(gate)], cwd=str(WORKSPACE_ROOT))
-        return res.returncode
 
     if test_target in ["qemu", "lifecycle", "all"]:
         if test_target in ["qemu", "all"]:
