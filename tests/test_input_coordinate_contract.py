@@ -125,3 +125,9 @@ def test_kernel_keyboard_contract_encodes_canonical_keys():
     assert "pub fn post_key_event" in input_source
     assert "InputEventKind::Key" in driver
     assert "INPUT_KEYCODE" in serial
+
+
+def test_studio_keyboard_uses_server_key_contract():
+    source = (ROOT / "emulator/app.js").read_text()
+    assert "body: JSON.stringify({ key: e.key })" in source
+    assert "body: JSON.stringify({ code:" not in source
