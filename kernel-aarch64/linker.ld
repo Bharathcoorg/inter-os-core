@@ -9,8 +9,15 @@ SECTIONS
 
     _kernel_start = .;
 
-    /* Standard ARM64 Linux / Android Boot Header (64 bytes) */
-    .head : {
+    /* Standard ARM64 Linux / Android Boot Header (64 bytes).
+     *
+     * The header must share a loadable segment with the entry code: a boot
+     * protocol loader jumps to the image base and relies on `code0` branching
+     * to offset 0x40. Any alignment padding or segment break between the header
+     * and the first instruction sends that branch into padding. Emitting the
+     * header as the first 64 bytes of .text keeps the image conformant.
+     */
+    .text : {
         /* code0: Branch to _start (b 0x40) */
         LONG(0x14000010);
         /* code1: NOP */
@@ -29,11 +36,7 @@ SECTIONS
         LONG(0x644d5241);
         /* res5 */
         LONG(0);
-    }
 
-    . = ALIGN(4K);
-
-    .text : ALIGN(4K) {
         *(.text.boot)
         *(.text .text.*)
     }
