@@ -91,8 +91,8 @@ class SerialReader:
                 continue
         return False
 
-def test_app_lifecycle(reader, monitor_sock, phase_num, app_name, app_id, tap_coords, present_marker, dump_prefix, in_app_interactions=None, exit_gesture="back"):
-    print(f"\n[LIFECYCLE TEST] === Phase {phase_num}: Testing {app_name} ({app_id}) ===")
+def test_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, tap_coords, present_marker, dump_prefix, in_app_interactions=None, exit_gesture="back"):
+    print(f"\n[LIFECYCLE TEST] === Operation {operation_num}: Testing {app_name} ({app_id}) ===")
     print(f"[LIFECYCLE TEST] Dispatching touch tap on {app_name} card at {tap_coords}...")
     reader.sock.sendall(f"TAP {tap_coords[0]} {tap_coords[1]}\n".encode('utf-8'))
 
@@ -241,7 +241,7 @@ def main():
             monitor_sock = None
 
         # 1. Wait for launcher presentation
-        print("[LIFECYCLE TEST] Phase 1: Awaiting Launcher homescreen presentation...")
+        print("[LIFECYCLE TEST] Operation 1: Awaiting Launcher homescreen presentation...")
         launcher_ready = reader.wait_for(
             "Step 5: Initial presentation complete",
             timeout=90.0,
@@ -285,7 +285,7 @@ def main():
         test_app_lifecycle(
             reader=reader,
             monitor_sock=monitor_sock,
-            phase_num=2,
+            operation_num=2,
             app_name="Calculator",
             app_id="org.interos.calculator",
             tap_coords=(180, 520),
@@ -303,7 +303,7 @@ def main():
         test_app_lifecycle(
             reader=reader,
             monitor_sock=monitor_sock,
-            phase_num=3,
+            operation_num=3,
             app_name="Settings",
             app_id="org.interos.settings",
             tap_coords=(180, 350),
@@ -320,7 +320,7 @@ def main():
         test_app_lifecycle(
             reader=reader,
             monitor_sock=monitor_sock,
-            phase_num=4,
+            operation_num=4,
             app_name="Terminal",
             app_id="org.interos.terminal",
             tap_coords=(485, 350),
@@ -336,7 +336,7 @@ def main():
         test_app_lifecycle(
             reader=reader,
             monitor_sock=monitor_sock,
-            phase_num=5,
+            operation_num=5,
             app_name="Vault",
             app_id="org.interos.vault",
             tap_coords=(485, 520),
@@ -352,7 +352,7 @@ def main():
         test_app_lifecycle(
             reader=reader,
             monitor_sock=monitor_sock,
-            phase_num=6,
+            operation_num=6,
             app_name="Camera",
             app_id="org.interos.camera",
             tap_coords=(180, 690),
@@ -368,7 +368,7 @@ def main():
         test_app_lifecycle(
             reader=reader,
             monitor_sock=monitor_sock,
-            phase_num=7,
+            operation_num=7,
             app_name="Dialer",
             app_id="org.interos.dialer",
             tap_coords=(485, 690),
@@ -384,7 +384,7 @@ def main():
         test_app_lifecycle(
             reader=reader,
             monitor_sock=monitor_sock,
-            phase_num=8,
+            operation_num=8,
             app_name="Browser",
             app_id="org.interos.browser",
             tap_coords=(180, 860),
@@ -400,7 +400,7 @@ def main():
         test_app_lifecycle(
             reader=reader,
             monitor_sock=monitor_sock,
-            phase_num=9,
+            operation_num=9,
             app_name="Messages",
             app_id="org.interos.messages",
             tap_coords=(485, 860),
@@ -416,7 +416,7 @@ def main():
         test_app_lifecycle(
             reader=reader,
             monitor_sock=monitor_sock,
-            phase_num=10,
+            operation_num=10,
             app_name="Calendar",
             app_id="org.interos.calendar",
             tap_coords=(180, 1030),
@@ -429,7 +429,7 @@ def main():
         test_app_lifecycle(
             reader=reader,
             monitor_sock=monitor_sock,
-            phase_num=11,
+            operation_num=11,
             app_name="Music",
             app_id="org.interos.music",
             tap_coords=(485, 1030),
