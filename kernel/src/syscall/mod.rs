@@ -3016,13 +3016,10 @@ pub fn sys_audio_control(action: u32, param: u32) -> Result<u32, SyscallResult> 
 }
 
 /// Derives an application-isolated 32-byte cryptographic key from hardware key slot.
-pub fn sys_keystore_derive(slot_idx: u32, out_buf: &mut [u8; 32]) -> Result<usize, SyscallResult> {
-    require_system_control()?;
-    let slot = crate::crypto::KeySlot::from_u32(slot_idx).ok_or(SyscallResult::InvalidArguments)?;
-    let ks = crate::crypto::SECURE_KEYSTORE.lock();
-    let derived = ks.derive_key(slot, b"userspace_app_key");
-    out_buf.copy_from_slice(&derived);
-    Ok(32)
+pub fn sys_keystore_derive(_slot_idx: u32, _out_buf: &mut [u8; 32]) -> Result<usize, SyscallResult> {
+    // Raw keystore-derived key material must never cross the kernel/userspace
+    // boundary. In-kernel services use scoped cryptographic operations instead.
+    Err(SyscallResult::PermissionDenied)
 }
 
 /// Queries mobile hardware sensor telemetry (orientation, 3-axis accel, ambient lux, proximity).
