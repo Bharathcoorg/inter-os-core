@@ -130,11 +130,13 @@ pub unsafe extern "C" fn trap_entry() -> ! {
         "ld x30, 8*30(sp)",
         "ld x31, 8*31(sp)",
 
-        // Restore original SP into sscratch, deallocate frame, and restore SP
+        // Restore the user SP directly and keep sscratch bound to the kernel stack.
+        // The previous implementation left the user SP in sscratch, causing a
+        // second user trap to allocate its TrapFrame on the user stack.
         "ld t0,  8*2(sp)",
-        "csrw sscratch, t0",
         "addi sp, sp, 288",
-        "csrrw sp, sscratch, sp",
+        "csrw sscratch, sp",
+        "mv sp, t0",
         "sret",
     );
 }
