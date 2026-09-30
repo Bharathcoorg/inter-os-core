@@ -243,6 +243,20 @@ impl LauncherState {
         core::str::from_utf8(&self.recent_apps[index][..len]).ok()
     }
 
+    fn recent_label(&self, index: usize) -> Option<&[u8]> {
+        let id = self.recent_id(index)?;
+        for i in 0..self.app_count {
+            let len = self.app_id_lens[i] as usize;
+            if len > 0 && &self.app_ids[i][..len] == id.as_bytes() {
+                let label_len = self.app_label_lens[i] as usize;
+                if label_len > 0 {
+                    return Some(&self.app_labels[i][..label_len]);
+                }
+            }
+        }
+        None
+    }
+
     pub fn dismiss_recent(&mut self, index: usize) {
         if index >= 3 {
             return;
@@ -709,87 +723,33 @@ fn get_activity_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
         return BG_DARK;
     }
 
-    // 3. 4 Grouped Multi-Tasking Cards (y: 135..1035, x: 48..672)
-    // Card 0: Work (4 apps · 2 tasks)
-    // Card 1: Personal (3 apps · 1 task)
-    // Card 2: Research (5 apps · 3 files)
-    // Card 3: Media (2 apps · Playing)
-    let cards = [
-        (
-            135usize,
-            340usize,
-            &b"Work"[..],
-            &b"4 apps . 2 tasks"[..],
-            ACCENT_SKY,
-            &b"Browser  Files  Calc"[..],
-        ),
-        (
-            360,
-            565,
-            &b"Personal"[..],
-            &b"3 apps . 1 task"[..],
-            SUCCESS_EMERALD,
-            &b"Messages  Mail  Camera"[..],
-        ),
-        (
-            585,
-            790,
-            &b"Research"[..],
-            &b"5 apps . 3 files"[..],
-            ACCENT_AMBER,
-            &b"Notes  Browser  Docs"[..],
-        ),
-        (
-            810,
-            1015,
-            &b"Media"[..],
-            &b"2 apps . Playing"[..],
-            0xFFF43F5E,
-            &b"Music  Gallery"[..],
-        ),
-    ];
-
-    for (y0, y1, title, sub, color, previews) in cards {
+    // 3. Recent applications from the live runtime registry.
+    let cards = [(135usize, 340usize, 0usize), (360, 565, 1), (585, 790, 2), (810, 1015, 0)];
+    for (y0, y1, recent_idx) in cards {
         if y >= y0 && y < y1 && x >= 48 && x < 672 {
-            // Border
-            if y == y0 || y == y1 - 1 || x == 48 || x == 671 {
-                return BORDER_SUBTLE;
-            }
-
-            // Left vertical accent stripe (x: 48..56)
-            if x < 56 {
-                return color;
-            }
-
-            // Title & Subtitle header (y: y0 + 16 .. y0 + 44)
+            if y == y0 || y == y1 - 1 || x == 48 || x == 671 { return BORDER_SUBTLE; }
+            let accent = match recent_idx {
+                0 => ACCENT_SKY,
+                1 => SUCCESS_EMERALD,
+                2 => ACCENT_AMBER,
+                _ => TEXT_MUTED,
+            };
+            if x < 56 { return accent; }
             if y >= y0 + 18 && y < y0 + 34 {
-                if let Some(c) = test_text(x, y, 76, y0 + 18, 2, title, TEXT_PRIMARY) {
-                    return c;
-                }
-                // Right chevron '>'
-                if let Some(c) = test_text(x, y, 630, y0 + 18, 2, b">", TEXT_MUTED) {
-                    return c;
-                }
-            }
-            if y >= y0 + 42 && y < y0 + 50 {
-                if let Some(c) = test_text(x, y, 76, y0 + 42, 1, sub, TEXT_MUTED) {
+                if let Some(label) = state.recent_label(recent_idx) {
+                    if let Some(c) = test_text(x, y, 76, y0 + 18, 2, label, TEXT_PRIMARY) { return c; }
+                } else if let Some(c) = test_text(x, y, 76, y0 + 18, 2, b"No recent app", TEXT_MUTED) {
                     return c;
                 }
             }
-
-            // Mini App Preview Tag Container (y: y0 + 70 .. y0 + 175)
-            if y >= y0 + 70 && y < y0 + 175 && x >= 76 && x < 644 {
-                if y == y0 + 70 || y == y0 + 174 || x == 76 || x == 643 {
-                    return BORDER_SUBTLE;
-                }
-                if y >= y0 + 115 && y < y0 + 131 {
-                    if let Some(c) = test_text(x, y, 96, y0 + 115, 2, previews, color) {
-                        return c;
-                    }
-                }
-                return 0xFF0E1422;
+            if y >= y0 + 48 && y < y0 + 64 {
+                let subtitle = if state.recent_task_ids[recent_idx] > 0 {
+                    b"Running task" as &[u8]
+                } else {
+                    b"Available in registry" as &[u8]
+                };
+                if let Some(c) = test_text(x, y, 76, y0 + 48, 1, subtitle, TEXT_MUTED) { return c; }
             }
-
             return SURFACE_RAISED;
         }
     }
