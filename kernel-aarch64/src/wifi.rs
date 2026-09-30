@@ -5,8 +5,8 @@
 //!
 //! Features:
 //! - IEEE 802.11ax Frame parsing & serialization (Management, Data, LLC/SNAP encapsulation)
-//! - WPA3-SAE (Simultaneous Authentication of Equals / Dragonfly Handshake) in pure `no_std`
-//! - Cryptographic Pairwise Master Key (PMK) derivation via HMAC-SHA256
+//! - WPA3-SAE frame/protocol boundary; cryptographic group operations are delegated to the concrete backend
+//! - Pairwise Master Key handling is unavailable until a real SAE crypto backend is bound
 //! - Sovereign P2P Wi-Fi Direct (Ad-Hoc Group Owner negotiation & client association)
 //! - Dynamic Anti-Tracking MAC Address Randomization (defends against commercial venue tracking)
 //! - Zero Ambient Authority: Wi-Fi scanning, connection, and data transfer require `CapabilityType::WifiNetworkDirect`.
@@ -15,7 +15,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use crate::capability::{CapabilityTable, CapabilityType, Rights};
-use crate::crypto::{sha256, HmacSha256};
+use crate::crypto::sha256;
 
 pub const FRAME_TYPE_MGMT: u8 = 0x00;
 pub const FRAME_TYPE_DATA: u8 = 0x02;
@@ -34,6 +34,7 @@ pub const AUTH_ALG_WPA3_SAE: u16 = 0x0003; // SAE (Simultaneous Authentication o
 pub enum WifiError {
     CapabilityDenied,
     HardwareDisabled,
+    HardwareUnavailable,
     MalformedFrame,
     AuthenticationFailed,
     AssociationRejected,
