@@ -437,8 +437,26 @@ mod tests {
         );
         assert_eq!(
             router.dispatch_pointer(up, 720, 24).map(|g| g.kind),
-            Some(GestureKind::Recents)
+            Some(GestureKind::Back)
         );
+    }
+
+    #[test]
+    fn right_edge_swipe_left_is_recents() {
+        let mut router = InputRouter::new();
+        let down = PointerEvent::new(InputSource::Touch, CoordinateSpace::LogicalPortrait, 0, PointerPhase::Down, 716, 700);
+        let up = PointerEvent::new(InputSource::Touch, CoordinateSpace::LogicalPortrait, 0, PointerPhase::Up, 620, 700);
+        router.dispatch_pointer(down, 720, 24);
+        assert_eq!(router.dispatch_pointer(up, 720, 24).map(|g| g.kind), Some(GestureKind::Recents));
+    }
+
+    #[test]
+    fn bottom_edge_swipe_up_is_home() {
+        let mut router = InputRouter::new();
+        let down = PointerEvent::new(InputSource::Touch, CoordinateSpace::LogicalPortrait, 0, PointerPhase::Down, 360, 1438);
+        let up = PointerEvent::new(InputSource::Touch, CoordinateSpace::LogicalPortrait, 0, PointerPhase::Up, 360, 1360);
+        router.dispatch_pointer(down, 720, 24);
+        assert_eq!(router.dispatch_pointer(up, 720, 24).map(|g| g.kind), Some(GestureKind::Home));
     }
 
     #[test]
