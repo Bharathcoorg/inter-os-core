@@ -369,42 +369,19 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
 
     // 18. Physical Smartphone Battery, Thermal & DVFS Power Governor Driver
     kprintln!("--- [Initializing Mobile Battery Fuel Gauge & DVFS Thermal Governor] ---");
-    let mut battery = power::BatteryStatus::new(4150, 100, power::ChargingState::Discharging);
+    let battery = power::BatteryStatus::new(0, 0, power::ChargingState::NotCharging);
     let mut governor = power::DvfsGovernor::new();
 
-    // Normal thermal state: 32 C -> 2400 MHz, 120 FPS target
-    let policy1 = governor.update(32, &battery);
-    assert_eq!(policy1, power::ThermalPolicy::Normal);
-    assert_eq!(governor.current_freq_mhz, 2400);
-    assert_eq!(governor.display_target_fps, 120);
-    kprintln!("[OK] Mobile Power Governor: Normal (32 C, 100% BAT @ 4150 mV) -> 2400 MHz, 120 FPS display target.");
-
-    // Simulate thermal stress tier 1: 78 C -> ThrottlingTier1 (1200 MHz, 60 FPS target)
-    let policy2 = governor.update(78, &battery);
-    assert_eq!(policy2, power::ThermalPolicy::ThrottlingTier1);
-    assert_eq!(governor.current_freq_mhz, 1200);
-    assert_eq!(governor.display_target_fps, 60);
-    kprintln!("[OK] Mobile Power Governor: ThrottlingTier1 (78 C) -> Throttled 1200 MHz, 60 FPS display target.");
-
-    // Simulate critical cooldown: 86 C -> CriticalCooldown (600 MHz, 30 FPS target)
-    let policy3 = governor.update(86, &battery);
-    assert_eq!(policy3, power::ThermalPolicy::CriticalCooldown);
-    assert_eq!(governor.current_freq_mhz, 600);
+    // No PMIC/thermal backend is bound yet. The governor must fail closed
+    // instead of treating constructor defaults as physical telemetry.
+    assert!(!battery.hardware_present);
+    assert!(!governor.hardware_present);
+    let policy = governor.update(32, &battery);
+    assert_eq!(policy, power::ThermalPolicy::Normal);
+    assert_eq!(governor.current_freq_mhz, governor.min_freq_mhz);
     assert_eq!(governor.display_target_fps, 30);
-    kprintln!("[OK] Mobile Power Governor: CriticalCooldown (86 C) -> Emergency 600 MHz, 30 FPS display target.");
-
-    // Return to normal temperature but simulate low battery (12% battery saver mode)
-    battery.capacity_pct = 12;
-    let policy4 = governor.update(35, &battery);
-    assert_eq!(policy4, power::ThermalPolicy::Normal);
-    assert!(governor.battery_saver_active);
-    assert_eq!(governor.current_freq_mhz, 1200);
-    assert_eq!(governor.display_target_fps, 60);
-    kprintln!("[OK] Mobile Power Governor: Battery Saver Active (12% BAT) -> Capped 1200 MHz, 60 FPS display target.");
-
-    // Low power architectural idle
-    governor.enter_low_power_idle();
-    kprintln!("[TEST] AArch64 Architectural WFI Low-Power Idle State VERIFIED.");
+    assert!(!governor.battery_saver_active);
+    kprintln!("[OK] Mobile Power Governor: PMIC/thermal backend unbound; safe minimum frequency policy enforced.");
 
     // 19. Sovereign Hardware Cryptographic Enclave & DID Keystore
     kprintln!("--- [Testing Sovereign Hardware Crypto Enclave & DID Keystore] ---");
