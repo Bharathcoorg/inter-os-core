@@ -61,6 +61,7 @@ pub struct ApduResponse {
 pub struct SimCardController {
     pub mmio_base: usize,
     pub enabled: bool,
+    pub hardware_present: bool,
     pub active_slot: SimSlot,
     pub card_present: [bool; 2],
     pub transactions_count: u64,
@@ -71,6 +72,7 @@ impl SimCardController {
         Self {
             mmio_base,
             enabled: false,
+            hardware_present: false,
             active_slot: SimSlot::PhysicalNanoSim,
             card_present: [false; 2],
             transactions_count: 0,
@@ -110,7 +112,7 @@ impl SimCardController {
         caps.check(CapabilityType::SimCardSecureElement, Rights::READ)
             .map_err(|_| SimError::CapabilityDenied)?;
 
-        if !self.enabled {
+        if !self.enabled || !self.hardware_present {
             return Err(SimError::HardwareDisabled);
         }
 
