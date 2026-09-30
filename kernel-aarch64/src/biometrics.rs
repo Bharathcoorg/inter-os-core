@@ -61,6 +61,7 @@ pub struct ScanSample {
 pub struct BiometricsController {
     pub mmio_base: usize,
     pub enabled: bool,
+    pub hardware_present: bool,
     pub enrolled_templates: Vec<FingerprintTemplate>,
     pub failed_attempts: u8,
     pub lockout_active: bool,
@@ -74,6 +75,7 @@ impl BiometricsController {
         Self {
             mmio_base,
             enabled: false,
+            hardware_present: false,
             enrolled_templates: Vec::new(),
             failed_attempts: 0,
             lockout_active: false,
@@ -85,6 +87,7 @@ impl BiometricsController {
 
     pub fn init_hardware(&mut self) {
         self.enabled = true;
+        self.hardware_present = false;
     }
 
     /// Enrolls a new fingerprint template into the isolated hardware enclave.
@@ -97,7 +100,7 @@ impl BiometricsController {
         caps.check(CapabilityType::BiometricAuthEnclave, Rights::INVOKE)
             .map_err(|_| BiometricError::CapabilityDenied)?;
 
-        if !self.enabled {
+        if !self.enabled || !self.hardware_present {
             return Err(BiometricError::HardwareDisabled);
         }
 
@@ -195,6 +198,11 @@ impl BiometricsController {
         }
 
         match_count
+    }
+
+    pub fn set_hardware_present(&mut self, present: bool) {
+        self.hardware_present = present;
+        if !present { self.enrolled_templates.clear(); self.failed_attempts=0; self.lockout_active=false; }
     }
 
     /// Resets hardware lockout following successful master passphrase verification.
