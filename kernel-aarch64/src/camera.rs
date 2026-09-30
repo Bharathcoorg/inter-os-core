@@ -77,6 +77,8 @@ pub enum CameraError {
 /// Sovereign Mobile Camera & ISP Hardware Driver.
 pub struct CameraDriver {
     pub mmio_base: usize,
+    /// True only after a platform probe has bound a real CSI/ISP backend.
+    pub hardware_present: bool,
     pub enabled: bool,
     pub privacy_killswitch: bool,
     pub resolution: SensorResolution,
@@ -90,6 +92,7 @@ impl CameraDriver {
     pub fn new(mmio_base: usize) -> Self {
         Self {
             mmio_base,
+            hardware_present: false,
             enabled: false,
             privacy_killswitch: false,
             resolution: SensorResolution::Res640x480,
@@ -103,7 +106,18 @@ impl CameraDriver {
     pub fn init_hardware(&mut self, resolution: SensorResolution, format: PixelFormat) {
         self.resolution = resolution;
         self.format = format;
-        self.enabled = true;
+        // Configuration alone does not prove that a CSI/ISP device exists.
+        // A concrete board probe must set hardware_present before capture.
+        self.enabled = false;
+    }
+
+    /// Binds the driver to a successfully probed hardware backend.
+    pub fn set_hardware_present(&mut self, present: bool) {
+        self.hardware_present = present;
+        self.enabled = present;
+        if !present {
+            self.current_dma_buf = 0;
+        }
     }
 
     /// Engages or disengages the sovereign hardware/software privacy killswitch.
@@ -127,31 +141,13 @@ impl CameraDriver {
             return Err(CameraError::PrivacyKillswitchEngaged);
         }
 
-        if !self.enabled {
+        if !self.hardware_present || !self.enabled {
             return Err(CameraError::HardwareDisabled);
         }
 
-        self.frames_captured = self.frames_captured.saturating_add(1);
-        let dma_slot = self.current_dma_buf;
-        self.current_dma_buf ^= 1; // Ping-pong double-buffer
-
-        let (width, height) = self.resolution.dimensions();
-        // Generate representative test pattern (e.g. 64-byte sample preview buffer)
-        let sample_len = (width.min(64) * height.min(64) * 2) as usize;
-        let mut data = Vec::with_capacity(sample_len);
-        for i in 0..sample_len {
-            data.push(((i ^ (self.frames_captured as usize)) & 0xFF) as u8);
-        }
-
-        Ok(CameraFrame {
-            width,
-            height,
-            format: self.format,
-            data,
-            timestamp_tick: current_tick,
-            frame_index: self.frames_captured,
-            dma_slot,
-        })
+        // The actual implementation must consume a DMA buffer filled by the
+        // CSI/ISP backend. Never synthesize camera pixels when hardware is absent.
+        Err(CameraError::DeviceBusy)
     }
 
     /// Computes spatial luminance edge energy across a captured frame for offline neural vision.
