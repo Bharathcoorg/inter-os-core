@@ -169,6 +169,7 @@ pub struct LauncherState {
     pub anim_tick: u32,
     pub app_drawer_tab: usize,
     pub notif_tab: usize,
+    pub notification_count: usize,
     pub recent_apps: [[u8; 32]; 3],
     pub recent_app_lens: [u8; 3],
     pub recent_task_ids: [u64; 3],
@@ -196,6 +197,7 @@ impl LauncherState {
             anim_tick: 0,
             app_drawer_tab: 0,
             notif_tab: 0,
+            notification_count: 0,
             recent_apps: [[0u8; 32]; 3],
             recent_app_lens: [0; 3],
             recent_task_ids: [0; 3],
@@ -292,6 +294,12 @@ fn refresh_clock(state: &mut LauncherState) {
     if digits >= 4 {
         state.clock_time = [hour[0], hour[1], b':', minute[0], minute[1]];
     }
+}
+
+fn refresh_notifications(state: &mut LauncherState) {
+    let uid = std::user_get_current();
+    let locked = std::user_get_lock_state(uid).unwrap_or(0) != 0;
+    state.notification_count = std::notification_query(uid, locked).unwrap_or(0);
 }
 
 fn refresh_package_catalog(state: &mut LauncherState) {
@@ -1785,241 +1793,63 @@ fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 
 #[inline(never)]
 fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32 {
-    // 1. Status Bar (y: 0..48)
     if y < 48 {
-        if y == 47 {
-            return BORDER_SUBTLE;
-        }
         if y >= 16 && y < 32 {
             if let Some(c) = test_text(x, y, 48, 16, 2, state.clock_time, TEXT_PRIMARY) {
                 return c;
             }
         }
-        if x >= 590 && x <= 608 && y >= 16 && y <= 32 {
-            if x <= 593 && y >= 28 {
-                return TEXT_PRIMARY;
-            }
-            if x >= 595 && x <= 598 && y >= 24 {
-                return TEXT_PRIMARY;
-            }
-            if x >= 600 && x <= 603 && y >= 20 {
-                return TEXT_PRIMARY;
-            }
-            if x >= 605 && x <= 608 && y >= 16 {
-                return TEXT_PRIMARY;
-            }
-        }
-        if x >= 626 && x <= 644 && y >= 18 && y <= 32 {
-            let dx = (x as i32) - 635;
-            let dy = (y as i32) - 30;
-            let d2 = dx * dx + dy * dy;
-            if (d2 >= 100 && d2 <= 144 && dy <= -2) || (d2 >= 36 && d2 <= 64 && dy <= -1) || d2 <= 9
-            {
-                return TEXT_PRIMARY;
-            }
-        }
-        if x >= 658 && x <= 686 && y >= 18 && y <= 32 {
-            if x == 658 || x == 684 || y == 18 || y == 32 {
-                return TEXT_PRIMARY;
-            }
-            if x >= 685 && x <= 686 && y >= 22 && y <= 28 {
-                return TEXT_PRIMARY;
-            }
-            if x >= 661 && x <= 680 && y >= 21 && y <= 29 {
-                return SUCCESS_EMERALD;
-            }
-        }
         return BG_DARK;
     }
 
-    // 2. Header (y: 48..110)
     if y >= 48 && y < 110 {
         if y >= 64 && y < 88 {
-            if let Some(c) = test_text(x, y, 48, 64, 3, b"Events", TEXT_PRIMARY) {
+            if let Some(c) = test_text(x, y, 48, 64, 3, b"Notifications", TEXT_PRIMARY) {
                 return c;
             }
         }
-        // Filter icon at (644, 76)
-        let dx = (x as i32) - 644;
-        let dy = (y as i32) - 76;
-        if dx.abs() <= 12 && (dy == -8 || dy == -2 || dy == 4) {
-            return TEXT_MUTED;
-        }
-        if y >= 106 {
-            return BORDER_SUBTLE;
-        }
         return BG_DARK;
     }
 
-    // 3. Category Tabs (y: 115..160)
-    // All, Messages, System, Apps
-    if y >= 115 && y < 160 {
-        let tabs = [
-            (40usize, 170usize, &b"All"[..], 0usize),
-            (185, 315, &b"Messages"[..], 1),
-            (330, 460, &b"System"[..], 2),
-            (475, 605, &b"Apps"[..], 3),
-        ];
-
-        for (x0, x1, label, idx) in tabs {
-            if x >= x0 && x < x1 {
-                let is_sel = state.notif_tab == idx;
-                if y == 115 || y == 159 || x == x0 || x == x1 - 1 {
-                    return if is_sel { ACCENT_SKY } else { BORDER_SUBTLE };
-                }
-                if y >= 131 && y < 147 {
-                    let ox = x0 + (x1 - x0).saturating_sub(label.len() * 16) / 2;
-                    let fg = if is_sel { TEXT_DARK } else { TEXT_MUTED };
-                    if let Some(c) = test_text(x, y, ox, 131, 2, label, fg) {
-                        return c;
-                    }
-                }
-                return if is_sel {
-                    SURFACE_LIGHT
-                } else {
-                    SURFACE_RAISED
-                };
-            }
-        }
-        return BG_DARK;
-    }
-
-    // 4. Section: Today (y: 170..620)
-    if y >= 170 && y < 190 && x >= 48 && x < 200 {
-        if let Some(c) = test_text(x, y, 48, 170, 2, b"Today", TEXT_PRIMARY) {
-            return c;
-        }
-    }
-
-    let today_items: [(usize, usize, &[u8], &[u8], &[u8], u32); 4] = [
-        (
-            195,
-            290,
-            b"System Security",
-            b"Ring 0 Verified . Active",
-            b"Zero-trust capability sandbox active",
-            SUCCESS_EMERALD,
-        ),
-        (
-            300,
-            395,
-            b"Meeting reminder",
-            b"Team sync (11:00) . 1 hr ago",
-            b"Join voice room",
-            ACCENT_SKY,
-        ),
-        (
-            405,
-            500,
-            b"Download complete",
-            b"interos-sdk.zip . 2 hr ago",
-            b"Saved to /downloads",
-            0xFF60A5FA,
-        ),
-        (
-            510,
-            605,
-            b"Photo saved",
-            b"IMG_20250924.jpg . 3 hr ago",
-            b"Saved to Gallery",
-            ACCENT_AMBER,
-        ),
-    ];
-
-    for (y0, y1, title, sub, preview, color) in today_items {
-        if y >= y0 && y < y1 && x >= 40 && x < 680 {
-            if x < 48 {
-                return color;
-            }
-            if y == y0 || y == y1 - 1 || x == 40 || x == 679 {
-                return BORDER_SUBTLE;
-            }
-            if y >= y0 + 16 && y < y0 + 32 {
-                if let Some(c) = test_text(x, y, 68, y0 + 16, 2, title, TEXT_PRIMARY) {
-                    return c;
-                }
-            }
-            if y >= y0 + 40 && y < y0 + 48 {
-                if let Some(c) = test_text(x, y, 68, y0 + 40, 1, sub, TEXT_MUTED) {
-                    return c;
-                }
-            }
-            if y >= y0 + 58 && y < y0 + 66 {
-                if let Some(c) = test_text(x, y, 68, y0 + 58, 1, preview, color) {
-                    return c;
-                }
-            }
-            return SURFACE_RAISED;
-        }
-    }
-
-    // 5. Section: Yesterday (y: 620..870)
-    if y >= 625 && y < 645 && x >= 48 && x < 200 {
-        if let Some(c) = test_text(x, y, 48, 625, 2, b"Yesterday", TEXT_PRIMARY) {
-            return c;
-        }
-    }
-
-    let yest_items: [(usize, usize, &[u8], &[u8], &[u8], u32); 2] = [
-        (
-            655,
-            745,
-            b"App updated",
-            b"Browser . 10:20 PM",
-            b"Version 1.4.0 active",
-            0xFFA78BFA,
-        ),
-        (
-            755,
-            845,
-            b"USB device connected",
-            b"External storage . 9:15 PM",
-            b"Mounted at /mnt/usb0",
-            0xFF38BDF8,
-        ),
-    ];
-
-    for (y0, y1, title, sub, preview, color) in yest_items {
-        if y >= y0 && y < y1 && x >= 40 && x < 680 {
-            if x < 48 {
-                return color;
-            }
-            if y == y0 || y == y1 - 1 || x == 40 || x == 679 {
-                return BORDER_SUBTLE;
-            }
-            if y >= y0 + 16 && y < y0 + 32 {
-                if let Some(c) = test_text(x, y, 68, y0 + 16, 2, title, TEXT_PRIMARY) {
-                    return c;
-                }
-            }
-            if y >= y0 + 40 && y < y0 + 48 {
-                if let Some(c) = test_text(x, y, 68, y0 + 40, 1, sub, TEXT_MUTED) {
-                    return c;
-                }
-            }
-            if y >= y0 + 58 && y < y0 + 66 {
-                if let Some(c) = test_text(x, y, 68, y0 + 58, 1, preview, color) {
-                    return c;
-                }
-            }
-            return SURFACE_RAISED;
-        }
-    }
-
-    // 6. "Clear All" Pill (y: 880..935, x: 260..460)
-    if y >= 880 && y < 935 && x >= 260 && x < 460 {
-        if y == 880 || y == 934 || x == 260 || x == 459 {
+    if y >= 125 && y < 260 && x >= 40 && x < 680 {
+        if y == 125 || y == 259 || x == 40 || x == 679 {
             return BORDER_SUBTLE;
         }
-        if y >= 900 && y < 916 {
-            if let Some(c) = test_text(x, y, 316, 900, 2, b"Clear All", TEXT_MUTED) {
+        if y >= 150 && y < 166 {
+            let label = if state.notification_count == 0 {
+                &b"No active notifications"[..]
+            } else {
+                &b"Active notifications"[..]
+            };
+            if let Some(c) = test_text(x, y, 68, 150, 2, label, TEXT_PRIMARY) {
+                return c;
+            }
+        }
+        if y >= 182 && y < 198 {
+            let sub = if state.notification_count == 0 {
+                &b"The notification center is clear"[..]
+            } else {
+                &b"Details are provided by system services"[..]
+            };
+            if let Some(c) = test_text(x, y, 68, 182, 1, sub, TEXT_MUTED) {
                 return c;
             }
         }
         return SURFACE_RAISED;
     }
 
-    // 7. Home Gesture Pill (x: 260..460, y: 1418..1424)
+    if y >= 300 && y < 355 && x >= 260 && x < 460 {
+        if y == 300 || y == 354 || x == 260 || x == 459 {
+            return BORDER_SUBTLE;
+        }
+        if y >= 320 && y < 336 {
+            if let Some(c) = test_text(x, y, 315, 320, 2, b"Clear All", TEXT_MUTED) {
+                return c;
+            }
+        }
+        return SURFACE_RAISED;
+    }
+
     if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
         return TEXT_MUTED;
     }
@@ -2689,6 +2519,7 @@ pub extern "C" fn _start() -> ! {
     refresh_package_catalog(&mut state);
     refresh_runtime_recents(&mut state);
     refresh_clock(&mut state);
+    refresh_notifications(&mut state);
     std::log(
         0,
         "[LAUNCHER] Package catalog loaded from the kernel registry.",
@@ -2742,6 +2573,7 @@ pub extern "C" fn _start() -> ! {
             if state.active_child.is_none() && (events & std::EVENT_TIMER_TICK) != 0 {
                 refresh_ticks += 1;
                 refresh_clock(&mut state);
+                refresh_notifications(&mut state);
                 if state.wallpaper_id == 3
                     && (state.current_view == ViewMode::HomeScreen
                         || state.current_view == ViewMode::LockScreen)
