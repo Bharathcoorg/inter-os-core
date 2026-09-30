@@ -150,6 +150,27 @@ pub fn init() {
     assert_eq!(lease.attenuated_rights, Rights::READ);
     assert_eq!(lease.remaining_invocations, 2);
     assert_eq!(lease.object_id, parent_cap.object_id);
+    let ipc_parent = Capability {
+        id: CapabilityId(101),
+        cap_type: CapabilityType::IpcSend,
+        rights: Rights::WRITE.union(Rights::GRANT),
+        object_id: 42,
+    };
+    let ipc_lease = DelegatedLease::new(
+        3,
+        &ipc_parent,
+        TaskId(1),
+        TaskId(2),
+        Rights::WRITE,
+        1,
+        50,
+        current_ticks,
+    ).expect("object-scoped delegation must succeed");
+    let derived_ipc = ipc_lease.to_capability();
+    let mut ipc_table = crate::capability::CapabilityTable::new(2);
+    let ipc_slot = ipc_table.insert(derived_ipc).expect("derived IPC capability must install");
+    assert!(ipc_table.verify_object(ipc_slot, CapabilityType::IpcSend, Rights::WRITE, 42).is_ok());
+    assert_eq!(ipc_table.verify_object(ipc_slot, CapabilityType::IpcSend, Rights::WRITE, 99), Err(CapError::TargetMismatch));
 
     // 2. Consume invocation 1 (ticks = 1010)
     let inv1 = lease.consume_invocation(1010, Rights::READ);
