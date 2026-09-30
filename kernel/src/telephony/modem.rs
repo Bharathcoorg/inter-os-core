@@ -137,6 +137,9 @@ impl CellularModem {
 
     /// Answers an incoming voice call (`ATA`).
     pub fn answer(&mut self, current_ticks: u64) -> Result<(), &'static str> {
+        if !self.hardware_present {
+            return Err("cellular modem backend unavailable");
+        }
         match &self.call_state {
             CallState::Incoming { caller_id } => {
                 self.call_state = CallState::Active {
@@ -151,6 +154,9 @@ impl CellularModem {
 
     /// Terminates or rejects an active voice call (`ATH`).
     pub fn hangup(&mut self) -> Result<(), &'static str> {
+        if !self.hardware_present {
+            return Err("cellular modem backend unavailable");
+        }
         if self.call_state == CallState::Idle {
             return Ok(());
         }
@@ -316,6 +322,9 @@ impl CellularModem {
 
     /// Inbound SMS processor: stores message in inbox and dispatches intent.
     pub fn process_inbound_sms(&mut self, sender: &str, body: &str, current_ticks: u64) -> Option<&'static str> {
+        if !self.hardware_present {
+            return None;
+        }
         if sender.is_empty() || sender.len() > MAX_PHONE_NUMBER_LEN || body.len() > MAX_SMS_BODY_LEN { return None; }
         if self.sms_inbox.len() >= MAX_SMS_RECORDS { return None; }
         let id = self.next_sms_id;
