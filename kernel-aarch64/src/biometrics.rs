@@ -13,7 +13,6 @@
 extern crate alloc;
 use alloc::vec::Vec;
 use crate::capability::{CapabilityTable, CapabilityType, Rights};
-use crate::crypto::HmacSha256;
 
 pub const MAX_ENROLLED_FINGERS: usize = 5;
 pub const MAX_FAILED_ATTEMPTS_BEFORE_LOCKOUT: u8 = 5;
@@ -23,6 +22,7 @@ pub const MINUTIAE_MATCH_THRESHOLD: usize = 8;
 pub enum BiometricError {
     CapabilityDenied,
     HardwareDisabled,
+    HardwareBackendUnavailable,
     SensorDirty,
     NoFingerDetected,
     SpoofDetectedLivenessFailed,
@@ -65,7 +65,6 @@ pub struct BiometricsController {
     pub enrolled_templates: Vec<FingerprintTemplate>,
     pub failed_attempts: u8,
     pub lockout_active: bool,
-    pub root_auth_seed: [u8; 32],
     pub total_scans_processed: u64,
     pub successful_auths: u64,
 }
@@ -79,7 +78,6 @@ impl BiometricsController {
             enrolled_templates: Vec::new(),
             failed_attempts: 0,
             lockout_active: false,
-            root_auth_seed: [0x42; 32],
             total_scans_processed: 0,
             successful_auths: 0,
         }
@@ -93,82 +91,26 @@ impl BiometricsController {
     /// Enrolls a new fingerprint template into the isolated hardware enclave.
     pub fn enroll_finger(
         &mut self,
-        finger_id: u8,
-        minutiae: Vec<Minutiae>,
+        _finger_id: u8,
+        _minutiae: Vec<Minutiae>,
         caps: &CapabilityTable,
     ) -> Result<(), BiometricError> {
         caps.check(CapabilityType::BiometricAuthEnclave, Rights::INVOKE)
             .map_err(|_| BiometricError::CapabilityDenied)?;
-
-        if !self.enabled || !self.hardware_present {
-            return Err(BiometricError::HardwareDisabled);
-        }
-
-        if self.enrolled_templates.len() >= MAX_ENROLLED_FINGERS {
-            return Err(BiometricError::TemplateFull);
-        }
-
-        self.enrolled_templates.push(FingerprintTemplate {
-            finger_id,
-            minutiae,
-        });
-
-        Ok(())
+        if !self.enabled || !self.hardware_present { return Err(BiometricError::HardwareDisabled); }
+        Err(BiometricError::HardwareBackendUnavailable)
     }
 
     /// Verifies a captured scan against enrolled templates, enforcing liveness check and lockout policy.
     pub fn verify_fingerprint(
         &mut self,
-        sample: &ScanSample,
+        _sample: &ScanSample,
         caps: &CapabilityTable,
     ) -> Result<[u8; 32], BiometricError> {
         caps.check(CapabilityType::BiometricAuthEnclave, Rights::INVOKE)
             .map_err(|_| BiometricError::CapabilityDenied)?;
-
-        if !self.enabled {
-            return Err(BiometricError::HardwareDisabled);
-        }
-
-        if self.lockout_active {
-            return Err(BiometricError::HardwareLockoutActive);
-        }
-
-        self.total_scans_processed += 1;
-
-        // 1. Anti-Spoofing Liveness Detection
-        // Skin impedance must be within physiological bounds (100 - 500 kOhm) and optical pulse present
-        if sample.impedance_kohm < 100 || sample.impedance_kohm > 500 || !sample.pulse_detected {
-            self.failed_attempts += 1;
-            if self.failed_attempts >= MAX_FAILED_ATTEMPTS_BEFORE_LOCKOUT {
-                self.lockout_active = true;
-            }
-            return Err(BiometricError::SpoofDetectedLivenessFailed);
-        }
-
-        // 2. Minutiae Matching across enrolled templates
-        for template in &self.enrolled_templates {
-            let matched_count = Self::match_minutiae(&template.minutiae, &sample.minutiae);
-            if matched_count >= MINUTIAE_MATCH_THRESHOLD {
-                // Successful Match: reset failed attempts counter
-                self.failed_attempts = 0;
-                self.successful_auths += 1;
-
-                // Derive 256-bit Biometric Authentication Token via HMAC-SHA256
-                let mut preimage = Vec::new();
-                preimage.extend_from_slice(b"FINGERPRINT_AUTH_SUCCESS_TOKEN:");
-                preimage.push(template.finger_id);
-                let auth_token = HmacSha256::mac(&self.root_auth_seed, &preimage);
-                return Ok(auth_token);
-            }
-        }
-
-        // Match failed
-        self.failed_attempts += 1;
-        if self.failed_attempts >= MAX_FAILED_ATTEMPTS_BEFORE_LOCKOUT {
-            self.lockout_active = true;
-        }
-
-        Err(BiometricError::AuthenticationFailed)
+        if !self.enabled || !self.hardware_present { return Err(BiometricError::HardwareDisabled); }
+        Err(BiometricError::HardwareBackendUnavailable)
     }
 
     /// Minutiae matching algorithm comparing Euclidean spatial distance and angular orientation.
