@@ -2055,9 +2055,25 @@ fn render_header(surface: u32) {
     }
 }
 
-fn resolve_app_at_touch<'a>(_state: &'a LauncherState, x: u32, y: u32) -> Option<&'a str> {
+fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<&'a str> {
     let x = x as usize;
     let y = y as usize;
+
+    if let Some(r_idx) = if (185..395).contains(&y) { Some(0) }
+        else if (410..620).contains(&y) { Some(1) }
+        else if (635..845).contains(&y) { Some(2) }
+        else if (860..1070).contains(&y) { Some(3) }
+        else { None }
+    {
+        let c_idx = if (50..230).contains(&x) { Some(0) }
+            else if (270..450).contains(&x) { Some(1) }
+            else if (490..670).contains(&x) { Some(2) }
+            else { None };
+        if let Some(c_idx) = c_idx {
+            let index = state.app_drawer_page * 12 + r_idx * 3 + c_idx;
+            return package_id_at(state, index);
+        }
+    }
 
     // Direct app launch matrix (used by integration & lifecycle verification suites)
     if (340..=360).contains(&y) {
