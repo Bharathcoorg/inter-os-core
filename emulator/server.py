@@ -1903,27 +1903,15 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if self.path == '/api/themes/bootloader':
-            content_length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(content_length)
-            try:
-                data = json.loads(body.decode('utf-8'))
-                custom_subtext = str(data.get('custom_subtext', '')).strip()[:80]
-                active = get_active_theme()
-                if 'bootloader' not in active:
-                    active['bootloader'] = {}
-                active['bootloader']['immutable_brand'] = 'InterOS'
-                active['bootloader']['custom_subtext'] = custom_subtext or 'Sovereign DevKit Edition'
-                set_active_theme(active)
-                serial_lines.append(f"[BOOTLOADER] Subtitle updated to '{active['bootloader']['custom_subtext']}'. Immutable brand: InterOS.")
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps({'success': True, 'bootloader': active['bootloader']}).encode())
-            except Exception as e:
-                self.send_response(500)
-                self.end_headers()
-                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            self.send_response(409)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': False,
+                'status': 'DISABLED',
+                'error': 'Bootloader branding is immutable in Device Studio'
+            }).encode())
             return
 
         self.send_response(404)
