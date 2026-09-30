@@ -8,7 +8,15 @@ grep -q 'CONTACTS_BOOK: \[Contact; 0\] = \[\]' apps/dialer/src/main.rs
 grep -q 'BOOKMARKS: \[Bookmark; 0\] = \[\]' apps/browser/src/main.rs
 grep -q 'PHOTOS: \[PhotoItem; 0\] = \[\]' apps/gallery/src/main.rs
 grep -q 'ITEMS_ALL: \[VfsItem; 0\] = \[\]' apps/file_manager/src/main.rs
-grep -q 'remove fabricated home and recents state' <(git log -20 --format=%s) || true
+grep -q 'pub static BOOKMARKS: \[Bookmark; 0\] = \[\]' apps/browser/src/main.rs
+! grep -q 'INTER_DMA_AUDIO_PCM_BLOCK' apps/music/src/main.rs
+! grep -q 'Sovereign Symphony in C' apps/music/src/main.rs
+! grep -q '4 apps . 2 tasks' apps/launcher/src/main.rs
+! grep -q 'Mail' apps/launcher/src/main.rs
+! grep -q 'Maps' apps/launcher/src/main.rs
+! grep -q 'Contacts' apps/launcher/src/main.rs
+! grep -q 'Wallpaper theme' apps/launcher/src/main.rs
+! grep -q 'flashlight_on' apps/launcher/src/main.rs
 ! grep -q 'music.play_arpeggio();' apps/music/src/main.rs
 
 echo "application truth contract: PASS"
