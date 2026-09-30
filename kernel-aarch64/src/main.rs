@@ -58,7 +58,7 @@ use capability::{CapabilityTable, CapabilityType, Rights};
 use core::panic::PanicInfo;
 use display::{SimpleFbFormat, SimpleFramebuffer};
 use fdt::ArmFdtParser;
-use gic::{Gicv2, DEFAULT_GICC_BASE, DEFAULT_GICD_BASE};
+use gic::Gicv2;
 use psci::{PsciConduit, PsciController};
 use storage::SdhciController;
 use telephony::SerialRilDriver;
@@ -91,6 +91,9 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     let mut ram_size = 1024 * 1024 * 1024u64; // 1 GB default fallback
     let mut has_valid_fdt = false;
 
+    // Keep the parsed tree so device discovery below is driven by the platform
+    // description rather than by assumed addresses.
+    let mut dtb: Option<ArmFdtParser<'static>> = None;
     if dtb_phys_addr != 0 {
         unsafe {
             if let Ok(parser) = ArmFdtParser::from_raw_ptr(dtb_phys_addr as *const u8) {
@@ -104,6 +107,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
                 if let Ok(bootargs) = parser.get_bootargs() {
                     kprintln!("[AArch64] Kernel bootargs: '{}'", bootargs);
                 }
+                dtb = Some(parser);
             }
         }
     }
@@ -112,15 +116,34 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         kprintln!("[AArch64] Using built-in hardware topology (RAM: 0x{:016X}, {} MiB).", ram_base, ram_size / (1024 * 1024));
     }
 
-    // 4. Initialize ARM Generic Interrupt Controller (GICv2)
-    kprintln!("--- [Initializing GICv2 Interrupt Controller] ---");
-    let gic = Gicv2::new(DEFAULT_GICD_BASE, DEFAULT_GICC_BASE);
-    unsafe {
-        gic.init();
+    // 4. Interrupt Controller
+    kprintln!("--- [Discovering interrupt controller] ---");
+    // The interrupt controller must be described by the platform before any of
+    // its registers are touched. GICv2, GICv2m and GICv3 share a distributor
+    // window but not a register model, so a mismatch is reported rather than
+    // written through as though it were GICv2.
+    let gic;
+    if let Some(parser) = dtb.as_ref() {
+        match gic::describe_interrupt_controller(parser) {
+            gic::IntcDescription::Gicv2 { distributor, cpu_interface } => {
+                gic = Gicv2::new(distributor, cpu_interface);
+                unsafe { gic.init(); }
+                // Enable Virtual Timer PPI (IRQ 27)
+                gic.enable_irq(27);
+                kprintln!("[OK] GICv2 from device tree: distributor @ 0x{:08X}, CPU interface @ 0x{:08X}, IRQ 27 enabled.",
+                    distributor, cpu_interface);
+            }
+            gic::IntcDescription::Unsupported(model) => {
+                kprintln!("[OK] Interrupt controller {} declared by the platform uses a register model this driver does not implement.", model);
+                kprintln!("[OK] Interrupt routing left unconfigured rather than written through as GICv2.");
+            }
+            gic::IntcDescription::Absent => {
+                kprintln!("[OK] No interrupt controller declared in the platform description.");
+            }
+        }
+    } else {
+        kprintln!("[OK] No device tree available; interrupt routing left unconfigured.");
     }
-    // Enable Virtual Timer PPI (IRQ 27)
-    gic.enable_irq(27);
-    kprintln!("[OK] GICv2: Distributor @ 0x{:08X}, CPU Interface @ 0x{:08X}, IRQ 27 enabled.", DEFAULT_GICD_BASE, DEFAULT_GICC_BASE);
 
     // 5. Initialize ARM Generic Architectural Timer
     kprintln!("--- [Initializing ARM Generic Timer] ---");
@@ -139,43 +162,70 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     let psci_ver = psci.invoke_psci(psci::PSCI_FN_VERSION, 0, 0, 0);
     kprintln!("[OK] ARM PSCI: Firmware interface v{:X}.{:X} verified.", (psci_ver >> 16) & 0xFFFF, psci_ver & 0xFFFF);
 
-    // 7. Initialize Mobile Display (SimpleFB Linear Framebuffer)
-    kprintln!("--- [Initializing Smartphone Display Pipeline] ---");
-    // Standard mobile portrait resolution: 720x1440 RGB565 (PinePhone / CM4 / Snapdragon)
+    // 7. Smartphone Display Pipeline
+    kprintln!("--- [Testing SimpleFB display rasteriser] ---");
+    // Fallback geometry for the rasteriser conformance test. It describes a
+    // drawing surface only; no panel is claimed to exist behind it.
     const FB_WIDTH: u32 = 720;
     const FB_HEIGHT: u32 = 1440;
     const FB_STRIDE: u32 = FB_WIDTH * 2; // RGB565 = 2 bytes/px
-    // Allocate virtual scanout backing buffer in kernel heap space
-    let fb_buf = alloc::vec![0u8; (FB_STRIDE * FB_HEIGHT) as usize];
+
+    // Prefer a framebuffer the device tree actually declares. When the platform
+    // exposes none, render into a kernel-heap surface and claim no scanout.
+    let (fb_buf, mut fb, display_from_fdt) = match dtb.as_ref().and_then(|p| {
+        SimpleFramebuffer::from_fdt(p, "framebuffer", 0).ok()
+    }) {
+        Some(framebuffer) => {
+            let size = framebuffer.buffer_size();
+            let buf = alloc::vec![0u8; size];
+            // Re-point the DTB-derived surface at our backing store.
+            let mut fb = framebuffer;
+            fb.base_vaddr = buf.as_ptr() as usize;
+            (buf, fb, true)
+        }
+        None => {
+            let buf = alloc::vec![0u8; (FB_STRIDE * FB_HEIGHT) as usize];
+            // base_paddr stays 0: no physical scanout has been discovered.
+            let fb = SimpleFramebuffer::new(
+                0,
+                buf.as_ptr() as usize,
+                FB_WIDTH,
+                FB_HEIGHT,
+                FB_STRIDE,
+                SimpleFbFormat::Rgb565,
+            );
+            (buf, fb, false)
+        }
+    };
     let fb_vaddr = fb_buf.as_ptr() as usize;
 
-    let mut fb = SimpleFramebuffer::new(
-        0x5000_0000, // Physical scanout base
-        fb_vaddr,
-        FB_WIDTH,
-        FB_HEIGHT,
-        FB_STRIDE,
-        SimpleFbFormat::Rgb565,
-    );
-
-    // Render Sovereign Mobile Smartphone Splash Screen
-    // Background: Deep Sovereign Dark Navy (0x0A, 0x0F, 0x1D)
+    // Render a neutral boot splash. Status indicators are omitted entirely:
+    // signal, battery and thermal state have no sensor backend attached yet.
     fb.clear(10, 15, 29);
-
-    // Status Bar: Cyan accent header
-    fb.fill_rect(0, 0, FB_WIDTH, 48, 0, 229, 255);
-    fb.draw_string(20, 16, "INTER OS  |  5G NSA  |  100% BAT", (10, 15, 29), (0, 229, 255));
-
-    // Brand Title & Architecture Splash
+    fb.fill_rect(0, 0, fb.width, 48, 0, 229, 255);
+    fb.draw_string(20, 16, "INTER OS  |  AARCH64", (10, 15, 29), (0, 229, 255));
     fb.draw_string(140, 200, "INTER OS -- MOBILE v4.0", (0, 229, 255), (10, 15, 29));
     fb.draw_string(110, 230, "AArch64 Sovereign Smartphone OS", (255, 255, 255), (10, 15, 29));
     fb.draw_string(120, 260, "Zero-Trust Capability Microkernel", (160, 175, 195), (10, 15, 29));
+    fb.fill_rect(40, fb.height - 120, fb.width - 80, 80, 22, 27, 46);
+    fb.draw_string(80, fb.height - 85, "[DIALER]  [VAULT]  [AI ASSISTANT]  [SETTINGS]", (0, 229, 255), (22, 27, 46));
 
-    // Mobile Docking Station Bar
-    fb.fill_rect(40, FB_HEIGHT - 120, FB_WIDTH - 80, 80, 22, 27, 46);
-    fb.draw_string(80, FB_HEIGHT - 85, "[DIALER]  [VAULT]  [AI ASSISTANT]  [SETTINGS]", (0, 229, 255), (22, 27, 46));
+    // Prove the rasteriser actually produced pixels rather than trusting the log.
+    let expected_bar = fb.pack_rgb(0, 229, 255);
+    assert_eq!(fb.get_pixel(0, 24), Some(expected_bar), "status bar row must be the cyan accent");
+    assert_eq!(fb.get_pixel(0, 0), Some(fb.pack_rgb(0, 229, 255)));
+    assert_eq!(fb.get_pixel(0, 60), Some(fb.pack_rgb(10, 15, 29)), "below the bar must be the background");
+    assert_eq!(fb.get_pixel(fb.width, 0), None, "reads outside the surface must be rejected");
 
-    kprintln!("[OK] SimpleFB: 720x1440 RGB565 mobile display splash rasterized ({} KiB scanout).", fb.buffer_size() / 1024);
+    if display_from_fdt {
+        kprintln!("[OK] Display: {}x{} surface from device tree at physical 0x{:08x} ({} KiB).",
+            fb.width, fb.height, fb.base_paddr, fb.buffer_size() / 1024);
+    } else {
+        kprintln!("[TEST] SimpleFB rasteriser: {}x{} RGB565 surface rendered ({} KiB) and sampled back.",
+            fb.width, fb.height, fb.buffer_size() / 1024);
+        kprintln!("[OK] Display: no framebuffer node in the device tree, so no panel or scanout is claimed.");
+    }
+    let _ = fb_vaddr;
 
     // 8. Mobile eMMC 5.1 / SDHCI Storage Host Controller
     kprintln!("--- [Initializing Mobile eMMC 5.1 Flash Storage Controller] ---");
@@ -190,10 +240,15 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     );
     kprintln!("[OK] SDHCI / eMMC 5.1: no fabricated card, completion, or FIFO state is claimed.");
 
-    // 9. Goodix GT911 Multi-Touch Digitizer Pipeline
-    kprintln!("--- [Initializing Goodix GT911 Multi-Touch Pipeline] ---");
+    // 9. Goodix GT911 Multi-Touch Digitizer Protocol
+    kprintln!("--- [Testing Goodix GT911 multi-touch protocol] ---");
     let mut touch_driver = GoodixGt911Driver::new(GT911_I2C_ADDR_PRIMARY, FB_WIDTH, FB_HEIGHT);
-    // Emulate incoming dual-touch frame: Contact 0 at (360, 640), Contact 1 at (500, 1000)
+    // No digitizer is attached, so no contact may be reported as observed.
+    assert!(!touch_driver.hardware_present);
+
+    // Decoder conformance against the GT911 register layout. This exercises the
+    // coordinate decoder only; the bytes are a known-good frame, not a reading
+    // taken from a digitizer.
     let mut touch_frame = [0u8; 1 + 2 * touch::BYTES_PER_POINT];
     touch_frame[0] = 0x82; // Ready bit (0x80) | 2 contacts (0x02)
     // Point 0: slot 0, x=360 (0x0168), y=640 (0x0280), size=100
@@ -210,17 +265,33 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     let mut out_points = [TouchPoint { slot: 0, x: 0, y: 0, pressure: 0, phase: TouchPhase::Down }; MAX_TOUCH_SLOTS];
     let pt_count = touch_driver.parse_frame(&touch_frame, &mut out_points);
     assert_eq!(pt_count, 2);
-    kprintln!("[OK] Goodix GT911: Decoded {} capacitive contacts: Slot 0 @ ({}, {}), Slot 1 @ ({}, {}).",
-        pt_count, out_points[0].x, out_points[0].y, out_points[1].x, out_points[1].y);
+    assert_eq!((out_points[0].x, out_points[0].y), (360, 640));
+    assert_eq!((out_points[1].x, out_points[1].y), (500, 1000));
+    kprintln!("[TEST] GT911 decoder: 2 contacts decoded from a known-good frame ({} px @ {}, {} px).",
+        pt_count, out_points[0].x, out_points[0].y);
+    kprintln!("[OK] Touch: decoder validated; no digitizer is attached, so no contact is claimed.");
 
-    // 10. Streaming Serial RIL Telephony Baseband Engine
-    kprintln!("--- [Initializing Streaming Serial RIL Telephony Engine] ---");
+    // 10. Streaming Serial RIL Telephony Protocol
+    kprintln!("--- [Testing streaming serial RIL telephony protocol] ---");
     let mut ril = SerialRilDriver::new();
+    // No baseband is attached, so modem state may not be ingested or reported.
+    assert!(!ril.hardware_present);
+    assert_eq!(
+        ril.ingest_modem_rx(b"+CSQ: 31,0\r\n").err(),
+        Some("SerialRIL: modem hardware unavailable")
+    );
+    assert_eq!(
+        ril.read_signal_quality().err(),
+        Some("SerialRIL: modem hardware unavailable")
+    );
+
+    // AT framer conformance against a recorded byte stream, not live modem state.
     let at_stream = b"+CSQ: 31,0\r\n+CRING: VOICE\r\n";
     let framed = ril.feed_rx_bytes(at_stream);
     assert_eq!(framed, 2);
     assert_eq!(ril.pending_urcs.len(), 2);
-    kprintln!("[OK] Streaming Serial RIL: Processed {} AT frames -> Signal: +CSQ 31 (100% 5G signal), URC: Incoming Voice Call Alert.", framed);
+    kprintln!("[TEST] RIL framer: {} AT lines framed from a recorded stream.", framed);
+    kprintln!("[OK] Telephony: framer validated; no modem is bound, so no signal or registration is claimed.");
 
     // 11. Multi-Tasking Scheduler & Register Context Switching
     task::test_context_switching();
@@ -300,26 +371,29 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert_eq!(svc_task_id, 0);
     kprintln!("[TEST] AArch64 Vector Table (VBAR_EL1): Hardware 'svc #0' trap -> sys_get_ticks (x0={}), sys_get_task_id (x0={}) VERIFIED.", svc_ticks, svc_task_id);
 
-    // 15. Physical Touch Digitizer Force-Takeover Preemption & Mobile Shell Surface
-    kprintln!("--- [Testing Physical Multi-Touch Digitizer & Interactive Mobile Shell] ---");
+    // 15. Mobile Shell Hit-Testing & Touch-Initiated Preemption
+    kprintln!("--- [Testing mobile shell hit-testing and touch preemption] ---");
+    // No digitizer is attached, so the coordinates below are synthetic UI-logic
+    // inputs rather than observed contacts.
+    assert!(!touch_driver.hardware_present);
     let mut mobile_shell = shell::MobileShell::new();
 
-    // Simulate capacitive tap on [SETTINGS] dock button at (580, 1360)
+    // Synthetic tap on the [SETTINGS] dock button at (580, 1360)
     let tap_down = TouchPoint { slot: 0, x: 580, y: 1360, pressure: 750, phase: TouchPhase::Down };
     let tap_up = TouchPoint { slot: 0, x: 580, y: 1360, pressure: 0, phase: TouchPhase::Up };
     mobile_shell.process_touch(&tap_down, &mut fb);
     let action1 = mobile_shell.process_touch(&tap_up, &mut fb);
     assert_eq!(action1, Some(shell::MobileAction::LaunchSettings));
-    kprintln!("[TEST] Mobile Shell Hit-Testing: Touch tap @ (580, 1360) -> LaunchSettings VERIFIED.");
-    kprintln!("[TEST] SimpleFB Mobile Display: Settings Surface rendered ({} KiB scanout) VERIFIED.", fb.buffer_size() / 1024);
+    kprintln!("[TEST] Mobile Shell Hit-Testing: synthetic tap @ (580, 1360) -> LaunchSettings VERIFIED.");
+    kprintln!("[TEST] SimpleFB Mobile Display: Settings Surface rendered ({} KiB surface).", fb.buffer_size() / 1024);
 
-    // Simulate capacitive tap on [DIALER] dock button at (100, 1360)
+    // Synthetic tap on the [DIALER] dock button at (100, 1360)
     let dialer_up = TouchPoint { slot: 0, x: 100, y: 1360, pressure: 0, phase: TouchPhase::Up };
     let action2 = mobile_shell.process_touch(&dialer_up, &mut fb);
     assert_eq!(action2, Some(shell::MobileAction::LaunchDialer));
-    kprintln!("[TEST] Mobile Shell Hit-Testing: Touch tap @ (100, 1360) -> LaunchDialer VERIFIED.");
+    kprintln!("[TEST] Mobile Shell Hit-Testing: synthetic tap @ (100, 1360) -> LaunchDialer VERIFIED.");
 
-    // Simulate touch preemption: touch event routes intent via capability-guarded IPC to telephony_service
+    // Touch-initiated intent routes via capability-guarded IPC to telephony_service
     sender_caps.mint(CapabilityType::IpcSend, Rights::INVOKE, Some(1));
     let dial_intent = b"DIAL_+15550199234";
     let dial_ipc_res = ipc::IPC_ROUTER.lock().send(&sender_caps, 0, 1, 0x201, dial_intent);
@@ -388,16 +462,19 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     crypto::verify_crypto_subsystem();
     kprintln!("[OK] RFC 4231 HMAC-SHA256 & FIPS PUB 180-4 SHA-256 Engine: Test vectors VERIFIED.");
 
-    // Sovereign device master root seed (256-bit hardware cryptographic root of trust)
-    let device_master_seed: [u8; 32] = [
+    // Identity vault conformance. The seed below is a fixed test vector so the
+    // DID derivation is reproducible, NOT a device root of trust: a real device
+    // key is generated inside a secure element and never exists in ROM.
+    let vault_test_seed: [u8; 32] = [
         0x13, 0x37, 0x42, 0x69, 0xAA, 0x55, 0xDE, 0xAD,
         0xBE, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB,
         0xCD, 0xEF, 0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54,
         0x32, 0x10, 0x42, 0x42, 0x13, 0x37, 0x77, 0x88,
     ];
-    let mut vault = crypto::IdentityVault::new(device_master_seed);
+    let mut vault = crypto::IdentityVault::new(vault_test_seed);
     let device_did = vault.device_did().clone();
-    kprintln!("[OK] Sovereign Identity: Device DID attested -> {}", device_did.as_str());
+    kprintln!("[TEST] Identity Vault: DID derivation from a test seed -> {}", device_did.as_str());
+    kprintln!("[OK] Device identity: no secure element is bound, so no attested device DID is claimed.");
 
     // Cryptographic state commitment signing
     let state_commitment_data = b"STATE_COMMITMENT_BLOCK_001_MERKLE_ROOT";
@@ -489,7 +566,8 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     // Test 4: Distance-vector dynamic route discovery
     let next_hop = mesh_ctrl.routing_table.find_next_hop(peer_node_id);
     assert_eq!(next_hop, Some(peer_node_id));
-    kprintln!("[OK] Mesh Routing Table: Discovered direct 1-hop route to peer 0x{:016X} (-65 dBm).", peer_node_id);
+    // Link quality has no radio attached, so only the route itself is claimed.
+    kprintln!("[OK] Mesh Routing Table: Discovered direct 1-hop route to peer 0x{:016X}.", peer_node_id);
 
     // Test 5: Offline-First Merkle State Sync
     let remote_synced = mesh_ctrl.sync_engine.evaluate_peer_state(&initial_merkle_state);
@@ -789,8 +867,17 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     kprintln!("--- [Testing Sovereign OTA Updates & A/B Partition Rollback Engine] ---");
 
     let board_id = *b"PINEPHONE_A64\0\0\0";
-    let publisher_key = [0x42u8; 32];
-    let mut ota = ota::OtaManager::new(540, publisher_key, board_id); // Version 540 active on Slot A
+    // Boot self-test publisher key material. This is a throwaway signature-test
+    // keypair, not a device secret and not an update-authorisation credential:
+    // a real publisher keeps its Ed25519 secret key offline and never ships it.
+    let publisher_seed: [u8; 32] = [
+        0x0D, 0x0E, 0x0A, 0x0D, 0x00, 0x0D, 0x0E, 0x0A,
+        0x0D, 0x00, 0x0D, 0x0E, 0x0A, 0x0D, 0x00, 0x0D,
+        0x0E, 0x0A, 0x0D, 0x00, 0x0D, 0x0E, 0x0A, 0x0D,
+        0x00, 0x0D, 0x0E, 0x0A, 0x0D, 0x00, 0x0D, 0x0E,
+    ];
+    let publisher_pubkey = crypto::ed25519_public_key(&publisher_seed);
+    let mut ota = ota::OtaManager::new(540, publisher_pubkey, board_id); // Version 540 active on Slot A
     assert_eq!(ota.active_slot, ota::PartitionSlot::SlotA);
     assert_eq!(ota.slot_a.version, 540);
     assert_eq!(ota.slot_a.status, ota::SlotStatus::Valid);
@@ -804,7 +891,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         version: 550,
         payload_len: 4,
         payload_sha256: [0u8; 32],
-        signature: [0u8; 32],
+        signature: [0u8; 64],
     };
     let unauth_stage = ota.verify_and_stage_update(&dummy_header, &[1, 2, 3, 4], &empty_caps);
     assert_eq!(unauth_stage, Err(ota::OtaError::CapabilityDenied));
@@ -839,7 +926,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         version: 550,
         payload_len: sample_payload.len() as u32,
         payload_sha256: valid_digest,
-        signature: [0xEEu8; 32], // forged signature
+        signature: [0xEEu8; 64], // forged signature
     };
     let forged_res = ota.verify_and_stage_update(&forged_hdr, sample_payload, &ota_caps);
     assert_eq!(forged_res, Err(ota::OtaError::InvalidSignature));
@@ -847,7 +934,8 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
 
     // Test 5: Valid Staging into Slot B
     let preimage = forged_hdr.compute_signature_preimage();
-    let valid_signature = crypto::HmacSha256::mac(&publisher_key, &preimage);
+    let valid_signature = crypto::sign_ed25519_signature(&publisher_seed, &preimage);
+    assert!(crypto::verify_ed25519_signature(&preimage, &publisher_pubkey, &valid_signature));
     let mut valid_hdr = forged_hdr;
     valid_hdr.signature = valid_signature;
 
@@ -887,10 +975,10 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         version: 560,
         payload_len: sample_payload2.len() as u32,
         payload_sha256: valid_digest2,
-        signature: [0u8; 32],
+        signature: [0u8; 64],
     };
     let preimage2 = valid_hdr2.compute_signature_preimage();
-    valid_hdr2.signature = crypto::HmacSha256::mac(&publisher_key, &preimage2);
+    valid_hdr2.signature = crypto::sign_ed25519_signature(&publisher_seed, &preimage2);
 
     let staged_slot2 = ota.verify_and_stage_update(&valid_hdr2, sample_payload2, &ota_caps).unwrap();
     assert_eq!(staged_slot2, ota::PartitionSlot::SlotB);
@@ -1143,126 +1231,11 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     kprintln!("[OK] USB-PD: protocol state is isolated from absent physical TCPC hardware.");
 
     
-// 40. Sovereign Mobile Multi-Core SMP Bring-Up, Inter-Processor Interrupts (IPI) & big.LITTLE Scheduler
+// 40. Sovereign Mobile Multi-Core SMP, IPI & big.LITTLE Scheduler
     kprintln!("--- [Testing Sovereign Mobile Multi-Core SMP Subsystem] ---");
 
-    let mut smp = smp::SmpController::new(0x0800_0000, psci);
-    assert_eq!(smp.online_core_count(), 1);
-    assert_eq!(smp.cores.len(), 8);
-    kprintln!("[OK] SMP Topology: Initialized 8-core mobile CPU topology (4 LITTLE Efficiency + 4 big Performance).");
-
-    // Test 1: Zero Ambient Authority: Uncredentialed secondary core boot rejected
-    let unauth_smp = smp.boot_secondary_core(1, 0x4008_0000, 0, &empty_caps);
-    assert_eq!(unauth_smp.err(), Some(smp::SmpError::CapabilityDenied));
-    kprintln!("[TEST] Zero Ambient Authority: Uncredentialed secondary core boot REJECTED (CapabilityDenied) VERIFIED.");
-
-    // Mint SMP capability
-    let mut smp_caps = CapabilityTable::new();
-    smp_caps.mint(CapabilityType::CpuSmpGovernorDirect, Rights::WRITE | Rights::INVOKE, None);
-
-    // Test 2: Secondary Core Boot Bring-Up via ARM PSCI v1.1 CPU_ON
-    smp.boot_secondary_core(1, 0x4008_0000, 0, &smp_caps).expect("Boot Core 1 failed");
-    smp.boot_secondary_core(4, 0x4008_0000, 0, &smp_caps).expect("Boot Core 4 failed");
-    assert_eq!(smp.online_core_count(), 3);
-    kprintln!("[OK] PSCI v1.1 CPU_ON: Brought up Core 1 (LITTLE) and Core 4 (big) -> 3 Cores Online.");
-
-    // Test 3: Inter-Processor Interrupt (IPI) Dispatch via GICv2 SGIR
-    smp.dispatch_ipi(0b0000_0010, smp::IpiKind::Reschedule, &smp_caps).expect("Reschedule IPI failed");
-    smp.dispatch_ipi(0b0001_0010, smp::IpiKind::TlbShootdown, &smp_caps).expect("TLB Shootdown IPI failed");
-    assert_eq!(smp.total_ipis_sent, 2);
-    kprintln!("[OK] GICv2 SGIR Engine: Dispatched Reschedule IPI (SGI 0) & TLB Shootdown IPI (SGI 1) VERIFIED.");
-
-    // Test 4: big.LITTLE Energy-Aware Task Placement
-    let little_core = smp.place_task_by_affinity(101, smp::TaskAffinityClass::BackgroundDaemon, &smp_caps)
-        .expect("Place background task failed");
-    assert!(little_core < 4, "Background task must be placed on a LITTLE core (0..3)");
-
-    let big_core = smp.place_task_by_affinity(102, smp::TaskAffinityClass::ComputeVector, &smp_caps)
-        .expect("Place camera task failed");
-    assert_eq!(big_core, 4, "High compute task must be placed on online big core (4)");
-    kprintln!("[TEST] big.LITTLE Energy Scheduler: Routed BackgroundDaemon to Core {} (LITTLE) & ComputeVector to Core {} (big) VERIFIED.",
-        little_core, big_core);
-
-    // Test 5: Dynamic CPU Hotplug Power Management (Power off Core 1 to save battery)
-    smp.power_off_core(1, &smp_caps).expect("Power off Core 1 failed");
-    assert_eq!(smp.online_core_count(), 2);
-    kprintln!("[OK] Dynamic CPU Hotplug: Core 1 powered off via PSCI CPU_OFF -> Conserving idle battery.");
-
-    // 41. SIM/eSIM backend boundary
-    kprintln!("--- [Testing AArch64 SIM/eSIM backend boundary] ---");
-    let mut sim = sim::SimCardController::new(0x090D_0000);
-    sim.init_hardware();
-    assert!(sim.enabled);
-    assert!(!sim.hardware_present);
-    let mut sim_caps = CapabilityTable::new();
-    sim_caps.mint(CapabilityType::SimCardSecureElement, Rights::READ | Rights::WRITE | Rights::INVOKE, None);
-    assert_eq!(sim.read_iccid(&sim_caps).err(), Some(sim::SimError::HardwareDisabled));
-    kprintln!("[OK] SIM/eSIM: no fabricated ICCID or card presence.");
-
-    // 42. Display backend boundary
-    kprintln!("--- [Testing AArch64 display backend boundary] ---");
-    let mut display_hal = display_hal::MobileDisplayHal::new(0x090E_0000);
-    display_hal.init_hardware();
-    assert!(display_hal.enabled);
-    assert!(!display_hal.hardware_present);
-    let mut disp_caps = CapabilityTable::new();
-    disp_caps.mint(CapabilityType::DisplayControllerDirect, Rights::READ | Rights::WRITE, None);
-    assert_eq!(display_hal.set_refresh_rate(display_hal::RefreshRateHz::Hz120, 85, &disp_caps).err(), Some(display_hal::DisplayError::HardwareDisabled));
-    kprintln!("[OK] Display: panel timing is not exposed as physical hardware without a bound backend.");
-
-    // 43. StrongBox backend boundary
-    kprintln!("--- [Testing AArch64 StrongBox backend boundary] ---");
-    let mut strongbox = strongbox::StrongBoxHal::new(0x090F_0000);
-    strongbox.init_hardware();
-    assert!(strongbox.enabled);
-    assert!(!strongbox.hardware_present);
-    let mut sb_caps = CapabilityTable::new();
-    sb_caps.mint(CapabilityType::StrongBoxSecureEnclave, Rights::READ | Rights::WRITE | Rights::INVOKE, None);
-    assert_eq!(strongbox.generate_key(strongbox::KeyAlgorithm::Ed25519, &sb_caps).err(), Some(strongbox::StrongBoxError::HardwareDisabled));
-    kprintln!("[OK] StrongBox: no software-generated secure-element keys or attestations.");
-
-    // 44. Remote killswitch backend boundary
-    kprintln!("--- [Testing AArch64 remote killswitch backend boundary] ---");
-    let mut killswitch = killswitch::RemoteKillswitchHal::new(0x0910_0000, [0u8; 32]);
-    killswitch.init_hardware();
-    assert!(killswitch.enabled);
-    assert!(!killswitch.hardware_present);
-    let mut ks_caps = CapabilityTable::new();
-    ks_caps.mint(CapabilityType::RemoteKillSwitchDirect, Rights::READ | Rights::WRITE | Rights::INVOKE, None);
-    assert_eq!(killswitch.execute_kill_command(killswitch::KillAction::LockdownScreen, killswitch.current_nonce, &[0u8; 64], &ks_caps).err(), Some(killswitch::KillswitchError::HardwareDisabled));
-    kprintln!("[OK] Remote killswitch: command execution requires a concrete hardware controller.");
-
-    kprintln!();
-    kprintln!("============================================================");
-    kprintln!("  [READY] AArch64 Sovereign Smartphone Microkernel");
-    kprintln!("  Source-level backend boundaries validated; runtime hardware remains unbound until a concrete driver is attached.");
-    kprintln!("============================================================");
-
-    // Enter idle wait loop
-    loop {
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            core::arch::asm!("wfi");
-        }
-    }
-}
-
-#[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
-    kprintln!();
-    kprintln!("============================================================");
-    kprintln!("  [AArch64 KERNEL PANIC]");
-    kprintln!("  {}", info);
-    kprintln!("============================================================");
-    loop {
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            core::arch::asm!("wfe");
-        }
-    }
-}    // 40. Sovereign Mobile Multi-Core SMP, IPI & big.LITTLE Scheduler
-    kprintln!("--- [Testing Sovereign Mobile Multi-Core SMP Subsystem] ---");
-
+    // No GIC distributor base is claimed: PSCI and GIC MMIO are only touched
+    // once a real topology has been discovered and explicitly bound.
     let mut smp = smp::SmpController::new(0, psci);
     assert!(!smp.hardware_present);
     assert_eq!(smp.online_core_count(), 1);
@@ -1286,6 +1259,7 @@ fn panic(info: &PanicInfo) -> ! {
         smp.power_off_core(1, &smp_caps).err(),
         Some(smp::SmpError::HardwareDisabled)
     );
+    assert_eq!(smp.total_ipis_sent, 0);
     kprintln!("[OK] SMP: CPU_ON, IPI and hotplug operations fail closed without real PSCI/GIC hardware.");
 
     // 41. SIM/eSIM backend boundary
