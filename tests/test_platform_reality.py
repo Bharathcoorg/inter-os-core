@@ -82,6 +82,31 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertIn("pmic.is_hardware_present()", syscall)
         self.assertNotIn('r#"{{"present":true,"voltage_mv"', syscall)
 
+    def test_modem_defaults_to_hardware_absent(self):
+        modem = self.read("kernel/src/telephony/modem.rs")
+        syscall = self.read("kernel/src/syscall/mod.rs")
+        self.assertIn("hardware_present: bool", modem)
+        self.assertIn("hardware_present: false", modem)
+        self.assertIn("let is_present = modem.hardware_present;", syscall)
+        self.assertNotIn("modem.state != crate::telephony::ModemRadioState::PowerDown", syscall)
+
+    def test_raw_keystore_keys_never_cross_userspace_boundary(self):
+        syscall = self.read("kernel/src/syscall/mod.rs")
+        self.assertIn("Raw keystore-derived key material must never cross", syscall)
+        self.assertIn("Err(SyscallResult::PermissionDenied)", syscall)
+
+    def test_aarch64_camera_never_returns_synthetic_frames(self):
+        camera = self.read("kernel-aarch64/src/camera.rs")
+        self.assertIn("hardware_present: bool", camera)
+        self.assertIn("if !self.hardware_present || !self.enabled", camera)
+        self.assertNotIn("Generate representative test pattern", camera)
+
+    def test_riscv_unsupported_ipc_does_not_report_success(self):
+        syscall = self.read("kernel-riscv64/src/syscall.rs")
+        self.assertIn("5 => -38", syscall)
+        self.assertIn("6 => -38", syscall)
+        self.assertIn("SCHEDULER.lock().current_task_id()", syscall)
+
     def test_no_internal_gate_labels_enter_public_source(self):
         for path in ["README.md", "kernel/src/platform.rs", "tests/test_platform_reality.py"]:
             text = self.read(path).lower()
