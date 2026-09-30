@@ -43,6 +43,7 @@ pub enum RefreshRateHz {
 pub struct MobileDisplayHal {
     pub mmio_base: usize,
     pub enabled: bool,
+    pub hardware_present: bool,
     pub width: u32,
     pub height: u32,
     pub current_hz: RefreshRateHz,
@@ -57,6 +58,7 @@ impl MobileDisplayHal {
         Self {
             mmio_base,
             enabled: false,
+            hardware_present: false,
             width: 1080,
             height: 2400,
             current_hz: RefreshRateHz::Hz60,
@@ -69,9 +71,15 @@ impl MobileDisplayHal {
 
     pub fn init_hardware(&mut self) {
         self.enabled = true;
+        self.hardware_present = false;
         self.current_hz = RefreshRateHz::Hz60;
         self.brightness_nits = 400;
         self.dc_dimming_active = true;
+    }
+
+    pub fn set_hardware_present(&mut self, present: bool) {
+        self.hardware_present = present;
+        if !present { self.current_hz = RefreshRateHz::Hz60; }
     }
 
     /// Sets display refresh rate with automatic battery conservation governor.
@@ -84,7 +92,7 @@ impl MobileDisplayHal {
         caps.check(CapabilityType::DisplayControllerDirect, Rights::WRITE)
             .map_err(|_| DisplayError::CapabilityDenied)?;
 
-        if !self.enabled {
+        if !self.enabled || !self.hardware_present {
             return Err(DisplayError::HardwareDisabled);
         }
 
