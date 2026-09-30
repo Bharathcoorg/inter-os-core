@@ -7,9 +7,7 @@
 //!   * Waveform::Triangle: Warm mellow woodwind texture
 //!   * Waveform::Sawtooth: Rich harmonic brass/lead
 //! - Local playlist state is populated only from real media storage.
-//!   * Track 0: "Sovereign Symphony in C" (120 BPM, FLAC, 4:12)
-//!   * Track 1: "Cybernetic Sunrise" (95 BPM, Opus, 3:45)
-//!   * Track 2: "Mesh Harmony" (130 BPM, FLAC, 5:02)
+//!   * Playlist is populated from real media storage when media is available.
 //! - High-throughput Zero-Copy DMA Audio Streaming via SHM Pipe 1
 //! - Hardware Keystore Slot 1 media key derivation
 //! - Sovereign Vault Sector 204 authenticated track record encryption
