@@ -3068,7 +3068,9 @@ pub fn sys_battery_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
     let gov = crate::drivers::pmic::DVFS_GOVERNOR.lock();
     let _ = write!(
         writer,
-        r#"{{"present":true,"voltage_mv":{},"soc":{},"capacity":{},"charging":"{:?}","temp":{},"governor":"{:?}","mhz":{}}}"#,
+        r#"{{"present":{},"telemetry_valid":{},"voltage_mv":{},"soc":{},"capacity":{},"charging":"{:?}","temp":{},"governor":"{:?}","mhz":{}}}"#,
+        pmic.is_hardware_present(),
+        pmic.is_hardware_present(),
         pmic.telemetry.voltage_mv,
         pmic.telemetry.soc_percent,
         pmic.telemetry.capacity_mah,
