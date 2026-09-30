@@ -136,10 +136,12 @@ if __name__ == "__main__":
 
 
 def test_developer_terminal_is_disabled_by_default_and_kernel_gated():
-    settings = (ROOT / "kernel/src/settings.rs").read_text()
-    syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text()
-    launcher = (ROOT / "apps/launcher/src/main.rs").read_text()
-    app = (ROOT / "apps/settings/src/main.rs").read_text()
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    settings = (root / "kernel/src/settings.rs").read_text()
+    syscall = (root / "kernel/src/syscall/mod.rs").read_text()
+    launcher = (root / "apps/launcher/src/main.rs").read_text()
+    app = (root / "apps/settings/src/main.rs").read_text()
     assert "developer.terminal_enabled=false" in settings
     assert "developer_terminal_enabled()" in syscall
     assert "return Err(SyscallResult::PermissionDenied)" in syscall
