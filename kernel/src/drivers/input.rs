@@ -16,6 +16,11 @@ pub enum InputEventKind {
     LongPress = 3,
     Pan = 4,
     Pinch = 5,
+    Back = 6,
+    Home = 7,
+    Recents = 8,
+    Cancel = 9,
+    Fling = 10,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -29,6 +34,29 @@ pub struct InputEvent {
 }
 
 impl InputEvent {
+    pub fn from_canonical(gesture: crate::input::GestureEvent) -> Self {
+        let kind = match gesture.kind {
+            crate::input::GestureKind::Tap => InputEventKind::Tap,
+            crate::input::GestureKind::DoubleTap => InputEventKind::DoubleTap,
+            crate::input::GestureKind::LongPress => InputEventKind::LongPress,
+            crate::input::GestureKind::Scroll => InputEventKind::Pan,
+            crate::input::GestureKind::Fling => InputEventKind::Fling,
+            crate::input::GestureKind::Back => InputEventKind::Back,
+            crate::input::GestureKind::Home => InputEventKind::Home,
+            crate::input::GestureKind::Recents => InputEventKind::Recents,
+            crate::input::GestureKind::Cancel => InputEventKind::Cancel,
+            crate::input::GestureKind::Pinch => InputEventKind::Pinch,
+        };
+        Self {
+            kind,
+            x: gesture.position.x.max(0) as u32,
+            y: gesture.position.y.max(0) as u32,
+            dx: gesture.delta_x,
+            dy: gesture.delta_y,
+            ..Self::EMPTY
+        }
+    }
+
     pub const EMPTY: Self = Self {
         kind: InputEventKind::Tap,
         x: 0,
