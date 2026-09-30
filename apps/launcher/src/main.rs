@@ -160,7 +160,6 @@ pub enum ViewMode {
 pub struct LauncherState {
     pub current_view: ViewMode,
     pub clock_time: [u8; 5],
-    pub anim_tick: u32,
     pub app_drawer_tab: usize,
     pub flashlight_on: bool,
     pub notification_count: usize,
@@ -182,7 +181,6 @@ impl LauncherState {
         Self {
             current_view: ViewMode::LockScreen,
             clock_time: *b"00:00",
-            anim_tick: 0,
             app_drawer_tab: 0,
             flashlight_on: false,
             notification_count: 0,
@@ -419,52 +417,6 @@ fn package_id_at(state: &LauncherState, index: usize) -> Option<&str> {
 // -----------------------------------------------------------------------------
 // Pixel-Accurate Screen Renderers
 // -----------------------------------------------------------------------------
-
-// -----------------------------------------------------------------------------
-// Reference Modern Smartphone Wallpapers (Midnight Slate, Deep Azure, Obsidian, Dusk)
-// -----------------------------------------------------------------------------
-#[allow(dead_code)]
-#[inline(always)]
-fn get_wallpaper_pixel(_x: usize, y: usize, state: &LauncherState) -> u32 {
-    let y_norm = (y as u32).min(1440);
-    match state.wallpaper_id {
-        // Theme 0: Midnight Slate (Clean Modern Dark Gradient)
-        0 => {
-            let grad_val = (y_norm * 22) / 1440;
-            let r = 0x09 + grad_val / 3;
-            let g = 0x0D + grad_val / 2;
-            let b = 0x16 + grad_val;
-            (0xFF << 24) | (r << 16) | (g << 8) | b
-        }
-
-        // Theme 1: Deep Azure (Refined Midnight Blue)
-        1 => {
-            let grad_val = (y_norm * 28) / 1440;
-            let r = 0x07 + grad_val / 4;
-            let g = 0x0F + grad_val / 2;
-            let b = 0x22 + grad_val;
-            (0xFF << 24) | (r << 16) | (g << 8) | b
-        }
-
-        // Theme 2: Obsidian Minimal (Pure Graphite / Black)
-        2 => {
-            let grad_val = (y_norm * 16) / 1440;
-            let r = 0x0A + grad_val;
-            let g = 0x0C + grad_val;
-            let b = 0x10 + grad_val;
-            (0xFF << 24) | (r << 16) | (g << 8) | b
-        }
-
-        // Theme 3: Dusk (Subtle Twilight Gradient)
-        _ => {
-            let grad_val = (y_norm * 24) / 1440;
-            let r = 0x10 + grad_val / 2;
-            let g = 0x0B + grad_val / 3;
-            let b = 0x1A + grad_val;
-            (0xFF << 24) | (r << 16) | (g << 8) | b
-        }
-    }
-}
 
 #[inline(never)]
 fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
