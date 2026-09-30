@@ -202,47 +202,12 @@ impl WifiController {
 
         self.state = WifiStationState::AuthenticatingSae;
 
-        // 1. Derive Password Element (PWE) via pure no_std hashing: PWE = SHA256(passphrase | min(MACs) | max(MACs))
-        let mut pwe_material = Vec::new();
-        pwe_material.extend_from_slice(passphrase.as_bytes());
-        if self.current_mac < bssid {
-            pwe_material.extend_from_slice(&self.current_mac);
-            pwe_material.extend_from_slice(&bssid);
-        } else {
-            pwe_material.extend_from_slice(&bssid);
-            pwe_material.extend_from_slice(&self.current_mac);
-        }
-        let pwe = sha256(&pwe_material);
-
-        // A production WPA3-SAE implementation must use the chipset/crypto
-        // backend's random scalar and the standardized Dragonfly group
-        // arithmetic. Never synthesize a deterministic handshake here.
-        let mut commit_scalar = Vec::new();
-        commit_scalar.extend_from_slice(b"SAE_COMMIT_SCALAR:");
-        commit_scalar.extend_from_slice(&ephemeral_rand);
-        commit_scalar.extend_from_slice(&pwe);
-        let scalar_hash = sha256(&commit_scalar);
-
-        // 3. Confirm Token Verification via HMAC-SHA256
-        let mut confirm_material = Vec::new();
-        confirm_material.extend_from_slice(b"SAE_CONFIRM_TOKEN:");
-        confirm_material.extend_from_slice(&scalar_hash);
-        let confirm_token = HmacSha256::mac(&pwe, &confirm_material);
-
-        // 4. Derive Pairwise Master Key (PMK)
-        let mut pmk_preimage = Vec::new();
-        pmk_preimage.extend_from_slice(b"WPA3_SAE_PMK_DERIVATION:");
-        pmk_preimage.extend_from_slice(&confirm_token);
-        pmk_preimage.extend_from_slice(&pwe);
-        let pmk = sha256(&pmk_preimage);
-
-        self.derived_pmk = Some(pmk);
-        self.active_bssid = Some(bssid);
-        self.state = WifiStationState::Associated;
-
-        Ok(pmk)
+        // The standardized SAE group arithmetic, anti-clogging token
+        // exchange, and secure random scalar generation belong to the concrete
+        // chipset/crypto backend. Do not derive a PMK from a software placeholder.
+        self.state = WifiStationState::Disconnected;
+        Err(WifiError::HardwareUnavailable)
     }
-
     /// Ingests a raw 802.11 Beacon frame from an Access Point.
     pub fn process_beacon_frame(&mut self, frame: &[u8], rssi_dbm: i8, caps: &CapabilityTable) -> Result<DiscoveredNetwork, WifiError> {
         caps.check(CapabilityType::WifiNetworkDirect, Rights::READ)
