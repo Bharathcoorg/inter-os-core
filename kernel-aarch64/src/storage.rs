@@ -73,6 +73,7 @@ unsafe fn mmio_write8(base: usize, offset: usize, val: u8) {
 
 pub struct SdhciController {
     pub base_vaddr: usize,
+    pub hardware_present: bool,
     pub rca: u16,
     pub total_sectors: u32,
     pub high_capacity: bool,
@@ -83,6 +84,7 @@ impl SdhciController {
     pub const fn new(base_vaddr: usize) -> Self {
         Self {
             base_vaddr,
+            hardware_present: false,
             rca: 0,
             total_sectors: 0,
             high_capacity: false,
@@ -90,7 +92,13 @@ impl SdhciController {
         }
     }
 
+    pub fn set_hardware_present(&mut self, present: bool) {
+        self.hardware_present = present;
+        if !present { self.rca = 0; self.total_sectors = 0; self.high_capacity = false; }
+    }
+
     pub fn reset(&self) -> Result<(), &'static str> {
+        if !self.hardware_present { return Err("SDHCI hardware unavailable"); }
         unsafe {
             mmio_write8(self.base_vaddr, SDHCI_SOFTWARE_RESET, 0x01);
             for _ in 0..TIMEOUT_CYCLES {
@@ -104,6 +112,7 @@ impl SdhciController {
     }
 
     pub fn is_card_inserted(&self) -> bool {
+        if !self.hardware_present { return false; }
         unsafe {
             let state = mmio_read32(self.base_vaddr, SDHCI_PRESENT_STATE);
             (state & STATE_CARD_INSERTED) != 0
@@ -111,6 +120,7 @@ impl SdhciController {
     }
 
     pub fn send_command(&self, cmd_idx: u16, arg: u32, is_data: bool) -> Result<u32, &'static str> {
+        if !self.hardware_present { return Err("SDHCI hardware unavailable"); }
         unsafe {
             for _ in 0..TIMEOUT_CYCLES {
                 let state = mmio_read32(self.base_vaddr, SDHCI_PRESENT_STATE);
@@ -128,9 +138,7 @@ impl SdhciController {
             mmio_write32(self.base_vaddr, SDHCI_ARGUMENT, arg);
             mmio_write16(self.base_vaddr, SDHCI_COMMAND, cmd_idx);
 
-            let cur = mmio_read32(self.base_vaddr, SDHCI_INT_STATUS);
-            mmio_write32(self.base_vaddr, SDHCI_INT_STATUS, (cur & !INT_ERROR) | INT_CMD_COMPLETE);
-
+            // Hardware owns interrupt status. Never manufacture completion bits in software.
             for _ in 0..TIMEOUT_CYCLES {
                 let int_stat = mmio_read32(self.base_vaddr, SDHCI_INT_STATUS);
                 if (int_stat & INT_ERROR) != 0 || (int_stat & INT_TIMEOUT_ERROR) != 0 {
