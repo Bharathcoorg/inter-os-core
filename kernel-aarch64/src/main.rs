@@ -909,63 +909,23 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     let mut audio_driver = audio::AudioDriver::new(0x0902_0000);
     audio_driver.init_hardware(audio::SampleRate::Rate48kHz, audio::ChannelMode::Stereo);
     assert!(audio_driver.enabled);
-    kprintln!("[OK] I2S Audio Codec: Initialized hardware @ 0x09020000 (48 kHz Stereo, 80% gain).");
+    assert!(!audio_driver.hardware_present);
+    kprintln!("[OK] I2S Audio Codec: configuration parsed; physical codec backend remains unbound.");
 
-    // Test 1: Zero Ambient Authority: Uncredentialed PCM streaming rejected
     let tone_samples = audio::AudioDriver::generate_tone_440hz(128, 48000);
-    let unauth_audio = audio_driver.stream_pcm(&tone_samples, audio::AudioStreamType::BackgroundMediaMusic, &empty_caps);
-    assert_eq!(unauth_audio, Err(audio::AudioError::CapabilityDenied));
-    kprintln!("[TEST] Zero Ambient Authority: Uncredentialed audio PCM write REJECTED (CapabilityDenied) VERIFIED.");
-
-    // Mint capability for audio streaming
     let mut audio_caps = CapabilityTable::new();
     audio_caps.mint(CapabilityType::AudioStreamDirect, Rights::WRITE, None);
 
-    // Test 2: Authorized PCM streaming (Music stream)
-    let written = audio_driver.stream_pcm(&tone_samples, audio::AudioStreamType::BackgroundMediaMusic, &audio_caps)
-        .expect("Streaming audio failed");
-    assert_eq!(written, 128);
-    assert_eq!(audio_driver.ring_buffer.len(), 128);
-    kprintln!("[OK] I2S PCM Streamer: Written 128 samples of 440 Hz concert A tone into DMA ring buffer.");
-
-    // Test 3: Simulated DMA Hardware Pump (consume 64 samples)
-    let dma_chunk = audio_driver.pump_hardware_dma(64);
-    assert_eq!(dma_chunk.len(), 64);
-    assert_eq!(audio_driver.ring_buffer.len(), 64);
-    assert_eq!(audio_driver.samples_rendered, 128);
-    kprintln!("[OK] Audio DMA Pipeline: Pumped 64 samples to DAC output FIFO (64 samples remaining).");
-
-    // Test 4: Priority Audio Focus Preemption (Principle #8)
-    // When an incoming voice call or emergency alert arrives, background music is paused!
-    let voice_focus = audio_driver.focus_governor.request_focus(audio::AudioStreamType::TelephonyVoice);
-    assert_eq!(voice_focus, audio::AudioFocusState::Active);
-
-    // Background music attempt is now blocked with FocusDenied
-    let music_attempt = audio_driver.stream_pcm(&tone_samples, audio::AudioStreamType::BackgroundMediaMusic, &audio_caps);
-    assert_eq!(music_attempt, Err(audio::AudioError::FocusDenied));
-    kprintln!("[TEST] Priority Audio Focus: Telephony voice call preempted background music (FocusDenied) VERIFIED.");
-
-    // Telephony voice can stream without contention
-    let voice_samples = [1000i16; 32];
-    let voice_written = audio_driver.stream_pcm(&voice_samples, audio::AudioStreamType::TelephonyVoice, &audio_caps)
-        .expect("Voice stream failed");
-    assert_eq!(voice_written, 32);
-    kprintln!("[OK] Telephony Voice Audio: Streamed 32 voice PCM samples during active call.");
-
-    // Release voice call -> Music can resume
-    audio_driver.focus_governor.release_focus(audio::AudioStreamType::TelephonyVoice);
-    let music_resumed = audio_driver.stream_pcm(&tone_samples[..32], audio::AudioStreamType::BackgroundMediaMusic, &audio_caps)
-        .expect("Resuming music failed");
-    assert_eq!(music_resumed, 32);
-    kprintln!("[OK] Focus Resumption: Released voice focus -> Background music resumed seamlessly.");
-
-    // Test 5: Hardware Underrun Detection
-    let _all_samples = audio_driver.pump_hardware_dma(500); // Drain everything
-    assert_eq!(audio_driver.ring_buffer.len(), 0);
-    assert!(audio_driver.pump_hardware_dma(1).is_empty()); // Read from empty
-    kprintln!("[TEST] Hardware Underrun Detection: Handled starved buffer gracefully VERIFIED.");
-
-
+    // Protocol/ring-buffer logic may be exercised, but no physical DAC write or
+    // DMA completion may be claimed while the codec backend is absent.
+    let stream_res = audio_driver.stream_pcm(
+        &tone_samples,
+        audio::AudioStreamType::BackgroundMediaMusic,
+        &audio_caps,
+    );
+    assert!(stream_res.is_err());
+    assert!(audio_driver.ring_buffer.is_empty());
+    kprintln!("[OK] I2S PCM: authorized stream rejected without a bound codec/DMA backend.");
 
     // 29. Sovereign Mobile Camera / Hardware ISP Frame Capture Driver & Multimodal Neural Vision
     kprintln!("--- [Testing Sovereign Mobile Camera & Hardware ISP Driver] ---");
