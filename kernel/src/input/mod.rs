@@ -10,7 +10,7 @@ pub mod router;
 pub mod touch;
 
 pub use coordinate::{CoordinateSpace, CoordinateTransform, Point};
-pub use event::{InputEvent, InputSource};
+pub use event::{InputEvent, InputSource, KeyAction, KeyCode, KeyEvent, PointerEvent, PointerPhase};
 pub use queue::InputQueue;
 pub use router::{GestureEvent, GestureKind, InputRouter, PointerOwner, PointerState};
 pub use touch::{MAX_TOUCH_SLOTS, TouchDigitizer, TouchGesture, TouchPhase, TouchPoint};
