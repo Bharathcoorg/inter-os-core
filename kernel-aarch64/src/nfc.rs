@@ -138,6 +138,7 @@ pub struct NdefRecord {
 pub struct NfcController {
     pub mmio_base: usize,
     pub enabled: bool,
+    pub hardware_present: bool,
     pub mode: NfcOperatingMode,
     pub field_present: bool,
     pub active_aid_selected: bool,
@@ -152,6 +153,7 @@ impl NfcController {
         Self {
             mmio_base,
             enabled: false,
+            hardware_present: false,
             mode: NfcOperatingMode::Off,
             field_present: false,
             active_aid_selected: false,
@@ -165,7 +167,12 @@ impl NfcController {
     pub fn init_hardware(&mut self, mode: NfcOperatingMode) {
         self.enabled = true;
         self.mode = mode;
-        self.field_present = true;
+        self.field_present = false;
+    }
+
+    pub fn set_hardware_present(&mut self, present: bool) {
+        self.hardware_present = present;
+        if !present { self.field_present=false; self.active_aid_selected=false; }
     }
 
     /// Processes an incoming ISO 7816-4 APDU frame received over the contactless RF field.
@@ -178,7 +185,7 @@ impl NfcController {
         caps.check(CapabilityType::NfcSecureElement, Rights::WRITE)
             .map_err(|_| NfcError::CapabilityDenied)?;
 
-        if !self.enabled {
+        if !self.enabled || !self.hardware_present {
             return Err(NfcError::HardwareDisabled);
         }
 
