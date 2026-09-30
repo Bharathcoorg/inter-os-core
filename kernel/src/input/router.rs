@@ -46,6 +46,7 @@ pub struct PointerState {
     pub start: Point,
     pub current: Point,
     pub owner: PointerOwner,
+    pub edge: u8,
     pub down_tick: u64,
 }
 
@@ -58,6 +59,7 @@ impl PointerState {
             start: Point { x: 0, y: 0 },
             current: Point { x: 0, y: 0 },
             owner: PointerOwner::None,
+            edge: 0,
             down_tick: 0,
         }
     }
@@ -113,12 +115,22 @@ impl InputRouter {
 
     /// System-owned gestures are reserved only at the display edges.
     /// Everything else remains available to the focused application.
-    pub fn classify_owner(&self, position: Point, screen_width: u32, edge: u32) -> PointerOwner {
-        if position.x < edge as i32 || position.x >= screen_width.saturating_sub(edge) as i32 {
+    pub fn classify_owner(&self, position: Point, screen_width: u32, screen_height: u32, edge: u32) -> PointerOwner {
+        if position.x < edge as i32
+            || position.x >= screen_width.saturating_sub(edge) as i32
+            || position.y >= screen_height.saturating_sub(edge) as i32
+        {
             PointerOwner::System
         } else {
             PointerOwner::App
         }
+    }
+
+    fn classify_edge(position: Point, screen_width: u32, screen_height: u32, edge: u32) -> u8 {
+        if position.x < edge as i32 { 1 }
+        else if position.x >= screen_width.saturating_sub(edge) as i32 { 2 }
+        else if position.y >= screen_height.saturating_sub(edge) as i32 { 3 }
+        else { 0 }
     }
 
     /// Dispatches a pointer using monotonic kernel ticks.
@@ -137,7 +149,7 @@ impl InputRouter {
         }
         match event.phase {
             PointerPhase::Down => {
-                let owner = self.classify_owner(event.position, screen_width, edge);
+                let owner = self.classify_owner(event.position, screen_width, 1440, edge);
                 self.pointers[index] = PointerState {
                     active: true,
                     source: event.source,
@@ -145,6 +157,7 @@ impl InputRouter {
                     start: event.position,
                     current: event.position,
                     owner,
+                    edge: Self::classify_edge(event.position, screen_width, 1440, edge),
                     down_tick: now_tick,
                 };
                 None
@@ -226,10 +239,11 @@ impl InputRouter {
                     });
                 }
                 if state.owner == PointerOwner::System {
-                    let kind = if dy.abs() > dx.abs() {
-                        if dy > 0 { GestureKind::Back } else { GestureKind::Home }
-                    } else {
-                        GestureKind::Recents
+                    let kind = match state.edge {
+                        1 if dx >= 40 => GestureKind::Back,
+                        2 if dx <= -40 => GestureKind::Recents,
+                        3 if dy <= -40 => GestureKind::Home,
+                        _ => GestureKind::Cancel,
                     };
                     return Some(GestureEvent {
                         kind,
@@ -284,7 +298,7 @@ impl InputRouter {
 
         match event.phase {
             PointerPhase::Down => {
-                let owner = self.classify_owner(event.position, screen_width, edge);
+                let owner = self.classify_owner(event.position, screen_width, 1440, edge);
                 self.pointers[index] = PointerState {
                     active: true,
                     source: event.source,
@@ -292,6 +306,7 @@ impl InputRouter {
                     start: event.position,
                     current: event.position,
                     owner,
+                    edge: Self::classify_edge(event.position, screen_width, 1440, edge),
                     down_tick: 0,
                 };
                 None
