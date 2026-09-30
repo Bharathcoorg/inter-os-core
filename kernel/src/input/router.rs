@@ -264,6 +264,7 @@ impl InputRouter {
                         delta_x: 0,
                         delta_y: 0,
                         pointer_id: event.pointer_id,
+                        scale_milli: 1000,
                     })
                 } else { None }
             }
@@ -358,6 +359,7 @@ impl InputRouter {
                         delta_x: 0,
                         delta_y: 0,
                         pointer_id: event.pointer_id,
+                        scale_milli: 1000,
                     })
                 } else {
                     None
