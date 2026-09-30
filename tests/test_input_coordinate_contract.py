@@ -131,3 +131,10 @@ def test_studio_keyboard_uses_server_key_contract():
     source = (ROOT / "emulator/app.js").read_text()
     assert "body: JSON.stringify({ key: e.key })" in source
     assert "body: JSON.stringify({ code:" not in source
+
+
+def test_system_gesture_directions_are_explicit():
+    source = (ROOT / "kernel/src/input/router.rs").read_text()
+    assert "1 if dx >= 40 => GestureKind::Back" in source
+    assert "2 if dx <= -40 => GestureKind::Recents" in source
+    assert "3 if dy <= -40 => GestureKind::Home" in source
