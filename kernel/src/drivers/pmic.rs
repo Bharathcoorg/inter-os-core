@@ -202,10 +202,30 @@ pub fn test_pmic_dvfs() {
     assert_eq!(gov.active_profile, DvfsProfile::PowerSave);
     assert!(gov.thermal_throttled);
 
-    // Fuel Gauge test
+    // Fuel Gauge unavailable-state contract: a new controller must not
+    // fabricate telemetry or mutate its state when no hardware is attached.
     let mut pmic = PmicFuelGauge::new();
-    pmic.update(500.0, 0.1); // discharge 50 mAh
-    assert!(pmic.telemetry.soc_percent <= 82);
+    pmic.update(500.0, 0.1);
+    assert!(!pmic.is_hardware_present());
+    assert_eq!(pmic.telemetry.soc_percent, 0);
+    assert_eq!(pmic.telemetry.voltage_mv, 0);
+    assert_eq!(pmic.coulomb_counter_mah, 0.0);
 
-    crate::serial_println!("[TEST] PMIC & DVFS: Interactive governor scaling, thermal throttle, and fuel gauge verified.");
+    // Enable an explicit hardware-backed telemetry sample before exercising
+    // coulomb counting. This prevents the test from passing through the
+    // unavailable early-return path.
+    pmic.set_telemetry(
+        4000,
+        80,
+        3200,
+        25,
+        ChargingState::Discharging,
+    );
+    assert!(pmic.is_hardware_present());
+    pmic.update(500.0, 0.1); // discharge 50 mAh
+    assert_eq!(pmic.coulomb_counter_mah, 3150.0);
+    assert_eq!(pmic.telemetry.soc_percent, 78);
+    assert_eq!(pmic.telemetry.voltage_mv, 4046);
+
+    crate::serial_println!("[TEST] PMIC & DVFS: governor scaling, thermal throttle, unavailable safety, and coulomb counting verified.");
 }
