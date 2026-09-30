@@ -245,5 +245,4 @@ impl BluetoothController {
         if !self.powered || !self.hardware_present { return Err(BluetoothError::HardwareDisabled); }
         Err(BluetoothError::HardwareBackendUnavailable)
     }
-    }
 }
