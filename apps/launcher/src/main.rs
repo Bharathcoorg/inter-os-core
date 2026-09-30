@@ -1457,20 +1457,16 @@ fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         }
     }
 
-    // 5. 3 Pagination Dots (y: 1140..1156)
+    // 5. Registry-backed pagination dots (up to three pages).
     if y >= 1144 && y <= 1152 {
-        let dx_0 = (x as i32) - 336;
-        let dy_c = (y as i32) - 1148;
-        if dx_0 * dx_0 + dy_c * dy_c <= 16 {
-            return TEXT_PRIMARY; // First dot active
-        }
-        let dx_1 = (x as i32) - 360;
-        if dx_1 * dx_1 + dy_c * dy_c <= 9 {
-            return TEXT_MUTED;
-        }
-        let dx_2 = (x as i32) - 384;
-        if dx_2 * dx_2 + dy_c * dy_c <= 9 {
-            return TEXT_MUTED;
+        let pages = ((state.app_count + 11) / 12).max(1).min(3);
+        for dot in 0..pages {
+            let center = 336 + dot * 24;
+            let dx = (x as i32) - center as i32;
+            let dy = (y as i32) - 1148;
+            if dx * dx + dy * dy <= if dot == state.app_drawer_page { 16 } else { 9 } {
+                return if dot == state.app_drawer_page { TEXT_PRIMARY } else { TEXT_MUTED };
+            }
         }
     }
 
