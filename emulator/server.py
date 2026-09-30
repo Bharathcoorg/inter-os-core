@@ -70,42 +70,32 @@ os.makedirs(THEMES_DIR, exist_ok=True)
 ACTIVE_THEME_FILE = os.path.join(THEMES_DIR, "_active_theme.json")
 
 def get_active_theme():
-    if os.path.exists(ACTIVE_THEME_FILE):
-        try:
-            with open(ACTIVE_THEME_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                while isinstance(data, dict) and "theme" in data and isinstance(data["theme"], dict):
-                    data = data["theme"]
-                return data
-        except Exception:
-            pass
-    default_theme_path = os.path.join(THEMES_DIR, "bento_glass.theme")
-    if os.path.exists(default_theme_path):
-        try:
-            with open(default_theme_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
+    # Device Studio exposes the same stock system theme as the guest launcher.
+    # Theme mutation is intentionally disabled until the system supports a
+    # complete, authoritative theme service.
     return {
-        "theme_id": "bento_glass",
-        "name": "Bento Glass Horizon",
+        "theme_id": "interos_stock",
+        "name": "InterOS Stock",
+        "version": 1,
         "bootloader": {
             "immutable_brand": "InterOS",
-            "custom_subtext": "Sovereign DevKit Edition"
+            "custom_subtext": ""
+        },
+        "ui": {
+            "background": "#F7F8FA",
+            "surface": "#FFFFFF",
+            "text": "#0F172A",
+            "muted": "#64748B",
+            "accent": "#0284C7",
+            "success": "#10B981",
+            "danger": "#DC2626"
         }
     }
 
 def set_active_theme(theme_data):
-    if not isinstance(theme_data, dict):
-        return
-    if "bootloader" not in theme_data:
-        theme_data["bootloader"] = {}
-    theme_data["bootloader"]["immutable_brand"] = "InterOS"
-    try:
-        with open(ACTIVE_THEME_FILE, "w", encoding="utf-8") as f:
-            json.dump(theme_data, f, indent=2)
-    except Exception:
-        pass
+    # Kept as a compatibility boundary; the canonical stock theme cannot be
+    # replaced by host-side state.
+    return
 
 # -----------------------------------------------------------------------------
 # Real-Time Mobile Subsystems State (Cellular Baseband, PMIC/DVFS, KMS, Touch)
@@ -2488,64 +2478,27 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if self.path == '/api/themes/apply':
-            content_length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(content_length)
-            try:
-                data = json.loads(body.decode('utf-8'))
-                raw_id = str(data.get('theme_id') or data.get('id') or '').strip()
-                if not raw_id:
-                    self.send_response(400)
-                    self.end_headers()
-                    self.wfile.write(json.dumps({'success': False, 'error': 'Missing theme_id'}).encode())
-                    return
-                theme_id = re.sub(r'[^a-zA-Z0-9_-]', '_', raw_id).lower()
-                target_file = os.path.join(THEMES_DIR, f"{theme_id}.theme")
-                if not os.path.exists(target_file):
-                    self.send_response(404)
-                    self.end_headers()
-                    self.wfile.write(json.dumps({'success': False, 'error': 'Theme not found'}).encode())
-                    return
-                with open(target_file, "r", encoding="utf-8") as tf:
-                    theme_data = json.load(tf)
-                theme_data['id'] = theme_data.get('theme_id', theme_id)
-                set_active_theme(theme_data)
-                serial_lines.append(f"[THEME_HAL] Active theme switched to '{theme_data.get('name')}' ({theme_id}).")
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps({'success': True, 'theme': theme_data, 'active_theme': theme_data}).encode())
-            except Exception as e:
-                self.send_response(500)
-                self.end_headers()
-                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            self.send_response(409)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': False,
+                'status': 'DISABLED',
+                'error': 'Theme switching is disabled; InterOS uses the canonical stock system theme'
+            }).encode())
             return
 
         if self.path == '/api/themes/save':
-            content_length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(content_length)
-            try:
-                data = json.loads(body.decode('utf-8'))
-                raw_id = data.get('theme_id') or data.get('name', 'custom_theme')
-                theme_id = re.sub(r'[^a-zA-Z0-9_-]', '_', raw_id).lower()
-                data['theme_id'] = theme_id
-                if 'bootloader' not in data:
-                    data['bootloader'] = {}
-                data['bootloader']['immutable_brand'] = 'InterOS'
-                out_path = os.path.join(THEMES_DIR, f"{theme_id}.theme")
-                with open(out_path, "w", encoding="utf-8") as tf:
-                    json.dump(data, tf, indent=2)
-                set_active_theme(data)
-                serial_lines.append(f"[THEME_HAL] Saved and applied custom theme '{data.get('name')}' ({theme_id}.theme).")
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps({'success': True, 'theme': data}).encode())
-            except Exception as e:
-                self.send_response(500)
-                self.end_headers()
-                self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
+            self.send_response(409)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': False,
+                'status': 'DISABLED',
+                'error': 'Custom themes are disabled; InterOS uses the canonical stock system theme'
+            }).encode())
             return
 
         if self.path == '/api/themes/bootloader':
