@@ -44,11 +44,11 @@ In accordance with our engineering integrity policy, every subsystem is classifi
 
 | Subsystem / Feature | Implementation State | Verification Level | Verification Evidence / Mechanism |
 | :--- | :--- | :--- | :--- |
-| **x86_64 Virtual Address Isolation** | Real 4-Level PML4 CR3 per-process paging, W^X, Ring 3 isolation | **Verified via QEMU Runtime Gate** | `tests/verify_x86_boot.py` & `tests/test_interactive_lifecycle.py`; boot milestones, DRM/KMS scanout, and 10-app lifecycle verified |
+| **x86_64 Virtual Address Isolation** | Real 4-Level PML4 CR3 per-process paging, W^X, Ring 3 isolation | **Verified via QEMU Runtime Gate** | `tests/verify_x86_boot.py` & `tests/test_interactive_lifecycle.py`; boot lifecycle, DRM/KMS scanout, and application lifecycle verified |
 | **AArch64 Virtual Address Isolation** | Cortex-A53 EL1 kernel, MMU, VBAR_EL1, EL0 userspace | **QEMU verification available** | `tests/test_aarch64.ps1`; QEMU virt boot, userspace execution, and isolation checks are exercised locally |
 | **RISC-V 64 MMU & U-Mode** | Sv39 3-level page tables, stvec trap vector, U-mode syscall ABI | **QEMU verification available** | `tests/test_riscv64.ps1`; QEMU virt boot, userspace execution, and pointer/isolation checks are exercised locally |
 | **Lifecycle Stress & Resource Stability** | Repeated smartphone app/window lifecycles | **Locally verified stress coverage** | `tests/test_lifecycle_stress.py`; resource counters and bounded growth are checked across repeated iterations |
-| **Clean Reboot Recovery** | Dual-boot lifecycle with guest ACPI shutdown | **Verified Clean Dual-Boot** | `tests/test_reboot_recovery.py`; Session 1 ACPI shutdown (port 0x604) exit 0 -> Session 2 reboot milestone & app responsiveness |
+| **Clean Reboot Recovery** | Dual-boot lifecycle with guest ACPI shutdown | **Verified Clean Dual-Boot** | `tests/test_reboot_recovery.py`; Session 1 ACPI shutdown (port 0x604) exit 0 -> Session 2 reboot & app responsiveness |
 | **Syscall Pointer Validation** | `UserPtr<T>`, `UserSlice`, `copy_from_user`, `copy_to_user` | **Implemented & Adversarially Tested** | Null exclusion (<0x1000), integer overflow prevention, kernel address range rejection |
 | **Process Lifecycle & Multitasking** | PID assignment, Zombie states, parent tracking, exit codes | **Implemented & Tested** | `WaitPid` (Syscall 63) & `ExitWithCode` (Syscall 64) in kernel and `interos-std` |
 | **Capability Security Model** | Per-process capability token table, rights bitmask, generation tags | **Implemented & Tested** | Non-forgeable object handles; cross-process handle sharing prevented without delegation |
