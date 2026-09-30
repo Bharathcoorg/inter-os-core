@@ -1,4 +1,4 @@
-//! Hardware-Isolated Secure Enclave & Keystore Subsystem
+//! Secure Keystore Subsystem
 //!
 //! Provides cryptographic Key Derivation (KDF) using RFC 4231 HMAC-SHA256 and TRNG entropy,
 //! hardware key slot isolation, and authenticated encrypted credential storage
@@ -66,9 +66,12 @@ pub struct KeystoreEntry {
     pub auth_tag: [u8; 32],
 }
 
-/// Hardware-Isolated Secure Keystore
+/// Secure Keystore. The current generic target uses encrypted persistent
+/// software state; a physical device backend must explicitly provide hardware
+/// isolation before the platform reports hardware-backed key storage.
 pub struct SecureKeystore {
     master_seed: [u8; 32],
+    hardware_backed: bool,
     entries: Vec<KeystoreEntry>,
 }
 
@@ -76,9 +79,13 @@ impl SecureKeystore {
     pub const fn new() -> Self {
         Self {
             master_seed: [0u8; 32],
+            hardware_backed: false,
             entries: Vec::new(),
         }
     }
+
+    /// Returns whether a concrete hardware-backed keystore is bound.
+    pub const fn is_hardware_backed(&self) -> bool { self.hardware_backed }
 
     /// Derives a 32-byte cryptographic key for a specific slot using domain-separated HMAC-SHA256.
     pub fn derive_key(&self, slot: KeySlot, label: &[u8]) -> [u8; 32] {
@@ -214,7 +221,7 @@ fn constant_time_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
 
 pub static SECURE_KEYSTORE: Mutex<SecureKeystore> = Mutex::new(SecureKeystore::new());
 
-/// Initializes the Secure Keystore and verifies derivation & authenticated tamper-proofing.
+/// Initializes the generic software-backed keystore and verifies derivation & authenticated tamper-proofing.
 pub fn init() {
     let mut ks = SECURE_KEYSTORE.lock();
 
