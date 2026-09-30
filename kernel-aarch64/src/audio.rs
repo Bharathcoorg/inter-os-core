@@ -179,6 +179,7 @@ pub struct AudioDriver {
     pub sample_rate: SampleRate,
     pub channels: ChannelMode,
     pub enabled: bool,
+    pub hardware_present: bool,
     pub gain_percent: u8,
     pub ring_buffer: PcmRingBuffer,
     pub focus_governor: AudioFocusGovernor,
@@ -193,6 +194,7 @@ impl AudioDriver {
             sample_rate: SampleRate::Rate48kHz,
             channels: ChannelMode::Stereo,
             enabled: false,
+            hardware_present: false,
             gain_percent: 80,
             ring_buffer: PcmRingBuffer::new(),
             focus_governor: AudioFocusGovernor::new(),
@@ -205,6 +207,7 @@ impl AudioDriver {
         self.sample_rate = rate;
         self.channels = mode;
         self.enabled = true;
+        self.hardware_present = false;
     }
 
     /// Writes PCM samples to the audio ring buffer, enforcing capability.
@@ -219,7 +222,7 @@ impl AudioDriver {
             .check(CapabilityType::AudioStreamDirect, Rights::WRITE)
             .map_err(|_| AudioError::CapabilityDenied)?;
 
-        if !self.enabled {
+        if !self.enabled || !self.hardware_present {
             return Err(AudioError::HardwareDisabled);
         }
 
@@ -245,7 +248,12 @@ impl AudioDriver {
         Ok(written)
     }
 
-    /// Consumes samples from ring buffer simulating hardware DAC DMA transfer.
+    pub fn set_hardware_present(&mut self, present: bool) {
+        self.hardware_present = present;
+        if !present { self.ring_buffer = PcmRingBuffer::new(); }
+    }
+
+    /// Consumes samples from the software staging ring buffer.
     pub fn pump_hardware_dma(&mut self, max_samples: usize) -> Vec<i16> {
         let mut dma_batch = Vec::new();
         for _ in 0..max_samples {
