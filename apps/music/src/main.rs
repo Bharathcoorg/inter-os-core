@@ -49,7 +49,7 @@ pub struct AudioTrack {
     pub codec: &'static str,
 }
 
-/// Sovereign Music Playlist.
+/// Local Music Playlist.
 pub static PLAYLIST: [AudioTrack; 0] = [];
 
 /// Production Sovereign Music state manager.
