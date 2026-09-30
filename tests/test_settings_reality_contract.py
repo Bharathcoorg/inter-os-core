@@ -147,4 +147,6 @@ def test_developer_terminal_is_disabled_by_default_and_kernel_gated():
     assert "return Err(SyscallResult::PermissionDenied)" in syscall
     assert "std::settings_get(0, \"developer.terminal_enabled\"" in launcher\n    assert "developer_terminal_enabled()" in launcher
     assert "toggle_terminal" in app
+    assert "Developer terminal" in app
+    assert "Disabled by default" in app
     assert '"developer.terminal_enabled"' in app
