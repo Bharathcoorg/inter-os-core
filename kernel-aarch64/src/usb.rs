@@ -74,6 +74,7 @@ pub struct PowerContract {
 pub struct UsbPdController {
     pub mmio_base: usize,
     pub enabled: bool,
+    pub hardware_present: bool,
     pub polarity: TypeCPolarity,
     pub power_role: PortPowerRole,
     pub data_port_state: UsbDataPortState,
@@ -87,6 +88,7 @@ impl UsbPdController {
         Self {
             mmio_base,
             enabled: false,
+            hardware_present: false,
             polarity: TypeCPolarity::Unattached,
             power_role: PortPowerRole::Sink,
             data_port_state: UsbDataPortState::LockedChargeOnly,
@@ -98,7 +100,13 @@ impl UsbPdController {
 
     pub fn init_hardware(&mut self) {
         self.enabled = true;
+        self.hardware_present = false;
         self.data_port_state = UsbDataPortState::LockedChargeOnly;
+    }
+
+    pub fn set_hardware_present(&mut self, present: bool) {
+        self.hardware_present = present;
+        if !present { self.polarity=TypeCPolarity::Unattached; self.active_contract=None; self.available_pdos.clear(); }
     }
 
     /// Detects Type-C cable attachment and CC line orientation.
@@ -122,7 +130,7 @@ impl UsbPdController {
         caps.check(CapabilityType::UsbPowerDeliveryDirect, Rights::WRITE)
             .map_err(|_| UsbError::CapabilityDenied)?;
 
-        if !self.enabled || self.polarity == TypeCPolarity::Unattached {
+        if !self.enabled || !self.hardware_present || self.polarity == TypeCPolarity::Unattached {
             return Err(UsbError::NoPortConnected);
         }
 
