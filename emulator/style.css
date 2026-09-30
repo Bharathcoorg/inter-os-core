@@ -12,14 +12,14 @@
   --bg-phone: #000000; /* Pure pitch OLED black */
   --border-glass: rgba(255, 255, 255, 0.1);
   --border-glass-hover: rgba(255, 255, 255, 0.25);
-  
+
   /* Luminous Monochrome & Highlights */
   --white-pure: #FFFFFF;
   --white-soft: #F1F5F9;
   --white-muted: #A1A1AA;
   --white-dim: #71717A;
   --white-ghost: rgba(255, 255, 255, 0.06);
-  
+
   /* Strict White & Black Accent Mapping */
   --cyan-accent: #FFFFFF;
   --cyan-glow: rgba(255, 255, 255, 0.3);
@@ -72,7 +72,7 @@ html, body.dark-theme {
   padding: 0;
   display: flex;
   flex-direction: column;
-  background-image: 
+  background-image:
     radial-gradient(circle at 20% 20%, rgba(255, 255, 255, 0.025) 0%, transparent 50%),
     radial-gradient(circle at 80% 80%, rgba(255, 255, 255, 0.015) 0%, transparent 50%);
 }
@@ -1381,7 +1381,7 @@ html, body.dark-theme {
   border-radius: var(--radius-phone);
   padding: 10px;
   position: relative;
-  box-shadow: 
+  box-shadow:
     0 30px 80px -20px rgba(0, 0, 0, 0.98),
     0 0 50px rgba(255, 255, 255, 0.04),
     inset 0 0 2px rgba(255, 255, 255, 0.35);
@@ -1577,22 +1577,22 @@ html, body.dark-theme {
   transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), border-color 0.4s ease, box-shadow 0.4s ease;
 }
 
-.orb-haptic-ring.ring-1 { 
-  width: 146px; 
-  height: 146px; 
-  animation: breathe-ring 5s infinite ease-in-out; 
+.orb-haptic-ring.ring-1 {
+  width: 146px;
+  height: 146px;
+  animation: breathe-ring 5s infinite ease-in-out;
 }
-.orb-haptic-ring.ring-2 { 
-  width: 178px; 
-  height: 178px; 
-  animation: breathe-ring 5s infinite ease-in-out 0.8s; 
-  border-color: rgba(255, 255, 255, 0.05); 
+.orb-haptic-ring.ring-2 {
+  width: 178px;
+  height: 178px;
+  animation: breathe-ring 5s infinite ease-in-out 0.8s;
+  border-color: rgba(255, 255, 255, 0.05);
 }
-.orb-haptic-ring.ring-3 { 
-  width: 210px; 
-  height: 210px; 
-  animation: breathe-ring 5s infinite ease-in-out 1.6s; 
-  border-color: rgba(255, 255, 255, 0.025); 
+.orb-haptic-ring.ring-3 {
+  width: 210px;
+  height: 210px;
+  animation: breathe-ring 5s infinite ease-in-out 1.6s;
+  border-color: rgba(255, 255, 255, 0.025);
 }
 
 @keyframes breathe-ring {
@@ -1646,7 +1646,7 @@ html, body.dark-theme {
   background: radial-gradient(circle at 36% 24%, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.015) 45%, transparent 75%);
   border-radius: 50%;
   border: 1.2px solid rgba(255, 255, 255, 0.22);
-  box-shadow: 
+  box-shadow:
     0 16px 45px rgba(0, 0, 0, 0.95),
     0 0 28px rgba(255, 255, 255, 0.04),
     inset 0 0 20px rgba(255, 255, 255, 0.08);
@@ -3373,7 +3373,7 @@ html, body.dark-theme {
 .viewfinder-grid {
   position: absolute;
   top: 0; left: 0; right: 0; bottom: 0;
-  background-image: 
+  background-image:
     linear-gradient(to right, rgba(255, 255, 255, 0.05) 1px, transparent 1px),
     linear-gradient(to bottom, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
   background-size: 33.33% 33.33%;
@@ -4954,94 +4954,311 @@ html, body.dark-theme {
   display: block;
 }
 
-/* Lock Screen Overlay */
+/* Sovereign Lock Screen Overlay */
 .screen-lockscreen {
   position: absolute;
   inset: 0;
-  background: rgba(9, 11, 15, 0.92);
-  backdrop-filter: blur(28px);
-  -webkit-backdrop-filter: blur(28px);
-  z-index: 900;
+  background: radial-gradient(circle at 50% 15%, rgba(13, 20, 36, 0.96) 0%, rgba(5, 8, 15, 0.98) 100%);
+  backdrop-filter: blur(32px);
+  -webkit-backdrop-filter: blur(32px);
+  z-index: 500;
   display: none;
   flex-direction: column;
   justify-content: space-between;
-  padding: 44px 20px 28px 20px;
+  padding: 48px 20px 24px 20px;
   box-sizing: border-box;
   color: #FFFFFF;
-  cursor: pointer;
   user-select: none;
-  animation: lock-fade-in 0.25s ease;
+  touch-action: none;
+  cursor: grab;
+  transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s ease;
+  will-change: transform, opacity;
+}
+
+.screen-lockscreen:active {
+  cursor: grabbing;
 }
 
 .screen-lockscreen.active {
   display: flex;
 }
 
-@keyframes lock-fade-in {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
+.screen-lockscreen.unlocking {
+  transform: translateY(-100%) !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+.lock-top-section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.lock-security-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  background: rgba(0, 242, 254, 0.08);
+  border: 1px solid rgba(0, 242, 254, 0.25);
+  border-radius: 9999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  color: #00F2FE;
+  text-transform: uppercase;
 }
 
 .lock-clock-box {
   text-align: center;
-  margin-top: 16px;
 }
 
 .lock-time {
-  font-family: var(--font-display, sans-serif);
-  font-size: 3.4rem;
-  font-weight: 700;
+  font-family: var(--font-display, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif);
+  font-size: 3.6rem;
+  font-weight: 300;
   letter-spacing: -1.5px;
   line-height: 1;
   color: #FFFFFF;
+  text-shadow: 0 0 35px rgba(255, 255, 255, 0.25);
 }
 
 .lock-date {
-  font-size: 0.82rem;
-  color: #A1A1AA;
+  font-size: 0.85rem;
+  color: #94A3B8;
   margin-top: 8px;
   font-weight: 500;
+  letter-spacing: 0.2px;
 }
 
-.lock-notification-card {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 16px;
-  padding: 12px 14px;
-  text-align: left;
-  backdrop-filter: blur(12px);
-}
-
-.lock-notif-title {
-  font-size: 0.72rem;
-  font-weight: 700;
-  color: #10B981;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.lock-notif-body {
-  font-size: 0.68rem;
-  color: #E4E4E7;
-  margin-top: 4px;
-  line-height: 1.35;
-}
-
-.lock-unlock-prompt {
-  text-align: center;
-  font-size: 0.72rem;
-  color: #71717A;
+.lock-center-section {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
-  animation: bounce-prompt 1.8s infinite;
+  padding: 0 4px;
 }
 
-@keyframes bounce-prompt {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-6px); }
+.lock-vitals-card {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 18px;
+  padding: 14px 16px;
+  box-sizing: border-box;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+}
+
+.lvc-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.lvc-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #10B981;
+  box-shadow: 0 0 8px #10B981;
+}
+
+.lvc-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: #F8FAFC;
+  text-transform: uppercase;
+}
+
+.lvc-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.lvc-stat {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+}
+
+.lvc-lbl {
+  color: #64748B;
+}
+
+.lvc-val {
+  color: #CBD5E1;
+  font-weight: 600;
+  font-family: var(--font-mono, monospace);
+}
+
+.lock-bottom-section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+}
+
+.lock-unlock-prompt {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  user-select: none;
+}
+
+.unlock-chevron-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  height: 20px;
+}
+
+.unlock-chevron {
+  font-size: 14px;
+  line-height: 8px;
+  font-weight: 900;
+  color: #00F2FE;
+  animation: chevron-pulse 1.8s infinite ease-in-out;
+}
+.unlock-chevron.c1 { animation-delay: 0s; opacity: 0.3; }
+.unlock-chevron.c2 { animation-delay: 0.2s; opacity: 0.6; }
+.unlock-chevron.c3 { animation-delay: 0.4s; opacity: 1; }
+
+@keyframes chevron-pulse {
+  0%, 100% { transform: translateY(0); opacity: 0.3; }
+  50% { transform: translateY(-4px); opacity: 1; text-shadow: 0 0 8px #00F2FE; }
+}
+
+.unlock-text {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
+  color: #94A3B8;
+  text-transform: uppercase;
+}
+
+/* Horizontal Slide-to-Unlock Slider Bar */
+.slide-to-unlock-track {
+  position: relative;
+  width: 100%;
+  height: 48px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 24px;
+  display: flex;
+  align-items: center;
+  padding: 4px;
+  box-sizing: border-box;
+  overflow: hidden;
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+
+.slide-to-unlock-thumb {
+  position: absolute;
+  left: 4px;
+  width: 40px;
+  height: 40px;
+  background: linear-gradient(135deg, #00F2FE 0%, #4FACFE 100%);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #040810;
+  cursor: grab;
+  box-shadow: 0 2px 10px rgba(0, 242, 254, 0.5);
+  transition: transform 0.05s linear;
+  z-index: 2;
+  user-select: none;
+  touch-action: none;
+}
+
+.slide-to-unlock-thumb:active {
+  cursor: grabbing;
+}
+
+.slide-track-label {
+  width: 100%;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  color: rgba(255, 255, 255, 0.5);
+  pointer-events: none;
+  user-select: none;
+  animation: shimmer-text 2.4s infinite;
+  background: linear-gradient(90deg, rgba(255,255,255,0.3) 0%, rgba(255,255,255,0.9) 50%, rgba(255,255,255,0.3) 100%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+@keyframes shimmer-text {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.lock-quick-actions {
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0 8px;
+  box-sizing: border-box;
+}
+
+.lock-action-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #E2E8F0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.15s, border-color 0.2s;
+  backdrop-filter: blur(10px);
+}
+
+.lock-action-btn:hover {
+  background: rgba(0, 242, 254, 0.18);
+  border-color: rgba(0, 242, 254, 0.4);
+  color: #00F2FE;
+  transform: scale(1.06);
+}
+
+.lock-action-btn:active {
+  transform: scale(0.94);
+}
+
+/* Standby AOD Wake Prompt */
+.aod-wake-prompt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: #64748B;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  margin-top: 18px;
+  animation: pulse-wake 2s infinite ease-in-out;
+}
+
+.aod-wake-icon {
+  font-size: 14px;
+  color: #00F2FE;
+}
+
+@keyframes pulse-wake {
+  0%, 100% { opacity: 0.4; transform: translateY(0); }
+  50% { opacity: 0.9; transform: translateY(-3px); }
 }
 
 /* ==========================================================================
@@ -10631,7 +10848,7 @@ body.light-theme .device-chassis {
   backdrop-filter: blur(var(--glass-blur)) saturate(160%);
   -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(160%);
   border: 1px solid var(--glass-border);
-  box-shadow: 
+  box-shadow:
     0 16px 36px -6px rgba(0, 0, 0, 0.6),
     0 4px 12px rgba(0, 0, 0, 0.4),
     var(--glass-specular);
@@ -10716,7 +10933,7 @@ body.light-theme .device-chassis {
   backdrop-filter: blur(var(--glass-blur)) saturate(160%);
   -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(160%);
   border: 1px solid var(--glass-border);
-  box-shadow: 
+  box-shadow:
     0 12px 24px -4px rgba(0, 0, 0, 0.5),
     var(--glass-specular);
   border-radius: 28px;
@@ -10764,7 +10981,7 @@ body.light-theme .device-chassis {
   backdrop-filter: blur(var(--glass-blur)) saturate(160%);
   -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(160%);
   border: 1px solid var(--glass-border);
-  box-shadow: 
+  box-shadow:
     0 12px 24px -4px rgba(0, 0, 0, 0.5),
     var(--glass-specular);
   border-radius: var(--pod-radius);
@@ -10860,7 +11077,7 @@ button.bento-pod {
   backdrop-filter: blur(var(--glass-blur)) saturate(150%);
   -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(150%);
   border: 1px solid var(--glass-border);
-  box-shadow: 
+  box-shadow:
     0 12px 28px -4px rgba(0, 0, 0, 0.5),
     var(--glass-specular);
   border-radius: var(--pod-radius);
@@ -10984,7 +11201,7 @@ button.bento-pod:hover .camera-aperture-disc {
   backdrop-filter: blur(28px) saturate(180%);
   -webkit-backdrop-filter: blur(28px) saturate(180%);
   border: 1px solid var(--dock-border);
-  box-shadow: 
+  box-shadow:
     0 20px 40px -8px rgba(0, 0, 0, 0.7),
     0 0 1px 1px rgba(255, 255, 255, 0.15) inset;
   border-radius: 9999px;
@@ -12548,7 +12765,7 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   border-radius: 44px;
   padding: 7px;
   position: relative;
-  box-shadow: 
+  box-shadow:
     0 20px 50px -12px rgba(0, 0, 0, 0.95),
     0 0 30px rgba(255, 255, 255, 0.03),
     inset 0 0 0 1px rgba(255, 255, 255, 0.12);

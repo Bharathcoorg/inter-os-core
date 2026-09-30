@@ -1,6 +1,6 @@
 /**
  * Inter OS — Device Studio & Emulator Controller
- * 
+ *
  * Features:
  * - Complete Android Emulator Hardware Toolbar (Power, Vol+, Vol-, Screenshot, Rotate, Reboot, Back, Home, Recents)
  * - Minimalist, modern Mobile OS (Clock & Date widget, Sideload Tray, 8 System Apps, Dock, Lockscreen, Boot Splash)
@@ -364,7 +364,7 @@ document.addEventListener('DOMContentLoaded', () => {
       } else {
         qemuGlobalStatus.classList.remove('online');
       }
-      qemuGlobalStatus.title = isAlive 
+      qemuGlobalStatus.title = isAlive
         ? `QEMU Microkernel: ${data.status || 'running'} (Mode: ${data.mode || 'live'})`
         : 'QEMU Microkernel: Standby';
     }
@@ -516,8 +516,8 @@ document.addEventListener('DOMContentLoaded', () => {
       scanoutModeLabel.textContent = cropMode === 'portrait' ? 'Portrait' : 'Full 720p';
     }
     if (scanoutResText) {
-      scanoutResText.innerHTML = cropMode === 'portrait' 
-        ? 'LIVE SCANOUT &bull; 720&times;1440' 
+      scanoutResText.innerHTML = cropMode === 'portrait'
+        ? 'LIVE SCANOUT &bull; 720&times;1440'
         : 'LIVE SCANOUT &bull; 1280&times;720';
     }
     refreshScanoutFrame();
@@ -947,6 +947,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const phoneGestureBarPill = document.getElementById('phone-gesture-bar-pill');
   phoneGestureBarPill?.addEventListener('click', () => {
+    if (state.locked || screenLockscreen?.classList.contains('active')) {
+      unlockDevice('gesture-bar');
+      return;
+    }
     dispatchHardwareGesture('Home (Gesture Bar Pill)', {
       action: 'tap',
       x: 640,
@@ -1466,20 +1470,79 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // Lockscreen Unlock Action (Tap or Swipe Up Gesture)
-  function unlockDevice() {
-    if (!state.locked && !screenLockscreen?.classList.contains('active')) return;
+  // Lockscreen Unlock Action (Tap, Swipe Up, or Slide-to-Unlock Gesture)
+  async function unlockDevice(gestureType = 'gesture') {
     state.locked = false;
-    screenLockscreen?.classList.remove('active');
+    if (screenLockscreen) {
+      screenLockscreen.classList.add('unlocking');
+      setTimeout(() => {
+        screenLockscreen.classList.remove('active');
+        screenLockscreen.classList.remove('unlocking');
+        screenLockscreen.style.transform = '';
+        screenLockscreen.style.opacity = '';
+        if (slideThumb) {
+          slideThumb.style.transform = '';
+        }
+      }, 350);
+    }
     playBeep(650, 0.04, 'sine');
-    logConsole('info', '[SECURITY_HAL] Lockscreen unlocked via gesture. Enforcing Ring 3 App Sandbox.');
+    logConsole('ok', `[SECURITY_HAL] Lockscreen unlocked via ${gestureType}. Active session resumed.`);
+
+    // Dispatch unlock to QEMU microkernel to transition launcher ViewMode::LockScreen -> ViewMode::HomeScreen
+    try {
+      if (gestureType === 'slide') {
+        await fetch('/api/touch/event', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'swipe',
+            x: 500,
+            y: 680,
+            x2: 780,
+            y2: 680,
+            steps: 8
+          })
+        });
+      } else {
+        await fetch('/api/touch/event', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'swipe',
+            x: 640,
+            y: 640,
+            x2: 640,
+            y2: 160,
+            steps: 8
+          })
+        });
+      }
+      // Also send tap at (640, 400) to guarantee transition
+      await fetch('/api/touch/event', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'tap',
+          x: 640,
+          y: 400
+        })
+      });
+    } catch (_) {}
+
+    setTimeout(refreshScanoutFrame, 60);
+    setTimeout(refreshScanoutFrame, 180);
+    setTimeout(refreshScanoutFrame, 350);
   }
 
-  screenLockscreen?.addEventListener('click', unlockDevice);
+  screenLockscreen?.addEventListener('click', (e) => {
+    if (e.target.closest('#slide-to-unlock-track')) return;
+    unlockDevice('tap');
+  });
 
   let lockStartY = 0;
   let isLockDragging = false;
   screenLockscreen?.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('#slide-to-unlock-track')) return;
     isLockDragging = true;
     lockStartY = e.clientY;
   });
@@ -1497,10 +1560,58 @@ document.addEventListener('DOMContentLoaded', () => {
     const dy = e.clientY - lockStartY;
     screenLockscreen.style.transform = '';
     screenLockscreen.style.opacity = '';
-    if (dy < -35) {
-      unlockDevice();
+    if (dy < -25) {
+      unlockDevice('swipe-up');
     }
   });
+
+  // Slide-to-Unlock horizontal slider
+  const slideTrack = document.getElementById('slide-to-unlock-track');
+  const slideThumb = document.getElementById('slide-to-unlock-thumb');
+  let isSlideDragging = false;
+  let slideStartX = 0;
+
+  if (slideThumb && slideTrack) {
+    slideThumb.addEventListener('pointerdown', (e) => {
+      e.stopPropagation();
+      isSlideDragging = true;
+      slideStartX = e.clientX;
+      try { slideThumb.setPointerCapture(e.pointerId); } catch (_) {}
+    });
+
+    window.addEventListener('pointermove', (e) => {
+      if (!isSlideDragging) return;
+      const trackRect = slideTrack.getBoundingClientRect();
+      const maxDrag = trackRect.width - 48;
+      const dx = Math.max(0, Math.min(maxDrag, e.clientX - slideStartX));
+      slideThumb.style.transform = `translateX(${dx}px)`;
+      if (dx >= maxDrag * 0.7) {
+        isSlideDragging = false;
+        try { slideThumb.releasePointerCapture(e.pointerId); } catch (_) {}
+        slideThumb.style.transform = `translateX(${maxDrag}px)`;
+        unlockDevice('slide');
+      }
+    });
+
+    const finishSlide = (e) => {
+      if (!isSlideDragging) return;
+      isSlideDragging = false;
+      const trackRect = slideTrack.getBoundingClientRect();
+      const maxDrag = trackRect.width - 48;
+      const dx = e ? Math.max(0, e.clientX - slideStartX) : 0;
+      if (dx >= maxDrag * 0.55) {
+        slideThumb.style.transform = `translateX(${maxDrag}px)`;
+        unlockDevice('slide');
+      } else {
+        slideThumb.style.transition = 'transform 0.25s ease';
+        slideThumb.style.transform = 'translateX(0px)';
+        setTimeout(() => { slideThumb.style.transition = ''; }, 260);
+      }
+    };
+
+    window.addEventListener('pointerup', finishSlide);
+    window.addEventListener('pointercancel', finishSlide);
+  }
 
   // Volume Controls (HUD Toast + Real QEMU / Audio Sync)
   let volToastTimer = null;
@@ -1689,7 +1800,7 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       const RFB = module.default;
       vbeScreenTarget.innerHTML = '';
-      
+
       const wsUrl = `ws://${window.location.hostname || '127.0.0.1'}:6081`;
       const rfb = new RFB(vbeScreenTarget, wsUrl, {
         shared: true,
@@ -3722,7 +3833,7 @@ document.addEventListener('DOMContentLoaded', () => {
       time: '12:42 PM',
       preview: 'v8.2 patch for 48-bit 4-level paging validated on QEMU x86_64.',
       messages: [
-        { sender: 'peer', text: 'Hey Bharath! Microkernel v8.2 boots cleanly with 0 warnings on x86_64-unknown-none.', time: '12:30 PM' },
+        { sender: 'peer', text: 'Hey team! Microkernel v8.2 boots cleanly with 0 warnings on x86_64-unknown-none.', time: '12:30 PM' },
         { sender: 'peer', text: 'All 4 cores active in SMP scheduler. Big-LITTLE energy model is operational.', time: '12:35 PM' },
         { sender: 'user', text: 'Awesome! I am testing multi-format sideloading for .app, .rap, .wasm, and .apk now.', time: '12:40 PM' },
         { sender: 'peer', text: 'v8.2 patch for 48-bit 4-level paging validated on QEMU x86_64.', time: '12:42 PM' }

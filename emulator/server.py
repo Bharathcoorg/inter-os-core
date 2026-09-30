@@ -634,9 +634,8 @@ def capture_qemu_screen_frame(full_scanout=False):
                     scaled.save(buf, format="PNG")
                     return buf.getvalue(), "image/png"
                 else:
-                    buf = io.BytesIO()
-                    img.save(buf, format="PNG")
-                    return buf.getvalue(), "image/png"
+                    # Early BIOS text terminal detected (< 820x720). Never leak text console to smartphone screen!
+                    return None, "Guest still in early BIOS bootloader stage; graphical canvas not ready"
     except Exception as e:
         return None, f"Image processing error: {e}"
 
@@ -728,7 +727,7 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
 
 
 def start_qemu_backend():
-    """Checks if QEMU backend is reachable or keeps it in clean Standby."""
+    """Ensures QEMU backend is active and reachable; launches primary instance if needed."""
     global qemu_subproc, ws_subproc
 
     # Check if a QEMU instance is already running on monitor port
@@ -736,14 +735,7 @@ def start_qemu_backend():
     if t["qemu_alive"]:
         return True, "Connected to active microkernel instance"
 
-    latest_telemetry["qemu_alive"] = False
-    latest_telemetry["status"] = "standby"
-    latest_telemetry["mode"] = "standby"
-    latest_telemetry["cpu"]["halted"] = True
-    latest_telemetry["cpu"]["rip"] = "Offline"
-    latest_telemetry["cpu"]["thread_id"] = "Offline"
-    latest_telemetry["cpu"]["registers"] = {}
-    return False, "QEMU Microkernel Standby (Launch via 'interos run qemu')"
+    return launch_qemu_profile("x86_64")
 
 
 last_telemetry_query = 0.0
@@ -866,11 +858,11 @@ def is_safe_proxy_url(url_str):
         parsed = urllib.parse.urlparse(url_str)
         if parsed.scheme not in ('http', 'https'):
             return False, f"Scheme '{parsed.scheme}' not allowed. Only HTTP and HTTPS protocols are permitted."
-        
+
         hostname = parsed.hostname
         if not hostname:
             return False, "Missing hostname in URL."
-        
+
         blocked_hostnames = {
             'localhost', 'localhost.localdomain', 'metadata.google.internal',
             'instance-data', '169.254.169.254'

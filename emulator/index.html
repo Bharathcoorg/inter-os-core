@@ -105,7 +105,7 @@
     <!-- Left Pane: Smartphone Device Emulator Stage -->
     <section class="device-stage ide-device-pane" id="ide-left-pane">
       <div class="emulator-stage-wrapper" id="emulator-stage-wrapper">
-        
+
         <div class="phone-and-nav-container">
           <!-- Physical Smartphone Chassis (Pixel Style Flagship Frame) -->
           <div class="device-chassis" id="device-chassis">
@@ -139,7 +139,7 @@
               <!-- Authentic Live Microkernel Scanout Display -->
               <div class="screen-live-scanout" id="screen-live-scanout" style="display: none;">
                 <img id="live-scanout-img" src="/api/screen/frame" alt="InterOS Microkernel Scanout" draggable="false" />
-                
+
                 <!-- Scanout Live Status Overlay Pill -->
                 <div class="scanout-live-pill" id="scanout-live-pill">
                   <span class="live-dot"></span>
@@ -157,52 +157,112 @@
                 </div>
               </div>
 
-              <!-- Pure Consumer Smartphone Standby Screen (Pixel Always-On Display, Zero Internal Texts) -->
-              <div class="screen-standby" id="screen-standby">
+              <!-- Pure Consumer Smartphone Standby Screen (AOD, Zero Fake Messages) -->
+              <div class="screen-standby" id="screen-standby" style="display: none;">
                 <div class="consumer-aod-content">
                   <div class="aod-clock-box">
                     <div class="aod-time" id="aod-time">09:20</div>
-                    <div class="aod-date" id="aod-date">Wednesday, Sep 24</div>
-                    <div class="aod-weather"><span class="aod-weather-icon">☀️</span> 24° Sunny</div>
+                    <div class="aod-date" id="aod-date">Wednesday, Sep 30</div>
+                    <div class="aod-weather"><span class="aod-weather-icon">⚡</span> 100% Charged &bull; Sovereign Standby</div>
                   </div>
-
-                  <div class="aod-notification-card">
-                    <div class="aod-notif-header">
-                      <span class="aod-notif-app">Messages</span>
-                      <span class="aod-notif-time">Just now</span>
-                    </div>
-                    <div class="aod-notif-body">
-                      <strong>Rama:</strong> Hey, let's review the new design.
-                    </div>
+                  <div class="aod-wake-prompt">
+                    <span class="aod-wake-icon">&uarr;</span>
+                    <span>Tap or swipe up to wake</span>
                   </div>
+                </div>
+              </div>
 
+              <!-- Authentic Sovereign Mobile Lockscreen (Slide to Unlock & Swipe Up) -->
+              <div class="screen-lockscreen" id="screen-lockscreen">
+                <div class="lock-top-section">
+                  <div class="lock-security-badge" id="lock-security-badge">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                    <span>SOVEREIGN RING 0 &bull; VERIFIED</span>
+                  </div>
+                  <div class="lock-clock-box">
+                    <div class="lock-time" id="lock-clock-time">09:20</div>
+                    <div class="lock-date" id="lock-clock-date">Wednesday, Sep 30</div>
                   </div>
                 </div>
 
-                <!-- Screen Overlay: Bootloader Splash Screen (Pure InterOS Branding & Quantum Ring Animation) -->
-                <div class="screen-boot-splash" id="screen-boot-splash" style="display: none;">
-                  <div class="boot-branding-box">
-                    <div class="boot-logo-wrapper">
-                      <div class="boot-quantum-ring ring-outer"></div>
-                      <div class="boot-quantum-ring ring-mid"></div>
-                      <div class="boot-core-glow"></div>
-                      <svg class="boot-logo-svg" viewBox="0 0 48 48" fill="none">
-                        <circle cx="24" cy="24" r="20" stroke="#FFFFFF" stroke-width="2"/>
-                        <circle cx="24" cy="24" r="10" stroke="rgba(255, 255, 255, 0.4)" stroke-width="1.5"/>
-                        <circle cx="24" cy="24" r="4" fill="#FFFFFF"/>
-                      </svg>
+                <div class="lock-center-section">
+                  <div class="lock-vitals-card">
+                    <div class="lvc-header">
+                      <span class="lvc-dot"></span>
+                      <span class="lvc-title">InterOS Sovereign Microkernel</span>
                     </div>
-                    <h1 class="boot-title">InterOS</h1>
+                    <div class="lvc-stats">
+                      <div class="lvc-stat"><span class="lvc-lbl">Architecture</span><span class="lvc-val">Capability Capability-Isolated</span></div>
+                      <div class="lvc-stat"><span class="lvc-lbl">Display</span><span class="lvc-val">720&times;1440 DRM Scanout</span></div>
+                      <div class="lvc-stat"><span class="lvc-lbl">Protection</span><span class="lvc-val">Zero Ambient Authority</span></div>
+                    </div>
                   </div>
                 </div>
 
-                <!-- Integrated Bottom Gesture Pill Bar -->
-                <div class="phone-gesture-bar-pill" id="phone-gesture-bar-pill" title="Tap: Home • Swipe Up: Activity Space">
-                  <div class="gesture-pill-handle"></div>
+                <div class="lock-bottom-section">
+                  <!-- Kinetic Swipe Up Affordance -->
+                  <div class="lock-unlock-prompt" id="lock-unlock-prompt">
+                    <div class="unlock-chevron-group">
+                      <span class="unlock-chevron c1">&#94;</span>
+                      <span class="unlock-chevron c2">&#94;</span>
+                      <span class="unlock-chevron c3">&#94;</span>
+                    </div>
+                    <span class="unlock-text">Swipe up to unlock</span>
+                  </div>
+
+                  <!-- Horizontal Slide-to-Unlock Slider Bar -->
+                  <div class="slide-to-unlock-track" id="slide-to-unlock-track">
+                    <div class="slide-to-unlock-thumb" id="slide-to-unlock-thumb" title="Drag right to unlock">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+                    </div>
+                    <span class="slide-track-label">Slide to unlock &rarr;</span>
+                  </div>
+
+                  <!-- Quick Action Buttons -->
+                  <div class="lock-quick-actions">
+                    <button class="lock-action-btn" id="lock-btn-torch" title="Flashlight / Torch">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                    </button>
+                    <button class="lock-action-btn" id="lock-btn-camera" title="Launch Camera">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Screen Overlay: Bootloader Splash Screen (Pure InterOS Branding & Quantum Ring Animation) -->
+              <div class="screen-boot-splash" id="screen-boot-splash" style="display: none;">
+                <div class="boot-branding-box">
+                  <div class="boot-logo-wrapper">
+                    <div class="boot-quantum-ring ring-outer"></div>
+                    <div class="boot-quantum-ring ring-mid"></div>
+                    <div class="boot-quantum-ring ring-inner"></div>
+                    <div class="boot-core-glow"></div>
+                    <svg class="boot-logo-svg" viewBox="0 0 48 48" fill="none">
+                      <circle cx="24" cy="24" r="20" stroke="#00F2FE" stroke-width="2"/>
+                      <circle cx="24" cy="24" r="10" stroke="rgba(255, 255, 255, 0.4)" stroke-width="1.5"/>
+                      <circle cx="24" cy="24" r="4" fill="#00F2FE"/>
+                    </svg>
+                  </div>
+                  <h1 class="boot-title">InterOS</h1>
+                  <div class="boot-subtitle" id="boot-custom-subtitle">Sovereign Zero-Trust Microkernel</div>
                 </div>
 
-                <!-- Screen Overlay: Floating Glass Toast Capsule -->
-                <div class="interos-toast-container" id="interos-toast-container" aria-live="polite"></div>
+                <div class="boot-minimal-indicator">
+                  <div class="boot-progress-bar">
+                    <div class="boot-progress-fill" id="boot-progress-fill"></div>
+                  </div>
+                  <div class="boot-step-label" id="boot-step-label">Initializing GDT, Paging &amp; Capability Space...</div>
+                </div>
+              </div>
+
+              <!-- Integrated Bottom Gesture Pill Bar -->
+              <div class="phone-gesture-bar-pill" id="phone-gesture-bar-pill" title="Tap: Home &bull; Swipe Up: Unlock / Home">
+                <div class="gesture-pill-handle"></div>
+              </div>
+
+              <!-- Screen Overlay: Floating Glass Toast Capsule -->
+              <div class="interos-toast-container" id="interos-toast-container" aria-live="polite"></div>
               </div>
             </div>
           </div>
@@ -732,7 +792,7 @@
             <strong>Cellular Baseband Modem &amp; 3GPP RIL Engine</strong>
             <span class="badge-chip" id="tel-signal-badge" style="color: #10B981; border-color: rgba(16, 185, 129, 0.3);">5G SA &bull; -82 dBm</span>
           </div>
-          
+
           <div class="appdev-stats-grid" style="margin-bottom: 16px;">
             <div class="appdev-stat-card">
               <span class="stat-lbl">CALL STATE</span>
