@@ -9,3 +9,4 @@ description = "AArch64 Sovereign Smartphone Physical Microkernel Payload for Int
 spin = "0.9.8"
 linked_list_allocator = "0.10.6"
 interos-android-shared = { path = "../kernel/src/compat/android/shared" }
+ed25519-dalek = { version = "2.1.1", default-features = false, features = ["alloc"] }
