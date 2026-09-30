@@ -1826,28 +1826,48 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(json.dumps({'success': False, 'error': 'unsupported touch action'}).encode())
                 return
 
-            is_portrait = data.get('coords') == 'portrait' or (0 <= x <= 720 and 0 <= y <= 1440)
-            if is_portrait:
-                px = max(0, min(719, x))
-                py = max(0, min(1439, y))
-                gx = 460 + int(px * 360 / 720)
+            # Coordinate space is explicit. Never infer portrait from overlapping
+            # numeric ranges: a 720x720 point is valid in both spaces.
+            space = str(data.get('coords', data.get('coordinate_space', 'guest_framebuffer'))).strip().lower()
+            if space in ('portrait', 'logical_portrait', 'studio_display'):
+                if space == 'studio_display':
+                    source_w, source_h = 720, 1440
+                else:
+                    source_w, source_h = 720, 1440
+                if not (0 <= x < source_w and 0 <= y < source_h):
+                    self.send_response(400)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': False, 'status': 'REJECTED', 'error': 'logical portrait coordinates must be within 720x1440'}).encode())
+                    return
+                px = x
+                py = y
+                gx = int(px * 360 / 720)
                 gy = int(py * 720 / 1440)
+                canonical_space = 'logical_portrait'
+            elif space in ('guest', 'guest_framebuffer', 'qemu', 'qemu_framebuffer'):
+                if not (0 <= x < 1280 and 0 <= y < 720):
+                    self.send_response(400)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': False, 'status': 'REJECTED', 'error': 'guest framebuffer coordinates must be within 1280x720'}).encode())
+                    return
+                gx = x
+                gy = y
+                # Device Studio uses the canonical 360x720 phone viewport inside
+                # the 1280x720 QEMU scanout. Keep outside-phone coordinates valid
+                # without guessing which coordinate system the sender intended.
+                if 460 <= gx < 820 and 0 <= gy < 720:
+                    px = int((gx - 460) * 720 / 360)
+                    py = int(gy * 1440 / 720)
+                else:
+                    px, py = gx, gy
+                canonical_space = 'guest_framebuffer'
             else:
-                gx = max(0, min(1279, x))
-                gy = max(0, min(719, y))
-                px = (gx - 460) * 2 if 460 <= gx <= 820 else gx
-                py = gy * 2 if 460 <= gx <= 820 else gy
-
-            if not is_portrait and not (0 <= x < 1280 and 0 <= y < 720):
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
-                self.wfile.write(json.dumps({
-                    'success': False,
-                    'status': 'REJECTED',
-                    'source': 'QEMU_VIRTUAL_INPUT_CONTRACT',
-                    'error': 'touch coordinates must be within 1280x720 guest scanout'
-                }).encode())
+                self.wfile.write(json.dumps({'success': False, 'status': 'REJECTED', 'error': 'unknown coordinate space'}).encode())
                 return
 
             sent = False
@@ -1862,54 +1882,44 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                                 y2 = int(data['y2'])
                             except (KeyError, TypeError, ValueError):
                                 x2, y2 = x, y
-                            if is_portrait:
+                            if canonical_space == 'logical_portrait':
                                 px2 = max(0, min(719, x2))
                                 py2 = max(0, min(1439, y2))
                             else:
-                                px2 = (x2 - 460) * 2 if 460 <= x2 <= 820 else x2
-                                py2 = y2 * 2 if 460 <= x2 <= 820 else y2
+                                if 460 <= x2 < 820 and 0 <= y2 < 720:
+                                    px2 = int((x2 - 460) * 720 / 360)
+                                    py2 = int(y2 * 1440 / 720)
+                                else:
+                                    px2, py2 = x2, y2
                             try:
-                                steps = int(data.get('steps', 5))
+                                steps = max(1, min(32, int(data.get('steps', 5))))
                             except (TypeError, ValueError):
                                 steps = 5
                             serial_socket_conn.sendall(f"SWIPE {px} {py} {px2} {py2} {steps}\n".encode('utf-8'))
-                        elif action == 'down':
-                            serial_socket_conn.sendall(f"INPUT_TOUCH DOWN {gx} {gy} 0\n".encode('utf-8'))
-                        elif action == 'up':
-                            serial_socket_conn.sendall(f"INPUT_TOUCH UP {gx} {gy} 0\n".encode('utf-8'))
-                        elif action == 'move':
-                            serial_socket_conn.sendall(f"INPUT_TOUCH MOVE {gx} {gy} 0\n".encode('utf-8'))
                         else:
-                            serial_socket_conn.sendall(f"INPUT_TOUCH DOWN {gx} {gy} 0\n".encode('utf-8'))
-                            serial_socket_conn.sendall(f"INPUT_TOUCH UP {gx} {gy} 0\n".encode('utf-8'))
+                            # Raw contact events are always transported in the
+                            # guest framebuffer space so the kernel owns gesture
+                            # recognition and cancellation semantics.
+                            serial_socket_conn.sendall(f"INPUT_TOUCH {action.upper()} {gx} {gy} {int(data.get('pointer_id', 0))}\n".encode('utf-8'))
                         sent = True
                     except Exception:
                         sent = False
 
-            if sent:
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps({
-                    'success': True,
-                    'status': 'DISPATCHED',
-                    'source': 'UART_COM1',
-                    'action': action,
-                    'x': x,
-                    'y': y
-                }).encode())
-            else:
-                self.send_response(503)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps({
-                    'success': False,
-                    'status': 'UNAVAILABLE',
-                    'source': 'UART_COM1',
-                    'error': 'QEMU COM1 serial input socket is offline or not connected'
-                }).encode())
+            self.send_response(200 if sent else 503)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': sent,
+                'status': 'DISPATCHED' if sent else 'UNAVAILABLE',
+                'source': 'UART_COM1' if sent else 'UNAVAILABLE',
+                'action': action,
+                'coordinate_space': canonical_space,
+                'x': x,
+                'y': y,
+                'guest_x': gx,
+                'guest_y': gy,
+            }).encode())
             return
         if self.path == '/api/kms/flip':
             self.send_response(409)
@@ -2596,4 +2606,3 @@ if __name__ == '__main__':
         stop_qemu_backend()
         print("\nStopping studio server.")
         sys.exit(0)
-
