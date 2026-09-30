@@ -235,7 +235,10 @@ impl NfcController {
                     return Ok(ApduResponse::new(Vec::new(), SW_WRONG_LENGTH));
                 }
 
-                // Signing requires a concrete secure-element backend; never fabricate a MAC in the kernel.\n                return Ok(ApduResponse::new(Vec::new(), SW_INS_NOT_SUPPORTED));\n            }
+                // Signing requires a concrete secure-element backend; never
+                // fabricate a MAC in the kernel.
+                return Ok(ApduResponse::new(Vec::new(), SW_INS_NOT_SUPPORTED));
+            }
 
             _ => Ok(ApduResponse::new(Vec::new(), SW_INS_NOT_SUPPORTED)),
         }
@@ -250,13 +253,18 @@ impl NfcController {
         let mut offset = 0;
 
         while offset < payload.len() {
+            // A record header needs three octets; stop cleanly on a truncated tail.
+            if offset + 3 > payload.len() {
+                break;
+            }
+
             let header = payload[offset];
             let tnf = header & 0x07;
             let type_len = payload[offset + 1] as usize;
             let payload_len = payload[offset + 2] as usize;
             offset += 3;
 
-            if offset + type_len + payload_len > payload.len() {
+            if type_len + payload_len > payload.len() - offset {
                 break;
             }
 
