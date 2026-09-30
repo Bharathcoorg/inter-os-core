@@ -74,6 +74,7 @@ pub struct SmpController {
     pub psci: PsciController,
     pub cores: Vec<CpuCore>,
     pub total_ipis_sent: u64,
+    pub hardware_present: bool,
 }
 
 impl SmpController {
@@ -111,12 +112,25 @@ impl SmpController {
             psci,
             cores,
             total_ipis_sent: 0,
+            hardware_present: false,
         }
     }
 
     /// Returns count of currently active/online CPU cores.
     pub fn online_core_count(&self) -> usize {
         self.cores.iter().filter(|c| c.state == CoreState::Online).count()
+    }
+
+    /// Binds the controller to a real PSCI/GIC-backed SMP topology.
+    pub fn set_hardware_present(&mut self, present: bool) {
+        self.hardware_present = present;
+        if !present {
+            for core in self.cores.iter_mut().skip(1) {
+                core.state = CoreState::Offline;
+                core.active_task_id = None;
+                core.load_pct = 0;
+            }
+        }
     }
 
     /// Brings up a secondary CPU core via ARM PSCI v1.1 CPU_ON firmware call.
@@ -127,6 +141,7 @@ impl SmpController {
         context_id: u64,
         caps: &CapabilityTable,
     ) -> Result<(), SmpError> {
+        if !self.hardware_present { return Err(SmpError::HardwareDisabled); }
         caps.check(CapabilityType::CpuSmpGovernorDirect, Rights::INVOKE)
             .map_err(|_| SmpError::CapabilityDenied)?;
 
@@ -157,6 +172,7 @@ impl SmpController {
 
     /// Powers off a secondary core to conserve battery life during low workload periods.
     pub fn power_off_core(&mut self, core_id: u8, caps: &CapabilityTable) -> Result<(), SmpError> {
+        if !self.hardware_present { return Err(SmpError::HardwareDisabled); }
         caps.check(CapabilityType::CpuSmpGovernorDirect, Rights::INVOKE)
             .map_err(|_| SmpError::CapabilityDenied)?;
 
@@ -185,6 +201,7 @@ impl SmpController {
         ipi_kind: IpiKind,
         caps: &CapabilityTable,
     ) -> Result<(), SmpError> {
+        if !self.hardware_present { return Err(SmpError::HardwareDisabled); }
         caps.check(CapabilityType::CpuSmpGovernorDirect, Rights::INVOKE)
             .map_err(|_| SmpError::CapabilityDenied)?;
 
