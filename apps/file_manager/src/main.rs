@@ -540,8 +540,7 @@ pub extern "C" fn _start() -> ! {
                 };
                 while std::input_event_poll(&mut input).is_ok() {
                     // Swipe gesture -> Return to launcher
-                    if input.kind == 4
-                        && ((input.dy <= -40 && input.y >= 1200) || input.dx.abs() >= 40)
+                    if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10
                     {
                         std::log(
                             0,
