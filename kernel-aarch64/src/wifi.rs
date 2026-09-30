@@ -15,7 +15,6 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use crate::capability::{CapabilityTable, CapabilityType, Rights};
-use crate::crypto::sha256;
 
 pub const FRAME_TYPE_MGMT: u8 = 0x00;
 pub const FRAME_TYPE_DATA: u8 = 0x02;
