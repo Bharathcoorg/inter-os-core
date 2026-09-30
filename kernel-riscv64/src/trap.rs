@@ -27,10 +27,8 @@ pub unsafe fn init_traps() {
     asm!(
         "csrw stvec, {0}",
         "csrw sscratch, {1}",
-        "csrrs zero, sstatus, {2}", // Enable SUM (bit 18) for servicing U-mode syscall memory
         in(reg) trap_handler_addr,
         in(reg) stack_top,
-        in(reg) (1usize << 18),
         options(nostack)
     );
 }
