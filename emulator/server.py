@@ -1741,6 +1741,50 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 'error': 'Hardware sensor injection is disabled; Device Studio only displays guest-reported telemetry'
             }).encode())
             return
+        if self.path == '/api/touch/event':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+                action = str(data.get('action', '')).strip().lower()
+                space = str(data.get('coords', 'portrait')).strip().lower()
+                if space in ('portrait', 'logical_portrait', 'studio_display'):
+                    x = int(data.get('x', 0)); y = int(data.get('y', 0))
+                    if not (0 <= x < 720 and 0 <= y < 1440): raise ValueError('portrait coordinates out of bounds')
+                    gx, gy = 460 + (x * 360 // 720), y * 720 // 1440
+                    x2 = int(data.get('x2', x)); y2 = int(data.get('y2', y))
+                    if not (0 <= x2 < 720 and 0 <= y2 < 1440): raise ValueError('portrait end coordinates out of bounds')
+                    gx2, gy2 = 460 + (x2 * 360 // 720), y2 * 720 // 1440
+                elif space in ('guest', 'guest_framebuffer', 'qemu', 'qemu_framebuffer'):
+                    gx, gy = int(data.get('x', 0)), int(data.get('y', 0))
+                    gx2, gy2 = int(data.get('x2', gx)), int(data.get('y2', gy))
+                    if not (0 <= gx < 1280 and 0 <= gy < 720 and 0 <= gx2 < 1280 and 0 <= gy2 < 720): raise ValueError('guest framebuffer coordinates out of bounds')
+                else:
+                    raise ValueError('unsupported coordinate space')
+                if action == 'tap':
+                    ok, msg = send_guest_serial_command(f'TAP {gx} {gy}', '[COM1 INPUT]', timeout=4)
+                elif action in ('down', 'move', 'up'):
+                    ok, msg = send_guest_serial_command(f'{action.upper()} {gx} {gy}', '[COM1 INPUT]', timeout=4)
+                elif action == 'cancel':
+                    ok, msg = send_guest_serial_command(f'INPUT_TOUCH CANCEL {gx} {gy} 0', '[COM1 INPUT]', timeout=4)
+                elif action in ('swipe', 'drag'):
+                    steps = max(2, min(20, int(data.get('steps', 5))))
+                    ok, msg = send_guest_serial_command(f'SWIPE {gx} {gy} {gx2} {gy2} {steps}', '[COM1 INPUT]', timeout=8)
+                else:
+                    raise ValueError('unsupported touch action')
+                if not ok: raise RuntimeError(msg)
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True, 'status': 'DISPATCHED', 'source': 'UART_COM1', 'action': action, 'coordinate_space': space, 'guest': {'x': gx, 'y': gy}}).encode())
+            except (ValueError, TypeError, json.JSONDecodeError, RuntimeError) as exc:
+                self.send_response(400 if isinstance(exc, (ValueError, TypeError, json.JSONDecodeError)) else 503)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': str(exc)}).encode())
+            return
+
         if self.path == '/api/input/key':
             content_length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(content_length) if content_length > 0 else b'{}'
