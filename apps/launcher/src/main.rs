@@ -4,28 +4,12 @@
 use core::panic::PanicInfo;
 use interos_std as std;
 
-const W: usize = 720;
-const H: usize = 1440;
-const CHUNK: usize = 4096;
+mod theme;
+use theme::*;
 
-// -----------------------------------------------------------------------------
-// 32-bit ARGB8888 Design Color Tokens
-// -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFF0A0D14;
-const SURFACE_DARK: u32 = 0xFF121824;
-const SURFACE_RAISED: u32 = 0xFF17243A;
-const SURFACE_LIGHT: u32 = 0xFFFFFFFF;
-const BORDER_SUBTLE: u32 = 0xFF222E42;
-const TEXT_PRIMARY: u32 = 0xFFF8FAFC;
-const TEXT_MUTED: u32 = 0xFF94A3B8;
-const TEXT_DARK: u32 = 0xFF0F172A;
-const ACCENT_SKY: u32 = 0xFF31C4FF;
-const ACCENT_AMBER: u32 = 0xFFF59E0B;
-const SUCCESS_EMERALD: u32 = 0xFF10B981;
-const CLOCK_TIME: &[u8; 5] = &[b'0', b'9', b':', b'2', b'0'];
-const DANGER_CRIMSON: u32 = 0xFFFF6B6B;
-const ACCENT_CYAN: u32 = 0xFF00F2FE;
-const ACCENT_VIOLET: u32 = 0xFF8A2BE2;
+const W: usize = SCREEN_WIDTH;
+const H: usize = SCREEN_HEIGHT;
+const CHUNK: usize = 4096;
 
 // -----------------------------------------------------------------------------
 // Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')
@@ -175,6 +159,7 @@ pub enum ViewMode {
 
 pub struct LauncherState {
     pub current_view: ViewMode,
+    pub clock_time: [u8; 5],
     pub task_done: [bool; 3],
     pub wifi_on: bool,
     pub bt_on: bool,
@@ -202,6 +187,7 @@ impl LauncherState {
     pub const fn new() -> Self {
         Self {
             current_view: ViewMode::LockScreen,
+            clock_time: *b"00:00",
             task_done: [false, false, false],
             wifi_on: false,
             bt_on: false,
@@ -285,6 +271,28 @@ impl LauncherState {
         self.recent_apps[2] = [0u8; 32];
         self.recent_app_lens[2] = 0;
         self.recent_task_ids[2] = 0;
+    }
+}
+
+fn refresh_clock(state: &mut LauncherState) {
+    let mut buf = [0u8; 96];
+    let Ok(n) = std::rtc_get_time(&mut buf) else { return; };
+    let data = &buf[..n];
+    let mut hour = [b'0'; 2];
+    let mut minute = [b'0'; 2];
+    let mut digits = 0usize;
+    let mut seen_colon = false;
+    for &b in data {
+        if b.is_ascii_digit() {
+            if !seen_colon && digits < 2 { hour[digits] = b; digits += 1; }
+            else if seen_colon && digits < 4 { minute[digits - 2] = b; digits += 1; }
+        } else if b == b':' && digits >= 2 {
+            seen_colon = true;
+            if digits >= 4 { break; }
+        }
+    }
+    if digits >= 4 {
+        state.clock_time = [hour[0], hour[1], b':', minute[0], minute[1]];
     }
 }
 
@@ -459,7 +467,7 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return 0xFFE2E8F0;
         }
         if y >= 16 && y < 32 {
-            if let Some(c) = test_text(x, y, 48, 16, 2, CLOCK_TIME, 0xFF0F172A) {
+            if let Some(c) = test_text(x, y, 48, 16, 2, state.clock_time, 0xFF0F172A) {
                 return c;
             }
         }
@@ -507,17 +515,17 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     if y < 235 {
         // Left Greeting
         if y >= 64 && y < 80 {
-            if let Some(c) = test_text(x, y, 48, 64, 2, b"Good morning,", 0xFF64748B) {
+            if let Some(c) = test_text(x, y, 48, 64, 2, b"InterOS", 0xFF64748B) {
                 return c;
             }
         }
         if y >= 88 && y < 120 {
-            if let Some(c) = test_text(x, y, 48, 88, 4, b"Bharath", 0xFF0F172A) {
+            if let Some(c) = test_text(x, y, 48, 88, 4, b"Device", 0xFF0F172A) {
                 return c;
             }
         }
         if y >= 132 && y < 148 {
-            if let Some(c) = test_text(x, y, 48, 132, 2, b"Let's make a good day.", 0xFF64748B) {
+            if let Some(c) = test_text(x, y, 48, 132, 2, b"System status", 0xFF64748B) {
                 return c;
             }
         }
@@ -551,7 +559,7 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         }
         // Weather condition "Mostly Sunny"
         if y >= 126 && y < 142 {
-            if let Some(c) = test_text(x, y, 485, 126, 2, b"Mostly Sunny", 0xFF64748B) {
+            if let Some(c) = test_text(x, y, 485, 126, 2, b"Weather unavailable", 0xFF64748B) {
                 return c;
             }
         }
@@ -597,7 +605,7 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             if y >= 310 && y < 326 {
                 let col = if state.task_done[0] { 0xFF94A3B8 } else { 0xFF0F172A };
                 if let Some(c) =
-                    test_text(x, y, 102, 310, 2, b"Meeting with team (11:00)", col)
+                    test_text(x, y, 102, 310, 2, b"System services", col)
                 {
                     return c;
                 }
@@ -622,7 +630,7 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             }
             if y >= 360 && y < 376 {
                 let col = if state.task_done[1] { 0xFF94A3B8 } else { 0xFF0F172A };
-                if let Some(c) = test_text(x, y, 102, 360, 2, b"2 unread messages", col) {
+                if let Some(c) = test_text(x, y, 102, 360, 2, b"Installed applications", col) {
                     return c;
                 }
             }
@@ -646,7 +654,7 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             }
             if y >= 410 && y < 426 {
                 let col = if state.task_done[2] { 0xFF94A3B8 } else { 0xFF0F172A };
-                if let Some(c) = test_text(x, y, 102, 410, 2, b"Finish design work", col) {
+                if let Some(c) = test_text(x, y, 102, 410, 2, b"Recent activity", col) {
                     return c;
                 }
             }
@@ -793,7 +801,7 @@ fn get_activity_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
             return BORDER_SUBTLE;
         }
         if y >= 16 && y < 32 {
-            if let Some(c) = test_text(x, y, 48, 16, 2, CLOCK_TIME, TEXT_PRIMARY) {
+            if let Some(c) = test_text(x, y, 48, 16, 2, state.clock_time, TEXT_PRIMARY) {
                 return c;
             }
         }
@@ -1320,7 +1328,7 @@ fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return 0x33FFFFFF;
         }
         if y >= 16 && y < 32 {
-            if let Some(c) = test_text(x, y, 48, 16, 2, CLOCK_TIME, 0xFFFFFFFF) {
+            if let Some(c) = test_text(x, y, 48, 16, 2, state.clock_time, 0xFFFFFFFF) {
                 return c;
             }
         }
@@ -1362,7 +1370,7 @@ fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             }
         }
         if y >= 195 && y < 259 {
-            if let Some(c) = test_text(x, y, 72, 195, 8, CLOCK_TIME, 0xFFFFFFFF) {
+            if let Some(c) = test_text(x, y, 72, 195, 8, state.clock_time, 0xFFFFFFFF) {
                 return c;
             }
         }
@@ -1566,7 +1574,7 @@ fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return BORDER_SUBTLE;
         }
         if y >= 16 && y < 32 {
-            if let Some(c) = test_text(x, y, 48, 16, 2, CLOCK_TIME, TEXT_PRIMARY) {
+            if let Some(c) = test_text(x, y, 48, 16, 2, state.clock_time, TEXT_PRIMARY) {
                 return c;
             }
         }
@@ -1785,7 +1793,7 @@ fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return BORDER_SUBTLE;
         }
         if y >= 16 && y < 32 {
-            if let Some(c) = test_text(x, y, 48, 16, 2, CLOCK_TIME, TEXT_PRIMARY) {
+            if let Some(c) = test_text(x, y, 48, 16, 2, state.clock_time, TEXT_PRIMARY) {
                 return c;
             }
         }
