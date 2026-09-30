@@ -63,3 +63,20 @@ def test_launcher_contains_no_removed_demo_workload_labels():
     source = (ROOT / "apps/launcher/src/main.rs").read_text()
     for label in ("Meeting with team (11:00)", "2 unread messages", "Mostly Sunny", "Finish design work"):
         assert label not in source
+
+
+def test_touch_path_uses_canonical_router():
+    source = (ROOT / "kernel/src/input/mod.rs").read_text()
+    assert "pub static INPUT_ROUTER: Mutex<InputRouter>" in source
+    assert "dispatch_pointer_at(pointer, 720, 24, ticks)" in source
+    assert "TOUCH_ENGINE.lock()" not in source
+    assert "pump_touch_events()" not in source
+
+
+def test_canonical_gesture_kinds_have_wire_codes():
+    source = (ROOT / "kernel/src/drivers/input.rs").read_text()
+    assert "Back = 6" in source
+    assert "Home = 7" in source
+    assert "Recents = 8" in source
+    assert "Cancel = 9" in source
+    assert "Fling = 10" in source
