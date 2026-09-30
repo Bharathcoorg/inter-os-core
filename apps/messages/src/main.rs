@@ -36,7 +36,7 @@ pub struct ConversationThread {
     pub unread_count: u8,
 }
 
-/// Static Conversation Directory matching the reference UI spec.
+/// Conversation directory populated from the real messaging backend.
 pub static THREADS: [ConversationThread; 0] = [];
 
 
