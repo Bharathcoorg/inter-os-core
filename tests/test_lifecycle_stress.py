@@ -90,7 +90,7 @@ def query_diag_state(sock, reader, timeout=6.0):
     raise RuntimeError("Failed to receive [DIAG_STATE] response from kernel COM1 UART")
 
 
-def execute_iteration_phases(reader, monitor_sock, iter_num):
+def execute_iteration_operations(reader, monitor_sock, iter_num):
     print(f"\n{'='*64}")
     print(f"  [STRESS ITERATION {iter_num}] Executing Smartphone lifecycle workload")
     print(f"{'='*64}")
@@ -99,7 +99,7 @@ def execute_iteration_phases(reader, monitor_sock, iter_num):
     test_app_lifecycle(
         reader=reader,
         monitor_sock=monitor_sock,
-        phase_num=2,
+        operation_num=2,
         app_name="Calculator",
         app_id="org.interos.calculator",
         tap_coords=(180, 520),
@@ -117,7 +117,7 @@ def execute_iteration_phases(reader, monitor_sock, iter_num):
     test_app_lifecycle(
         reader=reader,
         monitor_sock=monitor_sock,
-        phase_num=3,
+        operation_num=3,
         app_name="Settings",
         app_id="org.interos.settings",
         tap_coords=(180, 350),
@@ -134,7 +134,7 @@ def execute_iteration_phases(reader, monitor_sock, iter_num):
     test_app_lifecycle(
         reader=reader,
         monitor_sock=monitor_sock,
-        phase_num=4,
+        operation_num=4,
         app_name="Terminal",
         app_id="org.interos.terminal",
         tap_coords=(485, 350),
@@ -150,7 +150,7 @@ def execute_iteration_phases(reader, monitor_sock, iter_num):
     test_app_lifecycle(
         reader=reader,
         monitor_sock=monitor_sock,
-        phase_num=5,
+        operation_num=5,
         app_name="Vault",
         app_id="org.interos.vault",
         tap_coords=(485, 520),
@@ -166,7 +166,7 @@ def execute_iteration_phases(reader, monitor_sock, iter_num):
     test_app_lifecycle(
         reader=reader,
         monitor_sock=monitor_sock,
-        phase_num=6,
+        operation_num=6,
         app_name="Camera",
         app_id="org.interos.camera",
         tap_coords=(180, 690),
@@ -179,7 +179,7 @@ def execute_iteration_phases(reader, monitor_sock, iter_num):
     test_app_lifecycle(
         reader=reader,
         monitor_sock=monitor_sock,
-        phase_num=7,
+        operation_num=7,
         app_name="Dialer",
         app_id="org.interos.dialer",
         tap_coords=(485, 690),
@@ -195,7 +195,7 @@ def execute_iteration_phases(reader, monitor_sock, iter_num):
     test_app_lifecycle(
         reader=reader,
         monitor_sock=monitor_sock,
-        phase_num=8,
+        operation_num=8,
         app_name="Browser",
         app_id="org.interos.browser",
         tap_coords=(180, 860),
@@ -208,7 +208,7 @@ def execute_iteration_phases(reader, monitor_sock, iter_num):
     test_app_lifecycle(
         reader=reader,
         monitor_sock=monitor_sock,
-        phase_num=9,
+        operation_num=9,
         app_name="Messages",
         app_id="org.interos.messages",
         tap_coords=(485, 860),
@@ -221,7 +221,7 @@ def execute_iteration_phases(reader, monitor_sock, iter_num):
     test_app_lifecycle(
         reader=reader,
         monitor_sock=monitor_sock,
-        phase_num=10,
+        operation_num=10,
         app_name="Calendar",
         app_id="org.interos.calendar",
         tap_coords=(180, 1030),
@@ -234,7 +234,7 @@ def execute_iteration_phases(reader, monitor_sock, iter_num):
     test_app_lifecycle(
         reader=reader,
         monitor_sock=monitor_sock,
-        phase_num=11,
+        operation_num=11,
         app_name="Music",
         app_id="org.interos.music",
         tap_coords=(485, 1030),
@@ -430,7 +430,7 @@ def main():
         for i in range(1, total_iterations + 1):
             t0 = time.time()
             m_sock = monitor_sock if (i == 1 and args.screendump) else None
-            execute_iteration_phases(reader, m_sock, i)
+            execute_iteration_operations(reader, m_sock, i)
             elapsed = time.time() - t0
 
             # Capture post-iteration metrics
@@ -512,7 +512,7 @@ def main():
             json.dump({
                 "target": "x86_64",
                 "iterations_completed": total_iterations,
-                "phases_per_iteration": 20,
+                "operations_per_iteration": 20,
                 "total_phase_transitions": total_iterations * 20,
                 "baseline": baseline,
                 "metrics_history": metrics_history,
@@ -526,14 +526,14 @@ def main():
                 "shm_pipes_leaked": 0,
                 "result": "PASS",
                 "evidence_statement": (
-                    f"No monotonic resource growth detected across {total_iterations} iterations ({total_iterations*20} phases). "
+                    f"No monotonic resource growth detected across {total_iterations} iterations ({total_iterations*20} operations). "
                     f"Initial +{iter1_drift} B allocation classified as {classification}; subsequent drift is strictly 0 B."
                 )
             }, f, indent=2)
 
         print(f"[STRESS REPORT] Machine-readable metrics saved to: {out_report}")
         print("\n" + "=" * 68)
-        print(f"  LIFECYCLE STRESS TEST: PASSED (100%) ({total_iterations} iterations, {total_iterations*20} phases)")
+        print(f"  LIFECYCLE STRESS TEST: PASSED (100%) ({total_iterations} iterations, {total_iterations*20} operations)")
         print("=" * 68)
         return 0
 
