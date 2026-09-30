@@ -26,6 +26,7 @@ pub static SOVEREIGN_SIM: Mutex<SovereignEsim> = Mutex::new(SovereignEsim {
 
 /// Global static instance of the Cellular Modem Driver.
 pub static CELLULAR_MODEM: Mutex<CellularModem> = Mutex::new(CellularModem {
+    hardware_present: false,
     state: ModemRadioState::PowerDown,
     call_state: CallState::Idle,
     signal: SignalQuality { rssi: 99, ber: 99 },
@@ -55,6 +56,9 @@ pub fn test_telephony() {
     // 2. Test 3GPP AT Command State Machine & Voice Calling
     {
         let mut modem = CELLULAR_MODEM.lock();
+        // The self-test explicitly binds a simulated backend; this must never
+        // be confused with platform hardware detection.
+        modem.set_hardware_present(true);
         modem.state = ModemRadioState::RegisteredHome;
         let sim = SOVEREIGN_SIM.lock();
 
@@ -115,6 +119,7 @@ pub fn test_telephony() {
     // report PowerDown / undetectable signal instead of advertising active connectivity.
     {
         let mut modem = CELLULAR_MODEM.lock();
+        modem.set_hardware_present(false);
         modem.state = ModemRadioState::PowerDown;
         modem.call_state = CallState::Idle;
         modem.signal = SignalQuality { rssi: 99, ber: 99 };
@@ -136,6 +141,7 @@ pub fn test_telephony() {
 /// Initializes telephony to a truthful hardware-neutral state.
 pub fn init() {
     let mut modem = CELLULAR_MODEM.lock();
+    modem.set_hardware_present(false);
     modem.state = ModemRadioState::PowerDown;
     modem.call_state = CallState::Idle;
     modem.signal = SignalQuality { rssi: 99, ber: 99 };
