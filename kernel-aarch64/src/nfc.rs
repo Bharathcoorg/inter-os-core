@@ -15,7 +15,6 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use crate::capability::{CapabilityTable, CapabilityType, Rights};
-use crate::crypto::HmacSha256;
 
 pub const INTER_OS_DID_AID: [u8; 10] = [
     0xF0, 0x49, 0x4E, 0x54, 0x45, 0x52, 0x44, 0x49, 0x44, 0x01, // F0 "INTERDID" 01
@@ -142,7 +141,6 @@ pub struct NfcController {
     pub mode: NfcOperatingMode,
     pub field_present: bool,
     pub active_aid_selected: bool,
-    pub device_root_key: [u8; 32],
     pub device_did: String,
     pub total_taps_processed: u64,
     pub total_authentications_signed: u64,
@@ -157,7 +155,6 @@ impl NfcController {
             mode: NfcOperatingMode::Off,
             field_present: false,
             active_aid_selected: false,
-            device_root_key,
             device_did: String::from(device_did),
             total_taps_processed: 0,
             total_authentications_signed: 0,
@@ -238,16 +235,7 @@ impl NfcController {
                     return Ok(ApduResponse::new(Vec::new(), SW_WRONG_LENGTH));
                 }
 
-                // Compute HMAC-SHA256 of the reader challenge nonce using device root key
-                let mut challenge_payload = Vec::new();
-                challenge_payload.extend_from_slice(b"NFC_TAP_AUTH:");
-                challenge_payload.extend_from_slice(&cmd.data);
-
-                let signature = HmacSha256::mac(&self.device_root_key, &challenge_payload);
-                self.total_authentications_signed += 1;
-
-                Ok(ApduResponse::new(signature.to_vec(), SW_SUCCESS))
-            }
+                // Signing requires a concrete secure-element backend; never fabricate a MAC in the kernel.\n                return Ok(ApduResponse::new(Vec::new(), SW_INS_NOT_SUPPORTED));\n            }
 
             _ => Ok(ApduResponse::new(Vec::new(), SW_INS_NOT_SUPPORTED)),
         }
