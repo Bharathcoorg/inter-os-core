@@ -45,7 +45,7 @@ pub extern "C" fn _start() -> ! {
     match std::service_stop(11) {
         Ok(_) => {
             let _ = std::log(0, "[PID1] Service stop lifecycle contract exercised.");
-            match std::service_start(1) {
+            match std::service_start(11) {
                 Ok(_) => {
                     let _ = std::log(0, "[PID1] Service restart lifecycle contract exercised.");
                 }
