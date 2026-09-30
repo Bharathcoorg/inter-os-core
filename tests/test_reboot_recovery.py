@@ -160,6 +160,12 @@ def boot_and_verify_milestones(qemu_exe, kernel_img, ser_port, session_name):
     assert diag is not None, f"[{session_name}] DIAG_STATE query failed"
     print(f"[{session_name}] Microkernel state: tasks_total={diag['tasks_total']} | tasks_active={diag['tasks_active']} | surfaces={diag['surfaces']}")
 
+    # Unlock device to HomeScreen
+    reader.sock.sendall(b"SWIPE 360 1350 360 300 5\n")
+    unlocked = reader.wait_for("Home surface rendered.", timeout=25.0)
+    assert unlocked, f"[{session_name}] Failed to unlock device from LockScreen"
+    time.sleep(1.0)
+
     return proc, sock, reader, diag
 
 

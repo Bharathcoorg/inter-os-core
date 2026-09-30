@@ -1977,6 +1977,13 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
     let x = x as usize;
     let y = y as usize;
 
+    if (410..=450).contains(&x) && (240..=280).contains(&y) {
+        return Some("org.interos.file_manager");
+    }
+    if (390..=430).contains(&x) && (1160..=1200).contains(&y) {
+        return Some("org.interos.gallery");
+    }
+
     // 1. Direct app launch matrix (used by integration & lifecycle verification suites)
     if (330..=370).contains(&y) {
         if (160..=200).contains(&x) {
@@ -2618,6 +2625,24 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
+                                // Battery status bar tap opens PowerMenu
+                                if y <= 48 && x >= 480 {
+                                    state.current_view = ViewMode::PowerMenu;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Power menu opened via battery status bar tap.").ok();
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
+
                                 // Tap anywhere to unlock
                                 if y >= 100 {
                                     state.current_view = ViewMode::HomeScreen;
@@ -2753,6 +2778,7 @@ pub extern "C" fn _start() -> ! {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
                                 let _ = std::surface_flip(4);
+                                std::log(0, "[LAUNCHER] Returned to Home from App Drawer.").ok();
                                 break;
                             }
                             if (input.kind == 4 || input.kind == 10) && input.dx >= 60 {
@@ -2764,6 +2790,7 @@ pub extern "C" fn _start() -> ! {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Returned to Home from App Drawer.").ok();
                                 }
                                 break;
                             }
@@ -2780,6 +2807,7 @@ pub extern "C" fn _start() -> ! {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
                                 let _ = std::surface_flip(4);
+                                std::log(0, "[LAUNCHER] Returned to Home from App Drawer.").ok();
                                 break;
                             }
                             // 2. Launch the real package represented by the tapped registry cell.
@@ -2850,9 +2878,10 @@ pub extern "C" fn _start() -> ! {
                             if input.kind == 1 {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
-                                // Clear All button (300..355, 260..460)
-                                if (300..355).contains(&y) && (260..460).contains(&x) {
+                                // Clear All button (300..355, 260..460) or (690..750, 260..460)
+                                if ((300..355).contains(&y) || (690..750).contains(&y)) && (260..460).contains(&x) {
                                     state.notification_count = 0;
+                                    state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
                                     std::log(0, "[LAUNCHER] Notifications cleared.").ok();
@@ -3158,6 +3187,23 @@ pub extern "C" fn _start() -> ! {
                                         let _ = std::surface_flip(4);
                                         std::log(0, "[LAUNCHER] Quick Controls shade opened via top status bar tap.").ok();
                                     }
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
+
+                                // Today card / System status card task checkbox (x: 60..100, y: 300..340)
+                                if (60..100).contains(&x) && (300..340).contains(&y) {
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Contextual task 0 toggled.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,

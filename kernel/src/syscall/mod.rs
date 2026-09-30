@@ -3709,12 +3709,6 @@ pub fn sys_event_poll(interest_mask: u32, timeout_ticks: u32) -> Result<u32, Sys
         crate::task::yield_now();
         let mut reactor = crate::event::EVENT_REACTOR.lock();
         let ready = reactor.check_woken(current_id, interest_mask);
-        serial_println!(
-            "[EVENT REACTOR] Task {} woken from event wait: interest={:#04X}, triggered={:#04X}.",
-            current_id.0,
-            interest_mask,
-            ready
-        );
         Ok(ready)
     } else {
         Ok(0)
