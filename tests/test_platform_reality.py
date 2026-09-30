@@ -133,6 +133,13 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertIn("ed25519-dalek", cargo)
         self.assertNotIn("HmacSha256::mac(&self.publisher_pubkey", ota)
 
+    def test_keystore_does_not_claim_hardware_backing_without_backend(self):
+        keystore = self.read("kernel/src/crypto/keystore.rs")
+        self.assertIn("hardware_backed: bool", keystore)
+        self.assertIn("hardware_backed: false", keystore)
+        self.assertIn("is_hardware_backed", keystore)
+        self.assertIn("software-backed keystore", keystore)
+
     def test_no_internal_gate_labels_enter_public_source(self):
         for path in ["README.md", "kernel/src/platform.rs", "tests/test_platform_reality.py"]:
             text = self.read(path).lower()
