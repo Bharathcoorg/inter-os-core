@@ -50,7 +50,7 @@ pub struct Bookmark {
     pub is_sovereign: bool,
 }
 
-/// Built-in Sovereign Bookmarks.
+/// Optional bookmarks loaded from real browser state.
 pub static BOOKMARKS: [Bookmark; 0] = [];
 
 
