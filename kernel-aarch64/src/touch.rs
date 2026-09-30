@@ -39,6 +39,9 @@ pub struct GoodixGt911Driver {
     pub last_coords: [(u32, u32); MAX_TOUCH_SLOTS],
     pub touch_width: u32,
     pub touch_height: u32,
+    /// False until a real I2C digitizer has been probed and bound. No contact
+    /// may be reported as observed hardware while this is false.
+    pub hardware_present: bool,
 }
 
 impl GoodixGt911Driver {
@@ -49,7 +52,36 @@ impl GoodixGt911Driver {
             last_coords: [(0, 0); MAX_TOUCH_SLOTS],
             touch_width,
             touch_height,
+            hardware_present: false,
         }
+    }
+
+    /// Binds the driver to a digitizer that answered on a real I2C bus.
+    pub fn set_hardware_present(&mut self, present: bool) {
+        self.hardware_present = present;
+        if !present {
+            self.active_slots = [false; MAX_TOUCH_SLOTS];
+            self.last_coords = [(0, 0); MAX_TOUCH_SLOTS];
+        }
+    }
+
+    /// Reads a contact frame from the physical digitizer.
+    ///
+    /// Fails closed when no digitizer is bound: a frame may only enter the
+    /// system from a controller that actually responded on the bus.
+    pub fn read_contact_frame<B: I2cBusAdapter>(
+        &mut self,
+        bus: &mut B,
+        buf: &mut [u8],
+    ) -> Result<usize, &'static str> {
+        if !self.hardware_present {
+            return Err("GT911: digitizer hardware unavailable");
+        }
+        if buf.len() < 1 + 2 * BYTES_PER_POINT {
+            return Err("GT911: frame buffer too small");
+        }
+        bus.read_reg16(self.i2c_addr, GT911_REG_TOUCH_STATUS, buf)?;
+        Ok(buf.len())
     }
 
     pub fn probe<B: I2cBusAdapter>(&self, bus: &mut B) -> Result<[u8; 4], &'static str> {

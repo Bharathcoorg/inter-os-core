@@ -208,6 +208,57 @@ impl SimpleFramebuffer {
         (self.stride as usize) * (self.height as usize)
     }
 
+    /// Reads a pixel back from the surface in its native packed encoding.
+    ///
+    /// Used to prove that rasterisation actually reached the backing store
+    /// instead of merely reporting success. Returns `None` for out-of-range
+    /// coordinates.
+    pub fn get_pixel(&self, x: u32, y: u32) -> Option<u32> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+
+        let bpp = self.format.bytes_per_pixel();
+        let offset = (y as usize * self.stride as usize) + (x as usize * bpp);
+        let ptr = (self.base_vaddr + offset) as *const u8;
+
+        compiler_fence(Ordering::SeqCst);
+        let value = unsafe {
+            match self.format {
+                SimpleFbFormat::Rgb565 => core::ptr::read_volatile(ptr as *const u16) as u32,
+                SimpleFbFormat::Bgr888 | SimpleFbFormat::Rgb888 => {
+                    let b = core::ptr::read_volatile(ptr) as u32;
+                    let g = core::ptr::read_volatile(ptr.add(1)) as u32;
+                    let r = core::ptr::read_volatile(ptr.add(2)) as u32;
+                    (r << 16) | (g << 8) | b
+                }
+                SimpleFbFormat::Argb8888 | SimpleFbFormat::Xrgb8888 => {
+                    let b = core::ptr::read_volatile(ptr) as u32;
+                    let g = core::ptr::read_volatile(ptr.add(1)) as u32;
+                    let r = core::ptr::read_volatile(ptr.add(2)) as u32;
+                    let a = core::ptr::read_volatile(ptr.add(3)) as u32;
+                    (a << 24) | (r << 16) | (g << 8) | b
+                }
+            }
+        };
+        compiler_fence(Ordering::SeqCst);
+        Some(value)
+    }
+
+    /// Packs an 8-bit RGB triple into the surface's native encoding.
+    /// Exposed so callers can assert on read-back without duplicating the layout.
+    pub fn pack_rgb(&self, r: u8, g: u8, b: u8) -> u32 {
+        match self.format {
+            SimpleFbFormat::Rgb565 => {
+                let r5 = ((r as u32) >> 3) & 0x1F;
+                let g6 = ((g as u32) >> 2) & 0x3F;
+                let b5 = ((b as u32) >> 3) & 0x1F;
+                (r5 << 11) | (g6 << 5) | b5
+            }
+            _ => (r as u32) << 16 | (g as u32) << 8 | b as u32,
+        }
+    }
+
     #[inline]
     pub fn set_pixel(&mut self, x: u32, y: u32, r: u8, g: u8, b: u8) {
         if x >= self.width || y >= self.height {

@@ -35,6 +35,10 @@ pub struct SerialRilDriver {
     pub transaction_succeeded: bool,
     pub transaction_failed: bool,
     pub tx_queue: Vec<String>,
+    /// False until a physical baseband has been bound. Signal strength,
+    /// registration state and call alerts may only be surfaced when a modem
+    /// actually produced them.
+    pub hardware_present: bool,
 }
 
 impl SerialRilDriver {
@@ -50,7 +54,41 @@ impl SerialRilDriver {
             transaction_succeeded: false,
             transaction_failed: false,
             tx_queue: Vec::new(),
+            hardware_present: false,
         }
+    }
+
+    /// Binds the driver to a baseband reachable on a concrete transport.
+    pub fn set_hardware_present(&mut self, present: bool) {
+        self.hardware_present = present;
+        if !present {
+            self.pending_urcs.clear();
+            self.last_response = None;
+        }
+    }
+
+    /// Feeds bytes received from the physical baseband UART.
+    ///
+    /// Fails closed when no modem is bound. Callers that need to exercise the
+    /// AT framer itself use [`SerialRilDriver::feed_rx_bytes`] directly.
+    pub fn ingest_modem_rx(&mut self, bytes: &[u8]) -> Result<usize, &'static str> {
+        if !self.hardware_present {
+            return Err("SerialRIL: modem hardware unavailable");
+        }
+        Ok(self.feed_rx_bytes(bytes))
+    }
+
+    /// Reads the current signal quality reported by the modem.
+    pub fn read_signal_quality(&self) -> Result<u8, &'static str> {
+        if !self.hardware_present {
+            return Err("SerialRIL: modem hardware unavailable");
+        }
+        for urc in &self.pending_urcs {
+            if let UrcEvent::SignalQuality { rssi, .. } = urc {
+                return Ok(*rssi);
+            }
+        }
+        Err("SerialRIL: no signal quality reported by modem")
     }
 
     pub fn enqueue_command(&mut self, cmd: &str) -> Result<(), &'static str> {
