@@ -831,7 +831,7 @@ fn get_quick_controls_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
                 }
             }
             if y >= 205 && y < 213 {
-                if let Some(c) = test_text(x, y, 435, 205, 1, b"On", SUCCESS_EMERALD) {
+                if let Some(c) = test_text(x, y, 435, 205, 1, b"Unavailable", TEXT_MUTED) {
                     return c;
                 }
             }
@@ -853,11 +853,11 @@ fn get_quick_controls_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
         if (x >= 40 && x < 235) || (x >= 262 && x < 458) || (x >= 485 && x < 680) {
             if y >= 320 && y < 336 {
                 if x < 235 {
-                    if let Some(c) = test_text(x, y, 64, 320, 2, b"5G Mobile", TEXT_PRIMARY) {
+                    if let Some(c) = test_text(x, y, 64, 320, 2, b"Mobile unavailable", TEXT_MUTED) {
                         return c;
                     }
                 } else if x < 458 {
-                    if let Some(c) = test_text(x, y, 290, 320, 2, b"Hotspot", TEXT_MUTED) {
+                    if let Some(c) = test_text(x, y, 290, 320, 2, b"Hotspot unavailable", TEXT_MUTED) {
                         return c;
                     }
                 } else {
