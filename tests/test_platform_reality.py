@@ -116,6 +116,13 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertIn("SCHEDULER.lock().exit_current()", trap)
         self.assertIn("SCHEDULER.lock().add_task", main)
 
+    def test_aarch64_wifi_does_not_claim_sae_without_hardware_backend(self):
+        wifi = self.read("kernel-aarch64/src/wifi.rs")
+        self.assertIn("hardware_present: bool", wifi)
+        self.assertIn("HardwareUnavailable", wifi)
+        self.assertIn("Err(WifiError::HardwareUnavailable)", wifi)
+        self.assertNotIn("let ephemeral_rand = [0x55u8; 32]", wifi)
+
     def test_no_internal_gate_labels_enter_public_source(self):
         for path in ["README.md", "kernel/src/platform.rs", "tests/test_platform_reality.py"]:
             text = self.read(path).lower()
