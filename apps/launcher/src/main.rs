@@ -1260,7 +1260,7 @@ fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return 0x88FFFFFF;
     }
 
-    // 7. Foundational Mountain Wallpaper
+    // 7. Canonical stock background
     get_stock_background_pixel(x, y)
 }
 
@@ -2705,25 +2705,6 @@ pub extern "C" fn _start() -> ! {
                             if input.kind == 1 {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
-
-                                // Wallpaper cycle pill (x: 80..640, y: 1120..1195)
-                                if (1120..=1195).contains(&y) && (80..640).contains(&x) {
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Wallpaper cycled from lock screen.")
-                                        .ok();
-                                    let mut drain = std::InputEvent {
-                                        kind: 0,
-                                        x: 0,
-                                        y: 0,
-                                        dx: 0,
-                                        dy: 0,
-                                        scale_milli: 1000,
-                                    };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
-
 
                                 // Camera circle button at (648, 1330, r: 35)
                                 let c_dx = (x as i32) - 648;
