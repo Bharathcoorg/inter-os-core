@@ -406,6 +406,15 @@ def main():
         print("[STRESS SETUP] Initial launcher presentation verified.")
         time.sleep(1.0)
 
+        # Unlock device to HomeScreen
+        print("[STRESS SETUP] Unlocking device via swipe-up gesture...")
+        reader.sock.sendall(b"SWIPE 360 1350 360 300 5\n")
+        unlocked = reader.wait_for("render_full complete: 10-app home screen canvas initialized.", timeout=25.0)
+        if not unlocked:
+            raise RuntimeError("Failed to unlock device from LockScreen")
+        print("[STRESS SETUP] Device unlocked to HomeScreen.")
+        time.sleep(1.0)
+
         # Baseline capture
         baseline = query_diag_state(serial_sock, reader)
         print("\n" + "-" * 68)

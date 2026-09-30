@@ -268,6 +268,18 @@ def main():
         sz_launcher = os.path.getsize(ppm_launcher) if os.path.exists(ppm_launcher) else 0
         print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_launcher} ({sz_launcher} bytes)")
 
+        # Unlock device to HomeScreen
+        print("[LIFECYCLE TEST] Unlocking device via swipe-up gesture...")
+        reader.sock.sendall(b"SWIPE 360 1350 360 300 5\n")
+        unlocked = reader.wait_for(
+            "render_full complete: 10-app home screen canvas initialized.",
+            timeout=25.0,
+            print_keywords=["LAUNCHER", "Device unlocked", "render_full"]
+        )
+        assert unlocked, "Failed to unlock device from LockScreen"
+        print("[LIFECYCLE TEST] [OK] Device unlocked to HomeScreen.")
+        time.sleep(1.0)
+
         # 2. Multi-App Roundtrips:
         # App 1: Calculator (Row 1, Card 0: x=180, y=520)
         test_app_lifecycle(
