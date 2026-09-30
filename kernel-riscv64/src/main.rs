@@ -68,10 +68,10 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
     syscall::dispatch_syscall(&mut user_tf);
     assert_eq!(user_tf.regs[10], 1, "GetTaskId should return task ID 1");
     println!("[TEST] RISC-V Userspace Syscall: SYS_GET_TASK_ID returned valid Task ID 1 (VERIFIED).");
-    println!("[BOOT] InterOS RISC-V Firmware Interface: Complete (SBI v1.0+ Compliant).");
+    println!("[BOOT] InterOS RISC-V SBI console/trap interface initialized.");
     println!("[BOOT] Microkernel S-mode initialized.");
-    println!("[BOOT] 13 Sovereign Applications Verified for riscv64gc-unknown-none-elf.");
-    println!("[BOOT] System state: Userspace Ready (U-mode isolated).");
+    println!("[BOOT] RISC-V userspace smoke image is the current architecture validation target.");
+    println!("[BOOT] System state: U-mode isolation smoke path ready; runtime validation remains required.");
     println!("------------------------------------------------------------");
 
     // 5. Deploy and Launch Real RISC-V U-Mode Userspace Process
