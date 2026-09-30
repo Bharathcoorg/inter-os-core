@@ -2801,107 +2801,35 @@ pub extern "C" fn _start() -> ! {
                                 while std::input_event_poll(&mut drain).is_ok() {}
                                 break;
                             }
-                            // 2. Touch Tap
+                            // 2. Launch the real package represented by the tapped registry cell.
                             if input.kind == 1 {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
-
-                                // Clear all button or header icon
-                                let dx_c = (x as i32) - 644;
-                                let dy_c = (y as i32) - 76;
-                                if (y >= 700 && y < 755 && x >= 260 && x < 460)
-                                    || (dx_c * dx_c + dy_c * dy_c <= 324)
-                                {
-                                    let mut drain = std::InputEvent {
-                                        kind: 0,
-                                        x: 0,
-                                        y: 0,
-                                        dx: 0,
-                                        dy: 0,
-                                        scale_milli: 1000,
-                                    };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                if let Some(target_desc) = resolve_app_at_touch(&state, input.x, input.y) {
+                                    let mut target_buf = [0u8; 32];
+                                    let len = target_desc.len().min(32);
+                                    target_buf[..len].copy_from_slice(&target_desc.as_bytes()[..len]);
+                                    if let Ok(target_app) = core::str::from_utf8(&target_buf[..len]) {
+                                        match std::app_launch(target_app) {
+                                            Ok(task_id) => {
+                                                state.push_recent(target_app);
+                                                state.active_child = Some(task_id);
+                                                state.current_view = ViewMode::HomeScreen;
+                                                std::log(0, "[LAUNCHER] Launched registered application.").ok();
+                                                break;
+                                            }
+                                            Err(_) => {
+                                                std::log(0, "[LAUNCHER] Application launch rejected by kernel.").ok();
+                                            }
+                                        }
+                                    }
+                                } else if y >= 1400 {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Notifications cleared.").ok();
                                     break;
                                 }
-
-                                // Card 0: Messages
-                                if (205..310).contains(&y) && (40..680).contains(&x) {
-                                    state.push_recent("org.interos.messages");
-                                    if let Ok(task_id) = std::app_launch("org.interos.messages") {
-                                        state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
-                                        let mut drain = std::InputEvent {
-                                            kind: 0,
-                                            x: 0,
-                                            y: 0,
-                                            dx: 0,
-                                            dy: 0,
-                                            scale_milli: 1000,
-                                        };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-                                // Card 1: Messages
-                                if (325..430).contains(&y) && (40..680).contains(&x) {
-                                    state.push_recent("org.interos.messages");
-                                    if let Ok(task_id) = std::app_launch("org.interos.messages") {
-                                        state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
-                                        let mut drain = std::InputEvent {
-                                            kind: 0,
-                                            x: 0,
-                                            y: 0,
-                                            dx: 0,
-                                            dy: 0,
-                                            scale_milli: 1000,
-                                        };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-                                // Card 2: Calendar
-                                if (445..550).contains(&y) && (40..680).contains(&x) {
-                                    state.push_recent("org.interos.calendar");
-                                    if let Ok(task_id) = std::app_launch("org.interos.calendar") {
-                                        state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
-                                        let mut drain = std::InputEvent {
-                                            kind: 0,
-                                            x: 0,
-                                            y: 0,
-                                            dx: 0,
-                                            dy: 0,
-                                            scale_milli: 1000,
-                                        };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
-                                // Card 3: Settings
-                                if (565..670).contains(&y) && (40..680).contains(&x) {
-                                    state.push_recent("org.interos.settings");
-                                    if let Ok(task_id) = std::app_launch("org.interos.settings") {
-                                        state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
-                                        let mut drain = std::InputEvent {
-                                            kind: 0,
-                                            x: 0,
-                                            y: 0,
-                                            dx: 0,
-                                            dy: 0,
-                                            scale_milli: 1000,
-                                        };
-                                        while std::input_event_poll(&mut drain).is_ok() {}
-                                        break;
-                                    }
-                                }
                             }
-                        }
                         ViewMode::LiveWidgets => {
                             // Swipe right returns to HomeScreen
                             if (input.kind == 4 && input.dx >= 60)
