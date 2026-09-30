@@ -75,6 +75,9 @@ pub const MAX_SMS_BODY_LEN: usize = 1024;
 pub const MAX_SMS_RECORDS: usize = 32;
 
 pub struct CellularModem {
+    /// True only when a concrete modem backend has registered with this controller.
+    /// Software state alone must never make the platform report a cellular modem.
+    pub hardware_present: bool,
     pub state: ModemRadioState,
     pub call_state: CallState,
     pub signal: SignalQuality,
@@ -89,7 +92,8 @@ pub struct CellularModem {
 impl CellularModem {
     pub fn new() -> Self {
         Self {
-            state: ModemRadioState::RegisteredHome,
+            hardware_present: false,
+            state: ModemRadioState::PowerDown,
             call_state: CallState::Idle,
             signal: SignalQuality { rssi: 28, ber: 99 },
             pdp_context_active: true,
@@ -101,8 +105,22 @@ impl CellularModem {
         }
     }
 
+    /// Marks the controller online after a concrete modem backend has completed
+    /// hardware discovery and registration.
+    pub fn set_hardware_present(&mut self, present: bool) {
+        self.hardware_present = present;
+        if !present {
+            self.state = ModemRadioState::PowerDown;
+            self.pdp_context_active = false;
+            self.call_state = CallState::Idle;
+        }
+    }
+
     /// Initiates an outgoing cellular voice call (`ATD<number>;`).
     pub fn dial(&mut self, number: &str, current_ticks: u64) -> Result<(), &'static str> {
+        if !self.hardware_present {
+            return Err("cellular modem backend unavailable");
+        }
         if number.is_empty() || number.len() > MAX_PHONE_NUMBER_LEN { return Err("invalid phone number length"); }
         if self.state == ModemRadioState::PowerDown {
             return Err("Cellular radio is powered down");
@@ -156,6 +174,9 @@ impl CellularModem {
 
     /// Transmits an SMS message to a destination phone number (`AT+CMGS`).
     pub fn send_sms(&mut self, destination: &str, body: &str, current_ticks: u64) -> Result<u32, &'static str> {
+        if !self.hardware_present {
+            return Err("cellular modem backend unavailable");
+        }
         if self.state == ModemRadioState::PowerDown {
             return Err("Cellular radio powered down");
         }
@@ -177,6 +198,10 @@ impl CellularModem {
 
     /// Toggles cellular packet data (PDP Context Attach / Detach).
     pub fn set_data_enabled(&mut self, enabled: bool) -> bool {
+        if !self.hardware_present {
+            self.pdp_context_active = false;
+            return false;
+        }
         self.pdp_context_active = enabled;
         if enabled {
             if self.state == ModemRadioState::RegisteredHome {
@@ -191,6 +216,10 @@ impl CellularModem {
     /// Executes an AT command string against the modem baseband engine.
     pub fn execute_at(&mut self, cmd: &str, esim: &SovereignEsim, current_ticks: u64) -> Result<String, &'static str> {
         let trimmed = cmd.trim();
+
+        if !self.hardware_present {
+            return Err("cellular modem backend unavailable");
+        }
 
         if trimmed == "AT" || trimmed == "ATE0" {
             return Ok("OK".to_string());
