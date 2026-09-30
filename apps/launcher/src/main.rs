@@ -292,6 +292,14 @@ fn refresh_notifications(state: &mut LauncherState) {
     state.notification_count = std::notification_query(uid, locked).unwrap_or(0);
 }
 
+fn developer_terminal_enabled() -> bool {
+    let mut buf = [0u8; 8];
+    let Ok(n) = std::settings_get(3, "developer.terminal_enabled", &mut buf) else {
+        return false;
+    };
+    &buf[..n] == b"true"
+}
+
 fn refresh_package_catalog(state: &mut LauncherState) {
     let mut buf = [0u8; 4096];
     let Ok(n) = std::package_registry(0, &mut buf) else {
@@ -326,6 +334,11 @@ fn refresh_package_catalog(state: &mut LauncherState) {
             continue;
         };
         if status != b"active" || id.is_empty() || id.len() > 32 || display_name.is_empty() {
+            continue;
+        }
+        if (id == b"terminal" || id == b"org.interos.terminal" || id == b"app_terminal")
+            && !developer_terminal_enabled()
+        {
             continue;
         }
 
