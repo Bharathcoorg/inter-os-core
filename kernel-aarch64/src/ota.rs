@@ -9,7 +9,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 use crate::capability::{CapabilityTable, CapabilityType, Rights};
-use crate::crypto::{constant_time_eq_32, sha256, HmacSha256};
+use crate::crypto::{constant_time_eq_32, sha256, verify_ed25519_signature};
 
 /// OTA Package Header Magic: "INTR_OTA"
 pub const OTA_MAGIC: [u8; 8] = *b"INTR_OTA";
@@ -75,11 +75,11 @@ pub struct OtaPackageHeader {
     pub version: u32,
     pub payload_len: u32,
     pub payload_sha256: [u8; 32],
-    pub signature: [u8; 32],
+    pub signature: [u8; 64],
 }
 
 impl OtaPackageHeader {
-    /// Constructs preimage data used to generate and verify the publisher HMAC-SHA256 signature.
+    /// Constructs the canonical metadata preimage covered by the publisher Ed25519 signature.
     pub fn compute_signature_preimage(&self) -> Vec<u8> {
         let mut preimage = Vec::new();
         preimage.extend_from_slice(&self.magic);
@@ -199,8 +199,7 @@ impl OtaManager {
 
         // 7. Cryptographic publisher signature validation
         let preimage = header.compute_signature_preimage();
-        let expected_signature = HmacSha256::mac(&self.publisher_pubkey, &preimage);
-        if !constant_time_eq_32(&header.signature, &expected_signature) {
+        if !verify_ed25519_signature(&preimage, &self.publisher_pubkey, &header.signature) {
             return Err(OtaError::InvalidSignature);
         }
 
