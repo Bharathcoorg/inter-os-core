@@ -243,8 +243,13 @@ fn handle_rapp_command(s: &str) -> bool {
             serial_println!("[COM1 INPUT] REJECT touch bounds");
             return true;
         }
-        crate::input::post_touch_event(slot, x, y, if phase == crate::input::TouchPhase::Up { 0 } else { 512 }, phase);
-        serial_println!("[COM1 INPUT] TOUCH phase={:?} slot={} x={} y={}", phase, slot, x, y);
+        let (px, py) = if x >= 460 && x <= 820 {
+            ((x - 460) * 2, y * 2)
+        } else {
+            (x, y)
+        };
+        crate::input::post_touch_event(slot, px, py, if phase == crate::input::TouchPhase::Up { 0 } else { 512 }, phase);
+        serial_println!("[COM1 INPUT] TOUCH phase={:?} slot={} x={} y={} -> ({}, {})", phase, slot, x, y, px, py);
         return true;
     }
 

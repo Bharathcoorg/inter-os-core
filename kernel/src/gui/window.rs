@@ -133,6 +133,10 @@ impl WindowManager {
         self.windows.iter().filter(|w| w.visible && w.kind != WindowKind::SystemOverlay).max_by_key(|w| w.z).map(|w| w.id)
     }
 
+    pub fn top_visible_owner(&self) -> Option<u64> {
+        self.windows.iter().filter(|w| w.visible && w.kind != WindowKind::SystemOverlay).max_by_key(|w| w.z).map(|w| w.owner)
+    }
+
     pub fn snapshot(&self, out: &mut [Window]) -> usize {
         let n = out.len().min(self.windows.len());
         out[..n].copy_from_slice(&self.windows[..n]);

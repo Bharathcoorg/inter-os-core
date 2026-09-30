@@ -613,7 +613,7 @@ impl FramebufferWriter {
         let w = PHONE_W - 40;
         let mut y = PHONE_Y + 54;
 
-        self.draw_string(x, y, "SOVEREIGN TELEPHONY & DIALER", 1, COLOR_GREEN, Some(COLOR_FRAME_BG));
+        self.draw_string(x, y, "PHONE & DIALER", 1, COLOR_GREEN, Some(COLOR_FRAME_BG));
         self.draw_string(x + w - 144, y, "5G VoNR | RSSI 31", 1, COLOR_MUTED, Some(COLOR_FRAME_BG));
         y += 24;
 
