@@ -156,6 +156,16 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertIn("SCHEDULER.lock().exit_current()", trap)
         self.assertIn("SCHEDULER.lock().add_task", main)
 
+    def test_aarch64_smp_requires_real_psci_gic_backend(self):
+        smp = self.read("kernel-aarch64/src/smp.rs")
+        main = self.read("kernel-aarch64/src/main.rs")
+        self.assertIn("hardware_present: bool", smp)
+        self.assertIn("if !self.hardware_present", smp)
+        self.assertIn("SmpError::HardwareDisabled", smp)
+        self.assertIn("assert!(!smp.hardware_present)", main)
+        self.assertNotIn("smp.boot_secondary_core(1, 0x4008_0000, 0, &smp_caps).expect", main)
+        self.assertNotIn("smp.dispatch_ipi(0b0000_0010, smp::IpiKind::Reschedule, &smp_caps).expect", main)
+
     def test_aarch64_mobile_hal_backends_default_to_absent(self):
         modules = {
             "kernel-aarch64/src/gps.rs": "hardware_present: bool",
