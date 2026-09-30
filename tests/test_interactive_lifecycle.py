@@ -272,7 +272,7 @@ def main():
         print("[LIFECYCLE TEST] Unlocking device via swipe-up gesture...")
         reader.sock.sendall(b"SWIPE 360 1350 360 300 5\n")
         unlocked = reader.wait_for(
-            "render_full complete: 10-app home screen canvas initialized.",
+            "Home surface rendered.",
             timeout=25.0,
             print_keywords=["LAUNCHER", "Device unlocked", "render_full"]
         )
@@ -441,12 +441,12 @@ def main():
             exit_gesture="home_bar"
         )
 
-        # Phase 12: Overview / Recent Apps Switcher Test
-        print("\n[LIFECYCLE TEST] === Phase 12: Testing Overview / Recent Apps Deck ===")
+        # Recent apps: Overview / Recent Apps Switcher Test
+        print("\n[LIFECYCLE TEST] === Recent apps: Testing Overview / Recent Apps Deck ===")
         print("[LIFECYCLE TEST] Dispatching swipe-up gesture from bottom bar on homescreen to open overview...")
         reader.sock.sendall(b"SWIPE 360 1420 360 1100 5\n")
         overview_ready = reader.wait_for(
-            "render_overview complete: Recent apps overview deck displayed.",
+            "Recent apps surface rendered.",
             timeout=10.0,
             print_keywords=["LAUNCHER", "overview", "deck"]
         )
@@ -487,13 +487,13 @@ def main():
         assert reaped, "Failed to reap recent app upon swipe up"
         print("[LIFECYCLE TEST] [OK] Child application reaped, launcher returned to home grid.")
 
-        # Phase 13: Overview Card Dismissal Test (Tap dismiss badge & swipe-to-dismiss)
-        print("\n[LIFECYCLE TEST] === Phase 13: Testing Overview Card Dismissal ===")
+        # Recent app dismissal: Overview Card Dismissal Test (Tap dismiss badge & swipe-to-dismiss)
+        print("\n[LIFECYCLE TEST] === Recent app dismissal: Testing Overview Card Dismissal ===")
         time.sleep(1.0)
         print("[LIFECYCLE TEST] Dispatching swipe-up from homescreen to open overview...")
         reader.sock.sendall(b"SWIPE 360 1420 360 1100 5\n")
         overview2_ready = reader.wait_for(
-            "render_overview complete: Recent apps overview deck displayed.",
+            "Recent apps surface rendered.",
             timeout=10.0,
             print_keywords=["LAUNCHER", "overview", "deck"]
         )
@@ -536,13 +536,13 @@ def main():
         assert returned_home, "Failed to return home from overview deck"
         print("[LIFECYCLE TEST] [OK] Successfully returned to home grid after card dismissals.")
 
-        # Phase 14: Testing Quick Controls Shade
-        print("\n[LIFECYCLE TEST] === Phase 14: Testing Quick Controls Shade ===")
+        # Quick controls: Testing Quick Controls Shade
+        print("\n[LIFECYCLE TEST] === Quick controls: Testing Quick Controls Shade ===")
         time.sleep(0.5)
         print("[LIFECYCLE TEST] Opening Quick Controls via status bar tap (360, 25)...")
         reader.sock.sendall(b"TAP 360 25\n")
         qc_ready = reader.wait_for(
-            "render_quick_controls complete: Control center presented.",
+            "Quick controls surface rendered.",
             timeout=10.0,
             print_keywords=["LAUNCHER", "Quick", "Controls", "render_quick_controls"]
         )
@@ -555,20 +555,20 @@ def main():
         print("[LIFECYCLE TEST] Returning to Home from Quick Controls via bottom bar tap...")
         reader.sock.sendall(b"TAP 360 1410\n")
         qc_returned = reader.wait_for(
-            "render_full complete: 10-app home screen canvas initialized.",
+            "Home surface rendered.",
             timeout=10.0,
             print_keywords=["LAUNCHER", "render_full"]
         )
         assert qc_returned, "Failed to return to Home from Quick Controls"
         print("[LIFECYCLE TEST] [OK] Returned to Home from Quick Controls.")
 
-        # Phase 15: Testing Notifications Shade
-        print("\n[LIFECYCLE TEST] === Phase 15: Testing Notifications Shade ===")
+        # Notifications: Testing Notifications Shade
+        print("\n[LIFECYCLE TEST] === Notifications: Testing Notifications Shade ===")
         time.sleep(0.5)
         print("[LIFECYCLE TEST] Opening Notifications via top-left status bar tap (100, 25)...")
         reader.sock.sendall(b"TAP 100 25\n")
         notif_ready = reader.wait_for(
-            "render_notifications complete: Notifications & events presented.",
+            "Notifications surface rendered.",
             timeout=10.0,
             print_keywords=["LAUNCHER", "Notifications", "render_notifications"]
         )
@@ -581,20 +581,20 @@ def main():
         print("[LIFECYCLE TEST] Returning to Home from Notifications via bottom bar tap...")
         reader.sock.sendall(b"TAP 360 1410\n")
         notif_returned = reader.wait_for(
-            "render_full complete: 10-app home screen canvas initialized.",
+            "Home surface rendered.",
             timeout=10.0,
             print_keywords=["LAUNCHER", "render_full"]
         )
         assert notif_returned, "Failed to return to Home from Notifications"
         print("[LIFECYCLE TEST] [OK] Returned to Home from Notifications.")
 
-        # Phase 16: Testing App Drawer
-        print("\n[LIFECYCLE TEST] === Phase 16: Testing App Drawer ===")
+        # App drawer: Testing App Drawer
+        print("\n[LIFECYCLE TEST] === App drawer: Testing App Drawer ===")
         time.sleep(0.5)
         print("[LIFECYCLE TEST] Opening App Drawer via upward swipe (360, 700) -> (360, 400)...")
         reader.sock.sendall(b"SWIPE 360 700 360 400 5\n")
         drawer_ready = reader.wait_for(
-            "render_app_drawer complete: 16-app grid presented.",
+            "App drawer surface rendered.",
             timeout=10.0,
             print_keywords=["LAUNCHER", "Drawer", "render_app_drawer"]
         )
@@ -604,7 +604,7 @@ def main():
         print("[LIFECYCLE TEST] Switching category tab in App Drawer (x=250, y=160)...")
         reader.sock.sendall(b"TAP 250 160\n")
         tab_switched = reader.wait_for(
-            "render_app_drawer complete: 16-app grid presented.",
+            "App drawer surface rendered.",
             timeout=10.0,
             print_keywords=["LAUNCHER", "category", "tab", "render_app_drawer"]
         )
@@ -617,15 +617,15 @@ def main():
         print("[LIFECYCLE TEST] Returning to Home from App Drawer via bottom tap...")
         reader.sock.sendall(b"TAP 360 1410\n")
         drawer_returned = reader.wait_for(
-            "render_full complete: 10-app home screen canvas initialized.",
+            "Home surface rendered.",
             timeout=10.0,
             print_keywords=["LAUNCHER", "render_full"]
         )
         assert drawer_returned, "Failed to return to Home from App Drawer"
         print("[LIFECYCLE TEST] [OK] Returned to Home from App Drawer.")
 
-        # Phase 17: Testing Contextual Today Tasks
-        print("\n[LIFECYCLE TEST] === Phase 17: Testing Contextual Today Tasks ===")
+        # Contextual state: Testing Contextual Today Tasks
+        print("\n[LIFECYCLE TEST] === Contextual state: Testing Contextual Today Tasks ===")
         time.sleep(0.5)
         print("[LIFECYCLE TEST] Toggling Today card task 0 checkbox at (78, 318)...")
         reader.sock.sendall(b"TAP 78 318\n")
@@ -650,13 +650,13 @@ def main():
         assert task1_toggled, "Failed to toggle contextual task 1"
         print("[LIFECYCLE TEST] [OK] Contextual task 1 toggled.")
 
-        # Phase 18: Testing Live Widgets
-        print("\n[LIFECYCLE TEST] === Phase 18: Testing Live Widgets ===")
+        # Live widgets: Testing Live Widgets
+        print("\n[LIFECYCLE TEST] === Live widgets: Testing Live Widgets ===")
         time.sleep(0.5)
         print("[LIFECYCLE TEST] Opening Live Widgets via horizontal swipe left (500, 700) -> (150, 700)...")
         reader.sock.sendall(b"SWIPE 500 700 150 700 5\n")
         widgets_ready = reader.wait_for(
-            "render_live_widgets complete: Live widgets dashboard presented.",
+            "Live widgets surface rendered.",
             timeout=10.0,
             print_keywords=["LAUNCHER", "Widgets", "render_live_widgets"]
         )
@@ -669,20 +669,20 @@ def main():
         print("[LIFECYCLE TEST] Returning to Home from Live Widgets via bottom tap...")
         reader.sock.sendall(b"TAP 360 1410\n")
         widgets_returned = reader.wait_for(
-            "render_full complete: 10-app home screen canvas initialized.",
+            "Home surface rendered.",
             timeout=10.0,
             print_keywords=["LAUNCHER", "render_full"]
         )
         assert widgets_returned, "Failed to return to Home from Live Widgets"
         print("[LIFECYCLE TEST] [OK] Returned to Home from Live Widgets.")
 
-        # Phase 19: Testing Power Menu & Lock Screen
-        print("\n[LIFECYCLE TEST] === Phase 19: Testing Power Menu & Lock Screen ===")
+        # Power and lock: Testing Power Menu & Lock Screen
+        print("\n[LIFECYCLE TEST] === Power and lock: Testing Power Menu & Lock Screen ===")
         time.sleep(0.5)
         print("[LIFECYCLE TEST] Opening Power Menu via battery status bar tap (600, 25)...")
         reader.sock.sendall(b"TAP 600 25\n")
         pm_ready = reader.wait_for(
-            "render_power_menu complete: Power & safety drawer presented.",
+            "Power surface rendered.",
             timeout=10.0,
             print_keywords=["LAUNCHER", "Power", "menu", "render_power_menu"]
         )
@@ -695,7 +695,7 @@ def main():
         print("[LIFECYCLE TEST] Locking device from Power Menu (500, 225)...")
         reader.sock.sendall(b"TAP 500 225\n")
         device_locked = reader.wait_for(
-            "render_lock_screen complete: Atmospheric lock screen presented.",
+            "Lock surface rendered.",
             timeout=10.0,
             print_keywords=["LAUNCHER", "Device", "locked", "render_lock_screen"]
         )
@@ -708,7 +708,7 @@ def main():
         print("[LIFECYCLE TEST] Toggling flashlight on Lock Screen (72, 1330)...")
         reader.sock.sendall(b"TAP 72 1330\n")
         torch_toggled = reader.wait_for(
-            "render_lock_screen complete: Atmospheric lock screen presented.",
+            "Lock surface rendered.",
             timeout=10.0,
             print_keywords=["LAUNCHER", "Flashlight", "toggled", "render_lock_screen"]
         )
@@ -718,20 +718,20 @@ def main():
         print("[LIFECYCLE TEST] Unlocking device via bottom tap...")
         reader.sock.sendall(b"TAP 360 1410\n")
         unlocked = reader.wait_for(
-            "render_full complete: 10-app home screen canvas initialized.",
+            "Home surface rendered.",
             timeout=10.0,
             print_keywords=["LAUNCHER", "Device", "unlocked", "render_full"]
         )
         assert unlocked, "Failed to unlock device"
         print("[LIFECYCLE TEST] [OK] Device unlocked, returned to Home grid.")
 
-        # Phase 20: Testing System Space
-        print("\n[LIFECYCLE TEST] === Phase 20: Testing System Space ===")
+        # System surface: Testing System Space
+        print("\n[LIFECYCLE TEST] === System surface: Testing System Space ===")
         time.sleep(0.5)
         print("[LIFECYCLE TEST] Opening System Space via universal search bar tap (360, 1330)...")
         reader.sock.sendall(b"TAP 360 1330\n")
         sys_space_ready = reader.wait_for(
-            "render_system_space complete: Visual system space presented.",
+            "System surface rendered.",
             timeout=10.0,
             print_keywords=["LAUNCHER", "System Space", "render_system_space"]
         )
@@ -744,7 +744,7 @@ def main():
         print("[LIFECYCLE TEST] Returning to Home from System Space via bottom tap...")
         reader.sock.sendall(b"TAP 360 1410\n")
         sys_space_returned = reader.wait_for(
-            "render_full complete: 10-app home screen canvas initialized.",
+            "Home surface rendered.",
             timeout=10.0,
             print_keywords=["LAUNCHER", "render_full"]
         )
@@ -756,7 +756,7 @@ def main():
         print(f"[LIFECYCLE TEST] Final screendump recorded: {ppm_final}")
 
         print("\n============================================================")
-        print("  INTEROS CORE ALL 20 PHASES (10 APPS + 10 SCREENS): PASSED (100%)")
+        print("  INTEROS CORE LIFECYCLE INTERACTIONS: PASSED")
         print("============================================================")
 
     except Exception as e:
