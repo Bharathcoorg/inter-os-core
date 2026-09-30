@@ -49,6 +49,7 @@ pub struct SettingsApp {
     pub security_enforced: bool,
     pub cached_battery_soc: u8,
     pub cached_temp_c: u8,
+    pub terminal_enabled: bool,
 }
 
 impl SettingsApp {
@@ -62,6 +63,7 @@ impl SettingsApp {
             security_enforced: true,
             cached_battery_soc: 0,
             cached_temp_c: 0,
+            terminal_enabled: false,
         }
     }
 
@@ -208,6 +210,8 @@ fn render_settings_ui(surface: u32, tab: SettingsTab) {
                             2 => std::design::color::WARNING,
                             _ => std::design::color::TEXT_MUTED,
                         };
+                    } else if tab == SettingsTab::SecurityAndPrivacy && card == 3 && card_y >= 40 && card_y < 100 {
+                        chunk[i] = std::design::color::BACKGROUND;
                     } else {
                         chunk[i] = std::design::color::SURFACE;
                     }
@@ -272,6 +276,8 @@ pub extern "C" fn _start() -> ! {
     // 5. Query About Device & Hardware RTC
     settings.current_tab = SettingsTab::AboutDevice;
     settings.display_about_device();
+    settings.current_tab = SettingsTab::SecurityAndPrivacy;
+    settings.refresh_developer_options();
 
     // Initial render & presentation
     if surface > 0 {
@@ -316,7 +322,12 @@ pub extern "C" fn _start() -> ! {
                             }
                             std::exit_with_code(0);
                         }
-                        if input.y >= 110 && input.y < 170 && input.x >= 24 {
+                        if settings.current_tab == SettingsTab::SecurityAndPrivacy
+                            && input.y >= 830 && input.y < 1010
+                            && input.x >= 32 && input.x < W - 32
+                        {
+                            settings.toggle_terminal();
+                        } else if input.y >= 110 && input.y < 170 && input.x >= 24 {
                             let tapped = ((input.x - 24) / 136) as usize;
                             settings.current_tab = match tapped {
                                 0 => SettingsTab::Wireless,
