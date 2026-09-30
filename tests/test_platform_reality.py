@@ -123,6 +123,16 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertIn("Err(WifiError::HardwareUnavailable)", wifi)
         self.assertNotIn("let ephemeral_rand = [0x55u8; 32]", wifi)
 
+    def test_aarch64_ota_uses_asymmetric_publisher_signatures(self):
+        ota = self.read("kernel-aarch64/src/ota.rs")
+        crypto = self.read("kernel-aarch64/src/crypto.rs")
+        cargo = self.read("kernel-aarch64/Cargo.toml")
+        self.assertIn("pub signature: [u8; 64]", ota)
+        self.assertIn("verify_ed25519_signature", ota)
+        self.assertIn("ed25519_dalek", crypto)
+        self.assertIn("ed25519-dalek", cargo)
+        self.assertNotIn("HmacSha256::mac(&self.publisher_pubkey", ota)
+
     def test_no_internal_gate_labels_enter_public_source(self):
         for path in ["README.md", "kernel/src/platform.rs", "tests/test_platform_reality.py"]:
             text = self.read(path).lower()
