@@ -568,7 +568,6 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         if deg_d2 <= 16 && deg_d2 >= 4 {
             return 0xFF0F172A;
         }
-        // Weather condition "Mostly Sunny"
         if y >= 126 && y < 142 {
             if let Some(c) = test_text(x, y, 485, 126, 2, b"Weather unavailable", 0xFF64748B) {
                 return c;
@@ -597,7 +596,6 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             }
         }
 
-        // Task 1: Meeting with team (11:00)
         if y >= 305 && y < 330 {
             let dx1 = (x as i32) - 78;
             let dy1 = (y as i32) - 318;
@@ -623,7 +621,6 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             }
         }
 
-        // Task 2: 2 unread messages
         if y >= 355 && y < 380 {
             let dx2 = (x as i32) - 78;
             let dy2 = (y as i32) - 368;
@@ -647,7 +644,6 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             }
         }
 
-        // Task 3: Finish design work
         if y >= 405 && y < 430 {
             let dx3 = (x as i32) - 78;
             let dy3 = (y as i32) - 418;
