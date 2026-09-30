@@ -157,3 +157,20 @@ def test_launcher_drawer_pagination_is_registry_backed():
     assert "let pages = (state.app_count + 11) / 12" in source
     assert "state.app_drawer_page += 1" in source
     assert "let app_idx = state.app_drawer_page * 12" in source
+
+
+def test_first_party_media_and_browser_surfaces_do_not_bundle_demo_content():
+    browser = (ROOT / "apps/browser/src/main.rs").read_text()
+    gallery = (ROOT / "apps/gallery/src/main.rs").read_text()
+    messages = (ROOT / "apps/messages/src/main.rs").read_text()
+    music = (ROOT / "apps/music/src/main.rs").read_text()
+    assert "pub static BOOKMARKS: [Bookmark; 0] = [];" in browser
+    assert 'current_url: "about:blank"' in browser
+    assert "GET /catalog.json" not in browser
+    assert "pub static PHOTOS: [PhotoItem; 0] = [];" in gallery
+    assert "Mountain Ridge" not in gallery
+    assert "pub static THREADS: [ConversationThread; 0] = [];" in messages
+    assert "Security Kernel" not in messages
+    assert "pub static PLAYLIST: [AudioTrack; 0] = [];" in music
+    assert "Sovereign Symphony" not in music
+    assert "INTER_DMA_AUDIO_PCM_BLOCK" not in music
