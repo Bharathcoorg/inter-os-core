@@ -85,6 +85,7 @@ impl InputEvent {
             y: gesture.position.y.max(0) as u32,
             dx: gesture.delta_x,
             dy: gesture.delta_y,
+            scale_milli: gesture.scale_milli,
             ..Self::EMPTY
         }
     }
