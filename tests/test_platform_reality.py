@@ -107,6 +107,15 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertIn("6 => -38", syscall)
         self.assertIn("SCHEDULER.lock().current_task_id()", syscall)
 
+    def test_riscv_faults_and_exit_update_scheduler_state(self):
+        task = self.read("kernel-riscv64/src/task.rs")
+        trap = self.read("kernel-riscv64/src/trap.rs")
+        main = self.read("kernel-riscv64/src/main.rs")
+        self.assertIn("pub fn exit_current(&mut self) -> bool", task)
+        self.assertIn("task.state = TaskState::Exited", task)
+        self.assertIn("SCHEDULER.lock().exit_current()", trap)
+        self.assertIn("SCHEDULER.lock().add_task", main)
+
     def test_no_internal_gate_labels_enter_public_source(self):
         for path in ["README.md", "kernel/src/platform.rs", "tests/test_platform_reality.py"]:
             text = self.read(path).lower()
