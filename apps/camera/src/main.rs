@@ -491,7 +491,7 @@ pub extern "C" fn _start() -> ! {
                     scale_milli: 1000,
                 };
                 while std::input_event_poll(&mut input).is_ok() {
-                    if input.kind == 4 && (input.dy <= -40 || input.dx.abs() >= 40) {
+                    if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
                         std::log(
                             0,
                             "[CAMERA APP] Navigation gesture recognized. Returning to launcher.",
