@@ -510,3 +510,47 @@ mod tests {
         assert!(!router.pointer(0).unwrap().active);
     }
 }
+
+#[cfg(test)]
+mod canonical_integration_tests {
+    use super::*;
+
+    #[test]
+    fn timed_router_emits_fling_for_fast_app_swipe() {
+        let mut router = InputRouter::new();
+        let down = PointerEvent::new(
+            InputSource::DeviceStudio,
+            CoordinateSpace::LogicalPortrait,
+            0,
+            PointerPhase::Down,
+            300,
+            700,
+        );
+        let up = PointerEvent::new(
+            InputSource::DeviceStudio,
+            CoordinateSpace::LogicalPortrait,
+            0,
+            PointerPhase::Up,
+            300,
+            600,
+        );
+        router.dispatch_pointer_at(down, 720, 24, 100);
+        assert_eq!(
+            router.dispatch_pointer_at(up, 720, 24, 108).map(|g| g.kind),
+            Some(GestureKind::Fling)
+        );
+    }
+
+    #[test]
+    fn timed_router_emits_pinch_with_scale() {
+        let mut router = InputRouter::new();
+        let d0 = PointerEvent::new(InputSource::Touch, CoordinateSpace::LogicalPortrait, 0, PointerPhase::Down, 200, 400);
+        let d1 = PointerEvent::new(InputSource::Touch, CoordinateSpace::LogicalPortrait, 1, PointerPhase::Down, 400, 400);
+        let m1 = PointerEvent::new(InputSource::Touch, CoordinateSpace::LogicalPortrait, 1, PointerPhase::Move, 450, 400);
+        router.dispatch_pointer_at(d0, 720, 24, 10);
+        router.dispatch_pointer_at(d1, 720, 24, 11);
+        let gesture = router.dispatch_pointer_at(m1, 720, 24, 12).expect("pinch gesture");
+        assert_eq!(gesture.kind, GestureKind::Pinch);
+        assert!(gesture.scale_milli > 1000);
+    }
+}
