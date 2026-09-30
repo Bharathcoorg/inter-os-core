@@ -65,6 +65,17 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertIn('if abi_bytes != b"1" || state != b"running"', init)
         self.assertNotIn('task_bytes == b"0"', init)
 
+    def test_pid1_bootstrap_retries_dependency_blocked_services(self):
+        init = self.read("userspace/init/src/main.rs")
+        self.assertIn("for service_id in 1u8..=11u8", init)
+        self.assertIn("registry_has_all_running_services_after_query()", init)
+        self.assertIn("if !progress", init)
+
+    def test_pid1_lifecycle_smoke_uses_dependency_leaf(self):
+        init = self.read("userspace/init/src/main.rs")
+        self.assertIn("std::service_stop(11)", init)
+        self.assertNotIn("std::service_stop(1)", init)
+
     def test_no_internal_gate_labels_enter_public_source(self):
         for path in ["README.md", "kernel/src/platform.rs", "tests/test_platform_reality.py"]:
             text = self.read(path).lower()
