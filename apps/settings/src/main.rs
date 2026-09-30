@@ -1,12 +1,7 @@
 //! Inter OS Native Sovereign Settings & Telemetry App
 //!
 //! Full production settings and system diagnostics app executing in Ring 3 (User Mode):
-//! - 5-Category System Settings Matrix:
-//!   1. Wireless & Connectivity (Wi-Fi WPA3, BLE 5.0 Beaconing, 5G Cellular APN)
-//!   2. Power & Battery (Fuel Gauge SoC, Charging State, DVFS Frequency Governor)
-//!   3. Thermals & Hardware Sensors (SoC Temperature, 3-Axis IMU, Ambient Light Lux)
-//!   4. Security & Privacy (W3C DID, Hardware Keystore, Privacy Shield Redaction)
-//!   5. About Device & Microkernel Integrity (dm-verity Merkle Root, Long Mode CPU, Memory Map)
+//! - Five system-settings categories backed by kernel capability-checked services.
 //! - Interactive setting mutators (Power Profile, Wi-Fi Toggle, Brightness scaling)
 //! - DRM/KMS Client Surface Rendering & Double-Buffered Presentation
 //! - Asynchronous event reactor loop handling touch interactions and lifecycle termination
@@ -74,7 +69,7 @@ impl SettingsApp {
             if len > 0 {
                 std::log(
                     0,
-                    "[SETTINGS APP] Wireless: Wi-Fi Station 'InterSovereignMesh-5G' WPA3 Online, BLE 5.0 Beaconing active.",
+                    "[SETTINGS APP] Wireless telemetry is available; physical connectivity status is reported by the platform.",
                 ).ok();
             }
         }
@@ -137,7 +132,7 @@ impl SettingsApp {
         if let Ok(32) = std::keystore_derive(0, &mut key_buf) {
             std::log(
                 0,
-                "[SETTINGS APP] Keystore: Master hardware root of trust (Slot 0) ONLINE.",
+                "[SETTINGS APP] Keystore derivation is available from the platform security service.",
             )
             .ok();
         }
@@ -150,7 +145,7 @@ impl SettingsApp {
             if len > 0 {
                 std::log(
                     0,
-                    "[SETTINGS APP] System Time: Hardware RTC synchronized with UTC civil clock.",
+                    "[SETTINGS APP] System time is available from the platform RTC service.",
                 )
                 .ok();
             }
