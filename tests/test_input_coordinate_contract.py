@@ -57,3 +57,9 @@ def test_serial_touch_protocol_matches_studio_transport():
     assert 'INPUT_TOUCH' in source
     assert 'let Some(slot) = parts.next().and_then(|v| v.parse::<u8>().ok())' in source
     assert 'post_touch_event(slot, px, py' in source
+
+
+def test_launcher_contains_no_removed_demo_workload_labels():
+    source = (ROOT / "apps/launcher/src/main.rs").read_text()
+    for label in ("Meeting with team (11:00)", "2 unread messages", "Mostly Sunny", "Finish design work"):
+        assert label not in source
