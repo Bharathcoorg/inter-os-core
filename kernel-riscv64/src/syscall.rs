@@ -6,6 +6,7 @@
 
 use crate::trap::TrapFrame;
 use crate::println;
+use crate::task::SCHEDULER;
 
 fn validate_user_range(addr: usize, len: usize, write: bool) -> Result<(), i64> {
     if len == 0 || addr < USER_SPACE_MIN { return if len == 0 { Ok(()) } else { Err(-14) }; }
@@ -101,16 +102,14 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
             ticks as i64
         }
         // 5: IpcSend (cap_slot, target_id, msg_type, payload_ptr, payload_len)
-        5 => {
-            0
-        }
+        // IPC is not yet backed by a bounded RISC-V mailbox implementation. Do
+        // not report success until the capability and queue semantics exist.
+        5 => -38,
         // 6: IpcRecv (cap_slot, out_buf_ptr, out_buf_len)
-        6 => {
-            0
-        }
+        6 => -38,
         // 7: GetTaskId
         7 => {
-            1 // Default task ID
+            SCHEDULER.lock().current_task_id().0 as i64
         }
         _ => {
             -38 // -ENOSYS
