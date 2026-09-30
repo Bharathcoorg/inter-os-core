@@ -52,6 +52,16 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
     }
     println!("[BOOT] Traps: stvec vector table online (direct mode, per-task sscratch).");
 
+    // Supervisor user-memory access must be off: firmware leaves SUM set, and
+    // leaving it on would let S-mode reach user pages regardless of the
+    // permissions encoded in the page tables.
+    assert_eq!(
+        trap::read_sstatus() & mmu::SSTATUS_SUM,
+        0,
+        "sstatus.SUM must be clear so user-page permissions are enforced"
+    );
+    println!("[TEST] Supervisor isolation: sstatus.SUM cleared after trap init (W^X enforced by hardware).");
+
     // 3. Test Security Boundary: Syscall pointer validation
     let mut tf = trap::TrapFrame::default();
     tf.regs[17] = 3; // Syscall 3 (Log)

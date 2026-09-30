@@ -31,10 +31,12 @@ fn validate_user_range(addr: usize, len: usize, write: bool) -> Result<(), i64> 
 fn copy_from_user(dst: &mut [u8], addr: usize, len: usize) -> Result<(), i64> {
     if len > dst.len() { return Err(-22); }
     validate_user_range(addr, len, false)?;
+    // The range is validated first, so SUM is only ever enabled for an address
+    // that the page tables mark as user-readable.
     unsafe {
-        core::arch::asm!("csrrs zero, sstatus, {0}", in(reg) (1usize << 18));
-        core::ptr::copy_nonoverlapping(addr as *const u8, dst.as_mut_ptr(), len);
-        core::arch::asm!("csrrc zero, sstatus, {0}", in(reg) (1usize << 18));
+        crate::mmu::with_user_memory(|| {
+            core::ptr::copy_nonoverlapping(addr as *const u8, dst.as_mut_ptr(), len);
+        });
     }
     Ok(())
 }
@@ -43,9 +45,9 @@ fn copy_from_user(dst: &mut [u8], addr: usize, len: usize) -> Result<(), i64> {
 fn copy_to_user(addr: usize, src: &[u8]) -> Result<(), i64> {
     validate_user_range(addr, src.len(), true)?;
     unsafe {
-        core::arch::asm!("csrrs zero, sstatus, {0}", in(reg) (1usize << 18));
-        core::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len());
-        core::arch::asm!("csrrc zero, sstatus, {0}", in(reg) (1usize << 18));
+        crate::mmu::with_user_memory(|| {
+            core::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len());
+        });
     }
     Ok(())
 }

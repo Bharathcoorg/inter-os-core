@@ -27,10 +27,24 @@ pub unsafe fn init_traps() {
     asm!(
         "csrw stvec, {0}",
         "csrw sscratch, {1}",
+        // Clear SUM. Firmware leaves supervisor user-memory access enabled, which
+        // would let S-mode reach user pages regardless of the permissions encoded
+        // in the page tables. It is re-enabled only around an explicit copy.
+        "csrrc zero, sstatus, {2}",
         in(reg) trap_handler_addr,
         in(reg) stack_top,
+        in(reg) crate::mmu::SSTATUS_SUM,
         options(nostack)
     );
+}
+
+/// Reads `sstatus` so the caller can verify the supervisor isolation posture.
+pub fn read_sstatus() -> usize {
+    let value: usize;
+    unsafe {
+        asm!("csrr {0}, sstatus", out(reg) value);
+    }
+    value
 }
 
 #[unsafe(naked)]
@@ -160,7 +174,10 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
             // Environment call from U-mode (User Syscall)
             8 => {
                 let syscall_num = tf.regs[17];
-                tf.sepc += 4; // Advance instruction pointer past ecall
+                // Step over the ecall itself. A compressed `c.ecall` is 16 bits,
+                // so a fixed +4 would resume in the middle of the next instruction.
+                let width = unsafe { crate::mmu::instruction_len(tf.sepc) };
+                tf.sepc += width;
                 crate::syscall::dispatch_syscall(tf);
                 if syscall_num == 2 {
                     let exited = crate::task::SCHEDULER.lock().exit_current();
@@ -172,7 +189,8 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
             }
             // Environment call from S-mode
             9 => {
-                tf.sepc += 4;
+                let width = unsafe { crate::mmu::instruction_len(tf.sepc) };
+                tf.sepc += width;
                 crate::syscall::dispatch_syscall(tf);
             }
             // Instruction Page Fault (12), Load Page Fault (13), Store Page Fault (15)
@@ -219,9 +237,11 @@ pub unsafe extern "C" fn enter_user_mode(entry_point: usize, user_sp: usize, kst
         // a0 = entry_point, a1 = user_sp, a2 = kstack_top
         // 1. Initialize sscratch with kernel stack for handling traps from U-mode
         "csrw sscratch, a2",
-        // 2. Clear SPP (bit 8 = 0 for U-mode return) and set SPIE (bit 5 = 1)
+        // 2. Clear SPP (bit 8) so the return lands in U-mode, set SPIE (bit 5), and
+        // clear SUM (bit 18) so the privilege drop carries no supervisor
+        // user-memory bypass across the boundary.
         "csrr t0, sstatus",
-        "li t1, ~(1 << 8)",
+        "li t1, ~((1 << 8) | (1 << 18))",
         "and t0, t0, t1",
         "ori t0, t0, (1 << 5)",
         "csrw sstatus, t0",

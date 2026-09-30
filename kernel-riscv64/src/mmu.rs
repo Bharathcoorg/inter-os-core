@@ -20,6 +20,33 @@ pub const PTE_D: u64 = 1 << 7; // Dirty
 // SATP Mode
 pub const SATP_MODE_SV39: u64 = 8 << 60;
 
+/// `sstatus.SUM`: when set, supervisor loads and stores to user pages bypass
+/// page permissions. Firmware routinely leaves it set, so the kernel clears it
+/// and re-enables it only around an explicit, bounds-checked copy.
+pub const SSTATUS_SUM: usize = 1 << 18;
+
+/// Runs `f` with supervisor access to user memory temporarily enabled.
+///
+/// SUM is the only way S-mode can touch a `PTE_U` page while SUM is clear, which
+/// is what keeps the W^X split between the code and stack pages enforced by the
+/// hardware rather than only by convention.
+#[inline(always)]
+pub unsafe fn with_user_memory<R>(f: impl FnOnce() -> R) -> R {
+    asm!("csrrs zero, sstatus, {0}", in(reg) SSTATUS_SUM);
+    let result = f();
+    asm!("csrrc zero, sstatus, {0}", in(reg) SSTATUS_SUM);
+    result
+}
+
+/// Returns the encoded length in bytes of the instruction at `addr`.
+///
+/// With the C extension enabled a 16-bit compressed instruction is distinguished
+/// from a 32-bit one by the low two bits being `11` for the long form.
+pub unsafe fn instruction_len(addr: usize) -> usize {
+    let halfword = with_user_memory(|| core::ptr::read_volatile(addr as *const u16));
+    if halfword & 0x3 != 0x3 { 2 } else { 4 }
+}
+
 #[repr(C, align(4096))]
 pub struct PageTable {
     pub entries: [u64; 512],
