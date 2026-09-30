@@ -95,6 +95,18 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertIn("Raw keystore-derived key material must never cross", syscall)
         self.assertIn("Err(SyscallResult::PermissionDenied)", syscall)
 
+    def test_aarch64_storage_does_not_fabricate_command_completion(self):
+        storage = self.read("kernel-aarch64/src/storage.rs")
+        self.assertIn("hardware_present: bool", storage)
+        self.assertIn("hardware unavailable", storage.lower())
+        self.assertNotIn("INT_CMD_COMPLETE);", storage)
+
+    def test_aarch64_power_requires_real_telemetry(self):
+        power = self.read("kernel-aarch64/src/power.rs")
+        self.assertIn("hardware_present: bool", power)
+        self.assertIn("if !self.hardware_present || !battery.hardware_present", power)
+        self.assertIn("self.current_freq_mhz = self.min_freq_mhz", power)
+
     def test_aarch64_camera_never_returns_synthetic_frames(self):
         camera = self.read("kernel-aarch64/src/camera.rs")
         self.assertIn("hardware_present: bool", camera)
