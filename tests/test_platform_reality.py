@@ -107,6 +107,28 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertIn("if !self.hardware_present || !battery.hardware_present", power)
         self.assertIn("self.current_freq_mhz = self.min_freq_mhz", power)
 
+    def test_aarch64_runtime_selftests_do_not_fabricate_sd_hardware(self):
+        main = self.read("kernel-aarch64/src/main.rs")
+        self.assertIn("let sdhci = SdhciController::new(0);", main)
+        self.assertIn("SDHCI hardware unavailable", main)
+        self.assertNotIn("mmio_sdhci_space", main)
+        self.assertNotIn("INT_CMD_COMPLETE", main)
+
+    def test_aarch64_runtime_selftests_do_not_fabricate_power_or_audio(self):
+        main = self.read("kernel-aarch64/src/main.rs")
+        self.assertIn("assert!(!battery.hardware_present)", main)
+        self.assertIn("assert!(!governor.hardware_present)", main)
+        self.assertIn("assert!(!audio_driver.hardware_present)", main)
+        self.assertNotIn("Simulated DMA Hardware Pump", main)
+
+    def test_riscv_does_not_enable_sum_globally_on_trap_init(self):
+        trap = self.read("kernel-riscv64/src/trap.rs")
+        init = trap[trap.index("pub unsafe fn init_traps()"):trap.index("#[unsafe(naked)]")]
+        self.assertNotIn("1usize << 18", init)
+        syscall = self.read("kernel-riscv64/src/syscall.rs")
+        self.assertIn("csrrs zero, sstatus", syscall)
+        self.assertIn("csrrc zero, sstatus", syscall)
+
     def test_aarch64_camera_never_returns_synthetic_frames(self):
         camera = self.read("kernel-aarch64/src/camera.rs")
         self.assertIn("hardware_present: bool", camera)
