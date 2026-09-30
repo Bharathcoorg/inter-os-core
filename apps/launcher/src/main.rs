@@ -2520,8 +2520,8 @@ pub extern "C" fn _start() -> ! {
                                         .ok();
                                     break;
                                 }
-                                state.push_recent("org.interos.settings");
                                 if let Ok(task_id) = std::app_launch("org.interos.settings") {
+                                        state.push_recent("org.interos.settings");
                                     state.active_child = Some(task_id);
                                     state.current_view = ViewMode::HomeScreen;
                                     let mut drain = std::InputEvent {
@@ -2565,8 +2565,8 @@ pub extern "C" fn _start() -> ! {
                                 let c_dx = (x as i32) - 648;
                                 let c_dy = (y as i32) - 1330;
                                 if c_dx * c_dx + c_dy * c_dy <= 1225 {
-                                    state.push_recent("org.interos.camera");
-                                    if let Ok(task_id) = std::app_launch("org.interos.camera") {
+                                        if let Ok(task_id) = std::app_launch("org.interos.camera") {
+                                        state.push_recent("org.interos.camera");
                                         state.active_child = Some(task_id);
                                         state.current_view = ViewMode::HomeScreen;
                                         std::log(
@@ -2693,8 +2693,8 @@ pub extern "C" fn _start() -> ! {
 
                                 // Card 4: Emergency (y: 475..550, x: 365..695)
                                 if (475..550).contains(&y) && (365..695).contains(&x) {
-                                    state.push_recent("org.interos.dialer");
-                                    if let Ok(task_id) = std::app_launch("org.interos.dialer") {
+                                        if let Ok(task_id) = std::app_launch("org.interos.dialer") {
+                                        state.push_recent("org.interos.dialer");
                                         state.active_child = Some(task_id);
                                         state.current_view = ViewMode::HomeScreen;
                                         std::log(
@@ -2793,10 +2793,10 @@ pub extern "C" fn _start() -> ! {
 
                                 // Weather widget (135..315, 40..345)
                                 if (135..315).contains(&y) && (40..345).contains(&x) {
-                                    state.push_recent("org.interos.sensor_dashboard");
-                                    if let Ok(task_id) =
+                                        if let Ok(task_id) =
                                         std::app_launch("org.interos.sensor_dashboard")
                                     {
+                                        state.push_recent("org.interos.sensor_dashboard");
                                         state.active_child = Some(task_id);
                                         state.current_view = ViewMode::HomeScreen;
                                         let mut drain = std::InputEvent {
@@ -2813,8 +2813,8 @@ pub extern "C" fn _start() -> ! {
                                 }
                                 // Build status widget (135..315, 375..680)
                                 if (135..315).contains(&y) && (375..680).contains(&x) {
-                                    state.push_recent("org.interos.calculator");
-                                    if let Ok(task_id) = std::app_launch("org.interos.calculator") {
+                                        if let Ok(task_id) = std::app_launch("org.interos.calculator") {
+                                        state.push_recent("org.interos.calculator");
                                         state.active_child = Some(task_id);
                                         state.current_view = ViewMode::HomeScreen;
                                         let mut drain = std::InputEvent {
@@ -2831,8 +2831,8 @@ pub extern "C" fn _start() -> ! {
                                 }
                                 // Media widget (335..485)
                                 if (335..485).contains(&y) && (40..680).contains(&x) {
-                                    state.push_recent("org.interos.music");
-                                    if let Ok(task_id) = std::app_launch("org.interos.music") {
+                                        if let Ok(task_id) = std::app_launch("org.interos.music") {
+                                        state.push_recent("org.interos.music");
                                         state.active_child = Some(task_id);
                                         state.current_view = ViewMode::HomeScreen;
                                         let mut drain = std::InputEvent {
@@ -2849,8 +2849,8 @@ pub extern "C" fn _start() -> ! {
                                 }
                                 // Calendar widget (505..685, 40..345)
                                 if (505..685).contains(&y) && (40..345).contains(&x) {
-                                    state.push_recent("org.interos.calendar");
-                                    if let Ok(task_id) = std::app_launch("org.interos.calendar") {
+                                        if let Ok(task_id) = std::app_launch("org.interos.calendar") {
+                                        state.push_recent("org.interos.calendar");
                                         state.active_child = Some(task_id);
                                         state.current_view = ViewMode::HomeScreen;
                                         let mut drain = std::InputEvent {
@@ -2867,8 +2867,8 @@ pub extern "C" fn _start() -> ! {
                                 }
                                 // Health widget (505..685, 375..680)
                                 if (505..685).contains(&y) && (375..680).contains(&x) {
-                                    state.push_recent("org.interos.health");
-                                    if let Ok(task_id) = std::app_launch("org.interos.health") {
+                                        if let Ok(task_id) = std::app_launch("org.interos.health") {
+                                        state.push_recent("org.interos.health");
                                         state.active_child = Some(task_id);
                                         state.current_view = ViewMode::HomeScreen;
                                         let mut drain = std::InputEvent {
