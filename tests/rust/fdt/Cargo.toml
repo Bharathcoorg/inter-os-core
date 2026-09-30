@@ -1,0 +1,13 @@
+[package]
+name = "interos-fdt-hosttest"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Host-side tests for the shipped FDT parser. The parser source is included
+# directly (see src/lib.rs) so these tests exercise production code rather than
+# a reimplementation.
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

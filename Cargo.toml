@@ -32,6 +32,7 @@ exclude = [
     "kernel-riscv64",
     "kernel/src/compat/android/shared",
     "tools/mkbootimg",
+    "tests/rust/fdt",
 ]
 resolver = "2"
 
