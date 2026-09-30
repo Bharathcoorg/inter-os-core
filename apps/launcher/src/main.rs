@@ -1548,46 +1548,6 @@ fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     BG_DARK
 }
 
-fn resolve_app_in_drawer<'a>(_state: &'a LauncherState, x: usize, y: usize) -> Option<&'a str> {
-    let row_idx = if (185..395).contains(&y) {
-        0
-    } else if (410..620).contains(&y) {
-        1
-    } else if (635..845).contains(&y) {
-        2
-    } else if (860..1070).contains(&y) {
-        3
-    } else {
-        return None;
-    };
-
-    let col_idx = if (50..230).contains(&x) {
-        0
-    } else if (270..450).contains(&x) {
-        1
-    } else if (490..670).contains(&x) {
-        2
-    } else {
-        return None;
-    };
-
-    match (row_idx, col_idx) {
-        (0, 0) => Some("org.interos.browser"),
-        (0, 1) => Some("org.interos.messages"),
-        (0, 2) => Some("org.interos.calendar"),
-        (1, 0) => Some("org.interos.camera"),
-        (1, 1) => Some("org.interos.gallery"),
-        (1, 2) => Some("org.interos.file_manager"),
-        (2, 0) => Some("org.interos.vault"),
-        (2, 1) => Some("org.interos.music"),
-        (2, 2) => Some("org.interos.calculator"),
-        (3, 0) => Some("org.interos.sensor_dashboard"),
-        (3, 1) => Some("org.interos.dialer"),
-        (3, 2) => Some("org.interos.settings"),
-        _ => None,
-    }
-}
-
 fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     // 1. Status Bar (y: 0..48)
     if y < 48 {
