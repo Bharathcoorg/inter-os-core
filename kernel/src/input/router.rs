@@ -28,6 +28,7 @@ pub struct GestureEvent {
     pub delta_x: i32,
     pub delta_y: i32,
     pub pointer_id: u8,
+    pub scale_milli: u32,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -184,6 +185,7 @@ impl InputRouter {
                             delta_x: a.current.x - a.start.x,
                             delta_y: a.current.y - a.start.y,
                             pointer_id: event.pointer_id,
+                            scale_milli,
                         });
                     }
                 } else {
@@ -220,6 +222,7 @@ impl InputRouter {
                         delta_x: dx,
                         delta_y: dy,
                         pointer_id: event.pointer_id,
+                        scale_milli: 1000,
                     });
                 }
                 if state.owner == PointerOwner::System {
@@ -234,6 +237,7 @@ impl InputRouter {
                         delta_x: dx,
                         delta_y: dy,
                         pointer_id: event.pointer_id,
+                        scale_milli: 1000,
                     });
                 }
                 let held = now_tick.saturating_sub(state.down_tick);
@@ -248,6 +252,7 @@ impl InputRouter {
                     delta_x: dx,
                     delta_y: dy,
                     pointer_id: event.pointer_id,
+                        scale_milli: 1000,
                 })
             }
             PointerPhase::Cancel => {
@@ -315,6 +320,7 @@ impl InputRouter {
                         delta_x: dx,
                         delta_y: dy,
                         pointer_id: event.pointer_id,
+                        scale_milli: 1000,
                     });
                 }
 
@@ -330,6 +336,7 @@ impl InputRouter {
                         delta_x: dx,
                         delta_y: dy,
                         pointer_id: event.pointer_id,
+                        scale_milli: 1000,
                     });
                 }
 
@@ -339,6 +346,7 @@ impl InputRouter {
                     delta_x: dx,
                     delta_y: dy,
                     pointer_id: event.pointer_id,
+                        scale_milli: 1000,
                 })
             }
             PointerPhase::Cancel => {
