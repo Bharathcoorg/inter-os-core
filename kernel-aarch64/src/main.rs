@@ -1425,11 +1425,10 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     kprintln!("[TEST] WPA3-SAE hardware truth: handshake rejected without backend.");
 
 
-    // Test 6: Sovereign P2P Wi-Fi Direct Autonomous Group Owner (GO) Negotiation
-    let is_go = wifi.start_p2p_group_owner(14, &wifi_caps).expect("P2P GO start failed");
-    assert!(is_go);
-    assert_eq!(wifi.state, wifi::WifiStationState::GroupOwnerActive);
-    kprintln!("[OK] Sovereign P2P Wi-Fi Direct: Elected Autonomous Group Owner (Intent: 14/15) -> Ad-hoc Mesh Station Active.");
+    // Test 6: P2P control must also fail closed without a real radio backend.
+    let p2p = wifi.start_p2p_group_owner(14, &wifi_caps);
+    assert_eq!(p2p.err(), Some(wifi::WifiError::HardwareUnavailable));
+    kprintln!("[TEST] Wi-Fi Direct hardware truth: P2P control rejected without backend.");
 
     // 35. Sovereign Mobile GNSS / GPS Multi-Constellation Satellite Navigation Subsystem
     kprintln!("--- [Testing Sovereign Mobile GNSS / GPS Navigation Subsystem] ---");
