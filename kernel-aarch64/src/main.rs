@@ -179,21 +179,16 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
 
     // 8. Mobile eMMC 5.1 / SDHCI Storage Host Controller
     kprintln!("--- [Initializing Mobile eMMC 5.1 Flash Storage Controller] ---");
-    let mut mmio_sdhci_space = [0u32; 64];
-    let state_off = storage::SDHCI_PRESENT_STATE / 4;
-    mmio_sdhci_space[state_off] = storage::STATE_CARD_INSERTED | storage::STATE_BUFFER_READ_EN | storage::STATE_BUFFER_WRITE_EN;
-    let int_off = storage::SDHCI_INT_STATUS / 4;
-    mmio_sdhci_space[int_off] = storage::INT_CMD_COMPLETE;
-
-    let sdhci = SdhciController::new(mmio_sdhci_space.as_mut_ptr() as usize);
-    assert!(sdhci.is_card_inserted(), "SDHCI card detection failed");
-    let cmd0_resp = sdhci.send_command(storage::CMD0_GO_IDLE, 0, false).expect("CMD0 failed");
-    assert_eq!(cmd0_resp, 0);
-
-    let mut write_sector = [0xAAu8; storage::SECTOR_SIZE];
-    write_sector[0..8].copy_from_slice(b"INTEROS4");
-    sdhci.write_block(100, &write_sector).expect("Write sector failed");
-    kprintln!("[OK] SDHCI / eMMC 5.1: 64 GB flash storage controller verified (CMD0 + 512B FIFO write).");
+    // The controller is intentionally unbound until a real SDHCI/eMMC MMIO
+    // region is discovered from the platform device tree and attached.
+    let sdhci = SdhciController::new(0);
+    assert!(!sdhci.hardware_present);
+    assert!(!sdhci.is_card_inserted());
+    assert_eq!(
+        sdhci.send_command(storage::CMD0_GO_IDLE, 0, false).err(),
+        Some("SDHCI hardware unavailable")
+    );
+    kprintln!("[OK] SDHCI / eMMC 5.1: no fabricated card, completion, or FIFO state is claimed.");
 
     // 9. Goodix GT911 Multi-Touch Digitizer Pipeline
     kprintln!("--- [Initializing Goodix GT911 Multi-Touch Pipeline] ---");
