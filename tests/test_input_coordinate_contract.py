@@ -37,3 +37,9 @@ def test_launcher_no_longer_uses_fixed_clock_literal():
     assert 'b"Meeting with team (11:00)"' not in source
     assert 'b"2 unread messages"' not in source
     assert 'b"Mostly Sunny"' not in source
+
+def test_studio_exposes_only_stock_theme():
+    source = (ROOT / "emulator/server.py").read_text()
+    assert "'themes': [active]" in source
+    assert "Theme switching is disabled" in source
+    assert "Custom themes are disabled" in source
