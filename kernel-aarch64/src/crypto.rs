@@ -441,3 +441,20 @@ pub fn verify_crypto_subsystem() {
     ];
     assert!(constant_time_eq_32(&tag2, &expected_tag2), "RFC 4231 Test Case 2 failed");
 }
+
+
+/// Verifies a detached Ed25519 signature using a caller-supplied trusted
+/// publisher public key. OTA trust decisions must remain asymmetric.
+pub fn verify_ed25519_signature(
+    message: &[u8],
+    public_key: &[u8; 32],
+    signature: &[u8; 64],
+) -> bool {
+    use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+
+    let Ok(key) = VerifyingKey::from_bytes(public_key) else {
+        return false;
+    };
+    let sig = Signature::from_bytes(signature);
+    key.verify(message, &sig).is_ok()
+}
