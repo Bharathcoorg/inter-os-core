@@ -33,6 +33,10 @@ pub struct DelegatedLease {
     pub grantor_task: TaskId,
     pub grantee_task: TaskId,
     pub cap_type: CapabilityType,
+    /// Resource target inherited from the parent capability. The lease ID is
+    /// kept only in the capability ID so object-scoped authorization remains
+    /// bound to the original resource.
+    pub object_id: u64,
     pub attenuated_rights: Rights,
     pub max_invocations: u32,
     pub remaining_invocations: u32,
@@ -75,6 +79,7 @@ impl DelegatedLease {
             grantor_task: grantor,
             grantee_task: grantee,
             cap_type: parent.cap_type,
+            object_id: parent.object_id,
             attenuated_rights: safe_rights,
             max_invocations,
             remaining_invocations: max_invocations,
@@ -114,7 +119,7 @@ impl DelegatedLease {
             id: CapabilityId(self.lease_id | 0x8000_0000_0000_0000),
             cap_type: self.cap_type,
             rights: self.attenuated_rights,
-            object_id: self.lease_id,
+            object_id: self.object_id,
         }
     }
 }
@@ -144,6 +149,7 @@ pub fn init() {
 
     assert_eq!(lease.attenuated_rights, Rights::READ);
     assert_eq!(lease.remaining_invocations, 2);
+    assert_eq!(lease.object_id, parent_cap.object_id);
 
     // 2. Consume invocation 1 (ticks = 1010)
     let inv1 = lease.consume_invocation(1010, Rights::READ);
