@@ -247,6 +247,10 @@ impl WifiController {
         caps.check(CapabilityType::WifiNetworkDirect, Rights::INVOKE)
             .map_err(|_| WifiError::CapabilityDenied)?;
 
+        if !self.hardware_present || !self.enabled {
+            return Err(WifiError::HardwareUnavailable);
+        }
+
         if go_intent >= 10 {
             self.state = WifiStationState::GroupOwnerActive;
             Ok(true) // Elected as Group Owner
