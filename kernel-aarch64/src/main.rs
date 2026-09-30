@@ -1000,8 +1000,9 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
 
     let mut camera = camera::CameraDriver::new(0x0903_0000);
     camera.init_hardware(camera::SensorResolution::Res1920x1080, camera::PixelFormat::Rgb565);
-    assert!(camera.enabled);
-    kprintln!("[OK] MIPI CSI-2 Camera ISP: Initialized hardware @ 0x09030000 (1080p FHD RGB565).");
+    assert!(!camera.enabled);
+    assert!(!camera.hardware_present);
+    kprintln!("[OK] MIPI CSI-2 Camera configuration loaded; no physical backend is claimed.");
 
     // Test 1: Zero Ambient Authority: Uncredentialed camera frame capture rejected
     let unauth_capture = camera.capture_frame(200, &empty_caps);
@@ -1021,29 +1022,11 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     // Disengage killswitch to resume normal camera operations
     camera.set_privacy_killswitch(false);
 
-    // Test 3: Authorized Frame Capture & DMA Double-Buffering
-    let frame1 = camera.capture_frame(202, &camera_caps).expect("Frame 1 capture failed");
-    assert_eq!(frame1.frame_index, 1);
-    assert_eq!(frame1.dma_slot, 0);
-    assert_eq!((frame1.width, frame1.height), (1920, 1080));
-    assert!(!frame1.data.is_empty());
-    kprintln!("[OK] DMA Double-Buffering: Captured Frame #1 in Slot 0 (1920x1080 RGB565).");
+    // Test 3: Authorized capture must still fail without a concrete CSI/ISP backend.
+    let capture = camera.capture_frame(202, &camera_caps);
+    assert_eq!(capture.err(), Some(camera::CameraError::HardwareDisabled));
+    kprintln!("[TEST] Camera hardware truth: authorized capture rejected without backend.");
 
-    // Capture Frame 2 (ping-pong to Slot 1)
-    let frame2 = camera.capture_frame(203, &camera_caps).expect("Frame 2 capture failed");
-    assert_eq!(frame2.frame_index, 2);
-    assert_eq!(frame2.dma_slot, 1);
-
-    // Capture Frame 3 (ping-pong back to Slot 0)
-    let frame3 = camera.capture_frame(204, &camera_caps).expect("Frame 3 capture failed");
-    assert_eq!(frame3.frame_index, 3);
-    assert_eq!(frame3.dma_slot, 0);
-    kprintln!("[TEST] ISP Ping-Pong DMA: Verified alternating buffer slots [0 -> 1 -> 0] VERIFIED.");
-
-    // Test 4: Multimodal Neural Vision Feature Extraction
-    let edge_energy = camera::CameraDriver::compute_edge_energy(&frame1);
-    assert!(edge_energy > 0);
-    kprintln!("[OK] Multimodal Neural Vision: Extracted spatial edge energy ({}) from raw sensor frame.", edge_energy);
 
     // 30. Sovereign Cellular SMS & Emergency PDU Dispatcher
     kprintln!("--- [Testing Sovereign Cellular SMS & Emergency PDU Dispatcher] ---");
