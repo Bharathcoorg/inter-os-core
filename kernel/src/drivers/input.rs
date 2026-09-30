@@ -21,6 +21,7 @@ pub enum InputEventKind {
     Recents = 8,
     Cancel = 9,
     Fling = 10,
+    Key = 11,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -34,6 +35,37 @@ pub struct InputEvent {
 }
 
 impl InputEvent {
+    pub fn from_key(event: crate::input::KeyEvent) -> Self {
+        let code = match event.code {
+            crate::input::KeyCode::Character(c) => c as u32,
+            crate::input::KeyCode::Enter => 0x10000,
+            crate::input::KeyCode::Escape => 0x10001,
+            crate::input::KeyCode::Backspace => 0x10002,
+            crate::input::KeyCode::Tab => 0x10003,
+            crate::input::KeyCode::ArrowUp => 0x10004,
+            crate::input::KeyCode::ArrowDown => 0x10005,
+            crate::input::KeyCode::ArrowLeft => 0x10006,
+            crate::input::KeyCode::ArrowRight => 0x10007,
+            crate::input::KeyCode::Home => 0x10008,
+            crate::input::KeyCode::End => 0x10009,
+            crate::input::KeyCode::PageUp => 0x1000A,
+            crate::input::KeyCode::PageDown => 0x1000B,
+            crate::input::KeyCode::Unknown(code) => code,
+        };
+        let modifiers =
+            (event.shift as u32)
+            | ((event.ctrl as u32) << 1)
+            | ((event.alt as u32) << 2)
+            | ((event.meta as u32) << 3);
+        Self {
+            kind: InputEventKind::Key,
+            x: code,
+            y: if event.action == crate::input::KeyAction::Down { 1 } else { 0 },
+            scale_milli: modifiers,
+            ..Self::EMPTY
+        }
+    }
+
     pub fn from_canonical(gesture: crate::input::GestureEvent) -> Self {
         let kind = match gesture.kind {
             crate::input::GestureKind::Tap => InputEventKind::Tap,
