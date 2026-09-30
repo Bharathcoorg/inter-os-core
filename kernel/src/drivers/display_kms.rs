@@ -129,7 +129,10 @@ impl DrmKmsController {
     /// Allocates a new client surface for application rendering.
     pub fn create_surface(&mut self, width: u32, height: u32, z_order: u32, owner_task: u64) -> u32 {
         let pixels = match (width as usize).checked_mul(height as usize) {
-            Some(value) if value > 0 && value <= MAX_SCANOUT_PIXELS => value,
+            // Client surfaces have a stricter per-surface budget than the
+            // physical scanout buffer. This prevents a single display client
+            // from multiplying large kernel-heap allocations across 32 slots.
+            Some(value) if value > 0 && value <= MAX_SURFACE_PIXELS => value,
             _ => return 0,
         };
         if self.surfaces.len() >= MAX_CLIENT_SURFACES {
@@ -492,6 +495,8 @@ pub fn test_drm_kms() {
     let s2 = kms.create_surface(320, 40, 10, 1);
     assert_eq!(s1, 1);
     assert_eq!(s2, 2);
+    assert_eq!(kms.create_surface(1281, 720, 20, 1), 0);
+    assert_eq!(kms.create_surface(1280, 720, 20, 1), 3);
 
     // Fill surface 2 with a test color (semi-transparent white)
     let s2_pixels = vec![0x80FFFFFFu32; 320 * 40];
