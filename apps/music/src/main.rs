@@ -274,8 +274,12 @@ pub extern "C" fn _start() -> ! {
                         scale_milli: 1000,
                     };
                     while std::input_event_poll(&mut input).is_ok() {
-                        if input.kind == 4 && input.dy <= -60 && input.y <= 1380 {
-                            std::log(0, "[MUSIC APP] Swipe-up home gesture recognized. Exiting to launcher.").ok();
+                        if input.kind == 4 && (input.dy <= -40 || input.dx.abs() >= 40) {
+                            std::log(
+                                0,
+                                "[MUSIC APP] Navigation gesture recognized. Exiting to launcher.",
+                            )
+                            .ok();
                             if surface > 0 {
                                 let _ = std::surface_destroy(6, surface);
                             }

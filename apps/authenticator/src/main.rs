@@ -18,10 +18,29 @@ pub extern "C" fn _start() -> ! {
         .ok();
     }
 
-    let interest_mask = std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK;
+    let interest_mask = std::EVENT_TOUCH_INPUT | std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK;
     loop {
         match std::event_poll(interest_mask, 200) {
             Ok(events) => {
+                if events & std::EVENT_TOUCH_INPUT != 0 {
+                    let mut input = std::InputEvent {
+                        kind: 0,
+                        x: 0,
+                        y: 0,
+                        dx: 0,
+                        dy: 0,
+                        scale_milli: 1000,
+                    };
+                    while std::input_event_poll(&mut input).is_ok() {
+                        if (input.kind == 4 && (input.dy <= -40 || input.dx.abs() >= 40))
+                            || (input.kind == 1
+                                && (input.y >= 1400 || (input.x < 100 && input.y < 68)))
+                        {
+                            std::log(0, "[AUTHENTICATOR APP] Navigation gesture recognized. Exiting to launcher.").ok();
+                            std::exit_with_code(0);
+                        }
+                    }
+                }
                 if events & std::EVENT_IPC_MSG != 0 {
                     std::log(0, "[AUTHENTICATOR APP] Processed IPC TOTP batch request.").ok();
                 }
@@ -29,7 +48,9 @@ pub extern "C" fn _start() -> ! {
                     std::yield_now();
                 }
             }
-            Err(_) => {}
+            Err(_) => {
+                std::yield_now();
+            }
         }
     }
 }

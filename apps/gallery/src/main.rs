@@ -577,10 +577,12 @@ pub extern "C" fn _start() -> ! {
                 };
                 while std::input_event_poll(&mut input).is_ok() {
                     // Swipe up home gesture -> Return to launcher
-                    if input.kind == 4 && input.dy <= -60 && input.y >= 1200 {
+                    if input.kind == 4
+                        && ((input.dy <= -40 && input.y >= 1200) || input.dx.abs() >= 40)
+                    {
                         std::log(
                             0,
-                            "[GALLERY] Swipe-up home gesture recognized. Exiting to launcher.",
+                            "[GALLERY] Navigation gesture recognized. Exiting to launcher.",
                         )
                         .ok();
                         if surface > 0 {

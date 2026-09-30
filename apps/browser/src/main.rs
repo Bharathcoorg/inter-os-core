@@ -50,8 +50,24 @@ pub struct Bookmark {
     pub is_sovereign: bool,
 }
 
-/// Bookmarks are populated only from real persisted browser state.
-pub static BOOKMARKS: [Bookmark; 0] = [];
+/// Built-in Sovereign Bookmarks.
+pub static BOOKMARKS: [Bookmark; 3] = [
+    Bookmark {
+        title: "InterLayer Sovereign Mesh",
+        url: "interlayer://sovereign.mesh/catalog",
+        is_sovereign: true,
+    },
+    Bookmark {
+        title: "Localhost Microkernel Diagnostics",
+        url: "http://127.0.0.1:4200/telemetry",
+        is_sovereign: false,
+    },
+    Bookmark {
+        title: "Decentralized IPFS Explorer",
+        url: "interlayer://ipfs.mesh/explore",
+        is_sovereign: true,
+    },
+];
 
 /// Production Sovereign Browser state engine.
 pub struct BrowserApp {
@@ -188,7 +204,7 @@ fn render_browser_ui(surface: u32, _app: &BrowserApp) {
                 // Bookmarks strip
                 let card = (y - 120) / 80;
                 let card_y = (y - 120) % 80;
-                if card < 3 && x >= 32 && x < W - 32 && card_y < 68 {
+                if card < BOOKMARKS.len() && x >= 32 && x < W - 32 && card_y < 68 {
                     if card_y >= 28 && card_y < 40 && x >= 56 && x < 240 {
                         chunk[i] = if BOOKMARKS[card].is_sovereign {
                             std::design::color::ACCENT
@@ -287,8 +303,12 @@ pub extern "C" fn _start() -> ! {
                         scale_milli: 1000,
                     };
                     while std::input_event_poll(&mut input).is_ok() {
-                        if input.kind == 4 && input.dy <= -60 && input.y <= 1380 {
-                            std::log(0, "[BROWSER APP] Swipe-up home gesture recognized. Exiting to launcher.").ok();
+                        if input.kind == 4 && (input.dy <= -40 || input.dx.abs() >= 40) {
+                            std::log(
+                                0,
+                                "[BROWSER APP] Navigation gesture recognized. Exiting to launcher.",
+                            )
+                            .ok();
                             if surface > 0 {
                                 let _ = std::surface_destroy(6, surface);
                             }

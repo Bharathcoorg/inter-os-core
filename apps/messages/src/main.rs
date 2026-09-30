@@ -39,9 +39,9 @@ pub struct ConversationThread {
 /// Static Conversation Directory matching the reference UI spec.
 pub static THREADS: [ConversationThread; 5] = [
     ConversationThread {
-        peer_name: "Rama",
+        peer_name: "Security Kernel",
         peer_did: "did:key:z6MkhaX",
-        last_snippet: "Got it, thanks!",
+        last_snippet: "Hardware root verified",
         status: ThreadStatus::EncryptedP2P,
         unread_count: 1,
     },
@@ -53,9 +53,9 @@ pub static THREADS: [ConversationThread; 5] = [
         unread_count: 0,
     },
     ConversationThread {
-        peer_name: "Deeksha",
+        peer_name: "Mesh Relay",
         peer_did: "did:key:z6MknLMN",
-        last_snippet: "Okay, noted",
+        last_snippet: "P2P node verified",
         status: ThreadStatus::CellularSms,
         unread_count: 0,
     },
@@ -67,9 +67,9 @@ pub static THREADS: [ConversationThread; 5] = [
         unread_count: 0,
     },
     ConversationThread {
-        peer_name: "Bharath",
+        peer_name: "Device Admin",
         peer_did: "did:key:z6MksUVW",
-        last_snippet: "Let's catch up",
+        last_snippet: "Security policy synced",
         status: ThreadStatus::EncryptedP2P,
         unread_count: 0,
     },
@@ -313,8 +313,8 @@ pub extern "C" fn _start() -> ! {
                         scale_milli: 1000,
                     };
                     while std::input_event_poll(&mut input).is_ok() {
-                        if input.kind == 4 && input.dy <= -60 && input.y <= 1380 {
-                            std::log(0, "[MESSAGES APP] Swipe-up home gesture recognized. Exiting to launcher.").ok();
+                        if input.kind == 4 && (input.dy <= -40 || input.dx.abs() >= 40) {
+                            std::log(0, "[MESSAGES APP] Navigation gesture recognized. Exiting to launcher.").ok();
                             if surface > 0 {
                                 let _ = std::surface_destroy(6, surface);
                             }
