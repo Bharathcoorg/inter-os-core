@@ -324,9 +324,30 @@ impl PackageRegistry {
         Ok(())
     }
 
+    /// Refuses removal of a package that is still required by an active package.
+    /// Dependency checks are evaluated against the authoritative registry snapshot,
+    /// so uninstall cannot silently invalidate another active package's policy.
+    pub fn has_active_dependents(&self, package_id: &str) -> bool {
+        self.entries.iter().any(|entry| {
+            if !matches!(entry.state, PackageState::Active) || entry.package_id == package_id {
+                return false;
+            }
+            let Some(blob) = crate::package::PACKAGE_BLOB_STORE.lock().get(&entry.package_id).cloned() else {
+                return false;
+            };
+            let Ok(manifest) = crate::package::parse_rapp(&blob.bytes) else {
+                return false;
+            };
+            manifest.policy.dependencies.iter().any(|dep| dep.package_id == package_id)
+        })
+    }
+
     pub fn uninstall(&mut self, package_id: &str) -> Result<(), ()> {
         let idx = self.entries.iter().position(|entry| entry.package_id == package_id).ok_or(())?;
         if crate::package::first_party_package(package_id).is_some() {
+            return Err(());
+        }
+        if self.has_active_dependents(package_id) {
             return Err(());
         }
         let old = self.entries.clone();
