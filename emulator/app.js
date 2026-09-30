@@ -613,55 +613,41 @@ document.addEventListener('DOMContentLoaded', () => {
       const dist = Math.hypot(dx * rect.width, dy * rect.height);
 
       // Coordinate mapping
-      let startGX, startGY, endGX, endGY;
+      let payload;
       if (cropMode === 'portrait') {
-        startGX = 460 + Math.round(startX * 360);
-        startGY = Math.round(startY * 720);
-        endGX = 460 + Math.round(endX * 360);
-        endGY = Math.round(endY * 720);
+        const px1 = Math.max(0, Math.min(719, Math.round(startX * 719)));
+        const py1 = Math.max(0, Math.min(1439, Math.round(startY * 1439)));
+        const px2 = Math.max(0, Math.min(719, Math.round(endX * 719)));
+        const py2 = Math.max(0, Math.min(1439, Math.round(endY * 1439)));
+        if (dist > 18) {
+          payload = { action: 'swipe', coords: 'portrait', x: px1, y: py1, x2: px2, y2: py2, steps: 5 };
+        } else {
+          payload = { action: 'tap', coords: 'portrait', x: px2, y: py2 };
+        }
       } else {
-        startGX = Math.round(startX * 1280);
-        startGY = Math.round(startY * 720);
-        endGX = Math.round(endX * 1280);
-        endGY = Math.round(endY * 720);
+        const gx1 = Math.max(0, Math.min(1279, Math.round(startX * 1280)));
+        const gy1 = Math.max(0, Math.min(719, Math.round(startY * 720)));
+        const gx2 = Math.max(0, Math.min(1279, Math.round(endX * 1280)));
+        const gy2 = Math.max(0, Math.min(719, Math.round(endY * 720)));
+        if (dist > 18) {
+          payload = { action: 'swipe', x: gx1, y: gy1, x2: gx2, y2: gy2, steps: 5 };
+        } else {
+          payload = { action: 'tap', x: gx2, y: gy2 };
+        }
       }
 
-      if (dist > 28) {
-        // Swipe gesture
-        try {
-          await fetch('/api/touch/event', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              action: 'swipe',
-              x: startGX,
-              y: startGY,
-              x2: endGX,
-              y2: endGY,
-              steps: 6
-            })
-          });
-          logConsole('ok', `[TOUCH] Injected swipe gesture: (${startGX}, ${startGY}) -> (${endGX}, ${endGY})`);
-        } catch (_) {}
-      } else {
-        // Tap gesture
-        try {
-          await fetch('/api/touch/event', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              action: 'tap',
-              x: endGX,
-              y: endGY
-            })
-          });
-          logConsole('ok', `[TOUCH] Injected hardware tap: (${endGX}, ${endGY})`);
-        } catch (_) {}
-      }
+      try {
+        await fetch('/api/touch/event', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+      } catch (_) {}
 
-      // Schedule fast visual refresh
-      setTimeout(refreshScanoutFrame, 70);
-      setTimeout(refreshScanoutFrame, 200);
+      // Fast responsive frame refreshes
+      setTimeout(refreshScanoutFrame, 35);
+      setTimeout(refreshScanoutFrame, 120);
+      setTimeout(refreshScanoutFrame, 260);
     });
 
     liveScanoutImg.addEventListener('pointercancel', () => {
@@ -672,29 +658,27 @@ document.addEventListener('DOMContentLoaded', () => {
   // Canonical Navigation Gestures (Matching 16-Surface North Star Reference)
   async function dispatchHardwareGesture(gestureName, payload) {
     try {
-      const resp = await fetch('/api/touch/event', {
+      await fetch('/api/touch/event', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
-      const data = await resp.json();
-      if (data.success) {
-        logConsole('ok', `[GESTURE] ${gestureName} dispatched to microkernel.`);
-      }
     } catch (_) {}
-    setTimeout(refreshScanoutFrame, 80);
-    setTimeout(refreshScanoutFrame, 220);
+    setTimeout(refreshScanoutFrame, 40);
+    setTimeout(refreshScanoutFrame, 140);
+    setTimeout(refreshScanoutFrame, 280);
   }
 
   // 1. Swipe Up -> Activity Space (Multitasking)
   btnGestureActivity?.addEventListener('click', () => {
     dispatchHardwareGesture('Activity Space (Swipe Up)', {
       action: 'swipe',
-      x: 640,
-      y: 670,
-      x2: 640,
-      y2: 280,
-      steps: 8
+      coords: 'portrait',
+      x: 360,
+      y: 1400,
+      x2: 360,
+      y2: 800,
+      steps: 6
     });
   });
 
@@ -702,11 +686,12 @@ document.addEventListener('DOMContentLoaded', () => {
   btnGestureBack?.addEventListener('click', () => {
     dispatchHardwareGesture('Back (Swipe Left)', {
       action: 'swipe',
-      x: 790,
-      y: 360,
-      x2: 480,
-      y2: 360,
-      steps: 6
+      coords: 'portrait',
+      x: 600,
+      y: 720,
+      x2: 120,
+      y2: 720,
+      steps: 5
     });
   });
 
@@ -714,8 +699,9 @@ document.addEventListener('DOMContentLoaded', () => {
   btnGestureHome?.addEventListener('click', () => {
     dispatchHardwareGesture('Home (Tap Home Bar)', {
       action: 'tap',
-      x: 640,
-      y: 710
+      coords: 'portrait',
+      x: 360,
+      y: 1408
     });
   });
 
@@ -723,11 +709,12 @@ document.addEventListener('DOMContentLoaded', () => {
   btnGestureQuick?.addEventListener('click', () => {
     dispatchHardwareGesture('Quick Controls (Swipe Right)', {
       action: 'swipe',
-      x: 480,
-      y: 360,
-      x2: 800,
-      y2: 360,
-      steps: 6
+      coords: 'portrait',
+      x: 100,
+      y: 720,
+      x2: 600,
+      y2: 720,
+      steps: 5
     });
   });
 
@@ -735,8 +722,9 @@ document.addEventListener('DOMContentLoaded', () => {
   btnGestureSystem?.addEventListener('click', () => {
     dispatchHardwareGesture('System Space (Tap Top Bar)', {
       action: 'tap',
-      x: 640,
-      y: 15
+      coords: 'portrait',
+      x: 360,
+      y: 30
     });
   });
 
@@ -886,11 +874,12 @@ document.addEventListener('DOMContentLoaded', () => {
   emuBtnBack?.addEventListener('click', () => {
     dispatchHardwareGesture('Back (◁)', {
       action: 'swipe',
-      x: 790,
-      y: 360,
-      x2: 480,
-      y2: 360,
-      steps: 6
+      coords: 'portrait',
+      x: 600,
+      y: 720,
+      x2: 120,
+      y2: 720,
+      steps: 5
     });
   });
 
@@ -898,20 +887,19 @@ document.addEventListener('DOMContentLoaded', () => {
   emuBtnHome?.addEventListener('click', () => {
     dispatchHardwareGesture('Home (○)', {
       action: 'tap',
-      x: 640,
-      y: 710
+      coords: 'portrait',
+      x: 360,
+      y: 1408
     });
   });
 
   // Recents / App Switcher (▢) -> Activity Space
   emuBtnRecents?.addEventListener('click', () => {
     dispatchHardwareGesture('Recents / Activity Space (▢)', {
-      action: 'swipe',
-      x: 640,
-      y: 670,
-      x2: 640,
-      y2: 280,
-      steps: 8
+      action: 'tap',
+      coords: 'portrait',
+      x: 580,
+      y: 1404
     });
   });
 

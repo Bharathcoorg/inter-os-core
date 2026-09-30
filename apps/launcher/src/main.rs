@@ -408,6 +408,7 @@ fn package_id_at(state: &LauncherState, index: usize) -> Option<&str> {
 // -----------------------------------------------------------------------------
 // Reference Modern Smartphone Wallpapers (Midnight Slate, Deep Azure, Obsidian, Dusk)
 // -----------------------------------------------------------------------------
+#[allow(dead_code)]
 #[inline(always)]
 fn get_wallpaper_pixel(_x: usize, y: usize, state: &LauncherState) -> u32 {
     let y_norm = (y as u32).min(1440);
@@ -455,26 +456,26 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     // 1. Status Bar (y: 0..48)
     if y < 48 {
         if y == 47 {
-            return BORDER_SUBTLE;
+            return 0xFFE2E8F0;
         }
         if y >= 16 && y < 32 {
-            if let Some(c) = test_text(x, y, 48, 16, 2, CLOCK_TIME, TEXT_PRIMARY) {
+            if let Some(c) = test_text(x, y, 48, 16, 2, CLOCK_TIME, 0xFF0F172A) {
                 return c;
             }
         }
         // 4-Bar Cellular Signal
         if x >= 590 && x <= 608 && y >= 16 && y <= 32 {
             if x <= 593 && y >= 28 {
-                return TEXT_PRIMARY;
+                return 0xFF0F172A;
             }
             if x >= 595 && x <= 598 && y >= 24 {
-                return TEXT_PRIMARY;
+                return 0xFF0F172A;
             }
             if x >= 600 && x <= 603 && y >= 20 {
-                return TEXT_PRIMARY;
+                return 0xFF0F172A;
             }
             if x >= 605 && x <= 608 && y >= 16 {
-                return TEXT_PRIMARY;
+                return 0xFF0F172A;
             }
         }
         // Wi-Fi 3-arcs
@@ -484,160 +485,174 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             let d2 = dx * dx + dy * dy;
             if (d2 >= 100 && d2 <= 144 && dy <= -2) || (d2 >= 36 && d2 <= 64 && dy <= -1) || d2 <= 9
             {
-                return TEXT_PRIMARY;
+                return 0xFF0F172A;
             }
         }
         // Battery outline and level
         if x >= 658 && x <= 686 && y >= 18 && y <= 32 {
             if x == 658 || x == 684 || y == 18 || y == 32 {
-                return TEXT_PRIMARY;
+                return 0xFF0F172A;
             }
             if x >= 685 && x <= 686 && y >= 22 && y <= 28 {
-                return TEXT_PRIMARY;
+                return 0xFF0F172A;
             }
             if x >= 661 && x <= 680 && y >= 21 && y <= 29 {
                 return SUCCESS_EMERALD;
             }
         }
-        return BG_DARK;
+        return 0xFFF0F2F5;
     }
 
-    // 2. Wallpaper & Header (y: 48..235)
+    // 2. Contextual Greeting & Weather Header (y: 48..235)
     if y < 235 {
-        // Date & Tabular Clock
+        // Left Greeting
         if y >= 64 && y < 80 {
-            if let Some(c) = test_text(x, y, 48, 64, 2, b"Wed, 24 Sep", TEXT_MUTED) {
+            if let Some(c) = test_text(x, y, 48, 64, 2, b"Good morning,", 0xFF64748B) {
                 return c;
             }
         }
-        if y >= 90 && y < 122 {
-            if let Some(c) = test_text(x, y, 48, 90, 4, CLOCK_TIME, TEXT_PRIMARY) {
+        if y >= 88 && y < 120 {
+            if let Some(c) = test_text(x, y, 48, 88, 4, b"Bharath", 0xFF0F172A) {
                 return c;
             }
         }
-
-        // System Status Widget Right
-        if x >= 460 && x <= 680 && y >= 80 && y < 135 {
-            let dx = (x as i32) - 490;
-            let dy = (y as i32) - 96;
-            if dx * dx + dy * dy <= 81 {
-                return SUCCESS_EMERALD;
-            }
-            if y >= 84 && y < 92 {
-                if let Some(c) = test_text(x, y, 520, 84, 1, b"System", TEXT_MUTED) {
-                    return c;
-                }
-            }
-            if y >= 98 && y < 114 {
-                if let Some(c) = test_text(x, y, 520, 98, 2, b"Ready", TEXT_PRIMARY) {
-                    return c;
-                }
-            }
-            if y >= 118 && y < 126 {
-                if let Some(c) = test_text(x, y, 520, 118, 1, b"Online", TEXT_MUTED) {
-                    return c;
-                }
-            }
-        }
-
-        // Contextual Greeting
-        if y >= 148 && y < 172 {
-            if let Some(c) = test_text(x, y, 48, 148, 3, b"Welcome to InterOS", TEXT_PRIMARY) {
-                return c;
-            }
-        }
-        if y >= 180 && y < 196 {
-            if let Some(c) = test_text(x, y, 48, 180, 2, b"Modern Mobile Platform", TEXT_PRIMARY) {
-                return c;
-            }
-        }
-        if y >= 208 && y < 224 {
-            if let Some(c) = test_text(x, y, 48, 208, 2, b"Ready for daily use", TEXT_MUTED) {
+        if y >= 132 && y < 148 {
+            if let Some(c) = test_text(x, y, 48, 132, 2, b"Let's make a good day.", 0xFF64748B) {
                 return c;
             }
         }
 
-        return get_wallpaper_pixel(x, y, state);
+        // Right Weather Widget (x: 480..680, y: 64..165)
+        // Weather Sun Icon (center: 520, 96, r = 14)
+        let s_dx = (x as i32) - 520;
+        let s_dy = (y as i32) - 96;
+        let s_d2 = s_dx * s_dx + s_dy * s_dy;
+        if s_d2 <= 196 {
+            return 0xFFF59E0B;
+        }
+        // Sun rays
+        if (s_d2 >= 289 && s_d2 <= 484)
+            && ((s_dx.abs() <= 2) || (s_dy.abs() <= 2) || (s_dx.abs() - s_dy.abs()).abs() <= 2)
+        {
+            return 0xFFF59E0B;
+        }
+        // Temperature "24"
+        if y >= 80 && y < 112 {
+            if let Some(c) = test_text(x, y, 552, 80, 4, b"24", 0xFF0F172A) {
+                return c;
+            }
+        }
+        // Vector degree symbol circle at (608, 86, r = 4)
+        let deg_dx = (x as i32) - 608;
+        let deg_dy = (y as i32) - 86;
+        let deg_d2 = deg_dx * deg_dx + deg_dy * deg_dy;
+        if deg_d2 <= 16 && deg_d2 >= 4 {
+            return 0xFF0F172A;
+        }
+        // Weather condition "Mostly Sunny"
+        if y >= 126 && y < 142 {
+            if let Some(c) = test_text(x, y, 485, 126, 2, b"Mostly Sunny", 0xFF64748B) {
+                return c;
+            }
+        }
+
+        return 0xFFF0F2F5;
     }
 
     // 3. Interactive Contextual "Today" Card (x: 40..680, y: 240..470)
     if x >= 40 && x < 680 && y >= 240 && y < 470 {
-        if y >= 466 {
+        if y == 240 || y == 469 || x == 40 || x == 679 {
             return 0xFFE2E8F0;
         }
+        // Divider line below header
+        if y == 288 && x >= 64 && x <= 656 {
+            return 0xFFF1F5F9;
+        }
 
-        if y >= 258 && y < 274 {
-            if let Some(c) = test_text(x, y, 68, 258, 2, b"Today", TEXT_DARK) {
+        if y >= 256 && y < 272 {
+            if let Some(c) = test_text(x, y, 68, 256, 2, b"Today", 0xFF0F172A) {
                 return c;
             }
-            if let Some(c) = test_text(x, y, 640, 258, 2, b">", 0xFF64748B) {
+            if let Some(c) = test_text(x, y, 640, 256, 2, b">", 0xFF64748B) {
                 return c;
             }
         }
 
-        // Task 1: Meeting with team
+        // Task 1: Meeting with team (11:00)
         if y >= 305 && y < 330 {
             let dx1 = (x as i32) - 78;
             let dy1 = (y as i32) - 318;
             let d1_sq = dx1 * dx1 + dy1 * dy1;
-            if d1_sq <= 64 {
+            if d1_sq <= 81 {
                 if state.task_done[0] {
-                    return ACCENT_SKY;
+                    if d1_sq <= 16 {
+                        return 0xFFFFFFFF;
+                    }
+                    return 0xFF0284C7;
                 }
-                if d1_sq >= 36 {
-                    return 0xFF64748B;
+                if d1_sq >= 49 {
+                    return 0xFF94A3B8;
                 }
             }
             if y >= 310 && y < 326 {
+                let col = if state.task_done[0] { 0xFF94A3B8 } else { 0xFF0F172A };
                 if let Some(c) =
-                    test_text(x, y, 100, 310, 2, b"Meeting with team (11:00)", TEXT_DARK)
+                    test_text(x, y, 102, 310, 2, b"Meeting with team (11:00)", col)
                 {
                     return c;
                 }
             }
         }
 
-        // Task 2: "2 unread messages"
+        // Task 2: 2 unread messages
         if y >= 355 && y < 380 {
             let dx2 = (x as i32) - 78;
             let dy2 = (y as i32) - 368;
             let d2_sq = dx2 * dx2 + dy2 * dy2;
-            if d2_sq <= 64 {
+            if d2_sq <= 81 {
                 if state.task_done[1] {
-                    return ACCENT_SKY;
+                    if d2_sq <= 16 {
+                        return 0xFFFFFFFF;
+                    }
+                    return 0xFF0284C7;
                 }
-                if d2_sq >= 36 {
-                    return 0xFF64748B;
+                if d2_sq >= 49 {
+                    return 0xFF94A3B8;
                 }
             }
             if y >= 360 && y < 376 {
-                if let Some(c) = test_text(x, y, 100, 360, 2, b"2 unread messages", TEXT_DARK) {
+                let col = if state.task_done[1] { 0xFF94A3B8 } else { 0xFF0F172A };
+                if let Some(c) = test_text(x, y, 102, 360, 2, b"2 unread messages", col) {
                     return c;
                 }
             }
         }
 
-        // Task 3: "Finish design work"
+        // Task 3: Finish design work
         if y >= 405 && y < 430 {
             let dx3 = (x as i32) - 78;
             let dy3 = (y as i32) - 418;
             let d3_sq = dx3 * dx3 + dy3 * dy3;
-            if d3_sq <= 64 {
+            if d3_sq <= 81 {
                 if state.task_done[2] {
-                    return ACCENT_SKY;
+                    if d3_sq <= 16 {
+                        return 0xFFFFFFFF;
+                    }
+                    return 0xFF0284C7;
                 }
-                if d3_sq >= 36 {
-                    return 0xFF64748B;
+                if d3_sq >= 49 {
+                    return 0xFF94A3B8;
                 }
             }
             if y >= 410 && y < 426 {
-                if let Some(c) = test_text(x, y, 100, 410, 2, b"Finish design work", TEXT_DARK) {
+                let col = if state.task_done[2] { 0xFF94A3B8 } else { 0xFF0F172A };
+                if let Some(c) = test_text(x, y, 102, 410, 2, b"Finish design work", col) {
                     return c;
                 }
             }
         }
 
-        return SURFACE_LIGHT;
+        return 0xFFFFFFFF;
     }
 
     // 4. Reference 6-Tile Quick Launch Dock (x: 40..680, y: 500..810)
@@ -673,7 +688,7 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 
                 // Border
                 if y == y0 || y == y0 + 139 || x == x0 || x == x0 + 189 {
-                    return BORDER_SUBTLE;
+                    return 0xFFE2E8F0;
                 }
 
                 // Tile Icon Badge (Center: x0 + 95, y0 + 55, r = 26)
@@ -681,77 +696,93 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 let b_dy = (y as i32) - (y0 as i32 + 55);
                 let b_d2 = b_dx * b_dx + b_dy * b_dy;
                 let (icon_text, icon_color, label) = match card_idx {
-                    0 => (&b"TEL"[..], ACCENT_SKY, &b"Phone"[..]),
-                    1 => (&b"MSG"[..], SUCCESS_EMERALD, &b"Messages"[..]),
-                    2 => (&b"CAM"[..], ACCENT_AMBER, &b"Camera"[..]),
-                    3 => (&b"DIR"[..], 0xFF38BDF8, &b"Files"[..]),
-                    4 => (&b"WWW"[..], 0xFFA78BFA, &b"Browser"[..]),
+                    0 => (&b"TEL"[..], 0xFF10B981, &b"Phone"[..]),
+                    1 => (&b"MSG"[..], 0xFF0284C7, &b"Messages"[..]),
+                    2 => (&b"CAM"[..], 0xFFF59E0B, &b"Camera"[..]),
+                    3 => (&b"DIR"[..], 0xFF6366F1, &b"Files"[..]),
+                    4 => (&b"WWW"[..], 0xFF8B5CF6, &b"Browser"[..]),
                     _ => (&b"APP"[..], 0xFFF43F5E, &b"Apps"[..]),
                 };
 
                 if b_d2 <= 676 {
-                    if b_d2 >= 576 {
-                        return icon_color;
-                    }
-                    if y >= y0 + 47 && y < y0 + 63 {
+                    if y >= y0 + 51 && y < y0 + 59 {
                         let ox = x0 + 95 - 12;
-                        if let Some(c) = test_text(x, y, ox, y0 + 47, 1, icon_text, icon_color) {
+                        if let Some(c) = test_text(x, y, ox, y0 + 51, 1, icon_text, 0xFFFFFFFF) {
                             return c;
                         }
                     }
-                    return 0xFF0E1422;
+                    return icon_color;
                 }
 
                 // Label below icon (y0 + 100..y0 + 116)
                 if y >= y0 + 100 && y < y0 + 116 {
                     let ox = x0 + 95 - (label.len() * 16) / 2;
-                    if let Some(c) = test_text(x, y, ox, y0 + 100, 2, label, TEXT_PRIMARY) {
+                    if let Some(c) = test_text(x, y, ox, y0 + 100, 2, label, 0xFF0F172A) {
                         return c;
                     }
                 }
 
-                return SURFACE_RAISED;
+                return 0xFFFFFFFF;
             }
         }
-        return BG_DARK;
+        return 0xFFF0F2F5;
     }
 
-    // 5. Universal Search Command Bar (x: 40..680, y: 1290..1365)
-    if x >= 40 && x < 680 && y >= 1290 && y < 1365 {
-        if y == 1290 || y == 1364 || x == 40 || x == 679 {
-            return BORDER_SUBTLE;
+    // 5. Universal Search Command Bar (x: 40..680, y: 840..915)
+    if x >= 40 && x < 680 && y >= 840 && y < 915 {
+        if y == 840 || y == 914 || x == 40 || x == 679 {
+            return 0xFFE2E8F0;
         }
 
         // Search magnifying glass icon
         let dx_s = (x as i32) - 68;
-        let dy_s = (y as i32) - 1327;
+        let dy_s = (y as i32) - 877;
         let d_s = dx_s * dx_s + dy_s * dy_s;
         if (d_s >= 36 && d_s <= 64) || (dx_s >= 6 && dx_s <= 10 && dx_s == dy_s) {
-            return TEXT_MUTED;
+            return 0xFF64748B;
         }
 
         // Search placeholder text
-        if y >= 1320 && y < 1336 {
-            if let Some(c) = test_text(x, y, 96, 1320, 2, b"Search apps and files...", TEXT_MUTED) {
+        if y >= 870 && y < 886 {
+            if let Some(c) = test_text(x, y, 96, 870, 2, b"Search apps and files...", 0xFF94A3B8) {
                 return c;
             }
         }
 
         // Right arrow icon
-        if y >= 1320 && y < 1336 {
-            if let Some(c) = test_text(x, y, 644, 1320, 2, b">", TEXT_MUTED) {
+        if y >= 870 && y < 886 {
+            if let Some(c) = test_text(x, y, 644, 870, 2, b">", 0xFF64748B) {
                 return c;
             }
         }
-        return SURFACE_RAISED;
+        return 0xFFFFFFFF;
     }
 
-    // 6. Bottom Home Gesture Bar (x: 260..460, y: 1418..1424)
-    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
-        return TEXT_MUTED;
+    // 6. Bottom Navigation Bar (x: 0..720, y: 1380..1440)
+    if y >= 1380 {
+        if y == 1380 {
+            return 0xFFE2E8F0;
+        }
+        // Back chevron (<) at x: 140, y: 1404
+        if y >= 1402 && y < 1418 {
+            if let Some(c) = test_text(x, y, 140, 1402, 2, b"<", 0xFF64748B) {
+                return c;
+            }
+        }
+        // Home pill at (320..400, 1408..1414)
+        if x >= 320 && x <= 400 && y >= 1408 && y <= 1414 {
+            return 0xFF0F172A;
+        }
+        // Recents ([]) at x: 580, y: 1402
+        if y >= 1402 && y < 1418 {
+            if let Some(c) = test_text(x, y, 580, 1402, 2, b"[]", 0xFF64748B) {
+                return c;
+            }
+        }
+        return 0xFFFFFFFF;
     }
 
-    get_wallpaper_pixel(x, y, state)
+    0xFFF0F2F5
 }
 
 #[inline(never)]
@@ -1239,29 +1270,67 @@ fn get_system_space_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
 }
 
 #[inline(never)]
+fn get_lock_wallpaper_pixel(x: usize, y: usize) -> u32 {
+    let xi = x as i32;
+    let yi = y as i32;
+
+    // Mountain silhouettes matching Screen 1 reference UI:
+    // Peak 1 (Distant Ridge):
+    let m1 = 580 + ((xi - 340).abs() * 7) / 10;
+    // Peak 2 (Mid-range Ridge):
+    let m2 = 780 + ((xi - 180).abs() * 6) / 10;
+    // Peak 3 (Right Fore-peak):
+    let m3 = 920 + ((xi - 560).abs() * 8) / 10;
+    // Foreground ridge / ground:
+    let m4 = 1180 + ((xi - 300).abs() * 4) / 10;
+
+    if yi >= m4 {
+        return 0xFF050914; // Deepest foreground
+    } else if yi >= m3 {
+        return 0xFF0C1322;
+    } else if yi >= m2 {
+        return 0xFF141F36;
+    } else if yi >= m1 {
+        return 0xFF23324F;
+    }
+
+    // Sky Twilight Gradient (from dark blue down to warm rose/amber twilight glow near horizon):
+    if yi < 400 {
+        let t = (yi * 255) / 400;
+        let r = 10 + (t * 15) / 255;
+        let g = 16 + (t * 20) / 255;
+        let b = 38 + (t * 40) / 255;
+        (0xFF << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+    } else if yi < 600 {
+        let t = ((yi - 400) * 255) / 200;
+        let r = 25 + (t * 50) / 255;
+        let g = 36 + (t * 30) / 255;
+        let b = 78 + (t * 10) / 255;
+        (0xFF << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+    } else {
+        0xFF4A4E69
+    }
+}
+
+#[inline(never)]
 fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     // 1. Status Bar (y: 0..48)
     if y < 48 {
         if y == 47 {
-            return BORDER_SUBTLE;
+            return 0x33FFFFFF;
         }
         if y >= 16 && y < 32 {
-            if let Some(c) = test_text(x, y, 48, 16, 2, CLOCK_TIME, TEXT_PRIMARY) {
+            if let Some(c) = test_text(x, y, 48, 16, 2, CLOCK_TIME, 0xFFFFFFFF) {
                 return c;
             }
         }
         if x >= 590 && x <= 608 && y >= 16 && y <= 32 {
-            if x <= 593 && y >= 28 {
-                return TEXT_PRIMARY;
-            }
-            if x >= 595 && x <= 598 && y >= 24 {
-                return TEXT_PRIMARY;
-            }
-            if x >= 600 && x <= 603 && y >= 20 {
-                return TEXT_PRIMARY;
-            }
-            if x >= 605 && x <= 608 && y >= 16 {
-                return TEXT_PRIMARY;
+            if (x <= 593 && y >= 28)
+                || (x >= 595 && x <= 598 && y >= 24)
+                || (x >= 600 && x <= 603 && y >= 20)
+                || (x >= 605 && x <= 608 && y >= 16)
+            {
+                return 0xFFFFFFFF;
             }
         }
         if x >= 626 && x <= 644 && y >= 18 && y <= 32 {
@@ -1270,253 +1339,54 @@ fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             let d2 = dx * dx + dy * dy;
             if (d2 >= 100 && d2 <= 144 && dy <= -2) || (d2 >= 36 && d2 <= 64 && dy <= -1) || d2 <= 9
             {
-                return TEXT_PRIMARY;
+                return 0xFFFFFFFF;
             }
         }
         if x >= 658 && x <= 686 && y >= 18 && y <= 32 {
-            if x == 658 || x == 684 || y == 18 || y == 32 {
-                return TEXT_PRIMARY;
-            }
-            if x >= 685 && x <= 686 && y >= 22 && y <= 28 {
-                return TEXT_PRIMARY;
+            if x == 658 || x == 684 || y == 18 || y == 32 || (x >= 685 && x <= 686 && y >= 22 && y <= 28)
+            {
+                return 0xFFFFFFFF;
             }
             if x >= 661 && x <= 680 && y >= 21 && y <= 29 {
                 return SUCCESS_EMERALD;
             }
         }
-        return BG_DARK;
+        return get_lock_wallpaper_pixel(x, y);
     }
 
-    // 2. Security Status Pill (y: 70..106, x: 48..360)
-    if y >= 70 && y < 106 && x >= 48 && x < 360 {
-        if y == 70 || y == 105 || x == 48 || x == 359 {
-            return BORDER_SUBTLE;
-        }
-        if y >= 80 && y < 96 {
-            if let Some(c) = test_text(x, y, 68, 80, 2, b"INTEROS  SECURE", TEXT_PRIMARY) {
+    // 2. Clean Architectural Clock & Date (Screen 1 Reference)
+    if y >= 150 && y < 275 && x >= 48 && x < 672 {
+        if y >= 160 && y < 184 {
+            if let Some(c) = test_text(x, y, 72, 160, 3, b"Wed, 24 Sep", 0xFFE2E8F0) {
                 return c;
             }
         }
-        return SURFACE_DARK;
+        if y >= 195 && y < 259 {
+            if let Some(c) = test_text(x, y, 72, 195, 8, CLOCK_TIME, 0xFFFFFFFF) {
+                return c;
+            }
+        }
+        return get_lock_wallpaper_pixel(x, y);
     }
 
-    // 3. Distinct Architectural Large Clock Display (y: 125..275)
-    if y >= 125 && y < 275 && x >= 48 && x < 672 {
-        if x >= 48 && x <= 53 && y >= 135 && y <= 235 {
-            return ACCENT_SKY;
-        }
-        if y >= 135 && y < 183 {
-            if let Some(c) = test_text(x, y, 72, 135, 6, CLOCK_TIME, TEXT_PRIMARY) {
-                return c;
-            }
-        }
-        if y >= 195 && y < 211 {
-            if let Some(c) = test_text(x, y, 72, 195, 2, b"Wednesday, 30 Sep", 0xFF94A3B8) {
-                return c;
-            }
-            if let Some(c) = test_text(x, y, 380, 195, 2, b"InterOS Core", ACCENT_SKY) {
-                return c;
-            }
-        }
-        if y >= 220 && y < 228 {
-            if let Some(c) = test_text(
-                x,
-                y,
-                72,
-                220,
-                1,
-                b"HARDWARE ROOT VERIFIED  SANDBOX ACTIVE",
-                0xFF10B981,
-            ) {
-                return c;
-            }
-        }
-    }
-
-    // 4. Modular Lockscreen Cards (y: 285..580)
-    // Card 1: Platform & Security Status (x: 48..345, y: 285..465)
-    if x >= 48 && x < 345 && y >= 285 && y < 465 {
-        if y == 285 || y == 464 || x == 48 || x == 344 {
-            return BORDER_SUBTLE;
-        }
-        if y >= 305 && y < 321 {
-            if let Some(c) = test_text(x, y, 70, 305, 2, b"Security", ACCENT_SKY) {
-                return c;
-            }
-        }
-        if y >= 335 && y < 343 {
-            if let Some(c) = test_text(
-                x,
-                y,
-                70,
-                335,
-                1,
-                b"Hardware Root Verified",
-                TEXT_PRIMARY,
-            ) {
-                return c;
-            }
-        }
-        if y >= 355 && y < 363 {
-            if let Some(c) = test_text(x, y, 70, 355, 1, b"Sandbox Isolation: Enforced", TEXT_MUTED) {
-                return c;
-            }
-        }
-        // Indicator bar (x: 70..320, y: 375..385)
-        if y >= 375 && y <= 385 && x >= 70 && x <= 320 {
-            let seg = (x - 70) / 64;
-            let within = (x - 70) % 64;
-            if within <= 56 {
-                if seg < 2 {
-                    return SUCCESS_EMERALD;
-                } else if seg == 2 {
-                    return ACCENT_SKY;
-                } else {
-                    return 0xFF1E293B;
-                }
-            }
-        }
-        if y >= 405 && y < 413 {
-            if let Some(c) = test_text(x, y, 70, 405, 1, b"Zero Unsafe Capabilities", SUCCESS_EMERALD)
-            {
-                return c;
-            }
-        }
-        if y >= 425 && y < 433 {
-            if let Some(c) = test_text(x, y, 70, 425, 1, b"All Syscalls Audited", TEXT_MUTED) {
-                return c;
-            }
-        }
-        return 0xEE0A1220;
-    }
-
-    // Card 2: Network & Link (x: 375..672, y: 285..465)
-    if x >= 375 && x < 672 && y >= 285 && y < 465 {
-        if y == 285 || y == 464 || x == 375 || x == 671 {
-            return BORDER_SUBTLE;
-        }
-        if y >= 305 && y < 321 {
-            if let Some(c) = test_text(x, y, 395, 305, 2, b"Connectivity", 0xFFF59E0B) {
-                return c;
-            }
-        }
-        if y >= 335 && y < 343 {
-            if let Some(c) = test_text(x, y, 395, 335, 1, b"Local Stack: IPv4/IPv6 Ready", TEXT_PRIMARY) {
-                return c;
-            }
-        }
-        if y >= 355 && y < 363 {
-            if let Some(c) = test_text(x, y, 395, 355, 1, b"Loopback: 127.0.0.1 Up", SUCCESS_EMERALD)
-            {
-                return c;
-            }
-        }
-        // Link progress bar (x: 395..645, y: 375..385)
-        if y >= 375 && y <= 385 && x >= 395 && x <= 645 {
-            let prog = (x - 395) * 100 / 250;
-            if prog <= 65 {
-                return 0xFFF59E0B;
-            } else {
-                return 0xFF1E293B;
-            }
-        }
-        if y >= 405 && y < 413 {
-            if let Some(c) = test_text(
-                x,
-                y,
-                395,
-                405,
-                1,
-                b"UART Serial: Active",
-                TEXT_MUTED,
-            ) {
-                return c;
-            }
-        }
-        if y >= 425 && y < 433 {
-            if let Some(c) = test_text(x, y, 395, 425, 1, b"KMS Display: 720x1440 60Hz", TEXT_MUTED) {
-                return c;
-            }
-        }
-        return 0xEE0A1220;
-    }
-
-    // Card 3: System Status Card (x: 48..672, y: 480..570)
-    if x >= 48 && x < 672 && y >= 480 && y < 570 {
-        if y == 480 || y == 569 || x == 48 || x == 671 {
-            return BORDER_SUBTLE;
-        }
-        if y >= 500 && y < 516 {
-            if let Some(c) = test_text(x, y, 70, 500, 2, b"InterOS Modern Platform", TEXT_PRIMARY) {
-                return c;
-            }
-        }
-        if y >= 530 && y < 538 {
-            if let Some(c) = test_text(
-                x,
-                y,
-                70,
-                530,
-                1,
-                b"System Ready  16 Application Surfaces Active",
-                TEXT_MUTED,
-            ) {
-                return c;
-            }
-        }
-        return 0xEE0A1220;
-    }
-
-    // 5. Interactive Theme Switcher Card (x: 80..640, y: 1120..1190)
-    if x >= 80 && x < 640 && y >= 1120 && y < 1190 {
-        if y == 1120 || y == 1189 || x == 80 || x == 639 {
-            return ACCENT_SKY;
-        }
-        if y >= 1135 && y < 1151 {
-            let label = match state.wallpaper_id {
-                0 => &b"THEME: MIDNIGHT SLATE [TAP TO CYCLE]"[..],
-                1 => &b"THEME: DEEP AZURE     [TAP TO CYCLE]"[..],
-                2 => &b"THEME: OBSIDIAN       [TAP TO CYCLE]"[..],
-                _ => &b"THEME: DUSK           [TAP TO CYCLE]"[..],
-            };
-            if let Some(c) = test_text(x, y, 105, 1135, 2, label, ACCENT_SKY) {
-                return c;
-            }
-        }
-        if y >= 1160 && y < 1168 {
-            if let Some(c) = test_text(
-                x,
-                y,
-                180,
-                1160,
-                1,
-                b"Tap to switch system wallpaper theme",
-                TEXT_MUTED,
-            ) {
-                return c;
-            }
-        }
-        return 0xEE0A1628;
-    }
-
-    // 6. Flashlight Circular Button at (72, 1330, r: 35)
+    // 3. Flashlight Circular Button at (72, 1330, r: 35)
     let f_dx = (x as i32) - 72;
     let f_dy = (y as i32) - 1330;
     let f_d2 = f_dx * f_dx + f_dy * f_dy;
     if f_d2 <= 1225 {
         if f_d2 >= 1156 {
-            return BORDER_SUBTLE;
+            return 0x55FFFFFF;
         }
         if y >= 1324 && y < 1332 {
             let label = if state.flashlight_on {
                 &b"ON"[..]
             } else {
-                &b"LGT"[..]
+                &b"FLS"[..]
             };
             let fg = if state.flashlight_on {
                 TEXT_DARK
             } else {
-                TEXT_PRIMARY
+                0xFFFFFFFF
             };
             let ox = if state.flashlight_on { 64 } else { 60 };
             if let Some(c) = test_text(x, y, ox, 1324, 1, label, fg) {
@@ -1526,47 +1396,46 @@ fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return if state.flashlight_on {
             ACCENT_AMBER
         } else {
-            0xEE142032
+            0x77000000
         };
     }
 
-    // Camera Circular Button at (648, 1330, r: 35)
+    // 4. Camera Circular Button at (648, 1330, r: 35)
     let c_dx = (x as i32) - 648;
     let c_dy = (y as i32) - 1330;
     let c_d2 = c_dx * c_dx + c_dy * c_dy;
     if c_d2 <= 1225 {
-        if c_d2 >= 1156 {
-            return BORDER_SUBTLE;
+        if f_d2 >= 1156 {
+            return 0x55FFFFFF;
         }
         if y >= 1324 && y < 1332 {
-            if let Some(c) = test_text(x, y, 636, 1324, 1, b"CAM", TEXT_PRIMARY) {
+            if let Some(c) = test_text(x, y, 636, 1324, 1, b"CAM", 0xFFFFFFFF) {
                 return c;
             }
         }
-        return 0xEE142032;
+        return 0x77000000;
     }
 
-    // 7. Kinetic Unlock Affordance (x: 200..520, y: 1330..1390)
-    if x >= 200 && x < 520 && y >= 1330 && y < 1390 {
-        if y >= 1340 && y < 1356 {
-            if let Some(c) = test_text(x, y, 310, 1340, 2, b"^ ^ ^", ACCENT_CYAN) {
+    // 5. Kinetic Unlock Affordance (x: 220..500, y: 1370..1405)
+    if x >= 220 && x < 500 && y >= 1370 && y < 1405 {
+        if y == 1370 || y == 1404 || x == 220 || x == 499 {
+            return 0x44FFFFFF;
+        }
+        if y >= 1380 && y < 1396 {
+            if let Some(c) = test_text(x, y, 245, 1380, 2, b"Swipe up to unlock", 0xFFFFFFFF) {
                 return c;
             }
         }
-        if y >= 1365 && y < 1381 {
-            if let Some(c) = test_text(x, y, 240, 1365, 2, b"SWIPE UP TO UNLOCK", TEXT_PRIMARY) {
-                return c;
-            }
-        }
+        return 0x55000000;
     }
 
-    // Home Gesture Indicator Pill at (x: 260..460, y: 1418..1424)
+    // 6. Home Gesture Pill at (x: 260..460, y: 1418..1424)
     if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
-        return TEXT_MUTED;
+        return 0x88FFFFFF;
     }
 
-    // 8. Foundational Wallpaper Backdrop
-    get_wallpaper_pixel(x, y, state)
+    // 7. Foundational Mountain Wallpaper
+    get_lock_wallpaper_pixel(x, y)
 }
 
 #[inline(never)]
@@ -4166,24 +4035,6 @@ pub extern "C" fn _start() -> ! {
                                     }
                                 }
 
-                                // Universal search bar tap: opens System Space
-                                if (1290..1365).contains(&y) && (40..680).contains(&x) {
-                                    state.current_view = ViewMode::SystemSpace;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] System Space opened via universal search bar tap.").ok();
-                                    let mut drain = std::InputEvent {
-                                        kind: 0,
-                                        x: 0,
-                                        y: 0,
-                                        dx: 0,
-                                        dy: 0,
-                                        scale_milli: 1000,
-                                    };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
-
                                 // Launch application
                                 let target_desc = resolve_app_at_touch(&state, input.x, input.y)
                                     .map(|s| {
@@ -4206,6 +4057,53 @@ pub extern "C" fn _start() -> ! {
                                             }
                                         }
                                     }
+                                }
+
+                                // Universal search bar tap: opens System Space
+                                if ((840..915).contains(&y) || (1290..1365).contains(&y)) && (40..680).contains(&x) {
+                                    state.current_view = ViewMode::SystemSpace;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] System Space opened via universal search bar tap.").ok();
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
+
+                                // Bottom Navigation Bar tap (y >= 1380)
+                                if y >= 1380 {
+                                    if (520..640).contains(&x) {
+                                        // Recents button ([])
+                                        state.current_view = ViewMode::ActivitySpace;
+                                        let mut win_buf = [0u8; 1024];
+                                        let _ = std::window_list(&mut win_buf);
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        std::log(0, "[LAUNCHER] Overview / Recent Apps switcher opened via recents button.").ok();
+                                    } else {
+                                        // Back / Home button
+                                        state.current_view = ViewMode::HomeScreen;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        std::log(0, "[LAUNCHER] Returned to home screen via navigation bar.").ok();
+                                    }
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
                                 }
 
                                 // Tapping dock 6th item (Apps) opens App Drawer

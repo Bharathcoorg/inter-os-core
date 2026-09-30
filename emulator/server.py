@@ -1826,11 +1826,19 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(json.dumps({'success': False, 'error': 'unsupported touch action'}).encode())
                 return
 
-            if data.get('coords') == 'portrait' or (0 <= x <= 720 and 720 < y <= 1440):
-                x = 460 + int(x * 360 / 720)
-                y = int(y * 720 / 1440)
+            is_portrait = data.get('coords') == 'portrait' or (0 <= x <= 720 and 0 <= y <= 1440)
+            if is_portrait:
+                px = max(0, min(719, x))
+                py = max(0, min(1439, y))
+                gx = 460 + int(px * 360 / 720)
+                gy = int(py * 720 / 1440)
+            else:
+                gx = max(0, min(1279, x))
+                gy = max(0, min(719, y))
+                px = (gx - 460) * 2 if 460 <= gx <= 820 else gx
+                py = gy * 2 if 460 <= gx <= 820 else gy
 
-            if not (0 <= x < 1280 and 0 <= y < 720):
+            if not is_portrait and not (0 <= x < 1280 and 0 <= y < 720):
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
@@ -1846,44 +1854,34 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             with serial_socket_lock:
                 if serial_socket_conn:
                     try:
-                        if action == 'down':
-                            serial_socket_conn.sendall(f"INPUT_TOUCH DOWN {x} {y} 0\n".encode('utf-8'))
-                        elif action == 'up':
-                            serial_socket_conn.sendall(f"INPUT_TOUCH UP {x} {y} 0\n".encode('utf-8'))
-                        elif action == 'move':
-                            serial_socket_conn.sendall(f"INPUT_TOUCH MOVE {x} {y} 0\n".encode('utf-8'))
+                        if action == 'tap':
+                            serial_socket_conn.sendall(f"TAP {px} {py}\n".encode('utf-8'))
                         elif action == 'swipe':
                             try:
                                 x2 = int(data['x2'])
                                 y2 = int(data['y2'])
                             except (KeyError, TypeError, ValueError):
-                                self.send_response(400)
-                                self.send_header('Content-Type', 'application/json')
-                                self.end_headers()
-                                self.wfile.write(json.dumps({'success': False, 'error': 'swipe requires integer x2 and y2'}).encode())
-                                return
-                            if data.get('coords') == 'portrait' or (0 <= x2 <= 720 and 720 < y2 <= 1440):
-                                x2 = 460 + int(x2 * 360 / 720)
-                                y2 = int(y2 * 720 / 1440)
-                            if not (0 <= x2 < 1280 and 0 <= y2 < 720):
-                                self.send_response(400)
-                                self.send_header('Content-Type', 'application/json')
-                                self.end_headers()
-                                self.wfile.write(json.dumps({'success': False, 'status': 'REJECTED', 'error': 'swipe endpoint must remain inside 1280x720 guest scanout'}).encode())
-                                return
+                                x2, y2 = x, y
+                            if is_portrait:
+                                px2 = max(0, min(719, x2))
+                                py2 = max(0, min(1439, y2))
+                            else:
+                                px2 = (x2 - 460) * 2 if 460 <= x2 <= 820 else x2
+                                py2 = y2 * 2 if 460 <= x2 <= 820 else y2
                             try:
                                 steps = int(data.get('steps', 5))
                             except (TypeError, ValueError):
                                 steps = 5
-                            serial_socket_conn.sendall(f"INPUT_TOUCH DOWN {x} {y} 0\n".encode('utf-8'))
-                            for step in range(1, max(2, min(20, steps))):
-                                cur_x = x + ((x2 - x) * step) // max(2, min(20, steps))
-                                cur_y = y + ((y2 - y) * step) // max(2, min(20, steps))
-                                serial_socket_conn.sendall(f"INPUT_TOUCH MOVE {cur_x} {cur_y} 0\n".encode('utf-8'))
-                            serial_socket_conn.sendall(f"INPUT_TOUCH UP {x2} {y2} 0\n".encode('utf-8'))
+                            serial_socket_conn.sendall(f"SWIPE {px} {py} {px2} {py2} {steps}\n".encode('utf-8'))
+                        elif action == 'down':
+                            serial_socket_conn.sendall(f"INPUT_TOUCH DOWN {gx} {gy} 0\n".encode('utf-8'))
+                        elif action == 'up':
+                            serial_socket_conn.sendall(f"INPUT_TOUCH UP {gx} {gy} 0\n".encode('utf-8'))
+                        elif action == 'move':
+                            serial_socket_conn.sendall(f"INPUT_TOUCH MOVE {gx} {gy} 0\n".encode('utf-8'))
                         else:
-                            serial_socket_conn.sendall(f"INPUT_TOUCH DOWN {x} {y} 0\n".encode('utf-8'))
-                            serial_socket_conn.sendall(f"INPUT_TOUCH UP {x} {y} 0\n".encode('utf-8'))
+                            serial_socket_conn.sendall(f"INPUT_TOUCH DOWN {gx} {gy} 0\n".encode('utf-8'))
+                            serial_socket_conn.sendall(f"INPUT_TOUCH UP {gx} {gy} 0\n".encode('utf-8'))
                         sent = True
                     except Exception:
                         sent = False
