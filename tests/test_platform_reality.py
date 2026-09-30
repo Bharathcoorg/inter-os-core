@@ -76,6 +76,12 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertIn("std::service_stop(11)", init)
         self.assertNotIn("std::service_stop(1)", init)
 
+    def test_battery_syscall_reports_backend_availability(self):
+        syscall = self.read("kernel/src/syscall/mod.rs")
+        self.assertIn('"telemetry_valid"', syscall)
+        self.assertIn("pmic.is_hardware_present()", syscall)
+        self.assertNotIn('r#"{{"present":true,"voltage_mv"', syscall)
+
     def test_no_internal_gate_labels_enter_public_source(self):
         for path in ["README.md", "kernel/src/platform.rs", "tests/test_platform_reality.py"]:
             text = self.read(path).lower()
