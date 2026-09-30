@@ -92,6 +92,7 @@ impl CircularGeofence {
 pub struct GpsController {
     pub mmio_base: usize,
     pub enabled: bool,
+    pub hardware_present: bool,
     pub last_fix: Option<GpsFix>,
     pub total_sentences_parsed: u64,
     pub total_privacy_queries: u64,
@@ -102,6 +103,7 @@ impl GpsController {
         Self {
             mmio_base,
             enabled: false,
+            hardware_present: false,
             last_fix: None,
             total_sentences_parsed: 0,
             total_privacy_queries: 0,
@@ -110,6 +112,11 @@ impl GpsController {
 
     pub fn init_hardware(&mut self) {
         self.enabled = true;
+    }
+
+    pub fn set_hardware_present(&mut self, present: bool) {
+        self.hardware_present = present;
+        if !present { self.last_fix = None; }
     }
 
     /// Validates standard NMEA-0183 XOR checksum (e.g. "$GPGGA,...*47").
@@ -217,6 +224,7 @@ impl GpsController {
         accuracy: AccuracyLevel,
         caps: &CapabilityTable,
     ) -> Result<Coordinates, GpsError> {
+        if !self.enabled || !self.hardware_present { return Err(GpsError::HardwareDisabled); }
         let fix = self.last_fix.as_ref().ok_or(GpsError::NoSatelliteFix)?;
         self.total_privacy_queries += 1;
 
