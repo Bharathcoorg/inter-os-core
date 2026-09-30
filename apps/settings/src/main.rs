@@ -198,9 +198,9 @@ fn render_settings_ui(surface: u32, tab: SettingsTab) {
                 let card = (y - 200) / 210;
                 let card_y = (y - 200) % 210;
                 if tab == SettingsTab::SecurityAndPrivacy && card == 3 && card_y >= 35 && card_y < 85 {
-                    if let Some(c) = test_text(x, y, 60, 235 + card * 210 + 35, 1, b"Developer terminal", std::design::color::TEXT) {
+                    if let Some(c) = test_text(x, y, 60, 200 + card * 210 + 35, 1, b"Developer terminal", std::design::color::TEXT) {
                         chunk[i] = c;
-                    } else if let Some(c) = test_text(x, y, 60, 235 + card * 210 + 55, 1, b"Disabled by default", std::design::color::TEXT_MUTED) {
+                    } else if let Some(c) = test_text(x, y, 60, 200 + card * 210 + 55, 1, b"Disabled by default", std::design::color::TEXT_MUTED) {
                         chunk[i] = c;
                     } else {
                         chunk[i] = std::design::color::SURFACE;
