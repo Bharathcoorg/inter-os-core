@@ -294,7 +294,7 @@ fn refresh_notifications(state: &mut LauncherState) {
 
 fn developer_terminal_enabled() -> bool {
     let mut buf = [0u8; 8];
-    let Ok(n) = std::settings_get(3, "developer.terminal_enabled", &mut buf) else {
+    let Ok(n) = std::settings_get(0, "developer.terminal_enabled", &mut buf) else {
         return false;
     };
     &buf[..n] == b"true"
