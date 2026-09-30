@@ -51,23 +51,8 @@ pub struct Bookmark {
 }
 
 /// Built-in Sovereign Bookmarks.
-pub static BOOKMARKS: [Bookmark; 3] = [
-    Bookmark {
-        title: "InterLayer Sovereign Mesh",
-        url: "interlayer://sovereign.mesh/catalog",
-        is_sovereign: true,
-    },
-    Bookmark {
-        title: "Localhost Microkernel Diagnostics",
-        url: "http://127.0.0.1:4200/telemetry",
-        is_sovereign: false,
-    },
-    Bookmark {
-        title: "Decentralized IPFS Explorer",
-        url: "interlayer://ipfs.mesh/explore",
-        is_sovereign: true,
-    },
-];
+pub static BOOKMARKS: [Bookmark; 0] = [];
+
 
 /// Production Sovereign Browser state engine.
 pub struct BrowserApp {
@@ -81,7 +66,7 @@ pub struct BrowserApp {
 impl BrowserApp {
     pub const fn new() -> Self {
         Self {
-            current_url: "interlayer://sovereign.mesh/catalog",
+            current_url: "about:blank",
             scroll_offset_px: 0,
             pages_loaded: 0,
             trackers_blocked: 0,
@@ -134,18 +119,9 @@ impl BrowserApp {
         self.current_url = target_url;
         self.pages_loaded += 1;
 
-        // 3. Zero-Trust Network Socket Creation & Request Framing
-        if let Ok(sock_id) = std::net_socket(8080) {
-            self.active_socket_id = Some(sock_id as u64);
-            let req = b"GET /catalog.json HTTP/1.1\r\nHost: sovereign.mesh\r\nSec-Inter-Attest: DID\r\n\r\n";
-            if std::net_sendto([127, 0, 0, 1], 8443, req).is_ok() {
-                std::log(
-                    0,
-                    "[BROWSER APP] Network socket bound: port 8080, HTTP/1.1 request transmitted.",
-                )
-                .ok();
-            }
-        }
+        // Network transport is only used when a real navigation target and
+        // transport implementation are available; no synthetic request is emitted here.
+
 
         // 4. Hypermedia DOM Layout & Gravity Glass Inertial Touch Physics
         if let Ok(new_scroll) = std::surface_physics(3, self.scroll_offset_px, 720, 2000) {
@@ -273,7 +249,7 @@ pub extern "C" fn _start() -> ! {
     };
 
     // Ingest and navigate to default sovereign home portal
-    browser.navigate("interlayer://sovereign.mesh/catalog?fbclid=track123&utm_source=ad");
+    browser.current_url = "about:blank";
 
     if surface > 0 {
         render_browser_ui(surface, &browser);
