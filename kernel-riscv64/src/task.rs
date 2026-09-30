@@ -97,4 +97,17 @@ impl Scheduler {
             false
         }
     }
+
+    /// Marks the current task terminal without destroying its scheduler record.
+    /// Reaping remains a separate operation so future scheduling can preserve
+    /// ownership and lifecycle invariants.
+    pub fn exit_current(&mut self) -> bool {
+        let id = self.current_task;
+        if let Some(task) = self.tasks.iter_mut().flatten().find(|task| task.id == id) {
+            task.state = TaskState::Exited;
+            true
+        } else {
+            false
+        }
+    }
 }
