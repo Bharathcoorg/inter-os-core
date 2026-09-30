@@ -132,13 +132,16 @@ fn registry_has_all_running_services(buf: &[u8]) -> bool {
         let Some(id_bytes) = fields.next() else {
             continue;
         };
-        let Some(task_bytes) = fields.next() else {
+        // The public service snapshot exposes ABI version as field 2 and
+        // deliberately does not expose scheduler task IDs. Validate the
+        // published contract instead of interpreting ABI data as a task ID.
+        let Some(abi_bytes) = fields.next() else {
             continue;
         };
         let Some(state) = fields.next() else {
             continue;
         };
-        if state != b"running" || task_bytes == b"0" {
+        if abi_bytes != b"1" || state != b"running" {
             continue;
         }
         let id = match id_bytes {
