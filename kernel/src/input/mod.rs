@@ -133,6 +133,22 @@ pub fn post_char_event(c: char) {
         char_code: c,
         pressed: true,
     });
+    post_key_event(KeyEvent {
+        source: InputSource::Keyboard,
+        action: KeyAction::Down,
+        code: KeyCode::Character(c),
+        shift: false,
+        ctrl: false,
+        alt: false,
+        meta: false,
+    });
+}
+
+pub fn post_key_event(event: KeyEvent) {
+    INPUT_QUEUE.lock().push(InputEvent::KeyEvent(event));
+    let normalized = crate::drivers::input::InputEvent::from_key(event);
+    crate::drivers::input::INPUT_PIPELINE.lock().push(normalized);
+    crate::drivers::input::dispatch_to_focused_window(normalized);
     crate::event::broadcast_event(crate::event::EVENT_TOUCH_INPUT);
 }
 
