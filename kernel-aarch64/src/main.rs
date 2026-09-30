@@ -1364,8 +1364,9 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
 
     let mut wifi = wifi::WifiController::new(0x0907_0000);
     wifi.init_hardware();
-    assert!(wifi.enabled);
-    kprintln!("[OK] Wi-Fi 6 (802.11ax) Controller: Initialized hardware @ 0x09070000 (Channel 6).");
+    assert!(!wifi.enabled);
+    assert!(!wifi.hardware_present);
+    kprintln!("[OK] Wi-Fi configuration loaded; no physical chipset is claimed.");
 
     // Test 1: Zero Ambient Authority: Uncredentialed probe request rejected
     let unauth_probe = wifi.construct_probe_request(Some("SovereignMeshNet"), &empty_caps);
@@ -1414,15 +1415,15 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert!(net.wpa3_sae_supported);
     kprintln!("[OK] 802.11 Receiver: Ingested Beacon from '{}' (BSSID: 00:11:22:33:44:55, RSSI: -42 dBm, WPA3-SAE: True).", net.ssid);
 
-    // Test 5: Cryptographic WPA3-SAE (Simultaneous Authentication of Equals / Dragonfly Handshake)
-    let bssid = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
-    let pmk = wifi.perform_wpa3_sae_handshake(bssid, "SovereignPassphrase2026!", &wifi_caps)
-        .expect("WPA3 SAE handshake failed");
-    assert_eq!(pmk.len(), 32);
-    assert_eq!(wifi.state, wifi::WifiStationState::Associated);
-    assert_eq!(wifi.active_bssid, Some(bssid));
-    kprintln!("[TEST] WPA3-SAE Dragonfly Handshake: Derived forward-secure PMK ({:02X}{:02X}{:02X}{:02X}...) -> Associated VERIFIED.",
-        pmk[0], pmk[1], pmk[2], pmk[3]);
+    // Test 5: WPA3-SAE must not manufacture a PMK without a real radio/crypto backend.
+    let sae = wifi.perform_wpa3_sae_handshake(
+        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        "SovereignPassphrase2026!",
+        &wifi_caps,
+    );
+    assert_eq!(sae.err(), Some(wifi::WifiError::HardwareUnavailable));
+    kprintln!("[TEST] WPA3-SAE hardware truth: handshake rejected without backend.");
+
 
     // Test 6: Sovereign P2P Wi-Fi Direct Autonomous Group Owner (GO) Negotiation
     let is_go = wifi.start_p2p_group_owner(14, &wifi_caps).expect("P2P GO start failed");
