@@ -133,3 +133,16 @@ class SettingsRealityContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_developer_terminal_is_disabled_by_default_and_kernel_gated():
+    settings = (ROOT / "kernel/src/settings.rs").read_text()
+    syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text()
+    launcher = (ROOT / "apps/launcher/src/main.rs").read_text()
+    app = (ROOT / "apps/settings/src/main.rs").read_text()
+    assert "developer.terminal_enabled=false" in settings
+    assert "developer_terminal_enabled()" in syscall
+    assert "return Err(SyscallResult::PermissionDenied)" in syscall
+    assert "developer_terminal_enabled()" in launcher
+    assert "toggle_terminal" in app
+    assert '"developer.terminal_enabled"' in app
