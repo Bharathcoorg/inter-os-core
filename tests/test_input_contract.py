@@ -42,3 +42,14 @@ def test_first_party_apps_accept_canonical_system_gestures():
         assert "input.kind == 6" in source, name
         assert "input.kind == 7" in source, name
         assert "input.kind == 8" in source, name
+
+
+def test_gesture_thresholds_match_kernel_tick_rate():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    interrupts = (root / "kernel/src/interrupts.rs").read_text()
+    router = (root / "kernel/src/input/router.rs").read_text()
+    assert "SYSTEM_TICK_HZ" in interrupts
+    assert "LONG_PRESS_TICKS: u64 = 500" in router
+    assert "DOUBLE_TAP_WINDOW_TICKS: u64 = 300" in router
+    assert "FLING_WINDOW_TICKS: u64 = 250" in router
