@@ -52,6 +52,7 @@ pub struct HapticPulse {
 pub struct HapticsController {
     pub mmio_base: usize,
     pub enabled: bool,
+    pub hardware_present: bool,
     pub actuator_type: ActuatorType,
     pub resonant_freq_hz: u16,
     pub is_playing: bool,
@@ -65,6 +66,7 @@ impl HapticsController {
         Self {
             mmio_base,
             enabled: false,
+            hardware_present: false,
             actuator_type: ActuatorType::LinearResonantActuator,
             resonant_freq_hz: DEFAULT_LRA_RESONANT_FREQ_HZ,
             is_playing: false,
@@ -76,6 +78,7 @@ impl HapticsController {
 
     pub fn init_hardware(&mut self) {
         self.enabled = true;
+        self.hardware_present = false;
     }
 
     /// Synthesizes tactile pulse sequence for a requested haptic effect.
@@ -171,7 +174,7 @@ impl HapticsController {
         caps.check(CapabilityType::HapticsActuatorDirect, required_rights)
             .map_err(|_| HapticError::CapabilityDenied)?;
 
-        if !self.enabled {
+        if !self.enabled || !self.hardware_present {
             return Err(HapticError::HardwareDisabled);
         }
 
@@ -189,6 +192,11 @@ impl HapticsController {
         self.total_effects_played += 1;
 
         Ok(pulses.len())
+    }
+
+    pub fn set_hardware_present(&mut self, present: bool) {
+        self.hardware_present = present;
+        if !present { self.is_playing=false; }
     }
 
     /// Resets vibration thermal/battery governor window.
