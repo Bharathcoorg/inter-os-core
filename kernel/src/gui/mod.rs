@@ -5,7 +5,6 @@
 
 pub mod component;
 pub mod shade;
-pub mod shell;
 pub mod surface;
 pub mod compositor;
 pub mod physics;
@@ -15,7 +14,6 @@ pub mod buffer;
 
 pub use component::{PermissionModal, ShareSheetDrawer, UiCard};
 pub use shade::{NotificationShade, QuickToggle, ShadeState};
-pub use shell::MobileShell;
 pub use surface::{Color, Rect, Surface};
 pub use compositor::{GravityGlassCompositor, LayerType, SystemOverlayState, GRAVITY_COMPOSITOR};
 pub use physics::InertialScroller;
@@ -26,8 +24,6 @@ pub use ui::{Alignment, Axis, UiAnimation, UiBounds, UiInsets, UiLayout, UiNode,
 use spin::Mutex;
 use crate::serial_println;
 
-/// Global thread-safe instance of the Mobile Shell.
-pub static MOBILE_SHELL: Mutex<MobileShell> = Mutex::new(MobileShell::new());
 /// Authoritative application window registry used by input routing and composition.
 pub static WINDOW_MANAGER: Mutex<WindowManager> = Mutex::new(WindowManager::new());
 /// Global display-buffer lifecycle owner. Compositor publication must pass through explicit fences.
