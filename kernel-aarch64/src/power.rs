@@ -16,6 +16,7 @@ pub enum ChargingState {
 
 #[derive(Debug, Clone, Copy)]
 pub struct BatteryStatus {
+    pub hardware_present: bool,
     pub voltage_mv: u32,
     pub capacity_pct: u8,
     pub current_ma: i32,
@@ -26,6 +27,7 @@ pub struct BatteryStatus {
 impl BatteryStatus {
     pub const fn new(voltage_mv: u32, capacity_pct: u8, state: ChargingState) -> Self {
         Self {
+            hardware_present: false,
             voltage_mv,
             capacity_pct,
             current_ma: -450, // 450mA typical active phone discharge
@@ -52,6 +54,7 @@ pub enum GovernorMode {
 }
 
 pub struct DvfsGovernor {
+    pub hardware_present: bool,
     pub current_freq_mhz: u32,
     pub min_freq_mhz: u32,
     pub max_freq_mhz: u32,
@@ -64,6 +67,7 @@ pub struct DvfsGovernor {
 impl DvfsGovernor {
     pub const fn new() -> Self {
         Self {
+            hardware_present: false,
             current_freq_mhz: 2400,
             min_freq_mhz: 600,
             max_freq_mhz: 2400,
@@ -74,7 +78,16 @@ impl DvfsGovernor {
         }
     }
 
+    pub fn set_hardware_present(&mut self, present: bool) { self.hardware_present = present; }
+
     pub fn update(&mut self, cpu_temp_c: i32, battery: &BatteryStatus) -> ThermalPolicy {
+        if !self.hardware_present || !battery.hardware_present {
+            self.current_thermal_policy = ThermalPolicy::Normal;
+            self.battery_saver_active = false;
+            self.current_freq_mhz = self.min_freq_mhz;
+            self.display_target_fps = 30;
+            return self.current_thermal_policy;
+        }
         // Evaluate thermal policy
         self.current_thermal_policy = if cpu_temp_c >= 85 {
             ThermalPolicy::CriticalCooldown
