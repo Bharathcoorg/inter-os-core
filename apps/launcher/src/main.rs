@@ -2717,24 +2717,38 @@ pub extern "C" fn _start() -> ! {
                             }
                         }
                         ViewMode::AppDrawer => {
-                            // 1. Gesture Navigation
-                            // Swipe down or swipe right returns to HomeScreen
-                            if (input.kind == 4 && (input.dy >= 60 || input.dx >= 60))
-                                || (input.kind == 1 && input.y >= 1400)
-                            {
+                            // 1. Gesture navigation and real registry pagination.
+                            if (input.kind == 4 || input.kind == 10) && input.dy >= 60 {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
                                 let _ = std::surface_flip(4);
-                                std::log(0, "[LAUNCHER] Returned to Home from App Drawer.").ok();
-                                let mut drain = std::InputEvent {
-                                    kind: 0,
-                                    x: 0,
-                                    y: 0,
-                                    dx: 0,
-                                    dy: 0,
-                                    scale_milli: 1000,
-                                };
-                                while std::input_event_poll(&mut drain).is_ok() {}
+                                break;
+                            }
+                            if (input.kind == 4 || input.kind == 10) && input.dx >= 60 {
+                                if state.app_drawer_page > 0 {
+                                    state.app_drawer_page -= 1;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                } else {
+                                    state.current_view = ViewMode::HomeScreen;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                }
+                                break;
+                            }
+                            if (input.kind == 4 || input.kind == 10) && input.dx <= -60 {
+                                let pages = (state.app_count + 11) / 12;
+                                if state.app_drawer_page + 1 < pages {
+                                    state.app_drawer_page += 1;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                }
+                                break;
+                            }
+                            if input.kind == 1 && input.y >= 1400 {
+                                state.current_view = ViewMode::HomeScreen;
+                                render_view(surface, &state);
+                                let _ = std::surface_flip(4);
                                 break;
                             }
                             // 2. Launch the real package represented by the tapped registry cell.
