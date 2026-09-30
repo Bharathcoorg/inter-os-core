@@ -2888,7 +2888,6 @@ pub fn sys_input_event_poll(out_buf: &mut [u8]) -> Result<usize, SyscallResult> 
     let task_name = task.name;
     drop(sched);
 
-    crate::drivers::input::pump_touch_events();
     let event = if is_inputd {
         crate::drivers::input::INPUT_PIPELINE.lock().pop_service().ok_or(SyscallResult::NotReady)?
     } else {
