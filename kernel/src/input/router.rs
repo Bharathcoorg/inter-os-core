@@ -18,6 +18,7 @@ pub enum GestureKind {
     Home,
     Recents,
     Cancel,
+    Pinch,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -65,6 +66,18 @@ pub struct InputRouter {
     pointers: [PointerState; 5],
     last_tap_tick: u64,
     last_tap_position: Point,
+    pinch_initial_distance: Option<u32>,
+}
+
+fn isqrt_u32(n: u32) -> u32 {
+    if n == 0 { return 0; }
+    let mut x = n;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    x
 }
 
 impl InputRouter {
@@ -73,6 +86,7 @@ impl InputRouter {
             pointers: [PointerState::empty(); 5],
             last_tap_tick: 0,
             last_tap_position: Point { x: 0, y: 0 },
+            pinch_initial_distance: None,
         }
     }
 
@@ -136,13 +150,52 @@ impl InputRouter {
             }
             PointerPhase::Move => {
                 let state = &mut self.pointers[index];
-                if state.active { state.current = event.position; }
+                if !state.active { return None; }
+                state.current = event.position;
+
+                let mut active = [0usize; 2];
+                let mut count = 0usize;
+                for (id, pointer) in self.pointers.iter().enumerate() {
+                    if pointer.active {
+                        if count < 2 { active[count] = id; }
+                        count += 1;
+                    }
+                }
+                if count == 2 {
+                    let a = self.pointers[active[0]];
+                    let b = self.pointers[active[1]];
+                    let dx0 = a.start.x - b.start.x;
+                    let dy0 = a.start.y - b.start.y;
+                    let dx1 = a.current.x - b.current.x;
+                    let dy1 = a.current.y - b.current.y;
+                    let initial = self.pinch_initial_distance.get_or_insert(
+                        isqrt_u32((dx0 * dx0 + dy0 * dy0) as u32)
+                    );
+                    let current = isqrt_u32((dx1 * dx1 + dy1 * dy1) as u32);
+                    if *initial > 12 && current > 12 {
+                        let scale_milli = current.saturating_mul(1000) / *initial;
+                        let center = Point {
+                            x: (a.current.x + b.current.x) / 2,
+                            y: (a.current.y + b.current.y) / 2,
+                        };
+                        return Some(GestureEvent {
+                            kind: GestureKind::Pinch,
+                            position: center,
+                            delta_x: a.current.x - a.start.x,
+                            delta_y: a.current.y - a.start.y,
+                            pointer_id: event.pointer_id,
+                        });
+                    }
+                } else {
+                    self.pinch_initial_distance = None;
+                }
                 None
             }
             PointerPhase::Up => {
                 let state = self.pointers[index];
                 if !state.active { return None; }
                 self.pointers[index] = PointerState::empty();
+                if self.pointers.iter().all(|p| !p.active) { self.pinch_initial_distance = None; }
                 let dx = state.current.x - state.start.x;
                 let dy = state.current.y - state.start.y;
                 let distance = dx.abs().max(dy.abs());
