@@ -79,8 +79,13 @@ impl SimCardController {
 
     pub fn init_hardware(&mut self) {
         self.enabled = true;
-        self.card_present[0] = true; // Physical nano-SIM inserted
-        self.card_present[1] = true; // eUICC eSIM chip active
+        self.hardware_present = false;
+        self.card_present = [false; 2];
+    }
+
+    pub fn set_hardware_present(&mut self, present: bool) {
+        self.hardware_present = present;
+        if !present { self.card_present = [false; 2]; }
     }
 
     /// Switches the active transceiver slot between Physical nano-SIM and eSIM.
@@ -88,7 +93,7 @@ impl SimCardController {
         caps.check(CapabilityType::SimCardSecureElement, Rights::WRITE)
             .map_err(|_| SimError::CapabilityDenied)?;
 
-        if !self.enabled {
+        if !self.enabled || !self.hardware_present {
             return Err(SimError::HardwareDisabled);
         }
 
