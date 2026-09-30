@@ -100,3 +100,10 @@ def test_launcher_uses_live_system_state_not_fake_home_state():
     assert "std::rtc_get_time" in source
     assert "System status" in source
     assert "InterOS Stock" in source
+
+
+def test_input_event_poll_does_not_reactivate_legacy_touch_gesture_engine():
+    source = (ROOT / "kernel/src/syscall/mod.rs").read_text()
+    start = source.index("pub fn sys_input_event_poll")
+    end = source.index("pub fn sys_touch_poll", start)
+    assert "pump_touch_events()" not in source[start:end]
