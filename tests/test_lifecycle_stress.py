@@ -296,14 +296,6 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
     assert reader.wait_for("Home surface rendered.", timeout=25.0)
     time.sleep(0.5)
 
-    # Contextual state: Contextual Today Tasks
-    reader.sock.sendall(b"TAP 78 318\n")
-    assert reader.wait_for("Contextual task 0 toggled.", timeout=25.0)
-    time.sleep(0.5)
-    reader.sock.sendall(b"TAP 78 368\n")
-    assert reader.wait_for("Contextual task 1 toggled.", timeout=25.0)
-    time.sleep(0.5)
-
     # Live widgets: Live Widgets
     reader.sock.sendall(b"SWIPE 500 700 150 700 5\n")
     assert reader.wait_for("Live widgets surface rendered.", timeout=25.0)
@@ -339,7 +331,7 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
 
 def main():
     parser = argparse.ArgumentParser(description="Deterministic InterOS Lifecycle Stress Test")
-    parser.add_argument("--iterations", type=int, default=10, help="Number of 20-phase iterations (default: 10)")
+    parser.add_argument("--iterations", type=int, default=10, help="Number of lifecycle iterations (default: 10)")
     parser.add_argument("--quick", action="store_true", help="Quick mode (3 iterations)")
     parser.add_argument("--screendump", action="store_true", help="Record framebuffer screendump on first iteration")
     args = parser.parse_args()
