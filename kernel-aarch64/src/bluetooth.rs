@@ -113,6 +113,7 @@ pub struct DiscoveredPeer {
 pub struct BluetoothController {
     pub mmio_base: usize,
     pub powered: bool,
+    pub hardware_present: bool,
     pub advertising_active: bool,
     pub scanning_active: bool,
     pub current_rpa: [u8; 6],
@@ -127,6 +128,7 @@ impl BluetoothController {
         Self {
             mmio_base,
             powered: false,
+            hardware_present: false,
             advertising_active: false,
             scanning_active: false,
             current_rpa: [0x54, 0x38, 0x12, 0x9A, 0xBC, 0xDE], // Initial random static private address
@@ -137,8 +139,11 @@ impl BluetoothController {
         }
     }
 
-    pub fn init_hardware(&mut self) {
-        self.powered = true;
+    pub fn init_hardware(&mut self) { self.powered = true; }
+
+    pub fn set_hardware_present(&mut self, present: bool) {
+        self.hardware_present = present;
+        if !present { self.advertising_active = false; self.scanning_active = false; }
     }
 
     /// Generates and serializes an HCI_Reset command.
@@ -160,6 +165,7 @@ impl BluetoothController {
     ) -> Result<Vec<u8>, BluetoothError> {
         caps.check(CapabilityType::BluetoothDirect, Rights::WRITE)
             .map_err(|_| BluetoothError::CapabilityDenied)?;
+        if !self.powered || !self.hardware_present { return Err(BluetoothError::HardwareDisabled); }
 
         let mut adv_payload = Vec::new();
 
@@ -203,6 +209,7 @@ impl BluetoothController {
     ) -> Result<HciEventPacket, BluetoothError> {
         caps.check(CapabilityType::BluetoothDirect, Rights::READ)
             .map_err(|_| BluetoothError::CapabilityDenied)?;
+        if !self.powered || !self.hardware_present { return Err(BluetoothError::HardwareDisabled); }
 
         let event = HciEventPacket::parse(raw_event)?;
         self.events_received += 1;
