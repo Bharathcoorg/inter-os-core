@@ -1260,4 +1260,104 @@ fn panic(info: &PanicInfo) -> ! {
             core::arch::asm!("wfe");
         }
     }
+}    // 40. Sovereign Mobile Multi-Core SMP, IPI & big.LITTLE Scheduler
+    kprintln!("--- [Testing Sovereign Mobile Multi-Core SMP Subsystem] ---");
+
+    let mut smp = smp::SmpController::new(0, psci);
+    assert!(!smp.hardware_present);
+    assert_eq!(smp.online_core_count(), 1);
+    assert_eq!(smp.cores.len(), 8);
+    kprintln!("[OK] SMP topology model loaded; physical PSCI/GIC backend remains unbound.");
+
+    let mut smp_caps = CapabilityTable::new();
+    smp_caps.mint(CapabilityType::CpuSmpGovernorDirect, Rights::WRITE | Rights::INVOKE, None);
+
+    // No PSCI CPU_ON or GIC SGI MMIO is attempted until a real topology and
+    // interrupt-controller backend are discovered and explicitly attached.
+    assert_eq!(
+        smp.boot_secondary_core(1, 0x4008_0000, 0, &smp_caps).err(),
+        Some(smp::SmpError::HardwareDisabled)
+    );
+    assert_eq!(
+        smp.dispatch_ipi(0b0000_0010, smp::IpiKind::Reschedule, &smp_caps).err(),
+        Some(smp::SmpError::HardwareDisabled)
+    );
+    assert_eq!(
+        smp.power_off_core(1, &smp_caps).err(),
+        Some(smp::SmpError::HardwareDisabled)
+    );
+    kprintln!("[OK] SMP: CPU_ON, IPI and hotplug operations fail closed without real PSCI/GIC hardware.");
+
+    // 41. SIM/eSIM backend boundary
+    kprintln!("--- [Testing AArch64 SIM/eSIM backend boundary] ---");
+    let mut sim = sim::SimCardController::new(0x090D_0000);
+    sim.init_hardware();
+    assert!(sim.enabled);
+    assert!(!sim.hardware_present);
+    let mut sim_caps = CapabilityTable::new();
+    sim_caps.mint(CapabilityType::SimCardSecureElement, Rights::READ | Rights::WRITE | Rights::INVOKE, None);
+    assert_eq!(sim.read_iccid(&sim_caps).err(), Some(sim::SimError::HardwareDisabled));
+    kprintln!("[OK] SIM/eSIM: no fabricated ICCID or card presence.");
+
+    // 42. Display backend boundary
+    kprintln!("--- [Testing AArch64 display backend boundary] ---");
+    let mut display_hal = display_hal::MobileDisplayHal::new(0x090E_0000);
+    display_hal.init_hardware();
+    assert!(display_hal.enabled);
+    assert!(!display_hal.hardware_present);
+    let mut disp_caps = CapabilityTable::new();
+    disp_caps.mint(CapabilityType::DisplayControllerDirect, Rights::READ | Rights::WRITE, None);
+    assert_eq!(display_hal.set_refresh_rate(display_hal::RefreshRateHz::Hz120, 85, &disp_caps).err(), Some(display_hal::DisplayError::HardwareDisabled));
+    kprintln!("[OK] Display: panel timing is not exposed as physical hardware without a bound backend.");
+
+    // 43. StrongBox backend boundary
+    kprintln!("--- [Testing AArch64 StrongBox backend boundary] ---");
+    let mut strongbox = strongbox::StrongBoxHal::new(0x090F_0000);
+    strongbox.init_hardware();
+    assert!(strongbox.enabled);
+    assert!(!strongbox.hardware_present);
+    let mut sb_caps = CapabilityTable::new();
+    sb_caps.mint(CapabilityType::StrongBoxSecureEnclave, Rights::READ | Rights::WRITE | Rights::INVOKE, None);
+    assert_eq!(strongbox.generate_key(strongbox::KeyAlgorithm::Ed25519, &sb_caps).err(), Some(strongbox::StrongBoxError::HardwareDisabled));
+    kprintln!("[OK] StrongBox: no software-generated secure-element keys or attestations.");
+
+    // 44. Remote killswitch backend boundary
+    kprintln!("--- [Testing AArch64 remote killswitch backend boundary] ---");
+    let mut killswitch = killswitch::RemoteKillswitchHal::new(0x0910_0000, [0u8; 32]);
+    killswitch.init_hardware();
+    assert!(killswitch.enabled);
+    assert!(!killswitch.hardware_present);
+    let mut ks_caps = CapabilityTable::new();
+    ks_caps.mint(CapabilityType::RemoteKillSwitchDirect, Rights::READ | Rights::WRITE | Rights::INVOKE, None);
+    assert_eq!(killswitch.execute_kill_command(killswitch::KillAction::LockdownScreen, killswitch.current_nonce, &[0u8; 64], &ks_caps).err(), Some(killswitch::KillswitchError::HardwareDisabled));
+    kprintln!("[OK] Remote killswitch: command execution requires a concrete hardware controller.");
+
+    kprintln!();
+    kprintln!("============================================================");
+    kprintln!("  [READY] AArch64 Sovereign Smartphone Microkernel");
+    kprintln!("  Source-level backend boundaries validated; runtime hardware remains unbound until a concrete driver is attached.");
+    kprintln!("============================================================");
+
+    // Enter idle wait loop
+    loop {
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("wfi");
+        }
+    }
+}
+
+#[panic_handler]
+fn panic(info: &PanicInfo) -> ! {
+    kprintln!();
+    kprintln!("============================================================");
+    kprintln!("  [AArch64 KERNEL PANIC]");
+    kprintln!("  {}", info);
+    kprintln!("============================================================");
+    loop {
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("wfe");
+        }
+    }
 }
