@@ -37,43 +37,8 @@ pub struct ConversationThread {
 }
 
 /// Static Conversation Directory matching the reference UI spec.
-pub static THREADS: [ConversationThread; 5] = [
-    ConversationThread {
-        peer_name: "Security Kernel",
-        peer_did: "did:key:z6MkhaX",
-        last_snippet: "Hardware root verified",
-        status: ThreadStatus::EncryptedP2P,
-        unread_count: 1,
-    },
-    ConversationThread {
-        peer_name: "Team Sync",
-        peer_did: "did:key:z6MkpTHR",
-        last_snippet: "Meeting at 11:00 AM",
-        status: ThreadStatus::EncryptedP2P,
-        unread_count: 0,
-    },
-    ConversationThread {
-        peer_name: "Mesh Relay",
-        peer_did: "did:key:z6MknLMN",
-        last_snippet: "P2P node verified",
-        status: ThreadStatus::CellularSms,
-        unread_count: 0,
-    },
-    ConversationThread {
-        peer_name: "App Updates",
-        peer_did: "did:key:z6MkqRST",
-        last_snippet: "New version available",
-        status: ThreadStatus::EncryptedP2P,
-        unread_count: 0,
-    },
-    ConversationThread {
-        peer_name: "Device Admin",
-        peer_did: "did:key:z6MksUVW",
-        last_snippet: "Security policy synced",
-        status: ThreadStatus::EncryptedP2P,
-        unread_count: 0,
-    },
-];
+pub static THREADS: [ConversationThread; 0] = [];
+
 
 /// Production Sovereign Messages state manager.
 pub struct MessagesApp {
@@ -207,14 +172,8 @@ fn render_messages_ui(surface: u32, active_idx: usize) {
                     chunk[i] = std::design::color::BACKGROUND;
                 }
             } else if (490..1320).contains(&y) && x >= 24 && x < W - 24 {
-                // Active conversation bubbles pane
-                if (520..600).contains(&y) && x >= 48 && x < 420 {
-                    chunk[i] = std::design::color::SURFACE_RAISED;
-                } else if (640..720).contains(&y) && x >= 300 && x < W - 48 {
-                    chunk[i] = std::design::color::ACCENT;
-                } else {
-                    chunk[i] = 0xFF0F141C;
-                }
+                // No conversation backend data is available yet; keep the pane empty.
+                chunk[i] = std::design::color::BACKGROUND;
             } else if (1340..1440).contains(&y) {
                 // Bottom compose input bar
                 if y == 1340 {
