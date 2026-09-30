@@ -450,11 +450,28 @@ pub fn verify_ed25519_signature(
     public_key: &[u8; 32],
     signature: &[u8; 64],
 ) -> bool {
-    use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+    use ed25519_dalek::{Signature, VerifyingKey};
 
     let Ok(key) = VerifyingKey::from_bytes(public_key) else {
         return false;
     };
     let sig = Signature::from_bytes(signature);
     key.verify_strict(message, &sig).is_ok()
+}
+
+/// Signs a message with an Ed25519 private key. Only an offline publisher or
+/// update-signing service holds such a key; the kernel only ever verifies.
+pub fn sign_ed25519_signature(secret_key: &[u8; 32], message: &[u8]) -> [u8; 64] {
+    use ed25519_dalek::{Signer, SigningKey};
+
+    let signing_key = SigningKey::from_bytes(secret_key);
+    signing_key.sign(message).to_bytes()
+}
+
+/// Derives the Ed25519 public key matching a signing key.
+pub fn ed25519_public_key(secret_key: &[u8; 32]) -> [u8; 32] {
+    use ed25519_dalek::{SigningKey, VerifyingKey};
+
+    let signing_key = SigningKey::from_bytes(secret_key);
+    VerifyingKey::from(&signing_key).to_bytes()
 }
