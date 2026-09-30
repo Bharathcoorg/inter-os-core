@@ -1,6 +1,13 @@
 import glob
+import re
 import subprocess
 import sys
+
+def count_cases(path):
+    """Counts the unittest methods a contract file actually runs."""
+    with open(path, "r", encoding="utf-8") as handle:
+        source = handle.read()
+    return len(re.findall(r"^\s+def test_", source, re.MULTILINE))
 
 def main():
     failures = []
@@ -10,7 +17,8 @@ def main():
     ])
     skipped = sorted(glob.glob("tests/test_*.py"))
     skipped = [p for p in skipped if p not in tests]
-    print(f"Discovered {len(tests)} local contract tests.")
+    total = sum(count_cases(p) for p in tests)
+    print(f"Discovered {len(tests)} contract test files running {total} cases.")
     if skipped:
         print(f"Runtime/externally-dependent tests not executed: {len(skipped)}")
         for p in skipped:
@@ -23,13 +31,14 @@ def main():
             print(r.stderr)
             failures.append(p)
         else:
-            first_line = r.stdout.strip().split("\n")[0] if r.stdout else "OK"
-            print(f"PASS: {p} -> {first_line}")
+            ran = re.search(r"Ran (\d+) tests?", r.stdout)
+            detail = f"Ran {ran.group(1)} cases" if ran else "OK"
+            print(f"PASS: {p} -> {detail}")
     if failures:
-        print(f"\n{len(failures)} tests failed!")
+        print(f"\n{len(failures)} test files failed!")
         sys.exit(1)
     else:
-        print(f"\nALL {len(tests)} LOCAL CONTRACT TESTS PASSED.")
+        print(f"\nALL {total} LOCAL CONTRACT TEST CASES PASSED.")
         if skipped:
             print("Runtime/externally-dependent tests remain unexecuted; run them separately on the local QEMU/Device Studio environment.")
 
