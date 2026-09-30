@@ -128,6 +128,8 @@ class PlatformRealityTests(unittest.TestCase):
             "kernel-aarch64/src/biometrics.rs": "hardware_present: bool",
             "kernel-aarch64/src/strongbox.rs": "hardware_present: bool",
             "kernel-aarch64/src/killswitch.rs": "hardware_present: bool",
+            "kernel-aarch64/src/sim.rs": "hardware_present: bool",
+            "kernel-aarch64/src/display_hal.rs": "hardware_present: bool",
         }
         for path, field in modules.items():
             source = self.read(path)
