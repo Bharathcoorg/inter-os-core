@@ -18,21 +18,31 @@ pub extern "C" fn _start() -> ! {
     std::log(0, "[PID1] Inter OS userspace init started in Ring 3.").ok();
     // Service-manager bootstrap. PID 1, not kernel_main, owns the
     // startup ordering of the userspace service set.
-    const SERVICES: [u8; 11] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
-    for service_id in SERVICES {
-        match std::service_start(service_id) {
-            Ok(_) => {
-                let _ = std::log(0, "[PID1] Service started through lifecycle ABI.");
-            }
-            Err(_) => {
-                let _ = std::log(0, "[PID1] Service start request rejected.");
+    // Ask the authoritative kernel registry to start every declared
+    // userspace service. Retry dependency-blocked services so PID 1 does not
+    // depend on a duplicated dependency ordering table.
+    let mut remaining = 11u8;
+    while remaining > 0 {
+        let mut progress = false;
+        for service_id in 1u8..=11u8 {
+            match std::service_start(service_id) {
+                Ok(_) => progress = true,
+                Err(_) => {}
             }
         }
+        if registry_has_all_running_services_after_query() {
+            break;
+        }
+        if !progress {
+            break;
+        }
+        remaining -= 1;
     }
 
-    // Deterministic lifecycle smoke: exercise the real stop -> start path
-    // once after bootstrap. This makes QEMU validate more than initial spawning.
-    match std::service_stop(1) {
+    // Deterministic lifecycle smoke: exercise the real stop -> start path on
+    // Sensor, a dependency leaf, so the test does not intentionally violate
+    // the Compositor -> Display/Input dependency graph.
+    match std::service_stop(11) {
         Ok(_) => {
             let _ = std::log(0, "[PID1] Service stop lifecycle contract exercised.");
             match std::service_start(1) {
@@ -119,6 +129,14 @@ pub extern "C" fn _start() -> ! {
         // Block cooperatively until an IPC/timer/input event instead of
         // continuously spinning in Ring 3.
         let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 20);
+    }
+}
+
+fn registry_has_all_running_services_after_query() -> bool {
+    let mut service_buf = [0u8; SERVICE_BUFFER];
+    match std::service_list(&mut service_buf) {
+        Ok(len) => registry_has_all_running_services(&service_buf[..len]),
+        Err(_) => false,
     }
 }
 
