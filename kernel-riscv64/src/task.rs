@@ -32,6 +32,7 @@ pub struct Scheduler {
     pub tasks: [Option<TaskControlBlock>; 8],
     pub current_idx: usize,
     pub task_count: usize,
+    pub current_task: TaskId,
 }
 
 impl Scheduler {
@@ -41,6 +42,7 @@ impl Scheduler {
             tasks: [NONE_TCB; 8],
             current_idx: 0,
             task_count: 0,
+            current_task: TaskId(1),
         }
     }
 
@@ -77,3 +79,22 @@ impl Scheduler {
 }
 
 pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
+
+
+impl Scheduler {
+    /// Returns the scheduler-owned identity of the task currently executing
+    /// in the RISC-V kernel context. Syscalls must not manufacture task IDs.
+    pub fn current_task_id(&self) -> TaskId {
+        self.current_task
+    }
+
+    /// Selects a scheduler task as the current execution owner.
+    pub fn set_current_task(&mut self, id: TaskId) -> bool {
+        if self.tasks.iter().flatten().any(|task| task.id == id && task.state != TaskState::Exited) {
+            self.current_task = id;
+            true
+        } else {
+            false
+        }
+    }
+}
