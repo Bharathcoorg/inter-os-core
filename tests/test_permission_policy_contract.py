@@ -174,6 +174,13 @@ class PermissionPolicyContractTests(unittest.TestCase):
         # Second consumption returns False
         self.assertFalse(self.pm.consume_one_time_permission(20, 8))
 
+    def test_06_cross_task_revoke_requires_system_control(self):
+        from pathlib import Path
+        syscall = (Path(__file__).resolve().parents[1] / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
+        self.assertIn("let caller = match SCHEDULER.lock().current_task_id()", syscall)
+        self.assertIn("if task_id != caller", syscall)
+        self.assertIn("if require_system_control().is_err()", syscall)
+
 
 if __name__ == "__main__":
     unittest.main()
