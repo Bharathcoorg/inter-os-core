@@ -172,7 +172,7 @@ pub fn post_touch_event(slot: u8, x: u32, y: u32, pressure: u16, phase: TouchPha
 
     let gesture = INPUT_ROUTER
         .lock()
-        .dispatch_pointer_at(pointer, PHONE_X as u32 * 0 + 720, 24, ticks);
+        .dispatch_pointer_at(pointer, 720, 24, ticks);
 
     if let Some(gesture) = gesture {
         let event = crate::drivers::input::InputEvent::from_canonical(gesture);
