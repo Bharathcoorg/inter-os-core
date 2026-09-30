@@ -50,6 +50,7 @@ pub const fn make_opcode(ogf: u16, ocf: u16) -> u16 {
 pub enum BluetoothError {
     CapabilityDenied,
     HardwareDisabled,
+    HardwareBackendUnavailable,
     MalformedPacket,
     CommandRejected,
     ControllerTimeout,
@@ -228,7 +229,7 @@ impl BluetoothController {
                     bd_addr,
                     rssi,
                     device_name: String::from("Peer-Device"),
-                    is_sovereign_node: true,
+                    is_sovereign_node: false,
                 };
                 self.discovered_peers.push(peer);
             }
@@ -237,16 +238,12 @@ impl BluetoothController {
         Ok(event)
     }
 
-    /// Anti-Tracking: Rotates Resolvable Private Address (RPA) using PRNG seed.
-    pub fn rotate_private_address(&mut self, seed: u64, caps: &CapabilityTable) -> Result<[u8; 6], BluetoothError> {
+    /// Address rotation requires controller-provided cryptographic randomness.
+    pub fn rotate_private_address(&mut self, _seed: u64, caps: &CapabilityTable) -> Result<[u8; 6], BluetoothError> {
         caps.check(CapabilityType::BluetoothDirect, Rights::INVOKE)
             .map_err(|_| BluetoothError::CapabilityDenied)?;
-
-        let s_bytes = seed.to_le_bytes();
-        // Resolvable Private Address format: top two bits must be 01 (Random Private Resolvable)
-        let b0 = (s_bytes[0] & 0x3F) | 0x40;
-        self.current_rpa = [b0, s_bytes[1], s_bytes[2], s_bytes[3], s_bytes[4], s_bytes[5]];
-        self.addresses_rotated += 1;
-        Ok(self.current_rpa)
+        if !self.powered || !self.hardware_present { return Err(BluetoothError::HardwareDisabled); }
+        Err(BluetoothError::HardwareBackendUnavailable)
+    }
     }
 }
