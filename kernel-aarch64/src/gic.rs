@@ -3,6 +3,9 @@
 //! Provides bare-metal hardware interrupt routing, CPU core affinity,
 //! and priority masking for ARM Cortex-A smartphone SoCs and QEMU `virt`.
 
+use crate::fdt::ArmFdtParser;
+use alloc::vec::Vec;
+
 pub const DEFAULT_GICD_BASE: usize = 0x08000000;
 pub const DEFAULT_GICC_BASE: usize = 0x08010000;
 
@@ -21,6 +24,156 @@ pub const GICC_EOIR: usize = 0x010;
 
 pub const GIC_SPURIOUS_IRQ: u32 = 1023;
 
+/// What the platform description says the interrupt controller actually is.
+///
+/// GICv2 exposes the distributor and CPU interface as two separate windows of
+/// one node. GICv2m and GICv3 reuse the same conceptual device but have a
+/// different register model, so they must not be driven through the GICv2
+/// offsets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntcDescription {
+    Gicv2 {
+        distributor: usize,
+        cpu_interface: usize,
+    },
+    Unsupported(&'static str),
+    Absent,
+}
+
+/// Reads the `reg` property of a node as a list of base addresses.
+///
+/// `reg` is a sequence of `(address, size)` pairs, so the stride depends on both
+/// cell counts; skipping only the address cells would misread every size as the
+/// next base address.
+fn reg_windows(parser: &ArmFdtParser, node: &crate::fdt::ArmFdtNode) -> Option<Vec<usize>> {
+    let reg = parser.get_node_property(node, "reg").ok()?;
+    let address_cells = cell_count(parser, node, "#address-cells").unwrap_or(1);
+    let size_cells = cell_count(parser, node, "#size-cells").unwrap_or(0);
+    if address_cells == 0 || address_cells > 2 || size_cells > 2 {
+        return None;
+    }
+    let stride = (address_cells + size_cells) * 4;
+    if stride == 0 {
+        return None;
+    }
+
+    let mut bases = Vec::new();
+    let mut cursor = 0usize;
+    while cursor + address_cells * 4 <= reg.len() {
+        let value = match address_cells {
+            1 => u32::from_be_bytes(reg[cursor..cursor + 4].try_into().ok()?) as u64,
+            _ => u64::from_be_bytes(reg[cursor..cursor + 8].try_into().ok()?),
+        };
+        bases.push(value as usize);
+        cursor += stride;
+    }
+    if bases.is_empty() {
+        None
+    } else {
+        Some(bases)
+    }
+}
+
+/// Decodes a cell-count property, accepting the 1- and 2-cell encodings.
+fn cell_count(parser: &ArmFdtParser, node: &crate::fdt::ArmFdtNode, prop: &str) -> Option<usize> {
+    let p = parser.get_node_property(node, prop).ok()?;
+    match p.len() {
+        4 => Some(u32::from_be_bytes([p[0], p[1], p[2], p[3]]) as usize),
+        _ => None,
+    }
+}
+
+/// Identifies the interrupt controller the platform declares.
+///
+/// Returns [`IntcDescription::Unsupported`] for a recognised controller whose
+/// register model this driver does not implement, so the caller can decline to
+/// program it rather than issuing GICv2 writes to incompatible registers.
+pub fn describe_interrupt_controller(parser: &ArmFdtParser) -> IntcDescription {
+    // The spec identifies an interrupt controller by the presence of the
+    // `interrupt-controller` property; the vendor string then says which one.
+    let Ok(node) = parser.find_node_by_property("interrupt-controller") else {
+        return IntcDescription::Absent;
+    };
+
+    // A GICv2m platform describes the CPU interface with a GICv2-compatible
+    // string and puts the distributor in a nested `v2m@` frame, so the vendor
+    // string alone would misclassify it. The nested frame is authoritative.
+    for frame in ["arm,gic-v2m", "arm,gic-v2m-frame"] {
+        if parser.find_node_by_compatible(frame).is_ok() {
+            return IntcDescription::Unsupported("arm,gic-v2m");
+        }
+    }
+    for frame in ["arm,gic-v3", "arm,gic-v3-frame"] {
+        if parser.find_node_by_compatible(frame).is_ok() {
+            return IntcDescription::Unsupported("arm,gic-v3");
+        }
+    }
+
+    let mut model = "";
+    if let Ok(p) = parser.get_node_property(&node, "compatible") {
+        let mut cursor = 0usize;
+        while cursor < p.len() {
+            let mut end = cursor;
+            while end < p.len() && p[end] != 0 {
+                end += 1;
+            }
+            if let Ok(text) = core::str::from_utf8(&p[cursor..end]) {
+                if let Some(canonical) = classify(text) {
+                    model = canonical;
+                    break;
+                }
+            }
+            cursor = end + 1;
+        }
+    }
+
+    if is_gicv2_compatible(model) {
+        match reg_windows(parser, &node) {
+            // GICv2 publishes the distributor and the CPU interface as two
+            // windows of the same node.
+            Some(bases) if bases.len() >= 2 => IntcDescription::Gicv2 {
+                distributor: bases[0],
+                cpu_interface: bases[1],
+            },
+            _ => IntcDescription::Unsupported("arm,gic-400 without a CPU interface window"),
+        }
+    } else if is_other_gic_compatible(model) {
+        IntcDescription::Unsupported(model)
+    } else {
+        IntcDescription::Unsupported("unrecognised interrupt controller")
+    }
+}
+
+/// Maps a `compatible` entry onto the canonical model name this driver knows.
+///
+/// Returns a `'static` string so the classification outlives the parsed tree.
+fn classify(text: &str) -> Option<&'static str> {
+    match text {
+        // GICv2: distributor and CPU interface in one node.
+        "arm,gic-400" | "arm,cortex-a15-gic" | "arm,cortex-a9-gic" => Some("arm,gic-400"),
+        // Same device family, different register model.
+        "arm,gic-v2m" | "arm,gic-v2m-frame" => Some("arm,gic-v2m"),
+        "arm,gic-v3" | "arm,gic-v3-frame" => Some("arm,gic-v3"),
+        _ => None,
+    }
+}
+
+/// Distributor and CPU interface in one node, as GICv2 declares them.
+fn is_gicv2_compatible(text: &str) -> bool {
+    matches!(
+        text,
+        "arm,gic-400" | "arm,cortex-a15-gic" | "arm,cortex-a9-gic"
+    )
+}
+
+/// GIC variants that share the distributor window but not the register model.
+fn is_other_gic_compatible(text: &str) -> bool {
+    matches!(
+        text,
+        "arm,gic-v2m" | "arm,gic-v2m-frame" | "arm,gic-v3" | "arm,gic-v3-frame"
+    )
+}
+
 #[derive(Debug)]
 pub struct Gicv2 {
     gicd_base: usize,
@@ -29,7 +182,10 @@ pub struct Gicv2 {
 
 impl Gicv2 {
     pub const fn new(gicd_base: usize, gicc_base: usize) -> Self {
-        Self { gicd_base, gicc_base }
+        Self {
+            gicd_base,
+            gicc_base,
+        }
     }
 
     #[inline(always)]
@@ -111,9 +267,7 @@ impl Gicv2 {
 
     pub fn acknowledge_irq(&self) -> u32 {
         if self.gicc_base != 0 {
-            unsafe {
-                self.gicc_read(GICC_IAR) & 0x3FF
-            }
+            unsafe { self.gicc_read(GICC_IAR) & 0x3FF }
         } else {
             GIC_SPURIOUS_IRQ
         }
