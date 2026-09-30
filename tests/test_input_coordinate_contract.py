@@ -138,3 +138,15 @@ def test_system_gesture_directions_are_explicit():
     assert "1 if dx >= 40 => GestureKind::Back" in source
     assert "2 if dx <= -40 => GestureKind::Recents" in source
     assert "3 if dy <= -40 => GestureKind::Home" in source
+
+
+def test_launcher_uses_real_registry_for_drawer_and_recent_surfaces():
+    source = (ROOT / "apps/launcher/src/main.rs").read_text()
+    assert "fn package_id_at" in source
+    assert "fn recent_label" in source
+    assert "let app_idx = state.app_drawer_page * 12 + r_idx * 3 + c_idx;" in source
+    assert "resolve_app_in_drawer" not in source
+    assert "4 apps . 2 tasks" not in source
+    assert "Mail" not in source
+    assert "Maps" not in source
+    assert "Contacts" not in source
