@@ -116,6 +116,29 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertIn("SCHEDULER.lock().exit_current()", trap)
         self.assertIn("SCHEDULER.lock().add_task", main)
 
+    def test_aarch64_mobile_hal_backends_default_to_absent(self):
+        modules = {
+            "kernel-aarch64/src/gps.rs": "hardware_present: bool",
+            "kernel-aarch64/src/bluetooth.rs": "hardware_present: bool",
+            "kernel-aarch64/src/sensors.rs": "hardware_present: bool",
+            "kernel-aarch64/src/nfc.rs": "hardware_present: bool",
+            "kernel-aarch64/src/audio.rs": "hardware_present: bool",
+            "kernel-aarch64/src/usb.rs": "hardware_present: bool",
+            "kernel-aarch64/src/haptics.rs": "hardware_present: bool",
+            "kernel-aarch64/src/biometrics.rs": "hardware_present: bool",
+            "kernel-aarch64/src/strongbox.rs": "hardware_present: bool",
+            "kernel-aarch64/src/killswitch.rs": "hardware_present: bool",
+        }
+        for path, field in modules.items():
+            source = self.read(path)
+            self.assertIn(field, source)
+            self.assertIn("hardware_present: false", source)
+
+    def test_aarch64_killswitch_uses_real_ed25519_verification(self):
+        killswitch = self.read("kernel-aarch64/src/killswitch.rs")
+        self.assertIn("verify_ed25519_signature", killswitch)
+        self.assertNotIn("expected_tag[i] ^ self.owner_pubkey[i]", killswitch)
+
     def test_aarch64_wifi_does_not_claim_sae_without_hardware_backend(self):
         wifi = self.read("kernel-aarch64/src/wifi.rs")
         self.assertIn("hardware_present: bool", wifi)
