@@ -1844,8 +1844,18 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             active.len() as i64
         },
         113 => {
-            // PermissionRevoke: a1 = task_id, a2 = perm_id
+            // PermissionRevoke: a1 = task_id, a2 = perm_id. A task may revoke
+            // its own permission; revoking another task requires system control.
             let task_id = TaskId(a1);
+            let caller = match SCHEDULER.lock().current_task_id() {
+                Some(id) => id,
+                None => return SyscallResult::PermissionDenied as i64,
+            };
+            if task_id != caller {
+                if require_system_control().is_err() {
+                    return SyscallResult::PermissionDenied as i64;
+                }
+            }
             let perm = match crate::capability::permission::SensitivePermission::from_u32(a2 as u32) {
                 Some(p) => p,
                 None => return SyscallResult::InvalidArguments as i64,
