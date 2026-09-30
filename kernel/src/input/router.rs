@@ -236,8 +236,14 @@ impl InputRouter {
                         pointer_id: event.pointer_id,
                     });
                 }
+                let held = now_tick.saturating_sub(state.down_tick);
+                let kind = if held <= 12 && distance >= 80 {
+                    GestureKind::Fling
+                } else {
+                    GestureKind::Scroll
+                };
                 Some(GestureEvent {
-                    kind: GestureKind::Scroll,
+                    kind,
                     position: state.current,
                     delta_x: dx,
                     delta_y: dy,
