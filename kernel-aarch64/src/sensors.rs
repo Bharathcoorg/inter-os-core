@@ -73,6 +73,7 @@ pub struct EnvironmentSample {
 pub struct SensorHub {
     pub mmio_base: usize,
     pub enabled: bool,
+    pub hardware_present: bool,
     pub imu_active: bool,
     pub prox_als_active: bool,
     pub barometer_active: bool,
@@ -91,6 +92,7 @@ impl SensorHub {
         Self {
             mmio_base,
             enabled: false,
+            hardware_present: false,
             imu_active: false,
             prox_als_active: false,
             barometer_active: false,
@@ -125,6 +127,11 @@ impl SensorHub {
         self.barometer_active = true;
     }
 
+    pub fn set_hardware_present(&mut self, present: bool) {
+        self.hardware_present = present;
+        if !present { self.imu_active=false; self.prox_als_active=false; self.barometer_active=false; }
+    }
+
     /// Ingests hardware sensor telemetry, enforces Zero Ambient Authority,
     /// and updates orientation, screen blanking, and gestures.
     pub fn feed_hardware_telemetry(
@@ -138,7 +145,7 @@ impl SensorHub {
         caps.check(CapabilityType::SensorTelemetryRead, Rights::READ)
             .map_err(|_| SensorError::CapabilityDenied)?;
 
-        if !self.enabled {
+        if !self.enabled || !self.hardware_present {
             return Err(SensorError::HardwareDisabled);
         }
 
