@@ -163,7 +163,13 @@ impl<'a> ArmFdtParser<'a> {
                         offset += 1;
                     }
                     let name = core::str::from_utf8(&self.data[node_start..offset]).unwrap_or("");
-                    offset = offset.checked_add(3).map(|v| v & !3).ok_or(FdtError::CorruptedStructure)?;
+                    if offset >= limit {
+                        return Err(FdtError::CorruptedStructure);
+                    }
+                    offset = offset.checked_add(1).and_then(|v| v.checked_add(3)).map(|v| v & !3).ok_or(FdtError::CorruptedStructure)?;
+                    if offset > limit {
+                        return Err(FdtError::CorruptedStructure);
+                    }
 
                     let exact_unit_name = name == target_name
                         || (name.starts_with(target_name) && name.as_bytes().get(target_name.len()) == Some(&b'@'));
@@ -185,7 +191,14 @@ impl<'a> ArmFdtParser<'a> {
                         self.data[offset + 3],
                     ]) as usize;
                     offset += 8; // Skip len and nameoff
-                    offset = offset.checked_add(len).and_then(|v| v.checked_add(3)).map(|v| v & !3).ok_or(FdtError::CorruptedStructure)?; // Skip value and align
+                    let val_end = offset.checked_add(len).ok_or(FdtError::CorruptedStructure)?;
+                    if val_end > limit {
+                        return Err(FdtError::CorruptedStructure);
+                    }
+                    offset = val_end.checked_add(3).map(|v| v & !3).ok_or(FdtError::CorruptedStructure)?; // Skip value and align
+                    if offset > limit {
+                        return Err(FdtError::CorruptedStructure);
+                    }
                 }
                 FDT_END_NODE | FDT_NOP => {}
                 FDT_END => break,
@@ -249,7 +262,13 @@ impl<'a> ArmFdtParser<'a> {
         while offset < limit && self.data[offset] != 0 {
             offset += 1;
         }
-        offset = offset.checked_add(3).map(|v| v & !3).ok_or(FdtError::CorruptedStructure)?; // Align to 4 bytes
+        if offset >= limit {
+            return Err(FdtError::CorruptedStructure);
+        }
+        offset = offset.checked_add(1).and_then(|v| v.checked_add(3)).map(|v| v & !3).ok_or(FdtError::CorruptedStructure)?; // Align to 4 bytes
+        if offset > limit {
+            return Err(FdtError::CorruptedStructure);
+        }
 
         let mut depth = 1;
         while offset + 4 <= limit && depth > 0 {
@@ -267,7 +286,13 @@ impl<'a> ArmFdtParser<'a> {
                     while offset < limit && self.data[offset] != 0 {
                         offset += 1;
                     }
-                    offset = offset.checked_add(3).map(|v| v & !3).ok_or(FdtError::CorruptedStructure)?;
+                    if offset >= limit {
+                        return Err(FdtError::CorruptedStructure);
+                    }
+                    offset = offset.checked_add(1).and_then(|v| v.checked_add(3)).map(|v| v & !3).ok_or(FdtError::CorruptedStructure)?;
+                    if offset > limit {
+                        return Err(FdtError::CorruptedStructure);
+                    }
                 }
                 FDT_END_NODE => {
                     depth -= 1;
