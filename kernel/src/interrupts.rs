@@ -199,6 +199,13 @@ fn fault_report_hex(value: u64) -> bool {
 }
 
 #[inline(never)]
+fn fault_report_hex_byte(byte: u8) -> bool {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    fault_report_byte(HEX[((byte >> 4) & 0xf) as usize])
+        && fault_report_byte(HEX[(byte & 0xf) as usize])
+}
+
+#[inline(never)]
 fn fault_report_line(label: &[u8], value: u64) -> bool {
     fault_report_bytes(label)
         && fault_report_hex(value)
@@ -228,6 +235,14 @@ extern "x86-interrupt" fn page_fault_handler(
         core::arch::asm!("mov {}, cr2", out(reg) accessed_address,
                          options(nomem, nostack, preserves_flags));
     }
+    // DIAGNOSTIC: re-read CR2 immediately to detect stale values.
+    // If cr2_reread != accessed_address, the first read was left over from an
+    // earlier handled fault and did not belong to this exception.
+    let cr2_reread: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr2", out(reg) cr2_reread,
+                         options(nomem, nostack, preserves_flags));
+    }
     let instruction_pointer = stack_frame.instruction_pointer.as_u64();
     let stack_pointer = stack_frame.stack_pointer.as_u64();
     let error_flags = error_code.bits() as u64;
@@ -248,18 +263,29 @@ extern "x86-interrupt" fn page_fault_handler(
         // Preserve the existing security boundary: a ring-3 page fault
         // terminates the faulting user task rather than panicking the kernel.
         crate::task::terminate_current();
-
-        // A task terminator is expected not to return. If it does, never fall
-        // through into kernel-fault handling.
-        halt_after_fault_report_failure();
     }
 
     if !fault_report_bytes(b"\\r\\n[KERNEL PAGE FAULT]\\r\\n")
         || !fault_report_line(b"CR2=", accessed_address)
+        || !fault_report_line(b"CR2b=", cr2_reread)
         || !fault_report_line(b"RIP=", instruction_pointer)
         || !fault_report_line(b"RSP=", stack_pointer)
         || !fault_report_line(b"ERR=", error_flags)
-        || !fault_report_bytes(b"HALT\\r\\n")
+    {
+        halt_after_fault_report_failure();
+    }
+    // DIAGNOSTIC: dump 16 bytes at the fault RIP to see what instructions the
+    // CPU is actually executing (detects page table aliasing / code corruption).
+    if instruction_pointer > 0x1000 {
+        let _ = fault_report_bytes(b"CODE=");
+        let code_ptr = instruction_pointer as *const u8;
+        for i in 0..16u64 {
+            let byte = unsafe { core::ptr::read_volatile(code_ptr.add(i as usize)) };
+            let _ = fault_report_hex_byte(byte);
+        }
+        let _ = fault_report_bytes(b"\\r\\n");
+    }
+    if !fault_report_bytes(b"HALT\\r\\n")
     {
         halt_after_fault_report_failure();
     }
@@ -286,7 +312,6 @@ extern "x86-interrupt" fn general_protection_fault_handler(
             halt_after_fault_report_failure();
         }
         crate::task::terminate_current();
-        halt_after_fault_report_failure();
     }
 
     if !fault_report_bytes(b"\\r\\n[KERNEL GENERAL PROTECTION FAULT]\\r\\n")
