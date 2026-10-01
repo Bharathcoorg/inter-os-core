@@ -140,13 +140,13 @@ pub fn map_mmio_region(
             }
             Err(MapToError::PageAlreadyMapped(_)) => {
                 for mapped in mapped_pages.drain(..).rev() {
-                    let _ = unsafe { mapper.unmap(mapped) }.map(|(_, flush)| flush.flush());
+                    let _ = mapper.unmap(mapped).map(|(_, flush)| flush.flush());
                 }
                 return Err("MMIO virtual range already mapped");
             }
             Err(_) => {
                 for mapped in mapped_pages.drain(..).rev() {
-                    let _ = unsafe { mapper.unmap(mapped) }.map(|(_, flush)| flush.flush());
+                    let _ = mapper.unmap(mapped).map(|(_, flush)| flush.flush());
                 }
                 return Err("MMIO page mapping failed");
             }
