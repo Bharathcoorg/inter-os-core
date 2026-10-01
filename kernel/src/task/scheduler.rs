@@ -502,13 +502,12 @@ impl Scheduler {
                 TaskState::Zombie => "Zombie",
                 TaskState::Terminated => "Terminated",
             };
-            let cr3_str = if task.page_table.is_some() {
-                "0x0000000000400000"
-            } else {
-                "0x0000000000100000"
-            };
+            let cr3 = task.page_table
+                .as_ref()
+                .map(|pt| pt.lock().frame().start_address().as_u64())
+                .unwrap_or_else(|| crate::memory::kernel_pml4().start_address().as_u64());
             crate::serial_println!(
-                "[PROC] pid={} name={} state={} prio={} ticks={} caps={} kstack={} ppid={} cr3={}",
+                "[PROC] pid={} name={} state={} prio={} ticks={} caps={} kstack={} ppid={} cr3={:#x}",
                 task.id.0,
                 task.name,
                 state_str,
@@ -517,7 +516,7 @@ impl Scheduler {
                 task.cap_table.count(),
                 super::TASK_STACK_SIZE / 1024,
                 task.parent_id.0,
-                cr3_str
+                cr3
             );
         }
     }
