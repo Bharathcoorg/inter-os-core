@@ -454,7 +454,7 @@ class PlatformRealityTests(unittest.TestCase):
 
     def test_x86_page_fault_report_path_is_allocation_free_and_bounded(self):
         interrupts = self.read("kernel/src/interrupts.rs")
-        handler = interrupts[interrupts.index("extern \\"x86-interrupt\\" fn page_fault_handler"):interrupts.index("extern \\"x86-interrupt\\" fn general_protection_fault_handler")]
+        handler = interrupts[interrupts.index('extern "x86-interrupt" fn page_fault_handler'):interrupts.index('extern "x86-interrupt" fn general_protection_fault_handler')]
         # The fault reporter must not recurse through formatting, locks, panic
         # formatting, or the bootloader serial path after paging has failed.
         self.assertIn("fault_report_byte", handler)
