@@ -40,6 +40,38 @@ serial_socket_lock = threading.Lock()
 telemetry_lock = threading.Lock()
 launcher_has_booted = False
 
+# Guest scanout geometry.
+#
+# The kernel letterboxes its 720x1440 logical portrait surface into the centre of
+# the 1280x720 QEMU framebuffer (see kernel/src/framebuffer.rs
+# present_argb8888). The display crop and the input mapping are both derived from
+# these constants so the studio and the guest cannot disagree about where the
+# phone surface actually is.
+GUEST_FRAMEBUFFER_W, GUEST_FRAMEBUFFER_H = 1280, 720
+LOGICAL_SURFACE_W, LOGICAL_SURFACE_H = 720, 1440
+LETTERBOX_W = GUEST_FRAMEBUFFER_H * LOGICAL_SURFACE_W // LOGICAL_SURFACE_H   # 360
+LETTERBOX_X = (GUEST_FRAMEBUFFER_W - LETTERBOX_W) // 2                        # 460
+LETTERBOX_BOX = (LETTERBOX_X, 0, LETTERBOX_X + LETTERBOX_W, GUEST_FRAMEBUFFER_H)
+
+
+def portrait_from_framebuffer(gx, gy):
+    """Converts a guest framebuffer point into logical portrait coordinates.
+
+    Returns None when the point falls outside the letterboxed phone surface, so a
+    click on the surrounding desktop area is never mistaken for a touch on the
+    device screen.
+    """
+    left, top, right, bottom = LETTERBOX_BOX
+    if not (left <= gx < right and top <= gy < bottom):
+        return None
+    px = (gx - left) * LOGICAL_SURFACE_W // LETTERBOX_W
+    py = (gy - top) * LOGICAL_SURFACE_H // (bottom - top)
+    return (
+        max(0, min(LOGICAL_SURFACE_W - 1, px)),
+        max(0, min(LOGICAL_SURFACE_H - 1, py)),
+    )
+
+
 
 def check_launcher_ready():
     global launcher_has_booted
@@ -616,15 +648,19 @@ def capture_qemu_screen_frame(full_scanout=False):
                 return buf.getvalue(), "image/png"
             else:
                 width, height = img.size
-                if width >= 820 and height >= 720:
-                    crop_box = (460, 0, 820, 720)
-                    cropped = img.crop(crop_box)
-                    scaled = cropped.resize((720, 1440), Image.Resampling.BILINEAR)
+                if width >= GUEST_FRAMEBUFFER_W and height >= GUEST_FRAMEBUFFER_H:
+                    # Crop to the letterboxed phone surface, then present it at the
+                    # logical portrait size the UI was laid out for.
+                    cropped = img.crop(LETTERBOX_BOX)
+                    scaled = cropped.resize(
+                        (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H), Image.Resampling.BILINEAR
+                    )
                     buf = io.BytesIO()
                     scaled.save(buf, format="PNG")
                     return buf.getvalue(), "image/png"
                 else:
-                    # Early BIOS text terminal detected (< 820x720). Never leak text console to smartphone screen!
+                    # Early BIOS text terminal detected. Never leak the text
+                    # console into the smartphone viewport.
                     return None, "Guest still in early BIOS bootloader stage; graphical canvas not ready"
     except Exception as e:
         return None, f"Image processing error: {e}"
@@ -1764,21 +1800,29 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 data = json.loads(body.decode('utf-8'))
                 action = str(data.get('action', '')).strip().lower()
                 space = str(data.get('coords', 'portrait')).strip().lower()
+                # The guest accepts logical portrait coordinates, the same space
+                # the compositor and apps use. Framebuffer coordinates are
+                # converted here, in the one place that knows the studio's
+                # letterbox geometry, rather than being round-tripped through the
+                # kernel with a second copy of the constants.
+                LOGICAL_W, LOGICAL_H = 720, 1440
                 if space in ('portrait', 'logical_portrait', 'studio_display'):
                     x = int(data.get('x', 0)); y = int(data.get('y', 0))
-                    if not (0 <= x < 720 and 0 <= y < 1440): raise ValueError('portrait coordinates out of bounds')
-                    gx, gy = 460 + (x * 360 // 720), y * 720 // 1440
-                    x2 = int(data.get('x2', x)); y2 = int(data.get('y2', y))
-                    if not (0 <= x2 < 720 and 0 <= y2 < 1440): raise ValueError('portrait end coordinates out of bounds')
-                    gx2, gy2 = 460 + (x2 * 360 // 720), y2 * 720 // 1440
-                elif space in ('guest', 'guest_framebuffer', 'qemu', 'qemu_framebuffer'):
-                    x, y = int(data.get('x', 0)), int(data.get('y', 0))
-                    if not (0 <= x < 1280 and 0 <= y < 720): raise ValueError('guest framebuffer coordinates out of bounds')
+                    if not (0 <= x < LOGICAL_W and 0 <= y < LOGICAL_H): raise ValueError('portrait coordinates out of bounds')
                     gx, gy = x, y
-                    gx2, gy2 = int(data.get('x2', gx)), int(data.get('y2', gy))
-                    if not (0 <= gx2 < 1280 and 0 <= gy2 < 720): raise ValueError('guest framebuffer coordinates out of bounds')
+                    x2 = int(data.get('x2', x)); y2 = int(data.get('y2', y))
+                    if not (0 <= x2 < LOGICAL_W and 0 <= y2 < LOGICAL_H): raise ValueError('portrait end coordinates out of bounds')
+                    gx2, gy2 = x2, y2
+                elif space in ('guest', 'guest_framebuffer', 'qemu', 'qemu_framebuffer'):
+                    x = int(data.get('x', 0)); y = int(data.get('y', 0))
+                    if not (0 <= x < 1280 and 0 <= y < 720): raise ValueError('guest framebuffer coordinates out of bounds')
+                    gx, gy = portrait_from_framebuffer(x, y)
+                    x2 = int(data.get('x2', x)); y2 = int(data.get('y2', y))
+                    if not (0 <= x2 < 1280 and 0 <= y2 < 720): raise ValueError('guest framebuffer coordinates out of bounds')
+                    gx2, gy2 = portrait_from_framebuffer(x2, y2)
                 else:
                     raise ValueError('unsupported coordinate space')
+
                 if action == 'down':
                     ok, msg = send_guest_serial_command(f'INPUT_TOUCH DOWN {gx} {gy} 0', '[COM1 INPUT]', timeout=4)
                 elif action == 'move':

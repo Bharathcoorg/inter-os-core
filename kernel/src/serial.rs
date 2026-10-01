@@ -239,17 +239,22 @@ fn handle_rapp_command(s: &str) -> bool {
         let Some(x) = parts.next().and_then(|v| v.parse::<u32>().ok()) else { return true; };
         let Some(y) = parts.next().and_then(|v| v.parse::<u32>().ok()) else { return true; };
         let Some(slot) = parts.next().and_then(|v| v.parse::<u8>().ok()) else { return true; };
-        if x >= 1280 || y >= 720 || slot >= crate::input::MAX_TOUCH_SLOTS as u8 {
-            serial_println!("[COM1 INPUT] REJECT touch bounds");
+        // INPUT_TOUCH carries logical portrait coordinates, the same
+        // CoordinateSpace the compositor, window manager and apps use. Mapping
+        // the guest's letterboxed scanout back into UI space here would duplicate
+        // the presentation geometry in a second place with different constants,
+        // which previously rejected every gesture above the landscape midpoint.
+        const LOGICAL_WIDTH: u32 = 720;
+        const LOGICAL_HEIGHT: u32 = 1440;
+        if x >= LOGICAL_WIDTH || y >= LOGICAL_HEIGHT || slot >= crate::input::MAX_TOUCH_SLOTS as u8 {
+            serial_println!(
+                "[COM1 INPUT] REJECT touch bounds x={} y={} (logical {}x{})",
+                x, y, LOGICAL_WIDTH, LOGICAL_HEIGHT
+            );
             return true;
         }
-        let (px, py) = if x >= 460 && x <= 820 {
-            ((x - 460) * 2, y * 2)
-        } else {
-            (x, y)
-        };
-        crate::input::post_touch_event(slot, px, py, if phase == crate::input::TouchPhase::Up { 0 } else { 512 }, phase);
-        serial_println!("[COM1 INPUT] TOUCH phase={:?} slot={} x={} y={} -> ({}, {})", phase, slot, x, y, px, py);
+        crate::input::post_touch_event(slot, x, y, if phase == crate::input::TouchPhase::Up { 0 } else { 512 }, phase);
+        serial_println!("[COM1 INPUT] TOUCH phase={:?} slot={} x={} y={}", phase, slot, x, y);
         return true;
     }
 
@@ -502,35 +507,67 @@ fn handle_serial_command(cmd: &[u8]) {
         panic!("Controlled diagnostic fault: {}", reason);
     }
 
+    // Legacy convenience touch verbs. These accept the same logical portrait
+    // coordinates as INPUT_TOUCH and are bounds checked identically: an
+    // unchecked point here would be injected straight into the gesture router.
+    const TOUCH_MAX_X: u32 = 720;
+    const TOUCH_MAX_Y: u32 = 1440;
+    fn touch_point(x: u32, y: u32) -> Result<(u32, u32), ()> {
+        if x < TOUCH_MAX_X && y < TOUCH_MAX_Y { Ok((x, y)) } else { Err(()) }
+    }
+
     if verb.eq_ignore_ascii_case("TAP") || verb.eq_ignore_ascii_case("TOUCH") {
         if let (Some(x_str), Some(y_str)) = (parts.next(), parts.next()) {
             if let (Ok(x), Ok(y)) = (x_str.parse::<u32>(), y_str.parse::<u32>()) {
-                crate::serial_println!("[COM1 INPUT] Hardware touch tap received at ({}, {}).", x, y);
-                crate::input::post_touch_event(0, x, y, 1000, crate::input::TouchPhase::Down);
-                crate::input::post_touch_event(0, x, y, 0, crate::input::TouchPhase::Up);
+                match touch_point(x, y) {
+                    Ok((x, y)) => {
+                        crate::serial_println!("[COM1 INPUT] Hardware touch tap received at ({}, {}).", x, y);
+                        crate::input::post_touch_event(0, x, y, 1000, crate::input::TouchPhase::Down);
+                        crate::input::post_touch_event(0, x, y, 0, crate::input::TouchPhase::Up);
+                    }
+                    Err(()) => crate::serial_println!("[COM1 INPUT] REJECT tap out of bounds ({}, {})", x, y),
+                }
             }
         }
     } else if verb.eq_ignore_ascii_case("DOWN") {
         if let (Some(x_str), Some(y_str)) = (parts.next(), parts.next()) {
             if let (Ok(x), Ok(y)) = (x_str.parse::<u32>(), y_str.parse::<u32>()) {
-                crate::input::post_touch_event(0, x, y, 1000, crate::input::TouchPhase::Down);
+                match touch_point(x, y) {
+                    Ok((x, y)) => { crate::input::post_touch_event(0, x, y, 1000, crate::input::TouchPhase::Down); }
+                    Err(()) => crate::serial_println!("[COM1 INPUT] REJECT down out of bounds ({}, {})", x, y),
+                }
             }
         }
     } else if verb.eq_ignore_ascii_case("MOVE") {
         if let (Some(x_str), Some(y_str)) = (parts.next(), parts.next()) {
             if let (Ok(x), Ok(y)) = (x_str.parse::<u32>(), y_str.parse::<u32>()) {
-                crate::input::post_touch_event(0, x, y, 1000, crate::input::TouchPhase::Move);
+                match touch_point(x, y) {
+                    Ok((x, y)) => { crate::input::post_touch_event(0, x, y, 1000, crate::input::TouchPhase::Move); }
+                    Err(()) => crate::serial_println!("[COM1 INPUT] REJECT move out of bounds ({}, {})", x, y),
+                }
             }
         }
     } else if verb.eq_ignore_ascii_case("UP") {
         let (x, y) = match (parts.next(), parts.next()) {
-            (Some(xs), Some(ys)) => (xs.parse::<u32>().unwrap_or(0), ys.parse::<u32>().unwrap_or(0)),
-            _ => (0, 0),
+            (Some(xs), Some(ys)) => (xs.parse::<u32>().unwrap_or(u32::MAX), ys.parse::<u32>().unwrap_or(u32::MAX)),
+            _ => (u32::MAX, u32::MAX),
         };
-        crate::input::post_touch_event(0, x, y, 0, crate::input::TouchPhase::Up);
+        match touch_point(x, y) {
+            Ok((x, y)) => { crate::input::post_touch_event(0, x, y, 0, crate::input::TouchPhase::Up); }
+            Err(()) => crate::serial_println!("[COM1 INPUT] REJECT up out of bounds ({}, {})", x, y),
+        }
     } else if verb.eq_ignore_ascii_case("SWIPE") || verb.eq_ignore_ascii_case("DRAG") {
         if let (Some(x1_s), Some(y1_s), Some(x2_s), Some(y2_s)) = (parts.next(), parts.next(), parts.next(), parts.next()) {
             if let (Ok(x1), Ok(y1), Ok(x2), Ok(y2)) = (x1_s.parse::<u32>(), y1_s.parse::<u32>(), x2_s.parse::<u32>(), y2_s.parse::<u32>()) {
+                // Reject the whole gesture if either endpoint is outside the
+                // logical surface, rather than clamping into a bogus path.
+                if let Err(()) = touch_point(x1, y1).and_then(|_| touch_point(x2, y2)) {
+                    crate::serial_println!(
+                        "[COM1 INPUT] REJECT swipe out of bounds ({}, {}) -> ({}, {})",
+                        x1, y1, x2, y2
+                    );
+                    return;
+                }
                 let steps = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(5).clamp(2, 20);
                 crate::serial_println!("[COM1 INPUT] Hardware touch swipe received from ({}, {}) to ({}, {}) in {} steps.", x1, y1, x2, y2, steps);
                 crate::input::post_touch_event(0, x1, y1, 1000, crate::input::TouchPhase::Down);
