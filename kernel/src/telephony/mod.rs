@@ -15,13 +15,17 @@ use spin::Mutex;
 use crate::serial_println;
 
 /// Global static instance of the Mobile SIM Profile.
+///
+/// No subscriber credential is present: there is no provisioned profile on this
+/// platform, so there is no carrier identity, PIN or subscriber key to report.
 pub static SOVEREIGN_SIM: Mutex<SovereignEsim> = Mutex::new(SovereignEsim {
     subscriber_id: alloc::string::String::new(),
-    carrier_operator: "None",
+    carrier_operator: "",
     imsi_pseudonym: [0u8; 16],
-    pin_code: *b"1234",
+    pin_code: None,
     pin_verified: false,
     status: SimStatus::NoSim,
+    subscriber_auth_key: None,
 });
 
 /// Global static instance of the Cellular Modem Driver.

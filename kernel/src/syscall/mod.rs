@@ -24,6 +24,54 @@ use crate::task::{SCHEDULER, TaskId};
 /// Object-scoped capability target reserved for the PID1 service manager.
 pub const SERVICE_MANAGER_OBJECT: u64 = 0x5345_5256_4D47_52;
 
+/// Object-scoped capability target for user-account administration.
+///
+/// WHY a dedicated namespace instead of the raw uid: uid 0 is the SYSTEM user
+/// and raw uids collide with the "any object" convention used by the RAPP
+/// capability map (`object_id: 0`). Deriving the object id from the uid means a
+/// capability granted for one account can never be replayed against another,
+/// and can never be confused with a global SystemControl grant.
+pub const USER_CONTROL_OBJECT_BASE: u64 = 0x5553_4552_0000_0000;
+
+/// Returns the object id that `SystemControl` must be bound to in order to
+/// administer the account identified by `uid`.
+pub const fn user_control_object(uid: u32) -> u64 {
+    USER_CONTROL_OBJECT_BASE | (uid as u64)
+}
+
+/// Object-scoped capability target for the system notification broker.
+///
+/// WHY a dedicated object: a system component (for example a call or messaging
+/// daemon) legitimately posts notifications on behalf of other packages, so
+/// there must be a grant that means "may act for any package". Reusing a
+/// per-user control object for that would be ambiguous, and reusing the
+/// object-blind `authorize_capability` would let any SystemControl holder
+/// impersonate any package.
+pub const NOTIFICATION_CONTROL_OBJECT: u64 = 0x4E4F_5446_0000_0001;
+
+/// Base object id for the sovereign encrypted storage vault, namespaced per user.
+///
+/// WHY the vault needs its own object: `StorageRawBlock` is also granted to the
+/// storage service for whole-device block IO. Without a distinct per-caller
+/// vault object, that broad grant would satisfy the vault check and let any
+/// holder decrypt or overwrite another user's sectors.
+pub const VAULT_OBJECT_BASE: u64 = 0x5641_554C_5400_0000;
+
+/// Returns the object id a caller must hold `StorageRawBlock` against to use
+/// its own vault.
+pub const fn vault_object_for_user(uid: u32) -> u64 {
+    VAULT_OBJECT_BASE | (uid as u64)
+}
+
+/// Highest addressable vault sector index for a single user account.
+///
+/// WHY bound the index at all: `block_index` reaches the keystream derivation
+/// as raw attacker-controlled input. An unbounded index lets one caller sweep
+/// the entire (iv, block_index) keystream space, which is a chosen-plaintext
+/// oracle over another user's sectors once two accounts share the vault key.
+/// 1 MiB of user data (2048 sectors) is far above any single-user workload.
+pub const VAULT_MAX_BLOCK_INDEX: u64 = 2048;
+
 /// Well-known system call identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u64)]
@@ -360,6 +408,66 @@ fn require_system_control() -> Result<(), SyscallResult> {
     let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
     task.cap_table.authorize_capability(CapabilityType::SystemControl, Rights::INVOKE)
         .then_some(()).ok_or(SyscallResult::PermissionDenied)
+}
+
+/// Requires `SystemControl|INVOKE` bound to the administration object of the
+/// account `uid`.
+///
+/// WHY object-scoped and not the object-blind `require_system_control`: a
+/// capability that merely proves "you hold SystemControl somewhere" lets any
+/// holder lock, unlock, or switch to *any* account. Locking the owner's account
+/// is a denial of service on the device owner; switching the global active user
+/// is a full identity takeover. Binding to `user_control_object(uid)` makes
+/// authority attenuate to a single account.
+fn require_user_control_object(uid: u32) -> Result<(), SyscallResult> {
+    require_system_control_object(user_control_object(uid))
+}
+
+/// Resolves the user id the calling task is bound to, if any.
+///
+/// WHY this exists: a task may only act on its own account absent a delegated
+/// `SystemControl` grant. `process::user_for_task` reads the kernel-owned
+/// process binding, so it cannot be spoofed by an argument.
+fn caller_user_id() -> Option<u32> {
+    let task_id = SCHEDULER.lock().current_task_id()?;
+    crate::task::process::user_for_task(task_id)
+}
+
+/// Authorizes a notification operation against the caller's own account, or
+/// against a `SystemControl` grant for that specific account.
+///
+/// WHY: `NotificationQuery` takes a caller-supplied `user_id`. An unscoped
+/// check leaks notification titles and bodies across every account on the
+/// device. Binding to the caller's own account keeps the common case (an app
+/// reading its own notifications) working while closing the cross-account read.
+fn require_own_or_delegated_user(user_id: u32) -> Result<(), SyscallResult> {
+    if caller_user_id() == Some(user_id) {
+        return Ok(());
+    }
+    require_user_control_object(user_id)
+}
+
+/// Returns true when the caller's process name matches the package identity it
+/// is claiming to act as.
+///
+/// WHY: `NotificationPost`/`NotificationCancel` take a caller-supplied package
+/// id. The kernel already knows the package each task was spawned as
+/// (`TaskControlBlock::name` comes from the verified RAPP manifest), so
+/// requiring the claimed id to match that recorded identity is what prevents
+/// one app posting or cancelling notifications as another.
+fn caller_is_package(pkg: &str) -> bool {
+    let sched = SCHEDULER.lock();
+    sched.current_task().map(|t| t.name == pkg).unwrap_or(false)
+}
+
+/// Authorizes a package-scoped notification operation: the caller must be the
+/// package it claims, or hold the system notification broker's `SystemControl`
+/// grant (which is what lets a system daemon post for other packages).
+fn require_package_or_delegated(pkg: &str) -> Result<(), SyscallResult> {
+    if caller_is_package(pkg) {
+        return Ok(());
+    }
+    require_system_control_object(NOTIFICATION_CONTROL_OBJECT)
 }
 
 /// Sends an IPC message to a destination task.
@@ -1075,6 +1183,25 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             if buf_len != 512 {
                 return SyscallResult::InvalidArguments as i64;
             }
+            // Reject an unknown action before touching any state. `action` is
+            // caller-controlled and previously fell through to the decrypt arm
+            // for every value != 0.
+            if action > 1 {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            // Bound the attacker-chosen sector index. The index feeds the
+            // keystream derivation, so an unbounded value lets a caller sweep
+            // the whole (iv, block_index) space and derive keystreams for
+            // sectors belonging to other accounts.
+            if block_idx >= VAULT_MAX_BLOCK_INDEX {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            // Explicit null/zero-pointer rejection. copy_from_user already
+            // refuses addresses below USER_SPACE_START, but stating the
+            // invariant here keeps the requirement visible at the ABI edge.
+            if a3 == 0 || a5 == 0 {
+                return SyscallResult::InvalidArguments as i64;
+            }
             let mut kbuf = [0u8; 512];
             let mut iv = [0u8; 16];
             if copy_from_user(&mut kbuf, a3, 512).is_err() || copy_from_user(&mut iv, a5, 16).is_err() {
@@ -1745,8 +1872,13 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         },
         106 => {
             // UserSwitch: a1 = target_uid
+            // Object-scoped to the TARGET account: switching the global active
+            // user is an identity takeover, so authority must name the account
+            // being switched to rather than merely proving SystemControl.
+            let target_uid = a1 as u32;
+            if let Err(e) = require_user_control_object(target_uid) { return e as i64; }
             let mut mgr = crate::user::USER_MANAGER.lock();
-            match mgr.switch_user(crate::user::UserId(a1 as u32)) {
+            match mgr.switch_user(crate::user::UserId(target_uid)) {
                 Ok(()) => SyscallResult::Success as i64,
                 Err(crate::user::UserError::UserNotFound) => SyscallResult::TargetNotFound as i64,
                 Err(_) => SyscallResult::PermissionDenied as i64,
@@ -1765,6 +1897,11 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         },
         108 => {
             // UserUnlock: a1 = uid, a2 = secret_ptr, a3 = secret_len
+            // Object-scoped to the account being unlocked. Without this, any
+            // ring3 task can brute-force another account's secret and, via the
+            // 5-attempt lockout, deny the device owner access to their account.
+            let target_uid = a1 as u32;
+            if let Err(e) = require_user_control_object(target_uid) { return e as i64; }
             let len = a3 as usize;
             if len == 0 || len > 64 { return SyscallResult::InvalidArguments as i64; }
             let mut secret_buf = [0u8; 64];
@@ -1773,7 +1910,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             }
             let current_ticks = crate::interrupts::get_system_ticks();
             let mut mgr = crate::user::USER_MANAGER.lock();
-            match mgr.unlock(crate::user::UserId(a1 as u32), &secret_buf[..len], current_ticks) {
+            match mgr.unlock(crate::user::UserId(target_uid), &secret_buf[..len], current_ticks) {
                 Ok(()) => SyscallResult::Success as i64,
                 Err(crate::user::UserError::LockoutActive) => SyscallResult::PermissionDenied as i64,
                 Err(crate::user::UserError::AuthenticationFailed) => SyscallResult::PermissionDenied as i64,
@@ -1782,8 +1919,13 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         },
         109 => {
             // UserLock: a1 = uid
+            // Object-scoped to the account being locked. a1 is caller-controlled,
+            // so an unscoped check let any ring3 task lock ANY uid, including the
+            // device owner, which is a denial of service on the owner.
+            let target_uid = a1 as u32;
+            if let Err(e) = require_user_control_object(target_uid) { return e as i64; }
             let mut mgr = crate::user::USER_MANAGER.lock();
-            match mgr.lock(crate::user::UserId(a1 as u32)) {
+            match mgr.lock(crate::user::UserId(target_uid)) {
                 Ok(()) => SyscallResult::Success as i64,
                 Err(_) => SyscallResult::TargetNotFound as i64,
             }
@@ -1797,6 +1939,11 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 Ok(s) => s,
                 Err(_) => return SyscallResult::InvalidArguments as i64,
             };
+            // The claimed package id must be the package the kernel actually
+            // spawned this task as. Otherwise any ring3 task can post a
+            // notification attributed to an arbitrary package, which is
+            // notification spoofing (impersonating a system or banking alert).
+            if let Err(e) = require_package_or_delegated(pkg) { return e as i64; }
             let channel_len = (a4 & 0xFF) as usize;
             if channel_len == 0 || channel_len > 32 { return SyscallResult::InvalidArguments as i64; }
             let mut chan_buf = [0u8; 32];
@@ -1804,7 +1951,13 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 Ok(s) => s,
                 Err(_) => return SyscallResult::InvalidArguments as i64,
             };
-            let user_id = crate::user::USER_MANAGER.lock().active_user().0;
+            // Post into the caller's OWN account, never the global active user.
+            // Otherwise a background task bound to a background account could
+            // inject notifications into whatever session happens to be active.
+            let user_id = match caller_user_id() {
+                Some(uid) => uid,
+                None => return SyscallResult::PermissionDenied as i64,
+            };
             let current_ticks = crate::interrupts::get_system_ticks();
             let mut nm = crate::notification::NOTIFICATION_MANAGER.lock();
             match nm.post(
@@ -1831,6 +1984,9 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 Ok(s) => s,
                 Err(_) => return SyscallResult::InvalidArguments as i64,
             };
+            // Same identity binding as post: a caller may only cancel the
+            // notifications of the package it actually is.
+            if let Err(e) = require_package_or_delegated(pkg) { return e as i64; }
             let mut nm = crate::notification::NOTIFICATION_MANAGER.lock();
             match nm.cancel(pkg, a3) {
                 Ok(()) => SyscallResult::Success as i64,
@@ -1839,8 +1995,13 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         },
         112 => {
             // NotificationQuery: a1 = user_id, a2 = is_locked
+            // Scoped to the caller's own account (or a delegated grant for that
+            // account). The previous unscoped read returned notification titles
+            // and bodies for ANY user_id on the device.
+            let target_uid = a1 as u32;
+            if let Err(e) = require_own_or_delegated_user(target_uid) { return e as i64; }
             let nm = crate::notification::NOTIFICATION_MANAGER.lock();
-            let active = nm.query_active(a1 as u32, a2 != 0);
+            let active = nm.query_active(target_uid, a2 != 0);
             active.len() as i64
         },
         113 => {
@@ -1930,12 +2091,26 @@ pub fn sys_thermal_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
 /// Creates a cryptographic secure IPC session between calling task and peer task.
 pub fn sys_secure_ipc_session(peer: TaskId) -> Result<u64, SyscallResult> {
     let current_task = sys_get_task_id();
-    let sched = SCHEDULER.lock();
-    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    if !task.cap_table.authorize_capability(CapabilityType::IpcSend, Rights::WRITE) {
-        return Err(SyscallResult::PermissionDenied);
+    // Object-scoped to the PEER, not merely "holds IpcSend somewhere".
+    // WHY: the previous object-blind check let any holder of an IpcSend
+    // capability open an encrypted session with ANY task, which both leaks
+    // session existence across the trust boundary and lets an attacker
+    // enumerate and pre-create sessions against arbitrary peers.
+    {
+        let sched = SCHEDULER.lock();
+        let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+        if !task
+            .cap_table
+            .authorize_object(CapabilityType::IpcSend, Rights::WRITE, peer.0)
+        {
+            return Err(SyscallResult::PermissionDenied);
+        }
     }
-    drop(sched);
+    // A session with yourself carries no security property and would consume a
+    // slot in the bounded session table.
+    if peer == current_task || peer == TaskId(0) {
+        return Err(SyscallResult::InvalidArguments);
+    }
     let mut key = [0u8; 32];
     crate::crypto::get_random_bytes(&mut key);
     let mut mgr = crate::ipc::SECURE_IPC.lock();
@@ -3164,12 +3339,27 @@ pub fn sys_vault_crypt(
     buf: &mut [u8; 512],
     iv: &[u8; 16],
 ) -> Result<(), SyscallResult> {
+    // Object-scoped to the CALLER'S OWN vault.
+    // WHY: the previous check was `authorize_capability(StorageRawBlock, INVOKE)`,
+    // which is object-blind. `StorageRawBlock` is also granted to the storage
+    // service for whole-device block IO, so that broad grant satisfied the vault
+    // check and let the holder encrypt or decrypt any account's sectors.
+    let caller_uid = caller_user_id().ok_or(SyscallResult::PermissionDenied)?;
     {
         let sched = SCHEDULER.lock();
         let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-        if !task.cap_table.authorize_capability(CapabilityType::StorageRawBlock, Rights::INVOKE) {
+        if !task.cap_table.authorize_object(
+            CapabilityType::StorageRawBlock,
+            Rights::INVOKE,
+            vault_object_for_user(caller_uid),
+        ) {
             return Err(SyscallResult::PermissionDenied);
         }
+    }
+    // Defence in depth: the dispatcher validates this too, but `sys_vault_crypt`
+    // is reachable from other kernel paths, so the bound is enforced here as well.
+    if block_index >= VAULT_MAX_BLOCK_INDEX {
+        return Err(SyscallResult::InvalidArguments);
     }
 
     let vault = crate::storage::STORAGE_VAULT.lock();
@@ -3500,9 +3690,6 @@ pub fn sys_share_sheet_dispatch(
     let current_id = {
         let sched = SCHEDULER.lock();
         let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-        if !task.cap_table.authorize_capability(CapabilityType::IpcSend, Rights::WRITE) {
-            return Err(SyscallResult::PermissionDenied);
-        }
         task.id
     };
     let current_ticks = crate::interrupts::get_system_ticks();
@@ -3510,6 +3697,31 @@ pub fn sys_share_sheet_dispatch(
     if let Some(target_id_str) = target_app {
         let mut ssm = SHARE_SHEET_MANAGER.lock();
         let target = ssm.find_target(target_id_str).copied().ok_or(SyscallResult::TargetNotFound)?;
+        // The IpcSend must be bound to the RESOLVED TARGET task, not merely held.
+        // WHY: `target_id_str` is caller-supplied and resolves to any registered
+        // target. The previous object-blind `authorize_capability(IpcSend, WRITE)`
+        // let a single IpcSend inject an attacker-chosen kind and payload into
+        // every registered target's mailbox. The share-sheet ABI carries no
+        // capability slot argument, so the table is scanned for a matching slot.
+        // This early check runs before any state mutation so an unauthorized
+        // dispatch never records a share transaction; the consuming
+        // authorization happens inside the router at delivery time.
+        let (cap_slot, caller_caps) = {
+            let sched = SCHEDULER.lock();
+            let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+            let cap_slot = (0..task.cap_table.capacity())
+                .find(|slot| {
+                    task.cap_table
+                        .get(*slot)
+                        .is_ok_and(|cap| {
+                            cap.cap_type == CapabilityType::IpcSend
+                                && cap.object_id == target.target_task.0
+                                && cap.rights.contains(Rights::WRITE)
+                        })
+                })
+                .ok_or(SyscallResult::PermissionDenied)?;
+            (cap_slot, task.cap_table.clone())
+        };
         let tx_id = ssm.dispatch_share(current_id, target.target_task, mime_type, uri, None, current_ticks);
         drop(ssm);
 
@@ -3534,9 +3746,13 @@ pub fn sys_share_sheet_dispatch(
             len: pos,
         };
 
-        // Deliver directly to target mailbox
+        // Deliver to the target mailbox. `deliver_system_message` re-verifies the
+        // object-scoped IpcSend inside the router, so the check cannot be skipped
+        // by any future caller of this bus. The capability table was cloned out of
+        // the scheduler lock above because the router takes its own lock here and
+        // the two must not be held in a cycle.
         let mut router = IPC_ROUTER.lock();
-        let _ = router.deliver_system_message(target.target_task, ipc_msg);
+        let _ = router.deliver_system_message(current_id, &caller_caps, cap_slot, target.target_task, ipc_msg);
         drop(router);
 
         serial_println!(
@@ -3550,6 +3766,13 @@ pub fn sys_share_sheet_dispatch(
 
         Ok(target.target_task.0 as u64)
     } else {
+        // Interactive drawer path: no destination task is named, so there is no
+        // object to bind an IpcSend to. The drawer is a system UI surface, so
+        // authorize it against the share-bus control object rather than dropping
+        // the check. Without this, any ring3 task could raise a system share
+        // drawer over the foreground app.
+        require_system_control_object(NOTIFICATION_CONTROL_OBJECT)
+            .or_else(|_| require_system_control())?;
         let drawer = ShareSheetDrawer::new(
             current_ticks,
             "text/uri-list",

@@ -67,12 +67,20 @@ pub struct Credential {
 }
 
 impl Credential {
-    /// Creates a new credential from raw secret bytes using a pseudo-random salt.
-    pub fn new(secret: &[u8], salt_seed: u64) -> Self {
+    /// Creates a new credential from raw secret bytes using a random salt.
+    ///
+    /// WHY the salt comes from the hardware TRNG: the previous salt was derived
+    /// from a caller-supplied `tick ^ constant`, and the kernel calls this at
+    /// first boot where the tick counter is still zero. That made the salt a
+    /// fixed, publicly known constant, so the stored value was a single
+    /// unsalted-equivalent SHA-256 of the secret and identical secrets produced
+    /// identical hashes across every boot and every device.
+    ///
+    /// The `secret` is retained only as a transient argument. It is never
+    /// stored, and no default or derived secret is ever supplied by the kernel.
+    pub fn new(secret: &[u8]) -> Self {
         let mut salt = [0u8; 16];
-        let seed_bytes = salt_seed.to_le_bytes();
-        salt[0..8].copy_from_slice(&seed_bytes);
-        salt[8..16].copy_from_slice(&(!salt_seed).to_le_bytes());
+        crate::crypto::get_random_bytes(&mut salt);
 
         let mut hasher_input = Vec::with_capacity(16 + secret.len());
         hasher_input.extend_from_slice(&salt);
@@ -183,11 +191,16 @@ impl UserManager {
             vfs.mkdir(&format!("{}/app_data", storage_path));
         }
 
-        let credential = pin.map(|p| Credential::new(p, tick ^ 0xA5A5_5A5A_0001));
+        // A provisioned owner with no credential starts LOCKED, not Unlocked.
+        // WHY: the account must never be reachable without an out-of-band
+        // credential. A caller that omits the PIN gets an account that exists
+        // (so storage paths and uid allocation work) but is explicitly locked
+        // until `set_credential` supplies a real secret and `unlock` presents it.
+        let credential = pin.map(Credential::new);
         let lock_state = if credential.is_some() {
             UserLockState::Unlocked
         } else {
-            UserLockState::Uninitialized
+            UserLockState::Locked
         };
 
         let profile = UserProfile {
@@ -230,6 +243,9 @@ impl UserManager {
             uid,
             name: "Guest".to_string(),
             user_type: UserType::Guest,
+            // Guest sessions are intentionally credential-less and ephemeral.
+            // They are not a privilege target: a guest owns no persistent data
+            // and `guest_user()` is a distinct uid from the owner.
             lock_state: UserLockState::Unlocked,
             credential: None,
             storage_path,
@@ -264,11 +280,14 @@ impl UserManager {
             vfs.mkdir(&format!("{}/app_data", storage_path));
         }
 
-        let credential = pin.map(|p| Credential::new(p, tick ^ 0x5A5A_A5A5_0002));
+        // Same rule as the owner: no credential means Locked. An account that is
+        // Unlocked with no credential is an account anyone can act as, which is
+        // the same escalation the hardcoded owner PIN provided.
+        let credential = pin.map(Credential::new);
         let lock_state = if credential.is_some() {
             UserLockState::Locked
         } else {
-            UserLockState::Unlocked
+            UserLockState::Locked
         };
 
         let profile = UserProfile {
@@ -357,11 +376,33 @@ impl UserManager {
     /// Locks an unlocked user account.
     pub fn lock(&mut self, uid: UserId) -> Result<(), UserError> {
         let profile = self.users.get_mut(&uid).ok_or(UserError::UserNotFound)?;
-        if profile.credential.is_none() {
-            return Ok(()); // Accounts without credentials remain uninitialized/unlocked
-        }
+        // A credential-less account is forced to Locked. The previous early
+        // return left such an account at whatever state it had, so an owner
+        // provisioned without a PIN reported Unlocked and could be acted as.
         profile.lock_state = UserLockState::Locked;
         crate::serial_println!("[USER] User UID={} locked.", uid.0);
+        Ok(())
+    }
+
+    /// Establishes a credential on an account that does not yet have one.
+    ///
+    /// WHY this exists: the kernel must not ship a default secret, so the owner
+    /// account is provisioned locked and credential-less. This is the only way
+    /// to give it a real credential, and it leaves the account Locked, so the
+    /// secret still has to be presented through `unlock`.
+    ///
+    /// Callers MUST have already authorized this operation; this function
+    /// performs no capability check of its own and must not be reachable from a
+    /// path that has not.
+    pub fn set_credential(&mut self, uid: UserId, secret: &[u8]) -> Result<(), UserError> {
+        if secret.is_empty() {
+            return Err(UserError::InvalidCredential);
+        }
+        let profile = self.users.get_mut(&uid).ok_or(UserError::UserNotFound)?;
+        profile.credential = Some(Credential::new(secret));
+        // Stay Locked: setting a credential must not itself grant access.
+        profile.lock_state = UserLockState::Locked;
+        crate::serial_println!("[USER] Credential established for UID={} (account remains locked).", uid.0);
         Ok(())
     }
 
@@ -448,7 +489,20 @@ pub static USER_MANAGER: Mutex<UserManager> = Mutex::new(UserManager::new());
 pub fn init() {
     let mut mgr = USER_MANAGER.lock();
     if !mgr.is_provisioned() {
-        // Auto-provision initial device owner
-        let _ = mgr.provision_owner("Device Owner", Some(b"1234"), 0);
+        // Provision the owner account with NO credential.
+        //
+        // WHY: the previous call passed a hardcoded `Some(b"1234")`. That made
+        // the device owner's account unlockable by anyone who typed four digits,
+        // and since the salt was derived from the boot tick (zero at first
+        // boot) the stored hash was a fixed, publicly reproducible value. The
+        // account still exists so uid allocation and `/user/1000` storage paths
+        // work, but it is Locked and has no secret; `UserManager::set_credential`
+        // is the only way to give it one, and it must be called from an
+        // authenticated provisioning path, not from first boot.
+        let _ = mgr.provision_owner("Device Owner", None, 0);
+        crate::serial_println!(
+            "[USER:SECURITY] Device owner provisioned with NO default credential. \
+             Account is locked until a real credential is established."
+        );
     }
 }

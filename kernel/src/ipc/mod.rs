@@ -4,6 +4,12 @@
 //! Communication channels are strictly guarded by capabilities: a task cannot
 //! transmit messages to another task without possessing an `IpcSend` capability
 //! specifically targeted at the recipient's `TaskId`.
+//!
+//! Two rules hold for every delivery path in this module:
+//! 1. Userspace-originated sends verify an `IpcSend` capability whose
+//!    `object_id` equals the destination `TaskId` (`verify_object`).
+//! 2. Every write funnels through `writable_mailbox`, which rejects a
+//!    destination whose endpoint has been revoked.
 
 pub mod secure_channel;
 pub mod share;
@@ -17,7 +23,7 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use crate::capability::{CapError, CapabilityTable, CapabilityType, Rights};
+use crate::capability::{CapError, Capability, CapabilityId, CapabilityTable, CapabilityType, Rights};
 use crate::task::TaskId;
 
 /// Maximum payload size for high-speed microkernel IPC messages.
@@ -132,7 +138,13 @@ impl IpcRouter {
         }
     }
 
-    /// Registers a mailbox for a newly spawned task.
+    /// Registers a mailbox and a live inbound endpoint for a newly spawned task.
+    ///
+    /// The endpoint MUST be created here rather than lazily. `endpoints` is the
+    /// authorization record for "this task's inbox may be written at all"; a
+    /// table that is never populated makes every ownership and revocation check
+    /// below vacuously succeed, which is how a revoked or unregistered target
+    /// becomes indistinguishable from a permitted one.
     pub fn register_task(&mut self, task_id: TaskId) {
         if !self.mailboxes.iter().any(|m| m.task_id == task_id) {
             self.mailboxes.push(TaskMailbox {
@@ -140,19 +152,53 @@ impl IpcRouter {
                 queue: VecDeque::with_capacity(MAILBOX_CAPACITY),
             });
         }
+        if !self.endpoints.iter().any(|e| e.owner == task_id) {
+            let id = EndpointId(self.endpoints.len() as u64);
+            self.endpoints.push(IpcEndpoint { id, owner: task_id, is_revoked: false });
+        }
     }
 
-    /// Cleans up all IPC resources when a process/task dies or exits.
-    pub fn cleanup_task(&mut self, task_id: TaskId) {
-        // 1. Remove task's mailbox and discard pending messages
-        self.mailboxes.retain(|m| m.task_id != task_id);
-
-        // 2. Mark any endpoints owned by the dying task as revoked
+    /// Revokes the inbound endpoint owned by `task_id` without destroying state.
+    ///
+    /// This is the real revocation path: a revoked endpoint rejects every
+    /// subsequent delivery even while the mailbox is still present, so a peer
+    /// that lost authorization cannot keep injecting into a live task.
+    pub fn revoke_endpoint(&mut self, task_id: TaskId) {
         for ep in self.endpoints.iter_mut() {
             if ep.owner == task_id {
                 ep.is_revoked = true;
             }
         }
+    }
+
+    /// Returns a mutable mailbox only when the destination is registered and its
+    /// endpoint has not been revoked.
+    ///
+    /// WHY the endpoint check belongs here and not in each caller: every
+    /// delivery path funnels through this lookup, so centralizing it makes
+    /// "revoked" mean the same thing for send, direct send, and system delivery.
+    fn writable_mailbox(&mut self, dest_task: TaskId) -> Result<&mut TaskMailbox, IpcError> {
+        if self.endpoints.iter().any(|e| e.owner == dest_task && e.is_revoked) {
+            return Err(IpcError::EndpointRevoked);
+        }
+        self.mailboxes
+            .iter_mut()
+            .find(|m| m.task_id == dest_task)
+            .ok_or(IpcError::TargetNotFound)
+    }
+
+    /// Cleans up all IPC resources when a process/task dies or exits.
+    pub fn cleanup_task(&mut self, task_id: TaskId) {
+        // Revoke first, then drop the mailbox. Revocation is recorded before the
+        // mailbox disappears so the state transition is real rather than a
+        // no-op marker that is deleted in the same breath.
+        self.revoke_endpoint(task_id);
+
+        // 1. Remove task's mailbox and discard pending messages
+        self.mailboxes.retain(|m| m.task_id != task_id);
+
+        // 2. Drop the endpoint record; the mailbox no longer exists, so a
+        //    recreated task id gets a fresh, unrevoked endpoint.
         self.endpoints.retain(|ep| ep.owner != task_id);
     }
 
@@ -187,20 +233,32 @@ impl IpcRouter {
         Ok(())
     }
 
-    /// Delivers an authenticated system or kernel message directly to the target mailbox (e.g. Share Sheet bus).
-    pub fn deliver_system_message(&mut self, dest: TaskId, msg: IpcMessage) -> Result<(), IpcError> {
-        let mailbox = self
-            .mailboxes
-            .iter_mut()
-            .find(|m| m.task_id == dest)
-            .ok_or(IpcError::TargetNotFound)?;
+    /// Delivers a system-mediated message to `dest` on behalf of `sender`.
+    ///
+    /// This is a privileged kernel path (share-sheet bus, capability transfer),
+    /// NOT a bypass for userspace senders. It still requires the caller's
+    /// `IpcSend` capability to be bound to `dest`: the share sheet resolves a
+    /// caller-chosen `target_id_str` to a task, so without object scoping one
+    /// `IpcSend` lets a caller inject an attacker-chosen kind and payload into
+    /// any registered task's mailbox.
+    pub fn deliver_system_message(
+        &mut self,
+        sender: TaskId,
+        sender_caps: &CapabilityTable,
+        cap_slot: usize,
+        dest: TaskId,
+        msg: IpcMessage,
+    ) -> Result<(), IpcError> {
+        sender_caps.verify_object(cap_slot, CapabilityType::IpcSend, Rights::WRITE, dest.0)?;
 
+        let mailbox = self.writable_mailbox(dest)?;
         if mailbox.queue.len() >= MAILBOX_CAPACITY {
             return Err(IpcError::MailboxFull);
         }
 
         mailbox.queue.push_back(msg);
         crate::event::post_event(dest, crate::event::EVENT_IPC_MSG);
+        let _ = sender;
         Ok(())
     }
 
@@ -215,6 +273,12 @@ impl IpcRouter {
         receiver_caps
             .verify(cap_slot, CapabilityType::IpcReceive, Rights::READ)?;
 
+        // A revoked endpoint blocks reads too: a peer whose channel was revoked
+        // must not be able to drain whatever the endpoint already buffered.
+        if self.endpoints.iter().any(|e| e.owner == receiver && e.is_revoked) {
+            return Err(IpcError::EndpointRevoked);
+        }
+
         let mailbox = self
             .mailboxes
             .iter_mut()
@@ -224,7 +288,15 @@ impl IpcRouter {
         Ok(mailbox.queue.pop_front())
     }
 
-    /// Sends a pre-verified message directly to the target mailbox.
+    /// Sends a pre-authorized message directly to the target mailbox.
+    ///
+    /// This is the kernel-internal delivery path (input routing, focus events,
+    /// already-checked syscall dispatch). It deliberately performs NO capability
+    /// check: it exists only for callers that are not userspace senders, namely
+    /// the kernel itself (`TaskId(0)`) and the syscall layer after it has
+    /// already run `verify_object(IpcSend, dest)`. The object-scoped check is
+    /// enforced at those call sites, not here, so that a userspace `IpcSend`
+    /// can never be spent against an arbitrary destination here.
     pub fn send_direct(
         &mut self,
         sender: TaskId,
@@ -232,12 +304,7 @@ impl IpcRouter {
         msg_type: u32,
         data: &[u8],
     ) -> Result<(), IpcError> {
-        let mailbox = self
-            .mailboxes
-            .iter_mut()
-            .find(|m| m.task_id == dest_task)
-            .ok_or(IpcError::TargetNotFound)?;
-
+        let mailbox = self.writable_mailbox(dest_task)?;
         if mailbox.queue.len() >= MAILBOX_CAPACITY {
             return Err(IpcError::MailboxFull);
         }
@@ -311,8 +378,29 @@ pub fn run_ipc_adversarial_tests() {
     crate::serial_println!("[TEST] IPC Invariant: Bounded FIFO Queue Backpressure Enforced [PASSED]");
 
     // 2. Capability Transfer In-Band Test
-    let transferred = crate::capability::Capability {
-        id: crate::capability::CapabilityId(55),
+    // The sender is granted an IpcSend bound ONLY to target_id. A second
+    // capability bound to a different object stands in for "some other peer",
+    // which must not be usable to reach target_id.
+    let mut sender_caps = CapabilityTable::new(2);
+    sender_caps
+        .insert(Capability {
+            id: CapabilityId(54),
+            cap_type: CapabilityType::IpcSend,
+            rights: Rights::WRITE,
+            object_id: target_id.0,
+        })
+        .expect("sender capability table must have room");
+    let other_peer_slot = sender_caps
+        .insert(Capability {
+            id: CapabilityId(56),
+            cap_type: CapabilityType::IpcSend,
+            rights: Rights::WRITE,
+            object_id: target_id.0 ^ 0xFFFF,
+        })
+        .expect("second sender capability slot");
+
+    let transferred = Capability {
+        id: CapabilityId(55),
         cap_type: CapabilityType::SerialOutput,
         rights: Rights::WRITE,
         object_id: 1,
@@ -320,9 +408,31 @@ pub fn run_ipc_adversarial_tests() {
     let cap_msg = IpcMessage::with_capability(sender_id, 10, b"CAP_TRANSFER", transferred);
     // Drain one message to make space
     assert!(router.receive_direct(target_id).unwrap().is_some());
-    assert!(router.deliver_system_message(target_id, cap_msg).is_ok());
+    let bound_slot = 0;
+    assert!(router
+        .deliver_system_message(sender_id, &sender_caps, bound_slot, target_id, cap_msg)
+        .is_ok());
 
-    // 3. Process Death Cleanup Test
+    // An IpcSend bound to a different object must NOT reach target_id.
+    let forged_msg = IpcMessage::new(sender_id, 0xDEAD, b"FORGED");
+    assert_eq!(
+        router.deliver_system_message(sender_id, &sender_caps, other_peer_slot, target_id, forged_msg),
+        Err(IpcError::CapabilityDenied(CapError::TargetMismatch))
+    );
+    crate::serial_println!("[TEST] IPC Invariant: System Delivery Bound to Destination Object [PASSED]");
+
+    // 3. Endpoint Revocation Test
+    // Revoking the endpoint must block delivery while the mailbox still exists,
+    // otherwise revocation is indistinguishable from "never registered".
+    router.revoke_endpoint(target_id);
+    let revoked_msg = IpcMessage::new(sender_id, 0xBEEF, b"AFTER_REVOKE");
+    assert_eq!(
+        router.deliver_system_message(sender_id, &sender_caps, bound_slot, target_id, revoked_msg),
+        Err(IpcError::EndpointRevoked)
+    );
+    crate::serial_println!("[TEST] IPC Invariant: Endpoint Revocation Blocks Live-Task Delivery [PASSED]");
+
+    // 4. Process Death Cleanup Test
     router.cleanup_task(target_id);
     assert_eq!(
         router.send_direct(sender_id, target_id, 1, b"POST_MORTEM"),
