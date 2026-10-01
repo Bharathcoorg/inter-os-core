@@ -263,6 +263,9 @@ extern "x86-interrupt" fn page_fault_handler(
         // Preserve the existing security boundary: a ring-3 page fault
         // terminates the faulting user task rather than panicking the kernel.
         crate::task::terminate_current();
+
+        #[allow(unreachable_code)]
+        halt_after_fault_report_failure();
     }
 
     if !fault_report_bytes(b"\\r\\n[KERNEL PAGE FAULT]\\r\\n")
@@ -284,6 +287,27 @@ extern "x86-interrupt" fn page_fault_handler(
             let _ = fault_report_hex_byte(byte);
         }
         let _ = fault_report_bytes(b"\\r\\n");
+    }
+    // DIAGNOSTIC: sample pages across the kernel text range to find how much of
+    // the image is actually resident. Every probe is inside the mapped image, so
+    // these reads cannot fault. A page that reads zero here is code that exists
+    // in the image file but is absent in memory.
+    {
+        let base = (instruction_pointer & !0xFFF) as usize;
+        const SPANS: [i64; 7] = [-0x80000, -0x40000, -0x10000, 0, 0x10000, 0x40000, 0x80000];
+        for span in SPANS {
+            let addr = (base as i64 + span) as usize;
+            if addr == 0 {
+                continue;
+            }
+            let _ = fault_report_bytes(b"S[");
+            let _ = fault_report_hex_byte(((addr >> 8) & 0xff) as u8);
+            let _ = fault_report_hex_byte((addr & 0xff) as u8);
+            let _ = fault_report_bytes(b"]=");
+            let word = unsafe { core::ptr::read_volatile(addr as *const u64) };
+            let _ = fault_report_hex(word);
+            let _ = fault_report_bytes(b"\\r\\n");
+        }
     }
     if !fault_report_bytes(b"HALT\\r\\n")
     {
@@ -312,6 +336,9 @@ extern "x86-interrupt" fn general_protection_fault_handler(
             halt_after_fault_report_failure();
         }
         crate::task::terminate_current();
+
+        #[allow(unreachable_code)]
+        halt_after_fault_report_failure();
     }
 
     if !fault_report_bytes(b"\\r\\n[KERNEL GENERAL PROTECTION FAULT]\\r\\n")

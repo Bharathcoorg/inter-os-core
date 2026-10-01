@@ -39,6 +39,18 @@ pub fn init_memory(physical_memory_offset: VirtAddr, memory_regions: &'static Me
     let frame_allocator =
         unsafe { BootInfoFrameAllocator::init(memory_regions, physical_memory_offset) };
 
+    // DIAGNOSTIC: report whether any bootloader-declared usable region overlaps the
+    // kernel image. If one does, the frame allocator can hand out frames that are
+    // still executing code, which presents as a single randomly located zeroed page
+    // inside .text.
+    for region in memory_regions.iter() {
+        let kind = region.kind;
+        crate::serial_println!(
+            "[MEM] region {:?} start=0x{:X} end=0x{:X}",
+            kind, region.start, region.end
+        );
+    }
+
     *MEMORY_MAPPER.lock() = Some(mapper);
     *FRAME_ALLOCATOR.lock() = Some(frame_allocator);
 
@@ -48,6 +60,9 @@ pub fn init_memory(physical_memory_offset: VirtAddr, memory_regions: &'static Me
         if !pml4[i].is_unused() {
             crate::serial_println!("[BOOT] Kernel PML4 entry {}: frame {:#x}, flags {:?}", i, pml4[i].addr().as_u64(), pml4[i].flags());
         }
+    }
+    for (i, r) in memory_regions.iter().enumerate() {
+        crate::serial_println!("[MEMMAP] region {}: {:#x}..{:#x} ({:?})", i, r.start, r.end, r.kind);
     }
 }
 
