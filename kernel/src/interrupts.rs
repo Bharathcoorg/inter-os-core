@@ -140,28 +140,114 @@ extern "x86-interrupt" fn double_fault_handler(
     );
 }
 
+/// Allocation-free, bounded COM1 writer for exception diagnostics.
+///
+/// The normal serial formatter takes locks and walks arbitrary formatting
+/// arguments. That is unsafe once paging state is suspect because the reporter
+/// itself can become the second fault. This path only touches the 16550 PIO
+/// registers and uses bounded polling.
+#[inline(never)]
+fn fault_report_byte(byte: u8) -> bool {
+    let mut lsr = Port::<u8>::new(0x3FD);
+    let mut thr = Port::<u8>::new(0x3F8);
+
+    for _ in 0..10_000 {
+        let status: u8 = unsafe { lsr.read() };
+        if status & 0x20 != 0 {
+            unsafe { thr.write(byte); }
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+
+    false
+}
+
+#[inline(never)]
+fn fault_report_bytes(bytes: &[u8]) -> bool {
+    const MAX_BYTES: usize = 256;
+    let len = core::cmp::min(bytes.len(), MAX_BYTES);
+    for &byte in &bytes[..len] {
+        if !fault_report_byte(byte) {
+            return false;
+        }
+    }
+    true
+}
+
+#[inline(never)]
+fn fault_report_hex(value: u64) -> bool {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    if !fault_report_bytes(b"0x") {
+        return false;
+    }
+    for shift in (0..64).step_by(4).rev() {
+        if !fault_report_byte(HEX[((value >> shift) & 0xf) as usize]) {
+            return false;
+        }
+    }
+    true
+}
+
+#[inline(never)]
+fn fault_report_line(label: &[u8], value: u64) -> bool {
+    fault_report_bytes(label)
+        && fault_report_hex(value)
+        && fault_report_bytes(b"\\r\\n")
+}
+
+#[inline(never)]
+fn halt_after_fault_report_failure() -> ! {
+    loop {
+        x86_64::instructions::hlt();
+    }
+}
+
 extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
-    let accessed_address = Cr2::read();
+    // Capture the minimum state before touching any subsystem that may lock,
+    // allocate, format, or dereference arbitrary memory.
+    let accessed_address = Cr2::read().as_u64();
+    let instruction_pointer = stack_frame.instruction_pointer.as_u64();
+    let stack_pointer = stack_frame.stack_pointer.as_u64();
+    let error_flags = error_code.bits() as u64;
     let is_user = error_code.contains(PageFaultErrorCode::USER_MODE)
         || stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
 
     if is_user {
-        serial_println!("\n[USER EXCEPTION: PAGE FAULT]");
-        serial_println!("Accessed Address: {:?}", accessed_address);
-        serial_println!("Error Flags:      {:?}", error_code);
-        serial_println!("Faulting RIP:     {:?}", stack_frame.instruction_pointer);
-        serial_println!("[SECURITY] Terminating faulted user process to protect microkernel integrity.");
+        if !fault_report_bytes(b"\\r\\n[USER PAGE FAULT]\\r\\n")
+            || !fault_report_line(b"CR2=", accessed_address)
+            || !fault_report_line(b"RIP=", instruction_pointer)
+            || !fault_report_line(b"RSP=", stack_pointer)
+            || !fault_report_line(b"ERR=", error_flags)
+            || !fault_report_bytes(b"Terminating user task.\\r\\n")
+        {
+            halt_after_fault_report_failure();
+        }
+
+        // Preserve the existing security boundary: a ring-3 page fault
+        // terminates the faulting user task rather than panicking the kernel.
         crate::task::terminate_current();
+
+        // A task terminator is expected not to return. If it does, never fall
+        // through into kernel-fault handling.
+        halt_after_fault_report_failure();
     }
 
-    serial_println!("\n[CPU EXCEPTION: PAGE FAULT]");
-    serial_println!("Accessed Address: {:?}", accessed_address);
-    serial_println!("Error Flags:      {:?}", error_code);
-    serial_println!("{:#?}", stack_frame);
-    panic!("Fatal unhandled page fault in kernel context.");
+    if !fault_report_bytes(b"\\r\\n[KERNEL PAGE FAULT]\\r\\n")
+        || !fault_report_line(b"CR2=", accessed_address)
+        || !fault_report_line(b"RIP=", instruction_pointer)
+        || !fault_report_line(b"RSP=", stack_pointer)
+        || !fault_report_line(b"ERR=", error_flags)
+        || !fault_report_bytes(b"HALT\\r\\n")
+    {
+        halt_after_fault_report_failure();
+    }
+
+    // Kernel faults must remain fatal. Do not recurse through panic formatting.
+    halt_after_fault_report_failure()
 }
 
 extern "x86-interrupt" fn general_protection_fault_handler(
