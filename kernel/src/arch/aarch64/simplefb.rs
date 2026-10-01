@@ -209,8 +209,8 @@ impl SimpleFramebuffer {
 
     /// Fills a solid rectangle on the display screen.
     pub fn fill_rect(&mut self, x: u32, y: u32, w: u32, h: u32, r: u8, g: u8, b: u8) {
-        let x_end = (x + w).min(self.width);
-        let y_end = (y + h).min(self.height);
+        let x_end = x.checked_add(w).unwrap_or(u32::MAX).min(self.width);
+        let y_end = y.checked_add(h).unwrap_or(u32::MAX).min(self.height);
 
         for py in y..y_end {
             for px in x..x_end {
