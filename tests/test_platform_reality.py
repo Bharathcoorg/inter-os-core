@@ -241,6 +241,62 @@ class PlatformRealityTests(unittest.TestCase):
             text = self.read(path).lower()
             self.assertNotRegex(text, r"\bgate\s+[abcd]\b")
 
+    def test_userspace_build_script_cannot_report_a_false_success(self):
+        script = self.read("tools/build_userspace.ps1")
+        # Native tools write progress to stderr, so a blanket ErrorActionPreference
+        # of Stop aborts every build; a blanket Continue lets a failed step fall
+        # through to a success message. Failures must be judged by exit code.
+        self.assertIn('$ErrorActionPreference = "Stop"', script)
+        self.assertIn("$LASTEXITCODE", script)
+        self.assertIn("throw", script)
+        # A build step that reports success must have produced its artifact.
+        self.assertIn("was not produced", script)
+        # The success banner must not be reachable without the checks above.
+        success = script.index("All Ring-3 userspace binaries built")
+        self.assertLess(script.index("Assert-ExecutableElf -Path $targetPath"), success)
+        self.assertLess(script.index("was not produced"), success)
+
+    def test_userspace_build_produces_fixed_address_executables(self):
+        script = self.read("tools/build_userspace.ps1")
+        # The kernel ELF loader rejects ET_DYN, and the x86_64-unknown-none target
+        # defaults to position-independent executables. Without this the build
+        # produces images the guest cannot load and the device boots headless.
+        self.assertIn("-no-pie", script)
+        self.assertIn("ET_EXEC", script)
+        self.assertIn("Assert-ExecutableElf", script)
+
+    def test_userspace_build_covers_every_embedded_image(self):
+        script = self.read("tools/build_userspace.ps1")
+        # kernel/src/task/images.rs embeds these; a name that is embedded but never
+        # built ships as a stale artifact with no compiler error.
+        images = self.read("kernel/src/task/images.rs")
+        for name in ("init", "displayd", "inputd", "storaged", "netd", "powerd",
+                     "modemd", "audiod", "camerad", "sensord", "compositor", "launcher"):
+            self.assertIn(name, images)
+            self.assertIn(name, script, f"{name} is embedded by the kernel but not built")
+        self.assertIn("kernel-embedded user images", script)
+
+    def test_kernel_declares_its_embedded_user_images_as_build_inputs(self):
+        build_rs = self.read("kernel/build.rs")
+        # include_bytes! is invisible to Cargo's fingerprint, so a rebuilt app
+        # could otherwise ship inside the kernel image as a stale copy.
+        self.assertIn("rerun-if-changed", build_rs)
+        for name in ("launcher", "compositor", "init"):
+            self.assertIn(name, build_rs)
+
+    def test_guest_touch_uses_the_logical_portrait_surface(self):
+        serial = self.read("kernel/src/serial.rs")
+        main = self.read("emulator/server.py")
+        # INPUT_TOUCH must accept the space the compositor and apps use. The old
+        # letterbox remap rejected every gesture above the landscape midpoint.
+        self.assertIn("LOGICAL_WIDTH", serial)
+        self.assertIn("LOGICAL_HEIGHT", serial)
+        self.assertNotIn("x >= 460 && x <= 820", serial)
+        self.assertNotIn("460 + (x * 360 // 720)", main)
+        # Legacy verbs had no bounds check at all.
+        self.assertIn("touch_point", serial)
+        self.assertIn("portrait_from_framebuffer", main)
+
     def test_aarch64_boot_path_has_no_orphan_code_after_panic_handler(self):
         main = self.read("kernel-aarch64/src/main.rs")
         self.assertEqual(main.count("#[panic_handler]"), 1)
