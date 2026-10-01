@@ -118,7 +118,7 @@ impl SimpleFramebuffer {
         let format = SimpleFbFormat::from_dtb_string(fmt_str).ok_or("Unsupported SimpleFB format in DTB")?;
         let bpp = format.bytes_per_pixel() as u64;
         let min_stride = (width as u64).checked_mul(bpp).ok_or("Framebuffer row size overflow")?;
-        if stride as u64 < min_stride {
+        if (stride as u64) < min_stride {
             return Err("Framebuffer stride is smaller than one scanline");
         }
         let buffer_size = (stride as u64).checked_mul(height as u64).ok_or("Framebuffer size overflow")?;

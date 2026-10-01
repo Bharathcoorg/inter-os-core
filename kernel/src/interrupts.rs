@@ -9,7 +9,6 @@ use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
 use pic8259::ChainedPics;
 use spin::Mutex;
 use x86_64::instructions::port::Port;
-use x86_64::registers::control::Cr2;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
 use crate::{gdt, serial_println};
@@ -219,7 +218,16 @@ extern "x86-interrupt" fn page_fault_handler(
 ) {
     // Capture the minimum state before touching any subsystem that may lock,
     // allocate, format, or dereference arbitrary memory.
-    let accessed_address = Cr2::read().as_u64();
+    //
+    // Read the raw CR2 register with inline asm rather than the typed accessor:
+    // `Cr2::read()` returns a Result that would have to be unwrapped, and a
+    // fault handler cannot unwind, panic or format. This is exactly the
+    // hardware value and cannot fail.
+    let accessed_address: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr2", out(reg) accessed_address,
+                         options(nomem, nostack, preserves_flags));
+    }
     let instruction_pointer = stack_frame.instruction_pointer.as_u64();
     let stack_pointer = stack_frame.stack_pointer.as_u64();
     let error_flags = error_code.bits() as u64;
