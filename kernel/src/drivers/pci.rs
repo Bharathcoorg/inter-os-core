@@ -225,6 +225,13 @@ pub fn initialize_e1000_network() -> Result<(), &'static str> {
     if mac == crate::net::MacAddress::ZERO {
         return Err("E1000 EEPROM returned an invalid zero MAC");
     }
+    // WHY check before initialize(): initialize() enables the controller and
+    // sets the software link-up bit, at which point the device begins DMA into
+    // the descriptor buffers. Binding is gated until that mapping is verified,
+    // so the gate must be evaluated before the controller is ever enabled.
+    if !crate::net::ENABLE_E1000_BINDING {
+        return Err("E1000 binding is disabled pending DMA mapping verification");
+    }
     let mut nic = unsafe {
         crate::net::E1000Device::allocate_with_dma(mapped.as_u64() as usize, mac)
             .ok_or("Unable to allocate contiguous E1000 DMA memory")?
@@ -233,7 +240,9 @@ pub fn initialize_e1000_network() -> Result<(), &'static str> {
     if !nic.read_link_status() {
         return Err("E1000 controller reports link down after initialization");
     }
-    crate::net::NETWORK_DEVICE.lock().attach_e1000(nic);
+    if !crate::net::NETWORK_DEVICE.lock().attach_e1000(nic) {
+        return Err("E1000 binding was refused by the device manager");
+    }
     serial_println!("[NET] Intel E1000 network backend attached: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         mac.0[0], mac.0[1], mac.0[2], mac.0[3], mac.0[4], mac.0[5]);
     Ok(())

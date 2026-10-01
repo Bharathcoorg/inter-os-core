@@ -36,7 +36,22 @@ def main():
         "netd must not report loopback traffic as external"
     assert "net_send_socket(socket, [127, 0, 0, 1], 4242" not in service, \
         "netd must not transmit to its own loopback socket"
-    must(net, "pub use device::{LoopbackDevice, NetDeviceInfo, NetError, NetworkBackend, NetworkDevice, NetworkDeviceManager, NETWORK_DEVICE};", "network abstraction exports")
+    for symbol in ("LoopbackDevice", "NetDeviceInfo", "NetError", "NetworkBackend",
+                 "NetworkDevice", "NetworkDeviceManager", "NETWORK_DEVICE"):
+        must(net, symbol, f"network abstraction export {symbol}")
+    # Binding a probed NIC is gated until the descriptor DMA mapping is verified:
+    # enabling the controller makes the device DMA into buffers whose mapping has
+    # not been proven, which took the guest down during boot.
+    must(net, "ENABLE_E1000_BINDING", "E1000 binding gate export")
+    must(dev, "pub const ENABLE_E1000_BINDING: bool = false", "E1000 binding defaults to off")
+    must(dev, "if !ENABLE_E1000_BINDING", "attach refuses while binding is disabled")
+    # The gate must be evaluated before the controller is enabled, since
+    # initialize() starts DMA.
+    must(pci, "if !crate::net::ENABLE_E1000_BINDING", "PCI attach gated before enable")
+    must(pci, "nic.initialize()", "E1000 initialize call retained")
+    gate_at = pci.index("if !crate::net::ENABLE_E1000_BINDING")
+    init_at = pci.index("nic.initialize()")
+    assert gate_at < init_at, "E1000 binding gate must precede controller initialization"
     must(pci, "is_network_controller", "PCI network device discovery")
     must(pci, "pub fn memory_bar", "PCI BAR discovery")
     must(pci, "pub fn enable_memory_and_bus_master", "PCI DMA enablement")

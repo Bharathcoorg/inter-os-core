@@ -8,6 +8,22 @@ use super::e1000::E1000Device;
 pub const MAX_PACKET_SIZE: usize = 1514;
 pub const LOOPBACK_RING_SLOTS: usize = 8;
 
+/// Whether a probed E1000 may be bound as the active network device.
+///
+/// WHY this gate exists: the E1000 driver now reads its station address
+/// correctly, so probing a real NIC succeeds where it previously always failed.
+/// Once bound, the controller is enabled and begins DMA into descriptor buffers
+/// owned by the mapping layer. That DMA path is not yet verified on real
+/// hardware, and enabling it by default took the guest down with a kernel
+/// page fault during boot.
+///
+/// Until the descriptor buffers are proven correctly mapped and coherent,
+/// binding fails closed and the guest stays on the loopback backend, which is
+/// the honest description of the datapath in that state. Setting this to true
+/// enables the controller and is only appropriate once that mapping is
+/// verified; the boot banner states which backend is active either way.
+pub const ENABLE_E1000_BINDING: bool = false;
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum NetError {
     BufferTooSmall,
@@ -213,13 +229,21 @@ impl NetworkDeviceManager {
         match &self.backend { NetworkDeviceBackend::Loopback(d) => d.has_packets(), NetworkDeviceBackend::E1000(d) => d.has_packets() }
     }
 
-    /// Replaces the loopback backend with an initialized Ethernet controller.
-    pub fn attach_e1000(&mut self, device: E1000Device) {
-        self.backend = NetworkDeviceBackend::E1000(device);
-        self.kind = NetworkBackend::EthernetPci;
-        self.mtu = 1500;
-        self.link_up = true;
+/// Replaces the loopback backend with an initialized Ethernet controller.
+///
+/// Refuses to bind while [`ENABLE_E1000_BINDING`] is false, leaving the
+/// loopback backend in place rather than reporting a network device whose DMA
+/// path has not been verified.
+pub fn attach_e1000(&mut self, device: E1000Device) -> bool {
+    if !ENABLE_E1000_BINDING {
+        return false;
     }
+    self.backend = NetworkDeviceBackend::E1000(device);
+    self.kind = NetworkBackend::EthernetPci;
+    self.mtu = 1500;
+    self.link_up = true;
+    true
+}
 }
 
 impl NetworkDevice for NetworkDeviceManager {

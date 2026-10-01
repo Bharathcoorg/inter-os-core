@@ -19,7 +19,7 @@ pub mod wireless;
 pub mod route;
 
 pub use arp::{ArpOpcode, ArpPacket, ArpTable};
-pub use device::{LoopbackDevice, NetDeviceInfo, NetError, NetworkBackend, NetworkDevice, NetworkDeviceManager, NETWORK_DEVICE};
+pub use device::{LoopbackDevice, NetDeviceInfo, NetError, NetworkBackend, NetworkDevice, NetworkDeviceManager, NETWORK_DEVICE, ENABLE_E1000_BINDING};
 pub use e1000::E1000Device;
 pub use dns::{encode_query as dns_encode_query, parse_a_answer, DnsAnswer, DnsQuestion, DnsResolver, DNS_SERVER};
 pub use tcp::{next_state as tcp_next_state, seq_ge, seq_gt, seq_le, seq_lt, valid_established_segment, valid_syn_ack, TcpSegment, TcpState};
