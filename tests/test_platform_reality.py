@@ -486,5 +486,44 @@ class PlatformRealityTests(unittest.TestCase):
             self.assertNotIn("panic!(", handler)
             self.assertNotIn("{:#?}", handler)
 
+    def test_mmio_mapping_is_overflow_checked_and_transactional(self):
+        memory = self.read("kernel/src/memory.rs")
+        start = memory.index("pub fn map_mmio_region(")
+        end = memory.index("\n/// Allocates a single 4 KiB", start)
+        body = memory[start:end]
+        for literal in ("size.checked_add(4095)", "pages.checked_mul(4096)", "checked_add(span as u64)", "mapped_pages", "PageAlreadyMapped", "mapper.unmap(mapped)"):
+            self.assertIn(literal, body)
+        self.assertNotIn("size.saturating_add(4095)", body)
+
+    def test_process_table_reports_real_cr3_values(self):
+        scheduler = self.read("kernel/src/task/scheduler.rs")
+        start = scheduler.index("pub fn dump_process_table")
+        end = scheduler.index("\n    }", start)
+        body = scheduler[start:end]
+        self.assertIn("frame().start_address().as_u64()", body)
+        self.assertIn("crate::memory::kernel_pml4()", body)
+        self.assertNotIn("0x0000000000400000", body)
+        self.assertNotIn("0x0000000000100000", body)
+
+    def test_relocation_pointer_arithmetic_is_checked(self):
+        relocate = self.read("kernel/src/arch/relocate.rs")
+        for literal in ("base.checked_add", "dyn_vaddr.checked_add(dyn_memsz)", "r_offset.checked_add", "checked_add(base)"):
+            self.assertIn(literal, relocate)
+
+    def test_simplefb_rejects_missing_or_invalid_hardware_geometry(self):
+        fb = self.read("kernel/src/arch/aarch64/simplefb.rs")
+        start = fb.index("pub fn from_fdt")
+        end = fb.index("\n    /// Total size", start)
+        body = fb[start:end]
+        self.assertIn("Missing framebuffer reg property", body)
+        self.assertIn("Framebuffer stride is smaller than one scanline", body)
+        self.assertIn("Framebuffer size overflow", body)
+
+    def test_fdt_parser_bounds_strings_and_memory_ranges(self):
+        fdt = self.read("kernel/src/arch/aarch64/fdt.rs")
+        self.assertIn("let limit = base.checked_add(self.header.size_dt_strings as usize)?", fdt)
+        self.assertIn("base.checked_add(size).is_none()", fdt)
+        self.assertIn("rest.starts_with('@')", fdt)
+        self.assertNotIn("name.starts_with(target_name)", fdt)
 if __name__ == "__main__":
     unittest.main(verbosity=2)
