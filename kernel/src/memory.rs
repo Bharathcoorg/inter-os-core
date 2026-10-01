@@ -16,6 +16,14 @@ use x86_64::structures::paging::{
 use x86_64::{PhysAddr, VirtAddr};
 
 static PHYSICAL_MEMORY_OFFSET: Mutex<Option<VirtAddr>> = Mutex::new(None);
+/// Lock-free mirror of `PHYSICAL_MEMORY_OFFSET`.
+///
+/// The spinlock-backed accessor can deadlock and its `expect` can panic, so a
+/// fault handler must not use it. This mirror is readable from an exception
+/// context without taking a lock; it is zero until `init_memory` publishes the
+/// real offset.
+static PHYSICAL_MEMORY_OFFSET_RAW: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
 static MEMORY_MAPPER: Mutex<Option<OffsetPageTable<'static>>> = Mutex::new(None);
 static FRAME_ALLOCATOR: Mutex<Option<BootInfoFrameAllocator>> = Mutex::new(None);
 static KERNEL_PML4_FRAME: Mutex<Option<PhysFrame<Size4KiB>>> = Mutex::new(None);
@@ -34,6 +42,10 @@ pub fn init_memory(physical_memory_offset: VirtAddr, memory_regions: &'static Me
 
     // Publish the direct-map offset first: it is the precondition for zeroing frames.
     *PHYSICAL_MEMORY_OFFSET.lock() = Some(physical_memory_offset);
+    PHYSICAL_MEMORY_OFFSET_RAW.store(
+        physical_memory_offset.as_u64(),
+        core::sync::atomic::Ordering::Relaxed,
+    );
 
     let mapper = unsafe { init_page_table(physical_memory_offset) };
     let frame_allocator =
@@ -86,6 +98,14 @@ pub fn phys_mem_offset() -> VirtAddr {
     PHYSICAL_MEMORY_OFFSET
         .lock()
         .expect("Physical memory offset not initialized")
+}
+
+/// Lock-free, panic-free direct-map offset for use from a fault handler.
+///
+/// Returns 0 when memory management has not been initialised yet. Never locks
+/// and never unwinds, so it is safe in an exception context.
+pub fn phys_mem_offset_raw() -> u64 {
+    PHYSICAL_MEMORY_OFFSET_RAW.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 /// Allocates physically contiguous 4 KiB frames for DMA buffers.

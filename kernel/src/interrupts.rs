@@ -309,6 +309,79 @@ extern "x86-interrupt" fn page_fault_handler(
             let _ = fault_report_bytes(b"\\r\\n");
         }
     }
+    // DIAGNOSTIC: walk the page tables for the faulting virtual address and show
+    // where each level points. A page that is present and read-only but reads
+    // zero means its entry resolves to an empty frame; this says whether the
+    // entry is wrong or the frame was overwritten.
+    {
+        use x86_64::structures::paging::PageTable;
+        let off = crate::memory::phys_mem_offset_raw();
+        let (pml4_frame, _) = x86_64::registers::control::Cr3::read();
+        if off != 0 {
+            let va = instruction_pointer;
+            let indexes = [
+                ((va >> 39) & 0x1ff) as usize,
+                ((va >> 30) & 0x1ff) as usize,
+                ((va >> 21) & 0x1ff) as usize,
+                ((va >> 12) & 0x1ff) as usize,
+            ];
+            let labels: [&[u8]; 4] = [b"l4", b"l3", b"l2", b"l1"];
+            let mut table_addr = pml4_frame.start_address().as_u64();
+            let mut leaf = 0u64;
+            let mut pt_base = 0u64;
+            let _ = fault_report_bytes(b"WALK ");
+            for (level, index) in indexes.iter().enumerate() {
+                let table = unsafe { &*((off + table_addr) as *const PageTable) };
+                let entry = &table[*index];
+                let entry_addr = entry.addr().as_u64();
+                let _ = fault_report_bytes(labels[level]);
+                let _ = fault_report_bytes(b"=");
+                if entry.is_unused() {
+                    let _ = fault_report_bytes(b"unused\r\n");
+                    break;
+                }
+                let _ = fault_report_hex(entry_addr);
+                let _ = fault_report_bytes(b" ");
+                leaf = entry_addr & 0x000F_FFFF_FFFF_F000;
+                table_addr = leaf;
+                if level == 2 { pt_base = leaf; }
+            }
+            // Neighbouring entries in the same leaf table. A regular mapping is
+            // base + i * 0x1000; a single entry carrying its neighbour's frame
+            // is a mis-mapped page rather than an overwritten one.
+            if pt_base != 0 {
+                use x86_64::structures::paging::PageTable;
+                let table = unsafe { &*((off + pt_base) as *const PageTable) };
+                let idx = indexes[3];
+                let start = idx.saturating_sub(2);
+                for i in start..(idx + 3) {
+                    let _ = fault_report_bytes(b"PT[");
+                    let _ = fault_report_hex_byte(((i >> 8) & 0xff) as u8);
+                    let _ = fault_report_hex_byte((i & 0xff) as u8);
+                    let _ = fault_report_bytes(b"]=");
+                    let _ = fault_report_hex(table[i].addr().as_u64());
+                    let _ = fault_report_bytes(b"\r\n");
+                }
+            }
+            // The frame this virtual address finally resolves to.
+            let _ = fault_report_bytes(b"LEAF=");
+            let _ = fault_report_hex(leaf);
+            let _ = fault_report_bytes(b" DATA=");
+            let word = unsafe { core::ptr::read_volatile((off + leaf) as *const u64) };
+            let _ = fault_report_hex(word);
+            let _ = fault_report_bytes(b"\r\n");
+            // The neighbouring frame, so a one-page misalignment is distinguishable from
+            // a frame that was simply overwritten. Read relative to the leaf that
+            // is already known to be mapped, never via an independent address.
+            let _ = fault_report_bytes(b"NEXT=");
+            let next = leaf + 0x1000;
+            let _ = fault_report_hex(next);
+            let _ = fault_report_bytes(b" DATA=");
+            let word = unsafe { core::ptr::read_volatile((off + next) as *const u64) };
+            let _ = fault_report_hex(word);
+            let _ = fault_report_bytes(b"\r\n");
+        }
+    }
     if !fault_report_bytes(b"HALT\\r\\n")
     {
         halt_after_fault_report_failure();
