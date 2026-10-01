@@ -59,6 +59,13 @@ pub struct CameraApp {
     pub total_photos: u32,
     pub total_video_frames: u32,
     pub current_sector: u64,
+    /// Whether the flash/torch hardware backend answered a toggle request.
+    ///
+    /// WHY: this app holds neither `SystemControl` on the camera service object
+    /// nor `HardwarePortIo` on port 0xCA00, so `camera_toggle_flash` is refused
+    /// with PermissionDenied. The previous code discarded that error, kept a lit
+    /// `Torch` state locally and rendered it as an active amber pill.
+    pub flash_available: bool,
 }
 
 impl CameraApp {
@@ -72,6 +79,34 @@ impl CameraApp {
             total_photos: 0,
             total_video_frames: 0,
             current_sector: 201,
+            // WHY: fail closed. Assume no flash hardware until a toggle is
+            // actually accepted by the backend.
+            flash_available: false,
+        }
+    }
+
+    /// Toggles the flash/torch hardware and returns the state the hardware
+    /// actually reported.
+    ///
+    /// Returns `None` when the flash backend is absent or refused the request.
+    /// In that case the local mode is forced back to `Off` so neither the model
+    /// nor the UI can claim an emitting torch that no hardware produced.
+    pub fn toggle_flash(&mut self) -> Option<bool> {
+        match std::camera_toggle_flash() {
+            Ok(new_state) => {
+                self.flash_available = true;
+                self.flash = if new_state {
+                    FlashMode::Torch
+                } else {
+                    FlashMode::Off
+                };
+                Some(new_state)
+            }
+            Err(_) => {
+                self.flash_available = false;
+                self.flash = FlashMode::Off;
+                None
+            }
         }
     }
 
@@ -216,8 +251,19 @@ fn render_camera_ui(surface: u32, camera: &CameraApp) {
                         chunk[i] = std::design::color::SURFACE_RAISED;
                     }
                 } else if x >= 130 && x < 250 && y >= 28 && y < 68 {
-                    // Flash Mode Toggle Pill
-                    if camera.flash == FlashMode::Torch || camera.flash == FlashMode::On {
+                    // Flash Mode Toggle Pill.
+                    // WHY: the pill was filled lit amber whenever the mode was
+                    // On/Torch, which presented an emitting flash that no
+                    // hardware ever confirmed. Only light it when the backend
+                    // actually reported the torch on; otherwise draw the
+                    // unavailable outline so the state is explicit.
+                    if !camera.flash_available {
+                        if y == 28 || y == 67 || x == 130 || x == 249 {
+                            chunk[i] = std::design::color::TEXT_MUTED;
+                        } else {
+                            chunk[i] = std::design::color::SURFACE;
+                        }
+                    } else if camera.flash == FlashMode::Torch || camera.flash == FlashMode::On {
                         chunk[i] = std::design::color::WARNING;
                     } else {
                         chunk[i] = std::design::color::SURFACE_RAISED;
@@ -366,14 +412,31 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> bool {
 
     // 2. Flash mode toggle pill
     if x >= 130 && x < 250 && y >= 28 && y < 68 {
-        camera.flash = match camera.flash {
-            FlashMode::Off => FlashMode::Auto,
-            FlashMode::Auto => FlashMode::On,
-            FlashMode::On => FlashMode::Torch,
-            FlashMode::Torch => FlashMode::Off,
-        };
-        let _ = std::camera_toggle_flash();
-        std::audio_haptic_click().ok();
+        // WHY: the flash pill previously advanced the local mode and then
+        // discarded the `Err` from camera_toggle_flash, so the UI showed the next
+        // flash mode (ending in a lit Torch) even though the backend refused the
+        // request. Report the real outcome and keep the pill fail-closed.
+        match camera.toggle_flash() {
+            Some(on) => {
+                std::log(
+                    0,
+                    if on {
+                        "[CAMERA APP] Flash hardware reported torch ON."
+                    } else {
+                        "[CAMERA APP] Flash hardware reported torch OFF."
+                    },
+                )
+                .ok();
+            }
+            None => {
+                std::log(
+                    0,
+                    "[CAMERA APP] Flash unavailable: the camera hardware backend refused the toggle; flash is off.",
+                )
+                .ok();
+            }
+        }
+        let _ = std::audio_haptic_click();
         return false;
     }
 

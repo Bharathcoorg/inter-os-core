@@ -34,6 +34,32 @@ pub enum PowerProfile {
     PowerSaver = 2,  // 600 MHz
 }
 
+/// Outcome of a hardware/service query, recorded so the UI can render an
+/// explicit unavailable state instead of inventing one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelemetryState {
+    /// The kernel refused the query or no backend is attached.
+    Unavailable,
+    /// The query succeeded and returned a payload.
+    Reported,
+}
+
+/// Reports whether `haystack` contains the exact byte sequence `needle`.
+///
+/// WHY: the telemetry payloads are compact JSON with no allocator, so presence
+/// checks are done by scanning the raw bytes the kernel actually wrote.
+fn contains_run(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return false;
+    }
+    for i in 0..=(haystack.len() - needle.len()) {
+        if &haystack[i..i + needle.len()] == needle {
+            return true;
+        }
+    }
+    false
+}
+
 /// Sovereign Settings application state engine.
 pub struct SettingsApp {
     pub current_tab: SettingsTab,
@@ -45,6 +71,14 @@ pub struct SettingsApp {
     pub cached_battery_soc: u8,
     pub cached_temp_c: u8,
     pub terminal_enabled: bool,
+    /// Recorded outcome of the wireless HAL query for the last refresh.
+    pub wireless: TelemetryState,
+    /// Recorded outcome of the battery / power query for the last refresh.
+    pub battery: TelemetryState,
+    /// Recorded outcome of the thermal query for the last refresh.
+    pub thermal: TelemetryState,
+    /// Recorded outcome of the sensor query for the last refresh.
+    pub sensor: TelemetryState,
 }
 
 impl SettingsApp {
@@ -59,44 +93,133 @@ impl SettingsApp {
             cached_battery_soc: 0,
             cached_temp_c: 0,
             terminal_enabled: false,
+            // WHY: default to Unavailable so a query that never ran is never
+            // rendered as if hardware had answered.
+            wireless: TelemetryState::Unavailable,
+            battery: TelemetryState::Unavailable,
+            thermal: TelemetryState::Unavailable,
+            sensor: TelemetryState::Unavailable,
         }
     }
 
-    /// Queries and reports real-time wireless connectivity status.
+    /// Queries and reports the real outcome of the wireless HAL query.
     pub fn refresh_wireless(&mut self) {
         let mut buf = [0u8; 128];
-        if let Ok(len) = std::wireless_query(&mut buf) {
-            if len > 0 {
-                std::log(
-                    0,
-                    "[SETTINGS APP] Wireless telemetry is available; physical connectivity status is reported by the platform.",
-                ).ok();
-            }
-        }
-    }
-
-    /// Queries battery fuel gauge and updates power governor.
-    pub fn refresh_power(&mut self) {
-        let mut buf = [0u8; 128];
-        let mut profile = [0u8; 32];
-        if let Ok(n) = std::settings_get(3, "power.profile", &mut profile) {
-            if let Ok(v) = core::str::from_utf8(&profile[..n]) {
-                std::log(0, v).ok();
-            }
-        }
-        if let Ok(len) = std::battery_query(&mut buf) {
-            if len > 0 {
-                let profile_str = match self.power_profile {
-                    PowerProfile::Performance => "[SETTINGS APP] Power Profile: Interactive DVFS Governor set to Performance (2.4 GHz).",
-                    PowerProfile::Balanced => "[SETTINGS APP] Power Profile: Interactive DVFS Governor set to Balanced (1.2 GHz).",
-                    PowerProfile::PowerSaver => "[SETTINGS APP] Power Profile: Interactive DVFS Governor set to Power Saver (600 MHz).",
+        // WHY: a non-empty payload was previously treated as proof that wireless
+        // hardware exists. The payload carries the HAL's own station state, so
+        // report what the HAL actually said instead of the presence of bytes.
+        match std::wireless_query(&mut buf) {
+            Ok(len) if len > 0 => {
+                let body = &buf[..len];
+                self.wireless = if contains_run(body, b"\"wifi_state\":\"Disabled\"") {
+                    TelemetryState::Unavailable
+                } else {
+                    TelemetryState::Reported
                 };
                 std::log(
                     0,
-                    "[SETTINGS APP] Power telemetry available from the hardware service.",
+                    "[SETTINGS APP] Wireless HAL response (raw, exactly as reported by the HAL):",
                 )
                 .ok();
-                std::log(0, profile_str).ok();
+                std::log(0, core::str::from_utf8(body).unwrap_or("<non-utf8>")).ok();
+            }
+            Ok(_) => {
+                self.wireless = TelemetryState::Unavailable;
+                std::log(
+                    0,
+                    "[SETTINGS APP] Wireless HAL returned an empty payload; no wireless hardware reported.",
+                )
+                .ok();
+            }
+            Err(_) => {
+                // WHY: the query is gated on SystemControl, which this app does
+                // not hold. Say the query was refused instead of implying a radio.
+                self.wireless = TelemetryState::Unavailable;
+                std::log(
+                    0,
+                    "[SETTINGS APP] Wireless HAL query refused by the kernel; wireless state unknown.",
+                )
+                .ok();
+            }
+        }
+    }
+
+    /// Queries the battery fuel gauge and reports the real outcome.
+    pub fn refresh_power(&mut self) {
+        let mut profile = [0u8; 32];
+        // WHY: this read goes through the FileSystemRead capability slot, which
+        // this app holds. Report the stored value verbatim instead of echoing a
+        // profile name and then asserting a DVFS governor change that never ran.
+        match std::settings_get(3, "power.profile", &mut profile) {
+            Ok(n) => {
+                std::log(0, "[SETTINGS APP] Stored power.profile value:").ok();
+                if let Ok(v) = core::str::from_utf8(&profile[..n]) {
+                    std::log(0, v).ok();
+                }
+            }
+            Err(_) => {
+                std::log(
+                    0,
+                    "[SETTINGS APP] Stored power.profile read refused by the kernel; profile unknown.",
+                )
+                .ok();
+            }
+        }
+
+        // WHY: this app never calls power_set_profile/power_set_governor, so the
+        // governor must be read, not asserted. Report the observed governor id.
+        match std::power_get_governor() {
+            Ok(gov) => {
+                std::log(
+                    0,
+                    match gov {
+                        0 => "[SETTINGS APP] DVFS governor as reported by the kernel: Performance.",
+                        1 => "[SETTINGS APP] DVFS governor as reported by the kernel: Power Saver.",
+                        2 => "[SETTINGS APP] DVFS governor as reported by the kernel: Interactive.",
+                        3 => "[SETTINGS APP] DVFS governor as reported by the kernel: Schedutil.",
+                        _ => "[SETTINGS APP] DVFS governor as reported by the kernel: unrecognised id.",
+                    },
+                )
+                .ok();
+            }
+            Err(_) => {
+                // WHY: the governor query requires SystemControl. Report the
+                // refusal instead of the locally cached profile enum.
+                self.battery = TelemetryState::Unavailable;
+                std::log(
+                    0,
+                    "[SETTINGS APP] DVFS governor query refused by the kernel; no governor change was applied.",
+                )
+                .ok();
+            }
+        }
+
+        let mut buf = [0u8; 128];
+        match std::battery_query(&mut buf) {
+            Ok(len) if len > 0 => {
+                self.battery = TelemetryState::Reported;
+                std::log(
+                    0,
+                    "[SETTINGS APP] Battery fuel gauge response (raw, as reported by the service):",
+                )
+                .ok();
+                std::log(0, core::str::from_utf8(&buf[..len]).unwrap_or("<non-utf8>")).ok();
+            }
+            Ok(_) => {
+                self.battery = TelemetryState::Unavailable;
+                std::log(
+                    0,
+                    "[SETTINGS APP] Battery fuel gauge returned an empty payload.",
+                )
+                .ok();
+            }
+            Err(_) => {
+                self.battery = TelemetryState::Unavailable;
+                std::log(
+                    0,
+                    "[SETTINGS APP] Battery fuel gauge query refused by the kernel; charge level unknown.",
+                )
+                .ok();
             }
         }
     }
@@ -104,22 +227,61 @@ impl SettingsApp {
     /// Queries multi-zone thermal sensors and IMU orientation.
     pub fn refresh_thermals_and_sensors(&mut self) {
         let mut t_buf = [0u8; 128];
-        if let Ok(len) = std::thermal_query(&mut t_buf) {
-            if len > 0 {
+        match std::thermal_query(&mut t_buf) {
+            Ok(len) if len > 0 => {
+                self.thermal = TelemetryState::Reported;
                 std::log(
                     0,
-                    "[SETTINGS APP] Thermal telemetry available from the hardware service.",
+                    "[SETTINGS APP] Thermal response (raw, as reported by the service):",
+                )
+                .ok();
+                std::log(0, core::str::from_utf8(&t_buf[..len]).unwrap_or("<non-utf8>")).ok();
+            }
+            Ok(_) => {
+                self.thermal = TelemetryState::Unavailable;
+                std::log(
+                    0,
+                    "[SETTINGS APP] Thermal service returned an empty payload.",
+                )
+                .ok();
+            }
+            Err(_) => {
+                // WHY: an unbound thermal sensor reports DeviceError and this app
+                // lacks the power-control authority the query requires. Both mean
+                // there is no temperature to show.
+                self.thermal = TelemetryState::Unavailable;
+                std::log(
+                    0,
+                    "[SETTINGS APP] Thermal service reported no attached sensor; temperatures unknown.",
                 )
                 .ok();
             }
         }
 
         let mut s_buf = [0u8; 128];
-        if let Ok(len) = std::sensor_read(&mut s_buf) {
-            if len > 0 {
+        match std::sensor_read(&mut s_buf) {
+            Ok(len) if len > 0 => {
+                self.sensor = TelemetryState::Reported;
                 std::log(
                     0,
-                    "[SETTINGS APP] Sensor telemetry available from the hardware service.",
+                    "[SETTINGS APP] Sensor response (raw, as reported by the service):",
+                )
+                .ok();
+                std::log(0, core::str::from_utf8(&s_buf[..len]).unwrap_or("<non-utf8>")).ok();
+            }
+            Ok(_) => {
+                self.sensor = TelemetryState::Unavailable;
+                std::log(
+                    0,
+                    "[SETTINGS APP] Sensor service returned an empty payload.",
+                )
+                .ok();
+            }
+            Err(_) => {
+                self.sensor = TelemetryState::Unavailable;
+                std::log(
+                    0,
+                    "[SETTINGS APP] Sensor service query refused by the kernel; no sensor data.",
                 )
                 .ok();
             }
@@ -129,23 +291,62 @@ impl SettingsApp {
     /// Audits security identity and hardware keystore slots.
     pub fn audit_security(&mut self) {
         let mut key_buf = [0u8; 32];
-        if let Ok(32) = std::keystore_derive(0, &mut key_buf) {
-            std::log(
-                0,
-                "[SETTINGS APP] Keystore derivation is available from the platform security service.",
-            )
-            .ok();
+        // WHY: raw keystore material never crosses the kernel boundary, so this
+        // call is expected to be refused. Say so instead of staying silent, so a
+        // missing keystore is never read as an untested one.
+        match std::keystore_derive(0, &mut key_buf) {
+            // WHY: the derivation syscall returns a byte count; any length other
+            // than a full key is not a usable key, so treat it as a failure.
+            Ok(32) => {
+                std::log(
+                    0,
+                    "[SETTINGS APP] Keystore derivation succeeded for the application slot.",
+                )
+                .ok();
+            }
+            Ok(_) => {
+                std::log(
+                    0,
+                    "[SETTINGS APP] Keystore derivation returned a short result; no usable application key.",
+                )
+                .ok();
+            }
+            Err(_) => {
+                std::log(
+                    0,
+                    "[SETTINGS APP] Keystore derivation refused by the kernel; no application key is available.",
+                )
+                .ok();
+            }
         }
     }
 
     /// Reads real-time hardware clock and microkernel version metadata.
     pub fn display_about_device(&mut self) {
         let mut rtc_buf = [0u8; 64];
-        if let Ok(len) = std::rtc_get_time(&mut rtc_buf) {
-            if len > 0 {
+        // WHY: report the clock query outcome. rtc_get_time requires the
+        // system-control authority, so an unlogged Err must not be read as a
+        // confirmed wall-clock reading.
+        match std::rtc_get_time(&mut rtc_buf) {
+            Ok(len) if len > 0 => {
                 std::log(
                     0,
-                    "[SETTINGS APP] System time is available from the platform RTC service.",
+                    "[SETTINGS APP] System time as reported by the platform RTC service:",
+                )
+                .ok();
+                std::log(0, core::str::from_utf8(&rtc_buf[..len]).unwrap_or("<non-utf8>")).ok();
+            }
+            Ok(_) => {
+                std::log(
+                    0,
+                    "[SETTINGS APP] RTC service returned an empty payload; system time unknown.",
+                )
+                .ok();
+            }
+            Err(_) => {
+                std::log(
+                    0,
+                    "[SETTINGS APP] RTC query refused by the kernel; system time unknown.",
                 )
                 .ok();
             }
@@ -160,31 +361,67 @@ impl SettingsApp {
     /// Queries authoritative system settings for developer terminal availability.
     pub fn refresh_developer_options(&mut self) {
         let mut buf = [0u8; 16];
-        if let Ok(n) = std::settings_get(0, "developer.terminal_enabled", &mut buf) {
-            if let Ok(v) = core::str::from_utf8(&buf[..n]) {
-                self.terminal_enabled = v == "true";
+        // WHY: this read uses capability slot 0 (SerialOutput), which does not
+        // carry settings read rights, so the kernel refuses it. Keep the local
+        // value at the fail-closed default and log that it is unverified rather
+        // than leaving the app to imply a confirmed setting.
+        match std::settings_get(0, "developer.terminal_enabled", &mut buf) {
+            Ok(n) => {
+                if let Ok(v) = core::str::from_utf8(&buf[..n]) {
+                    self.terminal_enabled = v == "true";
+                    std::log(
+                        0,
+                        "[SETTINGS APP] developer.terminal_enabled read from the settings store.",
+                    )
+                    .ok();
+                    std::log(0, v).ok();
+                }
+            }
+            Err(_) => {
+                self.terminal_enabled = false;
+                std::log(
+                    0,
+                    "[SETTINGS APP] developer.terminal_enabled read refused by the kernel; showing Disabled by default.",
+                )
+                .ok();
             }
         }
     }
 
     /// Toggles the developer terminal setting and updates system configuration.
     pub fn toggle_terminal(&mut self) {
-        self.terminal_enabled = !self.terminal_enabled;
-        let val: &[u8] = if self.terminal_enabled { b"true" } else { b"false" };
-        std::settings_set(0, "developer.terminal_enabled", val).ok();
-        std::log(
-            0,
-            if self.terminal_enabled {
-                "[SETTINGS APP] Developer terminal enabled (default was: Disabled by default)."
-            } else {
-                "[SETTINGS APP] Developer terminal disabled."
-            },
-        )
-        .ok();
+        let desired = !self.terminal_enabled;
+        let val: &[u8] = if desired { b"true" } else { b"false" };
+        // WHY: settings_set requires a FileSystemWrite capability in the given
+        // slot. This call passes slot 0, which is the SerialOutput slot, so the
+        // kernel denies the write. The previous code discarded that error and
+        // logged success. Report the real result, and leave the local flag at the
+        // last observed value so the UI never shows an unpersisted toggle.
+        match std::settings_set(0, "developer.terminal_enabled", val) {
+            Ok(()) => {
+                self.terminal_enabled = desired;
+                std::log(
+                    0,
+                    if desired {
+                        "[SETTINGS APP] Developer terminal enabled (default was: Disabled by default)."
+                    } else {
+                        "[SETTINGS APP] Developer terminal disabled."
+                    },
+                )
+                .ok();
+            }
+            Err(_) => {
+                std::log(
+                    0,
+                    "[SETTINGS APP] Developer terminal change refused by the kernel (settings write denied). Unchanged: Disabled by default.",
+                )
+                .ok();
+            }
+        }
     }
 }
 
-fn render_settings_ui(surface: u32, tab: SettingsTab) {
+fn render_settings_ui(surface: u32, tab: SettingsTab, telemetry: [TelemetryState; 4]) {
     let tab_idx = tab as usize;
     let mut chunk = [0u32; CHUNK];
     let total = W * H;
@@ -232,10 +469,33 @@ fn render_settings_ui(surface: u32, tab: SettingsTab) {
                     };
                 } else if card < 4 && x >= 32 && x < W - 32 && card_y < 180 {
                     if card_y >= 100 && card_y < 140 && x >= 60 && x < W - 60 {
+                        // WHY: the accent strip is the only status indicator this
+                        // layout has. When the corresponding query was refused or
+                        // the backend is absent, render it muted so the card cannot
+                        // be read as reporting live hardware.
+                        let reported = telemetry.get(card).copied() == Some(TelemetryState::Reported);
                         chunk[i] = match card {
-                            0 => std::design::color::ACCENT,
-                            1 => std::design::color::SUCCESS,
-                            2 => std::design::color::WARNING,
+                            0 => {
+                                if reported {
+                                    std::design::color::ACCENT
+                                } else {
+                                    std::design::color::TEXT_MUTED
+                                }
+                            }
+                            1 => {
+                                if reported {
+                                    std::design::color::SUCCESS
+                                } else {
+                                    std::design::color::TEXT_MUTED
+                                }
+                            }
+                            2 => {
+                                if reported {
+                                    std::design::color::WARNING
+                                } else {
+                                    std::design::color::TEXT_MUTED
+                                }
+                            }
                             _ => std::design::color::TEXT_MUTED,
                         };
                     } else if tab == SettingsTab::SecurityAndPrivacy && card == 3 && card_y >= 40 && card_y < 100 {
@@ -309,7 +569,16 @@ pub extern "C" fn _start() -> ! {
 
     // Initial render & presentation
     if surface > 0 {
-        render_settings_ui(surface, settings.current_tab);
+        render_settings_ui(
+            surface,
+            settings.current_tab,
+            [
+                settings.wireless,
+                settings.battery,
+                settings.thermal,
+                settings.sensor,
+            ],
+        );
         let _ = std::surface_flip(6);
         std::log(0, "[SETTINGS APP] Settings UI presented to scanout buffer.").ok();
     }
@@ -375,7 +644,16 @@ pub extern "C" fn _start() -> ! {
                             settings.current_tab = next_tab;
                         }
                         if surface > 0 {
-                            render_settings_ui(surface, settings.current_tab);
+                            render_settings_ui(
+                                surface,
+                                settings.current_tab,
+                                [
+                                    settings.wireless,
+                                    settings.battery,
+                                    settings.thermal,
+                                    settings.sensor,
+                                ],
+                            );
                             let _ = std::surface_flip(6);
                         }
                         std::log(

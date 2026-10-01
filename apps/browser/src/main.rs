@@ -75,65 +75,117 @@ impl BrowserApp {
     }
 
     /// Parses a URI string into its protocol scheme, host, and path components.
-    pub fn parse_uri(&self, raw_url: &'static str) -> ParsedUri {
-        if raw_url.starts_with("interlayer://") {
-            ParsedUri {
-                scheme: UriScheme::InterLayer,
-                host: "sovereign.mesh",
-                path: "/catalog",
-                port: 8443,
-            }
-        } else if raw_url.starts_with("https://") {
-            ParsedUri {
-                scheme: UriScheme::Https,
-                host: "remote.web",
-                path: "/",
-                port: 443,
-            }
-        } else if raw_url.starts_with("http://") {
-            ParsedUri {
-                scheme: UriScheme::Http,
-                host: "127.0.0.1",
-                path: "/telemetry",
-                port: 4200,
-            }
-        } else if raw_url.starts_with("gemini://") {
-            ParsedUri {
-                scheme: UriScheme::Gemini,
-                host: "capsule.mesh",
-                path: "/",
-                port: 1965,
-            }
+///
+/// The previous implementation ignored the URL text and returned a different
+/// fixed host, path and port for every scheme ("remote.web", "sovereign.mesh",
+/// "127.0.0.1:4200"). That reported peers and endpoints that were never in the
+/// address the user navigated to. Every component returned here is a slice of
+/// `raw_url`, so a parsed URI always reflects the actual address.
+pub fn parse_uri(&self, raw_url: &'static str) -> ParsedUri {
+        let (scheme, rest) = if let Some(r) = raw_url.strip_prefix("interlayer://") {
+            (UriScheme::InterLayer, r)
+        } else if let Some(r) = raw_url.strip_prefix("https://") {
+            (UriScheme::Https, r)
+        } else if let Some(r) = raw_url.strip_prefix("http://") {
+            (UriScheme::Http, r)
+        } else if let Some(r) = raw_url.strip_prefix("gemini://") {
+            (UriScheme::Gemini, r)
         } else {
-            ParsedUri {
+            return ParsedUri {
                 scheme: UriScheme::Unknown,
-                host: "unknown",
-                path: "/",
-                port: 80,
+                host: "",
+                path: raw_url,
+                port: 0,
+            };
+        };
+
+        // Split the authority from the path at the first '/'.
+        let (authority, path) = match rest.find('/') {
+            Some(i) => (&rest[..i], &rest[i..]),
+            None => (rest, "/"),
+        };
+
+        // Split the host from an explicit ":port" suffix. A port is only
+        // recognised when the suffix is all decimal digits, so a host containing
+        // a colon is not silently misread as host:port.
+        let (host, port) = match authority.rfind(':') {
+            Some(i) => {
+                let digits = &authority[i + 1..];
+                let mut value: u16 = 0;
+                let mut all_digits = !digits.is_empty();
+                for b in digits.bytes() {
+                    if b.is_ascii_digit() {
+                        value = value.saturating_mul(10).saturating_add((b - b'0') as u16);
+                    } else {
+                        all_digits = false;
+                        break;
+                    }
+                }
+                if all_digits {
+                    (&authority[..i], value)
+                } else {
+                    (authority, 0)
+                }
             }
+            None => (authority, 0),
+        };
+
+        ParsedUri {
+            scheme,
+            host,
+            path,
+            port,
         }
     }
 
-    /// Navigates to a target URL with zero-trust socket dispatch.
-    pub fn navigate(&mut self, target_url: &'static str) {
+    /// Attempts to navigate to a target URL.
+    ///
+    /// Returns `true` only when a transport actually fetched something. The
+    /// previous version incremented `pages_loaded` unconditionally and reported
+    /// a rendered DOM, so the page counter claimed loads that never happened.
+    pub fn navigate(&mut self, target_url: &'static str) -> bool {
         self.current_url = target_url;
-        self.pages_loaded += 1;
 
-        // Network transport is only used when a real navigation target and
-        // transport implementation are available; no synthetic request is emitted here.
-
-
-        // 4. Hypermedia DOM Layout & Gravity Glass Inertial Touch Physics
-        if let Ok(new_scroll) = std::surface_physics(3, self.scroll_offset_px, 720, 2000) {
-            self.scroll_offset_px = new_scroll as i32;
-            std::log(0, "[BROWSER APP] Hypermedia DOM rendered: 3 layout boxes, Gravity Glass physics active.").ok();
+        // A real navigation requires a real transport. This app holds no socket
+        // to any of the parsed endpoints, so nothing is fetched and no page is
+        // counted. Only increment the counter on an actual fetch.
+        let parsed = self.parse_uri(target_url);
+        if parsed.scheme == UriScheme::Unknown {
+            std::log(0, "[BROWSER APP] Navigation rejected: the address has no supported scheme.").ok();
+            return false;
         }
+        if parsed.host.is_empty() {
+            std::log(0, "[BROWSER APP] Navigation rejected: the address has no host.").ok();
+            return false;
+        }
+        std::log(0, "[BROWSER APP] Navigation target parsed from the address bar:").ok();
+        std::log(0, target_url).ok();
+        std::log(
+            0,
+            "[BROWSER APP] No transport is bound to this app; no request was issued and no page was loaded.",
+        )
+        .ok();
 
-        // 5. Navigation Acoustic Feedback & Haptic Click (G5: 784Hz)
-        std::audio_play_tone(784).ok();
-        std::audio_silence().ok();
-        std::audio_haptic_click().ok();
-        std::log(0, "[BROWSER APP] Navigation chime emitted (784Hz).").ok();
+        // Navigation Acoustic Feedback & Haptic Click (G5: 784Hz).
+        // WHY: the previous code logged the chime unconditionally after an
+        // ignored Err. Only report it when the audio service accepted the tone.
+        if std::audio_play_tone(784).is_ok() {
+            std::log(0, "[BROWSER APP] Navigation chime emitted (784Hz).").ok();
+        } else {
+            std::log(
+                0,
+                "[BROWSER APP] Navigation chime not emitted: the audio service refused the tone request.",
+            )
+            .ok();
+        }
+        let _ = std::audio_silence();
+        let _ = std::audio_haptic_click();
+        false
+    }
+
+    /// Reports whether the parsed endpoint has both a host and a port.
+    pub fn endpoint_is_complete(&self, uri: &ParsedUri) -> bool {
+        !uri.host.is_empty() && uri.port != 0
     }
 }
 
@@ -141,7 +193,7 @@ const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
 
-fn render_browser_ui(surface: u32, _app: &BrowserApp) {
+fn render_browser_ui(surface: u32, app: &BrowserApp) {
     let mut chunk = [0u32; CHUNK];
     let total = W * H;
     let mut offset = 0;
@@ -177,25 +229,53 @@ fn render_browser_ui(surface: u32, _app: &BrowserApp) {
                     chunk[i] = std::design::color::SURFACE;
                 }
             } else if (120..380).contains(&y) {
-                // Bookmarks strip
-                let card = (y - 120) / 80;
-                let card_y = (y - 120) % 80;
-                if card < BOOKMARKS.len() && x >= 32 && x < W - 32 && card_y < 68 {
-                    if card_y >= 28 && card_y < 40 && x >= 56 && x < 240 {
-                        chunk[i] = if BOOKMARKS[card].is_sovereign {
-                            std::design::color::ACCENT
+                // Bookmarks strip.
+                // WHY: with an empty bookmark set the strip rendered as bare
+                // background, which reads as a blank screen rather than as an
+                // absent feature. Render an explicit empty-state card instead.
+                if BOOKMARKS.is_empty() {
+                    if (200..268).contains(&y) && x >= 32 && x < W - 32 {
+                        if y == 200 || y == 267 || x == 32 || x == W - 33 {
+                            chunk[i] = std::design::color::TEXT_MUTED;
                         } else {
-                            std::design::color::SUCCESS
-                        };
+                            chunk[i] = std::design::color::SURFACE;
+                        }
                     } else {
-                        chunk[i] = std::design::color::SURFACE;
+                        chunk[i] = std::design::color::BACKGROUND;
                     }
                 } else {
-                    chunk[i] = std::design::color::BACKGROUND;
+                    let card = (y - 120) / 80;
+                    let card_y = (y - 120) % 80;
+                    if card < BOOKMARKS.len() && x >= 32 && x < W - 32 && card_y < 68 {
+                        if card_y >= 28 && card_y < 40 && x >= 56 && x < 240 {
+                            chunk[i] = if BOOKMARKS[card].is_sovereign {
+                                std::design::color::ACCENT
+                            } else {
+                                std::design::color::SUCCESS
+                            };
+                        } else {
+                            chunk[i] = std::design::color::SURFACE;
+                        }
+                    } else {
+                        chunk[i] = std::design::color::BACKGROUND;
+                    }
                 }
             } else if (400..1320).contains(&y) && x >= 24 && x < W - 24 {
-                // Main hypermedia DOM canvas
-                if (420..460).contains(&y) && x >= 48 && x < 320 {
+                // Main hypermedia DOM canvas.
+                // WHY: a document heading, rule and body block were drawn
+                // unconditionally, presenting a page that was never fetched.
+                // Render the empty-document state until a page is actually loaded.
+                if app.pages_loaded == 0 {
+                    if (420..460).contains(&y) && x >= 48 && x < 320 {
+                        chunk[i] = std::design::color::TEXT_MUTED;
+                    } else if (500..510).contains(&y) && x >= 48 && x < W - 48 {
+                        chunk[i] = std::design::color::SURFACE_RAISED;
+                    } else if (540..550).contains(&y) && x >= 48 && x < 280 {
+                        chunk[i] = std::design::color::TEXT_MUTED;
+                    } else {
+                        chunk[i] = 0xFF0D1117;
+                    }
+                } else if (420..460).contains(&y) && x >= 48 && x < 320 {
                     chunk[i] = std::design::color::TEXT;
                 } else if (500..510).contains(&y) && x >= 48 && x < W - 48 {
                     chunk[i] = std::design::color::SURFACE_RAISED;
@@ -321,10 +401,34 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 if events & std::EVENT_IPC_MSG != 0 {
-                    std::log(0, "[BROWSER APP] Incoming navigation intent handled.").ok();
+                    // WHY: no navigation intent was fetched or parsed out of this
+                    // event. Report the event itself, not a handled intent.
+                    std::log(
+                        0,
+                        "[BROWSER APP] IPC message event raised; no navigation intent was parsed from it.",
+                    )
+                    .ok();
                 }
                 if events & std::EVENT_NETWORK_PACKET != 0 {
-                    std::log(0, "[BROWSER APP] Inbound hypermedia network packet parsed.").ok();
+                    // WHY: this app opens no socket and reads no bytes from one,
+                    // so no packet was received or parsed. Report the event and
+                    // the absence of a transport.
+                    match browser.active_socket_id {
+                        Some(_) => {
+                            std::log(
+                                0,
+                                "[BROWSER APP] Network event raised; no packet body was read from the socket.",
+                            )
+                            .ok();
+                        }
+                        None => {
+                            std::log(
+                                0,
+                                "[BROWSER APP] Network event raised with no open socket; no packet was received.",
+                            )
+                            .ok();
+                        }
+                    }
                 }
                 if events & std::EVENT_TIMER_TICK != 0 {
                     // Periodic cache maintenance

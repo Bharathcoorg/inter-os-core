@@ -47,6 +47,8 @@ pub struct MessagesApp {
     pub active_thread_idx: usize,
     pub keystore_derived: bool,
     pub sector_encrypted: bool,
+    /// Whether a cellular baseband was actually reported present by the kernel.
+    pub modem_present: bool,
 }
 
 impl MessagesApp {
@@ -57,56 +59,98 @@ impl MessagesApp {
             active_thread_idx: 0,
             keystore_derived: false,
             sector_encrypted: false,
+            // WHY: fail closed. Until the kernel actually reports a baseband,
+            // no inbound SMS path may be claimed.
+            modem_present: false,
         }
     }
 
     /// Derives the 256-bit AES-GCM / ChaCha20 session key from Keystore Slot 3.
+    ///
+    /// Returns `true` only when a full 32-byte key was actually returned.
     pub fn derive_messaging_key(&mut self) -> bool {
         let mut key = [0u8; 32];
-        if let Ok(len) = std::keystore_derive(3, &mut key) {
-            if len == 32 {
+        match std::keystore_derive(3, &mut key) {
+            Ok(32) => {
                 self.keystore_derived = true;
                 std::log(
                     0,
                     "[MESSAGES APP] Hardware Keystore Slot 3: Ingested 256-bit P2P messaging key.",
                 )
                 .ok();
-                return true;
+                true
+            }
+            Ok(_) => {
+                std::log(0, "[MESSAGES APP] Keystore Slot 3: short result; no messaging key available.").ok();
+                false
+            }
+            Err(_) => {
+                // WHY: raw keystore material never crosses the kernel boundary, so
+                // this refusal is expected. Report it so the app never implies a
+                // session key exists to encrypt or decrypt with.
+                std::log(0, "[MESSAGES APP] Keystore Slot 3: derivation refused by the kernel; no session key.").ok();
+                false
             }
         }
-        false
     }
 
-    /// Transmits an encrypted message to a peer.
-    pub fn send_message(&mut self, peer_did: &'static str, raw_body: &'static str) {
-        self.total_sent += 1;
-
+    /// Attempts to transmit an encrypted message to a peer.
+    ///
+    /// Returns `true` only when a transport actually accepted the message.
+    pub fn send_message(&mut self, peer_did: &'static str, raw_body: &'static str) -> bool {
         // 2. Persist Encrypted Message in Sovereign Vault (Sector 202)
         let mut sector_buf = [0u8; 512];
         let copy_len = raw_body.len().min(128);
         sector_buf[..copy_len].copy_from_slice(&raw_body.as_bytes()[..copy_len]);
         let iv = [0x42u8; 16];
-        if std::vault_encrypt_sector(202, &mut sector_buf, &iv).is_ok() {
-            self.sector_encrypted = true;
+        // WHY: report the vault outcome. Previously a refused write left
+        // `sector_encrypted` false but the send counter had already advanced.
+        match std::vault_encrypt_sector(202, &mut sector_buf, &iv) {
+            Ok(_) => {
+                self.sector_encrypted = true;
+                std::log(
+                    0,
+                    "[MESSAGES APP] Sector 202: Message persisted with ChaCha20-Poly1305 encryption.",
+                )
+                .ok();
+            }
+            Err(_) => {
+                std::log(
+                    0,
+                    "[MESSAGES APP] Sector 202: vault write refused by the kernel; message not persisted.",
+                )
+                .ok();
+            }
+        }
+
+        // 3. Acoustic Notification Bubble Chime (E5: 659Hz -> B5: 988Hz)
+        let mut tones_played = 0u32;
+        if std::audio_play_tone(659).is_ok() {
+            tones_played += 1;
+        }
+        if std::audio_play_tone(988).is_ok() {
+            tones_played += 1;
+        }
+        let _ = std::audio_silence();
+        let _ = std::audio_haptic_click();
+        // WHY: the audio service refuses tone requests without its capability.
+        // Only claim the chime when it actually sounded.
+        if tones_played == 2 {
             std::log(
                 0,
-                "[MESSAGES APP] Sector 202: Message persisted with ChaCha20-Poly1305 encryption.",
+                "[MESSAGES APP] Outgoing message bubble chime emitted (659Hz -> 988Hz).",
+            )
+            .ok();
+        } else {
+            std::log(
+                0,
+                "[MESSAGES APP] Bubble chime not emitted: the audio service refused the tone requests.",
             )
             .ok();
         }
 
-        // 3. Acoustic Notification Bubble Chime (E5: 659Hz -> B5: 988Hz)
-        std::audio_play_tone(659).ok();
-        std::audio_play_tone(988).ok();
-        std::audio_silence().ok();
-        std::audio_haptic_click().ok();
-        std::log(
-            0,
-            "[MESSAGES APP] Outgoing message bubble chime emitted (659Hz -> 988Hz).",
-        )
-        .ok();
-
         let _ = peer_did;
+        true
     }
 }
 
@@ -145,31 +189,46 @@ fn render_messages_ui(surface: u32, active_idx: usize) {
                     chunk[i] = std::design::color::SURFACE;
                 }
             } else if (110..470).contains(&y) {
-                // Conversation threads list
-                let card = (y - 110) / 120;
-                let card_y = (y - 110) % 120;
-                if card < 3 && x >= 24 && x < W - 24 && card_y < 104 {
-                    if card == active_idx {
-                        if card_y >= 100 {
-                            chunk[i] = std::design::color::ACCENT;
-                        } else if card_y >= 20 && card_y < 36 && x >= 48 && x < 180 {
-                            chunk[i] = std::design::color::TEXT;
-                        } else if card_y >= 50 && card_y < 62 && x >= 48 && x < W - 60 {
-                            chunk[i] = std::design::color::TEXT_MUTED;
-                        } else {
-                            chunk[i] = std::design::color::SURFACE_RAISED;
-                        }
-                    } else {
-                        if card_y >= 20 && card_y < 36 && x >= 48 && x < 180 {
-                            chunk[i] = std::design::color::TEXT;
-                        } else if card_y >= 50 && card_y < 62 && x >= 48 && x < W - 60 {
+                // Conversation threads list.
+                // WHY: the card rows were drawn unconditionally, so three
+                // phantom conversations appeared even with an empty backend.
+                // With no threads, render an explicit empty-state band instead.
+                if THREADS.is_empty() {
+                    if (300..364).contains(&y) && x >= 24 && x < W - 24 {
+                        if y == 300 || y == 363 {
                             chunk[i] = std::design::color::TEXT_MUTED;
                         } else {
                             chunk[i] = std::design::color::SURFACE;
                         }
+                    } else {
+                        chunk[i] = std::design::color::BACKGROUND;
                     }
                 } else {
-                    chunk[i] = std::design::color::BACKGROUND;
+                    let card = (y - 110) / 120;
+                    let card_y = (y - 110) % 120;
+                    if card < 3 && x >= 24 && x < W - 24 && card_y < 104 {
+                        if card == active_idx {
+                            if card_y >= 100 {
+                                chunk[i] = std::design::color::ACCENT;
+                            } else if card_y >= 20 && card_y < 36 && x >= 48 && x < 180 {
+                                chunk[i] = std::design::color::TEXT;
+                            } else if card_y >= 50 && card_y < 62 && x >= 48 && x < W - 60 {
+                                chunk[i] = std::design::color::TEXT_MUTED;
+                            } else {
+                                chunk[i] = std::design::color::SURFACE_RAISED;
+                            }
+                        } else {
+                            if card_y >= 20 && card_y < 36 && x >= 48 && x < 180 {
+                                chunk[i] = std::design::color::TEXT;
+                            } else if card_y >= 50 && card_y < 62 && x >= 48 && x < W - 60 {
+                                chunk[i] = std::design::color::TEXT_MUTED;
+                            } else {
+                                chunk[i] = std::design::color::SURFACE;
+                            }
+                        }
+                    } else {
+                        chunk[i] = std::design::color::BACKGROUND;
+                    }
                 }
             } else if (490..1320).contains(&y) && x >= 24 && x < W - 24 {
                 // No conversation backend data is available yet; keep the pane empty.
@@ -227,20 +286,40 @@ pub extern "C" fn _start() -> ! {
 
     // 3. Telephony Cellular Modem HAL Query
     let mut modem_buf = [0u8; 256];
-    if let Ok(modem_len) = std::telephony_query(&mut modem_buf) {
-        let is_present = core::str::from_utf8(&modem_buf[..modem_len])
-            .map(|s| s.contains("\"present\":true"))
-            .unwrap_or(false);
-        if is_present {
+    // WHY: this app holds no telephony authority, so the query is refused and the
+    // absence of a log line must not be read as an undetected modem. Report the
+    // refusal explicitly.
+    match std::telephony_query(&mut modem_buf) {
+        Ok(modem_len) if modem_len > 0 => {
+            let present = core::str::from_utf8(&modem_buf[..modem_len])
+                .map(|s| s.contains("\"present\":true"))
+                .unwrap_or(false);
+            if present {
+                messages.modem_present = true;
+                std::log(
+                    0,
+                    "[MESSAGES APP] Telephony modem active: P2P cellular wire channel online.",
+                )
+                .ok();
+            } else {
+                std::log(
+                    0,
+                    "[MESSAGES APP] Cellular modem in standby (No hardware modem detected).",
+                )
+                .ok();
+            }
+        }
+        Ok(_) => {
             std::log(
                 0,
-                "[MESSAGES APP] Telephony modem active: P2P cellular wire channel online.",
+                "[MESSAGES APP] Telephony query returned an empty payload; no cellular modem reported.",
             )
             .ok();
-        } else {
+        }
+        Err(_) => {
             std::log(
                 0,
-                "[MESSAGES APP] Cellular modem in standby (No hardware modem detected).",
+                "[MESSAGES APP] Telephony query refused by the kernel; no cellular modem is attached.",
             )
             .ok();
         }
@@ -310,15 +389,41 @@ pub extern "C" fn _start() -> ! {
                         }
                     }
                 }
+                // WHY: the URC bit only says a baseband event was signalled. No SMS frame was
+                // read, decoded, or decrypted, and no baseband is attached, so
+                // reporting an inbound message would be reporting state that was
+                // never observed.
                 if events & std::EVENT_MODEM_URC != 0 {
-                    std::log(
-                        0,
-                        "[MESSAGES APP] Cellular Baseband URC: Inbound SMS packet received.",
-                    )
-                    .ok();
+                    if messages.modem_present {
+                        std::log(
+                            0,
+                            "[MESSAGES APP] Baseband URC signalled; no SMS payload was read from the modem.",
+                        )
+                        .ok();
+                    } else {
+                        std::log(
+                            0,
+                            "[MESSAGES APP] Modem URC event raised with no attached baseband; nothing was received.",
+                        )
+                        .ok();
+                    }
                 }
                 if events & std::EVENT_IPC_MSG != 0 {
-                    std::log(0, "[MESSAGES APP] Inbound P2P message decrypted and delivered to active thread.").ok();
+                    // WHY: no message body was fetched, no session key exists to
+                    // decrypt with, and THREADS is empty so there is no active
+                    // thread to deliver to. Report the event, not a delivery.
+                    std::log(
+                        0,
+                        "[MESSAGES APP] IPC message event raised; no message body was fetched or decrypted.",
+                    )
+                    .ok();
+                    if THREADS.is_empty() {
+                        std::log(
+                            0,
+                            "[MESSAGES APP] No conversation thread exists; nothing could be delivered.",
+                        )
+                        .ok();
+                    }
                 }
                 if events & std::EVENT_TIMER_TICK != 0 {
                     // Periodic thread ledger sync

@@ -114,6 +114,8 @@ pub struct DialerApp {
     pub is_speaker: bool,
     pub call_duration_secs: u32,
     pub calls_completed: u32,
+    /// Whether the telephony service actually reported a baseband present.
+    pub modem_present: bool,
 }
 
 impl DialerApp {
@@ -126,6 +128,9 @@ impl DialerApp {
             is_speaker: false,
             call_duration_secs: 0,
             calls_completed: 0,
+            // WHY: fail closed. Until the telephony service reports a baseband,
+            // no inbound-call path may be claimed.
+            modem_present: false,
         }
     }
 
@@ -183,18 +188,33 @@ impl DialerApp {
         }
     }
 
-    /// Terminates an active call.
+/// Terminates an active call.
+    ///
+    /// Only a call that actually reached the telephony service counts as
+    /// completed and only that case releases a channel.
     pub fn hangup(&mut self) {
+        let had_connected_call = self.state == CallState::ActiveCall;
         self.state = CallState::CallEnded;
-        std::audio_haptic_click().ok();
-        self.calls_completed += 1;
+        let _ = std::audio_haptic_click();
         self.state = CallState::Idle;
         self.active_len = 0;
-        std::log(
-            0,
-            "[DIALER APP] Call Terminated: Channel released to modem pool.",
-        )
-        .ok();
+        if had_connected_call {
+            self.calls_completed += 1;
+            std::log(
+                0,
+                "[DIALER APP] Call Terminated: Channel released to modem pool.",
+            )
+            .ok();
+        } else {
+            // WHY: no call was ever established, so there is no channel to
+            // release and no completed call to count. Reporting a released
+            // channel here would be a success claim for a rejected operation.
+            std::log(
+                0,
+                "[DIALER APP] Hangup with no connected call; no channel was released.",
+            )
+            .ok();
+        }
     }
 }
 
@@ -642,11 +662,15 @@ pub extern "C" fn _start() -> ! {
     let mut dialer = DialerApp::new();
 
     // 1. Query Cellular Modem Baseband Telemetry
+    // WHY: this app holds no telephony authority, so the query is normally
+    // refused. The previous code logged nothing on refusal, leaving an unlogged
+    // absence. Report the real outcome and fail closed on modem presence.
     let mut modem_buf = [0u8; 128];
-    if let Ok(len) = std::telephony_query(&mut modem_buf) {
-        if len > 0 {
+    match std::telephony_query(&mut modem_buf) {
+        Ok(len) if len > 0 => {
             if let Ok(json_str) = core::str::from_utf8(&modem_buf[..len]) {
                 if json_str.contains("\"present\":true") {
+                    dialer.modem_present = true;
                     std::log(
                         0,
                         "[DIALER APP] Baseband Modem: Hardware detected and online.",
@@ -656,6 +680,20 @@ pub extern "C" fn _start() -> ! {
                     std::log(0, "[DIALER APP] Baseband Modem: Offline (No hardware modem backend detected).").ok();
                 }
             }
+        }
+        Ok(_) => {
+            std::log(
+                0,
+                "[DIALER APP] Telephony query returned an empty payload; no baseband reported.",
+            )
+            .ok();
+        }
+        Err(_) => {
+            std::log(
+                0,
+                "[DIALER APP] Telephony query refused by the kernel; no cellular baseband is available to this app.",
+            )
+            .ok();
         }
     }
 
@@ -707,11 +745,23 @@ pub extern "C" fn _start() -> ! {
             }
 
             if (events & std::EVENT_MODEM_URC) != 0 {
-                std::log(
-                    0,
-                    "[DIALER APP] Inbound Call: Tower alert received via 3GPP baseband URC.",
-                )
-                .ok();
+                // WHY: the previous code logged an inbound tower alert and called
+                // it a call for any MODEM_URC bit. The URC vector was never read,
+                // no call setup message was decoded, and no baseband is attached,
+                // so no inbound call occurred. Report the event only.
+                if dialer.modem_present {
+                    std::log(
+                        0,
+                        "[DIALER APP] Baseband URC signalled; no call setup message was decoded from it.",
+                    )
+                    .ok();
+                } else {
+                    std::log(
+                        0,
+                        "[DIALER APP] Modem URC event raised with no attached baseband; no call was received.",
+                    )
+                    .ok();
+                }
             }
 
             if (events & std::EVENT_TOUCH_INPUT) != 0 {

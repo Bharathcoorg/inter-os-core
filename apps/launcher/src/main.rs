@@ -173,7 +173,6 @@ pub struct LauncherState {
     pub app_count: usize,
     pub app_drawer_page: usize,
     pub active_child: Option<u64>,
-    pub torch_active: bool,
 }
 
 impl LauncherState {
@@ -194,7 +193,6 @@ impl LauncherState {
             app_count: 0,
             app_drawer_page: 0,
             active_child: None,
-            torch_active: false,
         }
     }
 
@@ -1158,7 +1156,24 @@ fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return get_stock_background_pixel(x, y);
     }
 
-    // Flashlight is unavailable until a real hardware capability is present.
+    // 3. Flashlight Affordance at (72, 1330, r: 35).
+    // WHY: no torch hardware, capability or syscall exists on this platform, so
+    // the affordance is rendered in the explicit "unavailable" style (dimmed
+    // outline, muted label) rather than as a working button.
+    let f_dx = (x as i32) - 72;
+    let f_dy = (y as i32) - 1330;
+    let f_d2 = f_dx * f_dx + f_dy * f_dy;
+    if f_d2 <= 1225 {
+        if f_d2 >= 1156 {
+            return 0x33FFFFFF;
+        }
+        if y >= 1324 && y < 1332 {
+            if let Some(c) = test_text(x, y, 44, 1324, 1, b"N/A", 0x88FFFFFF) {
+                return c;
+            }
+        }
+        return 0x33000000;
+    }
 
     // 4. Camera Circular Button at (648, 1330, r: 35)
     let c_dx = (x as i32) - 648;
@@ -2617,14 +2632,20 @@ pub extern "C" fn _start() -> ! {
                                     }
                                 }
 
-                                // Flashlight circle button at (72, 1330, r: 35)
+                                // Flashlight circle button at (72, 1330, r: 35).
+                                // WHY: there is no torch hardware, no torch
+                                // capability and no torch syscall on this platform.
+                                // The previous code flipped a local bool and
+                                // logged a successful toggle. Report the
+                                // absence; do not claim a toggle occurred.
                                 let f_dx = (x as i32) - 72;
                                 let f_dy = (y as i32) - 1330;
                                 if f_dx * f_dx + f_dy * f_dy <= 1225 {
-                                    state.torch_active = !state.torch_active;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Flashlight toggled on lock screen.").ok();
+                                    std::log(
+                                        0,
+                                        "[LAUNCHER] Flashlight unavailable: no torch hardware or capability exists on this platform.",
+                                    )
+                                    .ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,

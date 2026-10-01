@@ -85,6 +85,35 @@ pub fn day_of_week(mut year: u32, mut month: u8, day: u8) -> u8 {
     ((h + 6) % 7) as u8
 }
 
+/// Reads the unsigned decimal integer that follows `key` in a JSON payload.
+///
+/// WHY: the RTC syscall returns a compact JSON document. Reading the fields the
+/// kernel actually wrote is the only way to know the civil date; assuming a
+/// default date would present a fabricated "today".
+fn json_field(payload: &[u8], key: &[u8]) -> Option<u32> {
+    if key.is_empty() || key.len() > payload.len() {
+        return None;
+    }
+    for i in 0..=(payload.len() - key.len()) {
+        if &payload[i..i + key.len()] != key {
+            continue;
+        }
+        let mut j = i + key.len();
+        let mut value: u32 = 0;
+        let mut digits = 0;
+        while j < payload.len() && payload[j].is_ascii_digit() {
+            value = value.saturating_mul(10).saturating_add((payload[j] - b'0') as u32);
+            digits += 1;
+            j += 1;
+        }
+        if digits > 0 {
+            return Some(value);
+        }
+        return None;
+    }
+    None
+}
+
 /// Production Sovereign Calendar state manager.
 pub struct CalendarApp {
     pub current_year: u32,
@@ -93,28 +122,80 @@ pub struct CalendarApp {
     pub total_events: u32,
     pub rtc_synchronized: bool,
     pub sector_encrypted: bool,
+    /// Whether a real civil date has been read from the hardware RTC.
+    pub date_known: bool,
 }
 
 impl CalendarApp {
     pub const fn new() -> Self {
         Self {
-            current_year: 2026,
-            current_month: 9,
-            current_day: 21,
+            // WHY: no date is known until the hardware RTC answers. Seed with
+            // zero and report the date as unknown rather than shipping a
+            // hardcoded 2026-09-21 that looks like an observed date.
+            current_year: 0,
+            current_month: 0,
+            current_day: 0,
             total_events: 0,
             rtc_synchronized: false,
             sector_encrypted: false,
+            date_known: false,
         }
     }
 
-    /// Synchronizes internal civil clock with hardware RTC via fast syscall.
+    /// Synchronizes the internal civil clock with the hardware RTC.
+    ///
+    /// Returns `true` only when a real date was read and parsed from the RTC
+    /// payload.
     pub fn sync_rtc(&mut self) -> bool {
         let mut time_buf = [0u8; 64];
-        if let Ok(n) = std::rtc_get_time(&mut time_buf) {
-            if n > 0 {
-                self.rtc_synchronized = true;
-                std::log(0, "[CALENDAR APP] Hardware RTC synchronized: Civil clock verified via fast syscall.").ok();
-                return true;
+        // WHY: the previous version reported a verified civil clock on any
+        // non-empty payload without parsing a single field out of it. Parse the
+        // fields the kernel actually returned and only then claim the date.
+        match std::rtc_get_time(&mut time_buf) {
+            Ok(n) if n > 0 => {
+                let payload = &time_buf[..n];
+                std::log(0, "[CALENDAR APP] RTC payload as reported by the kernel:").ok();
+                std::log(0, core::str::from_utf8(payload).unwrap_or("<non-utf8>")).ok();
+
+                let y = json_field(payload, b"\"year\":");
+                let m = json_field(payload, b"\"month\":");
+                let d = json_field(payload, b"\"day\":");
+                match (y, m, d) {
+                    (Some(y), Some(m), Some(d))
+                        if y >= 1970 && (1..=12).contains(&m) && (1..=31).contains(&d) =>
+                    {
+                        self.current_year = y;
+                        self.current_month = m as u8;
+                        self.current_day = d as u8;
+                        self.date_known = true;
+                        self.rtc_synchronized = true;
+                        std::log(
+                            0,
+                            "[CALENDAR APP] Hardware RTC synchronized: civil date read from the RTC payload.",
+                        )
+                        .ok();
+                        return true;
+                    }
+                    _ => {
+                        std::log(
+                            0,
+                            "[CALENDAR APP] RTC payload carried no usable civil date; current date unknown.",
+                        )
+                        .ok();
+                    }
+                }
+            }
+            Ok(_) => {
+                std::log(0, "[CALENDAR APP] RTC returned an empty payload; current date unknown.").ok();
+            }
+            Err(_) => {
+                // WHY: rtc_get_time requires the system-control authority, which
+                // this app does not hold. Report the refusal.
+                std::log(
+                    0,
+                    "[CALENDAR APP] RTC query refused by the kernel; current date unknown.",
+                )
+                .ok();
             }
         }
         false
@@ -141,36 +222,64 @@ impl CalendarApp {
             self.current_year = y;
             self.current_month = m;
             self.current_day = day;
+            self.date_known = true;
         }
     }
 
     /// Inserts a scheduled event and encrypts in persistent storage.
-    pub fn schedule_event(&mut self, event_name: &'static str) {
+    ///
+    /// Returns `true` only when the agenda sector was actually written.
+    pub fn schedule_event(&mut self, event_name: &'static str) -> bool {
         // 1. Encrypt Updated Agenda in Storage Vault (Sector 203)
         let mut agenda_sector = [0u8; 512];
         let copy_len = event_name.len().min(128);
         agenda_sector[..copy_len].copy_from_slice(&event_name.as_bytes()[..copy_len]);
         let iv = [0x77u8; 16];
-        if std::vault_encrypt_sector(203, &mut agenda_sector, &iv).is_ok() {
-            self.sector_encrypted = true;
+        // WHY: report the vault outcome. The old code stayed silent on refusal,
+        // leaving the event looking scheduled when nothing was stored.
+        match std::vault_encrypt_sector(203, &mut agenda_sector, &iv) {
+            Ok(_) => {
+                self.sector_encrypted = true;
+                std::log(
+                    0,
+                    "[CALENDAR APP] Sector 203: Updated agenda encrypted with AES-XTS/HMAC.",
+                )
+                .ok();
+            }
+            Err(_) => {
+                std::log(
+                    0,
+                    "[CALENDAR APP] Sector 203: vault write refused by the kernel; event not persisted.",
+                )
+                .ok();
+            }
+        }
+
+        // 2. Acoustic Reminder Chime (A-Major: 440Hz -> 554Hz -> 659Hz).
+        // WHY: the audio service refuses tone requests without its capability,
+        // so only report the chime when the tones were actually accepted.
+        let mut tones_played = 0u32;
+        for freq in [440u32, 554, 659] {
+            if std::audio_play_tone(freq).is_ok() {
+                tones_played += 1;
+            }
+        }
+        let _ = std::audio_silence();
+        let _ = std::audio_haptic_click();
+        if tones_played == 3 {
             std::log(
                 0,
-                "[CALENDAR APP] Sector 203: Updated agenda encrypted with AES-XTS/HMAC.",
+                "[CALENDAR APP] Agenda reminder chime emitted (A-Major: 440Hz -> 554Hz -> 659Hz).",
+            )
+            .ok();
+        } else {
+            std::log(
+                0,
+                "[CALENDAR APP] Reminder chime not emitted: the audio service refused the tone requests.",
             )
             .ok();
         }
-
-        // 2. Acoustic Reminder Chime (A-Major: 440Hz -> 554Hz -> 659Hz)
-        std::audio_play_tone(440).ok();
-        std::audio_play_tone(554).ok();
-        std::audio_play_tone(659).ok();
-        std::audio_silence().ok();
-        std::audio_haptic_click().ok();
-        std::log(
-            0,
-            "[CALENDAR APP] Agenda reminder chime emitted (A-Major: 440Hz -> 554Hz -> 659Hz).",
-        )
-        .ok();
+        self.sector_encrypted
     }
 }
 
@@ -178,7 +287,7 @@ const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
 
-fn render_calendar_ui(surface: u32, _app: &CalendarApp) {
+fn render_calendar_ui(surface: u32, app: &CalendarApp) {
     let mut chunk = [0u32; CHUNK];
     let total = W * H;
     let mut offset = 0;
@@ -209,11 +318,18 @@ fn render_calendar_ui(surface: u32, _app: &CalendarApp) {
                     chunk[i] = std::design::color::SURFACE;
                 }
             } else if (120..440).contains(&y) && x >= 24 && x < W - 24 {
-                // Calendar month matrix (7 columns x 5 rows)
+                // Calendar month matrix (7 columns x 5 rows).
+                // WHY: a cell was always highlighted at row 2 col 3, which
+                // matched the old hardcoded 2026-09-21 default and read as the
+                // current day. Highlight only the day the RTC actually reported.
                 let col = (x - 24) / 96;
                 let row = (y - 120) / 64;
                 if (x - 24) % 96 < 88 && (y - 120) % 64 < 56 {
-                    if row == 2 && col == 3 {
+                    let selected = app.date_known
+                        && app.current_day >= 1
+                        && row == (app.current_day as usize - 1) / 7
+                        && col == (app.current_day as usize - 1) % 7;
+                    if selected {
                         chunk[i] = std::design::color::ACCENT;
                     } else {
                         chunk[i] = std::design::color::SURFACE;
@@ -222,21 +338,35 @@ fn render_calendar_ui(surface: u32, _app: &CalendarApp) {
                     chunk[i] = std::design::color::BACKGROUND;
                 }
             } else if (460..1320).contains(&y) {
-                // Agenda Events list
-                let card = (y - 460) / 140;
-                let card_y = (y - 460) % 140;
-                if card < 3 && x >= 24 && x < W - 24 && card_y < 120 {
-                    if card_y >= 20 && card_y < 36 && x >= 48 && x < 380 {
-                        chunk[i] = std::design::color::TEXT;
-                    } else if card_y >= 50 && card_y < 64 && x >= 48 && x < 200 {
-                        chunk[i] = std::design::color::TEXT_MUTED;
-                    } else if card_y >= 80 && card_y < 94 && x >= 48 && x < 160 {
-                        chunk[i] = std::design::color::SUCCESS;
+                // Agenda Events list.
+                // WHY: three event cards were drawn unconditionally, presenting
+                // an agenda that does not exist. Render an explicit empty state.
+                if AGENDA.is_empty() {
+                    if (620..684).contains(&y) && x >= 24 && x < W - 24 {
+                        if y == 620 || y == 683 || x == 24 || x == W - 25 {
+                            chunk[i] = std::design::color::TEXT_MUTED;
+                        } else {
+                            chunk[i] = std::design::color::SURFACE;
+                        }
                     } else {
-                        chunk[i] = std::design::color::SURFACE;
+                        chunk[i] = std::design::color::BACKGROUND;
                     }
                 } else {
-                    chunk[i] = std::design::color::BACKGROUND;
+                    let card = (y - 460) / 140;
+                    let card_y = (y - 460) % 140;
+                    if card < AGENDA.len() && x >= 24 && x < W - 24 && card_y < 120 {
+                        if card_y >= 20 && card_y < 36 && x >= 48 && x < 380 {
+                            chunk[i] = std::design::color::TEXT;
+                        } else if card_y >= 50 && card_y < 64 && x >= 48 && x < 200 {
+                            chunk[i] = std::design::color::TEXT_MUTED;
+                        } else if card_y >= 80 && card_y < 94 && x >= 48 && x < 160 {
+                            chunk[i] = std::design::color::SUCCESS;
+                        } else {
+                            chunk[i] = std::design::color::SURFACE;
+                        }
+                    } else {
+                        chunk[i] = std::design::color::BACKGROUND;
+                    }
                 }
             } else if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
                 chunk[i] = std::design::color::TEXT_MUTED;
@@ -276,11 +406,41 @@ pub extern "C" fn _start() -> ! {
         Err(_) => 0,
     };
 
-    // 3. Verify Gregorian Calendar Math
-    let days = days_in_month(calendar.current_year, calendar.current_month);
-    let dow = day_of_week(calendar.current_year, calendar.current_month, 1);
-    if days == 30 && dow == 2 {
-        std::log(0, "[CALENDAR APP] Gregorian date math verified: Sept 2026 has 30 days, starting on Tuesday.").ok();
+    // 3. Verify Gregorian Calendar Math against the date the RTC reported.
+    // WHY: this check previously ran against the hardcoded 2026-09-21 default
+    // and logged "Sept 2026 has 30 days" as an observation. With no RTC date
+    // there is nothing to verify, so report the date as unavailable.
+    if calendar.date_known {
+        let days = days_in_month(calendar.current_year, calendar.current_month);
+        let dow = day_of_week(calendar.current_year, calendar.current_month, 1);
+        std::log(
+            0,
+            match days {
+                31 => "[CALENDAR APP] Gregorian date math: the RTC-reported month has 31 days.",
+                30 => "[CALENDAR APP] Gregorian date math: the RTC-reported month has 30 days.",
+                _ => "[CALENDAR APP] Gregorian date math: the RTC-reported month has fewer than 30 days.",
+            },
+        )
+        .ok();
+        std::log(
+            0,
+            match dow {
+                0 => "[CALENDAR APP] Weekday for the first of the RTC-reported month: Sunday.",
+                1 => "[CALENDAR APP] Weekday for the first of the RTC-reported month: Monday.",
+                2 => "[CALENDAR APP] Weekday for the first of the RTC-reported month: Tuesday.",
+                3 => "[CALENDAR APP] Weekday for the first of the RTC-reported month: Wednesday.",
+                4 => "[CALENDAR APP] Weekday for the first of the RTC-reported month: Thursday.",
+                5 => "[CALENDAR APP] Weekday for the first of the RTC-reported month: Friday.",
+                _ => "[CALENDAR APP] Weekday for the first of the RTC-reported month: Saturday.",
+            },
+        )
+        .ok();
+    } else {
+        std::log(
+            0,
+            "[CALENDAR APP] No civil date available from the hardware RTC; month grid shows no selected day.",
+        )
+        .ok();
     }
 
     if surface > 0 {
@@ -330,9 +490,12 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 if events & std::EVENT_IPC_MSG != 0 {
+                    // WHY: no intent payload was fetched from the IPC bus and no
+                    // parser ran on one. Report the event; never claim a schedule
+                    // intent was parsed out of a raw event bit.
                     std::log(
                         0,
-                        "[CALENDAR APP] Incoming schedule intent parsed from Intent IPC bus.",
+                        "[CALENDAR APP] IPC message event raised; no schedule intent payload was read.",
                     )
                     .ok();
                 }

@@ -77,44 +77,91 @@ impl MusicApp {
     }
 
     /// Derives the media storage key from Hardware Keystore Slot 1.
+    ///
+    /// Returns `true` only when a full 32-byte key was actually returned.
     pub fn derive_keystore_key(&mut self) -> bool {
         let mut media_key = [0u8; 32];
-        if let Ok(len) = std::keystore_derive(1, &mut media_key) {
-            if len == 32 {
+        match std::keystore_derive(1, &mut media_key) {
+            Ok(32) => {
                 self.keystore_derived = true;
                 std::log(0, "[MUSIC APP] Hardware keystore: Ingested media decryption key for local audio streaming.").ok();
-                return true;
+                true
+            }
+            Ok(_) => {
+                // WHY: a short result is not a key. Report it instead of leaving
+                // the caller to assume derivation succeeded.
+                std::log(0, "[MUSIC APP] Hardware keystore: short derivation result; no media key available.").ok();
+                false
+            }
+            Err(_) => {
+                // WHY: this app holds no keystore capability, so the call is
+                // refused. Say so instead of reporting a key that was never issued.
+                std::log(0, "[MUSIC APP] Hardware keystore: derivation refused by the kernel; no media key available.").ok();
+                false
             }
         }
-        false
     }
 
     /// Plays the 4-note ascending C-major arpeggio via hardware audio timer.
-    pub fn play_arpeggio(&self) {
-        std::audio_play_tone(261).ok(); // C4
-        std::audio_play_tone(329).ok(); // E4
-        std::audio_play_tone(392).ok(); // G4
-        std::audio_play_tone(523).ok(); // C5
-        std::audio_silence().ok();
-        std::audio_haptic_click().ok();
+    ///
+    /// Returns `true` only when the audio service accepted the sequence. Tone
+    /// requests are gated on a capability this app does not hold, so the honest
+    /// default is "not played".
+    pub fn play_arpeggio(&self) -> bool {
+        let mut played = 0u32;
+        for freq in [261u32, 329, 392, 523] {
+            if std::audio_play_tone(freq).is_ok() {
+                played += 1;
+            }
+        }
+        let _ = std::audio_silence();
+        let _ = std::audio_haptic_click();
+        if played == 4 {
+            std::log(
+                0,
+                "[MUSIC APP] Arpeggiated C-major melody synthesized (261Hz -> 523Hz).",
+            )
+            .ok();
+            true
+        } else {
+            // WHY: audio control is refused without the audio-service authority.
+            // Never log a synthesized melody that was never emitted.
+            std::log(
+                0,
+                "[MUSIC APP] Arpeggio not played: the audio service refused the tone requests.",
+            )
+            .ok();
+            false
+        }
+    }
+
+    /// Attempts to stream one media payload over the zero-copy DMA ring.
+    ///
+    /// Returns `true` only when a transfer actually occurred. The local playlist
+    /// is populated from real media storage, so with no media there is nothing to
+    /// hand to the DMA engine and no buffer was consumed.
+    pub fn stream_dma_audio_block(&mut self) -> bool {
+        // WHY: the transport state and the DMA counter must track real transfers.
+        // Returning false here is what stops the caller from reporting playback
+        // or counting a buffer that was never streamed.
+        if PLAYLIST.is_empty() {
+            std::log(0, "[MUSIC APP] No media payload is available for DMA streaming.").ok();
+            return false;
+        }
+        // A non-empty playlist would require a real DMA descriptor from the media
+        // subsystem. No such descriptor exists yet, so fail closed.
         std::log(
             0,
-            "[MUSIC APP] Arpeggiated C-major melody synthesized (261Hz -> 523Hz).",
+            "[MUSIC APP] Media present but no DMA descriptor was obtained; no buffer streamed.",
         )
         .ok();
+        false
     }
-
-    /// Streams media only when a real media payload is available.
-    pub fn stream_dma_audio_block(&mut self) {
-        std::log(0, "[MUSIC APP] No media payload is available for DMA streaming.").ok();
-    }
-
 
     /// Encrypts metadata only when a real media record exists.
     pub fn encrypt_track_record(&mut self) {
         std::log(0, "[MUSIC APP] No media record is available for encryption.").ok();
     }
-
 }
 
 const W: usize = 720;
@@ -130,7 +177,11 @@ fn render_music_ui(surface: u32, app: &MusicApp) {
         let mut x = offset % W;
         let mut y = offset / W;
         for i in 0..count {
-            if y < 96 {
+            // WHY: the transport state drives the whole visual language of this screen.
+// Leave the artwork and progress rail neutral until media actually exists, so
+// the player is never shown mid-playback with no audio behind it.
+let has_media = !PLAYLIST.is_empty();
+if y < 96 {
                 if y >= 94 {
                     chunk[i] = std::design::color::ACCENT;
                 } else if x >= 24 && x < 100 && y >= 28 && y < 68 {
@@ -158,7 +209,13 @@ fn render_music_ui(surface: u32, app: &MusicApp) {
                 let dist_sq = (x as isize - center_x).pow(2) + (y as isize - center_y).pow(2);
                 if dist_sq < 220 * 220 {
                     if dist_sq < 60 * 60 {
-                        chunk[i] = std::design::color::ACCENT;
+                        // WHY: the accent disc read as a spinning record. With no
+                        // media loaded there is nothing spinning, so mute it.
+                        chunk[i] = if has_media {
+                            std::design::color::ACCENT
+                        } else {
+                            std::design::color::SURFACE_RAISED
+                        };
                     } else if (dist_sq % 2500) < 400 {
                         chunk[i] = std::design::color::SURFACE_RAISED;
                     } else {
@@ -170,8 +227,10 @@ fn render_music_ui(surface: u32, app: &MusicApp) {
             } else if (680..720).contains(&y) && x >= 48 && x < 380 {
                 chunk[i] = std::design::color::TEXT;
             } else if (740..752).contains(&y) && x >= 48 && x < W - 48 {
-                // Progress bar
-                if x < 48 + 360 {
+                // Progress bar. WHY: a fixed 33% accent fill claimed playback
+                // progress that never happened. Show an empty rail until a real
+                // transfer has moved the playhead.
+                if has_media && x < 48 + 360 {
                     chunk[i] = std::design::color::ACCENT;
                 } else {
                     chunk[i] = std::design::color::SURFACE_RAISED;
@@ -234,8 +293,14 @@ pub extern "C" fn _start() -> ! {
     music.play_arpeggio();
 
     // 5. Zero-Copy DMA Audio Streaming over Pipe 1
-    music.stream_dma_audio_block();
-    music.state = PlaybackState::Playing;
+    // WHY: the previous code set PlaybackState::Playing immediately after the
+    // stream call, even though the call reports that no media payload exists.
+    // The transport state must only be advanced when a transfer actually
+    // happened, otherwise the UI shows playback that never occurred.
+    if music.stream_dma_audio_block() {
+        music.total_dma_buffers_streamed += 1;
+        music.state = PlaybackState::Playing;
+    }
 
     if surface > 0 {
         render_music_ui(surface, &music);
@@ -287,11 +352,30 @@ pub extern "C" fn _start() -> ! {
                             let dist_sq = (input.x as isize - center_x).pow(2)
                                 + (input.y as isize - center_y).pow(2);
                             if dist_sq < 56 * 56 {
-                                music.state = match music.state {
-                                    PlaybackState::Playing => PlaybackState::Paused,
-                                    _ => PlaybackState::Playing,
-                                };
-                                std::audio_haptic_click().ok();
+                                // WHY: pressing play must not show an active
+                                // transport. Only a real DMA transfer may enter
+                                // the Playing state; otherwise report that there
+                                // is no media to play and stay Stopped.
+                                match music.state {
+                                    PlaybackState::Playing => {
+                                        music.state = PlaybackState::Paused;
+                                        std::log(0, "[MUSIC APP] Transport paused by user.").ok();
+                                    }
+                                    _ => {
+                                        if music.stream_dma_audio_block() {
+                                            music.total_dma_buffers_streamed += 1;
+                                            music.state = PlaybackState::Playing;
+                                        } else {
+                                            music.state = PlaybackState::Stopped;
+                                            std::log(
+                                                0,
+                                                "[MUSIC APP] Play requested but no media is available; transport stays stopped.",
+                                            )
+                                            .ok();
+                                        }
+                                    }
+                                }
+                                let _ = std::audio_haptic_click();
                                 if surface > 0 {
                                     render_music_ui(surface, &music);
                                     let _ = std::surface_flip(6);
@@ -301,15 +385,21 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 if events & std::EVENT_IPC_MSG != 0 {
+                    // WHY: the event bit only says an IPC message was queued. No
+                    // playback command was parsed out of it, so do not claim one
+                    // was received or applied.
                     std::log(
                         0,
-                        "[MUSIC APP] Audio playback IPC command received (Play/Pause/Skip).",
+                        "[MUSIC APP] IPC message event raised; no playback command was parsed from it.",
                     )
                     .ok();
                 }
                 if events & std::EVENT_TIMER_TICK != 0 {
-                    // Periodic DMA audio ring buffer refill
-                    if music.state == PlaybackState::Playing {
+                    // Periodic DMA audio ring buffer refill.
+                    // WHY: the counter used to advance on every timer tick while
+                    // Playing, with no DMA transfer taking place. Advance it only
+                    // when a refill actually transferred a buffer.
+                    if music.state == PlaybackState::Playing && music.stream_dma_audio_block() {
                         music.total_dma_buffers_streamed += 1;
                     }
                 }
