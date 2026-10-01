@@ -1087,8 +1087,29 @@ fn get_system_space_color(x: usize, y: usize, _state: &LauncherState) -> u32 {
 }
 
 #[inline(never)]
-fn get_stock_background_pixel(_x: usize, _y: usize) -> u32 {
-    BG_DARK
+/// Lock screen backdrop.
+///
+/// A vertical gradient rather than a flat fill, so the large white clock and the
+/// translucent control overlays keep a readable contrast ratio across the full
+/// height of the screen.
+fn get_stock_background_pixel(_x: usize, y: usize) -> u32 {
+    let span = H.saturating_sub(1).max(1);
+    let t = (y.min(H.saturating_sub(1)) * 256) / span;
+    lerp_argb(LOCK_BACKDROP_TOP, LOCK_BACKDROP_BOTTOM, t)
+}
+
+/// Interpolates two packed ARGB colours. `t` runs from 0 to 256 inclusive.
+fn lerp_argb(from: u32, to: u32, t: usize) -> u32 {
+    let t = t.min(256) as i64;
+    let mut out = 0u32;
+    for shift in [24u32, 16, 8, 0] {
+        let a = ((from >> shift) & 0xFF) as i64;
+        let b = ((to >> shift) & 0xFF) as i64;
+        // Signed arithmetic: `b` may be smaller than `a`.
+        let v = a + ((b - a) * t) / 256;
+        out |= (v as u32 & 0xFF) << shift;
+    }
+    out
 }
 
 #[inline(never)]
@@ -1166,13 +1187,15 @@ fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return 0x77000000;
     }
 
-    // 5. Kinetic Unlock Affordance (x: 220..500, y: 1370..1405)
-    if x >= 220 && x < 500 && y >= 1370 && y < 1405 {
-        if y == 1370 || y == 1404 || x == 220 || x == 499 {
+    // 5. Kinetic Unlock Affordance (x: 190..590, y: 1370..1405)
+    // The label is 18 characters at scale 2, i.e. 288 px wide, so the pill must be
+    // at least that wide or the tail of the text is clipped by the pill bounds.
+    if x >= 190 && x < 590 && y >= 1370 && y < 1405 {
+        if y == 1370 || y == 1404 || x == 190 || x == 589 {
             return 0x44FFFFFF;
         }
         if y >= 1380 && y < 1396 {
-            if let Some(c) = test_text(x, y, 245, 1380, 2, b"Swipe up to unlock", 0xFFFFFFFF) {
+            if let Some(c) = test_text(x, y, 246, 1380, 2, b"Swipe up to unlock", 0xFFFFFFFF) {
                 return c;
             }
         }

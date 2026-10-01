@@ -18,6 +18,15 @@ pub const DANGER_CRIMSON: u32 = 0xFFDC2626;
 pub const ACCENT_CYAN: u32 = 0xFF0284C7;
 pub const ACCENT_VIOLET: u32 = 0xFF7C3AED;
 
+// Lock screen backdrop.
+//
+// The lock screen is the one surface that draws opaque white type and
+// translucent dark control overlays, so it needs a dark canvas to stay legible.
+// Everything above the lock screen (home, app views, settings) stays on the
+// light palette defined above, matching a conventional mobile colour scheme.
+pub const LOCK_BACKDROP_TOP: u32 = 0xFF0B1220;
+pub const LOCK_BACKDROP_BOTTOM: u32 = 0xFF05080F;
+
 pub const SCREEN_WIDTH: usize = 720;
 pub const SCREEN_HEIGHT: usize = 1440;
 pub const CONTENT_PADDING: usize = 40;
