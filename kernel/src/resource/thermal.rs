@@ -35,24 +35,41 @@ pub enum CoolingState {
 /// Dynamic Thermal Governor.
 pub struct ThermalManager {
     zone_temperatures: [i32; 5], // Temperatures in °C
+    /// False until a real thermal sensor has fed a zone reading. Until then the
+    /// governor must not act on or publish a temperature.
+    pub sensor_present: bool,
     active_cooling_state: CoolingState,
     throttle_delay_micros: u32,
 }
 
 impl ThermalManager {
+    /// Creates a governor with no sensor bound.
+    ///
+    /// Zones start at zero and the governor reports no telemetry; a plausible
+    /// idle temperature would be indistinguishable from a measurement.
     pub const fn new() -> Self {
         Self {
-            zone_temperatures: [42, 39, 34, 38, 36], // Default nominal idle temperatures
+            zone_temperatures: [0; 5],
+            sensor_present: false,
             active_cooling_state: CoolingState::Normal,
             throttle_delay_micros: 0,
         }
     }
 
+    /// Binds a real thermal sensor and allows readings to be published.
+    pub fn set_sensor_present(&mut self, present: bool) {
+        self.sensor_present = present;
+    }
+
     /// Updates temperature reading for a specific zone and re-evaluates governor policy.
+    ///
+    /// This is the only path by which a temperature enters the governor, and it
+    /// marks the sensor present: callers must be a real sensor feed.
     pub fn update_temperature(&mut self, zone: ThermalZone, temp_c: i32) {
         let idx = zone as usize;
         if idx < self.zone_temperatures.len() {
             self.zone_temperatures[idx] = temp_c.clamp(THERMAL_MIN_C, THERMAL_MAX_C);
+            self.sensor_present = true;
         }
         self.evaluate_policy();
     }
@@ -137,9 +154,12 @@ impl ThermalManager {
             CoolingState::Throttled => "Throttled",
             CoolingState::CriticalShutdown => "Critical",
         };
+        // Without a bound sensor there is no measurement to report. Serialise an
+        // explicit absent state rather than plausible-looking zone temperatures.
         let _ = write!(
             writer,
-            r#"{{"cpu":{},"gpu":{},"battery":{},"modem":{},"charging":{},"state":"{}","throttling":{}}}"#,
+            r#"{{"present":{},"cpu":{},"gpu":{},"battery":{},"modem":{},"charging":{},"state":"{}","throttling":{}}}"#,
+            self.sensor_present,
             self.zone_temperatures[0],
             self.zone_temperatures[1],
             self.zone_temperatures[2],

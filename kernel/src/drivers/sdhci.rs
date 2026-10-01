@@ -402,9 +402,8 @@ pub fn test_sdhci_controller() {
 
     assert_eq!(controller.sector_count(), 125_829_120);
     crate::serial_println!(
-        "[TEST] SDHCI Controller: 64 GB eMMC 5.1 block device ({} sectors, model '{}') fully verified.",
+        "[TEST] SDHCI register model: capacity counter arithmetic exercised against a synthetic {}-sector descriptor.",
         controller.sector_count(),
-        controller.model()
     );
 }
 

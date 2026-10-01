@@ -266,16 +266,17 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             }
         }
 
-        // Horizontal Progress Gauge Track (x: 48..672, y: 156..170)
-        if y >= 156 && y < 170 && x >= 48 && x < 672 {
-            if y == 156 || y == 169 || x == 48 || x == 671 {
-                return BORDER_SUBTLE;
-            }
-            if x <= 254 {
-                return ACCENT_SKY; // 33% filled
-            }
-            return 0xFF0E1A2C;
+// Horizontal usage gauge track (x: 48..672, y: 156..170)
+    //
+    // No capacity query is available to this app, so the track is drawn empty.
+    // A fixed 33% fill directly above a "Usage telemetry unavailable" caption
+    // stated a storage reading that was never measured.
+    if y >= 156 && y < 170 && x >= 48 && x < 672 {
+        if y == 156 || y == 169 || x == 48 || x == 671 {
+            return BORDER_SUBTLE;
         }
+        return 0xFF0E1A2C;
+    }
 
         // Subtext: Free space & Partition format
         if y >= 184 && y < 192 {

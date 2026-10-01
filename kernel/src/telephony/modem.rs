@@ -35,17 +35,23 @@ impl SignalQuality {
         }
     }
 
-    /// Converts raw RSSI into signal bar count (0..5).
-    pub fn to_bars(&self) -> u8 {
-        match self.rssi {
-            0..=4 => 0,
-            5..=9 => 1,
-            10..=14 => 2,
-            15..=19 => 3,
-            20..=25 => 4,
-            _ => 5,
-        }
+/// Converts raw RSSI into signal bar count (0..5).
+///
+/// 3GPP reports 99 for "not detectable". That is the weakest possible reading,
+/// not the strongest, so it must not fall through to a full bar count: with no
+/// modem bound the honest answer is no bars at all.
+pub fn to_bars(&self) -> u8 {
+    match self.rssi {
+        0..=4 => 0,
+        5..=9 => 1,
+        10..=14 => 2,
+        15..=19 => 3,
+        20..=25 => 4,
+        26..=31 => 5,
+        // Unknown, out of range, or explicitly "not detectable".
+        _ => 0,
     }
+}
 }
 
 /// Active voice call state machine.

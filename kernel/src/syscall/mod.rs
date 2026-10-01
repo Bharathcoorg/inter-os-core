@@ -1902,6 +1902,11 @@ pub fn sys_resource_query(
         return SyscallResult::PermissionDenied;
     }
     let rm = crate::resource::RESOURCE_MANAGER.lock();
+    // No fuel gauge or thermal sensor is bound on this platform, so report the
+    // device as unavailable rather than publishing a plausible-looking value.
+    if !rm.battery.present || !rm.thermal.present {
+        return SyscallResult::DeviceError;
+    }
     *out_battery = rm.battery.percent;
     *out_temp = rm.thermal.temp_celsius;
     *out_throttling = rm.thermal.throttling;
@@ -1913,6 +1918,11 @@ pub fn sys_thermal_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
     if require_system_control_object(crate::services::SERVICE_POWER_CONTROL_OBJECT).is_err() { require_system_control()?; }
     if out_buf.len() < crate::resource::THERMAL_JSON_MAX { return Err(SyscallResult::InvalidArguments); }
     let tm = crate::resource::THERMAL_MANAGER.lock();
+    // An unbound sensor has nothing to report; the serialised form carries an
+    // explicit absent flag, so callers must not treat zeros as a reading.
+    if !tm.sensor_present {
+        return Err(SyscallResult::DeviceError);
+    }
     let len = tm.format_json(out_buf);
     Ok(len)
 }

@@ -93,14 +93,17 @@ pub fn run_network() -> ! {
 
         let now = std::get_ticks(1).unwrap_or(last_tick);
         if now.saturating_sub(last_tick) >= 100 || last_tick == 0 {
-            let _ = std::net_send_socket(socket, [127, 0, 0, 1], 4242, b"INTEROS_NETD_HEARTBEAT");
+            // A loopback self-send is not network traffic. This block used to
+            // transmit a datagram to its own bound socket, read the same datagram
+            // back out of the loopback ring and log it as an "External UDP
+            // packet received". No NIC is bound on this platform, so the
+            // datapath is drained and nothing is claimed to have arrived.
+            let mut drained = 0usize;
             if let Ok(len) = std::net_recvfrom(socket, &mut rx) {
-                if len > 0 {
-                    let _ = std::log(
-                        0,
-                        "[netd] External UDP packet received through userspace network service.",
-                    );
-                }
+                drained += len;
+            }
+            if drained > 0 {
+                let _ = std::log(0, "[netd] loopback datapath drained; no network device is attached.");
             }
             last_tick = now;
         }

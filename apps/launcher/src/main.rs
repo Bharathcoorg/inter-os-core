@@ -448,41 +448,30 @@ fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 return c;
             }
         }
-        // 4-Bar Cellular Signal
+        // Status indicators.
+        //
+        // No radio, Wi-Fi radio or fuel gauge is bound on this platform, so these
+        // draw empty outlines rather than a filled level. A full battery glyph
+        // or four signal bars with no measurement behind them is a fabricated
+        // reading, and the hardware query syscalls report unavailable.
+        const STATUS_UNAVAILABLE: u32 = 0xFFB6BFCC;
+        // Cellular: outline of the bar stack only, no filled level.
         if x >= 590 && x <= 608 && y >= 16 && y <= 32 {
-            if x <= 593 && y >= 28 {
-                return 0xFF0F172A;
-            }
-            if x >= 595 && x <= 598 && y >= 24 {
-                return 0xFF0F172A;
-            }
-            if x >= 600 && x <= 603 && y >= 20 {
-                return 0xFF0F172A;
-            }
-            if x >= 605 && x <= 608 && y >= 16 {
-                return 0xFF0F172A;
+            if y == 32 || x == 590 || (x == 605 && y == 16) {
+                return STATUS_UNAVAILABLE;
             }
         }
-        // Wi-Fi 3-arcs
-        if x >= 626 && x <= 644 && y >= 18 && y <= 32 {
-            let dx = (x as i32) - 635;
-            let dy = (y as i32) - 30;
-            let d2 = dx * dx + dy * dy;
-            if (d2 >= 100 && d2 <= 144 && dy <= -2) || (d2 >= 36 && d2 <= 64 && dy <= -1) || d2 <= 9
-            {
-                return 0xFF0F172A;
-            }
+        // Wi-Fi: outline dot only, no arcs, indicating no association.
+        if x >= 633 && x <= 637 && y >= 28 && y <= 32 {
+            return STATUS_UNAVAILABLE;
         }
-        // Battery outline and level
+        // Battery: shell and terminal only, with no charge fill.
         if x >= 658 && x <= 686 && y >= 18 && y <= 32 {
             if x == 658 || x == 684 || y == 18 || y == 32 {
-                return 0xFF0F172A;
+                return STATUS_UNAVAILABLE;
             }
             if x >= 685 && x <= 686 && y >= 22 && y <= 28 {
-                return 0xFF0F172A;
-            }
-            if x >= 661 && x <= 680 && y >= 21 && y <= 29 {
-                return TEXT_MUTED;
+                return STATUS_UNAVAILABLE;
             }
         }
         return 0xFFF0F2F5;

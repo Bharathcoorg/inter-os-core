@@ -179,38 +179,20 @@ pub struct PhotoItem {
     pub secondary_color: u32,
 }
 
-/// Default stock photo items bundled with the mobile gallery.
-pub static PHOTOS: [PhotoItem; 4] = [
-    PhotoItem {
-        title: "Mountain Ridge",
-        date: "Wed, 24 Sep",
-        meta: "RAW 48MP ISO 100",
-        primary_color: 0xFF2A5580,
-        secondary_color: 0xFF121B2A,
-    },
-    PhotoItem {
-        title: "Cyber Metropolis",
-        date: "Tue, 23 Sep",
-        meta: "HDR 4K Night",
-        primary_color: 0xFF31C4FF,
-        secondary_color: 0xFF0E1A2C,
-    },
-    PhotoItem {
-        title: "Golden Nature",
-        date: "Mon, 22 Sep",
-        meta: "Portrait f/1.8",
-        primary_color: 0xFFF59E0B,
-        secondary_color: 0xFF261D12,
-    },
-    PhotoItem {
-        title: "Modern Architecture",
-        date: "Sun, 21 Sep",
-        meta: "Studio Lighting",
-        primary_color: 0xFF10B981,
-        secondary_color: 0xFF0C2418,
-    },
-];
+/// Media entries, populated only from real media storage.
+///
+/// This is empty by design: no photo backend is bound, and nothing may be
+/// invented to fill the grid. A plausible title, date and EXIF string rendered
+/// as a photograph would be fabricated media state, and the procedural
+/// gradients previously drawn for these entries were not images at all.
+/// With no entries the grid renders an explicit empty state instead.
+pub static PHOTOS: [PhotoItem; 0] = [];
 
+/// Returns true when no real media is available to show.
+#[inline]
+fn has_no_media() -> bool {
+    PHOTOS.is_empty()
+}
 
 pub struct GalleryApp {
     pub selected_tab: usize, // 0: All, 1: Albums, 2: Favorites
@@ -399,6 +381,30 @@ fn get_gallery_color(x: usize, y: usize, app: &GalleryApp) -> u32 {
     let grid_top = 180;
     let tile_h = 240;
     let tile_gap = 20;
+
+    // Empty state: no media backend is bound, so say so rather than render
+    // placeholders that would read as real photographs.
+    if has_no_media() && y >= grid_top + 200 && y < grid_top + 300 {
+        if y >= grid_top + 240 && y < grid_top + 256 {
+            if let Some(c) = test_text(x, y, 176, grid_top + 240, 2, b"No media available", TEXT_MUTED) {
+                return c;
+            }
+        }
+        if y >= grid_top + 268 && y < grid_top + 280 {
+            if let Some(c) = test_text(
+                x,
+                y,
+                140,
+                grid_top + 268,
+                1,
+                b"Connect a media source to browse photos",
+                TEXT_MUTED,
+            ) {
+                return c;
+            }
+        }
+        return BG_DARK;
+    }
 
     for row in 0..3 {
         let row_y0 = grid_top + row * (tile_h + tile_gap);

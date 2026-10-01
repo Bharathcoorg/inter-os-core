@@ -59,8 +59,12 @@ pub fn init() {
 
     rm.set_foreground_active(false); // Reset to nominal
 
-    // 5. Mobile DVFS Power Governor tests
-    let mut pm = POWER_MANAGER.lock();
+    // 5. Mobile DVFS Power Governor tests.
+    //
+    // These exercise the governor algorithm on a local instance. Driving the
+    // global POWER_MANAGER here left fabricated temperatures and a fabricated
+    // 94% state of charge in the live telemetry that userspace can query.
+    let mut pm = PowerManager::new(2400);
     pm.update_thermal(35);
     pm.update_battery(94, true);
     pm.set_governor(DvfsGovernor::Interactive);
@@ -76,23 +80,31 @@ pub fn init() {
     pm.update_thermal(40); // Cool down
     pm.set_governor(DvfsGovernor::Powersave);
     assert_eq!(pm.current_freq_mhz, 600, "Powersave governor must lock to 600 MHz minimum floor");
-
-    pm.set_governor(DvfsGovernor::Interactive); // Restore interactive governor
     serial_println!("[TEST] Mobile DVFS Power Governor: Dynamic frequency scaling (2400 -> 1200 -> 600 MHz) VERIFIED.");
 
-    // 6. Battery Fuel Gauge Driver tests
-    let mut bg = BATTERY_GAUGE.lock();
+    // 6. Battery fuel gauge model tests, also on a local instance so the global
+    // gauge keeps reporting that no fuel gauge is present.
+    let mut bg = BatteryFuelGauge::new();
     bg.set_telemetry(3850, 4700, 28, ChargingStatus::ChargingAC);
     assert_eq!(bg.soc_percent, 94);
     assert_eq!(bg.voltage_mv, 3850);
     assert_eq!(bg.charging_status, ChargingStatus::ChargingAC);
     let drain_mw = bg.estimate_power_drain_mw(2400, 60);
     assert!(drain_mw > 2000, "2400 MHz + 60% brightness should draw ~2990 mW");
-    serial_println!("[TEST] Battery Fuel Gauge: 3850 mV, 94% SoC, ChargingAC, estimated drain = {} mW.", drain_mw);
+    serial_println!("[TEST] Battery fuel gauge model: SoC/drain arithmetic VERIFIED against a synthetic reading.");
+    assert!(
+        BATTERY_GAUGE.lock().soc_percent == 0,
+        "the global fuel gauge must not be left reporting a state of charge with no gauge attached"
+    );
 
-    // 7. Dynamic Multi-Zone Thermal Governor
-    thermal::init();
+    // 7. Thermal governor policy tests on a local instance.
+    let mut tm = thermal::ThermalManager::new();
+    tm.update_temperature(thermal::ThermalZone::CpuJunction, 78);
+    assert!(tm.is_throttling(), "78 C must engage thermal throttling");
+    tm.update_temperature(thermal::ThermalZone::CpuJunction, 35);
+    assert!(!tm.is_throttling(), "35 C must clear thermal throttling");
+    assert!(!thermal::THERMAL_MANAGER.lock().sensor_present, "the global thermal governor must not be left reporting temperatures with no sensor attached");
 
-    serial_println!("--- [Unified Resource Manager 100% Attested & Enforced] ---");
+    serial_println!("[OK] Resource governor algorithms verified; no telemetry published without a bound sensor.");
 }
 

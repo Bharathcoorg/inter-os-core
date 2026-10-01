@@ -43,5 +43,7 @@ pub fn init_and_test_drivers() {
     test_touch_gestures();
     test_gt911_pipeline();
     test_sdhci_controller();
-    crate::serial_println!("--- [All Hardware Driver Subsystems Verified] ---");
+    crate::serial_println!(
+        "--- [Hardware driver register models exercised; no physical controller is bound] ---"
+    );
 }
