@@ -116,21 +116,29 @@ impl SimpleFramebuffer {
         };
         let fmt_str = core::str::from_utf8(&fmt_bytes[..len]).map_err(|_| "Corrupted format string")?;
         let format = SimpleFbFormat::from_dtb_string(fmt_str).ok_or("Unsupported SimpleFB format in DTB")?;
+        let bpp = format.bytes_per_pixel() as u64;
+        let min_stride = (width as u64).checked_mul(bpp).ok_or("Framebuffer row size overflow")?;
+        if stride as u64 < min_stride {
+            return Err("Framebuffer stride is smaller than one scanline");
+        }
+        let buffer_size = (stride as u64).checked_mul(height as u64).ok_or("Framebuffer size overflow")?;
+        if buffer_size == 0 || buffer_size > usize::MAX as u64 {
+            return Err("Framebuffer size is invalid");
+        }
 
-        // Parse physical address from reg property (optional fallback)
-        let base_paddr = if let Ok(reg_bytes) = parser.get_node_property(&node, "reg") {
-            if reg_bytes.len() >= 8 {
-                u64::from_be_bytes([
-                    reg_bytes[0], reg_bytes[1], reg_bytes[2], reg_bytes[3],
-                    reg_bytes[4], reg_bytes[5], reg_bytes[6], reg_bytes[7],
-                ]) as usize
-            } else if reg_bytes.len() >= 4 {
-                u32::from_be_bytes([reg_bytes[0], reg_bytes[1], reg_bytes[2], reg_bytes[3]]) as usize
-            } else {
-                base_vaddr
-            }
+        // A physical framebuffer address must come from the DTB. Falling back to
+        // the virtual mapping base would turn an absent/invalid hardware resource
+        // into a fabricated physical address.
+        let reg_bytes = parser.get_node_property(&node, "reg").map_err(|_| "Missing framebuffer reg property")?;
+        let base_paddr = if reg_bytes.len() >= 8 {
+            u64::from_be_bytes([
+                reg_bytes[0], reg_bytes[1], reg_bytes[2], reg_bytes[3],
+                reg_bytes[4], reg_bytes[5], reg_bytes[6], reg_bytes[7],
+            ]) as usize
+        } else if reg_bytes.len() >= 4 {
+            u32::from_be_bytes([reg_bytes[0], reg_bytes[1], reg_bytes[2], reg_bytes[3]]) as usize
         } else {
-            base_vaddr
+            return Err("Invalid framebuffer reg property");
         };
 
         Ok(Self::new(base_paddr, base_vaddr, width, height, stride, format))
@@ -150,7 +158,14 @@ impl SimpleFramebuffer {
         }
 
         let bpp = self.format.bytes_per_pixel();
-        let offset = (y as usize * self.stride as usize) + (x as usize * bpp);
+        let offset = (y as usize)
+            .checked_mul(self.stride as usize)
+            .and_then(|row| (x as usize).checked_mul(bpp).and_then(|pixel| row.checked_add(pixel)))
+            .and_then(|pixel| pixel.checked_add(bpp))
+            .and_then(|end| end.checked_sub(bpp));
+        let Some(offset) = offset else { return; };
+        let Some(end) = self.base_vaddr.checked_add(offset).and_then(|addr| addr.checked_add(bpp)) else { return; };
+        if end < self.base_vaddr { return; }
         let ptr = (self.base_vaddr + offset) as *mut u8;
 
         compiler_fence(Ordering::SeqCst);
