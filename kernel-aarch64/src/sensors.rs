@@ -1,11 +1,19 @@
 //! Sovereign Mobile Sensor Fusion Subsystem & Hardware IMU/Barometer/Proximity/Light HAL (AArch64)
 //!
-//! Provides bare-metal driver support for physical smartphone I2C/SPI sensor arrays
-//! (InvenSense MPU-6050, Bosch BMI160, STMicroelectronics LSM6DS3, APDS-9960, BMP280)
-//! mapped at MMIO base `0x09050000`.
+//! This module is an **orientation classifier, gesture engine, and capability boundary, not a sensor
+//! driver**. No InvenSense/Bosch/ST/APDS/BMP sensor is described, addressed, or emulated here, and
+//! this file performs no read or write against `mmio_base`. `mmio_base` is retained only as the bind
+//! point a concrete driver would be written against; until `set_hardware_present(true)` is called by
+//! such a driver, no sensor exists and every telemetry read fails closed.
 //!
-//! Features:
-//! - 6-Axis IMU (3-axis Accelerometer in milli-g, 3-axis Gyroscope in deci-degrees/sec)
+//! Status of each layer, stated explicitly:
+//! - **Unavailable**: accelerometer, gyroscope, magnetometer, proximity, ambient light, barometer,
+//!   and derived altitude. The hub reports *no reading* until a driver feeds one.
+//! - **Emulated**: none. The constructor does not invent gravity, lux, or pressure.
+//! - **Present**: none. Zero sensor hardware is bound at build time.
+//!
+//! Reusable software that is honest about its own status:
+//! - 6-Axis IMU sample types (3-axis Accelerometer in milli-g, 3-axis Gyroscope in deci-degrees/sec)
 //! - Device orientation classifier (PortraitUp, PortraitDown, LandscapeLeft, LandscapeRight, FaceUp, FaceDown)
 //! - Proximity & Ambient Light (ALS) ear-detection for automatic screen blanking during voice calls
 //! - Adaptive display backlight governor (lux-based PWM duty cycle)
@@ -16,7 +24,14 @@
 extern crate alloc;
 use crate::capability::{CapabilityTable, CapabilityType, Rights};
 
+/// Reference sea-level pressure used by the hypsometric altimeter formula.
+///
+/// This is a physical reference constant, not a measurement: it is the P0 term of
+/// delta_h = (P0 - P) * 84 / 1000 and is never reported as "this device's pressure".
 pub const STANDARD_SEA_LEVEL_PRESSURE_PA: i32 = 101_325; // 1013.25 hPa
+
+/// Sentinel ambient-light value meaning "no ambient light reading has been taken yet".
+pub const NO_LUX_READING: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SensorError {
@@ -71,17 +86,22 @@ pub struct EnvironmentSample {
 }
 
 pub struct SensorHub {
+    /// Bind point for a concrete sensor driver. THIS MODULE PERFORMS NO MMIO ACCESS AT IT.
     pub mmio_base: usize,
     pub enabled: bool,
     pub hardware_present: bool,
     pub imu_active: bool,
     pub prox_als_active: bool,
     pub barometer_active: bool,
-    pub last_imu: ImuSample,
-    pub last_env: EnvironmentSample,
+    /// Most recent IMU sample, or `None` when no hardware has ever fed one.
+    pub last_imu: Option<ImuSample>,
+    /// Most recent environment sample, or `None` when no hardware has ever fed one.
+    pub last_env: Option<EnvironmentSample>,
+    /// Orientation derived from the most recent IMU sample, or `Unknown` when there has been none.
     pub orientation: DeviceOrientation,
     pub screen_state: ScreenBlankState,
-    pub display_backlight_pwm: u8,
+    /// Backlight duty cycle in percent, or `None` until a lux reading has driven the governor.
+    pub display_backlight_pwm: Option<u8>,
     pub last_gesture: GestureEvent,
     pub total_samples_read: u64,
     pub total_gestures_detected: u64,
@@ -96,30 +116,30 @@ impl SensorHub {
             imu_active: false,
             prox_als_active: false,
             barometer_active: false,
-            last_imu: ImuSample {
-                accel_x_mg: 0,
-                accel_y_mg: -1000, // Standard gravity in PortraitUp
-                accel_z_mg: 0,
-                gyro_x_dps: 0,
-                gyro_y_dps: 0,
-                gyro_z_dps: 0,
-            },
-            last_env: EnvironmentSample {
-                proximity_mm: 100, // 100mm = Far
-                ambient_lux: 350,   // Standard indoor lighting
-                pressure_pa: STANDARD_SEA_LEVEL_PRESSURE_PA,
-                altitude_meters: 0,
-            },
-            orientation: DeviceOrientation::PortraitUp,
+            // WHY None, not a fabricated sample: the constructor previously seeded
+            // accel_y_mg = -1000 ("standard gravity in PortraitUp"), proximity 100 mm,
+            // ambient_lux 350 ("standard indoor lighting"), sea-level pressure and altitude 0.
+            // Those are plausible-looking measurements that were never taken, and they are exactly
+            // what a fail-closed read path could leak. An unset sensor has no reading.
+            last_imu: None,
+            last_env: None,
+            // WHY Unknown, not PortraitUp: orientation is a conclusion drawn from an accelerometer
+            // sample. With no sample, no orientation may be asserted.
+            orientation: DeviceOrientation::Unknown,
             screen_state: ScreenBlankState::Active,
-            display_backlight_pwm: 65,
+            // WHY None, not 65: the PWM duty cycle is an output of the lux governor. No lux
+            // reading means no governor output exists.
+            display_backlight_pwm: None,
             last_gesture: GestureEvent::None,
             total_samples_read: 0,
             total_gestures_detected: 0,
         }
     }
 
-    /// Initializes sensor hub hardware and sub-busses.
+    /// Initializes the sensor hub's software paths and sub-busse enable bits.
+    ///
+    /// This does NOT assert that a sensor exists: `hardware_present` stays `false` until a
+    /// concrete driver binds, and `feed_hardware_telemetry` remains gated on it.
     pub fn init_hardware(&mut self) {
         self.enabled = true;
         self.imu_active = true;
@@ -129,7 +149,17 @@ impl SensorHub {
 
     pub fn set_hardware_present(&mut self, present: bool) {
         self.hardware_present = present;
-        if !present { self.imu_active=false; self.prox_als_active=false; self.barometer_active=false; }
+        if !present {
+            self.imu_active = false;
+            self.prox_als_active = false;
+            self.barometer_active = false;
+            // WHY: readings taken from a sensor that is no longer attached are not current
+            // readings. Drop them so a stale sample can never be read back as live telemetry.
+            self.last_imu = None;
+            self.last_env = None;
+            self.orientation = DeviceOrientation::Unknown;
+            self.display_backlight_pwm = None;
+        }
     }
 
     /// Ingests hardware sensor telemetry, enforces Zero Ambient Authority,
@@ -150,8 +180,14 @@ impl SensorHub {
         }
 
         let prev_orientation = self.orientation;
-        self.last_imu = imu;
-        self.last_env = env;
+
+        // WHY: refuse a sample whose ambient-light field is the explicit "no reading" sentinel.
+        // Treating it as 0 lux would drive the backlight governor to its floor on the strength of
+        // a value that was never measured.
+        if env.ambient_lux == NO_LUX_READING {
+            return Err(SensorError::SensorFault);
+        }
+
         self.total_samples_read += 1;
 
         // 1. Classify Device Orientation from Accelerometer Vector
@@ -166,12 +202,20 @@ impl SensorHub {
         }
 
         // 3. Ambient Light Display Backlight Governor
-        self.display_backlight_pwm = Self::calculate_backlight_pwm(env.ambient_lux);
+        let pwm = Self::calculate_backlight_pwm(env.ambient_lux);
 
         // 4. Barometric Hypsometric Altimeter (Integer math)
-        // delta_h = (P0 - P) * 84 / 1000 meters
+        // delta_h = (P0 - P) * 84 / 1000 meters, where P0 is the sea-level reference constant.
         let pressure_delta = STANDARD_SEA_LEVEL_PRESSURE_PA.saturating_sub(env.pressure_pa);
-        self.last_env.altitude_meters = (pressure_delta * 84) / 1000;
+        let mut env = env;
+        env.altitude_meters = (pressure_delta * 84) / 1000;
+
+        // Commit the derived environment sample and the governor output together, so
+        // `last_env` is only ever Some when its altitude was actually computed from a
+        // real pressure reading.
+        self.last_env = Some(env);
+        self.last_imu = Some(imu);
+        self.display_backlight_pwm = Some(pwm);
 
         // 5. Real-Time Gesture Engine
         let mut detected_gesture = GestureEvent::None;
