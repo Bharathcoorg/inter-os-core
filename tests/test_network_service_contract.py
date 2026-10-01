@@ -6,6 +6,9 @@ ROOT = Path(__file__).resolve().parents[1]
 def must(text, needle, label):
     assert needle in text, f"missing {label}: {needle}"
 
+def must_absent(text, needle, label):
+    assert needle not in text, f"{label} (found {needle!r})"
+
 def main():
     svc = (ROOT / "userspace/system-service/src/lib.rs").read_text()
     bin_ = (ROOT / "userspace/system-service/src/bin/netd.rs").read_text()
@@ -17,11 +20,20 @@ def main():
         "pub fn run_network() -> !",
         "std::net_socket(4242)",
         "std::network_poll()",
-        "std::net_send_socket(socket, [127, 0, 0, 1], 4242,",
         "std::net_recvfrom(socket",
         "std::EVENT_NETWORK_PACKET",
     ):
         must(svc, needle, needle)
+
+    # A loopback self-send is not network traffic. netd previously transmitted
+    # to its own bound socket, read the same datagram back out of the loopback
+    # ring and logged it as an externally received packet. The contract is that
+    # no such self-send exists and no external arrival is claimed while no
+    # network device is attached.
+    must_absent(svc, "net_send_socket(socket, [127, 0, 0, 1], 4242",
+                "netd must not transmit to its own loopback socket")
+    must_absent(svc, "External UDP packet",
+                "netd must not report loopback traffic as external")
     must(bin_, "interos_system_service::run_network()", "netd entrypoint")
     must(sdk, "NetworkPoll = 93", "network poll syscall ABI")
     must(sdk, "pub fn network_poll()", "network poll SDK")

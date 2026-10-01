@@ -118,7 +118,11 @@ class PlatformRealityTests(unittest.TestCase):
         power = self.read("kernel-aarch64/src/power.rs")
         self.assertIn("hardware_present: bool", power)
         self.assertIn("if !self.hardware_present || !battery.hardware_present", power)
-        self.assertIn("self.current_freq_mhz = self.min_freq_mhz", power)
+        # The applied clock is only meaningful once a controller has reported its
+        # operating points; before that the governor must record "no clock applied"
+        # rather than a plausible default frequency.
+        self.assertIn("NO_FREQ_MHZ", power)
+        self.assertIn("current_freq_mhz: u32", power)
 
     def test_aarch64_runtime_selftests_do_not_fabricate_sd_hardware(self):
         main = self.read("kernel-aarch64/src/main.rs")

@@ -29,7 +29,13 @@ def main():
     must(net, "NETWORK_DEVICE.lock().transmit", "network transmit uses canonical device")
     must(net, "NETWORK_DEVICE.lock()", "network receive uses canonical device")
     service = (ROOT / "userspace/system-service/src/lib.rs").read_text()
-    must(service, "[netd] External UDP packet received through userspace network service.", "userspace RX evidence marker")
+    # RX evidence must come from a real device. Reporting a loopback self-send as
+    # an externally received packet is fabricated telemetry, so the contract is
+    # that no such claim exists.
+    assert "External UDP packet" not in service, \
+        "netd must not report loopback traffic as external"
+    assert "net_send_socket(socket, [127, 0, 0, 1], 4242" not in service, \
+        "netd must not transmit to its own loopback socket"
     must(net, "pub use device::{LoopbackDevice, NetDeviceInfo, NetError, NetworkBackend, NetworkDevice, NetworkDeviceManager, NETWORK_DEVICE};", "network abstraction exports")
     must(pci, "is_network_controller", "PCI network device discovery")
     must(pci, "pub fn memory_bar", "PCI BAR discovery")
