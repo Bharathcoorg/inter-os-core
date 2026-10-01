@@ -457,10 +457,16 @@ class PlatformRealityTests(unittest.TestCase):
         handler = interrupts[interrupts.index('extern "x86-interrupt" fn page_fault_handler'):interrupts.index('extern "x86-interrupt" fn general_protection_fault_handler')]
         # The fault reporter must not recurse through formatting, locks, panic
         # formatting, or the bootloader serial path after paging has failed.
-        self.assertIn("fault_report_byte", handler)
-        self.assertIn("MAX_BYTES: usize = 256", handler)
-        self.assertIn("for _ in 0..10_000", handler)
-        self.assertIn("Cr2::read().as_u64()", handler)
+        self.assertIn("fault_report_bytes", handler)
+        self.assertIn("fault_report_line", handler)
+        # CR2 must be captured with a raw register read. The typed accessor
+        # returns a Result that would have to be unwrapped, and a fault handler
+        # must not panic. Assert the absence of any panic path rather than a
+        # literal, so an explanatory comment cannot satisfy or break it.
+        self.assertIn('core::arch::asm!("mov {}, cr2"', handler)
+        self.assertIn("out(reg) accessed_address", handler)
+        for panic_path in (".unwrap()", ".expect(", "panic!("):
+            self.assertNotIn(panic_path, handler)
         self.assertIn("stack_frame.instruction_pointer.as_u64()", handler)
         self.assertIn("stack_frame.stack_pointer.as_u64()", handler)
         self.assertIn("error_code.bits()", handler)
@@ -469,6 +475,18 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertNotIn("{:#?}", handler)
         self.assertIn("crate::task::terminate_current()", handler)
         self.assertIn("halt_after_fault_report_failure()", handler)
+
+        # The bounds live in the shared reporting helpers every fatal handler
+        # calls, so they are asserted at module scope rather than inside a single
+        # handler body. A length must be clamped and a UART wait must be bounded,
+        # or a corrupted frame can spin or overrun the reporting buffer.
+        self.assertIn("fn fault_report_byte(", interrupts)
+        self.assertIn("fn fault_report_bytes(", interrupts)
+        self.assertIn("fn fault_report_line(", interrupts)
+        self.assertIn("const MAX_BYTES: usize = 256", interrupts)
+        self.assertIn("core::cmp::min(bytes.len(), MAX_BYTES)", interrupts)
+        self.assertIn("for _ in 0..10_000", interrupts)
+        self.assertIn("fn halt_after_fault_report_failure(", interrupts)
 
     def test_x86_fatal_exception_handlers_avoid_recursive_reporting(self):
         interrupts = self.read("kernel/src/interrupts.rs")
@@ -523,7 +541,11 @@ class PlatformRealityTests(unittest.TestCase):
         fdt = self.read("kernel/src/arch/aarch64/fdt.rs")
         self.assertIn("let limit = base.checked_add(self.header.size_dt_strings as usize)?", fdt)
         self.assertIn("base.checked_add(size).is_none()", fdt)
-        self.assertIn("rest.starts_with('@')", fdt)
-        self.assertNotIn("name.starts_with(target_name)", fdt)
+        # Unit-address matching must be deliberate. A bare prefix test would let
+        # "intc" match "intcmux" and bind MMIO to the wrong node, so a prefix
+        # match is only accepted when the target is followed immediately by '@'.
+        self.assertIn("name == target_name", fdt)
+        self.assertIn("name.starts_with(target_name)", fdt)
+        self.assertIn("name.as_bytes().get(target_name.len()) == Some(&b'@')", fdt)
 if __name__ == "__main__":
     unittest.main(verbosity=2)
