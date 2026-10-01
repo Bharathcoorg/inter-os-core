@@ -134,10 +134,20 @@ extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) -> ! {
-    panic!(
-        "[CPU EXCEPTION: DOUBLE FAULT] (code: {})\n{:#?}",
-        error_code, stack_frame
-    );
+    // A double fault executes on the dedicated IST stack, but the ordinary
+    // formatter is still unsafe: it can lock, allocate, or fault again while
+    // the machine is already in a fatal exception state.
+    let rip = stack_frame.instruction_pointer.as_u64();
+    let rsp = stack_frame.stack_pointer.as_u64();
+    if !fault_report_bytes(b"\\r\\n[DOUBLE FAULT]\\r\\n")
+        || !fault_report_line(b"RIP=", rip)
+        || !fault_report_line(b"RSP=", rsp)
+        || !fault_report_line(b"ERR=", error_code)
+        || !fault_report_bytes(b"HALT\\r\\n")
+    {
+        halt_after_fault_report_failure();
+    }
+    halt_after_fault_report_failure()
 }
 
 /// Allocation-free, bounded COM1 writer for exception diagnostics.
