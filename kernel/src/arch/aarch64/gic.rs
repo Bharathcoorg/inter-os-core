@@ -46,8 +46,8 @@ impl Gicv2 {
 
     #[inline]
     unsafe fn gicd_read(&self, offset: usize) -> u32 {
-        let ptr = self.gicd_base.checked_add(offset).unwrap_or(0) as *const u32;
-        core::ptr::read_volatile(ptr)
+        let Some(addr) = self.gicd_base.checked_add(offset) else { return 0; };
+        core::ptr::read_volatile(addr as *const u32)
     }
 
     #[inline]
@@ -58,8 +58,8 @@ impl Gicv2 {
 
     #[inline]
     unsafe fn gicc_read(&self, offset: usize) -> u32 {
-        let ptr = self.gicc_base.checked_add(offset).unwrap_or(0) as *const u32;
-        core::ptr::read_volatile(ptr)
+        let Some(addr) = self.gicc_base.checked_add(offset) else { return 0; };
+        core::ptr::read_volatile(addr as *const u32)
     }
 
     #[inline]
