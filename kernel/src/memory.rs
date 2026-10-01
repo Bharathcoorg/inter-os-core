@@ -21,14 +21,24 @@ static FRAME_ALLOCATOR: Mutex<Option<BootInfoFrameAllocator>> = Mutex::new(None)
 static KERNEL_PML4_FRAME: Mutex<Option<PhysFrame<Size4KiB>>> = Mutex::new(None);
 
 /// Initializes global memory management singletons: page mapper, physical offset, and frame allocator.
+///
+/// INVARIANT (ordering): `PHYSICAL_MEMORY_OFFSET` is published *before* the mapper and
+/// the frame allocator are constructed, because `init_page_table` and `BootInfoFrameAllocator::init`
+/// both reach the frame allocator, and every frame the allocator returns must be zeroed
+/// through the direct map. Publishing the offset first means no allocation can ever observe
+/// an unpublished offset and silently skip zeroing. Previously the offset was stored *after*
+/// both constructors ran, which made zeroing depend on call ordering inside this function.
 pub fn init_memory(physical_memory_offset: VirtAddr, memory_regions: &'static MemoryRegions) {
     let (kernel_frame, _) = Cr3::read();
     *KERNEL_PML4_FRAME.lock() = Some(kernel_frame);
 
-    let mapper = unsafe { init_page_table(physical_memory_offset) };
-    let frame_allocator = unsafe { BootInfoFrameAllocator::init(memory_regions) };
-
+    // Publish the direct-map offset first: it is the precondition for zeroing frames.
     *PHYSICAL_MEMORY_OFFSET.lock() = Some(physical_memory_offset);
+
+    let mapper = unsafe { init_page_table(physical_memory_offset) };
+    let frame_allocator =
+        unsafe { BootInfoFrameAllocator::init(memory_regions, physical_memory_offset) };
+
     *MEMORY_MAPPER.lock() = Some(mapper);
     *FRAME_ALLOCATOR.lock() = Some(frame_allocator);
 
@@ -643,6 +653,16 @@ pub struct BootInfoFrameAllocator {
     region_idx: usize,
     next_addr: u64,
     recycled_frames: Vec<PhysFrame<Size4KiB>>,
+    /// Direct-map offset used to reach every frame this allocator returns.
+    ///
+    /// INVARIANT: the offset is stored *in the allocator* rather than read from the
+    /// global `PHYSICAL_MEMORY_OFFSET` at zeroing time. Reading a global made
+    /// zeroing conditional on that global already being published; if any frame were
+    /// ever allocated before publication the frame would be handed out unzeroed and
+    /// the resulting page-table contents would depend on residual RAM contents.
+    /// Owning the offset makes it impossible for `allocate_frame` to return an
+    /// unzeroed frame.
+    physical_memory_offset: VirtAddr,
 }
 
 impl BootInfoFrameAllocator {
@@ -664,12 +684,17 @@ impl BootInfoFrameAllocator {
     }
 
     /// Creates a FrameAllocator from the passed memory map.
-    pub unsafe fn init(memory_regions: &'static MemoryRegions) -> Self {
+    ///
+    /// `physical_memory_offset` is stored in the allocator so that every returned frame
+    /// is unconditionally zeroed through the direct map; see the field documentation for
+    /// why this must not depend on a separately published global.
+    pub unsafe fn init(memory_regions: &'static MemoryRegions, physical_memory_offset: VirtAddr) -> Self {
         let mut allocator = BootInfoFrameAllocator {
             memory_regions,
             region_idx: 0,
             next_addr: 0,
             recycled_frames: Vec::new(),
+            physical_memory_offset,
         };
         allocator.advance_to_usable_region();
         allocator
@@ -712,16 +737,19 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
             }
         };
 
-        // Frames may contain data from a previous address-space owner. Always
-        // zero before reuse so stale userspace contents cannot cross lifetimes.
-        if let Some(offset) = *PHYSICAL_MEMORY_OFFSET.lock() {
-            unsafe {
-                core::ptr::write_bytes(
-                    (offset + frame.start_address().as_u64()).as_mut_ptr::<u8>(),
-                    0,
-                    4096,
-                );
-            }
+        // Frames may contain data from a previous address-space owner, and freshly
+        // carved frames from the bootloader memory map contain residual RAM contents.
+        // Always zero before handing the frame out, using the offset owned by this
+        // allocator. This must be unconditional: skipping it would make page-table and
+        // heap contents depend on whatever QEMU happened to leave in RAM, which is
+        // exactly the kind of uninitialised-memory dependence that produces
+        // intermittent, nondeterministic behaviour.
+        unsafe {
+            core::ptr::write_bytes(
+                (self.physical_memory_offset + frame.start_address().as_u64()).as_mut_ptr::<u8>(),
+                0,
+                4096,
+            );
         }
         Some(frame)
     }
