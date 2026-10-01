@@ -237,6 +237,16 @@ pub fn start(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str> {
 
 fn start_locked(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str> {
     if id == ServiceId::Init { return Ok(TaskId(0)); }
+    // A service start that fails must say why on the service console. A silent
+    // Err here leaves PID 1 unable to start anything and the device with no
+    // display, input or launcher, with nothing to explain it.
+    macro_rules! bail {
+        ($reason:expr) => {{
+            let reason: &'static str = $reason;
+            crate::serial_println!("[SERVICE] start({:?}) rejected: {}", id, reason);
+            return Err(reason);
+        }};
+    }
     let existing = SERVICE_RECORDS.lock()[id as usize];
     if let Some(record) = existing {
         if record.state == ServiceState::Running && record.task != TaskId(0) {
@@ -244,43 +254,43 @@ fn start_locked(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str
             // same PID1 parent. Never turn the idempotent start path into a
             // cross-parent task-disclosure or control primitive.
             let scheduler = SCHEDULER.lock();
-            let task = scheduler.get_task(record.task).ok_or("running service task not found")?;
+            let task = match scheduler.get_task(record.task) {
+                Some(task) => task,
+                None => bail!("running service task not found"),
+            };
             if task.parent_id != parent_id {
-                return Err("running service is not owned by caller");
+                bail!("running service is not owned by caller");
             }
             return Ok(record.task);
         }
-        if record.state == ServiceState::Starting { return Err("service already starting"); }
+        if record.state == ServiceState::Starting { bail!("service already starting"); }
         // A failed userspace service still owns a scheduler task until the explicit
         // recovery path tears it down and reaps it. Do not spawn another
         // process here or recovery could create duplicate service instances.
         if record.state == ServiceState::Failed && record.task != TaskId(0) {
-            return Err("failed service requires recovery");
+            bail!("failed service requires recovery");
         }
         if !matches!(record.state, ServiceState::Declared | ServiceState::Stopped | ServiceState::Failed) {
-            return Err("service is not startable");
+            bail!("service is not startable");
         }
-    } else { return Err("service not declared"); }
+    } else { bail!("service not declared"); }
     let desc = descriptor(id);
-    if desc.abi_version != SERVICE_ABI_VERSION { return Err("unsupported service ABI"); }
+    if desc.abi_version != SERVICE_ABI_VERSION { bail!("unsupported service ABI"); }
     for dependency in desc.dependencies {
-        let dep = SERVICE_RECORDS.lock()[*dependency as usize].ok_or("service dependency not declared")?;
-        if dep.state != ServiceState::Running || dep.task == TaskId(0) { return Err("service dependency is not running"); }
+        let dep = match SERVICE_RECORDS.lock()[*dependency as usize] {
+            Some(dep) => dep,
+            None => bail!("service dependency not declared"),
+        };
+        if dep.state != ServiceState::Running || dep.task == TaskId(0) {
+            bail!("service dependency is not running");
+        }
     }
     let generation = SERVICE_RECORDS.lock()[id as usize].map(|r| r.generation.saturating_add(1)).unwrap_or(1);
     SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Starting, generation });
-    let task_result = crate::task::user::spawn_userspace_service(id as u8, parent_id);
-    let task = match task_result {
+    let task = match crate::task::user::spawn_userspace_service(id as u8, parent_id) {
         Ok(task) if task != TaskId(0) => task,
-        _ => {
-            SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord {
-                id,
-                task: TaskId(0),
-                state: ServiceState::Failed,
-                generation,
-            });
-            return Err("service spawn failed");
-        }
+        Ok(_) => bail!("service spawn returned no task"),
+        Err(reason) => bail!(reason),
     };
     crate::ipc::IPC_ROUTER.lock().register_task(task);
     let process = match crate::task::process::process_for_task(task) {
@@ -290,15 +300,15 @@ fn start_locked(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str
             let _ = scheduler.terminate_task(task, -1);
             let _ = scheduler.reap_child(parent_id, task);
             SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Failed, generation });
-            return Err("service process identity missing");
+            bail!("service process identity missing");
         }
     };
-    if let Err(_) = crate::task::process::set_limits(process, resource_limits(id)) {
+    if crate::task::process::set_limits(process, resource_limits(id)).is_err() {
         let mut scheduler = SCHEDULER.lock();
         let _ = scheduler.terminate_task(task, -1);
         let _ = scheduler.reap_child(parent_id, task);
         SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Failed, generation });
-        return Err("service resource limits rejected");
+        bail!("service resource limits rejected");
     }
     let now = crate::interrupts::get_system_ticks();
     SERVICE_HEARTBEATS[id as usize].store(now, Ordering::Release);
