@@ -246,6 +246,21 @@ pub fn init() {
         let _ = crate::storage::persistent::commit_kind(&record, 6);
         crate::serial_println!("[KEYSTORE] Generated new persistent device key seed.");
     }
+    // Release the global lock before the checks below: they take the seed once
+    // and then assert against the live keystore, and re-locking the same
+    // spinlock while its guard is alive would deadlock the boot.
+    let device_seed = ks.master_seed;
+    drop(ks);
+    // The remaining checks exercise derivation and authenticated encryption.
+    //
+    // WHY they run on a local instance: these operate on fixed literal secrets.
+    // Running them against SECURE_KEYSTORE stored those literals as live
+    // credentials (a "payment credential" and an eSIM subscriber token) in the
+    // production keystore on every boot, where anything that could reach the
+    // keystore could read them back. The assertions are worth keeping; the
+    // credentials are not.
+    let mut ks = SecureKeystore::new();
+    ks.master_seed = device_seed;
 
     // 1. Derive keys across pre-defined slots and verify uniqueness
     let k0 = ks.derive_key(KeySlot::SovereignMasterKey, b"master");
@@ -261,35 +276,36 @@ pub fn init() {
     assert_ne!(k1, k2);
     assert_ne!(k2, k3);
 
-    // 2. Test authenticated encryption and storage
-    let secret_payload = b"INTEROS_SECURE_AUTH_SESSION_TOKEN_9812";
-    ks.store_credential(KeySlot::PaymentCredentialKey, "auth.session", secret_payload)
-        .expect("Failed to store payment credential");
+    // 2. Authenticated encryption round trip
+    let secret_payload = b"selftest-only-material";
+    ks.store_credential(KeySlot::PaymentCredentialKey, "selftest.aead", secret_payload)
+        .expect("Failed to store test credential");
 
     // 3. Retrieve and verify plaintext equality
     let retrieved = ks
-        .retrieve_credential(KeySlot::PaymentCredentialKey, "auth.session")
-        .expect("Failed to retrieve payment credential");
+        .retrieve_credential(KeySlot::PaymentCredentialKey, "selftest.aead")
+        .expect("Failed to retrieve test credential");
     assert_eq!(retrieved.as_slice(), secret_payload);
 
-    // 4. Test tamper detection: flip 1 bit in stored ciphertext
-    if let Some(entry) = ks.entries.iter_mut().find(|e| &e.alias[..e.alias_len] == b"auth.session") {
+    // 4. Tamper detection: flip one bit of stored ciphertext
+    if let Some(entry) = ks.entries.iter_mut().find(|e| &e.alias[..e.alias_len] == b"selftest.aead") {
         if !entry.ciphertext.is_empty() {
-            entry.ciphertext[0] ^= 0x01; // Tamper 1 bit!
+            entry.ciphertext[0] ^= 0x01;
         }
     }
-    let tamper_result = ks.retrieve_credential(KeySlot::PaymentCredentialKey, "auth.session");
     assert_eq!(
-        tamper_result,
+        ks.retrieve_credential(KeySlot::PaymentCredentialKey, "selftest.aead"),
         Err(KeystoreError::IntegrityViolation),
         "Keystore must reject tampered ciphertext with IntegrityViolation"
     );
 
-    // 5. Restore clean entry for production use
-    ks.store_credential(KeySlot::PaymentCredentialKey, "auth.session", secret_payload)
-        .expect("Failed to restore clean credential");
-
-    // Pre-seed eSIM subscriber credential
-    ks.store_credential(KeySlot::TelephonyAuthKey, "esim.zk_subscriber", b"SOV_SUB_AUTH_TOKEN_99")
-        .expect("Failed to store eSIM subscriber credential");
+    // 5. The live keystore must hold no credential material.
+    let live = SECURE_KEYSTORE.lock();
+    assert!(
+        live.entries.is_empty(),
+        "boot-time keystore checks must not leave credentials in the live keystore"
+    );
+    crate::serial_println!(
+        "[KEYSTORE] Derivation and authenticated-encryption checks passed; no credential material stored."
+    );
 }

@@ -243,6 +243,13 @@ impl<'a, B: UpdateBackend> VerifiedUpdate<'a, B> {
 
     pub fn install(backend:&'a mut B, slot:UpdateSlot, tx:&mut UpdateTransaction, payload:&[u8])->Result<(),UpdateError>{
         if tx.state != UpdateState::Verified { return Err(UpdateError::InvalidFormat); }
+        // Enforce the rollback floor here, not only in install_with_boot_policy.
+        // install() is public, so without this a signed but older bundle could be
+        // written and activated by a caller that never consulted the policy.
+        {
+            let floor = UPDATE_ACTIVATION.lock().pending_version;
+            if tx.manifest.version < floor { return Err(UpdateError::Downgrade); }
+        }
         {
             let mut activation = UPDATE_ACTIVATION.lock();
             if slot == activation.active { return Err(UpdateError::ActivationFailed); }
