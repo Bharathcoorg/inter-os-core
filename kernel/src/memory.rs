@@ -105,21 +105,54 @@ pub fn map_mmio_region(
     virtual_base: VirtAddr,
 ) -> Result<VirtAddr, &'static str> {
     if size == 0 { return Err("MMIO mapping size is zero"); }
-    let pages = (size.saturating_add(4095)) / 4096;
+
+    // Round the byte span up without permitting arithmetic wraparound.
+    let pages = size.checked_add(4095).ok_or("MMIO size overflow")? / 4096;
+    let span = pages.checked_mul(4096).ok_or("MMIO span overflow")?;
+    let virt_end = virtual_base.as_u64().checked_add(span as u64).ok_or("MMIO virtual range overflow")?;
+    let phys_end = physical_base.as_u64().checked_add(span as u64).ok_or("MMIO physical range overflow")?;
+    if virt_end == 0 || phys_end == 0 {
+        return Err("MMIO address range overflow");
+    }
+
     let mut mapper_lock = MEMORY_MAPPER.lock();
     let mapper = mapper_lock.as_mut().ok_or("Memory mapper not initialized")?;
-    let _start = Page::<Size4KiB>::containing_address(virtual_base);
+    let mut mapped_pages: alloc::vec::Vec<Page<Size4KiB>> = alloc::vec::Vec::new();
+    let mut frame_allocator = FRAME_ALLOCATOR.lock();
+    let frame_allocator = frame_allocator.as_mut().ok_or("Frame allocator not initialized")?;
+
     for index in 0..pages {
-        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virtual_base.as_u64() + (index as u64) * 4096));
-        let phys = PhysFrame::containing_address(physical_base + (index as u64) * 4096);
+        let virt = virtual_base.as_u64()
+            .checked_add((index as u64).checked_mul(4096).ok_or("MMIO virtual offset overflow")?)
+            .ok_or("MMIO virtual address overflow")?;
+        let phys = physical_base.as_u64()
+            .checked_add((index as u64).checked_mul(4096).ok_or("MMIO physical offset overflow")?)
+            .ok_or("MMIO physical address overflow")?;
+
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt));
+        let phys_frame = PhysFrame::containing_address(PhysAddr::new(phys));
         let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE;
-        let map = unsafe { mapper.map_to(page, phys, flags, FRAME_ALLOCATOR.lock().as_mut().ok_or("Frame allocator not initialized")?) };
-        match map {
-            Ok(flush) => flush.flush(),
-            Err(MapToError::PageAlreadyMapped(_)) => return Err("MMIO virtual range already mapped"),
-            Err(_) => return Err("MMIO page mapping failed"),
+
+        match unsafe { mapper.map_to(page, phys_frame, flags, frame_allocator) } {
+            Ok(flush) => {
+                flush.flush();
+                mapped_pages.push(page);
+            }
+            Err(MapToError::PageAlreadyMapped(_)) => {
+                for mapped in mapped_pages.drain(..).rev() {
+                    let _ = unsafe { mapper.unmap(mapped) }.map(|(_, flush)| flush.flush());
+                }
+                return Err("MMIO virtual range already mapped");
+            }
+            Err(_) => {
+                for mapped in mapped_pages.drain(..).rev() {
+                    let _ = unsafe { mapper.unmap(mapped) }.map(|(_, flush)| flush.flush());
+                }
+                return Err("MMIO page mapping failed");
+            }
         }
     }
+
     Ok(virtual_base)
 }
 
