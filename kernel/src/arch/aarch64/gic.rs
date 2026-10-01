@@ -46,25 +46,25 @@ impl Gicv2 {
 
     #[inline]
     unsafe fn gicd_read(&self, offset: usize) -> u32 {
-        let ptr = (self.gicd_base + offset) as *const u32;
+        let ptr = self.gicd_base.checked_add(offset).unwrap_or(0) as *const u32;
         core::ptr::read_volatile(ptr)
     }
 
     #[inline]
     unsafe fn gicd_write(&self, offset: usize, val: u32) {
-        let ptr = (self.gicd_base + offset) as *mut u32;
+        let ptr = self.gicd_base.checked_add(offset).unwrap_or(0) as *mut u32;
         core::ptr::write_volatile(ptr, val);
     }
 
     #[inline]
     unsafe fn gicc_read(&self, offset: usize) -> u32 {
-        let ptr = (self.gicc_base + offset) as *const u32;
+        let ptr = self.gicc_base.checked_add(offset).unwrap_or(0) as *const u32;
         core::ptr::read_volatile(ptr)
     }
 
     #[inline]
     unsafe fn gicc_write(&self, offset: usize, val: u32) {
-        let ptr = (self.gicc_base + offset) as *mut u32;
+        let ptr = self.gicc_base.checked_add(offset).unwrap_or(0) as *mut u32;
         core::ptr::write_volatile(ptr, val);
     }
 
@@ -115,7 +115,7 @@ impl Gicv2 {
     /// Enables a specific hardware interrupt IRQ number.
     pub fn enable_irq(&self, irq: u32) {
         if self.gicd_base != 0 {
-            let reg_offset = GICD_ISENABLER + ((irq / 32) as usize) * 4;
+            let Some(reg_offset) = (irq / 32).checked_mul(4).and_then(|n| GICD_ISENABLER.checked_add(n as usize)) else { return; };
             let bit = 1 << (irq % 32);
             unsafe {
                 self.gicd_write(reg_offset, bit);
@@ -126,7 +126,7 @@ impl Gicv2 {
     /// Disables a specific hardware interrupt IRQ number.
     pub fn disable_irq(&self, irq: u32) {
         if self.gicd_base != 0 {
-            let reg_offset = GICD_ICENABLER + ((irq / 32) as usize) * 4;
+            let Some(reg_offset) = (irq / 32).checked_mul(4).and_then(|n| GICD_ICENABLER.checked_add(n as usize)) else { return; };
             let bit = 1 << (irq % 32);
             unsafe {
                 self.gicd_write(reg_offset, bit);
