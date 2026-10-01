@@ -122,7 +122,13 @@ pub unsafe fn apply_relocations() -> usize {
     let mut load_count = 0usize;
 
     for i in 0..e_phnum {
-        let phdr_ptr = (base + (e_phoff as u64) + (i * e_phentsize) as u64) as *const Elf64Phdr;
+        let Some(phdr_addr) = base
+            .checked_add(e_phoff as u64)
+            .and_then(|addr| addr.checked_add((i * e_phentsize) as u64)) else {
+            crate::serial_println!("[RELOC] phdr address overflow");
+            return 0;
+        };
+        let phdr_ptr = phdr_addr as *const Elf64Phdr;
         let p_type = core::ptr::read_unaligned(core::ptr::addr_of!((*phdr_ptr).p_type));
         let p_flags = core::ptr::read_unaligned(core::ptr::addr_of!((*phdr_ptr).p_flags));
         let p_vaddr = core::ptr::read_unaligned(core::ptr::addr_of!((*phdr_ptr).p_vaddr));
@@ -169,12 +175,19 @@ pub unsafe fn apply_relocations() -> usize {
     //
     // The dynamic table must be fully inside a PT_LOAD, otherwise we would be reading
     // unmapped memory based on an untrusted offset.
-    let dyn_end = dyn_vaddr.saturating_add(dyn_memsz);
+    let Some(dyn_end) = dyn_vaddr.checked_add(dyn_memsz) else {
+        crate::serial_println!("[RELOC] PT_DYNAMIC bounds overflow");
+        return 0;
+    };
     if dyn_vaddr < lo_start || dyn_end > lo_end {
         crate::serial_println!("[RELOC] PT_DYNAMIC outside PT_LOAD bounds");
         return 0;
     }
-    let dyn_ptr = (base + dyn_vaddr) as *const Elf64Dyn;
+    let Some(dyn_addr) = base.checked_add(dyn_vaddr) else {
+        crate::serial_println!("[RELOC] PT_DYNAMIC address overflow");
+        return 0;
+    };
+    let dyn_ptr = dyn_addr as *const Elf64Dyn;
     let dyn_count = (dyn_memsz as usize) / core::mem::size_of::<Elf64Dyn>();
 
     let mut rela_vaddr: u64 = 0;
@@ -224,7 +237,12 @@ pub unsafe fn apply_relocations() -> usize {
     core::arch::asm!("mov cr0, {}", in(reg) (cr0 & !(1u64 << 16)), options(nomem, nostack, preserves_flags));
 
     // 7. Apply all R_X86_64_RELATIVE relocations
-    let rela_ptr = (base + rela_vaddr) as *const Elf64Rela;
+    let Some(rela_addr) = base.checked_add(rela_vaddr) else {
+        crate::serial_println!("[RELOC] DT_RELA address overflow");
+        let _ = core::arch::asm!("mov cr0, {}", in(reg) cr0, options(nomem, nostack, preserves_flags));
+        return 0;
+    };
+    let rela_ptr = rela_addr as *const Elf64Rela;
     let rela_count = (rela_size as usize) / core::mem::size_of::<Elf64Rela>();
     let mut applied_count: usize = 0;
     let mut skipped_count: usize = 0;
