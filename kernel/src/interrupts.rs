@@ -264,18 +264,32 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    let rip = stack_frame.instruction_pointer.as_u64();
+    let rsp = stack_frame.stack_pointer.as_u64();
     let is_user = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
+
     if is_user {
-        serial_println!("\n[USER EXCEPTION: GENERAL PROTECTION FAULT (code: {})]", error_code);
-        serial_println!("Faulting RIP: {:?}", stack_frame.instruction_pointer);
-        serial_println!("[SECURITY] Terminating faulted user process to protect microkernel integrity.");
+        if !fault_report_bytes(b"\\r\\n[USER GENERAL PROTECTION FAULT]\\r\\n")
+            || !fault_report_line(b"RIP=", rip)
+            || !fault_report_line(b"RSP=", rsp)
+            || !fault_report_line(b"ERR=", error_code)
+            || !fault_report_bytes(b"Terminating user task.\\r\\n")
+        {
+            halt_after_fault_report_failure();
+        }
         crate::task::terminate_current();
+        halt_after_fault_report_failure();
     }
 
-    panic!(
-        "[CPU EXCEPTION: GENERAL PROTECTION FAULT] (code: {})\n{:#?}",
-        error_code, stack_frame
-    );
+    if !fault_report_bytes(b"\\r\\n[KERNEL GENERAL PROTECTION FAULT]\\r\\n")
+        || !fault_report_line(b"RIP=", rip)
+        || !fault_report_line(b"RSP=", rsp)
+        || !fault_report_line(b"ERR=", error_code)
+        || !fault_report_bytes(b"HALT\\r\\n")
+    {
+        halt_after_fault_report_failure();
+    }
+    halt_after_fault_report_failure()
 }
 
 // -----------------------------------------------------------------------------
