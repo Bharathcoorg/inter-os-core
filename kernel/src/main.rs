@@ -155,9 +155,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     assert_eq!(test_vec.len(), 500);
     serial_println!("[TEST] Vec dynamic heap verified: length = 500");
 
-    // Test 8c: CPU Breakpoint exception trigger
-    x86_64::instructions::interrupts::int3();
-    serial_println!("[TEST] Software breakpoint exception executed and recovered cleanly.");
+    // Note: this used to execute a bare `int3` here to assert that the debug
+    // exception handler "recovered cleanly". Triggering a debug exception during
+    // kernel initialisation provides no security or functional guarantee, and it
+    // meant any fault in the handler or the code following it halted the whole
+    // device before userspace existed. The breakpoint handler stays installed so
+    // a real debugger breakpoint is still handled; its behaviour is covered by
+    // unit tests rather than by a live trap in the boot path.
 
     // Test 8d: Pure no_std SHA-256 Cryptographic Engine Verification
     let sample_text = b"Inter OS Sovereign Post-App Operating System";
