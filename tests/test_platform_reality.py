@@ -452,5 +452,23 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertIn("no digitizer is attached", main)
         self.assertIn("no secure element is bound", main)
 
+    def test_x86_page_fault_report_path_is_allocation_free_and_bounded(self):
+        interrupts = self.read("kernel/src/interrupts.rs")
+        handler = interrupts[interrupts.index("extern \\"x86-interrupt\\" fn page_fault_handler"):interrupts.index("extern \\"x86-interrupt\\" fn general_protection_fault_handler")]
+        # The fault reporter must not recurse through formatting, locks, panic
+        # formatting, or the bootloader serial path after paging has failed.
+        self.assertIn("fault_report_byte", handler)
+        self.assertIn("MAX_BYTES: usize = 256", handler)
+        self.assertIn("for _ in 0..10_000", handler)
+        self.assertIn("Cr2::read().as_u64()", handler)
+        self.assertIn("stack_frame.instruction_pointer.as_u64()", handler)
+        self.assertIn("stack_frame.stack_pointer.as_u64()", handler)
+        self.assertIn("error_code.bits()", handler)
+        self.assertNotIn("serial_println!", handler)
+        self.assertNotIn("panic!(", handler)
+        self.assertNotIn("{:#?}", handler)
+        self.assertIn("crate::task::terminate_current()", handler)
+        self.assertIn("halt_after_fault_report_failure()", handler)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
