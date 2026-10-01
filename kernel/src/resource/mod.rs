@@ -26,14 +26,27 @@ pub static BATTERY_GAUGE: Mutex<BatteryFuelGauge> = Mutex::new(BatteryFuelGauge:
 
 /// Initializes the Resource Manager and validates priority rules via self-tests.
 pub fn init() {
-    let mut rm = RESOURCE_MANAGER.lock();
+    // 1. Nominal conditions test.
+    //
+    // Runs on a local instance and states its own premise. The global manager
+    // starts with no fuel gauge bound, so asserting against its default would
+    // either invent a battery level or read the absent case as low battery.
+    let mut rm = ResourceManager::new();
+    rm.update_battery(85, false);
+    rm.update_thermal(30);
 
-    // 1. Nominal conditions test
     assert!(rm.is_tier_permitted(WorkloadTier::ForegroundUserApp));
     assert!(rm.is_tier_permitted(WorkloadTier::BackgroundSync));
     assert!(rm.is_tier_permitted(WorkloadTier::BackgroundNetwork));
     assert!(rm.is_tier_permitted(WorkloadTier::BackgroundTasks));
     serial_println!("[TEST] Resource Manager Nominal State: All workload tiers permitted.");
+
+    // The live manager must still report no telemetry after this self-test.
+    {
+        let live = RESOURCE_MANAGER.lock();
+        assert!(!live.battery.present, "self-test must not publish a battery level");
+        assert!(!live.thermal.present, "self-test must not publish a temperature");
+    }
 
     // 2. Low-battery test (< 20% discharging)
     rm.update_battery(14, false);

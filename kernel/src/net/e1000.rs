@@ -211,7 +211,10 @@ impl E1000Device {
 
     pub fn eeprom_word(&self, address: u8) -> u16 {
         unsafe {
-            write32(self.base_vaddr, EERD, ((address as u32) << 8) | 1);
+            // EERD bit 31 is Start; bits 8-15 carry the address. Without the Start
+            // bit the device never begins the transfer, the polling loop below
+            // always timed out, and every EEPROM word read back as zero.
+            write32(self.base_vaddr, EERD, (1 << 31) | ((address as u32) << 8));
             for _ in 0..100_000 {
                 let value = read32(self.base_vaddr, EERD);
                 if value & 1 != 0 { return (value >> 16) as u16; }
@@ -223,22 +226,30 @@ impl E1000Device {
     pub fn mac_address(&self) -> MacAddress { self.mac }
 
     /// Reads the permanent station address from the E1000 EEPROM.
-    pub unsafe fn read_mac_from_eeprom(base_vaddr: usize) -> MacAddress {
-        let read = |address: u8| -> u16 {
-            write32(base_vaddr, EERD, ((address as u32) << 8) | 1);
-            for _ in 0..100_000 {
-                let value = read32(base_vaddr, EERD);
-                if value & 1 != 0 { return (value >> 16) as u16; }
-            }
-            0
-        };
-        let w0 = read(0);
-        let w1 = read(1);
-        let w2 = read(2);
-        MacAddress([(w0 & 0xff) as u8, (w0 >> 8) as u8,
-                    (w1 & 0xff) as u8, (w1 >> 8) as u8,
-                    (w2 & 0xff) as u8, (w2 >> 8) as u8])
-    }
+pub unsafe fn read_mac_from_eeprom(base_vaddr: usize) -> MacAddress {
+    let read = |address: u8| -> u16 {
+        // EERD bit 31 is Start; bits 8-15 carry the address; bit 0 of the read
+        // value reports Done. The Start bit was previously omitted, so every
+        // read timed out and returned zero.
+        write32(base_vaddr, EERD, (1 << 31) | ((address as u32) << 8));
+        for _ in 0..100_000 {
+            let value = read32(base_vaddr, EERD);
+            if value & 1 != 0 { return (value >> 16) as u16; }
+        }
+        0
+    };
+    // The MAC address lives in EEPROM words 3, 4 and 5. Words 0..2 hold the
+    // checksum and the EEPROM signature, so reading them yields zero on real
+    // hardware and the device then refused to attach, leaving every packet on
+    // the loopback path.
+    let w3 = read(3);
+    let w4 = read(4);
+    let w5 = read(5);
+    // Byte order within each word is low byte first.
+    MacAddress([(w3 & 0xff) as u8, (w3 >> 8) as u8,
+                (w4 & 0xff) as u8, (w4 >> 8) as u8,
+                (w5 & 0xff) as u8, (w5 >> 8) as u8])
+}
 }
 
 impl NetworkDevice for E1000Device {
@@ -272,14 +283,25 @@ impl NetworkDevice for E1000Device {
             let desc = &mut *self.rx_desc.add(idx);
             if desc.status & RX_EOP == 0 { return Err(NetError::NoPacketAvailable); }
             let len = desc.length as usize;
-            if len > out.len() { return Err(NetError::BufferTooSmall); }
-            let buffer = self.rx_buffer_phys + (idx * MAX_PACKET_SIZE) as u64;
-            let buffer_virt = physical_to_virtual(PhysAddr::new(buffer)).as_ptr();
-            core::ptr::copy_nonoverlapping(buffer_virt, out.as_mut_ptr(), len);
+            // WHY recycle first: returning BufferTooSmall before reclaiming the
+            // descriptor left the ring head parked on this buffer forever, so a
+            // single oversized frame permanently wedged receive.
             desc.status = 0;
             compiler_fence(Ordering::Release);
             write32(self.base_vaddr, RDT, idx as u32);
             self.rx_index = ((idx + 1) % RX_DESC_COUNT) as u16;
+
+            if len > out.len() { return Err(NetError::BufferTooSmall); }
+            if len > MAX_PACKET_SIZE { return Err(NetError::InvalidPacket); }
+
+            // The descriptor's address is written by the device. Bound it to the
+            // buffer this ring was built with rather than trusting it, so a
+            // corrupt descriptor cannot redirect the copy.
+            let expected = self.rx_buffer_phys + (idx * MAX_PACKET_SIZE) as u64;
+            if desc.addr != expected { return Err(NetError::InvalidPacket); }
+
+            let buffer_virt = physical_to_virtual(PhysAddr::new(expected)).as_ptr();
+            core::ptr::copy_nonoverlapping(buffer_virt, out.as_mut_ptr(), len);
             Ok(len)
         }
     }

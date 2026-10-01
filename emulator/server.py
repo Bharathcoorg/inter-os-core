@@ -768,10 +768,24 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
     ]
     if arch == "x86_64":
         cmd.extend(["-drive", f"format=raw,file={img_path}"])
+        # A real E1000 NIC on user-mode networking. Without one the guest has no
+        # network hardware at all and every packet stays on the kernel loopback
+        # path, which is not the same thing as having a network.
+        cmd.extend([
+            "-netdev", "user,id=net0",
+            "-device", "e1000,netdev=net0,mac=52:54:00:12:34:56",
+        ])
     elif arch == "aarch64":
         cmd.extend(["-machine", "virt", "-cpu", "cortex-a53", "-kernel", img_path])
     elif arch == "riscv64":
         cmd.extend(["-machine", "virt", "-cpu", "rv64", "-bios", "default", "-kernel", img_path])
+
+    # Give every architecture a real display device. The `virt` machine has no
+    # framebuffer by default, so Device Studio's phone viewport had nothing to
+    # show and no VNC pixels to stream.
+    if arch in ("aarch64", "riscv64"):
+        cmd.extend(["-device", "virtio-gpu-pci", "-device", "usb-ehci,id=usb0"])
+        cmd.extend(["-device", "usb-kbd", "-device", "usb-tablet", "bus=usb0.0"])
 
     try:
         serial_lines.clear()

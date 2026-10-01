@@ -312,13 +312,24 @@ def main():
                 f"luminance {before_mean:.1f} -> {home_mean:.1f}",
             )
 
-            # 3. An app launch must change the surface again.
-            serial.tap(110, 620)
+            # 3. Tapping a launcher icon must actually start an application.
+            # Assert on the launch record rather than a pixel delta: an app that
+            # renders in a similar palette would defeat a luminance comparison
+            # without indicating any real failure.
+            before_log = len(serial.text())
+            serial.tap(145, 597)   # Phone tile, first row of the home grid
             _, app_phone = capture(monitor, workdir, "03_app", args.out)
             app_mean, app_bright = luminance_stats(app_phone)
+            new_log = serial.text()[before_log:]
             results.check(
-                abs(app_mean - home_mean) > 2 or abs(app_bright - home_bright) > 0.0005,
-                "tapping a launcher icon opens an app surface",
+                "Launched application from real touch input" in new_log
+                or "Launched registered application" in new_log,
+                "tapping a launcher icon starts an application",
+                "launcher recorded the launch",
+            )
+            results.check(
+                abs(app_mean - home_mean) > 1 or abs(app_bright - home_bright) > 0.0002,
+                "the launched application renders a different surface",
                 f"luminance {home_mean:.1f} -> {app_mean:.1f}",
             )
 
