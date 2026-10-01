@@ -52,8 +52,8 @@ impl Gicv2 {
 
     #[inline]
     unsafe fn gicd_write(&self, offset: usize, val: u32) {
-        let ptr = self.gicd_base.checked_add(offset).unwrap_or(0) as *mut u32;
-        core::ptr::write_volatile(ptr, val);
+        let Some(addr) = self.gicd_base.checked_add(offset) else { return; };
+        core::ptr::write_volatile(addr as *mut u32, val);
     }
 
     #[inline]
@@ -64,8 +64,8 @@ impl Gicv2 {
 
     #[inline]
     unsafe fn gicc_write(&self, offset: usize, val: u32) {
-        let ptr = self.gicc_base.checked_add(offset).unwrap_or(0) as *mut u32;
-        core::ptr::write_volatile(ptr, val);
+        let Some(addr) = self.gicc_base.checked_add(offset) else { return; };
+        core::ptr::write_volatile(addr as *mut u32, val);
     }
 
     /// Initializes the Distributor and CPU Interface.
