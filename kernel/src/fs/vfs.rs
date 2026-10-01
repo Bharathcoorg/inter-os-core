@@ -269,6 +269,22 @@ impl Vfs {
         Ok(id)
     }
 
+    /// Durability barrier for an open descriptor.
+    ///
+    /// Confirms the descriptor belongs to `task_id` before flushing, so a task
+    /// cannot force a flush on behalf of another task's descriptor. The flush
+    /// itself is filesystem-wide because a write may have updated any inode.
+    pub fn fsync_for_task(&self, task_id: TaskId, fd: FileDescriptor) -> Result<(), FsError> {
+        let table = self
+            .task_file_tables
+            .get(&task_id)
+            .ok_or(FsError::InvalidFd)?;
+        match table.get(fd.0 as usize) {
+            Some(Some(_)) => self.sync(),
+            _ => Err(FsError::InvalidFd),
+        }
+    }
+
     /// Explicitly flushes dirty VFS data and metadata snapshots to persistent storage media.
     pub fn sync(&self) -> Result<(), FsError> {
         self.persist_data_snapshot()?;

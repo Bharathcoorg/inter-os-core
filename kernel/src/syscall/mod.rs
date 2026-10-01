@@ -88,6 +88,7 @@ pub enum SyscallNumber {
     FsWrite = 10,
     FsClose = 11,
     FsStat = 12,
+    FsSync = 125,
     BlockRead = 13,
     VerifyPackage = 14,
     WasmExecute = 16,
@@ -634,13 +635,50 @@ pub fn sys_fs_write(
     drop(sched);
 
     let mut vfs = VFS.lock();
-    vfs.write(task_id, &cap_table, cap_slot, fd, buf)
+    let written = vfs
+        .write(task_id, &cap_table, cap_slot, fd, buf)
         .map_err(|e| match e {
             FsError::CapabilityError(_) | FsError::PermissionDenied => SyscallResult::PermissionDenied,
             FsError::ReadOnlyFileSystem => SyscallResult::ReadOnlyFs,
             FsError::InvalidFd => SyscallResult::InvalidFd,
             _ => SyscallResult::InvalidArguments,
-        })
+        })?;
+
+    // Persist before reporting success.
+    //
+    // Writes land in an in-memory snapshot. Nothing else on the write path
+    // called sync(), so a successful write existed only in RAM and was lost on
+    // reboot. sync() copies the snapshot out and issues the ATA CACHE FLUSH, so
+    // returning before it completes would report a durability the device does
+    // not have.
+    if written > 0 {
+        if let Err(e) = vfs.sync() {
+            crate::serial_println!("[FS] durability flush failed after write: {:?}", e);
+            return Err(SyscallResult::DeviceError);
+        }
+    }
+    Ok(written)
+}
+
+/// Flushes filesystem data and metadata to persistent storage.
+///
+/// The write path already flushes, so this is a barrier for callers that want
+/// one explicitly before a rename, a shutdown or a power transition.
+pub fn sys_fs_fsync(fd: FileDescriptor) -> SyscallResult {
+    let sched = SCHEDULER.lock();
+    let current = match sched.current_task() {
+        Some(t) => t,
+        None => return SyscallResult::PermissionDenied,
+    };
+    let task_id = current.id;
+    drop(sched);
+
+    let vfs = VFS.lock();
+    match vfs.fsync_for_task(task_id, fd) {
+        Ok(()) => SyscallResult::Success,
+        Err(FsError::InvalidFd) => SyscallResult::InvalidFd,
+        Err(_) => SyscallResult::DeviceError,
+    }
 }
 
 /// Closes an open file descriptor.
@@ -871,11 +909,17 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 Err(e) => e as i64,
             }
         }
-        11 => {
-            // FsClose: a1 = fd
-            let fd = FileDescriptor(a1 as u32);
-            sys_fs_close(fd) as i64
-        }
+11 => {
+        // FsClose: a1 = fd
+        let fd = FileDescriptor(a1 as u32);
+        sys_fs_close(fd) as i64
+    }
+    125 => {
+        // FsSync: a1 = fd
+        let fd = FileDescriptor(a1 as u32);
+        sys_fs_fsync(fd) as i64
+    }
+
         13 => {
             // BlockRead: a1 = cap_slot, a2 = lba, a3 = buf_ptr
             let cap_slot = a1 as usize;

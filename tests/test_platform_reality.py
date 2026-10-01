@@ -240,6 +240,30 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertIn("is_hardware_backed", keystore)
         self.assertIn("software-backed keystore", keystore)
 
+    def test_writes_are_durable_before_they_report_success(self):
+        syscall = self.read("kernel/src/syscall/mod.rs")
+        vfs = self.read("kernel/src/fs/vfs.rs")
+        sdk = self.read("sdk/rust/interos-std/src/lib.rs")
+
+        # A write lands in an in-memory snapshot; only sync() copies it out and
+        # issues the ATA CACHE FLUSH. Nothing else on the write path called it,
+        # so a successful write existed only in RAM and was lost on reboot.
+        write = syscall[syscall.index("pub fn sys_fs_write("):]
+        write = write[: write.index("\npub fn ") if "\npub fn " in write else len(write)]
+        self.assertIn("vfs.sync()", write)
+        self.assertIn("written > 0", write)
+        # A failed flush must not be reported as a successful write.
+        self.assertIn("SyscallResult::DeviceError", write)
+
+        # The durability barrier must be reachable from userspace and must verify
+        # descriptor ownership before flushing on a task's behalf.
+        self.assertIn("pub fn fsync_for_task", vfs)
+        self.assertIn("pub fn sys_fs_fsync", syscall)
+        self.assertIn("pub fn fs_fsync", sdk)
+        self.assertIn("FsSync", sdk)
+        # The flush must actually reach the controller.
+        self.assertIn("drive.flush()", vfs)
+
     def test_no_internal_gate_labels_enter_public_source(self):
         for path in ["README.md", "kernel/src/platform.rs", "tests/test_platform_reality.py"]:
             text = self.read(path).lower()

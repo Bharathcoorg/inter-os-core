@@ -77,6 +77,7 @@ pub enum SyscallNumber {
     FsStat = 12,
     BlockRead = 13,
     VerifyPackage = 14,
+    FsSync = 125,
     WasmExecute = 16,
     ResourceQuery = 19,
     NetSocket = 21,
@@ -1683,6 +1684,21 @@ pub fn fs_write(cap_slot: usize, fd: u32, buf: &[u8]) -> Result<usize, i64> {
 /// Closes an open file descriptor.
 pub fn fs_close(fd: u32) -> Result<(), i64> {
     let ret = unsafe { syscall1(SyscallNumber::FsClose, fd as u64) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Flushes an open file's data and metadata to persistent storage.
+///
+/// Writes already flush before they report success, so this is a barrier for
+/// callers that need one before a rename, a shutdown or a power transition.
+/// A flush failure is reported rather than ignored: silently discarding it would
+/// claim a durability the device does not have.
+pub fn fs_fsync(fd: u32) -> Result<(), i64> {
+    let ret = unsafe { syscall1(SyscallNumber::FsSync, fd as u64) };
     if ret == 0 {
         Ok(())
     } else {
