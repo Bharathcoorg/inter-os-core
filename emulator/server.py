@@ -1534,6 +1534,26 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
 
         super().do_GET()
 
+    def _drain_body(self, content_length):
+        """Reads and discards a request body.
+
+        A handler that rejects a request without consuming its body leaves those
+        bytes in the socket, so the next request on the same keep-alive
+        connection is parsed against a desynchronised stream and the client sees
+        a reset instead of a response.
+        """
+        if content_length <= 0:
+            return
+        try:
+            remaining = int(content_length)
+            while remaining > 0:
+                chunk = self.rfile.read(min(remaining, 65536))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except (OSError, ValueError):
+            pass
+
     def do_POST(self):
         global serial_lines
 
@@ -1570,6 +1590,11 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             content_length = int(self.headers.get('Content-Length', 0))
             raw_pkg_name = self.headers.get('X-Package-Name', 'unnamed.rapp')
             if '..' in raw_pkg_name or '/' in raw_pkg_name or '\\' in raw_pkg_name:
+                # Drain the request body before responding. Leaving it unread
+                # desyncs the next request on this keep-alive connection, which
+                # surfaces to the client as a connection reset instead of the
+                # intended rejection.
+                self._drain_body(content_length)
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')
