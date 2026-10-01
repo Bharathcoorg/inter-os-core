@@ -89,8 +89,19 @@ impl<'a> ArmFdtParser<'a> {
             return Err(FdtError::UnsupportedVersion(version));
         }
 
-        if (totalsize as usize) > data.len() {
+        if (totalsize as usize) > data.len() || (totalsize as usize) < core::mem::size_of::<FdtHeader>() {
             return Err(FdtError::BufferTooShort);
+        }
+        let total = totalsize as usize;
+        let struct_start = off_dt_struct as usize;
+        let struct_size = size_dt_struct as usize;
+        let strings_start = off_dt_strings as usize;
+        let strings_size = size_dt_strings as usize;
+        if struct_start.checked_add(struct_size).filter(|end| *end <= total).is_none()
+            || strings_start.checked_add(strings_size).filter(|end| *end <= total).is_none()
+            || off_mem_rsvmap as usize >= total
+        {
+            return Err(FdtError::CorruptedStructure);
         }
 
         let header = FdtHeader {
@@ -133,7 +144,7 @@ impl<'a> ArmFdtParser<'a> {
     /// Finds a node by exact name or path prefix.
     pub fn find_node_by_name(&self, target_name: &str) -> Result<ArmFdtNode<'a>, FdtError> {
         let mut offset = self.header.off_dt_struct as usize;
-        let limit = offset + self.header.size_dt_struct as usize;
+        let limit = offset.checked_add(self.header.size_dt_struct as usize).ok_or(FdtError::CorruptedStructure)?;
 
         while offset + 4 <= limit {
             let token = u32::from_be_bytes([
@@ -151,9 +162,11 @@ impl<'a> ArmFdtParser<'a> {
                         offset += 1;
                     }
                     let name = core::str::from_utf8(&self.data[node_start..offset]).unwrap_or("");
-                    offset = (offset + 4) & !3; // Align to 4 bytes
+                    offset = offset.checked_add(3).map(|v| v & !3).ok_or(FdtError::CorruptedStructure)?;
 
-                    if name == target_name || name.starts_with(target_name) {
+                    let exact_unit_name = name == target_name
+                        || (name.starts_with(target_name) && name.as_bytes().get(target_name.len()) == Some(&b'@'));
+                    if exact_unit_name {
                         return Ok(ArmFdtNode {
                             name,
                             struct_offset: node_start,
@@ -171,7 +184,7 @@ impl<'a> ArmFdtParser<'a> {
                         self.data[offset + 3],
                     ]) as usize;
                     offset += 8; // Skip len and nameoff
-                    offset = (offset + len + 3) & !3; // Skip value and align
+                    offset = offset.checked_add(len).and_then(|v| v.checked_add(3)).map(|v| v & !3).ok_or(FdtError::CorruptedStructure)?; // Skip value and align
                 }
                 FDT_END_NODE | FDT_NOP => {}
                 FDT_END => break,
@@ -223,13 +236,13 @@ impl<'a> ArmFdtParser<'a> {
     /// Retrieves a raw property slice by name from a given node.
     pub fn get_node_property(&self, node: &ArmFdtNode<'a>, prop_name: &str) -> Result<&'a [u8], FdtError> {
         let mut offset = node.struct_offset;
-        let limit = self.header.off_dt_struct as usize + self.header.size_dt_struct as usize;
+        let limit = self.header.off_dt_struct as usize.checked_add(self.header.size_dt_struct as usize).ok_or(FdtError::CorruptedStructure)?;
 
         // Skip node name
         while offset < limit && self.data[offset] != 0 {
             offset += 1;
         }
-        offset = (offset + 4) & !3; // Align to 4 bytes
+        offset = offset.checked_add(3).map(|v| v & !3).ok_or(FdtError::CorruptedStructure)?; // Align to 4 bytes
 
         let mut depth = 1;
         while offset + 4 <= limit && depth > 0 {
@@ -247,7 +260,7 @@ impl<'a> ArmFdtParser<'a> {
                     while offset < limit && self.data[offset] != 0 {
                         offset += 1;
                     }
-                    offset = (offset + 4) & !3;
+                    offset = offset.checked_add(3).map(|v| v & !3).ok_or(FdtError::CorruptedStructure)?;
                 }
                 FDT_END_NODE => {
                     depth -= 1;
@@ -271,8 +284,11 @@ impl<'a> ArmFdtParser<'a> {
                     offset += 8;
 
                     let current_prop_name = self.get_string(name_off).unwrap_or("");
-                    let val_slice = &self.data[offset..offset + val_len];
-                    offset = (offset + val_len + 3) & !3;
+                    let val_end = offset.checked_add(val_len).ok_or(FdtError::CorruptedStructure)?;
+                    if val_end > limit { return Err(FdtError::CorruptedStructure); }
+                    let val_slice = &self.data[offset..val_end];
+                    offset = val_end.checked_add(3).map(|v| v & !3).ok_or(FdtError::CorruptedStructure)?;
+                    if offset > limit { return Err(FdtError::CorruptedStructure); }
 
                     if depth == 1 && current_prop_name == prop_name {
                         return Ok(val_slice);
