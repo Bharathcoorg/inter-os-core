@@ -236,7 +236,7 @@ impl<'a> ArmFdtParser<'a> {
     /// Retrieves a raw property slice by name from a given node.
     pub fn get_node_property(&self, node: &ArmFdtNode<'a>, prop_name: &str) -> Result<&'a [u8], FdtError> {
         let mut offset = node.struct_offset;
-        let limit = self.header.off_dt_struct as usize.checked_add(self.header.size_dt_struct as usize).ok_or(FdtError::CorruptedStructure)?;
+        let limit = (self.header.off_dt_struct as usize).checked_add(self.header.size_dt_struct as usize).ok_or(FdtError::CorruptedStructure)?;
 
         // Skip node name
         while offset < limit && self.data[offset] != 0 {
