@@ -549,6 +549,28 @@ def transfer_rapp_to_guest(package_bytes, package_id, timeout=30):
 
 WORKSPACE_ROOT = os.path.dirname(DIRECTORY)
 
+def _resolve_artifact(*candidates):
+    """Returns the newest existing artifact among the given relative paths.
+
+    The standalone kernels are excluded from the Cargo workspace, so their real
+    build output lives under their own crate's target directory while a stale
+    copy may still sit in the workspace target directory. Picking the newest
+    existing file avoids booting an artifact that is no longer being built.
+    """
+    best, best_mtime = None, None
+    for rel in candidates:
+        path = os.path.join(WORKSPACE_ROOT, rel)
+        if not os.path.exists(path):
+            continue
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if best_mtime is None or mtime > best_mtime:
+            best, best_mtime = path, mtime
+    return best
+
+
 SUPPORTED_PROFILES = {
     "x86_64": {
         "name": "InterOS x86_64 PC / VM",
@@ -570,7 +592,15 @@ SUPPORTED_PROFILES = {
         "cpu": "cortex-a53",
         "ram": 512,
         "boot_type": "Direct Kernel ELF",
-        "image": os.path.join(WORKSPACE_ROOT, "target", "aarch64-unknown-none", "debug", "kernel-aarch64"),
+        # Prefer the flat arm64 Image: the arm64 boot protocol hands the device
+        # tree to the kernel in x0, whereas an ELF is entered directly with
+        # x0 = 0 and no device tree at all.
+        "image": _resolve_artifact(
+            os.path.join("target", "kernel-aarch64.img"),
+            os.path.join("kernel-aarch64", "target", "aarch64-unknown-none", "debug", "kernel-aarch64.img"),
+            os.path.join("kernel-aarch64", "target", "aarch64-unknown-none", "debug", "kernel-aarch64"),
+            os.path.join("target", "aarch64-unknown-none", "debug", "kernel-aarch64"),
+        ),
         "status": "Source-level architecture target; runtime validation pending",
     },
     "riscv64": {
@@ -580,7 +610,10 @@ SUPPORTED_PROFILES = {
         "cpu": "rv64",
         "ram": 256,
         "boot_type": "OpenSBI / Direct Kernel ELF",
-        "image": os.path.join(WORKSPACE_ROOT, "target", "riscv64gc-unknown-none-elf", "debug", "kernel-riscv64"),
+        "image": _resolve_artifact(
+            os.path.join("kernel-riscv64", "target", "riscv64gc-unknown-none-elf", "debug", "kernel-riscv64"),
+            os.path.join("target", "riscv64gc-unknown-none-elf", "debug", "kernel-riscv64"),
+        ),
         "status": "Source-level architecture target; runtime validation pending",
     },
 }
