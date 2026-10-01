@@ -128,13 +128,14 @@ impl<'a> ArmFdtParser<'a> {
     /// Reads a null-terminated string from the DTB strings block.
     pub fn get_string(&self, offset: usize) -> Option<&'a str> {
         let base = self.header.off_dt_strings as usize;
+        let limit = base.checked_add(self.header.size_dt_strings as usize)?;
         let start = base.checked_add(offset)?;
-        if start >= self.data.len() {
+        if start >= limit || limit > self.header.totalsize as usize {
             return None;
         }
 
         let mut end = start;
-        while end < self.data.len() && self.data[end] != 0 {
+        while end < limit && self.data[end] != 0 {
             end += 1;
         }
 
@@ -210,11 +211,17 @@ impl<'a> ArmFdtParser<'a> {
                 reg_prop[8], reg_prop[9], reg_prop[10], reg_prop[11],
                 reg_prop[12], reg_prop[13], reg_prop[14], reg_prop[15],
             ]);
+            if size == 0 || base.checked_add(size).is_none() {
+                return Err(FdtError::CorruptedStructure);
+            }
             Ok((base, size))
         } else if reg_prop.len() >= 8 {
             // 32-bit address and size
             let base = u32::from_be_bytes([reg_prop[0], reg_prop[1], reg_prop[2], reg_prop[3]]) as u64;
             let size = u32::from_be_bytes([reg_prop[4], reg_prop[5], reg_prop[6], reg_prop[7]]) as u64;
+            if size == 0 || base.checked_add(size).is_none() {
+                return Err(FdtError::CorruptedStructure);
+            }
             Ok((base, size))
         } else {
             Err(FdtError::PropertyNotFound)
