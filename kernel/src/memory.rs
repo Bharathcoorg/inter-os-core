@@ -81,7 +81,7 @@ pub fn allocate_dma_frames(count: usize) -> Option<alloc::vec::Vec<PhysFrame<Siz
     frames.push(first);
     for _ in 1..count {
         let next = allocate_frame()?;
-        let expected = frames.last()?.start_address().as_u64() + 4096;
+        let expected = frames.last()?.start_address().as_u64().checked_add(4096)?;
         if next.start_address().as_u64() != expected {
             for frame in frames.drain(..) { recycle_frame(frame); }
             recycle_frame(next);
