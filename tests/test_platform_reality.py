@@ -470,5 +470,21 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertIn("crate::task::terminate_current()", handler)
         self.assertIn("halt_after_fault_report_failure()", handler)
 
+    def test_x86_fatal_exception_handlers_avoid_recursive_reporting(self):
+        interrupts = self.read("kernel/src/interrupts.rs")
+        for name in (
+            'double_fault_handler',
+            'general_protection_fault_handler',
+        ):
+            start = interrupts.index('extern "x86-interrupt" fn ' + name)
+            end = interrupts.find('extern "x86-interrupt" fn ', start + 20)
+            handler = interrupts[start:] if end == -1 else interrupts[start:end]
+            self.assertIn("fault_report_bytes", handler)
+            self.assertIn("fault_report_line", handler)
+            self.assertIn("halt_after_fault_report_failure()", handler)
+            self.assertNotIn("serial_println!", handler)
+            self.assertNotIn("panic!(", handler)
+            self.assertNotIn("{:#?}", handler)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
