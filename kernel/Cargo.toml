@@ -5,6 +5,14 @@ edition = "2021"
 authors = ["Inter OS Contributors"]
 description = "Core trusted microkernel for Inter OS (x86_64)"
 
+[lib]
+name = "kernel"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kernel"
+path = "src/main.rs"
+
 [dependencies]
 bootloader_api = "0.11.17"
 x86_64 = "0.15.5"

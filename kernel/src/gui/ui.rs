@@ -172,6 +172,6 @@ mod layout_tests {
         let b = layout.layout_child_bounds(parent, 2, 40, 1).unwrap();
         assert_eq!(a.width, 40);
         assert_eq!(b.x, 44);
-        assert!(a.x + a.width <= b.x);
+        assert!(a.x + a.width as i32 <= b.x);
     }
 }

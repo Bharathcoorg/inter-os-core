@@ -5,6 +5,10 @@
 //! brings up the ATA PIO Block Driver, SHA-256 Cryptographic Subsystem,
 //! dm-verity Merkle Tree Verifier, Capability-Governed VFS, local Capability Tool Engine,
 //! and pure `no_std` WebAssembly (WASM) Sandboxed Runtime.
+//!
+//! The modules themselves live in the `kernel` library so they can be unit
+//! tested on the host; this binary only owns the panic handler and the boot
+//! sequence.
 
 #![no_std]
 #![no_main]
@@ -12,64 +16,50 @@
 
 extern crate alloc;
 
-pub mod allocator;
-pub mod arch;
-pub mod audio;
-pub mod capability;
-pub mod compat;
-pub mod compositor;
-pub mod crypto;
-pub mod display_hal;
-pub mod drivers;
-pub mod event;
-pub mod framebuffer;
-pub mod fs;
-pub mod gdt;
-pub mod gui;
-pub mod hal;
-pub mod input;
-pub mod interrupts;
-pub mod ipc;
-pub mod memory;
-pub mod net;
-pub mod notification;
-pub mod package;
-pub mod panic;
-pub mod platform;
-pub mod resource;
-pub mod recovery;
-pub mod update;
-pub mod diagnostics;
-pub mod performance;
-pub mod watchdog;
-pub mod sensor;
-pub mod settings;
-pub mod services;
-mod service_abi;
-pub mod serial;
-pub mod storage;
-pub mod syscall;
-pub mod task;
-pub mod telephony;
-pub mod user;
-pub mod wasm;
-
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use bootloader_api::config::Mapping;
 use bootloader_api::{entry_point, BootInfo, BootloaderConfig};
 use x86_64::VirtAddr;
 
-use capability::{CapError, Capability, CapabilityId, CapabilityTable, CapabilityType, Rights};
-use crypto::Sha256;
-use drivers::{BlockDevice, ATA_PRIMARY, SECTOR_SIZE};
-use ipc::IPC_ROUTER;
-use package::RappArch;
-use storage::{MerkleVerifier, StorageError};
-use task::{SCHEDULER, TaskId};
-use wasm::{opcodes, Value, WasmError, WasmMemory, WasmModule, WasmVm};
+use kernel::capability::{CapError, Capability, CapabilityId, CapabilityTable, CapabilityType, Rights};
+use kernel::crypto::Sha256;
+use kernel::drivers::{BlockDevice, ATA_PRIMARY, SECTOR_SIZE};
+use kernel::ipc::IPC_ROUTER;
+use kernel::package::RappArch;
+use kernel::storage::{MerkleVerifier, StorageError};
+use kernel::task::{SCHEDULER, TaskId};
+use kernel::wasm::{opcodes, Value, WasmError, WasmMemory, WasmModule, WasmVm};
 
-/// Custom bootloader configuration requesting dynamic physical memory mapping and 512 KiB kernel stack.
+use kernel::arch::apply_relocations;
+use kernel::audio;
+use kernel::compositor;
+use kernel::display_hal;
+use kernel::drivers::pci;
+use kernel::event;
+use kernel::fs;
+use kernel::gdt;
+use kernel::gui;
+use kernel::hal;
+use kernel::input;
+use kernel::interrupts;
+use kernel::memory;
+use kernel::net;
+use kernel::notification;
+use kernel::package;
+use kernel::platform;
+use kernel::recovery;
+use kernel::resource;
+use kernel::sensor;
+use kernel::serial;
+use kernel::services;
+use kernel::settings;
+use kernel::syscall;
+use kernel::task;
+use kernel::telephony;
+use kernel::user;
+use kernel::watchdog;
+
 pub static BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
     config.mappings.physical_memory = Some(Mapping::Dynamic);
@@ -84,15 +74,15 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     x86_64::instructions::interrupts::disable();
 
     // 1. Initialize COM1 serial port for diagnostics and test logging
-    serial::init();
+    kernel::serial::init();
     serial_println!("[BOOT] Serial COM1 online. Checking relocations...");
 
     // 1b. Apply early dynamic relocations if kernel was loaded at higher-half offset
-    let num_relocated = unsafe { arch::apply_relocations() };
+    let num_relocated = unsafe { kernel::arch::apply_relocations() };
     serial_println!("[BOOT] Relocations applied: {}", num_relocated);
 
     if let Some(framebuffer) = boot_info.framebuffer.as_mut() {
-        framebuffer::init(framebuffer);
+        kernel::framebuffer::init(framebuffer);
     }
 
     if num_relocated > 0 {
@@ -107,15 +97,15 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial_println!("================================================================================");
 
     // 3. Initialize Global Descriptor Table (GDT) and Task State Segment (TSS)
-    gdt::init();
+    kernel::gdt::init();
     serial_println!("[OK] GDT & TSS loaded with dedicated Double Fault IST stack & Ring 3 segments.");
 
     // 4. Initialize Interrupt Descriptor Table (IDT) for exceptions and hardware IRQs
-    interrupts::init_idt();
+    kernel::interrupts::init_idt();
     serial_println!("[OK] IDT loaded with CPU exception and hardware interrupt gates.");
 
     // 5. Initialize 8259 PIC controllers (PIT timer deferred until scheduler start)
-    interrupts::init_pics();
+    kernel::interrupts::init_pics();
     serial_println!("[OK] Dual 8259 PIC remapped (IRQs 32-47).");
 
     // 6. Initialize virtual memory page tables and physical frame allocator
@@ -125,19 +115,19 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         .expect("Bootloader failed to map physical memory offset");
     let phys_mem_offset = VirtAddr::new(phys_mem_offset_raw);
 
-    memory::init_memory(phys_mem_offset, &boot_info.memory_regions);
+    kernel::memory::init_memory(phys_mem_offset, &boot_info.memory_regions);
     serial_println!("[OK] Page tables and physical frame allocator initialized.");
 
     // 7. Initialize kernel heap allocator
-    memory::init_kernel_heap()
+    kernel::memory::init_kernel_heap()
         .expect("Kernel heap initialization failed");
     serial_println!("[OK] Kernel 64 MiB dynamic heap allocator online.");
 
     // Run Hardware MMU & Memory Isolation Adversarial Tests
-    memory::run_mmu_adversarial_tests();
+    kernel::memory::run_mmu_adversarial_tests();
 
     // Establish the truthful runtime/platform contract before subsystem self-tests.
-    platform::init();
+    kernel::platform::init();
 
     // 8. Run kernel core self-tests
     serial_println!("\n--- [Running Kernel Core Self-Tests] ---");
@@ -184,8 +174,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial_println!("[TEST] Merkle integrity attestation: VALIDATED (Tampering rejected).");
 
     // Initialize x86_64 Fast System Call MSRs (IA32_EFER.SCE, STAR, LSTAR, FMASK)
-    syscall::entry::init();
-    let dispatch_tid = syscall::sys_dispatch(7, 0, 0, 0, 0, 0);
+    kernel::syscall::entry::init();
+    let dispatch_tid = kernel::syscall::sys_dispatch(7, 0, 0, 0, 0, 0);
     assert_eq!(dispatch_tid, 0, "Syscall dispatcher must return Task 0 during boot");
     serial_println!("[TEST] Hardware Fast Syscall Subsystem: MSRs programmed, dispatcher verified TaskId(0).");
 
@@ -233,7 +223,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     // 9. Primary ATA / IDE PIO Block Driver Initialization
     serial_println!("\n--- [Initializing Hardware Storage Block Drivers] ---");
-    match drivers::ata::init() {
+    match kernel::drivers::ata::init() {
         Ok(()) => {
             let mut ata_guard = ATA_PRIMARY.lock();
             if let Some(drive) = ata_guard.as_mut() {
@@ -264,16 +254,16 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
 
     // 9b. Modular Hardware Driver Subsystems (DRM/KMS, FDT, PMIC, Touch)
-    drivers::init_and_test_drivers();
+    kernel::drivers::init_and_test_drivers();
 
     // Establish the persistent device key before any VFS payload is reconstructed.
     // The seed is loaded/generated after the physical block device is online.
-    crypto::rng::init();
-    crypto::keystore::init();
+    kernel::crypto::rng::init();
+    kernel::crypto::keystore::init();
     serial_println!("[OK] Persistent storage encryption root initialized before VFS mount.");
 
     // 10. Mount the canonical block-backed filesystem before VFS reconstruction.
-    match storage::init_block_filesystem() {
+    match kernel::storage::init_block_filesystem() {
         Ok(()) => serial_println!("[OK] Persistent InterFS region mounted/formatted."),
         Err(e) => serial_println!("[WARN] Persistent InterFS unavailable: {:?}", e),
     }
@@ -281,13 +271,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // 10b. Virtual Filesystem (VFS) Initialization & Package Runtime
     serial_println!("\n--- [Initializing Virtual Filesystem & Package Runtime] ---");
     // Persistent storage is now ready; recovery/update journals are restored before userspace starts.
-    recovery::init();
-    update::init();
+    kernel::recovery::init();
+    kernel::update::init();
 
-    fs::init();
-    crate::package::PACKAGE_BLOB_STORE.lock().restore();
-    crate::package::PACKAGE_REGISTRY.lock().seed();
-    crate::package::REVOCATION_REGISTRY.lock().seed();
+    kernel::fs::init();
+    kernel::package::PACKAGE_BLOB_STORE.lock().restore();
+    kernel::package::PACKAGE_REGISTRY.lock().seed();
+    kernel::package::REVOCATION_REGISTRY.lock().seed();
     serial_println!("[PACKAGE] persistent registry, payload store and revocation state restored.");
 
     // Generate sample sandboxed package bytecode: returns 0 (exit success)
@@ -337,63 +327,63 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial_println!("--- [Capability Subsystem 100% Attested & Enforced] ---\n");
 
     // 12. Initialize Android Compatibility Runtime (Zone 4 Isolation)
-    compat::android::init();
+    kernel::compat::android::init();
 
 
 
     // 15. Initialize persistent resource/recovery/update state after storage is mounted.
-    resource::init();
-    diagnostics::init();
-    performance::init();
+    kernel::resource::init();
+    kernel::diagnostics::init();
+    kernel::performance::init();
 
     // 16. Initialize Hardware Input Subsystem (Capacitive Touch Digitizer & Mobile Gesture Engine)
-    input::init();
+    kernel::input::init();
 
     // 19. Initialize Native Graphical User Shell & Window Compositor
-    gui::init();
+    kernel::gui::init();
 
     // 20. Initialize PCI Bus Enumeration (Physical Peripheral Discovery)
-    drivers::pci::init();
+    kernel::drivers::pci::init();
 
     // 21. Initialize In-Kernel Zero-Allocation Network Stack
-    net::init();
+    kernel::net::init();
 
 
 
     // 24. Initialize Multi-Architecture Mobile SoC Hardware Abstraction Layer (HAL)
-    hal::init();
+    kernel::hal::init();
 
     // 24b. Initialize Multi-Architecture Hardware & Boot Image Layer (Fastboot v2 & AArch64)
-    arch::init();
+    kernel::arch::init();
 
     // 25. Validate the already-initialized hardware entropy and secure keystore.
     let mut trng_test_buf = [0u8; 32];
-    crypto::get_random_bytes(&mut trng_test_buf);
+    kernel::crypto::get_random_bytes(&mut trng_test_buf);
     assert_ne!(trng_test_buf, [0u8; 32], "Hardware TRNG must produce non-zero entropy");
     serial_println!("[TEST] Hardware TRNG: Generated 32 bytes entropy, non-zero randomness validated.");
     serial_println!("[OK] Hardware-isolated Secure Enclave & Keystore remains initialized.");
 
     // 27. Initialize Bare-Metal Mobile Audio Subsystem (PC Speaker & PCI Audio)
-    audio::init();
+    kernel::audio::init();
 
     // 28. Initialize Sovereign Telephony & Cellular Baseband Modem Subsystem
-    telephony::init();
+    kernel::telephony::init();
 
     // 29. Initialize Mobile Hardware Sensor Subsystem (IMU, Orientation, Proximity)
-    sensor::init();
+    kernel::sensor::init();
 
     // 30. Initialize Storage Subsystems (Crash Dump & Encrypted Vault)
-    storage::init();
+    kernel::storage::init();
 
     // 31. Initialize Cryptographic Secure IPC Channels
-    ipc::init();
+    kernel::ipc::init();
 
     // 31b. Initialize Asynchronous Event Notification Subsystem (Sovereign epoll/kqueue)
-    event::init();
+    kernel::event::init();
 
     // 31c. Verify .rapp package format round-trip (build → parse → SHA-256 verify)
     {
-        use package::rapp::{parse_rapp, RappArch};
+        use kernel::package::rapp::{parse_rapp, RappArch};
         let test_elf = b"\x7fELF_TEST_PAYLOAD_STUB";
         // Negative trust-boundary test: a zero-signature package must not parse.
         let rapp_bin = {
@@ -408,7 +398,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             b.extend_from_slice(&0u16.to_le_bytes());
             b.extend_from_slice(&0u16.to_le_bytes());
             b.extend_from_slice(&2u16.to_le_bytes());
-            b.extend_from_slice(&crate::crypto::Sha256::digest(test_elf));
+            b.extend_from_slice(&kernel::crypto::Sha256::digest(test_elf));
             b.extend_from_slice(&[0u8; 64]);
             b.extend_from_slice(&(test_elf.len() as u32).to_le_bytes());
             b.extend_from_slice(&1u16.to_le_bytes());
@@ -421,10 +411,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
 
     // 32. Initialize Hardware MSR Fast System Call Extensions (SCE, STAR, LSTAR, FMASK)
-    syscall::entry::init();
+    kernel::syscall::entry::init();
 
     // 32b. Initialize Zero-Trust Capability Delegation Subsystem
-    capability::init();
+    kernel::capability::init();
 
     // 33. Initialize Multitasking Scheduler and Spawn System Tasks
     serial_println!("--- [Initializing Multitasking Scheduler & Spawning Tasks] ---");
@@ -442,27 +432,80 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     // Kernel registers service definitions only. Ring-3 PID 1
     // owns service startup, recovery and lifecycle policy.
-    services::init();
-    settings::init();
-    user::init();
-    notification::init();
+    kernel::services::init();
+    kernel::settings::init();
+    kernel::user::init();
+    kernel::notification::init();
 
     // Primordial userspace init/service-manager. It owns service lifecycle
     // through the object-scoped ServiceStart/Stop/Recover ABI.
-    let id_user_init = task::spawn_user_init(TaskId(0));
+    let id_user_init = kernel::task::spawn_user_init(TaskId(0));
     IPC_ROUTER.lock().register_task(id_user_init);
 
     serial_println!("[OK] PID1 userspace service manager spawned (Task {}).", id_user_init.0);
     serial_println!("[OK] Kernel service registry initialized; application startup delegated to userspace.");
 
-    interrupts::init_pit();
-    serial_println!("[OK] PIT system timer configured at {} Hz.", interrupts::SYSTEM_TICK_HZ);
+    kernel::interrupts::init_pit();
+    serial_println!("[OK] PIT system timer configured at {} Hz.", kernel::interrupts::SYSTEM_TICK_HZ);
 
     x86_64::instructions::interrupts::enable();
     serial_println!("[OK] Hardware interrupts enabled on CPU.");
 
     loop {
-        task::yield_now();
+        kernel::task::yield_now();
         x86_64::instructions::hlt();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Panic handler.
+//
+// Only a binary may define `#[panic_handler]`, so the policy API lives in the
+// library and the handler itself lives here.
+// ---------------------------------------------------------------------------
+
+use core::panic::PanicInfo;
+use kernel::panic::{get_panic_policy, PanicPolicy};
+use kernel::serial_println;
+
+#[panic_handler]
+fn panic(info: &PanicInfo) -> ! {
+    x86_64::instructions::interrupts::disable();
+
+    serial_println!("\n========================================================");
+    serial_println!("                 INTEROS CORE KERNEL PANIC                ");
+    serial_println!("========================================================");
+    if let Some(location) = info.location() {
+        serial_println!("Origin:  {}:{}:{}", location.file(), location.line(), location.column());
+    } else {
+        serial_println!("Origin:  Unknown location");
+    }
+    serial_println!("Details: {}", info.message());
+
+    // Diagnostic state capture. Locks are only attempted speculatively: a panic
+    // must never deadlock behind a subsystem that was already faulting.
+    let (heap_used, heap_free) = kernel::allocator::heap_stats();
+    let tasks = match kernel::task::SCHEDULER.try_lock() {
+        Some(sched) => sched.task_count(),
+        None => 0,
+    };
+    serial_println!("Diagnostic: heap_used={} heap_free={} tasks={}", heap_used, heap_free, tasks);
+
+    match get_panic_policy() {
+        PanicPolicy::Halt => {
+            serial_println!("Action:  [PANIC POLICY: HALT] CPU halted safely to prevent state corruption.");
+            serial_println!("========================================================\n");
+            loop {
+                x86_64::instructions::hlt();
+            }
+        }
+        PanicPolicy::Reboot => {
+            serial_println!("Action:  [PANIC POLICY: REBOOT] Resetting platform for automatic recovery...");
+            serial_println!("========================================================\n");
+            for _ in 0..10_000 {
+                core::hint::spin_loop();
+            }
+            kernel::hal::traits::PowerController::reset(&kernel::hal::platform::POWER);
+        }
     }
 }

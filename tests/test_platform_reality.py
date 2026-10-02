@@ -13,10 +13,13 @@ class PlatformRealityTests(unittest.TestCase):
         return (ROOT / path).read_text(encoding="utf-8")
 
     def test_platform_contract_is_bootstrapped(self):
-        main = self.read("kernel/src/main.rs")
+        # Module declarations live in the library; the binary owns only the panic
+        # handler and the boot sequence.
+        lib = self.read("kernel/src/lib.rs")
+        boot = self.read("kernel/src/main.rs")
         platform = self.read("kernel/src/platform.rs")
-        self.assertIn("pub mod platform;", main)
-        self.assertIn("platform::init();", main)
+        self.assertIn("pub mod platform;", lib)
+        self.assertIn("kernel::platform::init();", boot)
         self.assertIn("HardwareAvailability::Emulated", platform)
         self.assertIn("VerificationLevel::QemuVerified", platform)
 
@@ -628,23 +631,40 @@ class PlatformRealityTests(unittest.TestCase):
             self.assertIn(literal, relocate)
 
     def test_simplefb_rejects_missing_or_invalid_hardware_geometry(self):
-        fb = self.read("kernel/src/arch/aarch64/simplefb.rs")
+        fb = self.read("kernel-aarch64/src/display.rs")
         start = fb.index("pub fn from_fdt")
-        end = fb.index("\n    /// Total size", start)
+        end = fb.index("pub const fn buffer_size", start)
         body = fb[start:end]
+        # A display surface needs a real physical base; falling back to the
+        # virtual address would present heap or identity-mapped memory as a
+        # scanout.
         self.assertIn("Missing framebuffer reg property", body)
+        # Geometry arrives from a bootloader-supplied device tree and must be
+        # validated before it becomes an allocation or a pixel offset.
+        self.assertIn("Framebuffer geometry is zero", body)
+        self.assertIn("Framebuffer row size overflow", body)
         self.assertIn("Framebuffer stride is smaller than one scanline", body)
         self.assertIn("Framebuffer size overflow", body)
+        self.assertIn("Framebuffer reg property has no base address", body)
 
     def test_fdt_parser_bounds_strings_and_memory_ranges(self):
-        fdt = self.read("kernel/src/arch/aarch64/fdt.rs")
-        self.assertIn("let limit = base.checked_add(self.header.size_dt_strings as usize)?", fdt)
-        self.assertIn("base.checked_add(size).is_none()", fdt)
+        fdt = self.read("kernel-aarch64/src/fdt.rs")
+        # Header regions are validated against totalsize before any token is read,
+        # and the walk limits are proven to lie inside the blob.
+        self.assertIn("let strings_end = (off_dt_strings as usize)", fdt)
+        self.assertIn("checked_add(size_dt_strings as usize)", fdt)
+        self.assertIn("if strings_end > totalsize", fdt)
+        self.assertIn("let struct_end = (off_dt_struct as usize)", fdt)
+        self.assertIn("if struct_end > totalsize", fdt)
+        self.assertIn("fn struct_limit(&self) -> usize", fdt)
+        self.assertIn("fn strings_limit(&self) -> usize", fdt)
+        # A property length is untrusted input and is checked before slicing.
+        self.assertIn("if len > limit - value_start", fdt)
+        # Totals must not be wrappable by a hostile tree.
+        self.assertIn("total.saturating_add(region_size)", fdt)
         # Unit-address matching must be deliberate. A bare prefix test would let
-        # "intc" match "intcmux" and bind MMIO to the wrong node, so a prefix
-        # match is only accepted when the target is followed immediately by '@'.
-        self.assertIn("name == target_name", fdt)
-        self.assertIn("name.starts_with(target_name)", fdt)
-        self.assertIn("name.as_bytes().get(target_name.len()) == Some(&b'@')", fdt)
+        # "intc" match "intcmux" and bind MMIO to the wrong node.
+        self.assertIn("fn node_name_matches(name: &str, target: &str) -> bool", fdt)
+        self.assertIn("rest.starts_with('@')", fdt)
 if __name__ == "__main__":
     unittest.main(verbosity=2)

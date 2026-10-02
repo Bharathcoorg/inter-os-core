@@ -1,9 +1,12 @@
 //! Multi-Architecture Kernel Foundation
 //!
-//! Provides platform-specific low-level hardware abstractions, exception vector tables,
-//! fastboot Android boot image verification, and AArch64 mobile SoC drivers.
+//! Provides low-level boot-time abstractions: self-relocation for a higher-half
+//! load and fastboot Android boot image verification.
+//!
+//! AArch64 drivers live in the kernel-aarch64 crate, not here. They cannot run
+//! on this target, they duplicated that crate's own copies, and carrying them made
+//! the x86_64 kernel run AArch64 hardware self-tests on an x86_64 machine.
 
-pub mod aarch64;
 pub mod fastboot;
 pub mod relocate;
 
@@ -17,6 +20,5 @@ pub fn init() {
     // 1. Fastboot Android Boot Image Verification
     test_fastboot_boot_image();
 
-    // 2. AArch64 Smartphone Subsystem Verification
-    aarch64::init();
+
 }

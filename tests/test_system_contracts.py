@@ -113,7 +113,10 @@ class SystemContractTests(unittest.TestCase):
             self.assertTrue((ROOT / rel).is_file(), rel)
 
     def test_kernel_registers_reliability_subsystems(self):
-        main = (ROOT / "kernel/src/main.rs").read_text(encoding="utf-8")
+        # Module declarations live in the library so the pure-logic modules can be
+        # unit tested on the host; the binary owns only the panic handler and the
+        # boot sequence.
+        main = (ROOT / "kernel/src/lib.rs").read_text(encoding="utf-8")
         for name in ("recovery", "update", "diagnostics", "performance", "watchdog"):
             self.assertIn(f"pub mod {name};", main)
 

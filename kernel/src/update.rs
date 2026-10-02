@@ -194,12 +194,12 @@ mod tests {
         let m = UpdateManifest::new(2, payload.len() as u64, Sha256::digest(payload));
         assert!(UpdateTransaction::stage(m, payload, 1).is_ok());
         let bad = UpdateManifest::new(2, payload.len() as u64, [0u8; 32]);
-        assert_eq!(UpdateTransaction::stage(bad, payload, 1), Err(UpdateError::DigestMismatch));
+        assert!(matches!(UpdateTransaction::stage(bad, payload, 1), Err(UpdateError::DigestMismatch)));
     }
     #[test]
     fn activation_targets_inactive_slot_and_rolls_back_after_failures() {
         let mut a = ActivationRecord::new(UpdateSlot::A, 10);
-        assert_eq!(a.stage(11), Ok(UpdateSlot::B));
+        assert_eq!(a.stage(11).ok(), Some(UpdateSlot::B));
         a.begin_boot(); a.begin_boot(); a.begin_boot();
         assert!(a.recovery_required());
         a.rollback();
@@ -211,7 +211,7 @@ mod tests {
     fn downgrades_are_rejected() {
         let payload = b"update";
         let m = UpdateManifest::new(4, payload.len() as u64, Sha256::digest(payload));
-        assert_eq!(UpdateTransaction::stage(m, payload, 4), Err(UpdateError::Downgrade));
+        assert!(matches!(UpdateTransaction::stage(m, payload, 4), Err(UpdateError::Downgrade)));
     }
 }
 

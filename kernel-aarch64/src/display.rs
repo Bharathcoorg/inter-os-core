@@ -184,25 +184,51 @@ impl SimpleFramebuffer {
             fmt_bytes.len()
         };
         let fmt_str = core::str::from_utf8(&fmt_bytes[..len]).map_err(|_| "Corrupted format string")?;
-        let format = SimpleFbFormat::from_dtb_string(fmt_str).ok_or("Unsupported SimpleFB format in DTB")?;
+let format = SimpleFbFormat::from_dtb_string(fmt_str).ok_or("Unsupported SimpleFB format in DTB")?;
 
-        let base_paddr = if let Ok(reg_bytes) = parser.get_node_property(&node, "reg") {
-            if reg_bytes.len() >= 8 {
-                u64::from_be_bytes([
-                    reg_bytes[0], reg_bytes[1], reg_bytes[2], reg_bytes[3],
-                    reg_bytes[4], reg_bytes[5], reg_bytes[6], reg_bytes[7],
-                ]) as usize
-            } else if reg_bytes.len() >= 4 {
-                u32::from_be_bytes([reg_bytes[0], reg_bytes[1], reg_bytes[2], reg_bytes[3]]) as usize
-            } else {
-                base_vaddr
-            }
-        } else {
-            base_vaddr
-        };
-
-        Ok(Self::new(base_paddr, base_vaddr, width, height, stride, format))
+    // Validate the geometry before any surface is built from it. Every value
+    // comes from a device tree supplied by the bootloader, so a zero or forged
+    // dimension would otherwise turn into a divide-by-zero, a wrapped
+    // allocation or an out-of-bounds pixel offset.
+    if width == 0 || height == 0 {
+        return Err("Framebuffer geometry is zero");
     }
+    let bpp = format.bytes_per_pixel() as u64;
+    let min_stride = (width as u64)
+        .checked_mul(bpp)
+        .ok_or("Framebuffer row size overflow")?;
+    if (stride as u64) < min_stride {
+        return Err("Framebuffer stride is smaller than one scanline");
+    }
+    let buffer_size = (stride as u64)
+        .checked_mul(height as u64)
+        .ok_or("Framebuffer size overflow")?;
+    if buffer_size == 0 || buffer_size > usize::MAX as u64 {
+        return Err("Framebuffer size is invalid");
+    }
+
+    // A display-backed surface needs a physical base address. Falling back to the
+    // supplied virtual address would present a heap or identity-mapped range as
+    // though it were a scanout.
+    let base_paddr = parser
+        .get_node_property(&node, "reg")
+        .map_err(|_| "Missing framebuffer reg property")?;
+    let base_paddr = if base_paddr.len() >= 8 {
+        u64::from_be_bytes([
+            base_paddr[0], base_paddr[1], base_paddr[2], base_paddr[3],
+            base_paddr[4], base_paddr[5], base_paddr[6], base_paddr[7],
+        ]) as usize
+    } else if base_paddr.len() >= 4 {
+        u32::from_be_bytes([base_paddr[0], base_paddr[1], base_paddr[2], base_paddr[3]]) as usize
+    } else {
+        return Err("Framebuffer reg property is too short");
+    };
+    if base_paddr == 0 {
+        return Err("Framebuffer reg property has no base address");
+    }
+
+    Ok(Self::new(base_paddr, base_vaddr, width, height, stride, format))
+}
 
     pub const fn buffer_size(&self) -> usize {
         (self.stride as usize) * (self.height as usize)
