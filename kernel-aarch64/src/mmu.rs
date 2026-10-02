@@ -38,6 +38,9 @@ pub const DESC_AF: u64 = 1 << 10;          // Access Flag (must be 1 to avoid fa
 // Static primordial page tables
 static mut L1_TABLE: PageTable = PageTable::empty();
 static mut L2_TABLE: PageTable = PageTable::empty();
+/// Level 2 table for the high memory window that the level 1 block entries
+/// cannot describe exactly, such as the PCIe ECAM window at 0x4010_0000.
+static mut L2_HIGH_TABLE: PageTable = PageTable::empty();
 
 pub struct ArmMmu;
 
@@ -141,6 +144,110 @@ impl ArmMmu {
         }
     }
 
+    /// Maps a device MMIO region as uncached, strongly ordered memory.
+    ///
+    /// Uses the coarsest level that can represent the region exactly: a 1 GiB
+    /// level 1 block when the range is 1 GiB aligned, otherwise 2 MiB level 2
+    /// blocks inside the first gigabyte. Returns false without touching the
+    /// tables when the range is not representable, so a caller never proceeds on
+    /// a window that was silently left unmapped.
+    ///
+    /// This matters for the PCIe ECAM window, which sits at 0x4010000000 on
+    /// QEMU's `virt` machine and is far outside the first gigabyte.
+    pub fn map_device_region(start_paddr: u64, size: u64) -> bool {
+        const L1_BLOCK: u64 = 0x4000_0000; // 1 GiB
+        const L2_BLOCK: u64 = 0x20_0000; // 2 MiB
+
+        if size == 0 {
+            return false;
+        }
+
+        if start_paddr % L1_BLOCK == 0 && size % L1_BLOCK == 0 {
+            let first = start_paddr / L1_BLOCK;
+            let last = first + (size / L1_BLOCK);
+            if last > 512 {
+                return false;
+            }
+            unsafe {
+                for index in first..last {
+                    L1_TABLE.entries[index as usize] = (index * L1_BLOCK)
+                        | DESC_AF
+                        | DESC_SH_OUTER
+                        | DESC_AP_RW_EL1
+                        | DESC_ATTR_DEVICE
+                        | DESC_BLOCK
+                        | DESC_VALID;
+                }
+            }
+            return true;
+        }
+
+        if start_paddr % L2_BLOCK != 0 || size % L2_BLOCK != 0 {
+            return false;
+        }
+        let first = start_paddr / L2_BLOCK;
+        let last = first + (size / L2_BLOCK);
+        // Only the first gigabyte is reachable through the level 2 table.
+        if last > 512 {
+            return false;
+        }
+        unsafe {
+            for index in first..last {
+                L2_TABLE.entries[index as usize] = (index * L2_BLOCK)
+                    | DESC_AF
+                    | DESC_SH_OUTER
+                    | DESC_AP_RW_EL1
+                    | DESC_ATTR_DEVICE
+                    | DESC_BLOCK
+                    | DESC_VALID;
+            }
+        }
+        true
+    }
+
+    /// Maps a device region that is neither 1 GiB aligned nor inside the first
+    /// gigabyte, by giving it its own level 2 table.
+    ///
+    /// A level 1 entry can only point at a level 2 table, so the region is
+    /// mapped relative to the gigabyte its start address falls in. This is the
+    /// path the PCIe ECAM window takes on QEMU's `virt` machine, which sits at
+    /// 256 GiB + 256 MiB and is therefore 2 MiB but not 1 GiB aligned.
+    pub fn map_device_region_high(start_paddr: u64, size: u64) -> bool {
+        const L1_BLOCK: u64 = 0x4000_0000; // 1 GiB
+        const L2_BLOCK: u64 = 0x20_0000; // 2 MiB
+
+        if size == 0 || start_paddr % L2_BLOCK != 0 || size % L2_BLOCK != 0 {
+            return false;
+        }
+        let l1_index = start_paddr / L1_BLOCK;
+        // The window must sit inside a single gigabyte.
+        if (start_paddr + size - 1) / L1_BLOCK != l1_index {
+            return false;
+        }
+        let first_in_gib = (start_paddr % L1_BLOCK) / L2_BLOCK;
+        let count = size / L2_BLOCK;
+        if first_in_gib + count > 512 {
+            return false;
+        }
+
+        unsafe {
+            let l2_phys = core::ptr::addr_of!(L2_HIGH_TABLE) as u64;
+            L1_TABLE.entries[l1_index as usize] = l2_phys | DESC_TABLE | DESC_VALID;
+            let base = start_paddr - l1_index * L1_BLOCK;
+            for step in 0..count {
+                L2_HIGH_TABLE.entries[(first_in_gib + step) as usize] = (base + step * L2_BLOCK)
+                    | DESC_AF
+                    | DESC_SH_OUTER
+                    | DESC_AP_RW_EL1
+                    | DESC_ATTR_DEVICE
+                    | DESC_BLOCK
+                    | DESC_VALID;
+            }
+        }
+        true
+    }
+
+    /// Returns true when the MMU is currently enabled.
     pub fn is_enabled() -> bool {
         #[cfg(target_arch = "aarch64")]
         unsafe {

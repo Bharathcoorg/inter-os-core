@@ -243,6 +243,38 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertIn("is_hardware_backed", keystore)
         self.assertIn("software-backed keystore", keystore)
 
+    def test_aarch64_pci_is_discovered_from_the_device_tree(self):
+        bus = self.read("kernel-aarch64/src/pci_bus.rs")
+        ecam = self.read("kernel-aarch64/src/pcie.rs")
+        mmu = self.read("kernel-aarch64/src/mmu.rs")
+        main = self.read("kernel-aarch64/src/main.rs")
+        # The bus must come from the device tree, never from a fixed address.
+        self.assertIn("find_node_by_compatible(\"pci-host-ecam-generic\")", bus)
+        self.assertIn('get_node_property(&node, "reg")', bus)
+        self.assertIn("pub const fn unavailable() -> Self", bus)
+        # ECAM config space addressing: 64 KiB per bus, 256 bytes per function.
+        self.assertIn("ECAM_BUS_STRIDE: usize = 0x1_0000", ecam)
+        self.assertIn("ECAM_FUNCTION_STRIDE: usize = 0x100", ecam)
+        self.assertIn("(((device as usize) * 8) + (function as usize)) * ECAM_FUNCTION_STRIDE", ecam)
+        # QEMU places the ECAM window at 256 GiB + 256 MiB, which is 2 MiB but
+        # not 1 GiB aligned, so it needs its own level 2 table.
+        self.assertIn("pub fn map_device_region_high", mmu)
+        self.assertIn("L2_HIGH_TABLE", mmu)
+        # Enumeration must report rather than assume.
+        self.assertIn("enumerate_bus0", ecam)
+        self.assertIn("PcieBus::init_from_fdt", main)
+
+    def test_aarch64_boot_asserts_fail_closed_not_fabricated_hardware(self):
+        main = self.read("kernel-aarch64/src/main.rs")
+        # No panel is bound and no fuel gauge is attached, so these must not
+        # assert a real refresh rate or an enabled controller.
+        self.assertIn("governor.display_target_fps, power::NO_REFRESH_TARGET_HZ", main)
+        self.assertIn("governor.current_freq_mhz, power::NO_FREQ_MHZ", main)
+        self.assertIn("assert!(!display_hal.enabled);", main)
+        self.assertIn("assert!(!display_hal.hardware_present);", main)
+        self.assertNotIn("assert_eq!(governor.display_target_fps, 30);", main)
+        self.assertNotIn("assert!(display_hal.enabled);", main)
+
     def test_writes_are_durable_before_they_report_success(self):
         syscall = self.read("kernel/src/syscall/mod.rs")
         vfs = self.read("kernel/src/fs/vfs.rs")

@@ -1,4 +1,4 @@
-//! Inter OS Core — AArch64 Mobile Microkernel
+//! Inter OS Core â€” AArch64 Mobile Microkernel
 //!
 //! Bare-metal AArch64 entry point and hardware bring-up sequence for physical
 //! mobile ARM64 smartphones and QEMU `virt` machine.
@@ -24,6 +24,8 @@ pub mod mmu;
 pub mod power;
 pub mod probe;
 pub mod psci;
+pub mod pcie;
+pub mod pci_bus;
 pub mod sandbox;
 pub mod shell;
 pub mod storage;
@@ -77,7 +79,7 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
 
     kprintln!();
     kprintln!("============================================================");
-    kprintln!("  Inter OS — AArch64 Sovereign Smartphone Microkernel v4.0");
+    kprintln!("  Inter OS â€” AArch64 Sovereign Smartphone Microkernel v4.0");
     kprintln!("============================================================");
     kprintln!("[AArch64] Execution Level: EL1 (Drop from EL2 verified)");
     kprintln!("[AArch64] Device Tree Blob physical base: 0x{:016X}", dtb_phys_addr);
@@ -407,6 +409,35 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert!(mmu_active, "MMU activation failed");
     kprintln!("[OK] AArch64 MMU: 4-level translation tables, TTBR0_EL1 loaded, L1/L2 caches enabled (SCTLR_EL1.M=1).");
 
+    // 16b. PCIe discovery, driven by the device tree.
+    //
+    // Everything downstream that needs a PCI device must discover it here rather
+    // than assume an address. A platform without a host bridge reports the bus
+    // unavailable and nothing acts on it.
+    kprintln!("--- [Enumerating PCIe Bus] ---");
+    let pcie = match dtb.as_ref() {
+        Some(parser) => pci_bus::PcieBus::init_from_fdt(parser),
+        None => pci_bus::PcieBus::unavailable(),
+    };
+    if pcie.is_available() {
+        let mut found = 0u32;
+        for slot in 0..32usize {
+            if let Some(dev) = pcie.devices().get(slot).and_then(|d| *d) {
+                kprintln!(
+                    "[PCI] Device {:04x}:{:04x} class {:06x} at 00:{:02x}.{:x}",
+                    dev.vendor_id,
+                    dev.device_id,
+                    dev.class_code,
+                    dev.device,
+                    dev.function
+                );
+                found += 1;
+            }
+        }
+        kprintln!("[OK] PCIe: {} device(s) enumerated on bus 0.", found);
+    } else {
+        kprintln!("[OK] PCIe: no host bridge on this platform; no PCI device is claimed.");
+    }
     // 17. AArch64 Ring 3 / EL0 Userspace Execution & Privilege Separation
     kprintln!("--- [Testing AArch64 Ring 3 / EL0 Userspace Execution & Privilege Separation] ---");
     let user_ttbr0 = mmu::ArmMmu::create_user_page_table();
@@ -453,7 +484,11 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     let policy = governor.update(32, &battery);
     assert_eq!(policy, power::ThermalPolicy::Normal);
     assert_eq!(governor.current_freq_mhz, governor.min_freq_mhz);
-    assert_eq!(governor.display_target_fps, 30);
+    // No panel is bound, so the governor must report no refresh target rather
+    // than the 30 Hz it used to invent. Asserting a real rate here would
+    // reinstate the fabricated panel behaviour the governor was fixed to avoid.
+    assert_eq!(governor.display_target_fps, power::NO_REFRESH_TARGET_HZ);
+    assert_eq!(governor.current_freq_mhz, power::NO_FREQ_MHZ);
     assert!(!governor.battery_saver_active);
     kprintln!("[OK] Mobile Power Governor: PMIC/thermal backend unbound; safe minimum frequency policy enforced.");
 
@@ -1277,7 +1312,10 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     kprintln!("--- [Testing AArch64 display backend boundary] ---");
     let mut display_hal = display_hal::MobileDisplayHal::new(0x090E_0000);
     display_hal.init_hardware();
-    assert!(display_hal.enabled);
+    // No panel controller is bound, so the HAL must report itself disabled and
+    // unbacked. Asserting `enabled` here would reinstate the fabricated panel
+    // the HAL was fixed to stop claiming.
+    assert!(!display_hal.enabled);
     assert!(!display_hal.hardware_present);
     let mut disp_caps = CapabilityTable::new();
     disp_caps.mint(CapabilityType::DisplayControllerDirect, Rights::READ | Rights::WRITE, None);
