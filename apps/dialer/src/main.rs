@@ -200,11 +200,23 @@ impl DialerApp {
         self.active_len = 0;
         if had_connected_call {
             self.calls_completed += 1;
-            std::log(
-                0,
-                "[DIALER APP] Call Terminated: Channel released to modem pool.",
-            )
-            .ok();
+            // WHY: this line used to claim the channel was released to the
+            // modem pool, but hangup() issued no telephony syscall at all, so no
+            // modem state was ever touched. Ask the service and report the
+            // outcome it actually returned.
+            if std::telephony_hangup().is_ok() {
+                std::log(
+                    0,
+                    "[DIALER APP] Call Terminated: telephony service released the channel.",
+                )
+                .ok();
+            } else {
+                std::log(
+                    0,
+                    "[DIALER APP] Call Terminated locally: the telephony service refused the hangup, so no channel was released.",
+                )
+                .ok();
+            }
         } else {
             // WHY: no call was ever established, so there is no channel to
             // release and no completed call to count. Reporting a released
@@ -677,7 +689,14 @@ pub extern "C" fn _start() -> ! {
                     )
                     .ok();
                 } else {
-                    std::log(0, "[DIALER APP] Baseband Modem: Offline (No hardware modem backend detected).").ok();
+                    // WHY: the payload simply did not list a present modem.
+                    // "Offline" would assert a baseband state the HAL never
+                    // reported, so state only what the report actually said.
+                    std::log(
+                        0,
+                        "[DIALER APP] Baseband Modem: the telemetry report did not list a present modem.",
+                    )
+                    .ok();
                 }
             }
         }

@@ -240,9 +240,13 @@ impl CalendarApp {
         match std::vault_encrypt_sector(203, &mut agenda_sector, &iv) {
             Ok(_) => {
                 self.sector_encrypted = true;
+                // WHY: the syscall returns only success/failure, never the
+                // cipher it used. Naming "AES-XTS/HMAC" here invented a crypto
+                // detail this app cannot observe, so report only the outcome the
+                // vault actually acknowledged.
                 std::log(
                     0,
-                    "[CALENDAR APP] Sector 203: Updated agenda encrypted with AES-XTS/HMAC.",
+                    "[CALENDAR APP] Sector 203: Updated agenda sealed and persisted by the storage vault.",
                 )
                 .ok();
             }

@@ -108,9 +108,13 @@ impl MessagesApp {
         match std::vault_encrypt_sector(202, &mut sector_buf, &iv) {
             Ok(_) => {
                 self.sector_encrypted = true;
+                // WHY: the syscall returns only success/failure, never the
+                // cipher it used. Naming "ChaCha20-Poly1305" here invented a
+                // crypto detail this app cannot observe, so report only the
+                // outcome the vault actually acknowledged.
                 std::log(
                     0,
-                    "[MESSAGES APP] Sector 202: Message persisted with ChaCha20-Poly1305 encryption.",
+                    "[MESSAGES APP] Sector 202: Message sector sealed and persisted by the storage vault.",
                 )
                 .ok();
             }
@@ -150,7 +154,11 @@ impl MessagesApp {
         }
 
         let _ = peer_did;
-        true
+        // WHY: the documented contract is "true only when a transport actually
+        // accepted the message". This app holds no transport and issues no
+        // transmission syscall, so returning true fabricated a delivery that
+        // never happened.
+        false
     }
 }
 
@@ -302,9 +310,12 @@ pub extern "C" fn _start() -> ! {
                 )
                 .ok();
             } else {
+                // WHY: the report carried no "present":true field. "In standby"
+                // would assert a baseband state the HAL never reported, so state
+                // only what the payload actually said.
                 std::log(
                     0,
-                    "[MESSAGES APP] Cellular modem in standby (No hardware modem detected).",
+                    "[MESSAGES APP] Telephony telemetry did not report a present modem; no cellular channel is in use.",
                 )
                 .ok();
             }
