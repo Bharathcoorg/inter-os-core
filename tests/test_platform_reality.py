@@ -252,9 +252,11 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertIn("find_node_by_compatible(\"pci-host-ecam-generic\")", bus)
         self.assertIn('get_node_property(&node, "reg")', bus)
         self.assertIn("pub const fn unavailable() -> Self", bus)
-        # ECAM config space addressing: 64 KiB per bus, 256 bytes per function.
-        self.assertIn("ECAM_BUS_STRIDE: usize = 0x1_0000", ecam)
-        self.assertIn("ECAM_FUNCTION_STRIDE: usize = 0x100", ecam)
+        # ECAM config space addressing is 1 MiB per bus, 32 KiB per device slot and
+        # 4 KiB per function. The legacy 0xCF8 windows are 256 bytes and read
+        # the wrong register everywhere.
+        self.assertIn("ECAM_BUS_STRIDE: usize = 0x10_0000", ecam)
+        self.assertIn("ECAM_FUNCTION_STRIDE: usize = 0x1000", ecam)
         self.assertIn("(((device as usize) * 8) + (function as usize)) * ECAM_FUNCTION_STRIDE", ecam)
         # QEMU places the ECAM window at 256 GiB + 256 MiB, which is 2 MiB but
         # not 1 GiB aligned, so it needs its own level 2 table.

@@ -17,9 +17,11 @@ pub struct PcieEcam {
 }
 
 /// One 4096-byte register window per bus/device/function.
-const ECAM_BUS_STRIDE: usize = 0x1_0000;
-/// Each function occupies 256 bytes of configuration space.
-const ECAM_FUNCTION_STRIDE: usize = 0x100;
+const ECAM_BUS_STRIDE: usize = 0x10_0000;
+/// ECAM gives each function a 4 KiB window and each device 8 of them, which is
+/// 32 KiB. These are not the 256-byte windows of the legacy 0xCF8/0xCFC
+/// mechanism, and using those strides reads the wrong register everywhere.
+const ECAM_FUNCTION_STRIDE: usize = 0x1000;
 
 /// Config space header offsets.
 const PCI_VENDOR_ID: usize = 0x00;
@@ -61,10 +63,8 @@ impl PcieEcam {
     }
 
     fn config_ptr(&self, bus: u16, device: u8, function: u8) -> *const u8 {
-        // ECAM layout: 64 KiB per bus, then 256 bytes per function, with the
-        // eight functions of a device slot contiguous. Treating the device
-        // number's high bits as a bus index is a common mistake and silently
-        // makes every device look absent.
+        // ECAM layout: 1 MiB per bus, 32 KiB per device slot, and 4 KiB per
+        // function within the slot.
         let offset = (bus as usize) * ECAM_BUS_STRIDE
             + (((device as usize) * 8) + (function as usize)) * ECAM_FUNCTION_STRIDE;
         (self.base + offset) as *const u8

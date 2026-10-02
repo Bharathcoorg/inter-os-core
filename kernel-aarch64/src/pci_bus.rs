@@ -92,17 +92,15 @@ impl PcieBus {
         }
         crate::kprintln!("[PCI] ECAM window mapped at 0x{:X} ({} MiB).", base, size / (1024 * 1024));
 
+
         let ecam = PcieEcam::new(base as usize);
-        // Read the first few slots raw so an all-absent result is distinguishable
-        // from a window that is mapped but not being read.
-        for slot in 0..4u8 {
-            let raw = unsafe { ecam.read32(0, slot, 0, 0x00) };
-            crate::kprintln!("[PCI] raw slot {} vendor/device = 0x{:08X}", slot, raw);
-        }
         let devices = unsafe { ecam.enumerate_bus0() };
         let found = devices.iter().filter(|d| d.is_some()).count();
         if found == 0 {
-            crate::kprintln!("[PCI] No devices present on bus 0.");
+            crate::kprintln!(
+                "[PCI] No devices answered on bus 0; the window is mapped but the host bridge"
+            );
+            crate::kprintln!("[PCI]       returned no configuration data.");
         }
         bus.ecam = Some(ecam);
         bus.devices = devices;
