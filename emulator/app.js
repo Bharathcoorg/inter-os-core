@@ -739,10 +739,47 @@ document.addEventListener('DOMContentLoaded', () => {
   // =========================================================================
   let bootCheckInterval = null;
 
+  // Target badges must describe the machine that is actually running.
+  //
+  // These were static marketing copy ("ARM64 / RISC-V", "4 GB LPDDR4X",
+  // "720p @ 120Hz") that contradicted the guest the studio drives: the default
+  // profile is x86_64 with QEMU RAM, no memory technology and no 120 Hz panel.
+  // Report what was observed and say plainly that it is virtualised. When the
+  // guest cannot be reached, leave the badges undetermined rather than inventing
+  // a specification.
+  function describeObservedTarget(data) {
+    const set = (id, value) => {
+      const el = document.getElementById(id);
+      if (el && value) el.textContent = value;
+    };
+    const profile = (data && data.active_profile) || 'unknown';
+    set('spec-arch', profile === 'unknown' ? 'Undetermined' : profile + ' (virtualised)');
+    set('spec-memory', (data && data.ram_mb) ? data.ram_mb + ' MiB emulated' : 'Undetermined');
+    const w = data && (data.guest_width || data.display_width);
+    const h = data && (data.guest_height || data.display_height);
+    set('spec-display', (w && h) ? w + 'x' + h + ' virtual framebuffer' : 'Undetermined');
+    set('spec-security', 'Ring 3 capability sandbox (emulated)');
+  }
+
+  async function refreshTargetBadges() {
+    try {
+      const resp = await fetch('/api/qemu/status');
+      const data = await resp.json();
+      describeObservedTarget(data);
+    } catch (_) {
+      /* Leave the badges undetermined rather than inventing values. */
+    }
+  }
+
+  // The badges must describe the running machine even when the page is opened
+  // against an already-booted guest, where the boot poll never starts.
+  refreshTargetBadges();
+
   async function checkLauncherBootReady() {
     try {
       const resp = await fetch('/api/qemu/status');
       const data = await resp.json();
+      describeObservedTarget(data);
       if (data.launcher_ready) {
         if (bootCheckInterval) {
           clearInterval(bootCheckInterval);
