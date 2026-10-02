@@ -251,15 +251,20 @@ impl ArmMmu {
         unsafe {
             let l2_phys = core::ptr::addr_of!(L2_HIGH_TABLE) as u64;
             L1_TABLE.entries[l1_index as usize] = l2_phys | DESC_TABLE | DESC_VALID;
-            let base = start_paddr - l1_index * L1_BLOCK;
+            // The level 1 entry is a table pointer, not a block, so the leaf
+            // descriptor must carry the FULL physical address of each 2 MiB
+            // block. Writing the offset within the gigabyte here pointed every
+            // leaf at physical zero, which made the mapped window read back
+            // whatever happened to be there.
             for step in 0..count {
-                L2_HIGH_TABLE.entries[(first_in_gib + step) as usize] = (base + step * L2_BLOCK)
-                    | DESC_AF
-                    | DESC_SH_OUTER
-                    | DESC_AP_RW_EL1
-                    | DESC_ATTR_DEVICE
-                    | DESC_BLOCK
-                    | DESC_VALID;
+                L2_HIGH_TABLE.entries[(first_in_gib + step) as usize] =
+                    (start_paddr + step * L2_BLOCK)
+                        | DESC_AF
+                        | DESC_SH_OUTER
+                        | DESC_AP_RW_EL1
+                        | DESC_ATTR_DEVICE
+                        | DESC_BLOCK
+                        | DESC_VALID;
             }
             unsafe {
                 core::arch::asm!("dsb ish", options(nostack, preserves_flags));
