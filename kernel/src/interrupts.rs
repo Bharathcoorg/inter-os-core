@@ -199,13 +199,6 @@ fn fault_report_hex(value: u64) -> bool {
 }
 
 #[inline(never)]
-fn fault_report_hex_byte(byte: u8) -> bool {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    fault_report_byte(HEX[((byte >> 4) & 0xf) as usize])
-        && fault_report_byte(HEX[(byte & 0xf) as usize])
-}
-
-#[inline(never)]
 fn fault_report_line(label: &[u8], value: u64) -> bool {
     fault_report_bytes(label)
         && fault_report_hex(value)
@@ -235,14 +228,6 @@ extern "x86-interrupt" fn page_fault_handler(
         core::arch::asm!("mov {}, cr2", out(reg) accessed_address,
                          options(nomem, nostack, preserves_flags));
     }
-    // DIAGNOSTIC: re-read CR2 immediately to detect stale values.
-    // If cr2_reread != accessed_address, the first read was left over from an
-    // earlier handled fault and did not belong to this exception.
-    let cr2_reread: u64;
-    unsafe {
-        core::arch::asm!("mov {}, cr2", out(reg) cr2_reread,
-                         options(nomem, nostack, preserves_flags));
-    }
     let instruction_pointer = stack_frame.instruction_pointer.as_u64();
     let stack_pointer = stack_frame.stack_pointer.as_u64();
     let error_flags = error_code.bits() as u64;
@@ -250,12 +235,12 @@ extern "x86-interrupt" fn page_fault_handler(
         || stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
 
     if is_user {
-        if !fault_report_bytes(b"\\r\\n[USER PAGE FAULT]\\r\\n")
+        if !fault_report_bytes(b"\r\n[USER PAGE FAULT]\r\n")
             || !fault_report_line(b"CR2=", accessed_address)
             || !fault_report_line(b"RIP=", instruction_pointer)
             || !fault_report_line(b"RSP=", stack_pointer)
             || !fault_report_line(b"ERR=", error_flags)
-            || !fault_report_bytes(b"Terminating user task.\\r\\n")
+            || !fault_report_bytes(b"Terminating user task.\r\n")
         {
             halt_after_fault_report_failure();
         }
@@ -264,125 +249,20 @@ extern "x86-interrupt" fn page_fault_handler(
         // terminates the faulting user task rather than panicking the kernel.
         crate::task::terminate_current();
 
+        // A task terminator is not expected to return. If it ever does, never
+        // fall through into the kernel-fault path: that would report a user
+        // fault as a kernel fault and lose the distinction this handler exists
+        // to preserve.
         #[allow(unreachable_code)]
         halt_after_fault_report_failure();
     }
 
-    if !fault_report_bytes(b"\\r\\n[KERNEL PAGE FAULT]\\r\\n")
+    if !fault_report_bytes(b"\r\n[KERNEL PAGE FAULT]\r\n")
         || !fault_report_line(b"CR2=", accessed_address)
-        || !fault_report_line(b"CR2b=", cr2_reread)
         || !fault_report_line(b"RIP=", instruction_pointer)
         || !fault_report_line(b"RSP=", stack_pointer)
         || !fault_report_line(b"ERR=", error_flags)
-    {
-        halt_after_fault_report_failure();
-    }
-    // DIAGNOSTIC: dump 16 bytes at the fault RIP to see what instructions the
-    // CPU is actually executing (detects page table aliasing / code corruption).
-    if instruction_pointer > 0x1000 {
-        let _ = fault_report_bytes(b"CODE=");
-        let code_ptr = instruction_pointer as *const u8;
-        for i in 0..16u64 {
-            let byte = unsafe { core::ptr::read_volatile(code_ptr.add(i as usize)) };
-            let _ = fault_report_hex_byte(byte);
-        }
-        let _ = fault_report_bytes(b"\\r\\n");
-    }
-    // DIAGNOSTIC: sample pages across the kernel text range to find how much of
-    // the image is actually resident. Every probe is inside the mapped image, so
-    // these reads cannot fault. A page that reads zero here is code that exists
-    // in the image file but is absent in memory.
-    {
-        let base = (instruction_pointer & !0xFFF) as usize;
-        const SPANS: [i64; 7] = [-0x80000, -0x40000, -0x10000, 0, 0x10000, 0x40000, 0x80000];
-        for span in SPANS {
-            let addr = (base as i64 + span) as usize;
-            if addr == 0 {
-                continue;
-            }
-            let _ = fault_report_bytes(b"S[");
-            let _ = fault_report_hex_byte(((addr >> 8) & 0xff) as u8);
-            let _ = fault_report_hex_byte((addr & 0xff) as u8);
-            let _ = fault_report_bytes(b"]=");
-            let word = unsafe { core::ptr::read_volatile(addr as *const u64) };
-            let _ = fault_report_hex(word);
-            let _ = fault_report_bytes(b"\\r\\n");
-        }
-    }
-    // DIAGNOSTIC: walk the page tables for the faulting virtual address and show
-    // where each level points. A page that is present and read-only but reads
-    // zero means its entry resolves to an empty frame; this says whether the
-    // entry is wrong or the frame was overwritten.
-    {
-        use x86_64::structures::paging::PageTable;
-        let off = crate::memory::phys_mem_offset_raw();
-        let (pml4_frame, _) = x86_64::registers::control::Cr3::read();
-        if off != 0 {
-            let va = instruction_pointer;
-            let indexes = [
-                ((va >> 39) & 0x1ff) as usize,
-                ((va >> 30) & 0x1ff) as usize,
-                ((va >> 21) & 0x1ff) as usize,
-                ((va >> 12) & 0x1ff) as usize,
-            ];
-            let labels: [&[u8]; 4] = [b"l4", b"l3", b"l2", b"l1"];
-            let mut table_addr = pml4_frame.start_address().as_u64();
-            let mut leaf = 0u64;
-            let mut pt_base = 0u64;
-            let _ = fault_report_bytes(b"WALK ");
-            for (level, index) in indexes.iter().enumerate() {
-                let table = unsafe { &*((off + table_addr) as *const PageTable) };
-                let entry = &table[*index];
-                let entry_addr = entry.addr().as_u64();
-                let _ = fault_report_bytes(labels[level]);
-                let _ = fault_report_bytes(b"=");
-                if entry.is_unused() {
-                    let _ = fault_report_bytes(b"unused\r\n");
-                    break;
-                }
-                let _ = fault_report_hex(entry_addr);
-                let _ = fault_report_bytes(b" ");
-                leaf = entry_addr & 0x000F_FFFF_FFFF_F000;
-                table_addr = leaf;
-                if level == 2 { pt_base = leaf; }
-            }
-            // Neighbouring entries in the same leaf table. A regular mapping is
-            // base + i * 0x1000; a single entry carrying its neighbour's frame
-            // is a mis-mapped page rather than an overwritten one.
-            if pt_base != 0 {
-                use x86_64::structures::paging::PageTable;
-                let table = unsafe { &*((off + pt_base) as *const PageTable) };
-                let idx = indexes[3];
-                let start = idx.saturating_sub(2);
-                for i in start..(idx + 3) {
-                    let _ = fault_report_bytes(b"PT[");
-                    let _ = fault_report_hex_byte(((i >> 8) & 0xff) as u8);
-                    let _ = fault_report_hex_byte((i & 0xff) as u8);
-                    let _ = fault_report_bytes(b"]=");
-                    let _ = fault_report_hex(table[i].addr().as_u64());
-                    let _ = fault_report_bytes(b"\r\n");
-                }
-            }
-            // The frame this virtual address finally resolves to.
-            let _ = fault_report_bytes(b"LEAF=");
-            let _ = fault_report_hex(leaf);
-            let _ = fault_report_bytes(b" DATA=");
-            let word = unsafe { core::ptr::read_volatile((off + leaf) as *const u64) };
-            let _ = fault_report_hex(word);
-            let _ = fault_report_bytes(b"\r\n");
-            // The neighbouring frame, so a one-page misalignment is distinguishable from
-            // a frame that was simply overwritten. Read relative to the leaf that
-            // is already known to be mapped, never via an independent address.
-            let _ = fault_report_bytes(b"NEXT=");
-            let next = leaf + 0x1000;
-            let _ = fault_report_hex(next);
-            let _ = fault_report_bytes(b" DATA=");
-            let word = unsafe { core::ptr::read_volatile((off + next) as *const u64) };
-            let _ = fault_report_hex(word);
-            let _ = fault_report_bytes(b"\r\n");
-        }
-    }
-    if !fault_report_bytes(b"HALT\\r\\n")
+        || !fault_report_bytes(b"HALT\r\n")
     {
         halt_after_fault_report_failure();
     }
