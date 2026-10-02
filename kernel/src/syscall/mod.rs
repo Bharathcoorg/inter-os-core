@@ -1251,16 +1251,21 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             if copy_from_user(&mut kbuf, a3, 512).is_err() || copy_from_user(&mut iv, a5, 16).is_err() {
                 return SyscallResult::InvalidArguments as i64;
             }
-            match sys_vault_crypt(action, block_idx, &mut kbuf, &iv) {
-                Ok(()) => {
-                    if copy_to_user(a3, &kbuf).is_err() {
-                        return SyscallResult::InvalidArguments as i64;
-                    }
-                    SyscallResult::Success as i64
-                }
-                Err(e) => e as i64,
+    match sys_vault_crypt(action, block_idx, &mut kbuf, &mut iv) {
+        Ok(()) => {
+            if copy_to_user(a3, &kbuf).is_err() {
+                return SyscallResult::InvalidArguments as i64;
             }
+            // A seal generates a fresh IV; return it so the caller can record
+            // which envelope it now owns.
+            if action == 0 && copy_to_user(a5, &iv).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            SyscallResult::Success as i64
         }
+        Err(e) => e as i64,
+    }
+}
         45 => {
             // WirelessQuery: a1 = out_buf_ptr, a2 = out_buf_len
             let len = a2 as usize;
@@ -3381,7 +3386,7 @@ pub fn sys_vault_crypt(
     action: u32,
     block_index: u64,
     buf: &mut [u8; 512],
-    iv: &[u8; 16],
+    iv: &mut [u8; 16],
 ) -> Result<(), SyscallResult> {
     // Object-scoped to the CALLER'S OWN vault.
     // WHY: the previous check was `authorize_capability(StorageRawBlock, INVOKE)`,
@@ -3408,41 +3413,38 @@ pub fn sys_vault_crypt(
 
     let mut vault = crate::storage::STORAGE_VAULT.lock();
     if action == 0 {
-        // Encrypt
-        match vault.encrypt_sector(block_index, buf, iv) {
+        // Seal. The caller supplies plaintext; the envelope is written to the
+        // vault region and only the ciphertext is returned. A fresh IV is
+        // generated per seal so two blocks never share keystream.
+        match vault.seal_sector(block_index, buf) {
             Ok(enc_block) => {
                 buf.copy_from_slice(&enc_block.ciphertext);
+                iv.copy_from_slice(&enc_block.iv);
                 Ok(())
+            }
+            Err(crate::storage::VaultError::InvalidBlockIndex) => {
+                Err(SyscallResult::InvalidArguments)
             }
             Err(_) => Err(SyscallResult::DeviceError),
         }
     } else {
-        // Decrypt an envelope the vault previously sealed.
-        //
-        // The tag is the one the vault issued for this block, not one derived
-        // from whatever the caller just passed in. Recomputing the expected tag
-        // here from the caller's own ciphertext compared a value with itself, so
-        // IntegrityViolation was unreachable and any ciphertext decrypted to
-        // attacker-chosen bytes. The vault now rejects an envelope it did not
-        // issue, and separately verifies the tag against the ciphertext.
-        let block = crate::storage::VaultBlock {
-            iv: *iv,
-            block_index,
-            ciphertext: *buf,
-            hmac_tag: [0u8; 32],
-        };
-        match vault.decrypt_sector(&block) {
-            Ok(dec_plain) => {
-                buf.copy_from_slice(&dec_plain);
-                Ok(())
-            }
+        // Open. The envelope is read back from storage, so the ciphertext and
+        // the tag both come from the vault rather than from the caller.
+        // Recomputing the expected tag from caller-supplied ciphertext compared a
+        // value with itself, which made IntegrityViolation unreachable and let
+        // any ciphertext decrypt to attacker-chosen bytes.
+        match vault.open_sector(block_index, buf) {
+            Ok(()) => Ok(()),
             Err(crate::storage::VaultError::IntegrityViolation) => {
                 Err(SyscallResult::IntegrityViolation)
             }
             Err(crate::storage::VaultError::KeystoreUninitialized) => {
                 Err(SyscallResult::PermissionDenied)
             }
-            Err(_) => Err(SyscallResult::InvalidArguments),
+            Err(crate::storage::VaultError::InvalidBlockIndex) => {
+                Err(SyscallResult::InvalidArguments)
+            }
+            Err(_) => Err(SyscallResult::DeviceError),
         }
     }
 }

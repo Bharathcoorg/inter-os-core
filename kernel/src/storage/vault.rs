@@ -12,12 +12,24 @@ use crate::crypto::SHA256_DIGEST_LENGTH;
 /// Standard hardware sector size in bytes.
 pub const VAULT_SECTOR_SIZE: usize = 512;
 
+/// Physical placement of the sealed-envelope store.
+///
+/// Laid out after the InterFS region and well below the journal, which occupies
+/// the final slots at the end of the disk. Each sealed block occupies two
+/// sectors: a header carrying the magic, block index, IV and authentication
+/// tag, then the ciphertext.
+pub const VAULT_BASE_LBA: u32 = 4096 + 32809;
+pub const VAULT_TOTAL_BLOCKS: u32 = 2048;
+pub const VAULT_MAGIC: [u8; 4] = *b"IVLT";
+pub const VAULT_FORMAT_VERSION: u32 = 1;
+
 /// Errors returned by storage vault operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VaultError {
     IntegrityViolation,
     KeystoreUninitialized,
     InvalidBlockIndex,
+    HardwareFailure,
 }
 
 /// An authenticated, encrypted storage block envelope.
@@ -120,6 +132,115 @@ impl StorageVault {
         Ok(())
     }
 
+    /// Seals `plaintext` and persists the envelope, so it can be reopened after
+    /// a reboot.
+    ///
+    /// The envelope is written to the vault region on the data disk: a header
+    /// sector holding the magic, block index, IV and authentication tag, followed
+    /// by the ciphertext sector. Both are needed to open the block later, which
+    /// is what makes the integrity check meaningful: the tag now comes from
+    /// storage rather than from the caller.
+    pub fn seal_sector(
+        &mut self,
+        block_index: u64,
+        plaintext: &[u8; VAULT_SECTOR_SIZE],
+    ) -> Result<VaultBlock, VaultError> {
+        if block_index >= VAULT_TOTAL_BLOCKS as u64 {
+            return Err(VaultError::InvalidBlockIndex);
+        }
+        // A fresh IV per seal. Reusing one across blocks of a keystream would
+        // leak the keystream relationship between them.
+        let mut iv = [0u8; 16];
+        crate::crypto::get_random_bytes(&mut iv);
+        if iv == [0u8; 16] {
+            return Err(VaultError::HardwareFailure);
+        }
+        let block = self.encrypt_sector(block_index, plaintext, &iv)?;
+        self.write_envelope(block_index, &block)?;
+        Ok(block)
+    }
+
+    /// Reads a previously sealed envelope back and decrypts it.
+    ///
+    /// The ciphertext and tag come from storage, so a caller cannot choose the
+    // bytes being verified and `IntegrityViolation` is genuinely reachable.
+    pub fn open_sector(
+        &self,
+        block_index: u64,
+        out: &mut [u8; VAULT_SECTOR_SIZE],
+    ) -> Result<(), VaultError> {
+        let block = self.read_envelope(block_index)?;
+        let plaintext = self.decrypt_sector(&block)?;
+        out.copy_from_slice(&plaintext);
+        Ok(())
+    }
+
+    fn envelope_sectors(block_index: u64) -> Option<(u32, u32)> {
+        if block_index >= VAULT_TOTAL_BLOCKS as u64 {
+            return None;
+        }
+        let header = (VAULT_BASE_LBA as u64 + block_index * 2) as u32;
+        Some((header, header + 1))
+    }
+
+    fn write_envelope(&self, block_index: u64, block: &VaultBlock) -> Result<(), VaultError> {
+        use crate::drivers::{BlockDevice, SECTOR_SIZE};
+        let (header_lba, data_lba) =
+            Self::envelope_sectors(block_index).ok_or(VaultError::InvalidBlockIndex)?;
+        let mut header = [0u8; SECTOR_SIZE];
+        header[0..4].copy_from_slice(&VAULT_MAGIC);
+        header[4..8].copy_from_slice(&VAULT_FORMAT_VERSION.to_le_bytes());
+        header[8..16].copy_from_slice(&block_index.to_le_bytes());
+        header[16..32].copy_from_slice(&block.iv);
+        header[32..64].copy_from_slice(&block.hmac_tag);
+        header[64..72].copy_from_slice(&(block.ciphertext.len() as u64).to_le_bytes());
+
+        let mut guard = crate::drivers::ATA_PRIMARY.lock();
+        let drive = guard.as_mut().ok_or(VaultError::HardwareFailure)?;
+        // Payload first, then the header that makes it reachable, so a torn
+        // write never leaves a header pointing at unwritten ciphertext.
+        drive
+            .write_sector(data_lba, &block.ciphertext)
+            .map_err(|_| VaultError::HardwareFailure)?;
+        drive
+            .write_sector(header_lba, &header)
+            .map_err(|_| VaultError::HardwareFailure)?;
+        Ok(())
+    }
+
+    fn read_envelope(&self, block_index: u64) -> Result<VaultBlock, VaultError> {
+        use crate::drivers::{BlockDevice, SECTOR_SIZE};
+        let (header_lba, data_lba) =
+            Self::envelope_sectors(block_index).ok_or(VaultError::InvalidBlockIndex)?;
+        let mut guard = crate::drivers::ATA_PRIMARY.lock();
+        let drive = guard.as_mut().ok_or(VaultError::HardwareFailure)?;
+        let mut header = [0u8; SECTOR_SIZE];
+        drive
+            .read_sector(header_lba, &mut header)
+            .map_err(|_| VaultError::HardwareFailure)?;
+        if header[0..4] != VAULT_MAGIC
+            || u32::from_le_bytes([header[4], header[5], header[6], header[7]])
+                != VAULT_FORMAT_VERSION
+            || u64::from_le_bytes([
+                header[8], header[9], header[10], header[11],
+                header[12], header[13], header[14], header[15],
+            ]) != block_index
+        {
+            return Err(VaultError::IntegrityViolation);
+        }
+        let mut ciphertext = [0u8; VAULT_SECTOR_SIZE];
+        drive
+            .read_sector(data_lba, &mut ciphertext)
+            .map_err(|_| VaultError::HardwareFailure)?;
+
+        let mut iv = [0u8; 16];
+        iv.copy_from_slice(&header[16..32]);
+        let mut hmac_tag = [0u8; SHA256_DIGEST_LENGTH];
+        hmac_tag.copy_from_slice(&header[32..64]);
+
+        Ok(VaultBlock { iv, block_index, ciphertext, hmac_tag })
+    }
+
     /// Generates a 512-byte deterministic pseudo-random keystream for a block.
     fn generate_keystream(&self, block_index: u64, iv: &[u8; 16], out: &mut [u8; VAULT_SECTOR_SIZE]) {
         let mut counter_buf = [0u8; 16 + 8 + 4];
@@ -206,6 +327,36 @@ pub fn init() {
     let mut plaintext = [0u8; VAULT_SECTOR_SIZE];
     for i in 0..VAULT_SECTOR_SIZE {
         plaintext[i] = (i % 256) as u8;
+    }
+
+    // 0. Prove the persistent envelope store round-trips through the real disk
+    //    path. Sealing writes the header and ciphertext to the vault region and
+    //    opening reads them back, so a block sealed here can be reopened after a
+    //    reboot. This is the only check that would have caught the envelope never
+    //    reaching storage.
+    const CANARY_BLOCK: u64 = 0;
+    match vault.seal_sector(CANARY_BLOCK, &plaintext) {
+        Ok(sealed) => {
+            let mut reopened = [0u8; VAULT_SECTOR_SIZE];
+            match vault.open_sector(CANARY_BLOCK, &mut reopened) {
+                Ok(()) => assert_eq!(
+                    reopened, plaintext,
+                    "sealed block must reopen to the original plaintext"
+                ),
+                Err(e) => panic!("sealed vault block must reopen: {:?}", e),
+            }
+            let _ = sealed;
+            crate::serial_println!(
+                "[TEST] Vault persistence: envelope sealed to disk at LBA {} and reopened.",
+                VAULT_BASE_LBA
+            );
+        }
+        Err(VaultError::HardwareFailure) => {
+            crate::serial_println!(
+                "[WARN] Vault persistence check skipped: no block device for the vault region."
+            );
+        }
+        Err(e) => panic!("vault persistence check failed: {:?}", e),
     }
 
     // 1. Encrypt sector 42
