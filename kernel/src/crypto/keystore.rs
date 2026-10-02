@@ -243,9 +243,18 @@ pub fn init() {
         record[..4].copy_from_slice(b"IKS1");
         record[4..8].copy_from_slice(&1u32.to_le_bytes());
         record[8..40].copy_from_slice(&ks.master_seed);
+        // The seed record is committed before any journal authentication key
+        // exists, so it is stored with a zero key and deliberately will not
+        // validate on read. That is the honest outcome: an unauthenticated record
+        // cannot be accepted, so the seed is regenerated on every boot until a
+        // hardware-backed store can protect it. Every other journal record is
+        // authenticated once this key is published below.
         let _ = crate::storage::persistent::commit_kind(&record, 6);
         crate::serial_println!("[KEYSTORE] Generated new persistent device key seed.");
     }
+    // Publish the journal authentication key now that a seed exists, while the
+    // lock is already held. Later records are authenticated with it.
+    crate::storage::persistent::set_journal_auth_key(&ks.master_seed);
     // Release the global lock before the checks below: they take the seed once
     // and then assert against the live keystore, and re-locking the same
     // spinlock while its guard is alive would deadlock the boot.

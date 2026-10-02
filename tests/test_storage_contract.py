@@ -20,6 +20,10 @@ def must(text: str, needle: str, label: str) -> None:
     assert needle in text, f"missing {label}: {needle}"
 
 
+def must_not(text: str, needle: str, label: str) -> None:
+    assert needle not in text, f"forbidden {label}: {needle}"
+
+
 def main() -> None:
     ata = ATA.read_text()
     sdhci = SDHCI.read_text()
@@ -133,7 +137,13 @@ def main() -> None:
     payload_write = persistent.index("drive.write_sector(base + sector, &buf)")
     header_write = persistent.index("drive.write_sector(base, &header)")
     assert payload_write < header_write, "journal header must be published after payload sectors"
-    must(persistent, "Sha256::digest(payload)", "journal payload integrity digest")
+    # Records are authenticated with a keyed MAC that also covers the header
+    # fields. An unkeyed digest only proves the bytes are unchanged, so anything
+    # that could write the data disk could replace the stored trust root,
+    # revocation list or storage seed and still validate.
+    must(persistent, "fn record_tag", "journal record authentication tag")
+    must(persistent, "record_tag(expected_kind, generation", "read path verifies the tag")
+    must_not(persistent, "Sha256::digest(payload)", "unkeyed journal digest")
     must(persistent, "generation", "journal generation tracking")
     must(persistent, "const SLOT_COUNT: u32 = 16;", "redundant journal slots for eight record kinds")
     must(persistent, "5 => 8usize", "package payload journal kind")

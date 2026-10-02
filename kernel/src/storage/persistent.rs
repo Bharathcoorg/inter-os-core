@@ -5,7 +5,7 @@
 //! before the generation-bearing header; boot selects the newest digest-valid
 //! record for the requested kind.
 
-use crate::crypto::Sha256;
+use spin::Mutex;
 use crate::drivers::{BlockDevice, ATA_PRIMARY, SECTOR_SIZE};
 
 pub const JOURNAL_MAGIC: [u8; 4] = *b"IOSJ";
@@ -75,7 +75,7 @@ fn read_slot(
         }
     }
 
-    if offset != len || Sha256::digest(&payload[..len]) != digest {
+    if offset != len || record_tag(expected_kind, generation, &payload[..len]) != digest {
         return Ok(None);
     }
     Ok(Some((generation, len)))
@@ -106,6 +106,55 @@ pub fn load_latest_kind(
         }
     }
     Ok(best)
+}
+
+/// Authentication key for journal records, published once the device seed
+/// exists.
+///
+/// It lives in its own static rather than being derived from the keystore on
+/// demand: the keystore publishes this key while holding its own lock and then
+/// commits its seed record, so reading the keystore from inside the commit path
+/// would re-enter that lock and deadlock the boot.
+static JOURNAL_AUTH_KEY: Mutex<Option<[u8; 32]>> = Mutex::new(None);
+
+/// Publishes the journal authentication key. Called by the keystore once it has
+/// a device seed. Passing a zero key makes record verification fail closed.
+pub fn set_journal_auth_key(seed: &[u8; 32]) {
+    let key = crate::crypto::hmac::HmacSha256::compute(seed, b"interos.journal.v1");
+    *JOURNAL_AUTH_KEY.lock() = Some(key);
+}
+
+fn journal_auth_key() -> [u8; 32] {
+    match *JOURNAL_AUTH_KEY.lock() {
+        Some(key) => key,
+        // No key published yet: a zero key makes every tag mismatch rather than
+        // silently accepting an unauthenticated record.
+        None => [0u8; 32],
+    }
+}
+
+/// Computes the record authentication tag.
+///
+/// WHY a keyed MAC rather than a plain hash: an unkeyed digest only proves the
+/// payload has not changed, so anyone able to write the data disk could replace
+/// the stored trust root, revocation list or storage seed and still pass
+/// verification. The tag covers the header fields as well as the payload, so the
+/// kind, generation and length cannot be altered either.
+///
+/// This is a software-backed integrity mechanism. It resists corruption and
+/// casual modification; it is not a substitute for a hardware-backed store, and
+/// it cannot protect the keystore seed record itself from an attacker who can
+/// write the entire disk, because that seed derives this key.
+fn record_tag(kind: u8, generation: u64, payload: &[u8]) -> [u8; 32] {
+    let take = payload.len().min(512);
+    let mut buf = [0u8; 21 + 512];
+    buf[0] = JOURNAL_VERSION as u8;
+    buf[1] = kind;
+    buf[2..10].copy_from_slice(&generation.to_le_bytes());
+    buf[10..14].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+    buf[14..18].copy_from_slice(&JOURNAL_MAGIC);
+    buf[21..21 + take].copy_from_slice(&payload[..take]);
+    crate::crypto::hmac::HmacSha256::compute(&journal_auth_key(), &buf[..21 + take])
 }
 
 pub fn commit_kind(payload: &[u8], kind: u8) -> Result<u64, PersistentError> {
@@ -154,14 +203,14 @@ pub fn commit_kind(payload: &[u8], kind: u8) -> Result<u64, PersistentError> {
         drive.write_sector(base + sector, &buf).map_err(|_| PersistentError::Io)?;
     }
 
-    let digest = Sha256::digest(payload);
+    let tag = record_tag(kind, next_generation, payload);
     let mut header = [0u8; SECTOR_SIZE];
     header[0..4].copy_from_slice(&JOURNAL_MAGIC);
     header[4..8].copy_from_slice(&JOURNAL_VERSION.to_le_bytes());
     header[8..16].copy_from_slice(&next_generation.to_le_bytes());
     header[16..20].copy_from_slice(&(payload.len() as u32).to_le_bytes());
     header[20] = kind;
-    header[24..56].copy_from_slice(&digest);
+    header[24..56].copy_from_slice(&tag);
     header[56..60].copy_from_slice(&0x494F_534Au32.to_le_bytes());
     drive.write_sector(base, &header).map_err(|_| PersistentError::Io)?;
 

@@ -264,6 +264,22 @@ class PlatformRealityTests(unittest.TestCase):
         # The flush must actually reach the controller.
         self.assertIn("drive.flush()", vfs)
 
+    def test_persistent_journal_records_are_authenticated(self):
+        journal = self.read("kernel/src/storage/persistent.rs")
+        keystore = self.read("kernel/src/crypto/keystore.rs")
+        # An unkeyed digest only proves the payload is unchanged, so anything able
+        # to write the data disk could replace the trust root, revocation list or
+        # storage seed and still validate. Records are tagged with a keyed MAC.
+        self.assertIn("fn record_tag", journal)
+        self.assertIn("HmacSha256::compute(&journal_auth_key()", journal)
+        self.assertNotIn("Sha256::digest(payload)", journal)
+        self.assertNotIn("Sha256::digest(&payload[..len])", journal)
+        # The key is published by the keystore rather than read from it inside
+        # the commit path, which would re-enter that lock and deadlock the boot.
+        self.assertIn("static JOURNAL_AUTH_KEY", journal)
+        self.assertIn("pub fn set_journal_auth_key", journal)
+        self.assertIn("persistent::set_journal_auth_key(&ks.master_seed)", keystore)
+
     def test_vault_decryption_is_checked_against_a_kernel_issued_tag(self):
         vault = self.read("kernel/src/storage/vault.rs")
         syscall = self.read("kernel/src/syscall/mod.rs")
