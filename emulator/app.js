@@ -5046,4 +5046,159 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Back to Home
     backBtn?.addEventListener('click', () => switchView('view-home'));
-}});
+    fabBtn?.addEventListener('click', () => switchView('view-home'));
+
+    // Populate Apps
+    if (streamList) {
+      streamList.innerHTML = '';
+      const apps = [
+        { id: 'view-dialer', title: 'Phone', lucide: 'phone', badge: 'Telephony' },
+        { id: 'view-messages', title: 'Messages', lucide: 'message-square', badge: 'SMS & Chat' },
+        { id: 'view-browser', title: 'Browser', lucide: 'compass', badge: 'Web' },
+        { id: 'view-camera', title: 'Camera', lucide: 'camera', badge: 'Optical' },
+        { id: 'view-gallery', title: 'Gallery', lucide: 'image', badge: 'Moments' },
+        { id: 'view-files', title: 'Files', lucide: 'folder', badge: 'Storage' },
+        { id: 'view-music', title: 'Music & Synth', lucide: 'disc', badge: 'Hi-Fi Audio' },
+        { id: 'view-calculator', title: 'Calculator', lucide: 'calculator', badge: 'Quick Math' },
+        { id: 'view-calendar', title: 'Calendar', lucide: 'calendar', badge: 'Agenda' },
+        { id: 'view-clock', title: 'Clock & Timers', lucide: 'clock', badge: 'RTC' },
+        { id: 'view-settings', title: 'Settings', lucide: 'settings', badge: 'System' },
+        { id: 'view-authenticator', title: 'Security', lucide: 'shield-check', badge: 'Hardware Enclave' },
+        { id: 'view-health', title: 'Health Hub', lucide: 'activity', badge: 'Digital Twin' },
+        { id: 'view-meshchat', title: 'Mesh Chat', lucide: 'radio', badge: 'P2P LoRa' },
+        { id: 'view-terminal', title: 'Terminal', lucide: 'terminal', badge: 'Microkernel Shell' }
+      ];
+
+      apps.forEach(app => {
+        const item = document.createElement('button');
+        item.className = 'stream-app-item';
+        item.dataset.view = app.id;
+        item.dataset.letter = app.title[0].toUpperCase();
+        item.dataset.name = app.title.toLowerCase();
+        item.innerHTML = `
+          <div class="stream-app-icon-wrap">
+            <i data-lucide="${app.lucide}" style="width: 18px; height: 18px;"></i>
+          </div>
+          <span class="stream-app-label">${app.title}</span>
+          <span class="stream-app-badge">${app.badge}</span>
+        `;
+        item.addEventListener('click', () => {
+          playBeep(480, 0.02, 'sine');
+          switchView(app.id);
+        });
+        streamList.appendChild(item);
+      });
+    }
+
+    // Alphabet Scrubber
+    if (alphabetRail && viewport) {
+      alphabetRail.querySelectorAll('.alpha-node').forEach(node => {
+        node.addEventListener('click', () => {
+          const letter = node.dataset.letter;
+          if (letter === 'top') {
+            viewport.scrollTo({ top: 0, behavior: 'smooth' });
+            return;
+          }
+          if (letter === 'bottom') {
+            viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' });
+            return;
+          }
+          const target = streamList?.querySelector(`[data-letter="${letter}"]`);
+          if (target) {
+            target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }
+        });
+      });
+    }
+
+    // Search filter
+    if (searchPill) {
+      searchPill.addEventListener('click', () => {
+        const existingInput = searchPill.querySelector('.stream-search-input');
+        if (existingInput) return;
+        const placeholder = searchPill.querySelector('.stream-search-placeholder');
+        if (placeholder) placeholder.style.display = 'none';
+        const input = document.createElement('input');
+        input.className = 'stream-search-input';
+        input.placeholder = 'Filter apps...';
+        input.addEventListener('input', (e) => {
+          const q = e.target.value.toLowerCase().trim();
+          streamList?.querySelectorAll('.stream-app-item').forEach(it => {
+            it.style.display = it.dataset.name.includes(q) ? 'flex' : 'none';
+          });
+        });
+        input.addEventListener('blur', () => {
+          if (!input.value) {
+            input.remove();
+            if (placeholder) placeholder.style.display = 'inline';
+            streamList?.querySelectorAll('.stream-app-item').forEach(it => it.style.display = 'flex');
+          }
+        });
+        searchPill.appendChild(input);
+        input.focus();
+      });
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Interactive Hardware Input Bridge: Forward touch coordinates to running QEMU
+  // ---------------------------------------------------------------------------
+  function initHardwareTouchBridge() {
+    const phoneViewport = document.getElementById('phone-viewport');
+    if (!phoneViewport) return;
+
+    let isPointerDown = false;
+
+    function forwardTouchEvent(e, type) {
+      if (!state.qemuRunning) return;
+      const rect = phoneViewport.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+
+      const clientX = e.clientX || (e.touches && e.touches[0] ? e.touches[0].clientX : 0);
+      const clientY = e.clientY || (e.touches && e.touches[0] ? e.touches[0].clientY : 0);
+
+      // Map viewport dimensions to standard 720x1440 guest canvas resolution
+      const guestX = Math.round(Math.max(0, Math.min(719, ((clientX - rect.left) / rect.width) * 720)));
+      const guestY = Math.round(Math.max(0, Math.min(1439, ((clientY - rect.top) / rect.height) * 1440)));
+
+      fetch('/api/qemu/input', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: type, x: guestX, y: guestY })
+      }).catch(() => {});
+    }
+
+    phoneViewport.addEventListener('mousedown', (e) => {
+      isPointerDown = true;
+      forwardTouchEvent(e, 'down');
+    });
+
+    window.addEventListener('mouseup', (e) => {
+      if (isPointerDown) {
+        isPointerDown = false;
+        forwardTouchEvent(e, 'touch');
+      }
+    });
+
+    phoneViewport.addEventListener('touchstart', (e) => {
+      forwardTouchEvent(e, 'down');
+    }, { passive: true });
+
+    phoneViewport.addEventListener('touchend', (e) => {
+      forwardTouchEvent(e, 'touch');
+    }, { passive: true });
+  }
+
+  // Initialize interactive hardware touch bridge
+  initHardwareTouchBridge();
+
+  // Initialize both experiences on launch
+  initLauncherHomescreen();
+  initMinimalStream();
+
+  // Initialize Lucide icons on boot
+  if (window.lucide && typeof window.lucide.createIcons === 'function') {
+    window.lucide.createIcons();
+  }
+
+});
