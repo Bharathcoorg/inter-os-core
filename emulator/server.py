@@ -1278,6 +1278,12 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 'mode': t.get("mode", "standby"),
                 'launcher_ready': launcher_ready,
                 'active_profile': active_profile_key,
+                # Report the geometry this machine was actually launched with, so
+                # the studio describes the running target rather than a generic
+                # specification.
+                'ram_mb': (SUPPORTED_PROFILES.get(active_profile_key) or {}).get('ram'),
+                'guest_width': ((SUPPORTED_PROFILES.get(active_profile_key) or {}).get('display') or {}).get('guest_width'),
+                'guest_height': ((SUPPORTED_PROFILES.get(active_profile_key) or {}).get('display') or {}).get('guest_height'),
                 'pid': qemu_subproc.pid if qemu_subproc else None
             })
             self.wfile.write(response.encode())
