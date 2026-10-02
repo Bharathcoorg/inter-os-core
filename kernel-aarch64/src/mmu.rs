@@ -150,6 +150,62 @@ impl ArmMmu {
         }
     }
 
+    /// Maps a small device region by covering it with 2 MiB blocks.
+    ///
+    /// A device BAR is typically far smaller than the mapping granularity and
+    /// is rarely aligned to it, so it cannot be described by a single level 2
+    /// block. Every 2 MiB block that overlaps the region is mapped instead.
+    ///
+    /// `guard_lo..guard_hi` is a range the caller holds for normal memory; any
+    /// block that would map inside it is refused, so a coarse mapping can never
+    /// shadow RAM.
+    pub fn map_device_region_guarded(
+        start_paddr: u64,
+        size: u64,
+        guard_lo: u64,
+        guard_hi: u64,
+    ) -> bool {
+        const L2_BLOCK: u64 = 0x20_0000;
+
+        if size == 0 || start_paddr == 0 {
+            return false;
+        }
+        let first = start_paddr / L2_BLOCK;
+        let last = (start_paddr + size - 1) / L2_BLOCK;
+        for index in first..=last {
+            let block_lo = index * L2_BLOCK;
+            let block_hi = block_lo + L2_BLOCK;
+            if block_lo < guard_hi && block_hi > guard_lo {
+                // The block would shadow normal memory; refuse it.
+                return false;
+            }
+        }
+        // Only gigabytes already covered by the primordial level 2 table are
+        // usable here; anything else needs its own table and must go through
+        // map_device_region_high.
+        if unsafe { L1_TABLE.entries[((first >> 9) & 0x1FF) as usize] } & DESC_TABLE == 0 {
+            return false;
+        }
+        for index in first..=last {
+            unsafe {
+                L2_TABLE.entries[(index & 0x1FF) as usize] = (index * L2_BLOCK)
+                    | DESC_AF
+                    | DESC_SH_OUTER
+                    | DESC_AP_RW_EL1
+                    | DESC_ATTR_DEVICE
+                    | DESC_BLOCK
+                    | DESC_VALID;
+            }
+        }
+        unsafe {
+            core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+            core::arch::asm!("tlbi vmalle1", options(nostack, preserves_flags));
+            core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+            core::arch::asm!("isb", options(nostack, preserves_flags));
+        }
+        true
+    }
+
     /// Maps a device MMIO region as uncached, strongly ordered memory.
     ///
     /// Uses the coarsest level that can represent the region exactly: a 1 GiB

@@ -70,10 +70,22 @@ impl PcieEcam {
         (self.base + offset) as *const u8
     }
 
+    /// Reads a single configuration space byte.
+    ///
+    /// Capability structures place their type and BAR fields on byte boundaries
+    /// that a 32-bit access would straddle, so they have to be read as bytes.
+    ///
+    /// # Safety
+    /// As [`PcieEcam::read32`].
+    pub unsafe fn read8(&self, bus: u16, device: u8, function: u8, offset: usize) -> u8 {
+        read_volatile(self.config_ptr(bus, device, function).add(offset))
+    }
+
     /// Reads a 32-bit config space word.
     ///
     /// # Safety
-    /// The ECAM window must be mapped and the address must be in range.
+    /// The ECAM window must be mapped and the address must be in range, and the
+    /// offset must be 4-byte aligned.
     pub unsafe fn read32(&self, bus: u16, device: u8, function: u8, offset: usize) -> u32 {
         read_volatile(self.config_ptr(bus, device, function).add(offset) as *const u32)
     }

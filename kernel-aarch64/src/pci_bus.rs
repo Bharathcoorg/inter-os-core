@@ -104,6 +104,32 @@ impl PcieBus {
         }
         bus.ecam = Some(ecam);
         bus.devices = devices;
+        // Negotiate with any virtio device the platform actually exposes.
+        let mut index = 0usize;
+        while let Some(device) = bus.devices.get(index).and_then(|d| *d) {
+            if crate::virtio::VirtioPciDevice::is_virtio(&device) {
+                let ecam_ref = bus.ecam.as_ref();
+                match unsafe { crate::virtio::VirtioPciDevice::probe(ecam_ref.unwrap(), device) } {
+                    Some(virtio) => {
+                        let queues = unsafe { virtio.queue_count() };
+                        crate::kprintln!(
+                            "[VIRTIO] {:04x}:{:04x} negotiated virtio 1.0, features 0x{:016X}, {} queue(s), notify bar 0x{:X}",
+                            device.vendor_id, device.device_id, virtio.features, queues, virtio.notify_bar
+                        );
+                        if unsafe { virtio.begin_init() } {
+                            unsafe { virtio.finish_init() };
+                            crate::kprintln!("[VIRTIO] {:04x}:{:04x} initialised and ready.", device.vendor_id, device.device_id);
+                        } else {
+                            crate::kprintln!("[VIRTIO] {:04x}:{:04x} refused the handshake.", device.vendor_id, device.device_id);
+                        }
+                    }
+                    None => {
+                        crate::kprintln!("[VIRTIO] {:04x}:{:04x} is not a modern virtio device.", device.vendor_id, device.device_id);
+                    }
+                }
+            }
+            index += 1;
+        }
         bus
     }
 

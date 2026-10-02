@@ -35,6 +35,7 @@ pub mod telephony;
 pub mod timer;
 pub mod touch;
 pub mod uart;
+pub mod virtio;
 pub mod user;
 pub mod wasm;
 pub mod recovery;
