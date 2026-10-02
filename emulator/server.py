@@ -49,9 +49,36 @@ launcher_has_booted = False
 # phone surface actually is.
 GUEST_FRAMEBUFFER_W, GUEST_FRAMEBUFFER_H = 1280, 720
 LOGICAL_SURFACE_W, LOGICAL_SURFACE_H = 720, 1440
-LETTERBOX_W = GUEST_FRAMEBUFFER_H * LOGICAL_SURFACE_W // LOGICAL_SURFACE_H   # 360
-LETTERBOX_X = (GUEST_FRAMEBUFFER_W - LETTERBOX_W) // 2                        # 460
-LETTERBOX_BOX = (LETTERBOX_X, 0, LETTERBOX_X + LETTERBOX_W, GUEST_FRAMEBUFFER_H)
+
+
+def letterbox_box(fb_w, fb_h):
+    """Returns the phone-surface rect (left, top, right, bottom) in a fb_w x fb_h scanout.
+
+    WHY: the destination rectangle is the guest's, not ours. The kernel fits the
+    logical portrait surface by its limiting axis and centres it
+    (kernel/src/framebuffer.rs present_argb8888); for a 720x1440 surface in a
+    1280x720 scanout that is a 360x720 rectangle at x=460, which is exactly what
+    the portrait fast path in kernel/src/drivers/display_kms.rs composite()
+    hardcodes. Deriving it here means the crop follows whatever framebuffer size
+    a profile actually reports instead of assuming 1280x720, and the studio and
+    the guest cannot disagree about where the phone surface is.
+    """
+    if fb_w <= 0 or fb_h <= 0:
+        return None
+    if LOGICAL_SURFACE_W * fb_h <= LOGICAL_SURFACE_H * fb_w:
+        dst_h = fb_h
+        dst_w = max(1, min(fb_w, LOGICAL_SURFACE_W * fb_h // LOGICAL_SURFACE_H))
+    else:
+        dst_w = fb_w
+        dst_h = max(1, min(fb_h, LOGICAL_SURFACE_H * fb_w // LOGICAL_SURFACE_W))
+    off_x = (fb_w - dst_w) // 2
+    off_y = (fb_h - dst_h) // 2
+    return (off_x, off_y, off_x + dst_w, off_y + dst_h)
+
+
+LETTERBOX_BOX = letterbox_box(GUEST_FRAMEBUFFER_W, GUEST_FRAMEBUFFER_H)
+LETTERBOX_X = LETTERBOX_BOX[0]                          # 460
+LETTERBOX_W = LETTERBOX_BOX[2] - LETTERBOX_BOX[0]       # 360
 
 
 def portrait_from_framebuffer(gx, gy):
@@ -706,8 +733,11 @@ def capture_qemu_screen_frame(full_scanout=False):
                 width, height = img.size
                 if width >= GUEST_FRAMEBUFFER_W and height >= GUEST_FRAMEBUFFER_H:
                     # Crop to the letterboxed phone surface, then present it at the
-                    # logical portrait size the UI was laid out for.
-                    cropped = img.crop(LETTERBOX_BOX)
+                    # logical portrait size the UI was laid out for. The rect comes
+                    # from the captured framebuffer's own size, so a profile that
+                    # reports a mode other than 1280x720 is still framed correctly.
+                    box = letterbox_box(width, height)
+                    cropped = img.crop(box)
                     scaled = cropped.resize(
                         (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H), Image.Resampling.BILINEAR
                     )
