@@ -111,15 +111,21 @@ impl ArmMmu {
                 // T0SZ = 25 (39-bit VA space, Level 1 is root table)
                 // TG0 = 0b00 (4KB granule)
                 // IRGN0 = 0b01, ORGN0 = 0b01 (Write-Back)
-                // SH0 = 0b11 (Inner Shareable)
-                // IPS = 0b001 (36-bit physical addressing, 64 GB)
-                let tcr_val: u64 = (25 << 0)          // T0SZ = 25 (39-bit VA, L1 root)
-                    | (1 << 8)                        // IRGN0 = 0b01 (Inner WB WA)
-                    | (1 << 10)                       // ORGN0 = 0b01 (Outer WB WA)
-                    | (3 << 12)                       // SH0 = 0b11 (Inner Shareable)
-                    | (0 << 14)                       // TG0 = 0b00 (4KB Granule)
-                    | (1u64 << 32);                   // IPS = 0b001 (36-bit PA)
-                core::arch::asm!("msr tcr_el1, {}", in(reg) tcr_val);
+// SH0 = 0b11 (Inner Shareable)
+// IPS = 0b100 (48-bit physical addressing).
+        //
+        // WHY 48 bits: QEMU's `virt` machine places the PCIe ECAM window at
+        // 0x4010_0000, which needs 40 bits. At the previous 36-bit setting the
+        // address was outside the physical address field, so every translation
+        // failed and the bus read back all ones for every slot.
+        let tcr_val: u64 = (25 << 0)          // T0SZ = 25 (39-bit VA, L1 root)
+    | (1 << 8)                        // IRGN0 = 0b01 (Inner WB WA)
+    | (1 << 10)                       // ORGN0 = 0b01 (Outer WB WA)
+    | (3 << 12)                       // SH0 = 0b11 (Inner Shareable)
+    | (0 << 14)                       // TG0 = 0b00 (4KB Granule)
+    | (4u64 << 32);                   // IPS = 0b100 (48-bit PA)
+    core::arch::asm!("msr tcr_el1, {}", in(reg) tcr_val);
+
 
                 // 7. Install TTBR0_EL1
                 let l1_phys = core::ptr::addr_of!(L1_TABLE) as u64;
@@ -179,6 +185,12 @@ impl ArmMmu {
                         | DESC_VALID;
                 }
             }
+            unsafe {
+                core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+                core::arch::asm!("tlbi vmalle1", options(nostack, preserves_flags));
+                core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+                core::arch::asm!("isb", options(nostack, preserves_flags));
+            }
             return true;
         }
 
@@ -200,6 +212,12 @@ impl ArmMmu {
                     | DESC_ATTR_DEVICE
                     | DESC_BLOCK
                     | DESC_VALID;
+            }
+            unsafe {
+                core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+                core::arch::asm!("tlbi vmalle1", options(nostack, preserves_flags));
+                core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+                core::arch::asm!("isb", options(nostack, preserves_flags));
             }
         }
         true
@@ -242,6 +260,12 @@ impl ArmMmu {
                     | DESC_ATTR_DEVICE
                     | DESC_BLOCK
                     | DESC_VALID;
+            }
+            unsafe {
+                core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+                core::arch::asm!("tlbi vmalle1", options(nostack, preserves_flags));
+                core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+                core::arch::asm!("isb", options(nostack, preserves_flags));
             }
         }
         true
