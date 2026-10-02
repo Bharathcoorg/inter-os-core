@@ -815,13 +815,13 @@ impl FramebufferWriter {
                 py += 20;
                 self.draw_string(x + 14, py, "  SSID: InterSovereignMesh-5G", 1, COLOR_WHITE, Some(COLOR_DARK_SLATE));
                 py += 18;
-                self.draw_string(x + 14, py, "  Security: WPA3-Enterprise (802.11ax)", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
+                self.draw_string(x + 14, py, "Wi-Fi: no wireless hardware discovered", 1, COLOR_MUTED, Some(COLOR_DARK_SLATE));
                 py += 26;
-                self.draw_string(x + 14, py, "Bluetooth 5.0 LE: Beaconing Active (3 slots)", 1, COLOR_WHITE, Some(COLOR_DARK_SLATE));
+                self.draw_string(x + 14, py, "Bluetooth: no controller discovered", 1, COLOR_WHITE, Some(COLOR_DARK_SLATE));
                 py += 20;
-                self.draw_string(x + 14, py, "5G Cellular Modem: Sub-6GHz + mmWave", 1, COLOR_WHITE, Some(COLOR_DARK_SLATE));
+                self.draw_string(x + 14, py, "Cellular: no modem discovered", 1, COLOR_WHITE, Some(COLOR_DARK_SLATE));
                 py += 18;
-                self.draw_string(x + 14, py, "  Carrier: 'INTER_SOVEREIGN_5G' (RSSI: 31/31)", 1, COLOR_GREEN, Some(COLOR_DARK_SLATE));
+                self.draw_string(x + 14, py, "  Signal: unavailable", 1, COLOR_GREEN, Some(COLOR_DARK_SLATE));
             }
             2 => {
                 self.draw_string(x + 14, py, "[ 3. MOBILE DVFS POWER GOVERNOR ]", 1, COLOR_CYAN, Some(COLOR_DARK_SLATE));

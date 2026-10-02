@@ -264,6 +264,23 @@ class PlatformRealityTests(unittest.TestCase):
         # The flush must actually reach the controller.
         self.assertIn("drive.flush()", vfs)
 
+    def test_no_hardware_backed_strings_are_painted_or_reported(self):
+        framebuffer = self.read("kernel/src/framebuffer.rs")
+        modem = self.read("kernel/src/telephony/modem.rs")
+        # No radio is attached on this platform, so the system must not paint a
+        # carrier, a link standard or a signal level it never measured.
+        for fabricated in ("INTER_SOVEREIGN_5G", "RSSI: 31/31", "WPA3-Enterprise",
+                           "Beaconing Active", "Sub-6GHz + mmWave"):
+            self.assertNotIn(fabricated, framebuffer)
+        for reported in ("no wireless hardware discovered", "no controller discovered",
+                         "no modem discovered", "Signal: unavailable"):
+            self.assertIn(reported, framebuffer)
+        # A modem with no hardware must not report a strong signal or a live data
+        # context with an address.
+        self.assertIn("rssi: 99", modem)
+        self.assertIn("pdp_context_active: false", modem)
+        self.assertIn("ip_address: [0; 4]", modem)
+
     def test_persistent_journal_records_are_authenticated(self):
         journal = self.read("kernel/src/storage/persistent.rs")
         keystore = self.read("kernel/src/crypto/keystore.rs")

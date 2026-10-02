@@ -97,14 +97,18 @@ pub struct CellularModem {
 
 impl CellularModem {
     pub fn new() -> Self {
+        // No modem is attached. Signal is reported as 3GPP "not detectable" so it
+        // maps to zero bars, and there is no active data context or address.
+        // Reporting a carrier, a strong RSSI or a live PDP context here would be
+        // fabricated radio state.
         Self {
             hardware_present: false,
             state: ModemRadioState::PowerDown,
             call_state: CallState::Idle,
-            signal: SignalQuality { rssi: 28, ber: 99 },
-            pdp_context_active: true,
-            apn: "internet.interos.net",
-            ip_address: [10, 64, 12, 105],
+            signal: SignalQuality { rssi: 99, ber: 99 },
+            pdp_context_active: false,
+            apn: "",
+            ip_address: [0; 4],
             sms_inbox: Vec::new(),
             sms_outbox: Vec::new(),
             next_sms_id: 1,
