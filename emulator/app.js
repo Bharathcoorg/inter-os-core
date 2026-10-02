@@ -5009,3 +5009,4 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Back to Home
     backBtn?.addEventListener('click', () => switchView('view-home'));
+}});
