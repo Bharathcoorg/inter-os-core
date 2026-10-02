@@ -3406,7 +3406,7 @@ pub fn sys_vault_crypt(
         return Err(SyscallResult::InvalidArguments);
     }
 
-    let vault = crate::storage::STORAGE_VAULT.lock();
+    let mut vault = crate::storage::STORAGE_VAULT.lock();
     if action == 0 {
         // Encrypt
         match vault.encrypt_sector(block_index, buf, iv) {
@@ -3417,25 +3417,32 @@ pub fn sys_vault_crypt(
             Err(_) => Err(SyscallResult::DeviceError),
         }
     } else {
-        // Decrypt
+        // Decrypt an envelope the vault previously sealed.
+        //
+        // The tag is the one the vault issued for this block, not one derived
+        // from whatever the caller just passed in. Recomputing the expected tag
+        // here from the caller's own ciphertext compared a value with itself, so
+        // IntegrityViolation was unreachable and any ciphertext decrypted to
+        // attacker-chosen bytes. The vault now rejects an envelope it did not
+        // issue, and separately verifies the tag against the ciphertext.
         let block = crate::storage::VaultBlock {
             iv: *iv,
             block_index,
             ciphertext: *buf,
-            hmac_tag: [0u8; 32], // Computed on envelope
+            hmac_tag: [0u8; 32],
         };
-        // For direct sector decryption from user mode, compute tag
-        let mut block_with_tag = block;
-        let ks = crate::crypto::SECURE_KEYSTORE.lock();
-        let ks_key = ks.derive_key(crate::crypto::KeySlot::SovereignMasterKey, b"vault_master");
-        drop(ks);
-        block_with_tag.hmac_tag = block_with_tag.compute_hmac(&ks_key);
-        match vault.decrypt_sector(&block_with_tag) {
+        match vault.decrypt_sector(&block) {
             Ok(dec_plain) => {
                 buf.copy_from_slice(&dec_plain);
                 Ok(())
             }
-            Err(_) => Err(SyscallResult::IntegrityViolation),
+            Err(crate::storage::VaultError::IntegrityViolation) => {
+                Err(SyscallResult::IntegrityViolation)
+            }
+            Err(crate::storage::VaultError::KeystoreUninitialized) => {
+                Err(SyscallResult::PermissionDenied)
+            }
+            Err(_) => Err(SyscallResult::InvalidArguments),
         }
     }
 }

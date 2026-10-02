@@ -264,6 +264,20 @@ class PlatformRealityTests(unittest.TestCase):
         # The flush must actually reach the controller.
         self.assertIn("drive.flush()", vfs)
 
+    def test_vault_decryption_is_checked_against_a_kernel_issued_tag(self):
+        vault = self.read("kernel/src/storage/vault.rs")
+        syscall = self.read("kernel/src/syscall/mod.rs")
+        # A tag recomputed from the caller's own ciphertext compares a value with
+        # itself, so IntegrityViolation was unreachable and any ciphertext
+        # decrypted to attacker-chosen bytes.
+        self.assertIn("issued", vault)
+        self.assertIn("fn record_sealed", vault)
+        self.assertIn("fn matches_sealed", vault)
+        self.assertIn("!self.matches_sealed(block)", vault)
+        self.assertIn("block.verify(&self.vault_key)", vault)
+        self.assertNotIn("block_with_tag.hmac_tag = block_with_tag.compute_hmac", syscall)
+        self.assertNotIn("hmac_tag: [0u8; 32], // Computed on envelope", syscall)
+
     def test_guest_is_never_handed_the_boot_image_as_storage(self):
         # The kernel uses the Primary Master as the boot image and the Primary
         # Slave as persistent storage. With a single disk it falls back to

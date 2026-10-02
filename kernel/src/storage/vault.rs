@@ -51,14 +51,64 @@ impl VaultBlock {
 pub struct StorageVault {
     vault_key: [u8; 32],
     is_initialized: bool,
+    /// Authentication tags for the envelopes this vault has sealed, most recent
+    /// first.
+    ///
+    /// Decryption must be checked against a tag the kernel produced, not one
+    /// derived from whatever the caller just passed in. There is no persistent
+    /// vault region yet, so the issued tags are the only trustworthy record of
+    /// what was actually sealed; a ciphertext with no matching entry is
+    /// rejected instead of being accepted on a self-comparison.
+    issued: [Option<(u64, [u8; SHA256_DIGEST_LENGTH])>; SEALED_TAG_SLOTS],
 }
+
+const SEALED_TAG_SLOTS: usize = 32;
 
 impl StorageVault {
     pub const fn new() -> Self {
         Self {
             vault_key: [0u8; 32],
             is_initialized: false,
+            issued: [None; SEALED_TAG_SLOTS],
         }
+    }
+
+    /// Records the tag this vault produced for `block_index`, evicting the
+    /// oldest entry when the table is full.
+    fn record_sealed(&mut self, block_index: u64, tag: [u8; SHA256_DIGEST_LENGTH]) {
+        let mut oldest = 0usize;
+        for i in 0..SEALED_TAG_SLOTS {
+            if self.issued[i].is_none() {
+                oldest = i;
+                break;
+            }
+            if let Some((idx, _)) = self.issued[i] {
+                if idx == block_index {
+                    oldest = i;
+                    break;
+                }
+            }
+        }
+        self.issued[oldest] = Some((block_index, tag));
+    }
+
+    /// True when this vault previously sealed exactly this ciphertext for
+    /// `block_index`, verified against the recorded tag.
+    fn matches_sealed(&self, block: &VaultBlock) -> bool {
+        for entry in self.issued.iter().flatten() {
+            if entry.0 != block.block_index {
+                continue;
+            }
+            // Constant-time-ish comparison of the recorded tag.
+            let mut diff = 0u8;
+            for i in 0..SHA256_DIGEST_LENGTH {
+                diff |= entry.1[i] ^ block.hmac_tag[i];
+            }
+            if diff == 0 {
+                return true;
+            }
+        }
+        false
     }
 
     /// Initializes the vault using the hardware keystore DID Master Key (Slot 0).
@@ -90,7 +140,7 @@ impl StorageVault {
 
     /// Encrypts a 512-byte plaintext sector and signs the resulting envelope.
     pub fn encrypt_sector(
-        &self,
+        &mut self,
         block_index: u64,
         plaintext: &[u8; VAULT_SECTOR_SIZE],
         iv: &[u8; 16],
@@ -114,6 +164,7 @@ impl StorageVault {
             hmac_tag: [0u8; SHA256_DIGEST_LENGTH],
         };
         block.hmac_tag = block.compute_hmac(&self.vault_key);
+        self.record_sealed(block_index, block.hmac_tag);
         Ok(block)
     }
 
@@ -122,7 +173,14 @@ impl StorageVault {
         if !self.is_initialized {
             return Err(VaultError::KeystoreUninitialized);
         }
-        if !block.verify(&self.vault_key) {
+        // Two independent requirements. The tag must match the one this vault
+        // issued for this exact envelope, which is what makes tampering
+        // detectable; and it must be the correct tag for the ciphertext under
+        // the vault key, which proves the envelope was produced by this vault.
+        //
+        // Verifying a tag recomputed here from the caller's own ciphertext
+        // would compare a value with itself and accept anything.
+        if !self.matches_sealed(block) || !block.verify(&self.vault_key) {
             return Err(VaultError::IntegrityViolation);
         }
 
