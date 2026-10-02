@@ -27,6 +27,8 @@ import time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 IMAGE = os.path.join(ROOT, "target", "inter-os-bios.img")
+DATA_DISK = os.path.join(ROOT, "target", "inter-os-data.img")
+DATA_DISK_BYTES = 512 * 1024 * 1024
 
 MONITOR_PORT = 44551
 SERIAL_PORT = 43551
@@ -147,7 +149,7 @@ class GuestSerial:
             pass
 
 
-def start_qemu():
+def start_qemu(extra_args=()):
     if not os.path.exists(IMAGE):
         raise SystemExit(f"[SKIP] boot image missing: {IMAGE}")
     exe = None
@@ -161,16 +163,23 @@ def start_qemu():
     if not exe:
         raise SystemExit("[SKIP] qemu-system-x86_64 not available on PATH")
 
+    # A dedicated data disk is mandatory. The kernel uses the Primary Master as
+    # the boot image and the Primary Slave as persistent storage; with only one
+    # disk attached it falls back to formatting the boot image itself, which
+    # destroys the bootloader stages the kernel is embedded in, so every boot
+    # after the first loads a corrupted kernel.
+    ensure_data_disk()
+
     cmd = [
         exe,
-        "-drive", f"format=raw,file={IMAGE}",
+        "-drive", f"format=raw,file={IMAGE},index=0",
+        "-drive", f"format=raw,file={DATA_DISK},index=1",
         "-m", "1024M",
         "-display", "none",
-        "-vnc", "127.0.0.1:9",
         "-monitor", f"tcp:127.0.0.1:{MONITOR_PORT},server,nowait",
         "-serial", f"tcp:127.0.0.1:{SERIAL_PORT},server,nowait",
         "-no-reboot",
-    ]
+    ] + list(extra_args)
     return subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
@@ -182,6 +191,20 @@ def ppm_size(path):
         return None
     return int(match.group(1)), int(match.group(2))
 
+
+
+def ensure_data_disk():
+    """Creates the dedicated data disk if it does not exist yet.
+
+    The guest formats whatever disk it is given as its own filesystem. Attached
+    to the boot image that destroys the bootloader stages the kernel is embedded
+    in, so the next boot runs a corrupted kernel.
+    """
+    if os.path.exists(DATA_DISK) and os.path.getsize(DATA_DISK) >= DATA_DISK_BYTES:
+        return
+    os.makedirs(os.path.dirname(DATA_DISK), exist_ok=True)
+    subprocess.run(["qemu-img", "create", "-f", "raw", DATA_DISK, str(DATA_DISK_BYTES)],
+                   check=True, capture_output=True)
 
 def wait_for_graphical_framebuffer(monitor, workdir):
     """Waits until the guest leaves text mode and paints a real framebuffer."""

@@ -571,6 +571,29 @@ def _resolve_artifact(*candidates):
     return best
 
 
+def ensure_data_disk(path, size_bytes=512 * 1024 * 1024):
+    """Creates the guest's data disk if it does not exist yet.
+
+    The guest formats whatever disk it is handed as its own filesystem. Pointing
+    it at the boot image destroys the bootloader stages the kernel is embedded
+    in, so the next boot runs a corrupted kernel.
+    """
+    try:
+        if os.path.exists(path) and os.path.getsize(path) >= size_bytes:
+            return path
+    except OSError:
+        pass
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    qemu_img = shutil.which("qemu-img")
+    if qemu_img:
+        subprocess.run([qemu_img, "create", "-f", "raw", path, str(size_bytes)],
+                       check=True, capture_output=True)
+    else:
+        with open(path, "wb") as handle:
+            handle.truncate(size_bytes)
+    return path
+
+
 SUPPORTED_PROFILES = {
     "x86_64": {
         "name": "InterOS x86_64 PC / VM",
@@ -745,6 +768,7 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
     img_path = prof["image"]
     if not os.path.exists(img_path):
         return False, f"Boot image not found at '{img_path}'. Build target first with 'interos build {arch}'."
+    data_disk_path = os.path.join(WORKSPACE_ROOT, "target", f"interos-data-{arch}.img")
 
     ram = ram_mb or prof["ram"]
     serial_log = os.path.join(WORKSPACE_ROOT, "target", f"{arch}_boot.log")
@@ -767,7 +791,14 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
         "-no-reboot"
     ]
     if arch == "x86_64":
-        cmd.extend(["-drive", f"format=raw,file={img_path}"])
+        # A dedicated data disk is mandatory. The kernel uses the Primary Master
+        # as the read-only boot image and the Primary Slave as persistent storage;
+        # with only one disk attached it falls back to formatting the boot image
+        # itself, which overwrites the bootloader stages the kernel is embedded in
+        # and leaves the next boot running a corrupted kernel.
+        cmd.extend(["-drive", f"format=raw,file={img_path},index=0"])
+        ensure_data_disk(data_disk_path)
+        cmd.extend(["-drive", f"format=raw,file={data_disk_path},index=1"])
         # A real E1000 NIC on user-mode networking. Without one the guest has no
         # network hardware at all and every packet stays on the kernel loopback
         # path, which is not the same thing as having a network.

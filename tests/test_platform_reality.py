@@ -264,6 +264,34 @@ class PlatformRealityTests(unittest.TestCase):
         # The flush must actually reach the controller.
         self.assertIn("drive.flush()", vfs)
 
+    def test_guest_is_never_handed_the_boot_image_as_storage(self):
+        # The kernel uses the Primary Master as the boot image and the Primary
+        # Slave as persistent storage. With a single disk it falls back to
+        # formatting the boot image, which overwrites the bootloader stages the
+        # kernel is embedded in, so every boot after the first loads a corrupted
+        # kernel. Every launcher must therefore attach a second disk.
+        ata = self.read("kernel/src/drivers/ata.rs")
+        self.assertIn("ATA_BOOT", ata)
+        self.assertIn("ATA_PRIMARY", ata)
+        self.assertIn("new_primary_slave", ata)
+
+        server = self.read("emulator/server.py")
+        self.assertIn("def ensure_data_disk(", server)
+        self.assertIn('f"format=raw,file={img_path},index=0"', server)
+        self.assertIn('f"format=raw,file={data_disk_path},index=1"', server)
+        self.assertIn("interos-data-{arch}.img", server)
+
+        for script in ("qemu/run.ps1",):
+            text = self.read(script)
+            self.assertIn("inter-os-data", text)
+            self.assertIn("index=0", text)
+            self.assertIn("index=1", text)
+
+        interaction = self.read("tests/qemu/interaction_x86.py")
+        self.assertIn("def ensure_data_disk(", interaction)
+        self.assertIn("index=0", interaction)
+        self.assertIn("index=1", interaction)
+
     def test_no_internal_gate_labels_enter_public_source(self):
         for path in ["README.md", "kernel/src/platform.rs", "tests/test_platform_reality.py"]:
             text = self.read(path).lower()
