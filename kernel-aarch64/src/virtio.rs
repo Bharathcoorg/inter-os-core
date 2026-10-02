@@ -229,6 +229,12 @@ impl VirtioPciDevice {
     /// device's own registers faults, because a BAR lives in the platform's
     /// peripheral window and not in the tables built so far.
     ///
+    /// Returns `None` when the BAR holds no address. That is the expected state
+    /// on a platform booted directly with no firmware: assigning PCI BARs is a
+    /// firmware responsibility, and QEMU's `virt` machine does not do it, so a
+    /// device that reports all-zero BARs has no reachable registers. Driving it
+    /// anyway would be guessing at an address.
+    ///
     /// # Safety
     /// The ECAM window must be mapped. The BAR is probed and restored, so the
     /// device is left as it was found.

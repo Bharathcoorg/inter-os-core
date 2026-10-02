@@ -124,7 +124,12 @@ impl PcieBus {
                         }
                     }
                     None => {
-                        crate::kprintln!("[VIRTIO] {:04x}:{:04x} is not a modern virtio device.", device.vendor_id, device.device_id);
+                        crate::kprintln!(
+                            "[VIRTIO] {:04x}:{:04x} could not be claimed: it offers no assignable BAR. PCI BAR \
+                             addresses are assigned by firmware, and this platform booted directly with \
+                             no firmware, so the device has no reachable registers.",
+                            device.vendor_id, device.device_id
+                        );
                     }
                 }
             }
