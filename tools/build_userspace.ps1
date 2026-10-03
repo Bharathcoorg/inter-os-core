@@ -125,8 +125,12 @@ foreach ($app in @(
     "browser", "messages", "calendar", "music",
     "file_manager", "gallery"
 )) {
+    # WHY `--bin $app`: an app that also exposes a lib target makes the extra rustc
+    # flags ambiguous, and cargo then refuses with "extra arguments to `rustc` can
+    # only be passed to one target". Naming the binary keeps this working for every
+    # app, whether or not it has a library alongside it.
     Invoke-GuestBuild -Label "app: $app" `
-        -CargoArgs (@("rustc", "-p", $app, "--target", "x86_64-unknown-none", "--") + $StaticFlags) `
+        -CargoArgs (@("rustc", "-p", $app, "--bin", $app, "--target", "x86_64-unknown-none", "--") + $StaticFlags) `
         -Artifact $app -StripTool $StripExe
 }
 

@@ -6,6 +6,15 @@ edition = "2021"
 [dependencies]
 interos-std = { path = "../../sdk/rust/interos-std" }
 
+# WHY a lib target: the shell is `#![no_main]`, so cargo cannot attach a test
+# harness to the binary, and an integration test would still pull the bare-metal
+# binary into the host link and fail. Exposing the presentation modules as a lib
+# lets theme, layout and text metrics be tested on the host against the exact
+# source the firmware links.
+[lib]
+name = "launcher"
+path = "src/lib.rs"
+
 [[bin]]
 name = "launcher"
 path = "src/main.rs"

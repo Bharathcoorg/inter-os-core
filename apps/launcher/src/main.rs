@@ -4,8 +4,8 @@
 use core::panic::PanicInfo;
 use interos_std as std;
 
-mod theme;
-use theme::*;
+use launcher::theme::*;
+use launcher::{layout, text};
 
 const W: usize = SCREEN_WIDTH;
 const H: usize = SCREEN_HEIGHT;
