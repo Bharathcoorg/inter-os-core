@@ -194,6 +194,45 @@ fn read_file_or_empty(path: &Path) -> Vec<u8> {
     }
 }
 
+/// ELF `e_machine` values this tool can reason about.
+const EM_X86_64: u16 = 62;
+const EM_AARCH64: u16 = 183;
+const EM_RISCV: u16 = 243;
+
+fn arch_name(machine: u16) -> &'static str {
+    match machine {
+        EM_X86_64 => "x86_64",
+        EM_AARCH64 => "AArch64 (ARM64)",
+        EM_RISCV => "RISC-V",
+        3 => "x86",
+        40 => "ARM",
+        _ => "unknown",
+    }
+}
+
+/// Reads the ELF `e_machine` field so a phone image can never silently contain a
+/// kernel for the wrong processor.
+///
+/// WHY this exists: an Android boot image targets a physical smartphone, which is
+/// always ARM64. This tool previously packaged whatever file it was handed, so
+/// `qemu/build.ps1` produced `boot.img` from the *x86_64* kernel and then
+/// printed Pixel/PinePhone flash instructions for it. The container was
+/// well-formed and would have flashed without complaint, and the device would
+/// have failed to boot with no explanation. Reading `e_machine` turns that
+/// silent mismatch into a refusal.
+fn elf_machine(data: &[u8]) -> Option<u16> {
+    // e_ident is 16 bytes; e_machine sits at offset 18 and is 2 bytes.
+    if data.len() < 20 || &data[0..4] != b"\x7fELF" {
+        return None;
+    }
+    let bytes = [data[18], data[19]];
+    match data[5] {
+        1 => Some(u16::from_le_bytes(bytes)), // ELFDATA2LSB
+        2 => Some(u16::from_be_bytes(bytes)), // ELFDATA2MSB
+        _ => None,
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut kernel_path = PathBuf::from("target/x86_64-unknown-none/debug/kernel");
@@ -228,7 +267,7 @@ fn main() {
     println!("============================================================");
     println!("  [Inter OS] Android Boot Image Generator (Fastboot v2)");
     println!("============================================================");
-    println!("Target Device: Physical Smartphone (Pixel, PinePhone, Snapdragon)");
+    println!("Container target: AArch64 physical smartphone (Pixel, PinePhone, Snapdragon)");
     println!("Kernel Binary: {}", kernel_path.display());
     println!("Output Target: {}", out_path.display());
 
@@ -238,17 +277,54 @@ fn main() {
         std::process::exit(1);
     }
 
+    // WHY this gate: an Android boot image is only ever loaded by an ARM64
+    // phone. Refusing a mismatched kernel here is the difference between a
+    // clear error and a device that flashes fine and then does nothing.
+    let machine = match elf_machine(&kernel) {
+        Some(m) => m,
+        None => {
+            eprintln!("[ERROR] {} is not an ELF executable, so its architecture cannot be verified.", kernel_path.display());
+            eprintln!("        Refusing to package it into a device boot image.");
+            std::process::exit(1);
+        }
+    };
+    if machine != EM_AARCH64 {
+        eprintln!("[ERROR] Refusing to package a non-AArch64 kernel into a smartphone boot image.");
+        eprintln!("        {}: ELF e_machine = {} ({})", kernel_path.display(), machine, arch_name(machine));
+        eprintln!("        Physical smartphones are ARM64. This image would flash and then not boot.");
+        std::process::exit(1);
+    }
+    println!("Kernel architecture: {} (verified from ELF e_machine)", arch_name(machine));
+
+    // WHY these two refuse instead of synthesising: the tool used to substitute
+    // the FDT magic `d00dfeed` followed by the ASCII string
+    // "SOVEREIGN_DEVICE_TREE_BLOB_MOBILE_DEVBOARD_V1", and the CPIO magic
+    // "070701" followed by "INTER_OS_SOVEREIGN_RAMDISK_CONTAINING_INIT_SETTINGS_TERMINAL_DIALER_RETAIL_APK".
+    // Neither was a real device tree or a real cpio archive, yet the header
+    // reported non-zero `dtb_size`/`ramdisk_size`, so the image claimed to carry
+    // a device tree and an init/terminal/dialer ramdisk that did not exist.
+    // Missing payloads are now a hard error naming exactly what is absent.
+    let mut missing: Vec<String> = Vec::new();
+
     let mut ramdisk = read_file_or_empty(&ramdisk_path);
     if ramdisk.is_empty() {
-        // Synthesize standard ramdisk header containing sovereign system bins if file not found
-        println!("[INFO] Generating integrated ramdisk bundle...");
-        ramdisk = b"070701_INTER_OS_SOVEREIGN_RAMDISK_CONTAINING_INIT_SETTINGS_TERMINAL_DIALER_RETAIL_APK".to_vec();
+        missing.push(format!("ramdisk ({})", ramdisk_path.display()));
     }
 
     let mut dtb = read_file_or_empty(&dtb_path);
     if dtb.is_empty() {
-        println!("[INFO] Embedding default mobile devboard DTB...");
-        dtb = b"\xd0\x0d\xfe\xed_SOVEREIGN_DEVICE_TREE_BLOB_MOBILE_DEVBOARD_V1".to_vec();
+        missing.push(format!("device tree blob ({})", dtb_path.display()));
+    }
+
+    if !missing.is_empty() {
+        eprintln!("[ERROR] Cannot build a smartphone boot image: required payloads are missing.");
+        for m in &missing {
+            eprintln!("        missing: {}", m);
+        }
+        eprintln!("        Placeholders are no longer synthesised, because a boot image that reports a");
+        eprintln!("        non-zero dtb_size/ramdisk_size while carrying neither is a silent lie that");
+        eprintln!("        reaches the device as a boot failure with no usable diagnosis.");
+        std::process::exit(1);
     }
 
     let page_size = DEFAULT_PAGE_SIZE;
@@ -331,11 +407,15 @@ fn main() {
     let mut out_file = File::create(&out_path).expect("Failed to create output boot.img");
     out_file.write_all(&img).expect("Failed to write boot.img");
 
-    println!("Status: SUCCESS! Fastboot image created: {} ({} bytes)", out_path.display(), img.len());
+    println!("Status: SUCCESS! Android boot image created: {} ({} bytes)", out_path.display(), img.len());
     println!("SHA-256 Partition ID: {:02x?}", &digest[..8]);
-    println!("\nPhysical Device Flash Instructions:");
-    println!("  1. Connect smartphone in Fastboot mode (adb reboot bootloader)");
-    println!("  2. Run: fastboot flash boot {}", out_path.display());
-    println!("  3. Run: fastboot reboot");
+    println!("\nFlashing this image (UNTESTED on hardware -- no Inter OS build has booted on a physical device):");
+    println!("  1. Unlock the bootloader (device-specific; erases user data).");
+    println!("  2. Connect the phone in fastboot mode and confirm: fastboot devices");
+    println!("  3. fastboot flash boot {}", out_path.display());
+    println!("  4. fastboot reboot");
+    println!("\nA well-formed container is not a working OS: this kernel has no display, touch, or");
+    println!("storage driver for real phone hardware, so a successful flash is not expected to");
+    println!("reach a usable UI.");
     println!("============================================================\n");
 }

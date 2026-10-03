@@ -72,11 +72,100 @@ if [ "$MAGIC" != "ANDROID!" ]; then
     echo "[ERROR] Invalid boot image! Expected 'ANDROID!', got '$MAGIC'."
     exit 1
 fi
-echo "[OK] Android Boot Image v2 format verified (Magic: 'ANDROID!')."
+echo "[OK] Android Boot Image v2 container header verified (Magic: 'ANDROID!')."
+
+# --- Payload integrity -------------------------------------------------------
+#
+# WHY: magic alone certified containers carrying no usable payload. The image
+# generator used to synthesise a "device tree" as the FDT magic d00dfeed followed
+# by ASCII, and a "ramdisk" as the cpio magic 070701 followed by ASCII, while
+# reporting non-zero dtb_size/ramdisk_size. Both start with the correct magic, so
+# a magic-only check passes them. The structure is what distinguishes them: a cpio
+# newc header is 110 ASCII-hex bytes closed by a TRAILER!!! record, and an FDT
+# header carries a totalsize plus struct/strings extents that must fit the
+# payload, with the struct block opening on an FDT_BEGIN token.
+PAGE_SIZE=$(od -An -tu4 -j36 -N4 "$TARGET_IMG" | tr -d ' ')
+KERNEL_SIZE=$(od -An -tu4 -j8 -N4 "$TARGET_IMG" | tr -d ' ')
+RAMDISK_SIZE=$(od -An -tu4 -j16 -N4 "$TARGET_IMG" | tr -d ' ')
+SECOND_SIZE=$(od -An -tu4 -j24 -N4 "$TARGET_IMG" | tr -d ' ')
+DTB_SIZE=$(od -An -tu4 -j1632 -N4 "$TARGET_IMG" | tr -d ' ')
+
+FILE_SIZE=$(wc -c < "$TARGET_IMG" | tr -d ' ')
+
+be32() { # $1=absolute offset -> big-endian u32, or 0 when the read is out of range
+    # WHY the bound check: the header fields are read before they are validated.
+    # A fabricated dtb supplies ASCII where off_dt_struct belongs, which decodes
+    # to ~1.6e9, so dereferencing it made od seek past EOF and the script died
+    # with an od error instead of reporting a clean rejection.
+    if [ $(( $1 + 4 )) -gt "$FILE_SIZE" ]; then echo 0; return; fi
+    od -An -tx1 -j"$1" -N4 "$TARGET_IMG" | tr -d ' \n' | \
+        awk '{ printf "%d", strtonum("0x" $1) }'
+}
+be32safe() { # $1=offset $2=limit -> value only when within the limit
+    if [ $(( $1 + 4 )) -gt "$2" ]; then echo 0; return; fi
+    be32 "$1"
+}
+aligned() { # $1=offset $2=size ; payload start of the next page-aligned section
+    if [ "$2" -eq 0 ]; then echo "$1"; else
+        echo $(( $1 + $2 + ( ($3 - ($2 % $3)) % $3 ) ))
+    fi
+}
+
+RAMDISK_OFF=$PAGE_SIZE
+RAMDISK_OFF=$(aligned "$RAMDISK_OFF" "$KERNEL_SIZE" "$PAGE_SIZE")
+DTB_OFF=$(aligned "$RAMDISK_OFF" "$RAMDISK_SIZE" "$PAGE_SIZE")
+
+PROBLEMS=""
+if [ "$RAMDISK_SIZE" -lt 120 ]; then
+    PROBLEMS="${PROBLEMS}
+          - ramdisk is only ${RAMDISK_SIZE} bytes; a cpio newc archive needs a 110-byte header plus TRAILER!!!"
+elif ! dd if="$TARGET_IMG" bs=1 skip=$((RAMDISK_OFF + 110)) count=$((RAMDISK_SIZE - 110)) 2>/dev/null | grep -q "TRAILER!!!"; then
+    PROBLEMS="${PROBLEMS}
+          - ramdisk has no cpio TRAILER!!! record; it is not a real cpio archive"
+fi
+
+if [ "$DTB_SIZE" -lt 40 ]; then
+    PROBLEMS="${PROBLEMS}
+          - dtb is only ${DTB_SIZE} bytes; a flattened device tree needs a 40-byte header"
+else
+    TOTAL=$(be32safe $((DTB_OFF + 4)) "$FILE_SIZE")
+    OFF_STRUCT=$(be32safe $((DTB_OFF + 8)) "$FILE_SIZE")
+    OFF_STRINGS=$(be32safe $((DTB_OFF + 12)) "$FILE_SIZE")
+    SIZE_STRINGS=$(be32safe $((DTB_OFF + 32)) "$FILE_SIZE")
+    SIZE_STRUCT=$(be32safe $((DTB_OFF + 36)) "$FILE_SIZE")
+    if [ "$TOTAL" -lt 40 ] || [ "$TOTAL" -gt "$DTB_SIZE" ]; then
+        PROBLEMS="${PROBLEMS}
+          - dtb header totalsize ${TOTAL} is not within [40, ${DTB_SIZE}]"
+    elif [ $((OFF_STRUCT + SIZE_STRUCT)) -gt "$DTB_SIZE" ] || \
+         [ $((OFF_STRINGS + SIZE_STRINGS)) -gt "$DTB_SIZE" ]; then
+        PROBLEMS="${PROBLEMS}
+          - dtb struct/strings extents extend past the payload"
+    elif [ "$OFF_STRUCT" -lt 40 ] || [ "$OFF_STRUCT" -ge "$TOTAL" ]; then
+        PROBLEMS="${PROBLEMS}
+          - dtb off_dt_struct ${OFF_STRUCT} is not inside the payload"
+    else
+        TOKEN=$(be32 $((DTB_OFF + OFF_STRUCT)))
+        if [ "$TOKEN" -ne 1 ]; then
+            PROBLEMS="${PROBLEMS}
+          - dtb struct block does not open with an FDT_BEGIN token (found ${TOKEN})"
+        fi
+    fi
+fi
+
+if [ -n "$PROBLEMS" ]; then
+    echo ""
+    echo "[REJECTED] This image is a valid container but its payloads are not real:${PROBLEMS}"
+    echo "[REJECTED] Refusing to report this image as verified or to flash it."
+    exit 1
+fi
+
+echo "[OK] Payload integrity verified: ramdisk carries a cpio archive, dtb carries an FDT."
+echo "[NOT READY] This platform has never been booted on physical hardware; a successful"
+echo "[NOT READY] flash is not expected to reach a usable interface."
 
 # If Mode is Info, we are done
 if [ "$MODE" = "info" ] || [ "$MODE" = "Info" ]; then
-    echo "[SUCCESS] Image validation and Fastboot flasher pipeline verified."
+    echo "[INFO] Container structure and payload integrity verified."
     exit 0
 fi
 

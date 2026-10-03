@@ -31,3 +31,6 @@ scratch/
 # Cryptographic Private Keys
 *.key
 packages/*.key
+
+# Local UI reference images (design targets, not project assets)
+InterOS Core_ Minimal Open Mobile OS*.png

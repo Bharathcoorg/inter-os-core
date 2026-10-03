@@ -26,7 +26,8 @@ if ($LASTEXITCODE -ne 0) {
 }
 cargo +nightly check --manifest-path "$rootDir\apps\dialer\Cargo.toml" --target aarch64-unknown-none
 cargo +nightly check --manifest-path "$rootDir\apps\camera\Cargo.toml" --target aarch64-unknown-none
-Write-Host "[OK] AArch64 Mobile compatibility verified for physical smartphone flashing." -ForegroundColor Green
+Write-Host "[OK] AArch64 userspace SDK and 2 apps cross-check for aarch64-unknown-none." -ForegroundColor Green
+Write-Host "[NOTE] This is a compile check only. It is NOT verification for physical smartphone flashing: no AArch64 build has been booted on real hardware, and no display, touch, or storage driver exists for a physical device." -ForegroundColor Yellow
 
 # 3. Compile x86_64 Microkernel ELF with nightly
 Write-Host "[12/13] Compiling Microkernel for x86_64-unknown-none..." -ForegroundColor Yellow
@@ -67,30 +68,40 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "Build complete! Bootable image ready at: $outputImg" -ForegroundColor Green
 
-# 6. Package Android Boot Image (Fastboot v2 Header) for physical smartphone flashing
-Write-Host "[Packaging] Packaging Fastboot Android boot.img for physical device flashing..." -ForegroundColor Yellow
-$fastbootImg = "$rootDir\target\boot.img"
-cargo +nightly run --manifest-path "$rootDir\tools\mkbootimg\Cargo.toml" -- --kernel "$kernelElf" --output "$fastbootImg"
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "Fastboot boot.img creation failed!"
-    exit 1
-}
-
-Write-Host "Build complete! Fastboot flashable image ready at: $fastbootImg" -ForegroundColor Green
-
-# 7. Package Physical AArch64 Fastboot Android Boot Image
-Write-Host "[Packaging] Packaging Authentic AArch64 Fastboot Android boot-aarch64.img..." -ForegroundColor Yellow
+# 6. Package the Android Boot Image (Fastboot v2 header) for AArch64 phone hardware
+#
+# WHY this uses the AArch64 kernel and not $kernelElf: an Android boot image is
+# only ever loaded by an ARM64 phone. Packaging the x86_64 kernel here produced a
+# well-formed container that would flash cleanly and then fail to boot. The
+# mkbootimg tool now refuses a non-AArch64 kernel outright, so this step would
+# fail outright if it still passed $kernelElf.
+#
+# WHY this is reported rather than fatal: a real device image additionally needs a
+# genuine device tree blob and a genuine initramfs. Neither exists in this tree
+# yet, so the tool refuses to synthesise placeholders. That is an accurate
+# statement of an unfinished platform, not a build break.
+Write-Host "[Packaging] Packaging AArch64 Android boot.img for phone hardware..." -ForegroundColor Yellow
 $k_aarch64_1 = "$rootDir\target\aarch64-unknown-none\debug\kernel-aarch64"
 $k_aarch64_2 = "$rootDir\kernel-aarch64\target\aarch64-unknown-none\debug\kernel-aarch64"
 $aarch64KernelElf = if ((Test-Path $k_aarch64_2) -and (-not (Test-Path $k_aarch64_1) -or (Get-Item $k_aarch64_2).LastWriteTime -gt (Get-Item $k_aarch64_1).LastWriteTime)) { $k_aarch64_2 } else { $k_aarch64_1 }
-$aarch64BootImg = "$rootDir\target\boot-aarch64.img"
-cargo +nightly run --manifest-path "$rootDir\tools\mkbootimg\Cargo.toml" -- --kernel "$aarch64KernelElf" --output "$aarch64BootImg"
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "AArch64 Fastboot boot.img creation failed!"
-    exit 1
+$fastbootImg = "$rootDir\target\boot.img"
+
+cargo +nightly run --manifest-path "$rootDir\tools\mkbootimg\Cargo.toml" -- --kernel "$aarch64KernelElf" --output "$fastbootImg"
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "Android boot-image container built at: $fastbootImg" -ForegroundColor Green
+    Write-Host "[NOTE] Container only, and UNTESTED on hardware." -ForegroundColor Yellow
+} else {
+    Write-Host "[BLOCKED] No phone boot image was produced:" -ForegroundColor Yellow
+    Write-Host "         An ARM64 device image requires a real device tree blob and a real" -ForegroundColor Yellow
+    Write-Host "         initramfs, and neither exists in this tree. The tool refuses to" -ForegroundColor Yellow
+    Write-Host "         substitute placeholders, so no misleading image is produced." -ForegroundColor Yellow
+    Write-Host "         Supplied to: target/device_tree.dtb and target/ramdisk.cpio" -ForegroundColor Yellow
 }
 
-Write-Host "Build complete! Authentic AArch64 flashable image ready at: $aarch64BootImg" -ForegroundColor Green
+Write-Host "[NOTE] No Inter OS build has ever booted on physical hardware. The AArch64 kernel" -ForegroundColor Yellow
+Write-Host "[NOTE] has no display, touch, or phone storage driver, so flashing is not" -ForegroundColor Yellow
+Write-Host "[NOTE] expected to reach a usable UI even once an image can be built." -ForegroundColor Yellow
+
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "  InterOS Core Multi-Arch Built Successfully (x86_64 + Standalone AArch64 + RISC-V 64)" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
