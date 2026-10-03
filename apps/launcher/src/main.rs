@@ -588,12 +588,12 @@ fn lerp_argb(from: u32, to: u32, t: usize) -> u32 {
 // Single source of truth for the lock surface. Every stage that touches this
 // screen after this one reads its geometry from here rather than re-measuring.
 //
-// Source of truth: "InterOS Core_ Minimal Open Mobile OS (1).png", top-left
-// Lock Screen panel. That panel's phone display interior measures 173 x 427 px
-// (measured on the sheet: the interior spans x 28..200 and y 141..567). Every
-// value whose name ends in `_REF` below is expressed in that panel's own pixel
-// space; the matching logical values are the same measurement mapped onto the
-// guest's 720 x 1440 surface, per axis, because the design panel is not drawn
+// Source of truth: the supplied Lock Screen design panel. That panel's phone
+// display interior measures 173 x 427 px (the interior spans x 28..200 and
+// y 141..567 on the sheet). Every value whose name ends in `_REF` below is
+// expressed in that panel's own pixel space; the matching logical values are the
+// same measurement mapped onto the guest's 720 x 1440 surface, per axis, because
+// the design panel is not drawn
 // at the guest's aspect ratio:
 //     x_logical = x_panel * 720 / 173
 //     y_logical = y_panel * 1440 / 427
