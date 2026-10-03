@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Inter OS — Universal Rust Mobile Platform &amp; Device Studio</title>
-  <meta name="description" content="Universal Rust Mobile OS Development Studio, Multi-Format Sideloading (.app, .rap, .wasm, .apk), and Live Hardware Telemetry.">
+  <meta name="description" content="Device Studio for the InterOS Universal Rust Mobile Platform: a live monitor for the guest kernel's own framebuffer UI, multi-format package sideloading (.app, .rap, .wasm, .apk), and live hardware telemetry.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -19,7 +19,7 @@
         <span class="mobile-warning-title">Desktop Recommended</span>
       </div>
       <div class="mobile-warning-text">
-        InterOS Device Studio simulates a physical mobile chassis and live microkernel telemetry deck, best experienced on a desktop display (&gt;1024px).
+        InterOS Device Studio is a monitor and control panel for a virtual device, best experienced on a desktop display (&gt;1024px). The phone UI you see on screen is rendered by the guest kernel itself — the studio only displays that framebuffer and forwards your input to it.
       </div>
       <div class="mobile-warning-actions">
         <button id="btn-dismiss-mobile-warn" class="btn-mobile-dismiss">Continue on Mobile</button>
@@ -118,32 +118,42 @@
             <div class="device-screen" id="device-screen">
               <div class="screen-glare"></div>
 
-              <!-- Authentic Live Microkernel Scanout Display -->
-              <div class="screen-live-scanout" id="screen-live-scanout" style="display: flex;">
-                <img id="live-scanout-img" src="/api/screen/frame" alt="InterOS Microkernel Scanout" draggable="false" />
-              </div>
-            </div>
+              <!-- ================================================================
+                   THE ONE PHONE UI — the guest kernel's own framebuffer.
+                   WHY: InterOS ships a single stock UI rendered by the guest into
+                   the scanout. Device Studio is a monitor and input forwarder,
+                   not a second shell, so it must not contain a parallel phone UI:
+                   two UIs drift and the chrome ends up claiming behaviour the
+                   guest does not have.
 
-            <!-- Hidden compatibility stubs for legacy DOM references -->
-            <div style="display: none !important;" aria-hidden="true">
-              <div id="screen-standby"></div>
-              <div id="screen-lockscreen"></div>
-              <div id="screen-boot-splash"></div>
-              <div id="phone-status-bar"></div>
-              <div id="phone-gesture-bar-pill"></div>
-              <div id="lock-clock-time"></div>
-              <div id="lock-clock-date"></div>
-              <div id="btn-toggle-scanout-crop"></div>
-              <div id="btn-refresh-scanout"></div>
-              <div id="scanout-mode-label"></div>
-              <div id="chassis-nav-bar"></div>
-              <div id="chassis-btn-back"></div>
-              <div id="chassis-btn-home"></div>
-              <div id="chassis-btn-recents"></div>
+                   REMOVED HERE (all of it was a second UI owned by the chrome):
+                     #phone-viewport                  overlay wrapping the shell
+                     21 x .screen-view                guest-OS screen containers
+                     .launcher-dock-row / -dock-icon  launcher dock (5 + 1 icons)
+                     .minimal-stream-container        the whole app drawer:
+                       #stream-day-header, .stream-search-pill, #stream-app-list,
+                       #stream-alphabet-rail (28 nodes), #stream-fab-btn
+                     .horizon-stage                   recents / multitasking deck
+                     17 x .app-surface-note           "no guest surface" panels
+                     #view-bare-metal-vnc             unreachable noVNC container
+                     14 hidden legacy stubs           status bar, lock screen, boot
+                                                    splash, standby, chassis nav
+                   app.js lost switchView() and its 35 call sites with them, so
+                   navigation, lock screen, drawer and recents are now the guest's
+                   alone. app.js forwards pointer/keyboard events to the guest via
+                   POST /api/touch/event and /api/input/key.
+                   ================================================================ -->
+              <div class="screen-live-scanout" id="screen-live-scanout" style="display: flex;">
+                <img id="live-scanout-img" src="/api/screen/frame" alt="InterOS guest framebuffer — the guest kernel renders the entire device UI into this scanout" draggable="false" />
+              </div>
             </div>
           </div>
 
-          <!-- Bottom Navigation Gestures (Cleanly stacked beneath phone) -->
+          <!-- Guest Input Injector (device control, NOT studio navigation)
+               WHY: these buttons do not switch a studio screen -- the studio has
+               no screens. Each one posts a synthetic touch/gesture to the guest
+               over /api/touch/event, so the guest kernel performs the navigation
+               on its own framebuffer. -->
           <div class="device-gesture-guide" id="device-gesture-guide">
             <button class="gesture-btn" id="btn-gesture-activity" title="Activity Space / Overview">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="18 15 12 9 6 15"/></svg>
@@ -168,7 +178,10 @@
           </div>
         </div>
 
-        <!-- Android Emulator Quick-Action Floating Hardware Toolbar (Next to Phone) -->
+        <!-- Android Emulator Quick-Action Floating Hardware Toolbar (Next to Phone)
+             WHY: hardware device controls. Every button either powers the virtual
+             device or injects an input event into the guest framebuffer; none of
+             them navigate a Studio-owned screen, because there are none. -->
         <div class="emulator-side-toolbar" id="emulator-side-toolbar">
           <button class="emu-btn" id="emu-btn-power" title="Power / Lock Screen (Sleep / Wake)">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.36 6.64a9 9 0 1 1-12.73 0M12 2v10"/></svg>
