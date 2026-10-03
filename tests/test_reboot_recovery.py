@@ -4,12 +4,12 @@ InterOS Core — Deterministic Clean Reboot Recovery Verification
 ============================================================
 Verifies clean system reboot & recovery lifecycle:
 1. Boot Guest Session 1
-2. Verify all boot boot signals (Kernel, Memory, IDT, Services, PID1)
+2. Verify all boot signals (Kernel, Memory, IDT, Services, PID1)
 3. Establish known userspace state (Launcher active, interactive app cycle)
 4. Trigger clean guest shutdown via COM1 serial ACPI power-off
 5. Confirm QEMU exits cleanly with code 0
 6. Boot Guest Session 2 (Clean Reboot)
-7. Confirm all boot boot signals are cleanly re-established
+7. Confirm all boot signals are cleanly re-established
 8. Confirm userspace returns to expected responsive state
 9. Accurately documents persistence status (In-memory VFS / block writeback pending)
 """
@@ -113,7 +113,7 @@ class RecoverySerialReader:
         return None
 
 
-def boot_and_verify_boot signals(qemu_exe, kernel_img, ser_port, session_name):
+def boot_and_verify_boot_signals(qemu_exe, kernel_img, ser_port, session_name):
     print(f"\n[{session_name}] Launching QEMU instance...")
     qemu_cmd = [
         qemu_exe,
@@ -191,7 +191,7 @@ def main():
         # =====================================================================
         # Session 1: Initial Cold Boot & Known State Establishment
         # =====================================================================
-        proc1, sock1, reader1, diag1 = boot_and_verify_boot signals(
+        proc1, sock1, reader1, diag1 = boot_and_verify_boot_signals(
             qemu_exe, kernel_img, ser_port, "SESSION-1 (Cold Boot)"
         )
 
@@ -238,7 +238,7 @@ def main():
         # =====================================================================
         # Session 2: Clean Reboot & State Re-Verification
         # =====================================================================
-        proc2, sock2, reader2, diag2 = boot_and_verify_boot signals(
+        proc2, sock2, reader2, diag2 = boot_and_verify_boot_signals(
             qemu_exe, kernel_img, ser_port, "SESSION-2 (Reboot)"
         )
 
