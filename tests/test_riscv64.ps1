@@ -18,7 +18,7 @@ $content = if (Test-Path $log) { Get-Content $log } else { @() }
 Write-Host "=== Output Preview (Last 50 lines) ===" -ForegroundColor Cyan
 $content | Select-Object -Last 50
 
-$requiredMilestones = @(
+$requiredSignals = @(
     "OpenSBI",
     "Inter OS",
     "MMU: Sv39 3-level page tables active",
@@ -33,14 +33,14 @@ $requiredMilestones = @(
 
 $missing = @()
 $rawText = ($content -join "`n")
-foreach ($m in $requiredMilestones) {
+foreach ($m in $requiredSignals) {
     if (-not ($rawText -match [regex]::Escape($m))) {
         $missing += $m
     }
 }
 
 if ($missing.Count -gt 0) {
-    Write-Error "RISC-V64 boot verification FAILED: Missing milestones: $($missing -join ', ')"
+    Write-Error "RISC-V64 boot verification FAILED: Missing boot signals: $($missing -join ', ')"
     exit 1
 }
 
