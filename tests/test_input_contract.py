@@ -30,6 +30,10 @@ def main():
     must(binp,"interos_system_service::run_input()","inputd entry point")
     print("input event pipeline contract: PASS")
 
+    verify_first_party_system_gestures()
+    verify_gesture_thresholds()
+    print("first-party gesture and timing contracts: PASS")
+
 if __name__ == "__main__":
     main()
 
