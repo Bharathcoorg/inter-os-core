@@ -98,6 +98,11 @@ pub fn capability_policy(id: ServiceId, parent_id: TaskId) -> Result<Vec<Service
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::EventPoll, rights: Rights::READ | Rights::INVOKE, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::IpcReceive, rights: Rights::READ, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::ProcessSpawn, rights: Rights::INVOKE, object_id: 0 });
+            // WHY the launcher needs the clock: the lock screen is dominated by the
+            // time and the date, and without this authority it could only render the
+            // layout with both absent. Read-only, and scoped to the clock, so it
+            // confers no power, crypto or telephony authority.
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::RealtimeClockRead, rights: Rights::READ, object_id: 0 });
         }
         ServiceId::Display => policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FrameBufferDirect, rights: Rights::WRITE, object_id: 1 }),
         ServiceId::Storage => {
@@ -575,4 +580,75 @@ pub fn recover_failed(id: ServiceId, parent_id: TaskId) -> Result<(), &'static s
     SERVICE_RETRY_AFTER[idx].store(now.saturating_add(SERVICE_RESTART_BACKOFF_TICKS), Ordering::Release);
     SERVICE_RECORDS.lock()[idx] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Declared, generation: record.generation });
     start_locked(id, parent_id).map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::task::TaskId;
+
+    /// The launcher must be able to read the clock, and only the clock.
+    ///
+    /// WHY this exists: `sys_rtc_get_time` used to require `SystemControl` through
+    /// the object-blind `require_system_control()`. The only way to let the lock
+    /// screen render a time was therefore to grant the launcher power, crypto and
+    /// telephony authority over the entire device. Reading the clock authorises
+    /// nothing, so it gets its own narrow read-only capability.
+    ///
+    /// The second assertion is the one that matters most: granting the clock must
+    /// NOT have handed the launcher general system control, because that is the
+    /// over-grant this change exists to avoid.
+    #[test]
+    fn launcher_can_read_the_clock_without_holding_system_control() {
+        let policy = capability_policy(ServiceId::Launcher, TaskId(1)).expect("launcher policy");
+
+        assert!(
+            policy
+                .iter()
+                .any(|c| c.cap_type == CapabilityType::RealtimeClockRead && c.rights.contains(Rights::READ)),
+            "the launcher needs read authority for the real-time clock or the lock screen cannot show a time"
+        );
+
+        assert!(
+            !policy.iter().any(|c| c.cap_type == CapabilityType::SystemControl),
+            "the launcher must not hold SystemControl: it would confer power, crypto and telephony authority"
+        );
+
+        assert!(
+            !policy
+                .iter()
+                .any(|c| c.cap_type == CapabilityType::RealtimeClockRead && c.rights.contains(Rights::WRITE)),
+            "the clock capability must be read-only"
+        );
+    }
+
+    /// No other service may acquire clock authority by accident.
+    ///
+    /// WHY: the clock is a distinct capability precisely so it can be granted
+    /// narrowly. If every service picked it up through a shared tail, the split
+    /// would be meaningless and the next service added would silently inherit it.
+    #[test]
+    fn clock_authority_is_not_granted_to_other_services() {
+        for id in [
+            ServiceId::Display,
+            ServiceId::Input,
+            ServiceId::Storage,
+            ServiceId::Network,
+            ServiceId::Power,
+            ServiceId::Modem,
+            ServiceId::Audio,
+            ServiceId::Camera,
+            ServiceId::Compositor,
+            ServiceId::Sensor,
+        ] {
+            let Ok(policy) = capability_policy(id, TaskId(1)) else {
+                continue;
+            };
+            assert!(
+                !policy.iter().any(|c| c.cap_type == CapabilityType::RealtimeClockRead),
+                "{:?} must not hold RealtimeClockRead",
+                id
+            );
+        }
+    }
 }

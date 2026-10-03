@@ -3356,7 +3356,19 @@ pub fn sys_android_bridge_intent(action: &str, data_uri: &str, out_buf: &mut [u8
 
 /// Queries the active hardware real-time clock (RTC / CMOS) into `out_buf` JSON string.
 pub fn sys_rtc_get_time(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
-    require_system_control()?;
+    // WHY the narrow capability: reading the clock authorises nothing. The previous
+    // guard was the object-blind `require_system_control()`, so the only way to let
+    // the lock screen show a time was to hand it power, crypto and telephony
+    // authority over the device. `RealtimeClockRead` with READ rights is the least
+    // privilege that actually does the job.
+    let sched = SCHEDULER.lock();
+    let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+    task.cap_table
+        .authorize_capability(CapabilityType::RealtimeClockRead, Rights::READ)
+        .then_some(())
+        .ok_or(SyscallResult::PermissionDenied)?;
+    drop(sched);
+
     let mut rtc = crate::hal::RTC.lock();
     let dt = rtc.read_hardware();
     use core::fmt::Write;

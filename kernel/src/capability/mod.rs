@@ -53,6 +53,21 @@ pub enum CapabilityType {
     EventPoll,
     /// Permission for privileged global kernel controls (power, crypto, telephony, audio, device policy).
     SystemControl,
+    /// Permission to read the hardware real-time clock (date and time).
+    ///
+    /// WHY this exists rather than reusing `SystemControl`: reading the clock is a
+    /// passive observation that grants no authority over anything, whereas
+    /// `SystemControl` is documented as power, crypto, telephony, audio and device
+    /// policy. `sys_rtc_get_time` used to require `SystemControl`, and the only
+    /// guard for it was the object-blind `require_system_control()`, so satisfying
+    /// it would have handed the caller power, crypto and telephony authority over
+    /// the whole device just to learn the time. This file already documents why
+    /// the object-blind form is wrong: see the account-administration guard.
+    ///
+    /// The lock screen is the reason this matters in practice. It could not render
+    /// a clock without this capability, so the one element that dominates the
+    /// reference design was permanently absent rather than merely wrong.
+    RealtimeClockRead,
 }
 
 /// Bitmask representing granular rights held on a capability.
