@@ -1663,11 +1663,20 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             }
         }
         75 => {
+            // PackageList: a1=reserved, a2=out_ptr, a3=out_len
+            //
+            // WHY authorised by capability type here as well: this enumerates the
+            // catalogue rather than accessing a resource named by a capability, and
+            // making the caller pass its own slot index meant the SDK had to guess a
+            // slot number. It passed 0, which is SerialOutput for every service, so
+            // the listing was refused and callers saw an empty catalogue.
             let out_len=a3 as usize;
             if out_len==0||out_len>4096{return SyscallResult::InvalidArguments as i64;}
             let sched=SCHEDULER.lock();
             let current=match sched.current_task(){Some(t)=>t,None=>return SyscallResult::PermissionDenied as i64};
-            if current.cap_table.verify(a1 as usize,CapabilityType::FileSystemRead,Rights::READ).is_err(){return SyscallResult::PermissionDenied as i64;}
+            if !current.cap_table.authorize_capability(CapabilityType::FileSystemRead, Rights::READ) {
+                return SyscallResult::PermissionDenied as i64;
+            }
             drop(sched);
             let mut out=[0u8;4096];let mut pos=0usize;
             for p in crate::package::FIRST_PARTY_PACKAGES{
@@ -1681,11 +1690,24 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             let copy_len=pos.min(out_len);if copy_to_user(a2,&out[..copy_len]).is_err(){return SyscallResult::InvalidArguments as i64;}copy_len as i64
         }
         76 => {
-            // PackageRegistry: a1=cap_slot, a2=out_ptr, a3=out_len
-            let cap_slot=a1 as usize; let out_len=a3 as usize;
+            // PackageRegistry: a1=reserved, a2=out_ptr, a3=out_len
+            //
+            // WHY the capability is checked by type and not by the slot index the
+            // caller passes in `a1`: the previous guard verified whatever slot the
+            // caller named, so every caller had to know its own capability table
+            // layout. The launcher passed 0, but its FileSystemRead capability sits
+            // at slot 3 behind SerialOutput, TimerTickRead and IpcSend, so the call
+            // was refused and the shell silently rendered an empty app catalogue
+            // with no indication that anything was wrong. Authorising by capability
+            // type enforces exactly the same rule without making the caller
+            // responsible for its own table layout, and it cannot drift when the
+            // policy gains or loses a capability.
+            let out_len=a3 as usize;
             if out_len==0||out_len>4096{return SyscallResult::InvalidArguments as i64;}
             let sched=SCHEDULER.lock(); let current=match sched.current_task(){Some(t)=>t,None=>return SyscallResult::PermissionDenied as i64};
-            if current.cap_table.verify(cap_slot,CapabilityType::FileSystemRead,Rights::READ).is_err(){return SyscallResult::PermissionDenied as i64;}
+            if !current.cap_table.authorize_capability(CapabilityType::FileSystemRead, Rights::READ) {
+                return SyscallResult::PermissionDenied as i64;
+            }
             drop(sched);
             let mut out=[0u8;4096]; match sys_package_registry(&mut out[..out_len]) { Ok(n)=>{if copy_to_user(a2,&out[..n]).is_err(){return SyscallResult::InvalidArguments as i64;} n as i64}, Err(e)=>e as i64 }
         }

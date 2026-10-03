@@ -426,6 +426,38 @@ fn developer_terminal_enabled() -> bool {
     &buf[..n] == b"true"
 }
 
+/// Small stack buffer for formatting a log line without an allocator.
+///
+/// WHY this exists rather than a `heapless::String`: the shell is `#![no_std]`
+/// with no heap, and `std::log` takes a `&str`. Formatting the app count into a
+/// fixed buffer is the only way to report it.
+struct LineBuf<const N: usize> {
+    buf: [u8; N],
+    len: usize,
+}
+
+impl<const N: usize> LineBuf<N> {
+    const fn new() -> Self {
+        LineBuf { buf: [0u8; N], len: 0 }
+    }
+    fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
+    }
+}
+
+impl<const N: usize> core::fmt::Write for LineBuf<N> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        for ch in s.bytes() {
+            if self.len >= N {
+                return Err(core::fmt::Error);
+            }
+            self.buf[self.len] = ch;
+            self.len += 1;
+        }
+        Ok(())
+    }
+}
+
 fn refresh_package_catalog(state: &mut LauncherState) {
     let mut buf = [0u8; 4096];
     let Ok(n) = std::package_registry(0, &mut buf) else {
@@ -853,11 +885,21 @@ pub extern "C" fn _start() -> ! {
     refresh_runtime_recents(&mut state);
     refresh_clock(&mut state);
     refresh_notifications(&mut state);
+    // WHY the count is reported: an empty catalogue is indistinguishable from a
+    // refused read at the call site, because `refresh_package_catalog` maps a
+    // permission error to `app_count = 0` and returns. That made a kernel-side
+    // capability refusal look exactly like "this device has no apps installed".
     std::log(
         0,
         "[LAUNCHER] Package catalog loaded from the kernel registry.",
     )
     .ok();
+    {
+        use core::fmt::Write;
+        let mut line = LineBuf::<96>::new();
+        let _ = write!(line, "[LAUNCHER] Catalogue contains {} packages.", state.app_count);
+        std::log(0, line.as_str()).ok();
+    }
 
     std::log(0, "[LAUNCHER] Step 3: Rendering launcher UI canvas...").ok();
     render_view(surface, &state);
