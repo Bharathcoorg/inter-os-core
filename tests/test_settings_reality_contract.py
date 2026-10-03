@@ -131,22 +131,17 @@ class SettingsRealityContractTests(unittest.TestCase):
             self.store.set("key", "x" * 600)  # oversized value (>512)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-def test_developer_terminal_is_disabled_by_default_and_kernel_gated():
-    from pathlib import Path
-    root = Path(__file__).resolve().parents[1]
-    settings = (root / "kernel/src/settings.rs").read_text()
-    syscall = (root / "kernel/src/syscall/mod.rs").read_text()
-    launcher = (root / "apps/launcher/src/main.rs").read_text()
-    app = (root / "apps/settings/src/main.rs").read_text()
-    assert "developer.terminal_enabled=false" in settings
+    # Keep the developer terminal invariant inside the normal unittest runner.
+    source = (ROOT / "kernel/src/settings.rs").read_text()
+    syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text()
+    launcher = (ROOT / "apps/launcher/src/main.rs").read_text()
+    app = (ROOT / "apps/settings/src/main.rs").read_text()
+    assert "developer.terminal_enabled=false" in source
     assert "developer_terminal_enabled()" in syscall
-    assert "std::settings_get(0, \"developer.terminal_enabled\"" in launcher
+    assert 'std::settings_get(0, "developer.terminal_enabled"' in launcher
     assert "developer_terminal_enabled()" in launcher
     assert "toggle_terminal" in app
     assert "Developer terminal" in app
     assert "Disabled by default" in app
     assert '"developer.terminal_enabled"' in app
+    unittest.main()
