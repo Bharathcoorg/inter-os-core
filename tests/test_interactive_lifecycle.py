@@ -784,6 +784,21 @@ def main():
 
     except Exception as e:
         print(f"\n[LIFECYCLE TEST] FAILED: {e}")
+        # WHY dump the guest transcript on failure: this test is intermittently
+        # flaky, failing at a different step each time (Live Widgets, LockScreen
+        # unlock, Settings launch, Calculator), so the failure point alone carries
+        # no information. Without the transcript, each occurrence has to be
+        # reproduced by hand and usually cannot be, which is why this went
+        # undiagnosed twice. The dump makes the next occurrence self-diagnosing.
+        try:
+            dump_path = os.path.abspath(r"target\lifecycle_failure.log")
+            os.makedirs(os.path.dirname(dump_path), exist_ok=True)
+            with open(dump_path, "w", encoding="utf-8", errors="replace") as fh:
+                fh.write(f"FAILURE: {e}\n\n--- guest transcript ---\n")
+                fh.write("\n".join(reader.captured_logs))
+            print(f"[LIFECYCLE TEST] Guest transcript written to {dump_path}")
+        except Exception as dump_err:
+            print(f"[LIFECYCLE TEST] Could not write failure transcript: {dump_err}")
         raise
     finally:
         if serial_sock:
