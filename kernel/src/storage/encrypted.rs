@@ -19,16 +19,37 @@ pub enum EncryptionError {
     BufferTooSmall,
     IntegrityViolation,
     TooLarge,
+    /// No persistent storage root is established, so no key can be derived.
+    NoStorageRoot,
 }
 
-fn storage_key() -> [u8; 32] {
-    SECURE_KEYSTORE.lock().derive_key(KeySlot::SovereignMasterKey, b"storage-at-rest-v1")
+/// The storage-at-rest root key.
+///
+/// WHY this is a `Result`: `SecureKeystore::derive_key` returns a key rather than
+/// a result, so it cannot report that the root it is deriving from is absent.
+/// Called ungated, this would compute `HMAC(0, ...)` — a fixed function of
+/// published constants that anyone can reproduce — and encrypt every payload
+/// under it. Gating here is the only place that refusal can happen, because both
+/// the seal and the open path funnel through this function.
+///
+/// WHY the guard is `is_seeded()` and not "the seed is non-zero": `is_seeded`
+/// is the keystore's own statement that a root was *established*, which is
+/// exactly the guarantee a caller needs and is not the same question as whether
+/// the current seed bytes happen to be non-zero.
+fn storage_key() -> Result<[u8; 32], EncryptionError> {
+    let ks = SECURE_KEYSTORE.lock();
+    if !ks.is_seeded() {
+        return Err(EncryptionError::NoStorageRoot);
+    }
+    Ok(ks.derive_key(KeySlot::SovereignMasterKey, b"storage-at-rest-v1"))
 }
 
 /// Encrypts a bounded payload into an authenticated ENC1 envelope.
 pub fn seal(plaintext: &[u8], out: &mut Vec<u8>) -> Result<(), EncryptionError> {
     if plaintext.len() > u32::MAX as usize { return Err(EncryptionError::TooLarge); }
-    let key = storage_key();
+    // Fail closed before any key material exists: producing a ciphertext here
+    // would be a payload readable by anyone holding the zero seed.
+    let key = storage_key()?;
     let mut nonce = [0u8; 16];
     get_random_bytes(&mut nonce);
 
@@ -70,7 +91,10 @@ pub fn open(envelope: &[u8], out: &mut [u8]) -> Result<usize, EncryptionError> {
     let tag_offset = envelope.len() - ENCRYPTED_TAG_SIZE;
     let mut expected_tag = [0u8; 32];
     expected_tag.copy_from_slice(&envelope[tag_offset..]);
-    let key = storage_key();
+    // Same refusal as on the write path. Checking the tag under a key derived
+    // from an absent root would compare the caller's tag against one anyone can
+    // compute, so the "authenticated" verdict would mean nothing.
+    let key = storage_key()?;
     let actual_tag = HmacSha256::compute(&key, &envelope[..tag_offset]);
     if !constant_time_eq_32(&actual_tag, &expected_tag) {
         return Err(EncryptionError::IntegrityViolation);
@@ -87,4 +111,57 @@ pub fn open(envelope: &[u8], out: &mut [u8]) -> Result<usize, EncryptionError> {
         out[i] = ciphertext[i] ^ stream[i % 32];
     }
     Ok(plain_len)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// With no storage root established, `derive_key` still returns a key — it
+    /// is `HMAC(0, ...)`, which anyone can compute. So an unguarded caller
+    /// encrypts under published constants and "verifies" against a tag the
+    /// reader can also produce, and neither operation reports anything wrong.
+    ///
+    /// Both entry points must refuse instead. This is the assertion that proves
+    /// the guard is in the shared key function rather than in one caller.
+    ///
+    /// WHY the precondition is asserted rather than assumed: the result differs
+    /// depending on whether a root is established, and no test establishes one, so
+    /// this must fail loudly rather than silently check the other branch if that
+    /// ever changes.
+    #[test]
+    fn both_directions_refuse_when_no_storage_root_is_established() {
+        assert!(
+            !SECURE_KEYSTORE.lock().is_seeded(),
+            "no unit test establishes a storage root; this test's branch depends on there being none",
+        );
+
+        let mut sealed = Vec::new();
+        assert_eq!(
+            seal(b"interos at rest", &mut sealed),
+            Err(EncryptionError::NoStorageRoot),
+            "sealing without a root must refuse rather than derive from an absent seed",
+        );
+        assert!(
+            sealed.is_empty(),
+            "a refused seal must not leave a ciphertext behind that something could adopt",
+        );
+
+        // A well-formed envelope: the refusal is about the missing key, not about
+        // the input, so the key gate has to be the thing that fires.
+        let mut envelope = Vec::new();
+        envelope.extend_from_slice(&ENCRYPTED_MAGIC);
+        envelope.push(ENCRYPTED_VERSION);
+        envelope.push(0);
+        envelope.extend_from_slice(&4u32.to_le_bytes());
+        envelope.extend_from_slice(&[0u8; 16]);
+        envelope.extend_from_slice(&[0u8; 4]);
+        envelope.extend_from_slice(&[0u8; 32]);
+        let mut out = [0u8; 4];
+        assert_eq!(
+            open(&envelope, &mut out),
+            Err(EncryptionError::NoStorageRoot),
+            "opening without a root must refuse rather than check the tag under a derivable key",
+        );
+    }
 }

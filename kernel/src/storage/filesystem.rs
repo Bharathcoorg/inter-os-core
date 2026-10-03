@@ -8,8 +8,16 @@ use super::interfs::{FsBackendError, InterFs};
 
 /// Leave the first 4096 sectors to the bootloader/partition/device-specific area.
 pub const BLOCK_FS_BASE_LBA: u32 = 4096;
-/// Persistent journal currently reserves 16 * 128 sectors at the disk tail.
-pub const BLOCK_FS_TAIL_RESERVED: u32 = 16 * 128;
+/// Sectors the persistent journal occupies at the disk tail.
+///
+/// WHY this is derived from `persistent::TOTAL_SLOT_COUNT` rather than written
+/// as its own literal: the journal grew an extension pair when kind 9 was added,
+/// and a hand-written `16 * 128` silently under-reserved, which would have let
+/// InterFS format over the verified-boot record if the InterFS size cap were ever
+/// raised. Deriving both from the journal's own slot count makes that drift
+/// impossible.
+pub const BLOCK_FS_TAIL_RESERVED: u32 =
+    super::persistent::SLOT_SECTORS * super::persistent::TOTAL_SLOT_COUNT;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FilesystemLayout {

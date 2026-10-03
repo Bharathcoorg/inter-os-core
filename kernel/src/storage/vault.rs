@@ -124,8 +124,24 @@ impl StorageVault {
     }
 
     /// Initializes the vault using the hardware keystore DID Master Key (Slot 0).
+    ///
+    /// WHY this refuses without a storage root instead of deriving anyway:
+    /// `SecureKeystore::derive_key` returns a key rather than a result, so with
+    /// no root established the only key obtainable is `HMAC(0, ...)` — a fixed
+    /// function of published constants. Sealing under it would report success
+    /// while producing a ciphertext every reader on the machine could decrypt,
+    /// and the HMAC tag over it would authenticate nothing. The vault is left
+    /// uninitialised, which makes every seal, open, encrypt and decrypt fail
+    /// closed with `KeystoreUninitialized`.
+    ///
+    /// The same gate lives in `storage::encrypted::storage_key`, which is the
+    /// other unguarded `derive_key` caller. Both refuse rather than one of them
+    /// trusting the other to have checked.
     pub fn initialize(&mut self) -> Result<(), VaultError> {
         let ks = crate::crypto::SECURE_KEYSTORE.lock();
+        if !ks.is_seeded() {
+            return Err(VaultError::KeystoreUninitialized);
+        }
         let derived = ks.derive_key(crate::crypto::KeySlot::SovereignMasterKey, b"vault_master");
         self.vault_key = derived;
         self.is_initialized = true;
@@ -169,6 +185,13 @@ impl StorageVault {
         block_index: u64,
         out: &mut [u8; VAULT_SECTOR_SIZE],
     ) -> Result<(), VaultError> {
+        // WHY the gate is before the read and not after: with no vault key bound
+        // the envelope cannot be interpreted at all, so touching the disk would
+        // produce a verdict about the *media* — a misleading IntegrityViolation
+        // for a block that may be perfectly intact. Refuse on the real reason.
+        if !self.is_initialized {
+            return Err(VaultError::KeystoreUninitialized);
+        }
         let block = self.read_envelope(block_index)?;
         let plaintext = self.decrypt_sector(&block)?;
         out.copy_from_slice(&plaintext);
@@ -321,12 +344,55 @@ pub static STORAGE_VAULT: Mutex<StorageVault> = Mutex::new(StorageVault::new());
 /// Initializes the Sovereign Encrypted Storage Vault and runs verification self-tests.
 pub fn init() {
     let mut vault = STORAGE_VAULT.lock();
-    vault.initialize().expect("Failed to initialize storage vault");
-
     let test_iv: [u8; 16] = [0xA5; 16];
     let mut plaintext = [0u8; VAULT_SECTOR_SIZE];
     for i in 0..VAULT_SECTOR_SIZE {
         plaintext[i] = (i % 256) as u8;
+    }
+
+    if vault.initialize().is_err() {
+        // WHY this is a checked branch and not an early return that skips the
+        // self-tests: skipping would be the silent version of the same defect.
+        // The property that matters when there is no root is that the vault
+        // refuses, so that is what gets asserted here. `is_initialized` stays
+        // false, so every path below is already refusing; these assertions pin it
+        // so a future change cannot quietly re-derive a key from an absent seed.
+        assert!(
+            !vault.is_initialized,
+            "a refused initialization must leave the vault uninitialised, not half-configured",
+        );
+        let any_block = VaultBlock {
+            iv: test_iv,
+            block_index: 42,
+            ciphertext: plaintext,
+            hmac_tag: [0u8; SHA256_DIGEST_LENGTH],
+        };
+        assert_eq!(
+            vault.encrypt_sector(42, &plaintext, &test_iv).err(),
+            Some(VaultError::KeystoreUninitialized),
+            "with no storage root there is no vault key, so encryption must refuse",
+        );
+        assert_eq!(
+            vault.decrypt_sector(&any_block).err(),
+            Some(VaultError::KeystoreUninitialized),
+            "with no storage root there is no vault key, so decryption must refuse",
+        );
+        assert_eq!(
+            vault.seal_sector(42, &plaintext).err(),
+            Some(VaultError::KeystoreUninitialized),
+            "sealing must refuse before it writes anything to the vault region",
+        );
+        assert_eq!(
+            vault.open_sector(42, &mut plaintext),
+            Err(VaultError::KeystoreUninitialized),
+            "opening must refuse before it reads the vault region",
+        );
+        crate::serial_println!(
+            "[VAULT] FATAL: no persistent storage root, so no vault key can be derived and the \
+             vault stays uninitialised. Every vault operation fails closed with \
+             KeystoreUninitialized. No key was derived from an absent seed.",
+        );
+        return;
     }
 
     // 0. Prove the persistent envelope store round-trips through the real disk
@@ -384,4 +450,47 @@ pub fn init() {
     crate::serial_println!(
         "[TEST] Sovereign Encrypted Vault: Key-wrapped AES/HMAC block cipher, sector 42 verified, 1-bit tamper rejected."
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A vault with no storage root must refuse every operation, and must not
+    /// have a key in the first place.
+    ///
+    /// WHY this matters: `derive_key` cannot report the absence of a root, so an
+    /// ungated `initialize` produced `HMAC(0, ...)` and set `is_initialized`.
+    /// Everything downstream then reported success while protecting nothing —
+    /// and the keystream was a fixed function of public constants, so the
+    /// "encrypted" blocks were readable by anyone.
+    ///
+    /// Pinning assertions: the `is_initialized` check after the refused init, and
+    /// the four operation refusals. The `open_sector` one is the interesting
+    /// half: it must refuse *before* touching the disk, or it reports a verdict
+    /// about the media for a block that may be perfectly intact.
+    #[test]
+    fn an_unseeded_vault_refuses_rather_than_deriving_a_key_from_nothing() {
+        assert!(
+            !crate::crypto::SECURE_KEYSTORE.lock().is_seeded(),
+            "no unit test establishes a storage root; this test's branch depends on there being none",
+        );
+
+        let mut vault = StorageVault::new();
+        assert_eq!(vault.initialize(), Err(VaultError::KeystoreUninitialized));
+        assert!(!vault.is_initialized, "a refused initialize must not mark the vault usable");
+        assert_eq!(vault.vault_key, [0u8; 32], "a refused initialize must not leave a key behind");
+
+        let plaintext = [0x5Au8; VAULT_SECTOR_SIZE];
+        let block = VaultBlock {
+            iv: [0xA5; 16],
+            block_index: 42,
+            ciphertext: plaintext,
+            hmac_tag: [0u8; SHA256_DIGEST_LENGTH],
+        };
+        assert_eq!(vault.encrypt_sector(42, &plaintext, &[0xA5; 16]).err(), Some(VaultError::KeystoreUninitialized));
+        assert_eq!(vault.decrypt_sector(&block), Err(VaultError::KeystoreUninitialized));
+        assert_eq!(vault.seal_sector(42, &plaintext).err(), Some(VaultError::KeystoreUninitialized));
+        assert_eq!(vault.open_sector(42, &mut plaintext.clone()), Err(VaultError::KeystoreUninitialized));
+    }
 }
