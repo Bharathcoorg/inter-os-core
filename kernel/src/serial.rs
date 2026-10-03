@@ -83,9 +83,31 @@ use x86_64::instructions::port::Port;
 
 static RX_BUF: Mutex<RxState> = Mutex::new(RxState::new());
 
+/// Number of completed command lines that can be queued between the COM1
+/// interrupt and the main loop's dispatch pass.
+///
+/// WHY a queue rather than a single buffer: the interrupt handler must not
+/// dispatch, so completed lines have to be held somewhere. With a single buffer
+/// a second line arriving before the main loop runs would be appended to the
+/// first and the two would execute as one garbled command. Four slots is ample
+/// for a human or a test harness, and the overflow is reported rather than
+/// silently dropping the oldest.
+const RX_QUEUE_SLOTS: usize = 4;
+
 struct RxState {
+    /// Line currently being accumulated.
     buf: [u8; 512],
     len: usize,
+    /// Set when the current line exceeded the buffer.
+    overflowed: bool,
+    /// Completed lines awaiting dispatch.
+    queue: [[u8; 512]; RX_QUEUE_SLOTS],
+    qlens: [usize; RX_QUEUE_SLOTS],
+    qhead: usize,
+    qtail: usize,
+    qcount: usize,
+    /// Completed lines dropped because the queue was full.
+    dropped: u32,
 }
 
 impl RxState {
@@ -93,11 +115,61 @@ impl RxState {
         Self {
             buf: [0u8; 512],
             len: 0,
+            overflowed: false,
+            queue: [[0u8; 512]; RX_QUEUE_SLOTS],
+            qlens: [0; RX_QUEUE_SLOTS],
+            qhead: 0,
+            qtail: 0,
+            qcount: 0,
+            dropped: 0,
         }
+    }
+
+    /// Pushes the accumulated line onto the queue. Returns false if it was dropped.
+    fn push_current_line(&mut self) -> bool {
+        if self.qcount >= RX_QUEUE_SLOTS {
+            self.dropped += 1;
+            return false;
+        }
+        let len = self.len;
+        self.queue[self.qtail][..len].copy_from_slice(&self.buf[..len]);
+        self.qlens[self.qtail] = len;
+        self.qtail = (self.qtail + 1) % RX_QUEUE_SLOTS;
+        self.qcount += 1;
+        true
+    }
+
+    /// Pops the oldest completed line into `out`, returning its length.
+    fn pop_line(&mut self, out: &mut [u8; 512]) -> usize {
+        if self.qcount == 0 {
+            return 0;
+        }
+        let len = self.qlens[self.qhead];
+        out[..len].copy_from_slice(&self.queue[self.qhead][..len]);
+        self.qhead = (self.qhead + 1) % RX_QUEUE_SLOTS;
+        self.qcount -= 1;
+        len
     }
 }
 
 /// Polls the 16550 COM1 UART receiver and dispatches input commands.
+/// Drains the UART receive FIFO into the line buffer.
+///
+/// WHY this no longer dispatches commands: this runs in the COM1 interrupt
+/// handler (`irq4_com1_handler`), and `handle_serial_command` launches apps,
+/// renders surfaces and prints. Doing that in interrupt context is wrong twice
+/// over. It can block on a lock the interrupted code already holds — the
+/// scheduler, `DRM_KMS`, `SCHEDULER` — which is a deadlock, not a slow path. And
+/// every `serial_println!` it performs writes into a 16-byte hardware FIFO from
+/// inside the handler, so a response long enough to fill it loses bytes.
+///
+/// The symptom was intermittent and misleading: a `TAP` sent over the serial
+/// console would sometimes appear to do nothing at all, which looked like a UI
+/// defect and sent the investigation into the launcher and compositor.
+///
+/// The handler now only accumulates bytes, which is bounded and cannot block on
+/// anything but the short `RX_BUF` lock. Dispatch happens in
+/// `service_serial_commands`, called from the main loop.
 pub fn poll_serial_rx() {
     let mut lsr = Port::<u8>::new(0x3FD);
     let mut rbr = Port::<u8>::new(0x3F8);
@@ -111,19 +183,72 @@ pub fn poll_serial_rx() {
         let byte = unsafe { rbr.read() };
         count += 1;
 
+        // WHY an overflow marker rather than a silent drop: a line longer than the
+        // buffer must not be dispatched as if it were complete, and must not be
+        // discarded without trace either. The marker makes the truncation visible
+        // to the command handler.
         let mut state = RX_BUF.lock();
         if byte == b'\n' || byte == b'\r' {
-            if state.len > 0 {
-                let len = state.len;
+            // A line is complete. WHY it is queued rather than executed here: the
+            // handler must not launch apps or print. WHY it is queued rather than
+            // flushed by the next newline: two commands can arrive before the main
+            // loop runs, and concatenating them would execute one as a garbled
+            // prefix of the other.
+            if state.overflowed {
+                // Discard the truncated line rather than executing a prefix of it.
                 state.len = 0;
-                let slice = &state.buf[..len];
-                handle_serial_command(slice);
+                state.overflowed = false;
+            } else if state.len > 0 {
+                state.push_current_line();
+                state.len = 0;
             }
         } else if state.len < 511 {
             let idx = state.len;
             state.buf[idx] = byte;
             state.len += 1;
+        } else {
+            state.overflowed = true;
         }
+    }
+}
+
+/// Dispatches any complete serial command lines. Must be called from a normal
+/// (non-interrupt) context.
+pub fn service_serial_commands() {
+    loop {
+        // Copy the line out and release the lock before dispatching:
+        // handle_serial_command prints, and printing while holding RX_BUF would
+        // block the interrupt handler that fills it.
+        let mut local = [0u8; 512];
+        let (len, dropped) = {
+            let mut state = RX_BUF.lock();
+            let dropped = state.dropped;
+            state.dropped = 0;
+            (state.pop_line(&mut local), dropped)
+        };
+        if dropped > 0 {
+            serial_println!(
+                "[SERIAL] {} command line(s) dropped: the {}-slot receive queue was full.",
+                dropped,
+                RX_QUEUE_SLOTS
+            );
+        }
+        if len == 0 {
+            return;
+        }
+
+        let mut start = 0usize;
+        let mut end = len;
+        while start < end && (local[start] as char).is_ascii_whitespace() {
+            start += 1;
+        }
+        while end > start && (local[end - 1] as char).is_ascii_whitespace() {
+            end -= 1;
+        }
+        if start == end {
+            continue;
+        }
+        handle_serial_command(&local[start..end]);
     }
 }
 

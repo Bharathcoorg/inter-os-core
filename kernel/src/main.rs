@@ -452,6 +452,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial_println!("[OK] Hardware interrupts enabled on CPU.");
 
     loop {
+        // WHY serial commands are serviced here and not in the COM1 interrupt
+        // handler: dispatching a TAP launches apps, renders surfaces and prints,
+        // which can block on locks the interrupted code already holds and overruns
+        // the 16-byte UART FIFO from interrupt context. The handler only fills the
+        // line buffer; the work happens here, in a normal context.
+        kernel::serial::service_serial_commands();
         kernel::task::yield_now();
         x86_64::instructions::hlt();
     }

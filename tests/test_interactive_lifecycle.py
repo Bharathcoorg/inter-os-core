@@ -66,6 +66,46 @@ class SerialReader:
         self.buf = b""
         self.captured_logs = []
 
+    def flush(self, settle=0.35):
+        """Discards everything the guest has already produced.
+
+        WHY this is necessary: `wait_for` scans a persistent buffer for a marker
+        string, so without a barrier it can be satisfied by a line produced by an
+        *earlier* action. The test then passes spuriously, or fails depending on
+        whether the stale line happens to have been consumed yet. This was the
+        source of the intermittent "Failed to return to Home" failures: the
+        assertion was racing a leftover "Home surface rendered." rather than
+        observing the response to the tap just sent.
+
+        This does not weaken any assertion. It makes `wait_for` mean what it says:
+        the guest produced this marker *after* the command under test.
+        """
+        deadline = time.time() + settle
+        while time.time() < deadline:
+            self.sock.settimeout(0.05)
+            try:
+                data = self.sock.recv(65536)
+                if not data:
+                    break
+                # Keep draining; a marker may be split across reads.
+                self.buf += data
+            except (socket.timeout, BlockingIOError):
+                pass
+            except ConnectionResetError:
+                time.sleep(0.05)
+        try:
+            self.sock.settimeout(0.2)
+        except OSError:
+            pass
+        # A marker can straddle the flush boundary, so only whole lines are dropped.
+        cut = self.buf.rfind(b"\n")
+        self.buf = self.buf[cut + 1:] if cut >= 0 else b""
+
+    def send(self, line):
+        """Flushes stale output, then sends one command line."""
+        self.flush()
+        self.sock.sendall(line.encode("utf-8") if isinstance(line, str) else line)
+
     def wait_for(self, marker, timeout=15.0, print_keywords=None):
         timeout = max(timeout, 25.0)
         start_t = time.time()
@@ -94,7 +134,7 @@ class SerialReader:
 def test_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, tap_coords, present_marker, dump_prefix, in_app_interactions=None, exit_gesture="back"):
     print(f"\n[LIFECYCLE TEST] === Operation {operation_num}: Testing {app_name} ({app_id}) ===")
     print(f"[LIFECYCLE TEST] Dispatching touch tap on {app_name} card at {tap_coords}...")
-    reader.sock.sendall(f"TAP {tap_coords[0]} {tap_coords[1]}\n".encode('utf-8'))
+    reader.send(f"TAP {tap_coords[0]} {tap_coords[1]}\n".encode('utf-8'))
 
     # Wait for app launch and presentation
     presented = reader.wait_for(
@@ -123,7 +163,7 @@ def test_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, ta
     if in_app_interactions:
         for action_name, action_coords, action_marker, dump_suffix in in_app_interactions:
             print(f"[LIFECYCLE TEST] In-App Interaction: {action_name} at {action_coords}...")
-            reader.sock.sendall(f"TAP {action_coords[0]} {action_coords[1]}\n".encode('utf-8'))
+            reader.send(f"TAP {action_coords[0]} {action_coords[1]}\n".encode('utf-8'))
             if action_marker:
                 action_ok = reader.wait_for(
                     action_marker,
@@ -149,13 +189,13 @@ def test_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, ta
     # Dispatch touch tap on Back button, Home Gesture Bar, or Swipe Up
     if exit_gesture == "home_bar":
         print(f"[LIFECYCLE TEST] Dispatching touch tap on Home Gesture Bar (x=360, y=1420)...")
-        reader.sock.sendall(b"TAP 360 1420\n")
+        reader.send(b"TAP 360 1420\n")
     elif exit_gesture == "swipe_up":
         print(f"[LIFECYCLE TEST] Dispatching swipe-up gesture from bottom bar (360, 1420) -> (360, 1100)...")
-        reader.sock.sendall(b"SWIPE 360 1420 360 1100 5\n")
+        reader.send(b"SWIPE 360 1420 360 1100 5\n")
     else:
         print(f"[LIFECYCLE TEST] Dispatching touch tap on Back button (x=62, y=48)...")
-        reader.sock.sendall(b"TAP 62 48\n")
+        reader.send(b"TAP 62 48\n")
 
     # Wait for child exit and Launcher reaping
     reaped = reader.wait_for(
@@ -270,7 +310,7 @@ def main():
 
         # Unlock device to HomeScreen
         print("[LIFECYCLE TEST] Unlocking device via swipe-up gesture...")
-        reader.sock.sendall(b"SWIPE 360 1350 360 300 5\n")
+        reader.send(b"SWIPE 360 1350 360 300 5\n")
         unlocked = reader.wait_for(
             "Home surface rendered.",
             timeout=25.0,
@@ -444,7 +484,7 @@ def main():
         # Recent apps: Overview / Recent Apps Switcher Test
         print("\n[LIFECYCLE TEST] === Recent apps: Testing Overview / Recent Apps Deck ===")
         print("[LIFECYCLE TEST] Dispatching swipe-up gesture from bottom bar on homescreen to open overview...")
-        reader.sock.sendall(b"SWIPE 360 1420 360 1100 5\n")
+        reader.send(b"SWIPE 360 1420 360 1100 5\n")
         overview_ready = reader.wait_for(
             "Recent apps surface rendered.",
             timeout=10.0,
@@ -459,7 +499,7 @@ def main():
 
         # Tap on recent app Card 0 (y=340, x=360) in overview deck
         print("[LIFECYCLE TEST] Tapping Card 0 in overview to switch to recent app...")
-        reader.sock.sendall(b"TAP 360 340\n")
+        reader.send(b"TAP 360 340\n")
         switched = reader.wait_for(
             "Switched to recent app from overview card 0",
             timeout=10.0,
@@ -478,7 +518,7 @@ def main():
 
         # Exit child app via swipe up to return to launcher
         print("[LIFECYCLE TEST] Dispatching swipe-up from recent app to return to launcher...")
-        reader.sock.sendall(b"SWIPE 360 1420 360 1100 5\n")
+        reader.send(b"SWIPE 360 1420 360 1100 5\n")
         reaped = reader.wait_for(
             "Foreground application exited and was reaped",
             timeout=15.0,
@@ -491,7 +531,7 @@ def main():
         print("\n[LIFECYCLE TEST] === Recent app dismissal: Testing Overview Card Dismissal ===")
         time.sleep(1.0)
         print("[LIFECYCLE TEST] Dispatching swipe-up from homescreen to open overview...")
-        reader.sock.sendall(b"SWIPE 360 1420 360 1100 5\n")
+        reader.send(b"SWIPE 360 1420 360 1100 5\n")
         overview2_ready = reader.wait_for(
             "Recent apps surface rendered.",
             timeout=10.0,
@@ -503,7 +543,7 @@ def main():
 
         # Tap dismiss badge [X] on Card 0 (x=610, y=230)
         print("[LIFECYCLE TEST] Tapping dismiss badge on Card 0 (x=610, y=230)...")
-        reader.sock.sendall(b"TAP 610 230\n")
+        reader.send(b"TAP 610 230\n")
         card0_dismissed = reader.wait_for(
             "Card 0 dismissed via dismiss button tap.",
             timeout=10.0,
@@ -515,7 +555,7 @@ def main():
 
         # Dispatch horizontal swipe on Card 1 (y=660: x1=200 -> x2=550)
         print("[LIFECYCLE TEST] Dispatching horizontal swipe gesture on Card 1 (200, 660) -> (550, 660)...")
-        reader.sock.sendall(b"SWIPE 200 660 550 660 5\n")
+        reader.send(b"SWIPE 200 660 550 660 5\n")
         card1_dismissed = reader.wait_for(
             "Card 1 dismissed via swipe.",
             timeout=10.0,
@@ -527,7 +567,7 @@ def main():
 
         # Return home via close button tap
         print("[LIFECYCLE TEST] Returning home from overview deck via close button tap...")
-        reader.sock.sendall(b"TAP 360 1240\n")
+        reader.send(b"TAP 360 1240\n")
         returned_home = reader.wait_for(
             "Returned to home grid from recents.",
             timeout=10.0,
@@ -540,7 +580,7 @@ def main():
         print("\n[LIFECYCLE TEST] === Quick controls: Testing Quick Controls Shade ===")
         time.sleep(0.5)
         print("[LIFECYCLE TEST] Opening Quick Controls via status bar tap (360, 25)...")
-        reader.sock.sendall(b"TAP 360 25\n")
+        reader.send(b"TAP 360 25\n")
         qc_ready = reader.wait_for(
             "Quick controls surface rendered.",
             timeout=10.0,
@@ -553,7 +593,7 @@ def main():
         print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_qc}")
         time.sleep(0.5)
         print("[LIFECYCLE TEST] Returning to Home from Quick Controls via bottom bar tap...")
-        reader.sock.sendall(b"TAP 360 1410\n")
+        reader.send(b"TAP 360 1410\n")
         qc_returned = reader.wait_for(
             "Home surface rendered.",
             timeout=10.0,
@@ -566,7 +606,7 @@ def main():
         print("\n[LIFECYCLE TEST] === Notifications: Testing Notifications Shade ===")
         time.sleep(0.5)
         print("[LIFECYCLE TEST] Opening Notifications via top-left status bar tap (100, 25)...")
-        reader.sock.sendall(b"TAP 100 25\n")
+        reader.send(b"TAP 100 25\n")
         notif_ready = reader.wait_for(
             "Notifications surface rendered.",
             timeout=10.0,
@@ -579,7 +619,7 @@ def main():
         print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_notif}")
         time.sleep(0.5)
         print("[LIFECYCLE TEST] Returning to Home from Notifications via bottom bar tap...")
-        reader.sock.sendall(b"TAP 360 1410\n")
+        reader.send(b"TAP 360 1410\n")
         notif_returned = reader.wait_for(
             "Home surface rendered.",
             timeout=10.0,
@@ -592,7 +632,7 @@ def main():
         print("\n[LIFECYCLE TEST] === App drawer: Testing App Drawer ===")
         time.sleep(0.5)
         print("[LIFECYCLE TEST] Opening App Drawer via upward swipe (360, 700) -> (360, 400)...")
-        reader.sock.sendall(b"SWIPE 360 700 360 400 5\n")
+        reader.send(b"SWIPE 360 700 360 400 5\n")
         drawer_ready = reader.wait_for(
             "App drawer surface rendered.",
             timeout=10.0,
@@ -602,7 +642,7 @@ def main():
         print("[LIFECYCLE TEST] [OK] App Drawer opened.")
         time.sleep(0.5)
         print("[LIFECYCLE TEST] Switching category tab in App Drawer (x=250, y=160)...")
-        reader.sock.sendall(b"TAP 250 160\n")
+        reader.send(b"TAP 250 160\n")
         tab_switched = reader.wait_for(
             "App drawer surface rendered.",
             timeout=10.0,
@@ -615,7 +655,7 @@ def main():
         print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_drawer}")
         time.sleep(0.5)
         print("[LIFECYCLE TEST] Returning to Home from App Drawer via bottom tap...")
-        reader.sock.sendall(b"TAP 360 1410\n")
+        reader.send(b"TAP 360 1410\n")
         drawer_returned = reader.wait_for(
             "Home surface rendered.",
             timeout=10.0,
@@ -628,7 +668,7 @@ def main():
         print("\n[LIFECYCLE TEST] === Live widgets: Testing Live Widgets ===")
         time.sleep(0.5)
         print("[LIFECYCLE TEST] Opening Live Widgets via horizontal swipe left (500, 700) -> (150, 700)...")
-        reader.sock.sendall(b"SWIPE 500 700 150 700 5\n")
+        reader.send(b"SWIPE 500 700 150 700 5\n")
         widgets_ready = reader.wait_for(
             "Live widgets surface rendered.",
             timeout=10.0,
@@ -641,7 +681,7 @@ def main():
         print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_widgets}")
         time.sleep(0.5)
         print("[LIFECYCLE TEST] Returning to Home from Live Widgets via bottom tap...")
-        reader.sock.sendall(b"TAP 360 1410\n")
+        reader.send(b"TAP 360 1410\n")
         widgets_returned = reader.wait_for(
             "Home surface rendered.",
             timeout=10.0,
@@ -654,7 +694,7 @@ def main():
         print("\n[LIFECYCLE TEST] === Power and lock: Testing Power Menu & Lock Screen ===")
         time.sleep(0.5)
         print("[LIFECYCLE TEST] Opening Power Menu via battery status bar tap (600, 25)...")
-        reader.sock.sendall(b"TAP 600 25\n")
+        reader.send(b"TAP 600 25\n")
         pm_ready = reader.wait_for(
             "Power surface rendered.",
             timeout=10.0,
@@ -667,7 +707,7 @@ def main():
         print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_pm}")
         time.sleep(0.5)
         print("[LIFECYCLE TEST] Locking device from Power Menu (500, 225)...")
-        reader.sock.sendall(b"TAP 500 225\n")
+        reader.send(b"TAP 500 225\n")
         device_locked = reader.wait_for(
             "Lock surface rendered.",
             timeout=10.0,
@@ -679,18 +719,27 @@ def main():
         _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_lock}")
         print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_lock}")
         time.sleep(0.5)
-        print("[LIFECYCLE TEST] Toggling flashlight on Lock Screen (72, 1330)...")
-        reader.sock.sendall(b"TAP 72 1330\n")
-        torch_toggled = reader.wait_for(
-            "Lock surface rendered.",
+        print("[LIFECYCLE TEST] Tapping flashlight affordance on Lock Screen (72, 1330)...")
+        reader.send(b"TAP 72 1330\n")
+        # WHY this asserts "unavailable" rather than a toggle: there is no torch
+        # hardware, no torch capability and no torch syscall on this platform. The
+        # lock screen draws the affordance as a dimmed outline labelled "N/A" and
+        # reports the absence. This assertion previously waited for
+        # "Lock surface rendered." with a "toggled" keyword, which described an
+        # earlier implementation that flipped a local bool and logged a successful
+        # toggle -- a claim the platform cannot support. Waiting for a re-render
+        # here would also be wrong on the merits: toggling a torch that does not
+        # exist has nothing to redraw.
+        torch_reported = reader.wait_for(
+            "Flashlight unavailable",
             timeout=10.0,
-            print_keywords=["LAUNCHER", "Flashlight", "toggled", "render_lock_screen"]
+            print_keywords=["LAUNCHER", "Flashlight"],
         )
-        assert torch_toggled, "Failed to toggle flashlight on Lock Screen"
-        print("[LIFECYCLE TEST] [OK] Flashlight toggled on Lock Screen.")
+        assert torch_reported, "Lock Screen flashlight affordance did not report its availability"
+        print("[LIFECYCLE TEST] [OK] Flashlight affordance reported unavailable, as the platform has no torch.")
         time.sleep(0.5)
         print("[LIFECYCLE TEST] Unlocking device via bottom tap...")
-        reader.sock.sendall(b"TAP 360 1410\n")
+        reader.send(b"TAP 360 1410\n")
         unlocked = reader.wait_for(
             "Home surface rendered.",
             timeout=10.0,
@@ -703,7 +752,7 @@ def main():
         print("\n[LIFECYCLE TEST] === System surface: Testing System Space ===")
         time.sleep(0.5)
         print("[LIFECYCLE TEST] Opening System Space via universal search bar tap (360, 1330)...")
-        reader.sock.sendall(b"TAP 360 1330\n")
+        reader.send(b"TAP 360 1330\n")
         sys_space_ready = reader.wait_for(
             "System surface rendered.",
             timeout=10.0,
@@ -716,7 +765,7 @@ def main():
         print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_sys_space}")
         time.sleep(0.5)
         print("[LIFECYCLE TEST] Returning to Home from System Space via bottom tap...")
-        reader.sock.sendall(b"TAP 360 1410\n")
+        reader.send(b"TAP 360 1410\n")
         sys_space_returned = reader.wait_for(
             "Home surface rendered.",
             timeout=10.0,
