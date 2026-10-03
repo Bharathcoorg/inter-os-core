@@ -69,6 +69,21 @@ const LONG_PRESS_TICKS: u64 = 500;
 const DOUBLE_TAP_WINDOW_TICKS: u64 = 300;
 const FLING_WINDOW_TICKS: u64 = 250;
 
+/// WHY: one constant decides "the finger never really left this spot", shared
+/// by tap classification and by the double-tap proximity test. A real finger
+/// wobbles by more than a dozen pixels between contact and release, so a
+/// release a couple of dozen pixels from the press is still a tap. This is
+/// also why the slop is expressed as a named tolerance rather than folded into
+/// the edge/fling thresholds: widening it must not make a real drag vanish.
+const TAP_SLOP: i32 = 24;
+
+/// WHY: how far a press must travel before a system-owned edge swipe is
+/// recognised. It sits above `TAP_SLOP` so a press that merely wobbles off the
+/// edge is consumed by the tap arm first, and below the 80px fling travel so
+/// an edge swipe is not rejected for being short. Travel that is too short for
+/// the touched edge's direction is `Cancel`, not a mislabelled Back/Recents.
+const EDGE_SWIPE_MIN: i32 = 40;
+
 pub struct InputRouter {
     pointers: [PointerState; 5],
     last_tap_tick: u64,
@@ -137,7 +152,36 @@ impl InputRouter {
         else { 0 }
     }
 
-    /// Dispatches a pointer using monotonic kernel ticks.
+    /// Maps a completed swipe onto the system gesture owned by the edge it
+    /// started on.
+    ///
+    /// WHY: which edge was touched is captured at `Down` and is the only thing
+    /// that can disambiguate a horizontal swipe — direction alone cannot, since
+    /// a rightward swipe on the left edge means Back while a leftward swipe on
+    /// the right edge means Recents, and both are "horizontal". This lives in
+    /// one function so the timed and untimed entry points cannot disagree
+    /// about the same Down+Up pair.
+    fn classify_edge_gesture(edge: u8, dx: i32, dy: i32) -> GestureKind {
+        match edge {
+            1 if dx >= EDGE_SWIPE_MIN => GestureKind::Back,
+            2 if dx <= -EDGE_SWIPE_MIN => GestureKind::Recents,
+            3 if dy <= -EDGE_SWIPE_MIN => GestureKind::Home,
+            _ => GestureKind::Cancel,
+        }
+    }
+
+    /// Dispatches a pointer using monotonic kernel ticks supplied by the caller.
+    ///
+    /// WHY: elapsed time is an argument, never a global read. The router
+    /// classifies a gesture purely from the events handed to it plus the tick
+    /// stamped on each one, so its timing is a property of the event stream
+    /// rather than of a hardware counter that only the PIT handler advances.
+    /// That is what makes long-press, double-tap, and fling decidable in a
+    /// host test where no timer runs. The single production caller reads
+    /// `interrupts::get_system_ticks()` once per posted event
+    /// (`input::post_touch_event`) and passes that value through, so the
+    /// stream is stamped at the boundary and stays immutable downstream.
+    ///
     /// This variant enables long-press and double-tap semantics while keeping
     /// the legacy convenience method deterministic for callers without timing.
     pub fn dispatch_pointer_at(
@@ -211,21 +255,30 @@ impl InputRouter {
                 None
             }
             PointerPhase::Up => {
-                let state = self.pointers[index];
+                let mut state = self.pointers[index];
                 if !state.active { return None; }
+                // WHY: the release event carries the authoritative release
+                // position, and it is the only sample of the pointer's final
+                // location. `current` otherwise only ever advances on Move, so
+                // a stream whose Move samples were coalesced away or never
+                // delivered would classify the gesture as a tap at the press
+                // point. Adopting the release position here is what makes
+                // Down+Up with no intermediate Move still resolve to the
+                // movement gesture the user actually performed.
+                state.current = event.position;
                 self.pointers[index] = PointerState::empty();
                 if self.pointers.iter().all(|p| !p.active) { self.pinch_initial_distance = None; }
                 let dx = state.current.x - state.start.x;
                 let dy = state.current.y - state.start.y;
                 let distance = dx.abs().max(dy.abs());
-                if distance <= 12 {
+                if distance <= TAP_SLOP {
                     let held = now_tick.saturating_sub(state.down_tick);
                     let kind = if held >= LONG_PRESS_TICKS {
                         GestureKind::LongPress
                     } else if self.last_tap_tick != 0
                         && now_tick.saturating_sub(self.last_tap_tick) <= DOUBLE_TAP_WINDOW_TICKS
-                        && (state.current.x - self.last_tap_position.x).abs() <= 24
-                        && (state.current.y - self.last_tap_position.y).abs() <= 24
+                        && (state.current.x - self.last_tap_position.x).abs() <= TAP_SLOP
+                        && (state.current.y - self.last_tap_position.y).abs() <= TAP_SLOP
                     {
                         GestureKind::DoubleTap
                     } else {
@@ -245,12 +298,13 @@ impl InputRouter {
                     });
                 }
                 if state.owner == PointerOwner::System {
-                    let kind = match state.edge {
-                        1 if dx >= 40 => GestureKind::Back,
-                        2 if dx <= -40 => GestureKind::Recents,
-                        3 if dy <= -40 => GestureKind::Home,
-                        _ => GestureKind::Cancel,
-                    };
+                    // WHY: `owner` and `edge` are latched at Down and are
+                    // deliberately not re-derived at release. A back swipe
+                    // necessarily starts on the left edge and finishes in the
+                    // middle of the screen, so re-sampling the edge at the
+                    // release point would classify every real edge swipe as
+                    // Cancel and hand it to the app instead of the system.
+                    let kind = Self::classify_edge_gesture(state.edge, dx, dy);
                     return Some(GestureEvent {
                         kind,
                         position: state.current,
@@ -261,6 +315,9 @@ impl InputRouter {
                     });
                 }
                 let held = now_tick.saturating_sub(state.down_tick);
+                // WHY: fling is the fast-far case, scroll is everything else.
+                // A drag held past the fling window stays a drag, so slowing
+                // down can never be used to launder a movement into a fling.
                 let kind = if held <= FLING_WINDOW_TICKS && distance >= 80 {
                     GestureKind::Fling
                 } else {
@@ -326,16 +383,21 @@ impl InputRouter {
                 None
             }
             PointerPhase::Up => {
-                let state = self.pointers[index];
+                let mut state = self.pointers[index];
                 if !state.active {
                     return None;
                 }
+                // WHY: same invariant as `dispatch_pointer_at` — the release
+                // position is the authoritative final sample and must not be
+                // dropped in the timing-free path either, otherwise the two
+                // entry points would disagree about a single Down+Up pair.
+                state.current = event.position;
                 self.pointers[index] = PointerState::empty();
                 let dx = state.current.x - state.start.x;
                 let dy = state.current.y - state.start.y;
                 let distance = dx.abs().max(dy.abs());
 
-                if distance <= 12 {
+                if distance <= TAP_SLOP {
                     return Some(GestureEvent {
                         kind: GestureKind::Tap,
                         position: state.current,
@@ -347,11 +409,12 @@ impl InputRouter {
                 }
 
                 if state.owner == PointerOwner::System {
-                    let kind = if dy.abs() > dx.abs() {
-                        if dy > 0 { GestureKind::Back } else { GestureKind::Home }
-                    } else {
-                        GestureKind::Recents
-                    };
+                    // WHY: uses the latched edge, exactly like the timed path.
+                    // The previous rule here compared only dx against dy and so
+                    // reported Recents for *any* horizontal edge swipe — a
+                    // left-edge swipe towards the right is Back, and nothing
+                    // about the direction alone can tell the two apart.
+                    let kind = Self::classify_edge_gesture(state.edge, dx, dy);
                     return Some(GestureEvent {
                         kind,
                         position: state.current,
@@ -547,6 +610,221 @@ mod tests {
             Some(GestureKind::Cancel)
         );
         assert!(!router.pointer(0).unwrap().active);
+    }
+
+    // WHY: the two tests below are the same code path, the same source, the
+    // same pointer id, and the same tick values. The only difference is
+    // whether the release event carries a position away from the press. They
+    // exist as a pair so a future change cannot make a stationary press and a
+    // travelling one collapse into the same gesture kind: the router must
+    // learn the shape of the gesture from the events, not from the clock.
+
+    #[test]
+    fn release_position_alone_distinguishes_a_swipe_from_a_tap() {
+        let mut router = InputRouter::new();
+        // No Move event is ever delivered: the release must still be honoured.
+        let down = PointerEvent::new(
+            InputSource::DeviceStudio,
+            CoordinateSpace::LogicalPortrait,
+            0,
+            PointerPhase::Down,
+            300,
+            700,
+        );
+        let up = PointerEvent::new(
+            InputSource::DeviceStudio,
+            CoordinateSpace::LogicalPortrait,
+            0,
+            PointerPhase::Up,
+            300,
+            600,
+        );
+        router.dispatch_pointer_at(down, 720, 24, 100);
+        let gesture = router
+            .dispatch_pointer_at(up, 720, 24, 108)
+            .expect("a Down+Up pair with no Move is still a gesture");
+        assert_eq!(gesture.kind, GestureKind::Fling);
+        assert_eq!(gesture.delta_y, -100, "reported travel is the release travel");
+        assert_eq!(gesture.position, Point { x: 300, y: 600 });
+    }
+
+    #[test]
+    fn release_at_the_press_point_with_no_elapsed_ticks_is_still_a_tap() {
+        let mut router = InputRouter::new();
+        let down = PointerEvent::new(
+            InputSource::DeviceStudio,
+            CoordinateSpace::LogicalPortrait,
+            0,
+            PointerPhase::Down,
+            300,
+            700,
+        );
+        let up = PointerEvent::new(
+            InputSource::DeviceStudio,
+            CoordinateSpace::LogicalPortrait,
+            0,
+            PointerPhase::Up,
+            300,
+            700,
+        );
+        router.dispatch_pointer_at(down, 720, 24, 100);
+        // Zero elapsed ticks: not a long press, and last_tap_tick is still the
+        // `0` sentinel, so no double-tap can be synthesised either.
+        let gesture = router
+            .dispatch_pointer_at(up, 720, 24, 100)
+            .expect("a stationary press is a tap");
+        assert_eq!(gesture.kind, GestureKind::Tap);
+        assert_eq!(gesture.delta_x, 0);
+        assert_eq!(gesture.delta_y, 0);
+    }
+
+    #[test]
+    fn slow_drag_with_move_samples_is_a_drag_not_a_fling() {
+        let mut router = InputRouter::new();
+        let down = PointerEvent::new(
+            InputSource::DeviceStudio,
+            CoordinateSpace::LogicalPortrait,
+            0,
+            PointerPhase::Down,
+            300,
+            700,
+        );
+        let mid = PointerEvent::new(
+            InputSource::DeviceStudio,
+            CoordinateSpace::LogicalPortrait,
+            0,
+            PointerPhase::Move,
+            300,
+            640,
+        );
+        let up = PointerEvent::new(
+            InputSource::DeviceStudio,
+            CoordinateSpace::LogicalPortrait,
+            0,
+            PointerPhase::Up,
+            300,
+            600,
+        );
+        router.dispatch_pointer_at(down, 720, 24, 100);
+        router.dispatch_pointer_at(mid, 720, 24, 200);
+        // 400 ticks held, past the fling window: the same 100px of travel that
+        // flung above must be an ordinary drag here, so distance alone cannot
+        // decide the gesture and a slow drag cannot become a fling.
+        let gesture = router
+            .dispatch_pointer_at(up, 720, 24, 500)
+            .expect("a drag is a gesture");
+        assert_eq!(gesture.kind, GestureKind::Scroll);
+        assert_eq!(gesture.delta_y, -100);
+    }
+
+    #[test]
+    fn tap_slop_boundary_separates_a_tap_from_a_drag() {
+        // WHY: pins the exact tolerance rather than "some large number", so
+        // the tap/drag boundary cannot be widened until every gesture passes.
+        let down = |x: i32, y: i32| PointerEvent::new(
+            InputSource::DeviceStudio,
+            CoordinateSpace::LogicalPortrait,
+            0,
+            PointerPhase::Down,
+            x,
+            y,
+        );
+        let up = |x: i32, y: i32| PointerEvent::new(
+            InputSource::DeviceStudio,
+            CoordinateSpace::LogicalPortrait,
+            0,
+            PointerPhase::Up,
+            x,
+            y,
+        );
+
+        let mut router = InputRouter::new();
+        router.dispatch_pointer_at(down(300, 700), 720, 24, 100);
+        assert_eq!(
+            router
+                .dispatch_pointer_at(up(300 + TAP_SLOP, 700), 720, 24, 110)
+                .map(|g| g.kind),
+            Some(GestureKind::Tap),
+            "travel exactly at the slop is finger wobble, not a drag"
+        );
+
+        let mut router = InputRouter::new();
+        router.dispatch_pointer_at(down(300, 700), 720, 24, 100);
+        assert_eq!(
+            router
+                .dispatch_pointer_at(up(300 + TAP_SLOP + 1, 700), 720, 24, 110)
+                .map(|g| g.kind),
+            Some(GestureKind::Scroll),
+            "one pixel past the slop is a real drag"
+        );
+    }
+
+    #[test]
+    fn edge_swipe_recognised_without_move_samples_loses_to_a_short_press() {
+        // WHY: the same untimed entry point must judge a real edge swipe by
+        // its release position while still refusing to turn a wobbling press
+        // on the edge into a system gesture.
+        let mut router = InputRouter::new();
+        router.dispatch_pointer(
+            PointerEvent::new(
+                InputSource::Touch,
+                CoordinateSpace::LogicalPortrait,
+                0,
+                PointerPhase::Down,
+                4,
+                700,
+            ),
+            720,
+            24,
+        );
+        assert_eq!(
+            router
+                .dispatch_pointer(
+                    PointerEvent::new(
+                        InputSource::Touch,
+                        CoordinateSpace::LogicalPortrait,
+                        0,
+                        PointerPhase::Up,
+                        12,
+                        700,
+                    ),
+                    720,
+                    24,
+                )
+                .map(|g| g.kind),
+            Some(GestureKind::Tap)
+        );
+
+        let mut router = InputRouter::new();
+        router.dispatch_pointer(
+            PointerEvent::new(
+                InputSource::Touch,
+                CoordinateSpace::LogicalPortrait,
+                0,
+                PointerPhase::Down,
+                4,
+                700,
+            ),
+            720,
+            24,
+        );
+        assert_eq!(
+            router
+                .dispatch_pointer(
+                    PointerEvent::new(
+                        InputSource::Touch,
+                        CoordinateSpace::LogicalPortrait,
+                        0,
+                        PointerPhase::Up,
+                        120,
+                        700,
+                    ),
+                    720,
+                    24,
+                )
+                .map(|g| g.kind),
+            Some(GestureKind::Back)
+        );
     }
 }
 

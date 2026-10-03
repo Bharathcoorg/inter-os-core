@@ -53,8 +53,13 @@ impl WindowManager {
 
     pub fn create(&mut self, owner: u64, rect: WindowRect, kind: WindowKind, modal: bool) -> Result<WindowId, &'static str> {
         let id = WindowId(self.next_id);
+        // WHY there is no counter bump here: `create_with_id` already advances
+        // `next_id` past the identity it just registered, because it is also the
+        // entry point for KMS surface ids that may be far above the counter.
+        // Advancing a second time here skipped every other id (1, 3, 5, ...), so
+        // the second window ever created was WindowId(3) and no caller could
+        // name it. Ids must stay dense so a window's identity is predictable.
         self.create_with_id(id, owner, rect, kind, modal)?;
-        self.next_id = self.next_id.checked_add(1).filter(|v| *v != 0).unwrap_or(1);
         Ok(id)
     }
 
@@ -156,9 +161,16 @@ mod tests {
     fn modal_blocks_background_input() {
         let mut wm = WindowManager::new();
         let app = wm.create(1, WindowRect{x:0,y:0,width:100,height:100}, WindowKind::Application, false).unwrap();
-        let _dialog = wm.create(2, WindowRect{x:10,y:10,width:40,height:40}, WindowKind::Dialog, true).unwrap();
+        let dialog = wm.create(2, WindowRect{x:10,y:10,width:40,height:40}, WindowKind::Dialog, true).unwrap();
+        // WHY the explicit id: ids are dense, so the window created second is
+        // WindowId(2). It used to come back as WindowId(3) because `create`
+        // advanced the counter twice, and the hard-coded expectation below is
+        // what caught it.
+        assert_eq!(dialog, WindowId(2), "the second window must get the second id");
         assert_eq!(wm.hit_test(5, 5), None);
         assert_eq!(wm.hit_test(20, 20).map(|v| v.0), Some(WindowId(2)));
+        assert_eq!(wm.hit_test(20, 20).map(|v| v.0), Some(dialog),
+            "the event must reach the modal window itself, not merely id 2");
         assert!(wm.focus_owned(app, 1));
     }
 
@@ -170,5 +182,99 @@ mod tests {
         assert_eq!(wm.focused(), Some(app));
         assert_eq!(wm.focused_owner(), Some(11));
         assert_eq!(wm.hit_test(670, 25), Some((app, 11)));
+    }
+
+    /// Logical portrait is the only space UI hit testing consumes: serial
+    /// `TAP x y` is already in it, and `WindowRect.contains` is applied to it
+    /// directly, with no scaling on the way in.
+    const LOGICAL_PORTRAIT: WindowRect = WindowRect { x: 0, y: 0, width: 720, height: 1440 };
+
+    /// A tap anywhere on a full-height logical portrait surface must resolve to
+    /// the same window, including the lock screen shortcut band near the bottom.
+    ///
+    /// WHY: the lock screen draws its flashlight shortcut at (72, 1330) r=35
+    /// and its kinetic unlock pill at y 1370..1405, so a window rect that stops
+    /// short of the logical height silently swallows every bottom-screen tap.
+    /// That is indistinguishable at the UI from "the control did nothing": the
+    /// tap is routed to no window at all, so the application never even sees it.
+    ///
+    /// The rect must be the logical 720x1440 surface, never the size that
+    /// happens to be visible on scanout (the launcher surface is composited
+    /// down into a 360x720 slice of a 1280x720 framebuffer), and never a
+    /// half-height 720x720 guess.
+    ///
+    /// Pinning assertion: `hit_test(72, 1330)` returns the same window as
+    /// `hit_test(360, 700)`, and it does so only for the full-height rect.
+    #[test]
+    fn bottom_of_logical_portrait_routes_to_the_same_window_as_the_middle() {
+        let mut wm = WindowManager::new();
+        let app = wm.create(11, LOGICAL_PORTRAIT, WindowKind::Application, false).unwrap();
+
+        assert_eq!(
+            wm.hit_test(72, 1330),
+            Some((app, 11)),
+            "the lock screen flashlight shortcut must reach its window"
+        );
+        assert_eq!(
+            wm.hit_test(72, 1330),
+            wm.hit_test(360, 700),
+            "a bottom-band tap and a mid-screen tap must resolve identically"
+        );
+
+        // Negative control: a rect sized from the displayed scanout slice or
+        // from any stale half-height guess drops the band below the cut.
+        let mut stale = WindowManager::new();
+        let short = stale.create(11, WindowRect { x: 0, y: 0, width: 720, height: 720 }, WindowKind::Application, false).unwrap();
+        assert_eq!(
+            stale.hit_test(72, 1330), None,
+            "a 720-tall rect must not be able to claim the y=1330 band"
+        );
+        assert_eq!(stale.hit_test(360, 700), Some((short, 11)));
+    }
+
+    const UNIT: WindowRect = WindowRect { x: 0, y: 0, width: 64, height: 64 };
+
+    /// Automatic window ids must be handed out densely from 1.
+    ///
+    /// WHY this invariant: `WindowId` is a window's stable name in every
+    /// cross-layer message, so "the window created second" has to be a knowable
+    /// identity. `create` used to advance the counter a second time on top of
+    /// `create_with_id`, producing 1, 3, 5, ... — the modal-dialog routing test
+    /// above caught it as `Some(WindowId(3))` where `WindowId(2)` was correct.
+    ///
+    /// Pinning assertion: the second one. Three `create` calls plus a
+    /// `create_with_id` registration must leave the next automatic id at exactly
+    /// "highest id in use + 1", with no gap.
+    #[test]
+    fn window_ids_are_allocated_densely() {
+        let mut wm = WindowManager::new();
+        let a = wm.create(1, UNIT, WindowKind::Application, false).unwrap();
+        let b = wm.create(2, UNIT, WindowKind::Dialog, true).unwrap();
+        let c = wm.create(3, UNIT, WindowKind::Dialog, true).unwrap();
+        assert_eq!([a, b, c], [WindowId(1), WindowId(2), WindowId(3)],
+            "automatic ids must be dense: 1, 2, 3");
+
+        // A display-registered surface id pulls the counter up, and the next
+        // automatic id must follow it rather than collide with or skip past it.
+        wm.create_with_id(WindowId(41), 7, UNIT, WindowKind::Application, false).unwrap();
+        let d = wm.create(8, UNIT, WindowKind::Dialog, true).unwrap();
+        assert_eq!(d, WindowId(42), "the next automatic id must be the highest id in use plus one");
+    }
+
+    /// The dialog is the input target by identity, not by a hard-coded number:
+    /// whichever id `create` handed out, the modal window is the one that
+    /// receives the event and the application window underneath does not.
+    ///
+    /// Pinning assertion: `hit_test` resolves to the dialog's own id, and the
+    /// point outside the dialog still resolves to nothing at all.
+    #[test]
+    fn modal_priority_is_resolved_by_identity() {
+        let mut wm = WindowManager::new();
+        let app = wm.create(1, WindowRect{x:0,y:0,width:100,height:100}, WindowKind::Application, false).unwrap();
+        let dialog = wm.create(2, WindowRect{x:10,y:10,width:40,height:40}, WindowKind::Dialog, true).unwrap();
+        assert_ne!(dialog, app);
+        assert_eq!(wm.hit_test(20, 20), Some((dialog, 2)), "the modal window must receive the event");
+        assert_eq!(wm.hit_test(5, 5), None, "the modal window must block the window beneath it");
+        assert_eq!(wm.focused(), Some(dialog));
     }
 }

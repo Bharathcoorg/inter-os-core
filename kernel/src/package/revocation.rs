@@ -242,15 +242,8 @@ impl RevocationRegistry {
     }
 
     pub fn revoke_key(&mut self, key: &[u8; 32], reason: RevocationReason, epoch: u64, issuer: &str) -> Result<(), &'static str> {
-        let rec = RevocationRecord {
-            target_id: String::from("KEY_REVOCATION"), reason,
-            revoked_at_epoch: epoch, issuer: issuer.to_string(),
-        };
-        if !self.revoked_keys.contains_key(key) && self.revoked_keys.len() >= MAX_PERSISTED_RECORDS {
-            return Err("key revocation registry is full");
-        }
         let previous = self.revoked_keys.get(key).cloned();
-        self.revoked_keys.insert(*key, rec);
+        self.place_key_on_crl(key, reason, epoch, issuer)?;
         if self.persist().is_err() {
             match previous {
                 Some(old) => { self.revoked_keys.insert(*key, old); }
@@ -259,6 +252,25 @@ impl RevocationRegistry {
             return Err("failed to persist key revocation");
         }
         serial_println!("[REVOCATION] Key 0x{:02X}{:02X}... placed on CRL (Reason: {:?}).", key[0], key[1], reason);
+        Ok(())
+    }
+
+    /// Places a key on the CRL in memory.
+    ///
+    /// WHY the mutation is separate from the journal commit above: a revocation
+    /// the journal refused must leave no trace, and that compensation is only
+    /// observable when the commit can fail — which is every machine that has no
+    /// block device bound, including every host unit test. Keeping the state
+    /// transition here lets the decision rule in `is_key_trusted` be checked
+    /// directly instead of only through an unreachable durability path.
+    fn place_key_on_crl(&mut self, key: &[u8; 32], reason: RevocationReason, epoch: u64, issuer: &str) -> Result<(), &'static str> {
+        if !self.revoked_keys.contains_key(key) && self.revoked_keys.len() >= MAX_PERSISTED_RECORDS {
+            return Err("key revocation registry is full");
+        }
+        self.revoked_keys.insert(*key, RevocationRecord {
+            target_id: String::from("KEY_REVOCATION"), reason,
+            revoked_at_epoch: epoch, issuer: issuer.to_string(),
+        });
         Ok(())
     }
 
@@ -274,11 +286,8 @@ impl RevocationRegistry {
     /// Provisions a publisher trust root from a secure boot/provisioning path.
     /// This method intentionally has no userspace syscall wrapper.
     pub fn trust_key(&mut self, key: [u8; 32], publisher: &str) -> Result<(), &'static str> {
-        if !self.trusted_keys.contains_key(&key) && self.trusted_keys.len() >= MAX_PERSISTED_RECORDS {
-            return Err("publisher trust store is full");
-        }
         let previous = self.trusted_keys.get(&key).cloned();
-        self.trusted_keys.insert(key, publisher.to_string());
+        self.grant_trust_root(key, publisher)?;
         if self.persist_trusted_keys().is_err() {
             match previous {
                 Some(old) => { self.trusted_keys.insert(key, old); }
@@ -286,6 +295,24 @@ impl RevocationRegistry {
             }
             return Err("failed to persist publisher trust root");
         }
+        Ok(())
+    }
+
+    /// Records a publisher key in the device trust store, in memory only.
+    ///
+    /// WHY this exists beside `trust_key`: a trust root that only ever reaches
+    /// RAM disappears at the next reboot, leaving the publisher silently
+    /// untrusted, so `trust_key` is deliberately fail-closed and rolls the
+    /// record back whenever the journal refuses the commit. That is correct,
+    /// but it also means the trust decision itself cannot be observed on a
+    /// machine with no block device bound. The state transition therefore lives
+    /// here, where the invariant test can reach it, and no caller outside this
+    /// module can grant trust without journalling it.
+    fn grant_trust_root(&mut self, key: [u8; 32], publisher: &str) -> Result<(), &'static str> {
+        if !self.trusted_keys.contains_key(&key) && self.trusted_keys.len() >= MAX_PERSISTED_RECORDS {
+            return Err("publisher trust store is full");
+        }
+        self.trusted_keys.insert(key, publisher.to_string());
         Ok(())
     }
 
@@ -319,6 +346,13 @@ impl RevocationRegistry {
                 Some(old) => { self.revoked_keys.insert(proof.old_key, old); }
                 None => { self.revoked_keys.remove(&proof.old_key); }
             }
+            // WHY these two commits are best-effort and not reported: they run
+            // only while already returning a failure, and if they fail too the
+            // outcome is fail-closed — the journal keeps whatever the individual
+            // `revoke_key`/`trust_key` transactions had already undone, and the
+            // publisher is left with its previous root rather than with a
+            // half-applied rotation. There is no state to fall back *to* that the
+            // caller could act on, so the refusal below is the whole answer.
             let _ = self.persist_trusted_keys();
             let _ = self.persist();
             return Err("failed to persist key rotation");
@@ -335,14 +369,84 @@ pub static REVOCATION_REGISTRY: Mutex<RevocationRegistry> = Mutex::new(Revocatio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Trust is granted by exactly one thing — a provisioned trust root — and
+    /// revoked by exactly one thing — an entry on the CRL. Revocation must
+    /// always win, and nothing else may make a key trusted.
+    ///
+    /// WHY this drives `grant_trust_root`/`place_key_on_crl` and not the public
+    /// `trust_key`/`revoke_key`: those are journal-backed and fail closed, so on
+    /// a host with no block device bound they refuse every mutation and the
+    /// decision rule is unreachable. `durable_trust_state_agrees_with_the_
+    /// reported_outcome` pins the public half.
+    ///
+    /// Pinning assertion: the third one, `!is_key_trusted` after the key is on
+    /// the CRL — a key that is simultaneously trusted and revoked is the
+    /// over-revocation/under-revocation confusion this invariant exists to
+    /// forbid.
     #[test]
     fn trust_and_revocation_invariants() {
         let key = [7u8; 32];
         let mut r = RevocationRegistry::new();
+        assert!(!r.is_key_trusted(&key), "an unknown key must never be trusted");
+        r.grant_trust_root(key, "test-publisher").expect("the trust store has room");
+        assert!(r.is_key_trusted(&key), "a provisioned trust root must be trusted");
+        r.place_key_on_crl(&key, RevocationReason::KeyCompromised, 10, "root").expect("the CRL has room");
+        assert!(r.is_key_revoked(&key));
+        assert!(!r.is_key_trusted(&key), "revocation must always win over trust");
+    }
+
+    /// The public, journal-backed entry points must never leave in-memory state
+    /// that disagrees with the outcome they reported to the caller.
+    ///
+    /// WHY this is asserted in both directions rather than as a fixed `Ok`/`Err`:
+    /// a trust root or CRL entry that is only in RAM disappears at the next
+    /// reboot, so `trust_key` rolls the record back when the journal refuses and
+    /// `revoke_key` does the same. The invariant holds whichever side of the
+    /// durability boundary the machine is on, so it is asserted that way.
+    ///
+    /// Pinning assertion: the two `assert_eq!`s comparing the returned outcome
+    /// with the resulting trust state. If either entry point ever diverged —
+    /// reporting success for a rolled-back record, or leaving a record behind
+    /// after reporting refusal — one of them fires.
+    #[test]
+    fn durable_trust_state_agrees_with_the_reported_outcome() {
+        let key = [11u8; 32];
+        let mut r = RevocationRegistry::new();
+
+        let provisioned = r.trust_key(key, "test-publisher");
+        assert_eq!(provisioned.is_ok(), r.is_key_trusted(&key),
+            "the trust store must agree with what trust_key reported");
+        if let Err(reason) = provisioned {
+            assert_eq!(reason, "failed to persist publisher trust root");
+            assert!(r.trusted_keys.is_empty(), "a rolled-back trust root must not linger in memory");
+        }
+
+        let revoked = r.revoke_key(&key, RevocationReason::MaliciousBehavior, 12, "root");
+        assert_eq!(revoked.is_ok(), r.is_key_revoked(&key),
+            "the CRL must agree with what revoke_key reported");
+        if let Err(reason) = revoked {
+            assert_eq!(reason, "failed to persist key revocation");
+            assert!(!r.is_key_revoked(&key), "a rolled-back revocation must not be reported as in force");
+        }
+    }
+
+    /// A revoked key stays untrusted no matter how it is re-provisioned, and an
+    /// untrusted key can never be promoted by rotation.
+    ///
+    /// Pinning assertion: `is_key_trusted` stays false after re-granting trust to
+    /// an already-revoked key. `is_key_trusted` intersects the trust store with the
+    /// CRL precisely so that a stale trust record cannot resurrect a compromised
+    /// publisher.
+    #[test]
+    fn a_revoked_key_cannot_be_resurrected_by_reprovisioning() {
+        let key = [13u8; 32];
+        let mut r = RevocationRegistry::new();
+        r.grant_trust_root(key, "test-publisher").expect("the trust store has room");
+        r.place_key_on_crl(&key, RevocationReason::KeyCompromised, 20, "root").expect("the CRL has room");
         assert!(!r.is_key_trusted(&key));
-        r.trust_key(key, "test-publisher");
-        assert!(r.is_key_trusted(&key));
-        r.revoke_key(&key, RevocationReason::KeyCompromised, 10, "root");
-        assert!(!r.is_key_trusted(&key));
+        r.grant_trust_root(key, "test-publisher").expect("re-granting an existing key must not need a free slot");
+        assert!(!r.is_key_trusted(&key),
+            "a CRL entry must outrank a trust record written after it");
     }
 }
