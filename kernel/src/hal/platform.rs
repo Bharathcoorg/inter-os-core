@@ -46,7 +46,7 @@ pub struct X86SerialConsole;
 impl SerialConsole for X86SerialConsole {
     fn write_byte(&self, byte: u8) {
         use core::fmt::Write;
-        x86_64::instructions::interrupts::without_interrupts(|| {
+        crate::arch::with_interrupts_disabled(|| {
             if let Some(ref mut serial) = *crate::serial::SERIAL1.lock() {
                 let _ = serial.write_char(byte as char);
             }

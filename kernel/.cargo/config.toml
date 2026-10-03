@@ -1,5 +1,9 @@
-[build]
-target = "x86_64-unknown-none"
+# WHY: no `[build] target` here on purpose. Every real build path passes an
+# explicit `--target` (see `qemu/build.ps1`), and the target-specific rustflags
+# below are already declared in the workspace-root `.cargo/config.toml`, which
+# cargo still picks up from this directory. Pinning `build.target` forced
+# `cargo test` to compile for bare metal, where there is no test runner and no
+# heap, so all 67 unit tests were unrunnable.
 
 [target.x86_64-unknown-none]
 rustflags = [

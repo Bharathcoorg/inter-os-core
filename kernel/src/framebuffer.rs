@@ -1554,7 +1554,7 @@ pub fn init(framebuffer: &'static mut FrameBuffer) {
 /// This is the hardware-backed handoff used by the display driver on platforms where
 /// the bootloader exposes a linear framebuffer. No userspace pointer is retained.
 pub fn present_argb8888(pixels: &[u32], width: u32, height: u32) {
-    x86_64::instructions::interrupts::without_interrupts(|| {
+    crate::arch::with_interrupts_disabled(|| {
         let mut fb = FRAMEBUFFER_WRITER.lock();
         let info = match fb.info { Some(info) => info, None => return };
         let src_w = width as usize;
@@ -1596,28 +1596,28 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32) {
 
 
 pub fn draw_mobile_shell() {
-    x86_64::instructions::interrupts::without_interrupts(|| {
+    crate::arch::with_interrupts_disabled(|| {
         FRAMEBUFFER_WRITER.lock().draw_mobile_shell();
     });
 }
 
 /// Dispatches a keypress into the on-screen intent bar
 pub fn on_key_press(c: char) {
-    x86_64::instructions::interrupts::without_interrupts(|| {
+    crate::arch::with_interrupts_disabled(|| {
         FRAMEBUFFER_WRITER.lock().handle_key(c);
     });
 }
 
 /// Dispatches a touch event into the active screen
 pub fn on_touch(x: usize, y: usize) {
-    x86_64::instructions::interrupts::without_interrupts(|| {
+    crate::arch::with_interrupts_disabled(|| {
         FRAMEBUFFER_WRITER.lock().handle_touch(x, y);
     });
 }
 
 /// Programmatically switches the active screen view
 pub fn switch_screen(screen: ActiveScreen) {
-    x86_64::instructions::interrupts::without_interrupts(|| {
+    crate::arch::with_interrupts_disabled(|| {
         let mut fb = FRAMEBUFFER_WRITER.lock();
         fb.active_screen = screen;
         fb.redraw_phone();

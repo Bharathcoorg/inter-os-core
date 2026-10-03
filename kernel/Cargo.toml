@@ -12,6 +12,12 @@ path = "src/lib.rs"
 [[bin]]
 name = "kernel"
 path = "src/main.rs"
+# WHY: this binary is `#![no_main]` bare-metal boot code that owns the kernel
+# `#[panic_handler]`. Building a test harness for it produced a duplicate
+# `panic_impl` lang item and failed the whole `cargo test` run. It contains no
+# tests, so the harness is pure loss. All unit tests live in the `[lib]` above.
+test = false
+doctest = false
 
 [dependencies]
 bootloader_api = "0.11.17"
@@ -32,3 +38,10 @@ interos-android-shared = { path = "src/compat/android/shared" }
 [profile.dev]
 opt-level = 1
 panic = "abort"
+
+# WHY: `[profile.dev]` sets `panic = "abort"` for the bare-metal image, but the
+# test harness needs unwinding so a failing `#[test]` is reported instead of
+# aborting the whole run.
+[profile.test]
+opt-level = 1
+panic = "unwind"

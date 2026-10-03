@@ -35,14 +35,32 @@ pub fn init() {
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
-    use x86_64::instructions::interrupts;
 
-    // Print without interrupts to avoid deadlock if an interrupt handler also logs.
-    interrupts::without_interrupts(|| {
-        if let Some(ref mut serial) = *SERIAL1.lock() {
-            serial.write_fmt(args).expect("Printing to serial port failed");
-        }
-    });
+    // WHY: `without_interrupts` emits `cli`/`sti`, which are privileged. A host
+    // unit-test binary runs in ring 3, so taking that path raised
+    // STATUS_PRIVILEGED_INSTRUCTION and killed the test process before any
+    // assertion ran. The masking exists solely to stop an interrupt handler
+    // deadlocking against this lock; a test build has no COM1 and no timer
+    // interrupt, so there is nothing to mask against.
+    #[cfg(not(test))]
+    {
+        use x86_64::instructions::interrupts;
+
+        // Print without interrupts to avoid deadlock if an interrupt handler also logs.
+        interrupts::without_interrupts(|| {
+            if let Some(ref mut serial) = *SERIAL1.lock() {
+                serial.write_fmt(args).expect("Printing to serial port failed");
+            }
+        });
+    }
+
+    // WHY: no COM1 exists in a host test process. Output is deliberately dropped
+    // instead of executing privileged port I/O, so `cfg(test)` builds can assert
+    // on behaviour without pretending a console is attached.
+    #[cfg(test)]
+    {
+        let _ = args;
+    }
 }
 
 /// Prints formatted text to the COM1 serial interface.

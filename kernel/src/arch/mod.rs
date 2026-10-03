@@ -7,9 +7,11 @@
 //! on this target, they duplicated that crate's own copies, and carrying them made
 //! the x86_64 kernel run AArch64 hardware self-tests on an x86_64 machine.
 
+pub mod critical;
 pub mod fastboot;
 pub mod relocate;
 
+pub use critical::with_interrupts_disabled;
 pub use fastboot::{FastbootBootImage, FastbootError, test_fastboot_boot_image};
 pub use relocate::apply_relocations;
 

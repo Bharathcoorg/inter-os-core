@@ -11,6 +11,12 @@
 
 extern crate alloc;
 
+// WHY: `cargo test` builds this library for the host, and the host test harness
+// needs `std` for its allocator and test formatting. The bare-metal kernel build
+// stays `no_std`; `std` is linked only into test builds.
+#[cfg(test)]
+extern crate std;
+
 pub mod allocator;
 pub mod arch;
 pub mod audio;
