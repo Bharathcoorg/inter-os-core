@@ -13,6 +13,21 @@ use crate::capability::{Capability, CapabilityId, CapabilityType, Rights};
 use crate::task::TaskId;
 use crate::serial_println;
 
+/// Bit 62 tag for the permission-minted capability id space.
+///
+/// WHY a dedicated constant: `delegation::lease_capability_id` tags delegated
+/// leases with bit 63, and `CapabilityTable::verify_object` treats any capability
+/// id with bit 63 set as a lease. Permission ids previously used a `0x9000_...`
+/// base that also set bit 63, so the two spaces overlapped and every
+/// permission-minted capability was verified as a nonexistent lease, failing with
+/// `InvalidSlot`. Keeping the tag in one named place is what stops the two spaces
+/// from silently overlapping again.
+///
+/// Bit 62 is used because nothing else claims it: lease ids use bit 63, user slot
+/// handles are `0x5000_0000 + slot`, and the boot self-test ids (`0x00C0_FFEE_*`,
+/// `0x5A11_*`) live in the low 32 bits.
+pub const PERMISSION_ID_BASE: u64 = 0x4000_0000_0000_0000;
+
 /// Sensitive hardware and system resource categories requiring explicit consent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -48,6 +63,27 @@ pub enum SensitivePermission {
 }
 
 impl SensitivePermission {
+    /// The identity a grant of this permission mints for `task`.
+    ///
+    /// WHY this is a function of the module rather than an expression repeated at
+    /// each use: the identifier is what a revocation is published against, so a
+    /// second, hand-written copy of this expression is a way to revoke the wrong
+    /// capability while believing it succeeded.
+    pub fn capability_id(&self, task_id: TaskId) -> CapabilityId {
+        // WHY bit 62 and not bit 63: `CapabilityTable::verify_object` identifies a
+        // delegated lease by testing `cap.id.0 & 0x8000_0000_0000_0000`, because
+        // `delegation::lease_capability_id` tags leases with bit 63. This id space
+        // originally used the `0x9000_...` base, which also sets bit 63, so every
+        // permission-minted capability was misread as a lease: verification called
+        // `consume_invocation` for a lease that never existed and failed with
+        // `InvalidSlot`. The kernel panicked in its own boot self-test on this.
+        //
+        // The two id spaces must stay disjoint, so permission ids take bit 62,
+        // which no other producer uses (leases use bit 63; user slot handles and
+        // the self-test ids live in the low 32 bits).
+        CapabilityId(PERMISSION_ID_BASE | ((task_id.0 as u64) << 16) | (*self as u64))
+    }
+
     /// Parses a raw u32 syscall argument into a `SensitivePermission`.
     pub fn from_u32(val: u32) -> Option<Self> {
         match val {
@@ -185,7 +221,7 @@ impl SensitivePermission {
         };
 
         Capability {
-            id: CapabilityId(0x9000_0000_0000_0000 | ((task_id.0 as u64) << 16) | (*self as u64)),
+            id: self.capability_id(task_id),
             cap_type,
             rights,
             object_id,
@@ -293,7 +329,19 @@ impl PermissionManager {
 
         for record in self.records.iter_mut() {
             if record.request_id == request_id {
+                // WHY only a request that was actually outstanding can lift a
+                // revocation: otherwise an old, already-resolved request id could
+                // be replayed to un-revoke a capability that was taken back
+                // afterwards.
+                let was_outstanding = record.decision == ConsentDecision::Pending;
                 record.decision = decision;
+                if was_outstanding && decision == ConsentDecision::Granted {
+                    // A fresh consent resolution is the one event that
+                    // re-establishes authority for this capability identity.
+                    crate::capability::revocation::reinstate(
+                        record.permission.capability_id(record.task_id),
+                    );
+                }
                 return Some(record.clone());
             }
         }
@@ -310,7 +358,17 @@ impl PermissionManager {
     }
 
     /// Dynamically revokes a granted permission from a task.
+    ///
+    /// WHY the revocation is published unconditionally, before the record scan is
+    /// even reported: the consent record is only the policy half of the grant. The
+    /// capability itself is a separate object that may sit in the task's table, in
+    /// another table, or in an in-flight IPC message, so the record must not be
+    /// able to decide whether the authority ends. Publishing it here also closes
+    /// the case where the record was already marked revoked - by a one-time grant
+    /// being consumed, for instance - while the capability was still installed.
     pub fn revoke_permission(&mut self, task_id: TaskId, permission: SensitivePermission) -> bool {
+        crate::capability::revocation::revoke(permission.capability_id(task_id));
+
         let mut revoked = false;
         for record in self.records.iter_mut() {
             if record.task_id == task_id && record.permission == permission {
@@ -331,10 +389,16 @@ impl PermissionManager {
     }
 
     /// Consumes a one-time permission grant after single use.
+    ///
+    /// WHY this also publishes a revocation: consuming the consent record is not
+    /// the same as ending the authority. Without this the minted capability stayed
+    /// installed and usable for as long as the task lived, which is exactly the
+    /// single-use promise the grant was made under.
     pub fn consume_one_time_permission(&mut self, task_id: TaskId, permission: SensitivePermission) -> bool {
         for record in self.records.iter_mut() {
             if record.task_id == task_id && record.permission == permission && record.decision == ConsentDecision::GrantedOnce {
                 record.decision = ConsentDecision::Revoked;
+                crate::capability::revocation::revoke(permission.capability_id(task_id));
                 crate::serial_println!(
                     "[PERMISSION] Consumed one-time permission {:?} for Task {}",
                     permission,
@@ -345,9 +409,35 @@ impl PermissionManager {
         }
         false
     }
+
+    /// Drops every permission record belonging to an exiting task.
+    ///
+    /// WHY this matters for authority and not just tidiness: the records are the
+    /// input to `has_permission`, so leaving them behind would let a later request
+    /// from a re-used identity be answered from a grant made to a dead task.
+    /// Returns the number of records dropped.
+    pub fn cleanup_task(&mut self, task_id: TaskId) -> usize {
+        let before = self.records.len();
+        self.records.retain(|record| record.task_id != task_id);
+        let dropped = before - self.records.len();
+        if self
+            .active_prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.task_id == task_id)
+        {
+            self.active_prompt = None;
+        }
+        dropped
+    }
 }
 
 pub static PERMISSION_MANAGER: Mutex<PermissionManager> = Mutex::new(PermissionManager::new());
+
+/// Drops every permission record belonging to an exiting task. Returns the
+/// number of records dropped.
+pub fn cleanup_task(task: TaskId) -> usize {
+    PERMISSION_MANAGER.lock().cleanup_task(task)
+}
 
 /// Initializes the permission subsystem and executes automated self-tests.
 pub fn init() {

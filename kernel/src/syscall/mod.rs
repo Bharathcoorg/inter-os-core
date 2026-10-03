@@ -2074,8 +2074,11 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             if pm.revoke_permission(task_id, perm) {
                 let mut sched = SCHEDULER.lock();
                 if let Some(task) = sched.get_task_mut(task_id) {
-                    let cap_id = crate::capability::CapabilityId(0x9000_0000_0000_0000 | ((task_id.0 as u64) << 16) | (perm as u64));
-                    task.cap_table.revoke_by_id(cap_id);
+                    // WHY the shared helper instead of re-deriving the identity here:
+                    // a second hand-written copy of the id expression is exactly how
+                    // revocation ends up targeting a capability that was never minted,
+                    // while reporting success.
+                    task.cap_table.revoke_by_id(perm.capability_id(task_id));
                 }
                 SyscallResult::Success as i64
             } else {

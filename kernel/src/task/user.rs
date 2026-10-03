@@ -475,6 +475,18 @@ pub fn spawn_user_process_with_limits(
     parent_id: TaskId,
     limits: crate::task::process::ResourceLimits,
 ) -> Result<TaskId, &'static str> {
+    // WHY re-key here, at the single funnel every spawner passes through: app
+    // capability tables are built from hardcoded constants (CapabilityId(2601),
+    // CapabilityId(1701), ... -- 101 of them across 12 spawn functions), and
+    // `revoke_all` publishes those exact ids into the kernel-wide revocation set on
+    // task exit without ever evicting them. A relaunch therefore created a table
+    // whose every slot was already revoked: the app was born with no authorizable
+    // capability, `surface_create` was refused, and it rendered nothing. Re-keying
+    // once here restores the invariant that an identity is minted at most once per
+    // boot, and covers every present and future spawner at the same time.
+    let mut caps = caps;
+    caps.rekey_all();
+
     let mut pt = crate::memory::TaskPageTable::create_user_page_table()?;
     let stack_top = 0x0080_0000;
     let (user_entry, user_stack_top) = load_user_elf_into_page_table(elf_data, &mut pt, stack_top)?;

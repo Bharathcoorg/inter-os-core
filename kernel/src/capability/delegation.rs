@@ -42,6 +42,14 @@ pub struct DelegatedLease {
     pub remaining_invocations: u32,
     pub created_at_ticks: u64,
     pub expiry_ticks: u64,
+    /// Set when the source capability or this lease was revoked.
+    ///
+    /// WHY this is state and not only an absent registry entry: revocation must
+    /// be observable as a distinct refusal, and a lease that was dropped from
+    /// the registry is indistinguishable from one that never existed. Keeping
+    /// the flag on the lease means the check below cannot be skipped by a
+    /// registry that was rebuilt.
+    pub revoked: bool,
 }
 
 impl DelegatedLease {
@@ -85,7 +93,18 @@ impl DelegatedLease {
             remaining_invocations: max_invocations,
             created_at_ticks: current_ticks,
             expiry_ticks: current_ticks.saturating_add(duration_ticks),
+            revoked: false,
         })
+    }
+
+    /// Kills this lease.
+    ///
+    /// WHY the quota is also emptied: a revoked lease must not be usable again
+    /// even if a caller reads `remaining_invocations` as evidence of authority
+    /// instead of asking the registry.
+    pub fn revoke(&mut self) {
+        self.revoked = true;
+        self.remaining_invocations = 0;
     }
 
     /// Verifies whether the lease is currently valid for an operation and consumes 1 invocation.
@@ -100,6 +119,14 @@ impl DelegatedLease {
             if caller_task != self.grantee_task {
                 return Err(CapError::TargetMismatch);
             }
+        }
+
+        // 0. Revocation is checked first and unconditionally. A revoked lease
+        // authorizes nothing, whatever its expiry and remaining quota say, and
+        // the refusal is distinguishable from an exhausted quota so a caller can
+        // tell "authority was taken back" from "authority ran out".
+        if self.revoked {
+            return Err(CapError::RevokedHandle);
         }
 
         // 1. Check expiration
@@ -124,12 +151,19 @@ impl DelegatedLease {
     /// Converts this lease into a concrete kernel capability token for insertion into grantee's table.
     pub fn to_capability(&self) -> Capability {
         Capability {
-            id: CapabilityId(self.lease_id | 0x8000_0000_0000_0000),
+            id: lease_capability_id(self.lease_id),
             cap_type: self.cap_type,
             rights: self.attenuated_rights,
             object_id: self.object_id,
         }
     }
+}
+
+/// The identity a lease mints. The high bit marks a delegated capability, and
+/// it is also how a revocation published against a lease is recognised as
+/// belonging to that lease.
+pub fn lease_capability_id(lease_id: u64) -> CapabilityId {
+    CapabilityId(lease_id | 0x8000_0000_0000_0000)
 }
 
 /// Self-test validating monotonic attenuation, lease expiry, and quota exhaustion.
@@ -234,9 +268,81 @@ pub fn init() {
 /// Registers a lease only after its derived capability has been installed.
 pub fn register_lease(lease: DelegatedLease) {
     let mut registry = DELEGATION_REGISTRY.lock();
-    let now = crate::interrupts::get_system_ticks();
-    registry.retain(|existing| existing.expiry_ticks > now);
+    // WHY prune here rather than only on expiry: a lease with no invocations
+    // left, or one that has been revoked, can never authorize again, so keeping
+    // it only delays reclaiming it until its expiry. The registry is kernel
+    // state about authority that nothing can use, and it must not grow without
+    // bound.
+    prune_locked(&mut registry, crate::interrupts::get_system_ticks());
     registry.push(lease);
+}
+
+/// Drops every lease that can no longer authorize anything.
+fn prune_locked(registry: &mut Vec<DelegatedLease>, now: u64) -> usize {
+    let before = registry.len();
+    registry.retain(|lease| !lease.revoked && lease.expiry_ticks > now && lease.remaining_invocations > 0);
+    before - registry.len()
+}
+
+/// Reclaims unusable leases. Callers on a hot path may use this to bound growth.
+pub fn prune(now: u64) -> usize {
+    prune_locked(&mut DELEGATION_REGISTRY.lock(), now)
+}
+
+/// Revokes one lease by identifier.
+pub fn revoke_lease(lease_id: u64) -> bool {
+    let mut registry = DELEGATION_REGISTRY.lock();
+    let mut found = false;
+    for lease in registry.iter_mut() {
+        if lease.lease_id == lease_id && !lease.revoked {
+            lease.revoke();
+            found = true;
+        }
+    }
+    found
+}
+
+/// Revokes every lease derived from `parent_cap_id`, returning the revoked lease ids.
+///
+/// WHY this is the whole point of a delegation record: the derived capability is
+/// a copy of the source's authority. If the source is revoked and the copies
+/// stay live, the revocation never reaches the processes that actually hold the
+/// authority.
+pub fn revoke_derived_from(parent_cap_id: CapabilityId) -> Vec<u64> {
+    let mut registry = DELEGATION_REGISTRY.lock();
+    let mut revoked = Vec::new();
+    for lease in registry.iter_mut() {
+        if lease.parent_cap_id == parent_cap_id && !lease.revoked {
+            lease.revoke();
+            revoked.push(lease.lease_id);
+        }
+    }
+    revoked
+}
+
+/// Revokes every lease held by `grantee`, returning the revoked lease ids.
+///
+/// Used when a task exits. The lease outlives the task otherwise, and a lease
+/// naming a task that no longer exists is authority nobody can account for.
+pub fn revoke_for_grantee(grantee: TaskId) -> Vec<u64> {
+    let mut registry = DELEGATION_REGISTRY.lock();
+    let mut revoked = Vec::new();
+    for lease in registry.iter_mut() {
+        if lease.grantee_task == grantee && !lease.revoked {
+            lease.revoke();
+            revoked.push(lease.lease_id);
+        }
+    }
+    revoked
+}
+
+/// Returns whether a registered delegated lease is still active: present, not
+/// revoked, and unexpired.
+pub fn is_lease_active(lease_id: u64, current_ticks: u64) -> bool {
+    let registry = DELEGATION_REGISTRY.lock();
+    registry.iter().any(|lease| {
+        lease.lease_id == lease_id && !lease.revoked && current_ticks < lease.expiry_ticks
+    })
 }
 
 /// Validates and consumes one invocation from a delegated lease.
@@ -252,10 +358,4 @@ pub fn consume_invocation(
         .find(|lease| lease.lease_id == lease_id)
         .ok_or(CapError::InvalidSlot)?;
     lease.consume_invocation(caller, current_ticks, required_rights)
-}
-
-/// Returns true while a registered delegated lease is active.
-pub fn is_lease_active(lease_id: u64, current_ticks: u64) -> bool {
-    let registry = DELEGATION_REGISTRY.lock();
-    registry.iter().any(|lease| lease.lease_id == lease_id && current_ticks < lease.expiry_ticks)
 }

@@ -200,6 +200,37 @@ pub enum CapError {
     TableFull,
 }
 
+/// Base tag for the per-launch-instance capability id space.
+///
+/// WHY bit 61 and a dedicated constant: three other id spaces must not be
+/// reachable from here, or a re-keyed identity could be mistaken for one of them.
+/// Permission-minted ids use bit 62 (`PERMISSION_ID_BASE`) and delegated leases use
+/// bit 63 (`lease_capability_id`), because `verify_object` classifies a capability
+/// as a lease by testing bit 63. App spawner constants and the boot self-test ids
+/// (`0x00C0_FFEE_*`, `0x5A11_*`) live in the low 32 bits. Bit 61 is therefore free,
+/// and the counter starts well above the constant range.
+const INSTANCE_ID_BASE: u64 = 0x2000_0000_0000_0000;
+
+/// Monotonic per-boot counter behind `next_instance_capability_id`.
+///
+/// WHY `Relaxed`: this only has to be unique, never ordered against other memory.
+static NEXT_INSTANCE_CAPABILITY_ID: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0x0000_1000);
+
+/// Returns a capability identity that has never been minted before in this boot.
+pub fn next_instance_capability_id() -> u64 {
+    use core::sync::atomic::Ordering;
+    // Saturation rather than wrap: a wrapped counter could reissue a live identity,
+    // which is precisely the failure this whole scheme exists to prevent. Practically
+    // unreachable (2^52 launches), but the failure mode is silent authority reuse.
+    let n = NEXT_INSTANCE_CAPABILITY_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            Some(v.checked_add(1).unwrap_or(v))
+        })
+        .unwrap_or(0x0000_1000);
+    INSTANCE_ID_BASE | n
+}
+
 /// Guarded capability table assigned to each process/task.
 #[derive(Debug, Clone)]
 pub struct CapabilityTable {
@@ -265,21 +296,38 @@ impl CapabilityTable {
     }
 
     /// Retrieves a reference to a capability by slot index.
+    ///
+    /// WHY the revocation check lives here: every `verify*` method resolves its
+    /// capability through this function, so putting the authoritative check at
+    /// the single point where a capability leaves the table is what keeps a new
+    /// check shape from accidentally consulting only the caller's copy.
     pub fn get(&self, slot_idx: usize) -> Result<&Capability, CapError> {
-        self.slots
+        let cap = self
+            .slots
             .get(slot_idx)
             .and_then(|slot| slot.cap.as_ref())
-            .ok_or(CapError::InvalidSlot)
+            .ok_or(CapError::InvalidSlot)?;
+        if revocation::is_revoked(cap.id) {
+            return Err(CapError::RevokedHandle);
+        }
+        Ok(cap)
     }
 
     /// Retrieves a capability by its generation-counted `CapHandle`, rejecting stale or forged handles.
     pub fn get_by_handle(&self, handle: CapHandle) -> Result<&Capability, CapError> {
         let slot_idx = handle.slot();
         let slot = self.slots.get(slot_idx).ok_or(CapError::InvalidSlot)?;
+        // WHY the generation is compared before the revocation state: a handle
+        // minted before the revocation describes a slot that has since changed,
+        // and reporting it as stale is the more specific and more useful answer.
         if slot.generation != handle.generation() {
             return Err(CapError::StaleHandle);
         }
-        slot.cap.as_ref().ok_or(CapError::RevokedHandle)
+        let cap = slot.cap.as_ref().ok_or(CapError::RevokedHandle)?;
+        if revocation::is_revoked(cap.id) {
+            return Err(CapError::RevokedHandle);
+        }
+        Ok(cap)
     }
 
     /// Verifies that the capability at `slot_idx` satisfies the expected type and rights.
@@ -334,10 +382,17 @@ impl CapabilityTable {
 
     /// Checks whether the table contains a matching capability without consuming
     /// delegated invocation quota. This is a pure inspection operation.
+    ///
+    /// It still refuses a revoked capability: an inspection result is used as an
+    /// authorization decision by the network and shared-memory paths, so
+    /// answering "yes, you hold it" for a capability whose authority has been
+    /// taken back would be a stale-copy answer.
     pub fn has_capability(&self, expected_type: CapabilityType, required_rights: Rights) -> bool {
         self.slots.iter().any(|slot| {
             slot.cap.as_ref().is_some_and(|cap| {
-                cap.cap_type == expected_type && cap.rights.contains(required_rights)
+                cap.cap_type == expected_type
+                    && cap.rights.contains(required_rights)
+                    && !revocation::is_revoked(cap.id)
             })
         })
     }
@@ -354,6 +409,9 @@ impl CapabilityTable {
         for slot in &self.slots {
             let Some(cap) = slot.cap.as_ref() else { continue; };
             if cap.cap_type != expected_type || !cap.rights.contains(required_rights) {
+                continue;
+            }
+            if revocation::is_revoked(cap.id) {
                 continue;
             }
             if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
@@ -385,6 +443,9 @@ impl CapabilityTable {
                 || !cap.rights.contains(required_rights)
                 || cap.object_id != expected_object_id
             {
+                continue;
+            }
+            if revocation::is_revoked(cap.id) {
                 continue;
             }
             if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
@@ -432,12 +493,21 @@ impl CapabilityTable {
     }
 
     /// Revokes and removes the capability at `slot_idx`, incrementing generation to invalidate stale handles.
+    ///
+    /// WHY clearing the slot is not the enforcement: the capability may exist in
+    /// another table, in an IPC message in flight, or in a caller's own copy.
+    /// `revocation::revoke` publishes the revocation by identity, so every check
+    /// site denies it from then on regardless of how many copies exist. The slot
+    /// clearing and generation bump only tidy this table and invalidate handles.
     pub fn revoke(&mut self, slot_idx: usize) -> Result<(), CapError> {
-        if slot_idx >= self.slots.len() || self.slots[slot_idx].cap.is_none() {
+        if slot_idx >= self.slots.len() {
             return Err(CapError::InvalidSlot);
         }
-        self.slots[slot_idx].cap = None;
+        let Some(cap) = self.slots[slot_idx].cap.take() else {
+            return Err(CapError::InvalidSlot);
+        };
         self.slots[slot_idx].generation = self.slots[slot_idx].generation.wrapping_add(1);
+        revocation::revoke(cap.id);
         Ok(())
     }
 
@@ -454,29 +524,102 @@ impl CapabilityTable {
     }
 
     /// Revokes a capability by its unique 64-bit CapabilityId.
+    ///
+    /// Returns whether *this* table held a copy. The revocation is published
+    /// either way: whether a particular table happens to hold the capability is
+    /// not something the caller should have to get right for the authority to
+    /// end.
     pub fn revoke_by_id(&mut self, cap_id: CapabilityId) -> bool {
-        let slot_idx = self.slots.iter().position(|s| s.cap.as_ref().map(|c| c.id == cap_id).unwrap_or(false));
-        if let Some(idx) = slot_idx {
-            self.slots[idx].cap = None;
-            self.slots[idx].generation = self.slots[idx].generation.wrapping_add(1);
-            true
-        } else {
-            false
+        let mut held = false;
+        // Every slot is cleared, not just the first match: the same capability
+        // can legitimately be installed twice, and clearing one copy while
+        // leaving the other would leave live authority in a table the caller
+        // never inspected.
+        for slot in self.slots.iter_mut() {
+            if slot.cap.as_ref().map(|cap| cap.id) == Some(cap_id) {
+                slot.cap = None;
+                slot.generation = slot.generation.wrapping_add(1);
+                held = true;
+            }
         }
+        revocation::revoke(cap_id);
+        held
+    }
+
+    /// Revokes every capability this table holds.
+    ///
+    /// Used on the task-exit path. Task identifiers are allocated monotonically
+    /// and never reused, so a capability that belonged to an exited task can
+    /// never be legitimately held by a later one, and revoking by identity here
+    /// also kills any copy of it that escaped into another table.
+    pub fn revoke_all(&mut self) -> usize {
+        let mut revoked = 0usize;
+        for slot in self.slots.iter_mut() {
+            if let Some(cap) = slot.cap.take() {
+                slot.generation = slot.generation.wrapping_add(1);
+                revocation::revoke(cap.id);
+                revoked += 1;
+            }
+        }
+        revoked
+    }
+
+    /// Re-issues a fresh, never-before-used identity for every occupied slot.
+    ///
+    /// WHY this exists: app spawners build their capability tables from *constants*
+    /// (`CapabilityId(2601)`, `CapabilityId(1701)`, and so on — 101 of them across
+    /// 12 spawn functions). `revoke_all` publishes each id into the kernel-wide
+    /// revocation set on task exit and nothing ever evicts it, so the second launch
+    /// of the same app created a table whose every slot was already revoked. The app
+    /// was born with no authorizable capability: `surface_create` was refused,
+    /// `surface` came back 0, and the app skipped rendering entirely — which surfaced
+    /// as "Recents failed to present a canvas", though Recents was never the fault.
+    ///
+    /// Revocation-by-identity is only sound while an identity is minted at most once
+    /// per boot. Re-keying at the point a table enters the scheduler restores that
+    /// invariant for every spawner at once, instead of editing twelve call sites and
+    /// hoping the next app added later remembers.
+    ///
+    /// Type, rights and object_id are preserved: the id is opaque identity, and those
+    /// three fields are what actually authorise anything.
+    pub fn rekey_all(&mut self) -> usize {
+        let mut rekeyed = 0usize;
+        for slot in self.slots.iter_mut() {
+            if let Some(cap) = slot.cap.as_mut() {
+                cap.id = CapabilityId(next_instance_capability_id());
+                rekeyed += 1;
+            }
+        }
+        rekeyed
     }
 
     /// Finds the first slot containing a capability with the requested type and rights.
+    ///
+    /// Revoked capabilities are skipped so this returns a slot that can actually
+    /// authorize, rather than a revoked slot that would make a later `verify*`
+    /// fail and mask a valid capability further along the table.
     pub fn find_slot(&self, expected_type: CapabilityType, required_rights: Rights) -> Option<usize> {
         self.slots.iter().enumerate().find_map(|(idx, slot)| {
             slot.cap.as_ref().and_then(|cap| {
-                if cap.cap_type == expected_type && cap.rights.contains(required_rights) { Some(idx) } else { None }
+                if cap.cap_type == expected_type
+                    && cap.rights.contains(required_rights)
+                    && !revocation::is_revoked(cap.id)
+                {
+                    Some(idx)
+                } else {
+                    None
+                }
             })
         })
     }
 
-    /// Returns the total number of active capabilities in this table.
+    /// Returns the total number of capabilities in this table that can still
+    /// authorize something.
     pub fn count(&self) -> usize {
-        self.slots.iter().filter(|s| s.cap.is_some()).count()
+        self.slots
+            .iter()
+            .filter(|slot| slot.cap.as_ref().is_some_and(|cap| !revocation::is_revoked(cap.id)))
+            .count()
     }
 
     /// Validates internal slot invariants. Empty slots retain a generation counter;
@@ -491,6 +634,32 @@ pub use delegation::DelegatedLease;
 
 pub mod permission;
 pub use permission::{ConsentDecision, PermissionManager, PermissionRecord, SensitivePermission, PERMISSION_MANAGER};
+
+pub mod revocation;
+pub use revocation::{is_revoked as capability_revoked, revoke as revoke_capability_id};
+
+/// Releases every piece of authority a task is holding.
+///
+/// Called from the task exit paths, alongside the existing per-subsystem
+/// `cleanup_task` calls.
+///
+/// WHY the registry side matters here: dropping the task's capability table
+/// frees the table, but a delegated lease lives in the kernel-wide delegation
+/// registry and names the task as its grantee. Without this, that lease stays
+/// registered and stays exercisable after the task is gone.
+pub fn cleanup_task(task: crate::task::TaskId) {
+    let leases = revocation::revoke_grantee_delegations(task);
+    delegation::prune(crate::interrupts::get_system_ticks());
+    let consents = permission::cleanup_task(task);
+    if leases > 0 || consents > 0 {
+        crate::serial_println!(
+            "[CAPABILITY] Task {} released {} delegated lease(s) and {} permission grant(s) on exit.",
+            task.0,
+            leases,
+            consents,
+        );
+    }
+}
 
 /// Initializes the capability subsystem and runs delegation, permission, and adversarial self-tests.
 pub fn init() {
@@ -626,6 +795,177 @@ pub fn run_adversarial_tests() {
         Err(CapError::InvalidSlot)
     );
     crate::serial_println!("[TEST] Capability Adversarial: Quota Exhaustion Enforced [PASSED]");
+
+    // 10. Adversarial Test 9: Revocation Must Reach Every Copy Of The Capability
+    //
+    // Clearing a slot is not enforcement. The same capability installed in a
+    // second table is a separate copy of the same authority, and a copy handed
+    // out in-band is a third. If any of them still authorizes after the
+    // revocation, the process retained authority it was never meant to keep.
+    let revokable_id = CapabilityId(0x00C0_FFEE_0001);
+    let revokable = Capability {
+        id: revokable_id,
+        cap_type: CapabilityType::NetworkSend,
+        rights: Rights::WRITE,
+        object_id: 42,
+    };
+    let mut primary_table = CapabilityTable::new_for_task(crate::task::TaskId(120), 4);
+    let mut copied_table = CapabilityTable::new_for_task(crate::task::TaskId(121), 4);
+    let primary_slot = primary_table
+        .insert(revokable.clone())
+        .expect("insert into primary table");
+    let copied_slot = copied_table.insert(revokable).expect("insert into copied table");
+    assert!(primary_slot < primary_table.capacity());
+    assert!(copied_table.verify_object(copied_slot, CapabilityType::NetworkSend, Rights::WRITE, 42).is_ok());
+
+    assert!(primary_table.revoke_by_id(revokable_id));
+    assert_eq!(
+        copied_table.verify_object(copied_slot, CapabilityType::NetworkSend, Rights::WRITE, 42),
+        Err(CapError::RevokedHandle),
+        "A retained copy of a revoked capability must not authorize"
+    );
+    assert!(!copied_table.authorize_object(CapabilityType::NetworkSend, Rights::WRITE, 42));
+    assert!(!copied_table.has_capability(CapabilityType::NetworkSend, Rights::WRITE));
+    assert_eq!(copied_table.find_slot(CapabilityType::NetworkSend, Rights::WRITE), None);
+    crate::serial_println!("[TEST] Capability Adversarial: Stale Capability Copy Rejected Post-Revocation [PASSED]");
+
+    // 11. Adversarial Test 10: Revoking A Source Must Kill Its Delegated Leases
+    let source_id = CapabilityId(0x00C0_FFEE_0002);
+    let source = Capability {
+        id: source_id,
+        cap_type: CapabilityType::IpcSend,
+        rights: Rights::WRITE | Rights::GRANT,
+        object_id: 42,
+    };
+    let mut grantor_table = CapabilityTable::new_for_task(crate::task::TaskId(122), 4);
+    grantor_table.insert(source.clone()).expect("insert source capability");
+
+    let derived_lease = DelegatedLease::new(
+        delegation::allocate_lease_id(),
+        &source,
+        crate::task::TaskId(122),
+        crate::task::TaskId(123),
+        Rights::WRITE,
+        4,
+        5000,
+        crate::interrupts::get_system_ticks(),
+    ).expect("delegation must succeed");
+    delegation::register_lease(derived_lease.clone());
+    let derived_id = derived_lease.to_capability().id;
+    let mut grantee_table = CapabilityTable::new_for_task(crate::task::TaskId(123), 4);
+    let grantee_slot = grantee_table
+        .insert(derived_lease.to_capability())
+        .expect("insert derived capability");
+    assert!(grantee_table
+        .verify_object(grantee_slot, CapabilityType::IpcSend, Rights::WRITE, 42)
+        .is_ok());
+
+    assert!(grantor_table.revoke_by_id(source_id));
+    assert!(
+        revocation::is_revoked(derived_id),
+        "a capability derived from a revoked source must itself be revoked"
+    );
+    assert_eq!(
+        grantee_table.verify_object(grantee_slot, CapabilityType::IpcSend, Rights::WRITE, 42),
+        Err(CapError::RevokedHandle),
+        "A delegated capability must lose its authority when its source is revoked"
+    );
+    assert!(!delegation::is_lease_active(derived_lease.lease_id, crate::interrupts::get_system_ticks()));
+    crate::serial_println!("[TEST] Capability Adversarial: Delegated Authority Dies With Its Source [PASSED]");
+
+    // 12. Adversarial Test 11: A Permission Revocation Ends The Authority Even If
+    // The Table Cleanup Never Runs. The consent record alone is not enforcement.
+    {
+        use crate::capability::permission::{SensitivePermission, PERMISSION_MANAGER};
+        let victim = crate::task::TaskId(124);
+        let permission = SensitivePermission::CameraCapture;
+        let mut pm = PERMISSION_MANAGER.lock();
+        let (req_id, _) = pm.request_consent(victim, "adversarial.app", permission, false, 0);
+        assert_eq!(pm.resolve_consent(req_id, ConsentDecision::Granted).map(|r| r.decision), Some(ConsentDecision::Granted));
+
+        let mut victim_table = CapabilityTable::new_for_task(victim, 4);
+        let minted = victim_table
+            .insert(permission.to_capability(victim))
+            .expect("insert minted capability");
+        let minted_id = permission.capability_id(victim);
+        assert!(
+            !revocation::is_revoked(minted_id),
+            "a freshly granted permission must not already be revoked"
+        );
+        assert!(
+            victim_table
+                .verify_object(minted, CapabilityType::HardwarePortIo, Rights::READ, 0xCA00)
+                .is_ok(),
+            "a freshly minted, unrevoked permission must verify against its own type/object, \
+             got {:?} for minted_id {:?}",
+            victim_table.verify_object(minted, CapabilityType::HardwarePortIo, Rights::READ, 0xCA00).err(),
+            minted_id
+        );
+
+        assert!(pm.revoke_permission(victim, permission));
+        // Deliberately do not touch victim_table: this is the stale copy.
+        assert_eq!(
+            victim_table.verify_object(minted, CapabilityType::HardwarePortIo, Rights::READ, 0xCA00),
+            Err(CapError::RevokedHandle),
+            "A permission revocation must end the authority in the task's own table"
+        );
+        assert!(!pm.has_permission(victim, permission));
+        drop(pm);
+    }
+    crate::serial_println!("[TEST] Capability Adversarial: Consent Revocation Ends Minted Authority [PASSED]");
+
+    // 13. Adversarial Test 12: A One-Time Grant Ends At First Use
+    {
+        use crate::capability::permission::{SensitivePermission, PERMISSION_MANAGER};
+        let victim = crate::task::TaskId(125);
+        let permission = SensitivePermission::RtcClock;
+        let mut pm = PERMISSION_MANAGER.lock();
+        let (req_id, _) = pm.request_consent(victim, "onetime.app", permission, false, 0);
+        pm.resolve_consent(req_id, ConsentDecision::GrantedOnce);
+        let mut victim_table = CapabilityTable::new_for_task(victim, 4);
+        let minted = victim_table
+            .insert(permission.to_capability(victim))
+            .expect("insert minted capability");
+        let before = victim_table
+            .verify_object(minted, CapabilityType::TimerTickRead, Rights::READ, 0x70)
+            .is_ok();
+        assert!(before);
+        assert!(pm.consume_one_time_permission(victim, permission));
+        assert_eq!(
+            victim_table.verify_object(minted, CapabilityType::TimerTickRead, Rights::READ, 0x70),
+            Err(CapError::RevokedHandle),
+            "A consumed one-time grant must not leave its capability usable"
+        );
+        drop(pm);
+    }
+    crate::serial_println!("[TEST] Capability Adversarial: One-Time Grant Single-Use Enforced [PASSED]");
+
+    // 14. Adversarial Test 13: Task Exit Leaves No Usable Authority Behind
+    {
+        let exiting = crate::task::TaskId(126);
+        let exit_id = CapabilityId(0x00C0_FFEE_0003);
+        let mut exiting_table = CapabilityTable::new_for_task(exiting, 4);
+        let slot = exiting_table
+            .insert(Capability {
+                id: exit_id,
+                cap_type: CapabilityType::StorageRawBlock,
+                rights: Rights::READ | Rights::INVOKE,
+                object_id: 0,
+            })
+            .expect("insert capability");
+        assert!(exiting_table
+            .verify_object(slot, CapabilityType::StorageRawBlock, Rights::INVOKE, 0)
+            .is_ok());
+
+        // The scheduler drops the table; the registry must be told.
+        assert_eq!(exiting_table.revoke_all(), 1);
+        cleanup_task(exiting);
+        assert!(revocation::is_revoked(exit_id));
+        assert_eq!(exiting_table.count(), 0);
+        assert!(exiting_table.validate_invariants());
+        assert!(!exiting_table.authorize_object(CapabilityType::StorageRawBlock, Rights::INVOKE, 0));
+    }
+    crate::serial_println!("[TEST] Capability Adversarial: Task Exit Releases All Authority [PASSED]");
 
     crate::serial_println!("[TEST] Zero-Trust Capability Invariants: 100% Attested & Enforced.");
 }
