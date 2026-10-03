@@ -15,6 +15,12 @@ Validates:
 
 import sys
 import unittest
+from pathlib import Path
+
+# WHY this is defined here: the assertions below were moved out of the function
+# that had `ROOT` as a local, so every module-level reference to it raised
+# NameError and the whole contract failed before running a single check.
+ROOT = Path(__file__).resolve().parents[1]
 
 STANDARD_CATEGORIES = [
     "wifi",
@@ -144,4 +150,11 @@ class SettingsRealityContractTests(unittest.TestCase):
     assert "Developer terminal" in app
     assert "Disabled by default" in app
     assert '"developer.terminal_enabled"' in app
+
+
+# WHY this is outside the class: a refactor dedented the test class but left the
+# runner call indented inside its last method, so `unittest.main()` was never
+# reached at module level and the file reported "NO TESTS RAN" -- a contract that
+# silently asserted nothing.
+if __name__ == "__main__":
     unittest.main()

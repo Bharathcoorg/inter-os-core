@@ -30,12 +30,14 @@ def main():
     must(binp,"interos_system_service::run_input()","inputd entry point")
     print("input event pipeline contract: PASS")
 
-    verify_first_party_system_gestures()
-    verify_gesture_thresholds()
+    # WHY these are called here as well as collected by pytest: this file is run
+    # both as a standalone contract and as a test module. They were renamed to
+    # `test_*` so pytest would collect them, which left main() calling names that no
+    # longer existed and every run died with a NameError before asserting anything.
+    test_first_party_apps_accept_canonical_system_gestures()
+    test_gesture_thresholds_match_kernel_tick_rate()
     print("first-party gesture and timing contracts: PASS")
 
-if __name__ == "__main__":
-    main()
 
 
 def test_first_party_apps_accept_canonical_system_gestures():
@@ -57,3 +59,6 @@ def test_gesture_thresholds_match_kernel_tick_rate():
     assert "LONG_PRESS_TICKS: u64 = 500" in router
     assert "DOUBLE_TAP_WINDOW_TICKS: u64 = 300" in router
     assert "FLING_WINDOW_TICKS: u64 = 250" in router
+
+if __name__ == "__main__":
+    main()
