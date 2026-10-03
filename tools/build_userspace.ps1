@@ -88,7 +88,15 @@ function Invoke-GuestBuild {
     }
     Assert-ExecutableElf -Path $targetPath
 
-    Invoke-Native -Exe $StripTool -Arguments @($targetPath) -What "llvm-strip ($Artifact)"
+    # WHY --strip-debug: bare `llvm-strip` removes the symbol table but KEEPS the
+    # DWARF sections. Measured on the authenticator app, .debug_str alone was
+    # 302 KB, .debug_info 231 KB and .debug_line 137 KB -- 813 KB of DWARF around
+    # 11 KB of actual code, in an 834 KB file. The kernel embeds these binaries, so
+    # twelve such apps put roughly 10 MB of debug information into the image, and
+    # the signed RAPP artifacts built from them came out at ~878 KB each, far above
+    # the 60000-byte transfer limit, so no package could ever be installed.
+    # `--strip-debug` keeps the loadable segments the kernel's ELF loader needs.
+    Invoke-Native -Exe $StripTool -Arguments @("--strip-debug", $targetPath) -What "llvm-strip ($Artifact)"
     # Stripping must not change the executable type the kernel loader sees.
     Assert-ExecutableElf -Path $targetPath
     Write-Host "  -> ET_EXEC verified and stripped: $Artifact" -ForegroundColor Green
