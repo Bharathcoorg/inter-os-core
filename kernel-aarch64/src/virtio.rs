@@ -25,6 +25,8 @@ const VIRTIO_PCI_CAP_ID: u8 = 0x09;
 const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1;
 const VIRTIO_PCI_CAP_NOTIFY_BAR: u8 = 2;
 const VIRTIO_PCI_CAP_ISR_BAR: u8 = 3;
+/// The device-specific configuration structure, which is read-only here.
+const VIRTIO_PCI_CAP_DEVICE_CFG: u8 = 4;
 
 /// Feature bits. Virtio 1.0 features start at bit 32.
 const VIRTIO_F_VERSION_1: u32 = 32;
@@ -70,6 +72,9 @@ pub struct VirtioPciDevice {
     pub notify_bar: u64,
     pub isr_bar: u64,
     pub features: u64,
+    /// Device-specific configuration space, when the device publishes a
+    /// capability for it. Read-only to this driver.
+    pub device_cfg: *const u8,
 }
 
 impl VirtioPciDevice {
@@ -120,6 +125,7 @@ impl VirtioPciDevice {
         let mut notify_bar: Option<u64> = None;
         let mut notify_mult: u32 = 4;
         let mut isr_bar: Option<u64> = None;
+        let mut device_cfg: Option<*const u8> = None;
         // A malformed chain must terminate; refuse anything unreasonably long.
         for _ in 0..48 {
             if ptr == 0 || ptr == 0xFF {
@@ -149,6 +155,13 @@ impl VirtioPciDevice {
                         VIRTIO_PCI_CAP_ISR_BAR => {
                             let bar = ecam.read8(bus, dev, func, ptr as usize + 4);
                             isr_bar = Self::map_bar(ecam, bus, dev, func, bar);
+                        }
+                        VIRTIO_PCI_CAP_DEVICE_CFG => {
+                            let bar = ecam.read8(bus, dev, func, ptr as usize + 4);
+                            let offset = ecam.read32(bus, dev, func, ptr as usize + 8) as u64;
+                            if let Some(base) = Self::map_bar(ecam, bus, dev, func, bar) {
+                                device_cfg = Some((base.wrapping_add(offset)) as *const u8);
+                            }
                         }
                         _ => {}
                     }
@@ -200,40 +213,59 @@ impl VirtioPciDevice {
             notify_bar,
             isr_bar: isr_bar.unwrap_or(notify_bar),
             features: ((high_features as u64) << 32) | low_features as u64,
+            device_cfg: device_cfg.unwrap_or(core::ptr::null()),
         })
     }
 
-    /// Reads a 64-bit BAR and returns its physical address.
-    unsafe fn bar_address(
-        ecam: &PcieEcam,
-        bus: u16,
-        device: u8,
-        function: u8,
-        bar: u8,
-    ) -> u64 {
-        let offset = 0x10 + (bar as usize) * 4;
-        let low = ecam.read32(bus, device, function, offset);
-        if low & 1 == 0 {
-            let high = ecam.read32(bus, device, function, offset + 4);
-            (((high as u64) << 32) | (low as u64 & 0xFFFF_FFFF_0)) & 0xFFFF_FFFF_FFFF_FFF0
-        } else {
-            low as u64 & 0xFFFF_FFFC
+    /// Reads a little-endian 32-bit field from the device-specific
+    /// configuration space.
+    ///
+    /// Returns `None` when the device published no configuration capability, so
+    /// a caller cannot read a field that does not exist.
+    ///
+    /// # Safety
+    /// `index` must be inside the device's configuration structure, and the BAR
+    /// holding it must already be mapped.
+    pub unsafe fn device_config_u32(&self, index: usize) -> Option<u32> {
+        if self.device_cfg.is_null() {
+            return None;
         }
+        let bytes = core::slice::from_raw_parts(self.device_cfg.add(index * 4), 4);
+        Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    /// True when the device exposes device-specific configuration space.
+    pub fn has_device_config(&self) -> bool {
+        !self.device_cfg.is_null()
+    }
+
+    /// The device's status byte as it currently reads back.
+    ///
+    /// After a completed handshake this is ACK | DRIVER | FEATURES_OK |
+    /// DRIVER_OK, which is the only way to show the device really saw every
+    /// step rather than merely that the writes did not fault.
+    ///
+    /// # Safety
+    /// The common configuration structure must be mapped.
+    pub unsafe fn device_status(&self) -> u8 {
+        read_volatile(&(*self.common_cfg).device_status)
     }
 
     /// Maps a device BAR so its registers can be reached, and returns its
     /// address.
     ///
-    /// The size is recovered by writing all ones to the BAR and reading back the
-    /// mask, which needs configuration space only. Without mapping, touching the
-    /// device's own registers faults, because a BAR lives in the platform's
-    /// peripheral window and not in the tables built so far.
+    /// The size and the address both come from [`PcieEcam::probe_bar`], the
+    /// same probe the bus enumerator uses to decide where a BAR goes, so this
+    /// path cannot disagree with the assignment that was written.
     ///
-    /// Returns `None` when the BAR holds no address. That is the expected state
-    /// on a platform booted directly with no firmware: assigning PCI BARs is a
-    /// firmware responsibility, and QEMU's `virt` machine does not do it, so a
-    /// device that reports all-zero BARs has no reachable registers. Driving it
-    /// anyway would be guessing at an address.
+    /// The mapping is idempotent: if the bus enumerator already mapped the
+    /// region, the blocks are left alone and this still succeeds. That matters
+    /// because the enumerator refuses to let a coarse block shadow DRAM, and
+    /// repeating that check here would fail for a region it placed on purpose.
+    ///
+    /// Returns `None` when the BAR is not implemented, decodes port I/O, or
+    /// still holds no address. Driving the device anyway would be guessing at
+    /// an address.
     ///
     /// # Safety
     /// The ECAM window must be mapped. The BAR is probed and restored, so the
@@ -245,52 +277,30 @@ impl VirtioPciDevice {
         function: u8,
         bar: u8,
     ) -> Option<u64> {
-        let offset = 0x10 + (bar as usize) * 4;
-        let assigned_low = ecam.read32(bus, device, function, offset);
-        let assigned_high = ecam.read32(bus, device, function, offset + 4);
-
-        // Probe the size, then put the assigned address back.
-        ecam.write32(bus, device, function, offset, 0xFFFF_FFFF);
-        let mask_low = ecam.read32(bus, device, function, offset);
-        ecam.write32(bus, device, function, offset + 4, 0xFFFF_FFFF);
-        let mask_high = ecam.read32(bus, device, function, offset + 4);
-        ecam.write32(bus, device, function, offset, assigned_low);
-        ecam.write32(bus, device, function, offset + 4, assigned_high);
-
-        // A 32-bit I/O BAR is probed through the low half only.
-        if assigned_low & 1 != 0 {
-            let size = ((!mask_low as u64) + 1) & 0xFFFF_FFFF;
+        let probe = ecam.probe_bar(bus, device, function, bar as usize);
+        if !probe.is_memory || probe.size == 0 || probe.size > 1024 * 1024 * 1024 {
             return None;
         }
-
-        let size = (((!mask_high as u64) << 32) | (!mask_low as u64 & 0xFFFF_FFFF)) + 1;
-        if size == 0 || size > 16 * 1024 * 1024 {
-            return None;
-        }
-        let base = (((assigned_high as u64) << 32) | (assigned_low as u64 & 0xFFFF_FFFF_0))
-            & 0xFFFF_FFFF_FFFF_FFF0;
+        let base = probe.address;
         if base == 0 {
             return None;
         }
 
-        // Round up to a mapping granularity the MMU can represent.
+        // Round outwards to a mapping granularity the MMU can represent.
         const GRANULE: u64 = 0x20_0000;
         let map_base = base & !(GRANULE - 1);
-        let map_end = (base + size + GRANULE - 1) & !(GRANULE - 1);
+        let map_end = (base + probe.size + GRANULE - 1) & !(GRANULE - 1);
 
-        // A BAR is usually far smaller than the mapping granularity and is
-        // rarely aligned to it, so map the covering 2 MiB blocks instead. Normal
-        // memory must never be shadowed, so the platform RAM range is refused.
+        // Normal memory must never be shadowed, so the platform RAM range is
+        // refused. A block that is already mapped is left as it is.
         const PLATFORM_RAM_LO: u64 = 0x4000_0000;
         const PLATFORM_RAM_HI: u64 = 0x8000_0000;
-        if !crate::mmu::ArmMmu::map_device_region_guarded(
+        if !crate::mmu::ArmMmu::map_device_blocks(
             map_base,
             map_end - map_base,
             PLATFORM_RAM_LO,
             PLATFORM_RAM_HI,
-        ) && !crate::mmu::ArmMmu::map_device_region(map_base, map_end - map_base)
-            && !crate::mmu::ArmMmu::map_device_region_high(map_base, map_end - map_base)
-        {
+        ) {
             return None;
         }
         Some(base)
@@ -303,32 +313,43 @@ impl VirtioPciDevice {
 
     /// Performs the virtio 1.0 initialisation handshake.
     ///
-    /// The device must move ACK -> DRIVER -> FEATURES_OK before queues are
-    /// touched, and the driver must then read the final configuration space
-    /// before declaring itself ready.
+    /// `device_status` is a single byte the device stores verbatim, and the
+    /// specification requires the driver to *add* each step to the value
+    /// already there. Writing the step on its own would erase the earlier bits,
+    /// which the device is entitled to read as the driver having gone away, so
+    /// every step here is a read-modify-write.
+    ///
+    /// Each step is read back and checked, because a device is allowed to drop
+    /// back to zero at any point and a driver that only tested for non-zero
+    /// would carry on with a device that has forgotten it.
     pub unsafe fn begin_init(&self) -> bool {
         let cfg = &mut *self.common_cfg;
         write_volatile(&mut cfg.device_status, 0);
         core::arch::asm!("dsb sy", options(nostack, preserves_flags));
         core::arch::asm!("isb", options(nostack, preserves_flags));
 
-        write_volatile(&mut cfg.device_status, VirtioPciCommonCfg::STATUS_ACKNOWLEDGE);
-        if read_volatile(&mut cfg.device_status) == 0 {
-            return false;
+        let mut expected = VirtioPciCommonCfg::STATUS_ACKNOWLEDGE;
+        for step in [
+            VirtioPciCommonCfg::STATUS_ACKNOWLEDGE,
+            VirtioPciCommonCfg::STATUS_DRIVER,
+            // Features were negotiated during probe, so they are already stable.
+            VirtioPciCommonCfg::STATUS_FEATURES_OK,
+        ] {
+            expected |= step;
+            write_volatile(&mut cfg.device_status, expected);
+            if read_volatile(&mut cfg.device_status) != expected {
+                return false;
+            }
         }
-        write_volatile(&mut cfg.device_status, VirtioPciCommonCfg::STATUS_DRIVER);
-        if read_volatile(&mut cfg.device_status) == 0 {
-            return false;
-        }
-        // Features were negotiated during probe, so they are already stable.
-        write_volatile(
-            &mut cfg.device_status,
-            VirtioPciCommonCfg::STATUS_DRIVER | VirtioPciCommonCfg::STATUS_FEATURES_OK,
-        );
-        read_volatile(&mut cfg.device_status) != 0
+        true
     }
 
     /// Declares the driver ready after the configuration space has settled.
+    ///
+    /// WHY the read-modify-write: `device_status` is cumulative. Writing the
+    /// `DRIVER_OK` bit on its own would clear `ACKNOWLEDGE` and `FEATURES_OK`,
+    /// and a device that sees its status go backwards treats the driver as gone
+    /// and resets.
     pub unsafe fn finish_init(&self) {
         let cfg = &mut *self.common_cfg;
         // Configuration can change while the driver initialises; read until the
@@ -338,6 +359,10 @@ impl VirtioPciDevice {
         while read_volatile(&mut cfg.config_generation) != generation && attempts < 100 {
             attempts += 1;
         }
-        write_volatile(&mut cfg.device_status, VirtioPciCommonCfg::STATUS_DRIVER_OK);
+        let status = read_volatile(&mut cfg.device_status);
+        write_volatile(
+            &mut cfg.device_status,
+            status | VirtioPciCommonCfg::STATUS_DRIVER_OK,
+        );
     }
 }

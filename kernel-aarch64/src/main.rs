@@ -25,6 +25,7 @@ pub mod power;
 pub mod probe;
 pub mod psci;
 pub mod pcie;
+pub mod pci_bars;
 pub mod pci_bus;
 pub mod sandbox;
 pub mod shell;

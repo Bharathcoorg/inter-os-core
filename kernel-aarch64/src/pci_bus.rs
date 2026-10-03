@@ -92,7 +92,6 @@ impl PcieBus {
         }
         crate::kprintln!("[PCI] ECAM window mapped at 0x{:X} ({} MiB).", base, size / (1024 * 1024));
 
-
         let ecam = PcieEcam::new(base as usize);
         let devices = unsafe { ecam.enumerate_bus0() };
         let found = devices.iter().filter(|d| d.is_some()).count();
@@ -102,8 +101,63 @@ impl PcieBus {
             );
             crate::kprintln!("[PCI]       returned no configuration data.");
         }
-        bus.ecam = Some(ecam);
         bus.devices = devices;
+
+        // 16c. Assign the memory BARs the bus walk found unassigned.
+        //
+        // Nothing on this platform has programmed them: the machine is booted
+        // with `-kernel` and no firmware, and the machine model leaves BAR
+        // assignment to firmware. Until they are given an address the devices
+        // are enumerated but unreachable, so this runs before anything tries to
+        // talk to one.
+        if found > 0 {
+            let mut allocator = crate::pci_bars::BarAllocator::new();
+            let (windows, window_count) = crate::pci_bars::parse_ranges(parser, &node);
+            allocator.set_windows(windows, window_count);
+            allocator.reserve_ecam(base, size);
+            // DRAM comes from the device tree, so the set of addresses that must
+            // stay clear is the platform's own statement rather than a guess.
+            if let Ok(banks) = parser.parse_memory_regions() {
+                for bank in banks {
+                    allocator.reserve_ram(bank.0, bank.1);
+                }
+            }
+            if !allocator.has_window() {
+                crate::kprintln!(
+                    "[PCI] The host bridge publishes no usable memory window, so no BAR can be assigned."
+                );
+            } else {
+                for index in 0..window_count {
+                    let window = windows[index];
+                    // A 64 KiB window reports as 0 MiB, which reads like a bug,
+                    // so give the exact byte count alongside it.
+                    crate::kprintln!(
+                        "[PCI] host bridge range {}: 0x{:X} .. 0x{:X} ({} bytes, {} MiB){}.",
+                        index,
+                        window.base,
+                        window.base.saturating_add(window.size),
+                        window.size,
+                        window.size / (1024 * 1024),
+                        if window.base.saturating_add(window.size) > crate::pci_bars::MAX_REACHABLE {
+                            " - above the address space these translation tables describe, so it cannot be used"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+                let mut index = 0usize;
+                let mut total = 0u32;
+                while let Some(device) = bus.devices.get(index).and_then(|d| *d) {
+                    if !device.is_absent() {
+                        total += unsafe { crate::pci_bars::assign_device_bars(&ecam, &device, &mut allocator) };
+                    }
+                    index += 1;
+                }
+                crate::kprintln!("[PCI] {} memory BAR(s) assigned from the host bridge ranges.", total);
+            }
+        }
+        bus.ecam = Some(ecam);
+
         // Negotiate with any virtio device the platform actually exposes.
         let mut index = 0usize;
         while let Some(device) = bus.devices.get(index).and_then(|d| *d) {
@@ -118,16 +172,22 @@ impl PcieBus {
                         );
                         if unsafe { virtio.begin_init() } {
                             unsafe { virtio.finish_init() };
-                            crate::kprintln!("[VIRTIO] {:04x}:{:04x} initialised and ready.", device.vendor_id, device.device_id);
+                            // ACK | DRIVER | FEATURES_OK | DRIVER_OK is 15. Reading
+                            // it back is what proves the device saw each step.
+                            let status = unsafe { virtio.device_status() };
+                            crate::kprintln!(
+                                "[VIRTIO] {:04x}:{:04x} initialised, device status 0x{:02X} (expect 0x0F).",
+                                device.vendor_id, device.device_id, status
+                            );
+                            unsafe { report_device_config(&virtio, &device) };
                         } else {
                             crate::kprintln!("[VIRTIO] {:04x}:{:04x} refused the handshake.", device.vendor_id, device.device_id);
                         }
                     }
                     None => {
                         crate::kprintln!(
-                            "[VIRTIO] {:04x}:{:04x} could not be claimed: it offers no assignable BAR. PCI BAR \
-                             addresses are assigned by firmware, and this platform booted directly with \
-                             no firmware, so the device has no reachable registers.",
+                            "[VIRTIO] {:04x}:{:04x} could not be claimed: one of the BARs its \
+                             capabilities refer to has no assigned address.",
                             device.vendor_id, device.device_id
                         );
                     }
@@ -156,5 +216,62 @@ impl PcieBus {
             ecam.enable_memory_and_bus_master(0, device.device, device.function);
             ecam.read_bar64(0, device.device, device.function, 0)
         }
+    }
+}
+
+/// The device identifier virtio-gpu presents, which is the display controller.
+const VIRTIO_GPU_DEVICE: u16 = 0x1050;
+
+/// Reads and reports the leading words of a device's configuration space.
+///
+/// The virtio specification only lets a driver read configuration space once
+/// the device has seen `DRIVER`, so this runs after the handshake. The field
+/// names are only applied to virtio-gpu, whose layout is known; for any other
+/// device the raw words are printed instead, because naming them after another
+/// device's structure would be a claim this driver cannot support.
+///
+/// # Safety
+/// The configuration capability's BAR must already be mapped.
+unsafe fn report_device_config(virtio: &crate::virtio::VirtioPciDevice, device: &PcieDevice) {
+    if !virtio.has_device_config() {
+        crate::kprintln!(
+            "[VIRTIO] {:04x}:{:04x} published no configuration capability.",
+            device.vendor_id, device.device_id
+        );
+        return;
+    }
+    const WORDS: usize = 5;
+    let gpu = device.device_id == VIRTIO_GPU_DEVICE;
+    let names: [&str; WORDS] = ["events_read", "cursor_x", "cursor_y", "width", "height"];
+    let label = if gpu { "virtio-gpu" } else { "unnamed virtio device" };
+    let mut line = crate::alloc::format!("[VIRTIO] {} configuration space:", label);
+    let mut readable = true;
+    for index in 0..WORDS {
+        match virtio.device_config_u32(index) {
+            Some(value) => {
+                if gpu {
+                    line.push_str(&crate::alloc::format!(" {}={}", names[index], value));
+                } else {
+                    line.push_str(&crate::alloc::format!(" word{}={}", index, value));
+                }
+            }
+            None => readable = false,
+        }
+    }
+    if readable {
+        crate::kprintln!("{}", line);
+        if gpu {
+            crate::kprintln!(
+                "[VIRTIO] virtio-gpu reports width={} height={}; a zero pair means the device published \
+                 no display mode, so this is the configuration read and nothing more.",
+                virtio.device_config_u32(3).unwrap_or(0),
+                virtio.device_config_u32(4).unwrap_or(0)
+            );
+        }
+    } else {
+        crate::kprintln!(
+            "[VIRTIO] {} published a configuration capability but the read failed.",
+            label
+        );
     }
 }

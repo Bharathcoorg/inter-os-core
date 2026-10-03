@@ -29,6 +29,26 @@ const PCI_COMMAND: usize = 0x04;
 const PCI_CLASS_REVISION: usize = 0x08;
 const PCI_BAR0: usize = 0x10;
 
+/// Bits 0..3 of a memory BAR are read-only type bits: bit 0 says the BAR
+/// decodes memory rather than port I/O, bit 2 marks a 64-bit BAR and bit 3
+/// marks a prefetchable one. They must be cleared out of a size mask before
+/// the mask is inverted, or the recovered size is wrong by up to 15 bytes.
+const BAR_TYPE_MASK: u32 = 0xF;
+
+/// A Base Address Register after it has been size-probed.
+#[derive(Copy, Clone, Debug)]
+pub struct BarProbe {
+    /// The BAR decodes memory. A port I/O BAR is never assigned here because
+    /// this platform publishes no I/O window for it.
+    pub is_memory: bool,
+    /// The BAR is a 64-bit register pair, so its address spans both dwords.
+    pub is_64bit: bool,
+    /// The decoded size in bytes.
+    pub size: u64,
+    /// The address currently programmed, with the type bits cleared.
+    pub address: u64,
+}
+
 /// A device found on the bus.
 #[derive(Copy, Clone, Debug)]
 pub struct PcieDevice {
@@ -199,5 +219,109 @@ impl PcieEcam {
         if wanted != command {
             self.write32(bus, device, function, PCI_COMMAND, wanted);
         }
+    }
+
+    /// Size-probes one Base Address Register and leaves it as it was found.
+    ///
+    /// The size is recovered the way the specification requires: write all ones
+    /// to the register, read back the mask, invert it, and add one. The address
+    /// that was programmed is restored afterwards, so probing never changes the
+    /// device.
+    ///
+    /// WHY only the low dword decides the width: for a 32-bit BAR the dword
+    /// above it is the *next* BAR, so reading a size out of it would report the
+    /// neighbour's size and writing to it would corrupt the neighbour. A BAR is
+    /// therefore treated as 64-bit only when its own low half cannot express the
+    /// size at all, which can only happen for a region of 4 GiB or more. Every
+    /// other BAR can be programmed through its low half alone, which is correct
+    /// for a 32-bit BAR and for a 64-bit BAR that fits below 4 GiB.
+    ///
+    /// WHY the type bits are masked out first: bits 0..3 are read-only, so
+    /// inverting a mask that still contains them would produce a size that is
+    /// wrong by up to 15 bytes.
+    ///
+    /// # Safety
+    /// As [`PcieEcam::read32`].
+    pub unsafe fn probe_bar(
+        &self,
+        bus: u16,
+        device: u8,
+        function: u8,
+        bar: usize,
+    ) -> BarProbe {
+        let offset = PCI_BAR0 + bar * 4;
+        let assigned_low = self.read32(bus, device, function, offset);
+        let assigned_high = self.read32(bus, device, function, offset + 4);
+
+        self.write32(bus, device, function, offset, u32::MAX);
+        let mask_low = self.read32(bus, device, function, offset);
+        self.write32(bus, device, function, offset + 4, u32::MAX);
+        let mask_high = self.read32(bus, device, function, offset + 4);
+        self.write32(bus, device, function, offset, assigned_low);
+        self.write32(bus, device, function, offset + 4, assigned_high);
+
+        let is_memory = mask_low & 1 == 0;
+        // A BAR that reads back an all-zero mask is not implemented: the device
+        // ignored the write. Its size is zero, which callers must treat as
+        // "nothing here" rather than "unbounded".
+        if mask_low == 0 {
+            return BarProbe {
+                is_memory: false,
+                is_64bit: false,
+                size: 0,
+                address: 0,
+            };
+        }
+        let mask_low = mask_low & !BAR_TYPE_MASK;
+        if mask_low == 0xFFFF_FFF0 {
+            // Every address bit is writable, so the size lives in the upper
+            // dword and the BAR is necessarily 64 bits wide.
+            let mask_high = mask_high & !BAR_TYPE_MASK;
+            let inverted = (((!mask_high) as u64) << 32) | ((!mask_low) as u64);
+            return BarProbe {
+                is_memory,
+                is_64bit: true,
+                size: inverted.wrapping_add(1),
+                address: (((assigned_high as u64) << 32)
+                    | (assigned_low as u64 & !BAR_TYPE_MASK as u64))
+                    & 0xFFFF_FFFF_FFFF_FFF0,
+            };
+        }
+
+        let size = (((!mask_low) as u64).wrapping_add(1)) & 0xFFFF_FFFF;
+        BarProbe {
+            is_memory,
+            is_64bit: false,
+            size,
+            address: (assigned_low as u64) & 0xFFFF_FFFF_FFFF_FFF0 & !BAR_TYPE_MASK as u64,
+        }
+    }
+
+    /// Programs the address of an already-assigned BAR and returns the value the
+    /// register now reads back.
+    ///
+    /// Only the low dword is written unless the probe reported a 64-bit BAR, for
+    /// the reason given on [`PcieEcam::probe_bar`].
+    ///
+    /// # Safety
+    /// As [`PcieEcam::read32`], and `address` must satisfy the alignment and
+    /// size the probe reported.
+    pub unsafe fn write_bar_address(
+        &self,
+        bus: u16,
+        device: u8,
+        function: u8,
+        bar: usize,
+        address: u64,
+        is_64bit: bool,
+    ) -> u64 {
+        let offset = PCI_BAR0 + bar * 4;
+        if is_64bit {
+            self.write32(bus, device, function, offset, address as u32);
+            self.write32(bus, device, function, offset + 4, (address >> 32) as u32);
+        } else {
+            self.write32(bus, device, function, offset, address as u32);
+        }
+        self.probe_bar(bus, device, function, bar).address
     }
 }

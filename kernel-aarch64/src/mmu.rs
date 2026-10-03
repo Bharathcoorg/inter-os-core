@@ -7,6 +7,7 @@
 //! - SCTLR_EL1: Enables MMU (M bit), Data Cache (C bit), and Instruction Cache (I bit)
 
 #[repr(C, align(4096))]
+#[derive(Copy, Clone)]
 pub struct PageTable {
     pub entries: [u64; 512],
 }
@@ -41,6 +42,22 @@ static mut L2_TABLE: PageTable = PageTable::empty();
 /// Level 2 table for the high memory window that the level 1 block entries
 /// cannot describe exactly, such as the PCIe ECAM window at 0x4010_0000.
 static mut L2_HIGH_TABLE: PageTable = PageTable::empty();
+
+/// Extra level 2 tables, so 2 MiB blocks can be described in gigabytes other
+/// than the first.
+///
+/// WHY: a level 1 entry is either one 1 GiB block or a pointer to a level 2
+/// table, so a gigabyte that is already a single block (DRAM, the ECAM window)
+/// cannot be subdivided, and a gigabyte with no entry has no way to describe a
+/// single 2 MiB block. PCI BAR windows on QEMU's `virt` machine start inside
+/// the first gigabyte but run to 0x3EFF0000, which spans four of them, so a
+/// table per gigabyte is needed rather than the single shared table that the
+/// ECAM window uses.
+const HIGH_TABLE_SLOTS: usize = 8;
+static mut L2_HIGH_TABLES: [PageTable; HIGH_TABLE_SLOTS] =
+    [const { PageTable::empty() }; HIGH_TABLE_SLOTS];
+/// Gigabyte each pooled table describes, or `usize::MAX` when it is free.
+static mut L2_HIGH_OWNER: [usize; HIGH_TABLE_SLOTS] = [usize::MAX; HIGH_TABLE_SLOTS];
 
 pub struct ArmMmu;
 
@@ -327,6 +344,143 @@ impl ArmMmu {
                 core::arch::asm!("tlbi vmalle1", options(nostack, preserves_flags));
                 core::arch::asm!("dsb ish", options(nostack, preserves_flags));
                 core::arch::asm!("isb", options(nostack, preserves_flags));
+            }
+        }
+        true
+    }
+
+    /// Maps an arbitrary device region with 2 MiB blocks, allocating a level 2
+    /// table for every gigabyte it covers.
+    ///
+    /// This is the path a PCI BAR takes. A BAR is usually a few kilobytes and
+    /// almost never 2 MiB aligned, so it can only be described by the blocks
+    /// that cover it, and those blocks may live in any gigabyte.
+    ///
+    /// Blocks that are already mapped are left alone, so calling this twice for
+    /// the same region succeeds and does not disturb anything.
+    ///
+    /// `guard_lo..guard_hi` is a range held for normal memory. A block that
+    /// would *newly* shadow it is refused, but a block that is already mapped is
+    /// accepted, so re-mapping a region that another stage deliberately placed
+    /// cannot fail spuriously. Returns false without touching any table when a
+    /// gigabyte cannot be subdivided, so a caller never proceeds on a window
+    /// that was silently left unmapped.
+    pub fn map_device_blocks(
+        start_paddr: u64,
+        size: u64,
+        guard_lo: u64,
+        guard_hi: u64,
+    ) -> bool {
+        const L1_BLOCK: u64 = 0x4000_0000;
+        const L2_BLOCK: u64 = 0x20_0000;
+
+        if size == 0 || start_paddr == 0 {
+            return false;
+        }
+        let first = start_paddr / L2_BLOCK;
+        let last = (start_paddr + size - 1) / L2_BLOCK;
+        unsafe {
+            if last / (L1_BLOCK / L2_BLOCK) >= 512 {
+                // Outside the 39-bit virtual address space the tables describe.
+                return false;
+            }
+
+            // Everything must be doable before anything is written, so a refusal
+            // leaves the tables exactly as they were.
+            for index in first..=last {
+                if Self::block_is_mapped(index) {
+                    continue;
+                }
+                let block_lo = index * L2_BLOCK;
+                if block_lo < guard_hi && block_lo + L2_BLOCK > guard_lo {
+                    // A new block would shadow normal memory; refuse it.
+                    return false;
+                }
+                if Self::table_for_gigabyte(index / (L1_BLOCK / L2_BLOCK)).is_none() {
+                    return false;
+                }
+            }
+
+            for index in first..=last {
+                if Self::block_is_mapped(index) {
+                    continue;
+                }
+                let gib = index / (L1_BLOCK / L2_BLOCK);
+                if let Some(table) = Self::table_for_gigabyte(gib) {
+                    table.entries[(index % (L1_BLOCK / L2_BLOCK)) as usize] = (index * L2_BLOCK)
+                        | DESC_AF
+                        | DESC_SH_OUTER
+                        | DESC_AP_RW_EL1
+                        | DESC_ATTR_DEVICE
+                        | DESC_BLOCK
+                        | DESC_VALID;
+                }
+            }
+            core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+            core::arch::asm!("tlbi vmalle1", options(nostack, preserves_flags));
+            core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+            core::arch::asm!("isb", options(nostack, preserves_flags));
+        }
+        true
+    }
+
+    /// Returns the level 2 table describing `gib`, if it can describe one.
+    ///
+    /// The first gigabyte has the primordial table. Any other gigabyte must
+    /// have either no level 1 entry at all or one that is already a table
+    /// pointer; a gigabyte that is a single 1 GiB block (DRAM, or the ECAM
+    /// window) holds state that subdividing it would destroy.
+    unsafe fn table_for_gigabyte(gib: u64) -> Option<&'static mut PageTable> {
+        if gib == 0 {
+            return Some(&mut *(&raw mut L2_TABLE));
+        }
+        if gib >= 512 {
+            return None;
+        }
+        let entry = L1_TABLE.entries[gib as usize];
+        if entry & DESC_VALID == 0 {
+            // Unused gigabyte: claim a pooled table for it.
+            for slot in 0..HIGH_TABLE_SLOTS {
+                if L2_HIGH_OWNER[slot] == usize::MAX {
+                    L2_HIGH_OWNER[slot] = gib as usize;
+                    L1_TABLE.entries[gib as usize] =
+                        core::ptr::addr_of!(L2_HIGH_TABLES[slot]) as u64 | DESC_TABLE | DESC_VALID;
+                    return Some(&mut *(&raw mut L2_HIGH_TABLES[slot]));
+                }
+            }
+            return None;
+        }
+        if entry & DESC_TABLE == 0 {
+            // A 1 GiB block already describes this gigabyte.
+            return None;
+        }
+        for slot in 0..HIGH_TABLE_SLOTS {
+            if L2_HIGH_OWNER[slot] == gib as usize {
+                return Some(&mut *(&raw mut L2_HIGH_TABLES[slot]));
+            }
+        }
+        // Some other table owns the gigabyte (the ECAM window's).
+        None
+    }
+
+    /// True when the 2 MiB block is already described in the tables.
+    fn block_is_mapped(index: u64) -> bool {
+        const PER_GIB: u64 = 512;
+        let gib = index / PER_GIB;
+        let entry = unsafe { L1_TABLE.entries[gib as usize] };
+        if entry & DESC_VALID == 0 {
+            return false;
+        }
+        if entry & DESC_TABLE == 0 {
+            return true;
+        }
+        let slot = (index % PER_GIB) as usize;
+        if gib == 0 {
+            return unsafe { L2_TABLE.entries[slot] } & DESC_VALID != 0;
+        }
+        for slot_index in 0..HIGH_TABLE_SLOTS {
+            if unsafe { L2_HIGH_OWNER[slot_index] } == gib as usize {
+                return unsafe { L2_HIGH_TABLES[slot_index].entries[slot] } & DESC_VALID != 0;
             }
         }
         true
