@@ -4,12 +4,12 @@ InterOS Core — Deterministic Clean Reboot Recovery Verification
 ============================================================
 Verifies clean system reboot & recovery lifecycle:
 1. Boot Guest Session 1
-2. Verify all boot milestones (Kernel, Memory, IDT, Services, PID1)
+2. Verify all boot boot signals (Kernel, Memory, IDT, Services, PID1)
 3. Establish known userspace state (Launcher active, interactive app cycle)
 4. Trigger clean guest shutdown via COM1 serial ACPI power-off
 5. Confirm QEMU exits cleanly with code 0
 6. Boot Guest Session 2 (Clean Reboot)
-7. Confirm all boot milestones are cleanly re-established
+7. Confirm all boot boot signals are cleanly re-established
 8. Confirm userspace returns to expected responsive state
 9. Accurately documents persistence status (In-memory VFS / block writeback pending)
 """
@@ -113,7 +113,7 @@ class RecoverySerialReader:
         return None
 
 
-def boot_and_verify_milestones(qemu_exe, kernel_img, ser_port, session_name):
+def boot_and_verify_boot signals(qemu_exe, kernel_img, ser_port, session_name):
     print(f"\n[{session_name}] Launching QEMU instance...")
     qemu_cmd = [
         qemu_exe,
@@ -142,7 +142,7 @@ def boot_and_verify_milestones(qemu_exe, kernel_img, ser_port, session_name):
     print(f"[{session_name}]   [OK] Launcher presentation complete ({time.time()-t0:.2f}s)")
 
     full_log = "\n".join(reader.captured_logs)
-    required_milestones = [
+    required_boot signals = [
         ("GDT & TSS Initialization", r"GDT & TSS loaded|Creating GDT"),
         ("Page Tables & Memory Allocator", r"Page tables and physical frame allocator initialized|Kernel PML4 entry"),
         ("Microkernel Hardware & Drivers", r"Serial COM1 online|Hardware Drivers, Memory Management"),
@@ -150,7 +150,7 @@ def boot_and_verify_milestones(qemu_exe, kernel_img, ser_port, session_name):
         ("Compositor & Launcher Online", r"Step 5: Initial presentation complete"),
     ]
 
-    for label, pattern in required_milestones:
+    for label, pattern in required_boot signals:
         m = re.search(pattern, full_log)
         assert m, f"[{session_name}] Milestone failed: {label} (pattern '{pattern}' not matched)"
         print(f"[{session_name}]   [OK] Milestone verified: {label}")
@@ -191,7 +191,7 @@ def main():
         # =====================================================================
         # Session 1: Initial Cold Boot & Known State Establishment
         # =====================================================================
-        proc1, sock1, reader1, diag1 = boot_and_verify_milestones(
+        proc1, sock1, reader1, diag1 = boot_and_verify_boot signals(
             qemu_exe, kernel_img, ser_port, "SESSION-1 (Cold Boot)"
         )
 
@@ -238,7 +238,7 @@ def main():
         # =====================================================================
         # Session 2: Clean Reboot & State Re-Verification
         # =====================================================================
-        proc2, sock2, reader2, diag2 = boot_and_verify_milestones(
+        proc2, sock2, reader2, diag2 = boot_and_verify_boot signals(
             qemu_exe, kernel_img, ser_port, "SESSION-2 (Reboot)"
         )
 
@@ -273,14 +273,14 @@ def main():
                 "target": "x86_64",
                 "clean_reboot_cycle_verified": True,
                 "session_1": {
-                    "milestones_verified": True,
+                    "boot signals_verified": True,
                     "userspace_responsive": True,
                     "shutdown_requested": True,
                     "qemu_exit_code": exit_code,
                     "diag_state": diag1
                 },
                 "session_2": {
-                    "milestones_verified": True,
+                    "boot signals_verified": True,
                     "userspace_responsive": True,
                     "reboot_recovery_successful": True,
                     "qemu_exit_code": exit_code2,
