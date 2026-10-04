@@ -19,6 +19,7 @@
 //! they are. That separation is what makes a theme swappable and a layout
 //! testable without a device.
 
+pub mod font;
 pub mod layout;
 pub mod text;
 pub mod theme;

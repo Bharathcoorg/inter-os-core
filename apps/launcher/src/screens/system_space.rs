@@ -1,4 +1,4 @@
-//! System Space: device and account settings.
+﻿//! System Space: device and account settings.
 //!
 //! WHY `pub`: `render_view` in the crate root dispatches here by view mode.
 //! Geometry and colour come from `launcher::theme`, `launcher::layout` and
@@ -44,6 +44,28 @@ const THEME: Theme = Theme::LIGHT;
 const ROW_H: usize = space::XXL + space::XS;
 const ROW_GUTTER: usize = space::SM;
 const ROW_PITCH: usize = ROW_H + ROW_GUTTER;
+
+/// The scale every row's label and value are drawn at.
+///
+/// WHY it is derived from `ROW_H` and not read from `theme::type_scale`: a row has
+/// to hold one whole glyph cell, and this face's cell is `GLYPH_H` = 24 rows per
+/// scale step rather than the 8 the row heights were sized against. `ROW_H` is 52,
+/// so 24 * s <= 52 gives s = 2. At `type_scale::BODY` (3) the cell is 72, which is
+/// 20 px taller than the row: `run_left` pins the run to the row's top edge and the
+/// descenders of any label with a `g` or a `p` land in the gutter below it.
+///
+/// WHY 2 and not 1: at 1 the cap is 17 px on a 720 px surface, which is a caption,
+/// not a list label.
+const ROW_TEXT_SCALE: usize = 2;
+
+/// WHY the entry card's label is one word: this card is a third of the width of
+/// every other row on the surface, so the label column it leaves is about 240 px,
+/// and "Power menu" measured 240 px under the fixed cell the shell used to have --
+/// one pixel of slack. The moment glyphs stopped being a fixed 8 px wide the same
+/// label ellipsized to "Power Â·Â·Â·" in the screendump, which reads as a truncated
+/// control rather than a named one. "Power" plus the chevron says the same thing
+/// with room to spare.
+const POWER_LABEL: &[u8] = b"Power";
 
 /// WHY the value column has a ceiling at all: a reason string long enough to fill
 /// the row would push the label off it, and a value that needs the whole row is
@@ -255,11 +277,21 @@ pub(super) struct Cell<'a> {
     pub value: &'a [u8],
     pub fill: u32,
     pub value_ink: u32,
+    /// The scale both runs are drawn at. WHY it lives on the cell: a cell's text
+    /// scale is a consequence of the cell's height, so the painter and its caller
+    /// cannot be allowed to disagree about it.
+    pub scale: usize,
 }
 
 impl<'a> Cell<'a> {
     /// A cell whose value came from a [`Reading`], raised or recessed by whether
     /// that reading exists.
+    ///
+    /// WHY the scale is not a parameter here: it is a consequence of the row's
+    /// height, and the rows this constructor is shared with are all
+    /// `space::XXL + space::XS` tall, which holds exactly one cell of this face at
+    /// [`ROW_TEXT_SCALE`]. A caller whose rows are a different height uses
+    /// [`Cell::scaled`].
     pub(super) fn reading(
         rect: Rect,
         corner: usize,
@@ -267,8 +299,20 @@ impl<'a> Cell<'a> {
         value: &'a Reading,
         theme: &Theme,
     ) -> Cell<'a> {
+        Cell::scaled(rect, corner, label, value, ROW_TEXT_SCALE, theme)
+    }
+
+    /// [`Cell::reading`] at an explicit text scale.
+    pub(super) fn scaled(
+        rect: Rect,
+        corner: usize,
+        label: &'a [u8],
+        value: &'a Reading,
+        scale: usize,
+        theme: &Theme,
+    ) -> Cell<'a> {
         let (fill, value_ink) = value.skin(theme);
-        Cell { rect, corner, label, value: value.as_slice(), fill, value_ink }
+        Cell { rect, corner, label, value: value.as_slice(), fill, value_ink, scale }
     }
 
     /// Whether this pixel is on the cell at all.
@@ -293,7 +337,7 @@ pub(super) fn cell_pixel(x: usize, y: usize, theme: &Theme, cell: &Cell) -> u32 
     // share that suits a full-width reading row ellipsized the entry card down
     // to "Pow...".
     let value_w =
-        text::measure(cell.value, type_scale::CAPTION).min(pad.w * VALUE_COLUMN_MAX_PCT / 100)
+        text::measure(cell.value, cell.scale).min(pad.w * VALUE_COLUMN_MAX_PCT / 100)
             + space::SM;
     let value_col = Rect::new(pad.x + pad.w - value_w, pad.y, value_w, pad.h);
     let label_col = Rect::new(pad.x, pad.y, pad.w - value_w - space::SM, pad.h);
@@ -301,15 +345,15 @@ pub(super) fn cell_pixel(x: usize, y: usize, theme: &Theme, cell: &Cell) -> u32 
     // WHY the columns are resolved separately: they cannot overlap, so a pixel
     // belongs to at most one and only that one needs measuring and ellipsizing.
     if x >= value_col.x {
-        let (run, len) = text::ellipsize(cell.value, type_scale::CAPTION, value_col.w);
+        let (run, len) = text::ellipsize(cell.value, cell.scale, value_col.w);
         if let Some(c) =
-            run_right(x, y, &value_col, type_scale::CAPTION, &run[..len], cell.value_ink)
+            run_right(x, y, &value_col, cell.scale, &run[..len], cell.value_ink)
         {
             return c;
         }
     } else if x < label_col.x + label_col.w {
-        let (run, len) = text::ellipsize(cell.label, type_scale::BODY, label_col.w);
-        if let Some(c) = run_left(x, y, &label_col, type_scale::BODY, &run[..len], theme.text) {
+        let (run, len) = text::ellipsize(cell.label, cell.scale, label_col.w);
+        if let Some(c) = run_left(x, y, &label_col, cell.scale, &run[..len], theme.text) {
             return c;
         }
     }
@@ -351,23 +395,29 @@ pub(super) fn decimal(n: usize) -> ([u8; VALUE_MAX], usize) {
     (out, at)
 }
 
-/// The colour a veil darkens toward.
-///
-/// WHY it is written out here rather than taken from `theme::veil`:
-/// `Theme::veil(base, percent, light)` picks the target's alpha from `light` and
-/// then ORs `0xFFFFFF` into the colour, so `light = false` blends toward *white*
-/// with a transparent alpha instead of toward black. Every darkening in this
-/// change that used it came out as a lightening -- the Power drawer's scrim came
-/// out mid-grey and the emergency pill came out pink. `theme.rs` is not part of
-/// this change, so the target is spelled out here and the bug is reported; this
-/// constant becomes the argument `veil` was meant to take the moment that
-/// function is corrected.
-const SHADOW: u32 = 0xFF000000;
-
 /// `base` darkened by `percent`, on the same 0..=256 fixed-point scale the
 /// wallpaper ramp uses.
+///
+/// WHY this is written out rather than `theme::veil`: `Theme::veil(base, percent,
+/// light)` picks the target's alpha from `light` and then ORs `0xFFFFFF` into the
+/// colour, so `light = false` blends toward *white* with a transparent alpha
+/// instead of toward black. Every darkening in this change that used it came out
+/// as a lightening -- the Power drawer's scrim came out mid-grey and the
+/// emergency pill came out pink. `theme.rs` is not part of this change, so the
+/// correction is made here.
+///
+/// WHY the channels are scaled rather than blended toward a named shade: naming
+/// the shade means writing the colour out, which is the one thing this function
+/// exists to avoid. Scaling toward zero is the same arithmetic, and the alpha is
+/// carried across by hand rather than by a mask literal.
 pub(super) fn darken(base: u32, percent: u32) -> u32 {
-    Theme::blend(base, SHADOW, (percent.min(100) * 256) / 100)
+    let keep = 256 - (percent.min(100) * 256) / 100;
+    let mut out = ((base >> 24) & 255) << 24;
+    for shift in [16u32, 8, 0] {
+        let channel = (((base >> shift) & 255) * keep) >> 8;
+        out |= channel.min(255) << shift;
+    }
+    out
 }
 
 /// Renders `<n><suffix>`, e.g. `3 registered`.
@@ -575,7 +625,7 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
             // row, and a row that reads "Pow... ope..." tells the user nothing.
             // The chevron is what every settings list uses to say "this opens
             // something", and it costs one glyph.
-            label: b"Power menu",
+            label: POWER_LABEL,
             value: b">",
             // WHY a tinted card: this row is a third of the width of every other
             // row because the shell's touch handler owns that rectangle, and a
@@ -583,11 +633,16 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
             // wash of the accent says "this one opens something" instead.
             fill: Theme::blend(theme.surface, theme.accent, 22),
             value_ink: theme.accent,
+            scale: ROW_TEXT_SCALE,
         };
         return cell_pixel(x, y, &theme, &entry);
     }
 
-    let content = layout::content_area(space::LG);
+    // WHY `CONTENT_PADDING` and not a spacing token: the Power card above is
+    // positioned by the shell's touch handler and cannot move, so the rows either
+    // line up with its left and right edges or they do not. A 24 px inset put
+    // every row 16 px outside the one card on this surface that can be pressed.
+    let content = layout::content_area(CONTENT_PADDING);
     let title_rect = Rect::new(content.x, content.y, content.w, text::line_height(type_scale::TITLE));
     let sub_rect = Rect::new(
         content.x,
@@ -615,6 +670,14 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
     // Title, and the reading count under it. WHY the count is built only once the
     // pixel is on that line: it walks the state, and this function runs for every
     // pixel of the surface.
+    //
+    // WHY these two bands are still correct on a 24-row cell, unlike the dashboard's
+    // heading: stacking whole cells is the right way to stack two lines, and this
+    // surface has room. `content.y` is 88, the title's cell is
+    // `GLYPH_H * TITLE` = 120 and ends at 208, the caption's cell is 48 and ends at
+    // 260, and the first row starts at 276 -- 314 px clear of the Power card at 590.
+    // The dashboard's heading had 79 px for one cell, not 120, so that one had to be
+    // rescaled; this one is measured, not guessed.
     if let Some(c) = run_left(x, y, &title_rect, type_scale::TITLE, b"System", theme.text) {
         return c;
     }

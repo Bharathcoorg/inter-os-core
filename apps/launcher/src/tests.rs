@@ -330,19 +330,46 @@ fn themes_declare_the_same_metrics() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn measurement_matches_the_rasteriser_cell_math() {
-    // The rasteriser advances GLYPH_W * scale per character; measurement must agree
-    // or every centred label drifts.
-for scale in [1usize, 2, 3, 5, 12] {
+fn measurement_is_the_sum_of_real_advances() {
+    // WHY this replaced a fixed-cell assertion: the face is proportional, so a
+    // glyph's width depends on the character. The old test asserted
+    // `measure == len * GLYPH_W * scale`, which is only true for a monospaced face
+    // and would have passed while the launcher mis-rendered every centred label.
+    // This asserts the invariant the rasteriser actually depends on, and that it is
+    // genuinely proportional rather than accidentally cell-width.
+    for scale in [1usize, 2, 3] {
         for len in 0..12usize {
             let s: [u8; 16] = [b'x'; 16];
+            let expected: usize = s[..len].iter().map(|&c| tm::advance(c, scale)).sum();
             assert_eq!(
                 tm::measure(&s[..len], scale),
-                len * tm::GLYPH_W * scale,
-                "measure disagrees with the rasteriser at scale {}",
+                expected,
+                "measure must equal the sum of advances at scale {}",
                 scale
             );
         }
+    }
+
+    // And the face must actually be proportional: 'i' is narrower than 'W'.
+    assert!(
+        tm::measure(b"W", 1) > tm::measure(b"i", 1),
+        "a proportional face must give W a wider advance than i"
+    );
+}
+
+#[test]
+fn digits_are_tabular_so_a_clock_does_not_jitter() {
+    // WHY: the lock screen clock is built from digits. If they were proportional
+    // the whole time string would shift horizontally on every tick, which reads as
+    // a rendering fault rather than a clock.
+    let base = tm::measure(b"0", 2);
+    for d in b"123456789" {
+        assert_eq!(
+            tm::measure(&[*d], 2),
+            base,
+            "digit {} must share the zero advance",
+            *d as char
+        );
     }
 }
 
@@ -372,16 +399,26 @@ fn wrapping_never_exceeds_the_line_budget() {
             let (breaks, n) = tm::wrap(text, 1, max_width, max_lines);
             assert!(n <= max_lines, "produced {} lines for a budget of {}", n, max_lines);
             assert!(n <= breaks.len(), "line count must fit the fixed array");
-            let per_line = (max_width / tm::GLYPH_W).max(1);
+            // WHY measured width and not a character count: with a proportional
+            // face a character-count budget says nothing about whether the line
+            // fits. This is the invariant that actually matters, and it is
+            // stronger than the proxy it replaces.
+            let mut start = 0usize;
             for i in 0..n {
+                let end = start + breaks[i];
+                let w = tm::measure(&text[start..end], 1);
                 assert!(
-                    breaks[i] <= per_line,
-                    "line {} is {} chars, over the {} the width allows",
+                    w <= max_width,
+                    "line {} measures {} px, over the {} px budget",
                     i,
-                    breaks[i],
-                    per_line
+                    w,
+                    max_width
                 );
                 assert!(breaks[i] > 0, "an empty line would render as a gap");
+                start = end;
+                if start < text.len() && text[start] == b' ' {
+                    start += 1;
+                }
             }
         }
     }
@@ -413,8 +450,14 @@ fn wrapping_a_zero_budget_is_safe() {
 #[test]
 fn ellipsize_appends_an_ellipsis_when_it_cuts() {
     let (out, n) = tm::ellipsize(b"Settings and configuration", 2, 160);
-    assert_eq!(n, tm::measure(&out[..n], 2) / (tm::GLYPH_W * 2));
-    assert!(n <= 160 / (tm::GLYPH_W * 2), "result must fit the width");
+    // WHY measured width: the old assertion divided the result length by the cell
+    // width, which is meaningless for a proportional face. What must hold is that
+    // the result actually fits the space it was given.
+    assert!(
+        tm::measure(&out[..n], 2) <= 160,
+        "ellipsized result is {} px wide, over the 160 px budget",
+        tm::measure(&out[..n], 2)
+    );
     assert_eq!(&out[n - 3..n], b"...", "a cut string ends in an ellipsis");
 }
 

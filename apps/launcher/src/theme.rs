@@ -48,17 +48,27 @@ pub mod space {
 
 /// Type scale. `FONT_8X8` rasterises at integer multiples only, so these are the
 /// permitted multipliers rather than arbitrary point sizes.
+///
+/// WHY these are not the old values: they were sized for an 8x8 cell, where cap
+/// height was 8 x scale. The proportional face has `CAP_HEIGHT = 17`, so the same
+/// multiplier produced roughly double the intended cap height -- the dashboard
+/// heading needed a 120px cell in a 79px gap and was painted over. Each rung is now
+/// chosen from a cap height appropriate to its job.
+///
+/// `BADGE` and `CAPTION` coincide at 1 because a 17-row cap cannot express a
+/// smaller integer step. That is the honest consequence of the face, and it is why
+/// badges must be told apart from captions by ink weight rather than by size.
 pub mod type_scale {
     /// Badge glyphs inside icons, e.g. "TEL".
     pub const BADGE: usize = 1;
     /// Dense metadata: status-bar clock, captions, chip labels.
-    pub const CAPTION: usize = 2;
-    /// Body copy and list labels.
-    pub const BODY: usize = 3;
-    /// Section headings.
-    pub const TITLE: usize = 5;
-    /// The lock-screen clock and other display type.
-    pub const DISPLAY: usize = 12;
+    pub const CAPTION: usize = 1;
+    /// Body copy and list labels. One 24px cell fits a 52px row.
+    pub const BODY: usize = 2;
+    /// Section headings. 3 keeps a 72px cell inside a 79px gap.
+    pub const TITLE: usize = 3;
+    /// The lock-screen clock and other display type. 107.9 / 17 = 6.35 -> 6.
+    pub const DISPLAY: usize = 6;
 }
 
 /// Logical surface size. Every layout computation is expressed against this.

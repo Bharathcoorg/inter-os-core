@@ -1,44 +1,84 @@
-//! Lock Screen: wallpaper, clock, controls and unlock affordances.
+﻿//! Lock Screen: wallpaper, clock, controls and unlock affordances.
 //!
 //! WHY `pub` on the date constants: `LauncherState::date_line` and the RTC parser
 //! live in the crate root and size themselves from the same abbreviation tables
 //! this screen draws with, so the two must not diverge.
 //!
-//! Geometry and colour come from `crate::theme` and `crate::layout`, never from
-//! literals local to this file.
+//! Geometry and colour come from `launcher::theme`, `launcher::layout` and
+//! `launcher::text`, never from literals local to this file.
+//!
+//! WHY the type scales below are derived rather than read from `theme::type_scale`:
+//! they are this surface's own measured cap heights, and the reference panel fixes
+//! them independently of the shell's ladder. Each is
+//! `round(measured_cap_px / font::CAP_HEIGHT)`, so the derivation survives the next
+//! typeface: only `CAP_HEIGHT` changes, and the arithmetic below is re-run against
+//! it. `theme::type_scale` still sizes every other surface in the shell.
 
 use crate::{get_stock_background_pixel, test_text, LauncherState, H, W};
-use launcher::theme::*;
 use launcher::layout::{self, Rect};
+use launcher::text;
+use launcher::theme::*;
+
+/// WHY `Theme::LIGHT`: this is the one surface in the shell whose backdrop is a
+/// photograph rather than a page, and the reference's is a bright sky over a
+/// near-black ridge. Every piece of ink below is chosen from the pixel behind it
+/// instead of from the palette, so the surface reads if the wallpaper ramp is ever
+/// swapped for the dark one.
+const THEME: Theme = Theme::LIGHT;
 
 const LOCK_REF_W: usize = 173;
 /// Reference display height, in reference panel pixels.
 const LOCK_REF_H: usize = 427;
 /// Longest string the lock surface can render (`Www, DD Mmm`).
 pub const LOCK_DATE_TEXT_LEN: usize = 11;
-/// Bottom edge of the status-bar glyph band, reference y 15.
+/// Bottom edge of the status-bar band.
 const LOCK_STATUS_BAND: usize = 56;
-/// Status-bar clock origin, reference x 13 / y 9. Cap height measured at 7 px.
+
+/// Status-bar clock. Reference origin x 13 / y 9, cap height measured at 7 px on
+/// the panel.
+///
+/// WHY scale 1: 7 px measured cap over this face's 17-row cap is 7 / 17 = 0.41,
+/// which rounds to 0 -- and a zero scale rasterises nothing at all. The panel's
+/// reference rows are not device pixels, so the measurement is carried across at
+/// the surface's own vertical ratio, 1440 / 427 = 3.372: 7 x 3.372 = 23.6 device
+/// px, and 23.6 / 17 = 1.39, which is scale 1. Scale 2 would be 34 px, 44% over.
 const LOCK_STATUS_TIME_X: usize = 54;
-const LOCK_STATUS_TIME_Y: usize = 30;
-const LOCK_STATUS_TIME_SCALE: usize = 3;
+const LOCK_STATUS_TIME_Y: usize = 27;
+const LOCK_STATUS_TIME_SCALE: usize = 1;
 /// Left edge shared by the date line and the clock, reference x 18.
 const LOCK_CONTENT_X: usize = 75;
-/// Date line cap top, reference y 47. Cap height measured at 9 px.
-const LOCK_DATE_Y: usize = 158;
-const LOCK_DATE_SCALE: usize = 4;
-/// Clock cap top, reference y 68. Cap height measured at 32 px: the single
+/// Date line. Reference cap top y 47, cap height measured at 9 px.
+///
+/// WHY scale 2: 9 x 3.372 = 30.3 device px, and 30.3 / 17 = 1.78, which rounds to
+/// 2. Scale 1 is 17 px (44% under), scale 3 is 51 px (68% over).
+///
+/// WHY `_Y` is 6 px above the old 158: the reference position is a *cap top*, and
+/// this face puts cap ink `font::CAP_TOP * scale` below the cell origin, so
+/// 3 x 2 = 6. Under the previous fixed 8 px cell the ink began on the cell's first
+/// row, which is why the same number used to work.
+const LOCK_DATE_Y: usize = 152;
+const LOCK_DATE_SCALE: usize = 2;
+/// The clock. Reference cap top y 68, cap height measured at 32 px: the single
 /// largest type element on the surface.
-/// WHY 12 and not 14: the panel's clock is 109 x 32 panel px, i.e. 454 x 108
-/// logical. FONT_8X8 is 1.68x less condensed than the panel's typeface, so no
-/// scale matches both axes. Scale 12 lands the string's right edge on logical
-/// x 531 against the panel's 529, which is the measurement a reader can check
-/// against the design; the cost is a cap height of 84 against 108.
-const LOCK_CLOCK_Y: usize = 229;
-const LOCK_CLOCK_SCALE: usize = 12;
-/// Unlock hint cap top, reference y 341, horizontally centred.
-const LOCK_HINT_Y: usize = 1150;
-const LOCK_HINT_SCALE: usize = 3;
+///
+/// WHY scale 6: 32 x 3.372 = 107.9 device px, and 107.9 / 17 = 6.35, which rounds
+/// to 6. Scale 5 is 85 px (21% under), scale 7 is 119 px (10% over).
+///
+/// WHY this is a local constant and not `type_scale::DISPLAY`: the panel's clock
+/// is 107.9 px of cap on this surface, while `DISPLAY` has to serve every screen
+/// in the shell, and the two do not agree. See the note on `type_scale` below.
+const LOCK_CLOCK_Y: usize = 211;
+const LOCK_CLOCK_SCALE: usize = 6;
+/// Unlock hint. Reference cap top y 341, horizontally centred.
+///
+/// WHY scale 1: the panel sets the hint at the same size as the status-bar clock,
+/// and preserving that relationship preserves both cap heights, so the hint takes
+/// the clock's answer -- 23.6 device px of cap, 23.6 / 17 = 1.39, scale 1.
+///
+/// WHY `_Y` is 3 px above the old 1150: same cap-top correction as the date line,
+/// 3 x 1 = 3.
+const LOCK_HINT_Y: usize = 1147;
+const LOCK_HINT_SCALE: usize = 1;
 const LOCK_HINT_TEXT: &[u8] = b"Swipe up to unlock";
 /// Padlock glyph centre, reference x 87 / y 328; body 7 x 13 panel px.
 const LOCK_PADLOCK_CX: i32 = 362;
@@ -53,25 +93,41 @@ pub const LOCK_BTN_R: i32 = 73;
 pub const LOCK_PILL_W: usize = 241;
 pub const LOCK_PILL_H: usize = 9;
 pub const LOCK_PILL_Y: usize = 1421;
+/// What the torch control says about itself.
+const LOCK_NA_TEXT: &[u8] = b"N/A";
 
-/// Ink for everything the panel draws over its bright upper sky: the status bar,
-/// the date line and the clock. Measured stroke colour #0B0B0B.
-const LOCK_INK: u32 = 0xFF0B0B0B;
-/// Paper for everything the panel draws over its near-black foreground: the
-/// padlock, the unlock hint and the home indicator. Measured #F9F9F8.
-const LOCK_PAPER: u32 = 0xFFF9F9F8;
-/// The panel's circular controls are translucent, not opaque. Their body
-/// measures #545658 over a #1A1613 ridge and their rim #6C6B6D, which solves
-/// to a 27% and a 36% white veil respectively.
-const LOCK_BTN_FILL_ALPHA: u32 = 68;
-const LOCK_BTN_RIM_ALPHA: u32 = 92;
-/// Camera glyph inside its control, measured #FAFBFA.
-const LOCK_BTN_GLYPH: u32 = 0xFFFAFBFA;
-/// WHY dimmer: the torch control must not read as operable, because no torch
-/// hardware, capability or syscall exists on this platform.
-const LOCK_BTN_GLYPH_DIM: u32 = 0xFFB4B6B7;
-/// The figure standing on the near ridge, reference x 25..36 / y 213..247.
-const LOCK_FIGURE_INK: u32 = 0xFF16110F;
+/// WHY the two veils are percentages and not channel arithmetic: the panel's
+/// translucent control solves to a 27% and a 36% white veil, and those two
+/// numbers were written out by hand in three places, which is how one of them
+/// drifted to 30%. `Theme::veil` is the helper that exists for exactly this.
+const LOCK_BTN_FILL_PERCENT: u32 = 27;
+const LOCK_BTN_RIM_PERCENT: u32 = 36;
+
+/// Reference height at which the sky's light ends and the valley begins: the mean
+/// of [`LOCK_SKYLINE_FAR`].
+///
+/// WHY this is data and the colours are not: the old ramp was twenty-eight
+/// measured colours written into three stop tables, and a theme change could not
+/// reach them because they were not theme fields. A height is the one thing the
+/// theme cannot express -- it says how far down the frame the light changes
+/// character -- so the heights stayed and the colours became derivations.
+const LOCK_HORIZON_Y: usize = 156;
+/// Reference height of the mist band that sits behind the foreground rock.
+const LOCK_MIST_Y: usize = 244;
+/// Reference height at which the foreground has finished fading to the ramp's
+/// darkest stop.
+///
+/// WHY the foreground reaches its darkest stop early and holds it: the previous
+/// ramp spent the whole bottom third of the frame easing from the mist tone to the
+/// rock tone, so the middle of that band sat at about `#8D9193` -- mid-grey. That
+/// is a backdrop the padlock cannot be read against, and `ink_on` resolving per
+/// pixel from it is how the padlock came out dark navy on grey. The reference
+/// reaches full rock by reference row 300 and stays there.
+const LOCK_ROCK_Y: usize = 330;
+/// How far the sun lifts the right of the frame, as a fraction of the 0..=256
+/// ramp scale, out of a full `across` of 256 at the right edge.
+const LOCK_ACROSS_SPAN: u32 = 256;
+const LOCK_ACROSS_PERCENT: u32 = 26;
 
 pub const LOCK_WEEKDAY_ABBR: [&[u8; 3]; 7] = [
     b"Sun", b"Mon", b"Tue", b"Wed", b"Thu", b"Fri", b"Sat",
@@ -81,62 +137,18 @@ pub const LOCK_MONTH_ABBR: [&[u8; 3]; 12] = [
 ];
 
 // --- Wallpaper -------------------------------------------------------------
-// The panel's wallpaper is a photograph. It is rebuilt here as three measured
-// tonal bands separated by two silhouettes traced directly out of the panel
-// image: for every one of the 173 panel columns, the first row at which
-// luminance falls below a threshold and stays below it. The two thresholds
-// (far ridge at 180, foreground rock at 55) give the two skylines, and each is
-// kept at one entry per panel column so no traced peak is pooled away.
+// The panel's wallpaper is a photograph. It is rebuilt here as three tonal bands
+// separated by two silhouettes traced directly out of the panel image: for every
+// one of the 173 panel columns, the first row at which luminance falls below a
+// threshold and stays below it. The two thresholds (far ridge at 180, foreground
+// rock at 55) give the two skylines, and each is kept at one entry per panel
+// column so no traced peak is pooled away.
 //
-// Each colour ramp is a stop table of (reference y, left colour, right colour).
-// The panel's light comes from the upper right at the horizon and from the
-// upper left at the top of the frame, which is why the two ends differ.
-
-// Sky above the far ridge. Sampled on the panel at x 20 and x 172.
-const LOCK_SKY_STOPS: [(u16, [u32; 3], [u32; 3]); 9] = [
-    (0, [0xC6, 0xCF, 0xD6], [0xB8, 0xC1, 0xC5]),
-    (30, [0xC8, 0xCE, 0xD3], [0xBB, 0xC1, 0xCA]),
-    (55, [0xCC, 0xD0, 0xD5], [0xC8, 0xC9, 0xCF]),
-    (75, [0xD2, 0xD2, 0xD5], [0xD8, 0xD1, 0xD3]),
-    (95, [0xDC, 0xDA, 0xDA], [0xED, 0xE0, 0xD8]),
-    (115, [0xE2, 0xDB, 0xD9], [0xFC, 0xF1, 0xE8]),
-    (135, [0xEE, 0xE3, 0xDC], [0xFB, 0xF0, 0xE5]),
-    (150, [0xF4, 0xE6, 0xDD], [0xFD, 0xF2, 0xE6]),
-    (160, [0xF6, 0xE7, 0xDC], [0xFE, 0xF5, 0xEA]),
-];
-
-// Everything below the far ridge and above the foreground: the mountain body
-// falling into shadow, the mist band, and the warm fog that sits behind the
-// foreground rock. WHY one ramp and not one per layer: the panel's tonal bands
-// are horizontal, so splitting the ramp at a second silhouette only introduced
-// a visible seam at that silhouette. Left and right values are the panel's
-// measured split at the same heights; the right side is lit by the sun that
-// glows at the panel's upper-right horizon.
-const LOCK_VALLEY_STOPS: [(u16, [u32; 3], [u32; 3]); 12] = [
-    (145, [0x8D, 0x97, 0xA3], [0x98, 0xA1, 0xAC]),
-    (160, [0x7A, 0x84, 0x92], [0x8A, 0x93, 0x9F]),
-    (175, [0x62, 0x6D, 0x7C], [0x7A, 0x85, 0x93]),
-    (190, [0x53, 0x5F, 0x6B], [0x86, 0x8E, 0x9B]),
-    (205, [0x77, 0x7D, 0x87], [0x97, 0x96, 0x9D]),
-    (220, [0x7C, 0x7D, 0x83], [0xAA, 0xA0, 0xA1]),
-    (235, [0x93, 0x87, 0x84], [0xBD, 0xAF, 0xAD]),
-    (248, [0xA7, 0x9B, 0x98], [0xD2, 0xC6, 0xC2]),
-    (258, [0x6B, 0x5F, 0x5B], [0x9E, 0x92, 0x90]),
-    (275, [0x4B, 0x43, 0x40], [0x6E, 0x66, 0x68]),
-    (290, [0x2E, 0x28, 0x25], [0x42, 0x3C, 0x3E]),
-    (313, [0x1E, 0x1A, 0x19], [0x2A, 0x25, 0x23]),
-];
-
-// Foreground rock below the near ridge: near-black, warming to the bottom.
-const LOCK_FOREGROUND_STOPS: [(u16, [u32; 3], [u32; 3]); 7] = [
-    (240, [0x3A, 0x33, 0x33], [0x4A, 0x43, 0x42]),
-    (258, [0x2C, 0x25, 0x23], [0x38, 0x30, 0x2E]),
-    (278, [0x1E, 0x19, 0x17], [0x26, 0x20, 0x1E]),
-    (300, [0x1E, 0x1A, 0x19], [0x24, 0x1F, 0x1E]),
-    (330, [0x16, 0x14, 0x14], [0x1A, 0x17, 0x16]),
-    (370, [0x0F, 0x0E, 0x0E], [0x12, 0x11, 0x11]),
-    (426, [0x0B, 0x0B, 0x0D], [0x0D, 0x0D, 0x0F]),
-];
+// WHY the skylines are the only measured data left on this screen: they say
+// *where the mountains are*, which is a property of the photograph and not of
+// the visual language. Everything else -- every colour, every gap -- is derived
+// from the theme, so swapping `Theme::LIGHT` for `Theme::DARK` restains the
+// whole backdrop without touching a single number below.
 
 /// Far skyline, one entry per reference column (173 wide): the first row at
 /// which that column's luminance falls below 180 and stays below it. Stored
@@ -187,52 +199,25 @@ const LOCK_SKYLINE_NEAR: [u16; LOCK_REF_W] = [
     311, 312, 312, 313, 313,
 ];
 
-#[inline(always)]
-fn lock_lerp_ch(a: u32, b: u32, t: u32) -> u32 {
-    if b >= a {
-        a + (b - a) * t / 256
-    } else {
-        a - (a - b) * t / 256
-    }
+/// The brightest tone in the wallpaper: the sky where the sun sits behind the far
+/// ridge. WHY the ramp's top stop lifted toward the light rather than a measured
+/// cream: a warm horizon cannot be named by any field the theme has, and lifting
+/// the top stop toward its own ink is the one derivation that cannot go stale
+/// when the ramp is retuned.
+fn lock_horizon(theme: &Theme) -> u32 {
+    Theme::blend(theme.wallpaper_top, theme.ink_on_dark, 150)
 }
 
-#[inline(always)]
-fn lock_mix3(a: [u32; 3], b: [u32; 3], t: u32) -> [u32; 3] {
-    [
-        lock_lerp_ch(a[0], b[0], t),
-        lock_lerp_ch(a[1], b[1], t),
-        lock_lerp_ch(a[2], b[2], t),
-    ]
+/// The mountain body just under the far skyline: the ramp's mid stop pulled
+/// toward its bottom stop, because rock in shadow is darker than the sky on it.
+fn lock_shadow(theme: &Theme) -> u32 {
+    Theme::blend(theme.wallpaper_mid, theme.wallpaper_bottom, 80)
 }
 
-#[inline(always)]
-fn lock_argb(c: [u32; 3]) -> u32 {
-    0xFF00_0000 | (c[0] << 16) | (c[1] << 8) | c[2]
-}
-
-/// Samples a stop table at `rel`, returning the left and right colour for that
-/// height so the caller can apply the panel's horizontal light gradient.
-fn lock_pair_at(stops: &[(u16, [u32; 3], [u32; 3])], rel: u16) -> ([u32; 3], [u32; 3]) {
-    let mut i = 0usize;
-    while i + 2 < stops.len() && rel >= stops[i + 1].0 {
-        i += 1;
-    }
-    let a = stops[i];
-    let b = stops[i + 1];
-    let span = b.0.saturating_sub(a.0).max(1) as u32;
-    let f = ((rel.saturating_sub(a.0) as u32) * 256 / span).min(256);
-    (
-        [
-            lock_lerp_ch(a.1[0], b.1[0], f),
-            lock_lerp_ch(a.1[1], b.1[1], f),
-            lock_lerp_ch(a.1[2], b.1[2], f),
-        ],
-        [
-            lock_lerp_ch(a.2[0], b.2[0], f),
-            lock_lerp_ch(a.2[1], b.2[1], f),
-            lock_lerp_ch(a.2[2], b.2[2], f),
-        ],
-    )
+/// The mist band behind the foreground: the same mid stop lifted toward the
+/// light, because mist scatters it.
+fn lock_mist(theme: &Theme) -> u32 {
+    Theme::blend(theme.wallpaper_mid, theme.ink_on_dark, 150)
 }
 
 /// The lone figure standing on the near ridge, traced at panel x 25..36 and
@@ -263,12 +248,34 @@ fn lock_figure_hit(x: usize, y: usize) -> bool {
     false
 }
 
+/// The figure's ink, pulled most of the way to the ramp's darkest stop.
+///
+/// WHY derived from the pixel behind it rather than a colour of its own: it is a
+/// silhouette, and its whole job is to be the darkest thing in the valley. A
+/// fixed near-black stops being a silhouette the moment the ramp is retuned,
+/// while a figure derived from its own backdrop cannot.
+fn lock_figure_ink(theme: &Theme, behind: u32) -> u32 {
+    Theme::blend(behind, theme.wallpaper_bottom, 190)
+}
+
+/// The two ramp fractions for one pixel, folded into a single interpolation.
+///
+/// WHY they are folded instead of blended one after the other: the vertical ramp
+/// and the horizontal sun lift both move a pixel toward the bright end of the same
+/// band, so together they are one interpolation at `1 - (1 - v)(1 - s)` rather
+/// than two blends in sequence. This is the only full-bleed layer on the surface,
+/// so it runs once for each of the surface's 1,036,800 pixels, and folding takes
+/// it from six channel blends per pixel to two.
+fn lock_band(vertical: u32, across: u32) -> u32 {
+    vertical
+        .saturating_add(across)
+        .saturating_sub((vertical.saturating_mul(across)) >> 8)
+}
+
 /// Full-bleed wallpaper layer for the lock surface.
-fn lock_wallpaper_pixel(x: usize, y: usize) -> u32 {
+fn lock_wallpaper_pixel(theme: &Theme, x: usize, y: usize) -> u32 {
     let fx = (x * LOCK_REF_W) / W;
     let rel = ((y * LOCK_REF_H) / H) as u16;
-    let t = (((fx * 256) / (LOCK_REF_W - 1)).min(256)) as u32;
-
     let far = LOCK_SKYLINE_FAR[fx];
     let mut near = LOCK_SKYLINE_NEAR[fx];
     // WHY the clamp: the two skylines are traced at two independent
@@ -278,64 +285,84 @@ fn lock_wallpaper_pixel(x: usize, y: usize) -> u32 {
         near = far + 3;
     }
 
+    // WHY a fraction of the ramp rather than a second measured column per band:
+    // the panel's left/right split was one photograph's exposure, and the theme
+    // owns the exposure now. The sun is behind the far ridge on the right, so
+    // every band is lifted toward its own bright end as the frame goes right.
+    let across = ((fx * LOCK_ACROSS_SPAN as usize) / (LOCK_REF_W - 1)).min(256) as u32
+        * LOCK_ACROSS_PERCENT
+        / 256;
+
     if rel < far {
-        let (l, r) = lock_pair_at(&LOCK_SKY_STOPS, rel);
-        lock_argb(lock_mix3(l, r, t))
+        let vertical = rel as u32 * 256 / LOCK_HORIZON_Y as u32;
+        Theme::blend(
+            theme.wallpaper_top,
+            lock_horizon(theme),
+            lock_band(vertical, across),
+        )
     } else if rel < near {
+        // WHY saturating: the traced far ridge is not level. Its columns run from
+        // reference row 145 to 167, so a pixel can be below the ridge and above
+        // the nominal horizon height at the same time, and a plain subtraction
+        // there underflows -- which is a panic on this build, not a wrong colour.
+        let vertical = rel.saturating_sub(LOCK_HORIZON_Y as u16) as u32 * 256
+            / (LOCK_MIST_Y - LOCK_HORIZON_Y) as u32;
+        let base = Theme::blend(
+            lock_shadow(theme),
+            lock_mist(theme),
+            lock_band(vertical, across),
+        );
         if lock_figure_hit(x, y) {
-            return LOCK_FIGURE_INK;
+            return lock_figure_ink(theme, base);
         }
-        let (l, r) = lock_pair_at(&LOCK_VALLEY_STOPS, rel);
-        lock_argb(lock_mix3(l, r, t))
+        base
+    } else if (rel as usize) < LOCK_ROCK_Y {
+        let vertical = rel.saturating_sub(LOCK_MIST_Y as u16) as u32 * 256
+            / (LOCK_ROCK_Y - LOCK_MIST_Y) as u32;
+        Theme::blend(
+            lock_mist(theme),
+            theme.wallpaper_bottom,
+            lock_band(vertical, across),
+        )
     } else {
-        let (l, r) = lock_pair_at(&LOCK_FOREGROUND_STOPS, rel);
-        lock_argb(lock_mix3(l, r, t))
+        // The near rock itself: the ramp's darkest stop, held, with only the sun
+        // lift on top. WHY it is the dark stop and not a blend toward it: below
+        // the rock line the reference is not a gradient at all, it is the shadowed
+        // face of the foreground ridge.
+        Theme::blend(theme.wallpaper_bottom, lock_mist(theme), across)
     }
 }
 
-/// Status-bar signal, wifi and battery glyphs. Measured on the panel at
-/// x 132..177 and y 9..15, which is logical x 549..736 and y 30..51.
-fn lock_status_icons_pixel(x: usize, y: usize) -> Option<u32> {
-    let px = x as i32;
-    let py = y as i32;
-    // Four ascending signal bars: x 549..612, top edges stepping 42/38/34/30.
-    for i in 0..4i32 {
-        let x0 = 549 + i * 17;
-        if px >= x0 && px < x0 + 12 {
-            if py >= 30 + i * 4 && py < 52 {
-                return Some(LOCK_INK);
-            }
-        }
-    }
-    // Wifi: two arcs and a dot about a centre on the bottom edge of the band.
-    let wdx = px - 650;
-    let wdy = py - 51;
-    let wd2 = wdx * wdx + wdy * wdy;
-    if wd2 <= 400 && wdy <= -4 && (wd2 >= 230 || wd2 <= 20) {
-        return Some(LOCK_INK);
-    }
-    if wd2 <= 160 && wd2 >= 80 && wdy <= -3 {
-        return Some(LOCK_INK);
-    }
-    // Battery: 37 x 22 outline flush with the right edge, as measured, with the
-    // positive terminal nub in its final column.
-    if (682..=718).contains(&px) && (30..=51).contains(&py) {
-        let rim = px <= 683 || px >= 717 || py <= 31 || py >= 50;
-        if rim {
-            return Some(LOCK_INK);
-        }
-        if (685..=715).contains(&px) && (33..=48).contains(&py) {
-            return Some(SUCCESS_EMERALD);
-        }
-        return None;
-    }
-    if px == 719 && (37..=44).contains(&py) {
-        return Some(LOCK_INK);
-    }
-    None
+/// Ink for the status bar, the date line and the clock.
+///
+/// WHY the theme's own wallpaper ink: those three sit on the wallpaper's upper
+/// region, which is the bright end of that ramp by construction, so this is the
+/// ink the theme pairs with the region and it moves with the ramp instead of
+/// having to be re-measured whenever the ramp changes.
+fn lock_ink(theme: &Theme) -> u32 {
+    theme.wallpaper_ink
 }
 
-fn lock_padlock_pixel(x: usize, y: usize) -> Option<u32> {
+/// Ink for anything drawn over the wallpaper's dark end: the padlock, the unlock
+/// hint, the home indicator and the two control glyphs.
+///
+/// WHY it is resolved per pixel from what is behind it: the foreground follows
+/// `wallpaper_bottom`, and a fixed paper white is unreadable the moment that stop
+/// is a light colour.
+fn lock_paper(theme: &Theme, backdrop: u32) -> u32 {
+    layout::ink_on(theme, backdrop)
+}
+
+/// The glyph ink of a control that cannot be operated.
+///
+/// WHY the operable ink pulled back toward the disc instead of a dimmer colour of
+/// its own: the torch's shape is the camera's shape, so the only thing that says
+/// "this does nothing here" is that it does not come forward.
+fn lock_glyph_dim(theme: &Theme, disc: u32) -> u32 {
+    Theme::blend(lock_paper(theme, disc), disc, 90)
+}
+
+fn lock_padlock_pixel(theme: &Theme, backdrop: u32, x: usize, y: usize) -> Option<u32> {
     let dx = (x as i32) - LOCK_PADLOCK_CX;
     let dy = (y as i32) - LOCK_PADLOCK_CY;
     // body, with the two lower corners rounded off
@@ -346,70 +373,51 @@ fn lock_padlock_pixel(x: usize, y: usize) -> Option<u32> {
                 return None;
             }
         }
-        return Some(LOCK_PAPER);
+        return Some(lock_paper(theme, backdrop));
     }
     // shackle: the upper half of an annulus
     if (-19..0).contains(&dy) {
         let d2 = dx * dx + dy * dy;
         if d2 <= 13 * 13 && d2 >= 7 * 7 {
-            return Some(LOCK_PAPER);
+            return Some(lock_paper(theme, backdrop));
         }
     }
     None
 }
 
-/// Torch pictogram, drawn in the dimmed unavailable style: the panel's torch is
-/// a wide tapered head over a narrow handle with a small dark vent in the head.
-fn lock_torch_glyph_pixel(x: usize, y: usize) -> Option<u32> {
+/// Torch pictogram: the panel's torch is a wide tapered head over a narrow
+/// handle with a small dark vent in the head. Returns `true` for a pixel of the
+/// glyph; the caller supplies the ink, which for this control is the dimmed one.
+fn lock_torch_glyph_pixel(x: usize, y: usize) -> bool {
     let dx = (x as i32) - LOCK_BTN_L_CX;
     let dy = (y as i32) - (LOCK_BTN_CY - 2);
     let body = (dx >= -9 && dx <= 9 && dy >= -26 && dy < -14)
         || (dx >= -6 && dx <= 6 && dy >= -14 && dy < -5)
         || (dx >= -4 && dx <= 4 && dy >= -5 && dy < 22);
     if !body {
-        return None;
+        return false;
     }
     // the vent in the head is a hole, so the disc shows through it
-    if dx >= -2 && dx <= 2 && dy >= -19 && dy < -15 {
-        return None;
-    }
-    Some(LOCK_BTN_GLYPH_DIM)
+    !(dx >= -2 && dx <= 2 && dy >= -19 && dy < -15)
 }
 
-/// Camera pictogram.
-fn lock_camera_glyph_pixel(x: usize, y: usize) -> Option<u32> {
+/// Camera pictogram. Returns `true` for a pixel of the glyph; the caller supplies
+/// the ink, which differs between the two controls.
+fn lock_camera_glyph_pixel(x: usize, y: usize) -> bool {
     let dx = (x as i32) - LOCK_BTN_R_CX;
     let dy = (y as i32) - LOCK_BTN_CY;
     // body outline
     if dx.abs() <= 25 && (-12..=15).contains(&dy) {
         let rim = dx.abs() >= 22 || dy <= -9 || dy >= 12;
         if rim {
-            return Some(LOCK_BTN_GLYPH);
+            return true;
         }
         // lens ring
         let l2 = dx * dx + dy * dy;
-        if (81..=144).contains(&l2) {
-            return Some(LOCK_BTN_GLYPH);
-        }
-        return None;
+        return (81..=144).contains(&l2);
     }
     // viewfinder hump on the top edge
-    if (-19..=-13).contains(&dy) && dx >= -8 && dx <= 8 {
-        return Some(LOCK_BTN_GLYPH);
-    }
-    None
-}
-
-/// Composites `alpha` (0..=255) of white over `bg`.
-#[inline(always)]
-fn lock_veil(bg: u32, alpha: u32) -> u32 {
-    let r = ((bg >> 16) & 0xFF) as u32;
-    let g = ((bg >> 8) & 0xFF) as u32;
-    let b = (bg & 0xFF) as u32;
-    let nr = r + (255 - r) * alpha / 255;
-    let ng = g + (255 - g) * alpha / 255;
-    let nb = b + (255 - b) * alpha / 255;
-    0xFF00_0000 | (nr.min(255) << 16) | (ng.min(255) << 8) | nb.min(255)
+    (-19..=-13).contains(&dy) && (-8..=8).contains(&dx)
 }
 
 /// One circular control: a translucent veil over the wallpaper, with a slightly
@@ -421,24 +429,67 @@ fn lock_button_disc(x: usize, y: usize, cx: i32, bg: u32) -> Option<u32> {
     if d2 > LOCK_BTN_R * LOCK_BTN_R {
         return None;
     }
-    let alpha = if d2 > (LOCK_BTN_R - 2) * (LOCK_BTN_R - 2) {
-        LOCK_BTN_RIM_ALPHA
+    let percent = if d2 > (LOCK_BTN_R - 2) * (LOCK_BTN_R - 2) {
+        LOCK_BTN_RIM_PERCENT
     } else {
-        LOCK_BTN_FILL_ALPHA
+        LOCK_BTN_FILL_PERCENT
     };
-    Some(lock_veil(bg, alpha))
+    Some(Theme::veil(bg, percent, true))
+}
+
+/// Where the torch control's unavailability label starts.
+///
+/// WHY an origin and not a box: `test_text` is handed the glyph run's top-left and
+/// rasterises downward from it, so handing it a box whose height came from
+/// `text::line_height` puts the run a whole line-height above where it belongs.
+/// `line_height(CAPTION)` is 48 px on this face and the rasteriser draws 16, so
+/// the earlier version of this function drew "N/A" *inside* the torch disc, where
+/// the disc's own veil hid all but its last row.
+///
+/// WHY the position is still derived rather than typed: the label has to clear the
+/// control it belongs to and the home indicator, and both of those move when the
+/// disc moves or the type scale changes. It is centred on the disc, held one step
+/// below it, capped one step above the indicator, and clamped inside the surface,
+/// so it cannot end up off the edge or under the indicator whichever of them grows.
+///
+/// WHY the width it centres on is `text::measure` and not the rasteriser's cell:
+/// `measure` is the documented metric every other surface centres with, and it is
+/// the one that has to be right when the rasteriser is migrated onto the same
+/// metrics. Until then a label can sit a few pixels left of centre, which is
+/// visible but harmless; a label placed from a private metric would be exactly
+/// wrong the moment the face changed.
+fn lock_na_origin() -> (usize, usize) {
+    let w = text::measure(LOCK_NA_TEXT, type_scale::CAPTION);
+    let centre = LOCK_BTN_L_CX as usize;
+    let x = centre
+        .saturating_sub(w / 2)
+        .clamp(space::SM, W.saturating_sub(w + space::SM));
+    let y = (LOCK_BTN_CY as usize + LOCK_BTN_R as usize + space::MD)
+        .min(LOCK_PILL_Y.saturating_sub(space::MD));
+    (x, y)
 }
 
 pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
+    let theme = THEME;
+
     // 1. Full-bleed wallpaper.
-    let color = lock_wallpaper_pixel(x, y);
+    let color = lock_wallpaper_pixel(&theme, x, y);
 
     // 2. Status bar. The panel draws its status glyphs in near-black because
     //    they sit on the bright upper sky.
+    //
+    //    WHY the clock and nothing else: the panel also draws four signal bars, a
+    //    wifi arc and a filled battery, and this shell can measure none of the
+    //    three. The kernel's wireless manager starts with `hardware_present:
+    //    false`, there is no SIM, and the fuel gauge reports
+    //    `telemetry_valid: false`, so four filled bars and a solid battery are
+    //    three claims the platform cannot support -- and they are on the surface
+    //    a user reads as the state of their device, before they have touched
+    //    anything. The rest of the shell already draws its status bars this way.
     if y < LOCK_STATUS_BAND {
         if state.clock_source_ok
             && y >= LOCK_STATUS_TIME_Y
-            && y < LOCK_STATUS_TIME_Y + 8 * LOCK_STATUS_TIME_SCALE
+            && y < LOCK_STATUS_TIME_Y + text::line_height(LOCK_STATUS_TIME_SCALE)
         {
             if let Some(c) = test_text(
                 x,
@@ -447,13 +498,10 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 LOCK_STATUS_TIME_Y,
                 LOCK_STATUS_TIME_SCALE,
                 &state.clock_time,
-                LOCK_INK,
+                lock_ink(&theme),
             ) {
                 return c;
             }
-        }
-        if let Some(c) = lock_status_icons_pixel(x, y) {
-            return c;
         }
     }
 
@@ -462,77 +510,114 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     //    clock are the two largest pieces of type on the surface, so a
     //    placeholder there would read as a real time. With no source they are
     //    simply absent, and the layout they occupy is unchanged.
+    //
+    //    WHY every one of these is inside an explicit box. `test_text` already
+    //    rejects a pixel outside the run's own extent, but it does that *after*
+    //    measuring the run, and this function runs for all 1,036,800 pixels of the
+    //    surface. Testing `x >= LOCK_CONTENT_X && y >= LOCK_CLOCK_Y` with no upper
+    //    bound -- which is what this file used to do -- hands four fifths of the
+    //    screen to the text path on every frame, which is most of why a full
+    //    render of this surface costs what it does on the emulated build.
     if state.clock_source_ok {
-        if let Some(c) = test_text(
-            x,
-            y,
+        let date = Rect::new(
             LOCK_CONTENT_X,
             LOCK_DATE_Y,
-            LOCK_DATE_SCALE,
-            &state.date_line,
-            LOCK_INK,
-        ) {
-            return c;
+            text::measure(&state.date_line, LOCK_DATE_SCALE),
+            text::line_height(LOCK_DATE_SCALE),
+        );
+        if date.contains(x, y) {
+            if let Some(c) = test_text(
+                x,
+                y,
+                date.x,
+                date.y,
+                LOCK_DATE_SCALE,
+                &state.date_line,
+                lock_ink(&theme),
+            ) {
+                return c;
+            }
         }
 
-        // 4. The clock itself.
-        if let Some(c) = test_text(
-            x,
-            y,
+// 4. The clock itself.
+        let clock = Rect::new(
             LOCK_CONTENT_X,
             LOCK_CLOCK_Y,
-            LOCK_CLOCK_SCALE,
-            &state.clock_time,
-            LOCK_INK,
-        ) {
-            return c;
+            text::measure(&state.clock_time, LOCK_CLOCK_SCALE),
+            text::line_height(LOCK_CLOCK_SCALE),
+        );
+        if clock.contains(x, y) {
+            if let Some(c) = test_text(
+                x,
+                y,
+                clock.x,
+                clock.y,
+                LOCK_CLOCK_SCALE,
+                &state.clock_time,
+                lock_ink(&theme),
+            ) {
+                return c;
+            }
         }
     }
 
     // 5. Closed padlock above the centred unlock hint, both on the near-black
     //    foreground where the panel draws them in paper white.
-    if let Some(c) = lock_padlock_pixel(x, y) {
+    if let Some(c) = lock_padlock_pixel(&theme, color, x, y) {
         return c;
     }
-    // WHY the origin is derived from the string length: the panel centres the
+    // WHY the origin is derived from the measured string: the panel centres the
     // hint on the surface, so the x origin must follow the measured text.
-    let hint_w = LOCK_HINT_TEXT.len() * 8 * LOCK_HINT_SCALE;
-    let hint_x = (W.saturating_sub(hint_w)) / 2;
-    if let Some(c) = test_text(
-        x,
-        y,
-        hint_x,
+    let hint = Rect::new(
+        text::center_x(LOCK_HINT_TEXT, LOCK_HINT_SCALE, W),
         LOCK_HINT_Y,
-        LOCK_HINT_SCALE,
-        LOCK_HINT_TEXT,
-        LOCK_PAPER,
-    ) {
-        return c;
+        text::measure(LOCK_HINT_TEXT, LOCK_HINT_SCALE),
+        text::line_height(LOCK_HINT_SCALE),
+    );
+    if hint.contains(x, y) {
+        if let Some(c) = test_text(
+            x,
+            y,
+            hint.x,
+            hint.y,
+            LOCK_HINT_SCALE,
+            LOCK_HINT_TEXT,
+            lock_paper(&theme, color),
+        ) {
+            return c;
+        }
     }
 
     // 6. Torch control on the left. WHY dimmed and labelled: there is no torch
     //    hardware, no torch capability and no torch syscall on this platform, so
     //    the affordance must not read as operable.
-    if let Some(c) = lock_button_disc(x, y, LOCK_BTN_L_CX, color) {
-        if let Some(g) = lock_torch_glyph_pixel(x, y) {
-            return g;
+    if let Some(disc) = lock_button_disc(x, y, LOCK_BTN_L_CX, color) {
+        if lock_torch_glyph_pixel(x, y) {
+            return lock_glyph_dim(&theme, disc);
         }
-        return c;
+        return disc;
     }
 
     // 7. Camera control on the right.
-    if let Some(c) = lock_button_disc(x, y, LOCK_BTN_R_CX, color) {
-        if let Some(g) = lock_camera_glyph_pixel(x, y) {
-            return g;
+    if let Some(disc) = lock_button_disc(x, y, LOCK_BTN_R_CX, color) {
+        if lock_camera_glyph_pixel(x, y) {
+            return lock_paper(&theme, disc);
         }
-        return c;
+        return disc;
     }
 
     // 8. "N/A" under the torch disc, stating the absence rather than implying a
     //    control that does nothing.
-    let na_w = 3 * 8 * 2;
-    let na_x = (LOCK_BTN_L_CX as i32 - (na_w as i32) / 2).max(0) as usize;
-    if let Some(c) = test_text(x, y, na_x, 1387, 2, b"N/A", LOCK_BTN_GLYPH_DIM) {
+    let (na_x, na_y) = lock_na_origin();
+    if let Some(c) = test_text(
+        x,
+        y,
+        na_x,
+        na_y,
+        type_scale::CAPTION,
+        LOCK_NA_TEXT,
+        lock_paper(&theme, color),
+    ) {
         return c;
     }
 
@@ -543,7 +628,7 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         && x >= pill_x
         && x < pill_x + LOCK_PILL_W
     {
-        return LOCK_PAPER;
+        return lock_paper(&theme, color);
     }
 
     // 10. Wallpaper. The stock background remains the token this surface falls
