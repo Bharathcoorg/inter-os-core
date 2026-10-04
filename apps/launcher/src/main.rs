@@ -2,7 +2,6 @@
 #![no_main]
 
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicUsize, Ordering};
 use interos_std as std;
 
 use launcher::theme::*;
@@ -14,155 +13,9 @@ use launcher::{layout, text};
 mod screens;
 use screens::*;
 
-/// The logical design space: the coordinate system every renderer in
-/// `screens/**` draws in, and the coordinate system the kernel's touch pipeline
-/// delivers (`kernel/src/serial.rs` bounds console touches to 720x1440).
-///
-/// WHY these are not the surface size: they describe the *layout*. The buffer
-/// the display service actually allocated is a separate fact, measured at
-/// runtime -- see [`SURFACE_W`]. Every render path below walks the real buffer
-/// and maps it into this space, so a buffer that is not this shape still gets
-/// completely written.
 const W: usize = SCREEN_WIDTH;
 const H: usize = SCREEN_HEIGHT;
 const CHUNK: usize = 4096;
-
-/// Largest pixel count the kernel accepts in one `surface_write`
-/// (`kernel/src/syscall/mod.rs` rejects anything above 4096), so `CHUNK` is
-/// already the largest legal batch and the syscall count per frame is
-/// `ceil(surface_pixels / 4096)` regardless of how this is tuned.
-const MAX_WRITE_PIXELS: usize = 4096;
-
-/// Colour written to surface pixels that fall outside the logical design space.
-///
-/// WHY opaque: every renderer in `screens/**` ends in a fallback that returns a
-/// fully opaque theme colour, and the kernel composites surfaces source-over
-/// onto a slate backdrop. A zero here would be read as transparent and whatever
-/// the previous frame held would show through -- the exact failure this change
-/// exists to remove.
-///
-/// WHY not a theme colour: this region is not part of any screen's design, so
-/// painting it like one would make an out-of-viewport strip look like intended
-/// chrome.
-const OUTSIDE_VIEWPORT: u32 = 0xFF000000;
-
-/// Real surface width in pixels, as reported by the display service.
-///
-/// WHY read back rather than assumed: `surface_create` is the only place that
-/// knows how big the buffer is, and the render loop's contract is to fill every
-/// pixel of *that* buffer. Treating `W` as the buffer size is the defect this
-/// replaces -- when the two differ, the unwritten remainder keeps the previous
-/// frame and the user sees two screens at once.
-///
-/// WHY a pair of atomics rather than one struct in a static: they are published
-/// once, before the first render, and only read afterwards, so there is no torn
-/// state to guard against; storing them separately keeps this usable from the
-/// `no_std` shell without a lock on the render path.
-static SURFACE_W: AtomicUsize = AtomicUsize::new(0);
-static SURFACE_H: AtomicUsize = AtomicUsize::new(0);
-
-/// Real surface width, falling back to the design width if the query never ran.
-fn surface_w() -> usize {
-    let v = SURFACE_W.load(Ordering::Relaxed);
-    if v == 0 { W } else { v }
-}
-
-/// Real surface height, falling back to the design height if the query never ran.
-fn surface_h() -> usize {
-    let v = SURFACE_H.load(Ordering::Relaxed);
-    if v == 0 { H } else { v }
-}
-
-/// Reads the launcher's own surface geometry out of the compositor window
-/// registry and publishes it.
-///
-/// `window_list` answers one line per live surface in the form
-/// `id|owner|name|x|y|width|height|z|opacity|visible|input` (see
-/// `sys_window_list` in `kernel/src/syscall/mod.rs`). This is the device
-/// reporting its own buffer, not a constant being re-read.
-///
-/// WHY this is preferred over assuming `W` x `H`: the two can legitimately
-/// differ -- the kernel already accepts any surface up to 1080x2400 that a
-/// client asks for, and the launcher is one client among several. Whichever
-/// answer comes back is what the loop will fill, so there is no path on which
-/// the loop and the buffer can disagree about their size.
-///
-/// WHY the fallback keeps the design size rather than refusing to start: if the
-/// registry read is refused there is no measurement to use, and painting
-/// `W` x `H` into a buffer that was requested at `W` x `H` is correct in that
-/// case. It is reported on the console so the difference is never silent.
-fn publish_surface_geometry(id: u32) {
-    let mut buf = [0u8; 4096];
-    let mut found: Option<(usize, usize)> = None;
-
-    if let Ok(n) = std::window_list(&mut buf) {
-        for line in buf[..n].split(|b| *b == b'\n') {
-            if line.is_empty() {
-                continue;
-            }
-            let mut fields: [u32; 11] = [0; 11];
-            let mut count = 0usize;
-            let mut malformed = false;
-            for field in line.split(|b| *b == b'|') {
-                if count == fields.len() {
-                    malformed = true;
-                    break;
-                }
-                let text = core::str::from_utf8(field).unwrap_or("");
-                match text.trim().parse::<u32>() {
-                    Ok(v) => fields[count] = v,
-                    // Field 2 is the owning task's name, which is not a number.
-                    Err(_) => fields[count] = 0,
-                }
-                count += 1;
-            }
-            if malformed || count < 8 {
-                continue;
-            }
-            // Fields: id, owner, name, x, y, width, height, z, opacity, visible, input
-            if fields[0] != id {
-                continue;
-            }
-            found = Some((fields[5] as usize, fields[6] as usize));
-            break;
-        }
-    }
-
-    match found {
-        Some((w, h)) if w > 0 && h > 0 => {
-            SURFACE_W.store(w, Ordering::Relaxed);
-            SURFACE_H.store(h, Ordering::Relaxed);
-            log_line(&format_args!(
-                "[LAUNCHER] Display service reports surface {} as {}x{}; design space is {}x{}.",
-                id, w, h, W, H
-            ));
-        }
-        _ => {
-            // WHY fall back rather than refuse to paint: with no measurement the
-            // only size known to both sides is the size that was requested, and
-            // that is what the buffer was created at. Reported, never silent.
-            log_line(&format_args!(
-                "[LAUNCHER] Surface {} geometry unavailable from the display service; painting the requested {}x{}.",
-                id, W, H
-            ));
-        }
-    }
-}
-
-/// Formats one diagnostic line and emits it through the serial console.
-///
-/// WHY a helper rather than `format!`: the shell is `#![no_std]` with no heap and
-/// `std::log` takes a `&str`, so anything with a number in it has to be built in
-/// a fixed buffer first.
-fn log_line(args: &core::fmt::Arguments<'_>) {
-    use core::fmt::Write;
-    let mut line = LineBuf::<224>::new();
-    let _ = line.write_fmt(*args);
-    std::log(0, line.as_str()).ok();
-}
-
-/// Number of frames whose cost has already been reported on the console.
-static FRAMES_MEASURED: AtomicUsize = AtomicUsize::new(0);
 
 // -----------------------------------------------------------------------------
 // Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')
@@ -691,82 +544,36 @@ fn lerp_argb(from: u32, to: u32, t: usize) -> u32 {
 
 
 #[inline(never)]
-/// Draws one complete frame into `surface`, filling every pixel the display
-/// service allocated.
-///
-/// WHY it walks the real buffer and not `W * H`: the buffer is what the display
-/// service allocated, and only the display service knows its size. Iterating the
-/// design space instead meant that any surface larger than the design space kept
-/// whatever the previous frame had written in its margin, which is how the home
-/// screen ended up drawn on top of the lock screen's mountains -- the unwritten
-/// pixels were never transparency, they were simply never touched.
-///
-/// WHY surface pixels outside the design space get a named opaque colour rather
-/// than being skipped: "skipped" and "already correct" are indistinguishable
-/// afterwards. Every pixel of the buffer now receives a value this frame chose.
 fn render_view(surface: u32, state: &LauncherState) {
-    let sw = surface_w();
-    let sh = surface_h();
-    let total = sw * sh;
-    let started = std::get_ticks(1).unwrap_or(0);
     let mut chunk = [0u32; CHUNK];
-    let mut offset = 0usize;
-    let mut written = 0usize;
-    let mut refused = 0usize;
-
+    let total = W * H;
+    let mut offset = 0;
     while offset < total {
-        // WHY the heartbeat is still per batch: it is this shell's liveness
-        // signal to the service supervisor, and the supervisor restarts a task
-        // that stops beating. Measured cost is in the frame timing below.
         let _ = std::service_heartbeat(10);
-        // WHY clamp rather than trust CHUNK: the kernel refuses any batch above
-        // 4096 pixels, and a refusal would drop the tail of the frame silently.
-        let count = (total - offset).min(MAX_WRITE_PIXELS);
-        let mut x = offset % sw;
-        let mut y = offset / sw;
+        let count = (total - offset).min(CHUNK);
+        let mut x = offset % W;
+        let mut y = offset / W;
         for i in 0..count {
-            // WHY the bounds test: the renderers in `screens/**` all index their
-            // own layout with these coordinates, so they are only meaningful
-            // inside the design space. Outside it they would compute garbage.
-            chunk[i] = if x < W && y < H {
-                match state.current_view {
-                    ViewMode::HomeScreen => get_home_color(x, y, state),
-                    ViewMode::ActivitySpace => get_activity_color(x, y, state),
-                    ViewMode::QuickControls => get_quick_controls_color(x, y, state),
-                    ViewMode::SystemSpace => get_system_space_color(x, y, state),
-                    ViewMode::LockScreen => get_lock_screen_color(x, y, state),
-                    ViewMode::PowerMenu => get_power_menu_color(x, y, state),
-                    ViewMode::AppDrawer => get_app_drawer_color(x, y, state),
-                    ViewMode::Notifications => get_notifications_color(x, y, state),
-                    ViewMode::LiveWidgets => get_live_widgets_color(x, y, state),
-                }
-            } else {
-                OUTSIDE_VIEWPORT
+            chunk[i] = match state.current_view {
+                ViewMode::HomeScreen => get_home_color(x, y, state),
+                ViewMode::ActivitySpace => get_activity_color(x, y, state),
+                ViewMode::QuickControls => get_quick_controls_color(x, y, state),
+                ViewMode::SystemSpace => get_system_space_color(x, y, state),
+                ViewMode::LockScreen => get_lock_screen_color(x, y, state),
+                ViewMode::PowerMenu => get_power_menu_color(x, y, state),
+                ViewMode::AppDrawer => get_app_drawer_color(x, y, state),
+                ViewMode::Notifications => get_notifications_color(x, y, state),
+                ViewMode::LiveWidgets => get_live_widgets_color(x, y, state),
             };
             x += 1;
-            if x == sw {
+            if x == W {
                 x = 0;
                 y += 1;
             }
         }
-        // WHY the result is tallied: an ignored `Err` here is indistinguishable
-        // from a successful write until the pixels visibly fail to change.
-        match std::surface_write(4, surface, offset, &chunk[..count]) {
-            Ok(n) => written += n,
-            Err(_) => refused += 1,
-        }
+        let _ = std::surface_write(4, surface, offset, &chunk[..count]);
         offset += count;
     }
-
-    // Frame cost and coverage, reported rather than assumed.
-    //
-    // WHY this runs after the per-view completion lines rather than before: the
-    // lifecycle harnesses wait on exact substrings of those lines and read the
-    // lines that follow, so the established sequence is left byte-identical and
-    // these diagnostics are purely additive at the end of the frame.
-    let elapsed = std::get_ticks(1).unwrap_or(0).saturating_sub(started);
-    let measured = FRAMES_MEASURED.fetch_add(1, Ordering::Relaxed);
-
     match state.current_view {
         ViewMode::HomeScreen => {
             std::log(
@@ -832,55 +639,20 @@ fn render_view(surface: u32, state: &LauncherState) {
             .ok();
         }
     }
-
-    // Frame cost and coverage, reported rather than assumed.
-    //
-    // WHY an incomplete frame is always reported while a complete one is only
-    // reported a few times: a short frame is the defect this whole change exists
-    // to rule out, so it must never be silent, whereas a timing line on every
-    // frame would flood the serial console the lifecycle harness also reads.
-    if written != total || refused > 0 {
-        log_line(&format_args!(
-            "[LAUNCHER] INCOMPLETE FRAME: {} of {} surface pixels accepted, {} batches refused, {} ticks.",
-            written, total, refused, elapsed
-        ));
-    } else if measured < 3 {
-        log_line(&format_args!(
-            "[LAUNCHER] Frame complete: {} surface pixels in {} ticks across {} batches.",
-            written,
-            elapsed,
-            (total + MAX_WRITE_PIXELS - 1) / MAX_WRITE_PIXELS
-        ));
-    }
 }
 
-/// Repaints the 96-pixel status strip without redrawing the whole surface.
-///
-/// WHY the stride is the real surface width and not `W`: `surface_write` offsets
-/// are in surface pixels, so the row length used to turn an offset back into
-/// `(x, y)` has to be the buffer's own width. Using the design width here wrote
-/// every row to the wrong place whenever the two differed, which is the same
-/// class of bug as the one `render_view` had.
 fn render_header(surface: u32) {
-    let sw = surface_w();
-    let rows = 96usize.min(surface_h());
-    let total = sw * rows;
     let mut chunk = [0u32; CHUNK];
+    let total = W * 96;
     let mut offset = 0;
     let ticks = std::get_ticks(1).unwrap_or(0);
     let activity = ((ticks % 600) as usize).min(W - 48);
     while offset < total {
-        let count = (total - offset).min(MAX_WRITE_PIXELS);
-        let mut x = offset % sw;
-        let mut y = offset / sw;
+        let count = (total - offset).min(CHUNK);
+        let mut x = offset % W;
+        let mut y = offset / W;
         for i in 0..count {
-            // WHY the viewport test: the strip is design-space artwork. Surface
-            // columns beyond the design width belong to no screen, so they get
-            // the same deliberate out-of-viewport fill `render_view` uses rather
-            // than a stretched status bar.
-            if x >= W {
-                chunk[i] = OUTSIDE_VIEWPORT;
-            } else if y >= 94 {
+            if y >= 94 {
                 chunk[i] = ACCENT_SKY;
             } else if y >= 40 && y < 44 && x >= 24 && x < 24 + activity {
                 chunk[i] = ACCENT_SKY;
@@ -888,7 +660,7 @@ fn render_header(surface: u32) {
                 chunk[i] = SURFACE_DARK;
             }
             x += 1;
-            if x == sw {
+            if x == W {
                 x = 0;
                 y += 1;
             }
@@ -898,20 +670,6 @@ fn render_header(surface: u32) {
     }
 }
 
-/// Maps a touch to the package the shell should launch, in logical coordinates.
-///
-/// WHY the incoming coordinates need no rescaling here, and this is the whole
-/// shell's touch contract: the kernel's input pipeline publishes touches already
-/// in the logical portrait space -- `kernel/src/serial.rs` bounds the console
-/// touch verbs to 720x1440 and `post_touch_event` forwards them unchanged -- and
-/// every hit box in this file and in `screens/**` is measured in that same
-/// space. The scanout-to-surface fit is real, but it belongs to the display
-/// service (`DrmKmsController::composite` owns the 720x1440-into-1280x720
-/// placement) and it is not the space touches arrive in. Applying a viewport
-/// transform at this point would double-map every tap and break the
-/// touch-based assertions in `tests/test_interactive_lifecycle.py` and
-/// `tests/test_lifecycle_stress.py`, which tap logical coordinates such as
-/// `(360, 25)`, `(360, 1330)` and `(72, 1330)`.
 fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<&'a str> {
     let x = x as usize;
     let y = y as usize;
@@ -1004,10 +762,6 @@ pub extern "C" fn _start() -> ! {
     std::log(0, "[LAUNCHER USERSPACE] Live launcher online.").ok();
 
     std::log(0, "[LAUNCHER] Step 1: Allocating desktop surface (z=0)...").ok();
-    // WHY the design size is what is *requested*: it is the coordinate system the
-    // renderers draw in, so it is the only size that can be asked for. What the
-    // display service actually grants is measured immediately afterwards, and
-    // the render loop walks that measurement rather than this request.
     let surface = match std::surface_create(4, W as u32, H as u32, 0) {
         Ok(id) => {
             std::log(0, "[LAUNCHER] Step 2: Surface created successfully.").ok();
@@ -1018,10 +772,6 @@ pub extern "C" fn _start() -> ! {
             std::exit_with_code(1)
         }
     };
-
-    // Read the granted geometry back before anything is drawn, so the first frame
-    // is already sized to the real buffer rather than to the request.
-    publish_surface_geometry(surface);
 
     let mut state = LauncherState::new();
     refresh_package_catalog(&mut state);
