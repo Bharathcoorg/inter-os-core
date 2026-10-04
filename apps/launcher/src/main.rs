@@ -23,10 +23,19 @@ const CHUNK: usize = 4096;
 /// Rasterises a run of text at `(x, y)` against an origin, returning the ink
 /// colour if this pixel is covered.
 ///
-/// WHY this delegates rather than indexing a table: the face is proportional, so
-/// a glyph's width depends on its character and `char_w = GLYPH_W * scale` no
-/// longer holds. The old body computed the character index as `(x - x0) / char_w`,
-/// which silently mis-renders every string once advances differ per glyph.
+/// WHY this does its own pen walk rather than delegating to
+/// `launcher::text::rasterize_pixel`: a screen calls this several times *per
+/// pixel*, so this is one of the hottest paths in the shell. Delegating put three
+/// call frames (`test_text` -> `rasterize_pixel` -> `font::run_pixel`) between the
+/// pixel and the glyph bitmap, and the shell is compiled at `opt-level = 0`, where
+/// nothing is inlined and every one of those frames is a real call. Walking the
+/// pen here keeps the output bit-identical -- `font::run_pixel` is this same
+/// algorithm with no edge trimming -- and removes two calls from the inner loop.
+///
+/// WHY the face is proportional: a glyph's width depends on its character, so
+/// `char_w = GLYPH_W * scale` does not hold and the pen has to be walked. The old
+/// body computed the character index as `(x - x0) / char_w`, which silently
+/// mis-renders every string once advances differ per glyph.
 #[inline(always)]
 fn test_text(
     x: usize,
@@ -37,7 +46,35 @@ fn test_text(
     text: &[u8],
     color: u32,
 ) -> Option<u32> {
-    launcher::text::rasterize_pixel(x, y, x0, y0, scale, text, color)
+    if scale == 0 || text.is_empty() {
+        return None;
+    }
+    // WHY these two rejects come first, in this order: the row band is a single
+    // compare and turns away most of a full screen's worth of calls immediately,
+    // and neither test touches the pen. Walking the advances is the expensive
+    // part and must happen only for a pixel already inside the run's line box.
+    let dy = y.checked_sub(y0)?;
+    let row = dy / scale;
+    if row >= launcher::font::GLYPH_H {
+        return None;
+    }
+    let dx = x.checked_sub(x0)?;
+    let mut pen = 0usize;
+    for &c in text {
+        let adv = launcher::font::advance_of(c, false) * scale;
+        if dx < pen + adv {
+            // WHY `col` needs no bounds test: `dx - pen < adv <= GLYPH_W * scale`,
+            // so `col < GLYPH_W`, and `row < GLYPH_H` was checked above.
+            let col = (dx - pen) / scale;
+            return if launcher::font::pixel(c, col, row, false) {
+                Some(color)
+            } else {
+                None
+            };
+        }
+        pen += adv;
+    }
+    None
 }
 
 // -----------------------------------------------------------------------------
@@ -487,24 +524,31 @@ fn package_id_at(state: &LauncherState, index: usize) -> Option<&str> {
 /// A vertical gradient rather than a flat fill, so the large white clock and the
 /// translucent control overlays keep a readable contrast ratio across the full
 /// height of the screen.
+///
+/// WHY this is spelled out rather than delegated to a general two-endpoint
+/// interpolator: the lock screen calls this for every pixel of the surface, and
+/// `W`, `H` and both endpoint colours are compile-time constants, so only `y`
+/// varies down a column.
+///
+/// WHY the difference is signed: the lock ramp darkens downwards, so
+/// `to - from` is negative on every channel. `Theme::blend`'s
+/// `(a * inv + b * t) >> 8` form would be algebraically the same average but
+/// floors where this truncates, which differs by one in the low bit on a
+/// darkening channel. `i32` keeps the division truncating toward zero exactly as
+/// the `i64` this replaced did, so the ramp is bit-identical.
 fn get_stock_background_pixel(_x: usize, y: usize) -> u32 {
-    let span = H.saturating_sub(1).max(1);
-    let t = (y.min(H.saturating_sub(1)) * 256) / span;
-    lerp_argb(LOCK_BACKDROP_TOP, LOCK_BACKDROP_BOTTOM, t)
-}
-
-/// Interpolates two packed ARGB colours. `t` runs from 0 to 256 inclusive.
-fn lerp_argb(from: u32, to: u32, t: usize) -> u32 {
-    let t = t.min(256) as i64;
-    let mut out = 0u32;
-    for shift in [24u32, 16, 8, 0] {
-        let a = ((from >> shift) & 0xFF) as i64;
-        let b = ((to >> shift) & 0xFF) as i64;
-        // Signed arithmetic: `b` may be smaller than `a`.
-        let v = a + ((b - a) * t) / 256;
-        out |= (v as u32 & 0xFF) << shift;
-    }
-    out
+    let from = LOCK_BACKDROP_TOP;
+    let to = LOCK_BACKDROP_BOTTOM;
+    let t = (y.min(H - 1) * 256 / (H - 1)) as i32;
+    // WHY unrolled: this runs per pixel and the shell is built unoptimized, so a
+    // four-iteration array loop costs a real loop with a bounds check and an
+    // induction variable per pixel. Four explicit channels is the same arithmetic.
+    let ch = |shift: u32| -> u32 {
+        let a = ((from >> shift) & 0xFF) as i32;
+        let b = ((to >> shift) & 0xFF) as i32;
+        ((a + (b - a) * t / 256) as u32 & 0xFF) << shift
+    };
+    ch(24) | ch(16) | ch(8) | ch(0)
 }
 
 // ============================================================================
@@ -534,17 +578,62 @@ fn lerp_argb(from: u32, to: u32, t: usize) -> u32 {
 
 /// The closed padlock that sits above the unlock hint.
 
-#[inline(never)]
+/// The per-pixel colour function for one view.
+///
+/// WHY a function pointer instead of a `match` inside the pixel loop: the old loop
+/// re-dispatched all nine variants for every one of the 1,036,800 pixels. The view
+/// cannot change while a frame is being drawn, so the choice is loop-invariant and
+/// the match was pure overhead -- and at `opt-level = 0` it was a nine-way
+/// comparison chain per pixel rather than a jump table.
+type ScreenPixelFn = fn(usize, usize, &LauncherState) -> u32;
 
-#[inline(never)]
+/// Resolves a view to its renderer once, before any pixel is drawn.
+fn screen_renderer(view: ViewMode) -> ScreenPixelFn {
+    match view {
+        ViewMode::HomeScreen => get_home_color,
+        ViewMode::ActivitySpace => get_activity_color,
+        ViewMode::QuickControls => get_quick_controls_color,
+        ViewMode::SystemSpace => get_system_space_color,
+        ViewMode::LockScreen => get_lock_screen_color,
+        ViewMode::PowerMenu => get_power_menu_color,
+        ViewMode::AppDrawer => get_app_drawer_color,
+        ViewMode::Notifications => get_notifications_color,
+        ViewMode::LiveWidgets => get_live_widgets_color,
+    }
+}
 
-#[inline(never)]
+/// Guest ticks between two points, saturating at 0 if the counter wrapped.
+fn tick_delta(a: Option<u64>, b: Option<u64>) -> u64 {
+    match (a, b) {
+        (Some(a), Some(b)) => b.wrapping_sub(a),
+        _ => 0,
+    }
+}
 
-#[inline(never)]
-
+/// Emits `[LAUNCHER] FRAME ticks=<n>`.
+///
+/// WHY this exists at all: "the frame is slow" is not actionable without a number
+/// per frame, and the harness keys on fixed substrings, so the number has to go
+/// somewhere that cannot break them. It is emitted *after* the matched line and
+/// costs two `get_ticks` per frame.
+///
+/// WHY ticks rather than milliseconds: there is no clock in a `no_std` shell but
+/// `get_ticks`, and the guest PIT only advances when the emulated CPU takes the
+/// timer interrupt, so under TCG a tick is a poor proxy for wall time. Read it as
+/// "guest CPU consumed", which is the part that scales.
+fn log_frame_ticks(ticks: u64) {
+    let mut line = LineBuf::<64>::new();
+    {
+        use core::fmt::Write;
+        let _ = write!(line, "[LAUNCHER] FRAME ticks={}", ticks);
+    }
+    std::log(0, line.as_str()).ok();
+}
 
 #[inline(never)]
 fn render_view(surface: u32, state: &LauncherState) {
+    let draw = screen_renderer(state.current_view);
+    let frame_start = std::get_ticks(1).ok();
     let mut chunk = [0u32; CHUNK];
     let total = W * H;
     let mut offset = 0;
@@ -554,17 +643,7 @@ fn render_view(surface: u32, state: &LauncherState) {
         let mut x = offset % W;
         let mut y = offset / W;
         for i in 0..count {
-            chunk[i] = match state.current_view {
-                ViewMode::HomeScreen => get_home_color(x, y, state),
-                ViewMode::ActivitySpace => get_activity_color(x, y, state),
-                ViewMode::QuickControls => get_quick_controls_color(x, y, state),
-                ViewMode::SystemSpace => get_system_space_color(x, y, state),
-                ViewMode::LockScreen => get_lock_screen_color(x, y, state),
-                ViewMode::PowerMenu => get_power_menu_color(x, y, state),
-                ViewMode::AppDrawer => get_app_drawer_color(x, y, state),
-                ViewMode::Notifications => get_notifications_color(x, y, state),
-                ViewMode::LiveWidgets => get_live_widgets_color(x, y, state),
-            };
+            chunk[i] = draw(x, y, state);
             x += 1;
             if x == W {
                 x = 0;
@@ -639,6 +718,10 @@ fn render_view(surface: u32, state: &LauncherState) {
             .ok();
         }
     }
+    // WHY here and not earlier: the eight substrings above are what the lifecycle
+    // harness matches, and a diagnostic emitted before them could only ever make a
+    // slow frame look like a fast one.
+    log_frame_ticks(tick_delta(frame_start, std::get_ticks(1).ok()));
 }
 
 fn render_header(surface: u32) {
