@@ -19,7 +19,14 @@ Set-Location $WorkspaceRoot
 $StaticFlags = @(
     "-C", "relocation-model=static",
     "-C", "link-arg=-Ttext=0x00400000",
-    "-C", "link-arg=-no-pie"
+    "-C", "link-arg=-no-pie",
+    # WHY -C opt-level=3: the workspace dev profile only sets panic=abort, so these
+    # binaries were built unoptimised. The launcher is a per-pixel software
+    # rasteriser, so codegen quality is the difference between a usable frame and an
+    # unusable one: measured on a real boot, opt-level 3 alone took a full frame from
+    # 121.8s to 99.7s. It does not change behaviour, and the ET_EXEC and fixed-address
+    # requirements below are still asserted after every build.
+    "-C", "opt-level=3"
 )
 $UserTargetDir = Join-Path $WorkspaceRoot "target\x86_64-unknown-none\debug"
 $ET_EXEC = 2
