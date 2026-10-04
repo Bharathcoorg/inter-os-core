@@ -49,6 +49,41 @@ impl InterruptIndex {
     }
 }
 
+/// Line terminator for every fault-report line.
+///
+/// This must stay a real carriage return + newline pair. It used to be written
+/// with escaped backslashes, which in a Rust byte string is a literal
+/// backslash followed by `r` followed by `n` and not a line break at all. Every
+/// fault banner therefore printed as one unbroken line, which is what made three
+/// separate investigations read a fault address off an unreadable banner and
+/// chase the wrong function.
+pub const FAULT_LINE_END: &[u8] = b"\r\n";
+
+/// Banner header emitted before a double fault report.
+pub const DOUBLE_FAULT_BANNER: &[u8] = b"\r\n[DOUBLE FAULT]\r\n";
+/// Label for the stack pointer of a fault that changed privilege level.
+///
+/// Only in that case does the CPU write an RSP into the interrupt frame, so
+/// this label is only ever paired with a frame-derived value.
+pub const FAULT_FRAME_STACK_LABEL: &[u8] = b"RSP=";
+/// Label for the stack pointer of a same-privilege fault.
+///
+/// See [`handler_stack_pointer`] for why the frame's own RSP slot cannot be
+/// used in this case.
+pub const FAULT_HANDLER_STACK_LABEL: &[u8] = b"KSP=";
+/// Banner header emitted before a ring-3 page fault report.
+pub const USER_PAGE_FAULT_BANNER: &[u8] = b"\r\n[USER PAGE FAULT]\r\n";
+/// Banner header emitted before a supervisor page fault report.
+pub const KERNEL_PAGE_FAULT_BANNER: &[u8] = b"\r\n[KERNEL PAGE FAULT]\r\n";
+/// Banner header emitted before a ring-3 general protection fault report.
+pub const USER_GPF_BANNER: &[u8] = b"\r\n[USER GENERAL PROTECTION FAULT]\r\n";
+/// Banner header emitted before a supervisor general protection fault report.
+pub const KERNEL_GPF_BANNER: &[u8] = b"\r\n[KERNEL GENERAL PROTECTION FAULT]\r\n";
+/// Trailing line of a fatal, non-returning fault report.
+pub const FAULT_HALT_LINE: &[u8] = b"HALT\r\n";
+/// Trailing line of a user fault that terminates the faulting task.
+pub const FAULT_TASK_TERMINATED_LINE: &[u8] = b"Terminating user task.\r\n";
+
 static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     let mut idt = InterruptDescriptorTable::new();
 
@@ -137,12 +172,17 @@ extern "x86-interrupt" fn double_fault_handler(
     // formatter is still unsafe: it can lock, allocate, or fault again while
     // the machine is already in a fatal exception state.
     let rip = stack_frame.instruction_pointer.as_u64();
-    let rsp = stack_frame.stack_pointer.as_u64();
-    if !fault_report_bytes(b"\\r\\n[DOUBLE FAULT]\\r\\n")
+    // Read the frame's RSP only when the CPU actually wrote it.
+    let frame_stack_pointer = if frame_has_stack_pointer(&stack_frame) {
+        Some(stack_frame.stack_pointer.as_u64())
+    } else {
+        None
+    };
+    if !fault_report_bytes(DOUBLE_FAULT_BANNER)
         || !fault_report_line(b"RIP=", rip)
-        || !fault_report_line(b"RSP=", rsp)
+        || !fault_report_stack_pointer(frame_stack_pointer)
         || !fault_report_line(b"ERR=", error_code)
-        || !fault_report_bytes(b"HALT\\r\\n")
+        || !fault_report_bytes(FAULT_HALT_LINE)
     {
         halt_after_fault_report_failure();
     }
@@ -202,7 +242,54 @@ fn fault_report_hex(value: u64) -> bool {
 fn fault_report_line(label: &[u8], value: u64) -> bool {
     fault_report_bytes(label)
         && fault_report_hex(value)
-        && fault_report_bytes(b"\\r\\n")
+        && fault_report_bytes(FAULT_LINE_END)
+}
+
+/// Reads the stack pointer the handler is actually running on.
+///
+/// Inline asm rather than a typed accessor for the same reason CR2 is read
+/// this way: a fault handler cannot unwrap, panic or format.
+#[inline(always)]
+fn handler_stack_pointer() -> u64 {
+    let stack_pointer: u64;
+    unsafe {
+        core::arch::asm!("mov {}, rsp", out(reg) stack_pointer,
+                         options(nomem, nostack, preserves_flags));
+    }
+    stack_pointer
+}
+
+/// True when the CPU pushed an RSP/SS pair into the interrupt frame.
+///
+/// The CPU pushes SS and RSP only on a privilege-level change. A ring-0
+/// exception runs on the stack that was already current and pushes exactly
+/// RIP, CS and RFLAGS, so frame offset 24 is never written by the CPU.
+#[inline(always)]
+fn frame_has_stack_pointer(stack_frame: &InterruptStackFrame) -> bool {
+    stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3
+}
+
+/// Reports the stack pointer belonging to the faulting context.
+///
+/// Pass `Some` only when [`frame_has_stack_pointer`] confirms the CPU wrote the
+/// frame's RSP/SS slots, i.e. on a privilege-changing fault. Pass `None` for a
+/// same-privilege fault, where the slot was never written.
+///
+/// `InterruptStackFrame::stack_pointer` is the RSP/SS slot at frame offset 24.
+/// Reading it in a same-privilege (ring 0) fault reads memory the CPU never
+/// wrote: whatever the kernel stack happened to hold there. That yields a
+/// plausible-looking but fabricated address, and a fault report naming the
+/// wrong address is worse than one that names none - it is what sent past
+/// investigations into the wrong function. For a privilege-changing fault the
+/// slot is real and is reported as `RSP`; otherwise the handler's own stack
+/// pointer is reported under the distinct label `KSP` so the two can never be
+/// confused for the same measurement.
+#[inline(never)]
+fn fault_report_stack_pointer(frame_stack_pointer: Option<u64>) -> bool {
+    match frame_stack_pointer {
+        Some(value) => fault_report_line(FAULT_FRAME_STACK_LABEL, value),
+        None => fault_report_line(FAULT_HANDLER_STACK_LABEL, handler_stack_pointer()),
+    }
 }
 
 #[inline(never)]
@@ -229,18 +316,25 @@ extern "x86-interrupt" fn page_fault_handler(
                          options(nomem, nostack, preserves_flags));
     }
     let instruction_pointer = stack_frame.instruction_pointer.as_u64();
-    let stack_pointer = stack_frame.stack_pointer.as_u64();
+    // The frame's RSP/SS slots exist only when the exception changed privilege
+    // level. Reading them unconditionally on a ring-0 fault would report stale
+    // kernel stack contents as if they were the faulting stack pointer.
+    let frame_stack_pointer = if frame_has_stack_pointer(&stack_frame) {
+        Some(stack_frame.stack_pointer.as_u64())
+    } else {
+        None
+    };
     let error_flags = error_code.bits() as u64;
     let is_user = error_code.contains(PageFaultErrorCode::USER_MODE)
         || stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
 
     if is_user {
-        if !fault_report_bytes(b"\r\n[USER PAGE FAULT]\r\n")
+        if !fault_report_bytes(USER_PAGE_FAULT_BANNER)
             || !fault_report_line(b"CR2=", accessed_address)
             || !fault_report_line(b"RIP=", instruction_pointer)
-            || !fault_report_line(b"RSP=", stack_pointer)
+            || !fault_report_stack_pointer(frame_stack_pointer)
             || !fault_report_line(b"ERR=", error_flags)
-            || !fault_report_bytes(b"Terminating user task.\r\n")
+            || !fault_report_bytes(FAULT_TASK_TERMINATED_LINE)
         {
             halt_after_fault_report_failure();
         }
@@ -257,12 +351,12 @@ extern "x86-interrupt" fn page_fault_handler(
         halt_after_fault_report_failure();
     }
 
-    if !fault_report_bytes(b"\r\n[KERNEL PAGE FAULT]\r\n")
+    if !fault_report_bytes(KERNEL_PAGE_FAULT_BANNER)
         || !fault_report_line(b"CR2=", accessed_address)
         || !fault_report_line(b"RIP=", instruction_pointer)
-        || !fault_report_line(b"RSP=", stack_pointer)
+        || !fault_report_stack_pointer(frame_stack_pointer)
         || !fault_report_line(b"ERR=", error_flags)
-        || !fault_report_bytes(b"HALT\r\n")
+        || !fault_report_bytes(FAULT_HALT_LINE)
     {
         halt_after_fault_report_failure();
     }
@@ -276,15 +370,20 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     error_code: u64,
 ) {
     let rip = stack_frame.instruction_pointer.as_u64();
-    let rsp = stack_frame.stack_pointer.as_u64();
     let is_user = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
+    // Read the frame's RSP only when the CPU actually wrote it.
+    let frame_stack_pointer = if frame_has_stack_pointer(&stack_frame) {
+        Some(stack_frame.stack_pointer.as_u64())
+    } else {
+        None
+    };
 
     if is_user {
-        if !fault_report_bytes(b"\\r\\n[USER GENERAL PROTECTION FAULT]\\r\\n")
+        if !fault_report_bytes(USER_GPF_BANNER)
             || !fault_report_line(b"RIP=", rip)
-            || !fault_report_line(b"RSP=", rsp)
+            || !fault_report_stack_pointer(frame_stack_pointer)
             || !fault_report_line(b"ERR=", error_code)
-            || !fault_report_bytes(b"Terminating user task.\\r\\n")
+            || !fault_report_bytes(FAULT_TASK_TERMINATED_LINE)
         {
             halt_after_fault_report_failure();
         }
@@ -294,11 +393,11 @@ extern "x86-interrupt" fn general_protection_fault_handler(
         halt_after_fault_report_failure();
     }
 
-    if !fault_report_bytes(b"\\r\\n[KERNEL GENERAL PROTECTION FAULT]\\r\\n")
+    if !fault_report_bytes(KERNEL_GPF_BANNER)
         || !fault_report_line(b"RIP=", rip)
-        || !fault_report_line(b"RSP=", rsp)
+        || !fault_report_stack_pointer(frame_stack_pointer)
         || !fault_report_line(b"ERR=", error_code)
-        || !fault_report_bytes(b"HALT\\r\\n")
+        || !fault_report_bytes(FAULT_HALT_LINE)
     {
         halt_after_fault_report_failure();
     }
@@ -399,4 +498,276 @@ define_pic_eoi_handler!(irq11_handler, 43);
 define_pic_eoi_handler!(irq13_coproc_handler, 45);
 define_pic_eoi_handler!(irq14_ata_primary_handler, 46);
 define_pic_eoi_handler!(irq15_ata_secondary_handler, 47);
+
+// -----------------------------------------------------------------------------
+// Fault banner formatting tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod fault_banner_tests {
+    use super::*;
+
+    /// Every byte string an exception handler can hand to `fault_report_bytes`.
+    ///
+    /// A banner is only legible if these contain real control characters, so the
+    /// list is asserted as a whole rather than one string at a time.
+    const EMITTED_LITERALS: &[(&str, &[u8])] = &[
+        ("FAULT_LINE_END", FAULT_LINE_END),
+        ("DOUBLE_FAULT_BANNER", DOUBLE_FAULT_BANNER),
+        ("USER_PAGE_FAULT_BANNER", USER_PAGE_FAULT_BANNER),
+        ("KERNEL_PAGE_FAULT_BANNER", KERNEL_PAGE_FAULT_BANNER),
+        ("USER_GPF_BANNER", USER_GPF_BANNER),
+        ("KERNEL_GPF_BANNER", KERNEL_GPF_BANNER),
+        ("FAULT_HALT_LINE", FAULT_HALT_LINE),
+        ("FAULT_TASK_TERMINATED_LINE", FAULT_TASK_TERMINATED_LINE),
+    ];
+
+    /// Field labels passed to `fault_report_line`.
+    const EMITTED_LABELS: &[&[u8]] = &[b"RIP=", b"ERR=", b"CR2="];
+
+    /// Host-side replica of `fault_report_hex`, so the composed report can be
+    /// asserted without touching the 16550 ports.
+    fn render_hex(value: u64) -> alloc::vec::Vec<u8> {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = alloc::vec::Vec::new();
+        out.extend_from_slice(b"0x");
+        for shift in (0..64).step_by(4).rev() {
+            out.push(HEX[((value >> shift) & 0xf) as usize]);
+        }
+        out
+    }
+
+    /// Composes one report exactly as the handlers do: banner, then a labelled
+    /// hex field terminated by a real CRLF, then the trailing line.
+    fn compose_report(banner: &[u8], label: &[u8], value: u64, trailer: &[u8]) -> alloc::vec::Vec<u8> {
+        let mut out = alloc::vec::Vec::new();
+        out.extend_from_slice(banner);
+        out.extend_from_slice(label);
+        out.extend_from_slice(&render_hex(value));
+        out.extend_from_slice(FAULT_LINE_END);
+        out.extend_from_slice(trailer);
+        out
+    }
+
+    #[test]
+    fn no_emitted_literal_contains_a_literal_backslash() {
+        for (name, bytes) in EMITTED_LITERALS {
+            assert!(
+                !bytes.contains(&b'\\'),
+                "{name} contains a literal backslash byte: {bytes:?}"
+            );
+        }
+        for label in EMITTED_LABELS {
+            assert!(
+                !label.contains(&b'\\'),
+                "label {label:?} contains a literal backslash byte"
+            );
+        }
+    }
+
+    #[test]
+    fn every_emitted_literal_contains_a_real_crlf() {
+        for (name, bytes) in EMITTED_LITERALS {
+            assert!(
+                bytes.windows(2).any(|pair| pair == b"\r\n"),
+                "{name} has no real carriage return / newline pair: {bytes:?}"
+            );
+            assert!(
+                bytes.ends_with(b"\r\n"),
+                "{name} does not end with a carriage return / newline pair: {bytes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_newline_in_a_banner_is_preceded_by_a_carriage_return() {
+        for (name, bytes) in EMITTED_LITERALS {
+            for (index, &byte) in bytes.iter().enumerate() {
+                if byte == b'\n' {
+                    assert!(
+                        index > 0 && bytes[index - 1] == b'\r',
+                        "{name} has a bare newline at index {index}: {bytes:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_fault_report_spreads_across_distinct_lines() {
+        let report = compose_report(
+            KERNEL_PAGE_FAULT_BANNER,
+            b"CR2=",
+            0xffff_ffff_ffff_ffff,
+            FAULT_HALT_LINE,
+        );
+
+        assert_eq!(
+            report,
+            b"\r\n[KERNEL PAGE FAULT]\r\nCR2=0xffffffffffffffff\r\nHALT\r\n"
+        );
+        // A leading CRLF separates the banner from whatever the boot log printed
+        // before it, so the report is four lines: blank, banner, field, trailer.
+        assert_eq!(
+            report.iter().filter(|&&b| b == b'\n').count(),
+            4,
+            "separator, banner, field and trailer must each occupy their own line"
+        );
+        assert!(!report.contains(&b'\\'));
+    }
+
+    #[test]
+    fn double_fault_and_gpf_reports_are_also_multi_line() {
+        for (name, banner, trailer) in [
+            ("double fault", DOUBLE_FAULT_BANNER, FAULT_HALT_LINE),
+            ("user gpf", USER_GPF_BANNER, FAULT_TASK_TERMINATED_LINE),
+            ("kernel gpf", KERNEL_GPF_BANNER, FAULT_HALT_LINE),
+            ("user page fault", USER_PAGE_FAULT_BANNER, FAULT_TASK_TERMINATED_LINE),
+        ] {
+            let report = compose_report(banner, b"RIP=", 0x0000_0001_0001_4440, trailer);
+            assert_eq!(
+                report.iter().filter(|&&b| b == b'\n').count(),
+                4,
+                "{name} report must render a separator, banner, field and trailer line"
+            );
+            assert!(!report.contains(&b'\\'), "{name} report contains a backslash");
+            assert!(
+                report.starts_with(b"\r\n["),
+                "{name} report must open with a newline and a bracketed banner"
+            );
+        }
+    }
+
+    /// Guards the whole handler half of the file, not just the constants:
+    /// reintroducing an escaped backslash anywhere in a byte string here
+    /// silently breaks the banner again, and no compile-time check can see it.
+    #[test]
+    fn this_file_has_no_escaped_backslash_in_any_byte_string() {
+        // Assembled from parts so this test's own source cannot match itself.
+        const PAIR: [u8; 2] = [b'\\', b'\\'];
+        let source = include_str!("interrupts.rs");
+
+        // Scan up to the test module only; the assertions below have to spell
+        // a backslash byte themselves.
+        let production = source
+            .split_once("#[cfg(test)]")
+            .map_or(source, |(head, _tail)| head);
+
+        for (number, line) in production.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            let bad = line
+                .as_bytes()
+                .windows(PAIR.len())
+                .any(|window| window == PAIR);
+            assert!(
+                !bad,
+                "interrupts.rs:{} reintroduces an escaped backslash: {}",
+                number + 1,
+                trimmed
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // The interrupt frame's RSP/SS slots
+    // -------------------------------------------------------------------------
+
+    /// Byte offsets inside `InterruptStackFrameValue`, which is `#[repr(C)]`.
+    const FRAME_RIP: usize = 0;
+    const FRAME_CS: usize = 8;
+    const FRAME_RFLAGS: usize = 16;
+    const FRAME_RSP: usize = 24;
+
+    /// Mirrors the x86_64 crate's `InterruptStackFrameValue` layout.
+    ///
+    /// Duplicated deliberately: if the crate ever reordered the frame, the
+    /// reasoning these tests encode would silently stop applying.
+    #[repr(C)]
+    #[derive(Copy, Clone)]
+    struct FrameLayout {
+        instruction_pointer: u64,
+        code_segment: u16,
+        _reserved1: [u8; 6],
+        cpu_flags: u64,
+        stack_pointer: u64,
+        stack_segment: u16,
+        _reserved2: [u8; 6],
+    }
+
+    #[test]
+    fn the_rsp_slot_sits_after_the_slots_a_same_cpl_fault_always_writes() {
+        let frame = FrameLayout {
+            instruction_pointer: 0,
+            code_segment: 0,
+            _reserved1: [0; 6],
+            cpu_flags: 0,
+            stack_pointer: 0,
+            stack_segment: 0,
+            _reserved2: [0; 6],
+        };
+        let base = &frame as *const FrameLayout as usize;
+
+        assert_eq!(
+            &frame.instruction_pointer as *const u64 as usize - base,
+            FRAME_RIP
+        );
+        assert_eq!(&frame.code_segment as *const u16 as usize - base, FRAME_CS);
+        assert_eq!(&frame.cpu_flags as *const u64 as usize - base, FRAME_RFLAGS);
+        assert_eq!(
+            &frame.stack_pointer as *const u64 as usize - base,
+            FRAME_RSP
+        );
+    }
+
+    /// A ring-0 exception pushes exactly RIP, CS and RFLAGS, so the RSP slot at
+    /// offset 24 is memory the CPU never wrote for this fault.
+    #[test]
+    fn a_same_privilege_fault_does_not_establish_the_frame_rsp_slot() {
+        const BYTES_PUSHED_BY_CPU_WITHOUT_A_PRIVILEGE_CHANGE: usize = 24;
+        assert_eq!(FRAME_RSP, BYTES_PUSHED_BY_CPU_WITHOUT_A_PRIVILEGE_CHANGE);
+        assert!(
+            FRAME_RSP >= FRAME_RFLAGS + 8,
+            "the RSP slot must sit strictly after the last slot the CPU always writes"
+        );
+    }
+
+    /// The two stack-pointer labels must never be interchangeable, so a reader
+    /// can tell a frame-derived RSP from the handler's own stack pointer.
+    #[test]
+    fn the_two_stack_pointer_labels_are_distinguishable() {
+        assert_eq!(FAULT_FRAME_STACK_LABEL, b"RSP=");
+        assert_eq!(FAULT_HANDLER_STACK_LABEL, b"KSP=");
+        assert_ne!(FAULT_FRAME_STACK_LABEL, FAULT_HANDLER_STACK_LABEL);
+        for label in [FAULT_FRAME_STACK_LABEL, FAULT_HANDLER_STACK_LABEL] {
+            assert!(
+                !label.contains(&b'\\'),
+                "stack pointer label must not contain a backslash: {label:?}"
+            );
+        }
+    }
+
+    /// A kernel fault report must label its stack pointer as the handler's own
+    /// and never claim a frame RSP the CPU did not write.
+    #[test]
+    fn a_kernel_fault_report_labels_its_stack_pointer_as_the_handlers_own() {
+        let mut report = alloc::vec::Vec::new();
+        report.extend_from_slice(KERNEL_PAGE_FAULT_BANNER);
+        report.extend_from_slice(FAULT_HANDLER_STACK_LABEL);
+        report.extend_from_slice(&render_hex(0x0000_0000_0008_0000));
+        report.extend_from_slice(FAULT_LINE_END);
+
+        assert_eq!(
+            report,
+            b"\r\n[KERNEL PAGE FAULT]\r\nKSP=0x0000000000080000\r\n"
+        );
+        assert!(
+            !report.windows(3).any(|window| window == b"RSP"),
+            "a same-privilege report must not claim a frame RSP: {report:?}"
+        );
+        assert!(!report.contains(&b'\\'));
+    }
+}
 

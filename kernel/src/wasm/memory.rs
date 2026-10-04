@@ -21,7 +21,7 @@ pub struct WasmMemory {
 impl WasmMemory {
     /// Creates a new linear memory space with the specified initial pages and maximum limit.
     pub fn new(initial_pages: usize, max_pages: usize) -> Self {
-        let size = initial_pages * WASM_PAGE_SIZE;
+        let size = initial_pages.saturating_mul(WASM_PAGE_SIZE);
         Self {
             data: vec![0u8; size],
             max_pages,
@@ -30,7 +30,10 @@ impl WasmMemory {
 
     /// Creates linear memory bounded to an explicit maximum byte capacity.
     pub fn with_byte_limit(initial_bytes: usize, max_bytes: usize) -> Self {
-        let max_pages = (max_bytes + WASM_PAGE_SIZE - 1) / WASM_PAGE_SIZE;
+        let max_pages = max_bytes
+            .saturating_add(WASM_PAGE_SIZE - 1)
+            .checked_div(WASM_PAGE_SIZE)
+            .unwrap_or(0);
         Self {
             data: vec![0u8; initial_bytes],
             max_pages: core::cmp::max(1, max_pages),
@@ -56,9 +59,25 @@ impl WasmMemory {
         Ok(())
     }
 
+    /// True when `addr .. addr + 4` lies wholly inside the buffer.
+    ///
+    /// `addr + 4` must be computed with `checked_add`: a sandboxed address that
+    /// reached here as `0xFFFF_FFFF_FFFF_FFFF` (a negative `i32` reinterpreted as
+    /// a `usize`, or a pointer one below null) wraps to `3`, so a plain add
+    /// both overflows and defeats the bounds check that was supposed to reject
+    /// it. Wrapping would let the read land on the raw address and fault with
+    /// CR2 = 0xFFFF_FFFF_FFFF_FFFF instead of trapping in the sandbox.
+    #[inline]
+    fn i32_slot_in_bounds(&self, addr: usize) -> bool {
+        match addr.checked_add(4) {
+            Some(end) => end <= self.data.len(),
+            None => false,
+        }
+    }
+
     /// Reads a 32-bit little-endian integer.
     pub fn read_i32(&self, addr: usize) -> Result<i32, WasmError> {
-        if addr + 4 > self.data.len() {
+        if !self.i32_slot_in_bounds(addr) {
             return Err(WasmError::OutOfBoundsMemory);
         }
         let bytes = [
@@ -72,7 +91,7 @@ impl WasmMemory {
 
     /// Writes a 32-bit little-endian integer.
     pub fn write_i32(&mut self, addr: usize, val: i32) -> Result<(), WasmError> {
-        if addr + 4 > self.data.len() {
+        if !self.i32_slot_in_bounds(addr) {
             return Err(WasmError::OutOfBoundsMemory);
         }
         let bytes = val.to_le_bytes();
@@ -101,11 +120,106 @@ impl WasmMemory {
     /// Grows memory by `delta_pages`.
     pub fn grow(&mut self, delta_pages: usize) -> Result<usize, WasmError> {
         let current_pages = self.data.len() / WASM_PAGE_SIZE;
-        let new_pages = current_pages + delta_pages;
+        let new_pages = current_pages.checked_add(delta_pages).ok_or(WasmError::OutOfBoundsMemory)?;
         if new_pages > self.max_pages {
             return Err(WasmError::OutOfBoundsMemory);
         }
-        self.data.resize(new_pages * WASM_PAGE_SIZE, 0);
+        let new_bytes = new_pages.checked_mul(WASM_PAGE_SIZE).ok_or(WasmError::OutOfBoundsMemory)?;
+        self.data.resize(new_bytes, 0);
         Ok(current_pages)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `usize::MAX` base address plus four wraps to three, so an unchecked
+    /// `addr + 4 > len` guard accepts it and the read lands on the raw address.
+    /// On bare metal that is a page fault at CR2 = 0xFFFF_FFFF_FFFF_FFFF; on the
+    /// host it is an index panic. Either way it must not escape as a fault.
+    #[test]
+    fn a_wrapped_end_address_cannot_index_past_the_buffer() {
+        let memory = WasmMemory::new(1, 1);
+
+        assert_eq!(
+            memory.read_i32(usize::MAX),
+            Err(WasmError::OutOfBoundsMemory)
+        );
+        assert_eq!(
+            memory.read_i32(usize::MAX - 3),
+            Err(WasmError::OutOfBoundsMemory)
+        );
+        assert_eq!(
+            memory.read_i32(usize::MAX - 2),
+            Err(WasmError::OutOfBoundsMemory)
+        );
+        assert_eq!(
+            memory.read_i32(usize::MAX - 1),
+            Err(WasmError::OutOfBoundsMemory)
+        );
+    }
+
+    #[test]
+    fn a_wrapped_end_address_cannot_be_written_past_the_buffer() {
+        let mut memory = WasmMemory::new(1, 1);
+
+        assert_eq!(
+            memory.write_i32(usize::MAX, 1),
+            Err(WasmError::OutOfBoundsMemory)
+        );
+        assert_eq!(
+            memory.write_i32(usize::MAX - 3, 1),
+            Err(WasmError::OutOfBoundsMemory)
+        );
+        // Nothing may have leaked into the low addresses the wrap lands on.
+        assert_eq!(memory.size(), WASM_PAGE_SIZE);
+        assert!(memory.read_slice(0, WASM_PAGE_SIZE).is_ok());
+    }
+
+    #[test]
+    fn the_last_in_bounds_word_is_still_reachable() {
+        let mut memory = WasmMemory::new(1, 1);
+        let last = WASM_PAGE_SIZE - 4;
+
+        assert_eq!(memory.write_i32(last, 0x1234_5678), Ok(()));
+        assert_eq!(memory.read_i32(last), Ok(0x1234_5678));
+        assert_eq!(
+            memory.read_i32(last + 4),
+            Err(WasmError::OutOfBoundsMemory)
+        );
+        assert_eq!(
+            memory.write_i32(last + 4, 0),
+            Err(WasmError::OutOfBoundsMemory)
+        );
+    }
+
+    #[test]
+    fn a_negative_i32_used_as_an_address_is_out_of_bounds() {
+        let memory = WasmMemory::new(1, 1);
+
+        // `(-1i32) as usize` is 0xFFFF_FFFF_FFFF_FFFF on a 64-bit host. The
+        // sandbox must reject it rather than dereference it.
+        let signed = -1i32 as usize;
+        assert_eq!(signed, usize::MAX);
+        assert_eq!(
+            memory.read_i32(signed),
+            Err(WasmError::OutOfBoundsMemory)
+        );
+        assert_eq!(memory.read_u8(signed), Err(WasmError::OutOfBoundsMemory));
+        assert_eq!(
+            memory.read_slice(signed, 1),
+            Err(WasmError::OutOfBoundsMemory)
+        );
+    }
+
+    #[test]
+    fn page_arithmetic_cannot_wrap() {
+        let mut memory = WasmMemory::new(1, 2);
+        assert_eq!(memory.grow(usize::MAX), Err(WasmError::OutOfBoundsMemory));
+        assert_eq!(memory.size(), WASM_PAGE_SIZE);
+
+        let capped = WasmMemory::with_byte_limit(16, usize::MAX);
+        assert!(capped.max_pages >= 1);
     }
 }

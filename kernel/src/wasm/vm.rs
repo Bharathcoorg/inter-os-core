@@ -12,6 +12,20 @@ use alloc::vec::Vec;
 use crate::wasm::memory::WasmMemory;
 use crate::wasm::types::{opcodes, Value, WasmError};
 
+/// Converts a WASM linear-memory address operand into a host offset.
+///
+/// A WASM linear address is an unsigned 32-bit quantity, so a negative `i32`
+/// operand denotes an address at or above 4 GiB and is always out of bounds for
+/// this sandbox. It must not be reinterpreted as a `usize`: on a 64-bit host
+/// that sign-extends `-1` to `0xFFFF_FFFF_FFFF_FFFF`, turning a sandbox trap
+/// into a kernel-space page fault at exactly that address.
+fn linear_address(addr: i32) -> Result<usize, WasmError> {
+    if addr < 0 {
+        return Err(WasmError::OutOfBoundsMemory);
+    }
+    Ok(addr as usize)
+}
+
 /// Representation of an internal WASM bytecode function.
 #[derive(Debug, Clone)]
 pub struct WasmFunction {
@@ -273,7 +287,7 @@ impl WasmVm {
                     pc += len1;
                     let (offset, len2) = read_leb128_u32(&bytecode[pc..])?;
                     pc += len2;
-                    let base = self.pop_i32()? as usize;
+                    let base = linear_address(self.pop_i32()?)?;
                     let addr = base.checked_add(offset as usize).ok_or(WasmError::OutOfBoundsMemory)?;
                     let val = self.memory.read_i32(addr)?;
                     self.push(Value::I32(val));
@@ -284,7 +298,7 @@ impl WasmVm {
                     let (offset, len2) = read_leb128_u32(&bytecode[pc..])?;
                     pc += len2;
                     let val = self.pop_i32()?;
-                    let base = self.pop_i32()? as usize;
+                    let base = linear_address(self.pop_i32()?)?;
                     let addr = base.checked_add(offset as usize).ok_or(WasmError::OutOfBoundsMemory)?;
                     self.memory.write_i32(addr, val)?;
                 }
@@ -396,4 +410,119 @@ fn read_leb128_i64(bytes: &[u8]) -> Result<(i64, usize), WasmError> {
         }
     }
     Err(WasmError::Trap("Truncated LEB128".to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wasm::memory::WasmMemory;
+
+    /// Builds a one-function module that exports `probe` and runs it.
+    fn run(code: Vec<u8>, args: &[Value], fuel: u64) -> Result<Option<Value>, WasmError> {
+        let mut module = WasmModule::new();
+        let idx = module.add_function("probe", args.len(), 0, code);
+        module.add_export("probe", idx);
+        let mut vm = WasmVm::new(module, WasmMemory::new(1, 1), fuel);
+        vm.invoke_export("probe", args)
+    }
+
+    /// `i32.const -1; i32.load align=2 offset=0; end`
+    fn i32_load_of_minus_one() -> Vec<u8> {
+        alloc::vec![
+            opcodes::I32_CONST,
+            0x7F,
+            opcodes::I32_LOAD,
+            0x02,
+            0x00,
+            opcodes::END,
+        ]
+    }
+
+    /// `i32.const -1; i32.const 0; i32.store align=2 offset=0; end`
+    ///
+    /// `i32.store` pops the value first, so the base address is pushed first.
+    fn i32_store_at_minus_one() -> Vec<u8> {
+        alloc::vec![
+            opcodes::I32_CONST,
+            0x7F,
+            opcodes::I32_CONST,
+            0x00,
+            opcodes::I32_STORE,
+            0x02,
+            0x00,
+            opcodes::END,
+        ]
+    }
+
+    /// The reported boot signature: CR2 = 0xFFFF_FFFF_FFFF_FFFF with a read
+    /// error code of zero. A negative WASM address reinterpreted as a `usize`
+    /// produces exactly that address, so the interpreter has to trap in the
+    /// sandbox instead of dereferencing it.
+    #[test]
+    fn a_negative_i32_load_address_traps_instead_of_reaching_the_host() {
+        assert_eq!(
+            linear_address(-1),
+            Err(WasmError::OutOfBoundsMemory),
+            "-1 as a usize is 0xFFFF_FFFF_FFFF_FFFF, the reported fault address"
+        );
+        assert_eq!(
+            linear_address(i32::MIN),
+            Err(WasmError::OutOfBoundsMemory)
+        );
+        assert_eq!(linear_address(0), Ok(0));
+        assert_eq!(linear_address(0x7FFF_FFFF), Ok(0x7FFF_FFFF));
+
+        assert_eq!(
+            run(i32_load_of_minus_one(), &[], 16),
+            Err(WasmError::OutOfBoundsMemory)
+        );
+    }
+
+    #[test]
+    fn a_negative_i32_store_address_traps_instead_of_writing_the_host() {
+        assert_eq!(
+            run(i32_store_at_minus_one(), &[], 16),
+            Err(WasmError::OutOfBoundsMemory)
+        );
+    }
+
+    #[test]
+    fn an_in_bounds_store_and_load_round_trips() {
+        // i32.const 64; i32.const 0x1234; i32.store; then load it back.
+        let code = alloc::vec![
+            opcodes::I32_CONST,
+            0xC0,
+            0x00,
+            opcodes::I32_CONST,
+            0xB4,
+            0x24,
+            opcodes::I32_STORE,
+            0x02,
+            0x00,
+            opcodes::I32_CONST,
+            0xC0,
+            0x00,
+            opcodes::I32_LOAD,
+            0x02,
+            0x00,
+            opcodes::END,
+        ];
+        assert_eq!(run(code, &[], 32), Ok(Some(Value::I32(0x1234))));
+    }
+
+    #[test]
+    fn an_out_of_bounds_unsigned_address_still_traps() {
+        // Address 70000 is past the single 64 KiB page.
+        let code = alloc::vec![
+            opcodes::I32_CONST,
+            0xF0,
+            0xA2,
+            0x04,
+            opcodes::I32_LOAD,
+            0x02,
+            0x00,
+            opcodes::END,
+        ];
+        assert_eq!(run(code, &[], 16), Err(WasmError::OutOfBoundsMemory));
+    }
 }
