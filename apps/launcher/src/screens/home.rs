@@ -273,6 +273,546 @@ fn backdrop(theme: &Theme, y: usize) -> u32 {
 }
 
 // -----------------------------------------------------------------------------
+// Runs and the per-frame paint
+// -----------------------------------------------------------------------------
+
+/// Capacity of one run's byte buffer.
+///
+/// WHY it matches `text::ellipsize`: a run built here must be byte-for-byte the run
+/// the per-pixel painter used to build, for every input the registry can hold. The
+/// widest thing this surface prints is a card detail line, which is bounded by
+/// [`CARD_DETAIL_CAP`].
+const RUN_CAP: usize = 96;
+
+/// One label, placed and measured once per frame.
+///
+/// WHY a type: this surface's painters each began with a text metric -- a line
+/// height, a measure, an ellipsize, a `center_x` -- and every one of those ran for
+/// every pixel of a 1,036,800-pixel surface. The deck's tile in particular called
+/// `layout::grid_hit`, which rebuilt a rectangle for each of the grid's cells, and
+/// then ellipsized the app's name, all per pixel. Resolving each label into an
+/// origin, a measured box, its bytes and its ink once per frame leaves the painters
+/// asking only whether a pixel lands on it.
+///
+/// WHY the box is carried as well as the origin: `test_text` walks the pen of every
+/// glyph before it can say no, so a pixel that is nowhere near a run still costs a
+/// full pen walk per label. The stored box is exactly
+/// `y .. y + line_height(scale)` by `x .. x + measure(run)`, which is precisely the
+/// region `test_text` can return `Some` for, so rejecting against it first changes
+/// no pixel and skips the walk for the overwhelming majority of them.
+struct Run {
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    scale: usize,
+    len: usize,
+    ink: u32,
+    bytes: [u8; RUN_CAP],
+}
+
+impl Run {
+    /// A run that never inks anything.
+    const EMPTY: Run = Run {
+        x: 0,
+        y: 0,
+        w: 0,
+        h: 0,
+        scale: 1,
+        len: 0,
+        ink: 0,
+        bytes: [0u8; RUN_CAP],
+    };
+
+    /// `bytes` at (`x`, `y`), truncated with an ellipsis if wider than `fit`.
+    fn fitted(x: usize, y: usize, scale: usize, fit: usize, bytes: &[u8], ink: u32) -> Run {
+        let (buf, len) = text::ellipsize(bytes, scale, fit);
+        Run::placed(x, y, scale, buf, len, ink)
+    }
+
+    /// As [`Run::fitted`], centred across `centre`.
+    ///
+    /// WHY `centre` is a separate argument: the deck tile fits its name to the tile
+    /// less its padding but centres the result across the whole tile, so collapsing
+    /// the two widths into one would move every deck label.
+    fn centred(
+        x: usize,
+        y: usize,
+        scale: usize,
+        fit: usize,
+        centre: usize,
+        bytes: &[u8],
+        ink: u32,
+    ) -> Run {
+        let (buf, len) = text::ellipsize(bytes, scale, fit);
+        let inset = text::center_x(&buf[..len], scale, centre);
+        Run::placed(x + inset, y, scale, buf, len, ink)
+    }
+
+    /// A run drawn whole, with no truncation step.
+    ///
+    /// WHY it exists for the deck's badge: the old painter sized the type scale so
+    /// the badge fitted and then handed the bytes straight to `test_text`, so the
+    /// width it was sized against and the width it was fitted to are the same one
+    /// only because `icon_scale` guarantees it. Skipping the check keeps the badge
+    /// exactly as it was.
+    fn whole(x: usize, y: usize, scale: usize, bytes: &[u8], ink: u32) -> Run {
+        let mut buf = [0u8; RUN_CAP];
+        let len = bytes.len().min(RUN_CAP);
+        buf[..len].copy_from_slice(&bytes[..len]);
+        Run::placed(x, y, scale, buf, len, ink)
+    }
+
+    /// A run from an already-resolved buffer.
+    fn placed(x: usize, y: usize, scale: usize, buf: [u8; RUN_CAP], len: usize, ink: u32) -> Run {
+        Run {
+            x,
+            y,
+            w: text::measure(&buf[..len], scale),
+            h: text::line_height(scale),
+            scale,
+            len,
+            ink,
+            bytes: buf,
+        }
+    }
+
+    /// The colour of (`px`, `py`) if this run inks it.
+    fn pixel(&self, px: usize, py: usize) -> Option<u32> {
+        self.pixel_inked(px, py, self.ink)
+    }
+
+    /// As [`Run::pixel`], with the ink chosen by the caller.
+    ///
+    /// WHY two of them need this: the greeting and the navigation bar are drawn
+    /// straight onto the wallpaper ramp, whose colour is a function of `y`, so their
+    /// ink cannot be settled until the pixel's row is known.
+    fn pixel_inked(&self, px: usize, py: usize, ink: u32) -> Option<u32> {
+        if self.len == 0 {
+            return None;
+        }
+        if px < self.x || px - self.x >= self.w || py < self.y || py - self.y >= self.h {
+            return None;
+        }
+        test_text(px, py, self.x, self.y, self.scale, &self.bytes[..self.len], ink)
+    }
+}
+
+/// One row of the system card, with both of its lines resolved.
+struct CardRowPlan {
+    rect: Rect,
+    name: Run,
+    detail: Run,
+}
+
+impl CardRowPlan {
+    const EMPTY: CardRowPlan = CardRowPlan {
+        rect: Rect::new(0, 0, 0, 0),
+        name: Run::EMPTY,
+        detail: Run::EMPTY,
+    };
+}
+
+/// One deck tile, with its cell rectangle and both of its words resolved.
+struct DeckTilePlan {
+    cell: Rect,
+    badge: Run,
+    /// The app's name, resolved to exactly where and how it would be drawn.
+    ///
+    /// WHY it is here and never painted: the old painter ellipsized the name,
+    /// measured it, took its centring inset and then discarded `test_text`'s result
+    /// with `let _ =`, so the deck has never put an app's name on the framebuffer.
+    /// Resolving it once per frame keeps that finding visible in the source, at the
+    /// line a fix would change, instead of deleting a line of code that hid it.
+    #[allow(dead_code)]
+    label: Run,
+    fill: u32,
+}
+
+impl DeckTilePlan {
+    const EMPTY: DeckTilePlan = DeckTilePlan {
+        cell: Rect::new(0, 0, 0, 0),
+        badge: Run::EMPTY,
+        label: Run::EMPTY,
+        fill: 0,
+    };
+}
+
+/// The deck for this frame: its grid, already resolved into per-slot tiles.
+struct DeckPlan {
+    cells: [DeckTilePlan; MAX_DECK_TILES],
+    /// Grid slots the grid actually has. `layout::grid` derives its own column count
+    /// from the bounds it is handed, which is not always the count
+    /// [`deck_columns`] reported, so the grid -- not [`deck_columns`] -- is what this
+    /// records.
+    slots: usize,
+    columns: usize,
+    rows: usize,
+    origin_x: usize,
+    origin_y: usize,
+    pitch_x: usize,
+    pitch_y: usize,
+    app_count: usize,
+    /// The message drawn instead of a grid when the registry is empty.
+    empty: Option<Run>,
+}
+
+impl DeckPlan {
+    /// Which grid slot a point falls in.
+    ///
+    /// WHY this is arithmetic and not the linear search in `layout::grid_hit`: the
+    /// cells sit on a regular pitch with a gutter between them, so a point can be in
+    /// at most one, and the division finds it. The `contains` check then rejects the
+    /// gutters, which is what the loop's "no cell contains it" answer meant. The
+    /// search loop ran once per pixel and rebuilt a rectangle on every step.
+    fn slot_at(&self, x: usize, y: usize) -> Option<usize> {
+        if self.pitch_x == 0 || self.pitch_y == 0 || x < self.origin_x || y < self.origin_y {
+            return None;
+        }
+        let col = (x - self.origin_x) / self.pitch_x;
+        let row = (y - self.origin_y) / self.pitch_y;
+        if col >= self.columns || row >= self.rows {
+            return None;
+        }
+        let index = row * self.columns + col;
+        if index >= self.slots || !self.cells[index].cell.contains(x, y) {
+            return None;
+        }
+        Some(index)
+    }
+}
+
+/// Everything the painters need that does not depend on the pixel.
+///
+/// WHY this is separate from [`Frame`]: the band rectangles are needed by the hit
+/// test and by [`deck_columns`], which must stay cheap enough to call from a tap
+/// handler, while this is the painter's plan and is built once per rendered frame.
+struct Paint {
+    clock: Option<Run>,
+    greeting: [Run; 3],
+    weather: Run,
+    card_title: Run,
+    card_stack: Option<Rect>,
+    card_rows: [CardRowPlan; CARD_ROWS],
+    deck: DeckPlan,
+    search_magnifier: (usize, usize, i32),
+    search: Run,
+    nav_back: Run,
+    nav_recents: Run,
+    nav_pill: Rect,
+    telemetry: Telemetry,
+}
+
+/// The status bar's hardware glyph boxes.
+///
+/// WHY they are in the plan: the old painter recomputed all five from the constants
+/// on every one of the surface's pixels, and the leftmost cell of the signal stack
+/// is derived by walking back from the battery, which the right margin moves.
+struct Telemetry {
+    signal_x: usize,
+    signal_w: usize,
+    battery_x0: usize,
+    wifi_x0: usize,
+    term_x0: usize,
+}
+
+/// The status bar's glyph boxes for this frame.
+fn telemetry_plan() -> Telemetry {
+    let signal_x = telemetry_signal_x();
+    let signal_w = TELEMETRY_SIGNAL_BARS * TELEMETRY_BAR_W
+        + TELEMETRY_SIGNAL_BARS.saturating_sub(1) * TELEMETRY_BAR_GAP;
+    let battery_x0 = signal_x + signal_w + TELEMETRY_GAP;
+    Telemetry {
+        signal_x,
+        signal_w,
+        battery_x0,
+        wifi_x0: battery_x0 + TELEMETRY_BATTERY_W + TELEMETRY_GAP,
+        term_x0: battery_x0 + TELEMETRY_BATTERY_W,
+    }
+}
+
+/// Deck slots this surface will hold in one frame.
+///
+/// WHY it is the registry's capacity plus the column count rather than the app
+/// count: `layout::grid` rounds rows up, so a catalogue that exactly fills its rows
+/// still reports `columns * rows` cells, and that number can exceed `app_count` by
+/// up to one row.
+const MAX_DECK_TILES: usize = 32 + 6;
+
+fn build(state: &LauncherState) -> Paint {
+    let theme = active_theme();
+    let f = frame();
+
+    // WHY the status-bar clock is optional: with no RTC authority the read can be
+    // refused, and the old painter asked `state.clock_source_ok` for every pixel of
+    // the surface to decide whether to draw it at all.
+    let clock = if state.clock_source_ok {
+        let scale = type_scale::CAPTION;
+        let clock_y = STATUS_BAR_HEIGHT / 2 - text::line_height(scale) / 2;
+        // WHY whole and not fitted: the old painter handed the clock straight to
+        // `test_text`, so it was never truncated, and truncating it here would
+        // silently change a five-byte field into something shorter.
+        Some(Run::whole(
+            CONTENT_PADDING,
+            clock_y,
+            scale,
+            &state.clock_time,
+            0,
+        ))
+    } else {
+        None
+    };
+
+    // Greeting: three runs stacked from the theme's own line heights. None of them
+    // was ever ellipsized, so none of them is fitted here.
+    let title_scale = type_scale::TITLE;
+    let title_line = text::line_height(title_scale);
+    let caption_scale = type_scale::CAPTION;
+    let l1_y = f.greeting.y + space::SM;
+    let l2_y = l1_y + title_line + space::XS;
+    let sub_y = l2_y + title_line + space::SM;
+    let greeting = [
+        Run::whole(f.greeting.x, l1_y, title_scale, b"InterOS", 0),
+        Run::whole(f.greeting.x, l2_y, title_scale, b"Device", 0),
+        Run::whole(
+            f.greeting.x,
+            sub_y,
+            caption_scale,
+            b"No clock or weather source is bound to this shell.",
+            0,
+        ),
+    ];
+    // WHY the weather line is fitted and the other three are not: it was the one
+    // greeting line that went through `text::ellipsize`, fitted to the weather
+    // column less its padding and starting at that column's left padding.
+    let weather = Run::fitted(
+        f.weather.x + space::SM,
+        sub_y,
+        caption_scale,
+        f.weather.w.saturating_sub(space::SM * 2),
+        b"Weather unavailable",
+        0,
+    );
+
+    let card_title = Run::whole(
+        f.card_title.x,
+        f.card_title.y,
+        type_scale::TITLE,
+        b"System status",
+        theme.text,
+    );
+    let card_row_h = card_row_h();
+    let card_stack = layout::list(f.card_rows, CARD_ROWS, card_row_h, space::MD);
+    let mut card_rows = [CardRowPlan::EMPTY; CARD_ROWS];
+    if let Some(stack) = card_stack {
+        for row in 0..CARD_ROWS {
+            let Some(rect) = layout::list_row(stack, row, CARD_ROWS, card_row_h, space::MD) else {
+                continue;
+            };
+            // WHY the detail is built here: its third row counts the registry, and the
+            // old painter formatted that decimal for every pixel inside the card.
+            let mut buf = [0u8; CARD_DETAIL_CAP];
+            let len = card_row_text(state, row, &mut buf);
+            card_rows[row] = CardRowPlan {
+                rect,
+                name: Run::whole(
+                    rect.x,
+                    rect.y,
+                    CARD_ROW_LABEL,
+                    card_row_name(row),
+                    theme.text,
+                ),
+                detail: Run::whole(
+                    rect.x,
+                    rect.y + text::line_height(CARD_ROW_LABEL),
+                    CARD_ROW_DETAIL,
+                    &buf[..len],
+                    theme.text_muted,
+                ),
+            };
+        }
+    }
+
+    let deck = deck_plan(state, &theme, f.deck);
+
+    let search_scale = type_scale::BODY;
+    let magnifier_r = (text::line_height(search_scale) / 2).max(4) as i32;
+    let search_magnifier = (f.search.x + space::XL, f.search.center_y(), magnifier_r);
+    let search_text_x =
+        f.search.x + space::XL + magnifier_r as usize + space::SM + 2;
+    let search_room = (f.search.x + f.search.w - search_text_x).saturating_sub(space::XXL);
+    let search = Run::fitted(
+        search_text_x,
+        f.search.y + (f.search.h - text::line_height(LABEL_SCALE)) / 2,
+        LABEL_SCALE,
+        search_room,
+        b"Search apps and files",
+        theme.text_muted,
+    );
+
+    let nav_scale = type_scale::CAPTION;
+    let nav_cy = f.nav.y + (f.nav.h - text::line_height(nav_scale)) / 2;
+    // WHY the two navigation glyphs are placed here: their origins came from
+    // `text::measure` of a one- and two-byte literal, once per pixel, and they sit
+    // on the wallpaper ramp, so their ink is supplied per row rather than baked in.
+    let nav_back = Run::whole(
+        f.nav.w / 6 - text::measure(b"<", nav_scale) / 2,
+        nav_cy,
+        nav_scale,
+        b"<",
+        0,
+    );
+    let nav_recents = Run::whole(
+        f.nav.w * 5 / 6 - text::measure(b"[]", nav_scale) / 2,
+        nav_cy,
+        nav_scale,
+        b"[]",
+        0,
+    );
+    let pill_w = space::XXL * 5;
+
+    Paint {
+        clock,
+        greeting,
+        weather,
+        card_title,
+        card_stack,
+        card_rows,
+        deck,
+        search_magnifier,
+        search,
+        nav_back,
+        nav_recents,
+        nav_pill: Rect::new(
+            (SCREEN_WIDTH - pill_w) / 2,
+            f.nav.y + f.nav.h - space::MD - GESTURE_PILL_H,
+            pill_w,
+            GESTURE_PILL_H,
+        ),
+        telemetry: telemetry_plan(),
+    }
+}
+
+/// Resolves the deck for this frame.
+///
+/// WHY the empty message is stored rather than formatted per pixel: an empty deck
+/// was calling `text::ellipsize` and `text::center_x` for every pixel of the whole
+/// deck band, which is 15% of the surface, to draw sixteen glyphs in the middle.
+fn deck_plan(state: &LauncherState, theme: &Theme, deck: Rect) -> DeckPlan {
+    let mut plan = DeckPlan {
+        cells: [DeckTilePlan::EMPTY; MAX_DECK_TILES],
+        slots: 0,
+        columns: 0,
+        rows: 0,
+        origin_x: 0,
+        origin_y: 0,
+        pitch_x: 0,
+        pitch_y: 0,
+        app_count: state.app_count,
+        empty: None,
+    };
+    if state.app_count == 0 {
+        // WHY say this instead of leaving the band blank: an empty deck and a
+        // broken renderer look identical, and the difference is the one thing a
+        // reader of this surface needs to be told.
+        let caption = type_scale::CAPTION;
+        plan.empty = Some(Run::centred(
+            deck.x,
+            deck.y + (deck.h - text::line_height(caption)) / 2,
+            caption,
+            deck.w,
+            deck.w,
+            b"No apps installed",
+            theme.text_muted,
+        ));
+        return plan;
+    }
+
+    let g = deck_grid(state);
+    plan.slots = g.columns * g.rows;
+    plan.columns = g.columns;
+    plan.rows = g.rows;
+    plan.origin_x = g.origin_x;
+    plan.origin_y = g.origin_y;
+    plan.pitch_x = g.cell.w + g.gutter;
+    plan.pitch_y = g.cell.h + g.gutter;
+
+    // WHY the fill is resolved here: `layout::ink_on` scores a colour's relative
+    // luminance per pixel, and the badge word's ink depends on it.
+    let fill = theme.surface_raised;
+    let ink = layout::ink_on(theme, fill);
+    let slots = plan.slots.min(MAX_DECK_TILES).min(state.app_count);
+    for slot in 0..slots {
+        let Some(cell) = layout::grid_cell(&g, slot) else {
+            continue;
+        };
+        let badge = app_badge(state, slot);
+        let scale = icon_scale(cell, badge.len());
+        let icon_h = text::line_height(scale);
+        let group_h = icon_h + space::SM + text::line_height(LABEL_SCALE);
+        let top = cell.y + cell.h.saturating_sub(group_h) / 2;
+        // WHY the badge is drawn whole: the old painter sized the type scale so the
+        // badge fitted the cell and then handed the bytes straight to `test_text`,
+        // with no truncation step.
+        let badge_run = if badge.is_empty() {
+            Run::EMPTY
+        } else {
+            Run::whole(
+                cell.x + text::center_x(badge, scale, cell.w),
+                top,
+                scale,
+                badge,
+                ink,
+            )
+        };
+        plan.cells[slot] = DeckTilePlan {
+            cell,
+            badge: badge_run,
+            // WHY ellipsize and why a different width for fitting and for centring: a
+            // tile sized to the reference is 192 px and the registry's longest name
+            // is fourteen glyphs, so the name is fitted to the tile less its padding
+            // and the result is then centred across the whole tile. Both widths are
+            // what the old painter passed, and collapsing them into one would move
+            // every deck label.
+            label: Run::centred(
+                cell.x,
+                top + icon_h + space::SM,
+                LABEL_SCALE,
+                cell.w.saturating_sub(space::SM * 2),
+                cell.w,
+                app_label(state, slot),
+                ink,
+            ),
+            fill,
+        };
+    }
+    plan
+}
+
+/// This frame's painter plan.
+///
+/// WHY `(0, 0)` is the frame boundary and not a counter: `render_view` walks the
+/// surface in raster order from the top-left pixel, so `(0, 0)` is the first pixel
+/// of every frame and the only pixel within a frame that repeats it.
+/// `LauncherState` is borrowed immutably for the whole of a frame, so rebuilding
+/// there is once per frame and the plan can never lag the state it describes.
+static mut PAINT: Option<Paint> = None;
+
+fn paint(x: usize, y: usize, state: &LauncherState) -> &'static Paint {
+    let slot: *mut Option<Paint> = core::ptr::addr_of_mut!(PAINT);
+    // SAFETY: the launcher is one bare-metal task and the paint loop is not
+    // preemptible or reentrant, so this is the only reference to the slot at any
+    // time, and the reference handed back cannot outlive the call that made it.
+    let empty = unsafe { (*slot).is_none() };
+    if empty || (x == 0 && y == 0) {
+        // SAFETY: as above; this is the one mutation of the slot.
+        unsafe { *slot = Some(build(state)) };
+    }
+    // SAFETY: the slot is `Some` here -- it was just filled when it was empty.
+    unsafe { (*slot).as_ref() }.expect("WHY: the slot is filled when it is empty")
+}
+
+// -----------------------------------------------------------------------------
 // Deck geometry
 // -----------------------------------------------------------------------------
 
@@ -430,7 +970,7 @@ fn telemetry_signal_x() -> usize {
     wifi_x0 - TELEMETRY_GAP - signal_w
 }
 
-fn status_bar_pixel(x: usize, y: usize, theme: &Theme, state: &LauncherState) -> Option<u32> {
+fn status_bar_pixel(x: usize, y: usize, theme: &Theme, p: &Paint) -> Option<u32> {
     if y >= STATUS_BAR_HEIGHT {
         return None;
     }
@@ -438,24 +978,13 @@ fn status_bar_pixel(x: usize, y: usize, theme: &Theme, state: &LauncherState) ->
 
     // WHY gated on the source rather than drawn from the buffer: with no RTC
     // authority granted to this shell the read can be refused, and a clock is the
-    // one thing on this surface a reader takes as a measurement.
-    if state.clock_source_ok {
-        let scale = type_scale::CAPTION;
-        let clock_y = STATUS_BAR_HEIGHT / 2 - text::line_height(scale) / 2;
-        if let Some(c) = test_text(
-            x,
-            y,
-            CONTENT_PADDING,
-            clock_y,
-            scale,
-            &state.clock_time,
-            ink,
-        ) {
-            return Some(c);
-        }
+    // one thing on this surface a reader takes as a measurement. The gate itself is
+    // resolved in the plan, so this is a plain "is the run there" test.
+    if let Some(c) = p.clock.as_ref().and_then(|r| r.pixel_inked(x, y, ink)) {
+        return Some(c);
     }
 
-    telemetry_pixel(x, y, ink)
+    telemetry_pixel(x, y, &p.telemetry, ink)
 }
 
 /// The status bar's hardware glyphs.
@@ -464,22 +993,20 @@ fn status_bar_pixel(x: usize, y: usize, theme: &Theme, state: &LauncherState) ->
 /// every glyph is an outline with nothing filled. The fill arithmetic is written
 /// out anyway and reached only through [`Reading::level`], so a bound sensor has
 /// one place to go rather than a colour to change.
-fn telemetry_pixel(x: usize, y: usize, ink: u32) -> Option<u32> {
+fn telemetry_pixel(x: usize, y: usize, t: &Telemetry, ink: u32) -> Option<u32> {
     let top = TELEMETRY_TOP;
     let bottom = TELEMETRY_TOP + TELEMETRY_H - 1;
     if y < top || y > bottom {
         return None;
     }
-    let signal_x = telemetry_signal_x();
-    let signal_w = TELEMETRY_SIGNAL_BARS * TELEMETRY_BAR_W
-        + TELEMETRY_SIGNAL_BARS.saturating_sub(1) * TELEMETRY_BAR_GAP;
-    let battery_x0 = signal_x + signal_w + TELEMETRY_GAP;
-    let wifi_x0 = battery_x0 + TELEMETRY_BATTERY_W + TELEMETRY_GAP;
-    let term_x0 = battery_x0 + TELEMETRY_BATTERY_W;
+    let signal_x = t.signal_x;
+    let battery_x0 = t.battery_x0;
+    let wifi_x0 = t.wifi_x0;
+    let term_x0 = t.term_x0;
 
     // Cellular: a stack of bars of increasing height. Outlined while there is no
     // reading, filled from the bottom by the level once there is one.
-    if x >= signal_x && x < signal_x + signal_w {
+    if x >= signal_x && x < signal_x + t.signal_w {
         for bar in 0..TELEMETRY_SIGNAL_BARS {
             let bx = signal_x + bar * (TELEMETRY_BAR_W + TELEMETRY_BAR_GAP);
             if x < bx || x >= bx + TELEMETRY_BAR_W {
@@ -558,42 +1085,20 @@ fn telemetry_pixel(x: usize, y: usize, ink: u32) -> Option<u32> {
 /// a name here would be invented. It also cannot print a temperature: there is no
 /// weather sensor, no weather capability and no weather syscall here, so the line
 /// states the absence instead of showing a plausible number.
-fn greeting_pixel(x: usize, y: usize, f: &Frame, theme: &Theme) -> Option<u32> {
+fn greeting_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<u32> {
     let band = Rect::new(0, f.greeting.y, SCREEN_WIDTH, f.greeting.h);
     if !band.contains(x, y) {
         return None;
     }
+    // WHY the ink is taken per row and not baked into the runs: these four lines are
+    // drawn straight onto the wallpaper ramp, whose colour is a function of `y`.
     let ink = layout::ink_on(theme, backdrop(theme, y));
-    let scale = type_scale::TITLE;
-    let line_h = text::line_height(scale);
-    let l1_y = f.greeting.y + space::SM;
-    if let Some(c) = test_text(x, y, f.greeting.x, l1_y, scale, b"InterOS", ink) {
-        return Some(c);
+    for run in p.greeting.iter() {
+        if let Some(c) = run.pixel_inked(x, y, ink) {
+            return Some(c);
+        }
     }
-    let l2_y = l1_y + line_h + space::XS;
-    if let Some(c) = test_text(x, y, f.greeting.x, l2_y, scale, b"Device", ink) {
-        return Some(c);
-    }
-    let sub_y = l2_y + line_h + space::SM;
-    let caption = type_scale::CAPTION;
-    if let Some(c) = test_text(
-        x,
-        y,
-        f.greeting.x,
-        sub_y,
-        caption,
-        b"No clock or weather source is bound to this shell.",
-        ink,
-    ) {
-        return Some(c);
-    }
-    let (shown, len) = text::ellipsize(
-        b"Weather unavailable",
-        caption,
-        f.weather.w.saturating_sub(space::SM * 2),
-    );
-    let wx = f.weather.x + space::SM;
-    if let Some(c) = test_text(x, y, wx, sub_y, caption, &shown[..len], ink) {
+    if let Some(c) = p.weather.pixel_inked(x, y, ink) {
         return Some(c);
     }
     None
@@ -665,7 +1170,7 @@ fn card_row_name(row: usize) -> &'static [u8] {
     }
 }
 
-fn card_pixel(x: usize, y: usize, f: &Frame, theme: &Theme, state: &LauncherState) -> Option<u32> {
+fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<u32> {
     if !f.card.contains(x, y) {
         return None;
     }
@@ -675,44 +1180,24 @@ fn card_pixel(x: usize, y: usize, f: &Frame, theme: &Theme, state: &LauncherStat
     if rounded_outline(f.card, x, y, radius::CARD) {
         return Some(theme.border);
     }
-    let ink = theme.text;
-    if let Some(c) = test_text(
-        x,
-        y,
-        f.card_title.x,
-        f.card_title.y,
-        type_scale::TITLE,
-        b"System status",
-        ink,
-    ) {
+    if let Some(c) = p.card_title.pixel(x, y) {
         return Some(c);
     }
 
-    let row_h = card_row_h();
-    let stack = layout::list(f.card_rows, CARD_ROWS, row_h, space::MD);
-    let stack = stack?;
-    for row in 0..CARD_ROWS {
-        let Some(rect) = layout::list_row(stack, row, CARD_ROWS, row_h, space::MD) else {
-            continue;
-        };
-        if !rect.contains(x, y) {
+    // WHY the rows carry their own rectangles: the old painter rebuilt the stack and
+    // walked it for every pixel of the card, and formatted the third row's decimal
+    // app count each time it landed inside one.
+    if p.card_stack.is_none() {
+        return None;
+    }
+    for row in p.card_rows.iter() {
+        if !row.rect.contains(x, y) {
             continue;
         }
-        let name = card_row_name(row);
-        if let Some(c) = test_text(x, y, rect.x, rect.y, CARD_ROW_LABEL, name, ink) {
+        if let Some(c) = row.name.pixel(x, y) {
             return Some(c);
         }
-        let mut buf = [0u8; CARD_DETAIL_CAP];
-        let len = card_row_text(state, row, &mut buf);
-        if let Some(c) = test_text(
-            x,
-            y,
-            rect.x,
-            rect.y + text::line_height(CARD_ROW_LABEL),
-            CARD_ROW_DETAIL,
-            &buf[..len],
-            theme.text_muted,
-        ) {
+        if let Some(c) = row.detail.pixel(x, y) {
             return Some(c);
         }
     }
@@ -740,63 +1225,39 @@ fn icon_scale(cell: Rect, glyphs: usize) -> usize {
     by_h.min(by_w).clamp(ICON_SCALE_MIN, ICON_SCALE_MAX)
 }
 
-fn deck_pixel(x: usize, y: usize, f: &Frame, theme: &Theme, state: &LauncherState) -> Option<u32> {
+fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<u32> {
+    let deck = &p.deck;
     if !f.deck.contains(x, y) {
         return None;
     }
-    if state.app_count == 0 {
-        // WHY say this instead of leaving the band blank: an empty deck and a
-        // broken renderer look identical, and the difference is the one thing a
-        // reader of this surface needs to be told.
-        let caption = type_scale::CAPTION;
-        let (shown, len) = text::ellipsize(b"No apps installed", caption, f.deck.w);
-        let lx = f.deck.x + text::center_x(&shown[..len], caption, f.deck.w);
-        let ly = f.deck.y + (f.deck.h - text::line_height(caption)) / 2;
-        return test_text(x, y, lx, ly, caption, &shown[..len], theme.text_muted);
+    if let Some(empty) = deck.empty.as_ref() {
+        return empty.pixel(x, y);
     }
 
-    let g = deck_grid(state);
-    let index = layout::grid_hit(&g, x, y)?;
-    if index >= state.app_count {
+    let index = deck.slot_at(x, y)?;
+    if index >= deck.app_count {
         return None;
     }
-    let cell = layout::grid_cell(&g, index)?;
+    let tile = &deck.cells[index];
 
     // WHY one elevation step below the card: the reference draws the deck tiles
     // at #F3F3F2 and the card above them at #F8F6F4, and `surface` /
     // `surface_raised` are exactly that pair. The border is there because on the
     // dark theme `surface_raised` and the bottom of the wallpaper ramp are close
     // enough that a tile would otherwise have no edge.
-    let fill = theme.surface_raised;
-    if !rounded_contains(cell, x, y, radius::CARD) {
+    if !rounded_contains(tile.cell, x, y, radius::CARD) {
         return None;
     }
-    if rounded_outline(cell, x, y, radius::CARD) {
+    if rounded_outline(tile.cell, x, y, radius::CARD) {
         return Some(theme.border);
     }
-    let ink = layout::ink_on(theme, fill);
-
-    let badge = app_badge(state, index);
-    let scale = icon_scale(cell, badge.len());
-    let icon_h = text::line_height(scale);
-    let label_h = text::line_height(LABEL_SCALE);
-    let group_h = icon_h + space::SM + label_h;
-    let top = cell.y + cell.h.saturating_sub(group_h) / 2;
-
-    if !badge.is_empty() {
-        let icon_x = cell.x + text::center_x(badge, scale, cell.w);
-        if let Some(c) = test_text(x, y, icon_x, top, scale, badge, ink) {
-            return Some(c);
-        }
+    if let Some(c) = tile.badge.pixel(x, y) {
+        return Some(c);
     }
-    let label = app_label(state, index);
-    // WHY ellipsize: a tile sized to the reference is 192 px, and the registry's
-    // longest name is fourteen glyphs. Clipping mid-word reads as a fault; an
-    // ellipsis reads as a decision.
-    let (shown, len) = text::ellipsize(label, LABEL_SCALE, cell.w.saturating_sub(space::SM * 2));
-    let label_x = cell.x + text::center_x(&shown[..len], LABEL_SCALE, cell.w);
-    let _ = test_text(x, y, label_x, top + icon_h + space::SM, LABEL_SCALE, &shown[..len], ink);
-    Some(fill)
+    // WHY the app's name is not consulted here: see [`DeckTilePlan::label`]. It is
+    // resolved once per frame and deliberately not painted, because painting it
+    // would alter the screen. That belongs in a change of its own.
+    Some(tile.fill)
 }
 
 // -----------------------------------------------------------------------------
@@ -808,7 +1269,7 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, theme: &Theme, state: &LauncherStat
 /// WHY it is on this surface at all: the reference home panel has no search bar
 /// -- that lives on the App View panel -- but the shell opens System Space from a
 /// tap here, so removing it would take a working control with it.
-fn search_pixel(x: usize, y: usize, f: &Frame, theme: &Theme) -> Option<u32> {
+fn search_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<u32> {
     if !f.search.contains(x, y) {
         return None;
     }
@@ -819,12 +1280,11 @@ fn search_pixel(x: usize, y: usize, f: &Frame, theme: &Theme) -> Option<u32> {
         return Some(theme.overlay_border);
     }
     let ink = layout::ink_on(theme, theme.overlay);
-    let scale = type_scale::BODY;
-    let cy = f.search.center_y();
 
-    // Magnifier: ring plus handle.
-    let gx = f.search.x + space::XL;
-    let r = (text::line_height(scale) / 2).max(4) as i32;
+    // Magnifier: ring plus handle. WHY the centre and radius are in the plan: they
+    // came from `text::line_height(type_scale::BODY)`, which the old painter
+    // re-derived for every pixel of the surface to place a 20 px circle.
+    let (gx, cy, r) = p.search_magnifier;
     let dx = x as i32 - gx as i32;
     let dy = y as i32 - cy as i32;
     let d2 = dx * dx + dy * dy;
@@ -837,19 +1297,7 @@ fn search_pixel(x: usize, y: usize, f: &Frame, theme: &Theme) -> Option<u32> {
         return Some(ink);
     }
 
-    let placeholder_y = f.search.y + (f.search.h - text::line_height(LABEL_SCALE)) / 2;
-    let text_x = gx + r as usize + space::SM + 2;
-    let room = (f.search.x + f.search.w - text_x).saturating_sub(space::XXL);
-    let (shown, len) = text::ellipsize(b"Search apps and files", LABEL_SCALE, room);
-    if let Some(c) = test_text(
-        x,
-        y,
-        text_x,
-        placeholder_y,
-        LABEL_SCALE,
-        &shown[..len],
-        theme.text_muted,
-    ) {
+    if let Some(c) = p.search.pixel(x, y) {
         return Some(c);
     }
     Some(theme.overlay)
@@ -859,48 +1307,22 @@ fn search_pixel(x: usize, y: usize, f: &Frame, theme: &Theme) -> Option<u32> {
 // Navigation
 // -----------------------------------------------------------------------------
 
-fn nav_pixel(x: usize, y: usize, f: &Frame, theme: &Theme) -> Option<u32> {
+fn nav_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<u32> {
     if !f.nav.contains(x, y) {
         return None;
     }
     let ink = layout::ink_on(theme, backdrop(theme, y));
-    let scale = type_scale::CAPTION;
-    let line_h = text::line_height(scale);
-    let cy = f.nav.y + (f.nav.h - line_h) / 2;
 
-    // Back chevron.
-    if let Some(c) = test_text(
-        x,
-        y,
-        f.nav.w / 6 - text::measure(b"<", scale) / 2,
-        cy,
-        scale,
-        b"<",
-        ink,
-    ) {
+    // Back chevron, then recents: the same order and the same centring as before,
+    // with both origins resolved in the plan.
+    if let Some(c) = p.nav_back.pixel_inked(x, y, ink) {
         return Some(c);
     }
-    // Recents.
-    if let Some(c) = test_text(
-        x,
-        y,
-        f.nav.w * 5 / 6 - text::measure(b"[]", scale) / 2,
-        cy,
-        scale,
-        b"[]",
-        ink,
-    ) {
+    if let Some(c) = p.nav_recents.pixel_inked(x, y, ink) {
         return Some(c);
     }
     // Home pill, the width the theme can name and the height the shell measures.
-    let pill_w = space::XXL * 5;
-    let pill = Rect::new(
-        (SCREEN_WIDTH - pill_w) / 2,
-        f.nav.y + f.nav.h - space::MD - GESTURE_PILL_H,
-        pill_w,
-        GESTURE_PILL_H,
-    );
-    if pill.contains(x, y) {
+    if p.nav_pill.contains(x, y) {
         return Some(ink);
     }
     None
@@ -913,22 +1335,25 @@ fn nav_pixel(x: usize, y: usize, f: &Frame, theme: &Theme) -> Option<u32> {
 pub fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     let theme = active_theme();
     let f = frame();
-    if let Some(c) = status_bar_pixel(x, y, &theme, state) {
+    // WHY the plan is taken once, up front: it is the only place in this function
+    // where anything other than a pixel test happens.
+    let p = paint(x, y, state);
+    if let Some(c) = status_bar_pixel(x, y, &theme, p) {
         return c;
     }
-    if let Some(c) = greeting_pixel(x, y, &f, &theme) {
+    if let Some(c) = greeting_pixel(x, y, &f, p, &theme) {
         return c;
     }
-    if let Some(c) = card_pixel(x, y, &f, &theme, state) {
+    if let Some(c) = card_pixel(x, y, &f, p, &theme) {
         return c;
     }
-    if let Some(c) = deck_pixel(x, y, &f, &theme, state) {
+    if let Some(c) = deck_pixel(x, y, &f, p, &theme) {
         return c;
     }
-    if let Some(c) = search_pixel(x, y, &f, &theme) {
+    if let Some(c) = search_pixel(x, y, &f, p, &theme) {
         return c;
     }
-    if let Some(c) = nav_pixel(x, y, &f, &theme) {
+    if let Some(c) = nav_pixel(x, y, &f, p, &theme) {
         return c;
     }
     backdrop(&theme, y)

@@ -16,10 +16,8 @@
 
 #![allow(unused_imports)]
 
-use super::system_space::{
-    darken, decimal, push, round_contains, run_center, run_left, VALUE_MAX,
-};
-use crate::LauncherState;
+use super::system_space::{darken, decimal, push, round_contains, VALUE_MAX};
+use crate::{test_text, LauncherState};
 use launcher::layout::{self, Rect};
 use launcher::text;
 use launcher::theme::*;
@@ -236,31 +234,148 @@ fn action_skin(theme: &Theme, index: usize, can: &Can) -> PillSkin {
     }
 }
 
-/// Paints one pill: rounded fill, hairline outline, a centred label with a
-/// centred status line under it.
-fn pill_pixel(
+// -----------------------------------------------------------------------------
+// Runs and the per-frame frame
+// -----------------------------------------------------------------------------
+
+/// Capacity of one run's byte buffer. WHY it matches `text::ellipsize`, so a run
+/// built once per frame is byte-for-byte the run the per-pixel painter built.
+const RUN_CAP: usize = 96;
+
+/// One label, placed and measured once per frame.
+///
+/// WHY this type: the drawer's title measured five glyphs for every pixel of its
+/// band, each pill ellipsized its label and its status and re-measured both to centre
+/// them for every pixel of the pill, and `action_summary` -- which counts the live
+/// actions by walking the package registry -- was rebuilt for every pixel of the line
+/// under the title. Nothing about any of that depends on the pixel.
+///
+/// WHY the box is carried as well as the origin: `test_text` walks the pen of every
+/// glyph before it can answer "no", so a pixel nowhere near a run still costs a pen
+/// walk per label. The stored box is exactly
+/// `y .. y + line_height(scale)` by `x .. x + measure(run)`, which is the region
+/// `test_text` can return `Some` for.
+struct Run {
     x: usize,
     y: usize,
-    rect: &Rect,
-    theme: &Theme,
-    label: &[u8],
-    status: &[u8],
-    skin: &PillSkin,
-) -> u32 {
-    let corner = radius::SHEET.min(rect.h / 2);
-    if !round_contains(rect, corner, x, y) {
-        return theme.bg;
-    }
-    let inner = rect.inset(1);
-    if !round_contains(&inner, corner.saturating_sub(1), x, y) {
-        return skin.border;
+    w: usize,
+    h: usize,
+    scale: usize,
+    len: usize,
+    ink: u32,
+    bytes: [u8; RUN_CAP],
+}
+
+impl Run {
+    /// A run that never inks anything.
+    const EMPTY: Run = Run {
+        x: 0,
+        y: 0,
+        w: 0,
+        h: 0,
+        scale: 1,
+        len: 0,
+        ink: 0,
+        bytes: [0u8; RUN_CAP],
+    };
+
+    /// `bytes` centred across `width` from `x`, at `y`.
+    ///
+    /// WHY `y` is passed rather than a box: the two lines of a pill are already
+    /// centred vertically against the block the old painter computed, and a vertical
+    /// centre against a per-line box is the same number written once.
+    fn centred(
+        x: usize,
+        y: usize,
+        scale: usize,
+        width: usize,
+        bytes: &[u8],
+        ink: u32,
+    ) -> Run {
+        let (buf, len) = text::ellipsize(bytes, scale, width);
+        let inset = text::center_x(&buf[..len], scale, width);
+        Run::placed(x + inset, y, scale, buf, len, ink)
     }
 
-    // WHY the two lines are laid out as one block: a label and its status read
-    // as a single control when they share a baseline group, and the block is
-    // centred against the pill rather than each line against the pill. A pill
-    // with no status line centres its label on its own, because a label
-    // floating high in a button reads as misaligned rather than as quiet.
+    /// `bytes` drawn whole with no truncation step -- the title and the count under
+    /// it, which the old painter never offered a width to fit.
+    fn whole(x: usize, y: usize, scale: usize, bytes: &[u8], ink: u32) -> Run {
+        let mut buf = [0u8; RUN_CAP];
+        let len = bytes.len().min(RUN_CAP);
+        buf[..len].copy_from_slice(&bytes[..len]);
+        Run::placed(x, y, scale, buf, len, ink)
+    }
+
+    /// A run from an already-resolved buffer.
+    fn placed(x: usize, y: usize, scale: usize, buf: [u8; RUN_CAP], len: usize, ink: u32) -> Run {
+        Run {
+            x,
+            y,
+            w: text::measure(&buf[..len], scale),
+            h: text::line_height(scale),
+            scale,
+            len,
+            ink,
+            bytes: buf,
+        }
+    }
+
+    /// The colour of (`px`, `py`) if this run inks it.
+    fn pixel(&self, px: usize, py: usize) -> Option<u32> {
+        if self.len == 0 {
+            return None;
+        }
+        if px < self.x || px - self.x >= self.w || py < self.y || py - self.y >= self.h {
+            return None;
+        }
+        test_text(px, py, self.x, self.y, self.scale, &self.bytes[..self.len], self.ink)
+    }
+}
+
+/// One pill, with its skin and both of its lines resolved.
+struct PillPlan {
+    rect: Rect,
+    inner: Rect,
+    corner: usize,
+    skin: PillSkin,
+    label: Run,
+    status: Run,
+}
+
+impl PillPlan {
+    const EMPTY: PillPlan = PillPlan {
+        rect: Rect::new(0, 0, 0, 0),
+        inner: Rect::new(0, 0, 0, 0),
+        corner: 0,
+        skin: PillSkin {
+            fill: 0,
+            border: 0,
+            label_ink: 0,
+            status_ink: 0,
+        },
+        label: Run::EMPTY,
+        status: Run::EMPTY,
+    };
+}
+
+/// Everything the drawer needs that does not depend on the pixel.
+struct Frame {
+    clock: Option<Run>,
+    title: Run,
+    summary: Run,
+    pills: [PillPlan; ACTION_COUNT],
+    dismiss: PillPlan,
+    indicator: Rect,
+}
+
+/// Resolves one pill.
+///
+/// WHY the two lines are laid out as one block: a label and its status read as a
+/// single control when they share a baseline group, and the block is centred against
+/// the pill rather than each line against the pill. A pill with no status line
+/// centres its label on its own, because a label floating high in a button reads as
+/// misaligned rather than as quiet.
+fn pill_plan(rect: Rect, label: &[u8], status: &[u8], skin: PillSkin) -> PillPlan {
     let label_h = text::line_height(type_scale::BODY);
     let status_h = text::line_height(type_scale::CAPTION);
     let block_h = if status.is_empty() {
@@ -269,58 +384,142 @@ fn pill_pixel(
         label_h + space::XS + status_h
     };
     let top = rect.y + rect.h.saturating_sub(block_h) / 2;
-    let label_rect = Rect::new(rect.x + space::MD, top, rect.w - space::MD * 2, label_h);
-    let status_rect = Rect::new(
-        rect.x + space::MD,
-        top + label_h + space::XS,
-        rect.w - space::MD * 2,
-        status_h,
-    );
+    let text_w = rect.w - space::MD * 2;
+    PillPlan {
+        rect,
+        inner: rect.inset(1),
+        corner: radius::SHEET.min(rect.h / 2),
+        label: Run::centred(
+            rect.x + space::MD,
+            top,
+            type_scale::BODY,
+            text_w,
+            label,
+            skin.label_ink,
+        ),
+        status: if status.is_empty() {
+            Run::EMPTY
+        } else {
+            Run::centred(
+                rect.x + space::MD,
+                top + label_h + space::XS,
+                type_scale::CAPTION,
+                text_w,
+                status,
+                skin.status_ink,
+            )
+        },
+        skin,
+    }
+}
 
-    let (label_run, label_len) = text::ellipsize(label, type_scale::BODY, label_rect.w);
-    if let Some(c) = run_center(
-        x,
-        y,
-        &label_rect,
-        type_scale::BODY,
-        &label_run[..label_len],
-        skin.label_ink,
-    ) {
+/// Builds this frame's plan.
+///
+/// WHY the summary is built here: `available_actions` asks each action whether it can
+/// run, and the emergency action answers by walking the package registry for the
+/// dialer. That walk ran for every pixel of the line under the title.
+fn build(state: &LauncherState) -> Frame {
+    let theme = THEME;
+
+    let bar = Rect::new(0, 0, SCREEN_WIDTH, STATUS_BAR_HEIGHT);
+    let panel = Rect::new(DRAWER_X, STATUS_BAR_HEIGHT, SCREEN_WIDTH - DRAWER_X, SCREEN_HEIGHT);
+    let pad = panel.inset(space::LG);
+
+    let title_h = text::line_height(type_scale::TITLE);
+    let caption_h = text::line_height(type_scale::CAPTION);
+    let title_y = pad.y + space::MD;
+    let sub_y = title_y + title_h + space::XS;
+
+    let (summary, summary_len) = action_summary(state);
+
+    let mut pills = [PillPlan::EMPTY; ACTION_COUNT];
+    for index in 0..ACTION_COUNT {
+        let (label, can) = action(state, index);
+        let skin = action_skin(&theme, index, &can);
+        pills[index] = pill_plan(PILLS[index], label, can.status(), skin);
+    }
+
+    let indicator_w = space::XL * 4;
+    let indicator_h = space::XS;
+
+    Frame {
+        clock: if state.clock_source_ok {
+            Some(Run::whole(
+                bar.x + CONTENT_PADDING,
+                bar.y + (bar.h - caption_h) / 2,
+                type_scale::CAPTION,
+                &state.clock_time,
+                layout::ink_on(&theme, theme.overlay),
+            ))
+        } else {
+            None
+        },
+        title: Run::whole(pad.x, title_y, type_scale::TITLE, b"Power", theme.text),
+        summary: Run::whole(pad.x, sub_y, type_scale::CAPTION, &summary[..summary_len], theme.text_muted),
+        pills,
+        dismiss: pill_plan(DISMISS_PILL, b"Cancel", b"", PillSkin::live(&theme)),
+        indicator: Rect::new(
+            panel.x + (panel.w - indicator_w) / 2,
+            SCREEN_HEIGHT - space::MD - indicator_h,
+            indicator_w,
+            indicator_h,
+        ),
+    }
+}
+
+/// This frame's plan.
+///
+/// WHY `(0, 0)` is the frame boundary: `render_view` walks the surface in raster
+/// order from the top-left pixel, so `(0, 0)` is the first pixel of every frame and
+/// the only pixel within a frame that repeats it. `LauncherState` is borrowed
+/// immutably for the whole of a frame, so rebuilding there is once per frame -- which
+/// is also the only cadence at which the registry can have changed underneath it.
+static mut FRAME: Option<Frame> = None;
+
+fn frame(x: usize, y: usize, state: &LauncherState) -> &'static Frame {
+    let slot: *mut Option<Frame> = core::ptr::addr_of_mut!(FRAME);
+    // SAFETY: the launcher is one bare-metal task and the paint loop is neither
+    // preemptible nor reentrant, so this is the only reference to the slot at any
+    // moment, and the reference returned cannot outlive the call that made it.
+    let empty = unsafe { (*slot).is_none() };
+    if empty || (x == 0 && y == 0) {
+        // SAFETY: as above; this is the one mutation of the slot.
+        unsafe { *slot = Some(build(state)) };
+    }
+    // SAFETY: the slot is `Some` here -- it was just filled when it was empty.
+    unsafe { (*slot).as_ref() }.expect("WHY: the slot is filled when it is empty")
+}
+/// Paints one pill from a resolved plan: rounded fill, hairline outline, a centred
+/// label with a centred status line under it.
+fn pill_pixel(x: usize, y: usize, theme: &Theme, plan: &PillPlan) -> u32 {
+    if !round_contains(&plan.rect, plan.corner, x, y) {
+        return theme.bg;
+    }
+    if !round_contains(&plan.inner, plan.corner.saturating_sub(1), x, y) {
+        return plan.skin.border;
+    }
+    if let Some(c) = plan.label.pixel(x, y) {
         return c;
     }
-    let (status_run, status_len) = text::ellipsize(status, type_scale::CAPTION, status_rect.w);
-    if let Some(c) = run_center(
-        x,
-        y,
-        &status_rect,
-        type_scale::CAPTION,
-        &status_run[..status_len],
-        skin.status_ink,
-    ) {
+    if let Some(c) = plan.status.pixel(x, y) {
         return c;
     }
-    skin.fill
+    plan.skin.fill
 }
 
 pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     let theme = THEME;
 
+    // WHY the plan is fetched before anything is drawn: it carries every rectangle,
+    // every line and every skin for this frame, and fetching it is the only place in
+    // this function where anything other than a pixel test happens.
+    let f = frame(x, y, state);
+
     // Status bar: the same chrome every other surface draws, so the drawer does
     // not read as a different device.
-    let bar = Rect::new(0, 0, SCREEN_WIDTH, STATUS_BAR_HEIGHT);
     if y < STATUS_BAR_HEIGHT {
-        if state.clock_source_ok {
-            let area = Rect::new(bar.x + CONTENT_PADDING, bar.y, bar.w - CONTENT_PADDING * 2, bar.h);
-            if let Some(c) = run_left(
-                x,
-                y,
-                &area,
-                type_scale::CAPTION,
-                &state.clock_time,
-                layout::ink_on(&theme, theme.overlay),
-            ) {
-                return c;
-            }
+        if let Some(c) = f.clock.as_ref().and_then(|r| r.pixel(x, y)) {
+            return c;
         }
         return theme.overlay;
     }
@@ -338,68 +537,34 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return theme.border;
     }
 
-    let panel = Rect::new(DRAWER_X, STATUS_BAR_HEIGHT, SCREEN_WIDTH - DRAWER_X, SCREEN_HEIGHT);
-    let pad = panel.inset(space::LG);
-
     // Title and the count of what the shell can actually do.
-    let title_rect = Rect::new(
-        pad.x,
-        pad.y + space::MD,
-        pad.w,
-        text::line_height(type_scale::TITLE),
-    );
-    if let Some(c) = run_left(x, y, &title_rect, type_scale::TITLE, b"Power", theme.text) {
+    if let Some(c) = f.title.pixel(x, y) {
         return c;
     }
-    let sub_rect = Rect::new(
-        pad.x,
-        title_rect.y + title_rect.h + space::XS,
-        pad.w,
-        text::line_height(type_scale::CAPTION),
-    );
-    // WHY the summary is built only once the pixel is on that line: counting the
-    // live actions walks the package registry, and this function runs for every
-    // pixel of the drawer.
-    if y >= sub_rect.y && y < sub_rect.y + sub_rect.h {
-        let (summary, summary_len) = action_summary(state);
-        if let Some(c) = run_left(
-            x,
-            y,
-            &sub_rect,
-            type_scale::CAPTION,
-            &summary[..summary_len],
-            theme.text_muted,
-        ) {
-            return c;
-        }
+    // WHY the summary is the count and nothing else: each of the four actions is
+    // checked against the shell's own capabilities, and an action the kernel cannot
+    // perform says so on its own pill rather than in a word here.
+    if let Some(c) = f.summary.pixel(x, y) {
+        return c;
     }
 
-    // The actions, each drawn only as live when the shell can perform it.
+    // The actions, each drawn only as live when the shell can perform it. WHY the
+    // order is kept: the pills are scanned in the same order as before, and the
+    // first one containing the pixel is the one drawn.
     for index in 0..ACTION_COUNT {
-        let rect = PILLS[index];
-        if !round_contains(&rect, radius::SHEET, x, y) {
+        if !round_contains(&f.pills[index].rect, radius::SHEET, x, y) {
             continue;
         }
-        let (label, can) = action(state, index);
-        let skin = action_skin(&theme, index, &can);
-        return pill_pixel(x, y, &rect, &theme, label, can.status(), &skin);
+        return pill_pixel(x, y, &theme, &f.pills[index]);
     }
 
-    if round_contains(&DISMISS_PILL, radius::CONTROL, x, y) {
-        return pill_pixel(x, y, &DISMISS_PILL, &theme, b"Cancel", b"", &PillSkin::live(&theme));
+    if round_contains(&f.dismiss.rect, radius::CONTROL, x, y) {
+        return pill_pixel(x, y, &theme, &f.dismiss);
     }
 
     // Home indicator, over the drawer only: the scrim belongs to the screen
     // underneath and is not this surface's to annotate.
-    let indicator_w = space::XL * 4;
-    let indicator_h = space::XS;
-    let indicator = Rect::new(
-        panel.x + (panel.w - indicator_w) / 2,
-        SCREEN_HEIGHT - space::MD - indicator_h,
-        indicator_w,
-        indicator_h,
-    );
-    if round_contains(&indicator, indicator_h / 2, x, y) {
+    if round_contains(&f.indicator, f.indicator.h / 2, x, y) {
         return Theme::blend(theme.text_muted, theme.bg, 140);
     }
 

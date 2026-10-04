@@ -13,8 +13,20 @@
 //! `round(measured_cap_px / font::CAP_HEIGHT)`, so the derivation survives the next
 //! typeface: only `CAP_HEIGHT` changes, and the arithmetic below is re-run against
 //! it. `theme::type_scale` still sizes every other surface in the shell.
+//!
+//! WHY there is a [`Frame`] and a one-slot memo for it: this renderer is called
+//! once per pixel -- 1,036,800 times a frame -- through a function pointer the
+//! shell resolved before the loop began, so the compiler cannot hoist anything out
+//! of it. Every rectangle it draws with used to be re-measured inside that call:
+//! two 16-byte `text::measure` walks for the hint, an 11-byte one for the date
+//! line and a 5-byte one for the clock, plus `lock_na_origin`, on every pixel of
+//! the surface -- roughly fifty `text::advance` lookups a pixel, about fifty
+//! million a frame. None of that depends on `(x, y)`. It is measured once per
+//! frame into `Frame` and read back as plain numbers per pixel.
 
-use crate::{get_stock_background_pixel, test_text, LauncherState, H, W};
+use core::cell::UnsafeCell;
+
+use crate::{test_text, LauncherState, H, W};
 use launcher::layout::{self, Rect};
 use launcher::text;
 use launcher::theme::*;
@@ -254,8 +266,8 @@ fn lock_figure_hit(x: usize, y: usize) -> bool {
 /// silhouette, and its whole job is to be the darkest thing in the valley. A
 /// fixed near-black stops being a silhouette the moment the ramp is retuned,
 /// while a figure derived from its own backdrop cannot.
-fn lock_figure_ink(theme: &Theme, behind: u32) -> u32 {
-    Theme::blend(behind, theme.wallpaper_bottom, 190)
+fn lock_figure_ink(f: &Frame, behind: u32) -> u32 {
+    Theme::blend(behind, f.bottom, 190)
 }
 
 /// The two ramp fractions for one pixel, folded into a single interpolation.
@@ -273,7 +285,15 @@ fn lock_band(vertical: u32, across: u32) -> u32 {
 }
 
 /// Full-bleed wallpaper layer for the lock surface.
-fn lock_wallpaper_pixel(theme: &Theme, x: usize, y: usize) -> u32 {
+///
+/// WHY the ramp arrives in a `&Frame` rather than a `&Theme`: every tone below is
+/// `Theme::blend` of two theme stops, and `blend` is a four-iteration loop with a
+/// bounds check per channel. While `THEME` is a constant the compiler folds all of
+/// them away, which is why they were free until now -- but `screens/app_drawer.rs`
+/// records the plan to replace that constant with the active theme, at which point
+/// every one of them becomes real work on every one of a million pixels. Taking
+/// them from the frame costs nothing today and keeps that change off the hot path.
+fn lock_wallpaper_pixel(f: &Frame, x: usize, y: usize) -> u32 {
     let fx = (x * LOCK_REF_W) / W;
     let rel = ((y * LOCK_REF_H) / H) as u16;
     let far = LOCK_SKYLINE_FAR[fx];
@@ -295,11 +315,7 @@ fn lock_wallpaper_pixel(theme: &Theme, x: usize, y: usize) -> u32 {
 
     if rel < far {
         let vertical = rel as u32 * 256 / LOCK_HORIZON_Y as u32;
-        Theme::blend(
-            theme.wallpaper_top,
-            lock_horizon(theme),
-            lock_band(vertical, across),
-        )
+        Theme::blend(f.top, f.horizon, lock_band(vertical, across))
     } else if rel < near {
         // WHY saturating: the traced far ridge is not level. Its columns run from
         // reference row 145 to 167, so a pixel can be below the ridge and above
@@ -307,29 +323,21 @@ fn lock_wallpaper_pixel(theme: &Theme, x: usize, y: usize) -> u32 {
         // there underflows -- which is a panic on this build, not a wrong colour.
         let vertical = rel.saturating_sub(LOCK_HORIZON_Y as u16) as u32 * 256
             / (LOCK_MIST_Y - LOCK_HORIZON_Y) as u32;
-        let base = Theme::blend(
-            lock_shadow(theme),
-            lock_mist(theme),
-            lock_band(vertical, across),
-        );
+        let base = Theme::blend(f.shadow, f.mist, lock_band(vertical, across));
         if lock_figure_hit(x, y) {
-            return lock_figure_ink(theme, base);
+            return lock_figure_ink(f, base);
         }
         base
     } else if (rel as usize) < LOCK_ROCK_Y {
         let vertical = rel.saturating_sub(LOCK_MIST_Y as u16) as u32 * 256
             / (LOCK_ROCK_Y - LOCK_MIST_Y) as u32;
-        Theme::blend(
-            lock_mist(theme),
-            theme.wallpaper_bottom,
-            lock_band(vertical, across),
-        )
+        Theme::blend(f.mist, f.bottom, lock_band(vertical, across))
     } else {
         // The near rock itself: the ramp's darkest stop, held, with only the sun
         // lift on top. WHY it is the dark stop and not a blend toward it: below
         // the rock line the reference is not a gradient at all, it is the shadowed
         // face of the foreground ridge.
-        Theme::blend(theme.wallpaper_bottom, lock_mist(theme), across)
+        Theme::blend(f.bottom, f.mist, across)
     }
 }
 
@@ -439,6 +447,10 @@ fn lock_button_disc(x: usize, y: usize, cx: i32, bg: u32) -> Option<u32> {
 
 /// Where the torch control's unavailability label starts.
 ///
+/// WHY once per frame and not per pixel: this walks `LOCK_NA_TEXT` through
+/// `text::measure`, and the pixel function used to call it for every pixel of the
+/// surface. It is now reached only from [`Frame::measure`]. See the module header.
+///
 /// WHY an origin and not a box: `test_text` is handed the glyph run's top-left and
 /// rasterises downward from it, so handing it a box whose height came from
 /// `text::line_height` puts the run a whole line-height above where it belongs.
@@ -469,11 +481,221 @@ fn lock_na_origin() -> (usize, usize) {
     (x, y)
 }
 
+/// The "N/A" label as a box: its origin from [`lock_na_origin`] plus its own
+/// extent, measured at the caption scale.
+///
+/// WHY the extent is here at all: the pixel function used to hand `test_text` this
+/// label's origin and let it reject the other 1,036,000-odd pixels one row-band
+/// test at a time, which is the cheapest possible reject but still a call and a pen
+/// walk per pixel. Testing the box first is the same test `test_text` performs on
+/// the row (`y` in `[y0, y0 + line_height)`) extended with the one it performs on
+/// the column, so it accepts exactly the pixels `test_text` could have accepted and
+/// rejects the rest without calling anything.
+fn lock_na_box() -> Rect {
+    let (x, y) = lock_na_origin();
+    Rect::new(
+        x,
+        y,
+        text::measure(LOCK_NA_TEXT, type_scale::CAPTION),
+        text::line_height(type_scale::CAPTION),
+    )
+}
+
+// --- Per-frame metrics -------------------------------------------------------
+// Everything below this line exists because `get_lock_screen_color` runs
+// 1,036,800 times a frame. The values it needs depend on the shell state and on
+// constants -- never on `(x, y)` -- so they are computed once per frame here and
+// read back per pixel.
+
+/// Everything this surface draws whose position or tone is derived, resolved once
+/// per frame.
+///
+/// WHY a struct rather than more constants: the four boxes come from
+/// `text::measure` over strings the kernel supplies, and the five ramp tones come
+/// from `Theme::blend` over theme stops. Both are cheap once and ruinous a million
+/// times, and both are exactly the kind of thing a future runtime theme would move
+/// out of the compiler's reach.
+struct Frame {
+    /// Cell height of the status-bar clock: `text::line_height(LOCK_STATUS_TIME_SCALE)`.
+    ///
+    /// WHY it is here and not typed: the status clock is the one run on this
+    /// surface with no measured width -- it is drawn from a fixed origin and the
+    /// rasteriser stops at the end of the string -- so its only metric is its
+    /// height, and that is still a `text::` call if it is made per pixel.
+    status_h: usize,
+    /// The date line, left-aligned on `LOCK_CONTENT_X`.
+    date: Rect,
+    /// The clock, left-aligned on `LOCK_CONTENT_X`.
+    clock: Rect,
+    /// The unlock hint, horizontally centred on the surface.
+    hint: Rect,
+    /// The torch's "N/A" label: an origin *and* an extent, see [`lock_na_box`].
+    na: Rect,
+    /// Ink for the status bar, the date line and the clock: [`lock_ink`].
+    ink: u32,
+    /// The ramp, resolved: top stop, brightest tone, shadowed rock, mist, and the
+    /// darkest stop the foreground holds.
+    top: u32,
+    horizon: u32,
+    shadow: u32,
+    mist: u32,
+    bottom: u32,
+}
+
+impl Frame {
+    /// Measures this frame. Called once per frame, from [`frame_for`], and never
+    /// from the per-pixel path.
+    ///
+    /// WHY the date and clock boxes are measured even when there is no clock
+    /// reading: `clock_source_ok` gates whether they are *drawn*, and it is read
+    /// live from the state per pixel, so measuring them unconditionally costs
+    /// sixteen advance lookups a frame and keeps this function free of a branch
+    /// whose two halves would have to stay in step with the pixel path's.
+    fn measure(state: &LauncherState) -> Frame {
+        let theme = THEME;
+        Frame {
+            status_h: text::line_height(LOCK_STATUS_TIME_SCALE),
+            date: Rect::new(
+                LOCK_CONTENT_X,
+                LOCK_DATE_Y,
+                text::measure(&state.date_line, LOCK_DATE_SCALE),
+                text::line_height(LOCK_DATE_SCALE),
+            ),
+            clock: Rect::new(
+                LOCK_CONTENT_X,
+                LOCK_CLOCK_Y,
+                text::measure(&state.clock_time, LOCK_CLOCK_SCALE),
+                text::line_height(LOCK_CLOCK_SCALE),
+            ),
+            hint: Rect::new(
+                text::center_x(LOCK_HINT_TEXT, LOCK_HINT_SCALE, W),
+                LOCK_HINT_Y,
+                text::measure(LOCK_HINT_TEXT, LOCK_HINT_SCALE),
+                text::line_height(LOCK_HINT_SCALE),
+            ),
+            na: lock_na_box(),
+            ink: lock_ink(&theme),
+            top: theme.wallpaper_top,
+            horizon: lock_horizon(&theme),
+            shadow: lock_shadow(&theme),
+            mist: lock_mist(&theme),
+            bottom: theme.wallpaper_bottom,
+        }
+    }
+}
+
+/// One memo slot: the frame, and what it was measured for.
+struct FrameSlot {
+    /// Address of the `LauncherState` these metrics were measured from.
+    ///
+    /// WHY the address and not the contents: the contents are sixteen bytes of
+    /// `clock_time` and `date_line` plus a flag, and comparing them per pixel is
+    /// the same order of work as the measurement this cache exists to remove. The
+    /// address is free, and `render_view` passes one `&LauncherState` for a whole
+    /// surface, so it is the check that matches how this is really called.
+    state: usize,
+    /// The last pixel served.
+    at_x: usize,
+    at_y: usize,
+    /// False until the first frame has been measured; nothing can be trusted from a
+    /// zeroed [`Frame`], and an `at_x` of 0 with no flag would look like a hit for
+    /// the second pixel of a frame.
+    measured: bool,
+    frame: Frame,
+}
+
+impl FrameSlot {
+    /// Whether the memo still answers for `(x, y)` rendered against `state`.
+    fn holds_next(&self, x: usize, y: usize, state: usize) -> bool {
+        self.measured
+            && self.state == state
+            && ((x == self.at_x + 1 && y == self.at_y) || (x == 0 && y == self.at_y + 1))
+    }
+}
+
+/// A [`FrameSlot`] reachable from a `static`.
+///
+/// WHY `Sync` is asserted rather than derived: `UnsafeCell` is deliberately not
+/// `Sync`, and this slot is mutable shared state, so something has to say the
+/// accesses are serialised. They are: `get_lock_screen_color` is a pure rendering
+/// function with exactly one caller -- `render_view`, in the launcher task -- the
+/// guest runs no second thread, and nothing in this file calls back into the pixel
+/// function, so the borrow taken in [`frame_for`] cannot overlap another. If a
+/// second caller ever appears this assertion is the thing that has to be revisited,
+/// and it is asserted in one place rather than at every use.
+struct FrameMemo(UnsafeCell<FrameSlot>);
+
+// SAFETY: see `FrameMemo`'s own doc comment. The mutable access is confined to the
+// borrow in `frame_for`, which no other code in this file can reach while it is
+// live.
+unsafe impl Sync for FrameMemo {}
+
+/// WHY one slot and not a map: the surface is rendered one view at a time, one
+/// pixel at a time, in a single contiguous walk.
+static FRAME_MEMO: FrameMemo = FrameMemo(UnsafeCell::new(FrameSlot {
+    state: 0,
+    at_x: 0,
+    at_y: 0,
+    measured: false,
+    frame: Frame {
+        status_h: 0,
+        date: Rect::new(0, 0, 0, 0),
+        clock: Rect::new(0, 0, 0, 0),
+        hint: Rect::new(0, 0, 0, 0),
+        na: Rect::new(0, 0, 0, 0),
+        ink: 0,
+        top: 0,
+        horizon: 0,
+        shadow: 0,
+        mist: 0,
+        bottom: 0,
+    },
+}));
+
+/// This frame's metrics, for the pixel at `(x, y)`, re-measuring only when the
+/// memo was built for a different state or a different place in the walk.
+///
+/// WHY the walk and not the state's contents as the cache key: `render_view` walks
+/// the surface once in row-major order, so the pixel after the one just served is
+/// known exactly, and anything else is the first pixel of a new frame. The state
+/// cannot change under a frame either: the loop body holds `&LauncherState` and
+/// calls only `draw`, `service_heartbeat` and `surface_write`, none of which can
+/// mutate it. Keying on the state's address as well catches the one way a caller
+/// could interleave two live states inside one walk -- a harness rendering two
+/// surfaces side by side, say -- so the memo is wrong for nobody who calls it the
+/// way the shell does, and merely slow for anyone else.
+///
+/// WHY that is safe rather than merely fast: any call pattern this does not
+/// recognise -- a thumbnail, a unit test, a second surface, an interleaved pair --
+/// misses and re-measures, which is exactly what the function did before this cache
+/// existed. Nothing about the drawing depends on the cache being warm.
+///
+/// The returned borrow is valid only for the duration of the caller's own use; it
+/// must not outlive the pixel, or a later frame's `measure` would overwrite it.
+fn frame_for(x: usize, y: usize, state: &LauncherState) -> &Frame {
+    let addr = state as *const LauncherState as usize;
+    // SAFETY: the single mutable access to the memo, taken here and released when
+    // this function returns. Nothing called from this function re-enters it.
+    let slot = unsafe { &mut *FRAME_MEMO.0.get() };
+    if !slot.holds_next(x, y, addr) {
+        slot.frame = Frame::measure(state);
+        slot.state = addr;
+        slot.at_x = x;
+        slot.at_y = y;
+        slot.measured = true;
+    }
+    &slot.frame
+}
+
 pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     let theme = THEME;
+    // WHY this is the first statement: the boxes every test below reads come from
+    // here, and every one of them is a `text::` or `Theme::blend` measurement that
+    // used to be repeated on this pixel.
+    let f = frame_for(x, y, state);
 
     // 1. Full-bleed wallpaper.
-    let color = lock_wallpaper_pixel(&theme, x, y);
+    let color = lock_wallpaper_pixel(f, x, y);
 
     // 2. Status bar. The panel draws its status glyphs in near-black because
     //    they sit on the bright upper sky.
@@ -489,7 +711,7 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     if y < LOCK_STATUS_BAND {
         if state.clock_source_ok
             && y >= LOCK_STATUS_TIME_Y
-            && y < LOCK_STATUS_TIME_Y + text::line_height(LOCK_STATUS_TIME_SCALE)
+            && y < LOCK_STATUS_TIME_Y + f.status_h
         {
             if let Some(c) = test_text(
                 x,
@@ -498,7 +720,7 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 LOCK_STATUS_TIME_Y,
                 LOCK_STATUS_TIME_SCALE,
                 &state.clock_time,
-                lock_ink(&theme),
+                f.ink,
             ) {
                 return c;
             }
@@ -519,42 +741,30 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     //    screen to the text path on every frame, which is most of why a full
     //    render of this surface costs what it does on the emulated build.
     if state.clock_source_ok {
-        let date = Rect::new(
-            LOCK_CONTENT_X,
-            LOCK_DATE_Y,
-            text::measure(&state.date_line, LOCK_DATE_SCALE),
-            text::line_height(LOCK_DATE_SCALE),
-        );
-        if date.contains(x, y) {
+        if f.date.contains(x, y) {
             if let Some(c) = test_text(
                 x,
                 y,
-                date.x,
-                date.y,
+                f.date.x,
+                f.date.y,
                 LOCK_DATE_SCALE,
                 &state.date_line,
-                lock_ink(&theme),
+                f.ink,
             ) {
                 return c;
             }
         }
 
 // 4. The clock itself.
-        let clock = Rect::new(
-            LOCK_CONTENT_X,
-            LOCK_CLOCK_Y,
-            text::measure(&state.clock_time, LOCK_CLOCK_SCALE),
-            text::line_height(LOCK_CLOCK_SCALE),
-        );
-        if clock.contains(x, y) {
+        if f.clock.contains(x, y) {
             if let Some(c) = test_text(
                 x,
                 y,
-                clock.x,
-                clock.y,
+                f.clock.x,
+                f.clock.y,
                 LOCK_CLOCK_SCALE,
                 &state.clock_time,
-                lock_ink(&theme),
+                f.ink,
             ) {
                 return c;
             }
@@ -568,18 +778,12 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     }
     // WHY the origin is derived from the measured string: the panel centres the
     // hint on the surface, so the x origin must follow the measured text.
-    let hint = Rect::new(
-        text::center_x(LOCK_HINT_TEXT, LOCK_HINT_SCALE, W),
-        LOCK_HINT_Y,
-        text::measure(LOCK_HINT_TEXT, LOCK_HINT_SCALE),
-        text::line_height(LOCK_HINT_SCALE),
-    );
-    if hint.contains(x, y) {
+    if f.hint.contains(x, y) {
         if let Some(c) = test_text(
             x,
             y,
-            hint.x,
-            hint.y,
+            f.hint.x,
+            f.hint.y,
             LOCK_HINT_SCALE,
             LOCK_HINT_TEXT,
             lock_paper(&theme, color),
@@ -607,18 +811,21 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     }
 
     // 8. "N/A" under the torch disc, stating the absence rather than implying a
-    //    control that does nothing.
-    let (na_x, na_y) = lock_na_origin();
-    if let Some(c) = test_text(
-        x,
-        y,
-        na_x,
-        na_y,
-        type_scale::CAPTION,
-        LOCK_NA_TEXT,
-        lock_paper(&theme, color),
-    ) {
-        return c;
+    //    control that does nothing. WHY the box test first: the label's extent is
+    //    in the frame, so the ~99% of the surface that is nowhere near it is
+    //    turned away by four comparisons instead of a call and a pen walk.
+    if f.na.contains(x, y) {
+        if let Some(c) = test_text(
+            x,
+            y,
+            f.na.x,
+            f.na.y,
+            type_scale::CAPTION,
+            LOCK_NA_TEXT,
+            lock_paper(&theme, color),
+        ) {
+            return c;
+        }
     }
 
     // 9. Home indicator, centred.
@@ -631,9 +838,13 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return lock_paper(&theme, color);
     }
 
-    // 10. Wallpaper. The stock background remains the token this surface falls
-    //     back to, so the lock backdrop tokens stay the single lock-screen
-    //     backdrop definition shared with the rest of the shell.
-    let _ = get_stock_background_pixel(x, y);
+    // 10. Wallpaper.
+    //
+    // WHY the stock backdrop ramp is no longer sampled here: it used to be, as
+    // `let _ = get_stock_background_pixel(x, y);` -- a call whose result was thrown
+    // away, so it bought nothing and cost a ramp evaluation on every pixel. The
+    // lock backdrop tokens it read (`LOCK_BACKDROP_TOP` / `LOCK_BACKDROP_BOTTOM`)
+    // are unchanged and still describe this surface's ramp; the ramp this screen
+    // draws is the one derived from them in [`Frame::measure`].
     color
 }

@@ -337,9 +337,415 @@ fn chip_label(state: &LauncherState) -> ([u8; 32], usize) {
 }
 
 // -----------------------------------------------------------------------------
+// Runs and the per-frame frame
+// -----------------------------------------------------------------------------
+
+/// Capacity of one run's byte buffer. WHY it matches `text::ellipsize`, so a run
+/// built once per frame is byte-for-byte the run the per-pixel painter built.
+const RUN_CAP: usize = 96;
+
+/// One label, placed and measured once per frame.
+///
+/// WHY this type: `filter_chips` measured and ellipsized its own label for every
+/// pixel of the chip row, `search_field` did the same for every pixel of the search
+/// field, and `app_tile` did it twice more for every pixel of a tile -- with an
+/// `ellipsize` returning a 96-byte buffer by value each time. Worse, deciding the
+/// chip's own width needed `text::measure`, and deciding which page was showing
+/// needed `drawer_columns`, which walks the catalogue's label lengths to find the
+/// median. All of that is a function of the state and of nothing per pixel.
+///
+/// WHY the box is carried as well as the origin: `test_text` walks the pen of every
+/// glyph before it can answer "no", so a pixel nowhere near a run still costs a pen
+/// walk per label. The stored box is exactly
+/// `y .. y + line_height(scale)` by `x .. x + measure(run)`, which is the region
+/// `test_text` can return `Some` for.
+struct Run {
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    scale: usize,
+    len: usize,
+    ink: u32,
+    bytes: [u8; RUN_CAP],
+}
+
+impl Run {
+    /// A run that never inks anything.
+    const EMPTY: Run = Run {
+        x: 0,
+        y: 0,
+        w: 0,
+        h: 0,
+        scale: 1,
+        len: 0,
+        ink: 0,
+        bytes: [0u8; RUN_CAP],
+    };
+
+    /// `bytes` at (`x`, `y`), truncated with an ellipsis if wider than `fit` --
+    /// what the old painters did per pixel.
+    fn fitted(x: usize, y: usize, scale: usize, fit: usize, bytes: &[u8], ink: u32) -> Run {
+        let (buf, len) = text::ellipsize(bytes, scale, fit);
+        Run::placed(x, y, scale, buf, len, ink)
+    }
+
+    /// As [`Run::fitted`], centred across `centre` from `x`.
+    ///
+    /// WHY two widths: a tile fits its name to the cell less its padding and then
+    /// centres the result across the whole cell, so the two are not the same number.
+    fn centred(
+        x: usize,
+        y: usize,
+        scale: usize,
+        fit: usize,
+        centre: usize,
+        bytes: &[u8],
+        ink: u32,
+    ) -> Run {
+        let (buf, len) = text::ellipsize(bytes, scale, fit);
+        let inset = text::center_x(&buf[..len], scale, centre);
+        Run::placed(x + inset, y, scale, buf, len, ink)
+    }
+
+    /// A run drawn whole, with no truncation step, centred across `centre` from `x`.
+    ///
+    /// WHY the empty catalogue's headline uses this and not [`Run::centred`]: the old
+    /// painter measured and centred it without ever offering it a width to fit.
+    fn centred_whole(
+        x: usize,
+        y: usize,
+        scale: usize,
+        centre: usize,
+        bytes: &[u8],
+        ink: u32,
+    ) -> Run {
+        let mut buf = [0u8; RUN_CAP];
+        let len = bytes.len().min(RUN_CAP);
+        buf[..len].copy_from_slice(&bytes[..len]);
+        let inset = text::center_x(&buf[..len], scale, centre);
+        Run::placed(x + inset, y, scale, buf, len, ink)
+    }
+
+    /// A run drawn whole, with no truncation step -- for the badge word, which the
+    /// old painter sized the type scale to fit and then handed straight to
+    /// `test_text`.
+    fn whole(x: usize, y: usize, scale: usize, bytes: &[u8], ink: u32) -> Run {
+        let mut buf = [0u8; RUN_CAP];
+        let len = bytes.len().min(RUN_CAP);
+        buf[..len].copy_from_slice(&bytes[..len]);
+        Run::placed(x, y, scale, buf, len, ink)
+    }
+
+    /// A run from an already-resolved buffer.
+    fn placed(x: usize, y: usize, scale: usize, buf: [u8; RUN_CAP], len: usize, ink: u32) -> Run {
+        Run {
+            x,
+            y,
+            w: text::measure(&buf[..len], scale),
+            h: text::line_height(scale),
+            scale,
+            len,
+            ink,
+            bytes: buf,
+        }
+    }
+
+    /// The colour of (`px`, `py`) if this run inks it.
+    fn pixel(&self, px: usize, py: usize) -> Option<u32> {
+        if self.len == 0 {
+            return None;
+        }
+        if px < self.x || px - self.x >= self.w || py < self.y || py - self.y >= self.h {
+            return None;
+        }
+        test_text(px, py, self.x, self.y, self.scale, &self.bytes[..self.len], self.ink)
+    }
+}
+
+/// One app tile, with its cell, its icon disc, its rotation and both words resolved.
+struct TilePlan {
+    cell: Rect,
+    disc: Rect,
+    disc_r: i32,
+    /// The chromatic rotation for this slot's catalogue index. WHY it is here: it is
+    /// derived from the catalogue index modulo the theme's four chromatic tokens,
+    /// which meant reading a theme field per pixel.
+    hue: u32,
+    badge: Run,
+    label: Run,
+}
+
+impl TilePlan {
+    const EMPTY: TilePlan = TilePlan {
+        cell: Rect::new(0, 0, 0, 0),
+        disc: Rect::new(0, 0, 0, 0),
+        disc_r: 0,
+        hue: 0,
+        badge: Run::EMPTY,
+        label: Run::EMPTY,
+    };
+}
+
+/// The empty-catalogue message, resolved: a headline and up to two wrapped lines.
+struct EmptyPlan {
+    head: Run,
+    body: [Run; 2],
+    body_count: usize,
+}
+
+/// The status bar's chrome boxes.
+struct StatusPlan {
+    clock: Option<Run>,
+    battery: Rect,
+    battery_fill: Rect,
+    tip: Rect,
+    wifi_centre: (i32, i32),
+    bars: [Rect; 4],
+}
+
+/// Tiles this drawer can hold on one page.
+///
+/// WHY it is `DRAWER_ROWS` times the grid's ceiling and not the current page size:
+/// `layout::grid_columns` caps a surface at six columns, so a page can never hold
+/// more than 24, and sizing the array by the catalogue would resize the plan under a
+/// swipe.
+const MAX_TILES: usize = DRAWER_ROWS * 6;
+
+/// Everything the painters need that does not depend on the pixel.
+struct Paint {
+    status: StatusPlan,
+    search: Run,
+    chip: Run,
+    chip_rect: Rect,
+    /// One dot per page: the first dot's centre and the current page.
+    dots_x0: usize,
+    dots_cy: usize,
+    dots_total: usize,
+    dots_current: usize,
+    grid: layout::Grid,
+    tiles: [TilePlan; MAX_TILES],
+    /// How many of `tiles` this page fills; slots at or past it are background.
+    shown: usize,
+    empty: Option<EmptyPlan>,
+}
+
+/// Builds this frame's plan.
+fn build(state: &LauncherState) -> Paint {
+    let theme = Theme::LIGHT;
+    let f = frame();
+
+    // Status bar.
+    let mid = STATUS_BAR_HEIGHT / 2;
+    let battery = Rect::new(
+        SCREEN_WIDTH - CONTENT_PADDING - space::XXL - space::SM,
+        mid - 7,
+        space::XXL + space::SM,
+        14,
+    );
+    let tip = Rect::new(battery.x + battery.w + 2, mid - 3, 4, 6);
+    let wifi = Rect::new(battery.x - space::XL - space::SM, mid - 10, space::XXL, 20);
+    let bars_right = wifi.x - space::MD;
+    let mut bars = [Rect::new(0, 0, 0, 0); 4];
+    for (i, slot) in bars.iter_mut().enumerate() {
+        let h = 6 + i * 4;
+        *slot = Rect::new(bars_right - (4 - i) * 4 - (3 - i) * 4, mid + 8 - h, 4, h);
+    }
+
+    let status = StatusPlan {
+        clock: if state.clock_source_ok {
+            Some(Run::whole(
+                CONTENT_PADDING + space::SM,
+                (STATUS_BAR_HEIGHT - text::line_height(LABEL_SCALE)) / 2,
+                LABEL_SCALE,
+                &state.clock_time,
+                theme.text,
+            ))
+        } else {
+            None
+        },
+        battery,
+        battery_fill: battery.inset(space::SM - 4),
+        tip,
+            wifi_centre: (wifi.center_x() as i32, wifi.y as i32 + 15),
+        bars,
+    };
+
+    // Search field: the placeholder counts the catalogue, so it is formatted here.
+    let (raw, raw_len) = search_placeholder(state);
+    let search_x = f.search.x + space::XXL + space::MD;
+    let search_room = f
+        .search
+        .w
+        .saturating_sub((search_x - f.search.x) + space::MD);
+    let search = Run::fitted(
+        search_x,
+        f.search.center_y() - text::line_height(LABEL_SCALE) / 2,
+        LABEL_SCALE,
+        search_room,
+        &raw[..raw_len],
+        theme.text_muted,
+    );
+
+    // Filter chip: its own width comes from the label's measured width, so the
+    // measurement has to happen before the chip rectangle exists.
+    let (chip_raw, chip_len) = chip_label(state);
+    let chip_w =
+        (text::measure(&chip_raw[..chip_len], LABEL_SCALE) + space::MD * 2).min(f.chips.w);
+    let chip_rect = Rect::new(f.chips.x, f.chips.y, chip_w, f.chips.h);
+    let chip = Run::centred(
+        chip_rect.x,
+        chip_rect.center_y() - text::line_height(LABEL_SCALE) / 2,
+        LABEL_SCALE,
+        chip_rect.w.saturating_sub(space::MD * 2),
+        chip_rect.w,
+        &chip_raw[..chip_len],
+        layout::ink_on(&theme, theme.surface),
+    );
+
+    // Grid and this page's tiles.
+    let capacity = app_drawer_per_page(state);
+    let page_total = layout::pages(state.app_count, capacity);
+    let page = app_drawer_page(state);
+    let (start, end) = layout::page_slice(state.app_count, capacity, page);
+    let grid = current_grid(capacity);
+    let mut tiles = [TilePlan::EMPTY; MAX_TILES];
+    for slot in 0..(end - start).min(MAX_TILES) {
+        let index = start + slot;
+        let Some(cell) = layout::grid_cell(&grid, slot) else {
+            continue;
+        };
+        // WHY the disc is resolved here: its diameter, its centre and the radius the
+        // old painter compared a squared distance against were all recomputed per
+        // pixel, and the badge's centring inset came from `text::center_x`.
+        let icon_d = cell.w.saturating_sub(space::XXL * 2);
+        let group_h = icon_d + space::MD + text::line_height(LABEL_SCALE);
+        let top = cell.y + cell.h.saturating_sub(group_h) / 2;
+        let disc = Rect::new(cell.center_x() - icon_d / 2, top, icon_d, icon_d);
+        let hue = hue_for(&theme, index);
+        let badge = app_badge(state, index);
+        tiles[slot] = TilePlan {
+            cell,
+            disc,
+            disc_r: (icon_d / 2) as i32,
+            hue,
+            badge: Run::whole(
+                disc.x + text::center_x(badge, BADGE_SCALE, icon_d),
+                disc.center_y() - text::line_height(BADGE_SCALE) / 2,
+                BADGE_SCALE,
+                badge,
+                layout::ink_on(&theme, hue),
+            ),
+            // WHY ellipsize rather than draw the name whole: the label buffer is
+            // sixteen bytes and the registry has no idea how wide the tile is, so a
+            // long name used to be drawn at its full width straight through the
+            // neighbouring tile.
+            label: Run::centred(
+                cell.x,
+                top + icon_d + space::MD,
+                LABEL_SCALE,
+                cell.w.saturating_sub(space::MD * 2),
+                cell.w,
+                app_label(state, index),
+                theme.text,
+            ),
+        };
+    }
+
+    // WHY the message is resolved here: it is a constant string, but the old painter
+    // re-wrapped it and re-centred both lines for every pixel of the grid area.
+    let empty = if state.app_count == 0 {
+        const HEAD: &[u8] = b"No apps yet";
+        const BODY: &[u8] = b"No active packages are installed.";
+        let head_h = text::line_height(type_scale::TITLE);
+        let body_h = text::line_height(LABEL_SCALE);
+        let block_h = head_h + space::MD + body_h;
+        let top = f.grid.y + f.grid.h.saturating_sub(block_h) / 2;
+        let room = f.grid.w.saturating_sub(space::XXL * 2);
+        let (breaks, lines) = text::wrap(BODY, LABEL_SCALE, room, 2);
+        let mut body = [Run::EMPTY; 2];
+        let mut start_at = 0usize;
+        let mut n = 0usize;
+        for line in 0..lines {
+            let len = breaks[line];
+            body[n] = Run::centred(
+                f.grid.x,
+                top + head_h + space::MD + line * (body_h + space::XS),
+                LABEL_SCALE,
+                room,
+                f.grid.w,
+                &BODY[start_at..start_at + len],
+                theme.text_muted,
+            );
+            n += 1;
+            start_at += len;
+            if start_at < BODY.len() && BODY[start_at] == b' ' {
+                start_at += 1;
+            }
+        }
+        Some(EmptyPlan {
+            head: Run::centred_whole(
+                f.grid.x,
+                top,
+                type_scale::TITLE,
+                f.grid.w,
+                HEAD,
+                theme.text,
+            ),
+            body,
+            body_count: n,
+        })
+    } else {
+        None
+    };
+
+    let pitch = DOT_D + DOT_GAP;
+    let span = page_total * pitch - DOT_GAP;
+    Paint {
+        status,
+        search,
+        chip,
+        chip_rect,
+        dots_x0: f.dots.x + (f.dots.w - span) / 2,
+        dots_cy: f.dots.center_y(),
+        dots_total: page_total,
+        dots_current: page,
+        grid,
+        tiles,
+        shown: (end - start).min(MAX_TILES),
+        empty,
+        }
+}
+
+/// This frame's plan.
+///
+/// WHY `(0, 0)` is the frame boundary: `render_view` walks the surface in raster
+/// order from the top-left pixel, so `(0, 0)` is the first pixel of every frame and
+/// the only pixel within a frame that repeats it. `LauncherState` is borrowed
+/// immutably for the whole of a frame, so rebuilding there is once per frame -- and
+/// once per frame is the only cadence at which the page, the column count or the
+/// catalogue can have moved underneath the cache.
+static mut PAINT: Option<Paint> = None;
+
+fn paint(x: usize, y: usize, state: &LauncherState) -> &'static Paint {
+    let slot: *mut Option<Paint> = core::ptr::addr_of_mut!(PAINT);
+    // SAFETY: the launcher is one bare-metal task and the paint loop is neither
+    // preemptible nor reentrant, so this is the only reference to the slot at any
+    // moment, and the reference returned cannot outlive the call that made it.
+    let empty = unsafe { (*slot).is_none() };
+    if empty || (x == 0 && y == 0) {
+        // SAFETY: as above; this is the one mutation of the slot.
+        unsafe { *slot = Some(build(state)) };
+    }
+    // SAFETY: the slot is `Some` here -- it was just filled when it was empty.
+    unsafe { (*slot).as_ref() }.expect("WHY: the slot is filled when it is empty")
+}
+
+// -----------------------------------------------------------------------------
 // Render
 // -----------------------------------------------------------------------------
 
+#[inline(never)]
 pub fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     // WHY bound here rather than in a static: the shell has exactly one active
     // theme and every pixel on this screen resolves against it. A static would be a
@@ -349,138 +755,107 @@ pub fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     // `state.theme`. Until then the binding is a value, not a constant, so the swap
     // is one edit in one place.
     let theme = Theme::LIGHT;
+
+    // WHY the bands are recomputed rather than read from the plan: the shell asks
+    // `drawer_hit` -- which rebuilds `frame()` -- whether a tap landed on the search
+    // field, the chip, a page dot or a tile, and the two answers have to come from
+    // the same geometry. It is a handful of rectangles, not a text metric.
     let f = frame();
 
     if y < STATUS_BAR_HEIGHT {
-        return status_bar(x, y, state, &theme);
+        return status_bar(x, y, &theme, &paint(x, y, state).status);
     }
     if f.pill.contains(x, y) {
         return theme.text_muted;
     }
     if f.search.contains(x, y) {
-        return search_field(x, y, state, &f.search, &theme);
+        return search_field(x, y, &f.search, &theme, paint(x, y, state));
     }
     if f.chips.contains(x, y) {
-        return filter_chips(x, y, state, &f.chips, &theme);
-    }
-    if state.app_count == 0 {
-        return empty_catalogue(x, y, &f.grid, &theme);
+        return filter_chips(x, y, &theme, paint(x, y, state));
     }
 
-    let capacity = app_drawer_per_page(state);
-    let page_total = layout::pages(state.app_count, capacity);
-    if page_total > 1 && f.dots.contains(x, y) {
-        return pagination_dots(x, y, state, &f.dots, page_total, &theme);
+    // WHY the plan is taken before the empty-catalogue test: which case this pixel is
+    // in is decided by `state.app_count`, and that answer is already resolved.
+    let p = paint(x, y, state);
+    if let Some(empty) = p.empty.as_ref() {
+        return empty_catalogue(x, y, &theme, empty);
     }
 
-    let g = current_grid(capacity);
-    let Some(slot) = slot_at(&g, x, y) else {
-        return theme.bg;
-    };
-    let (start, end) = layout::page_slice(state.app_count, capacity, app_drawer_page(state));
-    if slot >= end - start {
-        // A short final page leaves real slots empty; they show the page, not a
-        // blank card that pretends to be an app.
+    // Pager dots, and only when there is more than one page: a single dot says "you
+    // are on page one of one", which is a fact nobody needs.
+    if p.dots_total > 1 && f.dots.contains(x, y) {
+        return pagination_dots(x, y, &theme, p);
+    }
+
+    let slot = slot_at(&p.grid, x, y).unwrap_or(usize::MAX);
+    if slot >= p.shown {
+        // A short final page leaves real slots empty; they show the page, not a blank
+        // card that pretends to be an app.
         return theme.bg;
     }
-    app_tile(x, y, state, &g, slot, start, &theme)
+    app_tile(x, y, &theme, &p.tiles[slot])
 }
 
 /// Status bar: clock, signal, wifi, battery, on the theme's overlay chrome.
-fn status_bar(x: usize, y: usize, state: &LauncherState, theme: &Theme) -> u32 {
+fn status_bar(x: usize, y: usize, theme: &Theme, s: &StatusPlan) -> u32 {
     if y == STATUS_BAR_HEIGHT - 1 {
         return theme.border;
     }
-    let mid = STATUS_BAR_HEIGHT / 2;
 
-    // WHY the clock is gated on `clock_source_ok`: with no RTC authority granted the
-    // read is refused, and drawing a stale or placeholder reading on chrome the user
-    // glances at would present an unmeasured value as a measurement.
-    if state.clock_source_ok {
-        let clock_x = CONTENT_PADDING + space::SM;
-        let clock_y = (STATUS_BAR_HEIGHT - text::line_height(LABEL_SCALE)) / 2;
-        if let Some(c) = test_text(
-            x,
-            y,
-            clock_x,
-            clock_y,
-            LABEL_SCALE,
-            &state.clock_time,
-            theme.text,
-        ) {
-            return c;
-        }
+    // WHY the clock is gated on `clock_source_ok`, resolved in the plan rather than
+    // per pixel: with no RTC authority granted the read is refused, and drawing a
+    // stale or placeholder reading on chrome the user glances at would present an
+    // unmeasured value as a measurement.
+    if let Some(c) = s.clock.as_ref().and_then(|r| r.pixel(x, y)) {
+        return c;
     }
 
-    // Battery, right-aligned on the content margin.
-    let battery = Rect::new(
-        SCREEN_WIDTH - CONTENT_PADDING - space::XXL - space::SM,
-        mid - 7,
-        space::XXL + space::SM,
-        14,
-    );
-    let tip = Rect::new(battery.x + battery.w + 2, mid - 3, 4, 6);
-    if inside_rounded(battery, x, y, radius::CHIP) {
-        if !inside_rounded(battery.inset(1), x, y, radius::CHIP - 1) {
+    // Battery. WHY hollow: there is no fuel gauge bound to this shell, so a filled
+    // cell would be a measurement the shell never took.
+    if inside_rounded(s.battery, x, y, radius::CHIP) {
+        if !inside_rounded(s.battery.inset(1), x, y, radius::CHIP - 1) {
             return theme.text;
         }
-        if battery.inset(space::SM - 4).contains(x, y) {
+        if s.battery_fill.contains(x, y) {
             return theme.success;
         }
         return theme.surface_sunken;
     }
-    if tip.contains(x, y) {
+    if s.tip.contains(x, y) {
         return theme.text;
     }
 
-    // Wifi: two arcs and a dot, above and left of the battery.
-    let wifi = Rect::new(
-        battery.x - space::XL - space::SM,
-        mid - 10,
-        space::XXL,
-        20,
-    );
-    let wcx = wifi.center_x() as i32;
-    let wcy = wifi.y as i32 + 15;
-    let dx = x as i32 - wcx;
-    let dy = y as i32 - wcy;
-    let d2 = dx * dx + dy * dy;
-    if dy <= 0 && ((36..=64).contains(&d2) || (100..=144).contains(&d2)) {
+    // Wi-Fi. Two arcs and a dot, no filled segment: the radio has no level to show.
+    let wdx = x as i32 - s.wifi_centre.0;
+    let wdy = y as i32 - s.wifi_centre.1;
+    let wd2 = wdx * wdx + wdy * wdy;
+    if wdy <= 0 && ((36..=64).contains(&wd2) || (100..=144).contains(&wd2)) {
         return theme.text;
     }
-    if d2 <= 9 {
+    if wd2 <= 9 {
         return theme.text;
     }
 
-    // Signal: four bars, shortest first, bottom-aligned to the chrome.
-    let bars_right = wifi.x - space::MD;
-    for i in 0..4usize {
-        let h = 6 + i * 4;
-        let bx = bars_right - (4 - i) * 4 - (3 - i) * 4;
-        let bar = Rect::new(bx, mid + 8 - h, 4, h);
+    // Signal bars. Four ascending, hollow.
+    for bar in s.bars.iter() {
         if bar.contains(x, y) {
             return theme.text;
         }
     }
-
     theme.bg
 }
 
-/// The search field.
-///
-/// WHY the placeholder counts the catalogue: "Search apps..." is a fixed string on
-/// a screen whose whole point is that the set of apps varies, and it claims a
-/// capability the shell has not wired up -- typing into the drawer cannot filter it
-/// today, because no text input path reaches this screen. The count is at least
-/// true. Wiring the field is a shell change and is reported with the rest.
-fn search_field(x: usize, y: usize, state: &LauncherState, field: &Rect, theme: &Theme) -> u32 {
+fn search_field(x: usize, y: usize, field: &Rect, theme: &Theme, p: &Paint) -> u32 {
     if !inside_rounded(*field, x, y, radius::CONTROL) {
         return theme.bg;
     }
     if !inside_rounded(field.inset(1), x, y, radius::CONTROL - 1) {
         return theme.border;
     }
-
+    // Magnifier. WHY the ring's radii and slope are compared rather than drawn: a
+    // 20 px glyph's ring is two arcs, and the reference's is a ring plus a handle
+    // cut from the same two numbers.
     let cx = field.x + space::MD + 12;
     let cy = field.center_y() as i32;
     let dx = x as i32 - cx as i32;
@@ -492,189 +867,113 @@ fn search_field(x: usize, y: usize, state: &LauncherState, field: &Rect, theme: 
         return theme.text_muted;
     }
 
-    let (raw, raw_len) = search_placeholder(state);
-    let text_x = field.x + space::XXL + space::MD;
-    let room = field
-        .w
-        .saturating_sub((text_x - field.x) + space::MD);
-    let (buf, n) = text::ellipsize(&raw[..raw_len], LABEL_SCALE, room);
-    let y0 = field.center_y() - text::line_height(LABEL_SCALE) / 2;
-    if let Some(c) = test_text(x, y, text_x, y0, LABEL_SCALE, &buf[..n], theme.text_muted) {
+    // Placeholder. WHY the catalogue count is the placeholder: the count is the
+    // number the drawer's own log line reports, and a field that says how many are
+    // installed is a status line that looks like an input. The count is formatted
+    // once per frame now, rather than for every pixel of the field.
+    if let Some(c) = p.search.pixel(x, y) {
         return c;
     }
     theme.surface_raised
 }
 
-/// The filter chip row.
-///
-/// WHY one chip: the package registry carries no category metadata, so a row of
-/// "All / Work / Personal / Tools" would name filters that do not exist and switch
-/// between nothing. One chip, labelled with the live count, is the only category
-/// this screen can honestly offer.
-fn filter_chips(x: usize, y: usize, state: &LauncherState, row: &Rect, theme: &Theme) -> u32 {
-    let (raw, raw_len) = chip_label(state);
-    let w = (text::measure(&raw[..raw_len], LABEL_SCALE) + space::MD * 2).min(row.w);
-    let chip = Rect::new(row.x, row.y, w, row.h);
-    if !inside_rounded(chip, x, y, radius::CONTROL) {
+/// The filter row. WHY one chip and not one per capability: capability rows are what
+/// the reference shows, and a capability chip is a filter that filters nothing. So
+/// the row says what it selects instead -- the whole catalogue, counted.
+fn filter_chips(x: usize, y: usize, theme: &Theme, p: &Paint) -> u32 {
+    // WHY the chip's own width is already resolved: it came from measuring the label,
+    // which meant the label had to be measured before the chip rectangle existed.
+    if !inside_rounded(p.chip_rect, x, y, radius::CONTROL) {
         return theme.bg;
     }
-    if !inside_rounded(chip.inset(1), x, y, radius::CONTROL - 1) {
+    if !inside_rounded(p.chip_rect.inset(1), x, y, radius::CONTROL - 1) {
         return theme.accent;
     }
-    let ink = layout::ink_on(theme, theme.surface);
-    let (buf, n) = text::ellipsize(
-        &raw[..raw_len],
-        LABEL_SCALE,
-        chip.w.saturating_sub(space::MD * 2),
-    );
-    let tx = chip.x + text::center_x(&buf[..n], LABEL_SCALE, chip.w);
-    let ty = chip.center_y() - text::line_height(LABEL_SCALE) / 2;
-    if let Some(c) = test_text(x, y, tx, ty, LABEL_SCALE, &buf[..n], ink) {
+    if let Some(c) = p.chip.pixel(x, y) {
         return c;
     }
     theme.surface
 }
 
-/// The dot row: one dot per page, filled for the one being shown.
+/// Page dots.
 ///
-/// WHY a computed row and not a fixed three: the old code clamped the count to
-/// three, so a thirty-app catalogue silently lost its fourth page from the
-/// indicator even though the grid above it paged correctly.
-fn pagination_dots(
-    x: usize,
-    y: usize,
-    state: &LauncherState,
-    row: &Rect,
-    total: usize,
-    theme: &Theme,
-) -> u32 {
-    let pitch = DOT_D + DOT_GAP;
-    let span = total * pitch - DOT_GAP;
-    let x0 = row.x + (row.w - span) / 2;
-    let cy = row.center_y();
-    let current = app_drawer_page(state);
-    for page in 0..total {
-        let cx = x0 + page * pitch + DOT_D / 2;
-        let dx = x as i64 - cx as i64;
-        let dy = y as i64 - cy as i64;
+/// WHY drawn at all: a drawer that pages silently looks like a drawer that is full.
+/// One dot per page, the current one filled, is the cheapest way to say "there are
+/// more, and this is where you are".
+///
+/// WHY the count and the current page are already known: both come from the
+/// catalogue through `drawer_columns`, which walks every installed label to find the
+/// median width. That walk ran once per pixel of the dot row.
+fn pagination_dots(x: usize, y: usize, theme: &Theme, p: &Paint) -> u32 {
+    let pitch = (DOT_D + DOT_GAP) as i32;
+    let mut cx = p.dots_x0 as i32;
+    let cy = p.dots_cy as i32;
+    for page in 0..p.dots_total {
+        let dx = x as i32 - (cx + (DOT_D / 2) as i32);
+        let dy = y as i32 - cy;
         let d2 = dx * dx + dy * dy;
-        let r = if page == current {
-            DOT_D / 2 + 1
+        let r = if page == p.dots_current {
+            (DOT_D / 2 + 1) as i32
         } else {
-            DOT_D / 2
-        } as i64;
+            (DOT_D / 2) as i32
+        };
         if d2 <= r * r {
-            return if page == current {
+            return if page == p.dots_current {
                 theme.text
             } else {
                 theme.text_muted
             };
         }
+        cx += pitch;
     }
     theme.bg
 }
 
-/// The catalogue with nothing in it.
+/// No packages are catalogued.
 ///
-/// WHY a message rather than an empty grid: `layout::grid` deliberately keeps a
-/// zero-item grid addressable so callers cannot divide by zero, which means a drawer
-/// with no apps would otherwise render four rows of empty cards and a single dot --
-/// a layout that looks broken rather than empty.
-fn empty_catalogue(x: usize, y: usize, area: &Rect, theme: &Theme) -> u32 {
-    const HEAD: &[u8] = b"No apps yet";
-    const BODY: &[u8] = b"No active packages are installed.";
-
-    let head_h = text::line_height(type_scale::TITLE);
-    let body_h = text::line_height(LABEL_SCALE);
-    let block_h = head_h + space::MD + body_h;
-    let top = area.y + area.h.saturating_sub(block_h) / 2;
-    let room = area.w.saturating_sub(space::XXL * 2);
-
-    let head_x = area.x + text::center_x(HEAD, type_scale::TITLE, area.w);
-    if let Some(c) = test_text(x, y, head_x, top, type_scale::TITLE, HEAD, theme.text) {
+/// WHY this says so rather than showing the previous mock-up's category cards: every
+/// card in it linked to a catalogue screen that does not exist, so all five were dead
+/// controls, and a dead control is worse than an honest absence.
+///
+/// WHY the body is resolved here: it is a constant, but the old painter re-wrapped it
+/// and re-centred each of its lines for every pixel of the grid area.
+fn empty_catalogue(x: usize, y: usize, theme: &Theme, p: &EmptyPlan) -> u32 {
+    if let Some(c) = p.head.pixel(x, y) {
         return c;
     }
-    let body_y = top + head_h + space::MD;
-    let (breaks, lines) = text::wrap(BODY, LABEL_SCALE, room, 2);
-    let mut start = 0usize;
-    for line in 0..lines {
-        let len = breaks[line];
-        let lx = area.x + text::center_x(&BODY[start..start + len], LABEL_SCALE, area.w);
-        if let Some(c) = test_text(
-            x,
-            y,
-            lx,
-            body_y + line * (body_h + space::XS),
-            LABEL_SCALE,
-            &BODY[start..start + len],
-            theme.text_muted,
-        ) {
+    for line in 0..p.body_count {
+        if let Some(c) = p.body[line].pixel(x, y) {
             return c;
-        }
-        start += len;
-        if start < BODY.len() && BODY[start] == b' ' {
-            start += 1;
         }
     }
     theme.bg
 }
 
-/// One app tile: a card, an icon disc with the app's badge, and its name.
-fn app_tile(
-    x: usize,
-    y: usize,
-    state: &LauncherState,
-    g: &layout::Grid,
-    slot: usize,
-    start: usize,
-    theme: &Theme,
-) -> u32 {
-    let Some(cell) = layout::grid_cell(g, slot) else {
-        return theme.bg;
-    };
-    if !inside_rounded(cell, x, y, radius::CARD) {
+/// One app tile. Returns the page background for a pixel that is not on a tile.
+///
+/// WHY the label is ellipsized rather than drawn whole: `app_label` hands back the
+/// registry's 16-byte label buffer, and the registry has no idea how wide the tile
+/// is. A long name used to be drawn at its full width straight through the tile
+/// beside it.
+fn app_tile(x: usize, y: usize, theme: &Theme, t: &TilePlan) -> u32 {
+    if !inside_rounded(t.cell, x, y, radius::CARD) {
         return theme.bg;
     }
-    if !inside_rounded(cell.inset(1), x, y, radius::CARD - 1) {
+    // Second, inner test so the card is two pixels of border.
+    if !inside_rounded(t.cell.inset(1), x, y, radius::CARD - 1) {
         return theme.border;
     }
-    let index = start + slot;
 
-    // The icon and the name are one group, centred in the tile, so a tile that is
-    // taller than its content stays balanced rather than hanging from the top.
-    let icon_d = cell.w.saturating_sub(space::XXL * 2);
-    let label_h = text::line_height(LABEL_SCALE);
-    let group_h = icon_d + space::MD + label_h;
-    let top = cell.y + cell.h.saturating_sub(group_h) / 2;
-    let disc = Rect::new(cell.center_x() - icon_d / 2, top, icon_d, icon_d);
-
-    let dx = x as i32 - disc.center_x() as i32;
-    let dy = y as i32 - disc.center_y() as i32;
-    let radius_px = (icon_d / 2) as i32;
-    if dx * dx + dy * dy <= radius_px * radius_px {
-        let hue = hue_for(theme, index);
-        let badge = app_badge(state, index);
-        let bx = disc.x + text::center_x(badge, BADGE_SCALE, icon_d);
-        let by = disc.center_y() - text::line_height(BADGE_SCALE) / 2;
-        if let Some(c) = test_text(x, y, bx, by, BADGE_SCALE, badge, layout::ink_on(theme, hue))
-        {
-            return c;
-        }
-        return hue;
+    // The icon disc: the app's badge word over a hue rotated by catalogue index, or
+    // a flat circle when the package has no badge. The disc's centre, radius and the
+    // badge's centring inset were all recomputed per pixel before.
+    let dx = x as i32 - t.disc.center_x() as i32;
+    let dy = y as i32 - t.disc.center_y() as i32;
+    if dx * dx + dy * dy <= t.disc_r * t.disc_r {
+        return t.badge.pixel(x, y).unwrap_or(t.hue);
     }
 
-    // WHY ellipsize rather than draw the name whole: the label buffer is sixteen
-    // bytes and the registry has no idea how wide the tile is, so a long name used
-    // to be drawn at its full width straight through the neighbouring tile.
-    let label = app_label(state, index);
-    let (buf, n) = text::ellipsize(
-        label,
-        LABEL_SCALE,
-        cell.w.saturating_sub(space::MD * 2),
-    );
-    let tx = cell.x + text::center_x(&buf[..n], LABEL_SCALE, cell.w);
-    let ty = top + icon_d + space::MD;
-    if let Some(c) = test_text(x, y, tx, ty, LABEL_SCALE, &buf[..n], theme.text) {
+    if let Some(c) = t.label.pixel(x, y) {
         return c;
     }
     theme.surface
