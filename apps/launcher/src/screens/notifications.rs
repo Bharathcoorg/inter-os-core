@@ -4,459 +4,485 @@
 //! Geometry and colour come from `launcher::theme`, `launcher::layout` and
 //! `launcher::text`, never from literals local to this file.
 //!
-//! WHY there are no Today and Yesterday headings: the reference design groups
-//! entries under those two headings, and an entry can only be placed in either
-//! of them if it carries a timestamp. The kernel's notification manager stores
-//! `timestamp_ticks`, package, title and body for every record -- and its
-//! `NotificationQuery` syscall returns `active.len()`, a number, and nothing
-//! else. The shell therefore holds a count and not one entry, so it cannot place
-//! an entry in any group. Drawing the two headings anyway would put two empty
-//! sections on a device that may have six notifications waiting, which reads as
-//! "nothing arrived today" when the truth is "nothing is published to me". So
-//! the shade reports what it was given and names what is missing.
+//! WHY the rows, the plan and the frame come from `super::system_space`: this
+//! surface and the settings page are siblings reached from adjacent regions of the
+//! same status bar, and a reader sees them back to back. A shade row is the same kind
+//! of object as a settings row -- a label, a value column, a row plane inside a
+//! rounded card -- so both surfaces call the same `CellPlan::row` and the same
+//! `CardPlan`. Two row renderers would be two answers to "how tall is a row on this
+//! shell" and to "what does an unavailable row look like", and the two surfaces would
+//! drift the first time either was adjusted.
 //!
-//! WHY there is no Clear all control: clearing needs an id to cancel, the shell
-//! has no ids, and the handler in `main.rs` resets its local counter and
-//! navigates away. A button that empties a number on this screen while the
-//! notifications stay on the device is a control that reports work it did not
-//! do.
+//! WHY there are no Today and Yesterday headings: the reference design groups entries
+//! under those two headings, and an entry can only be placed in either of them if it
+//! carries a timestamp. The kernel's notification manager stores `timestamp_ticks`,
+//! package, title and body for every record -- and its `NotificationQuery` syscall
+//! returns `active.len()`, a number, and nothing else. `LauncherState` therefore
+//! holds a count and not one entry, so there is nothing to group. Drawing the two
+//! headings anyway would put two empty sections on a device that may have six
+//! notifications waiting, which reads as "nothing arrived today" when the truth is
+//! "nothing is published to me". So the shade reports what it was given, groups
+//! nothing, and names what is missing. The grouping code is not absent, it is driven
+//! by [`day_groups`], which is honest about returning zero.
+//!
+//! WHY the three groups are COUNT, ENTRIES and ACTIONS: the count is the one reading
+//! the shade has, the two entry fields are what it is asked for and cannot supply,
+//! and the action is the last thing a reader looks for. Separating them puts the one
+//! real reading alone at the top instead of making it one row among refusals.
+//!
+//! WHY there is no Clear all control: clearing needs an id to cancel, the shell has
+//! no ids, and the handler in `main.rs` resets its local counter and navigates away
+//! without ever issuing `notification_cancel`. A button that empties a number on this
+//! screen while the notifications stay on the device is a control that reports work
+//! it did not do.
 
-#![allow(unused_imports)]
-
-use super::system_space::{counted, round_contains, Reading};
-use crate::{test_text, LauncherState};
+use super::system_space::{
+    counted, header_h, round_contains, row_pad_x, CardPlan, CellPlan, Chip, Reading, Run, CARD_GAP, GROUP_ROW_H,
+};
+use crate::LauncherState;
 use launcher::layout::{self, Rect};
 use launcher::text;
 use launcher::theme::*;
 
-/// WHY `Theme::LIGHT`: the reference design splits its palette by context, and
-/// the notifications shade is one of the light surfaces -- a near-white page,
-/// white cards, dark ink -- rather than the near-black the Power drawer uses.
+/// WHY `Theme::LIGHT`: the reference design splits its palette by context, and the
+/// notifications shade is one of the light surfaces -- a near-white page, white cards,
+/// dark ink -- rather than the near-black the Power drawer uses. It is also the
+/// settings page's sibling, and two adjacent surfaces with different palettes would
+/// read as two different products.
 const THEME: Theme = Theme::LIGHT;
 
-/// Row geometry, in spacing tokens: a label with a caption beside it.
-const ROW_H: usize = space::XXL + space::XS;
-const ROW_GUTTER: usize = space::SM;
-const ROW_PITCH: usize = ROW_H + ROW_GUTTER;
+/// Inset from the sheet's edge to the cards inside it.
+///
+/// WHY larger than a card's own text inset: these cards are inset *inside* a sheet,
+/// so this is a card-to-sheet gap and not a card-edge-to-text gap, and it has to read
+/// as one more level of nesting.
+const SHEET_PAD: usize = space::XL;
 
-/// Row indices for the rows that exist when there is something to describe.
-const R_ENTRIES: usize = 0;
-const R_GROUPS: usize = 1;
-const R_CLEAR: usize = 2;
-const GROUP_ROWS: usize = R_CLEAR + 1;
+/// Cards one shade can hold: the three groups below, plus the card that names the
+/// fields a sheet could not fit.
+const SHADE_CARDS: usize = 5;
+
+/// Lines in the note printed under the groups.
+const NOTE_LINES: usize = 3;
+
+/// Gap between two lines of that note.
+const NOTE_GAP: usize = space::SM;
+
+/// Height of the note block, gaps included.
+fn note_h() -> usize {
+    NOTE_LINES * text::line_height(type_scale::CAPTION) + (NOTE_LINES - 1) * NOTE_GAP
+}
+
+/// -----------------------------------------------------------------------------
+// What the shade can and cannot know
+// -----------------------------------------------------------------------------
+
+/// One field of the notification subsystem the shade would show if the subsystem
+/// published it.
+#[derive(Clone, Copy, PartialEq)]
+enum Field {
+    /// The one reading that exists: how many records are active for this account.
+    Active,
+    /// Grouping entries under a day needs each entry's timestamp.
+    Grouping,
+    /// An unread badge needs a per-entry read flag and a total, not a count.
+    Unread,
+    /// Cancelling needs the notification ids the query does not return.
+    Clear,
+}
+
+impl Field {
+    fn label(self) -> &'static [u8] {
+        match self {
+            Field::Active => b"Notifications",
+            Field::Grouping => b"Day grouping",
+            Field::Unread => b"Unread count",
+            Field::Clear => b"Clear all",
+        }
+    }
+
+    /// What is missing, used verbatim as the row's value.
+    ///
+    /// WHY each reason names the specific missing part of the interface rather than
+    /// saying "unsupported": a reader who has just seen a count of five can tell from
+    /// this string exactly which field is absent, and can tell the difference between
+    /// "the shade is broken" and "the pipe only carries a number".
+    fn reason(self) -> &'static [u8] {
+        match self {
+            Field::Active => b"none active",
+            Field::Grouping => b"no timestamps published",
+            Field::Unread => b"no per-entry read flag",
+            Field::Clear => b"no entry ids to cancel",
+        }
+    }
+}
+
+/// Whether anything reported this field.
+///
+/// WHY this is separate from [`value`]: the shade chooses between its empty state and
+/// its list from this one bit, and a count of zero has to be distinguishable from a
+/// count the query refused to return without building a value string to find out.
+fn reported(field: Field, state: &LauncherState) -> bool {
+    field == Field::Active && state.notification_count > 0
+}
+
+/// The value column entry for one field.
+///
+/// WHY the whole rule of this surface lives in this function: it must never print a
+/// day, a time, a title or a count of unread where the platform has none of them to
+/// give. Availability is decided next to the bytes that would be printed, which is
+/// the only place the decision cannot be forgotten later.
+fn value(field: Field, state: &LauncherState) -> Reading {
+    match field {
+        Field::Active if state.notification_count > 0 => {
+            let (buf, len) = counted(state.notification_count, b" active");
+            Reading::of(&buf[..len])
+        }
+        // WHY the grouping row is driven by `day_groups` rather than being a refusal
+        // written out here: the count of groups is a real output of a real function,
+        // and the row should print it the day the syscall grows an entry list. Today
+        // that function returns zero, so the row is unavailable -- and unavailable
+        // rather than "0 groups", because "0 groups" reads as "nothing arrived today",
+        // which is a claim about the world. The truth is that the shell cannot see a
+        // single entry, so there is no today to be empty.
+        Field::Grouping => {
+            let groups = day_groups(state);
+            if groups == 0 {
+                Reading::unavailable(field.reason())
+            } else {
+                let (buf, len) = counted(groups, b" shown");
+                Reading::of(&buf[..len])
+            }
+        }
+        Field::Active | Field::Unread | Field::Clear => Reading::unavailable(field.reason()),
+    }
+}
+
+struct Group {
+    header: &'static [u8],
+    fields: &'static [Field],
+}
+
+static GROUPS: [Group; 3] = [
+    Group { header: b"COUNT", fields: &[Field::Active] },
+    Group { header: b"ENTRIES", fields: &[Field::Grouping, Field::Unread] },
+    Group { header: b"ACTIONS", fields: &[Field::Clear] },
+];
 
 /// How many day groups the shade can honestly show.
 ///
-/// WHY this is a function of the state and not two hardcoded headings: a group
-/// is a set of entries that share a day, and an entry belongs to a day only if
-/// it carries a time. `LauncherState` publishes `notification_count` and no
-/// per-entry record, so there is nothing to group and the answer is zero. Two
-/// changes would make it non-zero -- a syscall that returns the active records
-/// rather than their length, and fields on `LauncherState` to hold them -- and
-/// neither is in this screen's gift, so the shade says so instead of inventing
-/// entries to fill the headings.
+/// WHY this is a function of the state and not two hardcoded headings: a group is a
+/// set of entries that share a day, and an entry belongs to a day only if it carries
+/// a time. `LauncherState` publishes `notification_count` and no per-entry record, so
+/// there is nothing to group and the answer is zero. Two changes would make it
+/// non-zero -- a syscall that returns the active records rather than their length, and
+/// fields on `LauncherState` to hold them -- and neither is in this screen's gift, so
+/// the shade says so instead of inventing entries to fill the headings.
 fn day_groups(_state: &LauncherState) -> usize {
     0
 }
 
-/// How many rows the shade has. An empty shade has none: it draws the empty
-/// state, which is a different thing to show and not a list of zeroes.
-fn row_count(state: &LauncherState) -> usize {
-    if state.notification_count == 0 {
-        return 0;
-    }
-    GROUP_ROWS
-}
+/// The note printed under the groups when there is something to read.
+///
+/// WHY these three lines and not one: each names a different part of the interface
+/// that is absent -- the records, the fields on them, and the ids needed to act on
+/// them -- and collapsing them into "notifications unavailable" would leave a reader
+/// who has just seen a count of five with no idea what the shade is failing to show.
+///
+/// WHY the lines are pre-broken rather than wrapped: `text::wrap` returns a
+/// fixed `[usize; 3]` and would be free, but a note whose line breaks depend on the
+/// measure of the text is a note whose height changes with its content, and the
+/// sheet's height is derived from this block. Fixed lines keep the geometry stable.
+const NOTE: [&[u8]; NOTE_LINES] = [
+    b"The notification service publishes a count, not records.",
+    b"Titles, bodies and timestamps are not exposed to this",
+    b"shell, so entries cannot be grouped or dismissed.",
+];
 
-/// The label and the value of row `index`.
-fn row(state: &LauncherState, index: usize) -> (&[u8], Reading) {
-    match index {
-        R_ENTRIES => (
-            b"Entries",
-            // WHY unavailable rather than a dash: the service answers with a
-            // count, so there is no entry list to show, and saying which half of
-            // the pipe is missing is more useful than a mark that could mean
-            // "hidden" or "none".
-            Reading::unavailable(b"not published"),
-        ),
-        R_GROUPS => {
-            let groups = day_groups(state);
-            let value = if groups == 0 {
-                // WHY unavailable and not "0 groups": a zero there would read as
-                // "nothing arrived today", which is a claim about the world. The
-                // truth is that the shell cannot see a single entry, so there is
-                // no today to be empty.
-                Reading::unavailable(b"no entries")
-            } else {
-                let (shown, shown_len) = counted(groups, b" shown");
-                Reading::of(&shown[..shown_len])
-            };
-            (b"Day groups", value)
-        }
-        R_CLEAR => (
-            b"Clear all",
-            // WHY this row exists at all: the reference has a Clear all control
-            // and this shell has the tap handler for one, so a user who knows the
-            // reference will look for it. Naming it and saying why it cannot work
-            // is more honest than leaving a gap they will read as a missing
-            // button -- and the handler behind it only zeroes a local counter
-            // while the notifications stay on the device.
-            Reading::unavailable(b"no entry ids"),
-        ),
-        _ => (b"", Reading::unavailable(b"")),
-    }
-}
+/// The empty state's three lines.
+const EMPTY_LEDE: &[u8] = b"No notifications";
+const EMPTY_SUB: &[u8] = b"Nothing is active for this account";
+const EMPTY_NOTE: &[u8] = b"The service publishes a count only";
 
 // -----------------------------------------------------------------------------
-// Runs and the per-frame frame
+// The resolved frame
 // -----------------------------------------------------------------------------
 
-/// Capacity of one run's byte buffer. WHY it matches `text::ellipsize`, so a run
-/// built once per frame is byte-for-byte the run the per-pixel painter built.
-const RUN_CAP: usize = 96;
-
-/// The scale every row's label and value are drawn at.
-///
-/// WHY it is derived from [`ROW_H`] and not read from `theme::type_scale`: a row has
-/// to hold one whole glyph cell, and this face's cell is `GLYPH_H` rows per scale
-/// step, so the only scale that fits a 52 px row is 2. `system_space.rs` derives its
-/// own copy of this the same way and keeps it private, so it is derived again here
-/// rather than typed in as a number that could drift from the row it has to fit.
-const ROW_TEXT_SCALE: usize = ROW_H / text::GLYPH_H;
-
-/// The ceiling on the value column, as a share of the padded row width.
-///
-/// WHY it is repeated: `system_space.rs` keeps the same ceiling for the same reason
-/// -- a reason string long enough to fill the row would push the label off it. This
-/// screen has to reproduce that column arithmetic because it cannot call the shared
-/// cell painter for the reason below.
-const VALUE_COLUMN_MAX_PCT: usize = 50;
-
-/// One label, placed and measured once per frame.
-///
-/// WHY this type: the shade's header measured "Notifications" for every pixel of its
-/// title band, formatted the notification count into a fresh 48-byte buffer for
-/// every pixel of the line under it, and `run_left`/`run_center` measured their run
-/// again on every call. Everything that depends on the string rather than the pixel
-/// -- the ellipsis decision, the centring inset, the advance width -- is settled
-/// here, once per frame.
-///
-/// WHY the box is carried as well as the origin: `test_text` walks the pen of every
-/// glyph before it can answer "no", so a pixel nowhere near a run still costs a pen
-/// walk per label. The stored box is exactly
-/// `y .. y + line_height(scale)` by `x .. x + measure(run)`, which is the region
-/// `test_text` can return `Some` for.
-struct Run {
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
-    scale: usize,
-    len: usize,
-    ink: u32,
-    bytes: [u8; RUN_CAP],
-}
-
-impl Run {
-    /// A run that never inks anything.
-    const EMPTY: Run = Run {
-        x: 0,
-        y: 0,
-        w: 0,
-        h: 0,
-        scale: 1,
-        len: 0,
-        ink: 0,
-        bytes: [0u8; RUN_CAP],
-    };
-
-    /// `bytes` at (`x`, `y`), drawn whole with no truncation step.
-    fn whole(x: usize, y: usize, scale: usize, bytes: &[u8], ink: u32) -> Run {
-        let mut buf = [0u8; RUN_CAP];
-        let len = bytes.len().min(RUN_CAP);
-        buf[..len].copy_from_slice(&bytes[..len]);
-        Run::placed(x, y, scale, buf, len, ink)
-    }
-
-    /// As [`Run::whole`], but nothing is drawn if the run is wider than `centre`.
-    ///
-    /// WHY the guard: this is what `system_space::run_center` does, and the shade's
-    /// two empty-state lines reach it without ever being ellipsized. Without the
-    /// guard a line wider than its box would be drawn flush left instead of not
-    /// drawn at all, which is a different screen.
-    fn centred_whole(
-        x: usize,
-        y: usize,
-        scale: usize,
-        centre: usize,
-        bytes: &[u8],
-        ink: u32,
-    ) -> Run {
-        let mut buf = [0u8; RUN_CAP];
-        let len = bytes.len().min(RUN_CAP);
-        buf[..len].copy_from_slice(&bytes[..len]);
-        if text::measure(&buf[..len], scale) > centre {
-            return Run::EMPTY;
-        }
-        let inset = text::center_x(&buf[..len], scale, centre);
-        Run::placed(x + inset, y, scale, buf, len, ink)
-    }
-
-    /// `bytes` at (`x`, `y`), truncated with an ellipsis if wider than `fit` --
-    /// what `system_space::cell_pixel` did to both of a row's columns, per pixel.
-    fn fitted(x: usize, y: usize, scale: usize, fit: usize, bytes: &[u8], ink: u32) -> Run {
-        let (buf, len) = text::ellipsize(bytes, scale, fit);
-        Run::placed(x, y, scale, buf, len, ink)
-    }
-
-    /// A run from an already-resolved buffer.
-    fn placed(x: usize, y: usize, scale: usize, buf: [u8; RUN_CAP], len: usize, ink: u32) -> Run {
-        Run {
-            x,
-            y,
-            w: text::measure(&buf[..len], scale),
-            h: text::line_height(scale),
-            scale,
-            len,
-            ink,
-            bytes: buf,
-        }
-    }
-
-    /// The colour of (`px`, `py`) if this run inks it.
-    fn pixel(&self, px: usize, py: usize) -> Option<u32> {
-        if self.len == 0 {
-            return None;
-        }
-        if px < self.x || px - self.x >= self.w || py < self.y || py - self.y >= self.h {
-            return None;
-        }
-        test_text(px, py, self.x, self.y, self.scale, &self.bytes[..self.len], self.ink)
-    }
-}
-
-/// One row of the shade's list, with both columns and the column split resolved.
-///
-/// WHY the split is a number rather than two rectangles: the shared cell painter
-/// decides which column owns a pixel by comparing `x` against the value column's
-/// left edge and the label column's right edge, and those two edges are one gap
-/// apart. Storing both edges keeps that decision as two comparisons.
-struct CellPlan {
-    rect: Rect,
-    inner: Rect,
-    corner: usize,
-    fill: u32,
-    /// The value column's left edge: at or after this the value owns the pixel.
-    split_x: usize,
-    /// The label column's right edge: before this the label owns the pixel.
-    label_end: usize,
-    label: Run,
-    value: Run,
-}
-
-impl CellPlan {
-    const EMPTY: CellPlan = CellPlan {
-        rect: Rect::new(0, 0, 0, 0),
-        inner: Rect::new(0, 0, 0, 0),
-        corner: 0,
-        fill: 0,
-        split_x: 0,
-        label_end: 0,
-        label: Run::EMPTY,
-        value: Run::EMPTY,
-    };
-}
-
-/// The shade panel, resolved.
-struct PanelPlan {
-    bounds: Rect,
-    inner: Rect,
-    pad: Rect,
-    rows: usize,
-    stack: Option<Rect>,
-    empty_head: Run,
-    empty_body: Run,
-    cells: [CellPlan; GROUP_ROWS],
-}
-
-/// Everything the shade needs that does not depend on the pixel.
+/// One resolved frame of the shade.
 struct Frame {
     clock: Option<Run>,
+    badge: Option<Chip>,
     title: Run,
     headline: Run,
-    panel: PanelPlan,
+    sheet: Rect,
+    sheet_inner: Rect,
+    cards: [CardPlan; SHADE_CARDS],
+    count: usize,
+    empty: [Run; 3],
+    note: [Run; NOTE_LINES],
     indicator: Rect,
 }
 
-/// Resolves one row of the list into its two columns.
-///
-/// WHY this repeats the shared cell painter's arithmetic instead of calling it: the
-/// shared painter measures its value, ellipsizes both columns and re-centres
-/// whichever one the pixel lands in, on every pixel of the row, and
-/// `system_space.rs` is not this change's file to edit. The arithmetic below is that
-/// painter's, in its order, with the two columns resolved in advance.
-fn cell_plan(rect: Rect, label: &[u8], value: &Reading, theme: &Theme) -> CellPlan {
-    let pad = rect.inset(space::MD);
-    let (fill, value_ink) = value.skin(theme);
-    let value_w = text::measure(value.as_slice(), ROW_TEXT_SCALE)
-        .min(pad.w * VALUE_COLUMN_MAX_PCT / 100)
-        + space::SM;
-    let value_col = Rect::new(pad.x + pad.w - value_w, pad.y, value_w, pad.h);
-    let label_col = Rect::new(pad.x, pad.y, pad.w - value_w - space::SM, pad.h);
-    // Both columns are the padded row's full height, so both share one baseline.
-    let row_y = pad.y + pad.h.saturating_sub(text::line_height(ROW_TEXT_SCALE)) / 2;
-    let value_bytes = value.as_slice();
-    let (value_run, value_len) = text::ellipsize(value_bytes, ROW_TEXT_SCALE, value_col.w);
-    let value_w_measured = text::measure(&value_run[..value_len], ROW_TEXT_SCALE);
-    CellPlan {
-        rect,
-        inner: rect.inset(1),
-        corner: radius::CARD,
-        fill,
-        split_x: value_col.x,
-        label_end: label_col.x + label_col.w,
-        label: Run::fitted(
-            label_col.x,
-            row_y,
-            ROW_TEXT_SCALE,
-            label_col.w,
-            label,
-            theme.text,
-        ),
-        // WHY the value's origin is derived from its own measured width: the shared
-        // painter right-aligns it by building a rectangle that ends at the column's
-        // right edge and starting its run at that rectangle's left edge.
-        value: if value_w_measured > value_col.w {
-            Run::EMPTY
-        } else {
-            Run::placed(
-                value_col.x + value_col.w - value_w_measured,
-                row_y,
-                ROW_TEXT_SCALE,
-                value_run,
-                value_len,
-                value_ink,
-            )
-        },
-    }
+impl Frame {
+    const EMPTY: Frame = Frame {
+        clock: None,
+        badge: None,
+        title: Run::EMPTY,
+        headline: Run::EMPTY,
+        sheet: Rect::new(0, 0, 0, 0),
+        sheet_inner: Rect::new(0, 0, 0, 0),
+        cards: [CardPlan::EMPTY; SHADE_CARDS],
+        count: 0,
+        empty: [Run::EMPTY; 3],
+        note: [Run::EMPTY; NOTE_LINES],
+        indicator: Rect::new(0, 0, 0, 0),
+    };
 }
 
-/// Builds this frame's plan.
+/// Height of one group's card inside the sheet.
+fn group_h(group: &Group) -> usize {
+    header_h() + group.fields.len() * GROUP_ROW_H
+}
+
+/// Places one group inside the sheet at `y`.
+fn place_group(
+    cards: &mut [CardPlan; SHADE_CARDS],
+    count: &mut usize,
+    sheet_left: usize,
+    sheet_w: usize,
+    group: &Group,
+    y: usize,
+    state: &LauncherState,
+    theme: &Theme,
+) -> bool {
+    if *count >= SHADE_CARDS || group.fields.len() > 8 {
+        return false;
+    }
+    let rect = Rect::new(sheet_left + SHEET_PAD, y, sheet_w - SHEET_PAD * 2, group_h(group));
+    let mut card = CardPlan::with_header(rect, radius::CARD, group.header, theme);
+    // WHY the cards here are `surface_sunken` and the settings page's are `surface`:
+    // on the settings page the cards sit on the page, so they are raised one step.
+    // Here they sit inside a sheet, so they are recessed one step. Same tokens, one
+    // level deeper, which is what makes a sheet read as a sheet rather than as a
+    // card floating on a card.
+    card.set_fill(theme.surface_sunken);
+    for (i, field) in group.fields.iter().enumerate() {
+        let row_rect = Rect::new(rect.x, card.rows_top + i * GROUP_ROW_H, rect.w, GROUP_ROW_H);
+        card.push(CellPlan::row(row_rect, field.label(), &value(*field, state), row_pad_x(), theme));
+    }
+    cards[*count] = card;
+    *count += 1;
+    true
+}
+
+/// Places the card that names the fields a sheet could not fit.
+///
+/// WHY it lists them rather than counting them: a shade whose every row is already a
+/// refusal gains nothing from a row saying "3 more", while a card headed "NOT SHOWN"
+/// that names each field tells the reader the shade is the short one.
+fn place_overflow(
+    cards: &mut [CardPlan; SHADE_CARDS],
+    count: &mut usize,
+    sheet_left: usize,
+    sheet_w: usize,
+    fields: &[Field],
+    y: usize,
+    state: &LauncherState,
+    theme: &Theme,
+) -> bool {
+    if *count >= SHADE_CARDS || fields.is_empty() {
+        return false;
+    }
+    let rect = Rect::new(
+        sheet_left + SHEET_PAD,
+        y,
+        sheet_w - SHEET_PAD * 2,
+        header_h() + fields.len() * GROUP_ROW_H,
+    );
+    let mut card = CardPlan::with_header(rect, radius::CARD, b"NOT SHOWN", theme);
+    card.set_fill(theme.surface_sunken);
+    card.set_header_ink(theme.warning);
+    for (i, field) in fields.iter().enumerate() {
+        let row_rect = Rect::new(rect.x, card.rows_top + i * GROUP_ROW_H, rect.w, GROUP_ROW_H);
+        card.push(CellPlan::row(row_rect, field.label(), &value(*field, state), row_pad_x(), theme));
+    }
+    cards[*count] = card;
+    *count += 1;
+    true
+}
+
+/// Resolves one frame of the shade.
+///
+/// WHY the title block's geometry is identical to the settings page's: the two
+/// surfaces are reached from adjacent regions of the same status bar, and a title
+/// that sits at two different heights on two adjacent surfaces is the most obvious
+/// way two screens fail to look like one system.
+///
+/// WHY the sheet is sized to its content rather than run to the bottom of the screen:
+/// with no entries there is nothing to fill a full-height sheet, and a sheet with
+/// three lines at the top and 700 px of blank surface below them reads as a rendering
+/// fault. Sizing it to what it holds keeps the empty state a deliberate, compact
+/// panel, and it keeps the shade's title at the same height as the settings page's
+/// whatever the content is.
 fn build(state: &LauncherState) -> Frame {
     let theme = THEME;
+    let content = layout::content_area(CONTENT_PADDING);
+    let cap_h = text::line_height(type_scale::CAPTION);
 
-    let bar = Rect::new(0, 0, SCREEN_WIDTH, STATUS_BAR_HEIGHT);
-    let content = layout::content_area(space::LG);
-    let title_rect = Rect::new(
-        content.x,
-        content.y,
-        content.w,
-        text::line_height(type_scale::TITLE),
-    );
-    let sub_rect = Rect::new(
-        content.x,
-        title_rect.y + title_rect.h + space::XS,
-        content.w,
-        text::line_height(type_scale::CAPTION),
-    );
-    let panel_top = sub_rect.y + sub_rect.h + space::MD;
+    let mut frame = Frame::EMPTY;
 
-    let rows = row_count(state);
-    let bounds = Rect::new(
-        content.x,
-        panel_top,
-        content.w,
-        (content.y + content.h) - panel_top,
-    );
-    let pad = bounds.inset(space::XL);
-    let stack = layout::list(pad, rows, ROW_H, ROW_GUTTER);
+    // ---- status bar ------------------------------------------------------
+    frame.clock = if state.clock_source_ok {
+        Some(Run::whole(
+            content.x,
+            (STATUS_BAR_HEIGHT - cap_h) / 2,
+            type_scale::CAPTION,
+            &state.clock_time,
+            layout::ink_on(&theme, theme.overlay),
+        ))
+    } else {
+        None
+    };
+    // WHY the badge repeats the count here as well as in the COUNT group: the status
+    // bar is the one strip every surface in the shell shares, and a shade that is
+    // reachable from it has to say what it is holding while the reader is still
+    // looking at the bar.
+    frame.badge = if state.notification_count > 0 {
+        let (digits, dlen) = counted(state.notification_count, b"");
+        let t = Run::right_edge(
+            content.x + content.w - space::SM,
+            (STATUS_BAR_HEIGHT - cap_h) / 2,
+            type_scale::CAPTION,
+            60,
+            &digits[..dlen],
+            theme.text_on_accent,
+        );
+        if t.is_empty() {
+            None
+        } else {
+            Some(Chip::new(t, theme.accent))
+        }
+    } else {
+        None
+    };
 
-    // WHY the headline is formatted here: it is a count, so its text is a function of
-    // the state, and the old painter rebuilt it out of a 48-byte buffer for every
-    // pixel of the line under the title.
-    let (headline, headline_len) = counted(state.notification_count, b" active");
+    // ---- title block -----------------------------------------------------
+    let title_h = text::line_height(type_scale::TITLE);
+    let title_y = content.y;
+    let head_y = title_y + title_h + space::XS;
+    frame.title = Run::whole(content.x, title_y, type_scale::TITLE, b"Notifications", theme.text);
+    {
+        // WHY the headline is the count and nothing else: the notification service
+        // publishes a count, so any adjective beside it would be invented. And the
+        // empty case reads "none active" rather than "0 active" for the reason
+        // `Field::Active::reason` gives.
+        let headline = if reported(Field::Active, state) {
+            let (buf, len) = counted(state.notification_count, b" active");
+            Reading::of(&buf[..len])
+        } else {
+            Reading::unavailable(Field::Active.reason())
+        };
+        frame.headline = Run::whole(content.x, head_y, type_scale::CAPTION, headline.as_slice(), theme.text_muted);
+    }
 
-    let mut cells = [CellPlan::EMPTY; GROUP_ROWS];
-    if let Some(stack) = stack {
-        for index in 0..rows.min(GROUP_ROWS) {
-            let Some(rect) = layout::list_row(stack, index, rows, ROW_H, ROW_GUTTER) else {
-                continue;
-            };
-            let (label, value) = row(state, index);
-            cells[index] = cell_plan(rect, label, &value, &theme);
+    // ---- the sheet --------------------------------------------------------
+    let sheet_top = head_y + cap_h + space::XS;
+    let floor = content.y + content.h;
+    let sheet_left = content.x;
+    let sheet_w = content.w;
+    let inner_left = sheet_left + SHEET_PAD;
+    let inner_w = sheet_w - SHEET_PAD * 2;
+    let mut cards = [CardPlan::EMPTY; SHADE_CARDS];
+    let mut count = 0usize;
+
+    if !reported(Field::Active, state) {
+        // ---- empty state -------------------------------------------------
+        // WHY the sheet still fills the page even with nothing in it: a shade is an
+        // overlay, and a small card floating at the top of an empty page reads as a
+        // card that lost its content rather than as an overlay that has none. Filling
+        // it and centring the block in it is what makes the emptiness the message.
+        //
+        // WHY the block's centre is above the sheet's centre: an empty state's optical
+        // centre sits above its geometric centre, and a block pinned dead centre in a
+        // sheet this tall reads as low.
+        let body_h = text::line_height(type_scale::BODY);
+        let block_h = body_h + space::SM + cap_h + space::MD + cap_h;
+        let sheet_h = floor - sheet_top;
+        frame.sheet = Rect::new(sheet_left, sheet_top, sheet_w, sheet_h);
+        frame.sheet_inner = frame.sheet.inset(1);
+        let mut ey = sheet_top + (sheet_h * 2 / 5) - block_h / 2;
+        frame.empty[0] = Run::centred(inner_left, ey, type_scale::BODY, inner_w, EMPTY_LEDE, theme.text);
+        ey += body_h + space::SM;
+        frame.empty[1] = Run::centred(inner_left, ey, type_scale::CAPTION, inner_w, EMPTY_SUB, theme.text_muted);
+        ey += cap_h + space::MD;
+        frame.empty[2] = Run::centred(inner_left, ey, type_scale::CAPTION, inner_w, EMPTY_NOTE, theme.text_muted);
+    } else {
+        // ---- groups ------------------------------------------------------
+        // WHY the note's height is reserved before the groups are placed: the
+        // groups are what the reader came for, so they take the sheet first and the
+        // note gets what is left, rather than the note claiming a fixed block and
+        // pushing the last group off the bottom.
+        let note_reserve = space::XXL + note_h();
+        let mut gy = sheet_top + space::XL;
+        let mut deferred: [Field; 4] = [Field::Active; 4];
+        let mut deferred_len = 0usize;
+        for group in GROUPS.iter() {
+            let h = group_h(group);
+            if count < SHADE_CARDS
+                && gy + h + note_reserve <= floor
+                && place_group(&mut cards, &mut count, sheet_left, sheet_w, group, gy, state, &theme)
+            {
+                gy += h + CARD_GAP;
+            } else {
+                for field in group.fields.iter() {
+                    if deferred_len < deferred.len() {
+                        deferred[deferred_len] = *field;
+                        deferred_len += 1;
+                    }
+                }
+            }
+        }
+        if deferred_len > 0
+            && count < SHADE_CARDS
+            && gy + header_h() + deferred_len * GROUP_ROW_H + note_reserve <= floor
+            && place_overflow(
+                &mut cards,
+                &mut count,
+                sheet_left,
+                sheet_w,
+                &deferred[..deferred_len],
+                gy,
+                state,
+                &theme,
+            )
+        {
+        }
+        frame.count = count;
+        frame.cards = cards;
+
+        let pad = space::XXL;
+        let sheet_h = floor - sheet_top;
+        frame.sheet = Rect::new(sheet_left, sheet_top, sheet_w, sheet_h);
+        frame.sheet_inner = frame.sheet.inset(1);
+
+        // ---- note ---------------------------------------------------------
+        let mut ny = sheet_top + sheet_h - pad - note_h();
+        let mut k = 0usize;
+        while k < NOTE_LINES {
+            frame.note[k] = Run::whole(inner_left, ny, type_scale::CAPTION, NOTE[k], theme.text_muted);
+            ny += cap_h + NOTE_GAP;
+            k += 1;
         }
     }
 
-    // WHY the empty state's two lines are resolved even when they cannot be shown:
-    // they are two tests of `rows == 0` either way, and keeping both branches in one
-    // place is what stops the two states drifting apart.
-    let empty_title = Rect::new(pad.x, pad.y, pad.w, text::line_height(type_scale::BODY));
-    let empty_body = Rect::new(
-        pad.x,
-        empty_title.y + empty_title.h + space::SM,
-        pad.w,
-        text::line_height(type_scale::CAPTION),
-    );
-
     let indicator_w = space::XL * 4;
-    let indicator_h = space::XS;
-    Frame {
-        clock: if state.clock_source_ok {
-            Some(Run::whole(
-                bar.x + CONTENT_PADDING,
-                bar.y + (bar.h - text::line_height(type_scale::CAPTION)) / 2,
-                type_scale::CAPTION,
-                &state.clock_time,
-                layout::ink_on(&theme, theme.overlay),
-            ))
-        } else {
-            None
-        },
-        title: Run::whole(
-            title_rect.x,
-            title_rect.y + title_rect.h.saturating_sub(text::line_height(type_scale::TITLE)) / 2,
-            type_scale::TITLE,
-            b"Notifications",
-            theme.text,
-        ),
-        headline: Run::whole(
-            sub_rect.x,
-            sub_rect.y + sub_rect.h.saturating_sub(text::line_height(type_scale::CAPTION)) / 2,
-            type_scale::CAPTION,
-            &headline[..headline_len],
-            theme.text_muted,
-        ),
-        panel: PanelPlan {
-            bounds,
-            inner: bounds.inset(1),
-            pad,
-            rows,
-            stack,
-            empty_head: Run::centred_whole(
-                empty_title.x,
-                empty_title.y,
-                type_scale::BODY,
-                empty_title.w,
-                b"No notifications",
-                theme.text,
-            ),
-            empty_body: Run::centred_whole(
-                empty_body.x,
-                empty_body.y,
-                type_scale::CAPTION,
-                empty_body.w,
-                b"Nothing is active for this account",
-                theme.text_muted,
-            ),
-            cells,
-        },
-        indicator: Rect::new(
-            (SCREEN_WIDTH - indicator_w) / 2,
-            SCREEN_HEIGHT - space::MD - indicator_h,
-            indicator_w,
-            indicator_h,
-        ),
-    }
+    frame.indicator = Rect::new(
+        (SCREEN_WIDTH - indicator_w) / 2,
+        SCREEN_HEIGHT - space::MD - space::XS,
+        indicator_w,
+        space::XS,
+    );
+    frame
 }
 
 /// This frame's plan.
@@ -481,118 +507,62 @@ fn frame(x: usize, y: usize, state: &LauncherState) -> &'static Frame {
     // SAFETY: the slot is `Some` here -- it was just filled when it was empty.
     unsafe { (*slot).as_ref() }.expect("WHY: the slot is filled when it is empty")
 }
-/// Paints the shade panel: a rounded sheet covering the area under the header,
-/// with either the list of what the shell knows or the empty state.
-///
-/// WHY the panel fills that area instead of shrinking to its rows: a shade is a
-/// sheet that covers the screen, and a card floating in the middle of an empty
-/// page reads as a broken list. The rows inside it still come from the state, so
-/// a shade with nothing to list is a large area that says so.
-///
-/// WHY the row is found by arithmetic rather than by walking the stack: the stack
-/// and each row's rectangle were rebuilt for every pixel of the panel, which is
-/// most of the surface.
-fn panel_pixel(x: usize, y: usize, theme: &Theme, plan: &PanelPlan) -> u32 {
-    if !round_contains(&plan.bounds, radius::SHEET, x, y) {
-        return theme.bg;
-    }
-    if !round_contains(&plan.inner, radius::SHEET - 1, x, y) {
-        return theme.border;
-    }
-
-    if plan.rows == 0 {
-        // WHY the empty state is two centred lines and not a greyed-out Clear
-        // all button: there is nothing to clear, and a disabled control only
-        // raises the question the user cannot act on.
-        if let Some(c) = plan.empty_head.pixel(x, y) {
-            return c;
-        }
-        if let Some(c) = plan.empty_body.pixel(x, y) {
-            return c;
-        }
-        return theme.surface;
-    }
-
-    // WHY the row index is only computed inside the padded area: the stack starts
-    // at the panel's inner padding, so a pixel in the padding is above the first
-    // row and subtracting would underflow.
-    if plan.pad.contains(x, y) {
-        if let Some(stack) = plan.stack {
-            let index = (y - stack.y) / ROW_PITCH;
-            if index < plan.rows {
-                return cell_pixel(&plan.cells[index], x, y, theme);
-            }
-        }
-    }
-    theme.surface
-}
-
-/// One row: card fill, hairline outline, label left, value right.
-///
-/// WHY this exists rather than a call to `system_space::cell_pixel`: that painter
-/// measures its value, ellipsizes whichever of the two columns the pixel falls in,
-/// and rebuilds the column rectangles for every pixel of the row. The rows this
-/// shade draws are three, and their geometry is the same arithmetic in the same
-/// order -- resolved once per frame in [`cell_plan`], and read here.
-fn cell_pixel(plan: &CellPlan, x: usize, y: usize, theme: &Theme) -> u32 {
-    if !round_contains(&plan.rect, plan.corner, x, y) {
-        return theme.bg;
-    }
-    if !round_contains(&plan.inner, plan.corner.saturating_sub(1), x, y) {
-        return theme.border;
-    }
-
-    // WHY the columns are resolved separately: they cannot overlap, so a pixel
-    // belongs to at most one and only that one needs testing.
-    if x >= plan.split_x {
-        if let Some(c) = plan.value.pixel(x, y) {
-            return c;
-        }
-    } else if x < plan.label_end {
-        if let Some(c) = plan.label.pixel(x, y) {
-            return c;
-        }
-    }
-    plan.fill
-}
 
 pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     let theme = THEME;
-
-    // WHY the plan is fetched before anything is drawn: it carries every rectangle,
-    // every line and every derived ink for this frame, and fetching it is the only
-    // place in this function where anything other than a pixel test happens.
     let f = frame(x, y, state);
 
-    // Status bar.
     if y < STATUS_BAR_HEIGHT {
         if let Some(c) = f.clock.as_ref().and_then(|r| r.pixel(x, y)) {
             return c;
+        }
+        if let Some(chip) = &f.badge {
+            if let Some(c) = chip.pixel(x, y) {
+                return c;
+            }
         }
         return theme.overlay;
     }
     if y == STATUS_BAR_HEIGHT {
         return theme.border;
     }
-
-    if round_contains(&f.panel.bounds, radius::SHEET, x, y) {
-        return panel_pixel(x, y, &theme, &f.panel);
-    }
-
     if let Some(c) = f.title.pixel(x, y) {
         return c;
     }
-    // WHY the headline is the count and nothing else: the notification service
-    // publishes a count, so any adjective beside it would be invented. It is built
-    // once per frame now, because this function runs for every pixel of the surface.
     if let Some(c) = f.headline.pixel(x, y) {
         return c;
     }
-
-    // Home indicator.
-    if round_contains(&f.indicator, f.indicator.h / 2, x, y) {
-        return Theme::blend(theme.text_muted, theme.bg, 140);
+    if !round_contains(&f.sheet, radius::SHEET, x, y) {
+        return theme.bg;
+    }
+    if !round_contains(&f.sheet_inner, radius::SHEET - 1, x, y) {
+        return theme.border;
     }
 
-    theme.bg
+    let mut i = 0usize;
+    while i < f.count {
+        let card = &f.cards[i];
+        if y < card.top() {
+            break;
+        }
+        if let Some(c) = card.pixel(x, y, &theme) {
+            return c;
+        }
+        i += 1;
+    }
+    let mut j = 0usize;
+    while j < f.empty.len() {
+        if let Some(c) = f.empty[j].pixel(x, y) {
+            return c;
+        }
+        j += 1;
+    }
+    let mut k = 0usize;
+    while k < f.note.len() {
+        if let Some(c) = f.note[k].pixel(x, y) {
+            return c;
+        }
+        k += 1;
+    }
+    theme.surface
 }
