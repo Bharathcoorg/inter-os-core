@@ -38,8 +38,11 @@ pub static APP_AUTHENTICATOR_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MAN
 pub static APP_HEALTH_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/health"));
 pub static APP_CAMERA_PREVIEW_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/camera_preview"));
 pub static APP_HELLO_WORLD_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/hello_world"));
+pub static APP_MESHCHAT_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/meshchat"));
+pub static APP_SENSOR_DASHBOARD_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/sensor_dashboard"));
+pub static APP_TEST_APP_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/test_app"));
 
-// WHY the four statics above are embedded rather than loaded from the VFS: every
+// WHY the app statics above are embedded rather than loaded from the VFS: every
 // first-party app already on the launch path (settings, terminal, gallery, ...)
 // is a kernel-resident image, and `sys_app_launch` spawns from that image rather
 // than from a `/system/bin` file. Without these the launch arms would have no ELF

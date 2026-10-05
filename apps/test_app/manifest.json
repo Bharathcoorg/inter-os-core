@@ -3,15 +3,17 @@
   "name": "Test App",
   "version": "1.0.0",
   "category": "utility",
-  "description": "Standard #![no_std] Rust mobile app with UI frontend",
+  "description": "Ring 3 platform self-diagnostic: reports what the kernel can tell this task about itself, naming the source of every value",
   "icon": "ui/icon.svg",
   "entrypoint": {
-    "ui": "ui/index.html",
     "backend": "bin/test_app.elf"
   },
   "permissions": [
     "CAP_LOGGING",
-    "CAP_WINDOW_FOCUS"
+    "CAP_TIMER",
+    "CAP_FRAMEBUFFER",
+    "CAP_FILESYSTEM_READ",
+    "CAP_EVENT_POLL"
   ],
   "min_sdk_version": "0.8.0"
 }

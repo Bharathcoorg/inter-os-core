@@ -3,15 +3,15 @@
   "name": "Sensor Dashboard",
   "version": "1.0.0",
   "category": "utility",
-  "description": "Ring 3 thermal and ambient sensor telemetry monitor",
+  "description": "Ring 3 hardware sensor inventory: every channel with its measured availability and the kernel's reason",
   "icon": "ui/icon.svg",
   "entrypoint": {
     "backend": "bin/sensor_dashboard.elf"
   },
   "permissions": [
     "CAP_LOGGING",
-    "CAP_HARDWARE_IO",
-    "CAP_EVENT_POLL"
+    "CAP_EVENT_POLL",
+    "CAP_HARDWARE_IO"
   ],
   "min_sdk_version": "0.8.0"
 }

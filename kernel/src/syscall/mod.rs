@@ -4079,6 +4079,9 @@ fn native_first_party_app_available(package_id: &str) -> bool {
             | "org.interos.health"
             | "org.interos.camera_preview"
             | "org.interos.hello_world"
+            | "org.interos.meshchat"
+            | "org.interos.sensor_dashboard"
+            | "org.interos.test_app"
     )
 }
 
@@ -4642,6 +4645,186 @@ fn spawn_app_camera_preview(id_security: TaskId) -> TaskId {
     id
 }
 
+/// Spawns the Mesh Chat app in Ring 3.
+///
+/// WHY the network triple and nothing beyond the common base: the app's stated
+/// purpose is to exercise the real local UDP datagram path (`net_socket`,
+/// `net_sendto` to loopback, `net_recvfrom`, `network_poll`), and each of those
+/// is guarded by `NetworkSocket|WRITE`, `NetworkSend|WRITE` and
+/// `NetworkReceive|READ`. `wireless_query` is deliberately NOT granted: its only
+/// guard is the object-blind `require_system_control()`, which would hand this
+/// app power, crypto and telephony authority over the whole device just to read
+/// the radio's own fields. The app renders that probe as a named refusal, which
+/// is the honest result.
+fn spawn_app_meshchat(id_security: TaskId) -> TaskId {
+    let mut caps = CapabilityTable::new(8);
+    caps.insert(Capability {
+        id: CapabilityId(3301),
+        cap_type: CapabilityType::SerialOutput,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(3302),
+        cap_type: CapabilityType::IpcReceive,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(3303),
+        cap_type: CapabilityType::EventPoll,
+        rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(3304),
+        cap_type: CapabilityType::FrameBufferDirect,
+        rights: Rights::WRITE,
+        object_id: 1,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(3305),
+        cap_type: CapabilityType::NetworkSocket,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(3306),
+        cap_type: CapabilityType::NetworkSend,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(3307),
+        cap_type: CapabilityType::NetworkReceive,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+
+    let id = crate::task::user::spawn_user_process_with_parent(
+        "meshchat",
+        crate::task::images::APP_MESHCHAT_ELF,
+        caps,
+        1,
+        id_security,
+    ).expect("Failed to spawn registered first-party app");
+    serial_println!("[OK] Spawned app_meshchat (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
+    id
+}
+
+/// Spawns the Sensor Dashboard app in Ring 3.
+///
+/// WHY two object-scoped SystemControl capabilities: `sys_sensor_read` authorizes
+/// against `SystemControl|INVOKE` on the sensor control object, and
+/// `sys_battery_query` / `sys_thermal_query` against the power control object.
+/// Object-scoped INVOKE grants exactly the read path the dashboard probes and
+/// none of the device-wide authority the object-blind `require_system_control()`
+/// form would imply. When the hardware is absent the queries themselves return
+/// `DeviceError` with an explicit absent flag, so the app still reports absence
+/// rather than invented telemetry.
+fn spawn_app_sensor_dashboard(id_security: TaskId) -> TaskId {
+    let mut caps = CapabilityTable::new(8);
+    caps.insert(Capability {
+        id: CapabilityId(3401),
+        cap_type: CapabilityType::SerialOutput,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(3402),
+        cap_type: CapabilityType::TimerTickRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(3403),
+        cap_type: CapabilityType::EventPoll,
+        rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(3404),
+        cap_type: CapabilityType::FrameBufferDirect,
+        rights: Rights::WRITE,
+        object_id: 1,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(3405),
+        cap_type: CapabilityType::SystemControl,
+        rights: Rights::INVOKE,
+        object_id: crate::services::SERVICE_SENSOR_CONTROL_OBJECT,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(3406),
+        cap_type: CapabilityType::SystemControl,
+        rights: Rights::INVOKE,
+        object_id: crate::services::SERVICE_POWER_CONTROL_OBJECT,
+    }).ok();
+
+    let id = crate::task::user::spawn_user_process_with_parent(
+        "sensor_dashboard",
+        crate::task::images::APP_SENSOR_DASHBOARD_ELF,
+        caps,
+        1,
+        id_security,
+    ).expect("Failed to spawn registered first-party app");
+    serial_println!("[OK] Spawned app_sensor_dashboard (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
+    id
+}
+
+/// Spawns the Test App platform diagnostic in Ring 3.
+///
+/// WHY FrameBufferDirect carries READ as well as WRITE: the surface path
+/// authorizes WRITE on display object 1, but `sys_window_list` — the probe that
+/// shows live compositor geometry including this app's own window — authorizes
+/// READ. Without READ the probe would report a refusal the app was built to
+/// answer. `storage_query` is deliberately left ungranted (it needs
+/// `StorageRawBlock|READ`, which the app's manifest does not declare) so the
+/// app demonstrates a named, capability-attributed refusal on screen.
+fn spawn_app_test_app(id_security: TaskId) -> TaskId {
+    let mut caps = CapabilityTable::new(8);
+    caps.insert(Capability {
+        id: CapabilityId(3501),
+        cap_type: CapabilityType::SerialOutput,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(3502),
+        cap_type: CapabilityType::TimerTickRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(3503),
+        cap_type: CapabilityType::FileSystemRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(3504),
+        cap_type: CapabilityType::EventPoll,
+        rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(3505),
+        cap_type: CapabilityType::FrameBufferDirect,
+        rights: Rights::READ.union(Rights::WRITE),
+        object_id: 1,
+    }).ok();
+
+    let id = crate::task::user::spawn_user_process_with_parent(
+        "test_app",
+        crate::task::images::APP_TEST_APP_ELF,
+        caps,
+        1,
+        id_security,
+    ).expect("Failed to spawn registered first-party app");
+    serial_println!("[OK] Spawned app_test_app (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
+    id
+}
+
 /// Spawns the Hello World diagnostics app in Ring 3.
 ///
 /// WHY the same seven capabilities as every other first-party app and nothing more: this
@@ -4865,6 +5048,15 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         }
         "org.interos.hello_world" | "hello_world" => {
             spawn_app_hello_world(parent_id)
+        }
+        "org.interos.meshchat" | "meshchat" => {
+            spawn_app_meshchat(parent_id)
+        }
+        "org.interos.sensor_dashboard" | "sensor_dashboard" => {
+            spawn_app_sensor_dashboard(parent_id)
+        }
+        "org.interos.test_app" | "test_app" => {
+            spawn_app_test_app(parent_id)
         }
         _ => {
             crate::serial_println!("[APP_LAUNCH DEBUG] unknown app_id: '{}'", app_id);
