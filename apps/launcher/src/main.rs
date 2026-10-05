@@ -5,7 +5,6 @@ use core::panic::PanicInfo;
 use interos_std as std;
 
 use launcher::theme::*;
-use launcher::{layout, text};
 
 // WHY one file per screen: every renderer was a function in this file, so two
 // people editing different screens collided on every save. Submodules can reach
@@ -509,47 +508,6 @@ fn package_id_at(state: &LauncherState, index: usize) -> Option<&str> {
 // -----------------------------------------------------------------------------
 // Pixel-Accurate Screen Renderers
 // -----------------------------------------------------------------------------
-
-#[inline(never)]
-
-#[inline(never)]
-
-#[inline(never)]
-
-#[inline(never)]
-
-#[inline(never)]
-/// Lock screen backdrop.
-///
-/// A vertical gradient rather than a flat fill, so the large white clock and the
-/// translucent control overlays keep a readable contrast ratio across the full
-/// height of the screen.
-///
-/// WHY this is spelled out rather than delegated to a general two-endpoint
-/// interpolator: the lock screen calls this for every pixel of the surface, and
-/// `W`, `H` and both endpoint colours are compile-time constants, so only `y`
-/// varies down a column.
-///
-/// WHY the difference is signed: the lock ramp darkens downwards, so
-/// `to - from` is negative on every channel. `Theme::blend`'s
-/// `(a * inv + b * t) >> 8` form would be algebraically the same average but
-/// floors where this truncates, which differs by one in the low bit on a
-/// darkening channel. `i32` keeps the division truncating toward zero exactly as
-/// the `i64` this replaced did, so the ramp is bit-identical.
-fn get_stock_background_pixel(_x: usize, y: usize) -> u32 {
-    let from = LOCK_BACKDROP_TOP;
-    let to = LOCK_BACKDROP_BOTTOM;
-    let t = (y.min(H - 1) * 256 / (H - 1)) as i32;
-    // WHY unrolled: this runs per pixel and the shell is built unoptimized, so a
-    // four-iteration array loop costs a real loop with a bounds check and an
-    // induction variable per pixel. Four explicit channels is the same arithmetic.
-    let ch = |shift: u32| -> u32 {
-        let a = ((from >> shift) & 0xFF) as i32;
-        let b = ((to >> shift) & 0xFF) as i32;
-        ((a + (b - a) * t / 256) as u32 & 0xFF) << shift
-    };
-    ch(24) | ch(16) | ch(8) | ch(0)
-}
 
 // ============================================================================
 // Lock Screen design tokens
