@@ -230,61 +230,148 @@ impl DialerApp {
     }
 }
 
-// 7-segment bitmasks for standard numbers 0..9 and '-'
-fn get_7segment_mask(digit: i64) -> u8 {
-    match digit {
-        0 => 0b0011_1111,
-        1 => 0b0000_0110,
-        2 => 0b0101_1011,
-        3 => 0b0100_1111,
-        4 => 0b0110_0110,
-        5 => 0b0110_1101,
-        6 => 0b0111_1101,
-        7 => 0b0000_0111,
-        8 => 0b0111_1111,
-        9 => 0b0110_1111,
-        -1 => 0b0100_0000, // minus sign
-        _ => 0,
-    }
-}
+// -----------------------------------------------------------------------------
+// 32-bit ARGB8888 Design Color Tokens
+// -----------------------------------------------------------------------------
+const BG_DARK: u32 = 0xFF0A0D14;
+const SURFACE_DARK: u32 = 0xFF121824;
+const SURFACE_RAISED: u32 = 0xFF1A2234;
+const BORDER_SUBTLE: u32 = 0xFF222E42;
+const TEXT_PRIMARY: u32 = 0xFFF8FAFC;
+const TEXT_MUTED: u32 = 0xFF94A3B8;
+const ACCENT_SKY: u32 = 0xFF31C4FF;
+const SUCCESS_EMERALD: u32 = 0xFF10B981;
+const DANGER_CRIMSON: u32 = 0xFFEF4444;
+const WARNING_AMBER: u32 = 0xFFF59E0B;
 
-fn is_segment_pixel(mask: u8, dx: usize, dy: usize, w: usize, h: usize) -> bool {
-    let thick = 5usize;
-    // a: top horizontal
-    if (mask & 0b0000_0001) != 0 && dy < thick && dx >= thick && dx < w - thick {
-        return true;
+// -----------------------------------------------------------------------------
+// Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')
+// -----------------------------------------------------------------------------
+const FONT_8X8: [[u8; 8]; 95] = [
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // 32 ' '
+    [0x18, 0x18, 0x18, 0x18, 0x00, 0x00, 0x18, 0x00], // 33 '!'
+    [0x66, 0x66, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00], // 34 '"'
+    [0x6c, 0x6c, 0xfe, 0x6c, 0xfe, 0x6c, 0x6c, 0x00], // 35 '#'
+    [0x18, 0x3e, 0x60, 0x3c, 0x06, 0x7c, 0x18, 0x00], // 36 '$'
+    [0x00, 0xc6, 0xcc, 0x18, 0x30, 0x66, 0xc6, 0x00], // 37 '%'
+    [0x38, 0x6c, 0x38, 0x76, 0xdc, 0xcc, 0x76, 0x00], // 38 '&'
+    [0x18, 0x18, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00], // 39 '''
+    [0x0c, 0x18, 0x30, 0x30, 0x30, 0x18, 0x0c, 0x00], // 40 '('
+    [0x30, 0x18, 0x0c, 0x0c, 0x0c, 0x18, 0x30, 0x00], // 41 ')'
+    [0x00, 0x66, 0x3c, 0xff, 0x3c, 0x66, 0x00, 0x00], // 42 '*'
+    [0x00, 0x18, 0x18, 0x7e, 0x18, 0x18, 0x00, 0x00], // 43 '+'
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x30], // 44 ','
+    [0x00, 0x00, 0x00, 0x7e, 0x00, 0x00, 0x00, 0x00], // 45 '-'
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00], // 46 '.'
+    [0x06, 0x0c, 0x18, 0x30, 0x60, 0xc0, 0x80, 0x00], // 47 '/'
+    [0x7c, 0xc6, 0xce, 0xd6, 0xe6, 0xc6, 0x7c, 0x00], // 48 '0'
+    [0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x7e, 0x00], // 49 '1'
+    [0x7c, 0xc6, 0x06, 0x1c, 0x30, 0x66, 0xfe, 0x00], // 50 '2'
+    [0x7c, 0xc6, 0x06, 0x3c, 0x06, 0xc6, 0x7c, 0x00], // 51 '3'
+    [0x1c, 0x3c, 0x6c, 0xcc, 0xfe, 0x0c, 0x1e, 0x00], // 52 '4'
+    [0xfe, 0xc0, 0xfc, 0x06, 0x06, 0xc6, 0x7c, 0x00], // 53 '5'
+    [0x78, 0x0c, 0xc0, 0xfc, 0xc6, 0xc6, 0x7c, 0x00], // 54 '6'
+    [0xfe, 0xc6, 0x0c, 0x18, 0x30, 0x30, 0x30, 0x00], // 55 '7'
+    [0x7c, 0xc6, 0xc6, 0x7c, 0xc6, 0xc6, 0x7c, 0x00], // 56 '8'
+    [0x7c, 0xc6, 0xc6, 0x7e, 0x06, 0x0c, 0x78, 0x00], // 57 '9'
+    [0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00, 0x00], // 58 ':'
+    [0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x30, 0x00], // 59 ';'
+    [0x06, 0x0c, 0x18, 0x30, 0x18, 0x0c, 0x06, 0x00], // 60 '<'
+    [0x00, 0x7e, 0x00, 0x7e, 0x00, 0x00, 0x00, 0x00], // 61 '='
+    [0x60, 0x30, 0x18, 0x0c, 0x18, 0x30, 0x60, 0x00], // 62 '>'
+    [0x7c, 0xc6, 0x0c, 0x18, 0x18, 0x00, 0x18, 0x00], // 63 '?'
+    [0x7c, 0xc6, 0xde, 0xde, 0xdc, 0xc0, 0x7c, 0x00], // 64 '@'
+    [0x38, 0x6c, 0xc6, 0xfe, 0xc6, 0xc6, 0xc6, 0x00], // 65 'A'
+    [0xfc, 0x66, 0x66, 0x7c, 0x66, 0x66, 0xfc, 0x00], // 66 'B'
+    [0x3c, 0x66, 0xc0, 0xc0, 0xc0, 0x66, 0x3c, 0x00], // 67 'C'
+    [0xf8, 0x6c, 0x66, 0x66, 0x66, 0x6c, 0xf8, 0x00], // 68 'D'
+    [0xfe, 0x62, 0x68, 0x78, 0x68, 0x62, 0xfe, 0x00], // 69 'E'
+    [0xfe, 0x62, 0x68, 0x78, 0x68, 0x60, 0xf0, 0x00], // 70 'F'
+    [0x3c, 0x66, 0xc0, 0xc0, 0xce, 0x66, 0x3e, 0x00], // 71 'G'
+    [0xc6, 0xc6, 0xc6, 0xfe, 0xc6, 0xc6, 0xc6, 0x00], // 72 'H'
+    [0x7e, 0x18, 0x18, 0x18, 0x18, 0x18, 0x7e, 0x00], // 73 'I'
+    [0x1e, 0x0c, 0x0c, 0x0c, 0xcc, 0xcc, 0x78, 0x00], // 74 'J'
+    [0xe6, 0x66, 0x6c, 0x78, 0x6c, 0x66, 0xe6, 0x00], // 75 'K'
+    [0xf0, 0x60, 0x60, 0x60, 0x62, 0x66, 0xfe, 0x00], // 76 'L'
+    [0xc6, 0xee, 0xfe, 0xfe, 0xd6, 0xc6, 0xc6, 0x00], // 77 'M'
+    [0xc6, 0xe6, 0xf6, 0xde, 0xce, 0xc6, 0xc6, 0x00], // 78 'N'
+    [0x7c, 0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0x7c, 0x00], // 79 'O'
+    [0xfc, 0x66, 0x66, 0x7c, 0x60, 0x60, 0xf0, 0x00], // 80 'P'
+    [0x7c, 0xc6, 0xc6, 0xc6, 0xd6, 0xcc, 0x76, 0x00], // 81 'Q'
+    [0xfc, 0x66, 0x66, 0x7c, 0x6c, 0x66, 0xe6, 0x00], // 82 'R'
+    [0x7c, 0xc6, 0x60, 0x38, 0x0c, 0xc6, 0x7c, 0x00], // 83 'S'
+    [0x7e, 0x7e, 0x5a, 0x18, 0x18, 0x18, 0x3c, 0x00], // 84 'T'
+    [0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0x7c, 0x00], // 85 'U'
+    [0xc6, 0xc6, 0xc6, 0xc6, 0x6c, 0x38, 0x10, 0x00], // 86 'V'
+    [0xc6, 0xc6, 0xd6, 0xfe, 0xfe, 0xee, 0xc6, 0x00], // 87 'W'
+    [0xc6, 0x6c, 0x38, 0x38, 0x6c, 0xc6, 0xc6, 0x00], // 88 'X'
+    [0x66, 0x66, 0x66, 0x3c, 0x18, 0x18, 0x3c, 0x00], // 89 'Y'
+    [0xfe, 0xc6, 0x0c, 0x18, 0x30, 0x62, 0xfe, 0x00], // 90 'Z'
+    [0x3c, 0x30, 0x30, 0x30, 0x30, 0x30, 0x3c, 0x00], // 91 '['
+    [0xc0, 0x60, 0x30, 0x18, 0x0c, 0x06, 0x02, 0x00], // 92 '\'
+    [0x3c, 0x0c, 0x0c, 0x0c, 0x0c, 0x0c, 0x3c, 0x00], // 93 ']'
+    [0x10, 0x38, 0x6c, 0xc6, 0x00, 0x00, 0x00, 0x00], // 94 '^'
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff], // 95 '_'
+    [0x30, 0x18, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00], // 96 '`'
+    [0x00, 0x00, 0x7c, 0x06, 0x7e, 0xc6, 0x7e, 0x00], // 97 'a'
+    [0xe0, 0x60, 0x7c, 0x66, 0x66, 0x66, 0xdc, 0x00], // 98 'b'
+    [0x00, 0x00, 0x7c, 0xc6, 0xc0, 0xc6, 0x7c, 0x00], // 99 'c'
+    [0x1c, 0x0c, 0x7c, 0xcc, 0xcc, 0xcc, 0x76, 0x00], // 100 'd'
+    [0x00, 0x00, 0x7c, 0xc6, 0xfe, 0xc0, 0x7c, 0x00], // 101 'e'
+    [0x38, 0x6c, 0x60, 0xf0, 0x60, 0x60, 0xf0, 0x00], // 102 'f'
+    [0x00, 0x00, 0x76, 0xcc, 0xcc, 0x7c, 0x0c, 0xf8], // 103 'g'
+    [0xe0, 0x60, 0x6c, 0x76, 0x66, 0x66, 0xe6, 0x00], // 104 'h'
+    [0x18, 0x00, 0x38, 0x18, 0x18, 0x18, 0x3c, 0x00], // 105 'i'
+    [0x06, 0x00, 0x0e, 0x06, 0x06, 0x66, 0x66, 0x3c], // 106 'j'
+    [0xe0, 0x60, 0x66, 0x6c, 0x78, 0x6c, 0xe6, 0x00], // 107 'k'
+    [0x38, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3c, 0x00], // 108 'l'
+    [0x00, 0x00, 0xe6, 0xff, 0xdb, 0xc9, 0xc9, 0x00], // 109 'm'
+    [0x00, 0x00, 0xdc, 0x66, 0x66, 0x66, 0x66, 0x00], // 110 'n'
+    [0x00, 0x00, 0x7c, 0xc6, 0xc6, 0xc6, 0x7c, 0x00], // 111 'o'
+    [0x00, 0x00, 0xdc, 0x66, 0x66, 0x7c, 0x60, 0xf0], // 112 'p'
+    [0x00, 0x00, 0x76, 0xcc, 0xcc, 0x7c, 0x0c, 0x1e], // 113 'q'
+    [0x00, 0x00, 0xdc, 0x66, 0x60, 0x60, 0xf0, 0x00], // 114 'r'
+    [0x00, 0x00, 0x7c, 0xc0, 0x7c, 0x06, 0xfc, 0x00], // 115 's'
+    [0x30, 0x30, 0xfc, 0x30, 0x30, 0x34, 0x18, 0x00], // 116 't'
+    [0x00, 0x00, 0xcc, 0xcc, 0xcc, 0xcc, 0x76, 0x00], // 117 'u'
+    [0x00, 0x00, 0xc6, 0xc6, 0xc6, 0x6c, 0x38, 0x00], // 118 'v'
+    [0x00, 0x00, 0xc6, 0xd6, 0xfe, 0xfe, 0x6c, 0x00], // 119 'w'
+    [0x00, 0x00, 0xc6, 0x6c, 0x38, 0x6c, 0xc6, 0x00], // 120 'x'
+    [0x00, 0x00, 0xc6, 0xc6, 0xc6, 0x7e, 0x06, 0xfc], // 121 'y'
+    [0x00, 0x00, 0x7e, 0x4c, 0x18, 0x32, 0x7e, 0x00], // 122 'z'
+    [0x0e, 0x18, 0x18, 0x70, 0x18, 0x18, 0x0e, 0x00], // 123 '{'
+    [0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00], // 124 '|'
+    [0x70, 0x18, 0x18, 0x0e, 0x18, 0x18, 0x70, 0x00], // 125 '}'
+    [0x76, 0xdc, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // 126 '~'
+];
+
+#[inline(always)]
+fn test_text(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    color: u32,
+) -> Option<u32> {
+    let char_w = 8 * scale;
+    let char_h = 8 * scale;
+    let total_w = text.len() * char_w;
+    if y >= y0 && y < y0 + char_h && x >= x0 && x < x0 + total_w {
+        let char_idx = (x - x0) / char_w;
+        let c = text[char_idx];
+        if (32..=126).contains(&c) {
+            let glyph_idx = (c - 32) as usize;
+            let col = ((x - x0) % char_w) / scale;
+            let row = (y - y0) / scale;
+            let row_byte = FONT_8X8[glyph_idx][row];
+            if ((row_byte >> (7 - col)) & 1) == 1 {
+                return Some(color);
+            }
+        }
     }
-    // b: top-right vertical
-    if (mask & 0b0000_0010) != 0 && dy >= thick && dy < h / 2 && dx >= w - thick {
-        return true;
-    }
-    // c: bottom-right vertical
-    if (mask & 0b0000_0100) != 0 && dy >= h / 2 && dy < h - thick && dx >= w - thick {
-        return true;
-    }
-    // d: bottom horizontal
-    if (mask & 0b0000_1000) != 0 && dy >= h - thick && dy < h && dx >= thick && dx < w - thick {
-        return true;
-    }
-    // e: bottom-left vertical
-    if (mask & 0b0001_0000) != 0 && dy >= h / 2 && dy < h - thick && dx < thick {
-        return true;
-    }
-    // f: top-left vertical
-    if (mask & 0b0010_0000) != 0 && dy >= thick && dy < h / 2 && dx < thick {
-        return true;
-    }
-    // g: middle horizontal
-    let mid_y = h / 2;
-    if (mask & 0b0100_0000) != 0
-        && dy >= mid_y - thick / 2
-        && dy < mid_y + thick / 2
-        && dx >= thick
-        && dx < w - thick
-    {
-        return true;
-    }
-    false
+    None
 }
 
 // Keypad layout constants
@@ -311,279 +398,354 @@ fn get_keypad_char(row: usize, col: usize) -> Option<char> {
     }
 }
 
+fn get_keypad_sublabel(row: usize, col: usize) -> &'static [u8] {
+    match (row, col) {
+        (0, 1) => b"ABC",
+        (0, 2) => b"DEF",
+        (1, 0) => b"GHI",
+        (1, 1) => b"JKL",
+        (1, 2) => b"MNO",
+        (2, 0) => b"PQRS",
+        (2, 1) => b"TUV",
+        (2, 2) => b"WXYZ",
+        (3, 1) => b"+",
+        _ => b"",
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Pixel Color Resolution Engine
+// -----------------------------------------------------------------------------
+#[inline(never)]
+fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
+    // 1. Status Bar & Header (y: 0..96)
+    if y < 96 {
+        if y >= 94 {
+            return BORDER_SUBTLE;
+        }
+
+        // Back button (<) at (x: 24..100, y: 28..68)
+        if x >= 24 && x < 100 && y >= 28 && y < 68 {
+            let center_x = 62;
+            let center_y = 48;
+            let dx = (x as isize - center_x as isize).abs();
+            let dy = (y as isize - center_y as isize).abs();
+            if (dx + dy <= 12 && x <= center_x)
+                || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
+            {
+                return TEXT_PRIMARY;
+            }
+            return SURFACE_RAISED;
+        }
+
+        // Header Title: "Phone"
+        if y >= 36 && y < 60 {
+            if let Some(c) = test_text(x, y, 120, 36, 3, b"Phone", TEXT_PRIMARY) {
+                return c;
+            }
+        }
+
+        // Cellular signal indicator (x: 610..670, y: 40..62)
+        if x >= 610 && x < 670 && y >= 40 && y < 62 {
+            let bar_idx = (x - 610) / 15;
+            let bar_x = (x - 610) % 15;
+            let bar_min_y = 62 - (bar_idx + 1) * 5;
+            if bar_x < 9 && y >= bar_min_y {
+                return if dialer.modem_present { ACCENT_SKY } else { BORDER_SUBTLE };
+            }
+            return SURFACE_DARK;
+        }
+
+        // Battery indicator (x: 678..706, y: 44..58)
+        if x >= 678 && x < 706 && y >= 44 && y < 58 {
+            if x == 678 || x == 702 || y == 44 || y == 57 || (x >= 703 && y >= 48 && y < 54) {
+                return TEXT_MUTED;
+            }
+            return SURFACE_DARK;
+        }
+
+        return SURFACE_DARK;
+    }
+
+    // 2. Call Status & Dialed Number Display Card (y: 110..380, x: 24..696)
+    if (110..380).contains(&y) && x >= 24 && x < 696 {
+        if y == 110 || y == 379 || x == 24 || x == 695 {
+            return BORDER_SUBTLE;
+        }
+
+        // Status Pill Banner (y: 126..156, x: 220..500)
+        if (126..156).contains(&y) && x >= 220 && x < 500 {
+            if y == 126 || y == 155 || x == 220 || x == 499 {
+                return BORDER_SUBTLE;
+            }
+            let (label, text_x, color) = match dialer.state {
+                CallState::ActiveCall => (&b"Connected"[..], 324, SUCCESS_EMERALD),
+                CallState::Dialing => (&b"Calling..."[..], 324, ACCENT_SKY),
+                CallState::CallEnded => (&b"Call Ended"[..], 320, DANGER_CRIMSON),
+                CallState::CallHeld => (&b"On Hold"[..], 336, WARNING_AMBER),
+                CallState::Ringing => (&b"Ringing..."[..], 324, ACCENT_SKY),
+                _ => (&b"Ready to Call"[..], 308, TEXT_MUTED),
+            };
+            if y >= 135 && y < 147 {
+                if let Some(c) = test_text(x, y, text_x, 135, 1, label, color) {
+                    return c;
+                }
+            }
+            return 0xFF152236;
+        }
+
+        // Dialed Digits Display
+        if dialer.active_len > 0 {
+            let scale = if dialer.active_len <= 10 { 4 } else { 3 };
+            let char_w = 8 * scale;
+            let total_w = dialer.active_len * char_w;
+            let x0 = (W.saturating_sub(total_w)) / 2;
+            let y0 = 226;
+            if let Some(c) = test_text(
+                x,
+                y,
+                x0,
+                y0,
+                scale,
+                &dialer.active_number[..dialer.active_len],
+                TEXT_PRIMARY,
+            ) {
+                return c;
+            }
+        } else if y >= 238 && y < 254 {
+            if let Some(c) = test_text(x, y, 248, 238, 2, b"Enter a phone number", TEXT_MUTED) {
+                return c;
+            }
+        }
+
+        // Backspace button in display card (627, 270, r: 24)
+        if dialer.active_len > 0 {
+            let bx = 627i32;
+            let by = 250i32;
+            let dx = (x as i32) - bx;
+            let dy = (y as i32) - by;
+            if dx * dx + dy * dy <= 576 {
+                if dx * dx + dy * dy >= 484 {
+                    return DANGER_CRIMSON;
+                }
+                // Backspace icon 'X' inside
+                if dx.abs() <= 7 && dy.abs() <= 7 && (dx == dy || dx == -dy) {
+                    return DANGER_CRIMSON;
+                }
+                return 0xFF22161A;
+            }
+        }
+
+        return SURFACE_DARK;
+    }
+
+    // 3. Keypad Matrix (y: 410..984)
+    for row in 0..4 {
+        let by = ROW_Y[row];
+        if y >= by && y < by + BTN_H {
+            for col in 0..3 {
+                let bx = COL_X[col];
+                if x >= bx && x < bx + BTN_W {
+                    let cx = (bx + BTN_W / 2) as i32;
+                    let cy = (by + BTN_H / 2) as i32;
+                    let k_dx = (x as i32) - cx;
+                    let k_dy = (y as i32) - cy;
+                    let dist2 = k_dx * k_dx + k_dy * k_dy;
+
+                    if dist2 <= 50 * 50 {
+                        // Button rim
+                        if dist2 >= 46 * 46 {
+                            return BORDER_SUBTLE;
+                        }
+
+                        // Digit text
+                        if let Some(digit) = get_keypad_char(row, col) {
+                            let digit_byte = [digit as u8];
+                            if let Some(c) = test_text(
+                                x,
+                                y,
+                                (cx - 12) as usize,
+                                (cy - 24) as usize,
+                                3,
+                                &digit_byte,
+                                TEXT_PRIMARY,
+                            ) {
+                                return c;
+                            }
+                        }
+
+                        // Sublabel text
+                        let sublabel = get_keypad_sublabel(row, col);
+                        if !sublabel.is_empty() {
+                            let sub_w = sublabel.len() * 8;
+                            let sub_x = (cx as usize).saturating_sub(sub_w / 2);
+                            if let Some(c) = test_text(
+                                x,
+                                y,
+                                sub_x,
+                                (cy + 12) as usize,
+                                1,
+                                sublabel,
+                                TEXT_MUTED,
+                            ) {
+                                return c;
+                            }
+                        }
+
+                        return 0xFF151E2E;
+                    }
+                    return BG_DARK;
+                }
+            }
+        }
+    }
+
+    // 4. Action Bar (y: 990..1140)
+    if (990..1140).contains(&y) {
+        // SOS Button (x: 48..220, centered at 134, 1065, r: 40)
+        let s_dx = (x as i32) - 134;
+        let s_dy = (y as i32) - 1065;
+        if s_dx * s_dx + s_dy * s_dy <= 1600 {
+            if s_dx * s_dx + s_dy * s_dy >= 1444 {
+                return 0xFFE11D48;
+            }
+            if y >= 1057 && y < 1073 {
+                if let Some(c) = test_text(x, y, 122, 1057, 2, b"SOS", 0xFFF43F5E) {
+                    return c;
+                }
+            }
+            return 0xFF2A1518;
+        }
+
+        // Call / Hangup Central Button (x: 270..450, centered at 360, 1065, r: 52)
+        let c_dx = (x as i32) - 360;
+        let c_dy = (y as i32) - 1065;
+        if c_dx * c_dx + c_dy * c_dy <= 2704 {
+            let is_in_call = dialer.state != CallState::Idle;
+            let bg_color = if is_in_call { DANGER_CRIMSON } else { SUCCESS_EMERALD };
+
+            // Vector Phone Handset
+            if !is_in_call {
+                // Angled handset (green button)
+                let n1 = (c_dx + 12) * (c_dx + 12) + (c_dy + 12) * (c_dy + 12);
+                let n2 = (c_dx - 12) * (c_dx - 12) + (c_dy - 12) * (c_dy - 12);
+                if n1 <= 36 || n2 <= 36 {
+                    return 0xFFFFFFFF;
+                }
+                let diff = c_dx - c_dy;
+                if diff.abs() <= 5 && c_dx >= -12 && c_dx <= 12 && c_dy >= -12 && c_dy <= 12 {
+                    return 0xFFFFFFFF;
+                }
+            } else {
+                // Horizontal hangup handset (red button)
+                let n1 = (c_dx + 14) * (c_dx + 14) + (c_dy - 2) * (c_dy - 2);
+                let n2 = (c_dx - 14) * (c_dx - 14) + (c_dy - 2) * (c_dy - 2);
+                if n1 <= 36 || n2 <= 36 {
+                    return 0xFFFFFFFF;
+                }
+                if c_dy >= -8 && c_dy <= -2 && c_dx >= -14 && c_dx <= 14 {
+                    return 0xFFFFFFFF;
+                }
+            }
+
+            return bg_color;
+        }
+
+        // Contacts shortcut button (x: 500..672, centered at 586, 1065, r: 40)
+        let ct_dx = (x as i32) - 586;
+        let ct_dy = (y as i32) - 1065;
+        if ct_dx * ct_dx + ct_dy * ct_dy <= 1600 {
+            if ct_dx * ct_dx + ct_dy * ct_dy >= 1444 {
+                return BORDER_SUBTLE;
+            }
+            // Person silhouette
+            if ct_dx * ct_dx + (ct_dy + 8) * (ct_dy + 8) <= 49 {
+                return TEXT_PRIMARY;
+            }
+            if ct_dy >= 2 && ct_dy <= 14 && ct_dx.abs() <= (ct_dy - 2) + 6 {
+                return TEXT_PRIMARY;
+            }
+            return SURFACE_RAISED;
+        }
+
+        return BG_DARK;
+    }
+
+    // 5. Bottom Navigation Dock (y: 1260..1380)
+    if (1260..1380).contains(&y) && x >= 24 && x < 696 {
+        if y == 1260 || y == 1379 || x == 24 || x == 695 {
+            return BORDER_SUBTLE;
+        }
+
+        // 4 tabs across width:
+        // Tab 0: Favorites (x: 48..188)
+        // Tab 1: Recents (x: 208..348)
+        // Tab 2: Keypad (x: 368..508) -> ACTIVE
+        // Tab 3: Contacts (x: 528..668)
+        let is_keypad_tab = (368..508).contains(&x);
+        if is_keypad_tab && (1275..1365).contains(&y) {
+            if y == 1275 || y == 1364 || x == 368 || x == 507 {
+                return ACCENT_SKY;
+            }
+        }
+
+        // Tab titles
+        if y >= 1340 && y < 1348 {
+            if let Some(c) = test_text(x, y, 76, 1340, 1, b"Favorites", TEXT_MUTED) {
+                return c;
+            }
+            if let Some(c) = test_text(x, y, 248, 1340, 1, b"Recents", TEXT_MUTED) {
+                return c;
+            }
+            if let Some(c) = test_text(x, y, 412, 1340, 1, b"Keypad", ACCENT_SKY) {
+                return c;
+            }
+            if let Some(c) = test_text(x, y, 568, 1340, 1, b"Contacts", TEXT_MUTED) {
+                return c;
+            }
+        }
+
+        // Tab icons
+        if y >= 1290 && y < 1326 {
+            // Keypad icon (3x3 dots) at (438, 1308)
+            if is_keypad_tab {
+                let dot_dx = (x as i32) - 438;
+                let dot_dy = (y as i32) - 1308;
+                if dot_dx.abs() <= 10 && dot_dy.abs() <= 10 {
+                    if (dot_dx % 8).abs() <= 1 && (dot_dy % 8).abs() <= 1 {
+                        return ACCENT_SKY;
+                    }
+                }
+            }
+        }
+
+        return SURFACE_DARK;
+    }
+
+    // 6. Home Gesture Pill (x: 260..460, y: 1418..1424)
+    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
+        return TEXT_MUTED;
+    }
+
+    BG_DARK
+}
+
 fn render_dialer_ui(surface: u32, dialer: &DialerApp) {
     let mut chunk = [0u32; CHUNK];
     let total = W * H;
     let mut offset = 0;
-
-    // Precalculate dialed digits
-    let active_len = dialer.active_len;
-    let digit_w = 24usize;
-    let digit_h = 48usize;
-    let digit_gap = 8usize;
-    let total_digits_w = if active_len > 0 {
-        active_len * digit_w + (active_len - 1) * digit_gap
-    } else {
-        0
-    };
-    let display_start_x = if total_digits_w < 500 {
-        (W / 2).saturating_sub(total_digits_w / 2)
-    } else {
-        48
-    };
-    let display_y_start = 245usize;
-
     while offset < total {
         let count = (total - offset).min(CHUNK);
         let mut x = offset % W;
         let mut y = offset / W;
-
         for i in 0..count {
-            if y < 96 {
-                // Header / Status Bar
-                if y >= 94 {
-                    chunk[i] = std::design::color::ACCENT;
-                } else if x >= 24 && x < 100 && y >= 28 && y < 68 {
-                    // Back Button
-                    let center_x = 62;
-                    let center_y = 48;
-                    let dx = (x as isize - center_x as isize).abs();
-                    let dy = (y as isize - center_y as isize).abs();
-                    // Left arrow chevron <
-                    if (dx + dy <= 12 && x <= center_x)
-                        || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
-                    {
-                        chunk[i] = std::design::color::TEXT;
-                    } else {
-                        chunk[i] = std::design::color::SURFACE_RAISED;
-                    }
-                } else if x >= 610 && x < 670 && y >= 40 && y < 62 {
-                    // Cellular signal indicator (fail closed when no physical modem detected)
-                    let bar_idx = (x - 610) / 15;
-                    let bar_x = (x - 610) % 15;
-                    let bar_min_y = 62 - (bar_idx + 1) * 5;
-                    if bar_x < 9 && y >= bar_min_y {
-                        chunk[i] = std::design::color::SURFACE_RAISED;
-                    } else {
-                        chunk[i] = std::design::color::SURFACE;
-                    }
-                } else if x >= 678 && x < 706 && y >= 44 && y < 58 {
-                    // Battery indicator (fail closed outline when PMIC telemetry unavailable)
-                    if x == 678 || x == 702 || y == 44 || y == 57 || (x >= 703 && y >= 48 && y < 54)
-                    {
-                        chunk[i] = std::design::color::TEXT_MUTED;
-                    } else {
-                        chunk[i] = std::design::color::SURFACE;
-                    }
-                } else {
-                    chunk[i] = std::design::color::SURFACE;
-                }
-            } else if (110..380).contains(&y) && x >= 24 && x < W - 24 {
-                // Call Status & Number Display Card
-                if y >= 378 {
-                    chunk[i] = std::design::color::ACCENT;
-                } else if (124..168).contains(&y) && x >= 44 && x < W - 44 {
-                    // Status Pill Banner
-                    match dialer.state {
-                        CallState::ActiveCall => {
-                            chunk[i] = std::design::color::SUCCESS;
-                        }
-                        CallState::Dialing => {
-                            chunk[i] = std::design::color::ACCENT;
-                        }
-                        _ => {
-                            chunk[i] = std::design::color::SURFACE_RAISED;
-                        }
-                    }
-                } else if (display_y_start..display_y_start + digit_h).contains(&y)
-                    && x >= display_start_x
-                    && x < display_start_x + total_digits_w
-                {
-                    // Render dialed digits
-                    let rel_x = x - display_start_x;
-                    let digit_slot = rel_x / (digit_w + digit_gap);
-                    let in_digit_x = rel_x % (digit_w + digit_gap);
-
-                    let mut is_digit_px = false;
-                    if digit_slot < active_len && in_digit_x < digit_w {
-                        let c = dialer.active_number[digit_slot] as char;
-                        if c.is_ascii_digit() {
-                            let d = (c as u8 - b'0') as i64;
-                            let mask = get_7segment_mask(d);
-                            is_digit_px = is_segment_pixel(
-                                mask,
-                                in_digit_x,
-                                y - display_y_start,
-                                digit_w,
-                                digit_h,
-                            );
-                        } else if c == '+' || c == '*' {
-                            let cx = digit_w / 2;
-                            let cy = digit_h / 2;
-                            let rel_y = y - display_y_start;
-                            if (rel_y >= cy - 2
-                                && rel_y <= cy + 2
-                                && in_digit_x >= 2
-                                && in_digit_x < digit_w - 2)
-                                || (in_digit_x >= cx - 2
-                                    && in_digit_x <= cx + 2
-                                    && rel_y >= 4
-                                    && rel_y < digit_h - 4)
-                            {
-                                is_digit_px = true;
-                            }
-                        } else if c == '-' {
-                            let cy = digit_h / 2;
-                            let rel_y = y - display_y_start;
-                            if rel_y >= cy - 2
-                                && rel_y <= cy + 2
-                                && in_digit_x >= 2
-                                && in_digit_x < digit_w - 2
-                            {
-                                is_digit_px = true;
-                            }
-                        }
-                    }
-
-                    if is_digit_px {
-                        chunk[i] = std::design::color::TEXT;
-                    } else {
-                        chunk[i] = std::design::color::SURFACE;
-                    }
-                } else if x >= 590 && x < 665 && y >= 235 && y < 305 {
-                    // Backspace button [ <x ]
-                    let bx = 627;
-                    let by = 270;
-                    let dx = (x as isize - bx as isize).abs();
-                    let dy = (y as isize - by as isize).abs();
-                    if dx == dy && dx < 14 {
-                        chunk[i] = std::design::color::DANGER;
-                    } else if (dx <= 18 && dy <= 18) && (dx == 18 || dy == 18) {
-                        chunk[i] = std::design::color::TEXT_MUTED;
-                    } else {
-                        chunk[i] = std::design::color::SURFACE_RAISED;
-                    }
-                } else {
-                    chunk[i] = std::design::color::SURFACE;
-                }
-            } else {
-                // Keypad grid hit detection
-                let mut hit_keypad = false;
-                for row in 0..4 {
-                    let by = ROW_Y[row];
-                    if y >= by && y < by + BTN_H {
-                        for col in 0..3 {
-                            let bx = COL_X[col];
-                            if x >= bx && x < bx + BTN_W {
-                                hit_keypad = true;
-                                let center_x = bx + BTN_W / 2;
-                                let center_y = by + BTN_H / 2;
-
-                                let mut is_glyph = false;
-                                if let Some(action) = get_keypad_char(row, col) {
-                                    if ('0'..='9').contains(&action) {
-                                        let d = (action as u8 - b'0') as i64;
-                                        let mask = get_7segment_mask(d);
-                                        let gw = 32usize;
-                                        let gh = 64usize;
-                                        let gx_start = center_x.saturating_sub(gw / 2);
-                                        let gy_start = center_y.saturating_sub(gh / 2);
-                                        if x >= gx_start
-                                            && x < gx_start + gw
-                                            && y >= gy_start
-                                            && y < gy_start + gh
-                                        {
-                                            is_glyph = is_segment_pixel(
-                                                mask,
-                                                x - gx_start,
-                                                y - gy_start,
-                                                gw,
-                                                gh,
-                                            );
-                                        }
-                                    } else if action == '*' {
-                                        let dx = (x as isize - center_x as isize).abs();
-                                        let dy = (y as isize - center_y as isize).abs();
-                                        if (dx <= 14 && dy <= 3)
-                                            || (dx <= 3 && dy <= 14)
-                                            || (dx == dy && dx <= 12)
-                                        {
-                                            is_glyph = true;
-                                        }
-                                    } else if action == '#' {
-                                        let dx = (x as isize - center_x as isize).abs();
-                                        let dy = (y as isize - center_y as isize).abs();
-                                        if ((dx == 6 || dx == 7) && dy <= 16)
-                                            || ((dy == 6 || dy == 7) && dx <= 16)
-                                        {
-                                            is_glyph = true;
-                                        }
-                                    }
-                                }
-
-                                if is_glyph {
-                                    chunk[i] = std::design::color::TEXT;
-                                } else {
-                                    chunk[i] = std::design::color::SURFACE_RAISED;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if !hit_keypad {
-                    // Action Bar
-                    if (990..1140).contains(&y) {
-                        if x >= 48 && x < 220 && y >= 1005 && y < 1125 {
-                            // SOS Button
-                            chunk[i] = std::design::color::WARNING;
-                        } else if x >= 270 && x < 450 && y >= 995 && y < 1135 {
-                            // Call / End Button
-                            let center_x = 360;
-                            let center_y = 1065;
-                            let dx = (x as isize - center_x as isize).abs();
-                            let dy = (y as isize - center_y as isize).abs();
-
-                            let btn_color = if dialer.state == CallState::Idle {
-                                std::design::color::SUCCESS
-                            } else {
-                                std::design::color::DANGER
-                            };
-
-                            // Handset profile icon
-                            if (dx <= 24 && dy <= 8) || (dx <= 16 && dy <= 16) {
-                                chunk[i] = std::design::color::TEXT;
-                            } else {
-                                chunk[i] = btn_color;
-                            }
-                        } else if x >= 500 && x < 672 && y >= 1005 && y < 1125 {
-                            // Contacts shortcut
-                            chunk[i] = std::design::color::SURFACE_RAISED;
-                        } else {
-                            chunk[i] = std::design::color::BACKGROUND;
-                        }
-                    } else if (1260..1400).contains(&y) && x >= 24 && x < W - 24 {
-                        // Bottom Navigation Dock
-                        let is_keypad_tab = x >= 340 && x < 480;
-                        if (1298..1362).contains(&y) && is_keypad_tab {
-                            chunk[i] = std::design::color::ACCENT;
-                        } else {
-                            chunk[i] = std::design::color::SURFACE;
-                        }
-                    } else if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
-                        chunk[i] = std::design::color::TEXT_MUTED;
-                    } else {
-                        chunk[i] = std::design::color::BACKGROUND;
-                    }
-                }
-            }
+            chunk[i] = get_dialer_pixel(x, y, dialer);
             x += 1;
             if x == W {
                 x = 0;
                 y += 1;
             }
         }
-
         let _ = std::surface_write(6, surface, offset, &chunk[..count]);
         offset += count;
     }
