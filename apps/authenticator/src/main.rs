@@ -533,6 +533,28 @@ fn pixel(x: usize, y: usize, app: &Authenticator) -> u32 {
         if font::text_at(x, y, 116, 32, 3, b"Authenticator") {
             return TEXT;
         }
+        // Shield badge in header (640, 48)
+        let s_dx = (x as isize - 640).abs();
+        let s_dy = y as isize - 48;
+        if s_dy >= -14 && s_dy <= 16 && s_dx <= 14 {
+            let is_outer = if s_dy <= 2 { s_dx <= 14 } else { s_dx * 14 <= (16 - s_dy) * 14 };
+            let is_inner = if s_dy <= 1 { s_dx <= 11 } else { s_dx * 11 <= (13 - s_dy) * 11 };
+            if is_outer && !is_inner {
+                return ACCENT;
+            }
+            // Checkmark inside shield
+            let c_dx = x as isize - 640;
+            let c_dy = y as isize - 48;
+            let leg1 = c_dx >= -5 && c_dx <= -1 && c_dy == c_dx + 4;
+            let leg2 = c_dx >= -1 && c_dx <= 6 && c_dy == -c_dx + 2;
+            if leg1 || leg2 {
+                return OK;
+            }
+            if is_inner {
+                return CARD_RAISED;
+            }
+        }
+
         return CARD;
     }
 
@@ -540,7 +562,16 @@ fn pixel(x: usize, y: usize, app: &Authenticator) -> u32 {
 
     // ---- status strip: the last real platform answer ----
     if (1332..1400).contains(&y) && (30..690).contains(&x) {
-        if y == 1332 || y == 1399 || x == 30 || x == 689 {
+        let rx = (x - 30).min(689 - x);
+        let ry = (y - 1332).min(1399 - y);
+        if rx < 10 && ry < 10 {
+            let cdx = (10 - rx) as isize;
+            let cdy = (10 - ry) as isize;
+            if cdx * cdx + cdy * cdy >= 100 {
+                return BG;
+            }
+        }
+        if rx < 2 || ry < 2 {
             return EDGE;
         }
         if font::text_at(x, y, 44, 1352, 2, &app.status[..app.status_len]) {
@@ -552,10 +583,19 @@ fn pixel(x: usize, y: usize, app: &Authenticator) -> u32 {
     if in_card {
         for card in CARDS.iter() {
             if y >= card.y0 && y < card.y1 && x >= card.x0 && x < card.x1 {
-                if y == card.y0 || y == card.y1 - 1 || x == card.x0 || x == card.x1 - 1 {
+                let rx = (x - card.x0).min(card.x1 - 1 - x);
+                let ry = (y - card.y0).min(card.y1 - 1 - y);
+                if rx < 12 && ry < 12 {
+                    let cdx = (12 - rx) as isize;
+                    let cdy = (12 - ry) as isize;
+                    if cdx * cdx + cdy * cdy >= 144 {
+                        return BG;
+                    }
+                }
+                if rx < 2 || ry < 2 {
                     return EDGE;
                 }
-                if font::text_at(x, y, card.x0 + 14, card.y0 + 12, 2, card.caption) {
+                if font::text_at(x, y, card.x0 + 16, card.y0 + 14, 2, card.caption) {
                     return ACCENT;
                 }
                 return CARD;
@@ -870,15 +910,44 @@ fn keypad(x: usize, y: usize, app: &Authenticator) -> Option<u32> {
                 let Some(label) = key_at(col, row) else { return None };
                 let is_save = label == b"SAVE";
                 let enabled = if is_save { save.is_ok() } else { true };
-                let fill = if enabled { CARD_RAISED } else { RECESSED };
-                if y == ky || y == ky + KEY_H - 1 || x == kx || x == kx + kw - 1 {
-                    return Some(if enabled { EDGE } else { EDGE_MUTED });
+                let fill = if is_save && enabled {
+                    0xFF173826
+                } else if enabled {
+                    CARD_RAISED
+                } else {
+                    RECESSED
+                };
+
+                let rx = (x - kx).min(kx + kw - 1 - x);
+                let ry = (y - ky).min(ky + KEY_H - 1 - y);
+                if rx < 8 && ry < 8 {
+                    let cdx = (8 - rx) as isize;
+                    let cdy = (8 - ry) as isize;
+                    if cdx * cdx + cdy * cdy >= 64 {
+                        return None;
+                    }
+                }
+
+                if rx < 2 || ry < 2 {
+                    return Some(if is_save && enabled {
+                        OK
+                    } else if enabled {
+                        EDGE
+                    } else {
+                        EDGE_MUTED
+                    });
                 }
                 let tw = font::text_width(label, 2);
                 let tx = kx + (kw - tw) / 2;
                 let ty = ky + (KEY_H - 16) / 2;
                 if font::text_at(x, y, tx, ty, 2, label) {
-                    return Some(if enabled { TEXT } else { FAINT });
+                    return Some(if is_save && enabled {
+                        OK
+                    } else if enabled {
+                        TEXT
+                    } else {
+                        FAINT
+                    });
                 }
                 return Some(fill);
             }
