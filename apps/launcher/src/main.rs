@@ -683,11 +683,20 @@ fn render_view(surface: u32, state: &LauncherState) {
     }
     match state.current_view {
         ViewMode::HomeScreen => {
-            std::log(
-                0,
-                "[LAUNCHER] render_full complete: 10-app home screen canvas initialized. Home surface rendered.",
-            )
-            .ok();
+            // WHY the count is formatted rather than written: this line said
+            // "10-app" as a literal, so it reported the same number with four
+            // packages installed and with forty. A log that contradicts the
+            // screen above it is worse than no log.
+            let mut line = LineBuf::<96>::new();
+            {
+                use core::fmt::Write;
+                let _ = writeln!(
+                    line,
+                    "[LAUNCHER] render_full complete: {}-app home screen canvas initialized. Home surface rendered.",
+                    state.app_count
+                );
+            }
+            std::log(0, line.as_str()).ok();
         }
         ViewMode::ActivitySpace => {
             std::log(
@@ -725,11 +734,19 @@ fn render_view(surface: u32, state: &LauncherState) {
             .ok();
         }
         ViewMode::AppDrawer => {
-            std::log(
-                0,
-                "[LAUNCHER] render_app_drawer complete: 16-app grid presented. App drawer surface rendered.",
-            )
-            .ok();
+            // WHY formatted, not literal: "16-app grid presented" was hardcoded, so
+            // it reported sixteen with any number of packages installed. The drawer
+            // paginates from the real catalogue, so the line has to agree with it.
+            let mut line = LineBuf::<96>::new();
+            {
+                use core::fmt::Write;
+                let _ = writeln!(
+                    line,
+                    "[LAUNCHER] render_app_drawer complete: {}-app grid presented. App drawer surface rendered.",
+                    state.app_count
+                );
+            }
+            std::log(0, line.as_str()).ok();
         }
         ViewMode::Notifications => {
             std::log(
