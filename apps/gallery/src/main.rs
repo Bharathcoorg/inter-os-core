@@ -211,6 +211,83 @@ impl GalleryApp {
 }
 
 // -----------------------------------------------------------------------------
+// Vector Pictogram Engines
+// -----------------------------------------------------------------------------
+
+/// Empty state large landscape picture frame icon
+fn test_empty_gallery_frame(x: usize, y: usize, cx: usize, cy: usize) -> bool {
+    let dx = x as isize - cx as isize;
+    let dy = y as isize - cy as isize;
+    if dx.abs() <= 54 && dy.abs() <= 40 {
+        // Outer frame border (thickness 2)
+        if dx.abs() >= 52 || dy.abs() >= 38 {
+            return true;
+        }
+        // Sun circle at (-20, -14), radius 7
+        let sun_dx = dx + 20;
+        let sun_dy = dy + 14;
+        if sun_dx * sun_dx + sun_dy * sun_dy <= 49 {
+            return true;
+        }
+        // Mountain peaks
+        if dy >= -4 && dy <= 34 {
+            let m1 = (dx + 10).abs() * 2 <= (dy + 8) * 3;
+            let m2 = (dx - 22).abs() * 2 <= (dy - 4) * 3;
+            if m1 || m2 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Vector icon for Photos tab (small picture frame)
+fn test_tab_photos_icon(x: usize, y: usize, cx: usize, cy: usize) -> bool {
+    let dx = x as isize - cx as isize;
+    let dy = y as isize - cy as isize;
+    if dx.abs() <= 12 && dy.abs() <= 10 {
+        if dx.abs() >= 10 || dy.abs() >= 8 {
+            return true;
+        }
+        // Sun dot
+        if (dx + 5).abs() <= 2 && (dy + 3).abs() <= 2 {
+            return true;
+        }
+        // Mountain peak
+        if dy >= 0 && dy <= 6 && (dx - 2).abs() <= dy {
+            return true;
+        }
+    }
+    false
+}
+
+/// Vector icon for Albums tab (stacked album cards)
+fn test_tab_albums_icon(x: usize, y: usize, cx: usize, cy: usize) -> bool {
+    let dx = x as isize - cx as isize;
+    let dy = y as isize - cy as isize;
+    let front = (dx >= -8 && dx <= 10 && (dy == -6 || dy == 10))
+        || (dy >= -6 && dy <= 10 && (dx == -8 || dx == 10));
+    let back = (dx >= -12 && dx <= 6 && dy == -10)
+        || (dy >= -10 && dy <= 6 && dx == -12);
+    front || back
+}
+
+/// Vector icon for Places tab (map pin marker)
+fn test_tab_places_icon(x: usize, y: usize, cx: usize, cy: usize) -> bool {
+    let dx = x as isize - cx as isize;
+    let dy = y as isize - cy as isize;
+    if dy <= 2 {
+        let r2 = dx * dx + (dy + 3) * (dy + 3);
+        if r2 <= 9 * 9 && r2 >= 5 * 5 {
+            return true;
+        }
+    } else if dy <= 11 && dx.abs() <= (11 - dy) {
+        return true;
+    }
+    false
+}
+
+// -----------------------------------------------------------------------------
 // Pixel Color Resolution Engine
 // -----------------------------------------------------------------------------
 #[inline(never)]
@@ -242,17 +319,17 @@ fn get_gallery_color(x: usize, y: usize, app: &GalleryApp) -> u32 {
             }
         }
 
-        // Options icon at (640, 48, r: 16)
-        let s_dx = (x as i32) - 640;
-        let s_dy = (y as i32) - 48;
-        if s_dx * s_dx + s_dy * s_dy <= 256 {
-            if s_dx * s_dx + s_dy * s_dy >= 225 {
-                return BORDER_SUBTLE;
+        // Options kebab menu icon at (640, 48, r: 18)
+        let s_dx = (x as isize) - 640;
+        let s_dy = (y as isize) - 48;
+        let s_r2 = s_dx * s_dx + s_dy * s_dy;
+        if s_r2 <= 18 * 18 {
+            let is_dot = s_dx.abs() <= 2 && (s_dy.abs() <= 2 || (s_dy.abs() >= 6 && s_dy.abs() <= 10));
+            if is_dot {
+                return TEXT_PRIMARY;
             }
-            if y >= 44 && y < 52 {
-                if let Some(c) = test_text(x, y, 636, 44, 1, b"O", ACCENT_SKY) {
-                    return c;
-                }
+            if s_r2 >= 16 * 16 {
+                return BORDER_SUBTLE;
             }
             return SURFACE_RAISED;
         }
@@ -384,7 +461,10 @@ fn get_gallery_color(x: usize, y: usize, app: &GalleryApp) -> u32 {
 
     // Empty state: no media backend is bound, so say so rather than render
     // placeholders that would read as real photographs.
-    if has_no_media() && y >= grid_top + 200 && y < grid_top + 300 {
+    if has_no_media() && y >= grid_top + 40 && y < grid_top + 340 {
+        if test_empty_gallery_frame(x, y, 360, grid_top + 130) {
+            return 0xFF2A3A54;
+        }
         if y >= grid_top + 240 && y < grid_top + 256 {
             if let Some(c) = test_text(x, y, 176, grid_top + 240, 2, b"No media available", TEXT_MUTED) {
                 return c;
@@ -496,19 +576,28 @@ fn get_gallery_color(x: usize, y: usize, app: &GalleryApp) -> u32 {
 
         if let Some((idx, x0, x1, label)) = nav {
             let is_sel = app.bottom_nav == idx;
-            if y >= 1355 && y < 1371 {
-                let ox = x0 + (x1 - x0).saturating_sub(label.len() * 16) / 2;
-                if let Some(c) = test_text(
-                    x,
-                    y,
-                    ox,
-                    1355,
-                    2,
-                    label,
-                    if is_sel { ACCENT_SKY } else { TEXT_MUTED },
-                ) {
+            let icon_color = if is_sel { ACCENT_SKY } else { TEXT_MUTED };
+
+            let cx = x0 + (x1 - x0) / 2;
+            let is_icon = match idx {
+                0 => test_tab_photos_icon(x, y, cx, 1350),
+                1 => test_tab_albums_icon(x, y, cx, 1350),
+                _ => test_tab_places_icon(x, y, cx, 1350),
+            };
+            if is_icon {
+                return icon_color;
+            }
+
+            if y >= 1368 && y < 1376 {
+                let ox = cx.saturating_sub(label.len() * 4);
+                if let Some(c) = test_text(x, y, ox, 1368, 1, label, icon_color) {
                     return c;
                 }
+            }
+
+            // Active indicator pill at bottom
+            if is_sel && y >= 1392 && y < 1396 && x >= cx - 18 && x < cx + 18 {
+                return ACCENT_SKY;
             }
         }
         return SURFACE_DARK;
@@ -686,6 +775,23 @@ pub extern "C" fn _start() -> ! {
                                     }
                                 }
                             }
+                        }
+
+                        // Bottom Navigation Tabs (y: 1330..1400)
+                        if (1330..1400).contains(&y) {
+                            if (40..220).contains(&x) {
+                                app.bottom_nav = 0;
+                            } else if (270..450).contains(&x) {
+                                app.bottom_nav = 1;
+                            } else if (500..680).contains(&x) {
+                                app.bottom_nav = 2;
+                            }
+                            std::audio_haptic_click().ok();
+                            if surface > 0 {
+                                render_gallery_ui(surface, &app);
+                                let _ = std::surface_flip(6);
+                            }
+                            break;
                         }
                     }
                 }
