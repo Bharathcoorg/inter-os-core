@@ -162,9 +162,441 @@ impl MessagesApp {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Visual Design Tokens
+// -----------------------------------------------------------------------------
+const BG_DARK: u32 = 0xFF070B12;
+const SURFACE_DARK: u32 = 0xFF111B2B;
+const SURFACE_RAISED: u32 = 0xFF17243A;
+const BORDER_SUBTLE: u32 = 0xFF26354D;
+const ACCENT_SKY: u32 = 0xFF31C4FF;
+const SUCCESS_EMERALD: u32 = 0xFF56D68A;
+const TEXT_PRIMARY: u32 = 0xFFF4F7FB;
+const TEXT_MUTED: u32 = 0xFF9AA8BC;
+
+// -----------------------------------------------------------------------------
+// Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')
+// -----------------------------------------------------------------------------
+const FONT_8X8: [[u8; 8]; 95] = [
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // 32 ' '
+    [0x18, 0x18, 0x18, 0x18, 0x00, 0x00, 0x18, 0x00], // 33 '!'
+    [0x66, 0x66, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00], // 34 '"'
+    [0x6c, 0x6c, 0xfe, 0x6c, 0xfe, 0x6c, 0x6c, 0x00], // 35 '#'
+    [0x18, 0x3e, 0x60, 0x3c, 0x06, 0x7c, 0x18, 0x00], // 36 '$'
+    [0x00, 0xc6, 0xcc, 0x18, 0x30, 0x66, 0xc6, 0x00], // 37 '%'
+    [0x38, 0x6c, 0x38, 0x76, 0xdc, 0xcc, 0x76, 0x00], // 38 '&'
+    [0x18, 0x18, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00], // 39 '''
+    [0x0c, 0x18, 0x30, 0x30, 0x30, 0x18, 0x0c, 0x00], // 40 '('
+    [0x30, 0x18, 0x0c, 0x0c, 0x0c, 0x18, 0x30, 0x00], // 41 ')'
+    [0x00, 0x66, 0x3c, 0xff, 0x3c, 0x66, 0x00, 0x00], // 42 '*'
+    [0x00, 0x18, 0x18, 0x7e, 0x18, 0x18, 0x00, 0x00], // 43 '+'
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x30], // 44 ','
+    [0x00, 0x00, 0x00, 0x7e, 0x00, 0x00, 0x00, 0x00], // 45 '-'
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00], // 46 '.'
+    [0x06, 0x0c, 0x18, 0x30, 0x60, 0xc0, 0x80, 0x00], // 47 '/'
+    [0x7c, 0xc6, 0xce, 0xd6, 0xe6, 0xc6, 0x7c, 0x00], // 48 '0'
+    [0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x7e, 0x00], // 49 '1'
+    [0x7c, 0xc6, 0x06, 0x1c, 0x30, 0x66, 0xfe, 0x00], // 50 '2'
+    [0x7c, 0xc6, 0x06, 0x3c, 0x06, 0xc6, 0x7c, 0x00], // 51 '3'
+    [0x1c, 0x3c, 0x6c, 0xcc, 0xfe, 0x0c, 0x1e, 0x00], // 52 '4'
+    [0xfe, 0xc0, 0xfc, 0x06, 0x06, 0xc6, 0x7c, 0x00], // 53 '5'
+    [0x78, 0x0c, 0xc0, 0xfc, 0xc6, 0xc6, 0x7c, 0x00], // 54 '6'
+    [0xfe, 0xc6, 0x0c, 0x18, 0x30, 0x30, 0x30, 0x00], // 55 '7'
+    [0x7c, 0xc6, 0xc6, 0x7c, 0xc6, 0xc6, 0x7c, 0x00], // 56 '8'
+    [0x7c, 0xc6, 0xc6, 0x7e, 0x06, 0x0c, 0x78, 0x00], // 57 '9'
+    [0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00, 0x00], // 58 ':'
+    [0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x30, 0x00], // 59 ';'
+    [0x06, 0x0c, 0x18, 0x30, 0x18, 0x0c, 0x06, 0x00], // 60 '<'
+    [0x00, 0x7e, 0x00, 0x7e, 0x00, 0x00, 0x00, 0x00], // 61 '='
+    [0x60, 0x30, 0x18, 0x0c, 0x18, 0x30, 0x60, 0x00], // 62 '>'
+    [0x7c, 0xc6, 0x0c, 0x18, 0x18, 0x00, 0x18, 0x00], // 63 '?'
+    [0x7c, 0xc6, 0xde, 0xde, 0xdc, 0xc0, 0x7c, 0x00], // 64 '@'
+    [0x38, 0x6c, 0xc6, 0xfe, 0xc6, 0xc6, 0xc6, 0x00], // 65 'A'
+    [0xfc, 0x66, 0x66, 0x7c, 0x66, 0x66, 0xfc, 0x00], // 66 'B'
+    [0x3c, 0x66, 0xc0, 0xc0, 0xc0, 0x66, 0x3c, 0x00], // 67 'C'
+    [0xf8, 0x6c, 0x66, 0x66, 0x66, 0x6c, 0xf8, 0x00], // 68 'D'
+    [0xfe, 0x62, 0x68, 0x78, 0x68, 0x62, 0xfe, 0x00], // 69 'E'
+    [0xfe, 0x62, 0x68, 0x78, 0x68, 0x60, 0xf0, 0x00], // 70 'F'
+    [0x3c, 0x66, 0xc0, 0xc0, 0xce, 0x66, 0x3e, 0x00], // 71 'G'
+    [0xc6, 0xc6, 0xc6, 0xfe, 0xc6, 0xc6, 0xc6, 0x00], // 72 'H'
+    [0x3c, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3c, 0x00], // 73 'I'
+    [0x1e, 0x0c, 0x0c, 0x0c, 0xcc, 0xcc, 0x78, 0x00], // 74 'J'
+    [0xe6, 0x66, 0x6c, 0x78, 0x6c, 0x66, 0xe6, 0x00], // 75 'K'
+    [0xf0, 0x60, 0x60, 0x60, 0x62, 0x66, 0xfe, 0x00], // 76 'L'
+    [0xc6, 0xee, 0xfe, 0xfe, 0xd6, 0xc6, 0xc6, 0x00], // 77 'M'
+    [0xc6, 0xe6, 0xf6, 0xde, 0xce, 0xc6, 0xc6, 0x00], // 78 'N'
+    [0x7c, 0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0x7c, 0x00], // 79 'O'
+    [0xfc, 0x66, 0x66, 0x7c, 0x60, 0x60, 0xf0, 0x00], // 80 'P'
+    [0x7c, 0xc6, 0xc6, 0xc6, 0xd6, 0xcc, 0x7a, 0x00], // 81 'Q'
+    [0xfc, 0x66, 0x66, 0x7c, 0x6c, 0x66, 0xe6, 0x00], // 82 'R'
+    [0x7c, 0xc6, 0x60, 0x38, 0x0c, 0xc6, 0x7c, 0x00], // 83 'S'
+    [0x7e, 0x7e, 0x18, 0x18, 0x18, 0x18, 0x3c, 0x00], // 84 'T'
+    [0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0x7c, 0x00], // 85 'U'
+    [0xc6, 0xc6, 0xc6, 0xc6, 0x6c, 0x38, 0x10, 0x00], // 86 'V'
+    [0xc6, 0xc6, 0xd6, 0xfe, 0xfe, 0xee, 0xc6, 0x00], // 87 'W'
+    [0xc6, 0xc6, 0x6c, 0x38, 0x6c, 0xc6, 0xc6, 0x00], // 88 'X'
+    [0x66, 0x66, 0x66, 0x3c, 0x18, 0x18, 0x3c, 0x00], // 89 'Y'
+    [0xfe, 0xc6, 0x0c, 0x18, 0x30, 0x62, 0xfe, 0x00], // 90 'Z'
+    [0x3c, 0x30, 0x30, 0x30, 0x30, 0x30, 0x3c, 0x00], // 91 '['
+    [0xc0, 0x60, 0x30, 0x18, 0x0c, 0x06, 0x02, 0x00], // 92 '\'
+    [0x3c, 0x0c, 0x0c, 0x0c, 0x0c, 0x0c, 0x3c, 0x00], // 93 ']'
+    [0x10, 0x38, 0x6c, 0xc6, 0x00, 0x00, 0x00, 0x00], // 94 '^'
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff], // 95 '_'
+    [0x30, 0x18, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00], // 96 '`'
+    [0x00, 0x00, 0x78, 0x0c, 0x7c, 0xcc, 0x76, 0x00], // 97 'a'
+    [0xe0, 0x60, 0x7c, 0x66, 0x66, 0x66, 0xdc, 0x00], // 98 'b'
+    [0x00, 0x00, 0x7c, 0xc6, 0xc0, 0xc6, 0x7c, 0x00], // 99 'c'
+    [0x1c, 0x0c, 0x7c, 0xcc, 0xcc, 0xcc, 0x76, 0x00], // 100 'd'
+    [0x00, 0x00, 0x7c, 0xc6, 0xfe, 0xc0, 0x7c, 0x00], // 101 'e'
+    [0x1c, 0x36, 0x30, 0x78, 0x30, 0x30, 0x78, 0x00], // 102 'f'
+    [0x00, 0x00, 0x76, 0xcc, 0xcc, 0x7c, 0x0c, 0xf8], // 103 'g'
+    [0xe0, 0x60, 0x6c, 0x76, 0x66, 0x66, 0xe6, 0x00], // 104 'h'
+    [0x18, 0x00, 0x38, 0x18, 0x18, 0x18, 0x3c, 0x00], // 105 'i'
+    [0x06, 0x00, 0x06, 0x06, 0x06, 0x66, 0x3c, 0x00], // 106 'j'
+    [0xe0, 0x60, 0x66, 0x6c, 0x78, 0x6c, 0xe6, 0x00], // 107 'k'
+    [0x38, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3c, 0x00], // 108 'l'
+    [0x00, 0x00, 0xec, 0xfe, 0xd6, 0xd6, 0xd6, 0x00], // 109 'm'
+    [0x00, 0x00, 0xdc, 0x66, 0x66, 0x66, 0x66, 0x00], // 110 'n'
+    [0x00, 0x00, 0x7c, 0xc6, 0xc6, 0xc6, 0x7c, 0x00], // 111 'o'
+    [0x00, 0x00, 0xdc, 0x66, 0x66, 0x7c, 0x60, 0xf0], // 112 'p'
+    [0x00, 0x00, 0x76, 0xcc, 0xcc, 0x7c, 0x0c, 0x1e], // 113 'q'
+    [0x00, 0x00, 0xdc, 0x76, 0x60, 0x60, 0xf0, 0x00], // 114 'r'
+    [0x00, 0x00, 0x7e, 0xc0, 0x7c, 0x06, 0xfc, 0x00], // 115 's'
+    [0x30, 0x30, 0x78, 0x30, 0x30, 0x36, 0x1c, 0x00], // 116 't'
+    [0x00, 0x00, 0xcc, 0xcc, 0xcc, 0xcc, 0x76, 0x00], // 117 'u'
+    [0x00, 0x00, 0xc6, 0xc6, 0x6c, 0x38, 0x10, 0x00], // 118 'v'
+    [0x00, 0x00, 0xc6, 0xd6, 0xfe, 0xfe, 0x6c, 0x00], // 119 'w'
+    [0x00, 0x00, 0xc6, 0x6c, 0x38, 0x6c, 0xc6, 0x00], // 120 'x'
+    [0x00, 0x00, 0xc6, 0xc6, 0xce, 0x76, 0x06, 0x7c], // 121 'y'
+    [0x00, 0x00, 0xfc, 0x18, 0x30, 0x60, 0xfc, 0x00], // 122 'z'
+    [0x0e, 0x18, 0x18, 0x70, 0x18, 0x18, 0x0e, 0x00], // 123 '{'
+    [0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x18, 0x00], // 124 '|'
+    [0x70, 0x18, 0x18, 0x0e, 0x18, 0x18, 0x70, 0x00], // 125 '}'
+    [0x76, 0xdc, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // 126 '~'
+];
+
+fn test_text(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    color: u32,
+) -> Option<u32> {
+    if y < y0 || y >= y0 + 8 * scale {
+        return None;
+    }
+    let row = (y - y0) / scale;
+    for (i, &b) in text.iter().enumerate() {
+        let char_x0 = x0 + i * 8 * scale;
+        if x >= char_x0 && x < char_x0 + 8 * scale {
+            let col = (x - char_x0) / scale;
+            let glyph_idx = if (32..=126).contains(&b) {
+                (b - 32) as usize
+            } else {
+                0
+            };
+            let row_byte = FONT_8X8[glyph_idx][row];
+            if (row_byte & (0x80 >> col)) != 0 {
+                return Some(color);
+            }
+            return None;
+        }
+    }
+    None
+}
+
 const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
+
+#[inline(never)]
+fn get_messages_pixel(x: usize, y: usize, _active_idx: usize) -> u32 {
+    // 1. Status Bar & Header (y: 0..96)
+    if y < 96 {
+        if y >= 94 {
+            return BORDER_SUBTLE;
+        }
+
+        // Back button (<) at (x: 24..100, y: 28..68)
+        if x >= 24 && x < 100 && y >= 28 && y < 68 {
+            let center_x = 62;
+            let center_y = 48;
+            let dx = (x as isize - center_x as isize).abs();
+            let dy = (y as isize - center_y as isize).abs();
+            if (dx + dy <= 12 && x <= center_x)
+                || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
+            {
+                return TEXT_PRIMARY;
+            }
+            return SURFACE_RAISED;
+        }
+
+        // Header Title: "Messages"
+        if y >= 36 && y < 60 {
+            if let Some(c) = test_text(x, y, 116, 36, 3, b"Messages", TEXT_PRIMARY) {
+                return c;
+            }
+        }
+
+        // Security Pill Badge at top-right (x: 520..696, y: 28..68)
+        if x >= 520 && x < 696 && y >= 28 && y < 68 {
+            let rx = (x - 520).min(695 - x);
+            let ry = (y - 28).min(67 - y);
+            if rx < 20 && ry < 20 {
+                let cdx = (20 - rx) as isize;
+                let cdy = (20 - ry) as isize;
+                if cdx * cdx + cdy * cdy >= 400 {
+                    return SURFACE_DARK;
+                }
+            }
+
+            if let Some(c) = test_text(x, y, 548, 40, 2, b"P2P E2EE", SUCCESS_EMERALD) {
+                return c;
+            }
+
+            if rx < 2 || ry < 2 {
+                return BORDER_SUBTLE;
+            }
+            return SURFACE_RAISED;
+        }
+
+        return SURFACE_DARK;
+    }
+
+    // 2. Search & Filter Bar (y: 104..156)
+    if y >= 104 && y < 156 {
+        if x >= 24 && x < 696 && y >= 106 && y < 154 {
+            let rx = (x - 24).min(695 - x);
+            let ry = (y - 106).min(153 - y);
+            if rx < 22 && ry < 22 {
+                let cdx = (22 - rx) as isize;
+                let cdy = (22 - ry) as isize;
+                if cdx * cdx + cdy * cdy >= 484 {
+                    return BG_DARK;
+                }
+            }
+
+            // Vector magnifying glass icon at (cx: 56, cy: 130)
+            let cx = 56;
+            let cy = 130;
+            let dx = (x as isize - cx as isize).abs();
+            let dy = (y as isize - cy as isize).abs();
+            let d_sq = dx * dx + dy * dy;
+            if d_sq >= 20 && d_sq <= 48 {
+                return TEXT_MUTED;
+            }
+            // Glass handle pointing down-right
+            let hx = x as isize - (cx + 5) as isize;
+            let hy = y as isize - (cy + 5) as isize;
+            if hx >= 0 && hx <= 8 && hy >= 0 && hy <= 8 && (hx - hy).abs() <= 1 {
+                return TEXT_MUTED;
+            }
+
+            // Search placeholder text
+            if let Some(c) = test_text(x, y, 82, 122, 2, b"Search chats...", TEXT_MUTED) {
+                return c;
+            }
+
+            if rx < 2 || ry < 2 {
+                return BORDER_SUBTLE;
+            }
+            return SURFACE_DARK;
+        }
+        return BG_DARK;
+    }
+
+    // 3. Conversation Thread List / Empty State (y: 168..1320)
+    if y >= 168 && y < 1320 {
+        if THREADS.is_empty() {
+            // Empty state container card at x: 24..696, y: 180..680 (width: 672, height: 500)
+            if x >= 24 && x < 696 && y >= 180 && y < 680 {
+                let rx = (x - 24).min(695 - x);
+                let ry = (y - 180).min(679 - y);
+                if rx < 24 && ry < 24 {
+                    let cdx = (24 - rx) as isize;
+                    let cdy = (24 - ry) as isize;
+                    if cdx * cdx + cdy * cdy >= 576 {
+                        return BG_DARK;
+                    }
+                }
+
+                // --- Vector Chat Bubble Pictogram at cx: 360, cy: 300 ---
+                let cx = 360;
+                let cy = 300;
+
+                // Speech bubble body (x: cx - 60..cx + 60, y: cy - 40..cy + 30, radius 18)
+                if x >= cx - 60 && x < cx + 60 && y >= cy - 40 && y < cy + 30 {
+                    let bx = (x - (cx - 60)).min((cx + 59) - x);
+                    let by = (y - (cy - 40)).min((cy + 29) - y);
+                    let in_corner = bx < 18 && by < 18;
+                    let corner_out = in_corner && {
+                        let cdx = (18 - bx) as isize;
+                        let cdy = (18 - by) as isize;
+                        cdx * cdx + cdy * cdy >= 324
+                    };
+
+                    if !corner_out {
+                        // Interior micro-bars representing chat text
+                        if y >= cy - 22 && y < cy - 16 && x >= cx - 40 && x < cx + 28 {
+                            return ACCENT_SKY;
+                        }
+                        if y >= cy - 8 && y < cy - 2 && x >= cx - 40 && x < cx + 16 {
+                            return BORDER_SUBTLE;
+                        }
+                        if y >= cy + 6 && y < cy + 12 && x >= cx - 40 && x < cx - 4 {
+                            return BORDER_SUBTLE;
+                        }
+
+                        // Border rim
+                        let is_rim = bx < 2 || by < 2 || (in_corner && {
+                            let cdx = (18 - bx) as isize;
+                            let cdy = (18 - by) as isize;
+                            cdx * cdx + cdy * cdy >= 256
+                        });
+                        if is_rim {
+                            return BORDER_SUBTLE;
+                        }
+                        return SURFACE_RAISED;
+                    }
+                }
+
+                // Speech bubble pointer tail at bottom-left: x: cx - 44..cx - 18, y: cy + 30..cy + 48
+                if x >= cx - 44 && x < cx - 18 && y >= cy + 30 && y < cy + 48 {
+                    let rel_x = (x - (cx - 44)) as isize;
+                    let rel_y = (y - (cy + 30)) as isize;
+                    if rel_x >= (rel_y * 24) / 18 {
+                        if rel_x == (rel_y * 24) / 18 || x == cx - 19 || y == cy + 47 {
+                            return BORDER_SUBTLE;
+                        }
+                        return SURFACE_RAISED;
+                    }
+                }
+
+                // Empty state text
+                if let Some(c) = test_text(x, y, 196, 370, 2, b"No Conversations Yet", TEXT_PRIMARY) {
+                    return c;
+                }
+                if let Some(c) = test_text(x, y, 232, 404, 1, b"Encrypted P2P Wire Client Active", SUCCESS_EMERALD) {
+                    return c;
+                }
+                if let Some(c) = test_text(x, y, 240, 426, 1, b"Hardware Keystore Slot 3 Ready", TEXT_MUTED) {
+                    return c;
+                }
+
+                // Action Button: "+ Start New Chat" (x: 220..500, y: 476..528)
+                if x >= 220 && x < 500 && y >= 476 && y < 528 {
+                    let bx = (x - 220).min(499 - x);
+                    let by = (y - 476).min(527 - y);
+                    if bx < 24 && by < 24 {
+                        let cdx = (24 - bx) as isize;
+                        let cdy = (24 - by) as isize;
+                        if cdx * cdx + cdy * cdy >= 576 {
+                            return SURFACE_DARK;
+                        }
+                    }
+
+                    if let Some(c) = test_text(x, y, 236, 494, 2, b"+ Start New Chat", ACCENT_SKY) {
+                        return c;
+                    }
+
+                    if bx < 2 || by < 2 {
+                        return ACCENT_SKY;
+                    }
+                    return 0xFF132338;
+                }
+
+                if rx < 2 || ry < 2 {
+                    return BORDER_SUBTLE;
+                }
+                return SURFACE_DARK;
+            }
+        } else {
+            // Render actual conversation threads
+            let card_idx = (y - 180) / 120;
+            let card_offset_y = (y - 180) % 120;
+            if card_idx < THREADS.len() && card_offset_y < 104 && x >= 24 && x < W - 24 {
+                let rx = (x - 24).min(W - 25 - x);
+                let ry = card_offset_y.min(103 - card_offset_y);
+                if rx < 16 && ry < 16 {
+                    let cdx = (16 - rx) as isize;
+                    let cdy = (16 - ry) as isize;
+                    if cdx * cdx + cdy * cdy >= 256 {
+                        return BG_DARK;
+                    }
+                }
+
+                if rx < 2 || ry < 2 {
+                    return BORDER_SUBTLE;
+                }
+                return SURFACE_DARK;
+            }
+        }
+        return BG_DARK;
+    }
+
+    // 4. Bottom Compose Input Bar (y: 1330..1414)
+    if y >= 1330 && y < 1414 {
+        if y == 1330 {
+            return BORDER_SUBTLE;
+        }
+
+        // Text input field pill (x: 24..610, y: 1344..1404)
+        if x >= 24 && x < 610 && y >= 1344 && y < 1404 {
+            let rx = (x - 24).min(609 - x);
+            let ry = (y - 1344).min(1403 - y);
+            if rx < 24 && ry < 24 {
+                let cdx = (24 - rx) as isize;
+                let cdy = (24 - ry) as isize;
+                if cdx * cdx + cdy * cdy >= 576 {
+                    return BG_DARK;
+                }
+            }
+
+            if let Some(c) = test_text(x, y, 52, 1366, 2, b"Type a message...", TEXT_MUTED) {
+                return c;
+            }
+
+            if rx < 2 || ry < 2 {
+                return BORDER_SUBTLE;
+            }
+            return SURFACE_DARK;
+        }
+
+        // Vector Send Button Circle (x: 630..694, y: 1344..1404)
+        if x >= 630 && x < 694 && y >= 1344 && y < 1404 {
+            let cx = 662;
+            let cy = 1374;
+            let dx = (x as isize - cx as isize).abs();
+            let dy = (y as isize - cy as isize).abs();
+            if dx * dx + dy * dy <= 840 {
+                // Vector paper plane / arrow glyph in White
+                let rel_x = x as isize - cx as isize;
+                let rel_y = y as isize - cy as isize;
+
+                // Chevron arrow head pointing right
+                let is_arrow = (rel_y.abs() <= 10 && rel_x >= -8 + rel_y.abs() && rel_x <= -4 + rel_y.abs())
+                    || (rel_y.abs() <= 2 && rel_x >= -12 && rel_x <= 6);
+                if is_arrow {
+                    return 0xFFFFFFFF;
+                }
+
+                return ACCENT_SKY;
+            }
+            return BG_DARK;
+        }
+
+        return BG_DARK;
+    }
+
+    // 5. Home Gesture Pill (x: 260..460, y: 1418..1424)
+    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
+        return TEXT_MUTED;
+    }
+
+    BG_DARK
+}
 
 fn render_messages_ui(surface: u32, active_idx: usize) {
     let mut chunk = [0u32; CHUNK];
@@ -175,86 +607,7 @@ fn render_messages_ui(surface: u32, active_idx: usize) {
         let mut x = offset % W;
         let mut y = offset / W;
         for i in 0..count {
-            if y < 96 {
-                if y >= 94 {
-                    chunk[i] = std::design::color::ACCENT;
-                } else if x >= 24 && x < 100 && y >= 28 && y < 68 {
-                    // Back button <
-                    let center_x = 62;
-                    let center_y = 48;
-                    let dx = (x as isize - center_x as isize).abs();
-                    let dy = (y as isize - center_y as isize).abs();
-                    if (dx + dy <= 12 && x <= center_x)
-                        || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
-                    {
-                        chunk[i] = std::design::color::TEXT;
-                    } else {
-                        chunk[i] = std::design::color::SURFACE_RAISED;
-                    }
-                } else if x >= 120 && x < 320 && (40..56).contains(&y) {
-                    chunk[i] = std::design::color::TEXT;
-                } else {
-                    chunk[i] = std::design::color::SURFACE;
-                }
-            } else if (110..470).contains(&y) {
-                // Conversation threads list.
-                // WHY: the card rows were drawn unconditionally, so three
-                // phantom conversations appeared even with an empty backend.
-                // With no threads, render an explicit empty-state band instead.
-                if THREADS.is_empty() {
-                    if (300..364).contains(&y) && x >= 24 && x < W - 24 {
-                        if y == 300 || y == 363 {
-                            chunk[i] = std::design::color::TEXT_MUTED;
-                        } else {
-                            chunk[i] = std::design::color::SURFACE;
-                        }
-                    } else {
-                        chunk[i] = std::design::color::BACKGROUND;
-                    }
-                } else {
-                    let card = (y - 110) / 120;
-                    let card_y = (y - 110) % 120;
-                    if card < 3 && x >= 24 && x < W - 24 && card_y < 104 {
-                        if card == active_idx {
-                            if card_y >= 100 {
-                                chunk[i] = std::design::color::ACCENT;
-                            } else if card_y >= 20 && card_y < 36 && x >= 48 && x < 180 {
-                                chunk[i] = std::design::color::TEXT;
-                            } else if card_y >= 50 && card_y < 62 && x >= 48 && x < W - 60 {
-                                chunk[i] = std::design::color::TEXT_MUTED;
-                            } else {
-                                chunk[i] = std::design::color::SURFACE_RAISED;
-                            }
-                        } else {
-                            if card_y >= 20 && card_y < 36 && x >= 48 && x < 180 {
-                                chunk[i] = std::design::color::TEXT;
-                            } else if card_y >= 50 && card_y < 62 && x >= 48 && x < W - 60 {
-                                chunk[i] = std::design::color::TEXT_MUTED;
-                            } else {
-                                chunk[i] = std::design::color::SURFACE;
-                            }
-                        }
-                    } else {
-                        chunk[i] = std::design::color::BACKGROUND;
-                    }
-                }
-            } else if (490..1320).contains(&y) && x >= 24 && x < W - 24 {
-                // No conversation backend data is available yet; keep the pane empty.
-                chunk[i] = std::design::color::BACKGROUND;
-            } else if (1340..1440).contains(&y) {
-                // Bottom compose input bar
-                if y == 1340 {
-                    chunk[i] = std::design::color::SURFACE_RAISED;
-                } else if (1360..1410).contains(&y) && x >= 24 && x < W - 24 {
-                    chunk[i] = std::design::color::SURFACE_RAISED;
-                } else {
-                    chunk[i] = std::design::color::SURFACE;
-                }
-            } else if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
-                chunk[i] = std::design::color::TEXT_MUTED;
-            } else {
-                chunk[i] = std::design::color::BACKGROUND;
-            }
+            chunk[i] = get_messages_pixel(x, y, active_idx);
             x += 1;
             if x == W {
                 x = 0;
