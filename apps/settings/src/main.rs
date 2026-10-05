@@ -421,8 +421,584 @@ impl SettingsApp {
     }
 }
 
-fn render_settings_ui(surface: u32, tab: SettingsTab, telemetry: [TelemetryState; 4]) {
-    let tab_idx = tab as usize;
+// -----------------------------------------------------------------------------
+// Visual Design Tokens
+// -----------------------------------------------------------------------------
+const BG_DARK: u32 = 0xFF070B12;
+const SURFACE_DARK: u32 = 0xFF111B2B;
+const SURFACE_RAISED: u32 = 0xFF17243A;
+const BORDER_SUBTLE: u32 = 0xFF26354D;
+const ACCENT_SKY: u32 = 0xFF31C4FF;
+const SUCCESS_EMERALD: u32 = 0xFF56D68A;
+const WARNING_AMBER: u32 = 0xFFFFC043;
+const TEXT_PRIMARY: u32 = 0xFFF4F7FB;
+const TEXT_MUTED: u32 = 0xFF9AA8BC;
+
+// -----------------------------------------------------------------------------
+// Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')
+// -----------------------------------------------------------------------------
+const FONT_8X8: [[u8; 8]; 95] = [
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // 32 ' '
+    [0x18, 0x18, 0x18, 0x18, 0x00, 0x00, 0x18, 0x00], // 33 '!'
+    [0x66, 0x66, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00], // 34 '"'
+    [0x6c, 0x6c, 0xfe, 0x6c, 0xfe, 0x6c, 0x6c, 0x00], // 35 '#'
+    [0x18, 0x3e, 0x60, 0x3c, 0x06, 0x7c, 0x18, 0x00], // 36 '$'
+    [0x00, 0xc6, 0xcc, 0x18, 0x30, 0x66, 0xc6, 0x00], // 37 '%'
+    [0x38, 0x6c, 0x38, 0x76, 0xdc, 0xcc, 0x76, 0x00], // 38 '&'
+    [0x18, 0x18, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00], // 39 '''
+    [0x0c, 0x18, 0x30, 0x30, 0x30, 0x18, 0x0c, 0x00], // 40 '('
+    [0x30, 0x18, 0x0c, 0x0c, 0x0c, 0x18, 0x30, 0x00], // 41 ')'
+    [0x00, 0x66, 0x3c, 0xff, 0x3c, 0x66, 0x00, 0x00], // 42 '*'
+    [0x00, 0x18, 0x18, 0x7e, 0x18, 0x18, 0x00, 0x00], // 43 '+'
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x30], // 44 ','
+    [0x00, 0x00, 0x00, 0x7e, 0x00, 0x00, 0x00, 0x00], // 45 '-'
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00], // 46 '.'
+    [0x06, 0x0c, 0x18, 0x30, 0x60, 0xc0, 0x80, 0x00], // 47 '/'
+    [0x7c, 0xc6, 0xce, 0xd6, 0xe6, 0xc6, 0x7c, 0x00], // 48 '0'
+    [0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x7e, 0x00], // 49 '1'
+    [0x7c, 0xc6, 0x06, 0x1c, 0x30, 0x66, 0xfe, 0x00], // 50 '2'
+    [0x7c, 0xc6, 0x06, 0x3c, 0x06, 0xc6, 0x7c, 0x00], // 51 '3'
+    [0x1c, 0x3c, 0x6c, 0xcc, 0xfe, 0x0c, 0x1e, 0x00], // 52 '4'
+    [0xfe, 0xc0, 0xfc, 0x06, 0x06, 0xc6, 0x7c, 0x00], // 53 '5'
+    [0x78, 0x0c, 0xc0, 0xfc, 0xc6, 0xc6, 0x7c, 0x00], // 54 '6'
+    [0xfe, 0xc6, 0x0c, 0x18, 0x30, 0x30, 0x30, 0x00], // 55 '7'
+    [0x7c, 0xc6, 0xc6, 0x7c, 0xc6, 0xc6, 0x7c, 0x00], // 56 '8'
+    [0x7c, 0xc6, 0xc6, 0x7e, 0x06, 0x0c, 0x78, 0x00], // 57 '9'
+    [0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00, 0x00], // 58 ':'
+    [0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x30, 0x00], // 59 ';'
+    [0x06, 0x0c, 0x18, 0x30, 0x18, 0x0c, 0x06, 0x00], // 60 '<'
+    [0x00, 0x7e, 0x00, 0x7e, 0x00, 0x00, 0x00, 0x00], // 61 '='
+    [0x60, 0x30, 0x18, 0x0c, 0x18, 0x30, 0x60, 0x00], // 62 '>'
+    [0x7c, 0xc6, 0x0c, 0x18, 0x18, 0x00, 0x18, 0x00], // 63 '?'
+    [0x7c, 0xc6, 0xde, 0xde, 0xdc, 0xc0, 0x7c, 0x00], // 64 '@'
+    [0x38, 0x6c, 0xc6, 0xfe, 0xc6, 0xc6, 0xc6, 0x00], // 65 'A'
+    [0xfc, 0x66, 0x66, 0x7c, 0x66, 0x66, 0xfc, 0x00], // 66 'B'
+    [0x3c, 0x66, 0xc0, 0xc0, 0xc0, 0x66, 0x3c, 0x00], // 67 'C'
+    [0xf8, 0x6c, 0x66, 0x66, 0x66, 0x6c, 0xf8, 0x00], // 68 'D'
+    [0xfe, 0x62, 0x68, 0x78, 0x68, 0x62, 0xfe, 0x00], // 69 'E'
+    [0xfe, 0x62, 0x68, 0x78, 0x68, 0x60, 0xf0, 0x00], // 70 'F'
+    [0x3c, 0x66, 0xc0, 0xc0, 0xce, 0x66, 0x3e, 0x00], // 71 'G'
+    [0xc6, 0xc6, 0xc6, 0xfe, 0xc6, 0xc6, 0xc6, 0x00], // 72 'H'
+    [0x3c, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3c, 0x00], // 73 'I'
+    [0x1e, 0x0c, 0x0c, 0x0c, 0xcc, 0xcc, 0x78, 0x00], // 74 'J'
+    [0xe6, 0x66, 0x6c, 0x78, 0x6c, 0x66, 0xe6, 0x00], // 75 'K'
+    [0xf0, 0x60, 0x60, 0x60, 0x62, 0x66, 0xfe, 0x00], // 76 'L'
+    [0xc6, 0xee, 0xfe, 0xfe, 0xd6, 0xc6, 0xc6, 0x00], // 77 'M'
+    [0xc6, 0xe6, 0xf6, 0xde, 0xce, 0xc6, 0xc6, 0x00], // 78 'N'
+    [0x7c, 0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0x7c, 0x00], // 79 'O'
+    [0xfc, 0x66, 0x66, 0x7c, 0x60, 0x60, 0xf0, 0x00], // 80 'P'
+    [0x7c, 0xc6, 0xc6, 0xc6, 0xd6, 0xcc, 0x7a, 0x00], // 81 'Q'
+    [0xfc, 0x66, 0x66, 0x7c, 0x6c, 0x66, 0xe6, 0x00], // 82 'R'
+    [0x7c, 0xc6, 0x60, 0x38, 0x0c, 0xc6, 0x7c, 0x00], // 83 'S'
+    [0x7e, 0x7e, 0x18, 0x18, 0x18, 0x18, 0x3c, 0x00], // 84 'T'
+    [0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0x7c, 0x00], // 85 'U'
+    [0xc6, 0xc6, 0xc6, 0xc6, 0x6c, 0x38, 0x10, 0x00], // 86 'V'
+    [0xc6, 0xc6, 0xd6, 0xfe, 0xfe, 0xee, 0xc6, 0x00], // 87 'W'
+    [0xc6, 0xc6, 0x6c, 0x38, 0x6c, 0xc6, 0xc6, 0x00], // 88 'X'
+    [0x66, 0x66, 0x66, 0x3c, 0x18, 0x18, 0x3c, 0x00], // 89 'Y'
+    [0xfe, 0xc6, 0x0c, 0x18, 0x30, 0x62, 0xfe, 0x00], // 90 'Z'
+    [0x3c, 0x30, 0x30, 0x30, 0x30, 0x30, 0x3c, 0x00], // 91 '['
+    [0xc0, 0x60, 0x30, 0x18, 0x0c, 0x06, 0x02, 0x00], // 92 '\'
+    [0x3c, 0x0c, 0x0c, 0x0c, 0x0c, 0x0c, 0x3c, 0x00], // 93 ']'
+    [0x10, 0x38, 0x6c, 0xc6, 0x00, 0x00, 0x00, 0x00], // 94 '^'
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff], // 95 '_'
+    [0x30, 0x18, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00], // 96 '`'
+    [0x00, 0x00, 0x78, 0x0c, 0x7c, 0xcc, 0x76, 0x00], // 97 'a'
+    [0xe0, 0x60, 0x7c, 0x66, 0x66, 0x66, 0xdc, 0x00], // 98 'b'
+    [0x00, 0x00, 0x7c, 0xc6, 0xc0, 0xc6, 0x7c, 0x00], // 99 'c'
+    [0x1c, 0x0c, 0x7c, 0xcc, 0xcc, 0xcc, 0x76, 0x00], // 100 'd'
+    [0x00, 0x00, 0x7c, 0xc6, 0xfe, 0xc0, 0x7c, 0x00], // 101 'e'
+    [0x1c, 0x36, 0x30, 0x78, 0x30, 0x30, 0x78, 0x00], // 102 'f'
+    [0x00, 0x00, 0x76, 0xcc, 0xcc, 0x7c, 0x0c, 0xf8], // 103 'g'
+    [0xe0, 0x60, 0x6c, 0x76, 0x66, 0x66, 0xe6, 0x00], // 104 'h'
+    [0x18, 0x00, 0x38, 0x18, 0x18, 0x18, 0x3c, 0x00], // 105 'i'
+    [0x06, 0x00, 0x06, 0x06, 0x06, 0x66, 0x3c, 0x00], // 106 'j'
+    [0xe0, 0x60, 0x66, 0x6c, 0x78, 0x6c, 0xe6, 0x00], // 107 'k'
+    [0x38, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3c, 0x00], // 108 'l'
+    [0x00, 0x00, 0xec, 0xfe, 0xd6, 0xd6, 0xd6, 0x00], // 109 'm'
+    [0x00, 0x00, 0xdc, 0x66, 0x66, 0x66, 0x66, 0x00], // 110 'n'
+    [0x00, 0x00, 0x7c, 0xc6, 0xc6, 0xc6, 0x7c, 0x00], // 111 'o'
+    [0x00, 0x00, 0xdc, 0x66, 0x66, 0x7c, 0x60, 0xf0], // 112 'p'
+    [0x00, 0x00, 0x76, 0xcc, 0xcc, 0x7c, 0x0c, 0x1e], // 113 'q'
+    [0x00, 0x00, 0xdc, 0x76, 0x60, 0x60, 0xf0, 0x00], // 114 'r'
+    [0x00, 0x00, 0x7e, 0xc0, 0x7c, 0x06, 0xfc, 0x00], // 115 's'
+    [0x30, 0x30, 0x78, 0x30, 0x30, 0x36, 0x1c, 0x00], // 116 't'
+    [0x00, 0x00, 0xcc, 0xcc, 0xcc, 0xcc, 0x76, 0x00], // 117 'u'
+    [0x00, 0x00, 0xc6, 0xc6, 0x6c, 0x38, 0x10, 0x00], // 118 'v'
+    [0x00, 0x00, 0xc6, 0xd6, 0xfe, 0xfe, 0x6c, 0x00], // 119 'w'
+    [0x00, 0x00, 0xc6, 0x6c, 0x38, 0x6c, 0xc6, 0x00], // 120 'x'
+    [0x00, 0x00, 0xc6, 0xc6, 0xce, 0x76, 0x06, 0x7c], // 121 'y'
+    [0x00, 0x00, 0xfc, 0x18, 0x30, 0x60, 0xfc, 0x00], // 122 'z'
+    [0x0e, 0x18, 0x18, 0x70, 0x18, 0x18, 0x0e, 0x00], // 123 '{'
+    [0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x18, 0x00], // 124 '|'
+    [0x70, 0x18, 0x18, 0x0e, 0x18, 0x18, 0x70, 0x00], // 125 '}'
+    [0x76, 0xdc, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // 126 '~'
+];
+
+fn test_text(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    color: u32,
+) -> Option<u32> {
+    if y < y0 || y >= y0 + 8 * scale {
+        return None;
+    }
+    let row = (y - y0) / scale;
+    for (i, &b) in text.iter().enumerate() {
+        let char_x0 = x0 + i * 8 * scale;
+        if x >= char_x0 && x < char_x0 + 8 * scale {
+            let col = (x - char_x0) / scale;
+            let glyph_idx = if (32..=126).contains(&b) {
+                (b - 32) as usize
+            } else {
+                0
+            };
+            let row_byte = FONT_8X8[glyph_idx][row];
+            if (row_byte & (0x80 >> col)) != 0 {
+                return Some(color);
+            }
+            return None;
+        }
+    }
+    None
+}
+
+#[inline(never)]
+fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
+    // 1. Status Bar & Header (y: 0..96)
+    if y < 96 {
+        if y >= 94 {
+            return BORDER_SUBTLE;
+        }
+
+        // Back button (<) at (x: 24..100, y: 28..68)
+        if x >= 24 && x < 100 && y >= 28 && y < 68 {
+            let center_x = 62;
+            let center_y = 48;
+            let dx = (x as isize - center_x as isize).abs();
+            let dy = (y as isize - center_y as isize).abs();
+            if (dx + dy <= 12 && x <= center_x)
+                || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
+            {
+                return TEXT_PRIMARY;
+            }
+            return SURFACE_RAISED;
+        }
+
+        // Header Title: "Settings"
+        if y >= 36 && y < 60 {
+            if let Some(c) = test_text(x, y, 116, 36, 3, b"Settings", TEXT_PRIMARY) {
+                return c;
+            }
+        }
+
+        // Top right System Badge (x: 540..696, y: 28..68)
+        if x >= 540 && x < 696 && y >= 28 && y < 68 {
+            let rx = (x - 540).min(695 - x);
+            let ry = (y - 28).min(67 - y);
+            if rx < 20 && ry < 20 {
+                let cdx = (20 - rx) as isize;
+                let cdy = (20 - ry) as isize;
+                if cdx * cdx + cdy * cdy >= 400 {
+                    return SURFACE_DARK;
+                }
+            }
+
+            if let Some(c) = test_text(x, y, 574, 40, 2, b"SYSTEM", ACCENT_SKY) {
+                return c;
+            }
+
+            if rx < 2 || ry < 2 {
+                return BORDER_SUBTLE;
+            }
+            return SURFACE_RAISED;
+        }
+
+        return SURFACE_DARK;
+    }
+
+    // 2. Category Tab Strip (y: 104..164)
+    if y >= 104 && y < 164 {
+        for t in 0..5 {
+            let col_x = 24 + t * 136;
+            if x >= col_x && x < col_x + 124 && y >= 110 && y < 158 {
+                let is_active = t == app.current_tab as usize;
+                let rx = (x - col_x).min(col_x + 123 - x);
+                let ry = (y - 110).min(157 - y);
+                if rx < 14 && ry < 14 {
+                    let cdx = (14 - rx) as isize;
+                    let cdy = (14 - ry) as isize;
+                    if cdx * cdx + cdy * cdy >= 196 {
+                        return BG_DARK;
+                    }
+                }
+
+                let text_color = if is_active { 0xFFFFFFFF } else { TEXT_MUTED };
+                let (label, lx) = match t {
+                    0 => (&b"WIFI"[..], col_x + 30),
+                    1 => (&b"POWER"[..], col_x + 22),
+                    2 => (&b"SENSORS"[..], col_x + 8),
+                    3 => (&b"SECURITY"[..], col_x + 4),
+                    _ => (&b"ABOUT"[..], col_x + 22),
+                };
+
+                if let Some(c) = test_text(x, y, lx, 126, 2, label, text_color) {
+                    return c;
+                }
+
+                if rx < 2 || ry < 2 {
+                    return if is_active { ACCENT_SKY } else { BORDER_SUBTLE };
+                }
+
+                return if is_active { 0xFF173552 } else { SURFACE_DARK };
+            }
+        }
+        return BG_DARK;
+    }
+
+    // 3. Settings Cards (y: 176..1320)
+    if y >= 176 && y < 1320 {
+        match app.current_tab {
+            SettingsTab::Wireless => {
+                // Card 0: Wi-Fi
+                if x >= 24 && x < W - 24 && y >= 180 && y < 330 {
+                    if let Some(c) = render_card_frame(x, y, 180, 330, BORDER_SUBTLE) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 210, 2, b"Wi-Fi Network", TEXT_PRIMARY) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 250, 1, b"Hardware Status: Unavailable (No Radio)", TEXT_MUTED) {
+                        return c;
+                    }
+                    if let Some(c) = render_badge(x, y, 500, 206, b"UNAVAILABLE", TEXT_MUTED) {
+                        return c;
+                    }
+                    return SURFACE_DARK;
+                }
+                // Card 1: Bluetooth
+                if x >= 24 && x < W - 24 && y >= 350 && y < 500 {
+                    if let Some(c) = render_card_frame(x, y, 350, 500, BORDER_SUBTLE) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 380, 2, b"Bluetooth & BLE", TEXT_PRIMARY) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 420, 1, b"Hardware Status: Unavailable (No Adapter)", TEXT_MUTED) {
+                        return c;
+                    }
+                    if let Some(c) = render_badge(x, y, 500, 376, b"UNAVAILABLE", TEXT_MUTED) {
+                        return c;
+                    }
+                    return SURFACE_DARK;
+                }
+                // Card 2: Cellular
+                if x >= 24 && x < W - 24 && y >= 520 && y < 670 {
+                    if let Some(c) = render_card_frame(x, y, 520, 670, BORDER_SUBTLE) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 550, 2, b"Cellular Baseband", TEXT_PRIMARY) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 590, 1, b"Hardware Status: Unavailable (No SIM)", TEXT_MUTED) {
+                        return c;
+                    }
+                    if let Some(c) = render_badge(x, y, 500, 546, b"UNAVAILABLE", TEXT_MUTED) {
+                        return c;
+                    }
+                    return SURFACE_DARK;
+                }
+            }
+            SettingsTab::PowerAndBattery => {
+                // Card 0: Battery
+                if x >= 24 && x < W - 24 && y >= 180 && y < 330 {
+                    if let Some(c) = render_card_frame(x, y, 180, 330, WARNING_AMBER) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 210, 2, b"Battery Fuel Gauge", TEXT_PRIMARY) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 250, 1, b"Hardware Status: Simulated Power Bus", TEXT_MUTED) {
+                        return c;
+                    }
+                    if let Some(c) = render_badge(x, y, 510, 206, b"SIMULATED", WARNING_AMBER) {
+                        return c;
+                    }
+                    return SURFACE_DARK;
+                }
+                // Card 1: DVFS
+                if x >= 24 && x < W - 24 && y >= 350 && y < 500 {
+                    if let Some(c) = render_card_frame(x, y, 350, 500, ACCENT_SKY) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 380, 2, b"CPU Frequency Scaling", TEXT_PRIMARY) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 420, 1, b"Active Profile: Balanced (1200 MHz)", ACCENT_SKY) {
+                        return c;
+                    }
+                    if let Some(c) = render_badge(x, y, 520, 376, b"BALANCED", ACCENT_SKY) {
+                        return c;
+                    }
+                    return SURFACE_DARK;
+                }
+                // Card 2: Thermal Governor
+                if x >= 24 && x < W - 24 && y >= 520 && y < 670 {
+                    if let Some(c) = render_card_frame(x, y, 520, 670, SUCCESS_EMERALD) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 550, 2, b"Thermal Governor", TEXT_PRIMARY) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 590, 1, b"Dynamic Voltage and Frequency Scaling Active", SUCCESS_EMERALD) {
+                        return c;
+                    }
+                    if let Some(c) = render_badge(x, y, 530, 546, b"OPTIMAL", SUCCESS_EMERALD) {
+                        return c;
+                    }
+                    return SURFACE_DARK;
+                }
+            }
+            SettingsTab::ThermalsAndSensors => {
+                // Card 0: Core Temp
+                if x >= 24 && x < W - 24 && y >= 180 && y < 330 {
+                    if let Some(c) = render_card_frame(x, y, 180, 330, WARNING_AMBER) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 210, 2, b"CPU Core Temperature", TEXT_PRIMARY) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 250, 1, b"Hardware Status: Simulated Sensor Bus", TEXT_MUTED) {
+                        return c;
+                    }
+                    if let Some(c) = render_badge(x, y, 510, 206, b"SIMULATED", WARNING_AMBER) {
+                        return c;
+                    }
+                    return SURFACE_DARK;
+                }
+                // Card 1: Motion Sensor
+                if x >= 24 && x < W - 24 && y >= 350 && y < 500 {
+                    if let Some(c) = render_card_frame(x, y, 350, 500, WARNING_AMBER) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 380, 2, b"6-Axis Motion Sensor", TEXT_PRIMARY) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 420, 1, b"Accelerometer and Gyroscope Telemetry", TEXT_MUTED) {
+                        return c;
+                    }
+                    if let Some(c) = render_badge(x, y, 510, 376, b"SIMULATED", WARNING_AMBER) {
+                        return c;
+                    }
+                    return SURFACE_DARK;
+                }
+                // Card 2: Light Sensor
+                if x >= 24 && x < W - 24 && y >= 520 && y < 670 {
+                    if let Some(c) = render_card_frame(x, y, 520, 670, WARNING_AMBER) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 550, 2, b"Ambient Light Sensor", TEXT_PRIMARY) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 590, 1, b"Photodiode Lux Sensor Bus", TEXT_MUTED) {
+                        return c;
+                    }
+                    if let Some(c) = render_badge(x, y, 510, 546, b"SIMULATED", WARNING_AMBER) {
+                        return c;
+                    }
+                    return SURFACE_DARK;
+                }
+            }
+            SettingsTab::SecurityAndPrivacy => {
+                // Card 0: Keystore
+                if x >= 24 && x < W - 24 && y >= 180 && y < 330 {
+                    if let Some(c) = render_card_frame(x, y, 180, 330, SUCCESS_EMERALD) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 210, 2, b"Hardware Keystore", TEXT_PRIMARY) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 250, 1, b"Cryptographic Root Key Sealed in Hardware", SUCCESS_EMERALD) {
+                        return c;
+                    }
+                    if let Some(c) = render_badge(x, y, 520, 206, b"ENFORCED", SUCCESS_EMERALD) {
+                        return c;
+                    }
+                    return SURFACE_DARK;
+                }
+                // Card 1: Vault
+                if x >= 24 && x < W - 24 && y >= 350 && y < 500 {
+                    if let Some(c) = render_card_frame(x, y, 350, 500, SUCCESS_EMERALD) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 380, 2, b"Storage Vault Encryption", TEXT_PRIMARY) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 420, 1, b"Sectors 200-205 Cryptographically Sealed", SUCCESS_EMERALD) {
+                        return c;
+                    }
+                    if let Some(c) = render_badge(x, y, 510, 376, b"ENCRYPTED", SUCCESS_EMERALD) {
+                        return c;
+                    }
+                    return SURFACE_DARK;
+                }
+                // Card 2: Privacy Shield
+                if x >= 24 && x < W - 24 && y >= 520 && y < 670 {
+                    if let Some(c) = render_card_frame(x, y, 520, 670, SUCCESS_EMERALD) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 550, 2, b"Privacy Shield Filter", TEXT_PRIMARY) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 590, 1, b"Anti-Tracking Query & Header Sanitizer Active", SUCCESS_EMERALD) {
+                        return c;
+                    }
+                    if let Some(c) = render_badge(x, y, 540, 546, b"ACTIVE", SUCCESS_EMERALD) {
+                        return c;
+                    }
+                    return SURFACE_DARK;
+                }
+                // Card 3: Developer terminal (Tappable target: y: 830..1010, x: 32..688)
+                if x >= 32 && x < W - 32 && y >= 830 && y < 1010 {
+                    let accent_bar = if app.terminal_enabled { SUCCESS_EMERALD } else { BORDER_SUBTLE };
+                    if let Some(c) = render_card_frame(x, y, 830, 1010, accent_bar) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 860, 2, b"Developer terminal", TEXT_PRIMARY) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 896, 1, b"Disabled by default", TEXT_MUTED) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 924, 1, b"Config key: developer.terminal_enabled", TEXT_MUTED) {
+                        return c;
+                    }
+                    let (toggle_str, toggle_col) = if app.terminal_enabled {
+                        (&b"ENABLED"[..], SUCCESS_EMERALD)
+                    } else {
+                        (&b"DISABLED"[..], TEXT_MUTED)
+                    };
+                    if let Some(c) = render_badge(x, y, 520, 856, toggle_str, toggle_col) {
+                        return c;
+                    }
+                    return SURFACE_DARK;
+                }
+            }
+            SettingsTab::AboutDevice => {
+                // Card 0: OS
+                if x >= 24 && x < W - 24 && y >= 180 && y < 330 {
+                    if let Some(c) = render_card_frame(x, y, 180, 330, ACCENT_SKY) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 210, 2, b"InterOS Core", TEXT_PRIMARY) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 250, 1, b"Version: 0.8.2 (x86_64 Sovereign Microkernel)", ACCENT_SKY) {
+                        return c;
+                    }
+                    if let Some(c) = render_badge(x, y, 520, 206, b"VERIFIED", SUCCESS_EMERALD) {
+                        return c;
+                    }
+                    return SURFACE_DARK;
+                }
+                // Card 1: Architecture
+                if x >= 24 && x < W - 24 && y >= 350 && y < 500 {
+                    if let Some(c) = render_card_frame(x, y, 350, 500, ACCENT_SKY) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 380, 2, b"Platform Microkernel", TEXT_PRIMARY) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 420, 1, b"Capability Security & VFS Block Storage", TEXT_MUTED) {
+                        return c;
+                    }
+                    if let Some(c) = render_badge(x, y, 530, 376, b"RING 0", ACCENT_SKY) {
+                        return c;
+                    }
+                    return SURFACE_DARK;
+                }
+                // Card 2: RTC
+                if x >= 24 && x < W - 24 && y >= 520 && y < 670 {
+                    if let Some(c) = render_card_frame(x, y, 520, 670, SUCCESS_EMERALD) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 550, 2, b"Hardware Real-Time Clock", TEXT_PRIMARY) {
+                        return c;
+                    }
+                    if let Some(c) = test_text(x, y, 60, 590, 1, b"Civil Wall-Clock Synchronization Active", TEXT_MUTED) {
+                        return c;
+                    }
+                    if let Some(c) = render_badge(x, y, 510, 546, b"RTC SYNC", SUCCESS_EMERALD) {
+                        return c;
+                    }
+                    return SURFACE_DARK;
+                }
+            }
+        }
+        return BG_DARK;
+    }
+
+    // 4. Home Gesture Pill (x: 260..460, y: 1418..1424)
+    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
+        return TEXT_MUTED;
+    }
+
+    BG_DARK
+}
+
+fn render_card_frame(x: usize, y: usize, y0: usize, y1: usize, accent_col: u32) -> Option<u32> {
+    // Left accent strip
+    if x >= 24 && x < 34 {
+        return Some(accent_col);
+    }
+
+    let rx = (x - 24).min(W - 25 - x);
+    let ry = (y - y0).min(y1 - 1 - y);
+    if rx < 18 && ry < 18 {
+        let cdx = (18 - rx) as isize;
+        let cdy = (18 - ry) as isize;
+        if cdx * cdx + cdy * cdy >= 324 {
+            return Some(BG_DARK);
+        }
+    }
+
+    if rx < 2 || ry < 2 {
+        return Some(BORDER_SUBTLE);
+    }
+    None
+}
+
+fn render_badge(x: usize, y: usize, bx0: usize, by0: usize, label: &[u8], color: u32) -> Option<u32> {
+    let bw = label.len() * 8 + 24;
+    let bh = 28;
+    if x >= bx0 && x < bx0 + bw && y >= by0 && y < by0 + bh {
+        let rx = (x - bx0).min(bx0 + bw - 1 - x);
+        let ry = (y - by0).min(by0 + bh - 1 - y);
+        if rx < 12 && ry < 12 {
+            let cdx = (12 - rx) as isize;
+            let cdy = (12 - ry) as isize;
+            if cdx * cdx + cdy * cdy >= 144 {
+                return Some(SURFACE_DARK);
+            }
+        }
+
+        if let Some(c) = test_text(x, y, bx0 + 12, by0 + 10, 1, label, color) {
+            return Some(c);
+        }
+
+        if rx < 2 || ry < 2 {
+            return Some(color);
+        }
+        return Some(SURFACE_RAISED);
+    }
+    None
+}
+
+fn render_settings_ui(surface: u32, app: &SettingsApp) {
     let mut chunk = [0u32; CHUNK];
     let total = W * H;
     let mut offset = 0;
@@ -431,86 +1007,7 @@ fn render_settings_ui(surface: u32, tab: SettingsTab, telemetry: [TelemetryState
         let mut x = offset % W;
         let mut y = offset / W;
         for i in 0..count {
-            if y < 96 {
-                if y >= 94 {
-                    chunk[i] = std::design::color::ACCENT;
-                } else if x >= 24 && x < 100 && y >= 28 && y < 68 {
-                    // Back button <
-                    let center_x = 62;
-                    let center_y = 48;
-                    let dx = (x as isize - center_x as isize).abs();
-                    let dy = (y as isize - center_y as isize).abs();
-                    if (dx + dy <= 12 && x <= center_x)
-                        || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
-                    {
-                        chunk[i] = std::design::color::TEXT;
-                    } else {
-                        chunk[i] = std::design::color::SURFACE_RAISED;
-                    }
-                } else {
-                    chunk[i] = std::design::color::SURFACE;
-                }
-            } else if (110..170).contains(&y) {
-                let t = x.saturating_sub(24) / 136;
-                chunk[i] = if t == tab_idx && (x % 136) < 120 {
-                    std::design::color::ACCENT
-                } else {
-                    std::design::color::SURFACE_RAISED
-                };
-            } else if (200..1200).contains(&y) {
-                let card = (y - 200) / 210;
-                let card_y = (y - 200) % 210;
-                if tab == SettingsTab::SecurityAndPrivacy && card == 3 && card_y >= 35 && card_y < 85 {
-                    // "Developer terminal" / "Disabled by default" card preview
-                    chunk[i] = if card_y >= 60 {
-                        std::design::color::TEXT_MUTED
-                    } else {
-                        std::design::color::TEXT
-                    };
-                } else if card < 4 && x >= 32 && x < W - 32 && card_y < 180 {
-                    if card_y >= 100 && card_y < 140 && x >= 60 && x < W - 60 {
-                        // WHY: the accent strip is the only status indicator this
-                        // layout has. When the corresponding query was refused or
-                        // the backend is absent, render it muted so the card cannot
-                        // be read as reporting live hardware.
-                        let reported = telemetry.get(card).copied() == Some(TelemetryState::Reported);
-                        chunk[i] = match card {
-                            0 => {
-                                if reported {
-                                    std::design::color::ACCENT
-                                } else {
-                                    std::design::color::TEXT_MUTED
-                                }
-                            }
-                            1 => {
-                                if reported {
-                                    std::design::color::SUCCESS
-                                } else {
-                                    std::design::color::TEXT_MUTED
-                                }
-                            }
-                            2 => {
-                                if reported {
-                                    std::design::color::WARNING
-                                } else {
-                                    std::design::color::TEXT_MUTED
-                                }
-                            }
-                            _ => std::design::color::TEXT_MUTED,
-                        };
-                    } else if tab == SettingsTab::SecurityAndPrivacy && card == 3 && card_y >= 40 && card_y < 100 {
-                        chunk[i] = std::design::color::BACKGROUND;
-                    } else {
-                        chunk[i] = std::design::color::SURFACE;
-                    }
-                } else {
-                    chunk[i] = std::design::color::BACKGROUND;
-                }
-            } else if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
-                chunk[i] = std::design::color::TEXT_MUTED;
-            } else {
-                chunk[i] = std::design::color::BACKGROUND;
-            }
+            chunk[i] = get_settings_pixel(x, y, app);
             x += 1;
             if x == W {
                 x = 0;
@@ -569,16 +1066,7 @@ pub extern "C" fn _start() -> ! {
 
     // Initial render & presentation
     if surface > 0 {
-        render_settings_ui(
-            surface,
-            settings.current_tab,
-            [
-                settings.wireless,
-                settings.battery,
-                settings.thermal,
-                settings.sensor,
-            ],
-        );
+        render_settings_ui(surface, &settings);
         let _ = std::surface_flip(6);
         std::log(0, "[SETTINGS APP] Settings UI presented to scanout buffer.").ok();
     }
@@ -644,16 +1132,7 @@ pub extern "C" fn _start() -> ! {
                             settings.current_tab = next_tab;
                         }
                         if surface > 0 {
-                            render_settings_ui(
-                                surface,
-                                settings.current_tab,
-                                [
-                                    settings.wireless,
-                                    settings.battery,
-                                    settings.thermal,
-                                    settings.sensor,
-                                ],
-                            );
+                            render_settings_ui(surface, &settings);
                             let _ = std::surface_flip(6);
                         }
                         std::log(
