@@ -95,56 +95,147 @@ impl CalculatorState {
     }
 }
 
-// 7-segment bitmask table for digits 0..=9, minus '-', and 'E'
-fn get_7segment_mask(val: i64) -> u8 {
-    match val {
-        0 => 0b0011_1111,
-        1 => 0b0000_0110,
-        2 => 0b0101_1011,
-        3 => 0b0100_1111,
-        4 => 0b0110_0110,
-        5 => 0b0110_1101,
-        6 => 0b0111_1101,
-        7 => 0b0000_0111,
-        8 => 0b0111_1111,
-        9 => 0b0110_1111,
-        _ => 0b0100_0000, // '-'
-    }
-}
+// -----------------------------------------------------------------------------
+// 32-bit ARGB8888 Design Color Tokens
+// -----------------------------------------------------------------------------
+const BG_DARK: u32 = 0xFF0A0D14;
+const SURFACE_DARK: u32 = 0xFF121824;
+const SURFACE_RAISED: u32 = 0xFF1A2234;
+const BORDER_SUBTLE: u32 = 0xFF222E42;
+const TEXT_PRIMARY: u32 = 0xFFF8FAFC;
+const TEXT_MUTED: u32 = 0xFF94A3B8;
+const ACCENT_SKY: u32 = 0xFF31C4FF;
+const SUCCESS_EMERALD: u32 = 0xFF10B981;
+const DANGER_CRIMSON: u32 = 0xFFEF4444;
 
-fn is_segment_pixel(mask: u8, dx: usize, dy: usize) -> bool {
-    if dx >= 36 || dy >= 64 {
-        return false;
+// -----------------------------------------------------------------------------
+// Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')
+// -----------------------------------------------------------------------------
+const FONT_8X8: [[u8; 8]; 95] = [
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // 32 ' '
+    [0x18, 0x18, 0x18, 0x18, 0x00, 0x00, 0x18, 0x00], // 33 '!'
+    [0x66, 0x66, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00], // 34 '"'
+    [0x6c, 0x6c, 0xfe, 0x6c, 0xfe, 0x6c, 0x6c, 0x00], // 35 '#'
+    [0x18, 0x3e, 0x60, 0x3c, 0x06, 0x7c, 0x18, 0x00], // 36 '$'
+    [0x00, 0xc6, 0xcc, 0x18, 0x30, 0x66, 0xc6, 0x00], // 37 '%'
+    [0x38, 0x6c, 0x38, 0x76, 0xdc, 0xcc, 0x76, 0x00], // 38 '&'
+    [0x18, 0x18, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00], // 39 '''
+    [0x0c, 0x18, 0x30, 0x30, 0x30, 0x18, 0x0c, 0x00], // 40 '('
+    [0x30, 0x18, 0x0c, 0x0c, 0x0c, 0x18, 0x30, 0x00], // 41 ')'
+    [0x00, 0x66, 0x3c, 0xff, 0x3c, 0x66, 0x00, 0x00], // 42 '*'
+    [0x00, 0x18, 0x18, 0x7e, 0x18, 0x18, 0x00, 0x00], // 43 '+'
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x30], // 44 ','
+    [0x00, 0x00, 0x00, 0x7e, 0x00, 0x00, 0x00, 0x00], // 45 '-'
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00], // 46 '.'
+    [0x06, 0x0c, 0x18, 0x30, 0x60, 0xc0, 0x80, 0x00], // 47 '/'
+    [0x7c, 0xc6, 0xce, 0xd6, 0xe6, 0xc6, 0x7c, 0x00], // 48 '0'
+    [0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x7e, 0x00], // 49 '1'
+    [0x7c, 0xc6, 0x06, 0x1c, 0x30, 0x66, 0xfe, 0x00], // 50 '2'
+    [0x7c, 0xc6, 0x06, 0x3c, 0x06, 0xc6, 0x7c, 0x00], // 51 '3'
+    [0x1c, 0x3c, 0x6c, 0xcc, 0xfe, 0x0c, 0x1e, 0x00], // 52 '4'
+    [0xfe, 0xc0, 0xfc, 0x06, 0x06, 0xc6, 0x7c, 0x00], // 53 '5'
+    [0x78, 0x0c, 0xc0, 0xfc, 0xc6, 0xc6, 0x7c, 0x00], // 54 '6'
+    [0xfe, 0xc6, 0x0c, 0x18, 0x30, 0x30, 0x30, 0x00], // 55 '7'
+    [0x7c, 0xc6, 0xc6, 0x7c, 0xc6, 0xc6, 0x7c, 0x00], // 56 '8'
+    [0x7c, 0xc6, 0xc6, 0x7e, 0x06, 0x0c, 0x78, 0x00], // 57 '9'
+    [0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00, 0x00], // 58 ':'
+    [0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x30, 0x00], // 59 ';'
+    [0x06, 0x0c, 0x18, 0x30, 0x18, 0x0c, 0x06, 0x00], // 60 '<'
+    [0x00, 0x7e, 0x00, 0x7e, 0x00, 0x00, 0x00, 0x00], // 61 '='
+    [0x60, 0x30, 0x18, 0x0c, 0x18, 0x30, 0x60, 0x00], // 62 '>'
+    [0x7c, 0xc6, 0x0c, 0x18, 0x18, 0x00, 0x18, 0x00], // 63 '?'
+    [0x7c, 0xc6, 0xde, 0xde, 0xdc, 0xc0, 0x7c, 0x00], // 64 '@'
+    [0x38, 0x6c, 0xc6, 0xfe, 0xc6, 0xc6, 0xc6, 0x00], // 65 'A'
+    [0xfc, 0x66, 0x66, 0x7c, 0x66, 0x66, 0xfc, 0x00], // 66 'B'
+    [0x3c, 0x66, 0xc0, 0xc0, 0xc0, 0x66, 0x3c, 0x00], // 67 'C'
+    [0xf8, 0x6c, 0x66, 0x66, 0x66, 0x6c, 0xf8, 0x00], // 68 'D'
+    [0xfe, 0x62, 0x68, 0x78, 0x68, 0x62, 0xfe, 0x00], // 69 'E'
+    [0xfe, 0x62, 0x68, 0x78, 0x68, 0x60, 0xf0, 0x00], // 70 'F'
+    [0x3c, 0x66, 0xc0, 0xc0, 0xce, 0x66, 0x3e, 0x00], // 71 'G'
+    [0xc6, 0xc6, 0xc6, 0xfe, 0xc6, 0xc6, 0xc6, 0x00], // 72 'H'
+    [0x7e, 0x18, 0x18, 0x18, 0x18, 0x18, 0x7e, 0x00], // 73 'I'
+    [0x1e, 0x0c, 0x0c, 0x0c, 0xcc, 0xcc, 0x78, 0x00], // 74 'J'
+    [0xe6, 0x66, 0x6c, 0x78, 0x6c, 0x66, 0xe6, 0x00], // 75 'K'
+    [0xf0, 0x60, 0x60, 0x60, 0x62, 0x66, 0xfe, 0x00], // 76 'L'
+    [0xc6, 0xee, 0xfe, 0xfe, 0xd6, 0xc6, 0xc6, 0x00], // 77 'M'
+    [0xc6, 0xe6, 0xf6, 0xde, 0xce, 0xc6, 0xc6, 0x00], // 78 'N'
+    [0x7c, 0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0x7c, 0x00], // 79 'O'
+    [0xfc, 0x66, 0x66, 0x7c, 0x60, 0x60, 0xf0, 0x00], // 80 'P'
+    [0x7c, 0xc6, 0xc6, 0xc6, 0xd6, 0xcc, 0x76, 0x00], // 81 'Q'
+    [0xfc, 0x66, 0x66, 0x7c, 0x6c, 0x66, 0xe6, 0x00], // 82 'R'
+    [0x7c, 0xc6, 0x60, 0x38, 0x0c, 0xc6, 0x7c, 0x00], // 83 'S'
+    [0x7e, 0x7e, 0x5a, 0x18, 0x18, 0x18, 0x3c, 0x00], // 84 'T'
+    [0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0x7c, 0x00], // 85 'U'
+    [0xc6, 0xc6, 0xc6, 0xc6, 0x6c, 0x38, 0x10, 0x00], // 86 'V'
+    [0xc6, 0xc6, 0xd6, 0xfe, 0xfe, 0xee, 0xc6, 0x00], // 87 'W'
+    [0xc6, 0x6c, 0x38, 0x38, 0x6c, 0xc6, 0xc6, 0x00], // 88 'X'
+    [0x66, 0x66, 0x66, 0x3c, 0x18, 0x18, 0x3c, 0x00], // 89 'Y'
+    [0xfe, 0xc6, 0x0c, 0x18, 0x30, 0x62, 0xfe, 0x00], // 90 'Z'
+    [0x3c, 0x30, 0x30, 0x30, 0x30, 0x30, 0x3c, 0x00], // 91 '['
+    [0xc0, 0x60, 0x30, 0x18, 0x0c, 0x06, 0x02, 0x00], // 92 '\'
+    [0x3c, 0x0c, 0x0c, 0x0c, 0x0c, 0x0c, 0x3c, 0x00], // 93 ']'
+    [0x10, 0x38, 0x6c, 0xc6, 0x00, 0x00, 0x00, 0x00], // 94 '^'
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff], // 95 '_'
+    [0x30, 0x18, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00], // 96 '`'
+    [0x00, 0x00, 0x7c, 0x06, 0x7e, 0xc6, 0x7e, 0x00], // 97 'a'
+    [0xe0, 0x60, 0x7c, 0x66, 0x66, 0x66, 0xdc, 0x00], // 98 'b'
+    [0x00, 0x00, 0x7c, 0xc6, 0xc0, 0xc6, 0x7c, 0x00], // 99 'c'
+    [0x1c, 0x0c, 0x7c, 0xcc, 0xcc, 0xcc, 0x76, 0x00], // 100 'd'
+    [0x00, 0x00, 0x7c, 0xc6, 0xfe, 0xc0, 0x7c, 0x00], // 101 'e'
+    [0x38, 0x6c, 0x60, 0xf0, 0x60, 0x60, 0xf0, 0x00], // 102 'f'
+    [0x00, 0x00, 0x76, 0xcc, 0xcc, 0x7c, 0x0c, 0xf8], // 103 'g'
+    [0xe0, 0x60, 0x6c, 0x76, 0x66, 0x66, 0xe6, 0x00], // 104 'h'
+    [0x18, 0x00, 0x38, 0x18, 0x18, 0x18, 0x3c, 0x00], // 105 'i'
+    [0x06, 0x00, 0x0e, 0x06, 0x06, 0x66, 0x66, 0x3c], // 106 'j'
+    [0xe0, 0x60, 0x66, 0x6c, 0x78, 0x6c, 0xe6, 0x00], // 107 'k'
+    [0x38, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3c, 0x00], // 108 'l'
+    [0x00, 0x00, 0xe6, 0xff, 0xdb, 0xc9, 0xc9, 0x00], // 109 'm'
+    [0x00, 0x00, 0xdc, 0x66, 0x66, 0x66, 0x66, 0x00], // 110 'n'
+    [0x00, 0x00, 0x7c, 0xc6, 0xc6, 0xc6, 0x7c, 0x00], // 111 'o'
+    [0x00, 0x00, 0xdc, 0x66, 0x66, 0x7c, 0x60, 0xf0], // 112 'p'
+    [0x00, 0x00, 0x76, 0xcc, 0xcc, 0x7c, 0x0c, 0x1e], // 113 'q'
+    [0x00, 0x00, 0xdc, 0x66, 0x60, 0x60, 0xf0, 0x00], // 114 'r'
+    [0x00, 0x00, 0x7c, 0xc0, 0x7c, 0x06, 0xfc, 0x00], // 115 's'
+    [0x30, 0x30, 0xfc, 0x30, 0x30, 0x34, 0x18, 0x00], // 116 't'
+    [0x00, 0x00, 0xcc, 0xcc, 0xcc, 0xcc, 0x76, 0x00], // 117 'u'
+    [0x00, 0x00, 0xc6, 0xc6, 0xc6, 0x6c, 0x38, 0x00], // 118 'v'
+    [0x00, 0x00, 0xc6, 0xd6, 0xfe, 0xfe, 0x6c, 0x00], // 119 'w'
+    [0x00, 0x00, 0xc6, 0x6c, 0x38, 0x6c, 0xc6, 0x00], // 120 'x'
+    [0x00, 0x00, 0xc6, 0xc6, 0xc6, 0x7e, 0x06, 0xfc], // 121 'y'
+    [0x00, 0x00, 0x7e, 0x4c, 0x18, 0x32, 0x7e, 0x00], // 122 'z'
+    [0x0e, 0x18, 0x18, 0x70, 0x18, 0x18, 0x0e, 0x00], // 123 '{'
+    [0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00], // 124 '|'
+    [0x70, 0x18, 0x18, 0x0e, 0x18, 0x18, 0x70, 0x00], // 125 '}'
+    [0x76, 0xdc, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // 126 '~'
+];
+
+#[inline(always)]
+fn test_text(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    color: u32,
+) -> Option<u32> {
+    let char_w = 8 * scale;
+    let char_h = 8 * scale;
+    let total_w = text.len() * char_w;
+    if y >= y0 && y < y0 + char_h && x >= x0 && x < x0 + total_w {
+        let char_idx = (x - x0) / char_w;
+        let c = text[char_idx];
+        if (32..=126).contains(&c) {
+            let glyph_idx = (c - 32) as usize;
+            let col = ((x - x0) % char_w) / scale;
+            let row = (y - y0) / scale;
+            let row_byte = FONT_8X8[glyph_idx][row];
+            if ((row_byte >> (7 - col)) & 1) == 1 {
+                return Some(color);
+            }
+        }
     }
-    // Segment a: top horizontal
-    if (mask & 0b0000_0001) != 0 && dy < 6 && dx >= 4 && dx < 32 {
-        return true;
-    }
-    // Segment b: top-right vertical
-    if (mask & 0b0000_0010) != 0 && dy >= 4 && dy < 30 && dx >= 30 {
-        return true;
-    }
-    // Segment c: bottom-right vertical
-    if (mask & 0b0000_0100) != 0 && dy >= 34 && dy < 60 && dx >= 30 {
-        return true;
-    }
-    // Segment d: bottom horizontal
-    if (mask & 0b0000_1000) != 0 && dy >= 58 && dy < 64 && dx >= 4 && dx < 32 {
-        return true;
-    }
-    // Segment e: bottom-left vertical
-    if (mask & 0b0001_0000) != 0 && dy >= 34 && dy < 60 && dx < 6 {
-        return true;
-    }
-    // Segment f: top-left vertical
-    if (mask & 0b0010_0000) != 0 && dy >= 4 && dy < 30 && dx < 6 {
-        return true;
-    }
-    // Segment g: middle horizontal
-    if (mask & 0b0100_0000) != 0 && dy >= 29 && dy < 35 && dx >= 4 && dx < 32 {
-        return true;
-    }
-    false
+    None
 }
 
 // Button layout constants
@@ -179,227 +270,187 @@ fn get_button_action(row: usize, col: usize) -> Option<char> {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Pixel Color Resolution Engine
+// -----------------------------------------------------------------------------
+#[inline(never)]
+fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
+    // 1. Status Bar & Header (y: 0..96)
+    if y < 96 {
+        if y >= 94 {
+            return BORDER_SUBTLE;
+        }
+
+        // Back button (<) at (x: 24..100, y: 28..68)
+        if x >= 24 && x < 100 && y >= 28 && y < 68 {
+            let center_x = 62;
+            let center_y = 48;
+            let dx = (x as isize - center_x as isize).abs();
+            let dy = (y as isize - center_y as isize).abs();
+            if (dx + dy <= 12 && x <= center_x)
+                || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
+            {
+                return TEXT_PRIMARY;
+            }
+            return SURFACE_RAISED;
+        }
+
+        // Header Title: "Calculator"
+        if y >= 36 && y < 60 {
+            if let Some(c) = test_text(x, y, 120, 36, 3, b"Calculator", TEXT_PRIMARY) {
+                return c;
+            }
+        }
+
+        return SURFACE_DARK;
+    }
+
+    // 2. Numerical Display Card (y: 110..390, x: 24..696)
+    if (110..390).contains(&y) && x >= 24 && x < 696 {
+        if y == 110 || y == 389 || x == 24 || x == 695 {
+            return BORDER_SUBTLE;
+        }
+
+        // Active operation badge at top-left
+        if let Some(op) = calc.active_operation {
+            let op_sym = match op {
+                '/' => b"[ / ]",
+                '*' => b"[ * ]",
+                '-' => b"[ - ]",
+                '+' => b"[ + ]",
+                _ => b"[ ? ]",
+            };
+            if y >= 130 && y < 146 {
+                if let Some(c) = test_text(x, y, 48, 130, 2, op_sym, ACCENT_SKY) {
+                    return c;
+                }
+            }
+        }
+
+        // Format displayed value
+        let val = calc.displayed_value();
+        let is_neg = val < 0;
+        let mut uval = val.unsigned_abs();
+        let mut digits = [0u8; 20];
+        let mut count = 0usize;
+        if uval == 0 {
+            digits[0] = b'0';
+            count = 1;
+        } else {
+            let mut rev = [0u8; 20];
+            let mut rcount = 0usize;
+            while uval > 0 && rcount < 18 {
+                rev[rcount] = b'0' + (uval % 10) as u8;
+                uval /= 10;
+                rcount += 1;
+            }
+            if is_neg {
+                digits[0] = b'-';
+                count = 1;
+            }
+            for j in 0..rcount {
+                digits[count + j] = rev[rcount - 1 - j];
+            }
+            count += rcount;
+        }
+
+        let scale: usize = if count <= 8 { 5 } else if count <= 12 { 4 } else { 3 };
+        let char_w: usize = 8 * scale;
+        let total_w: usize = count * char_w;
+        let x0: usize = 648usize.saturating_sub(total_w);
+        let y0: usize = 260;
+
+        if let Some(c) = test_text(x, y, x0, y0, scale, &digits[..count], TEXT_PRIMARY) {
+            return c;
+        }
+
+        return SURFACE_DARK;
+    }
+
+    // 3. Keypad Matrix (5 rows, 4 cols)
+    for row in 0..5 {
+        let by = ROW_Y[row];
+        if y >= by && y < by + BTN_H {
+            for col in 0..4 {
+                let bx = COL_X[col];
+                if x >= bx && x < bx + BTN_W {
+                    // Rounded corner test (radius: 20)
+                    let rx = (x - bx).min(bx + BTN_W - 1 - x);
+                    let ry = (y - by).min(by + BTN_H - 1 - y);
+                    if rx < 20 && ry < 20 {
+                        let cdx = (20 - rx) as isize;
+                        let cdy = (20 - ry) as isize;
+                        if cdx * cdx + cdy * cdy > 400 {
+                            return BG_DARK;
+                        }
+                    }
+
+                    let (btn_bg, btn_border, text_color) = match (row, col) {
+                        (0, 0) => (0xFF26141A, DANGER_CRIMSON, DANGER_CRIMSON),
+                        (4, 3) => (SUCCESS_EMERALD, 0xFF34D399, 0xFFFFFFFF),
+                        (_, 3) => (0xFF14243A, ACCENT_SKY, ACCENT_SKY),
+                        (0, _) => (0xFF121B2A, BORDER_SUBTLE, TEXT_MUTED),
+                        _ => (0xFF162030, BORDER_SUBTLE, TEXT_PRIMARY),
+                    };
+
+                    // Button border rim (2 px)
+                    let is_border = rx < 2 || ry < 2
+                        || (rx < 20 && ry < 20 && {
+                            let cdx = (20 - rx) as isize;
+                            let cdy = (20 - ry) as isize;
+                            cdx * cdx + cdy * cdy >= 324
+                        });
+                    if is_border {
+                        return btn_border;
+                    }
+
+                    // Button symbol at center
+                    let center_x = bx + BTN_W / 2;
+                    let center_y = by + BTN_H / 2;
+
+                    if let Some(action) = get_button_action(row, col) {
+                        if action == '~' {
+                            if let Some(c) = test_text(x, y, center_x - 16, center_y - 8, 2, b"+/-", text_color) {
+                                return c;
+                            }
+                        } else {
+                            let act_byte = [action as u8];
+                            if let Some(c) = test_text(x, y, center_x - 12, center_y - 12, 3, &act_byte, text_color) {
+                                return c;
+                            }
+                        }
+                    }
+
+                    return btn_bg;
+                }
+            }
+        }
+    }
+
+    // 4. Home Gesture Pill (x: 260..460, y: 1418..1424)
+    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
+        return TEXT_MUTED;
+    }
+
+    BG_DARK
+}
+
 fn render_calculator_ui(surface: u32, calc: &CalculatorState) {
     let mut chunk = [0u32; CHUNK];
     let total = W * H;
     let mut offset = 0;
-
-    // Format display digits
-    let mut val = calc.displayed_value();
-    let is_neg = val < 0;
-    val = val.abs();
-
-    let mut digits = [0u8; 12];
-    let mut digit_count = 0usize;
-    if val == 0 {
-        digits[0] = 0;
-        digit_count = 1;
-    } else {
-        while val > 0 && digit_count < 10 {
-            digits[digit_count] = (val % 10) as u8;
-            val /= 10;
-            digit_count += 1;
-        }
-    }
-    if is_neg && digit_count < 11 {
-        digits[digit_count] = 255; // minus indicator
-        digit_count += 1;
-    }
-
-    // Right-align display digits
-    let digit_w = 36usize;
-    let digit_gap = 12usize;
-    let total_digits_w = digit_count * digit_w + (digit_count.saturating_sub(1)) * digit_gap;
-    let display_start_x = (W - 54).saturating_sub(total_digits_w);
-    let display_y_start = 240usize;
-
     while offset < total {
         let count = (total - offset).min(CHUNK);
         let mut x = offset % W;
         let mut y = offset / W;
-
         for i in 0..count {
-            if y < 96 {
-                // Header / Status bar
-                if y >= 94 {
-                    chunk[i] = std::design::color::ACCENT;
-                } else if x >= 24 && x < 100 && y >= 28 && y < 68 {
-                    // Back / Exit button
-                    chunk[i] = std::design::color::SURFACE_RAISED;
-                } else {
-                    chunk[i] = std::design::color::SURFACE;
-                }
-            } else if (110..390).contains(&y) && x >= 24 && x < W - 24 {
-                // Display Card
-                if y >= 388 {
-                    chunk[i] = std::design::color::ACCENT;
-                } else {
-                    // Check if inside active 7-segment digit
-                    let mut is_digit_pixel = false;
-                    if (display_y_start..display_y_start + 64).contains(&y)
-                        && x >= display_start_x
-                        && x < display_start_x + total_digits_w
-                    {
-                        let rel_x = x - display_start_x;
-                        let digit_slot = rel_x / (digit_w + digit_gap);
-                        let in_digit_x = rel_x % (digit_w + digit_gap);
-                        if digit_slot < digit_count && in_digit_x < digit_w {
-                            let d_val = digits[digit_count - 1 - digit_slot];
-                            let mask = if d_val == 255 {
-                                get_7segment_mask(-1)
-                            } else {
-                                get_7segment_mask(d_val as i64)
-                            };
-                            if is_segment_pixel(mask, in_digit_x, y - display_y_start) {
-                                is_digit_pixel = true;
-                            }
-                        }
-                    }
-                    if is_digit_pixel {
-                        chunk[i] = std::design::color::TEXT;
-                    } else {
-                        chunk[i] = std::design::color::SURFACE_RAISED;
-                    }
-                }
-            } else {
-                let active_row = if (440..580).contains(&y) {
-                    Some(0)
-                } else if (610..750).contains(&y) {
-                    Some(1)
-                } else if (780..920).contains(&y) {
-                    Some(2)
-                } else if (950..1090).contains(&y) {
-                    Some(3)
-                } else if (1120..1260).contains(&y) {
-                    Some(4)
-                } else {
-                    None
-                };
-
-                let active_col = if (28..172).contains(&x) {
-                    Some(0)
-                } else if (194..338).contains(&x) {
-                    Some(1)
-                } else if (360..504).contains(&x) {
-                    Some(2)
-                } else if (526..670).contains(&x) {
-                    Some(3)
-                } else {
-                    None
-                };
-
-                if let (Some(row), Some(col)) = (active_row, active_col) {
-                    let bx = COL_X[col];
-                    let by = ROW_Y[row];
-                    let center_x = bx + BTN_W / 2;
-                    let center_y = by + BTN_H / 2;
-
-                    // Determine button base color
-                    let btn_color = match (row, col) {
-                        (0, 0) => std::design::color::DANGER,
-                        (4, 3) => std::design::color::SUCCESS,
-                        (_, 3) => std::design::color::ACCENT,
-                        (0, _) => std::design::color::SURFACE,
-                        _ => std::design::color::SURFACE_RAISED,
-                    };
-
-                    // Render button glyph icon / symbol at center
-                    let mut is_glyph = false;
-                    let action = get_button_action(row, col).unwrap_or(' ');
-                    if ('0'..='9').contains(&action) {
-                        let d = (action as u8 - b'0') as i64;
-                        let mask = get_7segment_mask(d);
-                        let gx_start = center_x.saturating_sub(18);
-                        let gy_start = center_y.saturating_sub(32);
-                        if x >= gx_start && x < gx_start + 36 && y >= gy_start && y < gy_start + 64
-                        {
-                            is_glyph = is_segment_pixel(mask, x - gx_start, y - gy_start);
-                        }
-                    } else if action == '+' {
-                        // Cross +
-                        if (x >= center_x - 16
-                            && x < center_x + 16
-                            && y >= center_y - 3
-                            && y < center_y + 3)
-                            || (x >= center_x - 3
-                                && x < center_x + 3
-                                && y >= center_y - 16
-                                && y < center_y + 16)
-                        {
-                            is_glyph = true;
-                        }
-                    } else if action == '-' {
-                        // Minus -
-                        if x >= center_x - 16
-                            && x < center_x + 16
-                            && y >= center_y - 3
-                            && y < center_y + 3
-                        {
-                            is_glyph = true;
-                        }
-                    } else if action == '=' {
-                        // Equals =
-                        if (x >= center_x - 16
-                            && x < center_x + 16
-                            && y >= center_y - 8
-                            && y < center_y - 2)
-                            || (x >= center_x - 16
-                                && x < center_x + 16
-                                && y >= center_y + 2
-                                && y < center_y + 8)
-                        {
-                            is_glyph = true;
-                        }
-                    } else if action == 'C' {
-                        // Clear C (arc)
-                        let gx_start = center_x.saturating_sub(18);
-                        let gy_start = center_y.saturating_sub(32);
-                        if x >= gx_start && x < gx_start + 36 && y >= gy_start && y < gy_start + 64
-                        {
-                            let mask = 0b0011_1001; // a, d, e, f
-                            is_glyph = is_segment_pixel(mask, x - gx_start, y - gy_start);
-                        }
-                    } else if action == '/' {
-                        // Slash /
-                        let rel_x = x as i32 - center_x as i32;
-                        let rel_y = y as i32 - center_y as i32;
-                        if (-16..=16).contains(&rel_y) && (rel_x + rel_y).abs() <= 2 {
-                            is_glyph = true;
-                        }
-                    } else if action == '*' {
-                        // Star *
-                        let rel_x = x as i32 - center_x as i32;
-                        let rel_y = y as i32 - center_y as i32;
-                        if (rel_x.abs() <= 12 && rel_y.abs() <= 2)
-                            || (rel_x.abs() <= 2 && rel_y.abs() <= 12)
-                            || ((rel_x + rel_y).abs() <= 2 && rel_x.abs() <= 10)
-                            || ((rel_x - rel_y).abs() <= 2 && rel_x.abs() <= 10)
-                        {
-                            is_glyph = true;
-                        }
-                    }
-
-                    if is_glyph {
-                        chunk[i] = std::design::color::TEXT;
-                    } else {
-                        chunk[i] = btn_color;
-                    }
-                } else {
-                    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
-                        chunk[i] = std::design::color::TEXT_MUTED;
-                    } else {
-                        chunk[i] = std::design::color::BACKGROUND;
-                    }
-                }
-            }
-
+            chunk[i] = get_calculator_pixel(x, y, calc);
             x += 1;
             if x == W {
                 x = 0;
                 y += 1;
             }
         }
-
         let _ = std::surface_write(6, surface, offset, &chunk[..count]);
         offset += count;
     }
