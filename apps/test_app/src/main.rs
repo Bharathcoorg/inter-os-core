@@ -507,16 +507,190 @@ fn fmt_i64(v: i64, out: &mut [u8]) -> usize {
 // Palette and layout
 // -----------------------------------------------------------------------------
 
-const BG: u32 = 0xFF070B12;
-const CARD: u32 = 0xFF111B2B;
-const CARD_RAISED: u32 = 0xFF17243A;
-const EDGE: u32 = 0xFF26354D;
-const TEXT: u32 = 0xFFF4F7FB;
-const MUTED: u32 = 0xFF9AA8BC;
-const FAINT: u32 = 0xFF6C7A8E;
-const ACCENT: u32 = 0xFF31C4FF;
-const OK: u32 = 0xFF56D68A;
-const WARN: u32 = 0xFFFFC043;
+const BG: u32 = 0xFF080D1A;
+const CARD: u32 = 0xFF0F172A;
+const CARD_INNER: u32 = 0xFF0B1120;
+const CARD_RAISED: u32 = 0xFF1E293B;
+const EDGE: u32 = 0xFF2B3A55;
+const TEXT: u32 = 0xFFF1F5F9;
+const MUTED: u32 = 0xFF94A3B8;
+const FAINT: u32 = 0xFF64748B;
+const ACCENT: u32 = 0xFF38BDF8;
+const PURPLE: u32 = 0xFFA78BFA;
+const OK: u32 = 0xFF34D399;
+const WARN: u32 = 0xFFFBBF24;
+
+// -----------------------------------------------------------------------------
+// Geometry Helpers (Squircles & Rounded Rectangles)
+// -----------------------------------------------------------------------------
+
+fn in_rounded_rect(x: usize, y: usize, x0: usize, y0: usize, x1: usize, y1: usize, r: usize) -> bool {
+    if x < x0 || x >= x1 || y < y0 || y >= y1 {
+        return false;
+    }
+    let left = x0 + r;
+    let right = x1.saturating_sub(r + 1);
+    let top = y0 + r;
+    let bottom = y1.saturating_sub(r + 1);
+    if x >= left && x <= right {
+        return true;
+    }
+    if y >= top && y <= bottom {
+        return true;
+    }
+    let dx = if x < left { (left - x) as isize } else { (x - right) as isize };
+    let dy = if y < top { (top - y) as isize } else { (y - bottom) as isize };
+    (dx * dx + dy * dy) <= (r * r) as isize
+}
+
+fn on_rounded_rect_border(x: usize, y: usize, x0: usize, y0: usize, x1: usize, y1: usize, r: usize) -> bool {
+    if !in_rounded_rect(x, y, x0, y0, x1, y1, r) {
+        return false;
+    }
+    if r > 1 && in_rounded_rect(x, y, x0 + 1, y0 + 1, x1.saturating_sub(1), y1.saturating_sub(1), r - 1) {
+        return false;
+    }
+    true
+}
+
+// -----------------------------------------------------------------------------
+// Vector Pictograms
+// -----------------------------------------------------------------------------
+
+/// Vector Diagnostics Chip icon for header.
+fn icon_chip(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    // Chip body: 18x18 square
+    if dx.abs() <= 9 && dy.abs() <= 9 {
+        if dx.abs() == 9 || dy.abs() == 9 {
+            return Some(ACCENT);
+        }
+        if dx.abs() <= 5 && dy.abs() <= 5 {
+            if dx.abs() == 5 || dy.abs() == 5 {
+                return Some(MUTED);
+            }
+            if dx.abs() <= 2 && dy.abs() <= 2 {
+                return Some(OK);
+            }
+        }
+        return Some(CARD_RAISED);
+    }
+    // Pins extending on all 4 sides
+    if (dy.abs() == 3 || dy.abs() == 6) && (dx.abs() >= 10 && dx.abs() <= 13) {
+        return Some(ACCENT);
+    }
+    if (dx.abs() == 3 || dx.abs() == 6) && (dy.abs() >= 10 && dy.abs() <= 13) {
+        return Some(ACCENT);
+    }
+    None
+}
+
+/// Vector Task / Process icon for Card 0 (THIS PROCESS).
+fn icon_task(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    // Task card frame: 18x20
+    if dx.abs() <= 8 && dy.abs() <= 10 {
+        if dx.abs() == 8 || dy.abs() == 10 {
+            return Some(ACCENT);
+        }
+        // Top clip / tab
+        if dy <= -7 && dx.abs() <= 3 {
+            return Some(OK);
+        }
+        // Horizontal process rows
+        if dy == -3 && dx >= -5 && dx <= 5 {
+            return Some(MUTED);
+        }
+        if dy == 1 && dx >= -5 && dx <= 3 {
+            return Some(TEXT);
+        }
+        if dy == 5 && dx >= -5 && dx <= 1 {
+            return Some(MUTED);
+        }
+        return Some(CARD_RAISED);
+    }
+    // Top hanger clip loop
+    if dy <= -11 && dy >= -13 && dx.abs() <= 2 {
+        return Some(OK);
+    }
+    None
+}
+
+/// Vector CPU / Microprocessor icon for Card 1 (PLATFORM ARCHITECTURE).
+fn icon_cpu(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    // Outer processor package: 16x16
+    if dx.abs() <= 8 && dy.abs() <= 8 {
+        if dx.abs() == 8 || dy.abs() == 8 {
+            return Some(OK);
+        }
+        // Inner silicon core: 8x8
+        if dx.abs() <= 4 && dy.abs() <= 4 {
+            if dx.abs() == 4 || dy.abs() == 4 {
+                return Some(ACCENT);
+            }
+            return Some(CARD_RAISED);
+        }
+        return Some(CARD_INNER);
+    }
+    // Pins on 4 sides
+    if (dy.abs() == 2 || dy.abs() == 5) && (dx.abs() >= 9 && dx.abs() <= 11) {
+        return Some(OK);
+    }
+    if (dx.abs() == 2 || dx.abs() == 5) && (dy.abs() >= 9 && dy.abs() <= 11) {
+        return Some(OK);
+    }
+    None
+}
+
+/// Vector Inventory Matrix icon for Card 2 (HARDWARE INVENTORY).
+fn icon_matrix(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    let block_x = dx.abs() - 5;
+    let block_y = dy.abs() - 5;
+    if block_x.abs() <= 3 && block_y.abs() <= 3 {
+        if block_x.abs() == 3 || block_y.abs() == 3 {
+            return Some(PURPLE);
+        }
+        return Some(if dx < 0 && dy < 0 { OK } else { ACCENT });
+    }
+    // Interconnecting bus traces along axes
+    if (dx == 0 && dy.abs() <= 8) || (dy == 0 && dx.abs() <= 8) {
+        return Some(MUTED);
+    }
+    None
+}
+
+/// Vector Runtime Terminal Shell icon for Card 3 (ENVIRONMENT).
+fn icon_runtime(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    // Terminal frame
+    if dx.abs() <= 10 && dy.abs() <= 8 {
+        if dx.abs() == 10 || dy.abs() == 8 {
+            return Some(EDGE);
+        }
+        // Prompt >
+        if (dy == -3 && dx == -6)
+            || (dy == -2 && dx == -5)
+            || (dy == -1 && dx == -4)
+            || (dy == 0 && dx == -5)
+            || (dy == 1 && dx == -6)
+        {
+            return Some(ACCENT);
+        }
+        // Cursor _
+        if dy == 1 && dx >= -1 && dx <= 3 {
+            return Some(TEXT);
+        }
+        return Some(CARD_INNER);
+    }
+    None
+}
 
 struct Card {
     x0: usize,
@@ -527,10 +701,10 @@ struct Card {
 }
 
 const CARDS: [Card; 4] = [
-    Card { x0: 30, y0: 158, x1: 690, y1: 470, caption: b"THIS PROCESS" },
-    Card { x0: 30, y0: 490, x1: 690, y1: 800, caption: b"PLATFORM, FROM hal_query_platform()" },
-    Card { x0: 30, y0: 820, x1: 690, y1: 1130, caption: b"HARDWARE INVENTORY, PER settings_hardware_status()" },
-    Card { x0: 30, y0: 1150, x1: 690, y1: 1404, caption: b"ENVIRONMENT" },
+    Card { x0: 30, y0: 154, x1: 690, y1: 478, caption: b"THIS PROCESS IDENTITY" },
+    Card { x0: 30, y0: 492, x1: 690, y1: 792, caption: b"PLATFORM ARCHITECTURE" },
+    Card { x0: 30, y0: 806, x1: 690, y1: 1126, caption: b"HARDWARE AVAILABILITY INVENTORY" },
+    Card { x0: 30, y0: 1140, x1: 690, y1: 1396, caption: b"SYSTEM RUNTIME ENVIRONMENT" },
 ];
 
 // -----------------------------------------------------------------------------
@@ -561,65 +735,95 @@ fn render(surface: u32, app: &Diagnostics) {
 
 #[inline(never)]
 fn pixel(x: usize, y: usize, app: &Diagnostics) -> u32 {
+    // Header bar (0..96)
     if y < 96 {
         if y >= 94 {
             return EDGE;
         }
+        // Back button: tap hitbox (24..100) x (28..68)
         if (24..100).contains(&x) && (28..68).contains(&y) {
-            let border = y == 28 || y == 67 || x == 24 || x == 99;
+            let is_border = on_rounded_rect_border(x, y, 24, 28, 100, 68, 10);
             let chev = (x as isize - 62).abs() + (y as isize - 48).abs() <= 11 && x <= 62;
-            return if border || chev { TEXT } else { CARD_RAISED };
+            if is_border {
+                return EDGE;
+            }
+            if chev {
+                return TEXT;
+            }
+            return CARD_RAISED;
         }
-        if font::text_at(x, y, 116, 32, 3, b"Diagnostics") {
+        if font::text_at(x, y, 116, 34, 3, b"Diagnostics") {
             return TEXT;
+        }
+        if font::text_at(x, y, 118, 66, 1, b"KERNEL TELEMETRY & HARDWARE PROBES") {
+            return MUTED;
+        }
+        // Diagnostics chip icon at top right
+        if let Some(c) = icon_chip(x, y, 648, 48) {
+            return c;
         }
         return CARD;
     }
 
-    if (96..130).contains(&y) {
-        if font::text_at(x, y, 30, 104, 2, &app.status[..app.status_len]) {
+    // Status pill container (100..142)
+    if in_rounded_rect(x, y, 30, 100, 690, 142, 10) {
+        if on_rounded_rect_border(x, y, 30, 100, 690, 142, 10) {
+            return EDGE;
+        }
+        // Status indicator dot
+        let ddx = (x as isize) - 48;
+        let ddy = (y as isize) - 121;
+        if ddx * ddx + ddy * ddy <= 4 * 4 {
             return app.status_color;
         }
-        return BG;
+        if font::text_at(x, y, 64, 114, 2, &app.status[..app.status_len]) {
+            return app.status_color;
+        }
+        return CARD_RAISED;
     }
 
-    for card in CARDS.iter() {
-        if y >= card.y0 && y < card.y1 && x >= card.x0 && x < card.x1 {
-            if y == card.y0 || y == card.y1 - 1 || x == card.x0 || x == card.x1 - 1 {
+    // Card containers
+    for (i, card) in CARDS.iter().enumerate() {
+        if in_rounded_rect(x, y, card.x0, card.y0, card.x1, card.y1, 14) {
+            if on_rounded_rect_border(x, y, card.x0, card.y0, card.x1, card.y1, 14) {
                 return EDGE;
             }
-            if font::text_at(x, y, card.x0 + 14, card.y0 + 10, 2, card.caption) {
+            // Header divider line inside card
+            if y == card.y0 + 38 && x >= card.x0 + 12 && x <= card.x1 - 12 {
+                return EDGE;
+            }
+            // Card vector icon
+            let icon_cx = card.x0 + 26;
+            let icon_cy = card.y0 + 20;
+            let ic = match i {
+                0 => icon_task(x, y, icon_cx, icon_cy),
+                1 => icon_cpu(x, y, icon_cx, icon_cy),
+                2 => icon_matrix(x, y, icon_cx, icon_cy),
+                3 => icon_runtime(x, y, icon_cx, icon_cy),
+                _ => None,
+            };
+            if let Some(c) = ic {
+                return c;
+            }
+            if font::text_at(x, y, card.x0 + 46, card.y0 + 13, 2, card.caption) {
                 return ACCENT;
+            }
+            // Card body contents
+            let body_c = match i {
+                0 => process_card(x, y, app),
+                1 => platform_card(x, y, app),
+                2 => inventory_card(x, y, app),
+                3 => environment_card(x, y, app),
+                _ => None,
+            };
+            if let Some(c) = body_c {
+                return c;
             }
             return CARD;
         }
     }
 
-    if (158..470).contains(&y) && (30..690).contains(&x) {
-        if let Some(c) = process_card(x, y, app) {
-            return c;
-        }
-        return CARD;
-    }
-    if (490..800).contains(&y) && (30..690).contains(&x) {
-        if let Some(c) = platform_card(x, y, app) {
-            return c;
-        }
-        return CARD;
-    }
-    if (820..1130).contains(&y) && (30..690).contains(&x) {
-        if let Some(c) = inventory_card(x, y, app) {
-            return c;
-        }
-        return CARD;
-    }
-    if (1150..1404).contains(&y) && (30..690).contains(&x) {
-        if let Some(c) = environment_card(x, y, app) {
-            return c;
-        }
-        return CARD;
-    }
-
+    // Bottom gesture home bar (hitbox iy >= 1400)
     if (1418..1424).contains(&y) && (260..460).contains(&x) {
         return MUTED;
     }
@@ -628,14 +832,14 @@ fn pixel(x: usize, y: usize, app: &Diagnostics) -> u32 {
 
 #[inline(never)]
 fn row(x: usize, y: usize, top: usize, label: &[u8], verdict: &[u8], color: u32, source: &[u8]) -> Option<u32> {
-    if font::text_at(x, y, 44, top, 2, label) {
+    if font::text_at(x, y, 48, top, 2, label) {
         return Some(MUTED);
     }
-    let vx = 676usize.saturating_sub(font::text_width(verdict, 2));
+    let vx = 672usize.saturating_sub(font::text_width(verdict, 2));
     if font::text_at(x, y, vx, top, 2, verdict) {
         return Some(color);
     }
-    if font::text_at(x, y, 44, top + 18, 2, source) {
+    if font::text_at(x, y, 48, top + 18, 2, source) {
         return Some(FAINT);
     }
     None
@@ -643,7 +847,7 @@ fn row(x: usize, y: usize, top: usize, label: &[u8], verdict: &[u8], color: u32,
 
 #[inline(never)]
 fn line(x: usize, y: usize, top: usize, text: &[u8], color: u32) -> Option<u32> {
-    if font::text_at(x, y, 44, top, 2, text) {
+    if font::text_at(x, y, 48, top, 2, text) {
         return Some(color);
     }
     None
@@ -658,17 +862,17 @@ fn refusal(code: i64, out: &mut [u8]) -> usize {
     n
 }
 
-/// Card 1: identity, geometry and uptime of this very process.
+/// Card 0: identity, geometry and uptime of this very process.
 #[inline(never)]
 fn process_card(x: usize, y: usize, app: &Diagnostics) -> Option<u32> {
     let mut v = [0u8; 24];
     let n = fmt_u64(app.task_id, &mut v);
-    if let Some(c) = row(x, y, 190, b"Task id", &v[..n], TEXT, b"get_task_id()") {
+    if let Some(c) = row(x, y, 198, b"Task id", &v[..n], TEXT, b"get_task_id()") {
         return Some(c);
     }
 
     let n = fmt_u64(app.surface_id as u64, &mut v);
-    if let Some(c) = row(x, y, 232, b"Surface id", &v[..n], TEXT, b"surface_create(6, 720x1440, z=200)") {
+    if let Some(c) = row(x, y, 236, b"Surface id", &v[..n], TEXT, b"surface_create(6, 720x1440, z=200)") {
         return Some(c);
     }
 
@@ -679,19 +883,17 @@ fn process_card(x: usize, y: usize, app: &Diagnostics) -> Option<u32> {
                 return Some(c);
             }
             let n = fmt_u64(t / 1000, &mut v);
-            if let Some(c) = row(x, y, 316, b"Uptime", &v[..n], TEXT, b"boot ticks / 1000 = seconds") {
+            if let Some(c) = row(x, y, 312, b"Uptime", &v[..n], TEXT, b"boot ticks / 1000 = seconds") {
                 return Some(c);
             }
         }
         Probe::Refused(e) => {
-            // The refused status belongs on the row that made the call. Uptime is
-            // derived from the same read, so it gets the word, not a number.
             let mut w = [0u8; 40];
             let n = refusal(e, &mut w);
             if let Some(c) = row(x, y, 274, b"Boot ticks", &w[..n], WARN, b"get_ticks() refused") {
                 return Some(c);
             }
-            if let Some(c) = row(x, y, 316, b"Uptime", b"unavailable", WARN, b"derived from the same refused read") {
+            if let Some(c) = row(x, y, 312, b"Uptime", b"unavailable", WARN, b"derived from the same refused read") {
                 return Some(c);
             }
         }
@@ -702,8 +904,6 @@ fn process_card(x: usize, y: usize, app: &Diagnostics) -> Option<u32> {
         }
     }
 
-    // This app's own compositor entry, if the registry reported it. The geometry
-    // is the compositor's, not a constant this app chose.
     match &app.own_window {
         Some(w) => {
             let mut word = [0u8; 40];
@@ -712,20 +912,18 @@ fn process_card(x: usize, y: usize, app: &Diagnostics) -> Option<u32> {
             let n = n + fmt_i64(w.x, &mut word[n..]);
             let n = n + write_lit(b",", &mut word[n..]);
             let n = n + fmt_i64(w.y, &mut word[n..]);
-            if let Some(c) = row(x, y, 358, b"Own window", &word[..n], TEXT, b"window_list() -> name, x, y") {
+            if let Some(c) = row(x, y, 350, b"Own window", &word[..n], TEXT, b"window_list() -> name, x, y") {
                 return Some(c);
-            }            let mut word = [0u8; 40];
+            }
+            let mut word = [0u8; 40];
             let n = write_lit(b"", &mut word);
             let n = n + fmt_i64(w.width, &mut word[n..]);
             let n = n + write_lit(b"x", &mut word[n..]);
             let n = n + fmt_i64(w.height, &mut word[n..]);
             let n = n + write_lit(if w.visible { b" visible" } else { b" hidden" }, &mut word[n..]);
-            if let Some(c) = row(x, y, 400, b"Geometry", &word[..n], TEXT, b"window_list() -> width, height, visible") {
+            if let Some(c) = row(x, y, 388, b"Geometry", &word[..n], TEXT, b"window_list() -> width, height, visible") {
                 return Some(c);
             }
-            // The compositor's own id and z-order for this surface. These are
-            // worth showing because they are what the compositor sorts on, and
-            // they are the numbers a bring-up engineer needs to check.
             let mut word = [0u8; 40];
             let mut n = write_lit(b"win ", &mut word);
             n = n + fmt_u64(w.id as u64, &mut word[n..]);
@@ -733,12 +931,12 @@ fn process_card(x: usize, y: usize, app: &Diagnostics) -> Option<u32> {
             n = n + fmt_i64(w.z, &mut word[n..]);
             n = n + write_lit(b" task ", &mut word[n..]);
             n = n + fmt_u64(w.owner as u64, &mut word[n..]);
-            if let Some(c) = row(x, y, 442, b"Compositor", &word[..n], MUTED, b"window_list() -> id, z_order, owner_task") {
+            if let Some(c) = row(x, y, 426, b"Compositor", &word[..n], MUTED, b"window_list() -> id, z_order, owner_task") {
                 return Some(c);
             }
         }
         None => {
-            if let Some(c) = row(x, y, 358, b"Own window", b"not listed", WARN, b"window_list() has no entry for this surface") {
+            if let Some(c) = row(x, y, 350, b"Own window", b"not listed", WARN, b"window_list() has no entry for this surface") {
                 return Some(c);
             }
         }
@@ -746,51 +944,49 @@ fn process_card(x: usize, y: usize, app: &Diagnostics) -> Option<u32> {
     None
 }
 
-/// Card 2: the SoC, straight from the HAL.
+/// Card 1: the SoC, straight from the HAL.
 #[inline(never)]
 fn platform_card(x: usize, y: usize, app: &Diagnostics) -> Option<u32> {
     match &app.platform {
         Probe::Ok(p) => {
-            if let Some(c) = row(x, y, 546, b"Architecture", &p.arch[..p.arch_len], OK, b"hal_query_platform() -> arch") {
+            if let Some(c) = row(x, y, 540, b"Architecture", &p.arch[..p.arch_len], OK, b"hal_query_platform() -> arch") {
                 return Some(c);
             }
-            if let Some(c) = row(x, y, 588, b"SoC", &p.soc[..p.soc_len], OK, b"hal_query_platform() -> soc") {
+            if let Some(c) = row(x, y, 580, b"SoC", &p.soc[..p.soc_len], OK, b"hal_query_platform() -> soc") {
                 return Some(c);
             }
             let mut w = [0u8; 24];
             let n = fmt_i64(p.cores, &mut w);
-            if let Some(c) = row(x, y, 630, b"CPU cores", &w[..n], OK, b"hal_query_platform() -> cores") {
+            if let Some(c) = row(x, y, 620, b"CPU cores", &w[..n], OK, b"hal_query_platform() -> cores") {
                 return Some(c);
             }
             let mut w = [0u8; 24];
             let n = fmt_i64(p.freq_mhz, &mut w);
-            if let Some(c) = row(x, y, 672, b"Base clock", &w[..n], OK, b"hal_query_platform() -> freq_mhz") {
+            if let Some(c) = row(x, y, 660, b"Base clock", &w[..n], OK, b"hal_query_platform() -> freq_mhz") {
                 return Some(c);
             }
-            if line(x, y, 714, b"The base clock is the HAL's platform table,", FAINT).is_some() {
+            if line(x, y, 704, b"The base clock is the HAL's platform table,", FAINT).is_some() {
                 return Some(FAINT);
             }
-            line(x, y, 736, b"not a measured running frequency.", FAINT)
+            line(x, y, 726, b"not a measured running frequency.", FAINT)
         }
         Probe::Refused(e) => {
             let mut w = [0u8; 40];
             let n = refusal(*e, &mut w);
-            row(x, y, 546, b"Platform", &w[..n], WARN, b"hal_query_platform() refused")
+            row(x, y, 540, b"Platform", &w[..n], WARN, b"hal_query_platform() refused")
         }
         Probe::Malformed => {
-            row(x, y, 546, b"Platform", b"no data", WARN, b"hal_query_platform() payload lacked fields")
+            row(x, y, 540, b"Platform", b"no data", WARN, b"hal_query_platform() payload lacked fields")
         }
     }
 }
 
-/// Card 3: the kernel's own hardware availability table.
+/// Card 2: the kernel's own hardware availability table.
 #[inline(never)]
 fn inventory_card(x: usize, y: usize, app: &Diagnostics) -> Option<u32> {
-    // Each expansion is its own block, so the buffer names inside cannot collide
-    // across invocations.
     macro_rules! item {
         ($i:expr) => {{
-            if let Some(c) = item_row(x, y, 866 + $i * 42, &app.inventory[$i]) {
+            if let Some(c) = item_row(x, y, 852 + $i * 40, &app.inventory[$i]) {
                 return Some(c);
             }
         }};
@@ -806,9 +1002,6 @@ fn inventory_card(x: usize, y: usize, app: &Diagnostics) -> Option<u32> {
 }
 
 /// One inventory row, with the verdict the kernel returned for that category.
-///
-/// The provenance line names the exact category string that was queried, so the
-/// row can be reproduced by hand from a shell or a debugger.
 #[inline(never)]
 fn item_row(x: usize, y: usize, top: usize, entry: &InventoryRow) -> Option<u32> {
     let mut w = [0u8; 24];
@@ -828,10 +1021,9 @@ fn item_row(x: usize, y: usize, top: usize, entry: &InventoryRow) -> Option<u32>
     row(x, y, top, entry.label, &w[..wn], color, &source[..sn.min(source.len())])
 }
 
-/// Card 4: everything else the kernel will tell this task about its world.
+/// Card 3: everything else the kernel will tell this task about its world.
 #[inline(never)]
 fn environment_card(x: usize, y: usize, app: &Diagnostics) -> Option<u32> {
-    // Launcher service record.
     let mut w = [0u8; 32];
     let (color, wn) = match &app.launcher {
         Probe::Ok((state, gen)) => {
@@ -848,11 +1040,10 @@ fn environment_card(x: usize, y: usize, app: &Diagnostics) -> Option<u32> {
             (WARN, n)
         }
     };
-    if let Some(c) = row(x, y, 1196, b"Launcher", &w[..wn], color, b"service_query(10)") {
+    if let Some(c) = row(x, y, 1186, b"Launcher", &w[..wn], color, b"service_query(10)") {
         return Some(c);
     }
 
-    // Storage capacity, in MiB so the number is readable at this text size.
     let mut w = [0u8; 40];
     let (color, wn) = match app.storage_bytes {
         Probe::Ok(b) => {
@@ -870,11 +1061,10 @@ fn environment_card(x: usize, y: usize, app: &Diagnostics) -> Option<u32> {
             (WARN, n)
         }
     };
-    if let Some(c) = row(x, y, 1238, b"Block storage", &w[..wn], color, b"storage_query() -> sectors x 512") {
+    if let Some(c) = row(x, y, 1226, b"Block storage", &w[..wn], color, b"storage_query() -> sectors x 512") {
         return Some(c);
     }
 
-    // Other tasks currently scheduled.
     let mut w = [0u8; 40];
     let (color, wn) = match app.runtime_tasks {
         Some(n) => {
@@ -888,11 +1078,10 @@ fn environment_card(x: usize, y: usize, app: &Diagnostics) -> Option<u32> {
             (WARN, n)
         }
     };
-    if let Some(c) = row(x, y, 1280, b"Runtime", &w[..wn], color, b"app_runtime_list() -> task records") {
+    if let Some(c) = row(x, y, 1266, b"Runtime", &w[..wn], color, b"app_runtime_list() -> task records") {
         return Some(c);
     }
 
-    // The OS version the image carries, and this binary's own build version.
     let mut w = [0u8; 40];
     let (color, wn) = match app.policy_version {
         Some((maj, min, patch)) => {
@@ -909,14 +1098,14 @@ fn environment_card(x: usize, y: usize, app: &Diagnostics) -> Option<u32> {
             (WARN, n)
         }
     };
-    if let Some(c) = row(x, y, 1322, b"OS version", &w[..wn], color, b"/system/etc/policy.json") {
+    if let Some(c) = row(x, y, 1306, b"OS version", &w[..wn], color, b"/system/etc/policy.json") {
         return Some(c);
     }
 
     let mut w = [0u8; 40];
     let n = write_lit(b"build ", &mut w);
     let n = n + write_lit(BUILD_VERSION.as_bytes(), &mut w[n..]);
-    if let Some(c) = row(x, y, 1364, b"This binary", &w[..n], MUTED, b"compiled into this ELF, not read back") {
+    if let Some(c) = row(x, y, 1346, b"This binary", &w[..n], MUTED, b"compiled into this ELF, not read back") {
         return Some(c);
     }
     None
@@ -1031,8 +1220,10 @@ pub extern "C" fn _start() -> ! {
                         std::exit_with_code(0);
                     }
                     if input.kind == 1 {
-                        let tapped_back = (24..100).contains(&input.x) && (28..68).contains(&input.y);
-                        if tapped_back || input.y >= 1400 {
+                        let ix = input.x as usize;
+                        let iy = input.y as usize;
+                        let tapped_back = (24..100).contains(&ix) && (28..68).contains(&iy);
+                        if tapped_back || iy >= 1400 {
                             let _ = std::surface_destroy(6, surface);
                             std::exit_with_code(0);
                         }
