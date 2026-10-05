@@ -222,6 +222,506 @@ impl CameraApp {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Visual Design Tokens
+// -----------------------------------------------------------------------------
+const BG_DARK: u32 = 0xFF05080E;
+const SURFACE_RAISED: u32 = 0xFF1E293B;
+const BORDER_SUBTLE: u32 = 0xFF334155;
+const ACCENT_AMBER: u32 = 0xFFFFB800;
+const ACCENT_SKY: u32 = 0xFF38BDF8;
+const SUCCESS_EMERALD: u32 = 0xFF10B981;
+const DANGER_CRIMSON: u32 = 0xFFEF4444;
+const TEXT_PRIMARY: u32 = 0xFFF8FAFC;
+const TEXT_MUTED: u32 = 0xFF94A3B8;
+
+// -----------------------------------------------------------------------------
+// Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')
+// -----------------------------------------------------------------------------
+const FONT_8X8: [[u8; 8]; 95] = [
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // 32 ' '
+    [0x18, 0x18, 0x18, 0x18, 0x00, 0x00, 0x18, 0x00], // 33 '!'
+    [0x66, 0x66, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00], // 34 '"'
+    [0x6c, 0x6c, 0xfe, 0x6c, 0xfe, 0x6c, 0x6c, 0x00], // 35 '#'
+    [0x18, 0x3e, 0x60, 0x3c, 0x06, 0x7c, 0x18, 0x00], // 36 '$'
+    [0x00, 0xc6, 0xcc, 0x18, 0x30, 0x66, 0xc6, 0x00], // 37 '%'
+    [0x38, 0x6c, 0x38, 0x76, 0xdc, 0xcc, 0x76, 0x00], // 38 '&'
+    [0x18, 0x18, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00], // 39 '''
+    [0x0c, 0x18, 0x30, 0x30, 0x30, 0x18, 0x0c, 0x00], // 40 '('
+    [0x30, 0x18, 0x0c, 0x0c, 0x0c, 0x18, 0x30, 0x00], // 41 ')'
+    [0x00, 0x66, 0x3c, 0xff, 0x3c, 0x66, 0x00, 0x00], // 42 '*'
+    [0x00, 0x18, 0x18, 0x7e, 0x18, 0x18, 0x00, 0x00], // 43 '+'
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x30], // 44 ','
+    [0x00, 0x00, 0x00, 0x7e, 0x00, 0x00, 0x00, 0x00], // 45 '-'
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00], // 46 '.'
+    [0x06, 0x0c, 0x18, 0x30, 0x60, 0xc0, 0x80, 0x00], // 47 '/'
+    [0x7c, 0xc6, 0xce, 0xd6, 0xe6, 0xc6, 0x7c, 0x00], // 48 '0'
+    [0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x7e, 0x00], // 49 '1'
+    [0x7c, 0xc6, 0x06, 0x1c, 0x30, 0x66, 0xfe, 0x00], // 50 '2'
+    [0x7c, 0xc6, 0x06, 0x3c, 0x06, 0xc6, 0x7c, 0x00], // 51 '3'
+    [0x1c, 0x3c, 0x6c, 0xcc, 0xfe, 0x0c, 0x1e, 0x00], // 52 '4'
+    [0xfe, 0xc0, 0xfc, 0x06, 0x06, 0xc6, 0x7c, 0x00], // 53 '5'
+    [0x38, 0x60, 0xc0, 0xfc, 0xc6, 0xc6, 0x7c, 0x00], // 54 '6'
+    [0xfe, 0xc6, 0x0c, 0x18, 0x30, 0x30, 0x30, 0x00], // 55 '7'
+    [0x7c, 0xc6, 0xc6, 0x7c, 0xc6, 0xc6, 0x7c, 0x00], // 56 '8'
+    [0x7c, 0xc6, 0xc6, 0x7e, 0x06, 0x0c, 0x78, 0x00], // 57 '9'
+    [0x00, 0x18, 0x18, 0x00, 0x00, 0x18, 0x18, 0x00], // 58 ':'
+    [0x00, 0x18, 0x18, 0x00, 0x00, 0x18, 0x18, 0x30], // 59 ';'
+    [0x06, 0x0c, 0x18, 0x30, 0x18, 0x0c, 0x06, 0x00], // 60 '<'
+    [0x00, 0x00, 0x7e, 0x00, 0x7e, 0x00, 0x00, 0x00], // 61 '='
+    [0x60, 0x30, 0x18, 0x0c, 0x18, 0x30, 0x60, 0x00], // 62 '>'
+    [0x7c, 0xc6, 0x0c, 0x18, 0x18, 0x00, 0x18, 0x00], // 63 '?'
+    [0x7c, 0xc6, 0xde, 0xde, 0xdc, 0xc0, 0x7c, 0x00], // 64 '@'
+    [0x38, 0x6c, 0xc6, 0xfe, 0xc6, 0xc6, 0xc6, 0x00], // 65 'A'
+    [0xfc, 0x66, 0x66, 0x7c, 0x66, 0x66, 0xfc, 0x00], // 66 'B'
+    [0x3c, 0x66, 0xc0, 0xc0, 0xc0, 0x66, 0x3c, 0x00], // 67 'C'
+    [0xf8, 0x6c, 0x66, 0x66, 0x66, 0x6c, 0xf8, 0x00], // 68 'D'
+    [0xfe, 0x62, 0x68, 0x78, 0x68, 0x62, 0xfe, 0x00], // 69 'E'
+    [0xfe, 0x62, 0x68, 0x78, 0x68, 0x60, 0xf0, 0x00], // 70 'F'
+    [0x3c, 0x66, 0xc0, 0xc0, 0xce, 0x66, 0x3e, 0x00], // 71 'G'
+    [0xc6, 0xc6, 0xc6, 0xfe, 0xc6, 0xc6, 0xc6, 0x00], // 72 'H'
+    [0x3c, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3c, 0x00], // 73 'I'
+    [0x1e, 0x0c, 0x0c, 0x0c, 0xcc, 0xcc, 0x78, 0x00], // 74 'J'
+    [0xe6, 0x66, 0x6c, 0x78, 0x6c, 0x66, 0xe6, 0x00], // 75 'K'
+    [0xf0, 0x60, 0x60, 0x60, 0x62, 0x66, 0xfe, 0x00], // 76 'L'
+    [0xc6, 0xee, 0xfe, 0xd6, 0xc6, 0xc6, 0xc6, 0x00], // 77 'M'
+    [0xc6, 0xe6, 0xf6, 0xde, 0xce, 0xc6, 0xc6, 0x00], // 78 'N'
+    [0x7c, 0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0x7c, 0x00], // 79 'O'
+    [0xfc, 0x66, 0x66, 0x7c, 0x60, 0x60, 0xf0, 0x00], // 80 'P'
+    [0x7c, 0xc6, 0xc6, 0xc6, 0xd6, 0xde, 0x7c, 0x0e], // 81 'Q'
+    [0xfc, 0x66, 0x66, 0x7c, 0x6c, 0x66, 0xe6, 0x00], // 82 'R'
+    [0x7c, 0xc6, 0x60, 0x38, 0x0c, 0xc6, 0x7c, 0x00], // 83 'S'
+    [0x7e, 0x5a, 0x18, 0x18, 0x18, 0x18, 0x3c, 0x00], // 84 'T'
+    [0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0x7c, 0x00], // 85 'U'
+    [0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0x6c, 0x38, 0x00], // 86 'V'
+    [0xc6, 0xc6, 0xc6, 0xd6, 0xfe, 0xee, 0xc6, 0x00], // 87 'W'
+    [0xc6, 0xc6, 0x6c, 0x38, 0x6c, 0xc6, 0xc6, 0x00], // 88 'X'
+    [0x66, 0x66, 0x66, 0x3c, 0x18, 0x18, 0x3c, 0x00], // 89 'Y'
+    [0xfe, 0xc6, 0x0c, 0x18, 0x30, 0x62, 0xfe, 0x00], // 90 'Z'
+    [0x3c, 0x30, 0x30, 0x30, 0x30, 0x30, 0x3c, 0x00], // 91 '['
+    [0xc0, 0x60, 0x30, 0x18, 0x0c, 0x06, 0x02, 0x00], // 92 '\'
+    [0x3c, 0x0c, 0x0c, 0x0c, 0x0c, 0x0c, 0x3c, 0x00], // 93 ']'
+    [0x10, 0x38, 0x6c, 0xc6, 0x00, 0x00, 0x00, 0x00], // 94 '^'
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff], // 95 '_'
+    [0x30, 0x18, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00], // 96 '`'
+    [0x00, 0x00, 0x78, 0x0c, 0x7c, 0xcc, 0x76, 0x00], // 97 'a'
+    [0xe0, 0x60, 0x7c, 0x66, 0x66, 0x66, 0xdc, 0x00], // 98 'b'
+    [0x00, 0x00, 0x78, 0xcc, 0xc0, 0xcc, 0x78, 0x00], // 99 'c'
+    [0x1c, 0x0c, 0x7c, 0xcc, 0xcc, 0xcc, 0x76, 0x00], // 100 'd'
+    [0x00, 0x00, 0x78, 0xcc, 0xfc, 0xc0, 0x78, 0x00], // 101 'e'
+    [0x38, 0x6c, 0x60, 0xf0, 0x60, 0x60, 0xf0, 0x00], // 102 'f'
+    [0x00, 0x00, 0x76, 0xcc, 0xcc, 0x7c, 0x0c, 0xf8], // 103 'g'
+    [0xe0, 0x60, 0x6c, 0x76, 0x66, 0x66, 0xe6, 0x00], // 104 'h'
+    [0x18, 0x00, 0x38, 0x18, 0x18, 0x18, 0x3c, 0x00], // 105 'i'
+    [0x0c, 0x00, 0x1c, 0x0c, 0x0c, 0xcc, 0xcc, 0x78], // 106 'j'
+    [0xe0, 0x60, 0x66, 0x6c, 0x78, 0x6c, 0xe6, 0x00], // 107 'k'
+    [0x38, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3c, 0x00], // 108 'l'
+    [0x00, 0x00, 0xec, 0xfe, 0xd6, 0xd6, 0xd6, 0x00], // 109 'm'
+    [0x00, 0x00, 0xdc, 0x66, 0x66, 0x66, 0x66, 0x00], // 110 'n'
+    [0x00, 0x00, 0x7c, 0xc6, 0xc6, 0xc6, 0x7c, 0x00], // 111 'o'
+    [0x00, 0x00, 0xdc, 0x66, 0x66, 0x7c, 0x60, 0xf0], // 112 'p'
+    [0x00, 0x00, 0x76, 0xcc, 0xcc, 0x7c, 0x0c, 0x1e], // 113 'q'
+    [0x00, 0x00, 0xdc, 0x76, 0x66, 0x60, 0xf0, 0x00], // 114 'r'
+    [0x00, 0x00, 0x7c, 0xc0, 0x78, 0x0c, 0xf8, 0x00], // 115 's'
+    [0x10, 0x30, 0x7c, 0x30, 0x30, 0x34, 0x18, 0x00], // 116 't'
+    [0x00, 0x00, 0xcc, 0xcc, 0xcc, 0xcc, 0x76, 0x00], // 117 'u'
+    [0x00, 0x00, 0xc6, 0xc6, 0xc6, 0x6c, 0x38, 0x00], // 118 'v'
+    [0x00, 0x00, 0xc6, 0xd6, 0xd6, 0xfe, 0x6c, 0x00], // 119 'w'
+    [0x00, 0x00, 0xc6, 0x6c, 0x38, 0x6c, 0xc6, 0x00], // 120 'x'
+    [0x00, 0x00, 0xc6, 0xc6, 0xce, 0x76, 0x06, 0x7c], // 121 'y'
+    [0x00, 0x00, 0xfc, 0x18, 0x30, 0x60, 0xfc, 0x00], // 122 'z'
+    [0x0e, 0x18, 0x18, 0x70, 0x18, 0x18, 0x0e, 0x00], // 123 '{'
+    [0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x18, 0x00], // 124 '|'
+    [0x70, 0x18, 0x18, 0x0e, 0x18, 0x18, 0x70, 0x00], // 125 '}'
+    [0x76, 0xdc, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // 126 '~'
+];
+
+fn test_text(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    color: u32,
+) -> Option<u32> {
+    if y < y0 || y >= y0 + 8 * scale {
+        return None;
+    }
+    let row = (y - y0) / scale;
+    for (i, &b) in text.iter().enumerate() {
+        let char_x0 = x0 + i * 8 * scale;
+        if x >= char_x0 && x < char_x0 + 8 * scale {
+            let col = (x - char_x0) / scale;
+            let glyph_idx = if (32..=126).contains(&b) {
+                (b - 32) as usize
+            } else {
+                0
+            };
+            let row_byte = FONT_8X8[glyph_idx][row];
+            if (row_byte & (0x80 >> col)) != 0 {
+                return Some(color);
+            }
+            return None;
+        }
+    }
+    None
+}
+
+/// Vector lightning bolt pictogram for flash pill
+fn test_lightning(x: usize, y: usize, cx: usize, cy: usize) -> bool {
+    let dx = x as isize - cx as isize;
+    let dy = y as isize - cy as isize;
+    if dy >= -10 && dy <= 10 && dx >= -6 && dx <= 6 {
+        let is_top = dy < 0 && dx >= (dy / 2) && dx <= (dy / 2 + 4);
+        let is_bot = dy >= 0 && dx <= (dy / 2) && dx >= (dy / 2 - 4);
+        is_top || is_bot
+    } else {
+        false
+    }
+}
+
+/// Vector dual curved arrows pictogram for lens flip
+fn test_flip_arrows(x: usize, y: usize, cx: usize, cy: usize) -> bool {
+    let dx = x as isize - cx as isize;
+    let dy = y as isize - cy as isize;
+    let r2 = dx * dx + dy * dy;
+    let on_arc = r2 >= 13 * 13 && r2 <= 17 * 17 && ((dx.abs() > 4) || (dy.abs() > 4));
+    let arrow1 = (dx - 12).abs() <= 4 && (dy + 8).abs() <= 4 && (dx + dy <= 6);
+    let arrow2 = (dx + 12).abs() <= 4 && (dy - 8).abs() <= 4 && (dx + dy >= -6);
+    on_arc || arrow1 || arrow2
+}
+
+/// Vector landscape pictogram for gallery preview thumbnail
+fn test_gallery_icon(x: usize, y: usize, cx: usize, cy: usize) -> bool {
+    let dx = x as isize - cx as isize;
+    let dy = y as isize - cy as isize;
+    // Sun circle at (-8, -8), r=4
+    let sun_dx = dx + 8;
+    let sun_dy = dy + 8;
+    if sun_dx * sun_dx + sun_dy * sun_dy <= 16 {
+        return true;
+    }
+    // Mountain triangles
+    if (dy >= -2) && dy <= 12 {
+        let m1 = (dx + 4).abs() <= (dy + 2);
+        let m2 = (dx - 10).abs() <= (dy - 2);
+        if m1 || m2 {
+            return true;
+        }
+    }
+    false
+}
+
+#[inline(never)]
+fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
+    // 1. Status Bar & Top Controls (y: 0..110)
+    if y < 110 {
+        if y >= 108 {
+            return BORDER_SUBTLE;
+        }
+
+        // Back button (<) at (x: 24..100, y: 28..68)
+        if x >= 24 && x < 100 && y >= 28 && y < 68 {
+            let center_x = 62;
+            let center_y = 48;
+            let dx = (x as isize - center_x as isize).abs();
+            let dy = (y as isize - center_y as isize).abs();
+            if (dx + dy <= 12 && x <= center_x)
+                || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
+            {
+                return TEXT_PRIMARY;
+            }
+            return SURFACE_RAISED;
+        }
+
+        // Flash Mode Toggle Pill at (x: 130..250, y: 28..68)
+        if x >= 130 && x < 250 && y >= 28 && y < 68 {
+            let rx = (x - 130).min(249 - x);
+            let ry = (y - 28).min(67 - y);
+            if rx < 16 && ry < 16 {
+                let cdx = (16 - rx) as isize;
+                let cdy = (16 - ry) as isize;
+                if cdx * cdx + cdy * cdy >= 256 {
+                    return BG_DARK;
+                }
+            }
+
+            let is_lit = camera.flash_available && (camera.flash == FlashMode::Torch || camera.flash == FlashMode::On);
+            let icon_color = if is_lit {
+                ACCENT_AMBER
+            } else if !camera.flash_available {
+                TEXT_MUTED
+            } else {
+                TEXT_PRIMARY
+            };
+
+            if test_lightning(x, y, 154, 48) {
+                return icon_color;
+            }
+
+            let label = if !camera.flash_available {
+                &b"OFF"[..]
+            } else if is_lit {
+                &b"TORCH"[..]
+            } else {
+                &b"AUTO"[..]
+            };
+
+            if let Some(c) = test_text(x, y, 174, 42, 2, label, icon_color) {
+                return c;
+            }
+
+            if rx < 2 || ry < 2 {
+                return if is_lit { ACCENT_AMBER } else { BORDER_SUBTLE };
+            }
+            return SURFACE_RAISED;
+        }
+
+        // Mode Tag Pill at (x: 280..440, y: 28..68)
+        if x >= 280 && x < 440 && y >= 28 && y < 68 {
+            let rx = (x - 280).min(439 - x);
+            let ry = (y - 28).min(67 - y);
+            if rx < 16 && ry < 16 {
+                let cdx = (16 - rx) as isize;
+                let cdy = (16 - ry) as isize;
+                if cdx * cdx + cdy * cdy >= 256 {
+                    return BG_DARK;
+                }
+            }
+
+            if let Some(c) = test_text(x, y, 304, 42, 2, b"48MP PRO", ACCENT_SKY) {
+                return c;
+            }
+
+            if rx < 2 || ry < 2 {
+                return BORDER_SUBTLE;
+            }
+            return SURFACE_RAISED;
+        }
+
+        // ISP Filter Toggle Pill at (x: 470..610, y: 28..68)
+        if x >= 470 && x < 610 && y >= 28 && y < 68 {
+            let rx = (x - 470).min(609 - x);
+            let ry = (y - 28).min(67 - y);
+            if rx < 16 && ry < 16 {
+                let cdx = (16 - rx) as isize;
+                let cdy = (16 - ry) as isize;
+                if cdx * cdx + cdy * cdy >= 256 {
+                    return BG_DARK;
+                }
+            }
+
+            let (filter_name, filter_color) = match camera.filter {
+                CameraFilter::Normal => (&b"NORMAL"[..], ACCENT_SKY),
+                CameraFilter::Monochrome => (&b"MONO"[..], TEXT_MUTED),
+                CameraFilter::HighContrast => (&b"CONTRAST"[..], TEXT_PRIMARY),
+                CameraFilter::Sepia => (&b"SEPIA"[..], ACCENT_AMBER),
+                CameraFilter::NeuralHeatmap => (&b"HEATMAP"[..], DANGER_CRIMSON),
+            };
+
+            let label_x = 540 - (filter_name.len() * 16) / 2;
+            if let Some(c) = test_text(x, y, label_x, 42, 2, filter_name, filter_color) {
+                return c;
+            }
+
+            if rx < 2 || ry < 2 {
+                return filter_color;
+            }
+            return SURFACE_RAISED;
+        }
+
+        // NPU Vision AI Badge at (x: 630..696, y: 28..68)
+        if x >= 630 && x < 696 && y >= 28 && y < 68 {
+            let rx = (x - 630).min(695 - x);
+            let ry = (y - 28).min(67 - y);
+            if rx < 16 && ry < 16 {
+                let cdx = (16 - rx) as isize;
+                let cdy = (16 - ry) as isize;
+                if cdx * cdx + cdy * cdy >= 256 {
+                    return BG_DARK;
+                }
+            }
+
+            if let Some(c) = test_text(x, y, 648, 42, 2, b"AI", SUCCESS_EMERALD) {
+                return c;
+            }
+
+            if rx < 2 || ry < 2 {
+                return SUCCESS_EMERALD;
+            }
+            return SURFACE_RAISED;
+        }
+
+        return BG_DARK;
+    }
+
+    // 2. Viewfinder Canvas (y: 120..1120, x: 20..700)
+    if (120..1120).contains(&y) && x >= 20 && x < W - 20 {
+        let rel_y = y - 120;
+        let rel_x = x - 20;
+
+        // Viewfinder Outer L-Corner Framing
+        let is_top_left = (rel_x <= 30 && rel_y <= 4) || (rel_x <= 4 && rel_y <= 30);
+        let is_top_right = (rel_x >= 650 && rel_y <= 4) || (rel_x >= 676 && rel_y <= 30);
+        let is_bot_left = (rel_x <= 30 && rel_y >= 996) || (rel_x <= 4 && rel_y >= 970);
+        let is_bot_right = (rel_x >= 650 && rel_y >= 996) || (rel_x >= 676 && rel_y >= 970);
+        if is_top_left || is_top_right || is_bot_left || is_bot_right {
+            return 0x88FFFFFF;
+        }
+
+        // Center Focus Reticle: (340, 500)
+        let center_x = 340;
+        let center_y = 500;
+        let dx = (rel_x as isize - center_x as isize).abs();
+        let dy = (rel_y as isize - center_y as isize).abs();
+        let is_reticle =
+            (dx <= 40 && dy <= 40) && ((dx >= 36 && dy <= 12) || (dy >= 36 && dx <= 12));
+        let is_crosshair = (dx <= 4 && dy <= 1) || (dy <= 4 && dx <= 1);
+        if is_reticle || is_crosshair {
+            return ACCENT_AMBER;
+        }
+
+        // Zoom badge overlay at bottom of viewfinder (rel_y: 960..1010, rel_x: 280..400)
+        if (960..1010).contains(&rel_y) && (280..400).contains(&rel_x) {
+            let rx = (rel_x - 280).min(399 - rel_x);
+            let ry = (rel_y - 960).min(1009 - rel_y);
+            if rx < 18 && ry < 18 {
+                let cdx = (18 - rx) as isize;
+                let cdy = (18 - ry) as isize;
+                if cdx * cdx + cdy * cdy >= 324 {
+                    return 0xFF080D1A;
+                }
+            }
+
+            let zoom_str = match camera.zoom_x10 {
+                10 => &b"1.0x"[..],
+                20 => &b"2.0x"[..],
+                _ => &b"5.0x"[..],
+            };
+
+            if let Some(c) = test_text(x, y, 308, 120 + 978, 2, zoom_str, TEXT_PRIMARY) {
+                return c;
+            }
+
+            if rx < 2 || ry < 2 {
+                return 0x66FFFFFF;
+            }
+            return 0xCC111827;
+        }
+
+        // 3x3 Rule-of-Thirds Grid Lines
+        let is_grid = (rel_x == 226 || rel_x == 453) || (rel_y == 333 || rel_y == 666);
+        if is_grid {
+            return 0x26FFFFFF;
+        }
+
+        return 0xFF080D1A;
+    }
+
+    // 3. Mode Selector Carousel (y: 1150..1200)
+    if (1150..1200).contains(&y) {
+        // Document Vision (x: 80..250)
+        let is_doc = camera.mode == CameraMode::DocumentVision;
+        let doc_color = if is_doc { TEXT_PRIMARY } else { TEXT_MUTED };
+        if let Some(c) = test_text(x, y, 108, 1166, 2, b"DOCUMENTS", doc_color) {
+            return c;
+        }
+
+        // Photo (x: 270..450)
+        let is_photo = camera.mode == CameraMode::Photo;
+        let photo_color = if is_photo { TEXT_PRIMARY } else { TEXT_MUTED };
+        if let Some(c) = test_text(x, y, 320, 1166, 2, b"PHOTO", photo_color) {
+            return c;
+        }
+
+        // Video (x: 460..580)
+        let is_vid = camera.mode == CameraMode::Video;
+        let vid_color = if is_vid { TEXT_PRIMARY } else { TEXT_MUTED };
+        if let Some(c) = test_text(x, y, 480, 1166, 2, b"VIDEO", vid_color) {
+            return c;
+        }
+
+        // Active mode indicator underline
+        let is_active_mode = match camera.mode {
+            CameraMode::Photo => x >= 300 && x < 420,
+            CameraMode::Video => x >= 460 && x < 580,
+            CameraMode::DocumentVision => x >= 90 && x < 240,
+            _ => false,
+        };
+        if is_active_mode && y >= 1194 && y < 1198 {
+            return ACCENT_AMBER;
+        }
+
+        return BG_DARK;
+    }
+
+    // 4. Bottom Shutter Dock & Hardware Controls (y: 1210..1440)
+    if (1210..1410).contains(&y) {
+        // Left Gallery Thumbnail Card at (110, 1310)
+        let thumb_dx = (x as isize - 110).abs();
+        let thumb_dy = (y as isize - 1310).abs();
+        if thumb_dx <= 36 && thumb_dy <= 36 {
+            if test_gallery_icon(x, y, 110, 1310) {
+                return ACCENT_AMBER;
+            }
+            if thumb_dx == 36 || thumb_dy == 36 {
+                return BORDER_SUBTLE;
+            }
+            return SURFACE_RAISED;
+        }
+
+        // Center Shutter Button at (360, 1310)
+        let sc_x = 360;
+        let sc_y = 1310;
+        let dx = x as isize - sc_x as isize;
+        let dy = y as isize - sc_y as isize;
+        let dist_sq = dx * dx + dy * dy;
+
+        // Outer white metallic ring (radius 56..64)
+        if dist_sq <= 64 * 64 && dist_sq >= 56 * 56 {
+            return TEXT_PRIMARY;
+        }
+        // Concentric track gap (radius 48..56)
+        if dist_sq < 56 * 56 && dist_sq >= 48 * 48 {
+            return BG_DARK;
+        }
+        // Inner tactile shutter core (radius < 48)
+        if dist_sq < 48 * 48 {
+            if camera.mode == CameraMode::Video {
+                return DANGER_CRIMSON;
+            } else if camera.mode == CameraMode::DocumentVision {
+                return ACCENT_SKY;
+            } else {
+                return TEXT_PRIMARY;
+            }
+        }
+
+        // Right Lens Flip Button at (610, 1310)
+        let flip_dx = (x as isize - 610).abs();
+        let flip_dy = (y as isize - 1310).abs();
+        let flip_r2 = flip_dx * flip_dx + flip_dy * flip_dy;
+        if flip_r2 <= 32 * 32 {
+            if test_flip_arrows(x, y, 610, 1310) {
+                return TEXT_PRIMARY;
+            }
+            if flip_r2 >= 30 * 30 {
+                return BORDER_SUBTLE;
+            }
+            return SURFACE_RAISED;
+        }
+
+        return BG_DARK;
+    }
+
+    // Home gesture bar at bottom
+    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
+        return TEXT_MUTED;
+    }
+
+    BG_DARK
+}
+
 fn render_camera_ui(surface: u32, camera: &CameraApp) {
     let mut chunk = [0u32; CHUNK];
     let total = W * H;
@@ -233,156 +733,7 @@ fn render_camera_ui(surface: u32, camera: &CameraApp) {
         let mut y = offset / W;
 
         for i in 0..count {
-            if y < 110 {
-                // Top Control Bar & Overlays
-                if y >= 108 {
-                    chunk[i] = std::design::color::SURFACE_RAISED;
-                } else if x >= 24 && x < 100 && y >= 28 && y < 68 {
-                    // Back button capsule
-                    let center_x = 62;
-                    let center_y = 48;
-                    let dx = (x as isize - center_x as isize).abs();
-                    let dy = (y as isize - center_y as isize).abs();
-                    if (dx + dy <= 12 && x <= center_x)
-                        || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
-                    {
-                        chunk[i] = std::design::color::TEXT;
-                    } else {
-                        chunk[i] = std::design::color::SURFACE_RAISED;
-                    }
-                } else if x >= 130 && x < 250 && y >= 28 && y < 68 {
-                    // Flash Mode Toggle Pill.
-                    // WHY: the pill was filled lit amber whenever the mode was
-                    // On/Torch, which presented an emitting flash that no
-                    // hardware ever confirmed. Only light it when the backend
-                    // actually reported the torch on; otherwise draw the
-                    // unavailable outline so the state is explicit.
-                    if !camera.flash_available {
-                        if y == 28 || y == 67 || x == 130 || x == 249 {
-                            chunk[i] = std::design::color::TEXT_MUTED;
-                        } else {
-                            chunk[i] = std::design::color::SURFACE;
-                        }
-                    } else if camera.flash == FlashMode::Torch || camera.flash == FlashMode::On {
-                        chunk[i] = std::design::color::WARNING;
-                    } else {
-                        chunk[i] = std::design::color::SURFACE_RAISED;
-                    }
-                } else if x >= 280 && x < 440 && y >= 28 && y < 68 {
-                    // Mode Tag Pill
-                    chunk[i] = std::design::color::SURFACE_RAISED;
-                } else if x >= 470 && x < 610 && y >= 28 && y < 68 {
-                    // ISP Filter Toggle Pill
-                    match camera.filter {
-                        CameraFilter::Normal => chunk[i] = std::design::color::ACCENT,
-                        CameraFilter::Monochrome => chunk[i] = std::design::color::TEXT_MUTED,
-                        CameraFilter::HighContrast => chunk[i] = std::design::color::TEXT,
-                        CameraFilter::Sepia => chunk[i] = 0xFFD97706, // Amber
-                        CameraFilter::NeuralHeatmap => chunk[i] = std::design::color::DANGER,
-                    }
-                } else if x >= 630 && x < 696 && y >= 28 && y < 68 {
-                    // NPU Vision AI Badge
-                    chunk[i] = std::design::color::SUCCESS;
-                } else {
-                    chunk[i] = std::design::color::BACKGROUND;
-                }
-            } else if (120..1120).contains(&y) && x >= 20 && x < W - 20 {
-                // Viewfinder Canvas (680 wide x 1000 tall)
-                let rel_y = y - 120;
-                let rel_x = x - 20;
-
-                // Center Focus Reticle
-                let center_x = 340;
-                let center_y = 500;
-                let dx = (rel_x as isize - center_x as isize).abs();
-                let dy = (rel_y as isize - center_y as isize).abs();
-                let is_reticle =
-                    (dx <= 40 && dy <= 40) && ((dx >= 36 && dy <= 12) || (dy >= 36 && dx <= 12));
-
-                // 3x3 Rule-of-Thirds Grid Lines
-                let is_grid = (rel_x == 226 || rel_x == 453) || (rel_y == 333 || rel_y == 666);
-
-                // Zoom badge overlay at bottom of viewfinder
-                let is_zoom_badge = (960..1010).contains(&rel_y) && (280..400).contains(&rel_x);
-
-                if is_reticle {
-                    chunk[i] = std::design::color::WARNING; // Amber focus reticle
-                } else if is_zoom_badge {
-                    chunk[i] = std::design::color::SURFACE_RAISED;
-                } else if is_grid {
-                    chunk[i] = 0x33FFFFFF; // Subtle translucent grid
-                } else {
-                    // No guest camera frame is available in this runtime.
-                    // Keep the viewfinder neutral instead of fabricating imagery.
-                    chunk[i] = std::design::color::BACKGROUND;
-                }
-            } else {
-                // Bottom Dock & Shutter Controls (1140..1440)
-                if (1150..1200).contains(&y) {
-                    // Mode Selector Carousel
-                    let is_active_mode = match camera.mode {
-                        CameraMode::Photo => x >= 270 && x < 450,
-                        CameraMode::Video => x >= 460 && x < 580,
-                        CameraMode::DocumentVision => x >= 80 && x < 250,
-                        _ => false,
-                    };
-                    if is_active_mode && y >= 1195 {
-                        chunk[i] = std::design::color::WARNING; // Active mode indicator underline
-                    } else {
-                        chunk[i] = std::design::color::BACKGROUND;
-                    }
-                } else if (1220..1400).contains(&y) {
-                    // Center Shutter Button: (360, 1310)
-                    let sc_x = 360;
-                    let sc_y = 1310;
-                    let dx = x as isize - sc_x as isize;
-                    let dy = y as isize - sc_y as isize;
-                    let dist_sq = dx * dx + dy * dy;
-
-                    // Left Thumbnail Card: (110, 1310)
-                    let thumb_dx = (x as isize - 110).abs();
-                    let thumb_dy = (y as isize - 1310).abs();
-
-                    // Right Flip Camera: (610, 1310)
-                    let flip_dx = (x as isize - 610).abs();
-                    let flip_dy = (y as isize - 1310).abs();
-
-                    if dist_sq <= 56 * 56 {
-                        // Inner circle
-                        if dist_sq >= 48 * 48 && dist_sq <= 56 * 56 {
-                            // Ring gap
-                            chunk[i] = std::design::color::BACKGROUND;
-                        } else if dist_sq < 46 * 46 {
-                            if camera.mode == CameraMode::Video {
-                                chunk[i] = std::design::color::DANGER; // Red video record circle
-                            } else {
-                                chunk[i] = std::design::color::TEXT; // White photo shutter circle
-                            }
-                        } else {
-                            chunk[i] = std::design::color::TEXT;
-                        }
-                    } else if dist_sq <= 64 * 64 {
-                        // Outer white ring
-                        chunk[i] = std::design::color::TEXT;
-                    } else if thumb_dx <= 36 && thumb_dy <= 36 {
-                        // Thumbnail preview card
-                        if thumb_dx == 36 || thumb_dy == 36 {
-                            chunk[i] = std::design::color::TEXT_MUTED;
-                        } else {
-                            chunk[i] = std::design::color::SURFACE_RAISED;
-                        }
-                    } else if flip_dx <= 32 && flip_dy <= 32 {
-                        // Lens flip button
-                        chunk[i] = std::design::color::SURFACE_RAISED;
-                    } else {
-                        chunk[i] = std::design::color::BACKGROUND;
-                    }
-                } else if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
-                    chunk[i] = std::design::color::TEXT_MUTED;
-                } else {
-                    chunk[i] = std::design::color::BACKGROUND;
-                }
-            }
+            chunk[i] = get_camera_pixel(x, y, camera);
             x += 1;
             if x == W {
                 x = 0;
@@ -484,6 +835,14 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> bool {
         } else {
             let _ = camera.capture_still_photo();
         }
+        return false;
+    }
+
+    // 7. Lens Flip Button: (610, 1310)
+    let flip_dx = (x as isize - 610).abs();
+    let flip_dy = (y as isize - 1310).abs();
+    if flip_dx <= 36 && flip_dy <= 36 {
+        std::audio_haptic_click().ok();
         return false;
     }
 
