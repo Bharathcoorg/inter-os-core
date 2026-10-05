@@ -129,7 +129,7 @@ impl CameraDriver {
     /// Captures a sensor frame via DMA double-buffering, enforcing zero-trust capability.
     pub fn capture_frame(
         &mut self,
-        current_tick: u64,
+        _current_tick: u64,
         cap_table: &CapabilityTable,
     ) -> Result<CameraFrame, CameraError> {
         // Enforce Zero Ambient Authority: require CapabilityType::CameraCaptureDirect with Rights::READ

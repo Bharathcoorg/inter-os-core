@@ -1,4 +1,5 @@
 //! Host-side test harness for the shipped AArch64 FDT parser.
+#![allow(dead_code, unused_imports)]
 //!
 //! The production parser is included by path so these tests observe the exact
 //! code that runs on the kernel, including its bounds handling. A device tree is

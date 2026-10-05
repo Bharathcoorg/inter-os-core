@@ -147,7 +147,7 @@ pub struct NfcController {
 }
 
 impl NfcController {
-    pub fn new(mmio_base: usize, device_root_key: [u8; 32], device_did: &str) -> Self {
+    pub fn new(mmio_base: usize, _device_root_key: [u8; 32], device_did: &str) -> Self {
         Self {
             mmio_base,
             enabled: false,

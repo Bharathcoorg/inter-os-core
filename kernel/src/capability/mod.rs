@@ -239,7 +239,7 @@ pub fn next_instance_capability_id() -> u64 {
     // which is precisely the failure this whole scheme exists to prevent. Practically
     // unreachable (2^52 launches), but the failure mode is silent authority reuse.
     let n = NEXT_INSTANCE_CAPABILITY_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
             Some(v.checked_add(1).unwrap_or(v))
         })
         .unwrap_or(0x0000_1000);

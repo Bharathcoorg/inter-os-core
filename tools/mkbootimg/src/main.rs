@@ -306,12 +306,12 @@ fn main() {
     // Missing payloads are now a hard error naming exactly what is absent.
     let mut missing: Vec<String> = Vec::new();
 
-    let mut ramdisk = read_file_or_empty(&ramdisk_path);
+    let ramdisk = read_file_or_empty(&ramdisk_path);
     if ramdisk.is_empty() {
         missing.push(format!("ramdisk ({})", ramdisk_path.display()));
     }
 
-    let mut dtb = read_file_or_empty(&dtb_path);
+    let dtb = read_file_or_empty(&dtb_path);
     if dtb.is_empty() {
         missing.push(format!("device tree blob ({})", dtb_path.display()));
     }

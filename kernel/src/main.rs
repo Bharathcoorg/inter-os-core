@@ -12,7 +12,6 @@
 
 #![no_std]
 #![no_main]
-#![feature(abi_x86_interrupt)]
 
 extern crate alloc;
 
@@ -30,35 +29,6 @@ use kernel::package::RappArch;
 use kernel::storage::{MerkleVerifier, StorageError};
 use kernel::task::{SCHEDULER, TaskId};
 use kernel::wasm::{opcodes, Value, WasmError, WasmMemory, WasmModule, WasmVm};
-
-use kernel::arch::apply_relocations;
-use kernel::audio;
-use kernel::compositor;
-use kernel::display_hal;
-use kernel::drivers::pci;
-use kernel::event;
-use kernel::fs;
-use kernel::gdt;
-use kernel::gui;
-use kernel::hal;
-use kernel::input;
-use kernel::interrupts;
-use kernel::memory;
-use kernel::net;
-use kernel::notification;
-use kernel::package;
-use kernel::platform;
-use kernel::recovery;
-use kernel::resource;
-use kernel::sensor;
-use kernel::serial;
-use kernel::services;
-use kernel::settings;
-use kernel::syscall;
-use kernel::task;
-use kernel::telephony;
-use kernel::user;
-use kernel::watchdog;
 
 pub static BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();

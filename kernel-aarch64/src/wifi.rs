@@ -302,8 +302,8 @@ impl WifiController {
     /// deriving a forward-secure Pairwise Master Key (PMK) in pure no_std.
     pub fn perform_wpa3_sae_handshake(
         &mut self,
-        bssid: [u8; 6],
-        passphrase: &str,
+        _bssid: [u8; 6],
+        _passphrase: &str,
         caps: &CapabilityTable,
     ) -> Result<[u8; 32], WifiError> {
         caps.check(CapabilityType::WifiNetworkDirect, Rights::INVOKE)

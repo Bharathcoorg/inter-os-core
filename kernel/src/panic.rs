@@ -3,9 +3,7 @@
 //! Captures fatal system errors, prints full diagnostic state, and executes
 //! an explicit, configurable crash policy (HALT or CONTROLLED REBOOT).
 
-use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU8, Ordering};
-use crate::serial_println;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

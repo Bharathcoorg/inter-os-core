@@ -39,9 +39,5 @@ interos-android-shared = { path = "src/compat/android/shared" }
 opt-level = 1
 panic = "abort"
 
-# WHY: `[profile.dev]` sets `panic = "abort"` for the bare-metal image, but the
-# test harness needs unwinding so a failing `#[test]` is reported instead of
-# aborting the whole run.
 [profile.test]
 opt-level = 1
-panic = "unwind"

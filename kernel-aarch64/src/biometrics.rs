@@ -114,7 +114,7 @@ impl BiometricsController {
     }
 
     /// Minutiae matching algorithm comparing Euclidean spatial distance and angular orientation.
-    fn match_minutiae(enrolled: &[Minutiae], scan: &[Minutiae]) -> usize {
+    pub fn match_minutiae(enrolled: &[Minutiae], scan: &[Minutiae]) -> usize {
         let mut match_count = 0;
 
         for m_enrolled in enrolled {

@@ -286,12 +286,10 @@ impl ArmMmu {
                     | DESC_BLOCK
                     | DESC_VALID;
             }
-            unsafe {
-                core::arch::asm!("dsb ish", options(nostack, preserves_flags));
-                core::arch::asm!("tlbi vmalle1", options(nostack, preserves_flags));
-                core::arch::asm!("dsb ish", options(nostack, preserves_flags));
-                core::arch::asm!("isb", options(nostack, preserves_flags));
-            }
+            core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+            core::arch::asm!("tlbi vmalle1", options(nostack, preserves_flags));
+            core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+            core::arch::asm!("isb", options(nostack, preserves_flags));
         }
         true
     }
@@ -339,12 +337,10 @@ impl ArmMmu {
                         | DESC_BLOCK
                         | DESC_VALID;
             }
-            unsafe {
-                core::arch::asm!("dsb ish", options(nostack, preserves_flags));
-                core::arch::asm!("tlbi vmalle1", options(nostack, preserves_flags));
-                core::arch::asm!("dsb ish", options(nostack, preserves_flags));
-                core::arch::asm!("isb", options(nostack, preserves_flags));
-            }
+            core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+            core::arch::asm!("tlbi vmalle1", options(nostack, preserves_flags));
+            core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+            core::arch::asm!("isb", options(nostack, preserves_flags));
         }
         true
     }
