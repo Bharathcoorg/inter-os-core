@@ -4,6 +4,7 @@
 //! cannot overlap the boot area or the persistent metadata journal.
 use crate::storage::block::BlockDevice;
 use crate::drivers::ATA_PRIMARY;
+use super::boot_guard::{self, SectorRange, WriteVerdict};
 use super::interfs::{FsBackendError, InterFs};
 
 /// Leave the first 4096 sectors to the bootloader/partition/device-specific area.
@@ -45,15 +46,58 @@ fn filesystem_region_sectors(total: u32) -> Result<u32, FsBackendError> {
     Ok(available.min(MAX_INTERFS_REGION_SECTORS))
 }
 
+/// Decides whether the InterFS region of `device` may be written at all.
+///
+/// WHY this runs before the mount attempt and not only around the format: the
+/// region is written on every subsequent `store_data_file`, and `mount_region`
+/// itself publishes a superblock when it recovers an interrupted transaction.
+/// Guarding only `format_region` would have left a filesystem formatted by an
+/// earlier boot as a live way to overwrite the kernel image.
+///
+/// WHY the caller supplies the device and the range and the guard derives both
+/// facts itself: the range comes from the layout policy above, the image extent
+/// from the running kernel's program headers, and the boot area from the
+/// device's own partition table. Nothing here consults a fixed sector number,
+/// so repacking the image moves the protection with it.
+fn guard_region(
+    device: &mut dyn BlockDevice,
+    base_lba: u32,
+    region_sectors: u32,
+    scope: &str,
+) -> Result<(), FsBackendError> {
+    let Some(target) = SectorRange::new(base_lba, region_sectors) else {
+        return Err(FsBackendError::NoSpace);
+    };
+    match boot_guard::evaluate_device_writes(device, target) {
+        WriteVerdict::Permitted => Ok(()),
+        WriteVerdict::Refused(refusal) => {
+            let mut sector = [0u8; crate::storage::block::SECTOR_SIZE];
+            // WHY re-read LBA 0 for the notice: the refusal path needs the same
+            // boot area the decision used, and a failed read is itself a
+            // refusal reason, so a failure here yields no boot area rather than
+            // a fabricated one.
+            let boot = if device.read_sector(0, &mut sector).is_ok() {
+                Some(boot_guard::parse_boot_area(&sector))
+            } else {
+                None
+            };
+            boot_guard::announce_refusal(scope, device, target, boot.as_ref(), refusal);
+            Err(FsBackendError::BootDeviceProtected)
+        }
+    }
+}
+
 /// Mount the canonical InterFS region, formatting it only when no valid
 /// filesystem exists. Formatting is deliberately bounded away from the boot
-/// area and journal tail.
+/// area and journal tail, and is refused outright when the bound is not enough
+/// to clear the device the kernel booted from.
 pub fn init_block_filesystem_with_device(device: &mut dyn BlockDevice) -> Result<(), FsBackendError> {
     init_block_filesystem_with_layout(device, FilesystemLayout::canonical())
 }
 
 pub fn init_block_filesystem_with_layout(device: &mut dyn BlockDevice, layout: FilesystemLayout) -> Result<(), FsBackendError> {
     let region = region_for_layout(device.sector_count(), layout)?;
+    guard_region(device, layout.base_lba, region, "InterFS format")?;
     match InterFs::mount_region(device, layout.base_lba, region) {
         Ok(fs) if fs.capacity_sectors() == region - 41 => Ok(()),
         Ok(_) => Err(FsBackendError::CorruptMetadata),
@@ -70,6 +114,10 @@ pub fn init_block_filesystem() -> Result<(), FsBackendError> {
 
 pub fn load_data_file_with_device(device: &mut dyn BlockDevice, path: &str, out: &mut [u8]) -> Result<usize, FsBackendError> {
     let region = filesystem_region_sectors(device.sector_count())?;
+    // WHY the guard applies to a read as well: `mount_region` runs crash
+    // recovery, which republishes the superblock. There is no read-only mount in
+    // this backend, so "open it" and "write to it" are the same operation.
+    guard_region(device, BLOCK_FS_BASE_LBA, region, "InterFS mount")?;
     let mut fs = InterFs::mount_region(device, BLOCK_FS_BASE_LBA, region)?;
     fs.read_file(path, out)
 }
@@ -82,6 +130,7 @@ pub fn load_data_file(path: &str, out: &mut [u8]) -> Result<usize, FsBackendErro
 
 pub fn store_data_file_with_device(device: &mut dyn BlockDevice, path: &str, data: &[u8]) -> Result<(), FsBackendError> {
     let region = filesystem_region_sectors(device.sector_count())?;
+    guard_region(device, BLOCK_FS_BASE_LBA, region, "InterFS write")?;
     let mut fs = InterFs::mount_region(device, BLOCK_FS_BASE_LBA, region)?;
     match fs.write_file(path, data) {
         Ok(()) => Ok(()),
@@ -94,4 +143,179 @@ pub fn store_data_file(path: &str, data: &[u8]) -> Result<(), FsBackendError> {
     let mut guard = ATA_PRIMARY.lock();
     let device = guard.as_mut().ok_or(FsBackendError::NoSpace)?;
     store_data_file_with_device(device, path, data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::block::{BlockDeviceError, SECTOR_SIZE};
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    /// Sector count of the packaged reference image: a 4 MiB FAT boot
+    /// partition that starts at LBA 962 and runs to the end of the file.
+    const PACKAGED_SECTORS: u32 = 9154;
+
+    /// In-memory device that records every write, so a test can prove the disk
+    /// was left untouched rather than only that an error came back.
+    struct MockDevice {
+        sectors: Vec<u8>,
+        total: u32,
+        writes: usize,
+    }
+
+    impl MockDevice {
+        fn blank(total: u32) -> Self {
+            Self { sectors: vec![0u8; total as usize * SECTOR_SIZE], total, writes: 0 }
+        }
+
+        /// A device that presents itself as boot media, with the given
+        /// partition table.
+        fn boot_media_with(total: u32, parts: &[(u32, u32)]) -> Self {
+            let mut dev = Self::blank(total);
+            let mut mbr = [0u8; SECTOR_SIZE];
+            for (i, (lba, count)) in parts.iter().enumerate() {
+                let o = 446 + i * 16;
+                mbr[o] = 0x80;
+                mbr[o + 4] = 0x0C;
+                mbr[o + 8..o + 12].copy_from_slice(&lba.to_le_bytes());
+                mbr[o + 12..o + 16].copy_from_slice(&count.to_le_bytes());
+            }
+            mbr[510] = 0x55;
+            mbr[511] = 0xAA;
+            dev.sectors[..SECTOR_SIZE].copy_from_slice(&mbr);
+            dev
+        }
+
+        /// The packaged reference image: a loader partition at LBA 1 and a
+        /// 4 MiB FAT partition at LBA 962 running to the end of the file. The
+        /// kernel ELF lives inside that FAT partition.
+        fn packaged_boot_image() -> Self {
+            Self::boot_media_with(PACKAGED_SECTORS, &[(1, 961), (962, 8192)])
+        }
+
+        fn sector(&self, lba: u32) -> &[u8] {
+            let start = lba as usize * SECTOR_SIZE;
+            &self.sectors[start..start + SECTOR_SIZE]
+        }
+    }
+
+    impl BlockDevice for MockDevice {
+        fn read_sector(&mut self, lba: u32, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), BlockDeviceError> {
+            if lba >= self.total { return Err(BlockDeviceError::LbaOutOfRange); }
+            buf.copy_from_slice(self.sector(lba));
+            Ok(())
+        }
+        fn write_sector(&mut self, lba: u32, buf: &[u8; SECTOR_SIZE]) -> Result<(), BlockDeviceError> {
+            if lba >= self.total { return Err(BlockDeviceError::LbaOutOfRange); }
+            let start = lba as usize * SECTOR_SIZE;
+            self.sectors[start..start + SECTOR_SIZE].copy_from_slice(buf);
+            self.writes += 1;
+            Ok(())
+        }
+        fn sector_count(&self) -> u32 { self.total }
+        fn model(&self) -> &str { "MOCK" }
+    }
+
+    /// The defect this pins: on the packaged single-disk image the canonical
+    /// InterFS region starts at LBA 4096, which is inside the FAT boot partition
+    /// that holds `kernel-x86_64`. Before the guard existed this call formatted
+    /// 41 metadata sectors there plus a data extent, replacing 22,437 bytes of
+    /// the running image and faulting the *next* boot.
+    #[test]
+    fn formatting_the_boot_device_is_refused_and_writes_nothing() {
+        let mut dev = MockDevice::packaged_boot_image();
+        let before = dev.sectors.clone();
+        assert_eq!(dev.writes, 0);
+
+        let result = init_block_filesystem_with_device(&mut dev);
+
+        assert_eq!(result, Err(FsBackendError::BootDeviceProtected));
+        assert_eq!(dev.writes, 0, "a refused format must not issue a single write");
+        assert_eq!(dev.sectors, before, "the device must be byte-identical afterwards");
+        // The evidence the refusal is protecting: LBA 0 still holds the boot
+        // sector, and the filesystem base still holds whatever it held.
+        assert_eq!(dev.sector(0)[510], 0x55);
+    }
+
+    #[test]
+    fn the_same_layout_is_still_formatted_on_a_device_with_no_boot_sector() {
+        // A data disk has no 0x55AA boot sector, so no boot chain can have
+        // started from it and it is safe to initialise. Refusing here would have
+        // turned a protection into a loss of persistence.
+        let mut dev = MockDevice::blank(PACKAGED_SECTORS);
+        assert_eq!(init_block_filesystem_with_device(&mut dev), Ok(()));
+        assert!(dev.writes > 0);
+        assert_eq!(&dev.sector(BLOCK_FS_BASE_LBA)[0..4], b"IOFS");
+    }
+
+    /// WHY this is the test that shows the guard is not "never format LBA 4096":
+    /// the same device, the same partition table, the same canonical base -- and
+    /// a filesystem placed past the advertised boot area formats normally. Only
+    /// the overlap decides.
+    #[test]
+    fn a_layout_past_the_boot_area_formats_even_on_boot_media() {
+        // Boot area ends at LBA 9154 per this partition table, so place the
+        // filesystem beyond it.
+        let mut dev = MockDevice::boot_media_with(65536, &[(1, 961), (962, 8192)]);
+        let layout = FilesystemLayout { base_lba: 16384, tail_reserved_sectors: BLOCK_FS_TAIL_RESERVED };
+        let before = dev.sectors.clone();
+        assert_eq!(init_block_filesystem_with_layout(&mut dev, layout), Ok(()));
+        assert!(dev.writes > 0);
+        assert_eq!(&dev.sector(16384)[0..4], b"IOFS");
+        // ...and nothing below the boot area was touched.
+        assert_eq!(&dev.sectors[..16384 * SECTOR_SIZE], &before[..16384 * SECTOR_SIZE]);
+    }
+
+    /// The counterpart: move that same layout back inside the advertised boot
+    /// area and the identical call is refused.
+    #[test]
+    fn the_same_layout_inside_the_boot_area_is_refused() {
+        let mut dev = MockDevice::boot_media_with(65536, &[(1, 961), (962, 8192)]);
+        let layout = FilesystemLayout { base_lba: 8192, tail_reserved_sectors: BLOCK_FS_TAIL_RESERVED };
+        let before = dev.sectors.clone();
+        assert_eq!(
+            init_block_filesystem_with_layout(&mut dev, layout),
+            Err(FsBackendError::BootDeviceProtected)
+        );
+        assert_eq!(dev.writes, 0);
+        assert_eq!(dev.sectors, before);
+    }
+
+    #[test]
+    fn a_write_through_store_is_refused_on_the_boot_device_too() {
+        // Formatting is not the only way to destroy the image: every later
+        // `store_data_file` writes the same region.
+        let mut dev = MockDevice::packaged_boot_image();
+        let before = dev.sectors.clone();
+        assert_eq!(
+            store_data_file_with_device(&mut dev, "/data/test", b"payload"),
+            Err(FsBackendError::BootDeviceProtected)
+        );
+        assert_eq!(dev.writes, 0);
+        assert_eq!(dev.sectors, before);
+    }
+
+    /// The backstop inside the destructive primitive itself. A caller that skips
+    /// the placement layer -- the serial console, a recovery path, a future tool
+    /// -- must not be able to format the boot device either.
+    #[test]
+    fn format_region_itself_refuses_the_boot_device() {
+        let mut dev = MockDevice::packaged_boot_image();
+        let before = dev.sectors.clone();
+        let result = InterFs::format_region(&mut dev, BLOCK_FS_BASE_LBA, 2754);
+        assert!(matches!(result, Err(FsBackendError::BootDeviceProtected)), "{:?}", result.err());
+        assert_eq!(dev.writes, 0);
+        assert_eq!(dev.sectors, before);
+    }
+
+    /// ...and it still formats a data device, so the backstop does not simply
+    /// disable the operation.
+    #[test]
+    fn format_region_still_formats_a_data_device() {
+        let mut dev = MockDevice::blank(PACKAGED_SECTORS);
+        let fs = InterFs::format_region(&mut dev, BLOCK_FS_BASE_LBA, 2754).expect("data device must format");
+        assert_eq!(fs.capacity_sectors(), 2754 - 41);
+        assert_eq!(&dev.sector(BLOCK_FS_BASE_LBA)[0..4], b"IOFS");
+    }
 }

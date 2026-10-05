@@ -9,6 +9,7 @@
 
 use crate::crypto::Sha256;
 use crate::storage::block::{BlockDevice, BlockDeviceError, SECTOR_SIZE};
+use crate::storage::boot_guard::{self, SectorRange, WriteVerdict};
 
 pub const FS_MAGIC: [u8; 4] = *b"IOFS";
 pub const FS_VERSION: u32 = 1;
@@ -97,6 +98,14 @@ pub enum FsBackendError {
     InvalidPath,
     FileTooLarge,
     CorruptMetadata,
+    /// The requested range is inside the bootable region of the device the
+    /// kernel is executing from, so it was not written.
+    ///
+    /// WHY a distinct variant rather than `NoSpace`: no space is being denied.
+    /// The write was declined because it would have destroyed the running
+    /// image, and the caller has to say so on the console rather than report a
+    /// capacity problem the user can do nothing about.
+    BootDeviceProtected,
 }
 
 impl From<BlockDeviceError> for FsBackendError {
@@ -211,6 +220,18 @@ impl<'a, D: BlockDevice + ?Sized> InterFs<'a, D> {
         if region_sectors <= DATA_LBA + 1 || region_sectors - DATA_LBA > BITMAP_CAPACITY_SECTORS {
             return Err(FsBackendError::NoSpace);
         }
+        // WHY the guard lives here as well as in `storage::filesystem`: this is
+        // the destructive primitive. A caller reaching it directly -- a recovery
+        // path, a future tool, the serial console -- must not be able to format
+        // the device the kernel is executing from. The placement layer guards
+        // first so it can report the refusal with the layout it intended; this
+        // one is the backstop for everyone else.
+        if let Some(range) = SectorRange::new(base_lba, region_sectors) {
+            if let WriteVerdict::Refused(refusal) = boot_guard::evaluate_device_writes(device, range) {
+                boot_guard::announce_refusal("InterFS format", device, range, None, refusal);
+                return Err(FsBackendError::BootDeviceProtected);
+            }
+        }
         let sb = Superblock {
             total_sectors: region_sectors,
             data_start: DATA_LBA,
@@ -241,6 +262,16 @@ impl<'a, D: BlockDevice + ?Sized> InterFs<'a, D> {
     }
 
     pub fn mount_region(device: &'a mut D, base_lba: u32, region_sectors: u32) -> Result<Self, FsBackendError> {
+        // WHY mounting is guarded: `recover_transaction` republishes the
+        // superblock, so a mount is not a read. There is no read-only mount in
+        // this backend, which means "open the filesystem on this device" and
+        // "write to it" are the same decision and have to be guarded together.
+        if let Some(range) = SectorRange::new(base_lba, region_sectors) {
+            if let WriteVerdict::Refused(refusal) = boot_guard::evaluate_device_writes(device, range) {
+                boot_guard::announce_refusal("InterFS mount", device, range, None, refusal);
+                return Err(FsBackendError::BootDeviceProtected);
+            }
+        }
         let mut sector=[0u8; SECTOR_SIZE];
         device.read_sector(base_lba + FS_SUPERBLOCK_LBA, &mut sector)?;
         let sb=Superblock::decode(&sector)?;

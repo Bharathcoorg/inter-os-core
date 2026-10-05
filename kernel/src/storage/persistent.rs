@@ -23,6 +23,7 @@
 use alloc::vec::Vec;
 use spin::Mutex;
 use crate::drivers::{BlockDevice, ATA_PRIMARY, SECTOR_SIZE};
+use crate::storage::boot_guard::{self, SectorRange, WriteVerdict};
 
 pub const JOURNAL_MAGIC: [u8; 4] = *b"IOSJ";
 pub const JOURNAL_VERSION: u32 = 1;
@@ -61,6 +62,15 @@ pub enum PersistentError {
     Corrupt,
     TooLarge,
     Io,
+    /// The journal's tail region is inside the bootable region of the device the
+    /// kernel booted from, so the commit was declined.
+    ///
+    /// WHY this is not `Unavailable`: `Unavailable` is what the recovery policy
+    /// already treats as "refuse and let the caller re-seed", so folding this in
+    /// would let a boot device that cannot be written masquerade as a device with
+    /// nothing committed on it. The caller has to be able to tell "no record yet"
+    /// from "this device would have been destroyed".
+    BootDeviceProtected,
 }
 
 /// Sectors occupied by the whole journal: the extension region plus the primary
@@ -88,6 +98,46 @@ fn slot_base(total: u32, slot: u32) -> Option<u32> {
         Some(region_base + EXTENSION_SLOT_COUNT * SLOT_SECTORS + slot * SLOT_SECTORS)
     } else {
         Some(region_base + (slot - SLOT_COUNT) * SLOT_SECTORS)
+    }
+}
+
+/// The whole journal footprint, both the primary region and the extension
+/// below it, as one half-open sector range.
+fn journal_range(total: u32) -> Option<SectorRange> {
+    SectorRange::new(total.checked_sub(journal_reserved()?)?, journal_reserved()?)
+}
+
+/// Refuses a journal commit that would land inside the bootable region of the
+/// device the kernel is executing from.
+///
+/// WHY the whole journal is checked rather than just the one slot being
+/// written: the boot area is not a sparse thing, and a commit to any slot of the
+/// journal on a device whose boot area reaches the disk tail is writing over the
+/// image that is currently running. Refusing the region keeps the answer
+/// independent of which slot the alternating pair happened to pick.
+///
+/// WHY the guard is inside `commit_to` and not at the callers: every commit
+/// path funnels through it, so there is exactly one place where a destructive
+/// write can be declined, and the load path stays usable for inspection.
+fn guard_commit(drive: &mut impl BlockDevice, total: u32) -> Result<(), PersistentError> {
+    let Some(range) = journal_range(total) else {
+        return Err(PersistentError::Unavailable);
+    };
+    match boot_guard::evaluate_device_writes(drive, range) {
+        WriteVerdict::Permitted => Ok(()),
+        WriteVerdict::Refused(refusal) => {
+            let mut sector = [0u8; SECTOR_SIZE];
+            // WHY re-read LBA 0 for the notice: the refusal path reports the boot
+            // area the decision used, and a read failure yields none rather than a
+            // fabricated one.
+            let boot = if drive.read_sector(0, &mut sector).is_ok() {
+                Some(boot_guard::parse_boot_area(&sector))
+            } else {
+                None
+            };
+            boot_guard::announce_refusal("persistent journal commit", drive, range, boot.as_ref(), refusal);
+            Err(PersistentError::BootDeviceProtected)
+        }
     }
 }
 
@@ -317,6 +367,7 @@ fn commit_to(
         return Err(PersistentError::TooLarge);
     }
     let total = drive.sector_count();
+    guard_commit(drive, total)?;
 
     let mut generations = [0u64; TOTAL_SLOT_COUNT as usize];
     for slot in 0..TOTAL_SLOT_COUNT {
@@ -448,6 +499,22 @@ mod tests {
             header[20] = kind;
             let _ = self.write_sector(self.base_of(slot), &header);
         }
+
+        /// Turns this device into boot media whose partitions cover every sector,
+        /// which is the shape of the packaged single-disk image.
+        fn install_boot_sector(&mut self) {
+            let mut mbr = [0u8; SECTOR_SIZE];
+            for (i, (lba, count)) in [(1u32, 961u32), (962, self.total - 962)].iter().enumerate() {
+                let o = 446 + i * 16;
+                mbr[o] = 0x80;
+                mbr[o + 4] = 0x0C;
+                mbr[o + 8..o + 12].copy_from_slice(&lba.to_le_bytes());
+                mbr[o + 12..o + 16].copy_from_slice(&count.to_le_bytes());
+            }
+            mbr[510] = 0x55;
+            mbr[511] = 0xAA;
+            self.sectors[..SECTOR_SIZE].copy_from_slice(&mbr);
+        }
     }
 
     impl BlockDevice for MockDevice {
@@ -487,6 +554,50 @@ mod tests {
             }
             None => None,
         }
+    }
+
+    /// A commit to the journal tail of the device the kernel booted from is the
+    /// second way the packaged image destroyed itself: the tail reservation puts
+    /// the slots inside the FAT boot partition, and every record publishes a
+    /// header sector there. Before the guard this wrote the header and payload
+    /// straight over the running image.
+    #[test]
+    fn a_commit_to_the_boot_device_is_refused_and_writes_nothing() {
+        let mut dev = MockDevice::new(8192);
+        dev.install_boot_sector();
+        let before = dev.sectors.clone();
+
+        assert_eq!(
+            commit_to(&mut dev, &payload(9, 600), KIND),
+            Err(PersistentError::BootDeviceProtected)
+        );
+        assert_eq!(dev.sectors, before, "a refused commit must leave the device byte-identical");
+    }
+
+    /// The same commit on a device with no boot sector still lands, so the guard
+    /// has not turned persistence off.
+    #[test]
+    fn a_commit_to_a_data_device_still_lands() {
+        let mut dev = MockDevice::new(8192);
+        assert_eq!(commit_to(&mut dev, &payload(9, 600), KIND), Ok(1));
+        let (generation, len, bytes) = load(&mut dev).expect("the record must be readable");
+        assert_eq!(generation, 1);
+        assert_eq!(bytes, payload(9, 600));
+        assert_eq!(len, 600);
+    }
+
+    /// A refused commit must not look like "nothing was ever committed".
+    ///
+    /// WHY this matters: `SecureKeystore::recover` reads `Ok(None)` as a first
+    /// boot and mints a replacement storage root. If a boot-device refusal were
+    /// folded into `Unavailable` or `Ok(None)`, refusing the write would orphan
+    /// every credential already committed there.
+    #[test]
+    fn a_refused_commit_still_reports_its_own_error() {
+        assert_ne!(PersistentError::BootDeviceProtected, PersistentError::Unavailable);
+        assert_ne!(PersistentError::BootDeviceProtected, PersistentError::Corrupt);
+        assert_ne!(PersistentError::BootDeviceProtected, PersistentError::Io);
+        assert_ne!(PersistentError::BootDeviceProtected, PersistentError::TooLarge);
     }
 
     /// A payload sector lost past the old 512-byte tag window used to validate:

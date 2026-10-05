@@ -1,5 +1,6 @@
 //! Persistent storage subsystem for InterOS.
 pub mod verified;
+pub mod boot_guard;
 pub mod crashdump;
 pub mod vault;
 pub mod persistent;
@@ -10,6 +11,7 @@ pub mod block;
 pub mod volume;
 
 pub use block::{BlockDevice, BlockDeviceError, BlockDeviceInfo, BlockDeviceKind, SECTOR_SIZE};
+pub use boot_guard::{BootArea, ImageExtent, Refusal, SectorRange, WriteVerdict};
 pub use volume::{VolumeDescriptor, VolumeError, VolumeKind, VolumeTable, MAX_VOLUMES};
 pub use interfs::{InterFs, FsBackendError, FS_MAGIC, FS_VERSION};
 pub use filesystem::{BLOCK_FS_BASE_LBA, BLOCK_FS_TAIL_RESERVED, init_block_filesystem, load_data_file, store_data_file};
