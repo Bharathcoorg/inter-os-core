@@ -336,6 +336,7 @@ fn card_state(state: &LauncherState, index: usize) -> (&'static [u8], bool) {
 struct CardPlan {
     rect: Rect,
     tile: Rect,
+    icon: Option<launcher::icons::IconKind>,
     /// The registry's icon token for this slot, centred in the tile. Empty when the
     /// package is not catalogued, which is also what decides the tile's fill.
     token: Run,
@@ -380,6 +381,7 @@ impl CardPlan {
     const EMPTY: CardPlan = CardPlan {
         rect: Rect::new(0, 0, 0, 0),
         tile: Rect::new(0, 0, 0, 0),
+        icon: None,
         token: Run::EMPTY,
         title: Run::EMPTY,
         line: Run::EMPTY,
@@ -400,16 +402,24 @@ fn card_plan(state: &LauncherState, card: Rect, row: usize, theme: &Theme) -> Ca
     // package ids, once per pixel of the icon tile, and the icon tile is the one
     // place on this screen that consults the registry while painting.
     let token = recent_icon(state, row);
-    let token_run = match token {
-        Some(bytes) => Run::centred(
-            tile.x,
-            tile.y + (CARD_TILE - type_scale::BODY * text::GLYPH_H) / 2,
-            type_scale::BODY,
-            CARD_TILE,
-            bytes,
-            theme.text_on_accent,
-        ),
-        None => Run::EMPTY,
+    let id_bytes = state.recent_id(row).map(|id| id.as_bytes()).unwrap_or(b"");
+    let icon_kind = launcher::icons::match_icon_kind(id_bytes)
+        .or_else(|| token.and_then(|tok| launcher::icons::match_icon_kind(tok)));
+
+    let token_run = if icon_kind.is_some() {
+        Run::EMPTY
+    } else {
+        match token {
+            Some(bytes) => Run::centred(
+                tile.x,
+                tile.y + (CARD_TILE - type_scale::BODY * text::GLYPH_H) / 2,
+                type_scale::BODY,
+                CARD_TILE,
+                bytes,
+                theme.text_on_accent,
+            ),
+            None => Run::EMPTY,
+        }
     };
     // WHY the title falls back to the package id: `recent_label` returns nothing for
     // a package that is not in the catalogue, and the old painter then drew the id
@@ -453,6 +463,7 @@ fn card_plan(state: &LauncherState, card: Rect, row: usize, theme: &Theme) -> Ca
     CardPlan {
         rect: card,
         tile,
+        icon: icon_kind,
         token: token_run,
         title: title_run,
         line: line_run,
@@ -708,7 +719,7 @@ fn card_pixel(plan: &CardPlan, x: usize, y: usize, theme: &Theme) -> Option<u32>
     // when the package is not catalogued. Which of the two it is was decided in the
     // plan, because it is decided by scanning the catalogue.
     if rounded_contains(plan.tile, x, y, radius::CONTROL) {
-        colour = if plan.token.len > 0 {
+        colour = if plan.token.len > 0 || plan.icon.is_some() {
             theme.accent
         } else {
             theme.surface_sunken
@@ -716,7 +727,12 @@ fn card_pixel(plan: &CardPlan, x: usize, y: usize, theme: &Theme) -> Option<u32>
         if rounded_outline(plan.tile, x, y, radius::CONTROL) {
             colour = theme.border;
         }
-        if let Some(c) = plan.token.pixel(x, y) {
+        if let Some(kind) = plan.icon {
+            let ink = layout::ink_on(theme, colour);
+            if let Some(c) = launcher::icons::rasterize_icon_pixel(kind, x, y, plan.tile.center_x(), plan.tile.center_y(), ink) {
+                colour = c;
+            }
+        } else if let Some(c) = plan.token.pixel(x, y) {
             colour = c;
         }
     }
