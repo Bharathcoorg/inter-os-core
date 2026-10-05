@@ -32,22 +32,16 @@ const CHUNK: usize = 4096;
 const LAUNCHER_SERVICE_ID: u8 = 10;
 
 /// The version string compiled into this binary from the crate manifest.
-///
-/// This is a build-time constant of the artifact itself, which is a real
-/// source: it describes exactly the ELF that is running. It is not, and is not
-/// presented as, a version read back from the kernel at runtime.
 const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // -----------------------------------------------------------------------------
 // Measured state
 // -----------------------------------------------------------------------------
 
-/// Result of one real probe. Nothing here is ever defaulted to a made-up value.
+/// Result of one real probe.
 enum Probe<T: Copy> {
     Ok(T),
-    /// The syscall returned a negative kernel status code.
     Refused(i64),
-    /// The syscall succeeded but the payload did not contain the field we need.
     Malformed,
 }
 
@@ -59,7 +53,6 @@ struct HelloWorld {
     policy_version: Probe<PolicyVersion>,
 }
 
-/// Decoded 12-byte `service_query` ABI record.
 #[derive(Clone, Copy)]
 struct LauncherRecord {
     state: u8,
@@ -79,10 +72,6 @@ struct PolicyVersion {
 // Real sources
 // -----------------------------------------------------------------------------
 
-/// Reads the 12-byte service record for `service_id`.
-///
-/// `service_query` is a discovery syscall with no ambient authority, so this is
-/// a genuine read of live kernel service state.
 fn probe_service(service_id: u8) -> Probe<LauncherRecord> {
     let mut out = [0u8; 12];
     match std::service_query(service_id, &mut out) {
@@ -97,12 +86,6 @@ fn probe_service(service_id: u8) -> Probe<LauncherRecord> {
     }
 }
 
-/// Reads the 1 kHz boot timer.
-///
-/// The capability slot for `TimerTickRead` is chosen by the spawn policy, so
-/// probe the granted table rather than assume an index. A refused read stays
-/// refused: it is reported as unavailable instead of being reported as zero
-/// seconds of uptime.
 fn probe_ticks() -> Probe<u64> {
     let mut last = i64::MIN;
     for slot in 0..12usize {
@@ -114,16 +97,10 @@ fn probe_ticks() -> Probe<u64> {
     Probe::Refused(last)
 }
 
-/// Reads `/system/etc/policy.json` and extracts the `"version"` field.
-///
-/// The read-only system policy file is seeded into the VFS by the kernel at
-/// boot, so this is the version the running image actually carries.
 fn probe_policy_version() -> Probe<PolicyVersion> {
     let mut buf = [0u8; 256];
     let mut read_len = 0usize;
 
-    // The capability slot an app receives for filesystem reads is chosen by the
-    // spawn policy, not by this app, so probe the table rather than assume one.
     for slot in 0..12usize {
         if let Ok(fd) = std::fs_open(slot, "/system/etc/policy.json", std::FS_READ) {
             if let Ok(n) = std::fs_read(slot, fd, &mut buf) {
@@ -146,12 +123,6 @@ fn probe_policy_version() -> Probe<PolicyVersion> {
     }
 }
 
-/// Extracts the number after the `"version"` key of a flat JSON object.
-///
-/// WHY hand-parsed and not assumed: the payload is produced by the kernel's
-/// `core::fmt` writer, so this only has to understand the exact flat shape the
-/// kernel emits. If the shape ever changes the parse fails and the UI says so
-/// rather than inventing a version.
 fn parse_version_field(buf: &[u8]) -> Option<PolicyVersion> {
     let needle = b"\"version\":";
     let mut from = 0usize;
@@ -195,20 +166,143 @@ fn parse_version_field(buf: &[u8]) -> Option<PolicyVersion> {
 }
 
 // -----------------------------------------------------------------------------
-// Rendering
+// Palette and geometry
 // -----------------------------------------------------------------------------
 
 const BG: u32 = 0xFF070B12;
 const CARD: u32 = 0xFF111B2B;
 const CARD_RAISED: u32 = 0xFF17243A;
+const CARD_INNER: u32 = 0xFF0B121E;
 const EDGE: u32 = 0xFF26354D;
 const TEXT: u32 = 0xFFF4F7FB;
 const MUTED: u32 = 0xFF9AA8BC;
+const FAINT: u32 = 0xFF6C7A8E;
 const ACCENT: u32 = 0xFF31C4FF;
 const OK: u32 = 0xFF56D68A;
 const WARN: u32 = 0xFFFFC043;
+const AMBER: u32 = 0xFFF59E0B;
 
-/// A bordered content card with a caption.
+#[inline(always)]
+fn in_rounded_rect(x: usize, y: usize, x0: usize, y0: usize, x1: usize, y1: usize, r: usize) -> bool {
+    if x < x0 || x >= x1 || y < y0 || y >= y1 {
+        return false;
+    }
+    let left = x0 + r;
+    let right = x1.saturating_sub(r + 1);
+    let top = y0 + r;
+    let bottom = y1.saturating_sub(r + 1);
+    let dx = if x < left { left - x } else if x > right { x - right } else { 0 };
+    let dy = if y < top { top - y } else if y > bottom { y - bottom } else { 0 };
+    dx * dx + dy * dy <= r * r
+}
+
+#[inline(always)]
+fn on_rounded_rect_border(x: usize, y: usize, x0: usize, y0: usize, x1: usize, y1: usize, r: usize) -> bool {
+    if !in_rounded_rect(x, y, x0, y0, x1, y1, r) {
+        return false;
+    }
+    if r > 1 && in_rounded_rect(x, y, x0 + 1, y0 + 1, x1.saturating_sub(1), y1.saturating_sub(1), r - 1) {
+        return false;
+    }
+    true
+}
+
+// -----------------------------------------------------------------------------
+// Vector Pictograms
+// -----------------------------------------------------------------------------
+
+/// Vector Globe / Planet pictogram for header.
+fn icon_globe(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    let dist_sq = dx * dx + dy * dy;
+    if dist_sq <= 16 * 16 {
+        if dist_sq >= 14 * 14 {
+            return Some(ACCENT);
+        }
+        // Equator and central meridian lines
+        if dy.abs() <= 1 || dx.abs() <= 1 {
+            return Some(MUTED);
+        }
+        // Latitude / Longitude ellipse
+        let el = dx * dx * 2 + dy * dy;
+        if el >= 9 * 9 && el <= 12 * 12 {
+            return Some(FAINT);
+        }
+        return Some(CARD_INNER);
+    }
+    None
+}
+
+/// Vector Sparkle / Star icon for Card 0.
+fn icon_star(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    let abs_x = dx.abs();
+    let abs_y = dy.abs();
+    // 4-pointed star
+    if (abs_x <= 8 && abs_y <= 1) || (abs_y <= 8 && abs_x <= 1) || (abs_x + abs_y <= 6) {
+        return Some(AMBER);
+    }
+    None
+}
+
+/// Vector OS Shield / System icon for Card 1.
+fn icon_os(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    if dx.abs() <= 8 && dy >= -7 && dy <= 8 {
+        let is_border = dy == -7 || dx.abs() == 8 || (dy >= 4 && (dx.abs() as isize + dy) >= 12);
+        if is_border {
+            return Some(ACCENT);
+        }
+        if dx.abs() <= 4 && dy.abs() <= 3 {
+            return Some(TEXT);
+        }
+        return Some(CARD_INNER);
+    }
+    None
+}
+
+/// Vector Launch Speedometer / Gauge icon for Card 2.
+fn icon_speed(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    let dist_sq = dx * dx + dy * dy;
+    if dist_sq >= 6 * 6 && dist_sq <= 9 * 9 && dy <= 3 {
+        return Some(OK);
+    }
+    // Needle pointing to top-right
+    if dx >= 0 && dy <= 0 && (dx + dy).abs() <= 1 && dx <= 5 {
+        return Some(WARN);
+    }
+    None
+}
+
+/// Vector Document / Truth icon for Card 3.
+fn icon_verified(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    if dx.abs() <= 8 && dy.abs() <= 8 {
+        if dx.abs() == 8 || dy.abs() == 8 {
+            return Some(MUTED);
+        }
+        // Checkmark inside
+        if (dx == -3 && dy == 0)
+            || (dx == -2 && dy == 1)
+            || (dx == -1 && dy == 2)
+            || (dx == 0 && dy == 1)
+            || (dx == 1 && dy == 0)
+            || (dx == 2 && dy == -1)
+            || (dx == 3 && dy == -2)
+        {
+            return Some(OK);
+        }
+        return Some(CARD_INNER);
+    }
+    None
+}
+
 struct Card {
     x0: usize,
     y0: usize,
@@ -219,13 +313,12 @@ struct Card {
 }
 
 const CARDS: [Card; 4] = [
-    Card { x0: 30, y0: 118, x1: 690, y1: 372, caption: b"THIS APP", caption_color: ACCENT },
-    Card { x0: 30, y0: 392, x1: 690, y1: 592, caption: b"OS IDENTITY (READ AT RUNTIME)", caption_color: MUTED },
-    Card { x0: 30, y0: 612, x1: 690, y1: 1012, caption: b"LAUNCH PATH, MEASURED", caption_color: MUTED },
-    Card { x0: 30, y0: 1032, x1: 690, y1: 1300, caption: b"SCOPE", caption_color: MUTED },
+    Card { x0: 30, y0: 114, x1: 690, y1: 372, caption: b"APPLICATION IDENTITY", caption_color: ACCENT },
+    Card { x0: 30, y0: 390, x1: 690, y1: 592, caption: b"OS DISTRIBUTION & IDENTITY", caption_color: ACCENT },
+    Card { x0: 30, y0: 610, x1: 690, y1: 1012, caption: b"MEASURED LAUNCH PATH & TIMINGS", caption_color: ACCENT },
+    Card { x0: 30, y0: 1030, x1: 690, y1: 1300, caption: b"PLATFORM REALITY CONTRACT", caption_color: ACCENT },
 ];
 
-/// Small-caps field label on the left, value on the right, provenance underneath.
 struct Row {
     y: u32,
     label: &'static [u8],
@@ -255,9 +348,6 @@ impl Row {
     }
 }
 
-/// Writes the decimal digits of `v` into `out`, most significant first.
-/// Returns the number of bytes written. Never invents a value: `v` is the
-/// measured integer, and zero prints as a single `0`.
 fn fmt_u64(mut v: u64, out: &mut [u8]) -> usize {
     if out.is_empty() {
         return 0;
@@ -280,7 +370,6 @@ fn fmt_u64(mut v: u64, out: &mut [u8]) -> usize {
     n
 }
 
-/// Decimal digits of a signed kernel status code, prefixed with `-` when negative.
 fn fmt_i64(v: i64, out: &mut [u8]) -> usize {
     if v < 0 && !out.is_empty() {
         out[0] = b'-';
@@ -307,7 +396,7 @@ fn draw_rows(x: usize, y: usize, rows: &[Row], base: usize) -> Option<u32> {
             return Some(row.value_color);
         }
         if font::text_at(x, y, base + 14, top + 18, 2, &row.source[..row.source_len]) {
-            return Some(0xFF6C7A8E);
+            return Some(FAINT);
         }
     }
     None
@@ -338,36 +427,75 @@ fn render(surface: u32, app: &HelloWorld) {
 
 #[inline(never)]
 fn pixel(x: usize, y: usize, app: &HelloWorld) -> u32 {
-    // Header
+    // Header (y: 0..96)
     if y < 96 {
         if y >= 94 {
             return EDGE;
         }
+
+        // Back button
         if (24..100).contains(&x) && (28..68).contains(&y) {
-            let border = y == 28 || y == 67 || x == 24 || x == 99;
+            let on_border = on_rounded_rect_border(x, y, 24, 28, 100, 68, 8);
             let chev = (x as isize - 62).abs() + (y as isize - 48).abs() <= 11 && x <= 62;
-            return if border || chev { TEXT } else { CARD_RAISED };
+            return if on_border || chev { TEXT } else { CARD_RAISED };
         }
-        if font::text_at(x, y, 116, 32, 3, b"Hello World") {
+
+        // Globe Icon
+        if let Some(c) = icon_globe(x, y, 134, 48) {
+            return c;
+        }
+
+        // App Title and Subtitle
+        if font::text_at(x, y, 164, 32, 3, b"Hello World") {
             return TEXT;
         }
+        if font::text_at(x, y, 166, 62, 1, b"RING 3 REFERENCE BENCHMARK") {
+            return FAINT;
+        }
+
+        // Live status pill on top right
+        if in_rounded_rect(x, y, 540, 34, 690, 62, 6) {
+            if on_rounded_rect_border(x, y, 540, 34, 690, 62, 6) {
+                return EDGE;
+            }
+            let (dx, dy) = (x as isize - 556, y as isize - 48);
+            if dx * dx + dy * dy <= 4 * 4 {
+                return OK;
+            }
+            if font::text_at(x, y, 568, 41, 2, b"RUNNING") {
+                return OK;
+            }
+            return CARD_RAISED;
+        }
+
         return CARD;
     }
 
-    // Cards
-    for card in CARDS.iter() {
-        if y >= card.y0 && y < card.y1 && x >= card.x0 && x < card.x1 {
-            if y == card.y0 || y == card.y1 - 1 || x == card.x0 || x == card.x1 - 1 {
+    // Card Borders and Headers
+    for (idx, card) in CARDS.iter().enumerate() {
+        if in_rounded_rect(x, y, card.x0, card.y0, card.x1, card.y1, 10) {
+            if on_rounded_rect_border(x, y, card.x0, card.y0, card.x1, card.y1, 10) {
                 return EDGE;
             }
-            if font::text_at(x, y, card.x0 + 14, card.y0 + 12, 2, card.caption) {
+
+            let icon_hit = match idx {
+                0 => icon_star(x, y, card.x0 + 24, card.y0 + 20),
+                1 => icon_os(x, y, card.x0 + 24, card.y0 + 20),
+                2 => icon_speed(x, y, card.x0 + 24, card.y0 + 20),
+                3 => icon_verified(x, y, card.x0 + 24, card.y0 + 20),
+                _ => None,
+            };
+            if let Some(c) = icon_hit {
+                return c;
+            }
+
+            if font::text_at(x, y, card.x0 + 44, card.y0 + 12, 2, card.caption) {
                 return card.caption_color;
             }
-            return CARD;
         }
     }
 
-    // Card 1: identity of this binary.
+    // Card 1: identity of this binary
     if (170..372).contains(&y) && (30..690).contains(&x) {
         if font::text_at(x, y, 48, 196, 5, b"Hello World") {
             return TEXT;
@@ -375,26 +503,23 @@ fn pixel(x: usize, y: usize, app: &HelloWorld) -> u32 {
         let mut v = [0u8; 24];
         let n = write_lit(b"build ", &mut v);
         let dn = write_lit(BUILD_VERSION.as_bytes(), &mut v[n..]);
-        if font::text_at(x, y, 48, 300, 2, &v[..n + dn]) {
+        if font::text_at(x, y, 48, 296, 2, &v[..n + dn]) {
             return ACCENT;
         }
-        if font::text_at(x, y, 48, 330, 2, b"compiled into this ELF") {
+        if font::text_at(x, y, 48, 326, 2, b"compiled into this static ELF") {
             return MUTED;
         }
-        if font::text_at(x, y, 48, 236, 2, b"Ring 3 user mode") {
+        if font::text_at(x, y, 48, 240, 2, b"Ring 3 user-space isolated process") {
             return MUTED;
         }
         return CARD;
     }
 
-    // Card 2: OS identity read back from the running image.
+    // Card 2: OS identity read back from the running image
     if (440..592).contains(&y) && (30..690).contains(&x) {
         let mut v = [0u8; 24];
         match &app.policy_version {
             Probe::Ok(p) => {
-                // Dotted, exactly as the file spells it. Collapsing the three
-                // numbers into one integer would print "300" for 0.3.0, which is
-                // a version string the image never contained.
                 let n = write_lit(b"Inter OS ", &mut v);
                 let n = n + fmt_u64(p.major as u64, &mut v[n..]);
                 let n = n + write_lit(b".", &mut v[n..]);
@@ -433,7 +558,7 @@ fn pixel(x: usize, y: usize, app: &HelloWorld) -> u32 {
         return CARD;
     }
 
-    // Card 3: what the launch path actually produced.
+    // Card 3: what the launch path produced
     if (660..1012).contains(&y) && (30..690).contains(&x) {
         let mut r_task = Row::new(672, b"Task id", b"get_task_id()");
         let mut v = [0u8; 24];
@@ -454,9 +579,6 @@ fn pixel(x: usize, y: usize, app: &HelloWorld) -> u32 {
                 r_up.set(&v[..n], TEXT);
             }
             Probe::Refused(e) => {
-                // The refused status belongs on the row that made the call. Uptime
-                // is derived from the same read, so it gets the word, not the code:
-                // a bare "-1" in an uptime row would read as a measurement.
                 let n = write_lit(b"refused (", &mut v);
                 let mut n = n + fmt_i64(e, &mut v[n..]);
                 if n < v.len() {
@@ -507,7 +629,7 @@ fn pixel(x: usize, y: usize, app: &HelloWorld) -> u32 {
         return CARD;
     }
 
-    // Card 4: scope, stated plainly.
+    // Card 4: scope
     if (1080..1300).contains(&y) && (30..690).contains(&x) {
         let lines: [&[u8]; 6] = [
             b"No sensor, camera, radio or",
@@ -530,11 +652,11 @@ fn pixel(x: usize, y: usize, app: &HelloWorld) -> u32 {
     if (1418..1424).contains(&y) && (260..460).contains(&x) {
         return MUTED;
     }
+
     BG
 }
 
 fn service_state_word(state: u8) -> &'static [u8] {
-    // ServiceState: Declared=0, Starting=1, Running=2, Stopped=3, Failed=4.
     match state {
         0 => b"declared",
         1 => b"starting",
@@ -604,9 +726,10 @@ pub extern "C" fn _start() -> ! {
                 };
                 while std::input_event_poll(&mut input).is_ok() {
                     let gesture_exit = matches!(input.kind, 4 | 6 | 7 | 8 | 10);
+                    let (ix, iy) = (input.x as usize, input.y as usize);
                     let tapped_back =
-                        input.kind == 1 && ((24..100).contains(&input.x) && (28..68).contains(&input.y));
-                    let tapped_home = input.kind == 1 && input.y >= 1400;
+                        input.kind == 1 && ((24..100).contains(&ix) && (28..68).contains(&iy));
+                    let tapped_home = input.kind == 1 && iy >= 1400;
                     if gesture_exit || tapped_back || tapped_home {
                         std::log(0, "[HELLO WORLD] Navigation gesture recognized. Exiting to launcher.").ok();
                         let _ = std::surface_destroy(6, surface);
