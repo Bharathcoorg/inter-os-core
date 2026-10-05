@@ -216,8 +216,460 @@ impl VaultApp {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Visual Design Tokens
+// -----------------------------------------------------------------------------
+const BG_DARK: u32 = 0xFF080D1A;
+const SURFACE_DARK: u32 = 0xFF101726;
+const SURFACE_RAISED: u32 = 0xFF192236;
+const BORDER_SUBTLE: u32 = 0xFF2A374F;
+const ACCENT_SKY: u32 = 0xFF38BDF8;
+const ACCENT_AMBER: u32 = 0xFFFFB800;
+const SUCCESS_EMERALD: u32 = 0xFF10B981;
+const TEXT_PRIMARY: u32 = 0xFFF8FAFC;
+const TEXT_MUTED: u32 = 0xFF94A3B8;
+
+// -----------------------------------------------------------------------------
+// Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')
+// -----------------------------------------------------------------------------
+const FONT_8X8: [[u8; 8]; 95] = [
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // 32 ' '
+    [0x18, 0x18, 0x18, 0x18, 0x00, 0x00, 0x18, 0x00], // 33 '!'
+    [0x66, 0x66, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00], // 34 '"'
+    [0x6c, 0x6c, 0xfe, 0x6c, 0xfe, 0x6c, 0x6c, 0x00], // 35 '#'
+    [0x18, 0x3e, 0x60, 0x3c, 0x06, 0x7c, 0x18, 0x00], // 36 '$'
+    [0x00, 0xc6, 0xcc, 0x18, 0x30, 0x66, 0xc6, 0x00], // 37 '%'
+    [0x38, 0x6c, 0x38, 0x76, 0xdc, 0xcc, 0x76, 0x00], // 38 '&'
+    [0x18, 0x18, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00], // 39 '''
+    [0x0c, 0x18, 0x30, 0x30, 0x30, 0x18, 0x0c, 0x00], // 40 '('
+    [0x30, 0x18, 0x0c, 0x0c, 0x0c, 0x18, 0x30, 0x00], // 41 ')'
+    [0x00, 0x66, 0x3c, 0xff, 0x3c, 0x66, 0x00, 0x00], // 42 '*'
+    [0x00, 0x18, 0x18, 0x7e, 0x18, 0x18, 0x00, 0x00], // 43 '+'
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x30], // 44 ','
+    [0x00, 0x00, 0x00, 0x7e, 0x00, 0x00, 0x00, 0x00], // 45 '-'
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00], // 46 '.'
+    [0x06, 0x0c, 0x18, 0x30, 0x60, 0xc0, 0x80, 0x00], // 47 '/'
+    [0x7c, 0xc6, 0xce, 0xd6, 0xe6, 0xc6, 0x7c, 0x00], // 48 '0'
+    [0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x7e, 0x00], // 49 '1'
+    [0x7c, 0xc6, 0x06, 0x1c, 0x30, 0x66, 0xfe, 0x00], // 50 '2'
+    [0x7c, 0xc6, 0x06, 0x3c, 0x06, 0xc6, 0x7c, 0x00], // 51 '3'
+    [0x1c, 0x3c, 0x6c, 0xcc, 0xfe, 0x0c, 0x1e, 0x00], // 52 '4'
+    [0xfe, 0xc0, 0xfc, 0x06, 0x06, 0xc6, 0x7c, 0x00], // 53 '5'
+    [0x38, 0x60, 0xc0, 0xfc, 0xc6, 0xc6, 0x7c, 0x00], // 54 '6'
+    [0xfe, 0xc6, 0x0c, 0x18, 0x30, 0x30, 0x30, 0x00], // 55 '7'
+    [0x7c, 0xc6, 0xc6, 0x7c, 0xc6, 0xc6, 0x7c, 0x00], // 56 '8'
+    [0x7c, 0xc6, 0xc6, 0x7e, 0x06, 0x0c, 0x78, 0x00], // 57 '9'
+    [0x00, 0x18, 0x18, 0x00, 0x00, 0x18, 0x18, 0x00], // 58 ':'
+    [0x00, 0x18, 0x18, 0x00, 0x00, 0x18, 0x18, 0x30], // 59 ';'
+    [0x06, 0x0c, 0x18, 0x30, 0x18, 0x0c, 0x06, 0x00], // 60 '<'
+    [0x00, 0x00, 0x7e, 0x00, 0x7e, 0x00, 0x00, 0x00], // 61 '='
+    [0x60, 0x30, 0x18, 0x0c, 0x18, 0x30, 0x60, 0x00], // 62 '>'
+    [0x7c, 0xc6, 0x0c, 0x18, 0x18, 0x00, 0x18, 0x00], // 63 '?'
+    [0x7c, 0xc6, 0xde, 0xde, 0xdc, 0xc0, 0x7c, 0x00], // 64 '@'
+    [0x38, 0x6c, 0xc6, 0xfe, 0xc6, 0xc6, 0xc6, 0x00], // 65 'A'
+    [0xfc, 0x66, 0x66, 0x7c, 0x66, 0x66, 0xfc, 0x00], // 66 'B'
+    [0x3c, 0x66, 0xc0, 0xc0, 0xc0, 0x66, 0x3c, 0x00], // 67 'C'
+    [0xf8, 0x6c, 0x66, 0x66, 0x66, 0x6c, 0xf8, 0x00], // 68 'D'
+    [0xfe, 0x62, 0x68, 0x78, 0x68, 0x62, 0xfe, 0x00], // 69 'E'
+    [0xfe, 0x62, 0x68, 0x78, 0x68, 0x60, 0xf0, 0x00], // 70 'F'
+    [0x3c, 0x66, 0xc0, 0xc0, 0xce, 0x66, 0x3e, 0x00], // 71 'G'
+    [0xc6, 0xc6, 0xc6, 0xfe, 0xc6, 0xc6, 0xc6, 0x00], // 72 'H'
+    [0x3c, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3c, 0x00], // 73 'I'
+    [0x1e, 0x0c, 0x0c, 0x0c, 0xcc, 0xcc, 0x78, 0x00], // 74 'J'
+    [0xe6, 0x66, 0x6c, 0x78, 0x6c, 0x66, 0xe6, 0x00], // 75 'K'
+    [0xf0, 0x60, 0x60, 0x60, 0x62, 0x66, 0xfe, 0x00], // 76 'L'
+    [0xc6, 0xee, 0xfe, 0xd6, 0xc6, 0xc6, 0xc6, 0x00], // 77 'M'
+    [0xc6, 0xe6, 0xf6, 0xde, 0xce, 0xc6, 0xc6, 0x00], // 78 'N'
+    [0x7c, 0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0x7c, 0x00], // 79 'O'
+    [0xfc, 0x66, 0x66, 0x7c, 0x60, 0x60, 0xf0, 0x00], // 80 'P'
+    [0x7c, 0xc6, 0xc6, 0xc6, 0xd6, 0xde, 0x7c, 0x0e], // 81 'Q'
+    [0xfc, 0x66, 0x66, 0x7c, 0x6c, 0x66, 0xe6, 0x00], // 82 'R'
+    [0x7c, 0xc6, 0x60, 0x38, 0x0c, 0xc6, 0x7c, 0x00], // 83 'S'
+    [0x7e, 0x5a, 0x18, 0x18, 0x18, 0x18, 0x3c, 0x00], // 84 'T'
+    [0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0x7c, 0x00], // 85 'U'
+    [0xc6, 0xc6, 0xc6, 0xc6, 0xc6, 0x6c, 0x38, 0x00], // 86 'V'
+    [0xc6, 0xc6, 0xc6, 0xd6, 0xfe, 0xee, 0xc6, 0x00], // 87 'W'
+    [0xc6, 0xc6, 0x6c, 0x38, 0x6c, 0xc6, 0xc6, 0x00], // 88 'X'
+    [0x66, 0x66, 0x66, 0x3c, 0x18, 0x18, 0x3c, 0x00], // 89 'Y'
+    [0xfe, 0xc6, 0x0c, 0x18, 0x30, 0x62, 0xfe, 0x00], // 90 'Z'
+    [0x3c, 0x30, 0x30, 0x30, 0x30, 0x30, 0x3c, 0x00], // 91 '['
+    [0xc0, 0x60, 0x30, 0x18, 0x0c, 0x06, 0x02, 0x00], // 92 '\'
+    [0x3c, 0x0c, 0x0c, 0x0c, 0x0c, 0x0c, 0x3c, 0x00], // 93 ']'
+    [0x10, 0x38, 0x6c, 0xc6, 0x00, 0x00, 0x00, 0x00], // 94 '^'
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff], // 95 '_'
+    [0x30, 0x18, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00], // 96 '`'
+    [0x00, 0x00, 0x78, 0x0c, 0x7c, 0xcc, 0x76, 0x00], // 97 'a'
+    [0xe0, 0x60, 0x7c, 0x66, 0x66, 0x66, 0xdc, 0x00], // 98 'b'
+    [0x00, 0x00, 0x78, 0xcc, 0xc0, 0xcc, 0x78, 0x00], // 99 'c'
+    [0x1c, 0x0c, 0x7c, 0xcc, 0xcc, 0xcc, 0x76, 0x00], // 100 'd'
+    [0x00, 0x00, 0x78, 0xcc, 0xfc, 0xc0, 0x78, 0x00], // 101 'e'
+    [0x38, 0x6c, 0x60, 0xf0, 0x60, 0x60, 0xf0, 0x00], // 102 'f'
+    [0x00, 0x00, 0x76, 0xcc, 0xcc, 0x7c, 0x0c, 0xf8], // 103 'g'
+    [0xe0, 0x60, 0x6c, 0x76, 0x66, 0x66, 0xe6, 0x00], // 104 'h'
+    [0x18, 0x00, 0x38, 0x18, 0x18, 0x18, 0x3c, 0x00], // 105 'i'
+    [0x0c, 0x00, 0x1c, 0x0c, 0x0c, 0xcc, 0xcc, 0x78], // 106 'j'
+    [0xe0, 0x60, 0x66, 0x6c, 0x78, 0x6c, 0xe6, 0x00], // 107 'k'
+    [0x38, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3c, 0x00], // 108 'l'
+    [0x00, 0x00, 0xec, 0xfe, 0xd6, 0xd6, 0xd6, 0x00], // 109 'm'
+    [0x00, 0x00, 0xdc, 0x66, 0x66, 0x66, 0x66, 0x00], // 110 'n'
+    [0x00, 0x00, 0x7c, 0xc6, 0xc6, 0xc6, 0x7c, 0x00], // 111 'o'
+    [0x00, 0x00, 0xdc, 0x66, 0x66, 0x7c, 0x60, 0xf0], // 112 'p'
+    [0x00, 0x00, 0x76, 0xcc, 0xcc, 0x7c, 0x0c, 0x1e], // 113 'q'
+    [0x00, 0x00, 0xdc, 0x76, 0x66, 0x60, 0xf0, 0x00], // 114 'r'
+    [0x00, 0x00, 0x7c, 0xc0, 0x78, 0x0c, 0xf8, 0x00], // 115 's'
+    [0x10, 0x30, 0x7c, 0x30, 0x30, 0x34, 0x18, 0x00], // 116 't'
+    [0x00, 0x00, 0xcc, 0xcc, 0xcc, 0xcc, 0x76, 0x00], // 117 'u'
+    [0x00, 0x00, 0xc6, 0xc6, 0xc6, 0x6c, 0x38, 0x00], // 118 'v'
+    [0x00, 0x00, 0xc6, 0xd6, 0xd6, 0xfe, 0x6c, 0x00], // 119 'w'
+    [0x00, 0x00, 0xc6, 0x6c, 0x38, 0x6c, 0xc6, 0x00], // 120 'x'
+    [0x00, 0x00, 0xc6, 0xc6, 0xce, 0x76, 0x06, 0x7c], // 121 'y'
+    [0x00, 0x00, 0xfc, 0x18, 0x30, 0x60, 0xfc, 0x00], // 122 'z'
+    [0x0e, 0x18, 0x18, 0x70, 0x18, 0x18, 0x0e, 0x00], // 123 '{'
+    [0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x18, 0x00], // 124 '|'
+    [0x70, 0x18, 0x18, 0x0e, 0x18, 0x18, 0x70, 0x00], // 125 '}'
+    [0x76, 0xdc, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // 126 '~'
+];
+
+fn test_text(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    color: u32,
+) -> Option<u32> {
+    if y < y0 || y >= y0 + 8 * scale {
+        return None;
+    }
+    let row = (y - y0) / scale;
+    for (i, &b) in text.iter().enumerate() {
+        let char_x0 = x0 + i * 8 * scale;
+        if x >= char_x0 && x < char_x0 + 8 * scale {
+            let col = (x - char_x0) / scale;
+            let glyph_idx = if (32..=126).contains(&b) {
+                (b - 32) as usize
+            } else {
+                0
+            };
+            let row_byte = FONT_8X8[glyph_idx][row];
+            if (row_byte & (0x80 >> col)) != 0 {
+                return Some(color);
+            }
+            return None;
+        }
+    }
+    None
+}
+
+/// Vector padlock icon for sector security status
+fn test_vault_padlock(x: usize, y: usize, cx: usize, cy: usize, locked: bool) -> bool {
+    let dx = x as isize - cx as isize;
+    let dy = y as isize - cy as isize;
+    // Shackle loop (top)
+    if dy <= -2 && dy >= -16 {
+        let shackle_offset = if locked { 0 } else { -4 };
+        let r2 = (dx - shackle_offset) * (dx - shackle_offset) + (dy + 8) * (dy + 8);
+        if r2 >= 5 * 5 && r2 <= 9 * 9 && dy <= -8 {
+            return true;
+        }
+        if (dx - shackle_offset).abs() >= 5 && (dx - shackle_offset).abs() <= 9 && dy >= -8 && dy <= -2 {
+            return true;
+        }
+    }
+    // Solid padlock body
+    if dy >= -2 && dy <= 14 && dx.abs() <= 11 {
+        // Keyhole aperture
+        let is_keyhole = (dx.abs() <= 1 && dy >= 4 && dy <= 9) || (dx * dx + (dy - 4) * (dy - 4) <= 4);
+        if is_keyhole {
+            return false;
+        }
+        return true;
+    }
+    false
+}
+
 const SECTOR_CARD_Y: [usize; 6] = [290, 420, 550, 680, 810, 940];
 const SECTOR_CARD_H: usize = 118;
+
+#[inline(never)]
+fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
+    // 1. Status Bar & Header (y: 0..96)
+    if y < 96 {
+        if y >= 94 {
+            return BORDER_SUBTLE;
+        }
+
+        // Back button (<) at (x: 24..100, y: 28..68)
+        if x >= 24 && x < 100 && y >= 28 && y < 68 {
+            let center_x = 62;
+            let center_y = 48;
+            let dx = (x as isize - center_x as isize).abs();
+            let dy = (y as isize - center_y as isize).abs();
+            if (dx + dy <= 12 && x <= center_x)
+                || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
+            {
+                return TEXT_PRIMARY;
+            }
+            return SURFACE_RAISED;
+        }
+
+        // Header Title: "Vault"
+        if y >= 36 && y < 60 {
+            if let Some(c) = test_text(x, y, 116, 36, 3, b"Vault", TEXT_PRIMARY) {
+                return c;
+            }
+        }
+
+        // Hardware Keystore Badge (x: 460..696, y: 28..68)
+        if x >= 460 && x < 696 && y >= 28 && y < 68 {
+            let rx = (x - 460).min(695 - x);
+            let ry = (y - 28).min(67 - y);
+            if rx < 16 && ry < 16 {
+                let cdx = (16 - rx) as isize;
+                let cdy = (16 - ry) as isize;
+                if cdx * cdx + cdy * cdy >= 256 {
+                    return BG_DARK;
+                }
+            }
+
+            let is_active = vault.master_key_derived && vault.media_key_derived;
+            let (status_text, status_color) = if is_active {
+                (&b"ENCLAVE ACTIVE"[..], SUCCESS_EMERALD)
+            } else {
+                (&b"KEYSTORE SYNC"[..], ACCENT_AMBER)
+            };
+
+            if let Some(c) = test_text(x, y, 480, 42, 2, status_text, status_color) {
+                return c;
+            }
+
+            if rx < 2 || ry < 2 {
+                return status_color;
+            }
+            return SURFACE_RAISED;
+        }
+
+        return BG_DARK;
+    }
+
+    // 2. Storage Overview Card (y: 110..270, x: 24..696)
+    if (110..270).contains(&y) && x >= 24 && x < W - 24 {
+        let rx = (x - 24).min(W - 25 - x);
+        let ry = (y - 110).min(269 - y);
+        if rx < 18 && ry < 18 {
+            let cdx = (18 - rx) as isize;
+            let cdy = (18 - ry) as isize;
+            if cdx * cdx + cdy * cdy >= 324 {
+                return BG_DARK;
+            }
+        }
+
+        if let Some(c) = test_text(x, y, 44, 126, 2, b"HARDWARE ENCRYPTED STORAGE", TEXT_PRIMARY) {
+            return c;
+        }
+        if let Some(c) = test_text(x, y, 44, 150, 1, b"AES-256-XTS & ChaCha20-Poly1305 Verified", TEXT_MUTED) {
+            return c;
+        }
+
+        // Multi-Segment Storage Bar (y: 176..206, x: 44..W-44)
+        if (176..206).contains(&y) && x >= 44 && x < W - 44 {
+            let rel_x = x - 44;
+            let seg_w = (W - 88) / 6;
+            let seg_idx = (rel_x / seg_w).min(5);
+            let in_seg_x = rel_x % seg_w;
+            if in_seg_x >= seg_w - 3 {
+                return SURFACE_DARK;
+            }
+            return match seg_idx {
+                0 => 0xFF38BDF8, // Sector 100
+                1 => 0xFF10B981, // Sector 200
+                2 => 0xFFA855F7, // Sector 201
+                3 => 0xFFFFB800, // Sector 202
+                4 => 0xFFF43F5E, // Sector 203
+                _ => 0xFF06B6D4, // Sector 204
+            };
+        }
+
+        if let Some(c) = test_text(x, y, 44, 222, 1, b"3,072 / 3,072 BYTES ALLOCATED - 100% HEALTH", ACCENT_SKY) {
+            return c;
+        }
+        if let Some(c) = test_text(x, y, 44, 240, 1, b"Hardware Master Key & Multi-Sector Ledger Online", TEXT_MUTED) {
+            return c;
+        }
+
+        if rx < 2 || ry < 2 {
+            return BORDER_SUBTLE;
+        }
+        return SURFACE_DARK;
+    }
+
+    // 3. Sector Cards (y: 290, 420, 550, 680, 810, 940)
+    for idx in 0..6 {
+        let cy = SECTOR_CARD_Y[idx];
+        if y >= cy && y < cy + SECTOR_CARD_H && x >= 24 && x < W - 24 {
+            let rx = (x - 24).min(W - 25 - x);
+            let ry = (y - cy).min(SECTOR_CARD_H - 1 - (y - cy));
+            if rx < 16 && ry < 16 {
+                let cdx = (16 - rx) as isize;
+                let cdy = (16 - ry) as isize;
+                if cdx * cdx + cdy * cdy >= 256 {
+                    return BG_DARK;
+                }
+            }
+
+            // Left Sector Badge Box (x: 40..144, y: cy + 18..cy + 100)
+            if x >= 40 && x < 144 && y >= cy + 18 && y < cy + 100 {
+                let bx = (x - 40).min(143 - x);
+                let by = (y - (cy + 18)).min(cy + 99 - y);
+                if bx < 12 && by < 12 {
+                    let cdx = (12 - bx) as isize;
+                    let cdy = (12 - by) as isize;
+                    if cdx * cdx + cdy * cdy >= 144 {
+                        return SURFACE_DARK;
+                    }
+                }
+
+                let sec_label = match idx {
+                    0 => &b"S100"[..],
+                    1 => &b"S200"[..],
+                    2 => &b"S201"[..],
+                    3 => &b"S202"[..],
+                    4 => &b"S203"[..],
+                    _ => &b"S204"[..],
+                };
+
+                if let Some(c) = test_text(x, y, 54, cy + 50, 2, sec_label, ACCENT_SKY) {
+                    return c;
+                }
+
+                if bx < 2 || by < 2 {
+                    return BORDER_SUBTLE;
+                }
+                return SURFACE_RAISED;
+            }
+
+            // Middle Description & Details
+            let (desc, sub) = match idx {
+                0 => (&b"Root Keystore & Identity"[..], &b"512B Block - Master Attestation"[..]),
+                1 => (&b"General Media & Documents"[..], &b"512B Block - Sovereign Containers"[..]),
+                2 => (&b"Camera Photos & ISP Vision"[..], &b"512B Block - Encrypted AES-XTS"[..]),
+                3 => (&b"Encrypted Messages & P2P"[..], &b"512B Block - Wire Ledger"[..]),
+                4 => (&b"Calendar Events & Agenda"[..], &b"512B Block - Encrypted Timeline"[..]),
+                _ => (&b"Audio Tracks & Studio"[..], &b"512B Block - Music Synthesizer"[..]),
+            };
+
+            if let Some(c) = test_text(x, y, 160, cy + 32, 2, desc, TEXT_PRIMARY) {
+                return c;
+            }
+            if let Some(c) = test_text(x, y, 160, cy + 64, 1, sub, TEXT_MUTED) {
+                return c;
+            }
+
+            // Right Padlock Security Status
+            let is_auth = vault.sectors[idx].map_or(false, |s| s.authenticated);
+            let pad_color = if is_auth { SUCCESS_EMERALD } else { ACCENT_AMBER };
+
+            if test_vault_padlock(x, y, 630, cy + 46, true) {
+                return pad_color;
+            }
+
+            let pad_label = if is_auth { &b"VERIFIED"[..] } else { &b"LOCKED"[..] };
+            let pad_lx = if is_auth { 600 } else { 608 };
+            if let Some(c) = test_text(x, y, pad_lx, cy + 74, 1, pad_label, pad_color) {
+                return c;
+            }
+
+            if rx < 2 || ry < 2 {
+                return BORDER_SUBTLE;
+            }
+            return SURFACE_DARK;
+        }
+    }
+
+    // 4. Action Buttons (y: 1080..1220)
+    if (1080..1220).contains(&y) {
+        // Button 1: Test All Roundtrips (x: 40..340, y: 1100..1190)
+        if x >= 40 && x < 340 && y >= 1100 && y < 1190 {
+            let rx = (x - 40).min(339 - x);
+            let ry = (y - 1100).min(1189 - y);
+            if rx < 20 && ry < 20 {
+                let cdx = (20 - rx) as isize;
+                let cdy = (20 - ry) as isize;
+                if cdx * cdx + cdy * cdy >= 400 {
+                    return BG_DARK;
+                }
+            }
+
+            if let Some(c) = test_text(x, y, 116, 1136, 2, b"VERIFY ALL", ACCENT_SKY) {
+                return c;
+            }
+
+            if rx < 2 || ry < 2 {
+                return ACCENT_SKY;
+            }
+            return SURFACE_RAISED;
+        }
+
+        // Button 2: Export Backup (x: 380..680, y: 1100..1190)
+        if x >= 380 && x < 680 && y >= 1100 && y < 1190 {
+            let rx = (x - 380).min(679 - x);
+            let ry = (y - 1100).min(1189 - y);
+            if rx < 20 && ry < 20 {
+                let cdx = (20 - rx) as isize;
+                let cdy = (20 - ry) as isize;
+                if cdx * cdx + cdy * cdy >= 400 {
+                    return BG_DARK;
+                }
+            }
+
+            if let Some(c) = test_text(x, y, 460, 1136, 2, b"EXPORT BACKUP", SUCCESS_EMERALD) {
+                return c;
+            }
+
+            if rx < 2 || ry < 2 {
+                return SUCCESS_EMERALD;
+            }
+            return SURFACE_RAISED;
+        }
+
+        return BG_DARK;
+    }
+
+    // 5. Bottom Navigation Dock (y: 1260..1400)
+    if (1260..1400).contains(&y) && x >= 24 && x < W - 24 {
+        if y == 1260 {
+            return BORDER_SUBTLE;
+        }
+
+        // Tab 0: Sectors (Active)
+        if let Some(c) = test_text(x, y, 80, 1318, 2, b"SECTORS", ACCENT_SKY) {
+            return c;
+        }
+        if x >= 74 && x < 206 && y >= 1344 && y < 1348 {
+            return ACCENT_SKY;
+        }
+
+        // Tab 1: Keystore
+        if let Some(c) = test_text(x, y, 290, 1318, 2, b"KEYSTORE", TEXT_MUTED) {
+            return c;
+        }
+
+        // Tab 2: Audit
+        if let Some(c) = test_text(x, y, 530, 1318, 2, b"AUDIT", TEXT_MUTED) {
+            return c;
+        }
+
+        return SURFACE_DARK;
+    }
+
+    // Home Gesture Bar
+    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
+        return TEXT_MUTED;
+    }
+
+    BG_DARK
+}
 
 fn render_vault_ui(surface: u32, vault: &VaultApp) {
     let mut chunk = [0u32; CHUNK];
@@ -230,129 +682,7 @@ fn render_vault_ui(surface: u32, vault: &VaultApp) {
         let mut y = offset / W;
 
         for i in 0..count {
-            if y < 96 {
-                // Header / Status Bar
-                if y >= 94 {
-                    chunk[i] = std::design::color::ACCENT;
-                } else if x >= 24 && x < 100 && y >= 28 && y < 68 {
-                    // Back button capsule
-                    let center_x = 62;
-                    let center_y = 48;
-                    let dx = (x as isize - center_x as isize).abs();
-                    let dy = (y as isize - center_y as isize).abs();
-                    if (dx + dy <= 12 && x <= center_x)
-                        || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
-                    {
-                        chunk[i] = std::design::color::TEXT;
-                    } else {
-                        chunk[i] = std::design::color::SURFACE_RAISED;
-                    }
-                } else if x >= 480 && x < 696 && y >= 32 && y < 64 {
-                    // Hardware Keystore Badge
-                    let is_active = vault.master_key_derived && vault.media_key_derived;
-                    if is_active {
-                        chunk[i] = std::design::color::SUCCESS;
-                    } else {
-                        chunk[i] = std::design::color::WARNING;
-                    }
-                } else {
-                    chunk[i] = std::design::color::SURFACE;
-                }
-            } else if (110..270).contains(&y) && x >= 24 && x < W - 24 {
-                // Storage Overview Card
-                if y >= 268 {
-                    chunk[i] = std::design::color::ACCENT;
-                } else if (180..215).contains(&y) && x >= 44 && x < W - 44 {
-                    // Multi-Segment Storage Bar
-                    let rel_x = x - 44;
-                    let seg_w = (W - 88) / 6;
-                    let seg_idx = (rel_x / seg_w).min(5);
-                    let seg_color = match seg_idx {
-                        0 => std::design::color::ACCENT,  // Sector 100
-                        1 => std::design::color::SUCCESS, // Sector 200
-                        2 => 0xFF8B5CF6,                  // Sector 201 (Purple)
-                        3 => std::design::color::WARNING, // Sector 202
-                        4 => 0xFFF43F5E,                  // Sector 203 (Rose)
-                        _ => 0xFF06B6D4,                  // Sector 204 (Teal)
-                    };
-                    chunk[i] = seg_color;
-                } else {
-                    chunk[i] = std::design::color::SURFACE;
-                }
-            } else {
-                let card_idx = if (290..290 + SECTOR_CARD_H).contains(&y) {
-                    Some(0)
-                } else if (420..420 + SECTOR_CARD_H).contains(&y) {
-                    Some(1)
-                } else if (550..550 + SECTOR_CARD_H).contains(&y) {
-                    Some(2)
-                } else if (680..680 + SECTOR_CARD_H).contains(&y) {
-                    Some(3)
-                } else if (810..810 + SECTOR_CARD_H).contains(&y) {
-                    Some(4)
-                } else if (940..940 + SECTOR_CARD_H).contains(&y) {
-                    Some(5)
-                } else {
-                    None
-                };
-
-                if let Some(idx) = card_idx {
-                    let cy = SECTOR_CARD_Y[idx];
-                    if x >= 24 && x < W - 24 {
-                        if y >= cy + SECTOR_CARD_H - 2 {
-                            chunk[i] = std::design::color::SURFACE_RAISED;
-                        } else if x >= 40 && x < 150 && y >= cy + 18 && y < cy + SECTOR_CARD_H - 18
-                        {
-                            // Sector Badge Box
-                            chunk[i] = std::design::color::SURFACE_RAISED;
-                        } else if x >= 560 && x < 676 && y >= cy + 24 && y < cy + SECTOR_CARD_H - 24
-                        {
-                            // Padlock Status Pill
-                            let is_auth = vault.sectors[idx].map_or(false, |s| s.authenticated);
-                            if is_auth {
-                                chunk[i] = std::design::color::SUCCESS;
-                            } else {
-                                chunk[i] = std::design::color::DANGER;
-                            }
-                        } else if x >= 170 && x < 530 && y >= cy + 30 && y < cy + 50 {
-                            // Sector description label stripe
-                            chunk[i] = std::design::color::TEXT;
-                        } else if x >= 170 && x < 400 && y >= cy + 62 && y < cy + 76 {
-                            // Encryption status stripe
-                            chunk[i] = std::design::color::TEXT_MUTED;
-                        } else {
-                            chunk[i] = std::design::color::SURFACE;
-                        }
-                    } else {
-                        chunk[i] = std::design::color::BACKGROUND;
-                    }
-                } else {
-                    // Action Buttons (1080..1220)
-                    if (1080..1220).contains(&y) {
-                        if x >= 40 && x < 340 && y >= 1100 && y < 1200 {
-                            // Button 1: Test Roundtrip
-                            chunk[i] = std::design::color::ACCENT;
-                        } else if x >= 380 && x < 680 && y >= 1100 && y < 1200 {
-                            // Button 2: Export Backup
-                            chunk[i] = std::design::color::SUCCESS;
-                        } else {
-                            chunk[i] = std::design::color::BACKGROUND;
-                        }
-                    } else if (1260..1400).contains(&y) && x >= 24 && x < W - 24 {
-                        // Bottom Navigation Dock
-                        let is_sectors_tab = x >= 180 && x < 340;
-                        if (1298..1362).contains(&y) && is_sectors_tab {
-                            chunk[i] = std::design::color::ACCENT;
-                        } else {
-                            chunk[i] = std::design::color::SURFACE;
-                        }
-                    } else if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
-                        chunk[i] = std::design::color::TEXT_MUTED;
-                    } else {
-                        chunk[i] = std::design::color::BACKGROUND;
-                    }
-                }
-            }
+            chunk[i] = get_vault_pixel(x, y, vault);
             x += 1;
             if x == W {
                 x = 0;
