@@ -373,15 +373,25 @@ impl DrmKmsController {
                 let dst_x_start = 460usize;
                 let dst_x_end = 820usize;
                 let dst_y_end = 720usize;
+                let s_width = surface.width as usize;
                 for y in 0..dst_y_end {
                     let dst_y_offset = y * (self.scanout_width as usize);
-                    let src_y = y * 2;
-                    let src_y_offset = src_y * (surface.width as usize);
+                    let src_y0 = y * 2;
+                    let src_y1 = src_y0 + 1;
+                    let src_row0 = src_y0 * s_width;
+                    let src_row1 = src_y1 * s_width;
                     for x in dst_x_start..dst_x_end {
                         let dst_idx = dst_y_offset + x;
                         let src_x = (x - dst_x_start) * 2;
-                        let src_idx = src_y_offset + src_x;
-                        self.back_buffer[dst_idx] = surface.pixels[src_idx];
+                        let p00 = surface.pixels[src_row0 + src_x];
+                        let p01 = surface.pixels[src_row0 + src_x + 1];
+                        let p10 = surface.pixels[src_row1 + src_x];
+                        let p11 = surface.pixels[src_row1 + src_x + 1];
+
+                        // Fast 2x2 SSAA box-filter average across all 4 channels (ARGB):
+                        let rb = ((p00 & 0x00FF00FF) + (p01 & 0x00FF00FF) + (p10 & 0x00FF00FF) + (p11 & 0x00FF00FF)) >> 2;
+                        let ag = (((p00 >> 8) & 0x00FF00FF) + ((p01 >> 8) & 0x00FF00FF) + ((p10 >> 8) & 0x00FF00FF) + ((p11 >> 8) & 0x00FF00FF)) >> 2;
+                        self.back_buffer[dst_idx] = (rb & 0x00FF00FF) | ((ag & 0x00FF00FF) << 8);
                     }
                 }
                 surface.dirty = false;

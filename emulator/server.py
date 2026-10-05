@@ -739,7 +739,7 @@ def capture_qemu_screen_frame(full_scanout=False):
                     box = letterbox_box(width, height)
                     cropped = img.crop(box)
                     scaled = cropped.resize(
-                        (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H), Image.Resampling.BILINEAR
+                        (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H), Image.Resampling.LANCZOS
                     )
                     buf = io.BytesIO()
                     scaled.save(buf, format="PNG")
