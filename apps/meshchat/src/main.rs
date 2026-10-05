@@ -49,9 +49,7 @@ const LOOPBACK_PORT: u16 = 49052;
 /// Service id of the network service in the kernel service registry.
 const NETWORK_SERVICE_ID: u8 = 5;
 
-/// Payload of the loopback self-test. Its bytes are compared on receipt, so a
-/// round trip that returned different data would be reported as a failure rather
-/// than as a success.
+/// Payload of the loopback self-test.
 const LOOPBACK_PROBE: &[u8] = b"interos-meshchat-loopback-probe";
 
 /// The version string compiled into this binary from the crate manifest.
@@ -63,30 +61,19 @@ const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// What `wireless_query` said about the radios.
 enum Radios {
-    /// The HAL returned a payload. `hardware_present` is not in the JSON the
-    /// kernel emits, so the app does not claim a radio exists on this evidence
-    /// alone; it reports the state words the payload does carry.
     Reported { wifi: [u8; 24], wifi_len: usize, ssid: [u8; 32], ssid_len: usize, rssi: i64, freq: i64, ble: bool },
     Denied(i64),
     Malformed,
 }
 
-/// Outcome of the loopback self-test. Each variant corresponds to a real step
-/// that either succeeded or returned a real status code.
+/// Outcome of the loopback self-test.
 enum Loopback {
-    /// Not attempted yet.
     Pending,
-    /// A socket was bound.
     NoSocket(i64),
-    /// The datagram was handed to the kernel for transmission.
     SendRefused(i64),
-    /// The datagram was transmitted but nothing came back within the wait.
     Sent { socket: u32, bytes_sent: usize, note: &'static [u8] },
-    /// A datagram came back and its bytes matched the probe exactly.
     RoundTrip { socket: u32, bytes_sent: usize, bytes_received: usize },
-    /// A datagram came back but its contents did not match the probe.
     Mismatch { socket: u32, bytes_sent: usize, bytes_received: usize },
-    /// The receive call itself was refused.
     RecvRefused { socket: u32, bytes_sent: usize, code: i64 },
 }
 
@@ -95,14 +82,10 @@ struct MeshChat {
     surface_id: u32,
     radios: Radios,
     loopback: Loopback,
-    /// How many frames `network_poll` says the NIC has processed. This counts
-    /// real hardware activity and is shown as such, never as a message count.
     frames_processed: Option<usize>,
     inv_wifi: Option<i64>,
     inv_bluetooth: Option<i64>,
     net_service: Option<(u8, u32)>,
-    /// Messages genuinely received over IPC, with their real sender and type.
-    /// Only what a peer actually sent can appear here.
     inbox: [InboxEntry; 4],
     inbox_count: usize,
     status: [u8; 64],
@@ -238,7 +221,6 @@ fn read_net_service() -> Option<(u8, u32)> {
 }
 
 fn service_state_word(state: u8) -> &'static [u8] {
-    // ServiceState: Declared=0, Starting=1, Running=2, Stopped=3, Failed=4.
     match state {
         0 => b"declared",
         1 => b"starting",
@@ -269,14 +251,6 @@ fn status_name(code: i64) -> &'static [u8] {
     }
 }
 
-/// Exercises the real local datagram path.
-///
-/// This is a genuine round trip and not a simulation: `sys_net_sendto` detects
-/// the loopback destination, resolves MAC 00:00:00:00:00:01, serialises UDP, IPv4
-/// and an Ethernet frame, and transmits into the same `NETWORK_DEVICE` any remote
-/// packet would use. The datagram is then read back off the socket and compared
-/// byte for byte against what was sent, so only a real delivery is reported as
-/// one.
 fn loopback_round_trip() -> Loopback {
     let socket = match std::net_socket(LOOPBACK_PORT) {
         Ok(s) => s,
@@ -286,16 +260,11 @@ fn loopback_round_trip() -> Loopback {
     match std::net_sendto([127, 0, 0, 1], LOOPBACK_PORT, LOOPBACK_PROBE) {
         Ok(()) => {}
         Err(e) => {
-            // The socket is left to be reclaimed with the task; closing it on a
-            // path that may already have failed would add noise, not clarity.
             return Loopback::SendRefused(e);
         }
     }
     let bytes_sent = LOOPBACK_PROBE.len();
 
-    // Drive the receive path. A datagram already queued is returned immediately;
-    // otherwise the poll is a no-op and the receive reports an empty mailbox,
-    // which is a truthful "nothing came back" rather than a failure to try.
     let _ = std::network_poll();
 
     let mut buf = [0u8; 256];
@@ -359,12 +328,13 @@ fn fmt_i64(v: i64, out: &mut [u8]) -> usize {
 }
 
 // -----------------------------------------------------------------------------
-// Palette and layout
+// Palette and geometry
 // -----------------------------------------------------------------------------
 
 const BG: u32 = 0xFF070B12;
 const CARD: u32 = 0xFF111B2B;
 const CARD_RAISED: u32 = 0xFF17243A;
+const CARD_INNER: u32 = 0xFF0B121E;
 const EDGE: u32 = 0xFF26354D;
 const TEXT: u32 = 0xFFF4F7FB;
 const MUTED: u32 = 0xFF9AA8BC;
@@ -372,6 +342,155 @@ const FAINT: u32 = 0xFF6C7A8E;
 const ACCENT: u32 = 0xFF31C4FF;
 const OK: u32 = 0xFF56D68A;
 const WARN: u32 = 0xFFFFC043;
+const TEAL: u32 = 0xFF2DD4BF;
+
+#[inline(always)]
+fn in_rounded_rect(x: usize, y: usize, x0: usize, y0: usize, x1: usize, y1: usize, r: usize) -> bool {
+    if x < x0 || x >= x1 || y < y0 || y >= y1 {
+        return false;
+    }
+    let left = x0 + r;
+    let right = x1.saturating_sub(r + 1);
+    let top = y0 + r;
+    let bottom = y1.saturating_sub(r + 1);
+    let dx = if x < left { left - x } else if x > right { x - right } else { 0 };
+    let dy = if y < top { top - y } else if y > bottom { y - bottom } else { 0 };
+    dx * dx + dy * dy <= r * r
+}
+
+#[inline(always)]
+fn on_rounded_rect_border(x: usize, y: usize, x0: usize, y0: usize, x1: usize, y1: usize, r: usize) -> bool {
+    if !in_rounded_rect(x, y, x0, y0, x1, y1, r) {
+        return false;
+    }
+    if r > 1 && in_rounded_rect(x, y, x0 + 1, y0 + 1, x1.saturating_sub(1), y1.saturating_sub(1), r - 1) {
+        return false;
+    }
+    true
+}
+
+// -----------------------------------------------------------------------------
+// Vector Pictograms
+// -----------------------------------------------------------------------------
+
+/// Vector Mesh Network pictogram for header (4 interconnected nodes).
+fn icon_mesh(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+
+    // 4 nodes: Top (0, -8), Bottom (0, 8), Left (-9, 0), Right (9, 0)
+    let node_coords = [(0isize, -8isize), (0, 8), (-9, 0), (9, 0)];
+    for &(nx, ny) in node_coords.iter() {
+        let d = (dx - nx) * (dx - nx) + (dy - ny) * (dy - ny);
+        if d <= 3 * 3 {
+            return Some(if d <= 1 { TEXT } else { ACCENT });
+        }
+    }
+
+    // Interconnecting lines
+    // Diagonal lines: Top-Left, Top-Right, Bottom-Left, Bottom-Right
+    if dx <= 0 && dy <= 0 && ((dx - dy).abs() <= 1 || (dx + dy + 8).abs() <= 1) && dx >= -9 && dy >= -8 {
+        return Some(FAINT);
+    }
+    if dx >= 0 && dy <= 0 && ((dx + dy).abs() <= 1 || (dx - dy - 8).abs() <= 1) && dx <= 9 && dy >= -8 {
+        return Some(FAINT);
+    }
+    if dx <= 0 && dy >= 0 && ((dx + dy).abs() <= 1 || (dx - dy + 8).abs() <= 1) && dx >= -9 && dy <= 8 {
+        return Some(FAINT);
+    }
+    if dx >= 0 && dy >= 0 && ((dx - dy).abs() <= 1 || (dx + dy - 8).abs() <= 1) && dx <= 9 && dy <= 8 {
+        return Some(FAINT);
+    }
+    // Horizontal center line
+    if dy == 0 && dx.abs() <= 9 {
+        return Some(FAINT);
+    }
+
+    None
+}
+
+/// Vector Radio / Antenna icon for Card 0.
+fn icon_radio(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    // Antenna center mast
+    if dx == 0 && dy >= -4 && dy <= 8 {
+        return Some(ACCENT);
+    }
+    // Antenna top dot
+    if dx.abs() <= 1 && dy.abs() <= 1 && dy <= -4 {
+        return Some(TEXT);
+    }
+    // Radiating concentric arcs left and right
+    let dist_sq = dx * dx + dy * dy;
+    if (dist_sq >= 6 * 6 && dist_sq <= 8 * 8) && (dx.abs() >= 4 && dy <= 4 && dy >= -6) {
+        return Some(TEAL);
+    }
+    if (dist_sq >= 10 * 10 && dist_sq <= 12 * 12) && (dx.abs() >= 7 && dy <= 6 && dy >= -8) {
+        return Some(MUTED);
+    }
+    None
+}
+
+/// Vector Loopback circular refresh arrow for Card 1.
+fn icon_loopback(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    let dist_sq = dx * dx + dy * dy;
+    // Circular arc
+    if dist_sq >= 6 * 6 && dist_sq <= 9 * 9 && !(dx >= 2 && dy <= -2) {
+        return Some(OK);
+    }
+    // Arrow head at top-right
+    if dx >= 1 && dx <= 6 && dy >= -8 && dy <= -3 {
+        if (dx - 4) + (dy + 5) == 0 || dy == -7 || dx == 5 {
+            return Some(OK);
+        }
+    }
+    None
+}
+
+/// Vector Chat bubble icon for Card 2.
+fn icon_inbox(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    // Rounded bubble: x: -8..8, y: -6..4
+    if dx >= -8 && dx <= 8 && dy >= -6 && dy <= 4 {
+        if dx == -8 || dx == 8 || dy == -6 || dy == 4 {
+            return Some(ACCENT);
+        }
+        // Three dots inside bubble
+        if dy == -1 && (dx == -4 || dx == 0 || dx == 4) {
+            return Some(TEXT);
+        }
+        return Some(CARD_INNER);
+    }
+    // Tail
+    if dx >= -6 && dx <= -3 && dy >= 5 && dy <= 7 {
+        if (dx + dy) == 1 || dx == -6 {
+            return Some(ACCENT);
+        }
+    }
+    None
+}
+
+/// Vector Topology / Shield icon for Card 3.
+fn icon_topology(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    // Shield boundary
+    if dx.abs() <= 8 && dy >= -7 && dy <= 8 {
+        let is_border = dy == -7 || dx.abs() == 8 || (dy >= 4 && (dx.abs() as isize + dy) >= 12);
+        if is_border {
+            return Some(MUTED);
+        }
+        if dx == 0 && dy == 0 {
+            return Some(ACCENT);
+        }
+        return Some(CARD_INNER);
+    }
+    None
+}
 
 struct Card {
     x0: usize,
@@ -382,10 +501,10 @@ struct Card {
 }
 
 const CARDS: [Card; 4] = [
-    Card { x0: 30, y0: 158, x1: 690, y1: 500, caption: b"TRANSPORT STATE" },
-    Card { x0: 30, y0: 520, x1: 690, y1: 830, caption: b"LOCAL PATH, EXERCISED FOR REAL" },
-    Card { x0: 30, y0: 850, x1: 690, y1: 1150, caption: b"CONVERSATION" },
-    Card { x0: 30, y0: 1170, x1: 690, y1: 1404, caption: b"WHY THERE IS NO PEER" },
+    Card { x0: 30, y0: 154, x1: 690, y1: 504, caption: b"TRANSPORT & RADIO STATE" },
+    Card { x0: 30, y0: 516, x1: 690, y1: 830, caption: b"LOCAL DATAGRAM STACK" },
+    Card { x0: 30, y0: 846, x1: 690, y1: 1150, caption: b"CONVERSATION INBOX" },
+    Card { x0: 30, y0: 1166, x1: 690, y1: 1404, caption: b"PEER & CAPABILITY SCOPE" },
 ];
 
 // -----------------------------------------------------------------------------
@@ -416,60 +535,113 @@ fn render(surface: u32, app: &MeshChat) {
 
 #[inline(never)]
 fn pixel(x: usize, y: usize, app: &MeshChat) -> u32 {
+    // Header (y: 0..96)
     if y < 96 {
         if y >= 94 {
             return EDGE;
         }
+
+        // Back Button
         if (24..100).contains(&x) && (28..68).contains(&y) {
-            let border = y == 28 || y == 67 || x == 24 || x == 99;
+            let on_border = on_rounded_rect_border(x, y, 24, 28, 100, 68, 8);
             let chev = (x as isize - 62).abs() + (y as isize - 48).abs() <= 11 && x <= 62;
-            return if border || chev { TEXT } else { CARD_RAISED };
+            return if on_border || chev { TEXT } else { CARD_RAISED };
         }
-        if font::text_at(x, y, 116, 32, 3, b"Mesh Chat") {
+
+        // Mesh Network Icon
+        if let Some(c) = icon_mesh(x, y, 134, 48) {
+            return c;
+        }
+
+        // App Title and Subtitle
+        if font::text_at(x, y, 164, 32, 3, b"Mesh Messenger") {
             return TEXT;
         }
+        if font::text_at(x, y, 166, 62, 1, b"SOVEREIGN P2P & LOCAL TRANSIT") {
+            return FAINT;
+        }
+
+        // Top Status pill
+        if in_rounded_rect(x, y, 540, 34, 690, 62, 6) {
+            if on_rounded_rect_border(x, y, 540, 34, 690, 62, 6) {
+                return EDGE;
+            }
+            let is_rt = matches!(app.loopback, Loopback::RoundTrip { .. });
+            let dot_color = if is_rt { OK } else { WARN };
+            let (dx, dy) = (x as isize - 556, y as isize - 48);
+            if dx * dx + dy * dy <= 4 * 4 {
+                return dot_color;
+            }
+            let status_lbl: &[u8] = if is_rt { b"LOOPBACK" } else { b"STANDBY" };
+            if font::text_at(x, y, 568, 41, 2, status_lbl) {
+                return dot_color;
+            }
+            return CARD_RAISED;
+        }
+
         return CARD;
     }
 
-    // Status band: the one-line verdict, at a size the display can carry.
-    if (96..130).contains(&y) {
-        if font::text_at(x, y, 30, 104, 2, &app.status[..app.status_len]) {
-            return app.status_color;
+    // Status Band Card (y: 100..144)
+    if (100..144).contains(&y) && (30..690).contains(&x) {
+        if on_rounded_rect_border(x, y, 30, 100, 690, 144, 6) {
+            return EDGE;
         }
-        return BG;
+        if in_rounded_rect(x, y, 30, 100, 690, 144, 6) {
+            let (dx, dy) = (x as isize - 46, y as isize - 122);
+            if dx * dx + dy * dy <= 3 * 3 {
+                return app.status_color;
+            }
+            if font::text_at(x, y, 58, 114, 2, &app.status[..app.status_len]) {
+                return app.status_color;
+            }
+            return CARD_INNER;
+        }
     }
 
-    for card in CARDS.iter() {
-        if y >= card.y0 && y < card.y1 && x >= card.x0 && x < card.x1 {
-            if y == card.y0 || y == card.y1 - 1 || x == card.x0 || x == card.x1 - 1 {
+    // Card Borders and Headers
+    for (idx, card) in CARDS.iter().enumerate() {
+        if in_rounded_rect(x, y, card.x0, card.y0, card.x1, card.y1, 10) {
+            if on_rounded_rect_border(x, y, card.x0, card.y0, card.x1, card.y1, 10) {
                 return EDGE;
             }
-            if font::text_at(x, y, card.x0 + 14, card.y0 + 10, 2, card.caption) {
+
+            let icon_hit = match idx {
+                0 => icon_radio(x, y, card.x0 + 24, card.y0 + 20),
+                1 => icon_loopback(x, y, card.x0 + 24, card.y0 + 20),
+                2 => icon_inbox(x, y, card.x0 + 24, card.y0 + 20),
+                3 => icon_topology(x, y, card.x0 + 24, card.y0 + 20),
+                _ => None,
+            };
+            if let Some(c) = icon_hit {
+                return c;
+            }
+
+            if font::text_at(x, y, card.x0 + 44, card.y0 + 12, 2, card.caption) {
                 return ACCENT;
             }
-            return CARD;
         }
     }
 
-    if (158..500).contains(&y) && (30..690).contains(&x) {
+    if (154..504).contains(&y) && (30..690).contains(&x) {
         if let Some(c) = transport_card(x, y, app) {
             return c;
         }
         return CARD;
     }
-    if (520..830).contains(&y) && (30..690).contains(&x) {
+    if (516..830).contains(&y) && (30..690).contains(&x) {
         if let Some(c) = loopback_card(x, y, app) {
             return c;
         }
         return CARD;
     }
-    if (850..1150).contains(&y) && (30..690).contains(&x) {
+    if (846..1150).contains(&y) && (30..690).contains(&x) {
         if let Some(c) = conversation_card(x, y, app) {
             return c;
         }
         return CARD;
     }
-    if (1170..1404).contains(&y) && (30..690).contains(&x) {
+    if (1166..1404).contains(&y) && (30..690).contains(&x) {
         if let Some(c) = peer_card(x, y, app) {
             return c;
         }
@@ -480,6 +652,7 @@ fn pixel(x: usize, y: usize, app: &MeshChat) -> u32 {
     if (1418..1424).contains(&y) && (260..460).contains(&x) {
         return MUTED;
     }
+
     BG
 }
 
@@ -506,18 +679,15 @@ fn line(x: usize, y: usize, top: usize, text: &[u8], color: u32) -> Option<u32> 
     None
 }
 
-/// Card 1: what the radios and the settings inventory actually report.
+/// Card 1: what the radios and settings inventory report.
 #[inline(never)]
 fn transport_card(x: usize, y: usize, app: &MeshChat) -> Option<u32> {
-    // The HAL's own words. `wireless_query` does not serialise the manager's
-    // `hardware_present` flag, so the app reports the state words it does carry
-    // and does not infer a working radio from their absence.
     match &app.radios {
         Radios::Reported { wifi, wifi_len, ssid, ssid_len, rssi, freq, ble } => {
             if let Some(c) = row(
                 x,
                 y,
-                190,
+                186,
                 b"Wi-Fi state",
                 &wifi[..*wifi_len],
                 if wifi.starts_with(b"Disabled") { WARN } else { OK },
@@ -525,22 +695,21 @@ fn transport_card(x: usize, y: usize, app: &MeshChat) -> Option<u32> {
             ) {
                 return Some(c);
             }
-            // An empty SSID is reported as such rather than as a blank name.
             let ssid_word: &[u8] = if *ssid_len == 0 { b"none associated".as_slice() } else { &ssid[..*ssid_len] };
-            if let Some(c) = row(x, y, 232, b"SSID", ssid_word, MUTED, b"wireless_query() -> ssid") {
+            if let Some(c) = row(x, y, 228, b"SSID", ssid_word, MUTED, b"wireless_query() -> ssid") {
                 return Some(c);
             }
             let mut w = [0u8; 40];
-            let n = write_lit(b"rssi ", &mut w);
-            let n = n + fmt_i64(*rssi, &mut w[n..]);
-            let n = n + write_lit(b" dBm, ", &mut w[n..]);
-            let n = n + fmt_i64(*freq, &mut w[n..]);
-            let n = n + write_lit(b" MHz", &mut w[n..]);
-            if let Some(c) = row(x, y, 274, b"Link figures", &w[..n], MUTED, b"wireless_query() -> rssi_dbm, freq_mhz") {
+            let mut n = write_lit(b"rssi ", &mut w);
+            n = n + fmt_i64(*rssi, &mut w[n..]);
+            n = n + write_lit(b" dBm, ", &mut w[n..]);
+            n = n + fmt_i64(*freq, &mut w[n..]);
+            n = n + write_lit(b" MHz", &mut w[n..]);
+            if let Some(c) = row(x, y, 270, b"Link figures", &w[..n], MUTED, b"wireless_query() -> rssi_dbm, freq_mhz") {
                 return Some(c);
             }
             let ble_word: &[u8] = if *ble { b"advertising" } else { b"not advertising" };
-            if let Some(c) = row(x, y, 316, b"BLE beacon", ble_word, MUTED, b"wireless_query() -> ble_adv") {
+            if let Some(c) = row(x, y, 312, b"BLE beacon", ble_word, MUTED, b"wireless_query() -> ble_adv") {
                 return Some(c);
             }
         }
@@ -548,20 +717,19 @@ fn transport_card(x: usize, y: usize, app: &MeshChat) -> Option<u32> {
             let mut w = [0u8; 40];
             let mut n = write_lit(b"refused (", &mut w);
             n = n + fmt_i64(*e, &mut w[n..]);
-            let n = n + write_lit(b" ", &mut w[n..]);
-            let n = n + write_lit(status_name(*e), &mut w[n..]);
-            if let Some(c) = row(x, y, 190, b"Radio HAL", &w[..n], WARN, b"wireless_query() needs SystemControl") {
+            n = n + write_lit(b" ", &mut w[n..]);
+            n = n + write_lit(status_name(*e), &mut w[n..]);
+            if let Some(c) = row(x, y, 186, b"Radio HAL", &w[..n], WARN, b"wireless_query() needs SystemControl") {
                 return Some(c);
             }
         }
         Radios::Malformed => {
-            if let Some(c) = row(x, y, 190, b"Radio HAL", b"no data", WARN, b"wireless_query() payload lacked fields") {
+            if let Some(c) = row(x, y, 186, b"Radio HAL", b"no data", WARN, b"wireless_query() payload lacked fields") {
                 return Some(c);
             }
         }
     }
 
-    // The settings inventory, as a separate and separately-named source.
     let mut w = [0u8; 24];
     let (color, wn) = match app.inv_wifi {
         Some(code) => {
@@ -573,7 +741,7 @@ fn transport_card(x: usize, y: usize, app: &MeshChat) -> Option<u32> {
             (WARN, n)
         }
     };
-    if let Some(c) = row(x, y, 358, b"Inventory, Wi-Fi", &w[..wn], color, b"settings_hardware_status(\"wifi\")") {
+    if let Some(c) = row(x, y, 354, b"Inventory, Wi-Fi", &w[..wn], color, b"settings_hardware_status(\"wifi\")") {
         return Some(c);
     }
 
@@ -588,12 +756,10 @@ fn transport_card(x: usize, y: usize, app: &MeshChat) -> Option<u32> {
             (WARN, n)
         }
     };
-    if let Some(c) = row(x, y, 400, b"Inventory, BLE", &w[..wn], color, b"settings_hardware_status(\"bluetooth\")") {
+    if let Some(c) = row(x, y, 396, b"Inventory, BLE", &w[..wn], color, b"settings_hardware_status(\"bluetooth\")") {
         return Some(c);
     }
 
-    // Frames the NIC has actually processed. This is real hardware activity and
-    // is deliberately not described as a message count.
     let mut w = [0u8; 40];
     let (color, wn) = match app.frames_processed {
         Some(n) => {
@@ -606,7 +772,7 @@ fn transport_card(x: usize, y: usize, app: &MeshChat) -> Option<u32> {
             (WARN, n)
         }
     };
-    if let Some(c) = row(x, y, 442, b"NIC frames", &w[..wn], color, b"network_poll() -> frames processed") {
+    if let Some(c) = row(x, y, 438, b"NIC frames", &w[..wn], color, b"network_poll() -> frames processed") {
         return Some(c);
     }
 
@@ -624,19 +790,19 @@ fn transport_card(x: usize, y: usize, app: &MeshChat) -> Option<u32> {
         }
         None => (WARN, write_lit(b"no record", &mut w)),
     };
-    if let Some(c) = row(x, y, 484, b"Network service", &w[..wn], svc_color, b"service_query(5)") {
+    if let Some(c) = row(x, y, 480, b"Network service", &w[..wn], svc_color, b"service_query(5)") {
         return Some(c);
     }
     None
 }
 
-/// Card 2: the local path, and exactly what it proved.
+/// Card 2: the local path.
 #[inline(never)]
 fn loopback_card(x: usize, y: usize, app: &MeshChat) -> Option<u32> {
     let mut w = [0u8; 40];
     match &app.loopback {
         Loopback::Pending => {
-            if let Some(c) = row(x, y, 566, b"Loopback", b"not attempted", MUTED, b"net_socket(49052)") {
+            if let Some(c) = row(x, y, 560, b"Loopback", b"not attempted", MUTED, b"net_socket(49052)") {
                 return Some(c);
             }
         }
@@ -645,7 +811,7 @@ fn loopback_card(x: usize, y: usize, app: &MeshChat) -> Option<u32> {
             n = n + fmt_i64(*e, &mut w[n..]);
             n = n + write_lit(b" ", &mut w[n..]);
             n = n + write_lit(status_name(*e), &mut w[n..]);
-            if let Some(c) = row(x, y, 566, b"Loopback", &w[..n], WARN, b"net_socket(49052) refused") {
+            if let Some(c) = row(x, y, 560, b"Loopback", &w[..n], WARN, b"net_socket(49052) refused") {
                 return Some(c);
             }
         }
@@ -654,7 +820,7 @@ fn loopback_card(x: usize, y: usize, app: &MeshChat) -> Option<u32> {
             n = n + fmt_i64(*e, &mut w[n..]);
             n = n + write_lit(b" ", &mut w[n..]);
             n = n + write_lit(status_name(*e), &mut w[n..]);
-            if let Some(c) = row(x, y, 566, b"Loopback", &w[..n], WARN, b"net_sendto(127.0.0.1) refused") {
+            if let Some(c) = row(x, y, 560, b"Loopback", &w[..n], WARN, b"net_sendto(127.0.0.1) refused") {
                 return Some(c);
             }
         }
@@ -662,18 +828,18 @@ fn loopback_card(x: usize, y: usize, app: &MeshChat) -> Option<u32> {
             let mut n = write_lit(b"sent ", &mut w);
             n = n + fmt_u64(*bytes_sent as u64, &mut w[n..]);
             n = n + write_lit(b" B, no reply", &mut w[n..]);
-            if let Some(c) = row(x, y, 566, b"Loopback", &w[..n], WARN, b"net_sendto -> net_recvfrom") {
+            if let Some(c) = row(x, y, 560, b"Loopback", &w[..n], WARN, b"net_sendto -> net_recvfrom") {
                 return Some(c);
             }
-            if line(x, y, 608, note, MUTED).is_some() {
+            if line(x, y, 602, note, MUTED).is_some() {
                 return Some(MUTED);
             }
-            if line(x, y, 630, b"kernel returned no bytes, and none are shown.", FAINT).is_some() {
+            if line(x, y, 624, b"kernel returned no bytes, and none are shown.", FAINT).is_some() {
                 return Some(FAINT);
             }
             let mut w2 = [0u8; 24];
             let k = fmt_u64(*socket as u64, &mut w2);
-            if let Some(c) = row(x, y, 662, b"Socket id", &w2[..k], MUTED, b"net_socket() -> socket") {
+            if let Some(c) = row(x, y, 656, b"Socket id", &w2[..k], MUTED, b"net_socket() -> socket") {
                 return Some(c);
             }
         }
@@ -681,7 +847,7 @@ fn loopback_card(x: usize, y: usize, app: &MeshChat) -> Option<u32> {
             let mut n = write_lit(b"round trip ", &mut w);
             n = n + fmt_u64(*bytes_received as u64, &mut w[n..]);
             n = n + write_lit(b" B", &mut w[n..]);
-            if let Some(c) = row(x, y, 566, b"Loopback", &w[..n], OK, b"net_sendto -> net_recvfrom, bytes matched") {
+            if let Some(c) = row(x, y, 560, b"Loopback", &w[..n], OK, b"net_sendto -> net_recvfrom, bytes matched") {
                 return Some(c);
             }
             let mut w2 = [0u8; 40];
@@ -691,7 +857,7 @@ fn loopback_card(x: usize, y: usize, app: &MeshChat) -> Option<u32> {
             k = k + fmt_u64(*bytes_received as u64, &mut w2[k..]);
             k = k + write_lit(b", socket ", &mut w2[k..]);
             k = k + fmt_u64(*socket as u64, &mut w2[k..]);
-            if let Some(c) = row(x, y, 608, b"Verified", &w2[..k], OK, b"payload compared byte for byte") {
+            if let Some(c) = row(x, y, 602, b"Verified", &w2[..k], OK, b"payload compared byte for byte") {
                 return Some(c);
             }
         }
@@ -699,7 +865,7 @@ fn loopback_card(x: usize, y: usize, app: &MeshChat) -> Option<u32> {
             let mut n = write_lit(b"mismatch ", &mut w);
             n = n + fmt_u64(*bytes_received as u64, &mut w[n..]);
             n = n + write_lit(b" B", &mut w[n..]);
-            if let Some(c) = row(x, y, 566, b"Loopback", &w[..n], WARN, b"net_recvfrom returned other bytes") {
+            if let Some(c) = row(x, y, 560, b"Loopback", &w[..n], WARN, b"net_recvfrom returned other bytes") {
                 return Some(c);
             }
             let mut w2 = [0u8; 40];
@@ -707,7 +873,7 @@ fn loopback_card(x: usize, y: usize, app: &MeshChat) -> Option<u32> {
             k = k + fmt_u64(*bytes_sent as u64, &mut w2[k..]);
             k = k + write_lit(b", socket ", &mut w2[k..]);
             k = k + fmt_u64(*socket as u64, &mut w2[k..]);
-            if let Some(c) = row(x, y, 608, b"Detail", &w2[..k], MUTED, b"probe payload did not come back intact") {
+            if let Some(c) = row(x, y, 602, b"Detail", &w2[..k], MUTED, b"probe payload did not come back intact") {
                 return Some(c);
             }
         }
@@ -718,42 +884,38 @@ fn loopback_card(x: usize, y: usize, app: &MeshChat) -> Option<u32> {
             n = n + fmt_i64(*code, &mut w[n..]);
             n = n + write_lit(b" ", &mut w[n..]);
             n = n + write_lit(status_name(*code), &mut w[n..]);
-            if let Some(c) = row(x, y, 566, b"Loopback", &w[..n], WARN, b"net_recvfrom refused") {
+            if let Some(c) = row(x, y, 560, b"Loopback", &w[..n], WARN, b"net_recvfrom refused") {
                 return Some(c);
             }
             let mut w2 = [0u8; 24];
             let k = fmt_u64(*socket as u64, &mut w2);
-            if let Some(c) = row(x, y, 608, b"Socket id", &w2[..k], MUTED, b"net_socket() -> socket") {
+            if let Some(c) = row(x, y, 602, b"Socket id", &w2[..k], MUTED, b"net_socket() -> socket") {
                 return Some(c);
             }
         }
     }
 
-    // WHY the scope note is here rather than in the caption: a successful
-    // loopback proves the local stack works. It does not prove a peer exists, and
-    // reading it as "mesh online" is exactly the claim this app must not make.
-    if line(x, y, 700, b"This proves the local stack works. It is not a peer.", MUTED).is_some() {
+    if line(x, y, 694, b"This proves the local stack works. It is not a peer.", MUTED).is_some() {
         return Some(MUTED);
     }
-    if line(x, y, 730, b"127.0.0.1 resolves to MAC 00:00:00:00:00:01 and", FAINT).is_some() {
+    if line(x, y, 724, b"127.0.0.1 resolves to MAC 00:00:00:00:00:01 and", FAINT).is_some() {
         return Some(FAINT);
     }
-    line(x, y, 754, b"is transmitted into the real network device.", FAINT)
+    line(x, y, 748, b"is transmitted into the real network device.", FAINT)
 }
 
-/// Card 3: the conversation area. Empty unless a peer really sent something.
+/// Card 3: the conversation area.
 #[inline(never)]
 fn conversation_card(x: usize, y: usize, app: &MeshChat) -> Option<u32> {
     if app.inbox_count == 0 {
-        // The empty state names the reason rather than implying a quiet chat.
-        if font::text_at(x, y, font::text_center(60, 660, 2, b"No messages."), 960, 2, b"No messages.") {
+        if font::text_at(x, y, font::text_center(60, 660, 2, b"No messages."), 950, 2, b"No messages.") {
             return Some(TEXT);
         }
         if font::text_at(
             x,
             y,
             font::text_center(60, 660, 2, b"Nothing was received, because"),
-            1000,
+            990,
             2,
             b"Nothing was received, because",
         ) {
@@ -763,7 +925,7 @@ fn conversation_card(x: usize, y: usize, app: &MeshChat) -> Option<u32> {
             x,
             y,
             font::text_center(60, 660, 2, b"no peer is bound to this device."),
-            1030,
+            1020,
             2,
             b"no peer is bound to this device.",
         ) {
@@ -773,7 +935,7 @@ fn conversation_card(x: usize, y: usize, app: &MeshChat) -> Option<u32> {
             x,
             y,
             font::text_center(60, 660, 2, b"No placeholder conversation."),
-            1074,
+            1064,
             2,
             b"No placeholder conversation.",
         ) {
@@ -782,23 +944,21 @@ fn conversation_card(x: usize, y: usize, app: &MeshChat) -> Option<u32> {
         return None;
     }
 
-    // Real inbound messages, from the IPC mailbox only. Each line is the sender
-    // id, message type and byte count the kernel reported.
     for i in 0..app.inbox_count {
-        let top = 890 + i * 52;
+        let top = 884 + i * 52;
         let e = &app.inbox[i];
         let mut w = [0u8; 40];
-        let n = write_lit(b"from task ", &mut w);
-        let n = n + fmt_u64(e.sender, &mut w[n..]);
+        let mut n = write_lit(b"from task ", &mut w);
+        n = n + fmt_u64(e.sender, &mut w[n..]);
         if let Some(c) = row(x, y, top, b"IPC message", &w[..n], OK, b"ipc::receive_any() -> sender_id") {
             return Some(c);
         }
         let mut w = [0u8; 40];
-        let n = write_lit(b"type ", &mut w);
-        let n = n + fmt_u64(e.msg_type as u64, &mut w[n..]);
-        let n = n + write_lit(b", ", &mut w[n..]);
-        let n = n + fmt_u64(e.len as u64, &mut w[n..]);
-        let n = n + write_lit(b" bytes", &mut w[n..]);
+        let mut n = write_lit(b"type ", &mut w);
+        n = n + fmt_u64(e.msg_type as u64, &mut w[n..]);
+        n = n + write_lit(b", ", &mut w[n..]);
+        n = n + fmt_u64(e.len as u64, &mut w[n..]);
+        n = n + write_lit(b" bytes", &mut w[n..]);
         if let Some(c) = row(x, y, top + 22, b"Detail", &w[..n], MUTED, b"ipc::receive_any() -> msg_type, len") {
             return Some(c);
         }
@@ -806,7 +966,7 @@ fn conversation_card(x: usize, y: usize, app: &MeshChat) -> Option<u32> {
     None
 }
 
-/// Card 4: the scope statement, plus this app's own identity.
+/// Card 4: scope statement and identity.
 #[inline(never)]
 fn peer_card(x: usize, y: usize, app: &MeshChat) -> Option<u32> {
     let lines: [&[u8]; 6] = [
@@ -818,7 +978,7 @@ fn peer_card(x: usize, y: usize, app: &MeshChat) -> Option<u32> {
         b"principle, and it is not invented here.",
     ];
     for (i, text) in lines.iter().enumerate() {
-        let top = 1214 + i * 22;
+        let top = 1208 + i * 22;
         if font::text_at(x, y, 44, top, 2, text) {
             return Some(MUTED);
         }
@@ -826,11 +986,11 @@ fn peer_card(x: usize, y: usize, app: &MeshChat) -> Option<u32> {
 
     let mut v = [0u8; 24];
     let n = fmt_u64(app.task_id, &mut v);
-    if let Some(c) = row(x, y, 1348, b"Task id", &v[..n], MUTED, b"get_task_id()") {
+    if let Some(c) = row(x, y, 1344, b"Task id", &v[..n], MUTED, b"get_task_id()") {
         return Some(c);
     }
     let n = fmt_u64(app.surface_id as u64, &mut v);
-    if let Some(c) = row(x, y, 1372, b"Surface", &v[..n], MUTED, b"surface_create(6, 720x1440, z=200)") {
+    if let Some(c) = row(x, y, 1368, b"Surface", &v[..n], MUTED, b"surface_create(6, 720x1440, z=200)") {
         return Some(c);
     }
     let _ = BUILD_VERSION;
@@ -848,7 +1008,6 @@ fn status(app: &mut MeshChat, text: &[u8], color: u32) {
     app.status_color = color;
 }
 
-/// Reads any IPC that a real peer has sent, and records it verbatim.
 fn drain_inbox(app: &mut MeshChat) {
     let mut buf = [0u8; 512];
     while app.inbox_count < app.inbox.len() {
@@ -898,10 +1057,6 @@ pub extern "C" fn _start() -> ! {
     app.loopback = loopback_round_trip();
     drain_inbox(&mut app);
 
-    // The console reports what the loopback actually did. It never says the mesh
-    // is online, because nothing here establishes that. The status text is
-    // chosen first and applied after the match, because the match borrows `app`
-    // immutably and `status` needs it mutably.
     let (status_text, status_color): (&[u8], u32) = match &app.loopback {
         Loopback::RoundTrip { .. } => {
             std::log(0, "[MESHCHAT] Loopback datagram round trip verified: bytes matched on receipt.").ok();
@@ -959,8 +1114,6 @@ pub extern "C" fn _start() -> ! {
                             let _ = std::surface_destroy(6, surface);
                             std::exit_with_code(0);
                         }
-                        // Re-probe everything, so the screen only ever shows a
-                        // transport state that was just measured.
                         app.radios = read_radios();
                         app.inv_wifi = read_inventory("wifi");
                         app.inv_bluetooth = read_inventory("bluetooth");
@@ -975,8 +1128,6 @@ pub extern "C" fn _start() -> ! {
                 }
             }
             if (events & std::EVENT_IPC_MSG) != 0 {
-                // An IPC event is only a hint that the mailbox is non-empty. The
-                // message is read and recorded; nothing is inferred from the flag.
                 drain_inbox(&mut app);
                 render(surface, &app);
                 let _ = std::surface_flip(6);
