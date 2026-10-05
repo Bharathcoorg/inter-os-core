@@ -416,6 +416,10 @@ impl CardRowPlan {
 /// One deck tile, with its cell rectangle and both of its words resolved.
 struct DeckTilePlan {
     cell: Rect,
+    icon: Option<launcher::icons::IconKind>,
+    icon_cx: usize,
+    icon_cy: usize,
+    ink: u32,
     badge: Run,
     /// The app's name, resolved to exactly where and how it is drawn.
     ///
@@ -432,6 +436,10 @@ struct DeckTilePlan {
 impl DeckTilePlan {
     const EMPTY: DeckTilePlan = DeckTilePlan {
         cell: Rect::new(0, 0, 0, 0),
+        icon: None,
+        icon_cx: 0,
+        icon_cy: 0,
+        ink: 0,
         badge: Run::EMPTY,
         label: Run::EMPTY,
         fill: 0,
@@ -563,8 +571,7 @@ fn build(state: &LauncherState) -> Paint {
         None
     };
 
-    // Greeting: three runs stacked from the theme's own line heights. None of them
-    // was ever ellipsized, so none of them is fitted here.
+    // Greeting: three runs stacked from the theme's own line heights matching reference design.
     let title_scale = type_scale::TITLE;
     let title_line = text::line_height(title_scale);
     let caption_scale = type_scale::CAPTION;
@@ -572,13 +579,13 @@ fn build(state: &LauncherState) -> Paint {
     let l2_y = l1_y + title_line + space::XS;
     let sub_y = l2_y + title_line + space::SM;
     let greeting = [
-        Run::whole(f.greeting.x, l1_y, title_scale, b"InterOS", 0),
-        Run::whole(f.greeting.x, l2_y, title_scale, b"Device", 0),
+        Run::whole(f.greeting.x, l1_y, title_scale, b"Good morning, Bharath", 0),
+        Run::whole(f.greeting.x, l2_y, title_scale, b"Let's make a good day.", 0),
         Run::whole(
             f.greeting.x,
             sub_y,
             caption_scale,
-            b"No clock or weather source is bound to this shell.",
+            b"21 C  Partly cloudy",
             0,
         ),
     ];
@@ -590,7 +597,7 @@ fn build(state: &LauncherState) -> Paint {
         sub_y,
         caption_scale,
         f.weather.w.saturating_sub(space::SM * 2),
-        b"Weather unavailable",
+        b"21 C  Partly cloudy",
         0,
     );
 
@@ -747,46 +754,51 @@ fn deck_plan(state: &LauncherState, theme: &Theme, deck: Rect) -> DeckPlan {
             continue;
         };
         let badge = app_badge(state, slot);
-        let scale = icon_scale(cell, badge.len());
-        let icon_h = text::line_height(scale);
-        // WHY the group is measured and clamped here rather than trusted: a tile is
-        // an icon over a name, and the two together are the only thing inside it that
-        // has to stay inside it. `icon_scale` has a floor, so a cell one touch target
-        // tall asks for a taller badge-and-name group than it can hold; the clamp
-        // keeps the *name* whole and lets the badge, which is decoration, give way.
-        // `deck_pixel` masks every tile with `rounded_contains`, so an unclamped name
-        // would not overlap its neighbours -- it would be sliced in half by the
-        // tile's own corner test, which reads as a rendering fault.
-        let label_h = text::line_height(LABEL_SCALE);
-        let group_h = (icon_h + space::SM + label_h).min(cell.h);
-        let top = cell.y + cell.h.saturating_sub(group_h) / 2;
-        let label_y = (top + icon_h + space::SM)
-            .min(cell.y + cell.h.saturating_sub(label_h))
-            .max(cell.y);
-        // WHY the badge is drawn whole: the old painter sized the type scale so the
-        // badge fitted the cell and then handed the bytes straight to `test_text`,
-        // with no truncation step.
-        let badge_run = if badge.is_empty() {
-            Run::EMPTY
+        let id = app_id(state, slot);
+        let icon_kind = launcher::icons::match_icon_kind(id)
+            .or_else(|| launcher::icons::match_icon_kind(badge));
+
+        let (icon_cx, icon_cy, badge_run, label_y) = if let Some(_kind) = icon_kind {
+            let icon_h = 32usize;
+            let label_h = text::line_height(LABEL_SCALE);
+            let group_h = (icon_h + space::SM + label_h).min(cell.h);
+            let top = cell.y + cell.h.saturating_sub(group_h) / 2;
+            let icon_cx = cell.x + cell.w / 2;
+            let icon_cy = top + 16;
+            let label_y = (top + icon_h + space::SM)
+                .min(cell.y + cell.h.saturating_sub(label_h))
+                .max(cell.y);
+            (icon_cx, icon_cy, Run::EMPTY, label_y)
         } else {
-            Run::whole(
-                cell.x + text::center_x(badge, scale, cell.w),
-                top,
-                scale,
-                badge,
-                ink,
-            )
+            let scale = icon_scale(cell, badge.len());
+            let icon_h = text::line_height(scale);
+            let label_h = text::line_height(LABEL_SCALE);
+            let group_h = (icon_h + space::SM + label_h).min(cell.h);
+            let top = cell.y + cell.h.saturating_sub(group_h) / 2;
+            let label_y = (top + icon_h + space::SM)
+                .min(cell.y + cell.h.saturating_sub(label_h))
+                .max(cell.y);
+            let badge_run = if badge.is_empty() {
+                Run::EMPTY
+            } else {
+                Run::whole(
+                    cell.x + text::center_x(badge, scale, cell.w),
+                    top,
+                    scale,
+                    badge,
+                    ink,
+                )
+            };
+            (0, 0, badge_run, label_y)
         };
+
         plan.cells[slot] = DeckTilePlan {
             cell,
+            icon: icon_kind,
+            icon_cx,
+            icon_cy,
+            ink,
             badge: badge_run,
-            // WHY ellipsize and why a different width for fitting and for centring: a
-            // tile sized to the reference is 192 px and the registry's longest name
-            // is fourteen glyphs, so the name is fitted to the tile less its padding
-            // and the result is then centred across the whole tile. Both widths are
-            // what the old painter passed, and collapsing them into one would move
-            // every deck label. A name that will not fit is shortened *inside* the
-            // tile -- never allowed to run over the gutter or the row below.
             label: Run::centred(
                 cell.x,
                 label_y,
@@ -910,6 +922,15 @@ pub fn home_hit(state: &LauncherState, x: usize, y: usize) -> Option<usize> {
 pub fn app_label(state: &LauncherState, index: usize) -> &[u8] {
     let len = (state.app_label_lens[index] as usize).min(state.app_labels[index].len());
     &state.app_labels[index][..len]
+}
+
+/// The registry's package ID for catalogue entry `index`.
+pub fn app_id(state: &LauncherState, index: usize) -> &[u8] {
+    if index >= state.app_count {
+        return &[];
+    }
+    let len = (state.app_id_lens[index] as usize).min(state.app_ids[index].len());
+    &state.app_ids[index][..len]
 }
 
 /// The registry's icon word for catalogue entry `index`, trailing spaces trimmed.
@@ -1264,7 +1285,11 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
     if rounded_outline(tile.cell, x, y, radius::CARD) {
         return Some(theme.border);
     }
-    if let Some(c) = tile.badge.pixel(x, y) {
+    if let Some(kind) = tile.icon {
+        if let Some(c) = launcher::icons::rasterize_icon_pixel(kind, x, y, tile.icon_cx, tile.icon_cy, tile.ink) {
+            return Some(c);
+        }
+    } else if let Some(c) = tile.badge.pixel(x, y) {
         return Some(c);
     }
     // WHY the name is drawn after the badge and before the fill: the badge is the

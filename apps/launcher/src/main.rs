@@ -6,6 +6,7 @@ use interos_std as std;
 
 use launcher::theme::*;
 
+// Visual baseline theme: InterOS Stock
 // WHY one file per screen: every renderer was a function in this file, so two
 // people editing different screens collided on every save. Submodules can reach
 // the crate root's private items, so no visibility change was needed.
@@ -802,6 +803,9 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
 
     // 2. App Drawer Grid (scoped to AppDrawer view)
     if state.current_view == ViewMode::AppDrawer {
+        if let Some(idx) = screens::app_drawer::app_drawer_hit(state, x, y) {
+            return package_id_at(state, idx);
+        }
         if let Some(r_idx) = if (185..395).contains(&y) { Some(0) }
             else if (410..620).contains(&y) { Some(1) }
             else if (635..845).contains(&y) { Some(2) }
@@ -813,13 +817,20 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
                 else if (490..670).contains(&x) { Some(2) }
                 else { None };
             if let Some(c_idx) = c_idx {
-                let index = state.app_drawer_page * 12 + r_idx * 3 + c_idx;
-                return package_id_at(state, index);
+                let app_idx = state.app_drawer_page * 12 + r_idx * 3 + c_idx;
+                return package_id_at(state, app_idx);
             }
         }
     }
 
-    // 3. Row 0 of Quick Action Dock: Phone, Messages, Camera
+    // 3. Home Screen dynamic deck
+    if state.current_view == ViewMode::HomeScreen {
+        if let Some(idx) = screens::home::home_hit(state, x, y) {
+            return package_id_at(state, idx);
+        }
+    }
+
+    // 4. Row 0 of Quick Action Dock: Phone, Messages, Camera
     if (500..640).contains(&y) {
         if (48..238).contains(&x) {
             return Some("org.interos.dialer");
@@ -830,7 +841,7 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
         }
     }
 
-    // 4. Row 1 of Quick Action Dock: Files, Browser
+    // 5. Row 1 of Quick Action Dock: Files, Browser
     if (660..800).contains(&y) {
         if (48..238).contains(&x) {
             return Some("org.interos.file_manager");
@@ -1629,6 +1640,21 @@ pub extern "C" fn _start() -> ! {
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
                                     std::log(0, "[LAUNCHER] App drawer category tab switched.").ok();
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
+                                if let Some(page) = screens::app_drawer::app_drawer_dot_at(&state, input.x as usize, input.y as usize) {
+                                    state.app_drawer_page = page;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,

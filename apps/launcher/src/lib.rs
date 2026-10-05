@@ -22,6 +22,7 @@
 extern crate interos_std;
 
 pub mod font;
+pub mod icons;
 pub mod layout;
 pub mod text;
 pub mod theme;

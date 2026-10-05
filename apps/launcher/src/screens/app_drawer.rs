@@ -268,6 +268,14 @@ fn app_badge(state: &LauncherState, index: usize) -> &[u8] {
     &state.app_icons[index][..BADGE_GLYPHS]
 }
 
+fn app_id(state: &LauncherState, index: usize) -> &[u8] {
+    if index >= state.app_count {
+        return &[];
+    }
+    let len = (state.app_id_lens[index] as usize).min(state.app_ids[index].len());
+    &state.app_ids[index][..len]
+}
+
 /// The rotation an app's icon is drawn in.
 ///
 /// WHY four and not six: the rotation reads from theme fields only, and the theme
@@ -472,6 +480,7 @@ struct TilePlan {
     /// derived from the catalogue index modulo the theme's four chromatic tokens,
     /// which meant reading a theme field per pixel.
     hue: u32,
+    icon: Option<launcher::icons::IconKind>,
     badge: Run,
     label: Run,
 }
@@ -482,6 +491,7 @@ impl TilePlan {
         disc: Rect::new(0, 0, 0, 0),
         disc_r: 0,
         hue: 0,
+        icon: None,
         badge: Run::EMPTY,
         label: Run::EMPTY,
     };
@@ -624,18 +634,29 @@ fn build(state: &LauncherState) -> Paint {
         let disc = Rect::new(cell.center_x() - icon_d / 2, top, icon_d, icon_d);
         let hue = hue_for(&theme, index);
         let badge = app_badge(state, index);
-        tiles[slot] = TilePlan {
-            cell,
-            disc,
-            disc_r: (icon_d / 2) as i32,
-            hue,
-            badge: Run::whole(
+        let id = app_id(state, index);
+        let icon_kind = launcher::icons::match_icon_kind(id)
+            .or_else(|| launcher::icons::match_icon_kind(badge));
+
+        let badge_run = if icon_kind.is_some() || badge.is_empty() {
+            Run::EMPTY
+        } else {
+            Run::whole(
                 disc.x + text::center_x(badge, BADGE_SCALE, icon_d),
                 disc.center_y() - text::line_height(BADGE_SCALE) / 2,
                 BADGE_SCALE,
                 badge,
                 layout::ink_on(&theme, hue),
-            ),
+            )
+        };
+
+        tiles[slot] = TilePlan {
+            cell,
+            disc,
+            disc_r: (icon_d / 2) as i32,
+            hue,
+            icon: icon_kind,
+            badge: badge_run,
             // WHY ellipsize rather than draw the name whole: the label buffer is
             // sixteen bytes and the registry has no idea how wide the tile is, so a
             // long name used to be drawn at its full width straight through the
@@ -964,13 +985,20 @@ fn app_tile(x: usize, y: usize, theme: &Theme, t: &TilePlan) -> u32 {
         return theme.border;
     }
 
-    // The icon disc: the app's badge word over a hue rotated by catalogue index, or
-    // a flat circle when the package has no badge. The disc's centre, radius and the
-    // badge's centring inset were all recomputed per pixel before.
+    // The icon disc: vector pictogram or the app's badge word over a hue rotated
+    // by catalogue index, or a flat circle when the package has no badge.
     let dx = x as i32 - t.disc.center_x() as i32;
     let dy = y as i32 - t.disc.center_y() as i32;
     if dx * dx + dy * dy <= t.disc_r * t.disc_r {
-        return t.badge.pixel(x, y).unwrap_or(t.hue);
+        if let Some(kind) = t.icon {
+            let ink = layout::ink_on(theme, t.hue);
+            if let Some(c) = launcher::icons::rasterize_icon_pixel(kind, x, y, t.disc.center_x(), t.disc.center_y(), ink) {
+                return c;
+            }
+        } else if let Some(c) = t.badge.pixel(x, y) {
+            return c;
+        }
+        return t.hue;
     }
 
     if let Some(c) = t.label.pixel(x, y) {
