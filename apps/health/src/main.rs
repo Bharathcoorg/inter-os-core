@@ -240,15 +240,11 @@ fn read_sensor_service() -> Option<(u8, u32)> {
 }
 
 /// The kernel's settings-inventory verdict for the `sensors` category.
-///
-/// This is a different source from telemetry and is labelled as such: it
-/// describes the settings inventory, not whether a sensor answered.
 fn read_inventory() -> Option<i64> {
     std::settings_hardware_status("sensors").ok()
 }
 
 fn service_state_word(state: u8) -> &'static [u8] {
-    // ServiceState: Declared=0, Starting=1, Running=2, Stopped=3, Failed=4.
     match state {
         0 => b"declared",
         1 => b"starting",
@@ -310,12 +306,13 @@ fn fmt_i64(v: i64, out: &mut [u8]) -> usize {
 }
 
 // -----------------------------------------------------------------------------
-// Palette and layout
+// Palette and geometry
 // -----------------------------------------------------------------------------
 
 const BG: u32 = 0xFF070B12;
 const CARD: u32 = 0xFF111B2B;
 const CARD_RAISED: u32 = 0xFF17243A;
+const CARD_INNER: u32 = 0xFF0B121E;
 const EDGE: u32 = 0xFF26354D;
 const TEXT: u32 = 0xFFF4F7FB;
 const MUTED: u32 = 0xFF9AA8BC;
@@ -323,6 +320,127 @@ const FAINT: u32 = 0xFF6C7A8E;
 const ACCENT: u32 = 0xFF31C4FF;
 const OK: u32 = 0xFF56D68A;
 const WARN: u32 = 0xFFFFC043;
+const CORAL: u32 = 0xFFFF5E7E;
+
+#[inline(always)]
+fn in_rounded_rect(x: usize, y: usize, x0: usize, y0: usize, x1: usize, y1: usize, r: usize) -> bool {
+    if x < x0 || x >= x1 || y < y0 || y >= y1 {
+        return false;
+    }
+    let left = x0 + r;
+    let right = x1.saturating_sub(r + 1);
+    let top = y0 + r;
+    let bottom = y1.saturating_sub(r + 1);
+    let dx = if x < left { left - x } else if x > right { x - right } else { 0 };
+    let dy = if y < top { top - y } else if y > bottom { y - bottom } else { 0 };
+    dx * dx + dy * dy <= r * r
+}
+
+#[inline(always)]
+fn on_rounded_rect_border(x: usize, y: usize, x0: usize, y0: usize, x1: usize, y1: usize, r: usize) -> bool {
+    if !in_rounded_rect(x, y, x0, y0, x1, y1, r) {
+        return false;
+    }
+    if r > 1 && in_rounded_rect(x, y, x0 + 1, y0 + 1, x1.saturating_sub(1), y1.saturating_sub(1), r - 1) {
+        return false;
+    }
+    true
+}
+
+// -----------------------------------------------------------------------------
+// Vector Pictograms
+// -----------------------------------------------------------------------------
+
+/// Vector ECG Pulse & Heart icon for Health Hub header.
+fn icon_pulse(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    let dist_sq = dx * dx + dy * dy;
+    if dist_sq <= 17 * 17 {
+        // ECG waveform line
+        let on_ecg = match dx {
+            -11..=-7 => dy == 0,
+            -6 => dy == -2 || dy == -1,
+            -5 => dy == -4 || dy == -3,
+            -4 => dy == -1 || dy == 0,
+            -3 => dy == 2 || dy == 3,
+            -2 => dy == -6 || dy == -5,
+            -1 => dy == -9 || dy == -8,
+            0 => dy == -3 || dy == -2,
+            1 => dy == 4 || dy == 5,
+            2 => dy == 8 || dy == 9,
+            3 => dy == 4 || dy == 3,
+            4 => dy == -1 || dy == 0,
+            5..=11 => dy == 0,
+            _ => false,
+        };
+        if on_ecg {
+            return Some(0xFFFFFFFF);
+        }
+        if dist_sq >= 15 * 15 {
+            return Some(CORAL);
+        }
+        return Some(0xFF2A101C);
+    }
+    None
+}
+
+/// Vector Microchip icon for Sensor Bus card.
+fn icon_chip(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    if dx.abs() <= 8 && dy.abs() <= 8 {
+        if dx.abs() == 8 || dy.abs() == 8 {
+            return Some(ACCENT);
+        }
+        if dx.abs() <= 5 && dy.abs() <= 5 && (dx.abs() == 5 || dy.abs() == 5) {
+            return Some(MUTED);
+        }
+        return Some(CARD_RAISED);
+    }
+    if (dy.abs() == 2 || dy.abs() == 5) && (dx.abs() >= 9 && dx.abs() <= 12) {
+        return Some(ACCENT);
+    }
+    if (dx.abs() == 2 || dx.abs() == 5) && (dy.abs() >= 9 && dy.abs() <= 12) {
+        return Some(ACCENT);
+    }
+    None
+}
+
+/// Vector Activity Rings / Vitals icon for Metrics card.
+fn icon_vitals(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    let dist_sq = dx * dx + dy * dy;
+    if (dist_sq >= 9 * 9 && dist_sq <= 12 * 12) && dy <= 6 {
+        return Some(OK);
+    }
+    if (dist_sq >= 5 * 5 && dist_sq <= 7 * 7) && (dx >= -5 && dy >= -5) {
+        return Some(ACCENT);
+    }
+    if dist_sq <= 2 * 2 {
+        return Some(0xFFFFFFFF);
+    }
+    None
+}
+
+/// Vector Photodiode / Sun icon for Ambient Light Monitor card.
+fn icon_sun(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    let dist_sq = dx * dx + dy * dy;
+    if dist_sq <= 5 * 5 {
+        return Some(WARN);
+    }
+    let is_ray = (dx.abs() <= 1 && (dy.abs() >= 7 && dy.abs() <= 11))
+        || (dy.abs() <= 1 && (dx.abs() >= 7 && dx.abs() <= 11))
+        || ((dx - dy).abs() <= 1 && (dx.abs() >= 5 && dx.abs() <= 8))
+        || ((dx + dy).abs() <= 1 && (dx.abs() >= 5 && dx.abs() <= 8));
+    if is_ray {
+        return Some(WARN);
+    }
+    None
+}
 
 struct Card {
     x0: usize,
@@ -333,9 +451,9 @@ struct Card {
 }
 
 const CARDS: [Card; 3] = [
-    Card { x0: 30, y0: 112, x1: 690, y1: 452, caption: b"SENSOR BUS" },
-    Card { x0: 30, y0: 472, x1: 690, y1: 932, caption: b"METRICS" },
-    Card { x0: 30, y0: 952, x1: 690, y1: 1312, caption: b"AMBIENT LIGHT, REAL SAMPLES" },
+    Card { x0: 30, y0: 108, x1: 690, y1: 456, caption: b"SENSOR BUS TELEMETRY" },
+    Card { x0: 30, y0: 472, x1: 690, y1: 936, caption: b"BIOMETRIC & SENSOR METRICS" },
+    Card { x0: 30, y0: 952, x1: 690, y1: 1312, caption: b"AMBIENT LIGHT TRACE (REAL LUX)" },
 ];
 
 /// One row of the metric table.
@@ -346,9 +464,6 @@ struct Metric {
     color: u32,
 }
 
-/// The metric table is a fixed, hand-written inventory of what this kernel can
-/// and cannot measure. Rows whose verdict is driven by a live reading are built
-/// at render time instead; see `live_metric`.
 const STATIC_METRICS_HEAD: [Metric; 3] = [
     Metric {
         label: b"Heart rate",
@@ -427,50 +542,102 @@ fn render(surface: u32, app: &Health) {
 
 #[inline(never)]
 fn pixel(x: usize, y: usize, app: &Health) -> u32 {
+    // Top Bar (y: 0..96)
     if y < 96 {
         if y >= 94 {
             return EDGE;
         }
+
+        // Back Button
         if (24..100).contains(&x) && (28..68).contains(&y) {
-            let border = y == 28 || y == 67 || x == 24 || x == 99;
+            let on_border = on_rounded_rect_border(x, y, 24, 28, 100, 68, 8);
             let chev = (x as isize - 62).abs() + (y as isize - 48).abs() <= 11 && x <= 62;
-            return if border || chev { TEXT } else { CARD_RAISED };
+            return if on_border || chev { TEXT } else { CARD_RAISED };
         }
-        if font::text_at(x, y, 116, 32, 3, b"Health") {
+
+        // Pulse Icon
+        if let Some(c) = icon_pulse(x, y, 134, 48) {
+            return c;
+        }
+
+        // Title and Subtitle
+        if font::text_at(x, y, 164, 32, 3, b"Health Hub") {
             return TEXT;
         }
-        return CARD;
-    }
-
-    if (1312..1380).contains(&y) && (30..690).contains(&x) {
-        if y == 1312 || y == 1379 || x == 30 || x == 689 {
-            return EDGE;
+        if font::text_at(x, y, 166, 62, 1, b"SOVEREIGN BIOMETRIC PLATFORM") {
+            return FAINT;
         }
-        if font::text_at(x, y, 44, 1334, 2, &app.status[..app.status_len]) {
-            return app.status_color;
-        }
-        return CARD;
-    }
 
-    for card in CARDS.iter() {
-        if y >= card.y0 && y < card.y1 && x >= card.x0 && x < card.x1 {
-            if y == card.y0 || y == card.y1 - 1 || x == card.x0 || x == card.x1 - 1 {
+        // Live status pill in top header (x: 550..690, y: 34..62)
+        if in_rounded_rect(x, y, 540, 34, 690, 62, 6) {
+            if on_rounded_rect_border(x, y, 540, 34, 690, 62, 6) {
                 return EDGE;
             }
-            if font::text_at(x, y, card.x0 + 14, card.y0 + 12, 2, card.caption) {
-                return ACCENT;
+            let is_present = matches!(app.telemetry, Telemetry::Present { .. });
+            let dot_color = if is_present { OK } else { WARN };
+            let (dx, dy) = (x as isize - 556, y as isize - 48);
+            if dx * dx + dy * dy <= 4 * 4 {
+                return dot_color;
             }
-            return CARD;
+            let status_lbl: &[u8] = if is_present { b"ONLINE" } else { b"STANDBY" };
+            if font::text_at(x, y, 568, 41, 2, status_lbl) {
+                return dot_color;
+            }
+            return CARD_RAISED;
+        }
+
+        return CARD;
+    }
+
+    // Bottom Status Pill Card (y: 1324..1380)
+    if (1324..1380).contains(&y) && (30..690).contains(&x) {
+        if on_rounded_rect_border(x, y, 30, 1324, 690, 1380, 8) {
+            return EDGE;
+        }
+        if in_rounded_rect(x, y, 30, 1324, 690, 1380, 8) {
+            let (dx, dy) = (x as isize - 48, y as isize - 1352);
+            if dx * dx + dy * dy <= 4 * 4 {
+                return app.status_color;
+            }
+            if font::text_at(x, y, 62, 1344, 2, &app.status[..app.status_len]) {
+                return app.status_color;
+            }
+            return CARD_INNER;
         }
     }
 
-    if (112..452).contains(&y) && (30..690).contains(&x) {
+    // Card Borders and Headers
+    for (idx, card) in CARDS.iter().enumerate() {
+        if in_rounded_rect(x, y, card.x0, card.y0, card.x1, card.y1, 10) {
+            if on_rounded_rect_border(x, y, card.x0, card.y0, card.x1, card.y1, 10) {
+                return EDGE;
+            }
+
+            // Card Header Icons
+            let icon_hit = match idx {
+                0 => icon_chip(x, y, card.x0 + 24, card.y0 + 20),
+                1 => icon_vitals(x, y, card.x0 + 24, card.y0 + 20),
+                2 => icon_sun(x, y, card.x0 + 24, card.y0 + 20),
+                _ => None,
+            };
+            if let Some(c) = icon_hit {
+                return c;
+            }
+
+            if font::text_at(x, y, card.x0 + 44, card.y0 + 12, 2, card.caption) {
+                return ACCENT;
+            }
+        }
+    }
+
+    // Card Contents
+    if (108..456).contains(&y) && (30..690).contains(&x) {
         if let Some(c) = sensor_bus_card(x, y, app) {
             return c;
         }
         return CARD;
     }
-    if (472..932).contains(&y) && (30..690).contains(&x) {
+    if (472..936).contains(&y) && (30..690).contains(&x) {
         if let Some(c) = metrics_card(x, y, app) {
             return c;
         }
@@ -483,15 +650,16 @@ fn pixel(x: usize, y: usize, app: &Health) -> u32 {
         return CARD;
     }
 
+    // Home Gesture Bar
     if (1418..1424).contains(&y) && (260..460).contains(&x) {
         return MUTED;
     }
+
     BG
 }
 
 #[inline(never)]
 fn sensor_bus_card(x: usize, y: usize, app: &Health) -> Option<u32> {
-    // Verdict of the authoritative telemetry call.
     let (verdict, color) = match &app.telemetry {
         Telemetry::Present { .. } => (b"reading".as_slice(), OK),
         Telemetry::Absent { .. } => (b"no sensor bound".as_slice(), WARN),
@@ -508,35 +676,34 @@ fn sensor_bus_card(x: usize, y: usize, app: &Health) -> Option<u32> {
             wn += 1;
         }
     }
-    if let Some(c) = field(x, y, 160, b"Sensor read", &word[..wn], color) {
+    if let Some(c) = field(x, y, 154, b"Sensor read", &word[..wn], color) {
         return Some(c);
     }
-    if line(x, y, 180, b"sensor_read() -> kernel sensor manager", FAINT).is_some() {
+    if line(x, y, 174, b"sensor_read() -> kernel sensor manager", FAINT).is_some() {
         return Some(FAINT);
     }
 
-    // The kernel's own words, quoted, when it declared no hardware.
+    // Quoting kernel error verbatim if absent
     if let Telemetry::Absent { status, status_len, error, error_len } = &app.telemetry {
-        if font::text_at(x, y, 44, 214, 2, b"Kernel reports:") {
+        if font::text_at(x, y, 44, 208, 2, b"Kernel reports:") {
             return Some(MUTED);
         }
         if *status_len > 0
-            && font::text_at(x, y, 260, 214, 2, &status[..*status_len as usize])
+            && font::text_at(x, y, 260, 208, 2, &status[..*status_len as usize])
         {
             return Some(WARN);
         }
-        // The kernel's reason string, wrapped at the card's text width.
         let err = &error[..*error_len as usize];
         let split = err.len().min(39);
-        if font::text_at(x, y, 44, 246, 2, &err[..split]) {
+        if font::text_at(x, y, 44, 238, 2, &err[..split]) {
             return Some(TEXT);
         }
-        if font::text_at(x, y, 44, 272, 2, &err[split..]) {
+        if font::text_at(x, y, 44, 262, 2, &err[split..]) {
             return Some(TEXT);
         }
     }
 
-    // Live sensor service record.
+    // Live sensor service record
     let mut word = [0u8; 32];
     let (svc_color, wn) = match app.sensor_service {
         Some((2, gen)) => {
@@ -551,33 +718,33 @@ fn sensor_bus_card(x: usize, y: usize, app: &Health) -> Option<u32> {
         }
         None => (WARN, write_lit(b"no record", &mut word)),
     };
-    if let Some(c) = field(x, y, 316, b"Sensor service", &word[..wn], svc_color) {
+    if let Some(c) = field(x, y, 310, b"Sensor service", &word[..wn], svc_color) {
         return Some(c);
     }
-    if line(x, y, 336, b"service_query(11)", FAINT).is_some() {
+    if line(x, y, 330, b"service_query(11)", FAINT).is_some() {
         return Some(FAINT);
     }
 
-    // Settings inventory, named as a different source from telemetry.
+    // Settings inventory
     let mut word = [0u8; 32];
     let (inv_color, wn) = match app.inventory {
         Some(code) => (FAINT, write_lit(inventory_word(code), &mut word)),
         None => (WARN, write_lit(b"refused", &mut word)),
     };
-    if let Some(c) = field(x, y, 372, b"Settings inventory", &word[..wn], inv_color) {
+    if let Some(c) = field(x, y, 366, b"Settings inventory", &word[..wn], inv_color) {
         return Some(c);
     }
-    if line(x, y, 392, b"settings_hardware_status(\"sensors\")", FAINT).is_some() {
+    if line(x, y, 386, b"settings_hardware_status(\"sensors\")", FAINT).is_some() {
         return Some(FAINT);
     }
 
-    line(x, y, 424, b"Nothing is invented to fill the chart below.", MUTED)
+    line(x, y, 420, b"Nothing is invented to fill the chart below.", MUTED)
 }
 
 #[inline(never)]
 fn metrics_card(x: usize, y: usize, app: &Health) -> Option<u32> {
     for (i, metric) in STATIC_METRICS_HEAD.iter().enumerate() {
-        let top = 520 + i * 56;
+        let top = 518 + i * 56;
         if let Some(c) = field(x, y, top, metric.label, metric.verdict, metric.color) {
             return Some(c);
         }
@@ -586,8 +753,7 @@ fn metrics_card(x: usize, y: usize, app: &Health) -> Option<u32> {
         }
     }
 
-    // Live rows, driven by the reading we actually have.
-    let base = 520 + STATIC_METRICS_HEAD.len() * 56;
+    let base = 518 + STATIC_METRICS_HEAD.len() * 56;
     match &app.telemetry {
         Telemetry::Present { lux, accel, near, orientation } => {
             let mut word = [0u8; 32];
@@ -640,30 +806,56 @@ fn metrics_card(x: usize, y: usize, app: &Health) -> Option<u32> {
         }
     }
 
-    // WHY "measured": the three rows above this line are a hand-written inventory of
-    // what the platform cannot measure, and the rows below it are the live reading.
-    // Only the latter came out of a syscall, so only the latter is described that way.
-    line(x, y, 902, b"Every measured value came from one sensor_read call.", MUTED)
+    line(x, y, 904, b"Every measured value came from one sensor_read call.", MUTED)
 }
 
 #[inline(never)]
 fn trace_card(x: usize, y: usize, app: &Health) -> Option<u32> {
-    const PX0: usize = 62;
-    const PX1: usize = 658;
-    const PY0: usize = 1000;
-    const PY1: usize = 1236;
+    const PX0: usize = 56;
+    const PX1: usize = 664;
+    const PY0: usize = 998;
+    const PY1: usize = 1240;
 
     if x >= PX0 && x < PX1 && y >= PY0 && y < PY1 {
-        // Grid.
-        let gx = (x - PX0) % 119;
-        let gy = (y - PY0) % 47;
+        let gx = (x - PX0) % 120;
+        let gy = (y - PY0) % 48;
         if x == PX0 || x == PX1 - 1 || y == PY0 || y == PY1 - 1 {
             return Some(EDGE);
         }
         if gx == 0 || gy == 0 {
             return Some(CARD_RAISED);
         }
-        return Some(CARD);
+        if app.sample_count > 0 {
+            // Check if pixel is part of waveform or area glow
+            let mut lo = app.samples[0];
+            let mut hi = app.samples[0];
+            for i in 1..app.sample_count {
+                let v = app.samples[i];
+                if v < lo { lo = v; }
+                if v > hi { hi = v; }
+            }
+            let span = hi - lo;
+
+            // Plot sample lines
+            for i in 1..app.sample_count {
+                let y0 = plot_y(app.samples[i - 1], lo, span, PY0 + 10, PY1 - 10);
+                let y1 = plot_y(app.samples[i], lo, span, PY0 + 10, PY1 - 10);
+                let cx0 = PX0 + (PX1 - 1 - PX0) * (i - 1) / app.sample_count.max(1);
+                let cx1 = PX0 + (PX1 - 1 - PX0) * i / app.sample_count.max(1);
+
+                if x >= cx0 && x <= cx1 {
+                    let y_min = y0.min(y1);
+                    let y_max = y0.max(y1);
+                    if y >= y_min && y <= y_max + 1 {
+                        return Some(ACCENT);
+                    }
+                    if y > y_max && (y - y_max) % 4 == 0 {
+                        return Some(0x22173A5E);
+                    }
+                }
+            }
+        }
+        return Some(CARD_INNER);
     }
 
     if app.sample_count == 0 {
@@ -674,7 +866,7 @@ fn trace_card(x: usize, y: usize, app: &Health) -> Option<u32> {
             x,
             y,
             font::text_center(PX0, PX1, 2, b"Nothing to plot, and none is invented."),
-            1120,
+            1122,
             2,
             b"Nothing to plot, and none is invented.",
         ) {
@@ -684,7 +876,7 @@ fn trace_card(x: usize, y: usize, app: &Health) -> Option<u32> {
             x,
             y,
             font::text_center(PX0, PX1, 2, b"sensor_read() reported no sensor hardware."),
-            1150,
+            1154,
             2,
             b"sensor_read() reported no sensor hardware.",
         ) {
@@ -693,57 +885,43 @@ fn trace_card(x: usize, y: usize, app: &Health) -> Option<u32> {
         return None;
     }
 
-    // Real samples: normalise against the observed extremes only.
+    // Real samples: normalise against observed extremes
     let mut lo = app.samples[0];
     let mut hi = app.samples[0];
     for i in 1..app.sample_count {
         let v = app.samples[i];
-        if v < lo {
-            lo = v;
-        }
-        if v > hi {
-            hi = v;
-        }
-    }
-    let span = hi - lo;
-
-    for i in 1..app.sample_count {
-        let y0 = plot_y(app.samples[i - 1], lo, span, PY0, PY1);
-        let y1 = plot_y(app.samples[i], lo, span, PY0, PY1);
-        let cx0 = PX0 + (PX1 - 1 - PX0) * (i - 1) / app.sample_count.max(1);
-        let cx1 = PX0 + (PX1 - 1 - PX0) * i / app.sample_count.max(1);
-        if x >= cx0 && x < cx1 && y >= y0.min(y1) && y <= y0.max(y1) {
-            return Some(ACCENT);
-        }
+        if v < lo { lo = v; }
+        if v > hi { hi = v; }
     }
 
-    // Axis annotations, from the same samples.
+    // Axis annotations
     let mut word = [0u8; 24];
     let mut n = write_lit(b"max ", &mut word);
     let mut n2 = fmt_i64(hi, &mut word[n..]);
     n += n2;
     n2 = write_lit(b" lx", &mut word[n..]);
     n += n2;
-    if right_line(x, y, PY1 + 8, &word[..n], OK).is_some() {
+    if right_line(x, y, PY1 + 10, &word[..n], OK).is_some() {
         return Some(OK);
     }
     let mut word = [0u8; 24];
     let n = write_lit(b"min ", &mut word);
     let n = n + fmt_i64(lo, &mut word[n..]);
     let n = n + write_lit(b" lx", &mut word[n..]);
-    if line(x, y, PY1 + 8, &word[..n], MUTED).is_some() {
+    if line(x, y, PY1 + 10, &word[..n], MUTED).is_some() {
         return Some(MUTED);
     }
 
     let mut word = [0u8; 24];
     let n = write_lit(b"samples: ", &mut word);
     let n = n + fmt_u64(app.sample_count as u64, &mut word[n..]);
-    if right_line(x, y, 1268, &word[..n], MUTED).is_some() {
+    if right_line(x, y, 1276, &word[..n], MUTED).is_some() {
         return Some(MUTED);
     }
-    if line(x, y, 1268, b"real sensor_read() lux", FAINT).is_some() {
+    if line(x, y, 1276, b"real sensor_read() lux", FAINT).is_some() {
         return Some(FAINT);
     }
+
     None
 }
 
@@ -751,8 +929,6 @@ fn trace_card(x: usize, y: usize, app: &Health) -> Option<u32> {
 fn plot_y(v: i64, lo: i64, span: i64, py0: usize, py1: usize) -> usize {
     let height = (py1 - 1 - py0) as i64;
     if span <= 0 {
-        // Every sample is identical: a flat line at the top, labelled with the
-        // value. It is not nudged to look like movement that did not happen.
         return py0;
     }
     let up = ((v - lo) * height) / span;
@@ -873,8 +1049,6 @@ pub extern "C" fn _start() -> ! {
                             let _ = std::surface_destroy(6, surface);
                             std::exit_with_code(0);
                         }
-                        // Re-read every source on demand, so the screen always
-                        // reflects a call that actually happened.
                         sample(&mut app);
                         app.sensor_service = read_sensor_service();
                         app.inventory = read_inventory();
