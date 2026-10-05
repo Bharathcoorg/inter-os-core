@@ -239,9 +239,16 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             if s_dx * s_dx + s_dy * s_dy >= 225 {
                 return BORDER_SUBTLE;
             }
-            if y >= 44 && y < 52 {
-                if let Some(c) = test_text(x, y, 636, 44, 1, b"Q", ACCENT_SKY) {
-                    return c;
+            let l_dx = (x as i32) - 638;
+            let l_dy = (y as i32) - 46;
+            let lens_d2 = l_dx * l_dx + l_dy * l_dy;
+            if lens_d2 >= 9 && lens_d2 <= 25 {
+                return ACCENT_SKY;
+            }
+            if (641..=646).contains(&(x as i32)) && (49..=54).contains(&(y as i32)) {
+                let diff = (x as i32) - (y as i32) - (641 - 49);
+                if diff.abs() <= 1 {
+                    return ACCENT_SKY;
                 }
             }
             return SURFACE_RAISED;
@@ -315,11 +322,77 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             // Category Icon Badge Circle at (x0 + 35, 265, r: 16)
             let b_dx = (x as i32) - (x0 as i32 + 35);
             let b_dy = (y as i32) - 265;
-            if b_dx * b_dx + b_dy * b_dy <= 256 {
-                if is_selected {
-                    return ACCENT_SKY;
+            let b_dist2 = b_dx * b_dx + b_dy * b_dy;
+            if b_dist2 <= 256 {
+                if b_dist2 >= 220 {
+                    return if is_selected { ACCENT_SKY } else { BORDER_SUBTLE };
                 }
-                return 0xFF142032;
+                let icon_color = if is_selected { TEXT_PRIMARY } else { ACCENT_SKY };
+                match idx {
+                    0 => {
+                        // Clock pictogram (Recent)
+                        if b_dist2 >= 40 && b_dist2 <= 68 {
+                            return icon_color;
+                        }
+                        if b_dx == 0 && b_dy >= -5 && b_dy <= 0 {
+                            return icon_color;
+                        }
+                        if b_dy == 0 && b_dx >= 0 && b_dx <= 4 {
+                            return icon_color;
+                        }
+                    }
+                    1 => {
+                        // Landscape/Image pictogram (Images)
+                        if b_dx >= -8 && b_dx <= 8 && b_dy >= -6 && b_dy <= 6 {
+                            if b_dx == -8 || b_dx == 8 || b_dy == -6 || b_dy == 6 {
+                                return icon_color;
+                            }
+                            // Sun dot
+                            if (b_dx - 3).abs() <= 1 && (b_dy + 2).abs() <= 1 {
+                                return icon_color;
+                            }
+                            // Mountain peaks
+                            let m1 = 4 - (b_dx + 3).abs();
+                            let m2 = 4 - (b_dx - 2).abs();
+                            if (b_dx >= -6 && b_dx <= 0 && b_dy == m1)
+                                || (b_dx >= -1 && b_dx <= 6 && b_dy == m2)
+                            {
+                                return icon_color;
+                            }
+                        }
+                    }
+                    2 => {
+                        // Document pictogram (Docs)
+                        if b_dx >= -6 && b_dx <= 6 && b_dy >= -8 && b_dy <= 8 {
+                            // Folded corner top-right
+                            if b_dx >= 2 && b_dy <= -4 && (b_dx - 2) + (-4 - b_dy) >= 4 {
+                                // Cutout
+                            } else if b_dx == -6 || b_dx == 6 || b_dy == 8 || (b_dy == -8 && b_dx <= 2) {
+                                return icon_color;
+                            } else if (b_dx == 2 && b_dy <= -4) || (b_dy == -4 && b_dx >= 2) {
+                                return icon_color;
+                            } else if (b_dy == -1 || b_dy == 2 || b_dy == 5) && b_dx >= -4 && b_dx <= 3 {
+                                return icon_color;
+                            }
+                        }
+                    }
+                    _ => {
+                        // Download arrow pictogram (Download)
+                        if b_dx == 0 && b_dy >= -7 && b_dy <= 2 {
+                            return icon_color;
+                        }
+                        if b_dy >= 0 && b_dy <= 3 && b_dx.abs() <= (3 - b_dy) {
+                            return icon_color;
+                        }
+                        if b_dy == 6 && b_dx >= -7 && b_dx <= 7 {
+                            return icon_color;
+                        }
+                        if (b_dx == -7 || b_dx == 7) && b_dy >= 3 && b_dy <= 6 {
+                            return icon_color;
+                        }
+                    }
+                }
+                return if is_selected { 0xFF142C48 } else { 0xFF142032 };
             }
             // Count Pill
             if y >= 258 && y < 274 {
@@ -394,14 +467,30 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 if in_row_y == 18 || in_row_y == 61 || x == 42 || x == 85 {
                     return item.color_accent;
                 }
-                if (34..42).contains(&in_row_y) {
-                    let label = if item.is_dir {
-                        &b"DIR"[..]
-                    } else {
-                        &b"DOC"[..]
-                    };
-                    if let Some(c) = test_text(x, in_row_y, 48, 34, 1, label, item.color_accent) {
-                        return c;
+                let ix = (x as i32) - 64;
+                let iy = (in_row_y as i32) - 40;
+                if item.is_dir {
+                    // Folder vector icon
+                    if ix >= -12 && ix <= -2 && iy >= -10 && iy <= -6 {
+                        return item.color_accent;
+                    }
+                    if ix >= -12 && ix <= 12 && iy >= -6 && iy <= 10 {
+                        if ix == -12 || ix == 12 || iy == -6 || iy == 10 || iy == 0 {
+                            return item.color_accent;
+                        }
+                    }
+                } else {
+                    // Document vector icon
+                    if ix >= -10 && ix <= 10 && iy >= -12 && iy <= 12 {
+                        if ix >= 4 && iy <= -6 && (ix - 4) + (-6 - iy) >= 6 {
+                            // Cutout
+                        } else if ix == -10 || ix == 10 || iy == 12 || (iy == -12 && ix <= 4) {
+                            return item.color_accent;
+                        } else if (ix == 4 && iy <= -6) || (iy == -6 && ix >= 4) {
+                            return item.color_accent;
+                        } else if (iy == -2 || iy == 3 || iy == 8) && ix >= -6 && ix <= 5 {
+                            return item.color_accent;
+                        }
                     }
                 }
                 return 0xFF0E1A2C;
