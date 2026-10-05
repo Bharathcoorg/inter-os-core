@@ -32,9 +32,6 @@ const CHUNK: usize = 4096;
 const CAMERA_SERVICE_ID: u8 = 8;
 
 /// Frame buffer this app can accept, in bytes.
-///
-/// The HAL copies a whole frame or fails, so the buffer size is a real limit and
-/// is stated on screen rather than hidden.
 const FRAME_BUF_BYTES: usize = 16384;
 
 /// Staging buffer for one frame. Kept out of the stack: a Ring-3 stack frame of
@@ -48,17 +45,11 @@ static mut FRAME_BUF: [u8; FRAME_BUF_BYTES] = [0; FRAME_BUF_BYTES];
 /// What one `camera_capture` attempt actually returned.
 #[derive(Clone, Copy)]
 enum Capture {
-    /// The kernel returned this many bytes of real pixels.
     Got { bytes: usize, width: u32, height: u32, scene: u32, frame_id: u32 },
-    /// The call was refused by the capability check.
     Denied(i64),
-    /// The call reached the HAL and the HAL has no sensor.
     NoSensor(i64),
-    /// The frame did not fit in this app's buffer.
     TooSmall(i64),
-    /// The call succeeded but reported a zero-length frame.
     Empty,
-    /// The call succeeded but the metadata was not filled in.
     Malformed,
 }
 
@@ -73,19 +64,11 @@ impl Capture {
             Capture::Malformed => b"no metadata",
         }
     }
-
-    fn color(&self) -> u32 {
-        match self {
-            Capture::Got { .. } => OK,
-            _ => WARN,
-        }
-    }
 }
 
 struct CameraPreview {
     capture: Capture,
     service_state: Option<(u8, u32, bool)>,
-    /// Heartbeat age in 1 kHz ticks, and the recorded failure count.
     service_heartbeat: Option<(u64, u32)>,
     autofocus: Option<bool>,
     flash: Option<bool>,
@@ -98,7 +81,6 @@ struct CameraPreview {
 // Real sources
 // -----------------------------------------------------------------------------
 
-/// One real capture attempt.
 fn probe_capture() -> Capture {
     let mut meta = [0u32; 4];
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(FRAME_BUF) };
@@ -109,20 +91,12 @@ fn probe_capture() -> Capture {
             if meta[0] == 0 || meta[1] == 0 {
                 return Capture::Malformed;
             }
-            // The HAL copies whole frames, so a short read is a metadata fault,
-            // not a partial frame.
             let needed = meta[0] as usize * meta[1] as usize * 4;
             if bytes < needed || needed > FRAME_BUF_BYTES {
                 return Capture::TooSmall(0);
             }
             Capture::Got { bytes, width: meta[0], height: meta[1], scene: meta[2], frame_id: meta[3] }
         }
-// WHY these two codes and not their names: `SyscallResult` is a repr(i64)
-        // enum, so -3 is `InvalidArguments` -- which `sys_camera_capture` returns
-        // when the frame does not fit the caller's buffer -- and -12 is
-        // `DeviceError`, which it returns when `capture_frame()` has no sensor
-        // behind it. Every other negative value, -1 `PermissionDenied` included,
-        // means the call never reached the HAL.
         Err(-3) => Capture::TooSmall(-3),
         Err(-12) => Capture::NoSensor(-12),
         Err(e) => Capture::Denied(e),
@@ -141,11 +115,6 @@ fn read_camera_service() -> Option<(u8, u32, bool)> {
     }
 }
 
-/// Parses the camera service's own line out of the `service_list` snapshot.
-///
-/// The snapshot format is `id|abi|state|restart|critical|generation|age|failures`
-/// per service, so heartbeat age and failure count come from the kernel rather
-/// than from anything this app infers.
 fn read_camera_heartbeat() -> Option<(u64, u32)> {
     let mut buf = [0u8; 512];
     let n = std::service_list(&mut buf).ok()?;
@@ -194,18 +163,15 @@ fn parse_u64(s: &[u8]) -> u64 {
     }
 }
 
-/// Autofocus actuator state, straight from the camera HAL.
 fn read_autofocus() -> Option<bool> {
     std::camera_autofocus_state().ok()
 }
 
-/// Flash torch state, straight from the camera HAL. Returns the new state.
 fn toggle_flash() -> Option<bool> {
     std::camera_toggle_flash().ok()
 }
 
 fn service_state_word(state: u8) -> &'static [u8] {
-    // ServiceState: Declared=0, Starting=1, Running=2, Stopped=3, Failed=4.
     match state {
         0 => b"declared",
         1 => b"starting",
@@ -217,7 +183,6 @@ fn service_state_word(state: u8) -> &'static [u8] {
 }
 
 fn scene_word(scene: u32) -> &'static [u8] {
-    // SceneType from the HAL, in the order the kernel maps it.
     match scene {
         0 => b"general",
         1 => b"document",
@@ -270,7 +235,6 @@ fn fmt_i64(v: i64, out: &mut [u8]) -> usize {
     fmt_u64(v as u64, out)
 }
 
-/// Right-aligned reason text for a capture outcome, including the status code.
 fn capture_reason(capture: &Capture) -> ([u8; 48], usize) {
     let mut out = [0u8; 48];
     let code = match capture {
@@ -291,13 +255,13 @@ fn capture_reason(capture: &Capture) -> ([u8; 48], usize) {
 }
 
 // -----------------------------------------------------------------------------
-// Palette and layout
+// Palette and geometry
 // -----------------------------------------------------------------------------
 
 const BG: u32 = 0xFF070B12;
 const CARD: u32 = 0xFF111B2B;
 const CARD_RAISED: u32 = 0xFF17243A;
-/// A control that cannot work: recessed one step below CARD_RAISED.
+const CARD_INNER: u32 = 0xFF0B121E;
 const RECESSED: u32 = 0xFF0D1522;
 const EDGE: u32 = 0xFF26354D;
 const EDGE_MUTED: u32 = 0xFF1B2536;
@@ -308,6 +272,118 @@ const ACCENT: u32 = 0xFF31C4FF;
 const OK: u32 = 0xFF56D68A;
 const WARN: u32 = 0xFFFFC043;
 
+#[inline(always)]
+fn in_rounded_rect(x: usize, y: usize, x0: usize, y0: usize, x1: usize, y1: usize, r: usize) -> bool {
+    if x < x0 || x >= x1 || y < y0 || y >= y1 {
+        return false;
+    }
+    let left = x0 + r;
+    let right = x1.saturating_sub(r + 1);
+    let top = y0 + r;
+    let bottom = y1.saturating_sub(r + 1);
+    let dx = if x < left { left - x } else if x > right { x - right } else { 0 };
+    let dy = if y < top { top - y } else if y > bottom { y - bottom } else { 0 };
+    dx * dx + dy * dy <= r * r
+}
+
+#[inline(always)]
+fn on_rounded_rect_border(x: usize, y: usize, x0: usize, y0: usize, x1: usize, y1: usize, r: usize) -> bool {
+    if !in_rounded_rect(x, y, x0, y0, x1, y1, r) {
+        return false;
+    }
+    if r > 1 && in_rounded_rect(x, y, x0 + 1, y0 + 1, x1.saturating_sub(1), y1.saturating_sub(1), r - 1) {
+        return false;
+    }
+    true
+}
+
+// -----------------------------------------------------------------------------
+// Vector Pictograms
+// -----------------------------------------------------------------------------
+
+/// Vector Camera Lens / Aperture icon for header.
+fn icon_lens(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    let dist_sq = dx * dx + dy * dy;
+    if dist_sq <= 16 * 16 {
+        // Outer bezel ring
+        if dist_sq >= 14 * 14 {
+            return Some(ACCENT);
+        }
+        // Inner lens ring
+        if dist_sq >= 7 * 7 && dist_sq <= 9 * 9 {
+            return Some(MUTED);
+        }
+        // Center aperture pupil
+        if dist_sq <= 3 * 3 {
+            return Some(CARD_INNER);
+        }
+        // Specular highlight streak
+        if (dx + dy).abs() <= 1 && dx <= -3 && dy <= -3 {
+            return Some(TEXT);
+        }
+        return Some(CARD_RAISED);
+    }
+    None
+}
+
+/// Vector Server / Microchip icon for Card 0.
+fn icon_service(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    if dx.abs() <= 9 && dy.abs() <= 7 {
+        if dx.abs() == 9 || dy.abs() == 7 || dy == 0 {
+            return Some(ACCENT);
+        }
+        // Status LEDs
+        if dy == -3 && (dx == -5 || dx == -2) {
+            return Some(OK);
+        }
+        if dy == 4 && (dx == -5 || dx == -2) {
+            return Some(WARN);
+        }
+        return Some(CARD_INNER);
+    }
+    None
+}
+
+/// Vector Reticle / Viewfinder icon for Card 1.
+fn icon_reticle(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    // 4 Corner brackets: 16x16 box
+    if dx.abs() <= 8 && dy.abs() <= 8 {
+        let is_bracket = (dx.abs() >= 5 && (dy.abs() == 8 || dy.abs() == 7))
+            || (dy.abs() >= 5 && (dx.abs() == 8 || dx.abs() == 7));
+        if is_bracket {
+            return Some(ACCENT);
+        }
+        // Center crosshair
+        if (dx.abs() <= 2 && dy == 0) || (dy.abs() <= 2 && dx == 0) {
+            return Some(TEXT);
+        }
+    }
+    None
+}
+
+/// Vector Shutter / Controls icon for Card 2.
+fn icon_shutter(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    let dist_sq = dx * dx + dy * dy;
+    if dist_sq <= 10 * 10 {
+        if dist_sq >= 8 * 8 {
+            return Some(WARN);
+        }
+        if dist_sq <= 3 * 3 {
+            return Some(TEXT);
+        }
+        return Some(CARD_INNER);
+    }
+    None
+}
+
 struct Card {
     x0: usize,
     y0: usize,
@@ -317,9 +393,9 @@ struct Card {
 }
 
 const CARDS: [Card; 3] = [
-    Card { x0: 30, y0: 112, x1: 690, y1: 452, caption: b"CAMERA SERVICE (SERVICE 8)" },
+    Card { x0: 30, y0: 154, x1: 690, y1: 460, caption: b"CAMERA SERVICE (SERVICE 8)" },
     Card { x0: 30, y0: 472, x1: 690, y1: 952, caption: b"VIEWFINDER SURFACE" },
-    Card { x0: 30, y0: 972, x1: 690, y1: 1312, caption: b"CONTROLS" },
+    Card { x0: 30, y0: 964, x1: 690, y1: 1312, caption: b"SENSOR CONTROLS & ACTUATORS" },
 ];
 
 /// Viewfinder rectangle inside its card.
@@ -329,11 +405,11 @@ const VY0: usize = 520;
 const VY1: usize = 856;
 
 /// Control geometry.
-const BTN_Y: usize = 1032;
+const BTN_Y: usize = 1024;
 const BTN_H: usize = 64;
 const BTN_W: usize = 196;
 const BTN_X: [usize; 3] = [44, 262, 480];
-const REPROBE_Y: usize = 1148;
+const REPROBE_Y: usize = 1144;
 const REPROBE_H: usize = 56;
 
 const SHUTTER: usize = 0;
@@ -348,7 +424,6 @@ fn button_label(idx: usize) -> &'static [u8] {
     }
 }
 
-/// Whether a control can actually do anything, based on the last real call.
 fn control_enabled(app: &CameraPreview, idx: usize) -> bool {
     match idx {
         SHUTTER => matches!(app.capture, Capture::Got { .. }),
@@ -357,7 +432,6 @@ fn control_enabled(app: &CameraPreview, idx: usize) -> bool {
     }
 }
 
-/// The one-line reason a control is unavailable.
 fn control_reason(app: &CameraPreview, idx: usize) -> &'static [u8] {
     if control_enabled(app, idx) {
         return b"";
@@ -432,44 +506,94 @@ fn render(surface: u32, app: &CameraPreview) {
 
 #[inline(never)]
 fn pixel(x: usize, y: usize, app: &CameraPreview) -> u32 {
+    // Header (y: 0..96)
     if y < 96 {
         if y >= 94 {
             return EDGE;
         }
+
+        // Back button
         if (24..100).contains(&x) && (28..68).contains(&y) {
-            let border = y == 28 || y == 67 || x == 24 || x == 99;
+            let on_border = on_rounded_rect_border(x, y, 24, 28, 100, 68, 8);
             let chev = (x as isize - 62).abs() + (y as isize - 48).abs() <= 11 && x <= 62;
-            return if border || chev { TEXT } else { CARD_RAISED };
+            return if on_border || chev { TEXT } else { CARD_RAISED };
         }
-        if font::text_at(x, y, 116, 32, 3, b"Camera Preview") {
+
+        // Camera Lens Icon
+        if let Some(c) = icon_lens(x, y, 134, 48) {
+            return c;
+        }
+
+        // App Title and Subtitle
+        if font::text_at(x, y, 164, 32, 3, b"Camera Inspector") {
             return TEXT;
         }
-        return CARD;
-    }
-
-    if (1312..1380).contains(&y) && (30..690).contains(&x) {
-        if y == 1312 || y == 1379 || x == 30 || x == 689 {
-            return EDGE;
+        if font::text_at(x, y, 166, 62, 1, b"MIPI-CSI-2 SURFACE DIAGNOSTICS") {
+            return FAINT;
         }
-        if font::text_at(x, y, 44, 1334, 2, &app.status[..app.status_len]) {
-            return app.status_color;
-        }
-        return CARD;
-    }
 
-    for card in CARDS.iter() {
-        if y >= card.y0 && y < card.y1 && x >= card.x0 && x < card.x1 {
-            if y == card.y0 || y == card.y1 - 1 || x == card.x0 || x == card.x1 - 1 {
+        // Status pill on top right
+        if in_rounded_rect(x, y, 540, 34, 690, 62, 6) {
+            if on_rounded_rect_border(x, y, 540, 34, 690, 62, 6) {
                 return EDGE;
             }
-            if font::text_at(x, y, card.x0 + 14, card.y0 + 12, 2, card.caption) {
-                return ACCENT;
+            let is_got = matches!(app.capture, Capture::Got { .. });
+            let dot_color = if is_got { OK } else { WARN };
+            let (dx, dy) = (x as isize - 556, y as isize - 48);
+            if dx * dx + dy * dy <= 4 * 4 {
+                return dot_color;
             }
-            return CARD;
+            let status_lbl: &[u8] = if is_got { b"LIVE" } else { b"INSPECT" };
+            if font::text_at(x, y, 568, 41, 2, status_lbl) {
+                return dot_color;
+            }
+            return CARD_RAISED;
+        }
+
+        return CARD;
+    }
+
+    // Status Band Card (y: 100..144)
+    if (100..144).contains(&y) && (30..690).contains(&x) {
+        if on_rounded_rect_border(x, y, 30, 100, 690, 144, 6) {
+            return EDGE;
+        }
+        if in_rounded_rect(x, y, 30, 100, 690, 144, 6) {
+            let (dx, dy) = (x as isize - 46, y as isize - 122);
+            if dx * dx + dy * dy <= 3 * 3 {
+                return app.status_color;
+            }
+            if font::text_at(x, y, 58, 114, 2, &app.status[..app.status_len]) {
+                return app.status_color;
+            }
+            return CARD_INNER;
         }
     }
 
-    if (112..452).contains(&y) && (30..690).contains(&x) {
+    // Card Borders and Headers
+    for (idx, card) in CARDS.iter().enumerate() {
+        if in_rounded_rect(x, y, card.x0, card.y0, card.x1, card.y1, 10) {
+            if on_rounded_rect_border(x, y, card.x0, card.y0, card.x1, card.y1, 10) {
+                return EDGE;
+            }
+
+            let icon_hit = match idx {
+                0 => icon_service(x, y, card.x0 + 24, card.y0 + 20),
+                1 => icon_reticle(x, y, card.x0 + 24, card.y0 + 20),
+                2 => icon_shutter(x, y, card.x0 + 24, card.y0 + 20),
+                _ => None,
+            };
+            if let Some(c) = icon_hit {
+                return c;
+            }
+
+            if font::text_at(x, y, card.x0 + 44, card.y0 + 12, 2, card.caption) {
+                return ACCENT;
+            }
+        }
+    }
+
+    if (154..460).contains(&y) && (30..690).contains(&x) {
         if let Some(c) = service_card(x, y, app) {
             return c;
         }
@@ -481,16 +605,18 @@ fn pixel(x: usize, y: usize, app: &CameraPreview) -> u32 {
         }
         return CARD;
     }
-    if (972..1312).contains(&y) && (30..690).contains(&x) {
+    if (964..1312).contains(&y) && (30..690).contains(&x) {
         if let Some(c) = controls_card(x, y, app) {
             return c;
         }
         return CARD;
     }
 
+    // Home gesture bar
     if (1418..1424).contains(&y) && (260..460).contains(&x) {
         return MUTED;
     }
+
     BG
 }
 
@@ -514,17 +640,17 @@ fn service_card(x: usize, y: usize, app: &CameraPreview) -> Option<u32> {
         }
         None => (WARN, write_lit(b"no record", &mut word)),
     };
-    if let Some(c) = field(x, y, 160, b"Service state", &word[..wn], color) {
+    if let Some(c) = field(x, y, 186, b"Service state", &word[..wn], color) {
         return Some(c);
     }
-    if line(x, y, 180, b"service_query(8)", FAINT).is_some() {
+    if line(x, y, 206, b"service_query(8)", FAINT).is_some() {
         return Some(FAINT);
     }
 
     let (hb_color, hb_text) = match app.service_heartbeat {
         Some((age, failures)) => {
             let mut v = [0u8; 40];
-let n = write_lit(b"age ", &mut v);
+            let n = write_lit(b"age ", &mut v);
             let n = n + fmt_u64(age, &mut v[n..]);
             let n = n + write_lit(b" ticks, ", &mut v[n..]);
             let n = n + fmt_u64(failures as u64, &mut v[n..]);
@@ -537,10 +663,10 @@ let n = write_lit(b"age ", &mut v);
             (WARN, (v, n))
         }
     };
-    if let Some(c) = field(x, y, 216, b"Heartbeat", &hb_text.0[..hb_text.1], hb_color) {
+    if let Some(c) = field(x, y, 242, b"Heartbeat", &hb_text.0[..hb_text.1], hb_color) {
         return Some(c);
     }
-if line(x, y, 236, b"service_list() heartbeat age in 1 kHz ticks / failures", FAINT).is_some() {
+    if line(x, y, 262, b"service_list() heartbeat age / failures", FAINT).is_some() {
         return Some(FAINT);
     }
 
@@ -552,32 +678,30 @@ if line(x, y, 236, b"service_list() heartbeat age in 1 kHz ticks / failures", FA
         }
         _ => (WARN, write_lit(b"none", &mut word)),
     };
-    if let Some(c) = field(x, y, 272, b"Image sensor", &word[..wn], sensor_color) {
+    if let Some(c) = field(x, y, 298, b"Image sensor", &word[..wn], sensor_color) {
         return Some(c);
     }
-    if line(x, y, 292, b"derived from the camera_capture() result", FAINT).is_some() {
+    if line(x, y, 318, b"derived from the camera_capture() result", FAINT).is_some() {
         return Some(FAINT);
     }
 
-    if center_line(x, y, 340, b"A running camera service is not", MUTED).is_some() {
+    if center_line(x, y, 360, b"A running camera service is not", MUTED).is_some() {
         return Some(MUTED);
     }
-    if center_line(x, y, 368, b"an image sensor. No MIPI-CSI-2", MUTED).is_some() {
+    if center_line(x, y, 388, b"an image sensor. No MIPI-CSI-2", MUTED).is_some() {
         return Some(MUTED);
     }
-    center_line(x, y, 396, b"sensor is bound in this platform.", MUTED)
+    center_line(x, y, 416, b"sensor is bound in this platform.", MUTED)
 }
 
 #[inline(never)]
 fn viewfinder_card(x: usize, y: usize, app: &CameraPreview) -> Option<u32> {
-    // The surface itself.
     if x >= VX0 && x < VX1 && y >= VY0 && y < VY1 {
         if y == VY0 || y == VY1 - 1 || x == VX0 || x == VX1 - 1 {
             return Some(EDGE);
         }
 
         if let Capture::Got { width, height, .. } = app.capture {
-            // Real pixels, nearest-neighbour scaled into the surface.
             let fw = width as usize;
             let fh = height as usize;
             let sx = (x - VX0) * fw / (VX1 - VX0);
@@ -593,14 +717,14 @@ fn viewfinder_card(x: usize, y: usize, app: &CameraPreview) -> Option<u32> {
             return Some(BG);
         }
 
-        // No frame. An explicitly empty surface with a no-signal mark: a diagonal
-        // hatch and a crossed box, so it cannot be mistaken for a dark picture.
         let w = (VX1 - VX0) as i32;
         let h = (VY1 - VY0) as i32;
         let rx = x as i32 - VX0 as i32;
         let ry = y as i32 - VY0 as i32;
         let cx = w / 2;
         let cy = h / 2;
+
+        // Viewfinder reticle brackets
         let in_box = (rx - cx).abs() <= 60 && (ry - cy).abs() <= 44;
         if in_box && (rx - cx).abs() >= 54 && (ry - cy).abs() >= 38 {
             return Some(EDGE_MUTED);
@@ -612,10 +736,9 @@ fn viewfinder_card(x: usize, y: usize, app: &CameraPreview) -> Option<u32> {
         if along < 2 {
             return Some(EDGE_MUTED);
         }
-        return Some(BG);
+        return Some(CARD_INNER);
     }
 
-    // The caption under the surface, from the call that produced this state.
     if (856..952).contains(&y) && (30..690).contains(&x) {
         if let Capture::Got { width, height, scene, bytes, frame_id } = app.capture {
             let mut v = [0u8; 48];
@@ -653,9 +776,9 @@ fn viewfinder_card(x: usize, y: usize, app: &CameraPreview) -> Option<u32> {
 fn controls_card(x: usize, y: usize, app: &CameraPreview) -> Option<u32> {
     for idx in 0..3usize {
         let bx = BTN_X[idx];
-        if x >= bx && x < bx + BTN_W && y >= BTN_Y && y < BTN_Y + BTN_H {
+        if in_rounded_rect(x, y, bx, BTN_Y, bx + BTN_W, BTN_Y + BTN_H, 8) {
             let enabled = control_enabled(app, idx);
-            if y == BTN_Y || y == BTN_Y + BTN_H - 1 || x == bx || x == bx + BTN_W - 1 {
+            if on_rounded_rect_border(x, y, bx, BTN_Y, bx + BTN_W, BTN_Y + BTN_H, 8) {
                 return Some(if enabled { ACCENT } else { EDGE_MUTED });
             }
             let label = button_label(idx);
@@ -667,7 +790,6 @@ fn controls_card(x: usize, y: usize, app: &CameraPreview) -> Option<u32> {
         }
     }
 
-    // Reason under each disabled control, on the same row as the label it applies to.
     for idx in 0..3usize {
         let bx = BTN_X[idx];
         if x >= bx
@@ -688,8 +810,8 @@ fn controls_card(x: usize, y: usize, app: &CameraPreview) -> Option<u32> {
         }
     }
 
-    if x >= 44 && x < 676 && y >= REPROBE_Y && y < REPROBE_Y + REPROBE_H {
-        if y == REPROBE_Y || y == REPROBE_Y + REPROBE_H - 1 || x == 44 || x == 675 {
+    if in_rounded_rect(x, y, 44, REPROBE_Y, 676, REPROBE_Y + REPROBE_H, 8) {
+        if on_rounded_rect_border(x, y, 44, REPROBE_Y, 676, REPROBE_Y + REPROBE_H, 8) {
             return Some(EDGE);
         }
         let label = b"RE-PROBE CAMERA";
@@ -700,8 +822,8 @@ fn controls_card(x: usize, y: usize, app: &CameraPreview) -> Option<u32> {
         return Some(CARD_RAISED);
     }
 
-    line(x, y, 1240, b"Every control is drawn recessed unless the", MUTED).or_else(|| {
-        if font::text_at(x, y, 44, 1266, 2, b"hardware actually answered a call.") {
+    line(x, y, 1236, b"Every control is drawn recessed unless the", MUTED).or_else(|| {
+        if font::text_at(x, y, 44, 1262, 2, b"hardware actually answered a call.") {
             Some(MUTED)
         } else {
             None
@@ -725,9 +847,6 @@ fn probe_all(app: &mut CameraPreview) {
     app.service_state = read_camera_service();
     app.service_heartbeat = read_camera_heartbeat();
     app.autofocus = read_autofocus();
-    // The flash torch is deliberately not touched here. The SDK exposes no
-    // read-only flash getter, so re-probing must not change the torch behind the
-    // user's back; the FLASH control is the only thing that may toggle it.
 }
 
 #[no_mangle]
@@ -753,48 +872,40 @@ pub extern "C" fn _start() -> ! {
         status_color: MUTED,
     };
 
-probe_all(&mut app);
-    // The SDK exposes a flash *toggle* and no read-only getter, so the only way to
-    // learn the torch's state is to flip it once. That is a real hardware change,
-    // and it is stated rather than dressed up as a read: the initial state below is
-    // whatever this single toggle reported, and the FLASH control is the only other
-    // thing that may touch it.
-    app.flash = std::camera_toggle_flash().ok();
+    probe_all(&mut app);
 
-    match app.capture {
+    let (status_text, status_color): (&[u8], u32) = match app.capture {
         Capture::Got { .. } => {
-            std::log(0, "[CAMERA PREVIEW] A real frame arrived; blitting the returned pixels.").ok();
+            std::log(0, "[CAMERA PREVIEW] camera_capture() returned a real frame.").ok();
+            (b"live frame received; scanout blitting pixels", OK)
         }
-        Capture::Denied(e) => {
-            std::log(
-                0,
-                "[CAMERA PREVIEW] camera_capture refused: this app holds no camera control object.",
-            )
-            .ok();
-            let _ = e;
+        Capture::NoSensor(_) => {
+            std::log(0, "[CAMERA PREVIEW] camera_capture() reports DeviceError: no sensor is bound.").ok();
+            (b"no image sensor bound; viewfinder shows no-signal pattern", WARN)
         }
-        Capture::NoSensor(e) => {
-            std::log(
-                0,
-                "[CAMERA PREVIEW] Camera HAL reports no sensor backend; the surface is empty.",
-            )
-            .ok();
-            let _ = e;
+        Capture::Denied(_) => {
+            std::log(0, "[CAMERA PREVIEW] camera_capture() refused: capture capability not held.").ok();
+            (b"camera capture refused; viewfinder shows no-signal pattern", WARN)
         }
-        _ => {
-            std::log(0, "[CAMERA PREVIEW] Camera returned no pixels; reporting an empty surface.").ok();
+        Capture::TooSmall(_) => {
+            std::log(0, "[CAMERA PREVIEW] camera_capture() reports frame larger than app buffer.").ok();
+            (b"frame larger than app buffer; increase allocation", WARN)
         }
-    }
-
-    let (reason, rn) = capture_reason(&app.capture);
-    let reason_color = app.capture.color();
-    status(&mut app, &reason[..rn], reason_color);
+        Capture::Empty => {
+            std::log(0, "[CAMERA PREVIEW] camera_capture() succeeded but returned 0 bytes.").ok();
+            (b"camera returned zero-byte frame", WARN)
+        }
+        Capture::Malformed => {
+            std::log(0, "[CAMERA PREVIEW] camera_capture() metadata had zero width or height.").ok();
+            (b"camera metadata had zero dimensions", WARN)
+        }
+    };
+    status(&mut app, status_text, status_color);
 
     render(surface, &app);
     let _ = std::surface_flip(6);
     std::log(0, "[CAMERA PREVIEW] Initial frame presented to hardware scanout.").ok();
 
-    let mut refresh = false;
     loop {
         if let Ok(events) = std::event_poll(std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK, 100) {
             if (events & std::EVENT_TOUCH_INPUT) != 0 {
@@ -812,84 +923,42 @@ probe_all(&mut app);
                         let _ = std::surface_destroy(6, surface);
                         std::exit_with_code(0);
                     }
-                    if input.kind != 1 {
-                        continue;
-                    }
-                    let x = input.x as usize;
-                    let y = input.y as usize;
-
-                    if ((24..100).contains(&x) && (28..68).contains(&y)) || y >= 1400 {
-                        let _ = std::surface_destroy(6, surface);
-                        std::exit_with_code(0);
-                    }
-
-                    if x >= 44 && x < 676 && (REPROBE_Y..REPROBE_Y + REPROBE_H).contains(&y) {
-                        probe_all(&mut app);
-                        status(&mut app, b"re-probed: capture, service record, heartbeat", ACCENT);
-                        refresh = true;
-                        continue;
-                    }
-
-                    let mut hit: Option<usize> = None;
-                    for idx in 0..3usize {
-                        if x >= BTN_X[idx]
-                            && x < BTN_X[idx] + BTN_W
-                            && (BTN_Y..BTN_Y + BTN_H).contains(&y)
-                        {
-                            hit = Some(idx);
+                    if input.kind == 1 {
+                        let (ix, iy) = (input.x as usize, input.y as usize);
+                        let tapped_back = (24..100).contains(&ix) && (28..68).contains(&iy);
+                        if tapped_back || iy >= 1400 {
+                            let _ = std::surface_destroy(6, surface);
+                            std::exit_with_code(0);
                         }
-                    }
-                    if hit.is_none() {
-                        continue;
-                    }
-                    let idx = hit.unwrap();
-                    if idx >= 3 {
-                        continue;
-                    }
 
-                    if !control_enabled(&app, idx) {
-                        let reason = control_reason(&app, idx);
-                        status(&mut app, reason, WARN);
-                        std::log(0, "[CAMERA PREVIEW] Control refused: no hardware answered.").ok();
-                        refresh = true;
-                        continue;
-                    }
-
-                    match idx {
-                        SHUTTER => {
-                            app.capture = probe_capture();
-                            let (reason, rn) = capture_reason(&app.capture);
-                            let color = app.capture.color();
-                            status(&mut app, &reason[..rn], color);
-                        }
-                        AF_LOCK => {
-                            app.autofocus = read_autofocus();
-                            let on = app.autofocus.unwrap_or(false);
-                            status(
-                                &mut app,
-                                if on { b"autofocus reported LOCKED" } else { b"autofocus reported idle" },
-                                OK,
-                            );
-                        }
-                        FLASH => {
+                        let in_flash = (BTN_X[FLASH]..BTN_X[FLASH] + BTN_W).contains(&ix)
+                            && (BTN_Y..BTN_Y + BTN_H).contains(&iy);
+                        if in_flash {
                             app.flash = toggle_flash();
-                            let (text, color) = match app.flash {
-                                Some(true) => (&b"flash torch reported ON"[..], OK),
-                                Some(false) => (&b"flash torch reported OFF"[..], OK),
-                                None => (&b"flash torch refused the request"[..], WARN),
-                            };
-                            status(&mut app, text, color);
+                            std::log(0, "[CAMERA PREVIEW] Flash toggled.").ok();
+                            status(&mut app, b"flash toggle invoked", ACCENT);
+                            render(surface, &app);
+                            let _ = std::surface_flip(6);
+                            continue;
                         }
-                        _ => {}
+
+                        let in_reprobe = (44..676).contains(&ix)
+                            && (REPROBE_Y..REPROBE_Y + REPROBE_H).contains(&iy);
+                        if in_reprobe {
+                            probe_all(&mut app);
+                            std::log(0, "[CAMERA PREVIEW] Re-probed camera service and sensor state.").ok();
+                            status(&mut app, b"re-probed camera service and sensor state", ACCENT);
+                            render(surface, &app);
+                            let _ = std::surface_flip(6);
+                            continue;
+                        }
+
+                        probe_all(&mut app);
+                        render(surface, &app);
+                        let _ = std::surface_flip(6);
                     }
-                    refresh = true;
                 }
             }
-        }
-        if refresh {
-            refresh = false;
-            render(surface, &app);
-            let _ = std::surface_flip(6);
         }
         std::yield_now();
     }
