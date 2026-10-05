@@ -630,6 +630,34 @@ fn log_frame_ticks(ticks: u64) {
     std::log(0, line.as_str()).ok();
 }
 
+/// Kind the kernel's gesture router reports for a drag that travelled far enough,
+/// fast enough: `InputEventKind::Fling`.
+const DRAG_FLING: u8 = 10;
+
+/// Kind the same router reports for a slower drag: `InputEventKind::Pan`.
+const DRAG_PAN: u8 = 4;
+
+/// Whether `kind` is a drag this shell acts on as a swipe.
+///
+/// WHY both kinds: `InputRouter::dispatch_pointer_at` (`kernel/src/input/router.rs`)
+/// turns a pointer release into `GestureKind::Fling` when the pointer travelled at
+/// least 80 px AND was held no longer than `FLING_WINDOW_TICKS` (250), and into
+/// `GestureKind::Scroll` otherwise; `InputEvent::from_canonical` maps those to
+/// kinds 10 and 4. They are the same user action carrying the same `dx`/`dy`, so a
+/// handler that tests only one of them answers "no gesture" to half of every swipe
+/// the device can produce. A console `SWIPE` posts its whole Down/Move/Up sequence
+/// from one serial line, so it is always inside the fling window and always arrives
+/// as 10; so does a real finger flick. Verified on QEMU: `SWIPE 500 700 150 700 5`
+/// reaches the launcher as `[INPUT POLL SUCCESS] Task 11 (launcher) got Fling`.
+///
+/// WHY a helper rather than `kind == 4 || kind == 10` at each site: the pair is
+/// easy to half-apply, and a handler that quietly drops every fast swipe is
+/// indistinguishable from a broken gesture until someone tries it in the harness.
+#[inline]
+fn is_drag(kind: u8) -> bool {
+    kind == DRAG_PAN || kind == DRAG_FLING
+}
+
 #[inline(never)]
 fn render_view(surface: u32, state: &LauncherState) {
     let draw = screen_renderer(state.current_view);
@@ -989,7 +1017,7 @@ pub extern "C" fn _start() -> ! {
                     match state.current_view {
                         ViewMode::ActivitySpace => {
                             // 1. Swipe gestures
-                            if input.kind == 4 || input.kind == 10 {
+                            if is_drag(input.kind) {
                                 // Vertical swipe down returns to home
                                 if input.dy >= 60 {
                                     state.current_view = ViewMode::HomeScreen;
@@ -1264,7 +1292,7 @@ pub extern "C" fn _start() -> ! {
                             }
                         }
                         ViewMode::QuickControls => {
-                            if (input.kind == 4 && input.dy <= -60)
+                            if (is_drag(input.kind) && input.dy <= -60)
                                 || (input.kind == 1
                                     && (input.y >= 1350 || (input.y >= 70 && input.x >= 600)))
                             {
@@ -1299,7 +1327,7 @@ pub extern "C" fn _start() -> ! {
                             }
                         }
                         ViewMode::SystemSpace => {
-                            if (input.kind == 4 && input.dy >= 60)
+                            if (is_drag(input.kind) && input.dy >= 60)
                                 || (input.kind == 1 && input.y >= 1350)
                             {
                                 state.current_view = ViewMode::HomeScreen;
@@ -1356,8 +1384,8 @@ pub extern "C" fn _start() -> ! {
                             // a fling varies with how the pointer was released, so
                             // gating on it would drop unlocks at random.
                             let swipe_up =
-                                input.kind == 4 && (input.dy < 0 || input.dx > 25);
-                            if swipe_up || input.kind == 10 {
+                                is_drag(input.kind) && (input.dy < 0 || input.dx > 25);
+                            if swipe_up || input.kind == DRAG_FLING {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
                                 let _ = std::surface_flip(4);
@@ -1472,7 +1500,7 @@ pub extern "C" fn _start() -> ! {
                         }
                         ViewMode::PowerMenu => {
                             // Swipe right to dismiss
-                            if input.kind == 4 && input.dx >= 60 {
+                            if is_drag(input.kind) && input.dx >= 60 {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
                                 let _ = std::surface_flip(4);
@@ -1582,14 +1610,14 @@ pub extern "C" fn _start() -> ! {
                         }
                         ViewMode::AppDrawer => {
                             // 1. Gesture navigation and real registry pagination.
-                            if (input.kind == 4 || input.kind == 10) && input.dy >= 60 {
+                            if is_drag(input.kind) && input.dy >= 60 {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
                                 let _ = std::surface_flip(4);
                                 std::log(0, "[LAUNCHER] Returned to Home from App Drawer.").ok();
                                 break;
                             }
-                            if (input.kind == 4 || input.kind == 10) && input.dx >= 60 {
+                            if is_drag(input.kind) && input.dx >= 60 {
                                 if state.app_drawer_page > 0 {
                                     state.app_drawer_page -= 1;
                                     render_view(surface, &state);
@@ -1602,7 +1630,7 @@ pub extern "C" fn _start() -> ! {
                                 }
                                 break;
                             }
-                            if (input.kind == 4 || input.kind == 10) && input.dx <= -60 {
+                            if is_drag(input.kind) && input.dx <= -60 {
                                 let pages = (state.app_count + 11) / 12;
                                 if state.app_drawer_page + 1 < pages {
                                     state.app_drawer_page += 1;
@@ -1665,7 +1693,7 @@ pub extern "C" fn _start() -> ! {
                         }
                         ViewMode::Notifications => {
                             // Swipe up or bottom tap returns to HomeScreen
-                            if (input.kind == 4 && input.dy <= -60)
+                            if (is_drag(input.kind) && input.dy <= -60)
                                 || (input.kind == 1 && input.y >= 1350)
                             {
                                 state.current_view = ViewMode::HomeScreen;
@@ -1699,7 +1727,7 @@ pub extern "C" fn _start() -> ! {
                         }
                         ViewMode::LiveWidgets => {
                             // Swipe right returns to HomeScreen
-                            if (input.kind == 4 && input.dx >= 60)
+                            if (is_drag(input.kind) && input.dx >= 60)
                                 || (input.kind == 1 && input.y >= 1400)
                             {
                                 state.current_view = ViewMode::HomeScreen;
@@ -1838,7 +1866,7 @@ pub extern "C" fn _start() -> ! {
 
                             // 1. Gesture Navigation
                             // Swipe up: bottom bar opens Activity Space, middle opens App Drawer
-                            if (input.kind == 4 || input.kind == 10) && input.dy <= -60 {
+                            if is_drag(input.kind) && input.dy <= -60 {
                                 if input.y >= 1200 {
                                     state.current_view = ViewMode::ActivitySpace;
                                     let mut win_buf = [0u8; 1024];
@@ -1868,7 +1896,7 @@ pub extern "C" fn _start() -> ! {
                                 break;
                             }
                             // Swipe down: left/center opens Notifications, right opens Quick Controls
-                            if (input.kind == 4 || input.kind == 10) && input.dy >= 60 && input.y <= 120 {
+                            if is_drag(input.kind) && input.dy >= 60 && input.y <= 120 {
                                 if input.x < 360 {
                                     state.current_view = ViewMode::Notifications;
                                     render_view(surface, &state);
@@ -1892,7 +1920,7 @@ pub extern "C" fn _start() -> ! {
                                 break;
                             }
                             // Edge swipe from right opens Quick Controls
-                            if (input.kind == 4 || input.kind == 10) && input.dx <= -60 && input.x >= 650 {
+                            if is_drag(input.kind) && input.dx <= -60 && input.x >= 650 {
                                 state.current_view = ViewMode::QuickControls;
                                 render_view(surface, &state);
                                 let _ = std::surface_flip(4);
@@ -1909,7 +1937,7 @@ pub extern "C" fn _start() -> ! {
                                 break;
                             }
                             // Horizontal swipe left opens Live Widgets
-                            if (input.kind == 4 || input.kind == 10) && input.dx <= -60 && input.x < 650 {
+                            if is_drag(input.kind) && input.dx <= -60 && input.x < 650 {
                                 state.current_view = ViewMode::LiveWidgets;
                                 render_view(surface, &state);
                                 let _ = std::surface_flip(4);

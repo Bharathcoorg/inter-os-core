@@ -417,14 +417,14 @@ impl CardRowPlan {
 struct DeckTilePlan {
     cell: Rect,
     badge: Run,
-    /// The app's name, resolved to exactly where and how it would be drawn.
+    /// The app's name, resolved to exactly where and how it is drawn.
     ///
-    /// WHY it is here and never painted: the old painter ellipsized the name,
-    /// measured it, took its centring inset and then discarded `test_text`'s result
-    /// with `let _ =`, so the deck has never put an app's name on the framebuffer.
-    /// Resolving it once per frame keeps that finding visible in the source, at the
-    /// line a fix would change, instead of deleting a line of code that hid it.
-    #[allow(dead_code)]
+    /// WHY it lives in the plan: the tile carries an icon and a name, and both are
+    /// resolved here once per frame -- ellipsized, measured, centred -- so
+    /// [`deck_pixel`] asks only whether a pixel lands on either. This field used to
+    /// be computed and then thrown away with `let _ = test_text(..)`, which is why
+    /// the deck showed a grid of unlabelled tiles; the resolution work was already
+    /// here, so painting it costs one bounds test per pixel inside a tile.
     label: Run,
     fill: u32,
 }
@@ -749,8 +749,20 @@ fn deck_plan(state: &LauncherState, theme: &Theme, deck: Rect) -> DeckPlan {
         let badge = app_badge(state, slot);
         let scale = icon_scale(cell, badge.len());
         let icon_h = text::line_height(scale);
-        let group_h = icon_h + space::SM + text::line_height(LABEL_SCALE);
+        // WHY the group is measured and clamped here rather than trusted: a tile is
+        // an icon over a name, and the two together are the only thing inside it that
+        // has to stay inside it. `icon_scale` has a floor, so a cell one touch target
+        // tall asks for a taller badge-and-name group than it can hold; the clamp
+        // keeps the *name* whole and lets the badge, which is decoration, give way.
+        // `deck_pixel` masks every tile with `rounded_contains`, so an unclamped name
+        // would not overlap its neighbours -- it would be sliced in half by the
+        // tile's own corner test, which reads as a rendering fault.
+        let label_h = text::line_height(LABEL_SCALE);
+        let group_h = (icon_h + space::SM + label_h).min(cell.h);
         let top = cell.y + cell.h.saturating_sub(group_h) / 2;
+        let label_y = (top + icon_h + space::SM)
+            .min(cell.y + cell.h.saturating_sub(label_h))
+            .max(cell.y);
         // WHY the badge is drawn whole: the old painter sized the type scale so the
         // badge fitted the cell and then handed the bytes straight to `test_text`,
         // with no truncation step.
@@ -773,10 +785,11 @@ fn deck_plan(state: &LauncherState, theme: &Theme, deck: Rect) -> DeckPlan {
             // is fourteen glyphs, so the name is fitted to the tile less its padding
             // and the result is then centred across the whole tile. Both widths are
             // what the old painter passed, and collapsing them into one would move
-            // every deck label.
+            // every deck label. A name that will not fit is shortened *inside* the
+            // tile -- never allowed to run over the gutter or the row below.
             label: Run::centred(
                 cell.x,
-                top + icon_h + space::SM,
+                label_y,
                 LABEL_SCALE,
                 cell.w.saturating_sub(space::SM * 2),
                 cell.w,
@@ -1254,9 +1267,15 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
     if let Some(c) = tile.badge.pixel(x, y) {
         return Some(c);
     }
-    // WHY the app's name is not consulted here: see [`DeckTilePlan::label`]. It is
-    // resolved once per frame and deliberately not painted, because painting it
-    // would alter the screen. That belongs in a change of its own.
+    // WHY the name is drawn after the badge and before the fill: the badge is the
+    // icon, the name is its caption, and both sit on the tile's own fill. The run
+    // was ellipsized to the tile less its padding and placed in `deck_plan`, so this
+    // is one bounds test per pixel inside the tile -- and a name longer than the
+    // tile (the registry holds one up to sixteen bytes, e.g. "Authenticator") is
+    // already shortened inside the tile by the time it gets here.
+    if let Some(c) = tile.label.pixel(x, y) {
+        return Some(c);
+    }
     Some(tile.fill)
 }
 
