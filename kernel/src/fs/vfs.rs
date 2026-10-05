@@ -133,6 +133,19 @@ pub struct Vfs {
     hard_links: BTreeMap<String, InodeId>,
     next_inode: u64,
     task_file_tables: BTreeMap<TaskId, Vec<Option<OpenFileHandle>>>,
+    /// Set the first time a persistence attempt is refused, and never reset.
+    ///
+    /// WHY a latch rather than retrying: on a single-disk image the boot guard
+    /// refuses every write to the filesystem region by design, so each retry is
+    /// a guaranteed failure that still pays the full cost -- a 32 KiB snapshot
+    /// serialisation plus its cryptographic seal -- twice on every file close.
+    /// During one boot that was 160+ refused attempts burning CPU out from
+    /// under the launcher's first frame, with a console line each to show for
+    /// it. The refusal is a property of the device layout, which does not
+    /// change while the system runs, so the first refusal stands for the boot.
+    /// Inode mutations keep succeeding in RAM either way; the latch only skips
+    /// the doomed write-behind.
+    persist_unavailable: core::cell::Cell<bool>,
 }
 
 impl Vfs {
@@ -144,6 +157,7 @@ impl Vfs {
             hard_links: BTreeMap::new(),
             next_inode: 1,
             task_file_tables: BTreeMap::new(),
+            persist_unavailable: core::cell::Cell::new(false),
         };
 
         // Create root directory "/"
@@ -1026,6 +1040,17 @@ impl Vfs {
 
     /// Persists mutable /data regular files as one crash-consistent filesystem snapshot.
     fn persist_data_snapshot(&self) -> Result<(), FsError> {
+        if self.persist_unavailable.get() {
+            return Err(FsError::ReadOnlyFileSystem);
+        }
+        let result = self.persist_data_snapshot_attempt();
+        if result.is_err() {
+            self.latch_persistence_unavailable();
+        }
+        result
+    }
+
+    fn persist_data_snapshot_attempt(&self) -> Result<(), FsError> {
         let mut buf = alloc::vec![0u8; 32768];
         buf[..4].copy_from_slice(b"DTA1");
         let mut pos=6usize;
@@ -1055,6 +1080,17 @@ impl Vfs {
     /// Persists the mutable /data inode tree separately from file payloads.
     /// Paths and metadata are durable; file bytes remain in InterFS data files.
     fn persist_metadata_snapshot(&self) -> Result<(), FsError> {
+        if self.persist_unavailable.get() {
+            return Err(FsError::ReadOnlyFileSystem);
+        }
+        let result = self.persist_metadata_snapshot_attempt();
+        if result.is_err() {
+            self.latch_persistence_unavailable();
+        }
+        result
+    }
+
+    fn persist_metadata_snapshot_attempt(&self) -> Result<(), FsError> {
         let mut buf = alloc::vec![0u8; 32768];
         buf[..4].copy_from_slice(b"IVM2");
         let mut pos = 6usize;
@@ -1278,12 +1314,26 @@ impl Vfs {
             crate::task::process::release_open_file(process);
         }
         if self.persist_data_snapshot().is_err() {
-            crate::serial_println!("[VFS] persistent data snapshot unavailable; keeping live state.");
+            // Write-behind refused; failure is latched inside persist_data_snapshot
         }
         if self.persist_metadata_snapshot().is_err() {
-            crate::serial_println!("[VFS] persistent inode metadata unavailable; keeping live state.");
+            // Write-behind refused; failure is latched inside persist_metadata_snapshot
         }
         Ok(())
+    }
+
+    /// Records the first persistence refusal and says so, once.
+    ///
+    /// WHY one line rather than silence: the honest state is "this boot's
+    /// filesystem is RAM-only", and a user deserves to be told that a file they
+    /// wrote will not survive reboot. The console carries that once, at the
+    /// moment it becomes true, instead of on every subsequent close.
+    fn latch_persistence_unavailable(&self) {
+        if !self.persist_unavailable.replace(true) {
+            crate::serial_println!(
+                "[VFS] persistent storage refused on this device; the filesystem stays RAM-only for this boot."
+            );
+        }
     }
 }
 
@@ -1324,6 +1374,7 @@ pub static VFS: Mutex<Vfs> = Mutex::new(Vfs {
     hard_links: BTreeMap::new(),
     next_inode: 1,
     task_file_tables: BTreeMap::new(),
+    persist_unavailable: core::cell::Cell::new(false),
 });
 
 /// Initializes the root filesystem with essential system directories and trusted files.
