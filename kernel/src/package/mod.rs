@@ -51,7 +51,11 @@ pub const FIRST_PARTY_PACKAGES: &[PackageDescriptor] = &[
     PackageDescriptor { package_id: "org.interos.authenticator", path: "/packages/org.interos.authenticator.rapp", process_name: "authenticator", display_name: "Authenticator", icon: "AUTH" },
     PackageDescriptor { package_id: "org.interos.health", path: "/packages/org.interos.health.rapp", process_name: "health", display_name: "Health", icon: "HEAL" },
     PackageDescriptor { package_id: "org.interos.meshchat", path: "/packages/org.interos.meshchat.rapp", process_name: "meshchat", display_name: "MeshChat", icon: "MESH" },
-    PackageDescriptor { package_id: "org.interos.hello_world", path: "/packages/org.interos.hello_world.rapp", process_name: "hello_world", display_name: "Hello", icon: "TEST" },
+    PackageDescriptor { package_id: "org.interos.hello_world", path: "/packages/org.interos.hello_world.rapp", process_name: "hello_world", display_name: "Hello",
+        // WHY "HI" rather than the "TEST" this descriptor carried: the launcher badge is a
+        // short glyph of the app's own name, and "TEST" is already the badge for
+        // org.interos.test_app. Two drawer entries reading "TEST" cannot be told apart.
+        icon: "HI" },
     PackageDescriptor { package_id: "org.interos.sensor_dashboard", path: "/packages/org.interos.sensor_dashboard.rapp", process_name: "sensor_dashboard", display_name: "Sensors", icon: "SENS" },
     PackageDescriptor { package_id: "org.interos.camera_preview", path: "/packages/org.interos.camera_preview.rapp", process_name: "camera_preview", display_name: "Camera Preview", icon: "PREV" },
     PackageDescriptor { package_id: "org.interos.test_app", path: "/packages/org.interos.test_app.rapp", process_name: "test_app", display_name: "Test App", icon: "TEST" },
