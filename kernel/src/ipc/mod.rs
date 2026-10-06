@@ -145,7 +145,18 @@ impl IpcRouter {
     /// table that is never populated makes every ownership and revocation check
     /// below vacuously succeed, which is how a revoked or unregistered target
     /// becomes indistinguishable from a permitted one.
-    pub fn register_task(&mut self, task_id: TaskId) {
+    pub fn register_task(&mut self, task_id: TaskId) -> bool {
+        if self.mailboxes.iter().any(|m| m.task_id == task_id) {
+            return true;
+        }
+        if task_id != TaskId(0) {
+            let Some(process) = crate::task::process::process_for_task(task_id) else {
+                return false;
+            };
+            if crate::task::process::reserve_ipc_endpoint(process).is_err() {
+                return false;
+            }
+        }
         if !self.mailboxes.iter().any(|m| m.task_id == task_id) {
             self.mailboxes.push(TaskMailbox {
                 task_id,
@@ -156,6 +167,7 @@ impl IpcRouter {
             let id = EndpointId(self.endpoints.len() as u64);
             self.endpoints.push(IpcEndpoint { id, owner: task_id, is_revoked: false });
         }
+        true
     }
 
     /// Revokes the inbound endpoint owned by `task_id` without destroying state.
@@ -200,6 +212,11 @@ impl IpcRouter {
         // 2. Drop the endpoint record; the mailbox no longer exists, so a
         //    recreated task id gets a fresh, unrevoked endpoint.
         self.endpoints.retain(|ep| ep.owner != task_id);
+        if task_id != TaskId(0) {
+            if let Some(process) = crate::task::process::process_for_task(task_id) {
+                crate::task::process::release_ipc_endpoint(process);
+            }
+        }
     }
 
     /// Sends a message from `sender` to `dest_task`, strictly verifying that the sender
