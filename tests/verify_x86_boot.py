@@ -61,28 +61,36 @@ def main():
     sys._run_start_time = time.time()
 
     proc = subprocess.Popen(args)
-    time.sleep(0.5)
+    time.sleep(0.1)
 
     serial_sock = None
     monitor_sock = None
 
     try:
-        serial_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        serial_sock.settimeout(5.0)
-        serial_sock.connect(('127.0.0.1', ser_port))
-        serial_sock.settimeout(0.5)
+        for _ in range(40):
+            try:
+                serial_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                serial_sock.connect(('127.0.0.1', ser_port))
+                serial_sock.settimeout(0.5)
+                break
+            except (ConnectionRefusedError, OSError):
+                time.sleep(0.05)
+
+        if not serial_sock:
+            raise RuntimeError("Failed to connect to QEMU serial socket after retries")
+
         print("[BOOT TEST] Connected to QEMU serial socket.")
         reader = SerialReader(serial_sock)
 
-        try:
-            monitor_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            monitor_sock.settimeout(5.0)
-            monitor_sock.connect(('127.0.0.1', mon_port))
-            monitor_sock.settimeout(0.5)
-            print("[BOOT TEST] Connected to QEMU monitor socket.")
-        except Exception as e:
-            print(f"[BOOT TEST] Warning: Monitor socket connection failed: {e}")
-            monitor_sock = None
+        for _ in range(20):
+            try:
+                monitor_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                monitor_sock.connect(('127.0.0.1', mon_port))
+                monitor_sock.settimeout(5.0)
+                print("[BOOT TEST] Connected to QEMU monitor socket.")
+                break
+            except Exception as e:
+                time.sleep(0.05)
 
         print("[BOOT TEST] Awaiting Launcher homescreen presentation...")
         launcher_ready = reader.wait_for(
