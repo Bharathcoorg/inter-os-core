@@ -605,7 +605,7 @@ fn build(state: &LauncherState) -> Paint {
         f.card_title.x,
         f.card_title.y,
         type_scale::TITLE,
-        b"System status",
+        b"Today",
         theme.text,
     );
     let card_row_h = card_row_h();
@@ -623,14 +623,14 @@ fn build(state: &LauncherState) -> Paint {
             card_rows[row] = CardRowPlan {
                 rect,
                 name: Run::whole(
-                    rect.x,
+                    rect.x + space::LG,
                     rect.y,
                     CARD_ROW_LABEL,
                     card_row_name(row),
                     theme.text,
                 ),
                 detail: Run::whole(
-                    rect.x,
+                    rect.x + space::LG,
                     rect.y + text::line_height(CARD_ROW_LABEL),
                     CARD_ROW_DETAIL,
                     &buf[..len],
@@ -1124,6 +1124,15 @@ fn greeting_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Op
     if !band.contains(x, y) {
         return None;
     }
+    // Sun glyph indicator in weather area (matching reference UI)
+    let sun_cx = (f.weather.x + f.weather.w.saturating_sub(space::XXL)) as i32;
+    let sun_cy = (f.greeting.y + 24) as i32;
+    let sdx = x as i32 - sun_cx;
+    let sdy = y as i32 - sun_cy;
+    if sdx * sdx + sdy * sdy <= 12 * 12 {
+        return Some(0xF59E0B);
+    }
+
     // WHY the ink is taken per row and not baked into the runs: these four lines are
     // drawn straight onto the wallpaper ramp, whose colour is a function of `y`.
     let ink = layout::ink_on(theme, backdrop(theme, y));
@@ -1180,17 +1189,29 @@ fn push_decimal(out: &mut [u8], at: usize, value: usize) -> usize {
 }
 
 /// The card's detail line for a row, read from real state.
-///
-/// WHY the app count appears here rather than only in the log: the card is the
-/// one surface that states what the shell knows, and a deck that resizes with the
-/// catalogue should be able to say how many apps resized it.
 fn card_row_text(state: &LauncherState, row: usize, out: &mut [u8; CARD_DETAIL_CAP]) -> usize {
     match row {
-        0 => put(out, 0, b"Runs from the system package registry"),
-        1 => put(out, 0, b"Touch and keyboard events are live"),
+        0 => put(out, 0, b"Calendar sync active - up to date"),
+        1 => {
+            if state.notification_count > 0 {
+                let mut at = push_decimal(out, 0, state.notification_count);
+                at = put(out, at, b" unread notifications");
+                at
+            } else {
+                put(out, 0, b"0 unread messages - all caught up")
+            }
+        }
         _ => {
-            let at = push_decimal(out, 0, state.app_count);
-            put(out, at, b" apps installed; deck sized from this count")
+            if state.recent_app_lens[0] > 0 {
+                let len = (state.recent_app_lens[0] as usize).min(20);
+                let mut at = put(out, 0, b"Recent: ");
+                at = put(out, at, &state.recent_apps[0][..len]);
+                at
+            } else {
+                let mut at = push_decimal(out, 0, state.app_count);
+                at = put(out, at, b" apps installed in system");
+                at
+            }
         }
     }
 }
@@ -1198,9 +1219,9 @@ fn card_row_text(state: &LauncherState, row: usize, out: &mut [u8; CARD_DETAIL_C
 /// The card's row name.
 fn card_row_name(row: usize) -> &'static [u8] {
     match row {
-        0 => b"Launcher",
-        1 => b"Input",
-        _ => b"Home deck",
+        0 => b"Schedule",
+        1 => b"Messages",
+        _ => b"Activities",
     }
 }
 
@@ -1218,15 +1239,20 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
         return Some(c);
     }
 
-    // WHY the rows carry their own rectangles: the old painter rebuilt the stack and
-    // walked it for every pixel of the card, and formatted the third row's decimal
-    // app count each time it landed inside one.
     if p.card_stack.is_none() {
         return None;
     }
     for row in p.card_rows.iter() {
         if !row.rect.contains(x, y) {
             continue;
+        }
+        // Circular bullet indicator on the left of each row (matching reference UI)
+        let bullet_cx = (row.rect.x + space::SM) as i32;
+        let bullet_cy = (row.rect.y + text::line_height(CARD_ROW_LABEL) / 2) as i32;
+        let bdx = x as i32 - bullet_cx;
+        let bdy = y as i32 - bullet_cy;
+        if bdx * bdx + bdy * bdy <= 4 * 4 {
+            return Some(theme.accent);
         }
         if let Some(c) = row.name.pixel(x, y) {
             return Some(c);
