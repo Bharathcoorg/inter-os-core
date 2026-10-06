@@ -529,6 +529,7 @@ pub(super) struct Run {
     b: [u8; RUN_CAP],
 }
 
+#[allow(dead_code)]
 impl Run {
     /// A run that never inks anything.
     pub(super) const EMPTY: Run =
@@ -946,6 +947,7 @@ pub(super) struct Chip {
     text: Run,
 }
 
+#[allow(dead_code)]
 impl Chip {
     /// A chip of `fill` carrying `text`, with `space::SM` of air on the text's left.
     pub(super) fn new(text: Run, fill: u32) -> Chip {

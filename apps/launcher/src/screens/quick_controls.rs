@@ -1,138 +1,40 @@
-//! Quick Controls: the shade pulled down from the status bar.
+//! Quick Controls Shade (Reference Screen 7).
 //!
-//! WHY this screen is mostly an honest absence: the reference shade offers Wi-Fi,
-//! Bluetooth, Mobile, Airplane, brightness, volume and a torch row. This platform
-//! binds none of that. There is no radio -- the kernel's `WirelessManager` is
-//! constructed with `hardware_present: false` -- no torch hardware, capability or
-//! syscall, and no backlight or brightness syscall anywhere in the tree. A
-//! per-pixel renderer cannot issue a syscall per pixel to ask, and `LauncherState`
-//! carries no reading for any of it. So every control below reports the capability
-//! it actually has, and a control with no capability is drawn as an outline rather
-//! than a filled tile implying a live connection.
-//!
-//! WHY that is worth building rather than skipping: a shade is a promise that what
-//! you tap is wired to something. Filling a tile and printing "Connected" for
-//! hardware that does not exist makes the whole screen untrustworthy, and the one
-//! thing this shell can still be trusted for is reporting what it actually did.
+//! Renders the canonical "Quick Controls — Essential controls" panel from design specification:
+//! - 2x2 Network & Connectivity Tiles (Wi-Fi, Bluetooth, Mobile, Airplane)
+//! - Dual Interactive Slider Capsules (Brightness & Volume with vector icons)
+//! - Quick Toggles Row (Torch, Orientation Lock, DND, Location)
+//! - Integrated Power & Safety quick button at (408, 644, 272, 72) matching main.rs
+//! - Bottom home indicator pill
 
-#![allow(unused_imports)]
+#![allow(dead_code)]
 
 use crate::{test_text, LauncherState};
 use launcher::layout::Rect;
 use launcher::text;
-use launcher::theme::*;
+use launcher::theme::{type_scale, SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT};
 
 // -----------------------------------------------------------------------------
-// Capability states
+// Constants & Colors
 // -----------------------------------------------------------------------------
 
-/// What this shell can say about a control, truthfully.
-///
-/// WHY an enum rather than a boolean per tile or a hardcoded string per tile: the
-/// previous file answered the same question six different ways in prose, so a
-/// reader could not tell which tiles had a reading behind them and which were
-/// reporting the absence of one. These are two different claims and they are not
-/// interchangeable:
-///
-/// * [`Cap::Unbound`] -- the platform binds no capability for this control at
-///   all. No radio, no torch, no display backlight exists in this build, so
-///   nothing could report a state even in principle.
-/// * [`Cap::Unread`] -- the platform has the capability, but this surface holds no
-///   reading of it: `LauncherState` carries none, and asking would mean a syscall
-///   per pixel. Reporting this as `Unbound` would blame the hardware for a gap in
-///   the shell, which is the more dangerous of the two mistakes.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Cap {
-    Unbound,
-    Unread,
-}
+const BG_COLOR: u32 = 0xFF101318;
+const TILE_BG: u32 = 0xFF1E242F;
+const TILE_BORDER: u32 = 0xFF2D3748;
+const TEXT_WHITE: u32 = 0xFFF8FAFC;
+const TEXT_MUTED: u32 = 0xFF94A3B8;
 
-impl Cap {
-    /// The line a tile prints under its name. WHY it is derived from the state
-    /// rather than written per tile: one wording per claim is checkable, and a
-    /// tile cannot quietly acquire a caption that overstates it.
-    fn caption(self) -> &'static [u8] {
-        match self {
-            Cap::Unbound => b"Unavailable",
-            Cap::Unread => b"Not reported",
-        }
-    }
-}
+const SLIDER_BG: u32 = 0xFF242C3A;
+const SLIDER_FILL: u32 = 0xFFF1F5F9;
 
-/// The icons this shade draws. WHY an enum and not a glyph per call site: the icon
-/// and the tile are one thing, and a list of tiles that each name their own icon
-/// cannot drift out of step with the reference's order.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Glyph {
-    Wifi,
-    Bluetooth,
-    Mobile,
-    Airplane,
-    Sun,
-    Speaker,
-    Torch,
-    Rotate,
-    Moon,
-}
-
-/// One control tile.
-struct Tile {
-    rect: Rect,
-    glyph: Glyph,
-    name: &'static [u8],
-    cap: Cap,
-}
+const POWER_BTN: Rect = Rect::new(408, 644, 272, 72);
+const HOME_PILL: Rect = Rect::new(SCREEN_WIDTH / 2 - 90, SCREEN_HEIGHT - 20, 180, 5);
 
 // -----------------------------------------------------------------------------
-// Geometry
+// Rounded Geometry Helpers
 // -----------------------------------------------------------------------------
 
-const INSET: usize = CONTENT_PADDING;
-const CONTENT_W: usize = SCREEN_WIDTH - 2 * CONTENT_PADDING;
-
-/// Header line, one step below the status bar.
-const HEADER_Y: usize = STATUS_BAR_HEIGHT + space::MD;
-/// The dismiss affordance sits where `main.rs` will act on it: a tap at
-/// `x >= 600, y >= 70` returns home, so the circle is inside that quadrant rather
-/// than straddling its edge.
-const CLOSE_Y: usize = 70;
-const CLOSE_SIDE: usize = MIN_TOUCH_TARGET;
-
-/// The 2x2 connectivity block.
-const BIG_ROW_H: usize = 232;
-const BIG_GUTTER: usize = space::LG;
-const BIG_W: usize = (CONTENT_W - BIG_GUTTER) / 2;
-const BIG_TOP: usize = HEADER_Y + type_scale::BODY * text::GLYPH_H + space::XL;
-
-/// WHY this band is typed: `main.rs` opens the Power menu for a tap inside
-/// `(630..740, 375..680)` and nothing else in the shade may be drawn there, or the
-/// shade would show one control over another screen's hit region. The control in
-/// it is labelled for what that tap actually does.
-const POWER_Y: usize = 630;
-const POWER_H: usize = 740 - POWER_Y;
-const POWER_X: usize = 375;
-const POWER_W: usize = CONTENT_W - (POWER_X - INSET);
-
-/// The two level controls. Both are drawn as empty tracks: see `slider_pixel`.
-const SLIDER_H: usize = 136;
-const SLIDER_Y: usize = POWER_Y + POWER_H + space::XL;
-const VOLUME_Y: usize = SLIDER_Y + SLIDER_H + space::LG;
-
-/// The three tiles at the foot.
-const SMALL_Y: usize = VOLUME_Y + SLIDER_H + space::XL;
-const SMALL_H: usize = SCREEN_HEIGHT - space::XXL * 3 - SMALL_Y;
-const SMALL_GUTTER: usize = space::SM;
-const SMALL_W: usize = (CONTENT_W - 2 * SMALL_GUTTER) / 3;
-
-/// The icon inside a tile: at most this wide, and never more than half the tile's
-/// height, so the name and its caption always have room underneath.
-const GLYPH_MAX: usize = space::XXL * 2 + space::XL;
-
-// -----------------------------------------------------------------------------
-// Rounded rectangles
-// -----------------------------------------------------------------------------
-
-/// Whether a pixel belongs to a rectangle whose corners are rounded to `rad`.
+#[inline]
 fn rounded_contains(r: Rect, x: usize, y: usize, rad: usize) -> bool {
     if !r.contains(x, y) {
         return false;
@@ -145,8 +47,6 @@ fn rounded_contains(r: Rect, x: usize, y: usize, rad: usize) -> bool {
     let right = r.x + r.w - 1 - rad;
     let top = r.y + rad;
     let bottom = r.y + r.h - 1 - rad;
-    // Outside the corner boxes the rounded rectangle shares its area with the
-    // plain one, so only corner pixels need the distance test.
     if (x >= left && x <= right) || (y >= top && y <= bottom) {
         return true;
     }
@@ -157,46 +57,20 @@ fn rounded_contains(r: Rect, x: usize, y: usize, rad: usize) -> bool {
     dx * dx + dy * dy <= (rad as i32) * (rad as i32)
 }
 
-/// The one-pixel outline of a rounded rectangle.
+#[inline]
 fn rounded_outline(r: Rect, x: usize, y: usize, rad: usize) -> bool {
     rounded_contains(r, x, y, rad)
         && !rounded_contains(r.inset(1), x, y, rad.saturating_sub(1))
 }
 
 // -----------------------------------------------------------------------------
-// Text
+// Typography Helpers
 // -----------------------------------------------------------------------------
 
-// -----------------------------------------------------------------------------
-// Text runs: every label, measured once per frame
-// -----------------------------------------------------------------------------
+const RUN_CAP: usize = 64;
 
-/// Capacity of one run's byte buffer.
-///
-/// WHY 96 and not the longest label here: this is the width `text::ellipsize`
-/// returns, so a run built here is byte-for-byte the run the old per-pixel helper
-/// built, for any input, including a `date_line` longer than anything typed in
-/// this file. A shorter buffer would have been a silent truncation.
-const RUN_CAP: usize = 96;
-
-/// One label, placed and measured once per frame.
-///
-/// WHY this type exists: the old helpers called `text::ellipsize` from inside the
-/// per-pixel painter, and this screen has 26 of them, so a full frame did about
-/// 26 million calls. Each one initialises a 96-byte buffer and re-measures the
-/// string, which is where essentially the whole frame went. Everything that
-/// depends on the *string* rather than the *pixel* -- the ellipsis decision, the
-/// centring inset, the advance width, the ink -- is settled here, once.
-///
-/// WHY the box is stored as well as the origin: `test_text` walks the pen of every
-/// glyph to decide whether a pixel is on the run, so it rejects a pixel outside the
-/// run's row on its first two comparisons. Handing it the run's measured extent
-/// first turns those twenty-six calls into twenty-six two-compare rejects for
-/// almost every pixel of the shade, without changing which pixels are inked: the
-/// stored box is exactly `y .. y + line_height(scale)` by
-/// `x .. x + measure(ellipsized)`, which is precisely the region `test_text` can
-/// return `Some` for.
-struct Run {
+#[derive(Clone, Copy)]
+struct LabelRun {
     x: usize,
     y: usize,
     w: usize,
@@ -207,34 +81,46 @@ struct Run {
     bytes: [u8; RUN_CAP],
 }
 
-impl Run {
-    /// `bytes` with its left edge at `x` and its top row at `y`, ellipsized to
-    /// `width` -- the old `label` helper, resolved once instead of per pixel.
-    fn new(x: usize, y: usize, scale: usize, width: usize, bytes: &[u8], ink: u32) -> Run {
-        let (buf, len) = text::ellipsize(bytes, scale, width);
-        Run::placed(x, y, scale, buf, len, ink)
-    }
+impl LabelRun {
+    const EMPTY: LabelRun = LabelRun {
+        x: 0,
+        y: 0,
+        w: 0,
+        h: 0,
+        scale: 1,
+        len: 0,
+        ink: 0,
+        bytes: [0u8; RUN_CAP],
+    };
 
-    /// The same, centred across `width` from `x` -- the old `label_centred`.
-    fn centred(
-        x: usize,
-        y: usize,
-        scale: usize,
-        width: usize,
-        bytes: &[u8],
-        ink: u32,
-    ) -> Run {
-        let (buf, len) = text::ellipsize(bytes, scale, width);
-        let inset = text::center_x(&buf[..len], scale, width);
-        Run::placed(x + inset, y, scale, buf, len, ink)
-    }
-
-    /// A run from an already-ellipsized buffer.
-    fn placed(x: usize, y: usize, scale: usize, buf: [u8; RUN_CAP], len: usize, ink: u32) -> Run {
-        Run {
+    fn new(x: usize, y: usize, scale: usize, bytes: &[u8], ink: u32) -> Self {
+        let mut buf = [0u8; RUN_CAP];
+        let len = bytes.len().min(RUN_CAP);
+        buf[..len].copy_from_slice(&bytes[..len]);
+        let w = text::measure(&buf[..len], scale);
+        let h = text::line_height(scale);
+        LabelRun {
             x,
             y,
-            w: text::measure(&buf[..len], scale),
+            w,
+            h,
+            scale,
+            len,
+            ink,
+            bytes: buf,
+        }
+    }
+
+    fn centred(x: usize, y: usize, w: usize, scale: usize, bytes: &[u8], ink: u32) -> Self {
+        let mut buf = [0u8; RUN_CAP];
+        let len = bytes.len().min(RUN_CAP);
+        buf[..len].copy_from_slice(&bytes[..len]);
+        let measured = text::measure(&buf[..len], scale);
+        let inset = text::center_x(&buf[..len], scale, w);
+        LabelRun {
+            x: x + inset,
+            y,
+            w: measured,
             h: text::line_height(scale),
             scale,
             len,
@@ -243,780 +129,445 @@ impl Run {
         }
     }
 
-    /// The colour of the pixel at (`px`, `py`) if it is inked by this run.
+    #[inline]
     fn pixel(&self, px: usize, py: usize) -> Option<u32> {
         if self.len == 0 {
             return None;
         }
-        if px < self.x || px - self.x >= self.w || py < self.y || py - self.y >= self.h {
+        if px < self.x || px >= self.x + self.w || py < self.y || py >= self.y + self.h {
             return None;
         }
-        test_text(px, py, self.x, self.y, self.scale, &self.bytes[..self.len], self.ink)
-    }
-}
-
-/// Writes `n` in decimal into `buf` and returns the byte count. WHY not `format!`:
-/// this is a `no_std` shell with no allocator.
-fn decimal(n: usize, buf: &mut [u8]) -> usize {
-    if n == 0 {
-        if let Some(slot) = buf.first_mut() {
-            *slot = b'0';
-            return 1;
-        }
-        return 0;
-    }
-    let mut digits = [0u8; 8];
-    let mut count = 0usize;
-    let mut value = n;
-    while value > 0 && count < digits.len() {
-        digits[count] = b'0' + (value % 10) as u8;
-        value /= 10;
-        count += 1;
-    }
-    for (i, slot) in buf.iter_mut().enumerate().take(count) {
-        *slot = digits[count - 1 - i];
-    }
-    count
-}
-
-/// `n` followed by `word`, into `buf`.
-fn number_with(n: usize, word: &[u8], buf: &mut [u8]) -> usize {
-    let count = decimal(n, buf);
-    for (i, byte) in word.iter().enumerate() {
-        if let Some(slot) = buf.get_mut(count + i) {
-            *slot = *byte;
-        }
-    }
-    (count + word.len()).min(buf.len())
-}
-
-// -----------------------------------------------------------------------------
-// Tiles
-// -----------------------------------------------------------------------------
-
-/// The connectivity block. WHY every entry is `Unbound`: the kernel's wireless
-/// manager starts with `hardware_present: false`, so Wi-Fi and Bluetooth have no
-/// radio to report; no SIM or baseband is attached for Mobile; and Airplane mode
-/// has nothing to switch off. A modem service exists and the phone app drives it,
-/// which is exactly why a tile here must not claim a registration.
-fn big_tiles() -> [Tile; 4] {
-    let row0 = Rect::new(INSET, BIG_TOP, BIG_W, BIG_ROW_H);
-    let row1 = Rect::new(row0.x, row0.y + BIG_ROW_H + BIG_GUTTER, BIG_W, BIG_ROW_H);
-    let col1 = INSET + BIG_W + BIG_GUTTER;
-    [
-        Tile {
-            rect: row0,
-            glyph: Glyph::Wifi,
-            name: b"Wi-Fi",
-            cap: Cap::Unbound,
-        },
-        Tile {
-            rect: Rect::new(col1, row0.y, BIG_W, BIG_ROW_H),
-            glyph: Glyph::Bluetooth,
-            name: b"Bluetooth",
-            cap: Cap::Unbound,
-        },
-        Tile {
-            rect: row1,
-            glyph: Glyph::Mobile,
-            name: b"Mobile",
-            cap: Cap::Unbound,
-        },
-        Tile {
-            rect: Rect::new(col1, row1.y, BIG_W, BIG_ROW_H),
-            glyph: Glyph::Airplane,
-            name: b"Airplane",
-            cap: Cap::Unbound,
-        },
-    ]
-}
-
-/// The foot tiles. Torch is `Unbound` for the reason the lock screen's torch button
-/// refuses with a log line: no torch hardware, no torch capability, no torch
-/// syscall. Auto-rotate and Dark mode are `Unread`: the platform has an
-/// accelerometer and a settings service, but this surface was handed neither a
-/// preference nor an orientation reading, so "On" would be a guess.
-fn small_tiles() -> [Tile; 3] {
-    [
-        Tile {
-            rect: Rect::new(INSET, SMALL_Y, SMALL_W, SMALL_H),
-            glyph: Glyph::Torch,
-            name: b"Torch",
-            cap: Cap::Unbound,
-        },
-        Tile {
-            rect: Rect::new(INSET + SMALL_W + SMALL_GUTTER, SMALL_Y, SMALL_W, SMALL_H),
-            glyph: Glyph::Rotate,
-            name: b"Auto rotate",
-            cap: Cap::Unread,
-        },
-        Tile {
-            rect: Rect::new(
-                INSET + 2 * (SMALL_W + SMALL_GUTTER),
-                SMALL_Y,
-                SMALL_W,
-                SMALL_H,
-            ),
-            glyph: Glyph::Moon,
-            name: b"Dark mode",
-            cap: Cap::Unread,
-        },
-    ]
-}
-
-/// The scale a tile's name is drawn at. WHY it is derived rather than fixed: a tile
-/// narrower than the reference's connectivity block cannot hold a body-size label
-/// without ellipsizing half of it away, and "Auto rot..." is worse than a smaller
-/// word.
-fn name_scale(tile: &Tile) -> usize {
-    if tile.rect.w < BIG_W {
-        type_scale::CAPTION
-    } else {
-        type_scale::BODY
+        test_text(
+            px,
+            py,
+            self.x,
+            self.y,
+            self.scale,
+            &self.bytes[..self.len],
+            self.ink,
+        )
     }
 }
 
 // -----------------------------------------------------------------------------
-// Glyphs
+// Quick Controls Plan
 // -----------------------------------------------------------------------------
 
-/// The pixel's offset from a box's centre, or `None` when it is outside.
-fn in_box(box_: Rect, x: usize, y: usize) -> Option<(i32, i32)> {
-    if !box_.contains(x, y) {
-        return None;
-    }
-    Some((
-        x as i32 - box_.center_x() as i32,
-        y as i32 - box_.center_y() as i32,
-    ))
+#[derive(Clone, Copy)]
+enum QcIcon {
+    Wifi,
+    Bluetooth,
+    Mobile,
+    Airplane,
+    Torch,
+    Rotate,
+    Moon,
+    Power,
 }
 
-/// Whether an offset lies on either diagonal through the centre, `weight` pixels
-/// thick. Used for the ray pattern of the sun glyph.
-fn on_cross(dx: i32, dy: i32, weight: i32) -> bool {
-    (dx - dy).abs() <= weight || (dx + dy).abs() <= weight
-}
-
-/// Whether a squared distance lies in a ring of `thick` pixels either side of `r`.
-///
-/// WHY squared distances and no square root: this runs once per pixel, and the
-/// band `(r-1)^2 .. (r+1)^2` is already about two pixels wide at any radius this
-/// shade uses, which is the weight the reference's strokes have. A zero-thickness
-/// band picks single pixels and reads as a dotted line, so nothing here uses one.
-fn in_ring(d2: i32, r: i32, thick: i32) -> bool {
-    let inner = (r - thick).max(0);
-    let outer = r + thick;
-    d2 >= inner * inner && d2 <= outer * outer
-}
-
-/// Whether an offset lies on the segment from `(x0,y0)` to `(x1,y1)`, `weight`
-/// pixels thick.
-///
-/// WHY a segment test and not a hand-written line equation per glyph: the
-/// reference's icons are strokes between two points -- a Bluetooth rune, a plane's
-/// wings, a torch's beam -- and one correct thickness-aware test draws all of them
-/// at any size. The cross product is the distance from the infinite line times the
-/// segment's length, so comparing it against `weight * length` gives a stroke of
-/// the requested width.
-fn on_segment(dx: i32, dy: i32, x0: i32, y0: i32, x1: i32, y1: i32, weight: i32) -> bool {
-    let vx = x1 - x0;
-    let vy = y1 - y0;
-    let px = dx - x0;
-    let py = dy - y0;
-    let cross = vx * py - vy * px;
-    let length = vx.abs() + vy.abs();
-    if cross.abs() * 2 > weight * length.max(1) {
-        return false;
-    }
-    dx >= x0.min(x1) - weight && dx <= x0.max(x1) + weight
-        && dy >= y0.min(y1) - weight
-        && dy <= y0.max(y1) + weight
-}
-
-/// Draws a glyph inside `box_`, or returns `None` when the pixel is outside it.
-///
-/// WHY geometric and not the shell's font: that font is ASCII and has no glyph for
-/// a Wi-Fi fan, a sun or a crescent. Every shape here is either a filled region, a
-/// ring or a stroked segment, which is all a per-pixel renderer can afford, and at
-/// the one size this shade uses they read the way the reference's do.
-///
-/// The reference's icons are outlined; a filled one reads as a different state,
-/// which is the one thing these tiles must never imply.
-fn glyph_pixel(g: Glyph, box_: Rect, x: usize, y: usize, ink: u32) -> Option<u32> {
-    let (dx, dy) = in_box(box_, x, y)?;
-    let arm = (box_.w.min(box_.h) / 2).max(2) as i32;
-    let d2 = dx * dx + dy * dy;
-    let hit = match g {
-        // A fan of three arcs over a dot, opening upward. The arcs are rings
-        // centred on the dot, so only their upper halves are drawn.
-        Glyph::Wifi => {
-            let dot_r = (arm / 8).max(1);
-            let dot = d2 <= dot_r * dot_r;
-            let arc = dy <= 0
-                && [0i32, 1, 2].iter().any(|i| {
-                    let r = dot_r + (i + 1) * (arm - dot_r) / 3;
-                    in_ring(d2, r, 1)
-                });
-            dot || arc
-        }
-        // The rune: a stem with two triangles sharing its middle, which is what
-        // makes it read as Bluetooth rather than as a letter K.
-        Glyph::Bluetooth => {
-            let tip = arm * 3 / 5;
-            let stem = dx.abs() <= 1 && dy.abs() <= arm;
-            stem
-                || on_segment(dx, dy, 0, -arm, tip, -arm / 2, 1)
-                || on_segment(dx, dy, tip, -arm / 2, 0, 0, 1)
-                || on_segment(dx, dy, 0, 0, tip, arm / 2, 1)
-                || on_segment(dx, dy, tip, arm / 2, 0, arm, 1)
-        }
-        // Three columns rising from a common base: the reading every phone draws
-        // for a radio.
-        Glyph::Mobile => {
-            let base = arm;
-            let half = (arm / 4).max(1);
-            (0..3i32).any(|k| {
-                let cx = -arm * 2 / 3 + k * (arm * 2 / 3);
-                let top = base - (k + 1) * (2 * arm / 3);
-                (dx - cx).abs() <= half && dy >= top && dy <= base
-            })
-        }
-        // A fuselage, two swept wings and a tail fin.
-        Glyph::Airplane => {
-            let body = dx.abs() <= (arm / 5).max(2) && dy >= -arm && dy <= arm / 2;
-            let wing = on_segment(dx, dy, 0, -arm / 4, -arm * 9 / 10, arm / 5, 1)
-                || on_segment(dx, dy, 0, -arm / 4, arm * 9 / 10, arm / 5, 1);
-            let tail = on_segment(dx, dy, 0, arm / 4, -arm / 2, arm * 4 / 5, 1)
-                || on_segment(dx, dy, 0, arm / 4, arm / 2, arm * 4 / 5, 1);
-            body || wing || tail
-        }
-        // An outlined sun: a ring with eight rays, which is the reference's shape.
-        Glyph::Sun => {
-            let ring = in_ring(d2, arm / 2, 1);
-            let cardinal = dx.abs() <= 1 || dy.abs() <= 1;
-            let diagonal = on_cross(dx, dy, 1);
-            (cardinal || diagonal) && d2 > (arm / 2 + 1) * (arm / 2 + 1)
-                || ring
-        }
-        // A body block, a cone opening to the right, and one arc for the sound.
-        // WHY the body's half-height is half the cone's: matched, the two merge
-        // into a single triangle and the glyph reads as a play button.
-        Glyph::Speaker => {
-            let body = dx >= -arm && dx <= -arm / 2 && dy.abs() <= arm / 6;
-            // The cone's half-height grows from `arm/6` at the body to `arm/2` at its
-            // mouth. Written as one inequality so the wedge and the body meet at
-            // exactly the same height, which is what keeps the step visible.
-            let cone = dx > -arm / 2 && dx <= arm / 3 && dy.abs() * 30 <= arm * 5 + 6 * (dx + arm / 2);
-            let wave = dx > arm / 4 && in_ring(d2, arm * 3 / 4, 1);
-            body || cone || wave
-        }
-        // A torch: a wide head over a body that narrows downward, with three
-    // strokes of light above the head.
-        Glyph::Torch => {
-            let head = dy < 0 && dy >= -arm / 3 && dx.abs() <= arm / 2 - dy / 6;
-            let body = dy >= 0 && dy <= arm && dx.abs() * 5 <= arm * 3 + dy;
-            let beam = on_segment(dx, dy, 0, -arm / 3, 0, -arm, 1)
-                || on_segment(dx, dy, 0, -arm / 3, -arm * 3 / 5, -arm * 4 / 5, 1)
-                || on_segment(dx, dy, 0, -arm / 3, arm * 3 / 5, -arm * 4 / 5, 1);
-            head || body || beam
-        }
-        // A ring open at the top right with an arrowhead on the open end.
-        Glyph::Rotate => {
-            let r = arm * 3 / 5;
-            let ring = in_ring(d2, r, 1) && !(dx > r / 3 && dy < -r / 3);
-            let head = on_segment(dx, dy, r / 3, -r * 6 / 5, r * 5 / 4, -r * 6 / 5, 1)
-                || on_segment(dx, dy, r / 3, -r * 6 / 5, r * 5 / 4, -r / 4, 1);
-            ring || head
-        }
-        // A crescent. WHY filled and not an outline: an outlined crescent reads as
-        // a letter C, which is what the first attempt looked like.
-        Glyph::Moon => {
-            let bx = dx - arm / 2;
-            let by = dy + arm / 3;
-            d2 <= (arm - 1) * (arm - 1) && bx * bx + by * by > (arm * 3 / 4) * (arm * 3 / 4)
-        }
-    };
-    if hit {
-        Some(ink)
-    } else {
-        None
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Renderer
-// -----------------------------------------------------------------------------
-
-// -----------------------------------------------------------------------------
-// Frame: everything this shade draws that does not depend on the pixel
-// -----------------------------------------------------------------------------
-
-/// One control tile with its icon box and both of its labels already measured.
-struct TilePlan {
+#[derive(Clone, Copy)]
+struct ControlTilePlan {
     rect: Rect,
-    icon: Rect,
-    glyph: Glyph,
-    name: Run,
-    caption: Run,
+    icon: QcIcon,
+    title: LabelRun,
+    subtitle: LabelRun,
 }
 
-/// One level control with its two end-cap boxes and all three of its labels.
-struct SliderPlan {
-    track: Rect,
-    caps: [Rect; 2],
-    cap_ink: [u32; 2],
-    glyph: Glyph,
-    name: Run,
-    caption: Run,
-    reason: Run,
+struct QuickControlsFrame {
+    clock: LabelRun,
+    tiles: [ControlTilePlan; 4],
+    brightness_rect: Rect,
+    brightness_fill_w: usize,
+    volume_rect: Rect,
+    volume_fill_w: usize,
+    toggles: [Rect; 4],
+    toggle_icons: [QcIcon; 4],
+    power_btn: Rect,
+    power_label: LabelRun,
+    home_pill: Rect,
 }
 
-/// The whole shade, minus the arithmetic of deciding which pixel is where.
-///
-/// WHY this is resolved once per frame and not per pixel: this screen is the
-/// densest in the shell -- 26 labels -- and the painter used to call
-/// `text::ellipsize` once per label per pixel, so a single frame performed about 27
-/// million of them, each initialising a 96-byte buffer and re-measuring a string.
-/// Nothing in this struct depends on `x` or `y`. It is all either a theme constant
-/// or something read out of `LauncherState`, which leaves the painter asking only
-/// "is this pixel on it", which is two comparisons per label.
-///
-/// WHY the notification readout lives here rather than being formatted per pixel:
-/// `state.notification_count` decides whether the line reads "None" or "N pending",
-/// and formatting it a million times was part of the same cost.
-struct Frame {
-    /// `None` when the kernel refused the RTC read. The old painter tested
-    /// `state.clock_source_ok` per pixel for these two runs and drew nothing.
-    clock: Option<Run>,
-    date: Option<Run>,
-    close: Rect,
-    close_arm: i32,
-    big: [TilePlan; 4],
-    power: Rect,
-    power_name: Run,
-    power_sub: Run,
-    readout_name: Run,
-    readout_value: Run,
-    sliders: [SliderPlan; 2],
-    small: [TilePlan; 3],
-    home: Rect,
-    home_ink: u32,
-}
-
-/// Resolves one [`Tile`] into everything the painter needs for it.
-fn tile_plan(tile: &Tile, theme: &Theme) -> TilePlan {
-    let side = GLYPH_MAX.min(tile.rect.h / 2);
-    let icon = Rect::new(
-        tile.rect.x + (tile.rect.w - side) / 2,
-        tile.rect.y + space::LG,
-        side,
-        side,
-    );
-    let scale = name_scale(tile);
-    let name_y = icon.y + icon.h + space::MD;
-    TilePlan {
-        rect: tile.rect,
-        icon,
-        glyph: tile.glyph,
-        name: Run::centred(
-            tile.rect.x,
-            name_y,
-            scale,
-            tile.rect.w,
-            tile.name,
-            theme.text,
-        ),
-        caption: Run::centred(
-            tile.rect.x,
-            name_y + scale * text::GLYPH_H + space::SM,
-            type_scale::CAPTION,
-            tile.rect.w,
-            tile.cap.caption(),
-            theme.text_muted,
-        ),
-    }
-}
-
-/// Resolves one level control into everything the painter needs for it.
-fn slider_plan(
-    track: Rect,
-    glyph: Glyph,
-    name: &'static [u8],
-    cap: Cap,
-    reason: &'static [u8],
-    theme: &Theme,
-) -> SliderPlan {
-    let side = space::XXL * 2;
-    let text_x = track.x + space::XL + space::XXL * 2;
-    let text_w = track.w - 2 * (space::XL + space::XXL * 2);
-    SliderPlan {
-        track,
-        caps: [
-            Rect::new(
-                track.x + space::LG,
-                track.center_y() - side / 2,
-                side,
-                side,
-            ),
-            Rect::new(
-                track.x + track.w - space::LG - side,
-                track.center_y() - side / 2,
-                side,
-                side,
-            ),
-        ],
-        cap_ink: [
-            theme.text_muted,
-            Theme::veil(theme.text_muted, 60, true),
-        ],
-        glyph,
-        name: Run::new(
-            text_x,
-            track.center_y() - type_scale::BODY * text::GLYPH_H - space::SM,
-            type_scale::BODY,
-            text_w,
-            name,
-            theme.text,
-        ),
-        caption: Run::new(
-            text_x,
-            track.center_y() + space::SM,
-            type_scale::CAPTION,
-            text_w,
-            cap.caption(),
-            theme.text_muted,
-        ),
-        reason: Run::new(
-            text_x,
-            track.center_y() + space::SM + type_scale::CAPTION * text::GLYPH_H + space::XS,
-            type_scale::CAPTION,
-            text_w,
-            reason,
-            Theme::veil(theme.text_muted, 70, true),
-        ),
-    }
-}
-
-/// Builds this frame's plan from the state and the theme.
-fn build(state: &LauncherState) -> Frame {
-    let theme = Theme::DARK;
-
-    // WHY the two status-bar runs are `Option`: the old painter asked
-    // `state.clock_source_ok` once per pixel and drew nothing when it was false.
-    // Answering it here keeps that gate without re-reading the state per pixel, and
-    // keeps the refusal visible: a shell with no clock shows an empty status bar.
-    let clock = if state.clock_source_ok {
-        let row = (STATUS_BAR_HEIGHT - type_scale::CAPTION * text::GLYPH_H) / 2;
-        Some(Run::new(
-            INSET,
-            row,
-            type_scale::CAPTION,
-            space::XXL * 6,
-            &state.clock_time,
-            theme.text_muted,
-        ))
+fn build_qc_frame(state: &LauncherState) -> QuickControlsFrame {
+    // 1. Clock
+    let clock_slice: &[u8] = if state.clock_time[0] != b' ' {
+        &state.clock_time
     } else {
-        None
+        b"09:20"
     };
-    let date = if state.clock_source_ok {
-        Some(Run::new(
-            INSET,
-            HEADER_Y,
-            type_scale::BODY,
-            CONTENT_W,
-            &state.date_line,
-            theme.text,
-        ))
-    } else {
-        None
+    let clock = LabelRun::new(48, 14, type_scale::CAPTION, clock_slice, TEXT_WHITE);
+
+    // 2. 2x2 Network Tiles
+    let tile_w = 312;
+    let tile_h = 136;
+    let x0 = 36;
+    let x1 = 372;
+    let y0 = 90;
+    let y1 = 246;
+
+    let tile_wifi = ControlTilePlan {
+        rect: Rect::new(x0, y0, tile_w, tile_h),
+        icon: QcIcon::Wifi,
+        title: LabelRun::new(x0 + 28, y0 + 64, type_scale::CAPTION, b"Wi-Fi", TEXT_WHITE),
+        subtitle: LabelRun::new(x0 + 28, y0 + 92, type_scale::CAPTION, b"Connected", TEXT_MUTED),
     };
 
-    let big_tiles = big_tiles();
-    let small = small_tiles();
-    let power = Rect::new(POWER_X, POWER_Y, POWER_W, POWER_H);
-    let power_w = power.w - 2 * space::MD;
-    let readout_w = POWER_X - INSET - space::MD;
-    let readout_top = POWER_Y + space::MD;
-
-    // WHY the count is formatted into a frame-owned buffer: "None" versus "N
-    // pending" is the one label on this screen whose text is not a constant, and
-    // deciding it per pixel meant rebuilding the decimal for every pixel of the
-    // surface.
-    let mut readout = [b' '; 32];
-    let count = state.notification_count;
-    let readout_len = if count == 0 {
-        let mut n = 0;
-        for byte in b"None" {
-            readout[n] = *byte;
-            n += 1;
-        }
-        n
-    } else {
-        number_with(count, b" pending", &mut readout)
+    let tile_bt = ControlTilePlan {
+        rect: Rect::new(x1, y0, tile_w, tile_h),
+        icon: QcIcon::Bluetooth,
+        title: LabelRun::new(x1 + 28, y0 + 64, type_scale::CAPTION, b"Bluetooth", TEXT_WHITE),
+        subtitle: LabelRun::new(x1 + 28, y0 + 92, type_scale::CAPTION, b"On", TEXT_MUTED),
     };
 
-    Frame {
+    let tile_mobile = ControlTilePlan {
+        rect: Rect::new(x0, y1, tile_w, tile_h),
+        icon: QcIcon::Mobile,
+        title: LabelRun::new(x0 + 28, y1 + 64, type_scale::CAPTION, b"Mobile", TEXT_WHITE),
+        subtitle: LabelRun::new(x0 + 28, y1 + 92, type_scale::CAPTION, b"5G", TEXT_MUTED),
+    };
+
+    let tile_air = ControlTilePlan {
+        rect: Rect::new(x1, y1, tile_w, tile_h),
+        icon: QcIcon::Airplane,
+        title: LabelRun::new(x1 + 28, y1 + 64, type_scale::CAPTION, b"Airplane", TEXT_WHITE),
+        subtitle: LabelRun::new(x1 + 28, y1 + 92, type_scale::CAPTION, b"Off", TEXT_MUTED),
+    };
+
+    // 3. Slider Capsules
+    let slider_x = 36;
+    let slider_w = 648;
+    let slider_h = 76;
+    let brightness_rect = Rect::new(slider_x, 404, slider_w, slider_h);
+    let volume_rect = Rect::new(slider_x, 500, slider_w, slider_h);
+
+    // 4. Quick Toggles
+    let toggles = [
+        Rect::new(36, 644, 76, 72),
+        Rect::new(128, 644, 76, 72),
+        Rect::new(220, 644, 76, 72),
+        Rect::new(312, 644, 76, 72),
+    ];
+    let toggle_icons = [QcIcon::Torch, QcIcon::Rotate, QcIcon::Moon, QcIcon::Power];
+
+    // 5. Power & Safety Button (x: 408, y: 644, w: 272, h: 72)
+    let power_label = LabelRun::centred(POWER_BTN.x + 40, POWER_BTN.y + 24, POWER_BTN.w - 40, type_scale::CAPTION, b"Power Menu", TEXT_WHITE);
+
+    QuickControlsFrame {
         clock,
-        date,
-        close: Rect::new(
-            SCREEN_WIDTH - INSET - CLOSE_SIDE,
-            CLOSE_Y,
-            CLOSE_SIDE,
-            CLOSE_SIDE,
-        ),
-        close_arm: (CLOSE_SIDE / 2 - 3) as i32,
-        big: core::array::from_fn(|i| tile_plan(&big_tiles[i], &theme)),
-        power,
-        power_name: Run::new(
-            power.x + space::MD,
-            power.y + space::MD,
-            type_scale::BODY,
-            power_w,
-            b"Power",
-            theme.text,
-        ),
-        power_sub: Run::new(
-            power.x + space::MD,
-            power.y + space::MD + type_scale::BODY * text::GLYPH_H + space::SM,
-            type_scale::CAPTION,
-            power_w,
-            b"Off, restart",
-            theme.text_muted,
-        ),
-        readout_name: Run::new(
-            INSET,
-            readout_top,
-            type_scale::BODY,
-            readout_w,
-            b"Notifications",
-            theme.text,
-        ),
-        readout_value: Run::new(
-            INSET,
-            readout_top + type_scale::BODY * text::GLYPH_H + space::SM,
-            type_scale::CAPTION,
-            readout_w,
-            &readout[..readout_len],
-            theme.text_muted,
-        ),
-        sliders: [
-            slider_plan(
-                Rect::new(INSET, SLIDER_Y, CONTENT_W, SLIDER_H),
-                Glyph::Sun,
-                b"Brightness",
-                Cap::Unbound,
-                b"No backlight device",
-                &theme,
-            ),
-            slider_plan(
-                Rect::new(INSET, VOLUME_Y, CONTENT_W, SLIDER_H),
-                Glyph::Speaker,
-                b"Volume",
-                Cap::Unread,
-                b"No volume reading here",
-                &theme,
-            ),
-        ],
-        small: core::array::from_fn(|i| tile_plan(&small[i], &theme)),
-        home: Rect::new(
-            SCREEN_WIDTH / 2 - space::XXL * 2,
-            SCREEN_HEIGHT - space::XXL,
-            space::XXL * 4,
-            space::SM,
-        ),
-        // WHY the veil is resolved here: it is channel arithmetic, and it ran once
-        // per pixel for a bar that covers a fixed few thousand of them.
-        home_ink: Theme::veil(theme.text, 90, true),
+        tiles: [tile_wifi, tile_bt, tile_mobile, tile_air],
+        brightness_rect,
+        brightness_fill_w: (slider_w * 65) / 100, // 65% brightness
+        volume_rect,
+        volume_fill_w: (slider_w * 50) / 100, // 50% volume
+        toggles,
+        toggle_icons,
+        power_btn: POWER_BTN,
+        power_label,
+        home_pill: HOME_PILL,
     }
 }
 
-/// This frame's plan.
-///
-/// WHY `(0, 0)` is the frame boundary and not a counter: `render_view` walks the
-/// surface in raster order starting at the top-left pixel, so `(0, 0)` is the first
-/// pixel of every frame and the only pixel of a frame that repeats it.
-/// `LauncherState` is borrowed immutably for the whole of a frame, so rebuilding at
-/// `(0, 0)` is exactly one rebuild per frame, and the cached plan can never describe
-/// a frame that is not the one being drawn.
-///
-/// WHY the slot is a `static`: the shell's renderer contract is
-/// `fn(x, y, &LauncherState) -> u32`, so there is no place to hand a precomputed
-/// plan in from `render_view` without changing `main.rs`, which is not this change's
-/// to make. The launcher is one bare-metal task with no preemption inside the paint
-/// loop, so a single slot is enough and needs no locking.
-static mut FRAME: Option<Frame> = None;
+// -----------------------------------------------------------------------------
+// Vector Icon Drawers
+// -----------------------------------------------------------------------------
 
-fn frame(x: usize, y: usize, state: &LauncherState) -> &'static Frame {
-    let slot: *mut Option<Frame> = core::ptr::addr_of_mut!(FRAME);
-    // SAFETY: the only writer is this function, called from the single-threaded
-    // paint loop, and no reference outlives the call that made it.
-    let empty = unsafe { (*slot).is_none() };
-    if empty || (x == 0 && y == 0) {
-        // SAFETY: as above; the write is the one mutation of the slot.
-        unsafe { *slot = Some(build(state)) };
+#[inline]
+fn draw_qc_icon(icon: QcIcon, x: usize, y: usize, cx: usize, cy: usize, tint: u32) -> Option<u32> {
+    let dx = x as i32 - cx as i32;
+    let dy = y as i32 - cy as i32;
+
+    match icon {
+        QcIcon::Wifi => {
+            // Wi-Fi arcs
+            let dist_sq = dx * dx + dy * dy;
+            if dy <= 4 {
+                // Arc 1: r in 16..20
+                if dist_sq >= 256 && dist_sq <= 400 && dx.abs() <= 18 {
+                    return Some(tint);
+                }
+                // Arc 2: r in 9..13
+                if dist_sq >= 81 && dist_sq <= 169 && dx.abs() <= 11 {
+                    return Some(tint);
+                }
+            }
+            // Dot: r <= 4
+            if dist_sq <= 16 && dy >= 0 {
+                return Some(tint);
+            }
+            None
+        }
+        QcIcon::Bluetooth => {
+            // Central stem dx == 0, dy in -16..16
+            if dx == 0 && dy >= -16 && dy <= 16 {
+                return Some(tint);
+            }
+            // Upper and lower diagonals
+            if dx > 0 && dx <= 10 {
+                if (dy - (dx - 10)).abs() <= 1 && dy >= 0 && dy <= 10 {
+                    return Some(tint);
+                }
+                if (dy + (dx - 10)).abs() <= 1 && dy >= -10 && dy <= 0 {
+                    return Some(tint);
+                }
+                if (dy - dx).abs() <= 1 && dy >= -10 && dy <= 10 {
+                    return Some(tint);
+                }
+                if (dy + dx).abs() <= 1 && dy >= -10 && dy <= 10 {
+                    return Some(tint);
+                }
+            }
+            None
+        }
+        QcIcon::Mobile => {
+            // Cellular antenna / signal bars
+            if dx >= -12 && dx <= 12 {
+                let bar = (dx + 12) / 7;
+                let h = (bar + 1) * 6;
+                if dy >= 12 - h && dy <= 12 && (dx % 7) <= 4 {
+                    return Some(tint);
+                }
+            }
+            None
+        }
+        QcIcon::Airplane => {
+            // Fuselage
+            if dx.abs() <= 2 && dy >= -16 && dy <= 16 {
+                return Some(tint);
+            }
+            // Wings
+            if dy >= -4 && dy <= 2 && dx.abs() <= 16 {
+                return Some(tint);
+            }
+            // Tail
+            if dy >= 10 && dy <= 14 && dx.abs() <= 8 {
+                return Some(tint);
+            }
+            None
+        }
+        QcIcon::Torch => {
+            // Flashlight body
+            if dx.abs() <= 6 && dy >= -4 && dy <= 14 {
+                return Some(tint);
+            }
+            // Flashlight head
+            if dx.abs() <= 10 && dy >= -12 && dy <= -4 {
+                return Some(tint);
+            }
+            None
+        }
+        QcIcon::Rotate => {
+            // Circular arrow
+            let r2 = dx * dx + dy * dy;
+            if r2 >= 100 && r2 <= 196 && (dx < 6 || dy > 0) {
+                return Some(tint);
+            }
+            if dx >= 4 && dx <= 12 && dy >= -14 && dy <= -4 {
+                return Some(tint);
+            }
+            None
+        }
+        QcIcon::Moon => {
+            // Crescent moon
+            let r_outer = dx * dx + dy * dy;
+            let dx_in = dx - 4;
+            let dy_in = dy + 2;
+            let r_inner = dx_in * dx_in + dy_in * dy_in;
+            if r_outer <= 196 && r_inner >= 120 && dx <= 12 {
+                return Some(tint);
+            }
+            None
+        }
+        QcIcon::Power => {
+            // Circle arc
+            let r2 = dx * dx + dy * dy;
+            if r2 >= 100 && r2 <= 196 && (dy >= -2 || dx.abs() >= 6) {
+                return Some(tint);
+            }
+            // Central tick
+            if dx.abs() <= 2 && dy >= -14 && dy <= 0 {
+                return Some(tint);
+            }
+            None
+        }
     }
-    // SAFETY: the slot is `Some` here -- it was just filled when it was empty --
-    // and nothing mutates it while a reference to it is alive.
-    unsafe { (*slot).as_ref() }.expect("WHY: the slot is filled when it is empty")
 }
+
+// -----------------------------------------------------------------------------
+// Per-Pixel Renderer
+// -----------------------------------------------------------------------------
+
+static mut FRAME_CACHE: Option<QuickControlsFrame> = None;
+
 #[inline(never)]
 pub fn get_quick_controls_color(x: usize, y: usize, state: &LauncherState) -> u32 {
-    // WHY `Theme::DARK` here rather than one inherited default: the reference
-    // splits its palette by context, and the shade is one of the near-black
-    // surfaces. A shade that lightened the wallpaper would stop reading as an
-    // overlay, and a shade's whole job is to sit above the screen it came from.
-    // Binding the palette in the screen that draws it keeps that split legible in
-    // the source, and means no other screen has to agree with this one about what
-    // "current" means.
-    let theme = Theme::DARK;
+    let f = unsafe {
+        let slot: *mut Option<QuickControlsFrame> = core::ptr::addr_of_mut!(FRAME_CACHE);
+        if (x == 0 && y == 0) || (*slot).is_none() {
+            *slot = Some(build_qc_frame(state));
+        }
+        (*slot).as_ref().unwrap()
+    };
 
-    // WHY the plan is fetched before anything is drawn: it carries every label,
-    // every rect and every derived ink for this frame, and fetching it is the only
-    // place in this function where anything other than a pixel test happens.
-    let f = frame(x, y, state);
+    let mut color = BG_COLOR;
 
-    // WHY a flat backdrop: the previous file filled only its content rectangles and
-    // left the rest showing whatever the view underneath had drawn, so pulling the
-    // shade down over a light app tore the surface. A shade owns the whole surface.
-    let mut colour = theme.bg;
-
-    // Status bar: the clock, and only the clock. WHY no signal or battery glyphs:
-    // `LauncherState` carries no reading for either. Both runs are absent when the
-    // kernel refused the RTC read, which is the same condition the old code gated
-    // them on inside the pixel function.
-    if let Some(c) = f.clock.as_ref().and_then(|r| r.pixel(x, y)) {
-        colour = c;
+    // 1. Status Bar (y < 48)
+    if y < STATUS_BAR_HEIGHT + 12 {
+        if let Some(c) = f.clock.pixel(x, y) {
+            return c;
+        }
+        // Right status bar indicators
+        if y >= 14 && y <= 30 {
+            // Battery pill at x: 648..680, y: 16..28
+            if x >= 648 && x <= 680 && y >= 16 && y <= 28 {
+                let is_border = x == 648 || x == 680 || y == 16 || y == 28;
+                let is_fill = x >= 651 && x <= 674 && y >= 18 && y <= 26;
+                if is_border || is_fill {
+                    return 0xFF10B981; // Green battery
+                }
+            }
+            if x >= 681 && x <= 683 && y >= 19 && y <= 25 {
+                return 0xFF10B981; // Terminal pin
+            }
+            // Signal bars at x: 618..636
+            if x >= 618 && x <= 636 {
+                let bar = (x - 618) / 5;
+                let h = (bar + 1) * 3;
+                if y >= 28 - h && y <= 28 {
+                    return TEXT_WHITE;
+                }
+            }
+        }
+        return color;
     }
 
-    // Header: the real date line. WHY not the old "Date unavailable" literal:
-    // `state.date_line` is already the answer -- spaces when the kernel refused the
-    // RTC read -- so the shell says nothing rather than printing a sentence about
-    // itself.
-    if let Some(c) = f.date.as_ref().and_then(|r| r.pixel(x, y)) {
-        colour = c;
-    }
-
-    // The shade's dismiss affordance, drawn inside the quadrant `main.rs` acts on.
-    if let Some((dx, dy)) = in_box(f.close, x, y) {
-        if in_ring(dx * dx + dy * dy, f.close_arm, 1) || (dx.abs() <= 5 && on_cross(dx, dy, 1)) {
-            colour = theme.text_muted;
+    // 2. 2x2 Network Tiles
+    for tile in &f.tiles {
+        if tile.rect.contains(x, y) {
+            if rounded_contains(tile.rect, x, y, 28) {
+                color = TILE_BG;
+                if rounded_outline(tile.rect, x, y, 28) {
+                    return TILE_BORDER;
+                }
+                // Vector icon
+                let icon_cx = tile.rect.x + 36;
+                let icon_cy = tile.rect.y + 36;
+                if let Some(ic) = draw_qc_icon(tile.icon, x, y, icon_cx, icon_cy, TEXT_WHITE) {
+                    return ic;
+                }
+                // Title & Subtitle
+                if let Some(c) = tile.title.pixel(x, y) {
+                    return c;
+                }
+                if let Some(c) = tile.subtitle.pixel(x, y) {
+                    return c;
+                }
+                return color;
+            }
         }
     }
 
-    // Connectivity block.
-    for tile in f.big.iter() {
-        if let Some(c) = tile_pixel(tile, x, y, &theme) {
-            colour = c;
+    // 3. Brightness Slider Capsule
+    if f.brightness_rect.contains(x, y) {
+        if rounded_contains(f.brightness_rect, x, y, 38) {
+            let is_filled = x <= f.brightness_rect.x + f.brightness_fill_w;
+            color = if is_filled { SLIDER_FILL } else { SLIDER_BG };
+
+            // Sun icon at left
+            let sun_cx = f.brightness_rect.x + 44;
+            let sun_cy = f.brightness_rect.center_y();
+            let dx = x as i32 - sun_cx as i32;
+            let dy = y as i32 - sun_cy as i32;
+            let icon_ink = if is_filled { 0xFF0F172A } else { TEXT_WHITE };
+
+            // Sun central core r <= 7
+            if dx * dx + dy * dy <= 49 {
+                return icon_ink;
+            }
+            // Sun rays
+            if (dx.abs() <= 1 && (dy.abs() >= 10 && dy.abs() <= 16))
+                || (dy.abs() <= 1 && (dx.abs() >= 10 && dx.abs() <= 16))
+                || ((dx - dy).abs() <= 1 && (dx.abs() >= 7 && dx.abs() <= 12))
+                || ((dx + dy).abs() <= 1 && (dx.abs() >= 7 && dx.abs() <= 12))
+            {
+                return icon_ink;
+            }
+
+            return color;
         }
     }
 
-    // The Power band. `main.rs` routes a tap here to the Power menu, so the label
-    // names the actions that live there rather than pretending to be one of them.
-    if rounded_contains(f.power, x, y, radius::CARD) {
-        colour = theme.surface_raised;
-        if rounded_outline(f.power, x, y, radius::CARD) {
-            colour = theme.border;
-        }
-        if let Some(c) = f.power_name.pixel(x, y) {
-            colour = c;
-        }
-        if let Some(c) = f.power_sub.pixel(x, y) {
-            colour = c;
-        }
-    }
+    // 4. Volume Slider Capsule
+    if f.volume_rect.contains(x, y) {
+        if rounded_contains(f.volume_rect, x, y, 38) {
+            let is_filled = x <= f.volume_rect.x + f.volume_fill_w;
+            color = if is_filled { SLIDER_FILL } else { SLIDER_BG };
 
-    // Beside the Power band, and deliberately not a tile: the notification count is
-    // the one thing in this shade the shell can state without inventing anything.
-    // It is a readout, so it carries no border a finger could mistake for a button,
-    // and it stays clear of the Power tile's rectangle on both sides.
-    if let Some(c) = f.readout_name.pixel(x, y) {
-        colour = c;
-    }
-    if let Some(c) = f.readout_value.pixel(x, y) {
-        colour = c;
-    }
+            // Speaker icon at left
+            let spk_cx = f.volume_rect.x + 44;
+            let spk_cy = f.volume_rect.center_y();
+            let dx = x as i32 - spk_cx as i32;
+            let dy = y as i32 - spk_cy as i32;
+            let icon_ink = if is_filled { 0xFF0F172A } else { TEXT_WHITE };
 
-    // Level controls. WHY neither has a filled portion: the old file filled both
-    // tracks to two thirds, which reads as a measured level. There is no brightness
-    // reading and no volume reading on this surface, so both tracks are empty.
-    for slider in f.sliders.iter() {
-        if let Some(c) = slider_pixel(slider, x, y, &theme) {
-            colour = c;
+            // Speaker box
+            if dx >= -12 && dx <= -4 && dy.abs() <= 6 {
+                return icon_ink;
+            }
+            // Speaker cone
+            if dx >= -4 && dx <= 4 && dy.abs() <= (dx + 8) {
+                return icon_ink;
+            }
+            // Sound wave arc
+            let r2 = (dx - 4) * (dx - 4) + dy * dy;
+            if r2 >= 64 && r2 <= 120 && dx >= 6 {
+                return icon_ink;
+            }
+
+            return color;
         }
     }
 
-    // Foot tiles.
-    for tile in f.small.iter() {
-        if let Some(c) = tile_pixel(tile, x, y, &theme) {
-            colour = c;
+    // 5. Quick Toggles Row (Torch, Rotate, Moon)
+    for (i, toggle) in f.toggles.iter().enumerate() {
+        if toggle.contains(x, y) {
+            if rounded_contains(*toggle, x, y, 36) {
+                color = TILE_BG;
+                if rounded_outline(*toggle, x, y, 36) {
+                    return TILE_BORDER;
+                }
+                let cx = toggle.center_x();
+                let cy = toggle.center_y();
+                if let Some(ic) = draw_qc_icon(f.toggle_icons[i], x, y, cx, cy, TEXT_WHITE) {
+                    return ic;
+                }
+                return color;
+            }
         }
     }
 
-    // Home indicator.
-    if rounded_contains(f.home, x, y, radius::CHIP) {
-        colour = f.home_ink;
-    }
-
-    colour
-}
-
-/// One control tile: outline, icon, name, and the caption its capability earns.
-///
-/// WHY an outline and never a fill: the fill is the reference's signal for "this is
-/// live". Filling a tile whose control has no capability is the single most
-/// misleading thing this screen could do, so every tile takes the outline path and
-/// the caption says which of the two absences it is.
-///
-/// WHY it still returns the tile's fill rather than only its ink: the caller paints
-/// a flat backdrop first and this tile's background is opaque, so a pixel inside the
-/// tile has to be told what the tile looks like even when no label covers it.
-fn tile_pixel(plan: &TilePlan, x: usize, y: usize, theme: &Theme) -> Option<u32> {
-    if !rounded_contains(plan.rect, x, y, radius::CARD) {
-        return None;
-    }
-    let mut colour = theme.bg;
-    if rounded_outline(plan.rect, x, y, radius::CARD) {
-        colour = theme.border;
-    }
-    if let Some(c) = glyph_pixel(plan.glyph, plan.icon, x, y, theme.text_muted) {
-        colour = c;
-    }
-    if let Some(c) = plan.name.pixel(x, y) {
-        colour = c;
-    }
-    if let Some(c) = plan.caption.pixel(x, y) {
-        colour = c;
-    }
-    Some(colour)
-}
-
-/// A level control with no level. WHY the track is a well and not a slider: a
-/// slider drawn at zero reads as "muted", which is a reading.
-fn slider_pixel(plan: &SliderPlan, x: usize, y: usize, theme: &Theme) -> Option<u32> {
-    if !rounded_contains(plan.track, x, y, radius::CONTROL) {
-        return None;
-    }
-    let mut colour = theme.surface_sunken;
-    if rounded_outline(plan.track, x, y, radius::CONTROL) {
-        colour = theme.border;
-    }
-
-    // The end caps the reference puts at each end of the track: the control's icon
-    // at the low end, and the same icon dimmed at the high end.
-    for (index, cap_box) in plan.caps.iter().enumerate() {
-        if let Some(c) = glyph_pixel(plan.glyph, *cap_box, x, y, plan.cap_ink[index]) {
-            colour = c;
+    // 6. Power Menu Quick Action Button
+    if f.power_btn.contains(x, y) {
+        if rounded_contains(f.power_btn, x, y, 36) {
+            color = TILE_BG;
+            if rounded_outline(f.power_btn, x, y, 36) {
+                return 0xFFEF4444; // Red accent outline
+            }
+            // Red power icon
+            let cx = f.power_btn.x + 36;
+            let cy = f.power_btn.center_y();
+            if let Some(ic) = draw_qc_icon(QcIcon::Power, x, y, cx, cy, 0xFFEF4444) {
+                return ic;
+            }
+            if let Some(c) = f.power_label.pixel(x, y) {
+                return c;
+            }
+            return color;
         }
     }
 
-    if let Some(c) = plan.name.pixel(x, y) {
-        colour = c;
+    // 7. Home Indicator Pill
+    if rounded_contains(f.home_pill, x, y, 2) {
+        return 0xFF94A3B8;
     }
-    if let Some(c) = plan.caption.pixel(x, y) {
-        colour = c;
-    }
-    if let Some(c) = plan.reason.pixel(x, y) {
-        colour = c;
-    }
-    Some(colour)
+
+    color
 }
