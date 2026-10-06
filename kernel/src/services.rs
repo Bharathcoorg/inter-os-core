@@ -139,6 +139,7 @@ pub struct ServiceRecord { pub id: ServiceId, pub task: TaskId, pub state: Servi
 
 pub static SERVICE_RECORDS: spin::Mutex<[Option<ServiceRecord>; 12]> = spin::Mutex::new([None; 12]);
 const SERVICE_RESTART_BACKOFF_TICKS: u64 = 1000;
+const SERVICE_FAILURE_QUARANTINE_LIMIT: u64 = 5;
 static SERVICE_HEARTBEATS: [core::sync::atomic::AtomicU64; 12] = [
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
@@ -559,6 +560,9 @@ pub fn recover_failed(id: ServiceId, parent_id: TaskId) -> Result<(), &'static s
     let idx = id as usize;
     let record = SERVICE_RECORDS.lock()[idx].ok_or("service not declared")?;
     if record.state != ServiceState::Failed { return Err("service is not failed"); }
+    if SERVICE_FAILURES[idx].load(Ordering::Acquire) >= SERVICE_FAILURE_QUARANTINE_LIMIT {
+        return Err("service crash-loop quarantined");
+    }
     let now = crate::interrupts::get_system_ticks();
     if now < SERVICE_RETRY_AFTER[idx].load(Ordering::Acquire) { return Err("service recovery backoff active"); }
     if record.task != TaskId(0) {
