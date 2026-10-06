@@ -165,14 +165,14 @@ const H: usize = 1440;
 const CHUNK: usize = 4096;
 
 // -----------------------------------------------------------------------------
-// 32-bit ARGB8888 Design Color Tokens (light theme)
+// 32-bit ARGB8888 Design Color Tokens (immersive dark surface)
 // -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFFFAF9F6;
+const BG_DARK: u32 = 0xFF111214;
 #[allow(dead_code)]
-const SURFACE_RAISED: u32 = 0xFFF4F3EE;
-const BORDER_SUBTLE: u32 = 0xFFE5E4DE;
-const TEXT_PRIMARY: u32 = 0xFF18181B;
-const TEXT_MUTED: u32 = 0xFF71717A;
+const SURFACE_RAISED: u32 = 0xFF25282A;
+const BORDER_SUBTLE: u32 = 0xFF3A3D40;
+const TEXT_PRIMARY: u32 = 0xFFF7F6F2;
+const TEXT_MUTED: u32 = 0xFF777773;
 #[allow(dead_code)]
 const ACCENT: u32 = TEXT_PRIMARY;
 

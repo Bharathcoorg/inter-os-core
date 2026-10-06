@@ -516,6 +516,7 @@ struct TilePlan {
     /// The chromatic rotation for this slot's catalogue index. WHY it is here: it is
     /// derived from the catalogue index modulo the theme's four chromatic tokens,
     /// which meant reading a theme field per pixel.
+    #[allow(dead_code)]
     hue: u32,
     icon: Option<launcher::icons::IconKind>,
     badge: Run,
@@ -710,7 +711,7 @@ fn build(state: &LauncherState) -> Paint {
                 disc.center_y() - text::line_height(BADGE_SCALE) / 2,
                 BADGE_SCALE,
                 badge,
-                0xFFFFFFFF,
+                theme.text,
             )
         };
 
@@ -1010,17 +1011,20 @@ fn empty_catalogue(x: usize, y: usize, theme: &Theme, p: &EmptyPlan) -> u32 {
 /// is. A long name used to be drawn at its full width straight through the tile
 /// beside it.
 fn app_tile(x: usize, y: usize, theme: &Theme, t: &TilePlan) -> u32 {
-    // 1. Icon squircle: rounded rectangle with 18px corner radius
+    // 1. Icon squircle: white rounded rectangle with 18px corner radius and border
     if inside_rounded(t.disc, x, y, t.disc_r as usize) {
+        if !inside_rounded(t.disc.inset(1), x, y, (t.disc_r as usize).saturating_sub(1)) {
+            return theme.border;
+        }
         if let Some(kind) = t.icon {
-            let ink = 0xFFFFFFFF; // High contrast crisp white vector pictogram
+            let ink = theme.text;
             if let Some(c) = launcher::icons::rasterize_icon_pixel(kind, x, y, t.disc.center_x(), t.disc.center_y(), ink) {
                 return c;
             }
         } else if let Some(c) = t.badge.pixel(x, y) {
             return c;
         }
-        return t.hue;
+        return theme.surface;
     }
 
     // 2. App name label
@@ -1028,7 +1032,7 @@ fn app_tile(x: usize, y: usize, theme: &Theme, t: &TilePlan) -> u32 {
         return c;
     }
 
-    // 3. Clean background canvas (No card box borders)
+    // 3. Clean background canvas
     theme.bg
 }
 

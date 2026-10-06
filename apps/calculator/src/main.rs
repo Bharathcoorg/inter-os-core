@@ -98,16 +98,16 @@ impl CalculatorState {
 // -----------------------------------------------------------------------------
 // 32-bit ARGB8888 Design Color Tokens (Screen 16 Minimal Light Theme)
 // -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFFFFFFFF;
+const BG_DARK: u32 = 0xFFF7F6F2;
 #[allow(dead_code)]
 const SURFACE_DARK: u32 = 0xFFFFFFFF;
 #[allow(dead_code)]
-const SURFACE_RAISED: u32 = 0xFFF1F5F9;
+const SURFACE_RAISED: u32 = 0xFFEFEEE9;
 #[allow(dead_code)]
-const BORDER_SUBTLE: u32 = 0xFFE2E8F0;
-const TEXT_PRIMARY: u32 = 0xFF0F172A;
-const TEXT_MUTED: u32 = 0xFF64748B;
-const ACCENT_SKY: u32 = 0xFF0284C7;
+const BORDER_SUBTLE: u32 = 0xFFE1E0DB;
+const TEXT_PRIMARY: u32 = 0xFF111214;
+const TEXT_MUTED: u32 = 0xFF777773;
+const ACCENT_SKY: u32 = 0xFF2563EB;
 #[allow(dead_code)]
 const SUCCESS_EMERALD: u32 = 0xFF10B981;
 #[allow(dead_code)]
@@ -280,29 +280,25 @@ fn get_button_action(row: usize, col: usize) -> Option<char> {
 // -----------------------------------------------------------------------------
 #[inline(never)]
 fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
-    // 1. Status Bar & Seamless Header (y: 0..96)
-    if y < 96 {
-        // Back chevron (<) hit-target at (x: 24..90, y: 28..68)
-        if x >= 24 && x < 90 && y >= 28 && y < 68 {
-            let center_x = 52;
-            let center_y = 48;
-            let dx = (x as isize - center_x as isize).abs();
-            let dy = (y as isize - center_y as isize).abs();
-            if dx + dy <= 10 && x <= center_x {
-                return TEXT_PRIMARY;
-            }
-        }
-
-        // Clock "09:20" at x: 48, y: 40
-        if y >= 40 && y < 56 {
-            if let Some(c) = test_text(x, y, 48, 40, 2, b"09:20", TEXT_PRIMARY) {
+    // 1. Status Bar & Header Title (y: 0..110)
+    if y < 110 {
+        // Clock "09:20" at x: 48, y: 20
+        if y >= 20 && y < 36 {
+            if let Some(c) = test_text(x, y, 48, 20, 2, b"09:20", TEXT_PRIMARY) {
                 return c;
             }
         }
 
-        // Battery / Status at top right (x: 620..664, y: 40..56)
-        if y >= 40 && y < 56 {
-            if let Some(c) = test_text(x, y, 620, 40, 2, b"100%", TEXT_MUTED) {
+        // Wi-Fi / Battery indicator at top right
+        if y >= 20 && y < 36 {
+            if let Some(c) = test_text(x, y, 620, 20, 2, b"100%", TEXT_MUTED) {
+                return c;
+            }
+        }
+
+        // Canonical App Title: "Calculator" (bold display font at x: 48, y: 64)
+        if y >= 64 && y < 96 {
+            if let Some(c) = test_text(x, y, 48, 64, 3, b"Calculator", TEXT_PRIMARY) {
                 return c;
             }
         }
@@ -386,14 +382,14 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                         }
                     }
 
-                    // Button style: '=' is solid dark charcoal with white text; others are soft light grey
+                    // Canonical InterOS Calculator button styling:
+                    // Equals is solid dark (#111214) with white text (#FFFFFF);
+                    // all other keys use soft neutral surface (#EFEEE9) with subtle border (#E1E0DB).
                     let is_equals = row == 4 && col == 3;
                     let (btn_bg, btn_border, text_color) = if is_equals {
-                        (0xFF18181B, 0xFF18181B, 0xFFFFFFFF)
-                    } else if col == 3 || row == 0 {
-                        (0xFFF1F5F9, 0xFFE2E8F0, 0xFF0F172A)
+                        (0xFF111214, 0xFF111214, 0xFFFFFFFF)
                     } else {
-                        (0xFFF8FAFC, 0xFFE2E8F0, 0xFF0F172A)
+                        (0xFFEFEEE9, 0xFFE1E0DB, 0xFF111214)
                     };
 
                     // Subtle border rim for light buttons

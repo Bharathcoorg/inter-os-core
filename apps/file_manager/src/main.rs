@@ -23,20 +23,20 @@ const CHUNK: usize = 4096;
 // -----------------------------------------------------------------------------
 // 32-bit ARGB8888 Design Color Tokens (Screen 11 Light Theme)
 // -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFFFFFFFF;
+const BG_DARK: u32 = 0xFFF7F6F2;
 #[allow(dead_code)]
-const SURFACE_DARK: u32 = 0xFFF8FAFC;
+const SURFACE_DARK: u32 = 0xFFFFFFFF;
 #[allow(dead_code)]
-const SURFACE_RAISED: u32 = 0xFFF1F5F9;
-const BORDER_SUBTLE: u32 = 0xFFE2E8F0;
-const TEXT_PRIMARY: u32 = 0xFF0F172A;
-const TEXT_MUTED: u32 = 0xFF64748B;
+const SURFACE_RAISED: u32 = 0xFFEFEEE9;
+const BORDER_SUBTLE: u32 = 0xFFE1E0DB;
+const TEXT_PRIMARY: u32 = 0xFF111214;
+const TEXT_MUTED: u32 = 0xFF777773;
 #[allow(dead_code)]
-const ACCENT_SKY: u32 = 0xFF0284C7;
+const ACCENT_SKY: u32 = 0xFF2563EB;
 #[allow(dead_code)]
 const ACCENT_AMBER: u32 = 0xFFF59E0B;
 #[allow(dead_code)]
-const SUCCESS_EMERALD: u32 = 0xFF10B981;
+const SUCCESS_EMERALD: u32 = 0xFF2E8B57;
 #[allow(dead_code)]
 const DANGER_CRIMSON: u32 = 0xFFEF4444;
 

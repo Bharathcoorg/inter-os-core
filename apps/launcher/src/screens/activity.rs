@@ -20,11 +20,11 @@ use launcher::theme::{type_scale, SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT
 // Constants & Colors
 // -----------------------------------------------------------------------------
 
-const BG_COLOR: u32 = 0xFF0D1117;
-const CARD_BG: u32 = 0xFF161B22;
-const CARD_BORDER: u32 = 0xFF2A3240;
-const TEXT_WHITE: u32 = 0xFFF0F6FC;
-const TEXT_MUTED: u32 = 0xFF8B949E;
+const BG_COLOR: u32 = 0xFF111214;
+const CARD_BG: u32 = 0xFF25282A;
+const CARD_BORDER: u32 = 0xFF3A3D40;
+const TEXT_WHITE: u32 = 0xFFF7F6F2;
+const TEXT_MUTED: u32 = 0xFF777773;
 
 const CARD_X: usize = 32;
 const CARD_W: usize = SCREEN_WIDTH - 64; // 656

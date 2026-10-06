@@ -264,7 +264,7 @@ fn ink_polarity_flips_with_the_backdrop() {
     let t = Theme::LIGHT;
     assert_eq!(
         ink_on(&t, 0xFFFFFFFF),
-        0xFF0F172A,
+        t.ink_on_light,
         "dark ink on white"
     );
     assert_eq!(

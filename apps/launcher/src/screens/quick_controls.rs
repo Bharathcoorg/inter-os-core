@@ -18,14 +18,14 @@ use launcher::theme::{type_scale, SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT
 // Constants & Colors
 // -----------------------------------------------------------------------------
 
-const BG_COLOR: u32 = 0xFF101318;
-const TILE_BG: u32 = 0xFF1E242F;
-const TILE_BORDER: u32 = 0xFF2D3748;
-const TEXT_WHITE: u32 = 0xFFF8FAFC;
-const TEXT_MUTED: u32 = 0xFF94A3B8;
+const BG_COLOR: u32 = 0xFF111214;
+const TILE_BG: u32 = 0xFF25282A;
+const TILE_BORDER: u32 = 0xFF3A3D40;
+const TEXT_WHITE: u32 = 0xFFF7F6F2;
+const TEXT_MUTED: u32 = 0xFF777773;
 
-const SLIDER_BG: u32 = 0xFF242C3A;
-const SLIDER_FILL: u32 = 0xFFF1F5F9;
+const SLIDER_BG: u32 = 0xFF35393D;
+const SLIDER_FILL: u32 = 0xFFFFFFFF;
 
 const POWER_BTN: Rect = Rect::new(408, 644, 272, 72);
 const HOME_PILL: Rect = Rect::new(SCREEN_WIDTH / 2 - 90, SCREEN_HEIGHT - 20, 180, 5);

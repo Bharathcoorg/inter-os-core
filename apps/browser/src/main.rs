@@ -197,22 +197,22 @@ pub fn parse_uri(&self, raw_url: &'static str) -> ParsedUri {
 #[allow(dead_code)]
 const BG_DARK: u32 = 0xFFFFFFFF;
 #[allow(dead_code)]
-const SURFACE_DARK: u32 = 0xFFF8FAFC;
+const SURFACE_DARK: u32 = 0xFFF7F6F2;
 #[allow(dead_code)]
-const SURFACE_RAISED: u32 = 0xFFF1F5F9;
+const SURFACE_RAISED: u32 = 0xFFFFFFFF;
 #[allow(dead_code)]
-const BORDER_SUBTLE: u32 = 0xFFE2E8F0;
+const BORDER_SUBTLE: u32 = 0xFFE1E0DB;
 #[allow(dead_code)]
-const TEXT_PRIMARY: u32 = 0xFF0F172A;
+const TEXT_PRIMARY: u32 = 0xFF111214;
 #[allow(dead_code)]
-const TEXT_MUTED: u32 = 0xFF64748B;
+const TEXT_MUTED: u32 = 0xFF777773;
 #[allow(dead_code)]
-const ACCENT_SKY: u32 = 0xFF0284C7;
+const ACCENT_SKY: u32 = 0xFF2563EB;
 // Extra icon fills (not part of base tokens).
 #[allow(dead_code)]
-const ICON_RED: u32 = 0xFFEF4444;
+const ICON_RED: u32 = 0xFFDC2626;
 #[allow(dead_code)]
-const ICON_DARK: u32 = 0xFF18181B;
+const ICON_DARK: u32 = 0xFF111214;
 #[allow(dead_code)]
 const WHITE: u32 = 0xFFFFFFFF;
 

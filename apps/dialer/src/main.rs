@@ -233,15 +233,15 @@ impl DialerApp {
 // -----------------------------------------------------------------------------
 // 32-bit ARGB8888 Design Color Tokens (Screen 9 Modern Light Theme)
 // -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFFF8FAFC;
+const BG_DARK: u32 = 0xFFF7F6F2;
 const SURFACE_DARK: u32 = 0xFFFFFFFF;
-const SURFACE_RAISED: u32 = 0xFFF1F5F9;
-const BORDER_SUBTLE: u32 = 0xFFE2E8F0;
-const TEXT_PRIMARY: u32 = 0xFF0F172A;
-const TEXT_MUTED: u32 = 0xFF64748B;
-const ACCENT_SKY: u32 = 0xFF0284C7;
-const SUCCESS_EMERALD: u32 = 0xFF22C55E;
-const DANGER_CRIMSON: u32 = 0xFFEF4444;
+const SURFACE_RAISED: u32 = 0xFFEFEEE9;
+const BORDER_SUBTLE: u32 = 0xFFE1E0DB;
+const TEXT_PRIMARY: u32 = 0xFF111214;
+const TEXT_MUTED: u32 = 0xFF777773;
+const ACCENT_SKY: u32 = 0xFF2563EB;
+const SUCCESS_EMERALD: u32 = 0xFF2E8B57;
+const DANGER_CRIMSON: u32 = 0xFFDC2626;
 #[allow(dead_code)]
 const WARNING_AMBER: u32 = 0xFFF59E0B;
 
@@ -475,7 +475,7 @@ fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             if let Some(c) = test_text(x, y, 98, 122, 2, b"Dial", 0xFFFFFFFF) {
                 return c;
             }
-            return 0xFF18181B;
+            return 0xFF111214;
         }
         // Tab 2: "Recents" (Inactive: x: 195..345)
         if x >= 195 && x < 345 {

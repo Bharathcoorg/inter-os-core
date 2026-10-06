@@ -26,17 +26,17 @@ use launcher::theme::{type_scale, SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT
 // Constants & Colors
 // -----------------------------------------------------------------------------
 
-const BG_COLOR: u32 = 0xFFF8FAFC; // Crisp slate-50
+const BG_COLOR: u32 = 0xFFF7F6F2; // Canonical warm cream background
 const CARD_BG: u32 = 0xFFFFFFFF; // Pure white surface
-const CARD_BORDER: u32 = 0xFFE2E8F0; // Slate-200 border
-const TEXT_MAIN: u32 = 0xFF0F172A; // Slate-900
-const TEXT_MUTED: u32 = 0xFF475569; // Slate-600
-const TEXT_HINT: u32 = 0xFF94A3B8; // Slate-400
+const CARD_BORDER: u32 = 0xFFE1E0DB; // Canonical border
+const TEXT_MAIN: u32 = 0xFF111214; // Canonical near-black primary
+const TEXT_MUTED: u32 = 0xFF777773; // Canonical muted secondary
+const TEXT_HINT: u32 = 0xFF9CA3AF; // Muted hint
 
-const PILL_ACTIVE_BG: u32 = 0xFF0F172A;
+const PILL_ACTIVE_BG: u32 = 0xFF111214;
 const PILL_ACTIVE_TEXT: u32 = 0xFFFFFFFF;
-const PILL_INACTIVE_BG: u32 = 0xFFF1F5F9;
-const PILL_INACTIVE_TEXT: u32 = 0xFF475569;
+const PILL_INACTIVE_BG: u32 = 0xFFEFEEE9;
+const PILL_INACTIVE_TEXT: u32 = 0xFF777773;
 
 const CARD_X: usize = 32;
 const CARD_W: usize = SCREEN_WIDTH - 64; // 656

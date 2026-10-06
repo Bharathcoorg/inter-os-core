@@ -116,16 +116,21 @@ def check_launcher_ready():
             launcher_has_booted = True
             return True
     # Disk boot log check if serial_lines memory buffer was rotated
-    boot_log = os.path.join(os.path.dirname(DIRECTORY), "target", "x86_boot.log")
-    if os.path.exists(boot_log):
-        try:
-            with open(boot_log, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read()
-                if "[LAUNCHER] Step 5" in content or "[LAUNCHER]" in content or "name=launcher" in content:
-                    launcher_has_booted = True
-                    return True
-        except Exception:
-            pass
+    cand_logs = [
+        current_serial_log_path,
+        os.path.join(WORKSPACE_ROOT, "target", "x86_64_boot.log"),
+        os.path.join(WORKSPACE_ROOT, "target", "x86_boot.log"),
+    ]
+    for log_path in cand_logs:
+        if log_path and os.path.exists(log_path):
+            try:
+                with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                    c = f.read()
+                    if "[LAUNCHER] Step 5" in c or "[LAUNCHER]" in c or "name=launcher" in c:
+                        launcher_has_booted = True
+                        return True
+            except Exception:
+                pass
     return False
 
 # Guest package and filesystem state are authoritative. Device Studio does not

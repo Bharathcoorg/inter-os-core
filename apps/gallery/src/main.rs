@@ -22,19 +22,19 @@ const CHUNK: usize = 4096;
 // 32-bit ARGB8888 Design Color Tokens (light Photos)
 // -----------------------------------------------------------------------------
 #[allow(dead_code)]
-const BG_DARK: u32 = 0xFFFFFFFF;
+const BG_DARK: u32 = 0xFFF7F6F2;
 #[allow(dead_code)]
-const SURFACE_DARK: u32 = 0xFFF8FAFC;
+const SURFACE_DARK: u32 = 0xFFFFFFFF;
 #[allow(dead_code)]
-const SURFACE_RAISED: u32 = 0xFFF1F5F9;
+const SURFACE_RAISED: u32 = 0xFFEFEEE9;
 #[allow(dead_code)]
-const BORDER_SUBTLE: u32 = 0xFFE2E8F0;
+const BORDER_SUBTLE: u32 = 0xFFE1E0DB;
 #[allow(dead_code)]
-const TEXT_PRIMARY: u32 = 0xFF0F172A;
+const TEXT_PRIMARY: u32 = 0xFF111214;
 #[allow(dead_code)]
-const TEXT_MUTED: u32 = 0xFF64748B;
+const TEXT_MUTED: u32 = 0xFF777773;
 #[allow(dead_code)]
-const ACTIVE_PILL: u32 = 0xFF18181B;
+const ACTIVE_PILL: u32 = 0xFF111214;
 #[allow(dead_code)]
 const WHITE: u32 = 0xFFFFFFFF;
 

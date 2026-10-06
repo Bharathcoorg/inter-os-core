@@ -223,17 +223,17 @@ impl CameraApp {
 }
 
 // -----------------------------------------------------------------------------
-// Visual Design Tokens
+// Visual Design Tokens (canonical dark preview-first)
 // -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFF05080E;
-const SURFACE_RAISED: u32 = 0xFF1E293B;
-const BORDER_SUBTLE: u32 = 0xFF334155;
-const ACCENT_AMBER: u32 = 0xFFFFB800;
-const ACCENT_SKY: u32 = 0xFF38BDF8;
-const SUCCESS_EMERALD: u32 = 0xFF10B981;
-const DANGER_CRIMSON: u32 = 0xFFEF4444;
-const TEXT_PRIMARY: u32 = 0xFFF8FAFC;
-const TEXT_MUTED: u32 = 0xFF94A3B8;
+const BG_DARK: u32 = 0xFF111214;
+const SURFACE_RAISED: u32 = 0xFF25282A;
+const BORDER_SUBTLE: u32 = 0xFF3A3D40;
+const ACCENT_AMBER: u32 = 0xFFD97706;
+const ACCENT_SKY: u32 = 0xFF2563EB;
+const SUCCESS_EMERALD: u32 = 0xFF16A34A;
+const DANGER_CRIMSON: u32 = 0xFFDC2626;
+const TEXT_PRIMARY: u32 = 0xFFF7F6F2;
+const TEXT_MUTED: u32 = 0xFF777773;
 
 // -----------------------------------------------------------------------------
 // Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')

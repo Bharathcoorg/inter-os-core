@@ -596,7 +596,8 @@ fn build(state: &LauncherState) -> Paint {
         Run::whole(f.greeting.x, l2_y, caption_scale, b"Let's make a good day.", 0),
         Run::EMPTY,
     ];
-    let weather = Run::EMPTY;
+    let weather_x = f.weather.x + f.weather.w.saturating_sub(space::XXL + 48);
+    let weather = Run::whole(weather_x, l1_y + 4, type_scale::BODY, b"24", 0);
 
     let card_title = Run::whole(
         f.card_title.x,
@@ -735,14 +736,14 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
         empty: None,
     };
 
-    let fill = theme.surface_raised;
+    let fill = theme.surface;
 
     let dock_defs: [(Option<launcher::icons::IconKind>, &[u8], &[u8], u32); 6] = [
-        (Some(launcher::icons::IconKind::Phone), b"dialer", b"Phone", 0x16A34A),
-        (Some(launcher::icons::IconKind::Messages), b"messages", b"Messages", 0x2563EB),
-        (Some(launcher::icons::IconKind::Camera), b"camera", b"Camera", 0x475569),
-        (Some(launcher::icons::IconKind::Files), b"file_manager", b"Files", 0xD97706),
-        (Some(launcher::icons::IconKind::Browser), b"browser", b"Browser", 0x0284C7),
+        (Some(launcher::icons::IconKind::Phone), b"dialer", b"Phone", theme.text),
+        (Some(launcher::icons::IconKind::Messages), b"messages", b"Messages", theme.text),
+        (Some(launcher::icons::IconKind::Camera), b"camera", b"Camera", theme.text),
+        (Some(launcher::icons::IconKind::Files), b"file_manager", b"Files", theme.text),
+        (Some(launcher::icons::IconKind::Browser), b"browser", b"Browser", theme.text),
         (Some(launcher::icons::IconKind::Apps), b"apps", b"Apps", theme.text),
     ];
 
@@ -1082,8 +1083,18 @@ fn greeting_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Op
     let sun_cy = (f.greeting.y + 24) as i32;
     let sdx = x as i32 - sun_cx;
     let sdy = y as i32 - sun_cy;
-    if sdx * sdx + sdy * sdy <= 12 * 12 {
+    if sdx * sdx + sdy * sdy <= 10 * 10 {
         return Some(0xF59E0B);
+    }
+    // Small degree circle for 24 deg
+    let deg_cx = sun_cx - 24;
+    let deg_cy = (f.greeting.y + 14) as i32;
+    let ddx = x as i32 - deg_cx;
+    let ddy = y as i32 - deg_cy;
+    let dd2 = ddx * ddx + ddy * ddy;
+    if dd2 >= 4 && dd2 <= 9 {
+        let ink = layout::ink_on(theme, backdrop(theme, y));
+        return Some(ink);
     }
 
     // WHY the ink is taken per row and not baked into the runs: these four lines are
@@ -1195,17 +1206,41 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
     if p.card_stack.is_none() {
         return None;
     }
-    for row in p.card_rows.iter() {
+    for (row_idx, row) in p.card_rows.iter().enumerate() {
         if !row.rect.contains(x, y) {
             continue;
         }
-        // Circular bullet indicator on the left of each row (matching reference UI)
-        let bullet_cx = (row.rect.x + space::MD) as i32;
-        let bullet_cy = (row.rect.y + 12 + text::line_height(CARD_ROW_LABEL) / 2) as i32;
-        let bdx = x as i32 - bullet_cx;
-        let bdy = y as i32 - bullet_cy;
-        if bdx * bdx + bdy * bdy <= 4 * 4 {
-            return Some(theme.accent);
+        let icon_cx = (row.rect.x + space::MD) as i32;
+        let icon_cy = (row.rect.y + 12 + text::line_height(CARD_ROW_LABEL) / 2) as i32;
+        let idx = x as i32 - icon_cx;
+        let idy = y as i32 - icon_cy;
+
+        match row_idx {
+            0 => {
+                // Schedule: calendar icon (square outline with top hooks)
+                if idx.abs() <= 5 && idy.abs() <= 5 {
+                    if idx.abs() == 5 || idy == -5 || idy == 5 || idy == -2 {
+                        return Some(theme.accent);
+                    }
+                }
+            }
+            1 => {
+                // Messages: circular indicator dot
+                if idx * idx + idy * idy <= 4 * 4 {
+                    return Some(theme.accent);
+                }
+            }
+            _ => {
+                // Activities: checkmark icon
+                if idx.abs() <= 5 && idy.abs() <= 5 {
+                    if idx.abs() == 5 || idy.abs() == 5 {
+                        return Some(theme.accent);
+                    }
+                    if (idx == -1 && idy == 1) || (idx == 0 && idy == 2) || (idx == 2 && idy == 0) {
+                        return Some(theme.accent);
+                    }
+                }
+            }
         }
         if let Some(c) = row.name.pixel(x, y) {
             return Some(c);
