@@ -663,6 +663,7 @@ fn screen_renderer(view: ViewMode) -> ScreenPixelFn {
         ViewMode::QuickControls => get_quick_controls_color,
         ViewMode::SystemSpace => get_system_space_color,
         ViewMode::LockScreen => get_lock_screen_color,
+        ViewMode::PinEntry => get_pin_color,
         ViewMode::PowerMenu => get_power_menu_color,
         ViewMode::AppDrawer => get_app_drawer_color,
         ViewMode::Notifications => get_notifications_color,
