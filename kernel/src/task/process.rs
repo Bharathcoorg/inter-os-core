@@ -448,6 +448,7 @@ pub fn validate() -> bool {
     for record in table.iter().flatten() {
         if record.thread_count == 0 || record.thread_count > record.limits.max_threads { return false; }
         if record.open_file_count > record.limits.max_open_files { return false; }
+        if record.ipc_endpoint_count > record.limits.max_ipc_endpoints { return false; }
         if record.address_space_bytes > record.limits.max_address_space_bytes { return false; }
         let actual_threads = threads.iter().flatten().filter(|t| t.process == record.id).count();
         if actual_threads != record.thread_count as usize { return false; }
