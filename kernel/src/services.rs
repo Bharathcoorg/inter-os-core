@@ -103,6 +103,15 @@ pub fn capability_policy(id: ServiceId, parent_id: TaskId) -> Result<Vec<Service
             // layout with both absent. Read-only, and scoped to the clock, so it
             // confers no power, crypto or telephony authority.
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::RealtimeClockRead, rights: Rights::READ, object_id: 0 });
+            // The launcher owns the lock-screen interaction for the active user.
+            // Scope this authority to that account; it cannot administer another
+            // user because UserUnlock/UserLock require this exact object.
+            let active_uid = crate::user::USER_MANAGER.lock().active_user().0;
+            policy.push(ServiceCapabilitySpec {
+                cap_type: CapabilityType::SystemControl,
+                rights: Rights::INVOKE,
+                object_id: crate::syscall::user_control_object(active_uid),
+            });
         }
         ServiceId::Display => policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FrameBufferDirect, rights: Rights::WRITE, object_id: 1 }),
         ServiceId::Storage => {
