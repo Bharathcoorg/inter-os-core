@@ -6,7 +6,7 @@
 #![allow(unused_imports, dead_code)]
 
 use crate::screens::lock::LOCK_DATE_TEXT_LEN;
-use crate::{test_text, LauncherState};
+use crate::{test_text_aa, LauncherState};
 use launcher::layout::{self, Rect};
 use launcher::text;
 use launcher::theme::*;
@@ -70,7 +70,7 @@ pub(super) fn run_left(
     if y < y0 || y >= y0 + h || x < rect.x || x >= rect.x + w {
         return None;
     }
-    test_text(x, y, rect.x, y0, scale, run, color)
+    test_text_aa(x, y, rect.x, y0, scale, run, color, 0xFFFFFFFF)
 }
 
 /// Colours pixel if it falls on `run` right-aligned inside `rect`.
@@ -487,7 +487,7 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
     // 1. Status Bar
     if y < STATUS_BAR_HEIGHT {
         if state.clock_source_ok {
-            if let Some(c) = test_text(x, y, 48, 14, 1, &state.clock_time, TEXT_DARK) {
+            if let Some(c) = test_text_aa(x, y, 48, 14, 1, &state.clock_time, TEXT_DARK, 0xFFFFFFFF) {
                 return c;
             }
         }
@@ -505,7 +505,7 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
 
     // 2. Large Bold Title: "System"
     if y >= 56 && y < 96 && x >= 48 && x < 240 {
-        if let Some(c) = test_text(x, y, 48, 60, 3, b"System", TEXT_DARK) {
+        if let Some(c) = test_text_aa(x, y, 48, 60, 3, b"System", TEXT_DARK, 0xFFFFFFFF) {
             return c;
         }
     }
@@ -519,7 +519,7 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
 
     // Subtitle under sphere: "Everything in one place"
     if y >= 248 && y < 270 && x >= 240 && x < 480 {
-        if let Some(c) = test_text(x, y, 252, 250, 1, b"Everything in one place", TEXT_MUTED) {
+        if let Some(c) = test_text_aa(x, y, 252, 250, 1, b"Everything in one place", TEXT_MUTED, 0xFFFFFFFF) {
             return c;
         }
     }
@@ -530,10 +530,10 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
         if let Some(ic) = draw_device_icon(x, y, 75, 332, TEXT_DARK) {
             return ic;
         }
-        if let Some(c) = test_text(x, y, 105, 322, 2, b"Device", TEXT_DARK) {
+        if let Some(c) = test_text_aa(x, y, 105, 322, 2, b"Device", TEXT_DARK, 0xFFFFFFFF) {
             return c;
         }
-        if let Some(c) = test_text(x, y, 65, 372, 1, b"Display, Sound, Gestures", TEXT_MUTED) {
+        if let Some(c) = test_text_aa(x, y, 65, 372, 1, b"Display, Sound, Gestures", TEXT_MUTED, 0xFFFFFFFF) {
             return c;
         }
         return bg;
@@ -543,10 +543,10 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
         if let Some(ic) = draw_network_icon(x, y, 410, 332, TEXT_DARK) {
             return ic;
         }
-        if let Some(c) = test_text(x, y, 440, 322, 2, b"Network", TEXT_DARK) {
+        if let Some(c) = test_text_aa(x, y, 440, 322, 2, b"Network", TEXT_DARK, 0xFFFFFFFF) {
             return c;
         }
-        if let Some(c) = test_text(x, y, 400, 372, 1, b"Wi-Fi, Mobile, Bluetooth", TEXT_MUTED) {
+        if let Some(c) = test_text_aa(x, y, 400, 372, 1, b"Wi-Fi, Mobile, Bluetooth", TEXT_MUTED, 0xFFFFFFFF) {
             return c;
         }
         return bg;
@@ -558,10 +558,10 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
         if let Some(ic) = draw_personal_icon(x, y, 75, 472, TEXT_DARK) {
             return ic;
         }
-        if let Some(c) = test_text(x, y, 105, 462, 2, b"Personal", TEXT_DARK) {
+        if let Some(c) = test_text_aa(x, y, 105, 462, 2, b"Personal", TEXT_DARK, 0xFFFFFFFF) {
             return c;
         }
-        if let Some(c) = test_text(x, y, 65, 512, 1, b"Accounts, Language, Time", TEXT_MUTED) {
+        if let Some(c) = test_text_aa(x, y, 65, 512, 1, b"Accounts, Language, Time", TEXT_MUTED, 0xFFFFFFFF) {
             return c;
         }
         return bg;
@@ -571,10 +571,10 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
         if let Some(ic) = draw_apps_icon(x, y, 410, 472, TEXT_DARK) {
             return ic;
         }
-        if let Some(c) = test_text(x, y, 440, 462, 2, b"Apps", TEXT_DARK) {
+        if let Some(c) = test_text_aa(x, y, 440, 462, 2, b"Apps", TEXT_DARK, 0xFFFFFFFF) {
             return c;
         }
-        if let Some(c) = test_text(x, y, 400, 512, 1, b"Permissions, Storage", TEXT_MUTED) {
+        if let Some(c) = test_text_aa(x, y, 400, 512, 1, b"Permissions, Storage", TEXT_MUTED, 0xFFFFFFFF) {
             return c;
         }
         return bg;
@@ -586,10 +586,10 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
         if let Some(ic) = draw_battery_icon(x, y, 75, 627, TEXT_DARK) {
             return ic;
         }
-        if let Some(c) = test_text(x, y, 105, 617, 2, b"Power", TEXT_DARK) {
+        if let Some(c) = test_text_aa(x, y, 105, 617, 2, b"Power", TEXT_DARK, 0xFFFFFFFF) {
             return c;
         }
-        if let Some(c) = test_text(x, y, 65, 667, 1, b"Battery, Charging", TEXT_MUTED) {
+        if let Some(c) = test_text_aa(x, y, 65, 667, 1, b"Battery, Charging", TEXT_MUTED, 0xFFFFFFFF) {
             return c;
         }
         return bg;
@@ -599,10 +599,10 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
         if let Some(ic) = draw_security_icon(x, y, 410, 627, TEXT_DARK) {
             return ic;
         }
-        if let Some(c) = test_text(x, y, 440, 617, 2, b"Security", TEXT_DARK) {
+        if let Some(c) = test_text_aa(x, y, 440, 617, 2, b"Security", TEXT_DARK, 0xFFFFFFFF) {
             return c;
         }
-        if let Some(c) = test_text(x, y, 400, 667, 1, b"Lock, Encryption", TEXT_MUTED) {
+        if let Some(c) = test_text_aa(x, y, 400, 667, 1, b"Lock, Encryption", TEXT_MUTED, 0xFFFFFFFF) {
             return c;
         }
         return bg;
@@ -613,10 +613,10 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
         if let Some(ic) = draw_gear_icon(x, y, 75, 785, TEXT_DARK) {
             return ic;
         }
-        if let Some(c) = test_text(x, y, 105, 765, 2, b"System", TEXT_DARK) {
+        if let Some(c) = test_text_aa(x, y, 105, 765, 2, b"System", TEXT_DARK, 0xFFFFFFFF) {
             return c;
         }
-        if let Some(c) = test_text(x, y, 105, 800, 1, b"Updates, About, Tools", TEXT_MUTED) {
+        if let Some(c) = test_text_aa(x, y, 105, 800, 1, b"Updates, About, Tools", TEXT_MUTED, 0xFFFFFFFF) {
             return c;
         }
         return bg;

@@ -5,7 +5,7 @@
 #![allow(unused_imports, dead_code)]
 
 use super::system_space::round_contains;
-use crate::{test_text, LauncherState};
+use crate::{test_text_aa, LauncherState};
 use launcher::layout::Rect;
 use launcher::text;
 
@@ -138,7 +138,7 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     // 1. Top status bar (y < 48)
     if y < 48 {
         if state.clock_source_ok {
-            if let Some(c) = test_text(x, y, 48, 14, 1, &state.clock_time, 0xFFCBD5E1) {
+            if let Some(c) = test_text_aa(x, y, 48, 14, 1, &state.clock_time, 0xFFCBD5E1, 0xFF111214) {
                 return c;
             }
         }
@@ -165,7 +165,7 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return c;
         }
         // Single centered title text "Lock device" (scale 1, 24px height centered vertically at 190 + 25 = 215)
-        if let Some(c) = test_text(x, y, 175, 215, 1, b"Lock device", COLOR_CARD_TEXT) {
+        if let Some(c) = test_text_aa(x, y, 175, 215, 1, b"Lock device", COLOR_CARD_TEXT, 0xFF111214) {
             return c;
         }
         return COLOR_CARD_FILL;
@@ -182,7 +182,7 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return c;
         }
         // Single centered title text "Restart"
-        if let Some(c) = test_text(x, y, 175, 310, 1, b"Restart", COLOR_CARD_TEXT) {
+        if let Some(c) = test_text_aa(x, y, 175, 310, 1, b"Restart", COLOR_CARD_TEXT, 0xFF111214) {
             return c;
         }
         return COLOR_CARD_FILL;
@@ -199,7 +199,7 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return c;
         }
         // Single centered title text "Power off"
-        if let Some(c) = test_text(x, y, 175, 405, 1, b"Power off", COLOR_CARD_TEXT) {
+        if let Some(c) = test_text_aa(x, y, 175, 405, 1, b"Power off", COLOR_CARD_TEXT, 0xFF111214) {
             return c;
         }
         return COLOR_CARD_FILL;
@@ -216,7 +216,7 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return c;
         }
         // Single centered title text "Emergency"
-        if let Some(c) = test_text(x, y, 175, 500, 1, b"Emergency", COLOR_EMERGENCY_TEXT) {
+        if let Some(c) = test_text_aa(x, y, 175, 500, 1, b"Emergency", COLOR_EMERGENCY_TEXT, 0xFF111214) {
             return c;
         }
         return COLOR_EMERGENCY_FILL;
@@ -228,7 +228,7 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         if !round_contains(&inner, 26, x, y) {
             return COLOR_CANCEL_BORDER;
         }
-        if let Some(c) = test_text(x, y, 325, 595, 1, b"Cancel", COLOR_CANCEL_TEXT) {
+        if let Some(c) = test_text_aa(x, y, 325, 595, 1, b"Cancel", COLOR_CANCEL_TEXT, 0xFF111214) {
             return c;
         }
         return COLOR_CANCEL_FILL;
