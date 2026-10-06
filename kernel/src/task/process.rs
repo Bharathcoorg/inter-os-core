@@ -20,6 +20,7 @@ pub enum ProcessState { Running = 0, Background = 1, Suspended = 2, Killed = 3, 
 pub struct ResourceLimits {
     pub max_threads: u16,
     pub max_open_files: u16,
+    pub max_network_sockets: u16,
     pub max_ipc_endpoints: u16,
     pub max_address_space_bytes: u64,
     pub max_background_cpu_ticks: u64,
@@ -29,7 +30,7 @@ pub struct ResourceLimits {
 
 impl Default for ResourceLimits {
     fn default() -> Self {
-        Self { max_threads: 64, max_open_files: 256, max_ipc_endpoints: 64, max_address_space_bytes: 256 * 1024 * 1024, max_background_cpu_ticks: 500, max_background_ipc: 64, max_background_network_bytes: 1024 * 1024 }
+        Self { max_threads: 64, max_open_files: 256, max_network_sockets: 16, max_ipc_endpoints: 64, max_address_space_bytes: 256 * 1024 * 1024, max_background_cpu_ticks: 500, max_background_ipc: 64, max_background_network_bytes: 1024 * 1024 }
     }
 }
 
@@ -51,6 +52,7 @@ pub struct ProcessRecord {
     pub exit_code: i32,
     pub thread_count: u16,
     pub open_file_count: u16,
+    pub network_socket_count: u16,
     pub ipc_endpoint_count: u16,
     pub address_space_bytes: u64,
     pub limits: ResourceLimits,
@@ -68,7 +70,7 @@ pub static THREAD_TABLE: Mutex<[Option<ThreadRecord>; MAX_THREADS]> = Mutex::new
 pub fn register_leader(task: TaskId, parent_task: TaskId) -> Option<ProcessId> {
     if task == TaskId(0) { return None; }
     let id = ProcessId(NEXT_PROCESS_ID.fetch_add(1, Ordering::Relaxed));
-    let record = ProcessRecord { id, leader_task: task, parent_task, state: ProcessState::Running, exit_code: 0, thread_count: 1, open_file_count: 0, ipc_endpoint_count: 0, address_space_bytes: 0, limits: ResourceLimits::default(), user_id: 0, background_started_ticks: 0, background_cpu_ticks: 0, background_ipc: 0, background_network_bytes: 0 };
+    let record = ProcessRecord { id, leader_task: task, parent_task, state: ProcessState::Running, exit_code: 0, thread_count: 1, open_file_count: 0, network_socket_count: 0, ipc_endpoint_count: 0, address_space_bytes: 0, limits: ResourceLimits::default(), user_id: 0, background_started_ticks: 0, background_cpu_ticks: 0, background_ipc: 0, background_network_bytes: 0 };
     let mut table = PROCESS_TABLE.lock();
     let Some(slot) = table.iter_mut().find(|slot| slot.is_none()) else { return None; };
     let mut threads = THREAD_TABLE.lock();
@@ -269,6 +271,22 @@ pub fn release_ipc_endpoint(process: ProcessId) {
     }
 }
 
+pub fn reserve_network_socket(process: ProcessId) -> Result<(), &'static str> {
+    let mut table = PROCESS_TABLE.lock();
+    let record = table.iter_mut().flatten().find(|r| r.id == process).ok_or("process not found")?;
+    if !matches!(record.state, ProcessState::Running | ProcessState::Background) { return Err("process is not runnable"); }
+    if record.network_socket_count >= record.limits.max_network_sockets { return Err("network socket limit exceeded"); }
+    record.network_socket_count += 1;
+    Ok(())
+}
+
+pub fn release_network_socket(process: ProcessId) {
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(record) = table.iter_mut().flatten().find(|r| r.id == process) {
+        record.network_socket_count = record.network_socket_count.saturating_sub(1);
+    }
+}
+
 pub fn can_open_file(process: ProcessId) -> Result<(), &'static str> {
     let table = PROCESS_TABLE.lock();
     let record = table.iter().flatten().find(|r| r.id == process).ok_or("process not found")?;
@@ -448,6 +466,7 @@ pub fn validate() -> bool {
     for record in table.iter().flatten() {
         if record.thread_count == 0 || record.thread_count > record.limits.max_threads { return false; }
         if record.open_file_count > record.limits.max_open_files { return false; }
+        if record.network_socket_count > record.limits.max_network_sockets { return false; }
         if record.ipc_endpoint_count > record.limits.max_ipc_endpoints { return false; }
         if record.address_space_bytes > record.limits.max_address_space_bytes { return false; }
         let actual_threads = threads.iter().flatten().filter(|t| t.process == record.id).count();
