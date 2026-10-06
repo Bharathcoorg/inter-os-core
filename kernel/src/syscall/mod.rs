@@ -5050,6 +5050,13 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         return Err(SyscallResult::PermissionDenied);
     }
 
+    // Launch is single-instance per parent/package. Returning the live child
+    // keeps repeated home-screen taps from creating duplicate processes and
+    // surfaces; explicit restart/force-stop remains the lifecycle escape hatch.
+    if let Some(existing) = SCHEDULER.lock().find_child_by_name(parent_id, app_id) {
+        return Ok(existing);
+    }
+
     // External applications use the canonical RAPP v2 execution path. The
     // kernel verifies the package, derives capabilities only from its manifest,
     // and loads the signed ELF payload into a Ring-3 child. First-party
