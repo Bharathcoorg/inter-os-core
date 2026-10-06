@@ -234,11 +234,7 @@ impl IpcRouter {
         sender_caps
             .verify_object(cap_slot, CapabilityType::IpcSend, Rights::WRITE, dest_task.0)?;
 
-        let mailbox = self
-            .mailboxes
-            .iter_mut()
-            .find(|m| m.task_id == dest_task)
-            .ok_or(IpcError::TargetNotFound)?;
+        let mailbox = self.writable_mailbox(dest_task)?;
 
         if mailbox.queue.len() >= MAILBOX_CAPACITY {
             return Err(IpcError::MailboxFull);
