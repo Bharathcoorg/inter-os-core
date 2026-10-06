@@ -154,7 +154,13 @@ pub fn send_udp_datagram(
     };
     let eth_len = frame.serialize(&mut eth_buf).map_err(|_| NetError::BufferTooSmall)?;
 
-    // 6. Transmit into Loopback / Virtual NIC
+    // 6. Enforce the process-scoped background network budget before
+    // handing the frame to the virtual/physical network backend.
+    if let Some(task) = crate::task::SCHEDULER.lock().current_task_id() {
+        crate::task::process::consume_background_network(task, eth_len)
+            .map_err(|_| NetError::QueueFull)?;
+    }
+    // 7. Transmit into Loopback / Virtual NIC
     NETWORK_DEVICE.lock().transmit(&eth_buf[0..eth_len])
 }
 
@@ -196,6 +202,10 @@ fn transmit_tcp_payload_with_window(src_ip: Ipv4Address, src_port: u16, dst_ip: 
     let frame = EthernetFrame { dst_mac, src_mac: NETWORK_DEVICE.lock().info().mac, ethertype: EtherType::Ipv4, payload: &ip_buf[..ip_len] };
     let mut eth_buf = [0u8; 1514];
     let n = frame.serialize(&mut eth_buf).map_err(|_| NetError::BufferTooSmall)?;
+    if let Some(task) = crate::task::SCHEDULER.lock().current_task_id() {
+        crate::task::process::consume_background_network(task, n)
+            .map_err(|_| NetError::QueueFull)?;
+    }
     NETWORK_DEVICE.lock().transmit(&eth_buf[..n])?;
     Ok(payload.len())
 }
