@@ -22,6 +22,7 @@ pub use shm_pipe::{ShmError, ShmPipeManager, ShmRingBuffer, ShmSlot, DmaDescript
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use spin::Mutex;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::capability::{CapError, Capability, CapabilityId, CapabilityTable, CapabilityType, Rights};
 use crate::task::TaskId;
@@ -31,6 +32,8 @@ pub const IPC_MAX_PAYLOAD: usize = 64;
 
 /// Capacity of each task's incoming message mailbox.
 pub const MAILBOX_CAPACITY: usize = 16;
+
+static NEXT_ENDPOINT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Unique IPC endpoint identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -164,7 +167,7 @@ impl IpcRouter {
             });
         }
         if !self.endpoints.iter().any(|e| e.owner == task_id) {
-            let id = EndpointId(self.endpoints.len() as u64);
+            let id = EndpointId(NEXT_ENDPOINT_ID.fetch_add(1, Ordering::Relaxed));
             self.endpoints.push(IpcEndpoint { id, owner: task_id, is_revoked: false });
         }
         true
