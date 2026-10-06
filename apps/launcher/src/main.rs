@@ -912,26 +912,48 @@ pub extern "C" fn _start() -> ! {
 
             // Reap the foreground application when it exits.
             if let Some(child_id) = state.active_child {
-                if std::waitpid(child_id).is_ok() {
-                    state.active_child = None;
-                    refresh_runtime_recents(&mut state);
-                    state.current_view = ViewMode::HomeScreen;
-                    let mut discard = std::InputEvent {
-                        kind: 0,
-                        x: 0,
-                        y: 0,
-                        dx: 0,
-                        dy: 0,
-                        scale_milli: 1000,
-                    };
-                    while std::input_event_poll(&mut discard).is_ok() {}
-                    std::log(
-                        0,
-                        "[LAUNCHER] Foreground application exited and was reaped.",
-                    )
-                    .ok();
-                    render_view(surface, &state);
-                    let _ = std::surface_flip(4);
+                match std::waitpid(child_id) {
+                    Ok(()) => {
+                        state.active_child = None;
+                        refresh_runtime_recents(&mut state);
+                        state.current_view = ViewMode::HomeScreen;
+                        let mut discard = std::InputEvent {
+                            kind: 0,
+                            x: 0,
+                            y: 0,
+                            dx: 0,
+                            dy: 0,
+                            scale_milli: 1000,
+                        };
+                        while std::input_event_poll(&mut discard).is_ok() {}
+                        std::log(
+                            0,
+                            "[LAUNCHER] Foreground application exited and was reaped.",
+                        )
+                        .ok();
+                        render_view(surface, &state);
+                        let _ = std::surface_flip(4);
+                    }
+                    Err(code) if code != -30 => {
+                        // Child exited or invalid PID: clear active_child
+                        state.active_child = None;
+                        refresh_runtime_recents(&mut state);
+                        let mut discard = std::InputEvent {
+                            kind: 0,
+                            x: 0,
+                            y: 0,
+                            dx: 0,
+                            dy: 0,
+                            scale_milli: 1000,
+                        };
+                        while std::input_event_poll(&mut discard).is_ok() {}
+                        std::log(
+                            0,
+                            "[LAUNCHER] Foreground application no longer running; cleared active child.",
+                        )
+                        .ok();
+                    }
+                    _ => {}
                 }
             }
 
@@ -956,16 +978,17 @@ pub extern "C" fn _start() -> ! {
             }
 
             // Consume normalized touch input pipeline
-            if state.active_child.is_none() && (events & std::EVENT_TOUCH_INPUT) != 0 {
-                let mut input = std::InputEvent {
-                    kind: 0,
-                    x: 0,
-                    y: 0,
-                    dx: 0,
-                    dy: 0,
-                    scale_milli: 1000,
-                };
-                while std::input_event_poll(&mut input).is_ok() {
+            let mut input = std::InputEvent {
+                kind: 0,
+                x: 0,
+                y: 0,
+                dx: 0,
+                dy: 0,
+                scale_milli: 1000,
+            };
+            while (state.active_child.is_none() || state.current_view == ViewMode::LockScreen)
+                && std::input_event_poll(&mut input).is_ok()
+            {
                     if input.kind == 7 {
                         if state.current_view == ViewMode::HomeScreen {
                             refresh_runtime_recents(&mut state);
@@ -975,6 +998,21 @@ pub extern "C" fn _start() -> ! {
                             render_view(surface, &state);
                             let _ = std::surface_flip(4);
                             std::log(0, "[LAUNCHER] Overview / Recent Apps switcher opened via swipe-up gesture.").ok();
+                        } else if state.current_view == ViewMode::LockScreen {
+                            state.current_view = ViewMode::HomeScreen;
+                            render_view(surface, &state);
+                            let _ = std::surface_flip(4);
+                            std::log(0, "[LAUNCHER] Device unlocked via swipe/slide gesture. Home surface rendered.").ok();
+                            let mut drain = std::InputEvent {
+                                kind: 0,
+                                x: 0,
+                                y: 0,
+                                dx: 0,
+                                dy: 0,
+                                scale_milli: 1000,
+                            };
+                            while std::input_event_poll(&mut drain).is_ok() {}
+                            break;
                         } else {
                             state.current_view = ViewMode::HomeScreen;
                             render_view(surface, &state);
@@ -1369,9 +1407,10 @@ pub extern "C" fn _start() -> ! {
                             // here, and the delta the kernel chooses to report for
                             // a fling varies with how the pointer was released, so
                             // gating on it would drop unlocks at random.
-                            let swipe_up =
-                                is_drag(input.kind) && (input.dy < 0 || input.dx > 25);
-                            if swipe_up || input.kind == DRAG_FLING {
+                            let swipe_up = (is_drag(input.kind) && (input.dy < 0 || input.dx > 25))
+                                || input.kind == DRAG_FLING
+                                || input.kind == 7;
+                            if swipe_up {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
                                 let _ = std::surface_flip(4);
@@ -1466,7 +1505,7 @@ pub extern "C" fn _start() -> ! {
                                 }
 
                                 // Tap anywhere to unlock
-                                if y >= 100 {
+                                if y >= 60 || x < 480 {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
@@ -2149,7 +2188,6 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
             }
-        }
         std::yield_now();
     }
 }
