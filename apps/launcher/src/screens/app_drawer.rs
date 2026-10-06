@@ -166,9 +166,38 @@ pub fn app_drawer_per_page(state: &LauncherState) -> usize {
     drawer_columns(state) * DRAWER_ROWS
 }
 
+/// Category tabs: All, Work, Personal, Tools.
+pub const APP_DRAWER_TAB_NAMES: [&[u8]; 4] = [b"All", b"Work", b"Personal", b"Tools"];
+
+/// Filters installed application indices matching the specified category tab.
+pub fn filtered_indices(state: &LauncherState, tab: usize, out: &mut [usize; 32]) -> usize {
+    let mut count = 0;
+    for i in 0..state.app_count.min(32) {
+        let matches = if tab == 0 {
+            true
+        } else {
+            let cat_len = state.app_category_lens[i] as usize;
+            let cat = &state.app_categories[i][..cat_len];
+            match tab {
+                1 => cat == b"Work",
+                2 => cat == b"Personal",
+                3 => cat == b"Tools",
+                _ => true,
+            }
+        };
+        if matches {
+            out[count] = i;
+            count += 1;
+        }
+    }
+    count
+}
+
 /// How many pages the current catalogue needs.
 pub fn app_drawer_page_count(state: &LauncherState) -> usize {
-    layout::pages(state.app_count, app_drawer_per_page(state))
+    let mut filtered = [0usize; 32];
+    let count = filtered_indices(state, state.app_drawer_tab, &mut filtered);
+    layout::pages(count, app_drawer_per_page(state))
 }
 
 /// The page actually shown, clamped into range.
@@ -177,7 +206,12 @@ pub fn app_drawer_page_count(state: &LauncherState) -> usize {
 /// mutates, and a catalogue that shrank underneath it would otherwise render an
 /// empty page and claim there were two of them.
 pub fn app_drawer_page(state: &LauncherState) -> usize {
-    state.app_drawer_page.min(app_drawer_page_count(state) - 1)
+    let pages = app_drawer_page_count(state);
+    if pages == 0 {
+        0
+    } else {
+        state.app_drawer_page.min(pages - 1)
+    }
 }
 
 /// The cell rectangle for slot `slot` of the current page, at the drawer's stable
@@ -195,22 +229,39 @@ fn current_grid(capacity: usize) -> layout::Grid {
 /// the grid from hardcoded row and column bands, so any change to the layout would
 /// have left taps pointing at the wrong app. This is the same geometry the screen
 /// draws with, so the two cannot drift.
-/// app_drawer_hit, app_drawer_dot_at, app_drawer_log and log_render are the shell's
-/// half of this screen's contract and are documented as such; they carry the same
-/// allowance as [`APP_DRAWER_LOG_CAP`] above.
 #[allow(dead_code)]
 pub fn app_drawer_hit(state: &LauncherState, x: usize, y: usize) -> Option<usize> {
-    if state.app_count == 0 {
+    let mut filtered = [0usize; 32];
+    let count = filtered_indices(state, state.app_drawer_tab, &mut filtered);
+    if count == 0 {
         return None;
     }
     let capacity = app_drawer_per_page(state);
     let g = current_grid(capacity);
     let slot = slot_at(&g, x, y)?;
-    let (start, end) = layout::page_slice(state.app_count, capacity, app_drawer_page(state));
+    let (start, end) = layout::page_slice(count, capacity, app_drawer_page(state));
     if slot >= end - start {
         return None;
     }
-    Some(start + slot)
+    Some(filtered[start + slot])
+}
+
+/// Which category filter chip was tapped at (`x`, `y`), if any.
+#[allow(dead_code)]
+pub fn app_drawer_chip_at(x: usize, y: usize) -> Option<usize> {
+    let f = frame();
+    if !f.chips.contains(x, y) {
+        return None;
+    }
+    let gap = 10usize;
+    let chip_w = (f.chips.w.saturating_sub(gap * 3)) / 4;
+    for i in 0..4 {
+        let cx = f.chips.x + i * (chip_w + gap);
+        if (cx..cx + chip_w).contains(&x) {
+            return Some(i);
+        }
+    }
+    None
 }
 
 /// Which page the pagination dot at (`x`, `y`) jumps to, if any.
@@ -338,6 +389,7 @@ fn search_placeholder(state: &LauncherState) -> ([u8; 32], usize) {
 }
 
 /// The filter chip's label: the whole catalogue, counted.
+#[allow(dead_code)]
 fn chip_label(state: &LauncherState) -> ([u8; 32], usize) {
     let mut buf = [0u8; 32];
     let n = join_count(b"All ", state.app_count, b" apps", &mut buf);
@@ -420,6 +472,7 @@ impl Run {
     ///
     /// WHY the empty catalogue's headline uses this and not [`Run::centred`]: the old
     /// painter measured and centred it without ever offering it a width to fit.
+    #[allow(dead_code)]
     fn centred_whole(
         x: usize,
         y: usize,
@@ -522,12 +575,17 @@ struct StatusPlan {
 /// swipe.
 const MAX_TILES: usize = DRAWER_ROWS * 6;
 
+struct ChipPlan {
+    rect: Rect,
+    label: Run,
+    active: bool,
+}
+
 /// Everything the painters need that does not depend on the pixel.
 struct Paint {
     status: StatusPlan,
     search: Run,
-    chip: Run,
-    chip_rect: Rect,
+    chips: [ChipPlan; 4],
     /// One dot per page: the first dot's centre and the current page.
     dots_x0: usize,
     dots_cy: usize,
@@ -597,31 +655,54 @@ fn build(state: &LauncherState) -> Paint {
         theme.text_muted,
     );
 
-    // Filter chip: its own width comes from the label's measured width, so the
-    // measurement has to happen before the chip rectangle exists.
-    let (chip_raw, chip_len) = chip_label(state);
-    let chip_w =
-        (text::measure(&chip_raw[..chip_len], LABEL_SCALE) + space::MD * 2).min(f.chips.w);
-    let chip_rect = Rect::new(f.chips.x, f.chips.y, chip_w, f.chips.h);
-    let chip = Run::centred(
-        chip_rect.x,
-        chip_rect.center_y() - text::line_height(LABEL_SCALE) / 2,
-        LABEL_SCALE,
-        chip_rect.w.saturating_sub(space::MD * 2),
-        chip_rect.w,
-        &chip_raw[..chip_len],
-        layout::ink_on(&theme, theme.surface),
-    );
+    // 4 Category Filter Chips: All, Work, Personal, Tools
+    let gap = 10usize;
+    let chip_w = (f.chips.w.saturating_sub(gap * 3)) / 4;
+    let chip_h = 36usize;
+    let chip_y = f.chips.y + (f.chips.h.saturating_sub(chip_h)) / 2;
+    let mut chips = [
+        ChipPlan { rect: Rect::new(0, 0, 0, 0), label: Run::EMPTY, active: false },
+        ChipPlan { rect: Rect::new(0, 0, 0, 0), label: Run::EMPTY, active: false },
+        ChipPlan { rect: Rect::new(0, 0, 0, 0), label: Run::EMPTY, active: false },
+        ChipPlan { rect: Rect::new(0, 0, 0, 0), label: Run::EMPTY, active: false },
+    ];
+    for (i, label_bytes) in APP_DRAWER_TAB_NAMES.iter().enumerate() {
+        let chip_x = f.chips.x + i * (chip_w + gap);
+        let chip_rect = Rect::new(chip_x, chip_y, chip_w, chip_h);
+        let active = state.app_drawer_tab == i;
+        let ink = if active {
+            theme.bg
+        } else {
+            theme.text
+        };
+        let label = Run::centred(
+            chip_rect.x,
+            chip_rect.center_y() - text::line_height(LABEL_SCALE) / 2,
+            LABEL_SCALE,
+            chip_rect.w.saturating_sub(space::SM * 2),
+            chip_rect.w,
+            label_bytes,
+            ink,
+        );
+        chips[i] = ChipPlan {
+            rect: chip_rect,
+            label,
+            active,
+        };
+    }
 
-    // Grid and this page's tiles.
+    // Grid and this page's filtered tiles.
+    let mut filtered = [0usize; 32];
+    let filtered_count = filtered_indices(state, state.app_drawer_tab, &mut filtered);
     let capacity = app_drawer_per_page(state);
-    let page_total = layout::pages(state.app_count, capacity);
+    let page_total = layout::pages(filtered_count, capacity);
     let page = app_drawer_page(state);
-    let (start, end) = layout::page_slice(state.app_count, capacity, page);
+    let (start, end) = layout::page_slice(filtered_count, capacity, page);
     let grid = current_grid(capacity);
     let mut tiles = [TilePlan::EMPTY; MAX_TILES];
-    for slot in 0..(end - start).min(MAX_TILES) {
-        let index = start + slot;
+    let shown = (end - start).min(MAX_TILES);
+    for slot in 0..shown {
+        let index = filtered[start + slot];
         let Some(cell) = layout::grid_cell(&grid, slot) else {
             continue;
         };
@@ -657,10 +738,6 @@ fn build(state: &LauncherState) -> Paint {
             hue,
             icon: icon_kind,
             badge: badge_run,
-            // WHY ellipsize rather than draw the name whole: the label buffer is
-            // sixteen bytes and the registry has no idea how wide the tile is, so a
-            // long name used to be drawn at its full width straight through the
-            // neighbouring tile.
             label: Run::centred(
                 cell.x,
                 top + icon_d + space::MD,
@@ -673,48 +750,20 @@ fn build(state: &LauncherState) -> Paint {
         };
     }
 
-    // WHY the message is resolved here: it is a constant string, but the old painter
-    // re-wrapped it and re-centred both lines for every pixel of the grid area.
-    let empty = if state.app_count == 0 {
-        const HEAD: &[u8] = b"No apps yet";
-        const BODY: &[u8] = b"No active packages are installed.";
-        let head_h = text::line_height(type_scale::TITLE);
-        let body_h = text::line_height(LABEL_SCALE);
-        let block_h = head_h + space::MD + body_h;
-        let top = f.grid.y + f.grid.h.saturating_sub(block_h) / 2;
-        let room = f.grid.w.saturating_sub(space::XXL * 2);
-        let (breaks, lines) = text::wrap(BODY, LABEL_SCALE, room, 2);
-        let mut body = [Run::EMPTY; 2];
-        let mut start_at = 0usize;
-        let mut n = 0usize;
-        for line in 0..lines {
-            let len = breaks[line];
-            body[n] = Run::centred(
-                f.grid.x,
-                top + head_h + space::MD + line * (body_h + space::XS),
-                LABEL_SCALE,
-                room,
-                f.grid.w,
-                &BODY[start_at..start_at + len],
-                theme.text_muted,
-            );
-            n += 1;
-            start_at += len;
-            if start_at < BODY.len() && BODY[start_at] == b' ' {
-                start_at += 1;
-            }
-        }
+    let empty = if filtered_count == 0 {
+        let (head_bytes, body_bytes) = match state.app_drawer_tab {
+            1 => (&b"No Work Apps"[..], &b"No work applications installed"[..]),
+            2 => (&b"No Personal Apps"[..], &b"No personal applications installed"[..]),
+            3 => (&b"No Tool Apps"[..], &b"No tool applications installed"[..]),
+            _ => (&b"No apps installed"[..], &b"The package registry is empty"[..]),
+        };
         Some(EmptyPlan {
-            head: Run::centred_whole(
-                f.grid.x,
-                top,
-                type_scale::TITLE,
-                f.grid.w,
-                HEAD,
-                theme.text,
-            ),
-            body,
-            body_count: n,
+            head: Run::whole(f.grid.x, f.grid.y + 40, type_scale::TITLE, head_bytes, theme.text),
+            body: [
+                Run::whole(f.grid.x, f.grid.y + 80, type_scale::BODY, body_bytes, theme.text_muted),
+                Run::EMPTY,
+            ],
+            body_count: 1,
         })
     } else {
         None
@@ -725,17 +774,16 @@ fn build(state: &LauncherState) -> Paint {
     Paint {
         status,
         search,
-        chip,
-        chip_rect,
+        chips,
         dots_x0: f.dots.x + (f.dots.w - span) / 2,
         dots_cy: f.dots.center_y(),
         dots_total: page_total,
         dots_current: page,
         grid,
         tiles,
-        shown: (end - start).min(MAX_TILES),
+        shown,
         empty,
-        }
+    }
 }
 
 /// This frame's plan.
@@ -898,22 +946,27 @@ fn search_field(x: usize, y: usize, field: &Rect, theme: &Theme, p: &Paint) -> u
     theme.surface_raised
 }
 
-/// The filter row. WHY one chip and not one per capability: capability rows are what
-/// the reference shows, and a capability chip is a filter that filters nothing. So
-/// the row says what it selects instead -- the whole catalogue, counted.
+/// The filter row: 4 category chips (All, Work, Personal, Tools).
 fn filter_chips(x: usize, y: usize, theme: &Theme, p: &Paint) -> u32 {
-    // WHY the chip's own width is already resolved: it came from measuring the label,
-    // which meant the label had to be measured before the chip rectangle existed.
-    if !inside_rounded(p.chip_rect, x, y, radius::CONTROL) {
-        return theme.bg;
+    for chip in p.chips.iter() {
+        if chip.rect.contains(x, y) {
+            let rad = radius::CHIP;
+            if inside_rounded(chip.rect, x, y, rad) {
+                if let Some(c) = chip.label.pixel(x, y) {
+                    return c;
+                }
+                if chip.active {
+                    return theme.text;
+                } else {
+                    if !inside_rounded(chip.rect.inset(1), x, y, rad.saturating_sub(1)) {
+                        return theme.border;
+                    }
+                    return theme.surface;
+                }
+            }
+        }
     }
-    if !inside_rounded(p.chip_rect.inset(1), x, y, radius::CONTROL - 1) {
-        return theme.accent;
-    }
-    if let Some(c) = p.chip.pixel(x, y) {
-        return c;
-    }
-    theme.surface
+    theme.bg
 }
 
 /// Page dots.

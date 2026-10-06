@@ -119,6 +119,8 @@ pub struct LauncherState {
     pub app_labels: [[u8; 16]; 32],
     pub app_label_lens: [u8; 32],
     pub app_icons: [[u8; 4]; 32],
+    pub app_categories: [[u8; 8]; 32],
+    pub app_category_lens: [u8; 32],
     pub app_count: usize,
     pub app_drawer_page: usize,
     pub active_child: Option<u64>,
@@ -142,6 +144,8 @@ impl LauncherState {
             app_labels: [[0u8; 16]; 32],
             app_label_lens: [0u8; 32],
             app_icons: [[0u8; 4]; 32],
+            app_categories: [[0u8; 8]; 32],
+            app_category_lens: [0u8; 32],
             app_count: 0,
             app_drawer_page: 0,
             active_child: None,
@@ -421,6 +425,7 @@ fn refresh_package_catalog(state: &mut LauncherState) {
         let Some(icon) = fields.next() else {
             continue;
         };
+        let category = fields.next().unwrap_or(b"Tools");
         if status != b"active" || id.is_empty() || id.len() > 32 || display_name.is_empty() {
             continue;
         }
@@ -441,6 +446,10 @@ fn refresh_package_catalog(state: &mut LauncherState) {
         let icon_len = icon.len().min(4);
         state.app_icons[idx][..icon_len].copy_from_slice(&icon[..icon_len]);
         state.app_icons[idx][icon_len..].fill(b' ');
+
+        let cat_len = category.len().min(8);
+        state.app_categories[idx][..cat_len].copy_from_slice(&category[..cat_len]);
+        state.app_category_lens[idx] = cat_len as u8;
 
         state.app_count += 1;
     }
@@ -1675,7 +1684,9 @@ pub extern "C" fn _start() -> ! {
                             if input.kind == 1 {
                                 let _x = input.x as usize;
                                 let y = input.y as usize;
-                                if (140..180).contains(&y) {
+                                if let Some(tab) = screens::app_drawer::app_drawer_chip_at(input.x as usize, input.y as usize) {
+                                    state.app_drawer_tab = tab;
+                                    state.app_drawer_page = 0;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
                                     std::log(0, "[LAUNCHER] App drawer category tab switched.").ok();
