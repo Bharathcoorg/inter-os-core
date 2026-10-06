@@ -217,9 +217,23 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Guard right pane from ever scrolling vertically
-  ideRightPane?.addEventListener('scroll', () => {
-    if (ideRightPane.scrollTop !== 0) ideRightPane.scrollTop = 0;
+  // View Mode Switcher (Smartphone View vs Studio Telemetry Deck)
+  const btnShowPhone = document.getElementById('btn-show-phone');
+  const btnShowTelemetry = document.getElementById('btn-show-telemetry');
+  const studioWorkspace = document.getElementById('studio-workspace');
+
+  btnShowPhone?.addEventListener('click', () => {
+    btnShowPhone.classList.add('active');
+    btnShowTelemetry?.classList.remove('active');
+    studioWorkspace?.classList.add('smartphone-mode');
   });
+
+  btnShowTelemetry?.addEventListener('click', () => {
+    btnShowTelemetry.classList.add('active');
+    btnShowPhone?.classList.remove('active');
+    studioWorkspace?.classList.remove('smartphone-mode');
+  });
+
 
   // =========================================================================
   // HARDWARE TELEMETRY & REAL QEMU PROFILER
@@ -386,14 +400,22 @@ document.addEventListener('DOMContentLoaded', () => {
   fetchHardwareTelemetry();
   setInterval(fetchHardwareTelemetry, 1500);
 
-  // Warm Reboot Microkernel Button Wiring
-  btnRebootKernel?.addEventListener('click', async () => {
-    btnRebootKernel.style.pointerEvents = 'none';
-    const span = btnRebootKernel.querySelector('span');
-    const originalText = span ? span.textContent : 'Reboot OS';
-    if (span) span.textContent = 'Rebooting...';
-    playBeep(440, 0.1, 'square');
+  // Warm Reboot Microkernel Flow (Flicker-Free & Synced)
+  async function executeWarmReboot() {
+    isBooting = true;
+    hasLauncherPresented = false;
+    stopScanoutStream();
+    if (screenLiveScanout) screenLiveScanout.style.display = 'none';
+
+    if (btnRebootKernel) {
+      btnRebootKernel.style.pointerEvents = 'none';
+      const span = btnRebootKernel.querySelector('span');
+      if (span) span.textContent = 'Rebooting...';
+    }
+
     logConsole('warn', '[KERNEL_EVENT] Warm reboot signal dispatched to hardware controller...');
+    showToast('Rebooting InterOS...');
+    playBeep(440, 0.1, 'square');
 
     try {
       const res = await fetch('/api/qemu/reboot', { method: 'POST' });
@@ -406,12 +428,26 @@ document.addEventListener('DOMContentLoaded', () => {
       logConsole('err', `[REBOOT_ERROR] Failed to send reboot: ${err.message}`);
     }
 
+    if (bootCheckInterval) clearInterval(bootCheckInterval);
+    bootCheckInterval = setInterval(checkLauncherBootReady, 400);
+
     setTimeout(() => {
-      fetchHardwareTelemetry();
-      if (span) span.textContent = originalText;
-      btnRebootKernel.style.pointerEvents = 'auto';
-    }, 1200);
-  });
+      if (isBooting) {
+        isBooting = false;
+        if (bootCheckInterval) clearInterval(bootCheckInterval);
+        refreshScanoutFrame();
+        if (screenLiveScanout) screenLiveScanout.style.display = 'flex';
+        startScanoutStream();
+        if (btnRebootKernel) {
+          btnRebootKernel.style.pointerEvents = 'auto';
+          const span = btnRebootKernel.querySelector('span');
+          if (span) span.textContent = 'Reboot OS';
+        }
+      }
+    }, 45000);
+  }
+
+  btnRebootKernel?.addEventListener('click', executeWarmReboot);
 
   // =========================================================================
   // Authentic Microkernel Display & Live Scanout Controller
@@ -443,11 +479,20 @@ document.addEventListener('DOMContentLoaded', () => {
   function refreshScanoutFrame() {
     if (!liveScanoutImg || scanoutInFlight) return;
     scanoutInFlight = true;
-    const url = `/api/screen/frame?t=${Date.now()}${cropMode === 'full' ? '&full=1' : ''}`;
-    const done = () => { scanoutInFlight = false; };
-    liveScanoutImg.addEventListener('load', done, { once: true });
-    liveScanoutImg.addEventListener('error', done, { once: true });
-    liveScanoutImg.src = url;
+    const orientParam = (state.isLandscape || cropMode === 'full') ? '&orientation=landscape&full=1' : '';
+    const url = `/api/screen/frame?t=${Date.now()}${orientParam}`;
+    const preloader = new Image();
+    preloader.onload = () => {
+      // Swap source instantaneously only after the image is fully decoded in browser memory.
+      // This completely eliminates any blank frames, white flashes, or flickering.
+      liveScanoutImg.src = preloader.src;
+      scanoutInFlight = false;
+    };
+    preloader.onerror = () => {
+      // On transient network or busy state, keep existing frame visible without flickering.
+      scanoutInFlight = false;
+    };
+    preloader.src = url;
   }
 
   function startScanoutStream() {
@@ -496,57 +541,100 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  // Exact sub-rectangle occupied by the decoded pixels inside the <img> element
+  // accounting for CSS object-fit: contain letterboxing/pillarboxing.
+  function getRenderedImageRect(img) {
+    const rect = img.getBoundingClientRect();
+    const natW = img.naturalWidth || (state.isLandscape ? 1280 : 720);
+    const natH = img.naturalHeight || (state.isLandscape ? 720 : 1440);
+    const imgAspect = natW / natH;
+    const contAspect = rect.width / rect.height;
+    let renderW, renderH, renderX, renderY;
+    if (contAspect > imgAspect) {
+      renderH = rect.height;
+      renderW = renderH * imgAspect;
+      renderX = rect.left + (rect.width - renderW) / 2;
+      renderY = rect.top;
+    } else {
+      renderW = rect.width;
+      renderH = renderW / imgAspect;
+      renderX = rect.left;
+      renderY = rect.top + (rect.height - renderH) / 2;
+    }
+    return { left: renderX, top: renderY, width: renderW, height: renderH };
+  }
+
+  const virtualTouchDot = document.getElementById('virtual-touch-dot');
+  function updateVirtualTouch(clientX, clientY, active) {
+    if (!virtualTouchDot || !screenLiveScanout) return;
+    if (!active) {
+      virtualTouchDot.classList.remove('active');
+      return;
+    }
+    const screenRect = screenLiveScanout.getBoundingClientRect();
+    const x = clientX - screenRect.left;
+    const y = clientY - screenRect.top;
+    virtualTouchDot.style.left = `${x}px`;
+    virtualTouchDot.style.top = `${y}px`;
+    virtualTouchDot.classList.add('active');
+  }
+
   // THE GUEST INPUT PATH.
   // Pointer input on the framebuffer is the studio's only gesture surface and it
   // goes straight to the guest over POST /api/touch/event. Coordinates are
   // mapped into whichever space the guest compositor is being displayed in:
-  //   cropMode 'portrait' -> coords:"portrait"          (logical 720x1440)
-  //   cropMode 'full'     -> coords:"guest_framebuffer" (scanout 1280x720)
-  // server.py converts framebuffer space back to logical space in one place, so
-  // the studio never has to know the letterbox geometry.
+  //   portrait  -> coords:"portrait"  (logical 720x1440)
+  //   landscape -> coords:"landscape" (scanout 1280x720)
   if (liveScanoutImg) {
     let isPointerDown = false;
     let startX = 0, startY = 0;
 
     liveScanoutImg.addEventListener('pointerdown', (ev) => {
       isPointerDown = true;
-      const rect = liveScanoutImg.getBoundingClientRect();
-      startX = (ev.clientX - rect.left) / rect.width;
-      startY = (ev.clientY - rect.top) / rect.height;
+      const renderRect = getRenderedImageRect(liveScanoutImg);
+      startX = Math.max(0, Math.min(1, (ev.clientX - renderRect.left) / renderRect.width));
+      startY = Math.max(0, Math.min(1, (ev.clientY - renderRect.top) / renderRect.height));
+      updateVirtualTouch(ev.clientX, ev.clientY, true);
       try { liveScanoutImg.setPointerCapture(ev.pointerId); } catch (_) {}
+    });
+
+    liveScanoutImg.addEventListener('pointermove', (ev) => {
+      if (isPointerDown) {
+        updateVirtualTouch(ev.clientX, ev.clientY, true);
+      }
     });
 
     liveScanoutImg.addEventListener('pointerup', async (ev) => {
       if (!isPointerDown) return;
       isPointerDown = false;
-      const rect = liveScanoutImg.getBoundingClientRect();
-      const endX = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
-      const endY = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
+      updateVirtualTouch(ev.clientX, ev.clientY, false);
+      const renderRect = getRenderedImageRect(liveScanoutImg);
+      const endX = Math.max(0, Math.min(1, (ev.clientX - renderRect.left) / renderRect.width));
+      const endY = Math.max(0, Math.min(1, (ev.clientY - renderRect.top) / renderRect.height));
       const dx = endX - startX;
       const dy = endY - startY;
-      const dist = Math.hypot(dx * rect.width, dy * rect.height);
+      const dist = Math.hypot(dx * renderRect.width, dy * renderRect.height);
 
-      // Coordinate mapping
       let payload;
-      if (cropMode === 'portrait') {
+      if (state.isLandscape || cropMode === 'full') {
+        const gx1 = Math.max(0, Math.min(1279, Math.round(startX * 1279)));
+        const gy1 = Math.max(0, Math.min(719, Math.round(startY * 719)));
+        const gx2 = Math.max(0, Math.min(1279, Math.round(endX * 1279)));
+        const gy2 = Math.max(0, Math.min(719, Math.round(endY * 719)));
+        if (dist > 14) {
+          payload = { action: 'swipe', coords: 'landscape', x: gx1, y: gy1, x2: gx2, y2: gy2, steps: 5 };
+        } else {
+          payload = { action: 'tap', coords: 'landscape', x: gx2, y: gy2 };
+        }
+      } else {
         const px1 = Math.max(0, Math.min(719, Math.round(startX * 719)));
         const py1 = Math.max(0, Math.min(1439, Math.round(startY * 1439)));
         const px2 = Math.max(0, Math.min(719, Math.round(endX * 719)));
         const py2 = Math.max(0, Math.min(1439, Math.round(endY * 1439)));
-        if (dist > 18) {
+        if (dist > 14) {
           payload = { action: 'swipe', coords: 'portrait', x: px1, y: py1, x2: px2, y2: py2, steps: 5 };
         } else {
           payload = { action: 'tap', coords: 'portrait', x: px2, y: py2 };
-        }
-      } else {
-        const gx1 = Math.max(0, Math.min(1279, Math.round(startX * 1280)));
-        const gy1 = Math.max(0, Math.min(719, Math.round(startY * 720)));
-        const gx2 = Math.max(0, Math.min(1279, Math.round(endX * 1280)));
-        const gy2 = Math.max(0, Math.min(719, Math.round(endY * 720)));
-        if (dist > 18) {
-          payload = { action: 'swipe', coords: 'guest_framebuffer', x: gx1, y: gy1, x2: gx2, y2: gy2, steps: 5 };
-        } else {
-          payload = { action: 'tap', coords: 'guest_framebuffer', x: gx2, y: gy2 };
         }
       }
 
@@ -558,14 +646,14 @@ document.addEventListener('DOMContentLoaded', () => {
         });
       } catch (_) {}
 
-      // Fast responsive frame refreshes
       setTimeout(refreshScanoutFrame, 35);
-      setTimeout(refreshScanoutFrame, 120);
-      setTimeout(refreshScanoutFrame, 260);
+      setTimeout(refreshScanoutFrame, 100);
+      setTimeout(refreshScanoutFrame, 220);
     });
 
     liveScanoutImg.addEventListener('pointercancel', () => {
       isPointerDown = false;
+      updateVirtualTouch(0, 0, false);
     });
   }
 
@@ -694,9 +782,15 @@ document.addEventListener('DOMContentLoaded', () => {
           bootCheckInterval = null;
         }
         isBooting = false;
+        hasLauncherPresented = true;
         refreshScanoutFrame();
         if (screenLiveScanout) screenLiveScanout.style.display = 'flex';
         startScanoutStream();
+        if (btnRebootKernel) {
+          btnRebootKernel.style.pointerEvents = 'auto';
+          const span = btnRebootKernel.querySelector('span');
+          if (span) span.textContent = 'Reboot OS';
+        }
         logConsole('ok', '[LAUNCHER] Guest scanout ready and presented.');
         showToast('InterOS Ready');
       }
@@ -776,36 +870,10 @@ document.addEventListener('DOMContentLoaded', () => {
   // A second handler used to be registered here too, so one click downloaded the
   // same guest framebuffer twice; only the thorough one survives.
 
-  // Rotate Screen Button (Toggle Portrait Crop vs Full 720p)
-  emuBtnRotate?.addEventListener('click', () => {
-    setScanoutMode(cropMode === 'portrait' ? 'full' : 'portrait');
-    showToast(`Screen mode: ${cropMode === 'portrait' ? 'Portrait Phone' : 'Full Scanout'}`);
-  });
+  // Rotate Screen button is handled by the comprehensive orientation handler below
 
   // Warm Reboot Microkernel Button
-  emuBtnReboot?.addEventListener('click', async () => {
-    isBooting = true;
-    stopScanoutStream();
-    if (screenLiveScanout) screenLiveScanout.style.display = 'none';
-    logConsole('warn', '[REBOOT] Warm rebooting microkernel...');
-    showToast('Rebooting InterOS...');
-
-    try {
-      await fetch('/api/qemu/reboot', { method: 'POST' });
-    } catch (_) {}
-
-    if (bootCheckInterval) clearInterval(bootCheckInterval);
-    bootCheckInterval = setInterval(checkLauncherBootReady, 400);
-    setTimeout(() => {
-      if (isBooting) {
-        isBooting = false;
-        if (bootCheckInterval) clearInterval(bootCheckInterval);
-        refreshScanoutFrame();
-        if (screenLiveScanout) screenLiveScanout.style.display = 'flex';
-        startScanoutStream();
-      }
-    }, 45000);
-  });
+  emuBtnReboot?.addEventListener('click', executeWarmReboot);
 
   // Back / Home / Recents (◁ ○ ▢).
   // WHY: the studio has no screens to switch between, so these inject the guest's
@@ -1012,16 +1080,31 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Rotate Screen (Orientation)
-  emuBtnRotate?.addEventListener('click', () => {
+  emuBtnRotate?.addEventListener('click', async () => {
     state.isLandscape = !state.isLandscape;
+    const orient = state.isLandscape ? 'landscape' : 'portrait';
+    cropMode = state.isLandscape ? 'full' : 'portrait';
     if (state.isLandscape) {
       stageWrapper.classList.add('landscape');
       logConsole('info', '[DISPLAY_HAL] Gyroscope event: display rotated to LANDSCAPE (1280x720).');
+      showToast('Screen: Landscape Mode (1280x720)');
     } else {
       stageWrapper.classList.remove('landscape');
-      logConsole('info', '[DISPLAY_HAL] Gyroscope event: display rotated to PORTRAIT (720x1280).');
+      logConsole('info', '[DISPLAY_HAL] Gyroscope event: display rotated to PORTRAIT (720x1440).');
+      showToast('Screen: Portrait Mode (720x1440)');
     }
     playBeep(520, 0.03, 'sine');
+    try {
+      await fetch('/api/hardware/orientation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orientation: orient })
+      });
+    } catch (_) {}
+    refreshScanoutFrame();
+    setTimeout(refreshScanoutFrame, 60);
+    setTimeout(refreshScanoutFrame, 180);
+    setTimeout(refreshScanoutFrame, 350);
   });
   // Warm reboot requested through the studio's hardware control. WHY: the previous
   // version drove a staged "teardown -> boot splash -> reveal homescreen"
@@ -1030,14 +1113,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // action: ask the power HAL to reboot, then let the boot poller re-present the
   // guest framebuffer when it comes back.
   function triggerReboot() {
-    logConsole('warn', '[BOOT] Warm reboot sequence requested. Halting user tasks and initiating teardown...');
-    playBeep(260, 0.08, 'sawtooth');
-
-    fetch('/api/hardware/power', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'reboot' })
-    }).catch(() => {});
+    executeWarmReboot();
   }
   // =========================================================================
   // 12. MULTI-FORMAT APPLICATION SIDELOADING (.app, .rap, .wasm, .apk)

@@ -100,25 +100,29 @@ def portrait_from_framebuffer(gx, gy):
 
 
 
+last_reboot_cursor = 0
+
 def check_launcher_ready():
-    global launcher_has_booted
+    global launcher_has_booted, last_reboot_cursor
     if launcher_has_booted:
         return True
     with telemetry_lock:
-        if any("[LAUNCHER]" in line for line in serial_lines):
+        recent = serial_lines[last_reboot_cursor:] if last_reboot_cursor < len(serial_lines) else []
+        if any("[LAUNCHER]" in line for line in recent):
             launcher_has_booted = True
             return True
     # Disk boot log check if serial_lines memory buffer was rotated
-    boot_log = os.path.join(os.path.dirname(DIRECTORY), "target", "x86_boot.log")
-    if os.path.exists(boot_log):
-        try:
-            with open(boot_log, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read()
-                if "[LAUNCHER] Step 5" in content or "[LAUNCHER]" in content:
-                    launcher_has_booted = True
-                    return True
-        except Exception:
-            pass
+    if last_reboot_cursor == 0:
+        boot_log = os.path.join(os.path.dirname(DIRECTORY), "target", "x86_boot.log")
+        if os.path.exists(boot_log):
+            try:
+                with open(boot_log, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                    if "[LAUNCHER] Step 5" in content or "[LAUNCHER]" in content:
+                        launcher_has_booted = True
+                        return True
+            except Exception:
+                pass
     return False
 
 # Guest package and filesystem state are authoritative. Device Studio does not
@@ -705,51 +709,98 @@ def send_qemu_monitor_cmd(cmd_str, host='127.0.0.1', port=44445, timeout=0.8):
         return False, str(e)
 
 
-def capture_qemu_screen_frame(full_scanout=False):
+_last_frame_cache = {
+    'portrait': None,
+    'landscape': None,
+    'full': None,
+    'time': 0.0,
+}
+_capture_lock = threading.Lock()
+current_device_orientation = 'portrait'
+
+
+def capture_qemu_screen_frame(full_scanout=False, orientation=None):
     """
     Captures live QEMU scanout buffer via HMP screendump command.
     Returns (bytes, content_type) or (None, error_str) if QEMU monitor is unavailable.
+    Includes thread-safe caching and graceful fallback to prevent flicker or dropped frames.
     """
-    dump_dir = os.path.join(WORKSPACE_ROOT, "target")
-    os.makedirs(dump_dir, exist_ok=True)
-    ppm_path = os.path.join(dump_dir, "live_scanout.ppm").replace("\\", "/")
+    global _last_frame_cache, current_device_orientation
+    target_orient = orientation or current_device_orientation
+    is_landscape = (target_orient == 'landscape') or full_scanout
+    mode_key = 'full' if full_scanout else ('landscape' if is_landscape else 'portrait')
+    now = time.time()
 
-    ok, resp = send_qemu_monitor_cmd(f'screendump {ppm_path}')
-    if not ok:
-        return None, f"QEMU monitor screendump failed: {resp}"
+    # Fast path: return cached frame if captured within 60ms
+    if _last_frame_cache.get(mode_key) and (now - _last_frame_cache['time']) < 0.06:
+        return _last_frame_cache[mode_key], "image/png"
 
-    time.sleep(0.04)
-    if not os.path.exists(ppm_path):
-        return None, "Screendump PPM file not produced"
+    # Avoid concurrent disk contention on PPM dump
+    if not _capture_lock.acquire(blocking=False):
+        if _last_frame_cache.get(mode_key):
+            return _last_frame_cache[mode_key], "image/png"
+        return None, "Capture busy"
 
     try:
+        dump_dir = os.path.join(WORKSPACE_ROOT, "target")
+        os.makedirs(dump_dir, exist_ok=True)
+        ppm_path = os.path.join(dump_dir, "live_scanout.ppm").replace("\\", "/")
+
+        ok, resp = send_qemu_monitor_cmd(f'screendump {ppm_path}')
+        if not ok:
+            t = query_qemu_monitor()
+            if not t["qemu_alive"]:
+                launch_qemu_profile(active_profile_key)
+            if _last_frame_cache.get(mode_key):
+                return _last_frame_cache[mode_key], "image/png"
+            return None, f"QEMU monitor screendump failed: {resp}"
+
+        time.sleep(0.03)
+        if not os.path.exists(ppm_path):
+            if _last_frame_cache.get(mode_key):
+                return _last_frame_cache[mode_key], "image/png"
+            return None, "Screendump PPM file not produced"
+
         from PIL import Image
         with Image.open(ppm_path) as img:
-            if full_scanout:
+            if not check_launcher_ready():
+                if _last_frame_cache.get(mode_key):
+                    return _last_frame_cache[mode_key], "image/png"
+                return None, "Guest still booting; graphical canvas not ready"
+
+            if is_landscape:
                 buf = io.BytesIO()
                 img.save(buf, format="PNG")
-                return buf.getvalue(), "image/png"
+                frame_bytes = buf.getvalue()
+                _last_frame_cache['landscape'] = frame_bytes
+                _last_frame_cache['full'] = frame_bytes
+                _last_frame_cache['time'] = time.time()
+                return frame_bytes, "image/png"
             else:
                 width, height = img.size
                 if width >= GUEST_FRAMEBUFFER_W and height >= GUEST_FRAMEBUFFER_H:
-                    # Crop to the letterboxed phone surface, then present it at the
-                    # logical portrait size the UI was laid out for. The rect comes
-                    # from the captured framebuffer's own size, so a profile that
-                    # reports a mode other than 1280x720 is still framed correctly.
                     box = letterbox_box(width, height)
                     cropped = img.crop(box)
                     scaled = cropped.resize(
-                        (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H), Image.Resampling.LANCZOS
+                        (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H), Image.Resampling.BICUBIC
                     )
                     buf = io.BytesIO()
                     scaled.save(buf, format="PNG")
-                    return buf.getvalue(), "image/png"
+                    frame_bytes = buf.getvalue()
+                    _last_frame_cache['portrait'] = frame_bytes
+                    _last_frame_cache['time'] = time.time()
+                    return frame_bytes, "image/png"
                 else:
-                    # Early BIOS text terminal detected. Never leak the text
-                    # console into the smartphone viewport.
+                    if _last_frame_cache.get(mode_key):
+                        return _last_frame_cache[mode_key], "image/png"
                     return None, "Guest still in early BIOS bootloader stage; graphical canvas not ready"
     except Exception as e:
+        if _last_frame_cache.get(mode_key):
+            return _last_frame_cache[mode_key], "image/png"
         return None, f"Image processing error: {e}"
+    finally:
+        _capture_lock.release()
+
 
 
 def stop_qemu_backend():
@@ -783,7 +834,10 @@ def stop_qemu_backend():
 
 def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
     """Launches a real QEMU instance for the specified target device profile."""
-    global qemu_subproc, active_profile_key, current_serial_log_path
+    global qemu_subproc, active_profile_key, current_serial_log_path, launcher_has_booted, last_reboot_cursor
+    launcher_has_booted = False
+    with telemetry_lock:
+        last_reboot_cursor = len(serial_lines)
     stop_qemu_backend()
 
     if profile_key not in SUPPORTED_PROFILES:
@@ -817,8 +871,7 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
         "-monitor", "tcp:127.0.0.1:44445,server,nowait",
         "-serial", "tcp:127.0.0.1:4301,server,nowait",
         "-display", "none",
-        "-vnc", "127.0.0.1:1",
-        "-no-reboot"
+        "-vnc", "127.0.0.1:1"
     ]
     if arch == "x86_64":
         # A dedicated data disk is mandatory. The kernel uses the Primary Master
@@ -1314,6 +1367,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 'ram_mb': (SUPPORTED_PROFILES.get(active_profile_key) or {}).get('ram'),
                 'guest_width': ((SUPPORTED_PROFILES.get(active_profile_key) or {}).get('display') or {}).get('guest_width'),
                 'guest_height': ((SUPPORTED_PROFILES.get(active_profile_key) or {}).get('display') or {}).get('guest_height'),
+                'orientation': current_device_orientation,
                 'pid': qemu_subproc.pid if qemu_subproc else None
             })
             self.wfile.write(response.encode())
@@ -1341,10 +1395,11 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps(t).encode())
             return
 
-        if parsed_path.path in ('/api/screen/frame', '/api/qemu/screendump'):
+        if parsed_path.path in ('/api/screen/frame', '/api/qemu/screendump', '/api/screen/scanout'):
             query = urllib.parse.parse_qs(parsed_path.query)
-            full_scanout = query.get('full', ['0'])[0] in ('1', 'true', 'yes')
-            frame_bytes, err_or_type = capture_qemu_screen_frame(full_scanout=full_scanout)
+            full_scanout = query.get('full', ['0'])[0] in ('1', 'true', 'yes') or (parsed_path.path == '/api/screen/scanout')
+            orient = query.get('orientation', [None])[0]
+            frame_bytes, err_or_type = capture_qemu_screen_frame(full_scanout=full_scanout, orientation=orient)
             if frame_bytes:
                 self.send_response(200)
                 self.send_header('Content-Type', err_or_type)
@@ -1920,6 +1975,91 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps({'success': True, 'package': app_entry}).encode())
             return
 
+        if self.path in ('/api/hardware/power', '/api/power', '/api/reboot', '/api/qemu/reboot', '/api/restart', '/api/qemu/restart', '/api/reset', '/api/qemu/reset'):
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+            except Exception:
+                data = {}
+            action = str(data.get('action', 'reboot')).strip().lower()
+            if action in ('reboot', 'restart', 'reset') or self.path in ('/api/reboot', '/api/qemu/reboot', '/api/restart', '/api/qemu/restart', '/api/reset', '/api/qemu/reset'):
+                global launcher_has_booted, last_reboot_cursor
+                launcher_has_booted = False
+                with telemetry_lock:
+                    last_reboot_cursor = len(serial_lines)
+                _last_frame_cache['time'] = 0
+                _last_frame_cache.pop('portrait', None)
+                _last_frame_cache.pop('landscape', None)
+                _last_frame_cache.pop('full', None)
+                ok, resp = send_qemu_monitor_cmd('system_reset')
+                if not ok:
+                    ok, resp = launch_qemu_profile(active_profile_key)
+                self.send_response(200 if ok else 500)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': ok,
+                    'action': 'reboot',
+                    'qemu_reset': ok,
+                    'message': str(resp)
+                }).encode())
+                return
+            elif action in ('sleep', 'power', 'wake'):
+                send_guest_serial_command('POWER_KEY')
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True, 'action': action}).encode())
+                return
+            else:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': f"Unknown power action '{action}'"}).encode())
+                return
+
+        if self.path in ('/api/hardware/orientation', '/api/orientation'):
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+            except Exception:
+                data = {}
+            target_orient = str(data.get('orientation', '')).strip().lower()
+            if target_orient in ('landscape', 'landscape_right', 'landscaperight', 'horizontal'):
+                current_device_orientation = 'landscape'
+                send_guest_serial_command('ORIENTATION LANDSCAPE')
+            elif target_orient in ('landscape_left', 'landscapeleft'):
+                current_device_orientation = 'landscape'
+                send_guest_serial_command('ORIENTATION LANDSCAPE_LEFT')
+            elif target_orient in ('portrait', 'vertical'):
+                current_device_orientation = 'portrait'
+                send_guest_serial_command('ORIENTATION PORTRAIT')
+            else:
+                current_device_orientation = 'landscape' if current_device_orientation == 'portrait' else 'portrait'
+                send_guest_serial_command('ORIENTATION ' + current_device_orientation.upper())
+
+            # Invalidate cached frames immediately
+            _last_frame_cache['time'] = 0
+            _last_frame_cache.pop('portrait', None)
+            _last_frame_cache.pop('landscape', None)
+            _last_frame_cache.pop('full', None)
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': True,
+                'orientation': current_device_orientation,
+                'scanout': '1280x720' if current_device_orientation == 'landscape' else '720x1440'
+            }).encode())
+            return
+
         if self.path == '/api/hardware/sensor_inject':
             self.send_response(409)
             self.send_header('Content-Type', 'application/json')
@@ -1945,7 +2085,17 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 # letterbox geometry, rather than being round-tripped through the
                 # kernel with a second copy of the constants.
                 LOGICAL_W, LOGICAL_H = 720, 1440
-                if space in ('portrait', 'logical_portrait', 'studio_display'):
+                if space in ('landscape', 'logical_landscape') or (space in ('guest', 'guest_framebuffer', 'qemu', 'qemu_framebuffer') and current_device_orientation == 'landscape'):
+                    x = int(data.get('x', 0)); y = int(data.get('y', 0))
+                    if not (0 <= x < 1280 and 0 <= y < 720): raise ValueError('landscape coordinates out of bounds')
+                    # KMS LandscapeRight maps (x, y) in 1280x720 scanout to mobile surface (719 - y, (x * 1440) // 1280)
+                    gx = max(0, min(719, 719 - y))
+                    gy = max(0, min(1439, (x * 1440) // 1280))
+                    x2 = int(data.get('x2', x)); y2 = int(data.get('y2', y))
+                    if not (0 <= x2 < 1280 and 0 <= y2 < 720): raise ValueError('landscape end coordinates out of bounds')
+                    gx2 = max(0, min(719, 719 - y2))
+                    gy2 = max(0, min(1439, (x2 * 1440) // 1280))
+                elif space in ('portrait', 'logical_portrait', 'studio_display'):
                     x = int(data.get('x', 0)); y = int(data.get('y', 0))
                     if not (0 <= x < LOGICAL_W and 0 <= y < LOGICAL_H): raise ValueError('portrait coordinates out of bounds')
                     gx, gy = x, y
@@ -1955,26 +2105,30 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 elif space in ('guest', 'guest_framebuffer', 'qemu', 'qemu_framebuffer'):
                     x = int(data.get('x', 0)); y = int(data.get('y', 0))
                     if not (0 <= x < 1280 and 0 <= y < 720): raise ValueError('guest framebuffer coordinates out of bounds')
-                    gx, gy = portrait_from_framebuffer(x, y)
+                    p = portrait_from_framebuffer(x, y)
+                    if p is None: raise ValueError('coordinates outside letterboxed phone canvas')
+                    gx, gy = p
                     x2 = int(data.get('x2', x)); y2 = int(data.get('y2', y))
                     if not (0 <= x2 < 1280 and 0 <= y2 < 720): raise ValueError('guest framebuffer coordinates out of bounds')
-                    gx2, gy2 = portrait_from_framebuffer(x2, y2)
+                    p2 = portrait_from_framebuffer(x2, y2)
+                    if p2 is None: raise ValueError('coordinates outside letterboxed phone canvas')
+                    gx2, gy2 = p2
                 else:
                     raise ValueError('unsupported coordinate space')
 
                 if action == 'down':
-                    ok, msg = send_guest_serial_command(f'INPUT_TOUCH DOWN {gx} {gy} 0', '[COM1 INPUT]', timeout=4)
+                    ok, msg = send_guest_serial_command(f'INPUT_TOUCH DOWN {gx} {gy} 0')
                 elif action == 'move':
-                    ok, msg = send_guest_serial_command(f'INPUT_TOUCH MOVE {gx} {gy} 0', '[COM1 INPUT]', timeout=4)
+                    ok, msg = send_guest_serial_command(f'INPUT_TOUCH MOVE {gx} {gy} 0')
                 elif action == 'up':
-                    ok, msg = send_guest_serial_command(f'INPUT_TOUCH UP {gx} {gy} 0', '[COM1 INPUT]', timeout=4)
+                    ok, msg = send_guest_serial_command(f'INPUT_TOUCH UP {gx} {gy} 0')
                 elif action == 'tap':
-                    ok, msg = send_guest_serial_command(f'TAP {gx} {gy}', '[COM1 INPUT]', timeout=4)
+                    ok, msg = send_guest_serial_command(f'TAP {gx} {gy}')
                 elif action == 'cancel':
-                    ok, msg = send_guest_serial_command(f'INPUT_TOUCH CANCEL {gx} {gy} 0', '[COM1 INPUT]', timeout=4)
+                    ok, msg = send_guest_serial_command(f'INPUT_TOUCH CANCEL {gx} {gy} 0')
                 elif action in ('swipe', 'drag'):
                     steps = max(2, min(20, int(data.get('steps', 5))))
-                    ok, msg = send_guest_serial_command(f'SWIPE {gx} {gy} {gx2} {gy2} {steps}', '[COM1 INPUT]', timeout=8)
+                    ok, msg = send_guest_serial_command(f'SWIPE {gx} {gy} {gx2} {gy2} {steps}')
                 else:
                     raise ValueError('unsupported touch action')
                 if not ok: raise RuntimeError(msg)

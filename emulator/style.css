@@ -1483,7 +1483,55 @@ html, body.dark-theme {
 }
 
 .emulator-stage-wrapper.landscape {
-  transform: rotate(90deg) scale(0.85);
+  transform: none !important;
+  align-items: center !important;
+}
+
+.emulator-stage-wrapper.landscape .phone-and-nav-container,
+.studio-workspace.smartphone-mode .emulator-stage-wrapper.landscape .phone-and-nav-container {
+  max-width: 680px !important;
+  width: 100% !important;
+}
+
+.emulator-stage-wrapper.landscape .device-chassis,
+.studio-workspace.smartphone-mode .emulator-stage-wrapper.landscape .device-chassis {
+  aspect-ratio: 16 / 9 !important;
+  max-width: 680px !important;
+  width: min(680px, calc((100vh - 120px) * 16 / 9)) !important;
+  height: min(390px, calc(100vh - 120px)) !important;
+  border-radius: 36px !important;
+  padding: 6px !important;
+}
+
+.emulator-stage-wrapper.landscape .device-screen {
+  border-radius: 30px !important;
+}
+
+.emulator-stage-wrapper.landscape .device-gesture-guide,
+.studio-workspace.smartphone-mode .emulator-stage-wrapper.landscape .device-gesture-guide {
+  max-width: 680px !important;
+  width: 100% !important;
+}
+
+/* Virtual Touch Dot & Ripple Feedback (Android Emulator Digitizer) */
+.virtual-touch-dot {
+  position: absolute;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.7) 0%, rgba(56, 189, 248, 0.45) 55%, rgba(56, 189, 248, 0) 100%);
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 14px rgba(56, 189, 248, 0.75), inset 0 0 6px rgba(255, 255, 255, 0.8);
+  pointer-events: none;
+  transform: translate(-50%, -50%) scale(0);
+  opacity: 0;
+  transition: transform 0.1s cubic-bezier(0.1, 0.9, 0.2, 1), opacity 0.12s ease;
+  z-index: 100;
+}
+
+.virtual-touch-dot.active {
+  transform: translate(-50%, -50%) scale(1);
+  opacity: 1;
 }
 
 /* Android Studio-Style Quick-Action Hardware Toolbar */
@@ -2263,7 +2311,8 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   justify-content: center;
 }
 
-#live-scanout-img {
+#live-scanout-img,
+.screen-live-scanout canvas {
   width: 100%;
   height: 100%;
   object-fit: contain;
@@ -2271,7 +2320,36 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   user-select: none;
   -webkit-user-drag: none;
   touch-action: none;
+  image-rendering: auto;
 }
+
+.studio-workspace.smartphone-mode #ide-right-pane {
+  display: none !important;
+}
+
+.studio-workspace.smartphone-mode #ide-left-pane {
+  flex: 1 1 100% !important;
+  max-width: 100% !important;
+  width: 100% !important;
+  justify-content: center !important;
+  align-items: center !important;
+  padding: 10px 0 !important;
+}
+
+.studio-workspace.smartphone-mode .emulator-stage-wrapper {
+  justify-content: center !important;
+  width: 100% !important;
+}
+
+.studio-workspace.smartphone-mode .phone-and-nav-container {
+  align-items: center !important;
+}
+
+.studio-workspace.smartphone-mode .device-chassis {
+  height: min(840px, calc(100vh - 72px)) !important;
+  max-width: 440px !important;
+}
+
 /* --------------------------------------------------------------------------
    Pure Consumer Smartphone Stage & Pixel Chassis
    -------------------------------------------------------------------------- */
