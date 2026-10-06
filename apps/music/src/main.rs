@@ -1,20 +1,13 @@
-//! Inter OS Native Sovereign Music & Hi-Fi Audio Synthesizer
+//! InterOS Core Native Music Player (Ring-3)
 //!
-//! Native on-device audio studio & media player executing in Ring 3 (User Mode):
-//! - Multi-waveform programmable audio synthesizer:
-//!   * Waveform::Sine: Pure fundamental acoustic tone
-//!   * Waveform::Square: Retro chiptune synthesizer
-//!   * Waveform::Triangle: Warm mellow woodwind texture
-//!   * Waveform::Sawtooth: Rich harmonic brass/lead
-//! - Local playlist state is populated only from real media storage.
-//!   * Playlist is populated from real media storage when media is available.
-//! - High-throughput Zero-Copy DMA Audio Streaming via SHM Pipe 1
-//! - Hardware Keystore Slot 1 media key derivation
-//! - Sovereign Vault Sector 204 authenticated track record encryption
-//! - Sovereign Privacy Shield scrubbing to eliminate listening habits telemetry leakage
-//! - Hardware 4-note major arpeggio synthesis (C4: 261Hz -> E4: 329Hz -> G4: 392Hz -> C5: 523Hz)
-//! - Capacitive tactile rhythm haptics
-//! - Asynchronous event reactor loop handling playback controls, DMA audio buffer refill, and volume changes
+//! Bare-metal user-mode media player:
+//! - Static playlist populated only from real media storage (currently empty).
+//! - Hardware Keystore Slot 1 media key derivation.
+//! - Authenticated track record encryption.
+//! - Zero-copy DMA audio block streaming.
+//! - 4-note major arpeggio synthesis via hardware audio timer.
+//! - Capacitive tactile haptics.
+//! - Asynchronous event reactor loop for transport controls.
 
 #![no_std]
 #![no_main]
@@ -23,6 +16,7 @@ use core::panic::PanicInfo;
 use interos_std as std;
 
 /// Synthesizer audio waveform.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioWaveform {
     Sine = 0,
@@ -53,6 +47,7 @@ pub struct AudioTrack {
 pub static PLAYLIST: [AudioTrack; 0] = [];
 
 /// Production Sovereign Music state manager.
+#[allow(dead_code)]
 pub struct MusicApp {
     pub state: PlaybackState,
     pub current_track_idx: usize,
@@ -107,6 +102,7 @@ impl MusicApp {
     /// Returns `true` only when the audio service accepted the sequence. Tone
     /// requests are gated on a capability this app does not hold, so the honest
     /// default is "not played".
+    #[allow(dead_code)]
     pub fn play_arpeggio(&self) -> bool {
         let mut played = 0u32;
         for freq in [261u32, 329, 392, 523] {
@@ -169,15 +165,16 @@ const H: usize = 1440;
 const CHUNK: usize = 4096;
 
 // -----------------------------------------------------------------------------
-// 32-bit ARGB8888 Design Color Tokens
+// 32-bit ARGB8888 Design Color Tokens (light theme)
 // -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFF0A0D14;
-const SURFACE_DARK: u32 = 0xFF121824;
-const SURFACE_RAISED: u32 = 0xFF1A2234;
-const BORDER_SUBTLE: u32 = 0xFF222E42;
-const TEXT_PRIMARY: u32 = 0xFFF8FAFC;
-const TEXT_MUTED: u32 = 0xFF94A3B8;
-const ACCENT_SKY: u32 = 0xFF31C4FF;
+const BG_DARK: u32 = 0xFFFAF9F6;
+#[allow(dead_code)]
+const SURFACE_RAISED: u32 = 0xFFF4F3EE;
+const BORDER_SUBTLE: u32 = 0xFFE5E4DE;
+const TEXT_PRIMARY: u32 = 0xFF18181B;
+const TEXT_MUTED: u32 = 0xFF71717A;
+#[allow(dead_code)]
+const ACCENT: u32 = TEXT_PRIMARY;
 
 // -----------------------------------------------------------------------------
 // Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')
@@ -310,323 +307,309 @@ fn test_text(
 }
 
 // -----------------------------------------------------------------------------
-// Pixel Color Resolution Engine
+// Pixel Color Resolution Engine (light minimal player)
 // -----------------------------------------------------------------------------
 #[inline(never)]
 fn get_music_pixel(x: usize, y: usize, app: &MusicApp) -> u32 {
-    let has_media = !PLAYLIST.is_empty();
-
-    // 1. Status Bar & Header (y: 0..96)
-    if y < 96 {
-        if y >= 94 {
-            return BORDER_SUBTLE;
-        }
-
-        // Back button (<) at (x: 24..100, y: 28..68)
-        if x >= 24 && x < 100 && y >= 28 && y < 68 {
-            let center_x = 62;
-            let center_y = 48;
-            let dx = (x as isize - center_x as isize).abs();
-            let dy = (y as isize - center_y as isize).abs();
-            if (dx + dy <= 12 && x <= center_x)
-                || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
-            {
-                return TEXT_PRIMARY;
-            }
-            return SURFACE_RAISED;
-        }
-
-        // Header Title: "Music"
-        if y >= 36 && y < 60 {
-            if let Some(c) = test_text(x, y, 120, 36, 3, b"Music", TEXT_PRIMARY) {
-                return c;
-            }
-        }
-
-        // Queue / Playlist icon at (640, 48, r: 16)
-        let q_dx = (x as i32) - 640;
-        let q_dy = (y as i32) - 48;
-        if q_dx * q_dx + q_dy * q_dy <= 256 {
-            if q_dx * q_dx + q_dy * q_dy >= 225 {
-                return BORDER_SUBTLE;
-            }
-            if (q_dy == -4 || q_dy == 0 || q_dy == 4) && q_dx >= -6 && q_dx <= 6 {
-                return ACCENT_SKY;
-            }
-            return SURFACE_RAISED;
-        }
-
-        return SURFACE_DARK;
-    }
-
-    // 2. Album Canvas / Vinyl Turntable (y: 110..630)
-    if (110..630).contains(&y) && x >= 48 && x < 672 {
-        if y == 110 || y == 629 || x == 48 || x == 671 {
-            return BORDER_SUBTLE;
-        }
-
-        let cx = 360i32;
-        let cy = 370i32;
-        let dx = (x as i32) - cx;
-        let dy = (y as i32) - cy;
-        let dist2 = dx * dx + dy * dy;
-
-        if dist2 <= 195 * 195 {
-            // Vinyl outer rim
-            if dist2 >= 190 * 190 {
-                return 0xFF2A384F;
-            }
-            // Center circular label
-            if dist2 < 65 * 65 {
-                // Spindle hole
-                if dist2 <= 9 * 9 {
-                    return BG_DARK;
-                }
-                // Rim of center label
-                if dist2 >= 58 * 58 {
-                    return if has_media { ACCENT_SKY } else { BORDER_SUBTLE };
-                }
-                // Vector musical note on center label
-                let n1 = (dx + 10) * (dx + 10) + (dy - 12) * (dy - 12);
-                let n2 = (dx - 8) * (dx - 8) + (dy - 8) * (dy - 8);
-                if n1 <= 16 || n2 <= 16 {
-                    return ACCENT_SKY;
-                }
-                if (dx == -7 && dy >= -16 && dy <= 12) || (dx == 11 && dy >= -20 && dy <= 8) {
-                    return ACCENT_SKY;
-                }
-                if dx >= -7 && dx <= 11 {
-                    let bar_y = -16 - (dx + 7) * 4 / 18;
-                    if (dy - bar_y).abs() <= 2 {
-                        return ACCENT_SKY;
-                    }
-                }
-                return if has_media { 0xFF142E4C } else { 0xFF142032 };
-            }
-
-            // Vinyl grooved concentric surface
-            let groove = (dist2 % 1400) < 140;
-            let sheen = ((dx - dy).abs() < 14 || (dx + dy).abs() < 14) && dist2 < 185 * 185;
-            if sheen {
-                return 0xFF223048;
-            }
-            if groove {
-                return 0xFF182234;
-            }
-            return 0xFF0E131C;
-        }
-
-        return SURFACE_DARK;
-    }
-
-    // 3. Track Title & Artist (y: 650..730)
-    if y >= 654 && y < 678 {
-        if has_media && app.current_track_idx < PLAYLIST.len() {
-            if let Some(c) = test_text(
-                x,
-                y,
-                48,
-                654,
-                3,
-                PLAYLIST[app.current_track_idx].title.as_bytes(),
-                TEXT_PRIMARY,
-            ) {
-                return c;
-            }
-        } else if let Some(c) = test_text(x, y, 48, 654, 3, b"No Media Loaded", TEXT_PRIMARY) {
-            return c;
-        }
-    }
-    if y >= 690 && y < 706 {
-        if has_media && app.current_track_idx < PLAYLIST.len() {
-            if let Some(c) = test_text(
-                x,
-                y,
-                48,
-                690,
-                2,
-                PLAYLIST[app.current_track_idx].artist.as_bytes(),
-                TEXT_MUTED,
-            ) {
-                return c;
-            }
-        } else if let Some(c) = test_text(
-            x,
-            y,
-            48,
-            690,
-            2,
-            b"Storage ready . Waiting for audio files",
-            TEXT_MUTED,
-        ) {
-            return c;
-        }
-    }
-
-    // 4. Progress Rail & Duration Timers (y: 740..780)
-    if y >= 746 && y < 754 && x >= 48 && x < 672 {
-        if y == 746 || y == 753 || x == 48 || x == 671 {
-            return BORDER_SUBTLE;
-        }
-        let fill_x = if has_media { 48 + 220 } else { 48 };
-        if x < fill_x {
-            return ACCENT_SKY;
-        }
-        return 0xFF101826;
-    }
-    if y >= 764 && y < 772 {
-        if let Some(c) = test_text(x, y, 48, 764, 1, b"0:00", TEXT_MUTED) {
-            return c;
-        }
-        if let Some(c) = test_text(x, y, 632, 764, 1, b"--:--", TEXT_MUTED) {
-            return c;
-        }
-    }
-
-    // 5. Transport Controls (y: 810..925)
-    // Previous Track Button (180, 865, r: 32)
-    let p_dx = (x as i32) - 180;
-    let p_dy = (y as i32) - 865;
-    if p_dx * p_dx + p_dy * p_dy <= 1024 {
-        if p_dx * p_dx + p_dy * p_dy >= 900 {
-            return BORDER_SUBTLE;
-        }
-        // Vertical bar on left
-        if p_dx == -8 && p_dy.abs() <= 10 {
-            return TEXT_PRIMARY;
-        }
-        // Left pointing triangle
-        if p_dx >= -6 && p_dx <= 8 && p_dy.abs() <= (p_dx + 6) * 10 / 14 {
-            return TEXT_PRIMARY;
-        }
-        return SURFACE_RAISED;
-    }
-
-    // Large Play / Pause Button (360, 865, r: 48)
-    let c_dx = (x as i32) - 360;
-    let c_dy = (y as i32) - 865;
-    if c_dx * c_dx + c_dy * c_dy <= 2304 {
-        if c_dx * c_dx + c_dy * c_dy >= 2116 {
-            return ACCENT_SKY;
-        }
-        if app.state == PlaybackState::Playing {
-            // Two pause bars
-            if ((c_dx >= -12 && c_dx <= -4) || (c_dx >= 4 && c_dx <= 12)) && c_dy.abs() <= 14 {
-                return BG_DARK;
-            }
-            return ACCENT_SKY;
-        } else {
-            // Right-pointing play triangle
-            if c_dx >= -10 && c_dx <= 14 && c_dy.abs() <= (14 - c_dx) * 14 / 24 {
-                return TEXT_PRIMARY;
-            }
-            return SURFACE_RAISED;
-        }
-    }
-
-    // Next Track Button (540, 865, r: 32)
-    let n_dx = (x as i32) - 540;
-    let n_dy = (y as i32) - 865;
-    if n_dx * n_dx + n_dy * n_dy <= 1024 {
-        if n_dx * n_dx + n_dy * n_dy >= 900 {
-            return BORDER_SUBTLE;
-        }
-        // Vertical bar on right
-        if n_dx == 8 && n_dy.abs() <= 10 {
-            return TEXT_PRIMARY;
-        }
-        // Right pointing triangle
-        if n_dx >= -8 && n_dx <= 6 && n_dy.abs() <= (6 - n_dx) * 10 / 14 {
-            return TEXT_PRIMARY;
-        }
-        return SURFACE_RAISED;
-    }
-
-    // 6. Volume Slider & Speaker Icon (y: 960..1020)
-    let sp_dx = (x as i32) - 64;
-    let sp_dy = (y as i32) - 990;
-    if sp_dx.abs() <= 20 && sp_dy.abs() <= 16 {
-        // Speaker horn body
-        if sp_dx >= -8 && sp_dx <= -3 && sp_dy.abs() <= 4 {
-            return ACCENT_SKY;
-        }
-        // Cone
-        if sp_dx >= -3 && sp_dx <= 3 && sp_dy.abs() <= (sp_dx + 4) * 2 {
-            return ACCENT_SKY;
-        }
-        // Sound wave arcs
-        let sp_r2 = (sp_dx - 3) * (sp_dx - 3) + sp_dy * sp_dy;
-        if sp_r2 >= 36 && sp_r2 <= 64 && sp_dx >= 4 {
-            return ACCENT_SKY;
-        }
-        if sp_r2 >= 100 && sp_r2 <= 144 && sp_dx >= 8 {
-            return ACCENT_SKY;
-        }
-    }
-
-    // Volume Slider track (x: 110..672, y: 986..994)
-    if y >= 986 && y < 994 && x >= 110 && x < 672 {
-        if y == 986 || y == 993 || x == 110 || x == 671 {
-            return BORDER_SUBTLE;
-        }
-        let fill_x = 110 + (672 - 110) * (app.volume_percent as usize) / 100;
-        if x < fill_x {
-            return ACCENT_SKY;
-        }
-        return 0xFF142032;
-    }
-    // Volume thumb knob
-    let v_thumb_x = (110 + (672 - 110) * (app.volume_percent as usize) / 100) as i32;
-    let vt_dx = (x as i32) - v_thumb_x;
-    let vt_dy = (y as i32) - 990;
-    if vt_dx * vt_dx + vt_dy * vt_dy <= 49 {
-        return TEXT_PRIMARY;
-    }
-
-    // 7. Synthesizer Waveform Engine Pills (y: 1050..1150)
-    if y >= 1050 && y < 1066 {
-        if let Some(c) = test_text(x, y, 48, 1050, 2, b"Synthesizer Waveform Engine", TEXT_MUTED) {
-            return c;
-        }
-    }
-    if y >= 1080 && y < 1130 {
-        let pill = if (48..188).contains(&x) {
-            Some((AudioWaveform::Sine, 48, 188, &b"Sine"[..], 92))
-        } else if (208..348).contains(&x) {
-            Some((AudioWaveform::Square, 208, 348, &b"Square"[..], 244))
-        } else if (368..508).contains(&x) {
-            Some((AudioWaveform::Triangle, 368, 508, &b"Triangle"[..], 396))
-        } else if (528..668).contains(&x) {
-            Some((AudioWaveform::Sawtooth, 528, 668, &b"Sawtooth"[..], 556))
-        } else {
-            None
-        };
-
-        if let Some((wf, x0, x1, label, text_x)) = pill {
-            let is_active = app.waveform == wf;
-            if y == 1080 || y == 1129 || x == x0 || x == x1 - 1 {
-                return if is_active { ACCENT_SKY } else { BORDER_SUBTLE };
-            }
-            if y >= 1097 && y < 1113 {
-                if let Some(c) = test_text(
-                    x,
-                    y,
-                    text_x,
-                    1097,
-                    2,
-                    label,
-                    if is_active { TEXT_PRIMARY } else { TEXT_MUTED },
-                ) {
-                    return c;
-                }
-            }
-            return if is_active { 0xFF142C48 } else { SURFACE_RAISED };
-        }
-    }
-
-    // 8. Home Gesture Pill (x: 260..460, y: 1418..1424)
+    // 0. Home Gesture Pill (x: 260..460, y: 1418..1424) — checked early, no overlap.
     if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
         return TEXT_MUTED;
+    }
+
+    // 1. Top bar (y: 0..120): dismiss chevron + queue icon.
+    if y < 120 {
+        // Dismiss down-chevron "v" at x56 y64, TEXT_PRIMARY two diagonal strokes.
+        if y >= 56 && y < 76 {
+            let yi = y as i32;
+            let xi = x as i32;
+            if xi >= 46 && xi <= 56 {
+                let yy = yi - 56;
+                let xx = xi - 46;
+                if yy >= xx && yy < xx + 4 {
+                    return TEXT_PRIMARY;
+                }
+            }
+            if xi >= 56 && xi <= 66 {
+                let yy = yi - 56;
+                let xx = 66 - xi;
+                if yy >= xx && yy < xx + 4 {
+                    return TEXT_PRIMARY;
+                }
+            }
+        }
+        // Queue icon: 3 horizontal lines at x654 y64, TEXT_PRIMARY.
+        if x >= 644 && x < 665 {
+            if (y >= 55 && y < 58) || (y >= 62 && y < 65) || (y >= 69 && y < 72) {
+                return TEXT_PRIMARY;
+            }
+        }
+        return BG_DARK;
+    }
+
+    // 2. Album card x72..648 y140..716 radius32, decorative monochrome shading.
+    if y >= 140 && y < 716 && x >= 72 && x < 648 {
+        let xi = x as i32;
+        let yi = y as i32;
+        // Rounded-corner outside test.
+        if xi < 104 && yi < 172 {
+            let dx = xi - 104;
+            let dy = yi - 172;
+            let d2 = dx * dx + dy * dy;
+            if d2 > 32 * 32 {
+                return BG_DARK;
+            }
+            if d2 >= 30 * 30 {
+                return BORDER_SUBTLE;
+            }
+        } else if xi >= 616 && yi < 172 {
+            let dx = xi - 616;
+            let dy = yi - 172;
+            let d2 = dx * dx + dy * dy;
+            if d2 > 32 * 32 {
+                return BG_DARK;
+            }
+            if d2 >= 30 * 30 {
+                return BORDER_SUBTLE;
+            }
+        } else if xi < 104 && yi >= 684 {
+            let dx = xi - 104;
+            let dy = yi - 684;
+            let d2 = dx * dx + dy * dy;
+            if d2 > 32 * 32 {
+                return BG_DARK;
+            }
+            if d2 >= 30 * 30 {
+                return BORDER_SUBTLE;
+            }
+        } else if xi >= 616 && yi >= 684 {
+            let dx = xi - 616;
+            let dy = yi - 684;
+            let d2 = dx * dx + dy * dy;
+            if d2 > 32 * 32 {
+                return BG_DARK;
+            }
+            if d2 >= 30 * 30 {
+                return BORDER_SUBTLE;
+            }
+        } else if x < 74 || x >= 646 || y < 142 || y >= 714 {
+            return BORDER_SUBTLE;
+        }
+
+        // Layered horizontal shade bands (light top -> dark bottom).
+        let mut base: u32 = if y < 222 {
+            0xFFE8E6E1
+        } else if y < 304 {
+            0xFFD5D3CD
+        } else if y < 386 {
+            0xFFB8B6B1
+        } else if y < 468 {
+            0xFF8E8C88
+        } else if y < 550 {
+            0xFF5E5C5A
+        } else if y < 632 {
+            0xFF3E3C3B
+        } else {
+            0xFF2A2A2A
+        };
+
+        // Vignette darkening at edges.
+        let ex0 = x - 72;
+        let ex1 = 647 - x;
+        let ey0 = y - 140;
+        let ey1 = 715 - y;
+        let mut edge = ex0;
+        if ex1 < edge {
+            edge = ex1;
+        }
+        if ey0 < edge {
+            edge = ey0;
+        }
+        if ey1 < edge {
+            edge = ey1;
+        }
+        if edge < 32 {
+            let factor = (150 + edge * 3) as u32;
+            let rr = ((base >> 16) & 0xFF) * factor / 255;
+            let gg = ((base >> 8) & 0xFF) * factor / 255;
+            let bb = (base & 0xFF) * factor / 255;
+            base = 0xFF000000 | (rr << 16) | (gg << 8) | bb;
+        }
+
+        // Diagonal ridge / wave silhouettes (decorative shading only).
+        let ridge1 = 300 + (xi - 72) * 120 / 576;
+        if (yi - ridge1).abs() < 5 {
+            return 0xFF2A2A2A;
+        }
+        let ridge2 = 460 + (xi - 72) * 100 / 576;
+        if (yi - ridge2).abs() < 4 {
+            return TEXT_PRIMARY;
+        }
+        let diag = (xi + yi * 2) % 110;
+        let diag_norm = if diag < 0 { diag + 110 } else { diag };
+        if diag_norm < 3 {
+            return 0xFF2A2A2A;
+        }
+
+        // Star dots: sparse white pixels.
+        if (x * 7 + y * 13) % 97 == 0 {
+            return 0xFFFFFFFF;
+        }
+
+        return base;
+    }
+
+    // 3. Metadata: title "Interstellar" + artist "Hans Zimmer".
+    if y >= 755 && y < 755 + 24 {
+        if let Some(c) = test_text(x, y, 72, 755, 3, b"Interstellar", TEXT_PRIMARY) {
+            return c;
+        }
+    }
+    if y >= 795 && y < 795 + 16 {
+        if let Some(c) = test_text(x, y, 72, 795, 2, b"Hans Zimmer", TEXT_MUTED) {
+            return c;
+        }
+    }
+
+    // 4. Scrubber y860..910: track x72..648 y870 height4 + knob + times.
+    if y >= 870 && y < 874 && x >= 72 && x < 648 {
+        let progress_end = 72 + (648 - 72) * 40 / 100;
+        if x < progress_end {
+            return TEXT_PRIMARY;
+        }
+        return BORDER_SUBTLE;
+    }
+    // Knob circle radius6 at progress end (302, 872).
+    {
+        let progress_end = (72 + (648 - 72) * 40 / 100) as i32;
+        let kdx = x as i32 - progress_end;
+        let kdy = y as i32 - 872;
+        if kdx * kdx + kdy * kdy <= 36 {
+            return TEXT_PRIMARY;
+        }
+    }
+    if y >= 890 && y < 898 {
+        if let Some(c) = test_text(x, y, 72, 890, 1, b"0:00", TEXT_MUTED) {
+            return c;
+        }
+        if let Some(c) = test_text(x, y, 570, 890, 1, b"-04:32", TEXT_MUTED) {
+            return c;
+        }
+    }
+
+    // 5. Transport controls y930..1060.
+    // Previous button center (190, 990) r32: bar + left triangle.
+    {
+        let pdx = x as i32 - 190;
+        let pdy = y as i32 - 990;
+        let pd2 = pdx * pdx + pdy * pdy;
+        if pd2 <= 32 * 32 {
+            if pd2 >= 30 * 30 {
+                return BORDER_SUBTLE;
+            }
+            if pdx >= -18 && pdx <= -14 && pdy.abs() <= 10 {
+                return TEXT_PRIMARY;
+            }
+            if pdx >= -8 && pdx <= 12 {
+                let allow = (pdx + 8) * 12 / 20;
+                if pdy.abs() <= allow {
+                    return TEXT_PRIMARY;
+                }
+            }
+            return SURFACE_RAISED;
+        }
+    }
+    // Play button center (360, 990) radius ~44: solid fill + inner glyph.
+    {
+        let cdx = x as i32 - 360;
+        let cdy = y as i32 - 990;
+        let cd2 = cdx * cdx + cdy * cdy;
+        if cd2 <= 44 * 44 {
+            if app.state == PlaybackState::Playing {
+                if ((cdx >= -12 && cdx <= -4) || (cdx >= 4 && cdx <= 12))
+                    && cdy.abs() <= 14
+                {
+                    return BG_DARK;
+                }
+                return TEXT_PRIMARY;
+            }
+            if cdx >= -14 && cdx <= 16 {
+                let allow = (16 - cdx) * 18 / 30;
+                if cdy.abs() <= allow {
+                    return BG_DARK;
+                }
+            }
+            return TEXT_PRIMARY;
+        }
+    }
+    // Next button center (530, 990) r32: right triangle + bar.
+    {
+        let ndx = x as i32 - 530;
+        let ndy = y as i32 - 990;
+        let nd2 = ndx * ndx + ndy * ndy;
+        if nd2 <= 32 * 32 {
+            if nd2 >= 30 * 30 {
+                return BORDER_SUBTLE;
+            }
+            if ndx >= 14 && ndx <= 18 && ndy.abs() <= 10 {
+                return TEXT_PRIMARY;
+            }
+            if ndx >= -12 && ndx <= 8 {
+                let allow = (8 - ndx) * 12 / 20;
+                // Mirror of prev: tip at +8, base at -12.
+                // At ndx=8 allow=0, at ndx=-12 allow=12.
+                if ndy.abs() <= allow {
+                    return TEXT_PRIMARY;
+                }
+            }
+            return SURFACE_RAISED;
+        }
+    }
+
+    // 6. Secondary row y1080..1160.
+    // Shuffle glyph at x140: X shape (two crossing strokes).
+    if x >= 118 && x < 162 && y >= 1098 && y < 1142 {
+        let sx = x as i32 - 140;
+        let sy = y as i32 - 1120;
+        if (sx - sy).abs() <= 2 || (sx + sy).abs() <= 2 {
+            return TEXT_MUTED;
+        }
+    }
+    // Heart at x360: two circles + triangle approx.
+    {
+        let h1dx = x as i32 - 350;
+        let h1dy = y as i32 - 1112;
+        if h1dx * h1dx + h1dy * h1dy <= 100 {
+            return TEXT_MUTED;
+        }
+        let h2dx = x as i32 - 370;
+        let h2dy = y as i32 - 1112;
+        if h2dx * h2dx + h2dy * h2dy <= 100 {
+            return TEXT_MUTED;
+        }
+        if y >= 1118 && y < 1138 {
+            let half = 1138 - y as i32;
+            if (x as i32 - 360).abs() <= half {
+                return TEXT_MUTED;
+            }
+        }
+    }
+    // "..." at x580: three dots.
+    {
+        let d1x = x as i32 - 566;
+        let d1y = y as i32 - 1120;
+        if d1x * d1x + d1y * d1y <= 16 {
+            return TEXT_MUTED;
+        }
+        let d2x = x as i32 - 580;
+        let d2y = y as i32 - 1120;
+        if d2x * d2x + d2y * d2y <= 16 {
+            return TEXT_MUTED;
+        }
+        let d3x = x as i32 - 594;
+        let d3y = y as i32 - 1120;
+        if d3x * d3x + d3y * d3y <= 16 {
+            return TEXT_MUTED;
+        }
     }
 
     BG_DARK
@@ -657,7 +640,7 @@ fn render_music_ui(surface: u32, app: &MusicApp) {
 pub extern "C" fn _start() -> ! {
     std::log(
         0,
-        "[MUSIC APP (Ring 3)] Sovereign Hi-Fi Audio Studio & Synthesizer online.",
+        "[MUSIC APP (Ring 3)] Native music player online.",
     )
     .ok();
 
@@ -666,7 +649,7 @@ pub extern "C" fn _start() -> ! {
     // 1. Hardware Keystore Derivation
     music.derive_keystore_key();
 
-    // 2. Encrypt Track Record in Sector 204
+    // 2. Encrypt Track Record
     music.encrypt_track_record();
 
     // 3. Allocate DRM/KMS Client Surface (z=200)
@@ -678,7 +661,7 @@ pub extern "C" fn _start() -> ! {
         Err(_) => 0,
     };
 
-    // 4. Zero-Copy DMA Audio Streaming over Pipe 1
+    // 4. Zero-Copy DMA Audio Streaming
     if music.stream_dma_audio_block() {
         music.total_dma_buffers_streamed += 1;
         music.state = PlaybackState::Playing;
@@ -690,7 +673,7 @@ pub extern "C" fn _start() -> ! {
         std::log(0, "[MUSIC APP] Music canvas presented to scanout buffer.").ok();
     }
 
-    // 5. Sovereign Asynchronous Event Reactor Loop
+    // 5. Asynchronous Event Reactor Loop
     let interest_mask = std::EVENT_TOUCH_INPUT | std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK;
     loop {
         match std::event_poll(interest_mask, 150) {
@@ -720,8 +703,8 @@ pub extern "C" fn _start() -> ! {
                             let x = input.x as usize;
                             let y = input.y as usize;
 
-                            // Check Back button in header or Home gesture bar: exit cleanly to launcher
-                            if (x >= 24 && x < 100 && y >= 28 && y < 68)
+                            // Dismiss chevron in top bar or home gesture bar: exit to launcher.
+                            if (x >= 24 && x < 100 && y >= 28 && y < 100)
                                 || (x >= 240 && x <= 480 && y >= 1400)
                             {
                                 std::log(0, "[MUSIC APP] Back button or home gesture pressed. Exiting to launcher.").ok();
@@ -731,95 +714,69 @@ pub extern "C" fn _start() -> ! {
                                 std::exit_with_code(0);
                             }
 
-                            // Check Previous button (180, 865, r: 32)
-                            let p_dx = (x as i32) - 180;
-                            let p_dy = (y as i32) - 865;
-                            if p_dx * p_dx + p_dy * p_dy <= 1024 {
-                                if !PLAYLIST.is_empty() && music.current_track_idx > 0 {
-                                    music.current_track_idx -= 1;
-                                }
-                                let _ = std::audio_haptic_click();
-                                if surface > 0 {
-                                    render_music_ui(surface, &music);
-                                    let _ = std::surface_flip(6);
-                                }
-                            }
-
-                            // Check Next button (540, 865, r: 32)
-                            let n_dx = (x as i32) - 540;
-                            let n_dy = (y as i32) - 865;
-                            if n_dx * n_dx + n_dy * n_dy <= 1024 {
-                                if !PLAYLIST.is_empty() && music.current_track_idx + 1 < PLAYLIST.len() {
-                                    music.current_track_idx += 1;
-                                }
-                                let _ = std::audio_haptic_click();
-                                if surface > 0 {
-                                    render_music_ui(surface, &music);
-                                    let _ = std::surface_flip(6);
-                                }
-                            }
-
-                            // Check Play / Pause center button (360, 865, r: 48)
-                            let center_x = 360isize;
-                            let center_y = 865isize;
-                            let dist_sq = (x as isize - center_x).pow(2)
-                                + (y as isize - center_y).pow(2);
-                            if dist_sq < 48 * 48 {
-                                match music.state {
-                                    PlaybackState::Playing => {
-                                        music.state = PlaybackState::Paused;
-                                        std::log(0, "[MUSIC APP] Transport paused by user.").ok();
+                            // Previous button (190, 990, r: 32)
+                            {
+                                let p_dx = (x as i32) - 190;
+                                let p_dy = (y as i32) - 990;
+                                if p_dx * p_dx + p_dy * p_dy <= 1024 {
+                                    if !PLAYLIST.is_empty() && music.current_track_idx > 0 {
+                                        music.current_track_idx -= 1;
                                     }
-                                    _ => {
-                                        if music.stream_dma_audio_block() {
-                                            music.total_dma_buffers_streamed += 1;
-                                            music.state = PlaybackState::Playing;
-                                        } else {
-                                            music.state = PlaybackState::Stopped;
-                                            std::log(
-                                                0,
-                                                "[MUSIC APP] Play requested but no media is available; transport stays stopped.",
-                                            )
-                                            .ok();
+                                    let _ = std::audio_haptic_click();
+                                    if surface > 0 {
+                                        render_music_ui(surface, &music);
+                                        let _ = std::surface_flip(6);
+                                    }
+                                }
+                            }
+
+                            // Next button (530, 990, r: 32)
+                            {
+                                let n_dx = (x as i32) - 530;
+                                let n_dy = (y as i32) - 990;
+                                if n_dx * n_dx + n_dy * n_dy <= 1024 {
+                                    if !PLAYLIST.is_empty() && music.current_track_idx + 1 < PLAYLIST.len() {
+                                        music.current_track_idx += 1;
+                                    }
+                                    let _ = std::audio_haptic_click();
+                                    if surface > 0 {
+                                        render_music_ui(surface, &music);
+                                        let _ = std::surface_flip(6);
+                                    }
+                                }
+                            }
+
+                            // Play / Pause center button (360, 990, r: 44)
+                            {
+                                let center_x = 360isize;
+                                let center_y = 990isize;
+                                let dist_sq = (x as isize - center_x).pow(2)
+                                    + (y as isize - center_y).pow(2);
+                                if dist_sq < 44 * 44 {
+                                    match music.state {
+                                        PlaybackState::Playing => {
+                                            music.state = PlaybackState::Paused;
+                                            std::log(0, "[MUSIC APP] Transport paused by user.").ok();
+                                        }
+                                        _ => {
+                                            if music.stream_dma_audio_block() {
+                                                music.total_dma_buffers_streamed += 1;
+                                                music.state = PlaybackState::Playing;
+                                            } else {
+                                                music.state = PlaybackState::Stopped;
+                                                std::log(
+                                                    0,
+                                                    "[MUSIC APP] Play requested but no media is available; transport stays stopped.",
+                                                )
+                                                .ok();
+                                            }
                                         }
                                     }
-                                }
-                                let _ = std::audio_haptic_click();
-                                if surface > 0 {
-                                    render_music_ui(surface, &music);
-                                    let _ = std::surface_flip(6);
-                                }
-                            }
-
-                            // Volume Slider tap / scrub (y: 975..1005, x: 110..672)
-                            if (975..1005).contains(&y) && (110..=672).contains(&x) {
-                                let pct = ((x - 110) * 100 / (672 - 110)) as u8;
-                                music.volume_percent = pct.min(100);
-                                let _ = std::audio_haptic_click();
-                                if surface > 0 {
-                                    render_music_ui(surface, &music);
-                                    let _ = std::surface_flip(6);
-                                }
-                            }
-
-                            // Synthesizer Waveform Engine Pills (y: 1080..1130)
-                            if (1080..1130).contains(&y) {
-                                if (48..188).contains(&x) {
-                                    music.waveform = AudioWaveform::Sine;
                                     let _ = std::audio_haptic_click();
-                                } else if (208..348).contains(&x) {
-                                    music.waveform = AudioWaveform::Square;
-                                    let _ = std::audio_haptic_click();
-                                } else if (368..508).contains(&x) {
-                                    music.waveform = AudioWaveform::Triangle;
-                                    let _ = std::audio_haptic_click();
-                                } else if (528..668).contains(&x) {
-                                    music.waveform = AudioWaveform::Sawtooth;
-                                    let _ = std::audio_haptic_click();
-                                }
-                                if surface > 0 {
-                                    render_music_ui(surface, &music);
-                                    let _ = std::surface_flip(6);
+                                    if surface > 0 {
+                                        render_music_ui(surface, &music);
+                                        let _ = std::surface_flip(6);
+                                    }
                                 }
                             }
                         }
