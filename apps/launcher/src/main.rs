@@ -77,6 +77,20 @@ fn test_text(
     None
 }
 
+#[inline(always)]
+pub fn test_text_aa(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    text: &[u8],
+    color: u32,
+    bg: u32,
+) -> Option<u32> {
+    interos_std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false)
+}
+
 // -----------------------------------------------------------------------------
 // Interactive Launcher View Modes & Application State Engine
 // -----------------------------------------------------------------------------

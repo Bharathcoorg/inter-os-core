@@ -1,4 +1,4 @@
-﻿//! Lock Screen: wallpaper, clock, controls and unlock affordances.
+//! Lock Screen: wallpaper, clock, controls and unlock affordances.
 //!
 //! WHY `pub` on the date constants: `LauncherState::date_line` and the RTC parser
 //! live in the crate root and size themselves from the same abbreviation tables
@@ -26,7 +26,7 @@
 
 use core::cell::UnsafeCell;
 
-use crate::{test_text, LauncherState, H, W};
+use crate::{test_text, test_text_aa, LauncherState, H, W};
 use launcher::layout::{self, Rect};
 use launcher::text;
 use launcher::theme::*;
@@ -742,7 +742,7 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     //    render of this surface costs what it does on the emulated build.
     if state.clock_source_ok {
         if f.date.contains(x, y) {
-            if let Some(c) = test_text(
+            if let Some(c) = test_text_aa(
                 x,
                 y,
                 f.date.x,
@@ -750,6 +750,7 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 LOCK_DATE_SCALE,
                 &state.date_line,
                 f.ink,
+                color,
             ) {
                 return c;
             }
@@ -757,7 +758,7 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 
 // 4. The clock itself.
         if f.clock.contains(x, y) {
-            if let Some(c) = test_text(
+            if let Some(c) = test_text_aa(
                 x,
                 y,
                 f.clock.x,
@@ -765,6 +766,7 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 LOCK_CLOCK_SCALE,
                 &state.clock_time,
                 f.ink,
+                color,
             ) {
                 return c;
             }
