@@ -1120,15 +1120,17 @@ pub extern "C" fn _start() -> ! {
                         continue;
                     }
                     if input.kind == 6 {
-                        if !matches!(state.current_view, ViewMode::LockScreen | ViewMode::PinEntry) {
-                            state.current_view = match state.current_view {
-                                ViewMode::HomeScreen => ViewMode::HomeScreen,
-                                _ => ViewMode::HomeScreen,
-                            };
+                        if matches!(state.current_view, ViewMode::LockScreen | ViewMode::PinEntry) {
+                            continue;
+                        }
+                        if state.current_view != ViewMode::HomeScreen {
+                            state.current_view = ViewMode::HomeScreen;
                             render_view(surface, &state);
                             let _ = std::surface_flip(4);
+                            continue;
                         }
-                        continue;
+                        // HomeScreen owns the long-press gesture and opens the
+                        // power menu below; do not consume it here.
                     }
                     if input.kind == 9 { continue; }
 
