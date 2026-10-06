@@ -104,6 +104,9 @@ pub struct DrmKmsController {
     pub orientation: DisplayOrientation,
     pub refresh_hz: u16,
     pub frame_deadline_ticks: u64,
+    /// Set whenever a surface, display mode, or orientation changes. The compositor
+    /// can reuse the already-composed back buffer when the scene is unchanged.
+    pub frame_dirty: bool,
 }
 
 impl DrmKmsController {
@@ -123,6 +126,7 @@ impl DrmKmsController {
             orientation: DisplayOrientation::Portrait,
             refresh_hz: 60,
             frame_deadline_ticks: 0,
+            frame_dirty: true,
         }
     }
 
@@ -151,6 +155,7 @@ impl DrmKmsController {
         let mut surface = DrmSurface::new(id, width, height, z_order, owner_task);
         surface.input_enabled = !is_overlay;
         self.surfaces.push(surface);
+        self.frame_dirty = true;
         if crate::gui::WINDOW_MANAGER.lock().create_with_id(
             crate::gui::WindowId(id),
             owner_task,
@@ -175,6 +180,7 @@ impl DrmKmsController {
         if end > surface.pixels.len() { return Err("surface write out of bounds"); }
         surface.pixels[offset..end].copy_from_slice(src);
         surface.dirty = true;
+        self.frame_dirty = true;
         Ok(src.len())
     }
 
@@ -183,6 +189,7 @@ impl DrmKmsController {
         if let Some(pos) = self.surfaces.iter().position(|s| s.id == id) {
             let owner = self.surfaces[pos].owner_task;
             self.surfaces.remove(pos);
+            self.frame_dirty = true;
             let _ = crate::gui::WINDOW_MANAGER.lock().destroy_if(crate::gui::WindowId(id), Some(owner));
             if self.focused_surface == Some(id) {
                 self.focused_surface = self.surfaces.iter().filter(|s| s.visible && s.input_enabled).max_by_key(|s| s.z_order).map(|s| s.id);
@@ -200,6 +207,7 @@ impl DrmKmsController {
         }) {
             let owner = self.surfaces[pos].owner_task;
             self.surfaces.remove(pos);
+            self.frame_dirty = true;
             let gui_owner = owner_task.map(|_| owner);
             let _ = crate::gui::WINDOW_MANAGER.lock().destroy_if(crate::gui::WindowId(id), gui_owner);
             if self.focused_surface == Some(id) {
@@ -227,7 +235,9 @@ impl DrmKmsController {
                 self.focused_surface = self.surfaces.iter().filter(|s| s.visible && s.input_enabled).max_by_key(|s| s.z_order).map(|s| s.id);
             }
         }
-        before - self.surfaces.len()
+        let removed_count = before - self.surfaces.len();
+        if removed_count > 0 { self.frame_dirty = true; }
+        removed_count
     }
 
     /// Copies live window metadata without exposing client pixel memory.
@@ -259,6 +269,7 @@ impl DrmKmsController {
             s.z_order = z_order;
             s.visible = visible;
             s.dirty = true;
+            self.frame_dirty = true;
             true
         } else {
             false
@@ -278,6 +289,7 @@ impl DrmKmsController {
                 owner,
                 crate::gui::WindowRect { x, y, width: s.width, height: s.height },
             );
+            self.frame_dirty = true;
             return true;
         }
         false
@@ -336,6 +348,9 @@ impl DrmKmsController {
     /// Composites all visible surfaces onto the back buffer in z-order.
     pub fn composite(&mut self) {
         self.ensure_buffers();
+        if !self.frame_dirty && self.surfaces.iter().all(|s| !s.dirty) {
+            return;
+        }
         // Clear back buffer to base background color (slate navy: 0xFF0B0F19)
         let bg_color = 0xFF0B0F19u32;
         self.back_buffer.fill(bg_color);
@@ -470,6 +485,7 @@ impl DrmKmsController {
             }
             surface.dirty = false;
         }
+        self.frame_dirty = false;
     }
 
     pub fn set_display_mode(&mut self, width: u32, height: u32, refresh_hz: u16) -> Result<(), &'static str> {
@@ -483,12 +499,14 @@ impl DrmKmsController {
         self.scanout_width = width;
         self.scanout_height = height;
         self.refresh_hz = refresh_hz;
+        self.frame_dirty = true;
         self.ensure_buffers();
         Ok(())
     }
 
     pub fn set_orientation(&mut self, orientation: DisplayOrientation) {
         self.orientation = orientation;
+        self.frame_dirty = true;
     }
 
     pub fn next_frame_deadline(&self) -> u64 { self.frame_deadline_ticks }
@@ -521,6 +539,7 @@ pub static DRM_KMS: Mutex<DrmKmsController> = Mutex::new(DrmKmsController {
     orientation: DisplayOrientation::Portrait,
     refresh_hz: 60,
     frame_deadline_ticks: 0,
+    frame_dirty: true,
 });
 
 /// Automated verification self-test for DRM/KMS surface composition and page flipping.
