@@ -1654,60 +1654,163 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32) {
             let bpp = info.bytes_per_pixel;
             let stride_bytes = info.stride * bpp;
             let fmt = info.pixel_format;
+            let is_2x = (src_w == dst_w * 2) && (src_h == dst_h * 2);
             unsafe {
                 for dy in 0..dst_h {
-                    let sy = dy * src_h / dst_h;
-                    let src_row = sy * src_w;
                     let target_y = off_y + dy;
                     let row_start_ptr = ptr.add(target_y * stride_bytes + off_x * bpp);
                     match fmt {
                         PixelFormat::Bgr if bpp == 4 => {
                             let mut dst_ptr = row_start_ptr;
-                            for dx in 0..dst_w {
-                                let sx = dx * src_w / dst_w;
-                                let argb = pixels[src_row + sx];
-                                *dst_ptr = argb as u8;
-                                *dst_ptr.add(1) = (argb >> 8) as u8;
-                                *dst_ptr.add(2) = (argb >> 16) as u8;
-                                *dst_ptr.add(3) = 0xFF;
-                                dst_ptr = dst_ptr.add(4);
+                            if is_2x {
+                                let sy0 = dy * 2;
+                                let sy1 = sy0 + 1;
+                                let r0 = sy0 * src_w;
+                                let r1 = sy1 * src_w;
+                                for dx in 0..dst_w {
+                                    let sx = dx * 2;
+                                    let p00 = pixels[r0 + sx];
+                                    let p01 = pixels[r0 + sx + 1];
+                                    let p10 = pixels[r1 + sx];
+                                    let p11 = pixels[r1 + sx + 1];
+
+                                    let rb = ((p00 & 0x00FF00FF) + (p01 & 0x00FF00FF) + (p10 & 0x00FF00FF) + (p11 & 0x00FF00FF)) >> 2;
+                                    let ag = (((p00 >> 8) & 0x00FF00FF) + ((p01 >> 8) & 0x00FF00FF) + ((p10 >> 8) & 0x00FF00FF) + ((p11 >> 8) & 0x00FF00FF)) >> 2;
+                                    let argb = (rb & 0x00FF00FF) | ((ag & 0x00FF00FF) << 8);
+
+                                    *dst_ptr = argb as u8;
+                                    *dst_ptr.add(1) = (argb >> 8) as u8;
+                                    *dst_ptr.add(2) = (argb >> 16) as u8;
+                                    *dst_ptr.add(3) = 0xFF;
+                                    dst_ptr = dst_ptr.add(4);
+                                }
+                            } else {
+                                let sy = dy * src_h / dst_h;
+                                let src_row = sy * src_w;
+                                for dx in 0..dst_w {
+                                    let sx = dx * src_w / dst_w;
+                                    let argb = pixels[src_row + sx];
+                                    *dst_ptr = argb as u8;
+                                    *dst_ptr.add(1) = (argb >> 8) as u8;
+                                    *dst_ptr.add(2) = (argb >> 16) as u8;
+                                    *dst_ptr.add(3) = 0xFF;
+                                    dst_ptr = dst_ptr.add(4);
+                                }
                             }
                         }
                         PixelFormat::Bgr if bpp == 3 => {
                             let mut dst_ptr = row_start_ptr;
-                            for dx in 0..dst_w {
-                                let sx = dx * src_w / dst_w;
-                                let argb = pixels[src_row + sx];
-                                *dst_ptr = argb as u8;
-                                *dst_ptr.add(1) = (argb >> 8) as u8;
-                                *dst_ptr.add(2) = (argb >> 16) as u8;
-                                dst_ptr = dst_ptr.add(3);
+                            if is_2x {
+                                let sy0 = dy * 2;
+                                let sy1 = sy0 + 1;
+                                let r0 = sy0 * src_w;
+                                let r1 = sy1 * src_w;
+                                for dx in 0..dst_w {
+                                    let sx = dx * 2;
+                                    let p00 = pixels[r0 + sx];
+                                    let p01 = pixels[r0 + sx + 1];
+                                    let p10 = pixels[r1 + sx];
+                                    let p11 = pixels[r1 + sx + 1];
+
+                                    let rb = ((p00 & 0x00FF00FF) + (p01 & 0x00FF00FF) + (p10 & 0x00FF00FF) + (p11 & 0x00FF00FF)) >> 2;
+                                    let ag = (((p00 >> 8) & 0x00FF00FF) + ((p01 >> 8) & 0x00FF00FF) + ((p10 >> 8) & 0x00FF00FF) + ((p11 >> 8) & 0x00FF00FF)) >> 2;
+                                    let argb = (rb & 0x00FF00FF) | ((ag & 0x00FF00FF) << 8);
+
+                                    *dst_ptr = argb as u8;
+                                    *dst_ptr.add(1) = (argb >> 8) as u8;
+                                    *dst_ptr.add(2) = (argb >> 16) as u8;
+                                    dst_ptr = dst_ptr.add(3);
+                                }
+                            } else {
+                                let sy = dy * src_h / dst_h;
+                                let src_row = sy * src_w;
+                                for dx in 0..dst_w {
+                                    let sx = dx * src_w / dst_w;
+                                    let argb = pixels[src_row + sx];
+                                    *dst_ptr = argb as u8;
+                                    *dst_ptr.add(1) = (argb >> 8) as u8;
+                                    *dst_ptr.add(2) = (argb >> 16) as u8;
+                                    dst_ptr = dst_ptr.add(3);
+                                }
                             }
                         }
                         PixelFormat::Rgb if bpp == 4 => {
                             let mut dst_ptr = row_start_ptr;
-                            for dx in 0..dst_w {
-                                let sx = dx * src_w / dst_w;
-                                let argb = pixels[src_row + sx];
-                                *dst_ptr = (argb >> 16) as u8;
-                                *dst_ptr.add(1) = (argb >> 8) as u8;
-                                *dst_ptr.add(2) = argb as u8;
-                                *dst_ptr.add(3) = 0xFF;
-                                dst_ptr = dst_ptr.add(4);
+                            if is_2x {
+                                let sy0 = dy * 2;
+                                let sy1 = sy0 + 1;
+                                let r0 = sy0 * src_w;
+                                let r1 = sy1 * src_w;
+                                for dx in 0..dst_w {
+                                    let sx = dx * 2;
+                                    let p00 = pixels[r0 + sx];
+                                    let p01 = pixels[r0 + sx + 1];
+                                    let p10 = pixels[r1 + sx];
+                                    let p11 = pixels[r1 + sx + 1];
+
+                                    let rb = ((p00 & 0x00FF00FF) + (p01 & 0x00FF00FF) + (p10 & 0x00FF00FF) + (p11 & 0x00FF00FF)) >> 2;
+                                    let ag = (((p00 >> 8) & 0x00FF00FF) + ((p01 >> 8) & 0x00FF00FF) + ((p10 >> 8) & 0x00FF00FF) + ((p11 >> 8) & 0x00FF00FF)) >> 2;
+                                    let argb = (rb & 0x00FF00FF) | ((ag & 0x00FF00FF) << 8);
+
+                                    *dst_ptr = (argb >> 16) as u8;
+                                    *dst_ptr.add(1) = (argb >> 8) as u8;
+                                    *dst_ptr.add(2) = argb as u8;
+                                    *dst_ptr.add(3) = 0xFF;
+                                    dst_ptr = dst_ptr.add(4);
+                                }
+                            } else {
+                                let sy = dy * src_h / dst_h;
+                                let src_row = sy * src_w;
+                                for dx in 0..dst_w {
+                                    let sx = dx * src_w / dst_w;
+                                    let argb = pixels[src_row + sx];
+                                    *dst_ptr = (argb >> 16) as u8;
+                                    *dst_ptr.add(1) = (argb >> 8) as u8;
+                                    *dst_ptr.add(2) = argb as u8;
+                                    *dst_ptr.add(3) = 0xFF;
+                                    dst_ptr = dst_ptr.add(4);
+                                }
                             }
                         }
                         PixelFormat::Rgb if bpp == 3 => {
                             let mut dst_ptr = row_start_ptr;
-                            for dx in 0..dst_w {
-                                let sx = dx * src_w / dst_w;
-                                let argb = pixels[src_row + sx];
-                                *dst_ptr = (argb >> 16) as u8;
-                                *dst_ptr.add(1) = (argb >> 8) as u8;
-                                *dst_ptr.add(2) = argb as u8;
-                                dst_ptr = dst_ptr.add(3);
+                            if is_2x {
+                                let sy0 = dy * 2;
+                                let sy1 = sy0 + 1;
+                                let r0 = sy0 * src_w;
+                                let r1 = sy1 * src_w;
+                                for dx in 0..dst_w {
+                                    let sx = dx * 2;
+                                    let p00 = pixels[r0 + sx];
+                                    let p01 = pixels[r0 + sx + 1];
+                                    let p10 = pixels[r1 + sx];
+                                    let p11 = pixels[r1 + sx + 1];
+
+                                    let rb = ((p00 & 0x00FF00FF) + (p01 & 0x00FF00FF) + (p10 & 0x00FF00FF) + (p11 & 0x00FF00FF)) >> 2;
+                                    let ag = (((p00 >> 8) & 0x00FF00FF) + ((p01 >> 8) & 0x00FF00FF) + ((p10 >> 8) & 0x00FF00FF) + ((p11 >> 8) & 0x00FF00FF)) >> 2;
+                                    let argb = (rb & 0x00FF00FF) | ((ag & 0x00FF00FF) << 8);
+
+                                    *dst_ptr = (argb >> 16) as u8;
+                                    *dst_ptr.add(1) = (argb >> 8) as u8;
+                                    *dst_ptr.add(2) = argb as u8;
+                                    dst_ptr = dst_ptr.add(3);
+                                }
+                            } else {
+                                let sy = dy * src_h / dst_h;
+                                let src_row = sy * src_w;
+                                for dx in 0..dst_w {
+                                    let sx = dx * src_w / dst_w;
+                                    let argb = pixels[src_row + sx];
+                                    *dst_ptr = (argb >> 16) as u8;
+                                    *dst_ptr.add(1) = (argb >> 8) as u8;
+                                    *dst_ptr.add(2) = argb as u8;
+                                    dst_ptr = dst_ptr.add(3);
+                                }
                             }
                         }
                         _ => {
+                            let sy = dy * src_h / dst_h;
+                            let src_row = sy * src_w;
                             for dx in 0..dst_w {
                                 let sx = dx * src_w / dst_w;
                                 let argb = pixels[src_row + sx];
