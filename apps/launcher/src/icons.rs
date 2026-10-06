@@ -28,6 +28,7 @@ pub enum IconKind {
     Notes,
     Contacts,
     Maps,
+    Briefcase,
 }
 
 /// Identifies if a package ID or process name maps to a first-party vector pictogram.
@@ -106,6 +107,8 @@ pub fn match_icon_kind(id: &[u8]) -> Option<IconKind> {
         Some(IconKind::Contacts)
     } else if id == b"org.interos.maps" || id == b"maps" || id == b"Maps" || id == b"MAP" {
         Some(IconKind::Maps)
+    } else if id == b"briefcase" || id == b"work" || id == b"Work" || id == b"WORK" {
+        Some(IconKind::Briefcase)
     } else {
         None
     }
@@ -288,6 +291,15 @@ pub fn rasterize_icon_pixel(
             let pin_tip = (ry >= 3 && ry <= 10) && (rx.abs() <= (10 - ry));
             (pin_circle && !pin_hole) || pin_tip
         }
+        IconKind::Briefcase => {
+            // Arched handle
+            let handle = (rx.abs() <= 5 && ry >= -10 && ry <= -5) && !(rx.abs() <= 3 && ry >= -8 && ry <= -5);
+            // Main rectangular briefcase body
+            let body = rx >= -11 && rx <= 11 && ry >= -4 && ry <= 10;
+            // Center latch
+            let latch = rx.abs() <= 2 && ry >= -1 && ry <= 2;
+            handle || body || latch
+        }
     };
 
     if inked {
@@ -321,6 +333,7 @@ mod tests {
         assert_eq!(match_icon_kind(b"org.interos.notes"), Some(IconKind::Notes));
         assert_eq!(match_icon_kind(b"org.interos.contacts"), Some(IconKind::Contacts));
         assert_eq!(match_icon_kind(b"org.interos.maps"), Some(IconKind::Maps));
+        assert_eq!(match_icon_kind(b"work"), Some(IconKind::Briefcase));
         assert_eq!(match_icon_kind(b"org.custom.unknown"), None);
     }
 
@@ -346,6 +359,7 @@ mod tests {
             IconKind::Notes,
             IconKind::Contacts,
             IconKind::Maps,
+            IconKind::Briefcase,
         ];
 
         for &kind in &kinds {

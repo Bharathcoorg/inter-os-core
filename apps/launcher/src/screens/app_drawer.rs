@@ -320,6 +320,7 @@ fn icon_color(kind: Option<launcher::icons::IconKind>, index: usize, theme: &The
         Some(IconKind::Contacts) => 0xFF007AFF,
         Some(IconKind::Maps) => 0xFF34C759,
         Some(IconKind::Apps) => 0xFF5856D6,
+        Some(IconKind::Briefcase) => 0xFFD97706,
         None => hue_for(theme, index),
     }
 }
