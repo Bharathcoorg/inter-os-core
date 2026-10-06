@@ -102,6 +102,7 @@ pub enum ViewMode {
     SystemSpace,
     LockScreen,
     PowerMenu,
+    PinEntry,
     AppDrawer,
     Notifications,
     LiveWidgets,
@@ -170,6 +171,9 @@ pub struct LauncherState {
     pub app_count: usize,
     pub app_drawer_page: usize,
     pub active_child: Option<u64>,
+    pub pin_buffer: [u8; 8],
+    pub pin_len: u8,
+    pub pin_error: u8,
 }
 
 impl LauncherState {
@@ -196,6 +200,9 @@ impl LauncherState {
             app_count: 0,
             app_drawer_page: 0,
             active_child: None,
+            pin_buffer: [0; 8],
+            pin_len: 0,
+            pin_error: 0,
         }
     }
 
