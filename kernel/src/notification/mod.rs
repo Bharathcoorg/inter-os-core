@@ -234,6 +234,16 @@ impl NotificationManager {
         }
     }
 
+    /// Removes every notification owned by a package across all users. Package
+    /// removal must not leave stale badges or lock-screen entries behind.
+    pub fn cancel_all_for_package_all_users(&mut self, package_id: &str) {
+        for record in self.records.iter_mut() {
+            if record.package_id == package_id && !record.is_cancelled {
+                record.is_cancelled = true;
+            }
+        }
+    }
+
     /// Cancels all active notifications for a user.
     pub fn cancel_all_for_user(&mut self, user_id: u32) {
         for record in self.records.iter_mut() {
