@@ -25,11 +25,11 @@ const KEY_Y: usize = 520;
 #[inline]
 fn round_contains(rect: &Rect, radius: usize, x: usize, y: usize) -> bool {
     if !rect.contains(x, y) { return false; }
-    let rx = radius.min(rect.width / 2).min(rect.height / 2);
+    let rx = radius.min(rect.w / 2).min(rect.h / 2);
     let left = rect.x + rx;
-    let right = rect.x + rect.width.saturating_sub(rx);
+    let right = rect.x + rect.w.saturating_sub(rx);
     let top = rect.y + rx;
-    let bottom = rect.y + rect.height.saturating_sub(rx);
+    let bottom = rect.y + rect.h.saturating_sub(rx);
     if x >= left && x < right || y >= top && y < bottom { return true; }
     let cx = if x < left { left } else { right.saturating_sub(1) };
     let cy = if y < top { top } else { bottom.saturating_sub(1) };
