@@ -243,6 +243,11 @@ impl IpcRouter {
             return Err(IpcError::MailboxFull);
         }
 
+        // Background applications receive a bounded IPC budget so a hidden
+        // process cannot keep the system busy by continuously waking peers.
+        crate::task::process::consume_background_ipc(sender)
+            .map_err(|_| IpcError::MailboxFull)?;
+
         let msg = IpcMessage::new(sender, msg_type, data);
         mailbox.queue.push_back(msg);
         crate::event::post_event(dest_task, crate::event::EVENT_IPC_MSG);
