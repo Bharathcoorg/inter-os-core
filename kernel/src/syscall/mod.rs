@@ -3004,6 +3004,12 @@ pub fn dev_uninstall_verified_rapp(pkg_id: &str) -> Result<(), SyscallResult> {
         let _ = crate::package::PACKAGE_REGISTRY.lock().restore_entry(previous_entry);
         return Err(SyscallResult::DeviceError);
     }
+    crate::notification::NOTIFICATION_MANAGER
+        .lock()
+        .cancel_all_for_package_all_users(pkg_id);
+    crate::notification::NOTIFICATION_MANAGER
+        .lock()
+        .remove_app_policy(pkg_id);
     Ok(())
 }
 
