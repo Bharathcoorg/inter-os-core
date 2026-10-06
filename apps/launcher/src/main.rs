@@ -1082,50 +1082,52 @@ pub extern "C" fn _start() -> ! {
                 && std::input_event_poll(&mut input).is_ok()
             {
                     if input.kind == 7 {
-                        if state.current_view == ViewMode::HomeScreen {
+                        match state.current_view {
+                            ViewMode::HomeScreen => {
+                                refresh_runtime_recents(&mut state);
+                                state.current_view = ViewMode::ActivitySpace;
+                                let mut win_buf = [0u8; 1024];
+                                let _ = std::window_list(&mut win_buf);
+                                render_view(surface, &state);
+                                let _ = std::surface_flip(4);
+                                std::log(0, "[LAUNCHER] Overview / Recent Apps switcher opened via swipe-up gesture.").ok();
+                            }
+                            ViewMode::LockScreen => {
+                                state.pin_buffer = [0; 8];
+                                state.pin_len = 0;
+                                state.pin_error = 0;
+                                state.current_view = ViewMode::PinEntry;
+                                render_view(surface, &state);
+                                let _ = std::surface_flip(4);
+                                std::log(0, "[LAUNCHER] Unlock gesture accepted; credential entry required.").ok();
+                            }
+                            ViewMode::PinEntry => {}
+                            _ => {
+                                state.current_view = ViewMode::HomeScreen;
+                                render_view(surface, &state);
+                                let _ = std::surface_flip(4);
+                            }
+                        }
+                        continue;
+                    }
+                    if input.kind == 8 {
+                        if !matches!(state.current_view, ViewMode::LockScreen | ViewMode::PinEntry) {
                             refresh_runtime_recents(&mut state);
                             state.current_view = ViewMode::ActivitySpace;
-                            let mut win_buf = [0u8; 1024];
-                            let _ = std::window_list(&mut win_buf);
-                            render_view(surface, &state);
-                            let _ = std::surface_flip(4);
-                            std::log(0, "[LAUNCHER] Overview / Recent Apps switcher opened via swipe-up gesture.").ok();
-                        } else if state.current_view == ViewMode::LockScreen {
-                            state.current_view = ViewMode::HomeScreen;
-                            render_view(surface, &state);
-                            let _ = std::surface_flip(4);
-                            std::log(0, "[LAUNCHER] Device unlocked via swipe/slide gesture. Home surface rendered.").ok();
-                            let mut drain = std::InputEvent {
-                                kind: 0,
-                                x: 0,
-                                y: 0,
-                                dx: 0,
-                                dy: 0,
-                                scale_milli: 1000,
-                            };
-                            while std::input_event_poll(&mut drain).is_ok() {}
-                            break;
-                        } else {
-                            state.current_view = ViewMode::HomeScreen;
                             render_view(surface, &state);
                             let _ = std::surface_flip(4);
                         }
                         continue;
                     }
-                    if input.kind == 8 {
-                        refresh_runtime_recents(&mut state);
-                        state.current_view = ViewMode::ActivitySpace;
-                        render_view(surface, &state);
-                        let _ = std::surface_flip(4);
-                        continue;
-                    }
                     if input.kind == 6 {
-                        state.current_view = match state.current_view {
-                            ViewMode::HomeScreen | ViewMode::LockScreen => state.current_view,
-                            _ => ViewMode::HomeScreen,
-                        };
-                        render_view(surface, &state);
-                        let _ = std::surface_flip(4);
+                        if !matches!(state.current_view, ViewMode::LockScreen | ViewMode::PinEntry) {
+                            state.current_view = match state.current_view {
+                                ViewMode::HomeScreen => ViewMode::HomeScreen,
+                                _ => ViewMode::HomeScreen,
+                            };
+                            render_view(surface, &state);
+                            let _ = std::surface_flip(4);
+                        }
                         continue;
                     }
                     if input.kind == 9 { continue; }
