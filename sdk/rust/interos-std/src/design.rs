@@ -79,3 +79,265 @@ pub mod motion {
     pub const STANDARD: u32 = 220;
     pub const EMPHASIZED: u32 = 360;
 }
+
+pub mod viewport {
+    /// Canonical portrait smartphone logical viewport dimensions (9:18 standard).
+    pub const LOGICAL_WIDTH: usize = 720;
+    pub const LOGICAL_HEIGHT: usize = 1440;
+
+    /// Hardware / QEMU scanout dimensions.
+    pub const SCANOUT_WIDTH: usize = 1280;
+    pub const SCANOUT_HEIGHT: usize = 720;
+
+    /// System safe areas and chrome metrics.
+    pub const STATUS_BAR_HEIGHT: usize = 48;
+    pub const NAV_BAR_HEIGHT: usize = 64;
+    pub const GESTURE_BAR_HEIGHT: usize = 48;
+    pub const CONTENT_PADDING: usize = 24;
+
+    /// Display orientation mode.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum DisplayOrientation {
+        Portrait,
+        LandscapeLeft,
+        LandscapeRight,
+    }
+
+    /// Logical safe area insets for mobile applications.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct Insets {
+        pub top: usize,
+        pub bottom: usize,
+        pub left: usize,
+        pub right: usize,
+    }
+
+    impl Insets {
+        pub const STANDARD: Insets = Insets {
+            top: STATUS_BAR_HEIGHT,
+            bottom: GESTURE_BAR_HEIGHT,
+            left: 0,
+            right: 0,
+        };
+
+        pub const FULLSCREEN: Insets = Insets {
+            top: 0,
+            bottom: 0,
+            left: 0,
+            right: 0,
+        };
+    }
+
+    /// Unified display coordinate transformer between logical mobile canvas and scanout.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct DisplayTransform {
+        pub orientation: DisplayOrientation,
+        pub scanout_w: usize,
+        pub scanout_h: usize,
+    }
+
+    impl DisplayTransform {
+        pub const fn new(orientation: DisplayOrientation) -> Self {
+            Self {
+                orientation,
+                scanout_w: SCANOUT_WIDTH,
+                scanout_h: SCANOUT_HEIGHT,
+            }
+        }
+
+        /// Map logical portrait (lx, ly) in 720x1440 to scanout destination (sx, sy).
+        pub fn logical_to_scanout(&self, lx: usize, ly: usize) -> Option<(usize, usize)> {
+            if lx >= LOGICAL_WIDTH || ly >= LOGICAL_HEIGHT {
+                return None;
+            }
+            match self.orientation {
+                DisplayOrientation::Portrait => {
+                    // Centered 360x720 letterbox in 1280x720
+                    let dst_x = 460 + (lx / 2);
+                    let dst_y = ly / 2;
+                    Some((dst_x, dst_y))
+                }
+                DisplayOrientation::LandscapeRight => {
+                    let sx = (ly * self.scanout_w) / LOGICAL_HEIGHT;
+                    let sy = 719usize.saturating_sub(lx);
+                    Some((sx, sy))
+                }
+                DisplayOrientation::LandscapeLeft => {
+                    let sx = 1279usize.saturating_sub((ly * self.scanout_w) / LOGICAL_HEIGHT);
+                    let sy = lx;
+                    Some((sx, sy))
+                }
+            }
+        }
+    }
+}
+
+pub mod primitives {
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct Rect {
+        pub x: usize,
+        pub y: usize,
+        pub w: usize,
+        pub h: usize,
+    }
+
+    impl Rect {
+        pub const fn new(x: usize, y: usize, w: usize, h: usize) -> Self {
+            Self { x, y, w, h }
+        }
+
+        pub fn contains(&self, px: usize, py: usize) -> bool {
+            px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
+        }
+
+        pub fn inset(&self, pad: usize) -> Self {
+            Self {
+                x: self.x + pad,
+                y: self.y + pad,
+                w: self.w.saturating_sub(pad * 2),
+                h: self.h.saturating_sub(pad * 2),
+            }
+        }
+    }
+
+    /// Anti-aliased rounded rectangle rasterizer with 1px border support.
+    #[inline]
+    pub fn draw_rounded_rect(
+        x: usize,
+        y: usize,
+        rect: Rect,
+        radius: usize,
+        fill: u32,
+        border: Option<u32>,
+        border_w: usize,
+    ) -> Option<u32> {
+        if !rect.contains(x, y) {
+            return None;
+        }
+        let r = radius.min(rect.w / 2).min(rect.h / 2);
+        if r == 0 {
+            if let Some(b_color) = border {
+                if border_w > 0
+                    && (x < rect.x + border_w
+                        || x >= rect.x + rect.w - border_w
+                        || y < rect.y + border_w
+                        || y >= rect.y + rect.h - border_w)
+                {
+                    return Some(b_color);
+                }
+            }
+            return Some(fill);
+        }
+
+        let in_left = x < rect.x + r;
+        let in_right = x >= rect.x + rect.w - r;
+        let in_top = y < rect.y + r;
+        let in_bottom = y >= rect.y + rect.h - r;
+
+        if (in_left || in_right) && (in_top || in_bottom) {
+            let cx = if in_left { rect.x + r } else { rect.x + rect.w - r - 1 } as i32;
+            let cy = if in_top { rect.y + r } else { rect.y + rect.h - r - 1 } as i32;
+            let dx = (x as i32) - cx;
+            let dy = (y as i32) - cy;
+            let dist_sq = dx * dx + dy * dy;
+            let r_i32 = r as i32;
+            let r_sq = r_i32 * r_i32;
+
+            if dist_sq > r_sq {
+                return None;
+            }
+
+            if let Some(b_color) = border {
+                if border_w > 0 {
+                    let inner_r = r_i32.saturating_sub(border_w as i32);
+                    if dist_sq >= inner_r * inner_r {
+                        return Some(b_color);
+                    }
+                }
+            }
+            return Some(fill);
+        }
+
+        if let Some(b_color) = border {
+            if border_w > 0
+                && (x < rect.x + border_w
+                    || x >= rect.x + rect.w - border_w
+                    || y < rect.y + border_w
+                    || y >= rect.y + rect.h - border_w)
+            {
+                return Some(b_color);
+            }
+        }
+        Some(fill)
+    }
+
+    /// Renders a capsule / pill (fully rounded ends).
+    #[inline]
+    pub fn draw_pill(
+        x: usize,
+        y: usize,
+        rect: Rect,
+        fill: u32,
+        border: Option<u32>,
+    ) -> Option<u32> {
+        let r = rect.h / 2;
+        draw_rounded_rect(x, y, rect, r, fill, border, 1)
+    }
+
+    /// Renders a circular button or badge.
+    #[inline]
+    pub fn draw_circle(
+        x: usize,
+        y: usize,
+        cx: usize,
+        cy: usize,
+        radius: usize,
+        fill: u32,
+        border: Option<u32>,
+    ) -> Option<u32> {
+        let dx = (x as i32) - (cx as i32);
+        let dy = (y as i32) - (cy as i32);
+        let dist_sq = dx * dx + dy * dy;
+        let r_i32 = radius as i32;
+        let r_sq = r_i32 * r_i32;
+        if dist_sq > r_sq {
+            return None;
+        }
+        if let Some(b_color) = border {
+            let inner_r = r_i32.saturating_sub(1);
+            if dist_sq >= inner_r * inner_r {
+                return Some(b_color);
+            }
+        }
+        Some(fill)
+    }
+
+    /// Renders a crisp 1px divider.
+    #[inline]
+    pub fn draw_divider(
+        x: usize,
+        y: usize,
+        x0: usize,
+        y0: usize,
+        len: usize,
+        is_horizontal: bool,
+        color: u32,
+    ) -> Option<u32> {
+        if is_horizontal {
+            if y == y0 && x >= x0 && x < x0 + len {
+                Some(color)
+            } else {
+                None
+            }
+        } else {
+            if x == x0 && y >= y0 && y < y0 + len {
+                Some(color)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+pub use crate::font;
+

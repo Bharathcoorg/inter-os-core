@@ -7,6 +7,7 @@
 
 pub mod app;
 pub mod design;
+pub mod font;
 pub mod service;
 pub mod compositor {
     pub const MAGIC: [u8; 4] = *b"ICMP";
