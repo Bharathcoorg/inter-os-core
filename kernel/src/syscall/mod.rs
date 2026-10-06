@@ -2914,7 +2914,11 @@ pub fn sys_app_restart(app_id: &str) -> Result<TaskId, SyscallResult> {
         sched.find_child_by_name(parent, app_id)
     };
     if let Some(child) = child {
-        SCHEDULER.lock().terminate_child(parent, child, -9).map_err(|_| SyscallResult::NotReady)?;
+        {
+            let mut sched = SCHEDULER.lock();
+            sched.terminate_child(parent, child, -9).map_err(|_| SyscallResult::NotReady)?;
+        }
+        SCHEDULER.lock().reap_child(parent, child).map_err(|_| SyscallResult::NotReady)?;
     }
     sys_app_launch(app_id)
 }
