@@ -23,6 +23,7 @@ use core::panic::PanicInfo;
 use interos_std as std;
 
 /// Supported URI schemes.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UriScheme {
     Http = 0,
@@ -34,6 +35,7 @@ pub enum UriScheme {
 }
 
 /// Parsed sovereign URI structure.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct ParsedUri {
     pub scheme: UriScheme,
@@ -53,8 +55,8 @@ pub struct Bookmark {
 /// Optional bookmarks loaded from real browser state.
 pub static BOOKMARKS: [Bookmark; 0] = [];
 
-
 /// Production Sovereign Browser state engine.
+#[allow(dead_code)]
 pub struct BrowserApp {
     pub current_url: &'static str,
     pub scroll_offset_px: i32,
@@ -190,16 +192,29 @@ pub fn parse_uri(&self, raw_url: &'static str) -> ParsedUri {
 }
 
 // -----------------------------------------------------------------------------
-// Visual Design Tokens
+// Visual Design Tokens (light theme)
 // -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFF070B12;
-const SURFACE_DARK: u32 = 0xFF111B2B;
-const SURFACE_RAISED: u32 = 0xFF17243A;
-const BORDER_SUBTLE: u32 = 0xFF26354D;
-const ACCENT_SKY: u32 = 0xFF31C4FF;
-const SUCCESS_EMERALD: u32 = 0xFF56D68A;
-const TEXT_PRIMARY: u32 = 0xFFF4F7FB;
-const TEXT_MUTED: u32 = 0xFF9AA8BC;
+#[allow(dead_code)]
+const BG_DARK: u32 = 0xFFFFFFFF;
+#[allow(dead_code)]
+const SURFACE_DARK: u32 = 0xFFF8FAFC;
+#[allow(dead_code)]
+const SURFACE_RAISED: u32 = 0xFFF1F5F9;
+#[allow(dead_code)]
+const BORDER_SUBTLE: u32 = 0xFFE2E8F0;
+#[allow(dead_code)]
+const TEXT_PRIMARY: u32 = 0xFF0F172A;
+#[allow(dead_code)]
+const TEXT_MUTED: u32 = 0xFF64748B;
+#[allow(dead_code)]
+const ACCENT_SKY: u32 = 0xFF0284C7;
+// Extra icon fills (not part of base tokens).
+#[allow(dead_code)]
+const ICON_RED: u32 = 0xFFEF4444;
+#[allow(dead_code)]
+const ICON_DARK: u32 = 0xFF18181B;
+#[allow(dead_code)]
+const WHITE: u32 = 0xFFFFFFFF;
 
 // -----------------------------------------------------------------------------
 // Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')
@@ -339,348 +354,352 @@ const H: usize = 1440;
 const CHUNK: usize = 4096;
 
 #[inline(never)]
+fn pill_contains(x: usize, y: usize) -> bool {
+    if x < 36 || x >= 684 || y < 70 || y >= 130 {
+        return false;
+    }
+    if x >= 66 && x < 654 {
+        return true;
+    }
+    let (cx, cy) = if x < 66 { (66isize, 100isize) } else { (654isize, 100isize) };
+    let dx = x as isize - cx;
+    let dy = y as isize - cy;
+    dx * dx + dy * dy < 30 * 30
+}
+
+#[inline(never)]
+fn pill_border(x: usize, y: usize) -> bool {
+    if !pill_contains(x, y) {
+        return false;
+    }
+    // Inner pill shrunk by 2px: middle rect y72..128, caps radius 28.
+    let inside_inner = if x >= 66 && x < 654 {
+        y >= 72 && y < 128
+    } else {
+        let (cx, cy) = if x < 66 { (66isize, 100isize) } else { (654isize, 100isize) };
+        let dx = x as isize - cx;
+        let dy = y as isize - cy;
+        dx * dx + dy * dy < 28 * 28
+    };
+    !inside_inner
+}
+
+#[inline(never)]
+fn card_contains(x: usize, y: usize) -> bool {
+    if x < 48 || x >= 672 || y < 350 || y >= 700 {
+        return false;
+    }
+    // Rounded corners radius 24.
+    let in_mid_x = x >= 72 && x < 648;
+    let in_mid_y = y >= 350 && y < 700;
+    if in_mid_x && in_mid_y {
+        return true;
+    }
+    let in_x = x >= 48 && x < 672;
+    let in_y_band = y >= 374 && y < 676;
+    if in_x && in_y_band {
+        return true;
+    }
+    let corners = [(72isize, 374isize), (647isize, 374isize), (72, 675), (647, 675)];
+    for (cx, cy) in corners {
+        let dx = x as isize - cx;
+        let dy = y as isize - cy;
+        if dx * dx + dy * dy < 24 * 24 {
+            return true;
+        }
+    }
+    false
+}
+
+#[inline(never)]
+fn card_border(x: usize, y: usize) -> bool {
+    if !card_contains(x, y) {
+        return false;
+    }
+    // Inner card shrunk by 2px.
+    let x0 = x as isize;
+    let y0 = y as isize;
+    let inner = if x >= 50 && x < 670 && y >= 352 && y < 698 {
+        let in_mid_x = x >= 72 && x < 648 && y >= 352 && y < 698;
+        let in_band = x >= 50 && x < 670 && y >= 374 && y < 676;
+        if in_mid_x || in_band {
+            // Exclude inner corner cutouts radius 22.
+            let corners = [(72isize, 374isize), (647isize, 374isize), (72, 675), (647, 675)];
+            let mut in_corner_cut = false;
+            let outside_core = !(x >= 72 && x < 648) || !(y >= 374 && y < 676);
+            if outside_core {
+                for (cx, cy) in corners {
+                    let dx = x0 - cx;
+                    let dy = y0 - cy;
+                    if dx * dx + dy * dy >= 22 * 22 {
+                        in_corner_cut = true;
+                    }
+                }
+                !in_corner_cut
+            } else {
+                true
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    !inner
+}
+
+#[inline(never)]
 fn get_browser_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
-    // 1. Status Bar & Navigation Header (y: 0..96)
-    if y < 96 {
-        if y >= 94 {
-            return BORDER_SUBTLE;
-        }
+    let _ = app.current_url;
 
-        // Back button (<) at (x: 24..90, y: 28..68)
-        if x >= 24 && x < 90 && y >= 28 && y < 68 {
-            let center_x = 57;
-            let center_y = 48;
-            let dx = (x as isize - center_x as isize).abs();
-            let dy = (y as isize - center_y as isize).abs();
-            if (dx + dy <= 12 && x <= center_x)
-                || (x >= 24 && x < 90 && (y == 28 || y == 67 || x == 24 || x == 89))
+    // 1. Header y0..160: status bar + capsule search pill.
+    if y < 160 {
+        // Capsule search pill x36..684 y70..130 radius 30.
+        if pill_contains(x, y) {
+            if pill_border(x, y) {
+                return BORDER_SUBTLE;
+            }
+            // Magnifier icon near x60: ring center (64,100) radius ~7 + handle.
             {
-                return TEXT_PRIMARY;
-            }
-            return SURFACE_RAISED;
-        }
-
-        // URL Address Bar Pill at (x: 104..696, y: 28..68)
-        if x >= 104 && x < 696 && y >= 28 && y < 68 {
-            let rx = (x - 104).min(695 - x);
-            let ry = (y - 28).min(67 - y);
-            if rx < 20 && ry < 20 {
-                let cdx = (20 - rx) as isize;
-                let cdy = (20 - ry) as isize;
-                if cdx * cdx + cdy * cdy >= 400 {
-                    return SURFACE_DARK;
+                let dx = x as isize - 64;
+                let dy = y as isize - 100;
+                let d2 = dx * dx + dy * dy;
+                if d2 >= 25 && d2 <= 64 {
+                    return TEXT_MUTED;
                 }
-            }
-
-            // Security Padlock Vector Glyph at (cx: 128, cy: 48)
-            let cx = 128;
-            let cy = 48;
-            // Padlock shackle arc
-            if (x as isize - cx as isize).abs() <= 5 && y >= cy - 8 && y <= cy - 3 {
-                let is_shackle_rim = (x as isize - cx as isize).abs() >= 3 || y <= cy - 6;
-                if is_shackle_rim {
-                    return SUCCESS_EMERALD;
-                }
-            }
-            // Padlock body
-            if (x as isize - cx as isize).abs() <= 7 && y >= cy - 3 && y <= cy + 7 {
-                // Keyhole dot
-                if (x as isize - cx as isize).abs() <= 1 && y >= cy + 1 && y <= cy + 3 {
-                    return SURFACE_DARK;
-                }
-                return SUCCESS_EMERALD;
-            }
-
-            // Reload Arrow Glyph at (cx: 666, cy: 48)
-            let rx_rel = x as isize - 666;
-            let ry_rel = y as isize - 48;
-            let dist_sq = rx_rel * rx_rel + ry_rel * ry_rel;
-            if dist_sq >= 25 && dist_sq <= 49 {
-                // Break top right quadrant for arrow gap
-                if !(rx_rel > 0 && ry_rel < 0) {
+                // Handle: diagonal from (69,105) to (77,113).
+                let hx = x as isize - 69;
+                let hy = y as isize - 105;
+                if hx >= 0 && hx <= 8 && hy >= 0 && hy <= 8 && (hx - hy).abs() <= 1 {
                     return TEXT_MUTED;
                 }
             }
-            // Arrowhead at top-right pointing down
-            if rx_rel >= 3 && rx_rel <= 7 && ry_rel >= -5 && ry_rel <= -1 {
-                return TEXT_MUTED;
+            // Submit arrow "->" glyph near x648: shaft + '>' chevron.
+            {
+                // Shaft: horizontal y99..101, x638..660.
+                if y >= 99 && y <= 101 && x >= 638 && x < 660 {
+                    return TEXT_MUTED;
+                }
+                // Chevron: two diagonal strokes meeting at (662,100).
+                let dx = x as isize - 662;
+                let dy = y as isize - 100;
+                // Upper stroke: from (654,92) to (662,100); lower: (654,108) to (662,100).
+                if dx <= 0 && dx >= -8 {
+                    if (dy + dx).abs() <= 1 && dy <= 0 {
+                        return TEXT_MUTED;
+                    }
+                    if (dy - dx).abs() <= 7 && dy <= 0 {
+                        // tighten: use symmetric check below
+                    }
+                    if (dy + dx).abs() <= 1 && dy >= 0 {
+                        // lower stroke: dy == -dx
+                        return TEXT_MUTED;
+                    }
+                }
             }
-
-            // URL String Text
-            let url_bytes = app.current_url.as_bytes();
-            if let Some(c) = test_text(x, y, 146, 40, 2, url_bytes, TEXT_PRIMARY) {
+            // Placeholder text.
+            if let Some(c) = test_text(x, y, 96, 92, 1, b"Search or type URL", TEXT_MUTED) {
                 return c;
-            }
-
-            if rx < 2 || ry < 2 {
-                return BORDER_SUBTLE;
             }
             return SURFACE_DARK;
         }
 
-        return SURFACE_DARK;
-    }
-
-    // 2. Protocol Badges & Privacy Bar (y: 104..154)
-    if y >= 104 && y < 154 {
-        // Chip 1: HTTPS (x: 24..140)
-        if x >= 24 && x < 140 && y >= 110 && y < 148 {
-            if let Some(c) = test_text(x, y, 44, 122, 1, b"HTTPS", SUCCESS_EMERALD) {
+        // Status bar row y0..40: time + signal/battery glyphs on BG.
+        if y < 60 {
+            if let Some(c) = test_text(x, y, 48, 16, 1, b"09:20", TEXT_PRIMARY) {
                 return c;
             }
-            if x == 24 || x == 139 || y == 110 || y == 147 {
-                return BORDER_SUBTLE;
-            }
-            return SURFACE_RAISED;
-        }
-
-        // Chip 2: INTERLAYER P2P (x: 150..330)
-        if x >= 150 && x < 330 && y >= 110 && y < 148 {
-            if let Some(c) = test_text(x, y, 168, 122, 1, b"INTERLAYER P2P", ACCENT_SKY) {
-                return c;
-            }
-            if x == 150 || x == 329 || y == 110 || y == 147 {
-                return BORDER_SUBTLE;
-            }
-            return SURFACE_RAISED;
-        }
-
-        // Chip 3: GEMINI (x: 340..450)
-        if x >= 340 && x < 450 && y >= 110 && y < 148 {
-            if let Some(c) = test_text(x, y, 362, 122, 1, b"GEMINI", TEXT_PRIMARY) {
-                return c;
-            }
-            if x == 340 || x == 449 || y == 110 || y == 147 {
-                return BORDER_SUBTLE;
-            }
-            return SURFACE_RAISED;
-        }
-
-        // Chip 4: PRIVACY SHIELD ON (x: 460..696)
-        if x >= 460 && x < 696 && y >= 110 && y < 148 {
-            if let Some(c) = test_text(x, y, 484, 122, 1, b"PRIVACY SHIELD ON", SUCCESS_EMERALD) {
-                return c;
-            }
-            if x == 460 || x == 695 || y == 110 || y == 147 {
-                return BORDER_SUBTLE;
-            }
-            return SURFACE_RAISED;
-        }
-
-        return BG_DARK;
-    }
-
-    // 3. Bookmarks Ledger Bar (y: 164..280)
-    if y >= 164 && y < 280 {
-        if BOOKMARKS.is_empty() {
-            // Empty Bookmarks Card (x: 24..696, y: 168..270)
-            if x >= 24 && x < 696 && y >= 168 && y < 270 {
-                let rx = (x - 24).min(695 - x);
-                let ry = (y - 168).min(269 - y);
-                if rx < 18 && ry < 18 {
-                    let cdx = (18 - rx) as isize;
-                    let cdy = (18 - ry) as isize;
-                    if cdx * cdx + cdy * cdy >= 324 {
-                        return BG_DARK;
+            // Signal bars: 4 ascending bars baseline y36, x600..636.
+            {
+                let bars = [(600usize, 28usize), (610, 24), (620, 20), (630, 16)];
+                for (bx, top) in bars {
+                    if x >= bx && x < bx + 6 && y >= top && y < 38 {
+                        return TEXT_PRIMARY;
                     }
                 }
-
-                // Vector Bookmark Ribbon Glyph at (cx: 56, cy: 219)
-                let cx = 56;
-                let cy = 219;
-                if (x as isize - cx as isize).abs() <= 10 && y >= cy - 16 && y <= cy + 16 {
-                    let in_notch = y >= cy + 8 && (x as isize - cx as isize).abs() <= (y - (cy + 8)) as isize;
-                    if !in_notch {
-                        return ACCENT_SKY;
-                    }
-                }
-
-                // Bookmarks info text
-                if let Some(c) = test_text(x, y, 82, 198, 2, b"Sovereign Bookmarks Ledger", TEXT_PRIMARY) {
-                    return c;
-                }
-                if let Some(c) = test_text(x, y, 82, 226, 1, b"Sandboxed bookmarks store ready - no external sync", TEXT_MUTED) {
-                    return c;
-                }
-
-                if rx < 2 || ry < 2 {
-                    return BORDER_SUBTLE;
-                }
-                return SURFACE_DARK;
             }
-        } else {
-            // Render bookmarks
-            let card = (y - 168) / 80;
-            let card_y = (y - 168) % 80;
-            if card < BOOKMARKS.len() && x >= 24 && x < 696 && card_y < 68 {
-                if rx_calc(x, card_y) {
-                    return BORDER_SUBTLE;
-                }
-                return SURFACE_DARK;
-            }
-        }
-        return BG_DARK;
-    }
-
-    // 4. Main Web Canvas Viewport (y: 290..1320)
-    if y >= 290 && y < 1320 {
-        if app.pages_loaded == 0 {
-            // Sovereign Web Start Card at x: 24..696, y: 296..880 (height: 584)
-            if x >= 24 && x < 696 && y >= 296 && y < 880 {
-                let rx = (x - 24).min(695 - x);
-                let ry = (y - 296).min(879 - y);
-                if rx < 24 && ry < 24 {
-                    let cdx = (24 - rx) as isize;
-                    let cdy = (24 - ry) as isize;
-                    if cdx * cdx + cdy * cdy >= 576 {
-                        return BG_DARK;
+            // Battery outline x652..686 y18..32 + nub + fill.
+            {
+                if x >= 652 && x < 686 && y >= 18 && y < 32 {
+                    if x == 652 || x == 685 || y == 18 || y == 31 {
+                        return TEXT_PRIMARY;
                     }
+                    // Fill level ~70%.
+                    if x >= 654 && x < 676 {
+                        return TEXT_PRIMARY;
+                    }
+                    return BG_DARK;
                 }
-
-                // --- Vector Globe & Compass Pictogram at cx: 360, cy: 420 ---
-                let cx = 360;
-                let cy = 420;
-                let gx = x as isize - cx as isize;
-                let gy = y as isize - cy as isize;
-                let g_dist_sq = gx * gx + gy * gy;
-
-                // Outer globe rim
-                if g_dist_sq >= 38 * 38 && g_dist_sq <= 42 * 42 {
-                    return ACCENT_SKY;
-                }
-
-                // Equator line
-                if gy.abs() <= 1 && gx.abs() <= 38 {
-                    return BORDER_SUBTLE;
-                }
-
-                // Longitude ellipse
-                let ell_sq = gx * gx * 3 + gy * gy;
-                if ell_sq >= 36 * 36 && ell_sq <= 40 * 40 && gx.abs() <= 38 {
-                    return ACCENT_SKY;
-                }
-
-                // Center navigation beacon dot
-                if g_dist_sq <= 16 {
+                if x >= 686 && x < 690 && y >= 22 && y < 28 {
                     return TEXT_PRIMARY;
                 }
+            }
+            return BG_DARK;
+        }
+        return BG_DARK;
+    }
 
-                // Start Page Heading
-                if let Some(c) = test_text(x, y, 190, 490, 2, b"InterOS Sovereign Web", TEXT_PRIMARY) {
-                    return c;
-                }
-                if let Some(c) = test_text(x, y, 208, 524, 1, b"Zero-Trust Sandboxed Hypermedia Client", ACCENT_SKY) {
-                    return c;
-                }
-                if let Some(c) = test_text(x, y, 224, 552, 1, b"Anti-Tracking Privacy Shield Active", SUCCESS_EMERALD) {
-                    return c;
-                }
-
-                // Feature squircle pills at y: 600..650
-                // Pill 1: P2P MESH
-                if x >= 60 && x < 230 && y >= 600 && y < 644 {
-                    if let Some(c) = test_text(x, y, 98, 616, 1, b"P2P MESH", ACCENT_SKY) {
-                        return c;
+    // 2. Quick shortcuts y175..295: 4 circular capsules radius 32.
+    if y >= 175 && y < 295 {
+        // Labels y~270 (drawn even outside circles, checked first for text rows).
+        if y >= 270 && y < 278 {
+            if let Some(c) = test_text(x, y, 72, 270, 1, b"InterOS", TEXT_PRIMARY) {
+                return c;
+            }
+            if let Some(c) = test_text(x, y, 232, 270, 1, b"YouTube", TEXT_PRIMARY) {
+                return c;
+            }
+            if let Some(c) = test_text(x, y, 396, 270, 1, b"GitHub", TEXT_PRIMARY) {
+                return c;
+            }
+            if let Some(c) = test_text(x, y, 568, 270, 1, b"Add", TEXT_PRIMARY) {
+                return c;
+            }
+        }
+        let centers = [(100isize, 225isize), (260, 225), (420, 225), (580, 225)];
+        for (idx, (cx, cy)) in centers.iter().enumerate() {
+            let dx = x as isize - *cx;
+            let dy = y as isize - *cy;
+            let d2 = dx * dx + dy * dy;
+            if d2 < 32 * 32 {
+                match idx {
+                    0 => {
+                        // InterOS: raised fill + subtle border + diamond/dot glyph.
+                        if d2 >= 30 * 30 {
+                            return BORDER_SUBTLE;
+                        }
+                        let man = dx.abs() + dy.abs();
+                        if man >= 7 && man <= 10 {
+                            return TEXT_PRIMARY;
+                        }
+                        if d2 <= 4 {
+                            return TEXT_PRIMARY;
+                        }
+                        return SURFACE_RAISED;
                     }
-                    if x == 60 || x == 229 || y == 600 || y == 643 {
-                        return BORDER_SUBTLE;
+                    1 => {
+                        // YouTube: red circle + white play triangle.
+                        let lx = x as isize - 252;
+                        let wy = y as isize - 225;
+                        if x >= 252 && x <= 272 {
+                            let half = (272 - x as isize) / 2;
+                            if wy.abs() <= half && half >= 0 {
+                                let _ = lx;
+                                return WHITE;
+                            }
+                        }
+                        return ICON_RED;
                     }
-                    return SURFACE_RAISED;
-                }
-                // Pill 2: DID ATTESTED
-                if x >= 250 && x < 470 && y >= 600 && y < 644 {
-                    if let Some(c) = test_text(x, y, 286, 616, 1, b"DID ATTESTED", TEXT_PRIMARY) {
-                        return c;
+                    2 => {
+                        // GitHub: dark circle + white dot/shape.
+                        if d2 <= 81 {
+                            return WHITE;
+                        }
+                        // Small octocat-ish ears: two dots above center.
+                        if (x as isize - 414).abs() <= 2 && (y as isize - 217).abs() <= 2 {
+                            return WHITE;
+                        }
+                        if (x as isize - 426).abs() <= 2 && (y as isize - 217).abs() <= 2 {
+                            return WHITE;
+                        }
+                        return ICON_DARK;
                     }
-                    if x == 250 || x == 469 || y == 600 || y == 643 {
-                        return BORDER_SUBTLE;
+                    _ => {
+                        // Add: raised fill + "+" glyph.
+                        if d2 >= 30 * 30 {
+                            return BORDER_SUBTLE;
+                        }
+                        if (y as isize - 225).abs() <= 2 && dx.abs() <= 10 {
+                            return TEXT_MUTED;
+                        }
+                        if (x as isize - 580).abs() <= 2 && dy.abs() <= 10 {
+                            return TEXT_MUTED;
+                        }
+                        return SURFACE_RAISED;
                     }
-                    return SURFACE_RAISED;
                 }
-                // Pill 3: ZERO TRACKERS
-                if x >= 490 && x < 660 && y >= 600 && y < 644 {
-                    if let Some(c) = test_text(x, y, 520, 616, 1, b"ZERO TRACKERS", SUCCESS_EMERALD) {
-                        return c;
-                    }
-                    if x == 490 || x == 659 || y == 600 || y == 643 {
-                        return BORDER_SUBTLE;
-                    }
-                    return SURFACE_RAISED;
-                }
-
-                // Subtext guidance
-                if let Some(c) = test_text(x, y, 136, 680, 1, b"Type a web address in the navigation bar to browse", TEXT_MUTED) {
-                    return c;
-                }
-
-                if rx < 2 || ry < 2 {
-                    return BORDER_SUBTLE;
-                }
-                return SURFACE_DARK;
             }
         }
         return BG_DARK;
     }
 
-    // 5. Bottom Navigation Dock (y: 1330..1414)
-    if y >= 1330 && y < 1414 {
-        if y == 1330 {
-            return BORDER_SUBTLE;
-        }
-
-        // Back Chevron (<) at cx: 70, cy: 1372
-        let bx_rel = (x as isize - 70).abs();
-        let by_rel = (y as isize - 1372).abs();
-        if by_rel <= 10 && bx_rel <= 10 && x <= 70 && (bx_rel + by_rel >= 8 && bx_rel + by_rel <= 11) {
-            return TEXT_PRIMARY;
-        }
-
-        // Forward Chevron (>) at cx: 200, cy: 1372
-        let fx_rel = (x as isize - 200).abs();
-        let fy_rel = (y as isize - 1372).abs();
-        if fy_rel <= 10 && fx_rel <= 10 && x >= 200 && (fx_rel + fy_rel >= 8 && fx_rel + fy_rel <= 11) {
-            return TEXT_MUTED;
-        }
-
-        // Tab Pill [ 1 ] at cx: 345, cy: 1372
-        if x >= 330 && x < 362 && y >= 1358 && y < 1386 {
-            if let Some(c) = test_text(x, y, 342, 1368, 1, b"1", ACCENT_SKY) {
+    // 3. Discover section y310..1250.
+    if y >= 310 && y < 1250 {
+        // Title "Discover" x48 y320 scale2.
+        if y >= 320 && y < 336 {
+            if let Some(c) = test_text(x, y, 48, 320, 2, b"Discover", TEXT_PRIMARY) {
                 return c;
             }
-            if x == 330 || x == 361 || y == 1358 || y == 1385 {
-                return ACCENT_SKY;
+        }
+        // Preview card x48..672 y350..700 radius 24.
+        if card_contains(x, y) {
+            if card_border(x, y) {
+                return BORDER_SUBTLE;
             }
-            return SURFACE_RAISED;
+            // Interior mountain-ridge gradient painting (bands + ridges).
+            let mut base = 0xFFDBEAFE_u32;
+            if y >= 470 && y < 560 {
+                base = 0xFFBFDBFE;
+            } else if y >= 560 && y < 650 {
+                base = 0xFFA9BEDD;
+            } else if y >= 650 {
+                base = 0xFFE2E8F0;
+            }
+            // Far ridge: peak (430,470), base y650.
+            let dxf = (x as isize - 430).abs();
+            let line_far = 470 + dxf * 180 / 300;
+            // Near ridge: peak (220,540), base y700.
+            let dxn = (x as isize - 220).abs();
+            let line_near = 540 + dxn * 160 / 280;
+            let yi = y as isize;
+            if yi >= line_near {
+                return 0xFF475569;
+            }
+            if yi >= line_far && yi < 650 {
+                return 0xFF94A3B8;
+            }
+            // Ridge snow caps: small light band near peaks.
+            if (x as isize - 430).abs() <= 14 && yi >= 470 && yi < 486 {
+                return 0xFFF8FAFC;
+            }
+            if (x as isize - 220).abs() <= 10 && yi >= 540 && yi < 552 {
+                return 0xFFF1F5F9;
+            }
+            return base;
         }
-
-        // Bookmark Star / Ribbon at cx: 500, cy: 1372
-        let sx_rel = (x as isize - 500).abs();
-        let sy_rel = (y as isize - 1372).abs();
-        if (sx_rel <= 8 && sy_rel <= 1) || (sy_rel <= 8 && sx_rel <= 1) || (sx_rel == sy_rel && sx_rel <= 6) {
-            return TEXT_MUTED;
-        }
-
-        // Overflow menu (...) at cx: 640, cy: 1372
-        if (y as isize - 1372).abs() <= 2 {
-            let ox = x as isize - 640;
-            if ox.abs() <= 2 || (ox - 12).abs() <= 2 || (ox + 12).abs() <= 2 {
-                return TEXT_MUTED;
+        // Headline two lines scale2 at y725.
+        if y >= 725 && y < 741 {
+            if let Some(c) = test_text(x, y, 48, 725, 2, b"Open technology for a", TEXT_PRIMARY) {
+                return c;
             }
         }
-
-        return SURFACE_DARK;
+        if y >= 747 && y < 763 {
+            if let Some(c) = test_text(x, y, 48, 747, 2, b"better future", TEXT_PRIMARY) {
+                return c;
+            }
+        }
+        // Blurb two lines scale1 at y775+.
+        if y >= 775 && y < 783 {
+            if let Some(c) = test_text(x, y, 48, 775, 1, b"A more private, open and user", TEXT_MUTED) {
+                return c;
+            }
+        }
+        if y >= 789 && y < 797 {
+            if let Some(c) = test_text(x, y, 48, 789, 1, b"controlled internet.", TEXT_MUTED) {
+                return c;
+            }
+        }
+        // Reference the accent token so the light palette stays linked.
+        let _ = ACCENT_SKY;
+        return BG_DARK;
     }
 
-    // 6. Home Gesture Pill (x: 260..460, y: 1418..1424)
+    // 4. Home gesture pill x260..460 y1418..1424.
     if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
         return TEXT_MUTED;
     }
 
     BG_DARK
-}
-
-fn rx_calc(x: usize, card_y: usize) -> bool {
-    x == 24 || x == 695 || card_y == 0 || card_y == 67
 }
 
 fn render_browser_ui(surface: u32, app: &BrowserApp) {
@@ -766,7 +785,7 @@ pub extern "C" fn _start() -> ! {
                             std::exit_with_code(0);
                         }
                         if input.kind == 1 {
-                            // Check Back button in header or Home gesture bar: exit cleanly to launcher
+                            // Check Back button (legacy header) or Home gesture bar: exit cleanly to launcher
                             if (input.x >= 24 && input.x < 100 && input.y >= 28 && input.y < 68)
                                 || (input.x >= 240 && input.x <= 480 && input.y >= 1400)
                             {
@@ -777,7 +796,14 @@ pub extern "C" fn _start() -> ! {
                                 std::exit_with_code(0);
                             }
 
-                            // Check bookmark card taps
+                            // Tapping the search pill gives haptic feedback only; no navigation.
+                            if input.x >= 36 && input.x < 684 && input.y >= 70 && input.y < 130
+                            {
+                                let _ = std::audio_haptic_click();
+                                std::log(0, "[BROWSER APP] Search pill tapped; haptic feedback only.").ok();
+                            }
+
+                            // Check bookmark card taps (ledger is empty: no-op).
                             if input.y >= 120
                                 && input.y < 380
                                 && input.x >= 32
