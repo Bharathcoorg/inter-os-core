@@ -60,23 +60,8 @@ const BAR_PERIOD: u64 = 600;
 // surface id. Neither is reachable from this file.
 
 /// One chunk of the system line.
-fn chunk(surface: u32, offset: usize, count: usize, ticks: u64, windows: usize, services: usize) {
-    let mut pixels = [0u32; CHUNK];
-    pixels.fill(std::design::color::SURFACE);
-    for i in 0..count {
-        let q = offset + i;
-        let x = q % W as usize;
-        let y = q / W as usize;
-        if y < 2 || y >= H as usize - 2 || x < 2 || x >= W as usize - 2 {
-            pixels[i] = std::design::color::BORDER;
-        } else if y >= 38 && y < 42 && x < ((ticks % BAR_PERIOD) as usize).min(W as usize - 8) {
-            pixels[i] = std::design::color::ACCENT;
-        } else if y >= 70 && x < 48 + windows.min(8) * 18 {
-            pixels[i] = std::design::color::SUCCESS;
-        } else if y >= 78 && x < 48 + services.min(8) * 18 {
-            pixels[i] = std::design::color::TEXT_MUTED;
-        }
-    }
+fn chunk(surface: u32, offset: usize, count: usize, _ticks: u64, _windows: usize, _services: usize) {
+    let pixels = [0u32; CHUNK];
     let _ = std::surface_write(4, surface, offset, &pixels[..count]);
 }
 

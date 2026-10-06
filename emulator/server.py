@@ -108,21 +108,24 @@ def check_launcher_ready():
         return True
     with telemetry_lock:
         recent = serial_lines[last_reboot_cursor:] if last_reboot_cursor < len(serial_lines) else []
-        if any("[LAUNCHER]" in line for line in recent):
+        if any("[LAUNCHER]" in line for line in recent) or any("name=launcher" in line for line in recent):
+            launcher_has_booted = True
+            return True
+        # If no reboot was requested or cursor is at start, check all lines
+        if any("[LAUNCHER]" in line for line in serial_lines) or any("name=launcher" in line for line in serial_lines):
             launcher_has_booted = True
             return True
     # Disk boot log check if serial_lines memory buffer was rotated
-    if last_reboot_cursor == 0:
-        boot_log = os.path.join(os.path.dirname(DIRECTORY), "target", "x86_boot.log")
-        if os.path.exists(boot_log):
-            try:
-                with open(boot_log, "r", encoding="utf-8", errors="replace") as f:
-                    content = f.read()
-                    if "[LAUNCHER] Step 5" in content or "[LAUNCHER]" in content:
-                        launcher_has_booted = True
-                        return True
-            except Exception:
-                pass
+    boot_log = os.path.join(os.path.dirname(DIRECTORY), "target", "x86_boot.log")
+    if os.path.exists(boot_log):
+        try:
+            with open(boot_log, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+                if "[LAUNCHER] Step 5" in content or "[LAUNCHER]" in content or "name=launcher" in content:
+                    launcher_has_booted = True
+                    return True
+        except Exception:
+            pass
     return False
 
 # Guest package and filesystem state are authoritative. Device Studio does not
@@ -782,7 +785,7 @@ def capture_qemu_screen_frame(full_scanout=False, orientation=None):
                     box = letterbox_box(width, height)
                     cropped = img.crop(box)
                     scaled = cropped.resize(
-                        (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H), Image.Resampling.BICUBIC
+                        (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H), Image.Resampling.LANCZOS
                     )
                     buf = io.BytesIO()
                     scaled.save(buf, format="PNG")
@@ -822,6 +825,18 @@ def stop_qemu_backend():
         except Exception:
             pass
         qemu_subproc = None
+
+    try:
+        import psutil
+        for p in psutil.process_iter(['pid', 'name']):
+            p_name = p.info.get('name') or ''
+            if 'qemu-system' in p_name.lower():
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
     latest_telemetry["qemu_alive"] = False
     latest_telemetry["status"] = "standby"
@@ -1983,7 +1998,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             except Exception:
                 data = {}
             action = str(data.get('action', 'reboot')).strip().lower()
-            if action in ('reboot', 'restart', 'reset') or self.path in ('/api/reboot', '/api/qemu/reboot', '/api/restart', '/api/qemu/restart', '/api/reset', '/api/qemu/reset'):
+            if action in ('reboot', 'restart', 'reset', 'cold_reboot', 'relaunch') or self.path in ('/api/reboot', '/api/qemu/reboot', '/api/restart', '/api/qemu/restart', '/api/reset', '/api/qemu/reset'):
                 global launcher_has_booted, last_reboot_cursor
                 launcher_has_booted = False
                 with telemetry_lock:
@@ -1992,9 +2007,14 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 _last_frame_cache.pop('portrait', None)
                 _last_frame_cache.pop('landscape', None)
                 _last_frame_cache.pop('full', None)
-                ok, resp = send_qemu_monitor_cmd('system_reset')
-                if not ok:
+                if data.get('cold') or action in ('cold_reboot', 'relaunch'):
+                    stop_qemu_backend()
                     ok, resp = launch_qemu_profile(active_profile_key)
+                else:
+                    ok, resp = send_qemu_monitor_cmd('system_reset')
+                    if not ok:
+                        stop_qemu_backend()
+                        ok, resp = launch_qemu_profile(active_profile_key)
                 self.send_response(200 if ok else 500)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')

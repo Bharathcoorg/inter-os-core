@@ -38,7 +38,6 @@ pub fn run_display() -> ! {
         let _ = std::service_heartbeat(1);
         let now = std::get_ticks(1).unwrap_or(last_tick);
         if now.saturating_sub(last_tick) >= 100 || last_tick == 0 {
-            let _ = std::surface_flip(4);
             last_tick = now;
         }
         let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 20);

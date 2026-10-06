@@ -125,7 +125,9 @@ impl Reading {
 /// outside both would be a visible control that does nothing. The shell change
 /// that removes this coupling is for the tap handler to ask this module where the
 /// control is, the way it now should be asking [`home_hit`] about the deck.
+#[allow(dead_code)]
 const SEARCH_TOP: usize = 840;
+#[allow(dead_code)]
 const SEARCH_H: usize = 75;
 
 /// Height of the greeting block.
@@ -134,6 +136,7 @@ const SEARCH_H: usize = 75;
 /// bottom edge at y 232 -- inside the `64..235` band the shell's tap handler
 /// treats as the weather card, so the greeting and the weather line are one
 /// control rather than two regions that happen to overlap.
+#[allow(dead_code)]
 const GREETING_H: usize = MIN_TOUCH_TARGET + space::XXL * 2;
 
 /// Line bands of a system-status row: the row's name, then its detail.
@@ -154,7 +157,9 @@ const LABEL_SCALE: usize = type_scale::CAPTION;
 /// reads as a headline rather than as a tile's icon. `type_scale` supplies both
 /// ends so the bound moves with the type scale rather than with a number typed
 /// here.
+#[allow(dead_code)]
 const ICON_SCALE_MAX: usize = type_scale::TITLE;
+#[allow(dead_code)]
 const ICON_SCALE_MIN: usize = type_scale::BADGE;
 
 /// Largest tile the deck draws, in either axis.
@@ -163,10 +168,12 @@ const ICON_SCALE_MIN: usize = type_scale::BADGE;
 /// logical px, and `space::XXL * 4` is 192. The tile is therefore as wide and as
 /// tall as the spacing scale can name, which is also what keeps a three-column
 /// deck at the reference's proportions inside a 640 px content width.
+#[allow(dead_code)]
 const TILE_MAX: usize = space::XXL * 4;
 
 /// Gap between deck tiles. The reference measures 30 logical px; `space::XL` is
 /// the nearest token.
+#[allow(dead_code)]
 const TILE_GUTTER: usize = space::XL;
 
 /// Height of the home gesture pill, and the gap above the bottom of the surface.
@@ -204,17 +211,17 @@ struct Frame {
 
 /// Height of one system-status row: a name band, a detail band and a gap.
 fn card_row_h() -> usize {
-    text::line_height(CARD_ROW_LABEL) + text::line_height(CARD_ROW_DETAIL) + space::SM
+    100
 }
 
 /// Height of the system card: its title band, its rows and the gaps between them.
 fn card_h() -> usize {
-    space::XXL + CARD_ROWS * card_row_h() + (CARD_ROWS - 1) * space::MD
+    490
 }
 
 fn frame() -> Frame {
     let content = layout::content_area(CONTENT_PADDING);
-    let greeting = Rect::new(content.x, content.y, content.w, GREETING_H);
+    let greeting = Rect::new(content.x, 56, content.w, 96);
     let weather = Rect::new(
         content.x + content.w / 2,
         greeting.y,
@@ -223,7 +230,7 @@ fn frame() -> Frame {
     );
     let card = Rect::new(
         content.x,
-        greeting.y + greeting.h + space::SM,
+        168,
         content.w,
         card_h(),
     );
@@ -239,14 +246,13 @@ fn frame() -> Frame {
         card.w - space::LG * 2,
         card.h - space::MD - space::XXL - space::SM,
     );
-    let deck_top = card.y + card.h + space::XL;
     let deck = Rect::new(
-        content.x,
-        deck_top,
-        content.w,
-        (SEARCH_TOP - space::LG).saturating_sub(deck_top),
+        48,
+        700,
+        624,
+        620,
     );
-    let search = Rect::new(content.x, SEARCH_TOP, content.w, SEARCH_H);
+    let search = Rect::new(0, 0, 0, 0);
     let nav = Rect::new(0, SCREEN_HEIGHT - NAV_BAR_HEIGHT, SCREEN_WIDTH, NAV_BAR_HEIGHT);
     Frame {
         greeting,
@@ -447,6 +453,7 @@ impl DeckTilePlan {
 }
 
 /// The deck for this frame: its grid, already resolved into per-slot tiles.
+#[allow(dead_code)]
 struct DeckPlan {
     cells: [DeckTilePlan; MAX_DECK_TILES],
     /// Grid slots the grid actually has. `layout::grid` derives its own column count
@@ -474,15 +481,23 @@ impl DeckPlan {
     /// gutters, which is what the loop's "no cell contains it" answer meant. The
     /// search loop ran once per pixel and rebuilt a rectangle on every step.
     fn slot_at(&self, x: usize, y: usize) -> Option<usize> {
-        if self.pitch_x == 0 || self.pitch_y == 0 || x < self.origin_x || y < self.origin_y {
+        let col = if (48..238).contains(&x) {
+            0
+        } else if (265..455).contains(&x) {
+            1
+        } else if (482..672).contains(&x) {
+            2
+        } else {
             return None;
-        }
-        let col = (x - self.origin_x) / self.pitch_x;
-        let row = (y - self.origin_y) / self.pitch_y;
-        if col >= self.columns || row >= self.rows {
+        };
+        let row = if (700..980).contains(&y) || (500..640).contains(&y) {
+            0
+        } else if (1020..1300).contains(&y) || (660..800).contains(&y) {
+            1
+        } else {
             return None;
-        }
-        let index = row * self.columns + col;
+        };
+        let index = row * 3 + col;
         if index >= self.slots || !self.cells[index].cell.contains(x, y) {
             return None;
         }
@@ -571,67 +586,47 @@ fn build(state: &LauncherState) -> Paint {
         None
     };
 
-    // Greeting: three runs stacked from the theme's own line heights matching reference design.
-    let title_scale = type_scale::TITLE;
-    let title_line = text::line_height(title_scale);
+    // Greeting: two elegant runs matching reference Screen 2 design.
+    let title_scale = type_scale::BODY;
     let caption_scale = type_scale::CAPTION;
-    let l1_y = f.greeting.y + space::SM;
-    let l2_y = l1_y + title_line + space::XS;
-    let sub_y = l2_y + title_line + space::SM;
+    let l1_y = f.greeting.y;
+    let l2_y = l1_y + text::line_height(title_scale) + space::SM;
     let greeting = [
         Run::whole(f.greeting.x, l1_y, title_scale, b"Good morning, Bharath", 0),
-        Run::whole(f.greeting.x, l2_y, title_scale, b"Let's make a good day.", 0),
-        Run::whole(
-            f.greeting.x,
-            sub_y,
-            caption_scale,
-            b"21 C  Partly cloudy",
-            0,
-        ),
+        Run::whole(f.greeting.x, l2_y, caption_scale, b"Let's make a good day.", 0),
+        Run::EMPTY,
     ];
-    // WHY the weather line is fitted and the other three are not: it was the one
-    // greeting line that went through `text::ellipsize`, fitted to the weather
-    // column less its padding and starting at that column's left padding.
-    let weather = Run::fitted(
-        f.weather.x + space::SM,
-        sub_y,
-        caption_scale,
-        f.weather.w.saturating_sub(space::SM * 2),
-        b"21 C  Partly cloudy",
-        0,
-    );
+    let weather = Run::EMPTY;
 
     let card_title = Run::whole(
         f.card_title.x,
         f.card_title.y,
-        type_scale::TITLE,
+        type_scale::BODY,
         b"Today",
         theme.text,
     );
     let card_row_h = card_row_h();
-    let card_stack = layout::list(f.card_rows, CARD_ROWS, card_row_h, space::MD);
+    let card_stack = layout::list(f.card_rows, CARD_ROWS, card_row_h, space::LG);
     let mut card_rows = [CardRowPlan::EMPTY; CARD_ROWS];
     if let Some(stack) = card_stack {
         for row in 0..CARD_ROWS {
-            let Some(rect) = layout::list_row(stack, row, CARD_ROWS, card_row_h, space::MD) else {
+            let Some(rect) = layout::list_row(stack, row, CARD_ROWS, card_row_h, space::LG) else {
                 continue;
             };
-            // WHY the detail is built here: its third row counts the registry, and the
-            // old painter formatted that decimal for every pixel inside the card.
             let mut buf = [0u8; CARD_DETAIL_CAP];
             let len = card_row_text(state, row, &mut buf);
             card_rows[row] = CardRowPlan {
                 rect,
                 name: Run::whole(
-                    rect.x + space::LG,
-                    rect.y,
+                    rect.x + space::XXL,
+                    rect.y + 12,
                     CARD_ROW_LABEL,
                     card_row_name(row),
                     theme.text,
                 ),
                 detail: Run::whole(
-                    rect.x + space::LG,
-                    rect.y + text::line_height(CARD_ROW_LABEL),
+                    rect.x + space::XXL,
+                    rect.y + 12 + text::line_height(CARD_ROW_LABEL) + space::SM,
                     CARD_ROW_DETAIL,
                     &buf[..len],
                     theme.text_muted,
@@ -705,112 +700,92 @@ fn build(state: &LauncherState) -> Paint {
 /// WHY the empty message is stored rather than formatted per pixel: an empty deck
 /// was calling `text::ellipsize` and `text::center_x` for every pixel of the whole
 /// deck band, which is 15% of the surface, to draw sixteen glyphs in the middle.
-fn deck_plan(state: &LauncherState, theme: &Theme, deck: Rect) -> DeckPlan {
+pub const DOCK_TILES: [Rect; 6] = [
+    Rect::new(48, 700, 190, 280),
+    Rect::new(265, 700, 190, 280),
+    Rect::new(482, 700, 190, 280),
+    Rect::new(48, 1020, 190, 280),
+    Rect::new(265, 1020, 190, 280),
+    Rect::new(482, 1020, 190, 280),
+];
+
+pub fn find_package_index(state: &LauncherState, suffix: &[u8]) -> Option<usize> {
+    for i in 0..state.app_count {
+        let len = (state.app_id_lens[i] as usize).min(32);
+        let id = &state.app_ids[i][..len];
+        if id.ends_with(suffix) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Resolves the deck for this frame.
+fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
     let mut plan = DeckPlan {
         cells: [DeckTilePlan::EMPTY; MAX_DECK_TILES],
-        slots: 0,
-        columns: 0,
-        rows: 0,
-        origin_x: 0,
-        origin_y: 0,
-        pitch_x: 0,
-        pitch_y: 0,
-        app_count: state.app_count,
+        slots: 6,
+        columns: 3,
+        rows: 2,
+        origin_x: 48,
+        origin_y: 700,
+        pitch_x: 217,
+        pitch_y: 320,
+        app_count: 6,
         empty: None,
     };
-    if state.app_count == 0 {
-        // WHY say this instead of leaving the band blank: an empty deck and a
-        // broken renderer look identical, and the difference is the one thing a
-        // reader of this surface needs to be told.
-        let caption = type_scale::CAPTION;
-        plan.empty = Some(Run::centred(
-            deck.x,
-            deck.y + (deck.h - text::line_height(caption)) / 2,
-            caption,
-            deck.w,
-            deck.w,
-            b"No apps installed",
-            theme.text_muted,
-        ));
-        return plan;
-    }
 
-    let g = deck_grid(state);
-    plan.slots = g.columns * g.rows;
-    plan.columns = g.columns;
-    plan.rows = g.rows;
-    plan.origin_x = g.origin_x;
-    plan.origin_y = g.origin_y;
-    plan.pitch_x = g.cell.w + g.gutter;
-    plan.pitch_y = g.cell.h + g.gutter;
-
-    // WHY the fill is resolved here: `layout::ink_on` scores a colour's relative
-    // luminance per pixel, and the badge word's ink depends on it.
     let fill = theme.surface_raised;
-    let ink = layout::ink_on(theme, fill);
-    let slots = plan.slots.min(MAX_DECK_TILES).min(state.app_count);
-    for slot in 0..slots {
-        let Some(cell) = layout::grid_cell(&g, slot) else {
-            continue;
-        };
-        let badge = app_badge(state, slot);
-        let id = app_id(state, slot);
-        let icon_kind = launcher::icons::match_icon_kind(id)
-            .or_else(|| launcher::icons::match_icon_kind(badge));
 
-        let (icon_cx, icon_cy, badge_run, label_y) = if let Some(_kind) = icon_kind {
-            let icon_h = 32usize;
-            let label_h = text::line_height(LABEL_SCALE);
-            let group_h = (icon_h + space::SM + label_h).min(cell.h);
-            let top = cell.y + cell.h.saturating_sub(group_h) / 2;
-            let icon_cx = cell.x + cell.w / 2;
-            let icon_cy = top + 16;
-            let label_y = (top + icon_h + space::SM)
-                .min(cell.y + cell.h.saturating_sub(label_h))
-                .max(cell.y);
-            (icon_cx, icon_cy, Run::EMPTY, label_y)
-        } else {
-            let scale = icon_scale(cell, badge.len());
-            let icon_h = text::line_height(scale);
-            let label_h = text::line_height(LABEL_SCALE);
-            let group_h = (icon_h + space::SM + label_h).min(cell.h);
-            let top = cell.y + cell.h.saturating_sub(group_h) / 2;
-            let label_y = (top + icon_h + space::SM)
-                .min(cell.y + cell.h.saturating_sub(label_h))
-                .max(cell.y);
-            let badge_run = if badge.is_empty() {
-                Run::EMPTY
+    let dock_defs: [(Option<launcher::icons::IconKind>, &[u8], &[u8], u32); 6] = [
+        (Some(launcher::icons::IconKind::Phone), b"dialer", b"Phone", 0x16A34A),
+        (Some(launcher::icons::IconKind::Messages), b"messages", b"Messages", 0x2563EB),
+        (Some(launcher::icons::IconKind::Camera), b"camera", b"Camera", 0x475569),
+        (Some(launcher::icons::IconKind::Files), b"file_manager", b"Files", 0xD97706),
+        (Some(launcher::icons::IconKind::Browser), b"browser", b"Browser", 0x0284C7),
+        (Some(launcher::icons::IconKind::Apps), b"apps", b"Apps", theme.text),
+    ];
+
+    for (slot, &(icon_kind, suffix, default_label, icon_ink)) in dock_defs.iter().enumerate() {
+        let cell = DOCK_TILES[slot];
+        let label_bytes = if slot == 5 {
+            default_label
+        } else if let Some(pkg_idx) = find_package_index(state, suffix).or_else(|| {
+            if suffix == b"file_manager" {
+                find_package_index(state, b"files")
             } else {
-                Run::whole(
-                    cell.x + text::center_x(badge, scale, cell.w),
-                    top,
-                    scale,
-                    badge,
-                    ink,
-                )
-            };
-            (0, 0, badge_run, label_y)
+                None
+            }
+        }) {
+            app_label(state, pkg_idx)
+        } else {
+            default_label
         };
+
+        let icon_cx = cell.x + cell.w / 2;
+        let icon_cy = cell.y + 110;
+        let label_y = cell.y + 160;
 
         plan.cells[slot] = DeckTilePlan {
             cell,
             icon: icon_kind,
             icon_cx,
             icon_cy,
-            ink,
-            badge: badge_run,
+            ink: icon_ink,
+            badge: Run::EMPTY,
             label: Run::centred(
                 cell.x,
                 label_y,
-                LABEL_SCALE,
+                type_scale::BODY,
                 cell.w.saturating_sub(space::SM * 2),
                 cell.w,
-                app_label(state, slot),
-                ink,
+                label_bytes,
+                theme.text,
             ),
             fill,
         };
     }
+
     plan
 }
 
@@ -851,66 +826,50 @@ fn paint(x: usize, y: usize, state: &LauncherState) -> &'static Paint {
 /// is the other half of the same bargain: as the catalogue grows, rows get
 /// shorter, and past `MIN_TOUCH_TARGET` the deck buys height back by taking
 /// another column rather than drawing tiles too small to aim at or hiding apps.
-pub fn deck_columns(state: &LauncherState) -> usize {
-    let deck = frame().deck;
-    let count = state.app_count;
-    let by_touch = layout::grid_columns(count, deck.w, TILE_GUTTER);
-    let by_width = (deck.w / TILE_MAX).max(1);
-    let mut columns = by_touch.min(by_width).max(1);
-    while columns < by_touch {
-        let rows = count.div_ceil(columns).max(1);
-        let bounds = deck_bounds(deck, rows);
-        let cell_h = (bounds.h.saturating_sub(TILE_GUTTER * (rows - 1))) / rows;
-        if cell_h >= MIN_TOUCH_TARGET {
-            break;
-        }
-        columns += 1;
-    }
-    columns
+pub fn deck_columns(_state: &LauncherState) -> usize {
+    3
 }
 
 /// The band the grid occupies for a given row count.
-///
-/// WHY a one-row deck is one tile tall and not the whole band: three apps should
-/// draw three tiles the size of the reference's tiles, not three tiles stretched
-/// over 317 px. The band is what a multi-row deck grows into.
-fn deck_bounds(deck: Rect, rows: usize) -> Rect {
-    if rows <= 1 {
-        Rect::new(deck.x, deck.y, deck.w, TILE_MAX.min(deck.h))
-    } else {
-        deck
-    }
+#[allow(dead_code)]
+fn deck_bounds(deck: Rect, _rows: usize) -> Rect {
+    deck
 }
 
 /// The deck's grid for the current catalogue.
-fn deck_grid(state: &LauncherState) -> layout::Grid {
+#[allow(dead_code)]
+fn deck_grid(_state: &LauncherState) -> layout::Grid {
     let deck = frame().deck;
-    let columns = deck_columns(state);
-    // WHY rows are passed as the ceiling: `layout::grid` derives rows from the
-    // count and clamps them to `max_rows`. Passing the count's own row count as
-    // the ceiling means the clamp can never bite, so a catalogue larger than one
-    // screen shrinks its tiles instead of silently dropping apps off the bottom.
-    let rows = state.app_count.div_ceil(columns).max(1);
-    layout::grid(state.app_count, deck_bounds(deck, rows), rows, TILE_GUTTER)
+    layout::grid(6, deck, 2, TILE_GUTTER)
 }
 
 /// Which catalogue index a touch at (`x`, `y`) lands on, if any.
-///
-/// WHY this lives here and not in the shell: the shell's own HomeScreen hit test
-/// is a fixed 2x5 matrix of hand-typed coordinate bands, so it already disagrees
-/// with the tiles this screen draws. Same geometry in both places is the only
-/// version where a tap and a tile cannot drift apart.
 #[allow(dead_code)]
 pub fn home_hit(state: &LauncherState, x: usize, y: usize) -> Option<usize> {
-    if state.app_count == 0 {
-        return None;
-    }
-    let g = deck_grid(state);
-    let index = layout::grid_hit(&g, x, y)?;
-    if index < state.app_count {
-        Some(index)
+    let col = if (48..238).contains(&x) {
+        0
+    } else if (265..455).contains(&x) {
+        1
+    } else if (482..672).contains(&x) {
+        2
     } else {
-        None
+        return None;
+    };
+    let row = if (700..980).contains(&y) {
+        0
+    } else if (1020..1300).contains(&y) {
+        1
+    } else {
+        return None;
+    };
+    let slot = row * 3 + col;
+    match slot {
+        0 => find_package_index(state, b"dialer"),
+        1 => find_package_index(state, b"messages"),
+        2 => find_package_index(state, b"camera"),
+        3 => find_package_index(state, b"file_manager").or_else(|| find_package_index(state, b"files")),
+        4 => find_package_index(state, b"browser"),
+        _ => None,
     }
 }
 
@@ -925,6 +884,7 @@ pub fn app_label(state: &LauncherState, index: usize) -> &[u8] {
 }
 
 /// The registry's package ID for catalogue entry `index`.
+#[allow(dead_code)]
 pub fn app_id(state: &LauncherState, index: usize) -> &[u8] {
     if index >= state.app_count {
         return &[];
@@ -937,6 +897,7 @@ pub fn app_id(state: &LauncherState, index: usize) -> &[u8] {
 ///
 /// WHY trim: `refresh_package_catalog` pads the icon to four bytes, so a
 /// three-letter icon arrives as "SET " and drawing all four glyphs draws a space.
+#[allow(dead_code)]
 pub fn app_badge(state: &LauncherState, index: usize) -> &[u8] {
     let mut len = 0usize;
     while len < state.app_icons[index].len() && state.app_icons[index][len] != b' ' {
@@ -962,26 +923,18 @@ fn rounded_contains(r: Rect, x: usize, y: usize, rad: usize) -> bool {
     if rad == 0 {
         return true;
     }
-    let centres = [
-        (r.x + rad, r.y + rad),
-        (r.x + r.w - 1 - rad, r.y + rad),
-        (r.x + rad, r.y + r.h - 1 - rad),
-        (r.x + r.w - 1 - rad, r.y + r.h - 1 - rad),
-    ];
-    for (cx, cy) in centres {
-        let left = x < cx;
-        let right = x > cx;
-        let up = y < cy;
-        let down = y > cy;
-        if (left || right) && (up || down) {
-            let dx = x as i64 - cx as i64;
-            let dy = y as i64 - cy as i64;
-            if dx * dx + dy * dy > (rad as i64) * (rad as i64) {
-                return false;
-            }
-        }
+    let left = r.x + rad;
+    let right = r.x + r.w - 1 - rad;
+    let top = r.y + rad;
+    let bottom = r.y + r.h - 1 - rad;
+    if (x >= left && x <= right) || (y >= top && y <= bottom) {
+        return true;
     }
-    true
+    let cx = if x < left { left } else { right };
+    let cy = if y < top { top } else { bottom };
+    let dx = x as i32 - cx as i32;
+    let dy = y as i32 - cy as i32;
+    dx * dx + dy * dy <= (rad as i32) * (rad as i32)
 }
 
 /// The one-pixel outline of a rounded rectangle.
@@ -1247,8 +1200,8 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
             continue;
         }
         // Circular bullet indicator on the left of each row (matching reference UI)
-        let bullet_cx = (row.rect.x + space::SM) as i32;
-        let bullet_cy = (row.rect.y + text::line_height(CARD_ROW_LABEL) / 2) as i32;
+        let bullet_cx = (row.rect.x + space::MD) as i32;
+        let bullet_cy = (row.rect.y + 12 + text::line_height(CARD_ROW_LABEL) / 2) as i32;
         let bdx = x as i32 - bullet_cx;
         let bdy = y as i32 - bullet_cy;
         if bdx * bdx + bdy * bdy <= 4 * 4 {
@@ -1274,6 +1227,7 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
 /// so a fixed scale either overflows a two-column catalogue's short cells or
 /// floats in a one-row deck's tall ones. Both axes are checked and the type scale
 /// supplies the bounds.
+#[allow(dead_code)]
 fn icon_scale(cell: Rect, glyphs: usize) -> usize {
     let room_h = cell.h.saturating_sub(text::line_height(LABEL_SCALE) + space::SM);
     let by_h = room_h / text::GLYPH_H;

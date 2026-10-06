@@ -177,8 +177,7 @@ fn build(state: &LauncherState) -> Frame {
     if state.notification_count == 0 {
         frame.is_empty = true;
         let body_h = text::line_height(type_scale::BODY);
-        let block_h = body_h + space::SM + cap_h + space::MD + cap_h;
-        let mut ey = sheet_top + (sheet_h * 2 / 5) - block_h / 2;
+        let mut ey = sheet_top + space::XXL * 3;
         frame.empty[0] = Run::centred(inner_left, ey, type_scale::BODY, inner_w, b"No notifications", theme.text);
         ey += body_h + space::SM;
         frame.empty[1] = Run::centred(inner_left, ey, type_scale::CAPTION, inner_w, b"You're all caught up for now", theme.text_muted);

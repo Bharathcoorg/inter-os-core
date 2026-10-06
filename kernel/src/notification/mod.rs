@@ -298,6 +298,17 @@ pub fn init() {
     let current_ticks = crate::interrupts::get_system_ticks();
     let _ = nm.post(
         "system",
+        crate::user::UserId::OWNER.0,
+        "system",
+        "InterOS System",
+        "Kernel initialized. Sovereign security active.",
+        NotificationPriority::Default,
+        LockscreenVisibility::Public,
+        0,
+        current_ticks,
+    );
+    let _ = nm.post(
+        "system",
         0,
         "system",
         "InterOS System",

@@ -23,6 +23,7 @@ pub enum IconKind {
     Health,
     MeshChat,
     Sensors,
+    Apps,
 }
 
 /// Identifies if a package ID or process name maps to a first-party vector pictogram.
@@ -63,6 +64,8 @@ pub fn match_icon_kind(id: &[u8]) -> Option<IconKind> {
         Some(IconKind::MeshChat)
     } else if id == b"org.interos.sensor_dashboard" || id == b"sensor_dashboard" || id == b"sensors" || id == b"SENS" {
         Some(IconKind::Sensors)
+    } else if id == b"org.interos.apps" || id == b"apps" || id == b"APPS" || id == b"drawer" {
+        Some(IconKind::Apps)
     } else {
         None
     }
@@ -208,6 +211,12 @@ pub fn rasterize_icon_pixel(
             let arc3 = r2 >= 196 && r2 <= 225 && ry <= 8;
             arc1 || arc2 || arc3
         }
+        IconKind::Apps => {
+            // 4 rounded square tiles (2x2 grid) matching reference Screen 2 Apps tile
+            let in_tile_x = (rx >= -9 && rx <= -2) || (rx >= 2 && rx <= 9);
+            let in_tile_y = (ry >= -9 && ry <= -2) || (ry >= 2 && ry <= 9);
+            in_tile_x && in_tile_y
+        }
     };
 
     if inked {
@@ -257,6 +266,7 @@ mod tests {
             IconKind::Health,
             IconKind::MeshChat,
             IconKind::Sensors,
+            IconKind::Apps,
         ];
 
         for &kind in &kinds {

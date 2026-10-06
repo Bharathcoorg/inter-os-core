@@ -823,33 +823,16 @@ fn render_view(surface: u32, state: &LauncherState) {
     log_frame_ticks(tick_delta(frame_start, std::get_ticks(1).ok()));
 }
 
-fn render_header(surface: u32) {
-    let mut chunk = [0u32; CHUNK];
-    let total = W * 96;
-    let mut offset = 0;
-    let ticks = std::get_ticks(1).unwrap_or(0);
-    let activity = ((ticks % 600) as usize).min(W - 48);
-    while offset < total {
-        let count = (total - offset).min(CHUNK);
-        let mut x = offset % W;
-        let mut y = offset / W;
-        for i in 0..count {
-            if y >= 94 {
-                chunk[i] = ACCENT_SKY;
-            } else if y >= 40 && y < 44 && x >= 24 && x < 24 + activity {
-                chunk[i] = ACCENT_SKY;
-            } else {
-                chunk[i] = SURFACE_DARK;
-            }
-            x += 1;
-            if x == W {
-                x = 0;
-                y += 1;
-            }
+
+fn package_id_by_suffix<'a>(state: &'a LauncherState, suffix: &[u8]) -> Option<&'a str> {
+    for i in 0..state.app_count {
+        let len = (state.app_id_lens[i] as usize).min(32);
+        let id_bytes = &state.app_ids[i][..len];
+        if id_bytes.ends_with(suffix) {
+            return core::str::from_utf8(id_bytes).ok();
         }
-        let _ = std::surface_write(4, surface, offset, &chunk[..count]);
-        offset += count;
     }
+    None
 }
 
 fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<&'a str> {
@@ -857,42 +840,42 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
     let y = y as usize;
 
     if (410..=450).contains(&x) && (240..=280).contains(&y) {
-        return Some("org.interos.file_manager");
+        return package_id_by_suffix(state, b"file_manager").or_else(|| package_id_by_suffix(state, b"files"));
     }
     if (390..=430).contains(&x) && (1160..=1200).contains(&y) {
-        return Some("org.interos.gallery");
+        return package_id_by_suffix(state, b"gallery");
     }
 
     // 1. Direct app launch matrix (used by integration & lifecycle verification suites)
     if (330..=370).contains(&y) {
         if (160..=200).contains(&x) {
-            return Some("org.interos.settings");
+            return package_id_by_suffix(state, b"settings");
         } else if (465..=505).contains(&x) {
-            return Some("org.interos.terminal");
+            return package_id_by_suffix(state, b"terminal");
         }
     } else if (500..=540).contains(&y) {
         if (160..=200).contains(&x) {
-            return Some("org.interos.calculator");
+            return package_id_by_suffix(state, b"calculator");
         } else if (465..=505).contains(&x) {
-            return Some("org.interos.vault");
+            return package_id_by_suffix(state, b"vault");
         }
     } else if (670..=710).contains(&y) {
         if (160..=200).contains(&x) {
-            return Some("org.interos.camera");
+            return package_id_by_suffix(state, b"camera");
         } else if (465..=505).contains(&x) {
-            return Some("org.interos.dialer");
+            return package_id_by_suffix(state, b"dialer");
         }
     } else if (840..=880).contains(&y) {
         if (160..=200).contains(&x) {
-            return Some("org.interos.browser");
+            return package_id_by_suffix(state, b"browser");
         } else if (465..=505).contains(&x) {
-            return Some("org.interos.messages");
+            return package_id_by_suffix(state, b"messages");
         }
     } else if (1010..=1050).contains(&y) {
         if (160..=200).contains(&x) {
-            return Some("org.interos.calendar");
+            return package_id_by_suffix(state, b"calendar");
         } else if (465..=505).contains(&x) {
-            return Some("org.interos.music");
+            return package_id_by_suffix(state, b"music");
         }
     }
 
@@ -926,22 +909,22 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
     }
 
     // 4. Row 0 of Quick Action Dock: Phone, Messages, Camera
-    if (500..640).contains(&y) {
+    if (500..640).contains(&y) || (700..1000).contains(&y) {
         if (48..238).contains(&x) {
-            return Some("org.interos.dialer");
+            return package_id_by_suffix(state, b"dialer");
         } else if (265..455).contains(&x) {
-            return Some("org.interos.messages");
+            return package_id_by_suffix(state, b"messages");
         } else if (482..672).contains(&x) {
-            return Some("org.interos.camera");
+            return package_id_by_suffix(state, b"camera");
         }
     }
 
     // 5. Row 1 of Quick Action Dock: Files, Browser
-    if (660..800).contains(&y) {
+    if (660..800).contains(&y) || (1020..1320).contains(&y) {
         if (48..238).contains(&x) {
-            return Some("org.interos.file_manager");
+            return package_id_by_suffix(state, b"file_manager").or_else(|| package_id_by_suffix(state, b"files"));
         } else if (265..455).contains(&x) {
-            return Some("org.interos.browser");
+            return package_id_by_suffix(state, b"browser");
         }
     }
 
@@ -1061,13 +1044,10 @@ pub extern "C" fn _start() -> ! {
                         let previous_count = state.app_count;
                         refresh_package_catalog(&mut state);
                         refresh_runtime_recents(&mut state);
-                        if previous_count != state.app_count
-                            && state.current_view == ViewMode::AppDrawer
-                        {
+                        if previous_count != state.app_count {
                             render_view(surface, &state);
+                            let _ = std::surface_flip(4);
                         }
-                        render_header(surface);
-                        let _ = std::surface_flip(4);
                     }
                 }
             }
@@ -2264,6 +2244,7 @@ pub extern "C" fn _start() -> ! {
 
                                 // Tapping dock 6th item (Apps) opens App Drawer
                                 if ((660..800).contains(&y) && (482..672).contains(&x))
+                                    || ((1020..1320).contains(&y) && (482..672).contains(&x))
                                     || ((1120..1400).contains(&y) && (490..645).contains(&x))
                                 {
                                     state.current_view = ViewMode::AppDrawer;
