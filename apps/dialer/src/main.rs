@@ -231,17 +231,18 @@ impl DialerApp {
 }
 
 // -----------------------------------------------------------------------------
-// 32-bit ARGB8888 Design Color Tokens
+// 32-bit ARGB8888 Design Color Tokens (Screen 9 Modern Light Theme)
 // -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFF0A0D14;
-const SURFACE_DARK: u32 = 0xFF121824;
-const SURFACE_RAISED: u32 = 0xFF1A2234;
-const BORDER_SUBTLE: u32 = 0xFF222E42;
-const TEXT_PRIMARY: u32 = 0xFFF8FAFC;
-const TEXT_MUTED: u32 = 0xFF94A3B8;
-const ACCENT_SKY: u32 = 0xFF31C4FF;
-const SUCCESS_EMERALD: u32 = 0xFF10B981;
+const BG_DARK: u32 = 0xFFF8FAFC;
+const SURFACE_DARK: u32 = 0xFFFFFFFF;
+const SURFACE_RAISED: u32 = 0xFFF1F5F9;
+const BORDER_SUBTLE: u32 = 0xFFE2E8F0;
+const TEXT_PRIMARY: u32 = 0xFF0F172A;
+const TEXT_MUTED: u32 = 0xFF64748B;
+const ACCENT_SKY: u32 = 0xFF0284C7;
+const SUCCESS_EMERALD: u32 = 0xFF22C55E;
 const DANGER_CRIMSON: u32 = 0xFFEF4444;
+#[allow(dead_code)]
 const WARNING_AMBER: u32 = 0xFFF59E0B;
 
 // -----------------------------------------------------------------------------
@@ -467,40 +468,40 @@ fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         return SURFACE_DARK;
     }
 
-    // 2. Call Status & Dialed Number Display Card (y: 110..380, x: 24..696)
-    if (110..380).contains(&y) && x >= 24 && x < 696 {
-        if y == 110 || y == 379 || x == 24 || x == 695 {
-            return BORDER_SUBTLE;
-        }
-
-        // Status Pill Banner (y: 126..156, x: 220..500)
-        if (126..156).contains(&y) && x >= 220 && x < 500 {
-            if y == 126 || y == 155 || x == 220 || x == 499 {
-                return BORDER_SUBTLE;
+    // 2. Segmented Navigation Tabs (y: 105..155)
+    if (105..155).contains(&y) {
+        // Tab 1: "Dial" (Active Capsule: x: 48..180)
+        if x >= 48 && x < 180 {
+            if let Some(c) = test_text(x, y, 98, 122, 2, b"Dial", 0xFFFFFFFF) {
+                return c;
             }
-            let (label, text_x, color) = match dialer.state {
-                CallState::ActiveCall => (&b"Connected"[..], 324, SUCCESS_EMERALD),
-                CallState::Dialing => (&b"Calling..."[..], 324, ACCENT_SKY),
-                CallState::CallEnded => (&b"Call Ended"[..], 320, DANGER_CRIMSON),
-                CallState::CallHeld => (&b"On Hold"[..], 336, WARNING_AMBER),
-                CallState::Ringing => (&b"Ringing..."[..], 324, ACCENT_SKY),
-                _ => (&b"Ready to Call"[..], 308, TEXT_MUTED),
-            };
-            if y >= 135 && y < 147 {
-                if let Some(c) = test_text(x, y, text_x, 135, 1, label, color) {
-                    return c;
-                }
-            }
-            return 0xFF152236;
+            return 0xFF18181B;
         }
+        // Tab 2: "Recents" (Inactive: x: 195..345)
+        if x >= 195 && x < 345 {
+            if let Some(c) = test_text(x, y, 235, 122, 2, b"Recents", TEXT_MUTED) {
+                return c;
+            }
+            return SURFACE_RAISED;
+        }
+        // Tab 3: "Contacts" (Inactive: x: 360..510)
+        if x >= 360 && x < 510 {
+            if let Some(c) = test_text(x, y, 395, 122, 2, b"Contacts", TEXT_MUTED) {
+                return c;
+            }
+            return SURFACE_RAISED;
+        }
+    }
 
+    // 2b. Call Status & Dialed Number Display (y: 170..380, x: 24..696)
+    if (170..380).contains(&y) && x >= 24 && x < 696 {
         // Dialed Digits Display
         if dialer.active_len > 0 {
             let scale = if dialer.active_len <= 10 { 4 } else { 3 };
             let char_w = 8 * scale;
             let total_w = dialer.active_len * char_w;
             let x0 = (W.saturating_sub(total_w)) / 2;
-            let y0 = 226;
+            let y0 = 240;
             if let Some(c) = test_text(
                 x,
                 y,
@@ -512,16 +513,16 @@ fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             ) {
                 return c;
             }
-        } else if y >= 238 && y < 254 {
-            if let Some(c) = test_text(x, y, 248, 238, 2, b"Enter a phone number", TEXT_MUTED) {
+        } else if y >= 250 && y < 266 {
+            if let Some(c) = test_text(x, y, 248, 250, 2, b"Enter a phone number", TEXT_MUTED) {
                 return c;
             }
         }
 
-        // Backspace button in display card (627, 270, r: 24)
+        // Backspace button in display card (627, 260, r: 24)
         if dialer.active_len > 0 {
             let bx = 627i32;
-            let by = 250i32;
+            let by = 260i32;
             let dx = (x as i32) - bx;
             let dy = (y as i32) - by;
             if dx * dx + dy * dy <= 576 {
@@ -532,11 +533,11 @@ fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 if dx.abs() <= 7 && dy.abs() <= 7 && (dx == dy || dx == -dy) {
                     return DANGER_CRIMSON;
                 }
-                return 0xFF22161A;
+                return 0xFFFEE2E2;
             }
         }
 
-        return SURFACE_DARK;
+        return BG_DARK;
     }
 
     // 3. Keypad Matrix (y: 410..984)
@@ -592,7 +593,7 @@ fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                             }
                         }
 
-                        return 0xFF151E2E;
+                        return SURFACE_DARK;
                     }
                     return BG_DARK;
                 }

@@ -96,16 +96,21 @@ impl CalculatorState {
 }
 
 // -----------------------------------------------------------------------------
-// 32-bit ARGB8888 Design Color Tokens
+// 32-bit ARGB8888 Design Color Tokens (Screen 16 Minimal Light Theme)
 // -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFF0A0D14;
-const SURFACE_DARK: u32 = 0xFF121824;
-const SURFACE_RAISED: u32 = 0xFF1A2234;
-const BORDER_SUBTLE: u32 = 0xFF222E42;
-const TEXT_PRIMARY: u32 = 0xFFF8FAFC;
-const TEXT_MUTED: u32 = 0xFF94A3B8;
-const ACCENT_SKY: u32 = 0xFF31C4FF;
+const BG_DARK: u32 = 0xFFFFFFFF;
+#[allow(dead_code)]
+const SURFACE_DARK: u32 = 0xFFFFFFFF;
+#[allow(dead_code)]
+const SURFACE_RAISED: u32 = 0xFFF1F5F9;
+#[allow(dead_code)]
+const BORDER_SUBTLE: u32 = 0xFFE2E8F0;
+const TEXT_PRIMARY: u32 = 0xFF0F172A;
+const TEXT_MUTED: u32 = 0xFF64748B;
+const ACCENT_SKY: u32 = 0xFF0284C7;
+#[allow(dead_code)]
 const SUCCESS_EMERALD: u32 = 0xFF10B981;
+#[allow(dead_code)]
 const DANGER_CRIMSON: u32 = 0xFFEF4444;
 
 // -----------------------------------------------------------------------------
@@ -275,53 +280,49 @@ fn get_button_action(row: usize, col: usize) -> Option<char> {
 // -----------------------------------------------------------------------------
 #[inline(never)]
 fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
-    // 1. Status Bar & Header (y: 0..96)
+    // 1. Status Bar & Seamless Header (y: 0..96)
     if y < 96 {
-        if y >= 94 {
-            return BORDER_SUBTLE;
-        }
-
-        // Back button (<) at (x: 24..100, y: 28..68)
-        if x >= 24 && x < 100 && y >= 28 && y < 68 {
-            let center_x = 62;
+        // Back chevron (<) hit-target at (x: 24..90, y: 28..68)
+        if x >= 24 && x < 90 && y >= 28 && y < 68 {
+            let center_x = 52;
             let center_y = 48;
             let dx = (x as isize - center_x as isize).abs();
             let dy = (y as isize - center_y as isize).abs();
-            if (dx + dy <= 12 && x <= center_x)
-                || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
-            {
+            if dx + dy <= 10 && x <= center_x {
                 return TEXT_PRIMARY;
             }
-            return SURFACE_RAISED;
         }
 
-        // Header Title: "Calculator"
-        if y >= 36 && y < 60 {
-            if let Some(c) = test_text(x, y, 120, 36, 3, b"Calculator", TEXT_PRIMARY) {
+        // Clock "09:20" at x: 48, y: 40
+        if y >= 40 && y < 56 {
+            if let Some(c) = test_text(x, y, 48, 40, 2, b"09:20", TEXT_PRIMARY) {
                 return c;
             }
         }
 
-        return SURFACE_DARK;
-    }
-
-    // 2. Numerical Display Card (y: 110..390, x: 24..696)
-    if (110..390).contains(&y) && x >= 24 && x < 696 {
-        if y == 110 || y == 389 || x == 24 || x == 695 {
-            return BORDER_SUBTLE;
+        // Battery / Status at top right (x: 620..664, y: 40..56)
+        if y >= 40 && y < 56 {
+            if let Some(c) = test_text(x, y, 620, 40, 2, b"100%", TEXT_MUTED) {
+                return c;
+            }
         }
 
+        return BG_DARK;
+    }
+
+    // 2. Numerical Display Area (y: 110..410, x: 24..696)
+    if (110..410).contains(&y) && x >= 24 && x < 696 {
         // Active operation badge at top-left
         if let Some(op) = calc.active_operation {
-            let op_sym = match op {
-                '/' => b"[ / ]",
-                '*' => b"[ * ]",
-                '-' => b"[ - ]",
-                '+' => b"[ + ]",
-                _ => b"[ ? ]",
+            let op_sym: &[u8] = match op {
+                '/' => b"/",
+                '*' => b"*",
+                '-' => b"-",
+                '+' => b"+",
+                _ => b"?",
             };
-            if y >= 130 && y < 146 {
-                if let Some(c) = test_text(x, y, 48, 130, 2, op_sym, ACCENT_SKY) {
+            if y >= 140 && y < 164 {
+                if let Some(c) = test_text(x, y, 48, 140, 3, op_sym, ACCENT_SKY) {
                     return c;
                 }
             }
@@ -354,17 +355,17 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             count += rcount;
         }
 
-        let scale: usize = if count <= 8 { 5 } else if count <= 12 { 4 } else { 3 };
+        let scale: usize = if count <= 7 { 6 } else if count <= 10 { 5 } else { 4 };
         let char_w: usize = 8 * scale;
         let total_w: usize = count * char_w;
-        let x0: usize = 648usize.saturating_sub(total_w);
-        let y0: usize = 260;
+        let x0: usize = 660usize.saturating_sub(total_w);
+        let y0: usize = 280;
 
         if let Some(c) = test_text(x, y, x0, y0, scale, &digits[..count], TEXT_PRIMARY) {
             return c;
         }
 
-        return SURFACE_DARK;
+        return BG_DARK;
     }
 
     // 3. Keypad Matrix (5 rows, 4 cols)
@@ -374,33 +375,29 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             for col in 0..4 {
                 let bx = COL_X[col];
                 if x >= bx && x < bx + BTN_W {
-                    // Rounded corner test (radius: 20)
+                    // Rounded squircle corner test (radius: 28)
                     let rx = (x - bx).min(bx + BTN_W - 1 - x);
                     let ry = (y - by).min(by + BTN_H - 1 - y);
-                    if rx < 20 && ry < 20 {
-                        let cdx = (20 - rx) as isize;
-                        let cdy = (20 - ry) as isize;
-                        if cdx * cdx + cdy * cdy > 400 {
+                    if rx < 28 && ry < 28 {
+                        let cdx = (28 - rx) as isize;
+                        let cdy = (28 - ry) as isize;
+                        if cdx * cdx + cdy * cdy > 784 {
                             return BG_DARK;
                         }
                     }
 
-                    let (btn_bg, btn_border, text_color) = match (row, col) {
-                        (0, 0) => (0xFF26141A, DANGER_CRIMSON, DANGER_CRIMSON),
-                        (4, 3) => (SUCCESS_EMERALD, 0xFF34D399, 0xFFFFFFFF),
-                        (_, 3) => (0xFF14243A, ACCENT_SKY, ACCENT_SKY),
-                        (0, _) => (0xFF121B2A, BORDER_SUBTLE, TEXT_MUTED),
-                        _ => (0xFF162030, BORDER_SUBTLE, TEXT_PRIMARY),
+                    // Button style: '=' is solid dark charcoal with white text; others are soft light grey
+                    let is_equals = row == 4 && col == 3;
+                    let (btn_bg, btn_border, text_color) = if is_equals {
+                        (0xFF18181B, 0xFF18181B, 0xFFFFFFFF)
+                    } else if col == 3 || row == 0 {
+                        (0xFFF1F5F9, 0xFFE2E8F0, 0xFF0F172A)
+                    } else {
+                        (0xFFF8FAFC, 0xFFE2E8F0, 0xFF0F172A)
                     };
 
-                    // Button border rim (2 px)
-                    let is_border = rx < 2 || ry < 2
-                        || (rx < 20 && ry < 20 && {
-                            let cdx = (20 - rx) as isize;
-                            let cdy = (20 - ry) as isize;
-                            cdx * cdx + cdy * cdy >= 324
-                        });
-                    if is_border {
+                    // Subtle border rim for light buttons
+                    if !is_equals && (rx < 1 || ry < 1) {
                         return btn_border;
                     }
 

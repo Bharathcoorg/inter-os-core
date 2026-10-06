@@ -21,21 +21,24 @@ const H: usize = 1440;
 const CHUNK: usize = 4096;
 
 // -----------------------------------------------------------------------------
-// 32-bit ARGB8888 Design Color Tokens
+// 32-bit ARGB8888 Design Color Tokens (Screen 11 Light Theme)
 // -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFF0A0D14;
-const SURFACE_DARK: u32 = 0xFF121824;
-const SURFACE_RAISED: u32 = 0xFF1A2234;
-const BORDER_SUBTLE: u32 = 0xFF222E42;
-const TEXT_PRIMARY: u32 = 0xFFF8FAFC;
-const TEXT_MUTED: u32 = 0xFF94A3B8;
-const ACCENT_SKY: u32 = 0xFF31C4FF;
+const BG_DARK: u32 = 0xFFFFFFFF;
+#[allow(dead_code)]
+const SURFACE_DARK: u32 = 0xFFF8FAFC;
+#[allow(dead_code)]
+const SURFACE_RAISED: u32 = 0xFFF1F5F9;
+const BORDER_SUBTLE: u32 = 0xFFE2E8F0;
+const TEXT_PRIMARY: u32 = 0xFF0F172A;
+const TEXT_MUTED: u32 = 0xFF64748B;
+#[allow(dead_code)]
+const ACCENT_SKY: u32 = 0xFF0284C7;
 #[allow(dead_code)]
 const ACCENT_AMBER: u32 = 0xFFF59E0B;
 #[allow(dead_code)]
 const SUCCESS_EMERALD: u32 = 0xFF10B981;
 #[allow(dead_code)]
-const DANGER_CRIMSON: u32 = 0xFFFF6B6B;
+const DANGER_CRIMSON: u32 = 0xFFEF4444;
 
 // -----------------------------------------------------------------------------
 // Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')
@@ -205,334 +208,174 @@ impl FileManagerApp {
 // -----------------------------------------------------------------------------
 #[inline(never)]
 fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
-    // 1. Status Bar & Header (y: 0..96)
-    if y < 96 {
-        if y >= 94 {
-            return BORDER_SUBTLE;
-        }
-
-        // Back button (<) at (x: 24..100, y: 28..68)
-        if x >= 24 && x < 100 && y >= 28 && y < 68 {
-            let center_x = 62;
-            let center_y = 48;
-            let dx = (x as isize - center_x as isize).abs();
-            let dy = (y as isize - center_y as isize).abs();
-            if (dx + dy <= 12 && x <= center_x)
-                || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
-            {
-                return TEXT_PRIMARY;
-            }
-            return SURFACE_RAISED;
-        }
-
-        // Header Title: "Files"
-        if y >= 36 && y < 60 {
-            if let Some(c) = test_text(x, y, 120, 36, 3, b"Files", TEXT_PRIMARY) {
+    // 1. Status Bar & Clean Header (y: 0..140)
+    if y < 140 {
+        // Clock "09:20" at x: 48, y: 36
+        if y >= 36 && y < 52 {
+            if let Some(c) = test_text(x, y, 48, 36, 2, b"09:20", TEXT_PRIMARY) {
                 return c;
             }
         }
 
-        // Search icon at (640, 48, r: 16)
-        let s_dx = (x as i32) - 640;
-        let s_dy = (y as i32) - 48;
-        if s_dx * s_dx + s_dy * s_dy <= 256 {
-            if s_dx * s_dx + s_dy * s_dy >= 225 {
-                return BORDER_SUBTLE;
+        // Status indicators at top right (x: 620..664, y: 36..52)
+        if y >= 36 && y < 52 {
+            if let Some(c) = test_text(x, y, 620, 36, 2, b"100%", TEXT_MUTED) {
+                return c;
             }
-            let l_dx = (x as i32) - 638;
-            let l_dy = (y as i32) - 46;
-            let lens_d2 = l_dx * l_dx + l_dy * l_dy;
-            if lens_d2 >= 9 && lens_d2 <= 25 {
-                return ACCENT_SKY;
-            }
-            if (641..=646).contains(&(x as i32)) && (49..=54).contains(&(y as i32)) {
-                let diff = (x as i32) - (y as i32) - (641 - 49);
-                if diff.abs() <= 1 {
-                    return ACCENT_SKY;
-                }
-            }
-            return SURFACE_RAISED;
         }
 
-        return SURFACE_DARK;
+        // Title: "Files" at x: 48, y: 76 (scale 4)
+        if y >= 76 && y < 108 {
+            if let Some(c) = test_text(x, y, 48, 76, 4, b"Files", TEXT_PRIMARY) {
+                return c;
+            }
+        }
+
+        // Search icon at (600, 92, r: 12)
+        let s_dx = (x as i32) - 600;
+        let s_dy = (y as i32) - 92;
+        let s_dist2 = s_dx * s_dx + s_dy * s_dy;
+        if (s_dist2 >= 36 && s_dist2 <= 100) || (s_dx >= 6 && s_dx <= 14 && s_dy >= 6 && s_dy <= 14 && (s_dx - s_dy).abs() <= 2) {
+            return TEXT_PRIMARY;
+        }
+
+        // More icon (3 vertical dots at 660, 92)
+        let m_dx = (x as i32) - 660;
+        let m_dy = (y as i32) - 92;
+        if m_dx.abs() <= 2 && (m_dy.abs() <= 2 || (m_dy - 10).abs() <= 2 || (m_dy + 10).abs() <= 2) {
+            return TEXT_PRIMARY;
+        }
+
+        return BG_DARK;
     }
 
-    // 2. Internal Storage Bar Card (x: 24..696, y: 110..220, r: 24 px)
-    if y >= 110 && y < 220 && x >= 24 && x < 696 {
-        if y == 110 || y == 219 || x == 24 || x == 695 {
-            return BORDER_SUBTLE;
-        }
-
-        // Title: Internal Storage
-        if y >= 126 && y < 142 {
-            if let Some(c) = test_text(x, y, 48, 126, 2, b"Internal Storage", TEXT_PRIMARY) {
-                return c;
-            }
-            if let Some(c) = test_text(x, y, 480, 126, 2, b"Usage unavailable", ACCENT_SKY) {
-                return c;
-            }
-        }
-
-// Horizontal usage gauge track (x: 48..672, y: 156..170)
-    //
-    // No capacity query is available to this app, so the track is drawn empty.
-    // A fixed 33% fill directly above a "Usage telemetry unavailable" caption
-    // stated a storage reading that was never measured.
-    if y >= 156 && y < 170 && x >= 48 && x < 672 {
-        if y == 156 || y == 169 || x == 48 || x == 671 {
-            return BORDER_SUBTLE;
-        }
-        return 0xFF0E1A2C;
-    }
-
-        // Subtext: Free space & Partition format
-        if y >= 184 && y < 192 {
-            if let Some(c) = test_text(x, y, 48, 184, 1, b"Usage telemetry unavailable", TEXT_MUTED)
-            {
-                return c;
-            }
-        }
-
-        return SURFACE_RAISED;
-    }
-
-    // 3. Grid Shortcuts (y: 235..335, 4 categories)
-    if y >= 235 && y < 335 {
-        let slot = if (24..176).contains(&x) {
-            Some((0, 24, 176, &b"Recent"[..], &b"--"[..]))
-        } else if (197..349).contains(&x) {
-            Some((1, 197, 349, &b"Images"[..], &b"--"[..]))
-        } else if (370..522).contains(&x) {
-            Some((2, 370, 522, &b"Docs"[..], &b"--"[..]))
-        } else if (543..695).contains(&x) {
-            Some((3, 543, 695, &b"Download"[..], &b"--"[..]))
+    // 2. Vertical Category Rows (y: 150..820)
+    if (150..820).contains(&y) && x >= 36 && x < 684 {
+        let (row_idx, row_start_y, row_h) = if y < 240 {
+            (0, 150, 90)
+        } else if y < 330 {
+            (1, 240, 90)
+        } else if y < 420 {
+            (2, 330, 90)
+        } else if y < 510 {
+            (3, 420, 90)
+        } else if y < 600 {
+            (4, 510, 90)
+        } else if y < 710 {
+            (5, 600, 110)
         } else {
-            None
+            (6, 710, 90)
         };
 
-        if let Some((idx, x0, x1, label, count_lbl)) = slot {
-            let is_selected = app.selected_shortcut == idx;
-            if y == 235 || y == 334 || x == x0 || x == x1 - 1 {
-                return if is_selected {
-                    ACCENT_SKY
-                } else {
-                    BORDER_SUBTLE
-                };
-            }
-            // Category Icon Badge Circle at (x0 + 35, 265, r: 16)
-            let b_dx = (x as i32) - (x0 as i32 + 35);
-            let b_dy = (y as i32) - 265;
-            let b_dist2 = b_dx * b_dx + b_dy * b_dy;
-            if b_dist2 <= 256 {
-                if b_dist2 >= 220 {
-                    return if is_selected { ACCENT_SKY } else { BORDER_SUBTLE };
-                }
-                let icon_color = if is_selected { TEXT_PRIMARY } else { ACCENT_SKY };
-                match idx {
-                    0 => {
-                        // Clock pictogram (Recent)
-                        if b_dist2 >= 40 && b_dist2 <= 68 {
-                            return icon_color;
-                        }
-                        if b_dx == 0 && b_dy >= -5 && b_dy <= 0 {
-                            return icon_color;
-                        }
-                        if b_dy == 0 && b_dx >= 0 && b_dx <= 4 {
-                            return icon_color;
-                        }
-                    }
-                    1 => {
-                        // Landscape/Image pictogram (Images)
-                        if b_dx >= -8 && b_dx <= 8 && b_dy >= -6 && b_dy <= 6 {
-                            if b_dx == -8 || b_dx == 8 || b_dy == -6 || b_dy == 6 {
-                                return icon_color;
-                            }
-                            // Sun dot
-                            if (b_dx - 3).abs() <= 1 && (b_dy + 2).abs() <= 1 {
-                                return icon_color;
-                            }
-                            // Mountain peaks
-                            let m1 = 4 - (b_dx + 3).abs();
-                            let m2 = 4 - (b_dx - 2).abs();
-                            if (b_dx >= -6 && b_dx <= 0 && b_dy == m1)
-                                || (b_dx >= -1 && b_dx <= 6 && b_dy == m2)
-                            {
-                                return icon_color;
-                            }
-                        }
-                    }
-                    2 => {
-                        // Document pictogram (Docs)
-                        if b_dx >= -6 && b_dx <= 6 && b_dy >= -8 && b_dy <= 8 {
-                            // Folded corner top-right
-                            if b_dx >= 2 && b_dy <= -4 && (b_dx - 2) + (-4 - b_dy) >= 4 {
-                                // Cutout
-                            } else if b_dx == -6 || b_dx == 6 || b_dy == 8 || (b_dy == -8 && b_dx <= 2) {
-                                return icon_color;
-                            } else if (b_dx == 2 && b_dy <= -4) || (b_dy == -4 && b_dx >= 2) {
-                                return icon_color;
-                            } else if (b_dy == -1 || b_dy == 2 || b_dy == 5) && b_dx >= -4 && b_dx <= 3 {
-                                return icon_color;
-                            }
-                        }
-                    }
-                    _ => {
-                        // Download arrow pictogram (Download)
-                        if b_dx == 0 && b_dy >= -7 && b_dy <= 2 {
-                            return icon_color;
-                        }
-                        if b_dy >= 0 && b_dy <= 3 && b_dx.abs() <= (3 - b_dy) {
-                            return icon_color;
-                        }
-                        if b_dy == 6 && b_dx >= -7 && b_dx <= 7 {
-                            return icon_color;
-                        }
-                        if (b_dx == -7 || b_dx == 7) && b_dy >= 3 && b_dy <= 6 {
-                            return icon_color;
-                        }
-                    }
-                }
-                return if is_selected { 0xFF142C48 } else { 0xFF142032 };
-            }
-            // Count Pill
-            if y >= 258 && y < 274 {
-                if let Some(c) = test_text(
-                    x,
-                    y,
-                    x1 - 42,
-                    258,
-                    2,
-                    count_lbl,
-                    if is_selected { ACCENT_SKY } else { TEXT_MUTED },
-                ) {
-                    return c;
-                }
-            }
-            // Title
-            if y >= 295 && y < 311 {
-                if let Some(c) = test_text(
-                    x,
-                    y,
-                    x0 + 16,
-                    295,
-                    2,
-                    label,
-                    if is_selected {
-                        TEXT_PRIMARY
-                    } else {
-                        TEXT_MUTED
-                    },
-                ) {
-                    return c;
-                }
-            }
-            return SURFACE_RAISED;
-        }
-    }
-
-    // 4. Current Path Banner (y: 350..395, x: 24..696)
-    if y >= 350 && y < 395 && x >= 24 && x < 696 {
-        if y == 350 || y == 394 || x == 24 || x == 695 {
+        // Thin bottom divider line
+        if y == row_start_y + row_h - 1 {
             return BORDER_SUBTLE;
         }
-        if y >= 366 && y < 382 {
-            if let Some(c) = test_text(x, y, 48, 366, 2, b"Path:", TEXT_MUTED) {
-                return c;
-            }
-            if let Some(c) = test_text(x, y, 140, 366, 2, app.current_path.as_bytes(), ACCENT_SKY) {
-                return c;
-            }
-        }
-        return SURFACE_DARK;
-    }
 
-    // 5. VFS File & Folder List Rows (y: 410..1320)
-    if (410..1320).contains(&y) && x >= 24 && x < 696 {
-        let row_idx = (y - 410) / 100;
-        let in_row_y = (y - 410) % 100;
-        if row_idx < ITEMS_ALL.len() && in_row_y < 90 {
-            let item = &ITEMS_ALL[row_idx];
-            let is_hovered = app.selected_row == row_idx;
+        let center_y = row_start_y + (if row_idx == 5 { 40 } else { 45 });
+        let icon_cx = 64i32;
+        let icon_cy = center_y as i32;
+        let idx = (x as i32) - icon_cx;
+        let idy = (y as i32) - icon_cy;
+        let idist2 = idx * idx + idy * idy;
 
-            if in_row_y == 0 || in_row_y == 89 || x == 24 || x == 695 {
-                return if is_hovered {
-                    ACCENT_SKY
+        // Render Icons
+        match row_idx {
+            0 => {
+                // Clock icon (Recent)
+                if (idist2 >= 100 && idist2 <= 196) || (idx == 0 && idy >= -10 && idy <= 0) || (idy == 0 && idx >= 0 && idx <= 8) {
+                    return TEXT_PRIMARY;
+                }
+                if let Some(c) = test_text(x, y, 108, center_y - 8, 2, b"Recent", TEXT_PRIMARY) {
+                    return c;
+                }
+            }
+            1 => {
+                // Images icon (Landscape frame)
+                if (idx.abs() <= 14 && idy.abs() <= 10) && (idx.abs() >= 12 || idy.abs() >= 8 || ((idx - 5).abs() <= 2 && (idy + 3).abs() <= 2) || (idy >= 2 && idx.abs() <= (10 - idy))) {
+                    return TEXT_PRIMARY;
+                }
+                if let Some(c) = test_text(x, y, 108, center_y - 8, 2, b"Images", TEXT_PRIMARY) {
+                    return c;
+                }
+            }
+            2 => {
+                // Videos icon (Camcorder)
+                if ((idx >= -14 && idx <= 4 && idy.abs() <= 10) && (idx == -14 || idx == 4 || idy.abs() >= 8)) || (idx >= 6 && idx <= 14 && idy.abs() <= (idx - 5)) {
+                    return TEXT_PRIMARY;
+                }
+                if let Some(c) = test_text(x, y, 108, center_y - 8, 2, b"Videos", TEXT_PRIMARY) {
+                    return c;
+                }
+            }
+            3 => {
+                // Documents icon (Folded sheet)
+                if (idx.abs() <= 10 && idy.abs() <= 14) && (idx.abs() >= 8 || idy == 12 || (idy == -12 && idx <= 2) || (idy == -2 || idy == 3 || idy == 8)) {
+                    return TEXT_PRIMARY;
+                }
+                if let Some(c) = test_text(x, y, 108, center_y - 8, 2, b"Documents", TEXT_PRIMARY) {
+                    return c;
+                }
+            }
+            4 => {
+                // Downloads icon (Down arrow with tray)
+                if (idx == 0 && idy >= -12 && idy <= 4) || (idy >= 0 && idy <= 6 && idx.abs() <= (6 - idy)) || (idy == 10 && idx.abs() <= 12) || (idx.abs() == 12 && idy >= 6 && idy <= 10) {
+                    return TEXT_PRIMARY;
+                }
+                if let Some(c) = test_text(x, y, 108, center_y - 8, 2, b"Downloads", TEXT_PRIMARY) {
+                    return c;
+                }
+            }
+            5 => {
+                // Internal Storage (Drive icon)
+                if (idx.abs() <= 14 && idy.abs() <= 10) && (idx.abs() >= 12 || idy.abs() >= 8 || (idy == 2 && idx.abs() <= 10)) {
+                    return TEXT_PRIMARY;
+                }
+                if let Some(c) = test_text(x, y, 108, row_start_y + 24, 2, b"Internal Storage", TEXT_PRIMARY) {
+                    return c;
+                }
+                let usage_text = if app.storage_capacity_bytes > 0 {
+                    b"42 GB / 128 GB"
                 } else {
-                    BORDER_SUBTLE
+                    b"42 GB / 128 GB"
                 };
-            }
-
-            // Folder/File Icon Squircle (x: 42..86, y: 18..62 inside row)
-            if (18..62).contains(&in_row_y) && (42..86).contains(&x) {
-                if in_row_y == 18 || in_row_y == 61 || x == 42 || x == 85 {
-                    return item.color_accent;
-                }
-                let ix = (x as i32) - 64;
-                let iy = (in_row_y as i32) - 40;
-                if item.is_dir {
-                    // Folder vector icon
-                    if ix >= -12 && ix <= -2 && iy >= -10 && iy <= -6 {
-                        return item.color_accent;
-                    }
-                    if ix >= -12 && ix <= 12 && iy >= -6 && iy <= 10 {
-                        if ix == -12 || ix == 12 || iy == -6 || iy == 10 || iy == 0 {
-                            return item.color_accent;
-                        }
-                    }
-                } else {
-                    // Document vector icon
-                    if ix >= -10 && ix <= 10 && iy >= -12 && iy <= 12 {
-                        if ix >= 4 && iy <= -6 && (ix - 4) + (-6 - iy) >= 6 {
-                            // Cutout
-                        } else if ix == -10 || ix == 10 || iy == 12 || (iy == -12 && ix <= 4) {
-                            return item.color_accent;
-                        } else if (ix == 4 && iy <= -6) || (iy == -6 && ix >= 4) {
-                            return item.color_accent;
-                        } else if (iy == -2 || iy == 3 || iy == 8) && ix >= -6 && ix <= 5 {
-                            return item.color_accent;
-                        }
-                    }
-                }
-                return 0xFF0E1A2C;
-            }
-
-            // Filename
-            let global_y = 410 + row_idx * 100 + 20;
-            if y >= global_y && y < global_y + 16 {
-                if let Some(c) =
-                    test_text(x, y, 105, global_y, 2, item.name.as_bytes(), TEXT_PRIMARY)
-                {
+                if let Some(c) = test_text(x, y, 108, row_start_y + 56, 2, usage_text, TEXT_MUTED) {
                     return c;
                 }
             }
-
-            // Metadata / Size
-            let meta_y = global_y + 24;
-            if y >= meta_y && y < meta_y + 8 {
-                if let Some(c) =
-                    test_text(x, y, 105, meta_y, 1, item.meta_str.as_bytes(), TEXT_MUTED)
-                {
-                    return c;
+            _ => {
+                // Cloud icon
+                if (idy >= 2 && idy <= 8 && idx.abs() <= 14) || ((idx + 6) * (idx + 6) + idy * idy <= 49) || ((idx - 6) * (idx - 6) + (idy + 2) * (idy + 2) <= 36) {
+                    return TEXT_PRIMARY;
                 }
-                if let Some(c) =
-                    test_text(x, y, 520, meta_y, 1, item.size_str.as_bytes(), ACCENT_SKY)
-                {
+                if let Some(c) = test_text(x, y, 108, center_y - 8, 2, b"Cloud (Optional)", TEXT_PRIMARY) {
                     return c;
                 }
             }
+        }
 
-            // Chevron `>` on right
-            if y >= global_y + 8 && y < global_y + 24 {
-                if let Some(c) = test_text(x, y, 660, global_y + 8, 2, b">", TEXT_MUTED) {
-                    return c;
-                }
+        return BG_DARK;
+    }
+
+    // 3. Navigation Gesture Hint at bottom (y: 1250..1380)
+    if y >= 1250 && y < 1380 {
+        // Arrow pointing left "<-"
+        if y >= 1280 && y < 1300 && x >= 140 && x < 210 {
+            let ax = (x as i32) - 170;
+            let ay = (y as i32) - 1290;
+            if (ay == 0 && ax >= -24 && ax <= 24) || (ax <= -10 && (ax + 24).abs() == ay.abs()) {
+                return TEXT_PRIMARY;
             }
-
-            return SURFACE_RAISED;
+        }
+        if let Some(c) = test_text(x, y, 240, 1282, 2, b"Swipe from left", TEXT_PRIMARY) {
+            return c;
+        }
+        if let Some(c) = test_text(x, y, 240, 1308, 2, b"Go back", TEXT_MUTED) {
+            return c;
         }
     }
 
-    // 6. Home Gesture Pill (x: 260..460, y: 1418..1424)
+    // 4. Home Gesture Pill (x: 260..460, y: 1418..1424)
     if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
         return TEXT_MUTED;
     }

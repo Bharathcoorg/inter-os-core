@@ -163,16 +163,16 @@ impl MessagesApp {
 }
 
 // -----------------------------------------------------------------------------
-// Visual Design Tokens
+// Visual Design Tokens (Screen 10 Clean Conversation View)
 // -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFF070B12;
-const SURFACE_DARK: u32 = 0xFF111B2B;
-const SURFACE_RAISED: u32 = 0xFF17243A;
-const BORDER_SUBTLE: u32 = 0xFF26354D;
-const ACCENT_SKY: u32 = 0xFF31C4FF;
-const SUCCESS_EMERALD: u32 = 0xFF56D68A;
-const TEXT_PRIMARY: u32 = 0xFFF4F7FB;
-const TEXT_MUTED: u32 = 0xFF9AA8BC;
+const BG_DARK: u32 = 0xFFFFFFFF;
+const SURFACE_DARK: u32 = 0xFFF8FAFC;
+const SURFACE_RAISED: u32 = 0xFFF1F5F9;
+const BORDER_SUBTLE: u32 = 0xFFE2E8F0;
+const ACCENT_SKY: u32 = 0xFF0284C7;
+const SUCCESS_EMERALD: u32 = 0xFF22C55E;
+const TEXT_PRIMARY: u32 = 0xFF0F172A;
+const TEXT_MUTED: u32 = 0xFF64748B;
 
 // -----------------------------------------------------------------------------
 // Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')
