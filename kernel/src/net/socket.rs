@@ -141,8 +141,18 @@ impl SocketTable {
             return Err(NetError::CapabilityDenied);
         }
 
-        if port == 0 { return Err(NetError::InvalidPort); }
+        let process = crate::task::process::process_for_task(crate::task::TaskId(owner_task_id));
+        if let Some(process) = process {
+            crate::task::process::reserve_network_socket(process)
+                .map_err(|_| NetError::QueueFull)?;
+        }
+
+        if port == 0 { 
+            if let Some(process) = process { crate::task::process::release_network_socket(process); }
+            return Err(NetError::InvalidPort);
+        }
         if self.sockets.iter().flatten().any(|sock| sock.is_bound && sock.local_port == port) {
+            if let Some(process) = process { crate::task::process::release_network_socket(process); }
             return Err(NetError::PortInUse);
         }
         for slot in self.sockets.iter_mut() {
@@ -157,6 +167,7 @@ impl SocketTable {
             }
         }
 
+        if let Some(process) = process { crate::task::process::release_network_socket(process); }
         Err(NetError::QueueFull)
     }
 
@@ -185,6 +196,11 @@ impl SocketTable {
                 released += 1;
             }
         }
+        if released > 0 {
+            if let Some(process) = crate::task::process::process_for_task(crate::task::TaskId(owner_task_id)) {
+                for _ in 0..released { crate::task::process::release_network_socket(process); }
+            }
+        }
         released
     }
 
@@ -196,6 +212,9 @@ impl SocketTable {
                     return Err(NetError::CapabilityDenied);
                 }
                 *slot = None;
+                if let Some(process) = crate::task::process::process_for_task(crate::task::TaskId(owner_task_id)) {
+                    crate::task::process::release_network_socket(process);
+                }
                 return Ok(());
             }
         }
