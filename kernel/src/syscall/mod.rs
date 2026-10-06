@@ -2883,8 +2883,20 @@ pub fn sys_app_stop(child_id: TaskId) -> SyscallResult {
         Some(id) => id,
         None => return SyscallResult::PermissionDenied,
     };
-    match SCHEDULER.lock().terminate_child(parent, child_id, -9) {
-        Ok(()) => SyscallResult::Success,
+    let terminated = {
+        let mut sched = SCHEDULER.lock();
+        sched.terminate_child(parent, child_id, -9)
+    };
+    match terminated {
+        Ok(()) => {
+            // Force-stop is a synchronous lifecycle boundary: once the syscall
+            // returns, the child's IPC, files, events, sockets, capabilities,
+            // surfaces, process record, and kernel stack must be reclaimable.
+            match SCHEDULER.lock().reap_child(parent, child_id) {
+                Ok(_) => SyscallResult::Success,
+                Err(_) => SyscallResult::NotReady,
+            }
+        }
         Err(_) => SyscallResult::TargetNotFound,
     }
 }
