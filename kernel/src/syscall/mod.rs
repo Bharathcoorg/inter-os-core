@@ -2927,6 +2927,10 @@ pub fn sys_app_stop(child_id: TaskId) -> SyscallResult {
         Some(id) => id,
         None => return SyscallResult::PermissionDenied,
     };
+    let child_package = SCHEDULER
+        .lock()
+        .get_task(child_id)
+        .map(|task| task.name);
     let terminated = {
         let mut sched = SCHEDULER.lock();
         sched.terminate_child(parent, child_id, -9)
@@ -2937,7 +2941,14 @@ pub fn sys_app_stop(child_id: TaskId) -> SyscallResult {
             // returns, the child's IPC, files, events, sockets, capabilities,
             // surfaces, process record, and kernel stack must be reclaimable.
             match SCHEDULER.lock().reap_child(parent, child_id) {
-                Ok(_) => SyscallResult::Success,
+                Ok(_) => {
+                    if let Some(pkg) = child_package {
+                        crate::notification::NOTIFICATION_MANAGER
+                            .lock()
+                            .cancel_all_for_package_all_users(pkg);
+                    }
+                    SyscallResult::Success
+                },
                 Err(_) => SyscallResult::NotReady,
             }
         }
