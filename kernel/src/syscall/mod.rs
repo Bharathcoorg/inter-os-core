@@ -4113,8 +4113,9 @@ pub fn sys_package_registry(out_buf:&mut [u8])->Result<usize,SyscallResult>{
         };
         let display_name = descriptor.map(|p| p.display_name).unwrap_or(&e.package_id);
         let icon = descriptor.map(|p| p.icon).unwrap_or("APP");
-        let _=writeln!(w,"{}|{}|{}.{}.{}|{}|{}|{}|{}\n",
-            e.package_id,process,e.version.0,e.version.1,e.version.2,state,path,display_name,icon);
+        let category = descriptor.map(|p| p.category).unwrap_or("Tools");
+        let _=writeln!(w,"{}|{}|{}.{}.{}|{}|{}|{}|{}|{}\n",
+            e.package_id,process,e.version.0,e.version.1,e.version.2,state,path,display_name,icon,category);
         if w.n >= w.b.len() { break; }
     }
     Ok(w.n)
