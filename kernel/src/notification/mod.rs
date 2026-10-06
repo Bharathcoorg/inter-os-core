@@ -288,6 +288,11 @@ impl NotificationManager {
         self.app_blocks.insert(package_id.to_string(), blocked);
     }
 
+    /// Drops package-specific notification policy when the package is removed.
+    pub fn remove_app_policy(&mut self, package_id: &str) {
+        self.app_blocks.remove(package_id);
+    }
+
     /// Returns total active unread badge count for a package.
     pub fn get_badge_count(&self, package_id: &str, user_id: u32) -> u32 {
         self.records
