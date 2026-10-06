@@ -4514,7 +4514,8 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         let payload_end = verified.payload_offset.checked_add(verified.payload_len)
             .ok_or(SyscallResult::InvalidArguments)?;
         let payload = &blob.bytes[verified.payload_offset..payload_end];
-        let tid = crate::task::user::spawn_verified_rapp_process(&verified, payload, crate::task::TaskId(0))
+        let parent = crate::task::TaskId(0);
+        let tid = crate::task::user::spawn_verified_rapp_process(&verified, payload, parent)
             .map_err(|_| SyscallResult::DeviceError)?;
         register_spawned_task_ipc(tid, parent)?;
         serial_println!("[APP] QEMU dev bridge launched persistent RAPP '{}' as Task {}", verified.package_id, tid.0);
