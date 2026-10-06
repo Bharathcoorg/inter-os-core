@@ -38,6 +38,7 @@ interos-android-shared = { path = "src/compat/android/shared" }
 [profile.dev]
 opt-level = 1
 panic = "abort"
+debug = false
 
 [profile.test]
 opt-level = 1

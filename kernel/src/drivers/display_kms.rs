@@ -370,6 +370,34 @@ impl DrmKmsController {
             let y1 = sy.saturating_add(s_h).min(sh);
 
             if s_w == 720 && s_h == 1440 && sw == 1280 && sh == 720 {
+                let is_landscape = matches!(self.orientation, DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft);
+                if is_landscape {
+                    let s_width = surface.width as usize;
+                    let is_right = self.orientation == DisplayOrientation::LandscapeRight;
+                    for y in 0..720usize {
+                        let dst_y_offset = y * (self.scanout_width as usize);
+                        let src_x = if is_right {
+                            719usize.saturating_sub(y)
+                        } else {
+                            y
+                        };
+                        for x in 0..1280usize {
+                            let dst_idx = dst_y_offset + x;
+                            let src_y = if is_right {
+                                (x * 1440) / 1280
+                            } else {
+                                1439usize.saturating_sub((x * 1440) / 1280)
+                            };
+                            let src_idx = src_y * s_width + src_x;
+                            if src_idx < surface.pixels.len() {
+                                self.back_buffer[dst_idx] = surface.pixels[src_idx];
+                            }
+                        }
+                    }
+                    surface.dirty = false;
+                    continue;
+                }
+
                 let dst_x_start = 460usize;
                 let dst_x_end = 820usize;
                 let dst_y_end = 720usize;
@@ -490,7 +518,7 @@ pub static DRM_KMS: Mutex<DrmKmsController> = Mutex::new(DrmKmsController {
     vsync_counter: 0,
     page_flips_completed: 0,
     focused_surface: None,
-    orientation: DisplayOrientation::LandscapeRight,
+    orientation: DisplayOrientation::Portrait,
     refresh_hz: 60,
     frame_deadline_ticks: 0,
 });

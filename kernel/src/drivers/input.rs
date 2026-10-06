@@ -163,20 +163,32 @@ pub static INPUT_PIPELINE: Mutex<InputPipeline> = Mutex::new(InputPipeline::new(
 /// Routes normalized input events to the currently focused surface owner.
 pub fn dispatch_to_focused_window(event: InputEvent) {
     let owner = {
-        let mut wm = crate::gui::WINDOW_MANAGER.lock();
-        let target = match event.kind {
-            InputEventKind::Tap | InputEventKind::DoubleTap | InputEventKind::LongPress =>
-                wm.hit_test(event.x, event.y).map(|(_, owner)| owner),
-            InputEventKind::Pan | InputEventKind::Pinch =>
-                wm.focused_owner().or_else(|| wm.top_visible_owner()),
-            _ => wm.focused_owner().or_else(|| wm.top_visible_owner()),
-        };
-        let resolved = target.or_else(|| {
+        let top_kms_owner = {
             let kms = crate::drivers::display_kms::DRM_KMS.lock();
-            kms.surfaces.iter().rev().find(|s| s.input_enabled).map(|s| s.owner_task)
-        });
-        crate::serial_println!("[INPUT DISPATCH] event={:?} (x={}, y={}) resolved={:?} focused={:?}",
-            event.kind, event.x, event.y, resolved, wm.focused());
+            kms.surfaces.iter()
+                .filter(|s| s.visible && s.input_enabled && s.z_order > 0)
+                .max_by_key(|s| s.z_order)
+                .map(|s| s.owner_task)
+        };
+
+        let resolved = if let Some(top_task) = top_kms_owner {
+            Some(top_task)
+        } else {
+            let mut wm = crate::gui::WINDOW_MANAGER.lock();
+            let target = match event.kind {
+                InputEventKind::Tap | InputEventKind::DoubleTap | InputEventKind::LongPress =>
+                    wm.hit_test(event.x, event.y).map(|(_, owner)| owner),
+                InputEventKind::Pan | InputEventKind::Pinch =>
+                    wm.focused_owner().or_else(|| wm.top_visible_owner()),
+                _ => wm.focused_owner().or_else(|| wm.top_visible_owner()),
+            };
+            target.or_else(|| {
+                let kms = crate::drivers::display_kms::DRM_KMS.lock();
+                kms.surfaces.iter().rev().find(|s| s.input_enabled).map(|s| s.owner_task)
+            })
+        };
+        crate::serial_println!("[INPUT DISPATCH] event={:?} (x={}, y={}) resolved={:?}",
+            event.kind, event.x, event.y, resolved);
         resolved
     };
     if let Some(owner) = owner {

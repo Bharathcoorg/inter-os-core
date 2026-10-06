@@ -1583,12 +1583,148 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32) {
             fb.draw_rect(off_x, 0, dst_w, off_y, COLOR_OBSIDIAN);
             fb.draw_rect(off_x, off_y + dst_h, dst_w, info.height.saturating_sub(off_y + dst_h), COLOR_OBSIDIAN);
         }
-        for dy in 0..dst_h {
-            let sy = dy * src_h / dst_h;
-            for dx in 0..dst_w {
-                let sx = dx * src_w / dst_w;
-                let argb = pixels[sy * src_w + sx];
-                fb.set_pixel(off_x + dx, off_y + dy, ((argb >> 16) as u8, (argb >> 8) as u8, argb as u8));
+        if src_w == info.width && src_h == info.height && off_x == 0 && off_y == 0 {
+            if let Some(ptr) = fb.buffer_ptr {
+                let bpp = info.bytes_per_pixel;
+                let stride_bytes = info.stride * bpp;
+                let fmt = info.pixel_format;
+                unsafe {
+                    match fmt {
+                        PixelFormat::Bgr if bpp == 4 => {
+                            for dy in 0..info.height {
+                                let row_src = &pixels[dy * src_w..(dy + 1) * src_w];
+                                let mut dst_ptr = ptr.add(dy * stride_bytes);
+                                for &p in row_src {
+                                    *dst_ptr = p as u8;
+                                    *dst_ptr.add(1) = (p >> 8) as u8;
+                                    *dst_ptr.add(2) = (p >> 16) as u8;
+                                    *dst_ptr.add(3) = 0xFF;
+                                    dst_ptr = dst_ptr.add(4);
+                                }
+                            }
+                            return;
+                        }
+                        PixelFormat::Bgr if bpp == 3 => {
+                            for dy in 0..info.height {
+                                let row_src = &pixels[dy * src_w..(dy + 1) * src_w];
+                                let mut dst_ptr = ptr.add(dy * stride_bytes);
+                                for &p in row_src {
+                                    *dst_ptr = p as u8;
+                                    *dst_ptr.add(1) = (p >> 8) as u8;
+                                    *dst_ptr.add(2) = (p >> 16) as u8;
+                                    dst_ptr = dst_ptr.add(3);
+                                }
+                            }
+                            return;
+                        }
+                        PixelFormat::Rgb if bpp == 4 => {
+                            for dy in 0..info.height {
+                                let row_src = &pixels[dy * src_w..(dy + 1) * src_w];
+                                let mut dst_ptr = ptr.add(dy * stride_bytes);
+                                for &p in row_src {
+                                    *dst_ptr = (p >> 16) as u8;
+                                    *dst_ptr.add(1) = (p >> 8) as u8;
+                                    *dst_ptr.add(2) = p as u8;
+                                    *dst_ptr.add(3) = 0xFF;
+                                    dst_ptr = dst_ptr.add(4);
+                                }
+                            }
+                            return;
+                        }
+                        PixelFormat::Rgb if bpp == 3 => {
+                            for dy in 0..info.height {
+                                let row_src = &pixels[dy * src_w..(dy + 1) * src_w];
+                                let mut dst_ptr = ptr.add(dy * stride_bytes);
+                                for &p in row_src {
+                                    *dst_ptr = (p >> 16) as u8;
+                                    *dst_ptr.add(1) = (p >> 8) as u8;
+                                    *dst_ptr.add(2) = p as u8;
+                                    dst_ptr = dst_ptr.add(3);
+                                }
+                            }
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        if let Some(ptr) = fb.buffer_ptr {
+            let bpp = info.bytes_per_pixel;
+            let stride_bytes = info.stride * bpp;
+            let fmt = info.pixel_format;
+            unsafe {
+                for dy in 0..dst_h {
+                    let sy = dy * src_h / dst_h;
+                    let src_row = sy * src_w;
+                    let target_y = off_y + dy;
+                    let row_start_ptr = ptr.add(target_y * stride_bytes + off_x * bpp);
+                    match fmt {
+                        PixelFormat::Bgr if bpp == 4 => {
+                            let mut dst_ptr = row_start_ptr;
+                            for dx in 0..dst_w {
+                                let sx = dx * src_w / dst_w;
+                                let argb = pixels[src_row + sx];
+                                *dst_ptr = argb as u8;
+                                *dst_ptr.add(1) = (argb >> 8) as u8;
+                                *dst_ptr.add(2) = (argb >> 16) as u8;
+                                *dst_ptr.add(3) = 0xFF;
+                                dst_ptr = dst_ptr.add(4);
+                            }
+                        }
+                        PixelFormat::Bgr if bpp == 3 => {
+                            let mut dst_ptr = row_start_ptr;
+                            for dx in 0..dst_w {
+                                let sx = dx * src_w / dst_w;
+                                let argb = pixels[src_row + sx];
+                                *dst_ptr = argb as u8;
+                                *dst_ptr.add(1) = (argb >> 8) as u8;
+                                *dst_ptr.add(2) = (argb >> 16) as u8;
+                                dst_ptr = dst_ptr.add(3);
+                            }
+                        }
+                        PixelFormat::Rgb if bpp == 4 => {
+                            let mut dst_ptr = row_start_ptr;
+                            for dx in 0..dst_w {
+                                let sx = dx * src_w / dst_w;
+                                let argb = pixels[src_row + sx];
+                                *dst_ptr = (argb >> 16) as u8;
+                                *dst_ptr.add(1) = (argb >> 8) as u8;
+                                *dst_ptr.add(2) = argb as u8;
+                                *dst_ptr.add(3) = 0xFF;
+                                dst_ptr = dst_ptr.add(4);
+                            }
+                        }
+                        PixelFormat::Rgb if bpp == 3 => {
+                            let mut dst_ptr = row_start_ptr;
+                            for dx in 0..dst_w {
+                                let sx = dx * src_w / dst_w;
+                                let argb = pixels[src_row + sx];
+                                *dst_ptr = (argb >> 16) as u8;
+                                *dst_ptr.add(1) = (argb >> 8) as u8;
+                                *dst_ptr.add(2) = argb as u8;
+                                dst_ptr = dst_ptr.add(3);
+                            }
+                        }
+                        _ => {
+                            for dx in 0..dst_w {
+                                let sx = dx * src_w / dst_w;
+                                let argb = pixels[src_row + sx];
+                                fb.set_pixel(off_x + dx, target_y, ((argb >> 16) as u8, (argb >> 8) as u8, argb as u8));
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            for dy in 0..dst_h {
+                let sy = dy * src_h / dst_h;
+                for dx in 0..dst_w {
+                    let sx = dx * src_w / dst_w;
+                    let argb = pixels[sy * src_w + sx];
+                    fb.set_pixel(off_x + dx, off_y + dy, ((argb >> 16) as u8, (argb >> 8) as u8, argb as u8));
+                }
             }
         }
     });

@@ -441,6 +441,47 @@ fn handle_rapp_command(s: &str) -> bool {
         return true;
     }
 
+    if verb.eq_ignore_ascii_case("ORIENTATION") {
+        let opt = parts.next().map(|v| v.to_ascii_uppercase());
+        let set_kms_orientation = |orient: crate::drivers::display_kms::DisplayOrientation| {
+            for _ in 0..100 {
+                if let Some(mut kms) = crate::drivers::display_kms::DRM_KMS.try_lock() {
+                    kms.set_orientation(orient);
+                    return true;
+                }
+                core::hint::spin_loop();
+            }
+            false
+        };
+        match opt.as_deref() {
+            Some("LANDSCAPE") | Some("LANDSCAPE_RIGHT") | Some("LANDSCAPERIGHT") => {
+                set_kms_orientation(crate::drivers::display_kms::DisplayOrientation::LandscapeRight);
+                if let Some(mut sm) = crate::sensor::SENSOR_MANAGER.try_lock() {
+                    sm.imu.accel = crate::sensor::Vector3D { x: 980, y: 0, z: 0 };
+                }
+                serial_println!("[DISPLAY_HAL] Orientation changed to LandscapeRight. KMS scanout updated to 1280x720 full landscape.");
+            }
+            Some("LANDSCAPE_LEFT") | Some("LANDSCAPELEFT") => {
+                set_kms_orientation(crate::drivers::display_kms::DisplayOrientation::LandscapeLeft);
+                if let Some(mut sm) = crate::sensor::SENSOR_MANAGER.try_lock() {
+                    sm.imu.accel = crate::sensor::Vector3D { x: -980, y: 0, z: 0 };
+                }
+                serial_println!("[DISPLAY_HAL] Orientation changed to LandscapeLeft. KMS scanout updated to 1280x720 full landscape.");
+            }
+            Some("PORTRAIT") => {
+                set_kms_orientation(crate::drivers::display_kms::DisplayOrientation::Portrait);
+                if let Some(mut sm) = crate::sensor::SENSOR_MANAGER.try_lock() {
+                    sm.imu.accel = crate::sensor::Vector3D { x: 0, y: 980, z: 0 };
+                }
+                serial_println!("[DISPLAY_HAL] Orientation changed to Portrait. KMS scanout updated to 720x1440 centered scanout.");
+            }
+            _ => {
+                serial_println!("[DISPLAY_HAL] REJECT invalid orientation option");
+            }
+        }
+        return true;
+    }
+
     // RAPP_TRUST IS DELIBERATELY NOT IMPLEMENTED.
     //
     // This COM1 line is an unauthenticated channel: anything that can write

@@ -181,23 +181,31 @@ impl EventReactor {
         }
     }
 
-    /// Invoked on hardware timer tick to evaluate deadlines and wake timed-out tasks.
+    /// Invoked on hardware timer tick to evaluate deadlines and wake timed-out or event-ready tasks.
     pub fn on_tick(&mut self, current_ticks: u64) {
-        let mut has_expired = false;
+        let mut has_unblock = false;
         for sub in self.subscriptions.iter_mut() {
-            if sub.is_waiting && sub.wait_until_tick > 0 && current_ticks >= sub.wait_until_tick {
-                if (sub.interest_mask & EVENT_TIMER_TICK) != 0 {
-                    sub.pending_mask |= EVENT_TIMER_TICK;
+            if sub.is_waiting {
+                if (sub.pending_mask & sub.interest_mask) != 0 {
+                    has_unblock = true;
+                } else if sub.wait_until_tick > 0 && current_ticks >= sub.wait_until_tick {
+                    if (sub.interest_mask & EVENT_TIMER_TICK) != 0 {
+                        sub.pending_mask |= EVENT_TIMER_TICK;
+                    }
+                    has_unblock = true;
                 }
-                has_expired = true;
             }
         }
-        if has_expired {
+        if has_unblock {
             if let Some(mut sched) = SCHEDULER.try_lock() {
                 for sub in self.subscriptions.iter_mut() {
-                    if sub.is_waiting && sub.wait_until_tick > 0 && current_ticks >= sub.wait_until_tick {
-                        sub.is_waiting = false;
-                        sched.unblock_task(sub.task_id);
+                    if sub.is_waiting {
+                        let has_pending = (sub.pending_mask & sub.interest_mask) != 0;
+                        let has_timed_out = sub.wait_until_tick > 0 && current_ticks >= sub.wait_until_tick;
+                        if has_pending || has_timed_out {
+                            sub.is_waiting = false;
+                            sched.unblock_task(sub.task_id);
+                        }
                     }
                 }
             }
