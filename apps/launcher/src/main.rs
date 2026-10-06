@@ -2171,6 +2171,24 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
+                                // Tap on Apps dock tile (Row 1 Col 2) opens App Drawer
+                                if ((1020..1320).contains(&y) || (660..800).contains(&y)) && (482..672).contains(&x) {
+                                    state.current_view = ViewMode::AppDrawer;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] App Drawer opened via Apps dock tile tap.").ok();
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
+
                                 // Launch application
                                 let target_desc = resolve_app_at_touch(&state, input.x, input.y)
                                     .map(|s| {

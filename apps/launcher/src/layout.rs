@@ -102,6 +102,23 @@ pub fn grid(count: usize, bounds: Rect, max_rows: usize, gutter: usize) -> Grid 
     }
 }
 
+/// Computes a grid with an explicit number of columns.
+pub fn grid_fixed_columns(count: usize, bounds: Rect, columns: usize, max_rows: usize, gutter: usize) -> Grid {
+    let columns = columns.max(1);
+    let rows = ((count + columns - 1) / columns).max(1).min(max_rows.max(1));
+    let cell_w = (bounds.w.saturating_sub(gutter * (columns - 1))) / columns;
+    let cell_h = (bounds.h.saturating_sub(gutter * (rows - 1))) / rows;
+    Grid {
+        bounds,
+        columns,
+        rows,
+        cell: Rect::new(0, 0, cell_w, cell_h),
+        gutter,
+        origin_x: bounds.x,
+        origin_y: bounds.y,
+    }
+}
+
 /// How many columns fit a width, clamped to a sane range.
 ///
 /// WHY a floor of one and a ceiling of six: zero columns would divide by zero, and

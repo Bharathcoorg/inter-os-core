@@ -21,7 +21,7 @@ use crate::{test_text, LauncherState};
 use launcher::layout::{self, Rect};
 use launcher::text;
 use launcher::theme::{
-    radius, space, type_scale, Theme, CONTENT_PADDING, MIN_TOUCH_TARGET, NAV_BAR_HEIGHT,
+    radius, space, type_scale, Theme, CONTENT_PADDING, NAV_BAR_HEIGHT,
     SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT,
 };
 
@@ -35,7 +35,7 @@ use launcher::theme::{
 const DRAWER_ROWS: usize = 4;
 
 /// Gap between tiles, off the theme's spacing scale.
-const TILE_GUTTER: usize = space::MD;
+const TILE_GUTTER: usize = 20;
 
 /// Longest name the catalogue can carry: the element width of the label buffer in
 /// `LauncherState::app_labels`. Read from the state layout rather than assumed.
@@ -88,21 +88,19 @@ struct Frame {
 
 fn frame() -> Frame {
     let content = layout::content_area(CONTENT_PADDING);
-    let search = Rect::new(content.x, content.y, content.w, MIN_TOUCH_TARGET);
-    let chips_y = search.y + search.h + space::SM;
-    let chips = Rect::new(content.x, chips_y, content.w, MIN_TOUCH_TARGET);
+    let search = Rect::new(content.x, 46, content.w, 46);
+    let chips = Rect::new(content.x, 116, content.w, 52);
     let dots = Rect::new(
         content.x,
-        content.y + content.h - space::XL,
+        1095,
         content.w,
         space::XL,
     );
-    let grid_top = chips.y + chips.h + space::MD;
     let grid = Rect::new(
-        content.x,
-        grid_top,
-        content.w,
-        dots.y - space::LG - grid_top,
+        50,
+        185,
+        620,
+        885,
     );
     let nav_top = SCREEN_HEIGHT - NAV_BAR_HEIGHT;
     let pill = Rect::new(
@@ -120,45 +118,9 @@ fn frame() -> Frame {
     }
 }
 
-/// The label width that half of the catalogue's names fit inside.
-///
-/// WHY the median and not the longest name: a tile sized for the single longest
-/// name in the registry ("Camera Preview", fourteen glyphs) drops the grid to two
-/// columns and leaves every other app marooned in a 302px cell. Sizing the tile so
-/// half the catalogue reads in full holds the grid at the columns the design uses
-/// and leaves the few genuinely long names to `text::ellipsize`, which is what an
-/// ellipsis is for.
-fn median_label_px(state: &LauncherState) -> usize {
-    let mut hist = [0usize; APP_LABEL_CAPACITY + 1];
-    for i in 0..state.app_count {
-        hist[(state.app_label_lens[i] as usize).min(APP_LABEL_CAPACITY)] += 1;
-    }
-    let half = (state.app_count + 1) / 2;
-    let mut seen = 0usize;
-    for (len, hits) in hist.iter().enumerate() {
-        seen += hits;
-        if seen >= half {
-            return len * text::GLYPH_W * LABEL_SCALE;
-        }
-    }
-    0
-}
-
-/// Columns the drawer lays out.
-///
-/// WHY two ceilings and not one: `layout::grid_columns` answers "how many cells fit
-/// this width while each still meets the minimum touch target", which on a 720px
-/// surface is six columns of about 106px. A drawer tile is not a bare target -- it
-/// is an icon with the app's name under it -- and at the theme's caption scale a
-/// 106px cell holds five glyphs, which turns "Calculator" into "Calc...". So the
-/// grid takes whichever ceiling is tighter: the surface's touch ceiling, or the
-/// width the catalogue's own labels need plus `space::MD` of air on each side.
-pub fn drawer_columns(state: &LauncherState) -> usize {
-    let content = layout::content_area(CONTENT_PADDING);
-    let tile_min = median_label_px(state) + space::MD * 2;
-    let by_touch = layout::grid_columns(state.app_count, content.w, TILE_GUTTER);
-    let by_label = (content.w + TILE_GUTTER) / (tile_min + TILE_GUTTER);
-    by_touch.min(by_label).max(1)
+/// Columns the drawer lays out: strictly 3 columns (3x4 grid) matching Screen 3.
+pub fn drawer_columns(_state: &LauncherState) -> usize {
+    3
 }
 
 /// How many apps one page of the drawer holds for the current catalogue.
@@ -201,10 +163,6 @@ pub fn app_drawer_page_count(state: &LauncherState) -> usize {
 }
 
 /// The page actually shown, clamped into range.
-///
-/// WHY clamp rather than trust: `app_drawer_page` is a bare `usize` the shell
-/// mutates, and a catalogue that shrank underneath it would otherwise render an
-/// empty page and claim there were two of them.
 pub fn app_drawer_page(state: &LauncherState) -> usize {
     let pages = app_drawer_page_count(state);
     if pages == 0 {
@@ -216,11 +174,8 @@ pub fn app_drawer_page(state: &LauncherState) -> usize {
 
 /// The cell rectangle for slot `slot` of the current page, at the drawer's stable
 /// cell size.
-///
-/// WHY sized from the page capacity and not from the page's item count: cell size
-/// has to be the same on every page or the grid reflows as you swipe.
 fn current_grid(capacity: usize) -> layout::Grid {
-    layout::grid(capacity, frame().grid, DRAWER_ROWS, TILE_GUTTER)
+    layout::grid_fixed_columns(capacity, frame().grid, 3, DRAWER_ROWS, TILE_GUTTER)
 }
 
 /// Which catalogue index a touch at (`x`, `y`) lands on, if any.
@@ -339,6 +294,33 @@ fn hue_for(theme: &Theme, index: usize) -> u32 {
         1 => theme.success,
         2 => theme.warning,
         _ => theme.danger,
+    }
+}
+
+/// Rich, authentic background color for each app's squircle icon matching Screen 3.
+fn icon_color(kind: Option<launcher::icons::IconKind>, index: usize, theme: &Theme) -> u32 {
+    use launcher::icons::IconKind;
+    match kind {
+        Some(IconKind::Phone) => 0xFF34C759,
+        Some(IconKind::Messages) => 0xFF30D158,
+        Some(IconKind::Camera) => 0xFF2C2C2E,
+        Some(IconKind::Browser) => 0xFF007AFF,
+        Some(IconKind::Files) => 0xFF0A84FF,
+        Some(IconKind::Gallery) => 0xFF32ADE6,
+        Some(IconKind::Settings) => 0xFF8E8E93,
+        Some(IconKind::Music) => 0xFFFF2D55,
+        Some(IconKind::Calculator) => 0xFFFF9500,
+        Some(IconKind::Terminal) => 0xFF1C1C1E,
+        Some(IconKind::Health) => 0xFFFF375F,
+        Some(IconKind::Vault) => 0xFF5856D6,
+        Some(IconKind::Sensors) => 0xFF30B0C7,
+        Some(IconKind::MeshChat) => 0xFF007AFF,
+        Some(IconKind::Calendar) => 0xFFFF3B30,
+        Some(IconKind::Notes) => 0xFFFFCC00,
+        Some(IconKind::Contacts) => 0xFF007AFF,
+        Some(IconKind::Maps) => 0xFF34C759,
+        Some(IconKind::Apps) => 0xFF5856D6,
+        None => hue_for(theme, index),
     }
 }
 
@@ -526,6 +508,7 @@ impl Run {
 
 /// One app tile, with its cell, its icon disc, its rotation and both words resolved.
 struct TilePlan {
+    #[allow(dead_code)]
     cell: Rect,
     disc: Rect,
     disc_r: i32,
@@ -706,18 +689,17 @@ fn build(state: &LauncherState) -> Paint {
         let Some(cell) = layout::grid_cell(&grid, slot) else {
             continue;
         };
-        // WHY the disc is resolved here: its diameter, its centre and the radius the
-        // old painter compared a squared distance against were all recomputed per
-        // pixel, and the badge's centring inset came from `text::center_x`.
-        let icon_d = cell.w.saturating_sub(space::XXL * 2);
-        let group_h = icon_d + space::MD + text::line_height(LABEL_SCALE);
+        let icon_d = 80usize;
+        let group_h = icon_d + 12 + text::line_height(LABEL_SCALE);
         let top = cell.y + cell.h.saturating_sub(group_h) / 2;
         let disc = Rect::new(cell.center_x() - icon_d / 2, top, icon_d, icon_d);
-        let hue = hue_for(&theme, index);
         let badge = app_badge(state, index);
         let id = app_id(state, index);
+        let label = app_label(state, index);
         let icon_kind = launcher::icons::match_icon_kind(id)
+            .or_else(|| launcher::icons::match_icon_kind(label))
             .or_else(|| launcher::icons::match_icon_kind(badge));
+        let hue = icon_color(icon_kind, index, &theme);
 
         let badge_run = if icon_kind.is_some() || badge.is_empty() {
             Run::EMPTY
@@ -727,24 +709,24 @@ fn build(state: &LauncherState) -> Paint {
                 disc.center_y() - text::line_height(BADGE_SCALE) / 2,
                 BADGE_SCALE,
                 badge,
-                layout::ink_on(&theme, hue),
+                0xFFFFFFFF,
             )
         };
 
         tiles[slot] = TilePlan {
             cell,
             disc,
-            disc_r: (icon_d / 2) as i32,
+            disc_r: 18,
             hue,
             icon: icon_kind,
             badge: badge_run,
             label: Run::centred(
                 cell.x,
-                top + icon_d + space::MD,
+                top + icon_d + 12,
                 LABEL_SCALE,
-                cell.w.saturating_sub(space::MD * 2),
+                cell.w.saturating_sub(8),
                 cell.w,
-                app_label(state, index),
+                label,
                 theme.text,
             ),
         };
@@ -950,7 +932,7 @@ fn search_field(x: usize, y: usize, field: &Rect, theme: &Theme, p: &Paint) -> u
 fn filter_chips(x: usize, y: usize, theme: &Theme, p: &Paint) -> u32 {
     for chip in p.chips.iter() {
         if chip.rect.contains(x, y) {
-            let rad = radius::CHIP;
+            let rad = chip.rect.h / 2;
             if inside_rounded(chip.rect, x, y, rad) {
                 if let Some(c) = chip.label.pixel(x, y) {
                     return c;
@@ -958,10 +940,7 @@ fn filter_chips(x: usize, y: usize, theme: &Theme, p: &Paint) -> u32 {
                 if chip.active {
                     return theme.text;
                 } else {
-                    if !inside_rounded(chip.rect.inset(1), x, y, rad.saturating_sub(1)) {
-                        return theme.border;
-                    }
-                    return theme.surface;
+                    return theme.surface_raised;
                 }
             }
         }
@@ -1030,21 +1009,10 @@ fn empty_catalogue(x: usize, y: usize, theme: &Theme, p: &EmptyPlan) -> u32 {
 /// is. A long name used to be drawn at its full width straight through the tile
 /// beside it.
 fn app_tile(x: usize, y: usize, theme: &Theme, t: &TilePlan) -> u32 {
-    if !inside_rounded(t.cell, x, y, radius::CARD) {
-        return theme.bg;
-    }
-    // Second, inner test so the card is two pixels of border.
-    if !inside_rounded(t.cell.inset(1), x, y, radius::CARD - 1) {
-        return theme.border;
-    }
-
-    // The icon disc: vector pictogram or the app's badge word over a hue rotated
-    // by catalogue index, or a flat circle when the package has no badge.
-    let dx = x as i32 - t.disc.center_x() as i32;
-    let dy = y as i32 - t.disc.center_y() as i32;
-    if dx * dx + dy * dy <= t.disc_r * t.disc_r {
+    // 1. Icon squircle: rounded rectangle with 18px corner radius
+    if inside_rounded(t.disc, x, y, t.disc_r as usize) {
         if let Some(kind) = t.icon {
-            let ink = layout::ink_on(theme, t.hue);
+            let ink = 0xFFFFFFFF; // High contrast crisp white vector pictogram
             if let Some(c) = launcher::icons::rasterize_icon_pixel(kind, x, y, t.disc.center_x(), t.disc.center_y(), ink) {
                 return c;
             }
@@ -1054,10 +1022,13 @@ fn app_tile(x: usize, y: usize, theme: &Theme, t: &TilePlan) -> u32 {
         return t.hue;
     }
 
+    // 2. App name label
     if let Some(c) = t.label.pixel(x, y) {
         return c;
     }
-    theme.surface
+
+    // 3. Clean background canvas (No card box borders)
+    theme.bg
 }
 
 /// Whether a pixel belongs to a rectangle with rounded corners.

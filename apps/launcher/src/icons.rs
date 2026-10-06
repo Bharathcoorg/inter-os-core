@@ -24,6 +24,10 @@ pub enum IconKind {
     MeshChat,
     Sensors,
     Apps,
+    Calendar,
+    Notes,
+    Contacts,
+    Maps,
 }
 
 /// Identifies if a package ID or process name maps to a first-party vector pictogram.
@@ -32,40 +36,76 @@ pub fn match_icon_kind(id: &[u8]) -> Option<IconKind> {
         return None;
     }
     // Match package IDs, short process names, or badge acronyms
-    if id == b"org.interos.dialer" || id == b"dialer" || id == b"app_dialer" || id == b"CALL" || id == b"TEL" {
+    if id == b"org.interos.dialer" || id == b"dialer" || id == b"app_dialer" || id == b"CALL" || id == b"TEL"
+        || id == b"Phone" || id == b"phone"
+    {
         Some(IconKind::Phone)
-    } else if id == b"org.interos.messages" || id == b"messages" || id == b"app_messages" || id == b"MSG" || id == b"SMS" {
+    } else if id == b"org.interos.messages" || id == b"messages" || id == b"app_messages" || id == b"MSG" || id == b"SMS"
+        || id == b"Messages" || id == b"sms"
+    {
         Some(IconKind::Messages)
     } else if id == b"org.interos.camera" || id == b"camera" || id == b"app_camera"
         || id == b"org.interos.camera_preview" || id == b"camera_preview" || id == b"CAM"
+        || id == b"Camera" || id == b"Camera Preview"
     {
         Some(IconKind::Camera)
-    } else if id == b"org.interos.browser" || id == b"browser" || id == b"app_browser" || id == b"WEB" || id == b"BROW" {
+    } else if id == b"org.interos.browser" || id == b"browser" || id == b"app_browser" || id == b"WEB" || id == b"BROW"
+        || id == b"Browser"
+    {
         Some(IconKind::Browser)
-    } else if id == b"org.interos.file_manager" || id == b"file_manager" || id == b"files" || id == b"app_file_manager" || id == b"FILE" {
+    } else if id == b"org.interos.file_manager" || id == b"file_manager" || id == b"files" || id == b"app_file_manager" || id == b"FILE"
+        || id == b"Files" || id == b"File Manager"
+    {
         Some(IconKind::Files)
-    } else if id == b"org.interos.gallery" || id == b"gallery" || id == b"photos" || id == b"app_gallery" || id == b"GAL" || id == b"PHO" {
+    } else if id == b"org.interos.gallery" || id == b"gallery" || id == b"photos" || id == b"app_gallery" || id == b"GAL" || id == b"PHO"
+        || id == b"Gallery" || id == b"Photos"
+    {
         Some(IconKind::Gallery)
-    } else if id == b"org.interos.settings" || id == b"settings" || id == b"app_settings" || id == b"SET" || id == b"CFG" {
+    } else if id == b"org.interos.settings" || id == b"settings" || id == b"app_settings" || id == b"SET" || id == b"CFG"
+        || id == b"Settings"
+    {
         Some(IconKind::Settings)
-    } else if id == b"org.interos.music" || id == b"music" || id == b"app_music" || id == b"MUS" || id == b"AUD" {
+    } else if id == b"org.interos.music" || id == b"music" || id == b"app_music" || id == b"MUS" || id == b"AUD"
+        || id == b"Music" || id == b"Media" || id == b"Media Player"
+    {
         Some(IconKind::Music)
-    } else if id == b"org.interos.calculator" || id == b"calculator" || id == b"app_calculator" || id == b"CALC" || id == b"NUM" {
+    } else if id == b"org.interos.calculator" || id == b"calculator" || id == b"app_calculator" || id == b"CALC" || id == b"NUM"
+        || id == b"Calculator"
+    {
         Some(IconKind::Calculator)
-    } else if id == b"org.interos.terminal" || id == b"terminal" || id == b"app_terminal" || id == b"TERM" || id == b"CLI" {
+    } else if id == b"org.interos.terminal" || id == b"terminal" || id == b"app_terminal" || id == b"TERM" || id == b"CLI"
+        || id == b"Terminal"
+    {
         Some(IconKind::Terminal)
     } else if id == b"org.interos.vault" || id == b"vault" || id == b"app_vault"
         || id == b"org.interos.authenticator" || id == b"authenticator" || id == b"VAUL" || id == b"AUTH" || id == b"PASS"
+        || id == b"Vault" || id == b"Authenticator"
     {
         Some(IconKind::Vault)
-    } else if id == b"org.interos.health" || id == b"health" || id == b"HLTH" || id == b"FIT" {
+    } else if id == b"org.interos.health" || id == b"health" || id == b"HLTH" || id == b"FIT"
+        || id == b"Health"
+    {
         Some(IconKind::Health)
-    } else if id == b"org.interos.meshchat" || id == b"meshchat" || id == b"MESH" || id == b"CHAT" {
+    } else if id == b"org.interos.meshchat" || id == b"meshchat" || id == b"MESH" || id == b"CHAT"
+        || id == b"MeshChat"
+    {
         Some(IconKind::MeshChat)
-    } else if id == b"org.interos.sensor_dashboard" || id == b"sensor_dashboard" || id == b"sensors" || id == b"SENS" {
+    } else if id == b"org.interos.sensor_dashboard" || id == b"sensor_dashboard" || id == b"sensors" || id == b"SENS"
+        || id == b"Sensors" || id == b"Sensor Dashboard"
+    {
         Some(IconKind::Sensors)
-    } else if id == b"org.interos.apps" || id == b"apps" || id == b"APPS" || id == b"drawer" {
+    } else if id == b"org.interos.apps" || id == b"apps" || id == b"APPS" || id == b"drawer"
+        || id == b"Apps"
+    {
         Some(IconKind::Apps)
+    } else if id == b"org.interos.calendar" || id == b"calendar" || id == b"Calendar" || id == b"CAL" {
+        Some(IconKind::Calendar)
+    } else if id == b"org.interos.notes" || id == b"notes" || id == b"Notes" || id == b"NOTE" {
+        Some(IconKind::Notes)
+    } else if id == b"org.interos.contacts" || id == b"contacts" || id == b"Contacts" || id == b"CONT" {
+        Some(IconKind::Contacts)
+    } else if id == b"org.interos.maps" || id == b"maps" || id == b"Maps" || id == b"MAP" {
+        Some(IconKind::Maps)
     } else {
         None
     }
@@ -217,6 +257,37 @@ pub fn rasterize_icon_pixel(
             let in_tile_y = (ry >= -9 && ry <= -2) || (ry >= 2 && ry <= 9);
             in_tile_x && in_tile_y
         }
+        IconKind::Calendar => {
+            // Calendar with top header bar, hanger loops, and date body
+            let body = rx >= -10 && rx <= 10 && ry >= -7 && ry <= 10;
+            let loops = (rx == -5 || rx == 5) && (ry >= -10 && ry <= -7);
+            let header_bar = rx >= -10 && rx <= 10 && (ry >= -7 && ry <= -3);
+            let date_line1 = (rx >= -6 && rx <= 6) && (ry == 1);
+            let date_line2 = (rx >= -6 && rx <= 2) && (ry == 5);
+            (body || loops) && (!header_bar || ry >= -5) && (header_bar || date_line1 || date_line2)
+        }
+        IconKind::Notes => {
+            // Document outline with 3 horizontal writing lines
+            let sheet = rx >= -9 && rx <= 9 && ry >= -11 && ry <= 11;
+            let line1 = rx >= -6 && rx <= 6 && (ry == -4 || ry == -3);
+            let line2 = rx >= -6 && rx <= 6 && (ry == 1 || ry == 2);
+            let line3 = rx >= -6 && rx <= 2 && (ry == 6 || ry == 7);
+            let margin = rx == -7 && (ry >= -9 && ry <= 9);
+            sheet && (line1 || line2 || line3 || margin)
+        }
+        IconKind::Contacts => {
+            // Person silhouette: head circle + shoulder curve
+            let head = rx * rx + (ry + 3) * (ry + 3) <= 16;
+            let shoulders = (ry >= 3 && ry <= 10) && (rx.abs() <= 9) && (rx * rx + (ry - 3) * (ry - 3) <= 49);
+            head || shoulders
+        }
+        IconKind::Maps => {
+            // Map location teardrop pin
+            let pin_circle = rx * rx + (ry + 2) * (ry + 2) <= 36;
+            let pin_hole = rx * rx + (ry + 2) * (ry + 2) <= 9;
+            let pin_tip = (ry >= 3 && ry <= 10) && (rx.abs() <= (10 - ry));
+            (pin_circle && !pin_hole) || pin_tip
+        }
     };
 
     if inked {
@@ -246,6 +317,10 @@ mod tests {
         assert_eq!(match_icon_kind(b"org.interos.health"), Some(IconKind::Health));
         assert_eq!(match_icon_kind(b"org.interos.meshchat"), Some(IconKind::MeshChat));
         assert_eq!(match_icon_kind(b"org.interos.sensor_dashboard"), Some(IconKind::Sensors));
+        assert_eq!(match_icon_kind(b"org.interos.calendar"), Some(IconKind::Calendar));
+        assert_eq!(match_icon_kind(b"org.interos.notes"), Some(IconKind::Notes));
+        assert_eq!(match_icon_kind(b"org.interos.contacts"), Some(IconKind::Contacts));
+        assert_eq!(match_icon_kind(b"org.interos.maps"), Some(IconKind::Maps));
         assert_eq!(match_icon_kind(b"org.custom.unknown"), None);
     }
 
@@ -267,6 +342,10 @@ mod tests {
             IconKind::MeshChat,
             IconKind::Sensors,
             IconKind::Apps,
+            IconKind::Calendar,
+            IconKind::Notes,
+            IconKind::Contacts,
+            IconKind::Maps,
         ];
 
         for &kind in &kinds {
