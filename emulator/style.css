@@ -2315,14 +2315,12 @@ body[data-theme="cyberdeck_hud"] .device-screen {
 .screen-live-scanout canvas {
   width: 100%;
   height: 100%;
-  object-fit: contain;
-  cursor: crosshair;
+  object-fit: fill;
+  cursor: pointer;
   user-select: none;
   -webkit-user-drag: none;
   touch-action: none;
-  image-rendering: -webkit-optimize-contrast;
-  image-rendering: crisp-edges;
-  image-rendering: pixelated;
+  image-rendering: auto;
 }
 
 .studio-workspace.smartphone-mode #ide-right-pane {
@@ -2394,15 +2392,15 @@ body[data-theme="cyberdeck_hud"] .device-screen {
 }
 
 .device-chassis {
-  height: min(650px, calc(100vh - 110px));
+  height: min(680px, calc(100vh - 110px));
   max-height: calc(100vh - 110px);
-  aspect-ratio: 9 / 18.5;
+  aspect-ratio: 1 / 2;
   width: auto;
   max-width: 360px;
   background: #18181B;
   border: 3px solid #27272A;
   border-radius: 44px;
-  padding: 7px;
+  padding: 6px;
   position: relative;
   box-shadow:
     0 20px 50px -12px rgba(0, 0, 0, 0.95),
@@ -2417,6 +2415,7 @@ body[data-theme="cyberdeck_hud"] .device-screen {
 .device-screen {
   width: 100%;
   height: 100%;
+  aspect-ratio: 1 / 2;
   background: #000000;
   border-radius: 38px;
   overflow: hidden;

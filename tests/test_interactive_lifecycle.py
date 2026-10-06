@@ -224,8 +224,8 @@ def main():
     qemu_exe = find_qemu("qemu-system-x86_64.exe")
     kernel_img = os.path.abspath(r"target\inter-os-bios.img")
 
-    k1 = os.path.abspath(r"kernel\target\x86_64-unknown-none\debug\kernel")
-    k2 = os.path.abspath(r"target\x86_64-unknown-none\debug\kernel")
+    k1 = os.path.abspath(r"target\kernel-boot.elf")
+    k2 = os.path.abspath(r"kernel\target\x86_64-unknown-none\debug\kernel")
     kernel_elf = k1 if os.path.exists(k1) else k2
     if os.path.exists(kernel_elf):
         if not os.path.exists(kernel_img) or os.path.getmtime(kernel_elf) > os.path.getmtime(kernel_img):
@@ -233,6 +233,11 @@ def main():
             subprocess.run(["cargo", "+nightly", "run", "--manifest-path", "boot/Cargo.toml", "--", kernel_elf, kernel_img], check=True)
 
     assert os.path.exists(kernel_img), f"Kernel image not found at {kernel_img}"
+
+    data_disk = os.path.abspath(r"target\interos-data-x86_64.img")
+    if not os.path.exists(data_disk):
+        with open(data_disk, "wb") as f:
+            f.truncate(512 * 1024 * 1024)
 
     subprocess.run(["taskkill", "/F", "/IM", "qemu-system-x86_64.exe"], capture_output=True)
     time.sleep(1.0)
@@ -242,8 +247,8 @@ def main():
 
     args = [
         qemu_exe,
-        "-drive", f"format=raw,file={kernel_img}",
-        "-snapshot",
+        "-drive", f"format=raw,file={kernel_img},index=0",
+        "-drive", f"format=raw,file={data_disk},index=1",
         "-m", "1024M",
         "-display", "none",
         "-chardev", f"socket,id=ser0,host=127.0.0.1,port={ser_port},server=on,wait=off",

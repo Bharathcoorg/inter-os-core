@@ -1621,11 +1621,14 @@ pub extern "C" fn _start() -> ! {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
 
-                                // Tap outside drawer or Cancel button dismisses
-                                if x < 340
-                                    || y > 660
-                                    || (y >= 580 && y < 635 && x >= 420 && x < 640)
-                                {
+                                let in_card1 = (190..265).contains(&y) && (60..660).contains(&x);
+                                let in_card2 = (285..360).contains(&y) && (60..660).contains(&x);
+                                let in_card3 = (380..455).contains(&y) && (60..660).contains(&x);
+                                let in_card4 = (475..550).contains(&y) && (60..660).contains(&x);
+                                let in_cancel = (580..635).contains(&y) && (240..480).contains(&x);
+
+                                // Tap outside cards or Cancel button dismisses
+                                if in_cancel || (!in_card1 && !in_card2 && !in_card3 && !in_card4) {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
@@ -1642,8 +1645,8 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
-                                // Card 1: Lock device (y: 190..265, x: 365..695)
-                                if (190..265).contains(&y) && (365..695).contains(&x) {
+                                // Card 1: Lock device (y: 190..265, x: 60..660)
+                                if in_card1 {
                                     state.current_view = ViewMode::LockScreen;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
@@ -1660,8 +1663,8 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
-                                // Card 2: Restart (y: 285..360, x: 365..695)
-                                if (285..360).contains(&y) && (365..695).contains(&x) {
+                                // Card 2: Restart (y: 285..360, x: 60..660)
+                                if in_card2 {
                                     std::log(0, "[LAUNCHER] Power menu: System restart confirmed.")
                                         .ok();
                                     state.current_view = ViewMode::HomeScreen;
@@ -1670,8 +1673,8 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
-                                // Card 3: Power off (y: 380..455, x: 365..695)
-                                if (380..455).contains(&y) && (365..695).contains(&x) {
+                                // Card 3: Power off (y: 380..455, x: 60..660)
+                                if in_card3 {
                                     std::log(
                                         0,
                                         "[LAUNCHER] Power menu: System power off confirmed.",
@@ -1683,9 +1686,9 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
-                                // Card 4: Emergency (y: 475..550, x: 365..695)
-                                if (475..550).contains(&y) && (365..695).contains(&x) {
-                                        if let Ok(task_id) = std::app_launch("org.interos.dialer") {
+                                // Card 4: Emergency (y: 475..550, x: 60..660)
+                                if in_card4 {
+                                    if let Ok(task_id) = std::app_launch("org.interos.dialer") {
                                         state.push_recent("org.interos.dialer");
                                         state.active_child = Some(task_id);
                                         state.current_view = ViewMode::HomeScreen;

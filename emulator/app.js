@@ -585,35 +585,36 @@ document.addEventListener('DOMContentLoaded', () => {
   // mapped into whichever space the guest compositor is being displayed in:
   //   portrait  -> coords:"portrait"  (logical 720x1440)
   //   landscape -> coords:"landscape" (scanout 1280x720)
-  if (liveScanoutImg) {
+  const touchSurface = screenLiveScanout || liveScanoutImg;
+  if (touchSurface) {
     let isPointerDown = false;
     let startX = 0, startY = 0;
 
-    liveScanoutImg.addEventListener('pointerdown', (ev) => {
+    touchSurface.addEventListener('pointerdown', (ev) => {
       isPointerDown = true;
-      const renderRect = getRenderedImageRect(liveScanoutImg);
-      startX = Math.max(0, Math.min(1, (ev.clientX - renderRect.left) / renderRect.width));
-      startY = Math.max(0, Math.min(1, (ev.clientY - renderRect.top) / renderRect.height));
+      const rect = touchSurface.getBoundingClientRect();
+      startX = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
+      startY = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
       updateVirtualTouch(ev.clientX, ev.clientY, true);
-      try { liveScanoutImg.setPointerCapture(ev.pointerId); } catch (_) {}
+      try { touchSurface.setPointerCapture(ev.pointerId); } catch (_) {}
     });
 
-    liveScanoutImg.addEventListener('pointermove', (ev) => {
+    touchSurface.addEventListener('pointermove', (ev) => {
       if (isPointerDown) {
         updateVirtualTouch(ev.clientX, ev.clientY, true);
       }
     });
 
-    liveScanoutImg.addEventListener('pointerup', async (ev) => {
+    touchSurface.addEventListener('pointerup', async (ev) => {
       if (!isPointerDown) return;
       isPointerDown = false;
       updateVirtualTouch(ev.clientX, ev.clientY, false);
-      const renderRect = getRenderedImageRect(liveScanoutImg);
-      const endX = Math.max(0, Math.min(1, (ev.clientX - renderRect.left) / renderRect.width));
-      const endY = Math.max(0, Math.min(1, (ev.clientY - renderRect.top) / renderRect.height));
-      const dx = endX - startX;
-      const dy = endY - startY;
-      const dist = Math.hypot(dx * renderRect.width, dy * renderRect.height);
+      const rect = touchSurface.getBoundingClientRect();
+      const endX = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
+      const endY = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
+      const dx = (endX - startX) * rect.width;
+      const dy = (endY - startY) * rect.height;
+      const dist = Math.hypot(dx, dy);
 
       let payload;
       if (state.isLandscape || cropMode === 'full') {
@@ -621,7 +622,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const gy1 = Math.max(0, Math.min(719, Math.round(startY * 719)));
         const gx2 = Math.max(0, Math.min(1279, Math.round(endX * 1279)));
         const gy2 = Math.max(0, Math.min(719, Math.round(endY * 719)));
-        if (dist > 14) {
+        if (dist > 18) {
           payload = { action: 'swipe', coords: 'landscape', x: gx1, y: gy1, x2: gx2, y2: gy2, steps: 5 };
         } else {
           payload = { action: 'tap', coords: 'landscape', x: gx2, y: gy2 };
@@ -631,7 +632,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const py1 = Math.max(0, Math.min(1439, Math.round(startY * 1439)));
         const px2 = Math.max(0, Math.min(719, Math.round(endX * 719)));
         const py2 = Math.max(0, Math.min(1439, Math.round(endY * 1439)));
-        if (dist > 14) {
+        if (dist > 18) {
           payload = { action: 'swipe', coords: 'portrait', x: px1, y: py1, x2: px2, y2: py2, steps: 5 };
         } else {
           payload = { action: 'tap', coords: 'portrait', x: px2, y: py2 };
@@ -647,11 +648,11 @@ document.addEventListener('DOMContentLoaded', () => {
       } catch (_) {}
 
       setTimeout(refreshScanoutFrame, 35);
-      setTimeout(refreshScanoutFrame, 100);
-      setTimeout(refreshScanoutFrame, 220);
+      setTimeout(refreshScanoutFrame, 90);
+      setTimeout(refreshScanoutFrame, 200);
     });
 
-    liveScanoutImg.addEventListener('pointercancel', () => {
+    touchSurface.addEventListener('pointercancel', () => {
       isPointerDown = false;
       updateVirtualTouch(0, 0, false);
     });

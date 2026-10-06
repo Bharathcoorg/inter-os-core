@@ -772,8 +772,21 @@ def capture_qemu_screen_frame(full_scanout=False, orientation=None):
                 return None, "Guest still booting; graphical canvas not ready"
 
             if is_landscape:
+                width, height = img.size
+                if width >= GUEST_FRAMEBUFFER_W and height >= GUEST_FRAMEBUFFER_H:
+                    box = letterbox_box(width, height)
+                    rgb_img = img.convert("RGB")
+                    left_sample = rgb_img.getpixel((box[0] // 2, height // 2))
+                    right_sample = rgb_img.getpixel((box[2] + (width - box[2]) // 2, height // 2))
+                    if left_sample == (0, 0, 0) and right_sample == (0, 0, 0):
+                        cropped = img.crop(box)
+                        out_img = cropped.rotate(270, expand=True).resize((1280, 720), Image.Resampling.LANCZOS)
+                    else:
+                        out_img = img
+                else:
+                    out_img = img
                 buf = io.BytesIO()
-                img.save(buf, format="PNG")
+                out_img.save(buf, format="PNG")
                 frame_bytes = buf.getvalue()
                 _last_frame_cache['landscape'] = frame_bytes
                 _last_frame_cache['full'] = frame_bytes
