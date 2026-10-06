@@ -1215,14 +1215,32 @@ document.addEventListener('DOMContentLoaded', () => {
       });
       document.querySelectorAll('.btn-launch-pkg').forEach(b => {
         b.addEventListener('click', () => {
-          // WHY: this used to call switchView('view-helloworld'), i.e. open a
-          // Studio-rendered placeholder for the app. The only UI is the guest's
-          // framebuffer now, and server.py exposes no guest launch endpoint
-          // (only /api/apps/audit, /api/apps/list, /api/apps/upload,
-          // /api/apps/uninstall), so the action reports that honestly instead of
-          // faking a screen.
-          logConsole('warn', `[PROCESS] Launch '${b.dataset.pkgId}': unavailable until a guest application launch endpoint is connected.`);
-          showToast('Launch unavailable: no guest launch endpoint is connected');
+          const pkgId = b.dataset.pkgId;
+          b.disabled = true;
+          logConsole('info', `[PROCESS] Launch requested for '${pkgId}' via guest COM1 bridge.`);
+          fetch('/api/apps/launch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ app_id: pkgId })
+          })
+            .then(r => r.json())
+            .then(data => {
+              b.disabled = false;
+              if (data && data.success) {
+                const detail = (data.message || '[PROCESS] Guest application launched').toString();
+                logConsole('info', `[PROCESS] Guest application launched '${pkgId}': ${detail}`);
+                showToast(`Launched ${pkgId}`);
+                if (typeof populateProcessesTable === 'function') { try { populateProcessesTable(); } catch (_) {} }
+              } else {
+                logConsole('warn', `[PROCESS] Launch '${pkgId}' rejected: ${(data && (data.error || data.message)) || 'guest refused launch'}`);
+                showToast(`Launch failed: ${pkgId}`);
+              }
+            })
+            .catch(err => {
+              b.disabled = false;
+              logConsole('warn', `[PROCESS] Launch '${pkgId}' did not complete: ${err.message}`);
+              showToast('Launch did not complete');
+            });
         });
       });
     }

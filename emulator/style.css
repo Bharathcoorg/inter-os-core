@@ -2366,15 +2366,17 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   gap: 8px;
 }
 
-.device-stage.ide-device-pane {
+.device-stage.ide-device-pane,
+#device-stage {
   flex: 0 0 auto;
   min-width: 400px;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 4px 12px;
-  height: calc(100vh - 48px);
-  max-height: calc(100vh - 48px);
+  height: calc(100vh - 110px);
+  max-height: calc(100vh - 110px);
+  aspect-ratio: 1 / 2;
   overflow: hidden;
   box-sizing: border-box;
 }

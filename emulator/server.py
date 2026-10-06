@@ -1838,7 +1838,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode())
             return
 
-        if self.path == '/api/rapp/launch':
+        if self.path in ('/api/apps/launch', '/api/rapp/launch'):
             content_length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(content_length)
             try:
