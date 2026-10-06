@@ -2875,6 +2875,32 @@ pub fn sys_app_runtime_list(out_buf: &mut [u8]) -> Result<usize, SyscallResult> 
     Ok(w.n)
 }
 
+fn register_spawned_task_ipc(tid: TaskId, parent_id: TaskId) -> Result<(), SyscallResult> {
+    if crate::ipc::IPC_ROUTER.lock().register_task(tid) {
+        return Ok(());
+    }
+
+    // IPC registration is part of the launch transaction. A task that cannot
+    // obtain an inbound endpoint must never remain runnable without one.
+    let cleanup = {
+        let mut sched = SCHEDULER.lock();
+        let terminated = sched.terminate_task(tid, -24).is_ok();
+        let reaped = if terminated {
+            sched.reap_child(parent_id, tid).is_ok()
+        } else {
+            false
+        };
+        terminated && reaped
+    };
+    if !cleanup {
+        serial_println!(
+            "[APP] IPC endpoint allocation failed for task {}; cleanup was incomplete",
+            tid.0
+        );
+    }
+    Err(SyscallResult::NotReady)
+}
+
 pub fn sys_app_stop(child_id: TaskId) -> SyscallResult {
     if require_app_launcher_or_service_manager().is_err() {
         return SyscallResult::PermissionDenied;
@@ -4490,7 +4516,7 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         let payload = &blob.bytes[verified.payload_offset..payload_end];
         let tid = crate::task::user::spawn_verified_rapp_process(&verified, payload, crate::task::TaskId(0))
             .map_err(|_| SyscallResult::DeviceError)?;
-        crate::ipc::IPC_ROUTER.lock().register_task(tid);
+        register_spawned_task_ipc(tid, parent)?;
         serial_println!("[APP] QEMU dev bridge launched persistent RAPP '{}' as Task {}", verified.package_id, tid.0);
         serial_println!("[PROCESS] Guest application launched id={} task={}", verified.package_id, tid.0);
         return Ok(tid);
@@ -4523,7 +4549,7 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         }
         _ => return Err(SyscallResult::FileNotFound),
     };
-    crate::ipc::IPC_ROUTER.lock().register_task(tid);
+    register_spawned_task_ipc(tid, parent)?;
     serial_println!("[APP] QEMU dev bridge launched application '{}' as Task {}", app_id, tid.0);
     serial_println!("[PROCESS] Guest application launched id={} task={}", app_id, tid.0);
     Ok(tid)
@@ -5045,7 +5071,7 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
             let payload = &blob.bytes[verified.payload_offset..payload_end];
             let tid = crate::task::user::spawn_verified_rapp_process(&verified, payload, parent_id)
                 .map_err(|_| SyscallResult::DeviceError)?;
-            crate::ipc::IPC_ROUTER.lock().register_task(tid);
+            register_spawned_task_ipc(tid, parent_id)?;
             serial_println!("[APP] Launched persistent RAPP '{}' as Task {}", verified.package_id, tid.0);
             return Ok(tid);
         }
@@ -5086,7 +5112,7 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
                         payload,
                         parent_id,
                     ).map_err(|_| SyscallResult::DeviceError)?;
-                    crate::ipc::IPC_ROUTER.lock().register_task(tid);
+                    register_spawned_task_ipc(tid, parent_id)?;
                     serial_println!(
                         "[APP] Launched verified RAPP '{}' as Task {}",
                         verified.package_id,
@@ -5170,7 +5196,7 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
             return Err(SyscallResult::InvalidArguments);
         }
     };
-    crate::ipc::IPC_ROUTER.lock().register_task(tid);
+    register_spawned_task_ipc(tid, parent_id)?;
     serial_println!("[APP] Launched application '{}' as Task {}", app_id, tid.0);
     Ok(tid)
 }
