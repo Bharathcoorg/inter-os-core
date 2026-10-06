@@ -298,7 +298,13 @@ fn start_locked(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str
         Ok(_) => bail!("service spawn returned no task"),
         Err(reason) => bail!(reason),
     };
-    crate::ipc::IPC_ROUTER.lock().register_task(task);
+    if !crate::ipc::IPC_ROUTER.lock().register_task(task) {
+        let mut scheduler = SCHEDULER.lock();
+        let _ = scheduler.terminate_task(task, -1);
+        let _ = scheduler.reap_child(parent_id, task);
+        SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Failed, generation });
+        bail!("service IPC endpoint allocation failed");
+    }
     let process = match crate::task::process::process_for_task(task) {
         Some(process) => process,
         None => {
@@ -372,7 +378,13 @@ pub fn launch_verified_package(
         }
     };
 
-    crate::ipc::IPC_ROUTER.lock().register_task(task);
+    if !crate::ipc::IPC_ROUTER.lock().register_task(task) {
+        let mut scheduler = SCHEDULER.lock();
+        let _ = scheduler.terminate_task(task, -1);
+        let _ = scheduler.reap_child(parent_id, task);
+        SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Failed, generation });
+        return Err("verified service IPC endpoint allocation failed");
+    }
     let process = match crate::task::process::process_for_task(task) {
         Some(process) => process,
         None => {
