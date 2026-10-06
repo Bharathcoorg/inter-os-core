@@ -750,6 +750,9 @@ fn render_view(surface: u32, state: &LauncherState) {
         offset += count;
     }
     match state.current_view {
+        ViewMode::PinEntry => {
+            std::log(0, "[LAUNCHER] render_pin_entry complete: Credential entry presented.").ok();
+        }
         ViewMode::HomeScreen => {
             // WHY the count is formatted rather than written: this line said
             // "10-app" as a literal, so it reported the same number with four
@@ -1128,6 +1131,83 @@ pub extern "C" fn _start() -> ! {
                     if input.kind == 9 { continue; }
 
                     match state.current_view {
+                        ViewMode::PinEntry => {
+                            if input.kind == 1 {
+                                let x = input.x as usize;
+                                let y = input.y as usize;
+                                let mut digit = 0u8;
+                                let mut hit = false;
+                                for row in 0..3 {
+                                    for col in 0..3 {
+                                        let left = 130 + col * 164;
+                                        let top = 520 + row * 128;
+                                        if x >= left && x < left + 140 && y >= top && y < top + 104 {
+                                            digit = b'1' + (row * 3 + col) as u8;
+                                            hit = true;
+                                        }
+                                    }
+                                }
+                                if x >= 294 && x < 434 && y >= 904 && y < 1008 {
+                                    digit = b'0';
+                                    hit = true;
+                                }
+                                if hit {
+                                    if state.pin_len < 8 {
+                                        state.pin_buffer[state.pin_len as usize] = digit;
+                                        state.pin_len += 1;
+                                        state.pin_error = 0;
+                                    }
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    continue;
+                                }
+
+                                if x >= 490 && x < 590 && y >= 1036 && y < 1126 {
+                                    if state.pin_len > 0 {
+                                        state.pin_len -= 1;
+                                        state.pin_buffer[state.pin_len as usize] = 0;
+                                    }
+                                    state.pin_error = 0;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    continue;
+                                }
+
+                                if x >= 130 && x < 430 && y >= 1036 && y < 1126 {
+                                    let uid = std::user_get_current();
+                                    let len = state.pin_len as usize;
+                                    if len == 0 {
+                                        state.pin_error = 1;
+                                    } else if std::user_unlock(uid, &state.pin_buffer[..len]).is_ok() {
+                                        state.pin_buffer = [0; 8];
+                                        state.pin_len = 0;
+                                        state.pin_error = 0;
+                                        state.current_view = ViewMode::HomeScreen;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        std::log(0, "[LAUNCHER] User authentication succeeded; device unlocked.").ok();
+                                        continue;
+                                    } else {
+                                        state.pin_buffer = [0; 8];
+                                        state.pin_len = 0;
+                                        state.pin_error = 1;
+                                    }
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    continue;
+                                }
+                            }
+
+                            if (is_drag(input.kind) && input.dy >= 60) {
+                                state.pin_buffer = [0; 8];
+                                state.pin_len = 0;
+                                state.pin_error = 0;
+                                state.current_view = ViewMode::LockScreen;
+                                render_view(surface, &state);
+                                let _ = std::surface_flip(4);
+                                continue;
+                            }
+                        }
                         ViewMode::ActivitySpace => {
                             // 1. Swipe gestures
                             if is_drag(input.kind) {
@@ -1500,10 +1580,13 @@ pub extern "C" fn _start() -> ! {
                                 || input.kind == DRAG_FLING
                                 || input.kind == 7;
                             if swipe_up {
-                                state.current_view = ViewMode::HomeScreen;
+                                state.pin_buffer = [0; 8];
+                                state.pin_len = 0;
+                                state.pin_error = 0;
+                                state.current_view = ViewMode::PinEntry;
                                 render_view(surface, &state);
                                 let _ = std::surface_flip(4);
-                                std::log(0, "[LAUNCHER] Device unlocked via swipe/slide gesture. Home surface rendered.")
+                                std::log(0, "[LAUNCHER] Unlock gesture accepted; credential entry required.")
                                     .ok();
                                 let mut drain = std::InputEvent {
                                     kind: 0,
@@ -1593,13 +1676,16 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
-                                // Tap anywhere to unlock
+                                // Tapping the lock screen opens authenticated credential entry.
                                 if y >= 60 || x < 480 {
-                                    state.current_view = ViewMode::HomeScreen;
+                                    state.pin_buffer = [0; 8];
+                                    state.pin_len = 0;
+                                    state.pin_error = 0;
+                                    state.current_view = ViewMode::PinEntry;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Device unlocked via tap. Home surface rendered.").ok();
-                                    let mut drain = std::InputEvent {
+                                    std::log(0, "[LAUNCHER] Unlock tap accepted; credential entry required.").ok();
+                                let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
                                         y: 0,
