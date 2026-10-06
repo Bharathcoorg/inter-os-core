@@ -421,6 +421,24 @@ fn require_system_control() -> Result<(), SyscallResult> {
 /// is a full identity takeover. Binding to `user_control_object(uid)` makes
 /// authority attenuate to a single account.
 fn require_user_control_object(uid: u32) -> Result<(), SyscallResult> {
+    // The launcher is a system UI rather than an account-owned app. Give it a
+    // narrowly attenuated "active user only" authority so a user switch does
+    // not require rebuilding the service capability table. It still cannot
+    // administer an arbitrary UID supplied by an attacker.
+    if crate::user::USER_MANAGER.lock().active_user().0 == uid {
+        let sched = SCHEDULER.lock();
+        if let Some(task) = sched.current_task() {
+            if task.name == "org.interos.launcher"
+                && task.cap_table.authorize_object(
+                    CapabilityType::SystemControl,
+                    Rights::INVOKE,
+                    USER_CONTROL_OBJECT_BASE,
+                )
+            {
+                return Ok(());
+            }
+        }
+    }
     require_system_control_object(user_control_object(uid))
 }
 
