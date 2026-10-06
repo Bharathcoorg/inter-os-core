@@ -102,7 +102,7 @@ pub fn get_pin_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                     x, y, rect.x + 61, rect.y + 36, 2,
                     &[key_digit(col, row)], TEXT, PANEL
                 ) { return c; }
-                if x == rect.x || y == rect.y || x + 1 == rect.x + rect.width || y + 1 == rect.y + rect.height {
+                if x == rect.x || y == rect.y || x + 1 == rect.x + rect.w || y + 1 == rect.y + rect.h {
                     return BORDER;
                 }
                 return PANEL;
