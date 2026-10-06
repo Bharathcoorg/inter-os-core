@@ -1,45 +1,57 @@
-# InterOS System Services
+# InterOS System Services Specification
 
-InterOS keeps hardware-facing policy outside the microkernel's application model. First-party services run as isolated Ring-3 processes, receive only the capabilities required by their role, and report lifecycle state through the service manager.
+InterOS Core isolates hardware-facing policy outside the microkernel. System services execute as standalone Ring-3 user processes (`userspace/system-service/`), acquire only the capability rights required for their specific operational role, and communicate with PID 1 via structured heartbeats and lifecycle protocols.
 
-## Service set
+---
 
-| ID | Service | Responsibility | Lifecycle |
-| --- | --- | --- | --- |
-| 1 | displayd | display surface and scanout boundary | restart on failure |
-| 2 | inputd | normalized touch/input delivery | restart on failure |
-| 3 | storaged | persistent filesystem/storage boundary | restart on failure |
-| 4 | netd | network device polling and sockets | restart on failure |
-| 5 | powerd | battery, power and DVFS boundary | restart on failure |
-| 6 | modemd | cellular/baseband boundary | restart on failure |
-| 7 | audiod | audio feedback/stream boundary | restart on failure |
-| 8 | camerad | camera control/capture boundary | restart on failure |
-| 9 | compositor | window composition and display integration | restart on failure |
-| 10 | launcher | application launch and shell integration | restart on failure |
-| 11 | sensord | IMU/light/proximity sensor boundary | restart on failure |
+## 1. Canonical Service Registry
 
-## Security boundary
+| Service ID | Binary / Module | Primary Responsibility | Failure Recovery Policy | Implementation State | Verification State |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **1** | `displayd` | Surface creation, framebuffer scanout boundary | Restart on failure | Present | **QEMU-verified** |
+| **2** | `inputd` | Normalized touch/gesture delivery | Restart on failure | Present | **QEMU-verified** |
+| **3** | `storaged` | Persistent VFS storage and file operations | Restart on failure | Present | **QEMU-verified** |
+| **4** | `netd` | Network socket polling and packet datapath | Restart on failure | Present | **QEMU-verified (loopback)** |
+| **5** | `powerd` | Battery status, power profiles, DVFS boundary | Restart on failure | Present | **Unit-tested (emulated)** |
+| **6** | `modemd` | Cellular baseband, AT parser, SMS inbox | Restart on failure | Present | **Unit-tested (emulated)** |
+| **7** | `audiod` | Audio stream buffer playback and feedback | Restart on failure | Present | **Unit-tested (emulated)** |
+| **8** | `camerad` | Camera sensor control and capture boundary | Restart on failure | Present | **Unit-tested (emulated)** |
+| **9** | `compositor` | Window composition and DRM/KMS presentation | Restart on failure | Present | **QEMU-verified** |
+| **10** | `launcher` | Package catalog, shell UI, gesture navigation| Restart on failure | Present | **QEMU-verified** |
+| **11** | `sensord` | Accelerometer, gyroscope, light sensor | Restart on failure | Present | **Unit-tested (emulated)** |
 
-Services do not receive unrestricted hardware authority by default. Hardware control APIs use object-scoped `SystemControl` capabilities for power, telephony, audio, camera, and sensor domains. Generic `SystemControl` remains reserved for explicitly privileged kernel paths.
+---
 
-The storage service has separate filesystem read/write authority and bounded raw-block read access. Network service authority is split between socket creation, transmit, and receive capabilities. Display authority is scoped to the display object.
+## 2. Security & Capability Boundaries
 
-Signed service packages use dedicated capability identifiers for these scoped hardware domains. Unknown or unsupported service capabilities remain rejected.
+Services do not receive unrestricted hardware authority by default:
+- **Domain-Scoped `SystemControl`**: Peripheral control APIs require object-scoped capabilities (`SystemControlPower`, `SystemControlTelephony`, `SystemControlAudio`, `SystemControlCamera`, `SystemControlSensor`). Generic `SystemControl` remains reserved strictly for privileged kernel initialization.
+- **Storage Partitioning**: The storage service (`storaged`) holds dedicated `FileSystemRead` and `FileSystemWrite` capabilities. Unsandboxed raw-block storage operations require explicit `StorageRawBlock` rights held by the vault controller.
+- **Network Boundaries**: Network access is split between socket creation (`NetworkSocket`), datagram transmit (`NetworkTransmit`), and packet reception (`NetworkReceive`).
+- **Display Boundary**: Direct framebuffer flipping is restricted to `displayd` and `compositor` holding `FrameBufferDirect` tokens.
 
-## Lifecycle
+---
 
-PID 1 owns startup, recovery, and shutdown. The kernel service registry owns authoritative service identity, parent ownership, dependency checks, heartbeat validation, restart backoff, and generation tracking.
+## 3. Lifecycle & Supervision Architecture
 
-A service heartbeat is accepted only when the calling task matches the registered service task. Stale or terminated workers become failed and must pass the bounded recovery path before a new instance is started.
+- **Supervisor Role**: PID 1 (`userspace/init`) supervises service processes.
+- **Heartbeat Protocol**: Active services issue regular `sys_service_heartbeat(service_id)` syscalls. The kernel rejects heartbeats whose task PID does not match the registered task ID.
+- **Dependency Ordering**: A dependency service (e.g. `storaged`) cannot be stopped while dependent services are running.
+- **Failure Backoff & Recovery**: Unresponsive or crashed workers enter the failed state. PID 1 reaps the terminated process and restarts a clean instance with fresh capability allocations.
 
-A running dependency cannot be stopped while a registered dependent service is still running. Recovery verifies that a failed service task is owned by the requesting PID 1 instance before terminating and reaping it.
+---
 
-## Resource isolation
+## 4. Resource Budgets & Isolation
 
-Each first-party service receives process-level budgets. Thread and open-file limits are enforced at the process/VFS boundaries and are applied immediately after process registration, before the service is published as running. IPC-endpoint and address-space budget fields are reserved in the process resource contract for the next resource-accounting layer; they are not represented as fully enforced counters yet.
+- **Enforced Budgets**:
+  - Maximum thread counts and maximum open file descriptors are enforced at the process and VFS boundaries before service registration completes.
+- **Reserved Contract Fields**:
+  - IPC endpoint counts and address-space byte limit fields are declared in the process resource descriptor as architectural invariants; they are reserved for future quota accounting and are **not** currently enforced as active hardware counters.
 
-Service diagnostics expose lifecycle state, generation, heartbeat age, and cumulative failure count through the existing bounded service-list ABI.
+---
 
-## Verification boundary
+## 5. Verification Reality Boundary
 
-This document defines source-level contracts. It does not claim a fresh kernel build, CI execution, QEMU boot, repeated runtime soak, or physical-device validation.
+In accordance with the [Platform Reality Contract](PLATFORM_REALITY_CONTRACT.md):
+- Services running in QEMU consume emulated virtual platform backends (e.g. QEMU serial, loopback networking, virtual display).
+- An unavailable hardware peripheral (such as a physical 5G modem, physical camera sensor, or physical PMIC) reports `Unavailable` rather than fabricating simulated hardware data.

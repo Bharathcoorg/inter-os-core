@@ -1,72 +1,93 @@
 # Contributing to InterOS Core
 
-Thank you for your interest in contributing to **InterOS Core**! InterOS Core is an open-source, community-driven sovereign mobile operating system and developer platform.
+Thank you for your interest in contributing to **InterOS Core**! InterOS Core is an open-source, community-driven sovereign mobile operating system foundation.
 
 ---
 
-## 🧭 Code of Conduct & Principles
+## 🧭 Core Principles
 
-1. **Memory Safety First**: All microkernel and userspace components must be written in safe Rust (`#![no_std]`), utilizing `unsafe` only where strictly required for bare-metal hardware registers and MMU paging.
-2. **Zero Ambient Authority**: Every system service must operate via capability tokens. Ambient root privileges are strictly prohibited.
-3. **Multi-Architecture Parity**: Changes to the HAL or syscall interfaces should maintain parity across RISC-V 64, AArch64, and x86_64 targets.
-4. **Reproducible Builds**: All builds should be deterministic and testable under QEMU.
+1. **Memory Safety First**: All microkernel and userspace components must be written in bare-metal Rust (`#![no_std]`). The use of `unsafe` is restricted strictly to hardware MMIO access, page table operations, and low-level context switches.
+2. **Zero Ambient Authority**: Processes start with empty capability tables. Ambient root or supervisor privileges are strictly prohibited.
+3. **Multi-Architecture Parity**: Interfaces and HAL abstractions should maintain design parity across x86_64, AArch64, and RISC-V 64 targets.
+4. **Reproducible Builds**: All components must compile deterministically and be verifiable in the canonical QEMU environment.
+5. **Truthful Reality Model**: Never represent emulated or demo telemetry as physical hardware evidence. Follow the [Platform Reality Contract](docs/PLATFORM_REALITY_CONTRACT.md).
 
 ---
 
-## 🛠 Setting Up Your Development Environment
+## 🛠 Development Environment Setup
 
 ### Prerequisites
-- **Rust Toolchain**: `rustup default nightly` (or stable 1.80+)
-- **Cross-Compilation Targets**:
+
+- **Rust Toolchain**: Rust Nightly with the `rust-src` component:
   ```bash
-  rustup target add riscv64gc-unknown-none-elf
+  rustup toolchain install nightly
+  rustup default nightly
+  rustup component add rust-src
+  ```
+- **Compilation Target Triples**:
+  ```bash
+  rustup target add x86_64-unknown-none
   rustup target add aarch64-unknown-none
+  rustup target add riscv64gc-unknown-none-elf
   ```
 - **QEMU Emulators**:
-  - `qemu-system-riscv64`
+  - `qemu-system-x86_64` (canonical development target)
   - `qemu-system-aarch64`
-  - `qemu-system-x86_64`
-- **Python 3.10+** (for Device Studio emulator server)
+  - `qemu-system-riscv64`
+- **Python**: Python 3.8+ with `cryptography` package (`pip install cryptography`).
 
-### 1-Click Launch
-Run `setup.ps1` (Windows) or `setup.sh` (Linux/macOS) to compile and launch the local Device Studio on `http://localhost:4300`.
-
----
-
-## 📝 Contribution Areas
-
-We actively welcome contributions in the following domains:
-- **Microkernel Core**: Memory allocators, preemptive scheduler optimizations, page table management.
-- **Hardware Abstraction Layer (HAL)**: Drivers for touch digitizers (Goodix, FocalTech), power management ICs (PMIC), and cellular modems (Quectel, SIMCom).
-- **Userspace SDK (`interos-std`)**: Additional POSIX-lite syscalls, async event loops, graphics and font rendering primitives.
-- **Native Applications**: New sovereign mobile apps (notes, calculator, media tools).
-- **Device Studio**: Emulator UX enhancements, developer tools, and sensor mock pipelines.
-- **Documentation**: Tutorials, architecture deep-dives, hardware bring-up guides.
+### Diagnostic Environment Check
+Verify your local setup using the unified developer CLI:
+```bash
+python tools/interos.py doctor
+```
 
 ---
 
-## 🧪 Testing Guidelines
+## 🌿 Branch Policy
 
-Before submitting a Pull Request, ensure:
-1. `cargo check --target riscv64gc-unknown-none-elf` passes with zero errors.
-2. `cargo check --target aarch64-unknown-none` passes with zero errors.
-3. The Device Studio launches and serves all endpoints on port 4300.
-4. App interactions and IPC messages stream cleanly without panic.
+- **`master` is the sole canonical development branch.**
+- All pull requests, feature branches, and agent workflows must branch from and target `master`.
+- Do not create milestone branches (e.g. `M1`, `M2`, etc.) in the canonical repository.
+- Do not squash, reset, or rewrite canonical Git history.
+- Ensure all commits adhere to Conventional Commits:
+  - `feat(scope): ...`
+  - `fix(scope): ...`
+  - `test(scope): ...`
+  - `docs: ...`
 
 ---
 
-## 🔒 Security Vulnerability Reporting
+## 🧪 Testing & Validation Workflow
 
-Security is paramount in InterOS Core. If you discover a security vulnerability or capability leak, please do not open a public issue. Email security reports to `security@interos.org` or contact the core maintainers privately.
+Before submitting a Pull Request, verify all changes locally:
 
+1. **Workspace Compilation**:
+   ```bash
+   cargo check --workspace
+   ```
+2. **Unit Tests**:
+   ```bash
+   cargo test --workspace
+   ```
+3. **System Contract Suite**:
+   ```bash
+   python tools/interos.py contracts
+   ```
+4. **Full Contracts Suite**:
+   ```bash
+   python tests/run_all_contracts.py
+   ```
+5. **Canonical QEMU Boot Verification**:
+   ```bash
+   python tools/interos.py build demo
+   python tests/verify_x86_boot.py
+   ```
 
-## Canonical Development Branch
+---
 
-**`master` is the single canonical development branch for InterOS Core.**
+## 🔒 Security Reporting
 
-- All new work must branch from the current `master`.
-- Antigravity and other development agents must use `master` as their integration base.
-- `qemu-vertical-slice` is retained as a historical/reference branch and must not receive new feature work.
-- Do not reset, force-push, or rebuild `master` from either historical branch.
-- When importing older work, reconcile it into `master` with an explicit commit and preserve the existing canonical tree.
-- Keep migration/backup branches until the corresponding audit and CI validation are complete.
+Security is central to InterOS Core. If you discover a vulnerability, capability escalation, or memory safety violation:
+- Please do **not** open a public issue.
+- Report security vulnerabilities privately through GitHub Private Vulnerability Reporting or contact the repository maintainers directly.

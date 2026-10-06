@@ -3,15 +3,15 @@
 <div align="center">
 
 ![License: MIT / Apache-2.0](https://img.shields.io/badge/License-MIT%20%2F%20Apache--2.0-blue.svg)
-![Language: Rust](https://img.shields.io/badge/Language-Pure%20Rust%20%23!%5Bno__std%5D-orange.svg)
-![Architecture: RISC-V 64 / AArch64 / x86_64](https://img.shields.io/badge/Targets-RISC--V%2064%20%7C%20ARM64%20%7C%20x86__64-success.svg)
-![Build: Local](https://img.shields.io/badge/Build-Local-blue.svg)
-![Status: Open Source](https://img.shields.io/badge/Status-Public%20Core%20Platform-blueviolet.svg)
+![Language: Pure Rust](https://img.shields.io/badge/Language-Pure%20Rust%20%23!%5Bno__std%5D-orange.svg)
+![Architectures: x86_64 / AArch64 / RISC-V 64](https://img.shields.io/badge/Architectures-x86__64%20%7C%20AArch64%20%7C%20RISC--V%2064-success.svg)
+![Build: Reproducible](https://img.shields.io/badge/Build-Reproducible-blue.svg)
+![Verification: QEMU-Gated](https://img.shields.io/badge/Verification-QEMU--Gated-brightgreen.svg)
 
 ### **The Sovereign, Open-Source Rust Mobile Operating System Foundation**
 *A memory-safe, capability-based microkernel mobile platform for x86_64, AArch64, and RISC-V 64.*
 
-[Quickstart](#-quickstart) • [Architecture](#-system-architecture) • [Feature Reality Matrix](#-feature-status--reality-matrix) • [Security & Isolation](#-security-invariants--isolation-model) • [Device Studio](#-universal-device-studio) • [Developer CLI](#-developer-cli-interos) • [Hardware Bring-Up](#-hardware-bring-up--experimental-roadmap)
+[Quickstart](#-quickstart) • [Architecture](#-system-architecture) • [Reality Contract](#-platform-reality-contract) • [Security & Isolation](#-security-invariants--isolation-model) • [UI & Compositor](#-ui-rendering--compositor) • [Device Studio](#-universal-device-studio) • [Developer CLI](#-developer-cli-interos) • [Experimental Bring-Up](#-hardware-bring-up--experimental-status)
 
 </div>
 
@@ -19,233 +19,260 @@
 
 > **Status Notice: Engineering Reality & Verification Status**  
 > InterOS Core is an open-source, bare-metal Rust microkernel and mobile operating system foundation. All user processes execute in isolated virtual address spaces with hardware MMU enforcement (CR3 / TTBR0_EL1 / SATP), capability-based access control, safe syscall memory copies (`UserPtr`), and mandatory Ed25519 cryptographic package attestation.  
-> The current repository includes runtime verification coverage for the canonical x86_64 QEMU smartphone platform and QEMU virt targets for AArch64 and RISC-V64. Physical smartphone deployment remains experimental bring-up.
+> The current repository includes runtime verification coverage for the canonical x86_64 QEMU smartphone platform and QEMU virt targets for AArch64 and RISC-V 64. Physical smartphone deployment remains experimental bring-up.
 
 ---
 
+## 🏛 Platform Reality Contract
 
-## Platform Reality Contract
+InterOS strictly distinguishes implementation from verification evidence:
 
-InterOS distinguishes implementation from verification. Hardware-facing features use explicit **Unavailable**, **Emulated**, and **Present** states, while verification is classified as source-only, unit-tested, QEMU-verified, or hardware-verified. QEMU virtual platform execution is never represented as physical-device evidence.
+- **Implementation States**:
+  - `Unavailable`: No backend attached; telemetry and drivers report absence rather than fabricating values.
+  - `Emulated`: Virtual platform (QEMU) provides the backend implementation.
+  - `Present`: Genuine physical hardware backend is attached and verified.
+- **Verification States**:
+  - `Source-only`: Code, types, and build graph compile.
+  - `Unit-tested`: Function-level logic covered by automated unit tests.
+  - `QEMU-verified`: Subsystem exercised and verified inside guest virtual machine.
+  - `Hardware-verified`: Verified on physical silicon target with empirical evidence.
 
-The launcher and developer tooling do not treat fixed demonstration values as live telemetry. Missing hardware backends are reported as unavailable, and package trust remains based on cryptographic verification.
+> [!IMPORTANT]
+> **QEMU verification does not equal physical hardware verification.**  
+> The canonical developer platform is a virtual smartphone target in QEMU. Physical smartphone flashing (e.g. PinePhone Allwinner A64) is an experimental research track and is not production-ready.
 
-See [Platform Reality Contract](docs/PLATFORM_REALITY_CONTRACT.md) and run `python tools/interos.py reality` for the current runtime contract.
+See [Platform Reality Contract](docs/PLATFORM_REALITY_CONTRACT.md) and run `python tools/interos.py reality` for live state inspection.
 
-The syscall userspace-memory boundary is defined in [Syscall Pointer Safety](docs/SYSCALL_POINTER_SAFETY.md), including page mapping, permissions, ownership, alignment, overflow, and raw-pointer elimination rules.
+---
 
-The end-to-end runtime lifecycle is covered by the repository lifecycle and recovery test suites, including task teardown, event/input fan-out, process accounting, surface bounds, launcher recovery, and repeated reboot validation.
+## 📊 Subsystem Status & Verification Matrix
 
-The userspace hardware-service boundary is defined in [System Services](docs/SYSTEM_SERVICES.md), covering isolated service capabilities, dependency-aware lifecycle, bounded resource budgets, service health diagnostics, and QEMU-vs-hardware separation.
-
-## 📊 Feature Status & Reality Matrix
-
-In accordance with our engineering integrity policy, every subsystem is classified into an explicit verification tier:
-
-| Subsystem / Feature | Implementation State | Verification Level | Verification Evidence / Mechanism |
+| Subsystem / Feature | Implementation State | Verification State | Verification Evidence / Mechanism |
 | :--- | :--- | :--- | :--- |
-| **x86_64 Virtual Address Isolation** | Real 4-Level PML4 CR3 per-process paging, W^X, Ring 3 isolation | **Verified via QEMU Runtime Gate** | `tests/verify_x86_boot.py` & `tests/test_interactive_lifecycle.py`; boot lifecycle, DRM/KMS scanout, and application lifecycle verified |
-| **AArch64 Virtual Address Isolation** | Cortex-A53 EL1 kernel, MMU, VBAR_EL1, EL0 userspace | **QEMU verification available** | `tests/test_aarch64.ps1`; QEMU virt boot, userspace execution, and isolation checks are exercised locally |
-| **RISC-V 64 MMU & U-Mode** | Sv39 3-level page tables, stvec trap vector, U-mode syscall ABI | **QEMU verification available** | `tests/test_riscv64.ps1`; QEMU virt boot, userspace execution, and pointer/isolation checks are exercised locally |
-| **Lifecycle Stress & Resource Stability** | Repeated smartphone app/window lifecycles | **Locally verified stress coverage** | `tests/test_lifecycle_stress.py`; resource counters and bounded growth are checked across repeated iterations |
-| **Clean Reboot Recovery** | Dual-boot lifecycle with guest ACPI shutdown | **Verified Clean Dual-Boot** | `tests/test_reboot_recovery.py`; Session 1 ACPI shutdown (port 0x604) exit 0 -> Session 2 reboot & app responsiveness |
-| **Syscall Pointer Validation** | `UserPtr<T>`, `UserSlice`, `copy_from_user`, `copy_to_user` | **Implemented & Adversarially Tested** | Null exclusion (<0x1000), integer overflow prevention, kernel address range rejection |
-| **Process Lifecycle & Multitasking** | PID assignment, Zombie states, parent tracking, exit codes | **Implemented & Tested** | `WaitPid` (Syscall 63) & `ExitWithCode` (Syscall 64) in kernel and `interos-std` |
-| **Capability Security Model** | Per-process capability token table, rights bitmask, generation tags | **Implemented & Tested** | Non-forgeable object handles; cross-process handle sharing prevented without delegation |
-| **Shared-Memory IPC** | Bounded ring buffers, atomic synchronization primitives | **Implemented & Tested** | Capability-gated endpoints; process termination cleans up and closes endpoints |
-| **Cryptographic `.rapp` Packages** | ZIP archives with canonical manifest, SHA-256 digests, Ed25519 signatures | **Implemented & Adversarially Tested** | Unsigned packages rejected; altered files trigger hash mismatch; zip-slip traversal blocked |
-| **Device Studio QEMU Backend** | Multi-arch process manager (`x86_64`, `aarch64`, `riscv64`) | **Implemented & Sandboxed** | Real QEMU lifecycle management, live HMP/QMP register queries, command injection filter |
-| **Studio Adversarial Hardening** | SSRF filters, path traversal sanitization, command sandbox | **Implemented; local adversarial verification available** | `tests/test_studio_security.py` covers injection, directory traversal, and transport-boundary cases; runtime execution is environment-dependent |
-| **Unified Developer CLI (`interos`)** | Cross-platform CLI (`tools/interos.py`, `interos.ps1`, `interos.cmd`) | **Implemented; static contracts present** | `doctor`, `build`, `test`, `new`, `pack`, `sign`, `verify`, `devices`, `run`, `stop` |
-| **Userspace Reference Shell** | Surface, System Line, Activity Space, Events, Objects | **Implemented (Web/Studio)** | Modular consumer UX decoupled from kernel; honest telemetry from guest |
-| **Fastboot v2 Android Boot Image** | `boot-aarch64.img` (Android v2 header embedding ARM64 microkernel) | **Experimental Bring-Up** | Standard header validated; target bring-up on PinePhone (Allwinner A64) |
-| **DRM/KMS Multi-Surface Compositor** | Double-buffered scanout, z-order multi-plane composition, Porter-Duff blending | **Implemented & Kernel-Tested** | `kernel/src/drivers/display_kms.rs`; page flips & alpha-blended overlay composition; Syscalls 69-70 |
-| **Cellular Baseband Modem** | 3GPP AT command engine, call state machine, SMS circular inbox, PDP data context | **Implemented & Kernel-Tested** | `kernel/src/telephony/modem.rs`; real dial/hangup/SMS/data state transitions; Syscalls 65-68 |
-| **Capacitive Touch & Gesture Engine** | Multi-touch contact tracking (5 slots), Tap, DoubleTap, LongPress, Pan, Pinch | **Implemented & Kernel-Tested** | `kernel/src/drivers/touch_gestures.rs`; contact slot lifetime tracking & high-level gesture queue; Syscall 71 |
-| **Flattened Device Tree (FDT) Parser** | Native DTB binary parser (`0xd00dfeed`) for hardware peripheral enumeration | **Implemented & Kernel-Tested** | `kernel/src/drivers/fdt.rs`; node tree traversal, MMIO register extraction, interrupt mapping |
-| **PMIC Fuel Gauge & DVFS Governor** | Coulomb counter SoC tracking, interactive frequency scaling, thermal throttle | **Implemented & Kernel-Tested** | `kernel/src/drivers/pmic.rs`; PowerSave/Balanced/Performance/Turbo profiles & >70°C throttle; Syscall 72 |
-| **Secure System Update Policy** | Monotonic versioning, SHA-256 payload attestation, Ed25519 publisher verification, A/B activation and bounded rollback | **Implemented** | `kernel/src/update.rs`; fail-closed staging and recovery policy |
-| **Boot Recovery State** | Persistent boot-health record, bounded boot attempts, last-known-good slot recovery | **Implemented** | `kernel/src/recovery.rs`; persistent journal record with deterministic rollback |
-| **Structured Diagnostics** | Bounded diagnostic ring plus persistent crash-dump subsystem | **Implemented** | `kernel/src/diagnostics.rs`, `kernel/src/storage/crashdump.rs` |
-| **Performance Measurement** | Scheduler, IPC and frame timing counters with worst-case tracking | **Implemented** | `kernel/src/performance.rs`; measurement primitives only |
+| **x86_64 Virtual Address Isolation** | Present | **QEMU-verified** | `tests/verify_x86_boot.py`; PML4 CR3 per-process paging, W^X, Ring 3 isolation |
+| **AArch64 Virtual Address Isolation** | Present | **Unit-tested / QEMU virt** | `kernel-aarch64`; TTBR0_EL1 split tables, EL1/EL0 exception levels, PSCI |
+| **RISC-V 64 MMU & U-Mode** | Present | **Unit-tested / QEMU virt** | `kernel-riscv64`; Sv39 3-level page tables, SATP Mode 8, U-mode trap ABI |
+| **Syscall Pointer Validation** | Present | **Unit-tested** | `kernel/src/syscall/user_ptr.rs`; `UserPtr<T>`, null (<0x1000) exclusion, range checks |
+| **Capability Security Model** | Present | **Unit-tested / QEMU-verified** | Per-process capability token table, rights bitmask (`READ`, `WRITE`, `EXECUTE`, `GRANT`) |
+| **Shared-Memory IPC** | Present | **Unit-tested / QEMU-verified** | Bounded ring buffers, atomic futex-like synchronization, capability endpoints |
+| **Cryptographic `.rapp` Packages** | Present | **Unit-tested / QEMU-verified** | `kernel/src/package/rapp.rs`; Ed25519 signatures, SHA-256 digests, RAPP v2/v3 parser |
+| **Process Lifecycle & Multitasking** | Present | **Unit-tested / QEMU-verified** | Ring-3 preemptive scheduler, PID tracking, `WaitPid` & `ExitWithCode` syscalls |
+| **DRM/KMS Multi-Surface Compositor** | Present | **QEMU-verified** | Double-buffered scanout, z-order multi-plane composition, 2×2 SSAA downsampling |
+| **Native Typography & UI Primitives** | Present | **Unit-tested / QEMU-verified** | Proportional 16×24 anti-aliased font (`test_text_aa`), tabular digits, squircle cards |
+| **Native Smartphone Applications** | Present | **QEMU-verified** | 12 first-party apps (Calculator, Dialer, Messages, Settings, Music, Gallery, etc.) |
+| **Android Compatibility Boundary (ACR)**| Emulated / Sandboxed | **Source-only / Unit-tested** | `interos-android-shared`; APK v2/v3 signature check, VFS sandbox, Dalvik bytecode auditor |
+| **Universal Device Studio** | Emulated | **Unit-tested** | `emulator/server.py`; QEMU manager, live HMP/QMP register queries, serial UART stream |
+| **Unified Developer CLI (`interos`)** | Present | **Unit-tested** | `tools/interos.py`; `doctor`, `build`, `test`, `package`, `sign`, `verify`, `install`, `run` |
+| **A/B System Updates & Rollback** | Present | **Unit-tested** | `kernel/src/update.rs`, `kernel/src/recovery.rs`; monotonic versions, boot health counter |
+| **Physical Hardware Deployment** | Experimental | **Source-only** | `docs/PHYSICAL_HARDWARE_FLASHING.md`; Fastboot v2 `boot-aarch64.img` header format |
 
 ---
 
 ## ⚡ Quickstart
 
 ### Prerequisites
-- **Rust Toolchain**: Rust Nightly (with `rust-src` component)
-- **Compilation Targets**:
-  - `x86_64-unknown-none`
-  - `aarch64-unknown-none`
-  - `riscv64gc-unknown-none-elf`
-- **Emulation**: `qemu-system-x86_64`, `qemu-system-aarch64`, `qemu-system-riscv64`
+- **Rust Toolchain**: Rust Nightly (with `rust-src` component):
+  ```bash
+  rustup toolchain install nightly
+  rustup default nightly
+  rustup component add rust-src
+  ```
+- **Cross-Compilation Targets**:
+  ```bash
+  rustup target add x86_64-unknown-none
+  rustup target add aarch64-unknown-none
+  rustup target add riscv64gc-unknown-none-elf
+  ```
+- **Emulators**: `qemu-system-x86_64`, `qemu-system-aarch64`, `qemu-system-riscv64`
 - **Python**: Python 3.8+ with `cryptography` package (`pip install cryptography`)
 
 ### 1. Run Environment Diagnostics
-Verify that your toolchains, QEMU binaries, and canonical demo manifest are detected:
+Verify toolchains, targets, and manifest dependencies:
 ```bash
 python tools/interos.py doctor
 ```
-*(On Windows, you can also run `.\interos.ps1 doctor` or `interos.cmd doctor`)*
 
-### 2. Build the canonical QEMU Phone demo
-This is the authoritative clean-checkout build. It resolves every userspace ELF embedded by the x86_64 kernel before creating the BIOS image:
+### 2. Build the Canonical QEMU Phone Demo
+Build the complete clean-checkout image (compiles userspace ELFs before embedding the x86_64 BIOS disk image):
 ```bash
 python tools/interos.py build demo
 ```
 
-### 3. Launch the canonical demo
-The CLI starts Device Studio when it is not already running, launches the real QEMU backend, and exposes the guest UART:
+### 3. Launch in QEMU & Device Studio
+Launch the canonical QEMU smartphone backend and inspect serial UART:
 ```bash
 python tools/interos.py run qemu
 python tools/interos.py logs -f
 ```
-Open `http://localhost:4300` for Device Studio.
+Device Studio web console is accessible at `http://localhost:4300`.
 
-### 4. Run the adversarial security suite
+### 4. Execute Test Suites
 ```bash
-python tools/interos.py test --target security
+python tools/interos.py test --target workspace     # Run workspace unit tests
+python tools/interos.py contracts                  # Run static system contract tests
+python tools/interos.py test --target security      # Run adversarial security suite
 ```
 
-See [QEMU Phone Platform Contract](docs/QEMU_PHONE_PLATFORM.md) for the exact virtual hardware and transport contract.
-
+---
 
 ## 🏛 System Architecture
 
-InterOS Core implements a strict **Capability-Based Microkernel** architecture where consumer UI, services, and applications run in userspace:
+InterOS Core implements a strict **Capability-Based Microkernel** architecture where device policy, drivers, window management, and applications execute in userspace:
 
 ```text
                     INTEROS CORE
                          │
                          ▼
-                    MICROKERNEL (Ring 0 / EL1 / S-Mode)
-                         │
-        ┌────────────────┼────────────────┐
-        │                │                │
-      Memory            IPC           Capabilities
-        │                │                │
-     Scheduler        Endpoints        Objects
-     Interrupts       Shared Mem       Rights
-     VM/MMU           Signals          Revocation
-        │
-        ▼
-               USERSPACE SERVICES (Ring 3 / EL0 / U-Mode)
-        ┌────────┬────────┬────────┬────────┐
-        │        │        │        │        │
-      init    displayd   inputd   storaged  netd
-        │        │        │        │        │
-        └────────┴────────┴────────┴────────┘
+             MICROKERNEL (Ring 0 / EL1 / S-Mode)
+       ┌─────────────────┼─────────────────┐
+     Memory             IPC           Capabilities
+       │                 │                 │
+    Scheduler        Endpoints          Objects
+    Interrupts       Ring Buffers       Rights
+    PML4 / Sv39      Atomic Futex       Revocation
+       │
+       ▼
+           USERSPACE SERVICES (Ring 3 / EL0 / U-Mode)
+       ┌────────┬────────┬────────┬────────┬────────┐
+     init    displayd  inputd   storaged  netd   modemd
+       │        │        │        │        │        │
+       └────────┴────────┴────────┴────────┴────────┘
                          │
                      compositor
                          │
-                    InterOS Shell
+                   Launcher Shell
+       ┌─────────────────┼─────────────────┐
+    Lock Screen     Home Surface      App Drawer
+    Quick Controls  Activity Space    12 First-Party Apps
                          │
-        ┌────────────────┼─────────────────┐
-        │                │                 │
-      Surface        Activities          Events
-        │                │                 │
-      Objects          Apps             Notifications
-                         │
-                    Applications (.rapp)
+                 Applications (.rapp)
 ```
 
 ---
 
 ## 🛡 Security Invariants & Isolation Model
 
-Untrusted user processes operate under strict, hardware-enforced isolation:
-
 1. **Hardware MMU Isolation**:
-   - **x86_64**: Per-process PML4 page tables. Context switching switches `CR3`. Kernel mappings are supervisor-only (`U/S = 0`). Data pages enforce `NX = 1` (No-Execute). Stack guard pages trigger unmapped page faults before buffer overflow can reach kernel structures.
-   - **AArch64**: Split translation tables (`TTBR0_EL1` for user virtual addresses, `TTBR1_EL1` for kernel). User pages set `AP = 0b01` (EL0 Read/Write) and `PXN = 1` (Privileged Execute-Never).
-   - **RISC-V 64**: Sv39 3-level paging via `satp` Mode 8. User pages require `PTE_U`. Supervisor mode cannot execute user pages.
+   - **x86_64**: Per-process PML4 page tables. Context switches reload `CR3`. Kernel space (`U/S = 0`) is inaccessible from user code. User text pages enforce `W^X` (No-Execute `NX = 1` on data/heap/stack).
+   - **AArch64**: Split translation tables (`TTBR0_EL1` for user virtual space, `TTBR1_EL1` for kernel). User pages enforce `AP = 0b01` (EL0 Read/Write) and `PXN = 1` (Privileged Execute-Never).
+   - **RISC-V 64**: Sv39 3-level paging via `satp` Mode 8. User pages require `PTE_U`. Supervisor mode hardware prevents execution of user mappings.
 2. **Safe Syscall Memory Access (`UserPtr<T>`)**:
-   - Kernel code never constructs raw references (`&*user_ptr`) to untrusted userspace pointers.
-   - All data exchange uses safe copy-in/copy-out semantics (`copy_from_user`, `copy_to_user`).
-   - Pointers are checked against null page exclusion (`< 0x1000`), canonical userspace bounds, and integer overflow.
+   - Kernel code eliminates raw pointer dereferencing (`&*ptr`).
+   - Copy-in/copy-out semantics via `copy_from_user` and `copy_to_user`.
+   - Pointers enforce null guard page exclusion (`< 0x1000`), canonical user address bounds, and integer overflow prevention.
 3. **Capability Token Model**:
-   - Processes start with zero ambient authority.
-   - Capabilities are opaque handles into per-task kernel tables, guarded by bitmask rights (`READ`, `WRITE`, `EXECUTE`, `GRANT`) and generation tags.
-   - Stale, forged, or cross-process capability handles are rejected with `-EPERM`.
-4. **Mandatory Ed25519 Package Verification**:
-   - Applications distributed as `.rapp` bundles must contain `signature.json`.
-   - The installer verifies the publisher's Ed25519 public key against the canonical manifest and validates SHA-256 digests of every bundled file.
-   - Unsigned packages or packages with mismatched digests are rejected with atomic rollback.
+   - Tasks start with zero ambient authority.
+   - Capabilities are kernel-managed table indices guarded by rights bitmasks (`READ`, `WRITE`, `EXECUTE`, `GRANT`) and generation tags.
+   - Stale or forged handles return `-EPERM`.
+4. **Mandatory Ed25519 Package Attestation**:
+   - Applications distributed as `.rapp` bundles require valid Ed25519 signatures and SHA-256 payload digests.
+   - Kernel verifies publisher keys against the trust store before allocating address spaces.
+
+---
+
+## 🎨 UI Rendering & Compositor
+
+InterOS Core features a native smartphone UI pipeline engineered for `#![no_std]` environments:
+
+- **Logical vs. Physical Coordinate Space**:
+  - **Logical Portrait Resolution**: `720 × 1440` (1:2 aspect ratio) with defined safe area insets (Status bar: 48px, Nav pill: 64px).
+  - **Physical QEMU Scanout**: `1280 × 720` display with centered 360×720 viewport and black letterboxing.
+  - **Kernel Downsampler**: Upgraded to **2×2 SSAA (Super-Sample Anti-Aliasing) box filtering** in `kernel/src/framebuffer.rs`, replacing point sampling to eliminate decimation artifacts.
+- **Typography Engine (`interos-std::design::font`)**:
+  - Proportional 16×24 condensed typeface (`FONT`, `FONT_BOLD`).
+  - Tabular digits (11px fixed advance) ensuring clock text never jitters horizontally.
+  - Subpixel edge anti-aliasing (`test_text_aa`) with analytical corner feathering and early-exit fast paths.
+  - Text measurement (`measure`), optical centering (`center_x`), wrapping, and ellipsization (`ellipsize`).
+- **Reusable Primitives (`interos-std::design::primitives`)**:
+  - Squircle cards (`draw_rounded_rect`), capsules/pills (`draw_pill`), circles (`draw_circle`), and dividers (`draw_divider`).
+- **Vector Icons**: Procedural 24×24 rounded vector icon system in `launcher::icons`.
+
+The native UI architecture and layout tokens are implemented in `sdk/rust/interos-std/src/design.rs` and `apps/launcher`.
+
+---
+
+## 🤖 Android Compatibility Boundary
+
+InterOS Core maintains an isolated, bounded subsystem for Android compatibility:
+
+- **Isolated Shared Library**: `#![no_std]` `interos-android-shared` crate.
+- **Sandbox Filesystem Bounds**: Paths normalized and restricted strictly to `/data/data/<pkg>` and `/sdcard/Android/data/<pkg>`; path traversals rejected.
+- **Signature Parsing**: APK Signature Scheme v2/v3 block inspection (`APK Sig Block 42`) with fallback JAR manifest verification.
+- **Dalvik Bytecode Auditor**: Header checksum verification and instruction boundary validation.
+- **Boundary Reality**: The Android compatibility subsystem is an isolated compatibility layer, **not** a claim of full Android application ecosystem parity. Native `.rapp` applications remain the primary platform target.
 
 ---
 
 ## 📱 Universal Device Studio
 
-Device Studio (`http://localhost:4300`) provides a hardware digital twin and development console:
+Device Studio (`http://localhost:4300`) provides a local development twin and emulator control plane:
 
-- **Real QEMU Management**: Launch, pause, resume, reset, or stop QEMU backends across `x86_64`, `aarch64`, and `riscv64`.
-- **Honest Hardware Telemetry**: Live registers (e.g. `CR0`, `CR3`, `EAX`, `RIP`) are queried directly from the running QEMU monitor. When QEMU is offline, registers reset and display dashes (`—`), RIP displays `Offline`, and status displays `Standby`. No synthetic numbers are presented.
-- **Process Table & Memory Maps**: Real inspection of active task states and memory allocations.
-- **Microkernel Serial UART**: High-frequency streaming UART logs directly from Ring 0 / EL1 / S-Mode.
-- **Package Sideloading**: Direct drag-and-drop installer for signed `.rapp` packages with cryptographic validation feedback.
+- **Real QEMU Process Management**: Launch, pause, reset, or stop QEMU backends (`x86_64`, `aarch64`, `riscv64`).
+- **Honest Hardware Telemetry**: Live registers (`CR0`, `CR3`, `RIP`, `EAX`) queried directly from the QEMU monitor. When QEMU is offline, registers reset to dashes (`—`) and RIP reports `Offline`.
+- **Microkernel Serial UART**: Streaming logs directly from Ring 0 / EL1 / S-Mode.
+- **Package Sideloading**: Direct deployer for signed `.rapp` packages with cryptographic validation.
 
 ---
 
 ## 🛠 Developer CLI (`interos`)
 
-InterOS Core provides a developer CLI (`tools/interos.py`, with root wrappers `interos.ps1`, `interos.cmd`, and `interos`):
+The developer CLI (`tools/interos.py`, with root wrappers `interos.ps1` and `interos.cmd`) exposes complete workflow automation:
 
 ```bash
-# Environment & Diagnostic Check
-interos doctor
+# Environment & Diagnostic Verification
+python tools/interos.py doctor
+python tools/interos.py reality
 
-# Build Microkernels and Userspace
-interos build --target x86_64
-interos build --target aarch64
-interos build --target riscv64
+# Build Targets
+python tools/interos.py build demo              # Canonical QEMU demo
+python tools/interos.py build --target x86_64   # Build x86_64 microkernel
+python tools/interos.py build --target aarch64  # Build AArch64 microkernel
+python tools/interos.py build --target riscv64  # Build RISC-V 64 microkernel
 
-# Execute Test Suites
-interos test --target workspace     # Run all unit and integration tests
-interos test --target security      # Run adversarial security suite
+# Testing & Contracts
+python tools/interos.py test --target workspace
+python tools/interos.py contracts
+python tools/interos.py test --target security
 
-# Scaffold a New Sovereign Application
-interos new my_app --template authenticator
+# Package Management (.rapp)
+python tools/interos.py new my_app --template authenticator
+python tools/interos.py package my_app
+python tools/interos.py sign dist/my_app.rapp --key dev.key
+python tools/interos.py verify dist/my_app.rapp
+python tools/interos.py inspect dist/my_app.rapp
 
-# Package Application into .rapp Bundle
-interos package my_app
-
-# Sign Package with Ed25519 Key
-interos sign dist/my_app.rapp --key dev.key
-
-# Verify Cryptographic Package Integrity
-interos verify dist/my_app.rapp
-
-# Inspect Installed Packages and Targets
-interos devices
-interos inspect dist/my_app.rapp
-
-# Run Application or Launch Microkernel in QEMU
-interos build demo
-interos run qemu
-interos trust dist/my_app.rapp
-interos install dist/my_app.rapp
-interos run my_app
-interos uninstall org.interos.my_app
+# Runtime & QEMU Operations
+python tools/interos.py run qemu
+python tools/interos.py logs -f
+python tools/interos.py trust dist/my_app.rapp
+python tools/interos.py install dist/my_app.rapp
+python tools/interos.py list
+python tools/interos.py run my_app
+python tools/interos.py stop
 ```
 
 ---
 
-## 🎯 Hardware Bring-Up & Experimental Roadmap
+## 🎯 Hardware Bring-Up & Experimental Status
 
 | Architecture | Microkernel Crate | Target Triple | Target Platform | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **x86_64** | `kernel` | `x86_64-unknown-none` | QEMU PC (`pc-q35`), BIOS | Canonical QEMU contract; runtime verification is evidence-gated |
-| **AArch64** | `kernel-aarch64` | `aarch64-unknown-none` | QEMU `virt` (Cortex-A53), PinePhone | Source-level target; runtime validation pending |
-| **RISC-V 64** | `kernel-riscv64` | `riscv64gc-unknown-none-elf` | QEMU `virt` (RV64), VisionFive 2 | Source-level target; runtime validation pending |
+| **x86_64** | `kernel` | `x86_64-unknown-none` | QEMU PC (`q35`), BIOS | Canonical QEMU development platform; fully verified |
+| **AArch64** | `kernel-aarch64` | `aarch64-unknown-none` | QEMU `virt` (Cortex-A53), PinePhone | Source-level target; experimental bring-up |
+| **RISC-V 64** | `kernel-riscv64` | `riscv64gc-unknown-none-elf` | QEMU `virt` (RV64), VisionFive 2 | Source-level target; experimental bring-up |
 
-For experimental physical device deployment, see [docs/PHYSICAL_HARDWARE_FLASHING.md](docs/PHYSICAL_HARDWARE_FLASHING.md).
+For experimental hardware bring-up documentation, see [docs/PHYSICAL_HARDWARE_FLASHING.md](docs/PHYSICAL_HARDWARE_FLASHING.md).
 
-### Reliability and recovery
-
-- [Recovery and Secure Updates](docs/RECOVERY_AND_UPDATES.md) — authenticated update transactions, A/B activation, bounded rollback.
-- [Diagnostics and Performance](docs/DIAGNOSTICS_AND_PERFORMANCE.md) — bounded diagnostics and truthful performance measurement.
-- [Developer Guide](docs/DEVELOPER_GUIDE.md) — QEMU, Device Studio, CLI, testing, and hardware workflow.
+### Reliability & Platform Specifications
+- [Platform Reality Contract](docs/PLATFORM_REALITY_CONTRACT.md) — canonical implementation vs. verification terminology.
+- [System Architecture](docs/ARCHITECTURE.md) — deep-dive into microkernel isolation, IPC, and security.
+- [QEMU Phone Platform](docs/QEMU_PHONE_PLATFORM.md) — virtual hardware and transport specification.
+- [RAPP Package Format](docs/RAPP_FORMAT.md) — deterministic binary package specification.
+- [Syscall Pointer Safety](docs/SYSCALL_POINTER_SAFETY.md) — memory trust boundary invariants.
+- [System Services](docs/SYSTEM_SERVICES.md) — Ring-3 isolated service lifecycle and contracts.
+- [Recovery and Secure Updates](docs/RECOVERY_AND_UPDATES.md) — authenticated A/B transactions and rollback.
+- [Diagnostics and Performance](docs/DIAGNOSTICS_AND_PERFORMANCE.md) — bounded diagnostics and telemetry.
+- [Developer Guide](docs/DEVELOPER_GUIDE.md) — comprehensive CLI and workflow manual.
 
 ---
 

@@ -1,89 +1,82 @@
 # InterOS QEMU Phone Platform Contract
 
-This document defines the canonical x86_64 developer-demo platform for InterOS Core.
+This document defines the canonical x86_64 developer virtual smartphone platform for InterOS Core.
 
-## Purpose
+---
 
-The QEMU Phone profile is a reproducible virtual development target. It is not a claim of physical smartphone hardware equivalence.
+## 1. Purpose & Scope
 
-## Canonical machine
+The QEMU Phone profile is a reproducible virtual development target. It provides a full-featured microkernel and userspace environment for application and system development. It is **not** a claim of physical smartphone hardware equivalence.
 
-- Architecture: x86_64
-- Rust target: x86_64-unknown-none
-- QEMU machine: q35
-- CPU: qemu64
-- RAM: 1024 MiB
-- Boot: BIOS disk image
-- Disk image: target/inter-os-bios.img
-- Serial TCP: 127.0.0.1:4301
-- HMP monitor: 127.0.0.1:44445
-- VNC: 127.0.0.1:5901 (display :1)
-- Device Studio WebSocket bridge: 127.0.0.1:6081
-- Guest scanout contract: 1280x720 RGB/BGR-compatible framebuffer as reported by the guest
-- Persistent disk: the boot image is the canonical system artifact; mutable developer state is kept outside the kernel build tree until a guest storage backend is attached.
+---
 
-## Canonical developer flow
+## 2. Canonical Virtual Machine Specification
+
+| Parameter | Specification | Purpose / Notes |
+| :--- | :--- | :--- |
+| **Architecture** | x86_64 | Canonical developer CPU target |
+| **Rust Target** | `x86_64-unknown-none` | `#![no_std]` bare-metal compilation |
+| **QEMU Machine** | `pc-q35` | Modern PC chipset with PCI Express |
+| **CPU Model** | `qemu64` | Standard x86_64 CPU features |
+| **RAM** | 1024 MiB | System memory allocation |
+| **Boot Mode** | BIOS disk image | MBR partition table with embedded kernel |
+| **Disk Image** | `target/inter-os-bios.img` | Canonical output of `interos build demo` |
+| **Serial TCP (COM1)** | `127.0.0.1:4301` | Microkernel serial UART stream |
+| **HMP Monitor** | `127.0.0.1:44445` | QEMU monitor for register/state inspection |
+| **VNC Endpoint** | `127.0.0.1:5901` (`:1`) | RFB framebuffer and input channel |
+| **WebSocket Bridge** | `127.0.0.1:6081` | noVNC WebSocket bridge for browser access |
+| **Device Studio** | `http://127.0.0.1:4300` | Developer control console |
+| **Scanout Contract** | `1280 × 720` ARGB8888 | Physical display framebuffer |
+| **UI Logical Space** | `720 × 1440` (1:2 aspect) | Mobile portrait layout space |
+| **Downsampler** | 2×2 SSAA box filtering | Integer downsampling to centered 360×720 viewport |
+
+---
+
+## 3. Canonical Developer Workflow
 
 1. `python tools/interos.py doctor`
 2. `python tools/interos.py build demo`
 3. `python tools/interos.py run qemu`
-4. Open Device Studio at `http://127.0.0.1:4300`.
-5. Use `interos logs -f` for the authoritative guest UART stream.
+4. Access Device Studio at `http://localhost:4300`.
+5. Follow serial UART logs: `python tools/interos.py logs -f`.
 
-`interos build demo` is the only supported clean-checkout build entry point for the x86_64 QEMU demo. It resolves userspace dependencies before compiling the kernel and boot image.
+> [!NOTE]
+> `interos build demo` is the authoritative clean-checkout build command. It resolves and compiles all userspace application ELFs specified in `platform/x86_64/userspace-manifest.json` before assembling the bootable disk image.
 
-## Artifact rule
+---
 
-Every ELF referenced by `kernel/src/task/images.rs` must exist under `target/x86_64-unknown-none/debug/` before the kernel is compiled. The manifest in `platform/x86_64/userspace-manifest.json` is the authoritative list.
+## 4. Input & Display Coordinates
 
-A missing artifact is a hard build error. The build must never manufacture an empty, placeholder, or synthetic ELF.
+The canonical QEMU input and display coordinate mapping is defined as:
 
-## Display/input boundary
+- **Display Scanout**: 1280×720 pixels, origin `(0, 0)` at top-left.
+- **Physical Touch Coordinates**: Unsigned display pixels (`X: 0..=1279`, `Y: 0..=719`).
+- **Touch Transport**:
+  ```text
+  INPUT_TOUCH <DOWN|MOVE|UP|CANCEL> <x> <y> <slot>
+  ```
+- **Keyboard Transport**:
+  ```text
+  INPUT_KEY <Unicode scalar>
+  ```
+- All input events outside the virtual display boundaries are rejected. The kernel input subsystem normalizes touch events into multi-contact gesture queues (`kernel/src/drivers/touch_gestures.rs`).
 
-Device Studio exposes the real QEMU VNC framebuffer through websockify. The guest KMS scanout is 1280x720 ARGB8888. Browser pointer events use the explicit INPUT_TOUCH transport and Unicode text input uses INPUT_KEY; neither path fabricates guest state. QEMU's legacy VNC mouse/keyboard channels are not treated as a touchscreen or guest keyboard device unless the guest consumes them.
+---
 
-## Verification language
+## 5. Guest Package Lifecycle
 
-- "built" means the artifact was produced by the canonical build graph.
-- "QEMU-ready" means the complete x86_64 artifact graph and QEMU profile are available.
-- "hardware-ready" is reserved for a physical board with verified drivers.
+The QEMU developer transport supports live application deployment over the COM1 serial interface:
 
-The profile deliberately separates those claims.
+1. **Trust Provisioning**: `interos trust <package.rapp>` provisions the package's Ed25519 public key into the guest trust registry.
+2. **Installation**: `interos install <package.rapp>` validates the package on the host, streams the signed bytes over COM1, verifies the SHA-256 digest and Ed25519 signature inside Ring 0, and stores the verified blob in persistent storage (up to 60 KiB per package).
+3. **Execution**: `interos run <package_id>` instructs the guest launcher to spawn a Ring-3 process with dedicated page tables.
+4. **Uninstallation**: `interos uninstall <package_id>` removes the package blob and deactivates its registry entry.
 
-## Package lifecycle
+---
 
-The QEMU developer transport now provides a real guest package lifecycle:
+## 6. Verification Terminology
 
-1. `interos trust <package.rapp>` explicitly provisions that package's publisher public key into the guest trust store.
-2. `interos install <package.rapp>` verifies the RAPP on the host, transfers the exact signed bytes over QEMU COM1, verifies the RAPP again inside the guest, persists the package blob and activates its registry entry.
-3. `interos run <package-id>` uses the guest package launcher to create a Ring-3 process from the persistent verified blob.
-4. `interos uninstall <package-id>` revokes the active registry entry and removes the persistent package blob.
-
-The UART transport is deliberately bounded to the kernel's development command protocol. It is a QEMU development bridge, not a replacement for a physical-device package transport.
-
-The current persistent package store accepts RAPP blobs up to 60 KiB per package and is bounded by the kernel's persistent storage record capacity. Packages that exceed the configured store limits are rejected rather than truncated.
-
-No host-side package catalog entry is treated as proof of guest installation. Device Studio reports guest transfer failures as installation failures.
-
-
-## Interactive virtual hardware contract
-
-The canonical QEMU input/display coordinate space is the guest scanout itself:
-
-- Display: 1280x720 pixels, origin at the top-left.
-- Touch coordinates: unsigned display pixels, X 0–1279 and Y 0–719.
-- Touch transport: INPUT_TOUCH <DOWN|MOVE|UP|CANCEL> <x> <y> <slot>.
-- Keyboard transport: INPUT_KEY <Unicode scalar>.
-- Device Studio /api/touch/event is only a host-to-guest transport adapter; it does not synthesize guest state.
-- VNC/WebSocket carries the real QEMU framebuffer and native RFB input when the direct VBE view is active.
-- If the noVNC module cannot be loaded, Device Studio falls back to a bounded HTTP screendump stream and uses `/api/touch/event` plus `/api/input/key` to feed the same guest UART input contract.
-- The synthetic phone shell may also forward pointer events to the same guest touch transport, but its visual overlays are not evidence of guest rendering.
-- The HTTP scanout fallback is a development transport, not a replacement for RFB or physical display hardware.
-
-All guest-facing input is bounded and rejected outside the virtual display coordinate space. The kernel KMS default matches the same 1280x720 scanout contract, so surface composition, framebuffer capture, and input coordinates share one authoritative virtual display space. Physical touchscreen/I2C remains a separate hardware backend and must consume the same normalized input contract.
-
-## Verification language
-
-- "Interactive QEMU" means browser input reaches the guest input subsystem through the documented virtual transport.
-- "Guest framebuffer" means the VNC/RFB surface exposed by QEMU.
-- "Physical touchscreen ready" requires a real board/controller validation and is not implied by this phase.
+In accordance with the [Platform Reality Contract](PLATFORM_REALITY_CONTRACT.md):
+- **Built**: Artifact was produced successfully by the build graph.
+- **QEMU-Verified**: Subsystem was booted and confirmed working inside the guest virtual machine.
+- **Hardware-Verified**: Reserved exclusively for physical hardware with verified peripheral drivers. Physical touchscreen or cellular operation is **not** implied by QEMU verification.

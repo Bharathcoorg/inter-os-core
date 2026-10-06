@@ -1,28 +1,198 @@
 # InterOS Developer Guide
 
-## Core workflow
+The unified developer CLI (`tools/interos.py`, with root wrappers `interos.ps1` and `interos.cmd`) is the authoritative command interface for building, testing, packaging, and managing InterOS Core.
 
-Use the interos CLI as the primary developer entry point:
+---
 
-- interos doctor — inspect the development environment.
-- interos build --target <arch> — build a target.
-- interos test --target <suite> — run the relevant test suite.
-- interos new <name> — scaffold an application.
-- interos package <name> — create a .rapp package.
-- interos verify <package> — verify package integrity.
-- interos run <name> — deploy through Device Studio.
-- interos snapshot — manage QEMU snapshots.
-- interos trace — inspect live guest telemetry.
+## 1. Environment & Diagnostics
 
-## Reliability workflow
+### `interos doctor`
+Inspects and validates host prerequisites, installed toolchains, target triples, QEMU binaries, and Device Studio availability:
+```bash
+python tools/interos.py doctor [--port 4300]
+```
+Checks:
+- Rust compiler and Cargo version.
+- Rust target triples: `x86_64-unknown-none`, `aarch64-unknown-none`, `riscv64gc-unknown-none-elf`.
+- QEMU emulator binaries: `qemu-system-x86_64`, `qemu-system-aarch64`, `qemu-system-riscv64`.
+- Python `cryptography` module.
+- BIOS disk image builder and userspace manifest.
 
-Before hardware bring-up:
+### `interos reality`
+Displays the current platform reality contract, distinguishing implementation state from verification evidence:
+```bash
+python tools/interos.py reality
+```
 
-1. Run environment diagnostics.
-2. Exercise the target in QEMU.
-3. Inspect serial output and guest telemetry.
-4. Use snapshots for repeatable recovery scenarios.
-5. Run adversarial and contract tests.
-6. Only then move to a physical target with the explicit flashing safety gates.
+### `interos devices`
+Lists supported device profiles, CPU architectures, and their implementation and verification tiers:
+```bash
+python tools/interos.py devices
+```
 
-The public core must describe only capabilities that are actually implemented and verified.
+---
+
+## 2. Building & Compilation
+
+### `interos build`
+Builds the canonical demo, microkernels, or specific userspace applications:
+```bash
+# Build the complete canonical QEMU x86_64 demo (compiles all userspace ELFs before assembling the BIOS image):
+python tools/interos.py build demo
+
+# Build specific microkernel architectures:
+python tools/interos.py build --target x86_64
+python tools/interos.py build --target aarch64
+python tools/interos.py build --target riscv64
+
+# Build a specific userspace application crate:
+python tools/interos.py build calculator
+```
+
+---
+
+## 3. Testing & Contracts
+
+### `interos test`
+Executes automated test suites across targets:
+```bash
+# Run workspace unit tests:
+python tools/interos.py test --target workspace
+
+# Run static system contract checks:
+python tools/interos.py test --target contracts
+
+# Run adversarial security suite:
+python tools/interos.py test --target security
+
+# Run lifecycle stress and recovery tests:
+python tools/interos.py test --target lifecycle
+python tools/interos.py test --target recovery
+```
+
+### `interos contracts`
+Runs fast static assertions checking syscall pointer boundaries, service ABI limits, and packaging invariants:
+```bash
+python tools/interos.py contracts
+```
+
+---
+
+## 4. Application Packaging & Cryptography
+
+### `interos new`
+Scaffolds a new `.rapp` project from an official template:
+```bash
+python tools/interos.py new my_app --template basic
+```
+
+### `interos package` (alias: `pack`)
+Compiles and bundles an application into a deterministic binary `.rapp` package:
+```bash
+python tools/interos.py package my_app [--output dist/my_app.rapp] [--arch x86_64]
+```
+
+### `interos sign`
+Signs a `.rapp` package or payload binary with an Ed25519 private key:
+```bash
+python tools/interos.py sign dist/my_app.rapp --key dev.key
+```
+
+### `interos verify`
+Cryptographically verifies `.rapp` header fields, SHA-256 payload digest, and Ed25519 signature:
+```bash
+python tools/interos.py verify dist/my_app.rapp
+```
+
+### `interos inspect`
+Inspects header metadata, declared capabilities, architecture code, and hashes of a `.rapp` package:
+```bash
+python tools/interos.py inspect dist/my_app.rapp
+```
+
+---
+
+## 5. QEMU Runtime & Package Lifecycle
+
+### `interos run`
+Launches the canonical QEMU smartphone demo or deploys a specific package:
+```bash
+# Launch the canonical QEMU x86_64 demo:
+python tools/interos.py run qemu
+
+# Deploy and launch a specific application:
+python tools/interos.py run my_app
+```
+
+### `interos trust`
+Explicitly provisions a publisher's Ed25519 public key into the running guest trust store:
+```bash
+python tools/interos.py trust dist/my_app.rapp [--publisher developer]
+```
+
+### `interos install`
+Validates a signed package on the host, transfers it over the QEMU COM1 serial protocol, verifies it inside the guest kernel, and persists it in the guest package registry:
+```bash
+python tools/interos.py install dist/my_app.rapp
+```
+
+### `interos list`
+Queries the active guest package catalog and lists installed packages:
+```bash
+python tools/interos.py list
+```
+
+### `interos uninstall`
+Revokes an active package registration and removes its persistent blob from the guest store:
+```bash
+python tools/interos.py uninstall org.interos.my_app
+```
+
+---
+
+## 6. Runtime Management & Observability
+
+### `interos logs`
+Streams or follows live Ring-0 serial UART logs from the running microkernel:
+```bash
+# View recent UART output:
+python tools/interos.py logs
+
+# Follow log output continuously:
+python tools/interos.py logs -f
+```
+
+### `interos shell`
+Opens an interactive terminal session connected to the guest serial UART console (TCP port 4301):
+```bash
+python tools/interos.py shell [--port 4301]
+```
+
+### `interos trace`
+Queries and displays live CPU registers (`CR0`, `CR3`, `RIP`, `EAX`) directly from the QEMU monitor:
+```bash
+python tools/interos.py trace
+```
+
+### `interos snapshot`
+Manages live QEMU execution snapshots for reproducible debugging:
+```bash
+# Save a snapshot:
+python tools/interos.py snapshot --action save --name baseline
+
+# List existing snapshots:
+python tools/interos.py snapshot --action list
+
+# Restore a snapshot:
+python tools/interos.py snapshot --action load --name baseline
+```
+
+### `interos stop` & `interos restart`
+Controls the QEMU emulator process lifecycle:
+```bash
+# Gracefully terminate the running QEMU guest:
+python tools/interos.py stop
+
+# Reset and restart the QEMU guest:
+python tools/interos.py restart
+```

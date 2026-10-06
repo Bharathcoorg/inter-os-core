@@ -2,26 +2,33 @@
 
 InterOS separates kernel policy from board-specific hardware through explicit platform contracts.
 
-## Porting layers
+---
 
-1. **Architecture** — CPU execution, interrupt entry, timers, MMU/address spaces and context switching.
-2. **Board descriptor** — CPU count, memory discovery, timer and controller availability.
-3. **Drivers** — display, storage, USB, touch/input, audio, camera, modem, Wi-Fi, Bluetooth and sensors.
-4. **Services** — userspace policy and service lifecycle; services must not assume a specific board.
-5. **Applications** — consume stable package, IPC, permission and UI contracts.
+## 1. Porting Layers
 
-## Storage
+1. **Architecture**: CPU execution, interrupt entry, architectural timers, MMU/address space switching, and context save/restore.
+2. **Board Descriptor**: CPU topology, memory discovery, interrupt routing, and peripheral discovery.
+3. **Drivers**: Display scanout, block storage, USB, touch digitizer, audio, camera, cellular modem, wireless, and hardware sensors.
+4. **Services**: Userspace policy and service supervision; services must consume normalized HAL abstractions rather than assuming board-specific hardware.
+5. **Applications**: Native applications consume standard package, IPC, permission, and UI contracts.
 
-Filesystems consume the platform-neutral BlockDevice contract, not ATA/SDHCI directly. A board port supplies the appropriate block backend and maps controller failures to the bounded storage error contract.
+---
 
-## Updates
+## 2. Storage Abstraction
 
-The kernel verifies update manifests, payload digests, signatures and monotonic versions. A platform update backend is responsible for writing and verifying the inactive slot and activating it. No board is considered hardware-backed merely because a driver type exists.
+Filesystems consume the platform-neutral `BlockDevice` contract rather than driving controllers directly. A board port supplies the appropriate controller driver and maps controller faults to the bounded storage error ABI.
 
-## Reality contract
+---
 
-Hardware availability and verification level must remain truthful. QEMU/emulated devices are explicitly marked as emulated; unsupported phone peripherals remain unavailable until a real backend exists.
+## 3. System Updates
 
-## Public-source rule
+The microkernel verifies update manifests, payload digests, signatures, and monotonic versions. Platform update backends are responsible for writing the inactive A/B slot and marking it pending. A board is not considered hardware-backed merely because a driver struct exists.
 
-Board ports and examples belong in public platform code only when they are reproducible and free of private infrastructure, credentials, internal services or Agentic OS implementation details.
+---
+
+## 4. Reality Contract
+
+In accordance with the [Platform Reality Contract](PLATFORM_REALITY_CONTRACT.md), hardware availability and verification levels must remain truthful:
+- QEMU virtual devices are explicitly classified as `Emulated`.
+- Unsupported hardware peripherals remain `Unavailable` until a verified physical driver backend is attached.
+- Public platform documentation must describe only reproducible, public-source technical architectures.

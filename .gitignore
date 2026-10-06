@@ -35,4 +35,6 @@ packages/*.key
 # Local UI reference images (design targets, not project assets)
 InterOS Core_ Minimal Open Mobile OS*.png
 /Ui Samples/
+*UI_DESIGN_SYSTEM.md
+docs/UI_DESIGN_SYSTEM.md
 
