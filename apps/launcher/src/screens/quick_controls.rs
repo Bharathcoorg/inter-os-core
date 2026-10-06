@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 
 use crate::{test_text, LauncherState};
+use interos_std as std;
 use launcher::layout::Rect;
 use launcher::text;
 use launcher::theme::{type_scale, SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT};
@@ -187,82 +188,44 @@ struct QuickControlsFrame {
     home_pill: Rect,
 }
 
-fn build_qc_frame(state: &LauncherState) -> QuickControlsFrame {
-    // 1. Clock
-    let clock_slice: &[u8] = if state.clock_time[0] != b' ' {
-        &state.clock_time
-    } else {
-        b"09:20"
-    };
-    let clock = LabelRun::new(48, 14, type_scale::CAPTION, clock_slice, TEXT_WHITE);
+fn build_qc_frame(_state: &LauncherState) -> QuickControlsFrame {
+    let clock = LabelRun::new(48, 14, type_scale::CAPTION, b"", TEXT_WHITE);
+    let wifi = match std::settings_hardware_status("wifi") { Ok(1) => b"Virtual".as_slice(), _ => b"Unavailable".as_slice() };
+    let bluetooth = match std::settings_hardware_status("bluetooth") { Ok(1) => b"Virtual".as_slice(), _ => b"Unavailable".as_slice() };
+    let mobile = match std::settings_hardware_status("cellular") { Ok(1) => b"Virtual".as_slice(), _ => b"Unavailable".as_slice() };
 
-    // 2. 2x2 Network Tiles
-    let tile_w = 312;
-    let tile_h = 136;
-    let x0 = 36;
-    let x1 = 372;
-    let y0 = 90;
-    let y1 = 246;
+    let tile_w = 312; let tile_h = 136; let x0 = 36; let x1 = 372; let y0 = 90; let y1 = 246;
+    let tile_wifi = ControlTilePlan { rect: Rect::new(x0,y0,tile_w,tile_h), icon: QcIcon::Wifi,
+        title: LabelRun::new(x0+28,y0+64,type_scale::CAPTION,b"Wi-Fi",TEXT_WHITE),
+        subtitle: LabelRun::new(x0+28,y0+92,type_scale::CAPTION,wifi,TEXT_MUTED) };
+    let tile_bt = ControlTilePlan { rect: Rect::new(x1,y0,tile_w,tile_h), icon: QcIcon::Bluetooth,
+        title: LabelRun::new(x1+28,y0+64,type_scale::CAPTION,b"Bluetooth",TEXT_WHITE),
+        subtitle: LabelRun::new(x1+28,y0+92,type_scale::CAPTION,bluetooth,TEXT_MUTED) };
+    let tile_mobile = ControlTilePlan { rect: Rect::new(x0,y1,tile_w,tile_h), icon: QcIcon::Mobile,
+        title: LabelRun::new(x0+28,y1+64,type_scale::CAPTION,b"Mobile",TEXT_WHITE),
+        subtitle: LabelRun::new(x0+28,y1+92,type_scale::CAPTION,mobile,TEXT_MUTED) };
+    let tile_air = ControlTilePlan { rect: Rect::new(x1,y1,tile_w,tile_h), icon: QcIcon::Airplane,
+        title: LabelRun::new(x1+28,y1+64,type_scale::CAPTION,b"Airplane",TEXT_WHITE),
+        subtitle: LabelRun::new(x1+28,y1+92,type_scale::CAPTION,b"Off",TEXT_MUTED) };
 
-    let tile_wifi = ControlTilePlan {
-        rect: Rect::new(x0, y0, tile_w, tile_h),
-        icon: QcIcon::Wifi,
-        title: LabelRun::new(x0 + 28, y0 + 64, type_scale::CAPTION, b"Wi-Fi", TEXT_WHITE),
-        subtitle: LabelRun::new(x0 + 28, y0 + 92, type_scale::CAPTION, b"Connected", TEXT_MUTED),
-    };
+    let slider_x=36; let slider_w=648; let slider_h=76;
+    let brightness_rect=Rect::new(slider_x,404,slider_w,slider_h);
+    let volume_rect=Rect::new(slider_x,500,slider_w,slider_h);
+    let mut setting=[0u8;16];
+    let brightness_available=std::settings_get(0,"display.brightness",&mut setting).map(|n| n>0).unwrap_or(false);
+    let brightness_value=if brightness_available { let mut v=0usize; for &b in &setting { if b.is_ascii_digit(){v=v.saturating_mul(10).saturating_add((b-b'0') as usize);} } v.min(100) } else {0};
+    let volume=std::audio_query_volume();
+    let volume_available=volume.is_ok();
+    let volume_value=volume.unwrap_or(0).min(100) as usize;
 
-    let tile_bt = ControlTilePlan {
-        rect: Rect::new(x1, y0, tile_w, tile_h),
-        icon: QcIcon::Bluetooth,
-        title: LabelRun::new(x1 + 28, y0 + 64, type_scale::CAPTION, b"Bluetooth", TEXT_WHITE),
-        subtitle: LabelRun::new(x1 + 28, y0 + 92, type_scale::CAPTION, b"On", TEXT_MUTED),
-    };
-
-    let tile_mobile = ControlTilePlan {
-        rect: Rect::new(x0, y1, tile_w, tile_h),
-        icon: QcIcon::Mobile,
-        title: LabelRun::new(x0 + 28, y1 + 64, type_scale::CAPTION, b"Mobile", TEXT_WHITE),
-        subtitle: LabelRun::new(x0 + 28, y1 + 92, type_scale::CAPTION, b"5G", TEXT_MUTED),
-    };
-
-    let tile_air = ControlTilePlan {
-        rect: Rect::new(x1, y1, tile_w, tile_h),
-        icon: QcIcon::Airplane,
-        title: LabelRun::new(x1 + 28, y1 + 64, type_scale::CAPTION, b"Airplane", TEXT_WHITE),
-        subtitle: LabelRun::new(x1 + 28, y1 + 92, type_scale::CAPTION, b"Off", TEXT_MUTED),
-    };
-
-    // 3. Slider Capsules
-    let slider_x = 36;
-    let slider_w = 648;
-    let slider_h = 76;
-    let brightness_rect = Rect::new(slider_x, 404, slider_w, slider_h);
-    let volume_rect = Rect::new(slider_x, 500, slider_w, slider_h);
-
-    // 4. Quick Toggles
-    let toggles = [
-        Rect::new(36, 644, 76, 72),
-        Rect::new(128, 644, 76, 72),
-        Rect::new(220, 644, 76, 72),
-        Rect::new(312, 644, 76, 72),
-    ];
-    let toggle_icons = [QcIcon::Torch, QcIcon::Rotate, QcIcon::Moon, QcIcon::Power];
-
-    // 5. Power & Safety Button (x: 408, y: 644, w: 272, h: 72)
-    let power_label = LabelRun::centred(POWER_BTN.x + 40, POWER_BTN.y + 24, POWER_BTN.w - 40, type_scale::CAPTION, b"Power Menu", TEXT_WHITE);
-
+    let toggles=[Rect::new(36,644,76,72),Rect::new(128,644,76,72),Rect::new(220,644,76,72),Rect::new(312,644,76,72)];
+    let toggle_icons=[QcIcon::Torch,QcIcon::Rotate,QcIcon::Moon,QcIcon::Power];
+    let power_label=LabelRun::centred(POWER_BTN.x+40,POWER_BTN.y+24,POWER_BTN.w-40,type_scale::CAPTION,b"Power Menu",TEXT_WHITE);
     QuickControlsFrame {
-        clock,
-        tiles: [tile_wifi, tile_bt, tile_mobile, tile_air],
-        brightness_rect,
-        brightness_fill_w: (slider_w * 65) / 100, // 65% brightness
-        volume_rect,
-        volume_fill_w: (slider_w * 50) / 100, // 50% volume
-        toggles,
-        toggle_icons,
-        power_btn: POWER_BTN,
-        power_label,
-        home_pill: HOME_PILL,
+        clock, tiles:[tile_wifi,tile_bt,tile_mobile,tile_air], brightness_rect,
+        brightness_fill_w:(slider_w*brightness_value)/100, volume_rect,
+        volume_fill_w:(slider_w*volume_value)/100, brightness_available, volume_available,
+        toggles, toggle_icons, power_btn:POWER_BTN, power_label, home_pill:HOME_PILL,
     }
 }
 
@@ -414,28 +377,6 @@ pub fn get_quick_controls_color(x: usize, y: usize, state: &LauncherState) -> u3
         if let Some(c) = f.clock.pixel(x, y) {
             return c;
         }
-        // Right status bar indicators
-        if y >= 14 && y <= 30 {
-            // Battery pill at x: 648..680, y: 16..28
-            if x >= 648 && x <= 680 && y >= 16 && y <= 28 {
-                let is_border = x == 648 || x == 680 || y == 16 || y == 28;
-                let is_fill = x >= 651 && x <= 674 && y >= 18 && y <= 26;
-                if is_border || is_fill {
-                    return 0xFF10B981; // Green battery
-                }
-            }
-            if x >= 681 && x <= 683 && y >= 19 && y <= 25 {
-                return 0xFF10B981; // Terminal pin
-            }
-            // Signal bars at x: 618..636
-            if x >= 618 && x <= 636 {
-                let bar = (x - 618) / 5;
-                let h = (bar + 1) * 3;
-                if y >= 28 - h && y <= 28 {
-                    return TEXT_WHITE;
-                }
-            }
-        }
         return color;
     }
 
@@ -468,7 +409,7 @@ pub fn get_quick_controls_color(x: usize, y: usize, state: &LauncherState) -> u3
     // 3. Brightness Slider Capsule
     if f.brightness_rect.contains(x, y) {
         if rounded_contains(f.brightness_rect, x, y, 38) {
-            let is_filled = x <= f.brightness_rect.x + f.brightness_fill_w;
+            let is_filled = f.brightness_available && x <= f.brightness_rect.x + f.brightness_fill_w;
             color = if is_filled { SLIDER_FILL } else { SLIDER_BG };
 
             // Sun icon at left
@@ -498,7 +439,7 @@ pub fn get_quick_controls_color(x: usize, y: usize, state: &LauncherState) -> u3
     // 4. Volume Slider Capsule
     if f.volume_rect.contains(x, y) {
         if rounded_contains(f.volume_rect, x, y, 38) {
-            let is_filled = x <= f.volume_rect.x + f.volume_fill_w;
+            let is_filled = f.volume_available && x <= f.volume_rect.x + f.volume_fill_w;
             color = if is_filled { SLIDER_FILL } else { SLIDER_BG };
 
             // Speaker icon at left
