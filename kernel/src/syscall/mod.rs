@@ -4451,11 +4451,10 @@ pub fn sys_service_stop(service_id: u8) -> Result<(), SyscallResult> {
     crate::services::stop(id, parent_id).map_err(|_| SyscallResult::DeviceError)
 }
 
-/// Launches a first-party application in Ring 3 on behalf of PID 1 / service manager.
-/// Launches a verified persistent RAPP from the QEMU development bridge.
+/// Unified QEMU development bridge launcher for first-party apps and verified RAPPs.
 /// COM1 has no userspace task/capability context, so this is intentionally
 /// separate from the normal userspace syscall path and gated to QEMU.
-pub fn dev_launch_verified_rapp(app_id: &str) -> Result<crate::task::TaskId, SyscallResult> {
+pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult> {
     if crate::platform::PLATFORM_CONTRACT.verification != crate::platform::VerificationLevel::QemuVerified {
         return Err(SyscallResult::PermissionDenied);
     }
@@ -4463,21 +4462,62 @@ pub fn dev_launch_verified_rapp(app_id: &str) -> Result<crate::task::TaskId, Sys
     if app_id.is_empty() || app_id.len() > 128 || app_id.contains('/') || app_id.contains('\\') || app_id.contains("..") {
         return Err(SyscallResult::InvalidArguments);
     }
-    let blob = crate::package::PACKAGE_BLOB_STORE.lock().get(app_id).cloned()
-        .ok_or(SyscallResult::FileNotFound)?;
-    let verified = crate::package::parse_rapp(&blob.bytes)
-        .map_err(|_| SyscallResult::IntegrityViolation)?;
-    if verified.package_id != app_id || verified.version != blob.version {
-        return Err(SyscallResult::IntegrityViolation);
+    // External verified `.rapp` blobs take precedence when present.
+    if let Some(blob) = crate::package::PACKAGE_BLOB_STORE.lock().get(app_id).cloned() {
+        let verified = crate::package::parse_rapp(&blob.bytes)
+            .map_err(|_| SyscallResult::IntegrityViolation)?;
+        if verified.package_id != app_id || verified.version != blob.version {
+            return Err(SyscallResult::IntegrityViolation);
+        }
+        let payload_end = verified.payload_offset.checked_add(verified.payload_len)
+            .ok_or(SyscallResult::InvalidArguments)?;
+        let payload = &blob.bytes[verified.payload_offset..payload_end];
+        let tid = crate::task::user::spawn_verified_rapp_process(&verified, payload, crate::task::TaskId(0))
+            .map_err(|_| SyscallResult::DeviceError)?;
+        crate::ipc::IPC_ROUTER.lock().register_task(tid);
+        serial_println!("[APP] QEMU dev bridge launched persistent RAPP '{}' as Task {}", verified.package_id, tid.0);
+        serial_println!("[PROCESS] Guest application launched id={} task={}", verified.package_id, tid.0);
+        return Ok(tid);
     }
-    let payload_end = verified.payload_offset.checked_add(verified.payload_len)
-        .ok_or(SyscallResult::InvalidArguments)?;
-    let payload = &blob.bytes[verified.payload_offset..payload_end];
-    let tid = crate::task::user::spawn_verified_rapp_process(&verified, payload, crate::task::TaskId(0))
-        .map_err(|_| SyscallResult::DeviceError)?;
+    // First-party applications (all 21 registry entries resolve here; the two
+    // persistent system services are already running and refuse re-launch).
+    let parent = crate::task::TaskId(0);
+    let tid = match app_id {
+        "org.interos.settings" | "settings" | "app_settings" => crate::task::user::spawn_app_settings(parent),
+        "org.interos.terminal" | "terminal" | "app_terminal" => crate::task::user::spawn_app_terminal(parent),
+        "org.interos.calculator" | "calculator" | "app_calculator" => crate::task::user::spawn_app_calculator(parent),
+        "org.interos.dialer" | "dialer" | "app_dialer" => crate::task::user::spawn_app_dialer(parent),
+        "org.interos.vault" | "vault" | "app_vault" => crate::task::user::spawn_app_vault(parent),
+        "org.interos.camera" | "camera" | "app_camera" => crate::task::user::spawn_app_camera(parent),
+        "org.interos.browser" | "browser" | "app_browser" => crate::task::user::spawn_app_browser(parent),
+        "org.interos.messages" | "messages" | "app_messages" => crate::task::user::spawn_app_messages(parent),
+        "org.interos.calendar" | "calendar" | "app_calendar" => crate::task::user::spawn_app_calendar(parent),
+        "org.interos.music" | "music" | "app_music" => crate::task::user::spawn_app_music(parent),
+        "org.interos.file_manager" | "file_manager" | "files" | "app_file_manager" => crate::task::user::spawn_app_file_manager(parent),
+        "org.interos.gallery" | "gallery" | "photos" | "app_gallery" => crate::task::user::spawn_app_gallery(parent),
+        "org.interos.authenticator" | "authenticator" => spawn_app_authenticator(parent),
+        "org.interos.health" | "health" => spawn_app_health(parent),
+        "org.interos.camera_preview" | "camera_preview" => spawn_app_camera_preview(parent),
+        "org.interos.hello_world" | "hello_world" => spawn_app_hello_world(parent),
+        "org.interos.meshchat" | "meshchat" => spawn_app_meshchat(parent),
+        "org.interos.sensor_dashboard" | "sensor_dashboard" => spawn_app_sensor_dashboard(parent),
+        "org.interos.test_app" | "test_app" => spawn_app_test_app(parent),
+        "org.interos.compositor" | "compositor" | "org.interos.launcher" | "launcher" => {
+            return Err(SyscallResult::PermissionDenied);
+        }
+        _ => return Err(SyscallResult::FileNotFound),
+    };
     crate::ipc::IPC_ROUTER.lock().register_task(tid);
-    serial_println!("[APP] QEMU dev bridge launched persistent RAPP '{}' as Task {}", verified.package_id, tid.0);
+    serial_println!("[APP] QEMU dev bridge launched application '{}' as Task {}", app_id, tid.0);
+    serial_println!("[PROCESS] Guest application launched id={} task={}", app_id, tid.0);
     Ok(tid)
+}
+
+/// Launches a verified persistent RAPP from the QEMU development bridge.
+/// COM1 has no userspace task/capability context, so this is intentionally
+/// separate from the normal userspace syscall path and gated to QEMU.
+pub fn dev_launch_verified_rapp(app_id: &str) -> Result<crate::task::TaskId, SyscallResult> {
+    dev_launch_app(app_id)
 }
 
 /// Spawns the Sovereign Authenticator (TOTP) app in Ring 3.

@@ -362,6 +362,15 @@ fn handle_rapp_command(s: &str) -> bool {
         return true;
     }
 
+    if verb.eq_ignore_ascii_case("APP_LAUNCH") {
+        let Some(id) = parts.next() else { return true; };
+        match crate::syscall::dev_launch_app(id) {
+            Ok(tid) => serial_println!("[RAPP_HOST] LAUNCHED id={} task={}", id, tid.0),
+            Err(err) => serial_println!("[RAPP_HOST] LAUNCH_FAILED id={} error={:?}", id, err),
+        }
+        return true;
+    }
+
     if verb.eq_ignore_ascii_case("RAPP_UNINSTALL") {
         let Some(id) = parts.next() else { return true; };
         match crate::syscall::dev_uninstall_verified_rapp(id) {
@@ -560,6 +569,45 @@ fn handle_serial_command(cmd: &[u8]) {
             "[DIAG_STATE] tasks_total={} tasks_active={} surfaces={} mailboxes={} endpoints={} shm_pipes={} heap_used={} heap_free={}",
             tasks_tot, tasks_act, surfaces, mailboxes, endpoints, shm_pipes, heap_used, heap_free
         );
+        return;
+    }
+
+    if verb.eq_ignore_ascii_case("STUDIO_PKG_LIST") {
+        crate::package::PACKAGE_REGISTRY.lock().seed();
+        for pkg in crate::package::FIRST_PARTY_PACKAGES {
+            crate::serial_println!(
+                "[STUDIO_PKG] id={} name={} version=1.0.0 state=active process={} icon={}",
+                pkg.package_id, pkg.display_name, pkg.process_name, pkg.icon
+            );
+        }
+        let entries = crate::package::PACKAGE_REGISTRY.lock().entries().to_vec();
+        for entry in entries.iter() {
+            if crate::package::first_party_package(&entry.package_id).is_some() {
+                continue;
+            }
+            let state = match entry.state {
+                crate::package::PackageState::Active => "active",
+                crate::package::PackageState::Staged => "staged",
+                crate::package::PackageState::RolledBack => "rolledback",
+            };
+            crate::serial_println!(
+                "[STUDIO_PKG] id={} name={} version={}.{}.{} state={} process={} icon=RAPP",
+                entry.package_id, entry.package_id,
+                entry.version.0, entry.version.1, entry.version.2,
+                state, entry.package_id
+            );
+        }
+        crate::serial_println!("[STUDIO_PKG] END");
+        return;
+    }
+
+    if verb.eq_ignore_ascii_case("APP_LAUNCH") {
+        if let Some(id) = parts.next() {
+            match crate::syscall::dev_launch_app(id) {
+                Ok(tid) => serial_println!("[RAPP_HOST] LAUNCHED id={} task={}", id, tid.0),
+                Err(err) => serial_println!("[RAPP_HOST] LAUNCH_FAILED id={} error={:?}", id, err),
+            }
+        }
         return;
     }
 
