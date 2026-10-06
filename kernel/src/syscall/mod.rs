@@ -2974,6 +2974,9 @@ pub fn sys_app_restart(app_id: &str) -> Result<TaskId, SyscallResult> {
             sched.terminate_child(parent, child, -9).map_err(|_| SyscallResult::NotReady)?;
         }
         SCHEDULER.lock().reap_child(parent, child).map_err(|_| SyscallResult::NotReady)?;
+        crate::notification::NOTIFICATION_MANAGER
+            .lock()
+            .cancel_all_for_package_all_users(app_id);
     }
     sys_app_launch(app_id)
 }
