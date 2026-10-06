@@ -20,6 +20,7 @@ pub enum NotificationImportance {
 
 /// Delivery priority of a notification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
 pub enum NotificationPriority {
     Min = 0,
     Low = 1,
@@ -216,7 +217,7 @@ impl NotificationManager {
         let record = self
             .records
             .iter_mut()
-            .find(|r| r.id == id && r.package_id == package_id && !r.is_cancelled)
+            .find(|r| r.id == id && (package_id.is_empty() || r.package_id == package_id) && !r.is_cancelled)
             .ok_or(NotificationError::NotificationNotFound)?;
 
         record.is_cancelled = true;
@@ -231,6 +232,16 @@ impl NotificationManager {
                 record.is_cancelled = true;
             }
         }
+    }
+
+    /// Cancels all active notifications for a user.
+    pub fn cancel_all_for_user(&mut self, user_id: u32) {
+        for record in self.records.iter_mut() {
+            if record.user_id == user_id && !record.is_cancelled {
+                record.is_cancelled = true;
+            }
+        }
+        crate::serial_println!("[NOTIFICATION] Cancelled all notifications for user {}", user_id);
     }
 
     /// Queries active notifications filtered for the target user and lockscreen state.
@@ -284,5 +295,17 @@ pub static NOTIFICATION_MANAGER: Mutex<NotificationManager> = Mutex::new(Notific
 pub fn init() {
     let mut nm = NOTIFICATION_MANAGER.lock();
     nm.seed_standard_channels();
+    let current_ticks = crate::interrupts::get_system_ticks();
+    let _ = nm.post(
+        "system",
+        0,
+        "system",
+        "InterOS System",
+        "Kernel initialized. Sovereign security active.",
+        NotificationPriority::Default,
+        LockscreenVisibility::Public,
+        0,
+        current_ticks,
+    );
     crate::serial_println!("[OK] Sovereign Notification Subsystem initialized.");
 }

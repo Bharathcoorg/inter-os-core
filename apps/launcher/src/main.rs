@@ -93,6 +93,37 @@ pub enum ViewMode {
     LiveWidgets,
 }
 
+#[derive(Clone, Copy)]
+pub struct NotificationRecord {
+    pub id: u64,
+    pub package_id: [u8; 24],
+    pub pkg_len: u8,
+    pub channel: [u8; 16],
+    pub chan_len: u8,
+    pub title: [u8; 32],
+    pub title_len: u8,
+    pub body: [u8; 64],
+    pub body_len: u8,
+    pub timestamp_ticks: u64,
+    pub priority: u8,
+}
+
+impl NotificationRecord {
+    pub const EMPTY: Self = Self {
+        id: 0,
+        package_id: [0; 24],
+        pkg_len: 0,
+        channel: [0; 16],
+        chan_len: 0,
+        title: [0; 32],
+        title_len: 0,
+        body: [0; 64],
+        body_len: 0,
+        timestamp_ticks: 0,
+        priority: 0,
+    };
+}
+
 pub struct LauncherState {
     pub current_view: ViewMode,
     pub clock_time: [u8; 5],
@@ -109,6 +140,7 @@ pub struct LauncherState {
     /// calendar, and a hardcoded date would be fabricated data on a surface the
     /// user reads as the state of their device.
     pub date_line: [u8; LOCK_DATE_TEXT_LEN],
+    pub notifications: [NotificationRecord; 8],
     pub notification_count: usize,
     pub app_drawer_tab: usize,
     pub recent_apps: [[u8; 32]; 3],
@@ -134,6 +166,7 @@ impl LauncherState {
             clock_source_ok: false,
             clock_source_reported: false,
             date_line: [b' '; LOCK_DATE_TEXT_LEN],
+            notifications: [NotificationRecord::EMPTY; 8],
             notification_count: 0,
             app_drawer_tab: 0,
             recent_apps: [[0u8; 32]; 3],
@@ -346,10 +379,63 @@ fn weekday_from_civil(year: u32, month: u32, day: u32) -> usize {
     // 1970-01-01 (days == 0) was a Thursday, index 4 in a Sunday-first week.
     (((days + 4) % 7 + 7) % 7) as usize
 }
+fn parse_dec_u64(bytes: &[u8]) -> u64 {
+    let mut val = 0u64;
+    for &b in bytes {
+        if b.is_ascii_digit() {
+            val = val.saturating_mul(10).saturating_add((b - b'0') as u64);
+        }
+    }
+    val
+}
+
 fn refresh_notifications(state: &mut LauncherState) {
     let uid = std::user_get_current();
     let locked = std::user_get_lock_state(uid).unwrap_or(0) != 0;
-    state.notification_count = std::notification_query(uid, locked).unwrap_or(0);
+    let mut buf = [0u8; 2048];
+    if let Ok(n) = std::notification_query_records(uid, locked, &mut buf) {
+        state.notification_count = 0;
+        state.notifications = [NotificationRecord::EMPTY; 8];
+        for line in buf[..n].split(|b| *b == b'\n') {
+            if line.is_empty() || state.notification_count >= state.notifications.len() {
+                continue;
+            }
+            let mut parts = line.split(|b| *b == b'|');
+            let Some(id_bytes) = parts.next() else { continue; };
+            let Some(pkg_bytes) = parts.next() else { continue; };
+            let Some(chan_bytes) = parts.next() else { continue; };
+            let Some(prio_bytes) = parts.next() else { continue; };
+            let Some(ticks_bytes) = parts.next() else { continue; };
+            let Some(title_bytes) = parts.next() else { continue; };
+            let body_bytes = parts.next().unwrap_or(b"");
+
+            let id = parse_dec_u64(id_bytes);
+            let prio = parse_dec_u64(prio_bytes) as u8;
+            let ticks = parse_dec_u64(ticks_bytes);
+
+            let mut rec = NotificationRecord::EMPTY;
+            rec.id = id;
+            rec.priority = prio;
+            rec.timestamp_ticks = ticks;
+
+            rec.pkg_len = pkg_bytes.len().min(24) as u8;
+            rec.package_id[..rec.pkg_len as usize].copy_from_slice(&pkg_bytes[..rec.pkg_len as usize]);
+
+            rec.chan_len = chan_bytes.len().min(16) as u8;
+            rec.channel[..rec.chan_len as usize].copy_from_slice(&chan_bytes[..rec.chan_len as usize]);
+
+            rec.title_len = title_bytes.len().min(32) as u8;
+            rec.title[..rec.title_len as usize].copy_from_slice(&title_bytes[..rec.title_len as usize]);
+
+            rec.body_len = body_bytes.len().min(64) as u8;
+            rec.body[..rec.body_len as usize].copy_from_slice(&body_bytes[..rec.body_len as usize]);
+
+            state.notifications[state.notification_count] = rec;
+            state.notification_count += 1;
+        }
+    } else {
+        state.notification_count = std::notification_query(uid, locked).unwrap_or(0);
+    }
 }
 
 fn developer_terminal_enabled() -> bool {
@@ -1767,6 +1853,8 @@ pub extern "C" fn _start() -> ! {
                                 let y = input.y as usize;
                                 // Clear All button (300..355, 260..460) or (690..750, 260..460)
                                 if ((300..355).contains(&y) || (690..750).contains(&y)) && (260..460).contains(&x) {
+                                    let _ = std::notification_cancel("", 0);
+                                    state.notifications = [NotificationRecord::EMPTY; 8];
                                     state.notification_count = 0;
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);

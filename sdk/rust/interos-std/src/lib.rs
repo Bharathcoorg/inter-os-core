@@ -2376,6 +2376,24 @@ pub fn notification_query(user_id: u32, is_locked: bool) -> Result<usize, i64> {
     }
 }
 
+/// Queries active notification records for a user into a serialized buffer.
+pub fn notification_query_records(user_id: u32, is_locked: bool, buf: &mut [u8]) -> Result<usize, i64> {
+    let r = unsafe {
+        syscall4(
+            SyscallNumber::NotificationQuery,
+            user_id as u64,
+            if is_locked { 1 } else { 0 },
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        )
+    };
+    if r >= 0 {
+        Ok(r as usize)
+    } else {
+        Err(r)
+    }
+}
+
 /// Revokes a granted sensitive permission from a task.
 pub fn permission_revoke(task_id: u64, perm_id: u32) -> Result<(), i64> {
     let r = unsafe { syscall2(SyscallNumber::PermissionRevoke, task_id, perm_id as u64) };

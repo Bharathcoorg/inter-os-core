@@ -1,4 +1,4 @@
-﻿//! System Space: device and account settings.
+//! System Space: device and account settings.
 //!
 //! WHY `pub`: `render_view` in the crate root dispatches here by view mode.
 //! Geometry and colour come from `launcher::theme`, `launcher::layout` and
@@ -487,6 +487,7 @@ pub(super) fn header_h() -> usize {
 const ROW_PAD_X: usize = space::LG;
 
 /// The same inset, for the sibling surface that shares this row renderer.
+#[allow(dead_code)]
 pub(super) fn row_pad_x() -> usize {
     ROW_PAD_X
 }
@@ -589,16 +590,19 @@ impl Run {
     }
 
     /// The run's top edge.
+    #[allow(dead_code)]
     pub(super) fn top(&self) -> usize {
         self.y
     }
 
     /// The run's scale.
+    #[allow(dead_code)]
     pub(super) fn scale(&self) -> usize {
         self.scale
     }
 
     /// The run's bytes, for a caller recolouring it in place.
+    #[allow(dead_code)]
     pub(super) fn bytes(&self) -> &[u8] {
         &self.b[..self.len]
     }
@@ -879,11 +883,13 @@ impl CardPlan {
 
     /// Recolours the card's plane, for a card that sits inside a sheet rather than
     /// on the page.
+    #[allow(dead_code)]
     pub(super) fn set_fill(&mut self, fill: u32) {
         self.fill = fill;
     }
 
     /// Recolours the header, for the one card whose heading is a warning.
+    #[allow(dead_code)]
     pub(super) fn set_header_ink(&mut self, ink: u32) {
         self.header = Run::whole(
             self.header.left(),

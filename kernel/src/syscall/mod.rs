@@ -465,10 +465,15 @@ fn caller_is_package(pkg: &str) -> bool {
 /// package it claims, or hold the system notification broker's `SystemControl`
 /// grant (which is what lets a system daemon post for other packages).
 fn require_package_or_delegated(pkg: &str) -> Result<(), SyscallResult> {
+    if pkg.is_empty() {
+        return require_system_control_object(NOTIFICATION_CONTROL_OBJECT)
+            .or_else(|_| require_system_control());
+    }
     if caller_is_package(pkg) {
         return Ok(());
     }
     require_system_control_object(NOTIFICATION_CONTROL_OBJECT)
+        .or_else(|_| require_system_control())
 }
 
 /// Sends an IPC message to a destination task.
@@ -2015,12 +2020,23 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             // notification attributed to an arbitrary package, which is
             // notification spoofing (impersonating a system or banking alert).
             if let Err(e) = require_package_or_delegated(pkg) { return e as i64; }
-            let channel_len = (a4 & 0xFF) as usize;
-            if channel_len == 0 || channel_len > 32 { return SyscallResult::InvalidArguments as i64; }
-            let mut chan_buf = [0u8; 32];
-            let chan = match read_user_string(a3, channel_len, &mut chan_buf) {
+            let channel_len = (a4 & 0x1FF) as usize;
+            if channel_len == 0 || channel_len > 256 { return SyscallResult::InvalidArguments as i64; }
+            let mut chan_buf = [0u8; 256];
+            let chan_payload = match read_user_string(a3, channel_len, &mut chan_buf) {
                 Ok(s) => s,
                 Err(_) => return SyscallResult::InvalidArguments as i64,
+            };
+            let (chan, title, body) = if let Some(first_bar) = chan_payload.find('|') {
+                let c = &chan_payload[..first_bar];
+                let rest = &chan_payload[first_bar + 1..];
+                if let Some(second_bar) = rest.find('|') {
+                    (c, &rest[..second_bar], &rest[second_bar + 1..])
+                } else {
+                    (c, rest, "New notification")
+                }
+            } else {
+                (chan_payload, "Notification", "New alert")
             };
             // Post into the caller's OWN account, never the global active user.
             // Otherwise a background task bound to a background account could
@@ -2035,8 +2051,8 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 pkg,
                 user_id,
                 chan,
-                "Notification",
-                "New alert",
+                title,
+                body,
                 crate::notification::NotificationPriority::Default,
                 crate::notification::LockscreenVisibility::Public,
                 1,
@@ -2049,31 +2065,65 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         111 => {
             // NotificationCancel: a1 = pkg_ptr, a2 = pkg_len, a3 = notif_id
             let pkg_len = a2 as usize;
-            if pkg_len == 0 || pkg_len > 64 { return SyscallResult::InvalidArguments as i64; }
+            if pkg_len > 64 { return SyscallResult::InvalidArguments as i64; }
             let mut pkg_buf = [0u8; 64];
-            let pkg = match read_user_string(a1, pkg_len, &mut pkg_buf) {
-                Ok(s) => s,
-                Err(_) => return SyscallResult::InvalidArguments as i64,
+            let pkg = if pkg_len > 0 {
+                match read_user_string(a1, pkg_len, &mut pkg_buf) {
+                    Ok(s) => s,
+                    Err(_) => return SyscallResult::InvalidArguments as i64,
+                }
+            } else {
+                ""
             };
             // Same identity binding as post: a caller may only cancel the
-            // notifications of the package it actually is.
+            // notifications of the package it actually is, or hold system control.
             if let Err(e) = require_package_or_delegated(pkg) { return e as i64; }
             let mut nm = crate::notification::NOTIFICATION_MANAGER.lock();
+            if a3 == 0 {
+                if let Some(uid) = caller_user_id() {
+                    nm.cancel_all_for_user(uid);
+                    return SyscallResult::Success as i64;
+                }
+            }
             match nm.cancel(pkg, a3) {
                 Ok(()) => SyscallResult::Success as i64,
                 Err(_) => SyscallResult::TargetNotFound as i64,
             }
         },
         112 => {
-            // NotificationQuery: a1 = user_id, a2 = is_locked
-            // Scoped to the caller's own account (or a delegated grant for that
-            // account). The previous unscoped read returned notification titles
-            // and bodies for ANY user_id on the device.
+            // NotificationQuery: a1 = user_id, a2 = is_locked, a3 = out_buf_ptr, a4 = out_buf_cap
+            // Scoped to the caller's own account (or a delegated grant for that account).
             let target_uid = a1 as u32;
             if let Err(e) = require_own_or_delegated_user(target_uid) { return e as i64; }
             let nm = crate::notification::NOTIFICATION_MANAGER.lock();
             let active = nm.query_active(target_uid, a2 != 0);
-            active.len() as i64
+            if a3 == 0 || a4 == 0 {
+                return active.len() as i64;
+            }
+            let out_len = (a4 as usize).min(4096);
+            let mut out = [0u8; 4096];
+            use core::fmt::Write;
+            struct W<'a>{b:&'a mut[u8],n:usize}
+            impl<'a> Write for W<'a>{
+                fn write_str(&mut self,s:&str)->core::fmt::Result{
+                    let k=s.len().min(self.b.len().saturating_sub(self.n));
+                    self.b[self.n..self.n+k].copy_from_slice(&s.as_bytes()[..k]);
+                    self.n+=k;
+                    Ok(())
+                }
+            }
+            let mut w = W{b: &mut out[..out_len], n: 0};
+            for r in &active {
+                let _ = writeln!(w, "{}|{}|{}|{}|{}|{}|{}\n",
+                    r.id, r.package_id, r.channel_id, r.priority as u8, r.timestamp_ticks, r.title, r.body);
+                if w.n >= w.b.len() { break; }
+            }
+            let written = w.n;
+            drop(w);
+            if copy_to_user(a3, &out[..written]).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            written as i64
         },
         113 => {
             // PermissionRevoke: a1 = task_id, a2 = perm_id. A task may revoke
