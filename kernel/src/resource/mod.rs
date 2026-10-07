@@ -78,6 +78,7 @@ pub fn init() {
     // global POWER_MANAGER here left fabricated temperatures and a fabricated
     // 94% state of charge in the live telemetry that userspace can query.
     let mut pm = PowerManager::new(2400);
+    pm.set_display_refresh_range(60, 144);
     pm.update_thermal(35);
     pm.update_battery(94, true);
     pm.set_governor(DvfsGovernor::Interactive);

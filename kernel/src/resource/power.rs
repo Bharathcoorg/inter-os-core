@@ -42,6 +42,10 @@ pub struct PowerManager {
     pub min_freq_mhz: u32,
     pub thermal_trip: ThermalTrip,
     pub display_refresh_hz: u16,
+    /// Advertised panel refresh range. Zero means no panel/controller has been
+    /// bound, so the governor must not claim that any refresh rate is active.
+    pub display_min_refresh_hz: u16,
+    pub display_max_refresh_hz: u16,
     pub battery_percent: u8,
     pub is_charging: bool,
     pub touch_boost_active: bool,
@@ -60,6 +64,8 @@ impl PowerManager {
             min_freq_mhz: base_freq_mhz / 4, // 25% minimum frequency floor
             thermal_trip: ThermalTrip::Nominal,
             display_refresh_hz: 0,
+            display_min_refresh_hz: 0,
+            display_max_refresh_hz: 0,
             battery_percent: 0,
             is_charging: false,
             touch_boost_active: false,
@@ -114,6 +120,27 @@ impl PowerManager {
         self.recalculate_frequency();
     }
 
+    /// Binds the refresh-rate range advertised by the active display controller.
+    /// This is a capability/telemetry input, not a claim that the panel supports
+    /// every integer Hz in the interval.
+    pub fn set_display_refresh_range(&mut self, min_hz: u16, max_hz: u16) {
+        if min_hz == 0 || max_hz == 0 || min_hz > max_hz {
+            self.display_min_refresh_hz = 0;
+            self.display_max_refresh_hz = 0;
+        } else {
+            self.display_min_refresh_hz = min_hz;
+            self.display_max_refresh_hz = max_hz;
+        }
+        self.recalculate_frequency();
+    }
+
+    fn select_refresh_rate(&self, desired_hz: u16) -> u16 {
+        if self.display_max_refresh_hz == 0 {
+            return 0;
+        }
+        desired_hz.clamp(self.display_min_refresh_hz, self.display_max_refresh_hz)
+    }
+
     /// Recalculates effective clock frequency and display refresh rate based on policy.
     fn recalculate_frequency(&mut self) {
         if !self.telemetry_valid {
@@ -125,10 +152,10 @@ impl PowerManager {
                 // Performance locks to max unless critical thermal
                 if self.thermal_trip == ThermalTrip::Critical {
                     self.current_freq_mhz = self.base_freq_mhz / 2;
-                    self.display_refresh_hz = 60;
+                    self.display_refresh_hz = self.select_refresh_rate(60);
                 } else {
                     self.current_freq_mhz = self.max_freq_mhz;
-                    self.display_refresh_hz = 120;
+                    self.display_refresh_hz = self.select_refresh_rate(120);
                 }
             }
 
@@ -142,7 +169,7 @@ impl PowerManager {
                 match self.thermal_trip {
                     ThermalTrip::Critical => {
                         self.current_freq_mhz = self.min_freq_mhz;
-                        self.display_refresh_hz = 30;
+                        self.display_refresh_hz = self.select_refresh_rate(30);
                     }
                     ThermalTrip::Throttling => {
                         self.current_freq_mhz = self.base_freq_mhz / 2;
@@ -151,7 +178,7 @@ impl PowerManager {
                     ThermalTrip::Warning => {
                         let target = (self.base_freq_mhz as u64 * 3 / 4) as u32;
                         self.current_freq_mhz = target;
-                        self.display_refresh_hz = 90;
+                        self.display_refresh_hz = self.select_refresh_rate(90);
                     }
                     ThermalTrip::Nominal => {
                         if self.battery_valid && !self.is_charging && self.battery_percent < 15 {
@@ -234,5 +261,45 @@ impl PowerTransition {
     pub fn resume_complete(&mut self)->Result<(),&'static str>{
         if self.state != SuspendState::Resuming { return Err("resume not pending"); }
         self.state=SuspendState::Active; self.suspended_domains=PowerDomainMask(0); Ok(())
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refresh_policy_requires_a_bound_panel() {
+        let mut power = PowerManager::new(2400);
+        power.update_thermal(30);
+        assert_eq!(power.display_refresh_hz, 0);
+        power.set_display_refresh_range(60, 144);
+        assert_eq!(power.display_refresh_hz, 120);
+    }
+
+    #[test]
+    fn refresh_policy_clamps_to_advertised_range() {
+        let mut power = PowerManager::new(2400);
+        power.set_display_refresh_range(60, 90);
+        power.update_thermal(30);
+        assert_eq!(power.display_refresh_hz, 90);
+
+        power.update_thermal(80);
+        assert_eq!(power.display_refresh_hz, 60);
+
+        power.update_thermal(90);
+        assert_eq!(power.display_refresh_hz, 60);
+    }
+
+    #[test]
+    fn invalid_refresh_range_fails_closed() {
+        let mut power = PowerManager::new(2400);
+        power.set_display_refresh_range(0, 144);
+        power.update_thermal(30);
+        assert_eq!(power.display_refresh_hz, 0);
+
+        power.set_display_refresh_range(144, 60);
+        assert_eq!(power.display_refresh_hz, 0);
     }
 }

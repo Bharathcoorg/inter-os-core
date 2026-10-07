@@ -339,19 +339,42 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertIn("pub fn set_journal_auth_key", journal)
         self.assertIn("persistent::set_journal_auth_key(&ks.master_seed)", keystore)
 
-    def test_vault_decryption_is_checked_against_a_kernel_issued_tag(self):
+    def test_vault_decryption_uses_persistent_authenticated_envelopes(self):
         vault = self.read("kernel/src/storage/vault.rs")
         syscall = self.read("kernel/src/syscall/mod.rs")
-        # A tag recomputed from the caller's own ciphertext compares a value with
-        # itself, so IntegrityViolation was unreachable and any ciphertext
-        # decrypted to attacker-chosen bytes.
-        self.assertIn("issued", vault)
-        self.assertIn("fn record_sealed", vault)
-        self.assertIn("fn matches_sealed", vault)
-        self.assertIn("!self.matches_sealed(block)", vault)
+        # Vault authentication must be derived from the persisted envelope and
+        # keystore-derived key. An in-memory list of previously issued tags would
+        # make valid persisted data impossible to reopen after reboot.
         self.assertIn("block.verify(&self.vault_key)", vault)
+        self.assertNotIn("fn record_sealed", vault)
+        self.assertNotIn("fn matches_sealed", vault)
+        self.assertNotIn("issued", vault)
+        self.assertIn("fresh vault instance", vault)
         self.assertNotIn("block_with_tag.hmac_tag = block_with_tag.compute_hmac", syscall)
         self.assertNotIn("hmac_tag: [0u8; 32], // Computed on envelope", syscall)
+
+    def test_refresh_policy_does_not_claim_an_unbound_panel(self):
+        power = self.read("kernel/src/resource/power.rs")
+        self.assertIn("display_min_refresh_hz", power)
+        self.assertIn("display_max_refresh_hz", power)
+        self.assertIn("set_display_refresh_range", power)
+        self.assertIn("if self.display_max_refresh_hz == 0", power)
+        # Policy targets must be negotiated against the advertised panel range,
+        # not presented as universal 30/60/90/120 Hz hardware facts.
+        self.assertIn("select_refresh_rate(120)", power)
+        self.assertIn("select_refresh_rate(90)", power)
+        self.assertIn("select_refresh_rate(60)", power)
+        self.assertIn("select_refresh_rate(30)", power)
+
+    def test_studio_does_not_invent_scanout_dimensions_or_apk_trust(self):
+        server = self.read("emulator/server.py")
+        app = self.read("emulator/app.js")
+        self.assertIn('"framebuffer": {"width": None, "height": None', server)
+        self.assertIn("not cryptographically verified", server)
+        self.assertIn('"status": "Analyzed; guest installation required"', server)
+        self.assertIn("const fbW = liveScanoutImg?.naturalWidth || 0;", app)
+        self.assertIn("if (fbW < 1 || fbH < 1) return;", app)
+        self.assertNotIn("coords: 'landscape'", app)
 
     def test_guest_is_never_handed_the_boot_image_as_storage(self):
         # The kernel uses the Primary Master as the boot image and the Primary
