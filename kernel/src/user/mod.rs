@@ -399,6 +399,12 @@ impl UserManager {
             return Err(UserError::InvalidCredential);
         }
         let profile = self.users.get_mut(&uid).ok_or(UserError::UserNotFound)?;
+        if profile.credential.is_some() {
+            // Credential establishment is a first-boot operation. Once a secret
+            // exists, changing it requires an authenticated credential-change
+            // flow rather than an unauthenticated overwrite primitive.
+            return Err(UserError::PermissionDenied);
+        }
         profile.credential = Some(Credential::new(secret));
         // Stay Locked: setting a credential must not itself grant access.
         profile.lock_state = UserLockState::Locked;
