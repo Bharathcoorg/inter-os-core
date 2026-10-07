@@ -153,11 +153,10 @@ impl IpcRouter {
             return true;
         }
         if task_id != TaskId(0) {
-            let Some(process) = crate::task::process::process_for_task(task_id) else {
-                return false;
-            };
-            if crate::task::process::reserve_ipc_endpoint(process).is_err() {
-                return false;
+            if let Some(process) = crate::task::process::process_for_task(task_id) {
+                if crate::task::process::reserve_ipc_endpoint(process).is_err() {
+                    return false;
+                }
             }
         }
         if !self.mailboxes.iter().any(|m| m.task_id == task_id) {
@@ -245,8 +244,10 @@ impl IpcRouter {
 
         // Background applications receive a bounded IPC budget so a hidden
         // process cannot keep the system busy by continuously waking peers.
-        crate::task::process::consume_background_ipc(sender)
-            .map_err(|_| IpcError::MailboxFull)?;
+        if let Some(_) = crate::task::process::process_for_task(sender) {
+            crate::task::process::consume_background_ipc(sender)
+                .map_err(|_| IpcError::MailboxFull)?;
+        }
 
         let msg = IpcMessage::new(sender, msg_type, data);
         mailbox.queue.push_back(msg);
