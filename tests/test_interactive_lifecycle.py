@@ -65,6 +65,7 @@ class SerialReader:
         self.sock = sock
         self.buf = b""
         self.captured_logs = []
+        self.cmd_log_idx = 0
 
     def flush(self, settle=0.35):
         """Discards everything the guest has already produced.
@@ -104,10 +105,16 @@ class SerialReader:
     def send(self, line):
         """Flushes stale output, then sends one command line."""
         self.flush()
+        self.cmd_log_idx = len(self.captured_logs)
         self.sock.sendall(line.encode("utf-8") if isinstance(line, str) else line)
 
     def wait_for(self, marker, timeout=15.0, print_keywords=None):
         timeout = max(timeout, 25.0)
+        # Check logs already captured for the current command
+        for log in self.captured_logs[self.cmd_log_idx:]:
+            if marker in log:
+                return True
+
         start_t = time.time()
         while time.time() - start_t < timeout:
             try:
@@ -527,6 +534,7 @@ def main():
             print_keywords=["MUSIC", "APP", "canvas"]
         )
         assert recent_presented, "Recent app failed to present canvas within timeout"
+        print("[LIFECYCLE TEST] [OK] Recent app presented canvas.")
         time.sleep(1.0)
 
         # Exit child app via swipe up to return to launcher
