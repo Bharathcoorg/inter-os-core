@@ -76,6 +76,7 @@ pub enum NotificationError {
     MaxNotificationsExceeded,
     DndSuppressed,
     AppBlocked,
+    RateLimited,
 }
 
 /// Notification manager state engine.
@@ -86,6 +87,9 @@ pub struct NotificationManager {
     dnd_enabled: bool,
     app_blocks: BTreeMap<String, bool>,
     max_active: usize,
+    // Per-package notification flood control. The broker remains authoritative;
+    // package identity is already verified at the syscall boundary.
+    rate_state: BTreeMap<String, (u64, u16)>,
 }
 
 impl NotificationManager {
@@ -97,6 +101,7 @@ impl NotificationManager {
             dnd_enabled: false,
             app_blocks: BTreeMap::new(),
             max_active: 64,
+            rate_state: BTreeMap::new(),
         }
     }
 
@@ -164,18 +169,31 @@ impl NotificationManager {
             }
         }
 
-        // 2. Validate channel exists
+        // 2. Bound notification floods without imposing a global device-wide
+        // rate limit. A package gets 20 posts per 1000 ticks; the window is
+        // anchored to the first accepted post and resets after it expires.
+        const RATE_WINDOW_TICKS: u64 = 1000;
+        const RATE_LIMIT: u16 = 20;
+        let rate = self.rate_state.entry(package_id.to_string()).or_insert((current_tick, 0));
+        if current_tick.saturating_sub(rate.0) >= RATE_WINDOW_TICKS {
+            *rate = (current_tick, 0);
+        }
+        if rate.1 >= RATE_LIMIT {
+            return Err(NotificationError::RateLimited);
+        }
+
+        // 3. Validate channel exists
         let channel = self
             .channels
             .get(channel_id)
             .ok_or(NotificationError::ChannelNotFound)?;
 
-        // 3. Check DND filter
+        // 4. Check DND filter
         if self.dnd_enabled && !channel.dnd_bypass && priority < NotificationPriority::Urgent {
             return Err(NotificationError::DndSuppressed);
         }
 
-        // 4. Check active capacity limit
+        // 5. Check active capacity limit
         let active_count = self.records.iter().filter(|r| !r.is_cancelled).count();
         if active_count >= self.max_active {
             return Err(NotificationError::MaxNotificationsExceeded);
@@ -199,6 +217,9 @@ impl NotificationManager {
         };
 
         self.records.push(record);
+        if let Some(rate) = self.rate_state.get_mut(package_id) {
+            rate.1 = rate.1.saturating_add(1);
+        }
         // A suspended package is eligible for notification-driven wakeup. The
         // scheduler still enforces its background CPU quota after delivery.
         let _ = crate::task::process::wake_package(package_id, user_id);
@@ -291,6 +312,7 @@ impl NotificationManager {
     /// Drops package-specific notification policy when the package is removed.
     pub fn remove_app_policy(&mut self, package_id: &str) {
         self.app_blocks.remove(package_id);
+        self.rate_state.remove(package_id);
     }
 
     /// Returns total active unread badge count for a package.
