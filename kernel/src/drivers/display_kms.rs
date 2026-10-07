@@ -524,10 +524,10 @@ impl DrmKmsController {
 }
 
 /// Global static instance of the DRM/KMS Controller.
-/// Canonical x86_64 QEMU scanout: 1280x720 ARGB8888.
+/// Canonical portrait scanout matches the 720x1440 launcher surface. The boot framebuffer is a separate presentation target and may be any supported size.
 pub static DRM_KMS: Mutex<DrmKmsController> = Mutex::new(DrmKmsController {
-    scanout_width: 1280,
-    scanout_height: 720,
+    scanout_width: 720,
+    scanout_height: 1440,
     format: DrmPixelFormat::Argb8888,
     front_buffer: Vec::new(),
     back_buffer: Vec::new(),

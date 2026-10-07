@@ -79,8 +79,17 @@ fn main() -> anyhow::Result<()> {
             .context("Failed to create target output directory")?;
     }
 
-    let bios_boot = bootloader::BiosBoot::new(&kernel_path);
+    // Prefer the launcher logical surface at the bootloader boundary. This is a
+    // minimum request, not a fixed mode: unsupported firmware may choose a
+    // smaller framebuffer, which the runtime reports instead of inventing one.
+    let mut boot_config = BootConfig::default();
+    boot_config.frame_buffer.minimum_framebuffer_width = Some(720);
+    boot_config.frame_buffer.minimum_framebuffer_height = Some(1440);
+    boot_config.frame_buffer_logging = false;
+
+    let mut bios_boot = BiosBoot::new(&kernel_path);
     bios_boot
+        .set_boot_config(&boot_config)
         .create_disk_image(&out_path)
         .context("Failed to create bootable BIOS disk image via bootloader crate")?;
 

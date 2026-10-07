@@ -42,13 +42,11 @@ launcher_has_booted = False
 
 # Guest scanout geometry.
 #
-# The kernel letterboxes its 720x1440 logical portrait surface into the centre of
-# the 1280x720 QEMU framebuffer (see kernel/src/framebuffer.rs
-# present_argb8888). The display crop and the input mapping are both derived from
-# these constants so the studio and the guest cannot disagree about where the
-# phone surface actually is.
-GUEST_FRAMEBUFFER_W, GUEST_FRAMEBUFFER_H = 1280, 720
+# The logical phone surface is 720x1440. The actual QEMU framebuffer is learned
+# from live screendumps, so Device Studio does not assume a developer has a
+# particular host resolution.
 LOGICAL_SURFACE_W, LOGICAL_SURFACE_H = 720, 1440
+guest_framebuffer_size = (1280, 720)
 
 
 def letterbox_box(fb_w, fb_h):
@@ -76,9 +74,12 @@ def letterbox_box(fb_w, fb_h):
     return (off_x, off_y, off_x + dst_w, off_y + dst_h)
 
 
-LETTERBOX_BOX = letterbox_box(GUEST_FRAMEBUFFER_W, GUEST_FRAMEBUFFER_H)
-LETTERBOX_X = LETTERBOX_BOX[0]                          # 460
-LETTERBOX_W = LETTERBOX_BOX[2] - LETTERBOX_BOX[0]       # 360
+def current_framebuffer_size():
+    return guest_framebuffer_size
+
+def current_letterbox_box():
+    return letterbox_box(*current_framebuffer_size())
+
 
 
 def portrait_from_framebuffer(gx, gy):
@@ -88,10 +89,11 @@ def portrait_from_framebuffer(gx, gy):
     click on the surrounding desktop area is never mistaken for a touch on the
     device screen.
     """
-    left, top, right, bottom = LETTERBOX_BOX
+    left, top, right, bottom = current_letterbox_box()
     if not (left <= gx < right and top <= gy < bottom):
         return None
-    px = (gx - left) * LOGICAL_SURFACE_W // LETTERBOX_W
+    box_w = max(1, right - left)
+    px = (gx - left) * LOGICAL_SURFACE_W // box_w
     py = (gy - top) * LOGICAL_SURFACE_H // (bottom - top)
     return (
         max(0, min(LOGICAL_SURFACE_W - 1, px)),
@@ -784,14 +786,16 @@ def capture_qemu_screen_frame(full_scanout=False, orientation=None):
 
             if is_landscape:
                 width, height = img.size
-                if width >= GUEST_FRAMEBUFFER_W and height >= GUEST_FRAMEBUFFER_H:
+                global guest_framebuffer_size
+                guest_framebuffer_size = (width, height)
+                if width > 0 and height > 0:
                     box = letterbox_box(width, height)
                     rgb_img = img.convert("RGB")
                     left_sample = rgb_img.getpixel((box[0] // 2, height // 2))
                     right_sample = rgb_img.getpixel((box[2] + (width - box[2]) // 2, height // 2))
                     if left_sample == (0, 0, 0) and right_sample == (0, 0, 0):
                         cropped = img.crop(box)
-                        out_img = cropped.rotate(270, expand=True).resize((1280, 720), Image.Resampling.BILINEAR)
+                        out_img = cropped.rotate(270, expand=True)
                     else:
                         out_img = img
                 else:
@@ -805,14 +809,14 @@ def capture_qemu_screen_frame(full_scanout=False, orientation=None):
                 return frame_bytes, "image/png"
             else:
                 width, height = img.size
-                if width >= GUEST_FRAMEBUFFER_W and height >= GUEST_FRAMEBUFFER_H:
+                guest_framebuffer_size = (width, height)
+                if width > 0 and height > 0:
                     box = letterbox_box(width, height)
                     cropped = img.crop(box)
-                    scaled = cropped.resize(
-                        (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H), Image.Resampling.BILINEAR
-                    )
+                    # Preserve the captured guest pixels. Browser presentation
+                    # scaling is deliberately outside the capture path.
                     buf = io.BytesIO()
-                    scaled.save(buf, format="PNG", compress_level=1)
+                    cropped.save(buf, format="PNG", compress_level=1)
                     frame_bytes = buf.getvalue()
                     _last_frame_cache['portrait'] = frame_bytes
                     _last_frame_cache['time'] = time.time()
@@ -2100,7 +2104,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps({
                 'success': True,
                 'orientation': current_device_orientation,
-                'scanout': '1280x720' if current_device_orientation == 'landscape' else '720x1440'
+                'scanout': f'{guest_framebuffer_size[0]}x{guest_framebuffer_size[1]}'
             }).encode())
             return
 
@@ -2128,17 +2132,18 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 # converted here, in the one place that knows the studio's
                 # letterbox geometry, rather than being round-tripped through the
                 # kernel with a second copy of the constants.
-                LOGICAL_W, LOGICAL_H = 720, 1440
+                LOGICAL_W, LOGICAL_H = LOGICAL_SURFACE_W, LOGICAL_SURFACE_H
                 if space in ('landscape', 'logical_landscape') or (space in ('guest', 'guest_framebuffer', 'qemu', 'qemu_framebuffer') and current_device_orientation == 'landscape'):
                     x = int(data.get('x', 0)); y = int(data.get('y', 0))
-                    if not (0 <= x < 1280 and 0 <= y < 720): raise ValueError('landscape coordinates out of bounds')
+                    fb_w, fb_h = current_framebuffer_size()
+                    if not (0 <= x < fb_w and 0 <= y < fb_h): raise ValueError('landscape coordinates out of bounds')
                     # KMS LandscapeRight maps (x, y) in 1280x720 scanout to mobile surface (719 - y, (x * 1440) // 1280)
-                    gx = max(0, min(719, 719 - y))
-                    gy = max(0, min(1439, (x * 1440) // 1280))
+                    gx = max(0, min(LOGICAL_SURFACE_W - 1, LOGICAL_SURFACE_W - 1 - (y * LOGICAL_SURFACE_W) // max(1, fb_h)))
+                    gy = max(0, min(LOGICAL_SURFACE_H - 1, (x * LOGICAL_SURFACE_H) // max(1, fb_w)))
                     x2 = int(data.get('x2', x)); y2 = int(data.get('y2', y))
-                    if not (0 <= x2 < 1280 and 0 <= y2 < 720): raise ValueError('landscape end coordinates out of bounds')
-                    gx2 = max(0, min(719, 719 - y2))
-                    gy2 = max(0, min(1439, (x2 * 1440) // 1280))
+                    if not (0 <= x2 < fb_w and 0 <= y2 < fb_h): raise ValueError('landscape end coordinates out of bounds')
+                    gx2 = max(0, min(LOGICAL_SURFACE_W - 1, LOGICAL_SURFACE_W - 1 - (y2 * LOGICAL_SURFACE_W) // max(1, fb_h)))
+                    gy2 = max(0, min(LOGICAL_SURFACE_H - 1, (x2 * LOGICAL_SURFACE_H) // max(1, fb_w)))
                 elif space in ('portrait', 'logical_portrait', 'studio_display'):
                     x = int(data.get('x', 0)); y = int(data.get('y', 0))
                     if not (0 <= x < LOGICAL_W and 0 <= y < LOGICAL_H): raise ValueError('portrait coordinates out of bounds')
@@ -2148,12 +2153,13 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                     gx2, gy2 = x2, y2
                 elif space in ('guest', 'guest_framebuffer', 'qemu', 'qemu_framebuffer'):
                     x = int(data.get('x', 0)); y = int(data.get('y', 0))
-                    if not (0 <= x < 1280 and 0 <= y < 720): raise ValueError('guest framebuffer coordinates out of bounds')
+                    fb_w, fb_h = current_framebuffer_size()
+                    if not (0 <= x < fb_w and 0 <= y < fb_h): raise ValueError('guest framebuffer coordinates out of bounds')
                     p = portrait_from_framebuffer(x, y)
                     if p is None: raise ValueError('coordinates outside letterboxed phone canvas')
                     gx, gy = p
                     x2 = int(data.get('x2', x)); y2 = int(data.get('y2', y))
-                    if not (0 <= x2 < 1280 and 0 <= y2 < 720): raise ValueError('guest framebuffer coordinates out of bounds')
+                    if not (0 <= x2 < fb_w and 0 <= y2 < fb_h): raise ValueError('guest framebuffer coordinates out of bounds')
                     p2 = portrait_from_framebuffer(x2, y2)
                     if p2 is None: raise ValueError('coordinates outside letterboxed phone canvas')
                     gx2, gy2 = p2

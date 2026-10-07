@@ -86,8 +86,8 @@ pub mod viewport {
     pub const LOGICAL_HEIGHT: usize = 1440;
 
     /// Hardware / QEMU scanout dimensions.
-    pub const SCANOUT_WIDTH: usize = 1280;
-    pub const SCANOUT_HEIGHT: usize = 720;
+    pub const SCANOUT_WIDTH: usize = LOGICAL_WIDTH;
+    pub const SCANOUT_HEIGHT: usize = LOGICAL_HEIGHT;
 
     /// System safe areas and chrome metrics.
     pub const STATUS_BAR_HEIGHT: usize = 48;
@@ -147,25 +147,38 @@ pub mod viewport {
 
         /// Map logical portrait (lx, ly) in 720x1440 to scanout destination (sx, sy).
         pub fn logical_to_scanout(&self, lx: usize, ly: usize) -> Option<(usize, usize)> {
-            if lx >= LOGICAL_WIDTH || ly >= LOGICAL_HEIGHT {
+            if lx >= LOGICAL_WIDTH || ly >= LOGICAL_HEIGHT || self.scanout_w == 0 || self.scanout_h == 0 {
                 return None;
             }
+
             match self.orientation {
                 DisplayOrientation::Portrait => {
-                    // Centered 360x720 letterbox in 1280x720
-                    let dst_x = 460 + (lx / 2);
-                    let dst_y = ly / 2;
-                    Some((dst_x, dst_y))
+                    let (dst_w, dst_h) = if LOGICAL_WIDTH * self.scanout_h <= LOGICAL_HEIGHT * self.scanout_w {
+                        (
+                            (LOGICAL_WIDTH * self.scanout_h / LOGICAL_HEIGHT).max(1).min(self.scanout_w),
+                            self.scanout_h,
+                        )
+                    } else {
+                        (
+                            self.scanout_w,
+                            (LOGICAL_HEIGHT * self.scanout_w / LOGICAL_WIDTH).max(1).min(self.scanout_h),
+                        )
+                    };
+                    let off_x = (self.scanout_w - dst_w) / 2;
+                    let off_y = (self.scanout_h - dst_h) / 2;
+                    let sx = off_x + lx * dst_w / LOGICAL_WIDTH;
+                    let sy = off_y + ly * dst_h / LOGICAL_HEIGHT;
+                    Some((sx.min(self.scanout_w - 1), sy.min(self.scanout_h - 1)))
                 }
                 DisplayOrientation::LandscapeRight => {
-                    let sx = (ly * self.scanout_w) / LOGICAL_HEIGHT;
-                    let sy = 719usize.saturating_sub(lx);
-                    Some((sx, sy))
+                    let sx = ly * self.scanout_w / LOGICAL_HEIGHT;
+                    let sy = self.scanout_h - 1 - lx * self.scanout_h / LOGICAL_WIDTH;
+                    Some((sx.min(self.scanout_w - 1), sy.min(self.scanout_h - 1)))
                 }
                 DisplayOrientation::LandscapeLeft => {
-                    let sx = 1279usize.saturating_sub((ly * self.scanout_w) / LOGICAL_HEIGHT);
-                    let sy = lx;
-                    Some((sx, sy))
+                    let sx = self.scanout_w - 1 - ly * self.scanout_w / LOGICAL_HEIGHT;
+                    let sy = lx * self.scanout_h / LOGICAL_WIDTH;
+                    Some((sx.min(self.scanout_w - 1), sy.min(self.scanout_h - 1)))
                 }
             }
         }

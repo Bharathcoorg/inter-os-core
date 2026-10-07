@@ -479,7 +479,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let isStreamActive = false;
   let frameCount = 0;
   let fpsTimer = performance.now();
-  let measuredFps = 144;
+  let measuredFps = 0;
   const renderHzBadge = document.getElementById('render-hz-badge');
 
   function updateFpsCounter() {
@@ -490,7 +490,7 @@ document.addEventListener('DOMContentLoaded', () => {
       frameCount = 0;
       fpsTimer = now;
       if (renderHzBadge) {
-        const displayHz = measuredFps >= 70 ? `${measuredFps} Hz • Ultra Fluid` : `${Math.max(30, measuredFps)} FPS • Active`;
+        const displayHz = measuredFps > 0 ? `${measuredFps} FPS • Measured` : 'FPS • Measuring';
         renderHzBadge.textContent = displayHz;
       }
     }
@@ -818,7 +818,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Target badges must describe the machine that is actually running.
   //
   // These were static marketing copy ("ARM64 / RISC-V", "4 GB LPDDR4X",
-  // "720p @ 120Hz") that contradicted the guest the studio drives: the default
+  // "Guest display mode") that contradicted the guest the studio drives: the default
   // profile is x86_64 with QEMU RAM, no memory technology and no 120 Hz panel.
   // Report what was observed and say plainly that it is virtualised. When the
   // guest cannot be reached, leave the badges undetermined rather than inventing
@@ -1600,7 +1600,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (flipsBadge) flipsBadge.textContent = `${d.kms.page_flips} Page Flips`;
             if (frontEl) frontEl.textContent = d.kms.front_buffer;
             if (backEl) backEl.textContent = d.kms.back_buffer;
-            showToast(`KMS Page Flip #${d.kms.page_flips} @ 60Hz VSYNC`);
+            showToast(`KMS Page Flip #${d.kms.page_flips} • guest timing`);
           }
         });
     });
