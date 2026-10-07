@@ -32,7 +32,7 @@ pub const SLOT_SECTORS: u32 = 128;
 /// This literal is pinned by tests/test_storage_contract.py; see that test.
 const SLOT_COUNT: u32 = 16;
 /// Slots below the primary region, for kinds whose number is above 8.
-const EXTENSION_SLOT_COUNT: u32 = 2;
+const EXTENSION_SLOT_COUNT: u32 = 4;
 /// Every slot the journal scans, in address order.
 ///
 /// WHY this is `pub`: `storage::filesystem` derives its tail reservation from
@@ -42,7 +42,7 @@ const EXTENSION_SLOT_COUNT: u32 = 2;
 /// first, but a latent way for the filesystem to format over a live journal.
 pub const TOTAL_SLOT_COUNT: u32 = SLOT_COUNT + EXTENSION_SLOT_COUNT;
 pub const JOURNAL_MIN_KIND: u8 = 1;
-pub const JOURNAL_MAX_KIND: u8 = 9;
+pub const JOURNAL_MAX_KIND: u8 = 10;
 /// Payload bytes one slot can hold.
 ///
 /// WHY this is `SLOT_SECTORS - 1` sectors and not `SLOT_SECTORS * 512 - 64`:
@@ -94,10 +94,17 @@ fn slot_base(total: u32, slot: u32) -> Option<u32> {
     }
     let region_base = total - reserved;
     if slot < SLOT_COUNT {
-        // Identical to the historical `total - 16*128 + slot*128`.
+        // Identical to the historical primary-region addresses.
         Some(region_base + EXTENSION_SLOT_COUNT * SLOT_SECTORS + slot * SLOT_SECTORS)
     } else {
-        Some(region_base + (slot - SLOT_COUNT) * SLOT_SECTORS)
+        // Kind 9 originally occupied the first extension pair at
+        // total - 18*128. Keep that pair byte-for-byte stable while allocating
+        // the new kind 10 in the newly reserved pair immediately below it.
+        match slot {
+            16 | 17 => Some(region_base + (slot - SLOT_COUNT) * SLOT_SECTORS),
+            18 | 19 => Some(region_base + 2 * SLOT_SECTORS + (slot - 18) * SLOT_SECTORS),
+            _ => None,
+        }
     }
 }
 
@@ -325,8 +332,9 @@ fn record_tag(kind: u8, generation: u64, payload: &[u8]) -> [u8; 32] {
 ///
 /// WHY this exists as a function: the declared kinds partition the journal's
 /// slots exhaustively, so a kind cannot be added without giving it a pair, and
-/// giving it a pair must not move the primary region. Kinds 1..=8 own the
-/// primary region; kind 9 and anything after it own the extension region below.
+/// giving it a pair must not move an existing record. Kinds 1..=8 own the
+/// primary region; kind 9 retains its historical extension pair and kind 10
+/// uses the newly reserved pair below it.
 ///
 /// WHY kind 6 is alone in its own pair and must stay that way: it is the record
 /// read under the zero key before the published key exists, so a record
@@ -337,7 +345,7 @@ fn pair_start_for_kind(kind: u8) -> Option<usize> {
     let start = match kind {
         1 => 0usize, 2 => 2usize, 3 => 4usize, 4 => 6usize,
         5 => 8usize, 6 => 10usize, 7 => 12usize, 8 => 14usize,
-        9 => 16usize,
+        9 => 18usize, 10 => 16usize,
         _ => return None,
     };
     Some(start)

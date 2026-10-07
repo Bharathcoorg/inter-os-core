@@ -20,6 +20,7 @@ pub enum ProcessState { Running = 0, Background = 1, Suspended = 2, Killed = 3, 
 pub struct ResourceLimits {
     pub max_threads: u16,
     pub max_open_files: u16,
+    pub max_network_sockets: u16,
     pub max_ipc_endpoints: u16,
     pub max_address_space_bytes: u64,
     pub max_background_cpu_ticks: u64,
@@ -29,7 +30,7 @@ pub struct ResourceLimits {
 
 impl Default for ResourceLimits {
     fn default() -> Self {
-        Self { max_threads: 64, max_open_files: 256, max_ipc_endpoints: 64, max_address_space_bytes: 256 * 1024 * 1024, max_background_cpu_ticks: 500, max_background_ipc: 64, max_background_network_bytes: 1024 * 1024 }
+        Self { max_threads: 64, max_open_files: 256, max_network_sockets: 16, max_ipc_endpoints: 64, max_address_space_bytes: 256 * 1024 * 1024, max_background_cpu_ticks: 500, max_background_ipc: 64, max_background_network_bytes: 1024 * 1024 }
     }
 }
 
@@ -51,6 +52,8 @@ pub struct ProcessRecord {
     pub exit_code: i32,
     pub thread_count: u16,
     pub open_file_count: u16,
+    pub network_socket_count: u16,
+    pub ipc_endpoint_count: u16,
     pub address_space_bytes: u64,
     pub limits: ResourceLimits,
     pub user_id: u32,
@@ -67,7 +70,7 @@ pub static THREAD_TABLE: Mutex<[Option<ThreadRecord>; MAX_THREADS]> = Mutex::new
 pub fn register_leader(task: TaskId, parent_task: TaskId) -> Option<ProcessId> {
     if task == TaskId(0) { return None; }
     let id = ProcessId(NEXT_PROCESS_ID.fetch_add(1, Ordering::Relaxed));
-    let record = ProcessRecord { id, leader_task: task, parent_task, state: ProcessState::Running, exit_code: 0, thread_count: 1, open_file_count: 0, address_space_bytes: 0, limits: ResourceLimits::default(), user_id: 0, background_started_ticks: 0, background_cpu_ticks: 0, background_ipc: 0, background_network_bytes: 0 };
+    let record = ProcessRecord { id, leader_task: task, parent_task, state: ProcessState::Running, exit_code: 0, thread_count: 1, open_file_count: 0, network_socket_count: 0, ipc_endpoint_count: 0, address_space_bytes: 0, limits: ResourceLimits::default(), user_id: 0, background_started_ticks: 0, background_cpu_ticks: 0, background_ipc: 0, background_network_bytes: 0 };
     let mut table = PROCESS_TABLE.lock();
     let Some(slot) = table.iter_mut().find(|slot| slot.is_none()) else { return None; };
     let mut threads = THREAD_TABLE.lock();
@@ -244,6 +247,46 @@ pub fn enforce_background_budget() -> usize {
     suspended
 }
 
+pub fn can_reserve_ipc_endpoint(process: ProcessId) -> Result<(), &'static str> {
+    let table = PROCESS_TABLE.lock();
+    let record = table.iter().flatten().find(|r| r.id == process).ok_or("process not found")?;
+    if !matches!(record.state, ProcessState::Running | ProcessState::Background) { return Err("process is not runnable"); }
+    if record.ipc_endpoint_count >= record.limits.max_ipc_endpoints { return Err("IPC endpoint limit exceeded"); }
+    Ok(())
+}
+
+pub fn reserve_ipc_endpoint(process: ProcessId) -> Result<(), &'static str> {
+    let mut table = PROCESS_TABLE.lock();
+    let record = table.iter_mut().flatten().find(|r| r.id == process).ok_or("process not found")?;
+    if !matches!(record.state, ProcessState::Running | ProcessState::Background) { return Err("process is not runnable"); }
+    if record.ipc_endpoint_count >= record.limits.max_ipc_endpoints { return Err("IPC endpoint limit exceeded"); }
+    record.ipc_endpoint_count += 1;
+    Ok(())
+}
+
+pub fn release_ipc_endpoint(process: ProcessId) {
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(record) = table.iter_mut().flatten().find(|r| r.id == process) {
+        record.ipc_endpoint_count = record.ipc_endpoint_count.saturating_sub(1);
+    }
+}
+
+pub fn reserve_network_socket(process: ProcessId) -> Result<(), &'static str> {
+    let mut table = PROCESS_TABLE.lock();
+    let record = table.iter_mut().flatten().find(|r| r.id == process).ok_or("process not found")?;
+    if !matches!(record.state, ProcessState::Running | ProcessState::Background) { return Err("process is not runnable"); }
+    if record.network_socket_count >= record.limits.max_network_sockets { return Err("network socket limit exceeded"); }
+    record.network_socket_count += 1;
+    Ok(())
+}
+
+pub fn release_network_socket(process: ProcessId) {
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(record) = table.iter_mut().flatten().find(|r| r.id == process) {
+        record.network_socket_count = record.network_socket_count.saturating_sub(1);
+    }
+}
+
 pub fn can_open_file(process: ProcessId) -> Result<(), &'static str> {
     let table = PROCESS_TABLE.lock();
     let record = table.iter().flatten().find(|r| r.id == process).ok_or("process not found")?;
@@ -392,9 +435,10 @@ pub fn is_leader(task: TaskId) -> bool {
 pub fn set_limits(process: ProcessId, limits: ResourceLimits) -> Result<(), &'static str> {
     let mut table = PROCESS_TABLE.lock();
     let record = table.iter_mut().flatten().find(|r| r.id == process).ok_or("process not found")?;
-    if limits.max_threads == 0 || limits.max_open_files == 0 || limits.max_ipc_endpoints == 0 || limits.max_address_space_bytes < 4096 { return Err("invalid resource limits"); }
+    if limits.max_threads == 0 || limits.max_open_files == 0 || limits.max_network_sockets == 0 || limits.max_ipc_endpoints == 0 || limits.max_address_space_bytes < 4096 { return Err("invalid resource limits"); }
     if record.thread_count > limits.max_threads { return Err("limits below current usage"); }
     if record.open_file_count as u16 > limits.max_open_files { return Err("limits below current open-file usage"); }
+    if record.ipc_endpoint_count > limits.max_ipc_endpoints { return Err("limits below current IPC endpoint usage"); }
     if record.address_space_bytes > limits.max_address_space_bytes { return Err("limits below current address-space usage"); }
     record.limits = limits;
     Ok(())
@@ -422,6 +466,8 @@ pub fn validate() -> bool {
     for record in table.iter().flatten() {
         if record.thread_count == 0 || record.thread_count > record.limits.max_threads { return false; }
         if record.open_file_count > record.limits.max_open_files { return false; }
+        if record.network_socket_count > record.limits.max_network_sockets { return false; }
+        if record.ipc_endpoint_count > record.limits.max_ipc_endpoints { return false; }
         if record.address_space_bytes > record.limits.max_address_space_bytes { return false; }
         let actual_threads = threads.iter().flatten().filter(|t| t.process == record.id).count();
         if actual_threads != record.thread_count as usize { return false; }
@@ -450,6 +496,6 @@ pub fn snapshot(out: &mut [u8]) -> usize {
     struct W<'a> { b: &'a mut [u8], n: usize }
     impl<'a> Write for W<'a> { fn write_str(&mut self, s: &str) -> core::fmt::Result { let k=s.len().min(self.b.len().saturating_sub(self.n)); self.b[self.n..self.n+k].copy_from_slice(&s.as_bytes()[..k]); self.n+=k; Ok(()) } }
     let table=PROCESS_TABLE.lock(); let mut w=W{b:out,n:0};
-    for r in table.iter().flatten() { let _=writeln!(w,"{}|{}|{}|{}|{}|{}|{}\n",r.id.0,r.leader_task.0,r.parent_task.0,r.state as u8,r.thread_count,r.open_file_count,r.address_space_bytes); }
+    for r in table.iter().flatten() { let _=writeln!(w,"{}|{}|{}|{}|{}|{}|{}|{}\n",r.id.0,r.leader_task.0,r.parent_task.0,r.state as u8,r.thread_count,r.open_file_count,r.ipc_endpoint_count,r.address_space_bytes); }
     w.n
 }

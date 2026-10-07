@@ -51,6 +51,16 @@ def main() -> None:
     must(persistent, "pub fn commit_kind", "persistent metadata commit API")
     must(persistent, "load_latest_kind(out, 4)", "default persistent read record kind")
     must(persistent, "commit_kind(payload, 4)", "default persistent write record kind")
+    # Journal record kinds are globally unique: publisher trust roots use kind 3,
+    # while settings use the newly allocated kind 10. A collision here can make
+    # one subsystem restore another subsystem's bytes as valid state.
+    settings = (ROOT / "kernel/src/settings.rs").read_text()
+    revocation = (ROOT / "kernel/src/package/revocation.rs").read_text()
+    must(settings, "const KIND: u8 = 10;", "isolated settings journal kind")
+    must(revocation, "commit_kind(&buf[..pos], 3)", "publisher trust-root journal kind")
+    must(persistent, "pub const JOURNAL_MAX_KIND: u8 = 10;", "journal kind capacity")
+    must(persistent, "EXTENSION_SLOT_COUNT: u32 = 4", "reserved extension pair for new metadata")
+    must(persistent, "18 | 19", "stable legacy kind-9 extension slots")
     assert "load_latest_kind(out, 0)" not in persistent, "default loader must not use unsupported kind 0"
     assert "commit_kind(payload, 0)" not in persistent, "default commit must not use unsupported kind 0"
     must(vfs, "pub fn init()", "VFS initialization")

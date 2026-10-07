@@ -201,120 +201,68 @@ struct NotificationsFrame {
 }
 
 fn build_notifications_frame(state: &LauncherState) -> NotificationsFrame {
-    // 1. Clock
-    let clock_slice: &[u8] = if state.clock_time[0] != b' ' {
-        &state.clock_time
-    } else {
-        b"09:20"
-    };
+    let clock_slice: &[u8] = if state.clock_source_ok && state.clock_time[0] != b' ' { &state.clock_time } else { b"" };
     let clock = LabelRun::new(48, 14, type_scale::CAPTION, clock_slice, TEXT_MAIN);
+    let title = LabelRun::new(36, 64, type_scale::BODY, b"Notifications", TEXT_MAIN);
 
-    // 2. Header Title
-    let title = LabelRun::new(36, 64, type_scale::BODY, b"Events", TEXT_MAIN);
-
-    // 3. Filter Pills
     let pill_y = 124;
     let pill_h = 36;
     let pills = [
-        FilterPillPlan {
-            rect: Rect::new(36, pill_y, 68, pill_h),
-            bg: PILL_ACTIVE_BG,
-            label: LabelRun::centred(36, pill_y + 6, 68, type_scale::CAPTION, b"All", PILL_ACTIVE_TEXT),
-        },
-        FilterPillPlan {
-            rect: Rect::new(116, pill_y, 116, pill_h),
-            bg: PILL_INACTIVE_BG,
-            label: LabelRun::centred(116, pill_y + 6, 116, type_scale::CAPTION, b"Messages", PILL_INACTIVE_TEXT),
-        },
-        FilterPillPlan {
-            rect: Rect::new(244, pill_y, 96, pill_h),
-            bg: PILL_INACTIVE_BG,
-            label: LabelRun::centred(244, pill_y + 6, 96, type_scale::CAPTION, b"System", PILL_INACTIVE_TEXT),
-        },
-        FilterPillPlan {
-            rect: Rect::new(352, pill_y, 80, pill_h),
-            bg: PILL_INACTIVE_BG,
-            label: LabelRun::centred(352, pill_y + 6, 80, type_scale::CAPTION, b"Apps", PILL_INACTIVE_TEXT),
-        },
+        FilterPillPlan { rect: Rect::new(36, pill_y, 68, pill_h), bg: PILL_ACTIVE_BG,
+            label: LabelRun::centred(36, pill_y + 6, 68, type_scale::CAPTION, b"All", PILL_ACTIVE_TEXT) },
+        FilterPillPlan { rect: Rect::new(116, pill_y, 116, pill_h), bg: PILL_INACTIVE_BG,
+            label: LabelRun::centred(116, pill_y + 6, 116, type_scale::CAPTION, b"Messages", PILL_INACTIVE_TEXT) },
+        FilterPillPlan { rect: Rect::new(244, pill_y, 96, pill_h), bg: PILL_INACTIVE_BG,
+            label: LabelRun::centred(244, pill_y + 6, 96, type_scale::CAPTION, b"System", PILL_INACTIVE_TEXT) },
+        FilterPillPlan { rect: Rect::new(352, pill_y, 80, pill_h), bg: PILL_INACTIVE_BG,
+            label: LabelRun::centred(352, pill_y + 6, 80, type_scale::CAPTION, b"Apps", PILL_INACTIVE_TEXT) },
     ];
 
-    // 4. Section Labels
-    let today_label = LabelRun::new(36, 178, type_scale::CAPTION, b"Today", TEXT_MAIN);
-    let yesterday_label = LabelRun::new(36, 650, type_scale::CAPTION, b"Yesterday", TEXT_MAIN);
-
-    // 5. Notification Cards (Authentic Reference Screen 5 items)
-    let card0 = EventCardPlan {
-        rect: Rect::new(CARD_X, 210, CARD_W, 94),
-        icon_rect: Rect::new(CARD_X + 18, 210 + 20, 52, 52),
-        icon_bg: 0xFFDCFCE7, // Light emerald
-        icon_tint: 0xFF16A34A, // Forest green
-        icon_kind: IconKind::Messages,
-        title: LabelRun::new(CARD_X + 86, 210 + 16, type_scale::CAPTION, b"New message", TEXT_MAIN),
-        subtitle: LabelRun::new(CARD_X + 86, 210 + 40, type_scale::CAPTION, b"Rama", TEXT_MUTED),
-        time: LabelRun::new(CARD_X + 86, 210 + 64, type_scale::CAPTION, b"2 min ago", TEXT_HINT),
+    let count = state.notification_count.min(state.notifications.len()).min(5);
+    let today_label = if count > 0 {
+        LabelRun::new(36, 178, type_scale::CAPTION, b"Recent", TEXT_MAIN)
+    } else {
+        LabelRun::new(36, 210, type_scale::BODY, b"No notifications", TEXT_MUTED)
     };
+    let yesterday_label = LabelRun::new(36, 650, type_scale::CAPTION, b"", TEXT_MAIN);
 
-    let card1 = EventCardPlan {
-        rect: Rect::new(CARD_X, 318, CARD_W, 94),
-        icon_rect: Rect::new(CARD_X + 18, 318 + 20, 52, 52),
-        icon_bg: 0xFFFEE2E2, // Light rose
-        icon_tint: 0xFFDC2626, // Red
-        icon_kind: IconKind::Calendar,
-        title: LabelRun::new(CARD_X + 86, 318 + 16, type_scale::CAPTION, b"Meeting reminder", TEXT_MAIN),
-        subtitle: LabelRun::new(CARD_X + 86, 318 + 40, type_scale::CAPTION, b"Team sync at 11:00 AM", TEXT_MUTED),
-        time: LabelRun::new(CARD_X + 86, 318 + 64, type_scale::CAPTION, b"1 hr ago", TEXT_HINT),
-    };
-
-    let card2 = EventCardPlan {
-        rect: Rect::new(CARD_X, 426, CARD_W, 94),
-        icon_rect: Rect::new(CARD_X + 18, 426 + 20, 52, 52),
-        icon_bg: 0xFFCCFBF1, // Light teal
-        icon_tint: 0xFF0D9488, // Dark teal
-        icon_kind: IconKind::Files,
-        title: LabelRun::new(CARD_X + 86, 426 + 16, type_scale::CAPTION, b"Download complete", TEXT_MAIN),
-        subtitle: LabelRun::new(CARD_X + 86, 426 + 40, type_scale::CAPTION, b"interos-sdk.zip", TEXT_MUTED),
-        time: LabelRun::new(CARD_X + 86, 426 + 64, type_scale::CAPTION, b"2 hr ago", TEXT_HINT),
-    };
-
-    let card3 = EventCardPlan {
-        rect: Rect::new(CARD_X, 534, CARD_W, 94),
-        icon_rect: Rect::new(CARD_X + 18, 534 + 20, 52, 52),
-        icon_bg: 0xFFFEF3C7, // Light amber
-        icon_tint: 0xFFD97706, // Amber
-        icon_kind: IconKind::Gallery,
-        title: LabelRun::new(CARD_X + 86, 534 + 16, type_scale::CAPTION, b"Photo saved", TEXT_MAIN),
-        subtitle: LabelRun::new(CARD_X + 86, 534 + 40, type_scale::CAPTION, b"IMG_20260924.jpg", TEXT_MUTED),
-        time: LabelRun::new(CARD_X + 86, 534 + 64, type_scale::CAPTION, b"3 hr ago", TEXT_HINT),
-    };
-
-    let card4 = EventCardPlan {
-        rect: Rect::new(CARD_X, 680, CARD_W, 94),
-        icon_rect: Rect::new(CARD_X + 18, 680 + 20, 52, 52),
-        icon_bg: 0xFFDBEAFE, // Light sky
-        icon_tint: 0xFF2563EB, // Royal blue
-        icon_kind: IconKind::Browser,
-        title: LabelRun::new(CARD_X + 86, 680 + 16, type_scale::CAPTION, b"App updated", TEXT_MAIN),
-        subtitle: LabelRun::new(CARD_X + 86, 680 + 40, type_scale::CAPTION, b"Browser", TEXT_MUTED),
-        time: LabelRun::new(CARD_X + 86, 680 + 64, type_scale::CAPTION, b"10:30 PM", TEXT_HINT),
-    };
+    let mut cards: [Option<EventCardPlan>; 5] = [None, None, None, None, None];
+    for i in 0..count {
+        let rec = state.notifications[i];
+        let y = 210 + i * 108;
+        let title_bytes: &[u8] = if rec.title_len > 0 { &rec.title[..rec.title_len as usize] } else { b"Notification" };
+        let subtitle_bytes: &[u8] = if rec.body_len > 0 {
+            &rec.body[..rec.body_len as usize]
+        } else if rec.pkg_len > 0 {
+            &rec.package_id[..rec.pkg_len as usize]
+        } else if rec.chan_len > 0 {
+            &rec.channel[..rec.chan_len as usize]
+        } else {
+            b"System event"
+        };
+        let (icon_kind, icon_bg, icon_tint) = match i % 4 {
+            0 => (IconKind::Messages, 0xFFDCFCE7, 0xFF16A34A),
+            1 => (IconKind::Calendar, 0xFFFEE2E2, 0xFFDC2626),
+            2 => (IconKind::Files, 0xFFCCFBF1, 0xFF0D9488),
+            _ => (IconKind::Apps, 0xFFDBEAFE, 0xFF2563EB),
+        };
+        cards[i] = Some(EventCardPlan {
+            rect: Rect::new(CARD_X, y, CARD_W, 94),
+            icon_rect: Rect::new(CARD_X + 18, y + 20, 52, 52),
+            icon_bg, icon_tint, icon_kind,
+            title: LabelRun::new(CARD_X + 86, y + 16, type_scale::CAPTION, title_bytes, TEXT_MAIN),
+            subtitle: LabelRun::new(CARD_X + 86, y + 40, type_scale::CAPTION, subtitle_bytes, TEXT_MUTED),
+            time: LabelRun::new(CARD_X + 86, y + 64, type_scale::CAPTION, b"Event", TEXT_HINT),
+        });
+    }
 
     let clear_label = LabelRun::centred(CLEAR_BTN.x, CLEAR_BTN.y + 10, CLEAR_BTN.w, type_scale::CAPTION, b"Clear all", TEXT_MUTED);
-
     NotificationsFrame {
-        clock,
-        title,
-        today_label,
-        yesterday_label,
-        pills,
-        cards: [Some(card0), Some(card1), Some(card2), Some(card3), Some(card4)],
-        card_count: 5,
-        clear_btn: CLEAR_BTN,
-        clear_label,
-        home_pill: HOME_PILL,
+        clock, title, today_label, yesterday_label, pills, cards, card_count: count,
+        clear_btn: CLEAR_BTN, clear_label, home_pill: HOME_PILL,
     }
 }
 
-// -----------------------------------------------------------------------------
 // Per-Pixel Renderer
 // -----------------------------------------------------------------------------
 
@@ -336,28 +284,6 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
     if y < STATUS_BAR_HEIGHT + 12 {
         if let Some(c) = f.clock.pixel(x, y) {
             return c;
-        }
-        // Right status bar indicators
-        if y >= 14 && y <= 30 {
-            // Battery pill at x: 648..680, y: 16..28
-            if x >= 648 && x <= 680 && y >= 16 && y <= 28 {
-                let is_border = x == 648 || x == 680 || y == 16 || y == 28;
-                let is_fill = x >= 651 && x <= 674 && y >= 18 && y <= 26;
-                if is_border || is_fill {
-                    return 0xFF10B981; // Green battery
-                }
-            }
-            if x >= 681 && x <= 683 && y >= 19 && y <= 25 {
-                return 0xFF10B981; // Terminal pin
-            }
-            // Signal bars at x: 618..636
-            if x >= 618 && x <= 636 {
-                let bar = (x - 618) / 5;
-                let h = (bar + 1) * 3;
-                if y >= 28 - h && y <= 28 {
-                    return TEXT_MAIN;
-                }
-            }
         }
         return color;
     }

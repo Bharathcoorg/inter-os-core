@@ -400,28 +400,6 @@ pub fn get_activity_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         if let Some(c) = f.clock.pixel(x, y) {
             return c;
         }
-        // Right status bar indicators
-        if y >= 14 && y <= 30 {
-            // Battery pill at x: 648..680, y: 16..28
-            if x >= 648 && x <= 680 && y >= 16 && y <= 28 {
-                let is_border = x == 648 || x == 680 || y == 16 || y == 28;
-                let is_fill = x >= 651 && x <= 674 && y >= 18 && y <= 26;
-                if is_border || is_fill {
-                    return 0xFF10B981; // Green battery
-                }
-            }
-            if x >= 681 && x <= 683 && y >= 19 && y <= 25 {
-                return 0xFF10B981; // Terminal pin
-            }
-            // Signal bars at x: 618..636
-            if x >= 618 && x <= 636 {
-                let bar = (x - 618) / 5;
-                let h = (bar + 1) * 3;
-                if y >= 28 - h && y <= 28 {
-                    return TEXT_WHITE;
-                }
-            }
-        }
         return color;
     }
 

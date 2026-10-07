@@ -160,7 +160,15 @@ impl Scheduler {
             return Err(e);
         }
         self.tasks.push(tcb);
-        crate::ipc::IPC_ROUTER.lock().register_task(id);
+        let ipc_registered = crate::ipc::IPC_ROUTER.lock().register_task(id);
+        if !ipc_registered {
+            self.tasks.pop();
+            let mut pt = shared_space.lock();
+            let _ = crate::task::user::unmap_user_thread_stack(&mut pt, id);
+            crate::task::process::cancel_thread_reservation(process_id);
+            crate::task::process::release_address_space(process_id, crate::task::user::USER_STACK_SIZE);
+            return Err("IPC endpoint quota exceeded");
+        }
         Ok(id)
     }
 

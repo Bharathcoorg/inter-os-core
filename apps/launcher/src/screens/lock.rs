@@ -756,7 +756,7 @@ fn lock_pin_pad_pixel(color: u32, x: usize, y: usize, state: &LauncherState) -> 
 
     // 2. 4 PIN Bullet Dots at y = 345..375: cx = 270, 330, 390, 450
     if (345..375).contains(&y) && (245..475).contains(&x) {
-        for i in 0..4 {
+        for i in 0usize..4usize {
             let cx = 270 + i * 60;
             let cy = 360;
             let dx = (x as i32) - (cx as i32);
@@ -764,7 +764,7 @@ fn lock_pin_pad_pixel(color: u32, x: usize, y: usize, state: &LauncherState) -> 
             let dist_sq = dx * dx + dy * dy;
             let r = 9;
             if dist_sq <= r * r {
-                if i < state.pin_len {
+                if i < state.pin_len as usize {
                     return Some(0xFFFFFF);
                 } else if dist_sq >= (r - 2) * (r - 2) {
                     return Some(0x708090);

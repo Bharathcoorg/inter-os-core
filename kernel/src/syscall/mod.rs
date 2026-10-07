@@ -428,6 +428,24 @@ fn require_system_control() -> Result<(), SyscallResult> {
 /// is a full identity takeover. Binding to `user_control_object(uid)` makes
 /// authority attenuate to a single account.
 fn require_user_control_object(uid: u32) -> Result<(), SyscallResult> {
+    // The launcher is a system UI rather than an account-owned app. Give it a
+    // narrowly attenuated "active user only" authority so a user switch does
+    // not require rebuilding the service capability table. It still cannot
+    // administer an arbitrary UID supplied by an attacker.
+    if crate::user::USER_MANAGER.lock().active_user().0 == uid {
+        let sched = SCHEDULER.lock();
+        if let Some(task) = sched.current_task() {
+            if task.name == "org.interos.launcher"
+                && task.cap_table.authorize_object(
+                    CapabilityType::SystemControl,
+                    Rights::INVOKE,
+                    USER_CONTROL_OBJECT_BASE,
+                )
+            {
+                return Ok(());
+            }
+        }
+    }
     require_system_control_object(user_control_object(uid))
 }
 
@@ -2910,6 +2928,32 @@ pub fn sys_app_runtime_list(out_buf: &mut [u8]) -> Result<usize, SyscallResult> 
     Ok(w.n)
 }
 
+fn register_spawned_task_ipc(tid: TaskId, parent_id: TaskId) -> Result<(), SyscallResult> {
+    if crate::ipc::IPC_ROUTER.lock().register_task(tid) {
+        return Ok(());
+    }
+
+    // IPC registration is part of the launch transaction. A task that cannot
+    // obtain an inbound endpoint must never remain runnable without one.
+    let cleanup = {
+        let mut sched = SCHEDULER.lock();
+        let terminated = sched.terminate_task(tid, -24).is_ok();
+        let reaped = if terminated {
+            sched.reap_child(parent_id, tid).is_ok()
+        } else {
+            false
+        };
+        terminated && reaped
+    };
+    if !cleanup {
+        serial_println!(
+            "[APP] IPC endpoint allocation failed for task {}; cleanup was incomplete",
+            tid.0
+        );
+    }
+    Err(SyscallResult::NotReady)
+}
+
 pub fn sys_app_stop(child_id: TaskId) -> SyscallResult {
     if require_app_launcher_or_service_manager().is_err() {
         return SyscallResult::PermissionDenied;
@@ -2918,8 +2962,31 @@ pub fn sys_app_stop(child_id: TaskId) -> SyscallResult {
         Some(id) => id,
         None => return SyscallResult::PermissionDenied,
     };
-    match SCHEDULER.lock().terminate_child(parent, child_id, -9) {
-        Ok(()) => SyscallResult::Success,
+    let child_package = SCHEDULER
+        .lock()
+        .get_task(child_id)
+        .map(|task| task.name);
+    let terminated = {
+        let mut sched = SCHEDULER.lock();
+        sched.terminate_child(parent, child_id, -9)
+    };
+    match terminated {
+        Ok(()) => {
+            // Force-stop is a synchronous lifecycle boundary: once the syscall
+            // returns, the child's IPC, files, events, sockets, capabilities,
+            // surfaces, process record, and kernel stack must be reclaimable.
+            match SCHEDULER.lock().reap_child(parent, child_id) {
+                Ok(_) => {
+                    if let Some(pkg) = child_package {
+                        crate::notification::NOTIFICATION_MANAGER
+                            .lock()
+                            .cancel_all_for_package_all_users(pkg);
+                    }
+                    SyscallResult::Success
+                },
+                Err(_) => SyscallResult::NotReady,
+            }
+        }
         Err(_) => SyscallResult::TargetNotFound,
     }
 }
@@ -2937,7 +3004,14 @@ pub fn sys_app_restart(app_id: &str) -> Result<TaskId, SyscallResult> {
         sched.find_child_by_name(parent, app_id)
     };
     if let Some(child) = child {
-        SCHEDULER.lock().terminate_child(parent, child, -9).map_err(|_| SyscallResult::NotReady)?;
+        {
+            let mut sched = SCHEDULER.lock();
+            sched.terminate_child(parent, child, -9).map_err(|_| SyscallResult::NotReady)?;
+        }
+        SCHEDULER.lock().reap_child(parent, child).map_err(|_| SyscallResult::NotReady)?;
+        crate::notification::NOTIFICATION_MANAGER
+            .lock()
+            .cancel_all_for_package_all_users(app_id);
     }
     sys_app_launch(app_id)
 }
@@ -2979,6 +3053,12 @@ pub fn dev_uninstall_verified_rapp(pkg_id: &str) -> Result<(), SyscallResult> {
         let _ = crate::package::PACKAGE_REGISTRY.lock().restore_entry(previous_entry);
         return Err(SyscallResult::DeviceError);
     }
+    crate::notification::NOTIFICATION_MANAGER
+        .lock()
+        .cancel_all_for_package_all_users(pkg_id);
+    crate::notification::NOTIFICATION_MANAGER
+        .lock()
+        .remove_app_policy(pkg_id);
     Ok(())
 }
 
@@ -4509,8 +4589,10 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         let payload_end = verified.payload_offset.checked_add(verified.payload_len)
             .ok_or(SyscallResult::InvalidArguments)?;
         let payload = &blob.bytes[verified.payload_offset..payload_end];
-        let tid = crate::task::user::spawn_verified_rapp_process(&verified, payload, crate::task::TaskId(0))
+        let parent = crate::task::TaskId(0);
+        let tid = crate::task::user::spawn_verified_rapp_process(&verified, payload, parent)
             .map_err(|_| SyscallResult::DeviceError)?;
+        register_spawned_task_ipc(tid, parent)?;
         serial_println!("[APP] QEMU dev bridge launched persistent RAPP '{}' as Task {}", verified.package_id, tid.0);
         serial_println!("[PROCESS] Guest application launched id={} task={}", verified.package_id, tid.0);
         return Ok(tid);
@@ -4543,6 +4625,7 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         }
         _ => return Err(SyscallResult::FileNotFound),
     };
+    register_spawned_task_ipc(tid, parent)?;
     serial_println!("[APP] QEMU dev bridge launched application '{}' as Task {}", app_id, tid.0);
     serial_println!("[PROCESS] Guest application launched id={} task={}", app_id, tid.0);
     Ok(tid)
@@ -5042,6 +5125,13 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         return Err(SyscallResult::PermissionDenied);
     }
 
+    // Launch is single-instance per parent/package. Returning the live child
+    // keeps repeated home-screen taps from creating duplicate processes and
+    // surfaces; explicit restart/force-stop remains the lifecycle escape hatch.
+    if let Some(existing) = SCHEDULER.lock().find_child_by_name(parent_id, app_id) {
+        return Ok(existing);
+    }
+
     // External applications use the canonical RAPP v2 execution path. The
     // kernel verifies the package, derives capabilities only from its manifest,
     // and loads the signed ELF payload into a Ring-3 child. First-party
@@ -5064,6 +5154,7 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
             let payload = &blob.bytes[verified.payload_offset..payload_end];
             let tid = crate::task::user::spawn_verified_rapp_process(&verified, payload, parent_id)
                 .map_err(|_| SyscallResult::DeviceError)?;
+            register_spawned_task_ipc(tid, parent_id)?;
             serial_println!("[APP] Launched persistent RAPP '{}' as Task {}", verified.package_id, tid.0);
             return Ok(tid);
         }
@@ -5104,6 +5195,7 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
                         payload,
                         parent_id,
                     ).map_err(|_| SyscallResult::DeviceError)?;
+                    register_spawned_task_ipc(tid, parent_id)?;
                     serial_println!(
                         "[APP] Launched verified RAPP '{}' as Task {}",
                         verified.package_id,
@@ -5187,6 +5279,7 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
             return Err(SyscallResult::InvalidArguments);
         }
     };
+    register_spawned_task_ipc(tid, parent_id)?;
     serial_println!("[APP] Launched application '{}' as Task {}", app_id, tid.0);
     Ok(tid)
 }

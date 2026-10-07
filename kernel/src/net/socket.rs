@@ -141,8 +141,18 @@ impl SocketTable {
             return Err(NetError::CapabilityDenied);
         }
 
-        if port == 0 { return Err(NetError::InvalidPort); }
+        let process = crate::task::process::process_for_task(crate::task::TaskId(owner_task_id as u64));
+        if let Some(process) = process {
+            crate::task::process::reserve_network_socket(process)
+                .map_err(|_| NetError::QueueFull)?;
+        }
+
+        if port == 0 { 
+            if let Some(process) = process { crate::task::process::release_network_socket(process); }
+            return Err(NetError::InvalidPort);
+        }
         if self.sockets.iter().flatten().any(|sock| sock.is_bound && sock.local_port == port) {
+            if let Some(process) = process { crate::task::process::release_network_socket(process); }
             return Err(NetError::PortInUse);
         }
         for slot in self.sockets.iter_mut() {
@@ -157,6 +167,7 @@ impl SocketTable {
             }
         }
 
+        if let Some(process) = process { crate::task::process::release_network_socket(process); }
         Err(NetError::QueueFull)
     }
 
@@ -185,6 +196,11 @@ impl SocketTable {
                 released += 1;
             }
         }
+        if released > 0 {
+            if let Some(process) = crate::task::process::process_for_task(crate::task::TaskId(owner_task_id as u64)) {
+                for _ in 0..released { crate::task::process::release_network_socket(process); }
+            }
+        }
         released
     }
 
@@ -196,6 +212,9 @@ impl SocketTable {
                     return Err(NetError::CapabilityDenied);
                 }
                 *slot = None;
+                if let Some(process) = crate::task::process::process_for_task(crate::task::TaskId(owner_task_id as u64)) {
+                    crate::task::process::release_network_socket(process);
+                }
                 return Ok(());
             }
         }
@@ -282,6 +301,11 @@ impl TcpConnectionTable {
         if local_port == 0 || remote_port == 0 {
             return Err(NetError::InvalidPort);
         }
+        let process = crate::task::process::process_for_task(crate::task::TaskId(owner_task_id as u64));
+        if let Some(process) = process {
+            crate::task::process::reserve_network_socket(process)
+                .map_err(|_| NetError::QueueFull)?;
+        }
         if self.entries.iter().flatten().any(|conn| {
             conn.local_port == local_port
                 && conn.remote_ip == remote_ip
@@ -331,6 +355,7 @@ impl TcpConnectionTable {
                 return Ok(id);
             }
         }
+        if let Some(process) = process { crate::task::process::release_network_socket(process); }
         Err(NetError::QueueFull)
     }
 
@@ -570,6 +595,11 @@ impl TcpConnectionTable {
                 released += 1;
             }
         }
+        if released > 0 {
+            if let Some(process) = crate::task::process::process_for_task(crate::task::TaskId(owner_task_id as u64)) {
+                for _ in 0..released { crate::task::process::release_network_socket(process); }
+            }
+        }
         released
     }
 
@@ -597,10 +627,19 @@ impl TcpConnectionTable {
 
     pub fn reap_closed(&mut self) -> usize {
         let mut reaped = 0;
+        let mut owners = [0u32; 8];
         for slot in self.entries.iter_mut() {
             if slot.as_ref().map(|conn| conn.state == crate::net::TcpState::Closed && !conn.fin_pending).unwrap_or(false) {
+                if reaped < owners.len() {
+                    owners[reaped] = slot.as_ref().unwrap().owner_task_id;
+                }
                 *slot = None;
                 reaped += 1;
+            }
+        }
+        for owner in owners.iter().take(reaped) {
+            if let Some(process) = crate::task::process::process_for_task(crate::task::TaskId(*owner as u64)) {
+                crate::task::process::release_network_socket(process);
             }
         }
         reaped
@@ -615,6 +654,9 @@ impl TcpConnectionTable {
         match slot {
             Some(entry) if entry.as_ref().map(|c| c.owner_task_id == owner_task_id && c.state == crate::net::TcpState::Closed).unwrap_or(false) => {
                 *entry = None;
+                if let Some(process) = crate::task::process::process_for_task(crate::task::TaskId(owner_task_id as u64)) {
+                    crate::task::process::release_network_socket(process);
+                }
                 Ok(())
             }
             Some(_) => Err(NetError::NotReady),

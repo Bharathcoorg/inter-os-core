@@ -22,6 +22,7 @@ pub use shm_pipe::{ShmError, ShmPipeManager, ShmRingBuffer, ShmSlot, DmaDescript
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use spin::Mutex;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::capability::{CapError, Capability, CapabilityId, CapabilityTable, CapabilityType, Rights};
 use crate::task::TaskId;
@@ -31,6 +32,8 @@ pub const IPC_MAX_PAYLOAD: usize = 64;
 
 /// Capacity of each task's incoming message mailbox.
 pub const MAILBOX_CAPACITY: usize = 16;
+
+static NEXT_ENDPOINT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Unique IPC endpoint identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -145,7 +148,18 @@ impl IpcRouter {
     /// table that is never populated makes every ownership and revocation check
     /// below vacuously succeed, which is how a revoked or unregistered target
     /// becomes indistinguishable from a permitted one.
-    pub fn register_task(&mut self, task_id: TaskId) {
+    pub fn register_task(&mut self, task_id: TaskId) -> bool {
+        if self.mailboxes.iter().any(|m| m.task_id == task_id) {
+            return true;
+        }
+        if task_id != TaskId(0) {
+            let Some(process) = crate::task::process::process_for_task(task_id) else {
+                return false;
+            };
+            if crate::task::process::reserve_ipc_endpoint(process).is_err() {
+                return false;
+            }
+        }
         if !self.mailboxes.iter().any(|m| m.task_id == task_id) {
             self.mailboxes.push(TaskMailbox {
                 task_id,
@@ -153,9 +167,10 @@ impl IpcRouter {
             });
         }
         if !self.endpoints.iter().any(|e| e.owner == task_id) {
-            let id = EndpointId(self.endpoints.len() as u64);
+            let id = EndpointId(NEXT_ENDPOINT_ID.fetch_add(1, Ordering::Relaxed));
             self.endpoints.push(IpcEndpoint { id, owner: task_id, is_revoked: false });
         }
+        true
     }
 
     /// Revokes the inbound endpoint owned by `task_id` without destroying state.
@@ -200,6 +215,11 @@ impl IpcRouter {
         // 2. Drop the endpoint record; the mailbox no longer exists, so a
         //    recreated task id gets a fresh, unrevoked endpoint.
         self.endpoints.retain(|ep| ep.owner != task_id);
+        if task_id != TaskId(0) {
+            if let Some(process) = crate::task::process::process_for_task(task_id) {
+                crate::task::process::release_ipc_endpoint(process);
+            }
+        }
     }
 
     /// Sends a message from `sender` to `dest_task`, strictly verifying that the sender
@@ -217,15 +237,16 @@ impl IpcRouter {
         sender_caps
             .verify_object(cap_slot, CapabilityType::IpcSend, Rights::WRITE, dest_task.0)?;
 
-        let mailbox = self
-            .mailboxes
-            .iter_mut()
-            .find(|m| m.task_id == dest_task)
-            .ok_or(IpcError::TargetNotFound)?;
+        let mailbox = self.writable_mailbox(dest_task)?;
 
         if mailbox.queue.len() >= MAILBOX_CAPACITY {
             return Err(IpcError::MailboxFull);
         }
+
+        // Background applications receive a bounded IPC budget so a hidden
+        // process cannot keep the system busy by continuously waking peers.
+        crate::task::process::consume_background_ipc(sender)
+            .map_err(|_| IpcError::MailboxFull)?;
 
         let msg = IpcMessage::new(sender, msg_type, data);
         mailbox.queue.push_back(msg);
