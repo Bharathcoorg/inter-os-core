@@ -80,7 +80,16 @@ pub fn is_safe_android_path(path: &str, app_package: &str) -> bool {
 
     // 4. Must strictly reside within app-private directory or shared external storage
     let allowed_app_prefix = format!("/data/data/{}", app_package);
-    canonical.starts_with(&allowed_app_prefix) || canonical.starts_with("/sdcard/Android/data/")
+    let app_private = canonical == allowed_app_prefix
+        || canonical.strip_prefix(&allowed_app_prefix)
+            .map(|rest| rest.starts_with('/'))
+            .unwrap_or(false);
+    let shared_prefix = "/sdcard/Android/data";
+    let shared_storage = canonical == shared_prefix
+        || canonical.strip_prefix(shared_prefix)
+            .map(|rest| rest.starts_with('/'))
+            .unwrap_or(false);
+    app_private || shared_storage
 }
 
 /// Virtualized Android sandbox filesystem.

@@ -481,23 +481,15 @@ impl DeckPlan {
     /// gutters, which is what the loop's "no cell contains it" answer meant. The
     /// search loop ran once per pixel and rebuilt a rectangle on every step.
     fn slot_at(&self, x: usize, y: usize) -> Option<usize> {
-        let col = if (48..238).contains(&x) {
-            0
-        } else if (265..455).contains(&x) {
-            1
-        } else if (482..672).contains(&x) {
-            2
-        } else {
+        if self.columns == 0 || self.rows == 0 || x < self.origin_x || y < self.origin_y {
             return None;
-        };
-        let row = if (700..980).contains(&y) || (500..640).contains(&y) {
-            0
-        } else if (1020..1300).contains(&y) || (660..800).contains(&y) {
-            1
-        } else {
+        }
+        let col = (x - self.origin_x) / self.pitch_x.max(1);
+        let row = (y - self.origin_y) / self.pitch_y.max(1);
+        if col >= self.columns || row >= self.rows {
             return None;
-        };
-        let index = row * 3 + col;
+        }
+        let index = row * self.columns + col;
         if index >= self.slots || !self.cells[index].cell.contains(x, y) {
             return None;
         }
@@ -592,12 +584,12 @@ fn build(state: &LauncherState) -> Paint {
     let l1_y = f.greeting.y;
     let l2_y = l1_y + text::line_height(title_scale) + space::SM;
     let greeting = [
-        Run::whole(f.greeting.x, l1_y, title_scale, b"Good morning, Bharath", 0),
+        Run::whole(f.greeting.x, l1_y, title_scale, b"Good morning", 0),
         Run::whole(f.greeting.x, l2_y, caption_scale, b"Let's make a good day.", 0),
         Run::EMPTY,
     ];
-    let weather_x = f.weather.x + f.weather.w.saturating_sub(space::XXL + 48);
-    let weather = Run::whole(weather_x, l1_y + 4, type_scale::BODY, b"24", 0);
+    // Weather remains empty until a real weather capability is bound.
+    let weather = Run::EMPTY;
 
     let card_title = Run::whole(
         f.card_title.x,
@@ -973,7 +965,7 @@ fn status_bar_pixel(x: usize, y: usize, theme: &Theme, p: &Paint) -> Option<u32>
     // authority granted to this shell the read can be refused, and a clock is the
     // one thing on this surface a reader takes as a measurement. The gate itself is
     // resolved in the plan, so this is a plain "is the run there" test.
-    if let Some(c) = p.clock.as_ref().and_then(|r| r.pixel_inked(x, y, ink)) {
+    if let Some(c) = p.clock.as_ref().and_then(|r| r.pixel_inked_aa(x, y, ink, backdrop(theme, y))) {
         return Some(c);
     }
 
@@ -1106,7 +1098,7 @@ fn greeting_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Op
     // drawn straight onto the wallpaper ramp, whose colour is a function of `y`.
     let ink = layout::ink_on(theme, backdrop(theme, y));
     for run in p.greeting.iter() {
-        if let Some(c) = run.pixel_inked(x, y, ink) {
+        if let Some(c) = run.pixel_inked_aa(x, y, ink, backdrop(theme, y)) {
             return Some(c);
         }
     }
@@ -1204,7 +1196,7 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
     if rounded_outline(f.card, x, y, radius::CARD) {
         return Some(theme.border);
     }
-    if let Some(c) = p.card_title.pixel(x, y) {
+    if let Some(c) = p.card_title.pixel_aa(x, y, p.card_title.ink, theme.surface) {
         return Some(c);
     }
 
@@ -1247,10 +1239,10 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
                 }
             }
         }
-        if let Some(c) = row.name.pixel(x, y) {
+        if let Some(c) = row.name.pixel_aa(x, y, row.name.ink, theme.surface) {
             return Some(c);
         }
-        if let Some(c) = row.detail.pixel(x, y) {
+        if let Some(c) = row.detail.pixel_aa(x, y, row.detail.ink, theme.surface) {
             return Some(c);
         }
     }
@@ -1309,7 +1301,7 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
         if let Some(c) = launcher::icons::rasterize_icon_pixel(kind, x, y, tile.icon_cx, tile.icon_cy, tile.ink) {
             return Some(c);
         }
-    } else if let Some(c) = tile.badge.pixel(x, y) {
+    } else if let Some(c) = tile.badge.pixel_aa(x, y, tile.badge.ink, tile.fill) {
         return Some(c);
     }
     // WHY the name is drawn after the badge and before the fill: the badge is the
@@ -1318,7 +1310,7 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
     // is one bounds test per pixel inside the tile -- and a name longer than the
     // tile (the registry holds one up to sixteen bytes, e.g. "Authenticator") is
     // already shortened inside the tile by the time it gets here.
-    if let Some(c) = tile.label.pixel(x, y) {
+    if let Some(c) = tile.label.pixel_aa(x, y, tile.label.ink, tile.fill) {
         return Some(c);
     }
     Some(tile.fill)
@@ -1361,7 +1353,7 @@ fn search_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Opti
         return Some(ink);
     }
 
-    if let Some(c) = p.search.pixel(x, y) {
+    if let Some(c) = p.search.pixel_aa(x, y, p.search.ink, theme.overlay) {
         return Some(c);
     }
     Some(theme.overlay)
@@ -1379,10 +1371,10 @@ fn nav_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<
 
     // Back chevron, then recents: the same order and the same centring as before,
     // with both origins resolved in the plan.
-    if let Some(c) = p.nav_back.pixel_inked(x, y, ink) {
+    if let Some(c) = p.nav_back.pixel_inked_aa(x, y, ink, backdrop(theme, y)) {
         return Some(c);
     }
-    if let Some(c) = p.nav_recents.pixel_inked(x, y, ink) {
+    if let Some(c) = p.nav_recents.pixel_inked_aa(x, y, ink, backdrop(theme, y)) {
         return Some(c);
     }
     // Home pill, the width the theme can name and the height the shell measures.
