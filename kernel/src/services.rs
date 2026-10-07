@@ -103,6 +103,18 @@ pub fn capability_policy(id: ServiceId, parent_id: TaskId) -> Result<Vec<Service
             // layout with both absent. Read-only, and scoped to the clock, so it
             // confers no power, crypto or telephony authority.
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::RealtimeClockRead, rights: Rights::READ, object_id: 0 });
+            // The launcher hosts the lock screen and credential setup views, requiring
+            // authority to query lock state, authenticate credentials, and set PINs for the user.
+            policy.push(ServiceCapabilitySpec {
+                cap_type: CapabilityType::SystemControl,
+                rights: Rights::INVOKE,
+                object_id: crate::syscall::user_control_object(crate::user::UserId::OWNER.0),
+            });
+            policy.push(ServiceCapabilitySpec {
+                cap_type: CapabilityType::SystemControl,
+                rights: Rights::INVOKE,
+                object_id: crate::syscall::user_control_object(crate::user::UserId::GUEST.0),
+            });
         }
         ServiceId::Display => policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FrameBufferDirect, rights: Rights::WRITE, object_id: 1 }),
         ServiceId::Storage => {

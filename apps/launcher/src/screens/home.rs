@@ -643,30 +643,35 @@ fn build(state: &LauncherState) -> Paint {
     let search_magnifier = (f.search.x + space::XL, f.search.center_y(), magnifier_r);
     let search_text_x =
         f.search.x + space::XL + magnifier_r as usize + space::SM + 2;
-    let search_room = (f.search.x + f.search.w - search_text_x).saturating_sub(space::XXL);
-    let search = Run::fitted(
-        search_text_x,
-        f.search.y + (f.search.h - text::line_height(LABEL_SCALE)) / 2,
-        LABEL_SCALE,
-        search_room,
-        b"Search apps and files",
-        theme.text_muted,
-    );
+    let search_room = (f.search.x + f.search.w).saturating_sub(search_text_x).saturating_sub(space::XXL);
+    let search_y = f.search.y + f.search.h.saturating_sub(text::line_height(LABEL_SCALE)) / 2;
+    let search = if f.search.w > 0 && f.search.h > 0 {
+        Run::fitted(
+            search_text_x,
+            search_y,
+            LABEL_SCALE,
+            search_room,
+            b"Search apps and files",
+            theme.text_muted,
+        )
+    } else {
+        Run::whole(0, 0, LABEL_SCALE, b"", 0)
+    };
 
     let nav_scale = type_scale::CAPTION;
-    let nav_cy = f.nav.y + (f.nav.h - text::line_height(nav_scale)) / 2;
+    let nav_cy = f.nav.y + f.nav.h.saturating_sub(text::line_height(nav_scale)) / 2;
     // WHY the two navigation glyphs are placed here: their origins came from
     // `text::measure` of a one- and two-byte literal, once per pixel, and they sit
     // on the wallpaper ramp, so their ink is supplied per row rather than baked in.
     let nav_back = Run::whole(
-        f.nav.w / 6 - text::measure(b"<", nav_scale) / 2,
+        (f.nav.w / 6).saturating_sub(text::measure(b"<", nav_scale) / 2),
         nav_cy,
         nav_scale,
         b"<",
         0,
     );
     let nav_recents = Run::whole(
-        f.nav.w * 5 / 6 - text::measure(b"[]", nav_scale) / 2,
+        (f.nav.w * 5 / 6).saturating_sub(text::measure(b"[]", nav_scale) / 2),
         nav_cy,
         nav_scale,
         b"[]",

@@ -176,6 +176,7 @@ pub enum SyscallNumber {
     AppRestart = 122,
     AppRuntimeList = 123,
     AppFocus = 124,
+    UserSetCredential = 126,
 }
 
 // -----------------------------------------------------------------------------
@@ -2289,11 +2290,47 @@ pub fn user_switch(target_uid: u32) -> Result<(), i64> {
     }
 }
 
-/// Queries user lock state. Returns 0=Unlocked, 1=Locked, 2=Uninitialized, negative=Lockout ticks.
-pub fn user_get_lock_state(uid: u32) -> Result<i64, i64> {
+/// User lock/unlock status codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserLockState {
+    Unlocked = 0,
+    Locked = 1,
+    Uninitialized = 2,
+    Lockout = 3,
+}
+
+/// Queries user lock state. Returns Unlocked, Locked, Uninitialized, or Lockout.
+pub fn user_get_lock_state(uid: u32) -> Result<UserLockState, i64> {
     let r = unsafe { syscall1(SyscallNumber::UserLockState, uid as u64) };
-    if r >= -6 {
-        Ok(r)
+    match r {
+        0 => Ok(UserLockState::Unlocked),
+        1 => Ok(UserLockState::Locked),
+        2 => Ok(UserLockState::Uninitialized),
+        3 => Ok(UserLockState::Lockout),
+        err => Err(err),
+    }
+}
+
+/// Establishes or updates credentials for a user account.
+/// If an existing credential is set, `old_secret` must verify before updating.
+/// For first-boot credential setup (no prior secret), `old_secret` may be None.
+pub fn user_set_credential(uid: u32, secret: &[u8], old_secret: Option<&[u8]>) -> Result<(), i64> {
+    let (old_ptr, old_len) = match old_secret {
+        Some(s) => (s.as_ptr() as u64, s.len() as u64),
+        None => (0, 0),
+    };
+    let r = unsafe {
+        syscall5(
+            SyscallNumber::UserSetCredential,
+            uid as u64,
+            secret.as_ptr() as u64,
+            secret.len() as u64,
+            old_ptr,
+            old_len,
+        )
+    };
+    if r == 0 {
+        Ok(())
     } else {
         Err(r)
     }

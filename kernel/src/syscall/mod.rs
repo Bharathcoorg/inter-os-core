@@ -188,6 +188,7 @@ pub enum SyscallNumber {
     AppRestart = 122,
     AppRuntimeList = 123,
     AppFocus = 124,
+    UserSetCredential = 126,
 }
 
 /// System call result status codes.
@@ -367,6 +368,7 @@ pub fn sys_get_task_id() -> TaskId {
 pub fn sys_app_background() -> SyscallResult {
     let task = sys_get_task_id();
     if task == TaskId(0) { return SyscallResult::PermissionDenied; }
+    SCHEDULER.lock().set_task_priority(task, 1);
     crate::task::process::set_background(task, crate::interrupts::get_system_ticks())
         .map(|_| SyscallResult::Success).unwrap_or(SyscallResult::InvalidArgument)
 }
@@ -374,8 +376,13 @@ pub fn sys_app_background() -> SyscallResult {
 pub fn sys_app_foreground() -> SyscallResult {
     let task = sys_get_task_id();
     if task == TaskId(0) { return SyscallResult::PermissionDenied; }
+    {
+        let mut sched = SCHEDULER.lock();
+        sched.set_task_priority(task, 6);
+        sched.unblock_task(task);
+    }
     match crate::task::process::set_foreground(task) {
-        Ok(()) => { crate::task::SCHEDULER.lock().unblock_task(task); SyscallResult::Success }
+        Ok(()) => SyscallResult::Success,
         Err(_) => SyscallResult::InvalidArgument,
     }
 }
@@ -1853,6 +1860,34 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             SyscallResult::Success => 0,
             e => e as i64,
         },
+        126 => {
+            // UserSetCredential: a1 = uid, a2 = secret_ptr, a3 = secret_len, a4 = old_secret_ptr, a5 = old_secret_len
+            let target_uid = a1 as u32;
+            if let Err(e) = require_user_control_object(target_uid) { return e as i64; }
+            let len = a3 as usize;
+            if len == 0 || len > 64 { return SyscallResult::InvalidArguments as i64; }
+            let mut secret_buf = [0u8; 64];
+            if copy_from_user(&mut secret_buf[..len], a2, len).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let old_len = a5 as usize;
+            let mut old_buf = [0u8; 64];
+            let old_secret = if old_len > 0 {
+                if old_len > 64 || copy_from_user(&mut old_buf[..old_len], a4, old_len).is_err() {
+                    return SyscallResult::InvalidArguments as i64;
+                }
+                Some(&old_buf[..old_len])
+            } else {
+                None
+            };
+            let mut mgr = crate::user::USER_MANAGER.lock();
+            match mgr.change_credential(crate::user::UserId(target_uid), old_secret, &secret_buf[..len]) {
+                Ok(()) => SyscallResult::Success as i64,
+                Err(crate::user::UserError::AuthenticationFailed) => SyscallResult::PermissionDenied as i64,
+                Err(crate::user::UserError::InvalidCredential) => SyscallResult::InvalidArguments as i64,
+                Err(_) => SyscallResult::TargetNotFound as i64,
+            }
+        },
         123 => {
             let out_len = a2 as usize;
             if out_len == 0 || out_len > 4096 { return SyscallResult::InvalidArguments as i64; }
@@ -1967,7 +2002,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 Ok(crate::user::UserLockState::Unlocked) => 0,
                 Ok(crate::user::UserLockState::Locked) => 1,
                 Ok(crate::user::UserLockState::Uninitialized) => 2,
-                Ok(crate::user::UserLockState::Lockout { locked_until_tick }) => -(locked_until_tick as i64),
+                Ok(crate::user::UserLockState::Lockout { .. }) => 3,
                 Err(_) => SyscallResult::TargetNotFound as i64,
             }
         },
@@ -1979,7 +2014,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             let target_uid = a1 as u32;
             if let Err(e) = require_user_control_object(target_uid) { return e as i64; }
             let len = a3 as usize;
-            if len == 0 || len > 64 { return SyscallResult::InvalidArguments as i64; }
+            if len > 64 { return SyscallResult::InvalidArguments as i64; }
             let mut secret_buf = [0u8; 64];
             if copy_from_user(&mut secret_buf[..len], a2, len).is_err() {
                 return SyscallResult::InvalidArguments as i64;
@@ -4082,6 +4117,7 @@ pub fn sys_event_poll(interest_mask: u32, timeout_ticks: u32) -> Result<u32, Sys
         // Task needs to block awaiting event arrival or timer expiration
         let mut sched = SCHEDULER.lock();
         sched.block_task(current_id);
+        crate::serial_println!("[EVENT REACTOR] Task {} blocking on interest={:#04X} timeout={}", current_id.0, interest_mask, timeout_ticks);
         true
     };
 
@@ -4089,6 +4125,7 @@ pub fn sys_event_poll(interest_mask: u32, timeout_ticks: u32) -> Result<u32, Sys
         crate::task::yield_now();
         let mut reactor = crate::event::EVENT_REACTOR.lock();
         let ready = reactor.check_woken(current_id, interest_mask);
+        crate::serial_println!("[EVENT REACTOR] Task {} woke up: ready={:#04X}", current_id.0, ready);
         Ok(ready)
     } else {
         Ok(0)
@@ -4474,7 +4511,6 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         let payload = &blob.bytes[verified.payload_offset..payload_end];
         let tid = crate::task::user::spawn_verified_rapp_process(&verified, payload, crate::task::TaskId(0))
             .map_err(|_| SyscallResult::DeviceError)?;
-        crate::ipc::IPC_ROUTER.lock().register_task(tid);
         serial_println!("[APP] QEMU dev bridge launched persistent RAPP '{}' as Task {}", verified.package_id, tid.0);
         serial_println!("[PROCESS] Guest application launched id={} task={}", verified.package_id, tid.0);
         return Ok(tid);
@@ -4507,7 +4543,6 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         }
         _ => return Err(SyscallResult::FileNotFound),
     };
-    crate::ipc::IPC_ROUTER.lock().register_task(tid);
     serial_println!("[APP] QEMU dev bridge launched application '{}' as Task {}", app_id, tid.0);
     serial_println!("[PROCESS] Guest application launched id={} task={}", app_id, tid.0);
     Ok(tid)
@@ -4603,7 +4638,7 @@ fn spawn_app_authenticator(id_security: TaskId) -> TaskId {
         "authenticator",
         crate::task::images::APP_AUTHENTICATOR_ELF,
         caps,
-        1,
+        6,
         id_security,
     ).expect("Failed to spawn registered first-party app");
     serial_println!("[OK] Spawned app_authenticator (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
@@ -4666,7 +4701,7 @@ fn spawn_app_health(id_security: TaskId) -> TaskId {
         "health",
         crate::task::images::APP_HEALTH_ELF,
         caps,
-        1,
+        6,
         id_security,
     ).expect("Failed to spawn registered first-party app");
     serial_println!("[OK] Spawned app_health (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
@@ -4729,7 +4764,7 @@ fn spawn_app_camera_preview(id_security: TaskId) -> TaskId {
         "camera_preview",
         crate::task::images::APP_CAMERA_PREVIEW_ELF,
         caps,
-        1,
+        6,
         id_security,
     ).expect("Failed to spawn registered first-party app");
     serial_println!("[OK] Spawned app_camera_preview (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
@@ -4796,7 +4831,7 @@ fn spawn_app_meshchat(id_security: TaskId) -> TaskId {
         "meshchat",
         crate::task::images::APP_MESHCHAT_ELF,
         caps,
-        1,
+        6,
         id_security,
     ).expect("Failed to spawn registered first-party app");
     serial_println!("[OK] Spawned app_meshchat (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
@@ -4856,7 +4891,7 @@ fn spawn_app_sensor_dashboard(id_security: TaskId) -> TaskId {
         "sensor_dashboard",
         crate::task::images::APP_SENSOR_DASHBOARD_ELF,
         caps,
-        1,
+        6,
         id_security,
     ).expect("Failed to spawn registered first-party app");
     serial_println!("[OK] Spawned app_sensor_dashboard (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
@@ -4909,7 +4944,7 @@ fn spawn_app_test_app(id_security: TaskId) -> TaskId {
         "test_app",
         crate::task::images::APP_TEST_APP_ELF,
         caps,
-        1,
+        6,
         id_security,
     ).expect("Failed to spawn registered first-party app");
     serial_println!("[OK] Spawned app_test_app (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
@@ -4970,7 +5005,7 @@ fn spawn_app_hello_world(id_security: TaskId) -> TaskId {
         "hello_world",
         crate::task::images::APP_HELLO_WORLD_ELF,
         caps,
-        1,
+        6,
         id_security,
     ).expect("Failed to spawn registered first-party app");
     serial_println!("[OK] Spawned app_hello_world (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
@@ -5029,7 +5064,6 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
             let payload = &blob.bytes[verified.payload_offset..payload_end];
             let tid = crate::task::user::spawn_verified_rapp_process(&verified, payload, parent_id)
                 .map_err(|_| SyscallResult::DeviceError)?;
-            crate::ipc::IPC_ROUTER.lock().register_task(tid);
             serial_println!("[APP] Launched persistent RAPP '{}' as Task {}", verified.package_id, tid.0);
             return Ok(tid);
         }
@@ -5070,7 +5104,6 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
                         payload,
                         parent_id,
                     ).map_err(|_| SyscallResult::DeviceError)?;
-                    crate::ipc::IPC_ROUTER.lock().register_task(tid);
                     serial_println!(
                         "[APP] Launched verified RAPP '{}' as Task {}",
                         verified.package_id,
@@ -5154,7 +5187,6 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
             return Err(SyscallResult::InvalidArguments);
         }
     };
-    crate::ipc::IPC_ROUTER.lock().register_task(tid);
     serial_println!("[APP] Launched application '{}' as Task {}", app_id, tid.0);
     Ok(tid)
 }

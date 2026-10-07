@@ -30,6 +30,7 @@ pub use lock::{LOCK_DATE_TEXT_LEN, LOCK_MONTH_ABBR, LOCK_WEEKDAY_ABBR};
 // why these are shared rather than duplicated, so a layout change cannot leave
 // the tap targets disagreeing with what is drawn.
 pub use lock::{LOCK_BTN_CY, LOCK_BTN_L_CX, LOCK_BTN_R, LOCK_BTN_R_CX};
+pub use lock::hit_test_pin_pad;
 pub use notifications::get_notifications_color;
 pub use power::get_power_menu_color;
 pub use quick_controls::get_quick_controls_color;

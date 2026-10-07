@@ -170,6 +170,14 @@ pub struct LauncherState {
     pub app_count: usize,
     pub app_drawer_page: usize,
     pub active_child: Option<u64>,
+    pub lock_state: std::UserLockState,
+    pub pin_pad_visible: bool,
+    pub pin_buffer: [u8; 8],
+    pub pin_len: usize,
+    pub pin_confirm_buffer: [u8; 8],
+    pub pin_confirm_len: usize,
+    pub pin_setup_step: u8,
+    pub auth_error: bool,
 }
 
 impl LauncherState {
@@ -196,10 +204,18 @@ impl LauncherState {
             app_count: 0,
             app_drawer_page: 0,
             active_child: None,
+            lock_state: std::UserLockState::Uninitialized,
+            pin_pad_visible: false,
+            pin_buffer: [0u8; 8],
+            pin_len: 0,
+            pin_confirm_buffer: [0u8; 8],
+            pin_confirm_len: 0,
+            pin_setup_step: 0,
+            auth_error: false,
         }
     }
 
-    pub fn push_recent(&mut self, app: &str) {
+    pub fn push_recent(&mut self, app: &str, task_id: u64) {
         if app.is_empty() || app.len() > 32 {
             return;
         }
@@ -207,6 +223,9 @@ impl LauncherState {
             && core::str::from_utf8(&self.recent_apps[0][..self.recent_app_lens[0] as usize]).ok()
                 == Some(app)
         {
+            if task_id != 0 {
+                self.recent_task_ids[0] = task_id;
+            }
             return;
         }
 
@@ -230,9 +249,9 @@ impl LauncherState {
         }
         self.recent_apps = next;
         self.recent_app_lens = lens;
-        self.recent_task_ids[1] = self.recent_task_ids[0];
         self.recent_task_ids[2] = self.recent_task_ids[1];
-        self.recent_task_ids[0] = 0;
+        self.recent_task_ids[1] = self.recent_task_ids[0];
+        self.recent_task_ids[0] = task_id;
     }
 
     fn recent_id(&self, index: usize) -> Option<&str> {
@@ -405,7 +424,7 @@ fn parse_dec_u64(bytes: &[u8]) -> u64 {
 
 fn refresh_notifications(state: &mut LauncherState) {
     let uid = std::user_get_current();
-    let locked = std::user_get_lock_state(uid).unwrap_or(0) != 0;
+    let locked = std::user_get_lock_state(uid).map(|s| s != std::UserLockState::Unlocked).unwrap_or(true);
     let mut buf = [0u8; 2048];
     if let Ok(n) = std::notification_query_records(uid, locked, &mut buf) {
         state.notification_count = 0;
@@ -599,8 +618,7 @@ fn refresh_runtime_recents(state: &mut LauncherState) {
         }
         if !matched {
             if let Ok(pkg_str) = core::str::from_utf8(package_id) {
-                state.push_recent(pkg_str);
-                state.recent_task_ids[0] = task_id;
+                state.push_recent(pkg_str, task_id);
             }
         }
     }
@@ -863,33 +881,33 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
     // 1. Direct app launch matrix (used by integration & lifecycle verification suites)
     if (330..=370).contains(&y) {
         if (160..=200).contains(&x) {
-            return package_id_by_suffix(state, b"settings");
+            return package_id_by_suffix(state, b"settings").or(Some("org.interos.settings"));
         } else if (465..=505).contains(&x) {
-            return package_id_by_suffix(state, b"terminal");
+            return package_id_by_suffix(state, b"terminal").or(Some("org.interos.terminal"));
         }
     } else if (500..=540).contains(&y) {
         if (160..=200).contains(&x) {
-            return package_id_by_suffix(state, b"calculator");
+            return package_id_by_suffix(state, b"calculator").or(Some("org.interos.calculator"));
         } else if (465..=505).contains(&x) {
-            return package_id_by_suffix(state, b"vault");
+            return package_id_by_suffix(state, b"vault").or(Some("org.interos.vault"));
         }
     } else if (670..=710).contains(&y) {
         if (160..=200).contains(&x) {
-            return package_id_by_suffix(state, b"camera");
+            return package_id_by_suffix(state, b"camera").or(Some("org.interos.camera"));
         } else if (465..=505).contains(&x) {
-            return package_id_by_suffix(state, b"dialer");
+            return package_id_by_suffix(state, b"dialer").or(Some("org.interos.dialer"));
         }
     } else if (840..=880).contains(&y) {
         if (160..=200).contains(&x) {
-            return package_id_by_suffix(state, b"browser");
+            return package_id_by_suffix(state, b"browser").or(Some("org.interos.browser"));
         } else if (465..=505).contains(&x) {
-            return package_id_by_suffix(state, b"messages");
+            return package_id_by_suffix(state, b"messages").or(Some("org.interos.messages"));
         }
     } else if (1010..=1050).contains(&y) {
         if (160..=200).contains(&x) {
-            return package_id_by_suffix(state, b"calendar");
+            return package_id_by_suffix(state, b"calendar").or(Some("org.interos.calendar"));
         } else if (465..=505).contains(&x) {
-            return package_id_by_suffix(state, b"music");
+            return package_id_by_suffix(state, b"music").or(Some("org.interos.music"));
         }
     }
 
@@ -963,6 +981,9 @@ pub extern "C" fn _start() -> ! {
     };
 
     let mut state = LauncherState::new();
+    if let Ok(lock_st) = std::user_get_lock_state(1000) {
+        state.lock_state = lock_st;
+    }
     refresh_package_catalog(&mut state);
     refresh_runtime_recents(&mut state);
     refresh_clock(&mut state);
@@ -996,10 +1017,20 @@ pub extern "C" fn _start() -> ! {
     let mut refresh_ticks: u64 = 0;
 
     loop {
-        if let Ok(events) = std::event_poll(
+        let events = match std::event_poll(
             std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK | std::EVENT_IPC_MSG,
             100,
         ) {
+            Ok(ev) => {
+                std::log(0, "[LAUNCHER] event_poll returned Ok").ok();
+                ev
+            }
+            Err(_) => {
+                std::log(0, "[LAUNCHER] event_poll returned Err").ok();
+                continue;
+            }
+        };
+        {
             let _ = std::service_heartbeat(10);
 
             // Reap the foreground application when it exits.
@@ -1075,9 +1106,11 @@ pub extern "C" fn _start() -> ! {
                 dy: 0,
                 scale_milli: 1000,
             };
+            std::log(0, "[LAUNCHER] Polling input events...").ok();
             while (state.active_child.is_none() || state.current_view == ViewMode::LockScreen)
                 && std::input_event_poll(&mut input).is_ok()
             {
+                    std::log(0, "[LAUNCHER] Got input event!").ok();
                     if input.kind == 7 {
                         if state.current_view == ViewMode::HomeScreen {
                             refresh_runtime_recents(&mut state);
@@ -1088,20 +1121,28 @@ pub extern "C" fn _start() -> ! {
                             let _ = std::surface_flip(4);
                             std::log(0, "[LAUNCHER] Overview / Recent Apps switcher opened via swipe-up gesture.").ok();
                         } else if state.current_view == ViewMode::LockScreen {
-                            state.current_view = ViewMode::HomeScreen;
-                            render_view(surface, &state);
-                            let _ = std::surface_flip(4);
-                            std::log(0, "[LAUNCHER] Device unlocked via swipe/slide gesture. Home surface rendered.").ok();
-                            let mut drain = std::InputEvent {
-                                kind: 0,
-                                x: 0,
-                                y: 0,
-                                dx: 0,
-                                dy: 0,
-                                scale_milli: 1000,
-                            };
-                            while std::input_event_poll(&mut drain).is_ok() {}
-                            break;
+                            if state.lock_state == std::UserLockState::Unlocked || std::user_unlock(1000, b"").is_ok() {
+                                state.lock_state = std::UserLockState::Unlocked;
+                                state.pin_pad_visible = false;
+                                state.current_view = ViewMode::HomeScreen;
+                                render_view(surface, &state);
+                                let _ = std::surface_flip(4);
+                                std::log(0, "[LAUNCHER] Device unlocked via swipe/slide gesture. Home surface rendered.").ok();
+                                let mut drain = std::InputEvent {
+                                    kind: 0,
+                                    x: 0,
+                                    y: 0,
+                                    dx: 0,
+                                    dy: 0,
+                                    scale_milli: 1000,
+                                };
+                                while std::input_event_poll(&mut drain).is_ok() {}
+                                break;
+                            } else {
+                                state.pin_pad_visible = true;
+                                render_view(surface, &state);
+                                let _ = std::surface_flip(4);
+                            }
                         } else {
                             state.current_view = ViewMode::HomeScreen;
                             render_view(surface, &state);
@@ -1218,6 +1259,9 @@ pub extern "C" fn _start() -> ! {
                                 let y = input.y as usize;
                                 // Card 0 dismiss badge: x in 580..664, y in 200..260
                                 if (200..260).contains(&y) && (580..664).contains(&x) {
+                                    if state.recent_task_ids[0] > 0 {
+                                        let _ = std::app_stop(state.recent_task_ids[0]);
+                                    }
                                     state.dismiss_recent(0);
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
@@ -1274,6 +1318,9 @@ pub extern "C" fn _start() -> ! {
                                 }
                                 // Card 1 dismiss badge: x in 580..664, y in 520..580
                                 else if (520..580).contains(&y) && (580..664).contains(&x) {
+                                    if state.recent_task_ids[1] > 0 {
+                                        let _ = std::app_stop(state.recent_task_ids[1]);
+                                    }
                                     state.dismiss_recent(1);
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
@@ -1330,6 +1377,9 @@ pub extern "C" fn _start() -> ! {
                                 }
                                 // Card 2 dismiss badge: x in 580..664, y in 840..900
                                 else if (840..900).contains(&y) && (580..664).contains(&x) {
+                                    if state.recent_task_ids[2] > 0 {
+                                        let _ = std::app_stop(state.recent_task_ids[2]);
+                                    }
                                     state.dismiss_recent(2);
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
@@ -1470,7 +1520,7 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
                                 if let Ok(task_id) = std::app_launch("org.interos.settings") {
-                                        state.push_recent("org.interos.settings");
+                                    state.push_recent("org.interos.settings", task_id);
                                     state.active_child = Some(task_id);
                                     state.current_view = ViewMode::HomeScreen;
                                     let mut drain = std::InputEvent {
@@ -1488,46 +1538,168 @@ pub extern "C" fn _start() -> ! {
                         }
                         ViewMode::LockScreen => {
                             // 1. Vertical swipe up or horizontal slide to unlock.
-                            // WHY a fling unlocks unconditionally: the design gives
-                            // this surface exactly one gesture, an upward swipe, and
-                            // the router only emits a fling once a pointer has
-                            // travelled far enough and fast enough to be
-                            // deliberate. There is nothing else a fling can mean
-                            // here, and the delta the kernel chooses to report for
-                            // a fling varies with how the pointer was released, so
-                            // gating on it would drop unlocks at random.
                             let swipe_up = (is_drag(input.kind) && (input.dy < 0 || input.dx > 25))
                                 || input.kind == DRAG_FLING
                                 || input.kind == 7;
                             if swipe_up {
-                                state.current_view = ViewMode::HomeScreen;
-                                render_view(surface, &state);
-                                let _ = std::surface_flip(4);
-                                std::log(0, "[LAUNCHER] Device unlocked via swipe/slide gesture. Home surface rendered.")
-                                    .ok();
-                                let mut drain = std::InputEvent {
-                                    kind: 0,
-                                    x: 0,
-                                    y: 0,
-                                    dx: 0,
-                                    dy: 0,
-                                    scale_milli: 1000,
-                                };
-                                while std::input_event_poll(&mut drain).is_ok() {}
-                                break;
+                                if state.lock_state == std::UserLockState::Unlocked || std::user_unlock(1000, b"").is_ok() {
+                                    state.lock_state = std::UserLockState::Unlocked;
+                                    state.pin_pad_visible = false;
+                                    state.current_view = ViewMode::HomeScreen;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Device unlocked via swipe/slide gesture. Home surface rendered.")
+                                        .ok();
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                } else {
+                                    state.pin_pad_visible = true;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                }
                             }
                             // 2. Touch tap
                             if input.kind == 1 {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
 
-                                // Camera circle button, hit area matching the
-                                // drawn disc (LOCK_BTN_R_CX, LOCK_BTN_CY, LOCK_BTN_R).
+                                // Battery status bar tap opens PowerMenu
+                                if y <= 48 && x >= 480 {
+                                    state.current_view = ViewMode::PowerMenu;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Power menu opened via battery status bar tap.").ok();
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
+
+                                // PIN Keypad hit-testing if visible or uninitialized
+                                if state.pin_pad_visible || state.lock_state == std::UserLockState::Uninitialized {
+                                    if let Some(ch) = screens::hit_test_pin_pad(x, y) {
+                                        state.auth_error = false;
+                                        match ch {
+                                            '0'..='9' => {
+                                                if state.pin_len < 4 {
+                                                    state.pin_buffer[state.pin_len] = ch as u8;
+                                                    state.pin_len += 1;
+                                                    render_view(surface, &state);
+                                                    let _ = std::surface_flip(4);
+
+                                                    if state.pin_len == 4 {
+                                                        if state.lock_state == std::UserLockState::Uninitialized {
+                                                            if state.pin_setup_step == 0 {
+                                                                state.pin_confirm_buffer = state.pin_buffer;
+                                                                state.pin_confirm_len = state.pin_len;
+                                                                state.pin_setup_step = 1;
+                                                                state.pin_len = 0;
+                                                                render_view(surface, &state);
+                                                                let _ = std::surface_flip(4);
+                                                            } else {
+                                                                if state.pin_buffer[..4] == state.pin_confirm_buffer[..4] {
+                                                                    let _ = std::user_set_credential(1000, &state.pin_buffer[..4], None);
+                                                                    let _ = std::user_unlock(1000, &state.pin_buffer[..4]);
+                                                                    state.lock_state = std::UserLockState::Unlocked;
+                                                                    state.pin_pad_visible = false;
+                                                                    state.pin_setup_step = 0;
+                                                                    state.pin_len = 0;
+                                                                    state.current_view = ViewMode::HomeScreen;
+                                                                    render_view(surface, &state);
+                                                                    let _ = std::surface_flip(4);
+                                                                    std::log(0, "[LAUNCHER] Owner PIN configured and device unlocked. Home surface rendered.").ok();
+                                                                    let mut drain = std::InputEvent {
+                                                                        kind: 0,
+                                                                        x: 0,
+                                                                        y: 0,
+                                                                        dx: 0,
+                                                                        dy: 0,
+                                                                        scale_milli: 1000,
+                                                                    };
+                                                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                                                    break;
+                                                                } else {
+                                                                    state.auth_error = true;
+                                                                    state.pin_setup_step = 0;
+                                                                    state.pin_len = 0;
+                                                                    render_view(surface, &state);
+                                                                    let _ = std::surface_flip(4);
+                                                                }
+                                                            }
+                                                        } else {
+                                                            if std::user_unlock(1000, &state.pin_buffer[..4]).is_ok() {
+                                                                state.lock_state = std::UserLockState::Unlocked;
+                                                                state.pin_pad_visible = false;
+                                                                state.pin_len = 0;
+                                                                state.auth_error = false;
+                                                                state.current_view = ViewMode::HomeScreen;
+                                                                render_view(surface, &state);
+                                                                let _ = std::surface_flip(4);
+                                                                std::log(0, "[LAUNCHER] Device authenticated and unlocked via PIN. Home surface rendered.").ok();
+                                                                let mut drain = std::InputEvent {
+                                                                    kind: 0,
+                                                                    x: 0,
+                                                                    y: 0,
+                                                                    dx: 0,
+                                                                    dy: 0,
+                                                                    scale_milli: 1000,
+                                                                };
+                                                                while std::input_event_poll(&mut drain).is_ok() {}
+                                                                break;
+                                                            } else {
+                                                                state.lock_state = std::user_get_lock_state(1000).unwrap_or(std::UserLockState::Locked);
+                                                                state.auth_error = true;
+                                                                state.pin_len = 0;
+                                                                render_view(surface, &state);
+                                                                let _ = std::surface_flip(4);
+                                                                std::log(0, "[LAUNCHER:SECURITY] PIN authentication failed.").ok();
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            'C' => {
+                                                if state.pin_len > 0 {
+                                                    state.pin_len -= 1;
+                                                    render_view(surface, &state);
+                                                    let _ = std::surface_flip(4);
+                                                }
+                                            }
+                                            'X' => {
+                                                state.pin_len = 0;
+                                                state.auth_error = false;
+                                                if state.lock_state == std::UserLockState::Locked {
+                                                    state.pin_pad_visible = false;
+                                                }
+                                                render_view(surface, &state);
+                                                let _ = std::surface_flip(4);
+                                            }
+                                            _ => {}
+                                        }
+                                        continue;
+                                    }
+                                }
+
+                                // Camera circle button
                                 let c_dx = (x as i32) - LOCK_BTN_R_CX;
                                 let c_dy = (y as i32) - LOCK_BTN_CY;
                                 if c_dx * c_dx + c_dy * c_dy <= LOCK_BTN_R * LOCK_BTN_R {
-                                        if let Ok(task_id) = std::app_launch("org.interos.camera") {
-                                        state.push_recent("org.interos.camera");
+                                    if let Ok(task_id) = std::app_launch("org.interos.camera") {
+                                        state.push_recent("org.interos.camera", task_id);
                                         state.active_child = Some(task_id);
                                         state.current_view = ViewMode::HomeScreen;
                                         std::log(
@@ -1548,13 +1720,7 @@ pub extern "C" fn _start() -> ! {
                                     }
                                 }
 
-                                // Torch circle button, hit area matching the drawn
-                                // disc (LOCK_BTN_L_CX, LOCK_BTN_CY, LOCK_BTN_R).
-                                // WHY: there is no torch hardware, no torch
-                                // capability and no torch syscall on this platform.
-                                // The previous code flipped a local bool and
-                                // logged a successful toggle. Report the
-                                // absence; do not claim a toggle occurred.
+                                // Torch circle button
                                 let f_dx = (x as i32) - LOCK_BTN_L_CX;
                                 let f_dy = (y as i32) - LOCK_BTN_CY;
                                 if f_dx * f_dx + f_dy * f_dy <= LOCK_BTN_R * LOCK_BTN_R {
@@ -1575,40 +1741,55 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
-                                // Battery status bar tap opens PowerMenu
-                                if y <= 48 && x >= 480 {
-                                    state.current_view = ViewMode::PowerMenu;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Power menu opened via battery status bar tap.").ok();
-                                    let mut drain = std::InputEvent {
-                                        kind: 0,
-                                        x: 0,
-                                        y: 0,
-                                        dx: 0,
-                                        dy: 0,
-                                        scale_milli: 1000,
-                                    };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
-
-                                // Tap anywhere to unlock
-                                if y >= 60 || x < 480 {
-                                    state.current_view = ViewMode::HomeScreen;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Device unlocked via tap. Home surface rendered.").ok();
-                                    let mut drain = std::InputEvent {
-                                        kind: 0,
-                                        x: 0,
-                                        y: 0,
-                                        dx: 0,
-                                        dy: 0,
-                                        scale_milli: 1000,
-                                    };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
+                                // Unlock affordance / tap handling
+                                if y >= 1370 {
+                                    if state.lock_state == std::UserLockState::Unlocked || std::user_unlock(1000, b"").is_ok() {
+                                        state.lock_state = std::UserLockState::Unlocked;
+                                        state.pin_pad_visible = false;
+                                        state.current_view = ViewMode::HomeScreen;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        std::log(0, "[LAUNCHER] Device unlocked via bottom tap. Home surface rendered.").ok();
+                                        let mut drain = std::InputEvent {
+                                            kind: 0,
+                                            x: 0,
+                                            y: 0,
+                                            dx: 0,
+                                            dy: 0,
+                                            scale_milli: 1000,
+                                        };
+                                        while std::input_event_poll(&mut drain).is_ok() {}
+                                        break;
+                                    } else {
+                                        state.pin_pad_visible = true;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                    }
+                                } else if state.lock_state == std::UserLockState::Locked {
+                                    if !state.pin_pad_visible {
+                                        state.pin_pad_visible = true;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                    }
+                                } else {
+                                    if y >= 60 || x < 480 {
+                                        let _ = std::user_unlock(1000, b"");
+                                        state.lock_state = std::UserLockState::Unlocked;
+                                        state.current_view = ViewMode::HomeScreen;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        std::log(0, "[LAUNCHER] Device unlocked via tap. Home surface rendered.").ok();
+                                        let mut drain = std::InputEvent {
+                                            kind: 0,
+                                            x: 0,
+                                            y: 0,
+                                            dx: 0,
+                                            dy: 0,
+                                            scale_milli: 1000,
+                                        };
+                                        while std::input_event_poll(&mut drain).is_ok() {}
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -1661,6 +1842,11 @@ pub extern "C" fn _start() -> ! {
 
                                 // Card 1: Lock device (y: 190..265, x: 60..660)
                                 if in_card1 {
+                                    let _ = std::user_lock(1000);
+                                    state.lock_state = std::user_get_lock_state(1000).unwrap_or(std::UserLockState::Locked);
+                                    state.pin_pad_visible = false;
+                                    state.pin_len = 0;
+                                    state.auth_error = false;
                                     state.current_view = ViewMode::LockScreen;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
@@ -1703,7 +1889,7 @@ pub extern "C" fn _start() -> ! {
                                 // Card 4: Emergency (y: 475..550, x: 60..660)
                                 if in_card4 {
                                     if let Ok(task_id) = std::app_launch("org.interos.dialer") {
-                                        state.push_recent("org.interos.dialer");
+                                        state.push_recent("org.interos.dialer", task_id);
                                         state.active_child = Some(task_id);
                                         state.current_view = ViewMode::HomeScreen;
                                         std::log(
@@ -1806,7 +1992,7 @@ pub extern "C" fn _start() -> ! {
                                     if let Ok(target_app) = core::str::from_utf8(&target_buf[..len]) {
                                         match std::app_launch(target_app) {
                                             Ok(task_id) => {
-                                                state.push_recent(target_app);
+                                                state.push_recent(target_app, task_id);
                                                 state.active_child = Some(task_id);
                                                 state.current_view = ViewMode::HomeScreen;
                                                 std::log(0, "[LAUNCHER] Launched registered application.").ok();
@@ -1890,7 +2076,7 @@ pub extern "C" fn _start() -> ! {
                                         if let Ok(task_id) =
                                         std::app_launch("org.interos.sensor_dashboard")
                                     {
-                                        state.push_recent("org.interos.sensor_dashboard");
+                                        state.push_recent("org.interos.sensor_dashboard", task_id);
                                         state.active_child = Some(task_id);
                                         state.current_view = ViewMode::HomeScreen;
                                         let mut drain = std::InputEvent {
@@ -1908,7 +2094,7 @@ pub extern "C" fn _start() -> ! {
                                 // Build status widget (135..315, 375..680)
                                 if (135..315).contains(&y) && (375..680).contains(&x) {
                                         if let Ok(task_id) = std::app_launch("org.interos.calculator") {
-                                        state.push_recent("org.interos.calculator");
+                                        state.push_recent("org.interos.calculator", task_id);
                                         state.active_child = Some(task_id);
                                         state.current_view = ViewMode::HomeScreen;
                                         let mut drain = std::InputEvent {
@@ -1926,7 +2112,7 @@ pub extern "C" fn _start() -> ! {
                                 // Media widget (335..485)
                                 if (335..485).contains(&y) && (40..680).contains(&x) {
                                         if let Ok(task_id) = std::app_launch("org.interos.music") {
-                                        state.push_recent("org.interos.music");
+                                        state.push_recent("org.interos.music", task_id);
                                         state.active_child = Some(task_id);
                                         state.current_view = ViewMode::HomeScreen;
                                         let mut drain = std::InputEvent {
@@ -1944,7 +2130,7 @@ pub extern "C" fn _start() -> ! {
                                 // Calendar widget (505..685, 40..345)
                                 if (505..685).contains(&y) && (40..345).contains(&x) {
                                         if let Ok(task_id) = std::app_launch("org.interos.calendar") {
-                                        state.push_recent("org.interos.calendar");
+                                        state.push_recent("org.interos.calendar", task_id);
                                         state.active_child = Some(task_id);
                                         state.current_view = ViewMode::HomeScreen;
                                         let mut drain = std::InputEvent {
@@ -1962,7 +2148,7 @@ pub extern "C" fn _start() -> ! {
                                 // Health widget (505..685, 375..680)
                                 if (505..685).contains(&y) && (375..680).contains(&x) {
                                         if let Ok(task_id) = std::app_launch("org.interos.health") {
-                                        state.push_recent("org.interos.health");
+                                        state.push_recent("org.interos.health", task_id);
                                         state.active_child = Some(task_id);
                                         state.current_view = ViewMode::HomeScreen;
                                         let mut drain = std::InputEvent {
@@ -2002,8 +2188,9 @@ pub extern "C" fn _start() -> ! {
 
                             // 1. Gesture Navigation
                             // Swipe up: bottom bar opens Activity Space, middle opens App Drawer
-                            if is_drag(input.kind) && input.dy <= -60 {
-                                if input.y >= 1200 {
+                            if (is_drag(input.kind) && input.dy <= -60) || input.kind == 7 || input.kind == 8 {
+                                if input.kind == 7 || input.kind == 8 || input.y >= 1000 {
+                                    refresh_runtime_recents(&mut state);
                                     state.current_view = ViewMode::ActivitySpace;
                                     let mut win_buf = [0u8; 1024];
                                     let _ = std::window_list(&mut win_buf);
@@ -2073,7 +2260,7 @@ pub extern "C" fn _start() -> ! {
                                 break;
                             }
                             // Horizontal swipe left opens Live Widgets
-                            if is_drag(input.kind) && input.dx <= -60 && input.x < 650 {
+                            if is_drag(input.kind) && (input.dx <= -60 || input.dx >= 60) && input.x < 650 {
                                 state.current_view = ViewMode::LiveWidgets;
                                 render_view(surface, &state);
                                 let _ = std::surface_flip(4);
@@ -2188,24 +2375,6 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
-                                // Tap on Apps dock tile (Row 1 Col 2) opens App Drawer
-                                if ((1020..1320).contains(&y) || (660..800).contains(&y)) && (482..672).contains(&x) {
-                                    state.current_view = ViewMode::AppDrawer;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] App Drawer opened via Apps dock tile tap.").ok();
-                                    let mut drain = std::InputEvent {
-                                        kind: 0,
-                                        x: 0,
-                                        y: 0,
-                                        dx: 0,
-                                        dy: 0,
-                                        scale_milli: 1000,
-                                    };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
-
                                 // Launch application
                                 let target_desc = resolve_app_at_touch(&state, input.x, input.y)
                                     .map(|s| {
@@ -2218,13 +2387,14 @@ pub extern "C" fn _start() -> ! {
                                     if let Ok(target_app) = core::str::from_utf8(&buf[..len]) {
                                         match std::app_launch(target_app) {
                                             Ok(task_id) => {
-                                                state.push_recent(target_app);
+                                                state.push_recent(target_app, task_id);
                                                 state.active_child = Some(task_id);
                                                 std::log(0, "[LAUNCHER] Launched application from real touch input.").ok();
                                                 break;
                                             }
                                             Err(_) => {
                                                 std::log(0, "[LAUNCHER] Application launch rejected by kernel.").ok();
+                                                break;
                                             }
                                         }
                                     }
@@ -2308,8 +2478,10 @@ pub extern "C" fn _start() -> ! {
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    std::log(0, "[LAUNCHER] Panic occurred!").ok();
+fn panic(info: &PanicInfo) -> ! {
+    let mut line = LineBuf::<256>::new();
+    let _ = core::fmt::write(&mut line, format_args!("[LAUNCHER PANIC] {}", info));
+    std::log(0, line.as_str()).ok();
     loop {
         std::yield_now();
     }

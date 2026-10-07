@@ -166,7 +166,7 @@ pub fn dispatch_to_focused_window(event: InputEvent) {
         let top_kms_owner = {
             let kms = crate::drivers::display_kms::DRM_KMS.lock();
             kms.surfaces.iter()
-                .filter(|s| s.visible && s.input_enabled && s.z_order > 0)
+                .filter(|s| s.visible && s.input_enabled)
                 .max_by_key(|s| s.z_order)
                 .map(|s| s.owner_task)
         };
@@ -174,13 +174,15 @@ pub fn dispatch_to_focused_window(event: InputEvent) {
         let resolved = if let Some(top_task) = top_kms_owner {
             Some(top_task)
         } else {
-            let mut wm = crate::gui::WINDOW_MANAGER.lock();
-            let target = match event.kind {
-                InputEventKind::Tap | InputEventKind::DoubleTap | InputEventKind::LongPress =>
-                    wm.hit_test(event.x, event.y).map(|(_, owner)| owner),
-                InputEventKind::Pan | InputEventKind::Pinch =>
-                    wm.focused_owner().or_else(|| wm.top_visible_owner()),
-                _ => wm.focused_owner().or_else(|| wm.top_visible_owner()),
+            let target = {
+                let mut wm = crate::gui::WINDOW_MANAGER.lock();
+                match event.kind {
+                    InputEventKind::Tap | InputEventKind::DoubleTap | InputEventKind::LongPress =>
+                        wm.hit_test(event.x, event.y).map(|(_, owner)| owner),
+                    InputEventKind::Pan | InputEventKind::Pinch =>
+                        wm.focused_owner().or_else(|| wm.top_visible_owner()),
+                    _ => wm.focused_owner().or_else(|| wm.top_visible_owner()),
+                }
             };
             target.or_else(|| {
                 let kms = crate::drivers::display_kms::DRM_KMS.lock();
@@ -203,6 +205,7 @@ pub fn dispatch_to_focused_window(event: InputEvent) {
         msg[20..24].copy_from_slice(&event.scale_milli.to_le_bytes());
         let _ = crate::ipc::IPC_ROUTER.lock().send_direct(TaskId(0), TaskId(owner), 0x494E_5054, &msg);
         crate::event::post_event(TaskId(owner), crate::event::EVENT_TOUCH_INPUT);
+        crate::serial_println!("[INPUT DISPATCH] Dispatched to task {} complete", owner);
     }
 }
 

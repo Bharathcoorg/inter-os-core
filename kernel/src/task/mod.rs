@@ -187,7 +187,7 @@ impl TaskControlBlock {
             stack: Box::new([]),
             cap_table,
             cpu_ticks: 0,
-            priority: 0,
+            priority: 6,
             page_table: None,
             user_entry: 0,
             user_stack_top: 0,

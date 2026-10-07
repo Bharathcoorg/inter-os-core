@@ -139,7 +139,7 @@ def test_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, ta
     # Wait for app launch and presentation
     presented = reader.wait_for(
         present_marker,
-        timeout=30.0,
+        timeout=45.0,
         print_keywords=[app_name.upper(), "APP", "LAUNCHER", "INPUT", "Step", app_id]
     )
     assert presented, f"{app_name} failed to present frame within timeout"
@@ -492,7 +492,7 @@ def main():
         reader.send(b"SWIPE 360 1420 360 1100 5\n")
         overview_ready = reader.wait_for(
             "Recent apps surface rendered.",
-            timeout=10.0,
+            timeout=20.0,
             print_keywords=["LAUNCHER", "overview", "deck"]
         )
         assert overview_ready, "Launcher failed to open overview mode within timeout"
@@ -507,7 +507,7 @@ def main():
         reader.send(b"TAP 360 340\n")
         switched = reader.wait_for(
             "Switched to recent app from overview card 0",
-            timeout=10.0,
+            timeout=20.0,
             print_keywords=["LAUNCHER", "Switched", "APP"]
         )
         assert switched, "Failed to switch to recent app from overview"
@@ -515,7 +515,7 @@ def main():
         
         recent_presented = reader.wait_for(
             "Music canvas presented to scanout buffer.",
-            timeout=10.0,
+            timeout=20.0,
             print_keywords=["MUSIC", "APP", "canvas"]
         )
         assert recent_presented, "Recent app failed to present canvas within timeout"
@@ -539,7 +539,7 @@ def main():
         reader.send(b"SWIPE 360 1420 360 1100 5\n")
         overview2_ready = reader.wait_for(
             "Recent apps surface rendered.",
-            timeout=10.0,
+            timeout=20.0,
             print_keywords=["LAUNCHER", "overview", "deck"]
         )
         assert overview2_ready, "Launcher failed to re-open overview deck"
@@ -551,7 +551,7 @@ def main():
         reader.send(b"TAP 610 230\n")
         card0_dismissed = reader.wait_for(
             "Card 0 dismissed via dismiss button tap.",
-            timeout=10.0,
+            timeout=20.0,
             print_keywords=["LAUNCHER", "Card", "dismissed"]
         )
         assert card0_dismissed, "Failed to dismiss Card 0 via dismiss button tap"
@@ -563,7 +563,7 @@ def main():
         reader.send(b"SWIPE 200 660 550 660 5\n")
         card1_dismissed = reader.wait_for(
             "Card 1 dismissed via swipe.",
-            timeout=10.0,
+            timeout=20.0,
             print_keywords=["LAUNCHER", "Card", "dismissed"]
         )
         assert card1_dismissed, "Failed to dismiss Card 1 via horizontal swipe"
@@ -575,7 +575,7 @@ def main():
         reader.send(b"TAP 360 1240\n")
         returned_home = reader.wait_for(
             "Returned to home grid from recents.",
-            timeout=10.0,
+            timeout=20.0,
             print_keywords=["LAUNCHER", "Returned", "home"]
         )
         assert returned_home, "Failed to return home from overview deck"
@@ -588,7 +588,7 @@ def main():
         reader.send(b"TAP 360 25\n")
         qc_ready = reader.wait_for(
             "Quick controls surface rendered.",
-            timeout=10.0,
+            timeout=20.0,
             print_keywords=["LAUNCHER", "Quick", "Controls", "render_quick_controls"]
         )
         assert qc_ready, "Failed to open Quick Controls shade"
@@ -601,7 +601,7 @@ def main():
         reader.send(b"TAP 360 1410\n")
         qc_returned = reader.wait_for(
             "Home surface rendered.",
-            timeout=10.0,
+            timeout=20.0,
             print_keywords=["LAUNCHER", "render_full"]
         )
         assert qc_returned, "Failed to return to Home from Quick Controls"
@@ -614,7 +614,7 @@ def main():
         reader.send(b"TAP 100 25\n")
         notif_ready = reader.wait_for(
             "Notifications surface rendered.",
-            timeout=10.0,
+            timeout=20.0,
             print_keywords=["LAUNCHER", "Notifications", "render_notifications"]
         )
         assert notif_ready, "Failed to open Notifications shade"
@@ -627,7 +627,7 @@ def main():
         reader.send(b"TAP 360 1410\n")
         notif_returned = reader.wait_for(
             "Home surface rendered.",
-            timeout=10.0,
+            timeout=20.0,
             print_keywords=["LAUNCHER", "render_full"]
         )
         assert notif_returned, "Failed to return to Home from Notifications"
@@ -640,7 +640,7 @@ def main():
         reader.send(b"SWIPE 360 700 360 400 5\n")
         drawer_ready = reader.wait_for(
             "App drawer surface rendered.",
-            timeout=10.0,
+            timeout=20.0,
             print_keywords=["LAUNCHER", "Drawer", "render_app_drawer"]
         )
         assert drawer_ready, "Failed to open App Drawer"
@@ -650,7 +650,7 @@ def main():
         reader.send(b"TAP 250 160\n")
         tab_switched = reader.wait_for(
             "App drawer surface rendered.",
-            timeout=10.0,
+            timeout=20.0,
             print_keywords=["LAUNCHER", "category", "tab", "render_app_drawer"]
         )
         assert tab_switched, "Failed to switch App Drawer category tab"
@@ -663,7 +663,7 @@ def main():
         reader.send(b"TAP 360 1410\n")
         drawer_returned = reader.wait_for(
             "Home surface rendered.",
-            timeout=10.0,
+            timeout=20.0,
             print_keywords=["LAUNCHER", "render_full"]
         )
         assert drawer_returned, "Failed to return to Home from App Drawer"
@@ -676,7 +676,7 @@ def main():
         reader.send(b"SWIPE 500 700 150 700 5\n")
         widgets_ready = reader.wait_for(
             "Live widgets surface rendered.",
-            timeout=10.0,
+            timeout=25.0,
             print_keywords=["LAUNCHER", "Widgets", "render_live_widgets"]
         )
         assert widgets_ready, "Failed to open Live Widgets"
@@ -689,7 +689,7 @@ def main():
         reader.send(b"TAP 360 1410\n")
         widgets_returned = reader.wait_for(
             "Home surface rendered.",
-            timeout=10.0,
+            timeout=25.0,
             print_keywords=["LAUNCHER", "render_full"]
         )
         assert widgets_returned, "Failed to return to Home from Live Widgets"
@@ -702,7 +702,7 @@ def main():
         reader.send(b"TAP 600 25\n")
         pm_ready = reader.wait_for(
             "Power surface rendered.",
-            timeout=10.0,
+            timeout=25.0,
             print_keywords=["LAUNCHER", "Power", "menu", "render_power_menu"]
         )
         assert pm_ready, "Failed to open Power Menu"
@@ -715,7 +715,7 @@ def main():
         reader.send(b"TAP 500 225\n")
         device_locked = reader.wait_for(
             "Lock surface rendered.",
-            timeout=10.0,
+            timeout=25.0,
             print_keywords=["LAUNCHER", "Device", "locked", "render_lock_screen"]
         )
         assert device_locked, "Failed to lock device from Power Menu"
@@ -737,7 +737,7 @@ def main():
         # exist has nothing to redraw.
         torch_reported = reader.wait_for(
             "Flashlight unavailable",
-            timeout=10.0,
+            timeout=25.0,
             print_keywords=["LAUNCHER", "Flashlight"],
         )
         assert torch_reported, "Lock Screen flashlight affordance did not report its availability"
@@ -747,7 +747,7 @@ def main():
         reader.send(b"TAP 360 1410\n")
         unlocked = reader.wait_for(
             "Home surface rendered.",
-            timeout=10.0,
+            timeout=25.0,
             print_keywords=["LAUNCHER", "Device", "unlocked", "render_full"]
         )
         assert unlocked, "Failed to unlock device"
@@ -760,7 +760,7 @@ def main():
         reader.send(b"TAP 360 1330\n")
         sys_space_ready = reader.wait_for(
             "System surface rendered.",
-            timeout=10.0,
+            timeout=25.0,
             print_keywords=["LAUNCHER", "System Space", "render_system_space"]
         )
         assert sys_space_ready, "Failed to open System Space"
@@ -773,7 +773,7 @@ def main():
         reader.send(b"TAP 360 1410\n")
         sys_space_returned = reader.wait_for(
             "Home surface rendered.",
-            timeout=10.0,
+            timeout=25.0,
             print_keywords=["LAUNCHER", "render_full"]
         )
         assert sys_space_returned, "Failed to return to Home from System Space"

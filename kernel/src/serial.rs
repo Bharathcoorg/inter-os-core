@@ -816,6 +816,31 @@ fn handle_serial_command(cmd: &[u8]) {
                 crate::input::post_touch_event(0, x2, y2, 0, crate::input::TouchPhase::Up);
             }
         }
+    } else if verb.eq_ignore_ascii_case("PIN") || verb.eq_ignore_ascii_case("UNLOCK") {
+        if let Some(pin_str) = parts.next() {
+            crate::serial_println!("[COM1 INPUT] Hardware PIN entry received: {} digits.", pin_str.len());
+            for c in pin_str.chars() {
+                let coords = match c {
+                    '1' => Some((160, 480)),
+                    '2' => Some((360, 480)),
+                    '3' => Some((560, 480)),
+                    '4' => Some((160, 620)),
+                    '5' => Some((360, 620)),
+                    '6' => Some((560, 620)),
+                    '7' => Some((160, 760)),
+                    '8' => Some((360, 760)),
+                    '9' => Some((560, 760)),
+                    '0' => Some((360, 900)),
+                    'c' | 'C' => Some((160, 900)),
+                    'x' | 'X' => Some((560, 900)),
+                    _ => None,
+                };
+                if let Some((x, y)) = coords {
+                    crate::input::post_touch_event(0, x, y, 1000, crate::input::TouchPhase::Down);
+                    crate::input::post_touch_event(0, x, y, 0, crate::input::TouchPhase::Up);
+                }
+            }
+        }
     } else if s.len() == 1 {
         let c = s.chars().next().unwrap();
         crate::input::post_char_event(c);

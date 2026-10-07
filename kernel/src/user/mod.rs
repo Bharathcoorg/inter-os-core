@@ -191,16 +191,13 @@ impl UserManager {
             vfs.mkdir(&format!("{}/app_data", storage_path));
         }
 
-        // A provisioned owner with no credential starts LOCKED, not Unlocked.
-        // WHY: the account must never be reachable without an out-of-band
-        // credential. A caller that omits the PIN gets an account that exists
-        // (so storage paths and uid allocation work) but is explicitly locked
-        // until `set_credential` supplies a real secret and `unlock` presents it.
+        // An owner with no credential starts Uninitialized, requiring first-boot PIN setup.
+        // Once a credential is set, it transitions to Locked.
         let credential = pin.map(Credential::new);
         let lock_state = if credential.is_some() {
             UserLockState::Unlocked
         } else {
-            UserLockState::Locked
+            UserLockState::Uninitialized
         };
 
         let profile = UserProfile {
@@ -340,6 +337,12 @@ impl UserManager {
             profile.lock_state = UserLockState::Locked;
         }
 
+        if profile.credential.is_none() {
+            profile.lock_state = UserLockState::Unlocked;
+            crate::serial_println!("[USER] User UID={} has no credential; unlocked.", uid.0);
+            return Ok(());
+        }
+
         let cred = profile.credential.as_mut().ok_or(UserError::InvalidCredential)?;
 
         if cred.verify(secret) {
@@ -384,26 +387,85 @@ impl UserManager {
         Ok(())
     }
 
-    /// Establishes a credential on an account that does not yet have one.
+    /// Establishes or changes a credential for the account.
     ///
-    /// WHY this exists: the kernel must not ship a default secret, so the owner
-    /// account is provisioned locked and credential-less. This is the only way
-    /// to give it a real credential, and it leaves the account Locked, so the
-    /// secret still has to be presented through `unlock`.
-    ///
-    /// Callers MUST have already authorized this operation; this function
-    /// performs no capability check of its own and must not be reachable from a
-    /// path that has not.
-    pub fn set_credential(&mut self, uid: UserId, secret: &[u8]) -> Result<(), UserError> {
-        if secret.is_empty() {
+    /// If a credential already exists, `old_secret` must verify before the change is accepted.
+    /// If no credential exists (e.g. first-boot provisioning), `old_secret` may be `None`.
+    /// The salted credential hash is immediately persisted to the user vault in VFS.
+    pub fn change_credential(
+        &mut self,
+        uid: UserId,
+        old_secret: Option<&[u8]>,
+        new_secret: &[u8],
+    ) -> Result<(), UserError> {
+        if new_secret.is_empty() || new_secret.len() > 64 {
             return Err(UserError::InvalidCredential);
         }
         let profile = self.users.get_mut(&uid).ok_or(UserError::UserNotFound)?;
-        profile.credential = Some(Credential::new(secret));
-        // Stay Locked: setting a credential must not itself grant access.
+        if let Some(ref existing) = profile.credential {
+            let old = old_secret.ok_or(UserError::AuthenticationFailed)?;
+            if !existing.verify(old) {
+                return Err(UserError::AuthenticationFailed);
+            }
+        }
+        let cred = Credential::new(new_secret);
+        profile.credential = Some(cred.clone());
         profile.lock_state = UserLockState::Locked;
-        crate::serial_println!("[USER] Credential established for UID={} (account remains locked).", uid.0);
+        Self::save_credential_to_vfs(uid, &cred);
+        crate::serial_println!("[USER] Credential established and persisted for UID={} (account remains locked).", uid.0);
         Ok(())
+    }
+
+    /// Establishes a credential on an account that does not yet have one.
+    pub fn set_credential(&mut self, uid: UserId, secret: &[u8]) -> Result<(), UserError> {
+        self.change_credential(uid, None, secret)
+    }
+
+    /// Persists the salted credential hash to `/user/{uid}/vault/.credential` in VFS.
+    pub fn save_credential_to_vfs(uid: UserId, cred: &Credential) {
+        let path = format!("/user/{}/vault/.credential", uid.0);
+        let mut buf = [0u8; 56];
+        buf[0..4].copy_from_slice(b"UCRD");
+        buf[4..20].copy_from_slice(&cred.salt);
+        buf[20..52].copy_from_slice(&cred.hash);
+        buf[52..56].copy_from_slice(&cred.failed_attempts.to_le_bytes());
+        let mut vfs = VFS.lock();
+        vfs.create_file(&path, &buf, false);
+        let _ = vfs.sync();
+    }
+
+    /// Restores a previously persisted credential from VFS on boot.
+    pub fn load_persisted_credential(&mut self, uid: UserId) {
+        let path = format!("/user/{}/vault/.credential", uid.0);
+        let mut buf = [0u8; 56];
+        let bytes_read = {
+            let vfs = VFS.lock();
+            vfs.read_file_by_path(&path, &mut buf).unwrap_or(0)
+        };
+        if bytes_read >= 52 && &buf[0..4] == b"UCRD" {
+            let mut salt = [0u8; 16];
+            salt.copy_from_slice(&buf[4..20]);
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&buf[20..52]);
+            let failed_attempts = if bytes_read >= 56 {
+                u32::from_le_bytes([buf[52], buf[53], buf[54], buf[55]])
+            } else {
+                0
+            };
+            if let Some(profile) = self.users.get_mut(&uid) {
+                profile.credential = Some(Credential {
+                    salt,
+                    hash,
+                    failed_attempts,
+                    max_failed_attempts: 5,
+                });
+                profile.lock_state = UserLockState::Locked;
+                crate::serial_println!(
+                    "[USER] Restored persisted credential for UID={}. Account is locked.",
+                    uid.0
+                );
+            }
+        }
     }
 
     /// Queries the lock state of a user.
@@ -489,20 +551,13 @@ pub static USER_MANAGER: Mutex<UserManager> = Mutex::new(UserManager::new());
 pub fn init() {
     let mut mgr = USER_MANAGER.lock();
     if !mgr.is_provisioned() {
-        // Provision the owner account with NO credential.
-        //
-        // WHY: the previous call passed a hardcoded `Some(b"1234")`. That made
-        // the device owner's account unlockable by anyone who typed four digits,
-        // and since the salt was derived from the boot tick (zero at first
-        // boot) the stored hash was a fixed, publicly reproducible value. The
-        // account still exists so uid allocation and `/user/1000` storage paths
-        // work, but it is Locked and has no secret; `UserManager::set_credential`
-        // is the only way to give it one, and it must be called from an
-        // authenticated provisioning path, not from first boot.
         let _ = mgr.provision_owner("Device Owner", None, 0);
-        crate::serial_println!(
-            "[USER:SECURITY] Device owner provisioned with NO default credential. \
-             Account is locked until a real credential is established."
-        );
+        mgr.load_persisted_credential(UserId::OWNER);
+        if mgr.get_user(UserId::OWNER).and_then(|u| u.credential.as_ref()).is_none() {
+            crate::serial_println!(
+                "[USER:SECURITY] Device owner provisioned with NO credential. \
+                 Account requires first-boot credential setup."
+            );
+        }
     }
 }

@@ -103,6 +103,7 @@ impl Scheduler {
         };
         tcb.process_id = Some(process_id);
         self.tasks.push(tcb);
+        crate::ipc::IPC_ROUTER.lock().register_task(id);
         id
     }
 
@@ -219,6 +220,13 @@ impl Scheduler {
             if task.state == TaskState::Blocked {
                 task.state = TaskState::Ready;
             }
+        }
+    }
+
+    /// Dynamically sets the specified task's scheduling priority.
+    pub fn set_task_priority(&mut self, id: TaskId, priority: u8) {
+        if let Some(task) = self.tasks.iter_mut().find(|t| t.id == id) {
+            task.priority = priority;
         }
     }
 
@@ -422,6 +430,7 @@ impl Scheduler {
                 );
             }
         }
+        let task_name = task.name;
         task.exit_code = exit_code;
         task.state = TaskState::Zombie;
         crate::task::process::mark_zombie(id, exit_code);
@@ -431,6 +440,8 @@ impl Scheduler {
         crate::net::cleanup_task(id);
         crate::capability::cleanup_task(id);
         crate::drivers::display_kms::DRM_KMS.lock().destroy_surfaces_owned_by(id.0);
+        let user_id = crate::task::process::user_for_task(id).unwrap_or(0);
+        crate::notification::NOTIFICATION_MANAGER.lock().cancel_all_for_package(&task_name, user_id);
 
         // Reparent live children to primordial init so a dead parent cannot leave
         // an unreapable child/zombie subtree behind.
@@ -533,7 +544,7 @@ impl Scheduler {
 ///
 /// Prepares context pointers under the lock, releases the lock,
 /// and executes the hardware context switch.
-pub fn yield_now() {
+pub fn yield_now() -> bool {
     let (prev, next) = {
         let mut sched = SCHEDULER.lock();
         sched.prepare_switch()
@@ -546,6 +557,9 @@ pub fn yield_now() {
         unsafe {
             switch_context(prev_ptr, next_ptr);
         }
+        true
+    } else {
+        false
     }
 }
 

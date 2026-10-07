@@ -444,38 +444,36 @@ pub extern "C" fn _start() -> ! {
                 let _ = std::surface_flip(6);
             }
 
-            if (events & std::EVENT_TOUCH_INPUT) != 0 {
-                let mut input = std::InputEvent {
-                    kind: 0,
-                    x: 0,
-                    y: 0,
-                    dx: 0,
-                    dy: 0,
-                    scale_milli: 1000,
-                };
-                while std::input_event_poll(&mut input).is_ok() {
-                    if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
-                        std::log(
-                            0,
-                            "[CALCULATOR] Navigation gesture recognized. Returning to launcher.",
-                        )
-                        .ok();
+            let mut input = std::InputEvent {
+                kind: 0,
+                x: 0,
+                y: 0,
+                dx: 0,
+                dy: 0,
+                scale_milli: 1000,
+            };
+            while std::input_event_poll(&mut input).is_ok() {
+                if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
+                    std::log(
+                        0,
+                        "[CALCULATOR] Navigation gesture recognized. Returning to launcher.",
+                    )
+                    .ok();
+                    let _ = std::surface_destroy(6, surface);
+                    std::exit_with_code(0);
+                }
+                if input.kind == 1 {
+                    let (should_exit, action_logged) =
+                        handle_touch_point(&mut calc, input.x, input.y);
+                    if let Some(msg) = action_logged {
+                        std::log(0, msg).ok();
+                    }
+                    if should_exit {
                         let _ = std::surface_destroy(6, surface);
                         std::exit_with_code(0);
                     }
-                    if input.kind == 1 {
-                        let (should_exit, action_logged) =
-                            handle_touch_point(&mut calc, input.x, input.y);
-                        if let Some(msg) = action_logged {
-                            std::log(0, msg).ok();
-                        }
-                        if should_exit {
-                            let _ = std::surface_destroy(6, surface);
-                            std::exit_with_code(0);
-                        }
-                        render_calculator_ui(surface, &calc);
-                        let _ = std::surface_flip(6);
-                    }
+                    render_calculator_ui(surface, &calc);
+                    let _ = std::surface_flip(6);
                 }
             }
         }

@@ -232,7 +232,7 @@ pub fn app_drawer_dot_at(state: &LauncherState, x: usize, y: usize) -> Option<us
     }
     let pitch = DOT_D + DOT_GAP;
     let span = total * pitch - DOT_GAP;
-    let x0 = f.dots.x + (f.dots.w - span) / 2;
+    let x0 = f.dots.x + f.dots.w.saturating_sub(span) / 2;
     let cy = f.dots.center_y();
     for page in 0..total {
         let cx = x0 + page * pitch + DOT_D / 2;
@@ -759,7 +759,7 @@ fn build(state: &LauncherState) -> Paint {
         status,
         search,
         chips,
-        dots_x0: f.dots.x + (f.dots.w - span) / 2,
+        dots_x0: f.dots.x + f.dots.w.saturating_sub(span) / 2,
         dots_cy: f.dots.center_y(),
         dots_total: page_total,
         dots_current: page,

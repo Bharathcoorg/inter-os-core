@@ -610,7 +610,7 @@ pub fn spawn_verified_rapp_process(
     let process_name: &'static str = alloc::boxed::Box::leak(
         manifest.package_id.clone().into_boxed_str()
     );
-    spawn_user_process_with_parent(process_name, elf_payload, caps, 1, parent_id)
+    spawn_user_process_with_parent(process_name, elf_payload, caps, 6, parent_id)
 }
 
 /// Spawns a first-party system service as an isolated Ring-3 process owned by PID1.
@@ -659,7 +659,7 @@ pub fn spawn_packaged_process(
     parent_id: TaskId,
 ) -> Result<TaskId, &'static str> {
     let caps = capabilities_from_rapp(&[1, 3, 9], parent_id.0)?;
-    spawn_user_process_with_parent(process_name, elf_payload, caps, 1, parent_id)
+    spawn_user_process_with_parent(process_name, elf_payload, caps, 6, parent_id)
 }
 
 /// Compatibility wrapper for loading an ELF with specified stack top.
@@ -827,7 +827,7 @@ pub fn spawn_app_settings(id_security: TaskId) -> TaskId {
         "app_settings",
         APP_SETTINGS_ELF,
         caps,
-        1,
+        6,
         id_security,
     ).expect("Failed to spawn Settings app");
     serial_println!("[OK] Spawned Task 17: app_settings (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
@@ -889,7 +889,7 @@ pub fn spawn_app_terminal(id_security: TaskId) -> TaskId {
         "app_terminal",
         APP_TERMINAL_ELF,
         caps,
-        1,
+        6,
         id_security,
     ).expect("Failed to spawn Terminal app");
     serial_println!("[OK] Spawned Task 18: app_terminal (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
@@ -951,7 +951,7 @@ pub fn spawn_app_dialer(id_security: TaskId) -> TaskId {
         "app_dialer",
         APP_DIALER_ELF,
         caps,
-        1,
+        6,
         id_security,
     ).expect("Failed to spawn Dialer app");
     serial_println!("[OK] Spawned Task 19: app_dialer (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
@@ -1013,7 +1013,7 @@ pub fn spawn_app_vault(id_security: TaskId) -> TaskId {
         "app_vault",
         APP_VAULT_ELF,
         caps,
-        1,
+        6,
         id_security,
     ).expect("Failed to spawn Vault app");
     serial_println!("[OK] Spawned Task 20: app_vault (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
@@ -1075,7 +1075,7 @@ pub fn spawn_app_camera(id_security: TaskId) -> TaskId {
         "app_camera",
         APP_CAMERA_ELF,
         caps,
-        1,
+        6,
         id_security,
     ).expect("Failed to spawn Camera app");
     serial_println!("[OK] Spawned Task 21: app_camera (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
@@ -1137,7 +1137,7 @@ pub fn spawn_app_calculator(id_security: TaskId) -> TaskId {
         "app_calculator",
         APP_CALCULATOR_ELF,
         caps,
-        1,
+        6,
         id_security,
     ).expect("Failed to spawn Calculator app");
     serial_println!("[OK] Spawned Task 22: app_calculator (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
@@ -1205,7 +1205,7 @@ pub fn spawn_app_browser(id_security: TaskId) -> TaskId {
         "app_browser",
         APP_BROWSER_ELF,
         caps,
-        1,
+        6,
         id_security,
     ).expect("Failed to spawn Browser app");
     serial_println!("[OK] Spawned Task 23: app_browser (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
@@ -1273,7 +1273,7 @@ pub fn spawn_app_messages(id_security: TaskId) -> TaskId {
         "app_messages",
         APP_MESSAGES_ELF,
         caps,
-        1,
+        6,
         id_security,
     ).expect("Failed to spawn Messages app");
     serial_println!("[OK] Spawned Task 24: app_messages (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
@@ -1341,7 +1341,7 @@ pub fn spawn_app_calendar(id_security: TaskId) -> TaskId {
         "app_calendar",
         APP_CALENDAR_ELF,
         caps,
-        1,
+        6,
         id_security,
     ).expect("Failed to spawn Calendar app");
     serial_println!("[OK] Spawned Task 25: app_calendar (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
@@ -1409,7 +1409,7 @@ pub fn spawn_app_music(id_security: TaskId) -> TaskId {
         "app_music",
         APP_MUSIC_ELF,
         caps,
-        1,
+        6,
         id_security,
     ).expect("Failed to spawn Music app");
     serial_println!("[OK] Spawned Task 26: app_music (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
@@ -1477,7 +1477,7 @@ pub fn spawn_app_file_manager(id_security: TaskId) -> TaskId {
         "app_file_manager",
         APP_FILE_MANAGER_ELF,
         caps,
-        1,
+        6,
         id_security,
     ).expect("Failed to spawn File Manager app");
     serial_println!("[OK] Spawned Task 27: app_file_manager (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
@@ -1545,7 +1545,7 @@ pub fn spawn_app_gallery(id_security: TaskId) -> TaskId {
         "app_gallery",
         APP_GALLERY_ELF,
         caps,
-        1,
+        6,
         id_security,
     ).expect("Failed to spawn Gallery app");
     serial_println!("[OK] Spawned Task 28: app_gallery (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);

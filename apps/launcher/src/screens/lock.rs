@@ -239,6 +239,9 @@ fn lock_mist(theme: &Theme) -> u32 {
 /// WHY schematic: the panel's silhouette is 12 x 35 panel px, too little to carry
 /// any reading finer than head, shoulders and two legs.
 fn lock_figure_hit(x: usize, y: usize) -> bool {
+    if !(715..=833).contains(&y) || !(100..=154).contains(&x) {
+        return false;
+    }
     let dx = (x as i32) - 127;
     let dy = (y as i32) - 725;
     // head
@@ -371,6 +374,9 @@ fn lock_glyph_dim(theme: &Theme, disc: u32) -> u32 {
 }
 
 fn lock_padlock_pixel(theme: &Theme, backdrop: u32, x: usize, y: usize) -> Option<u32> {
+    if !(1080..=1130).contains(&y) || !(345..=380).contains(&x) {
+        return None;
+    }
     let dx = (x as i32) - LOCK_PADLOCK_CX;
     let dy = (y as i32) - LOCK_PADLOCK_CY;
     // body, with the two lower corners rounded off
@@ -431,8 +437,14 @@ fn lock_camera_glyph_pixel(x: usize, y: usize) -> bool {
 /// One circular control: a translucent veil over the wallpaper, with a slightly
 /// denser two-pixel rim, so the control picks up whatever is behind it.
 fn lock_button_disc(x: usize, y: usize, cx: i32, bg: u32) -> Option<u32> {
-    let dx = (x as i32) - cx;
     let dy = (y as i32) - LOCK_BTN_CY;
+    if dy < -LOCK_BTN_R || dy > LOCK_BTN_R {
+        return None;
+    }
+    let dx = (x as i32) - cx;
+    if dx < -LOCK_BTN_R || dx > LOCK_BTN_R {
+        return None;
+    }
     let d2 = dx * dx + dy * dy;
     if d2 > LOCK_BTN_R * LOCK_BTN_R {
         return None;
@@ -680,22 +692,140 @@ fn frame_for(x: usize, y: usize, state: &LauncherState) -> &Frame {
     if !slot.holds_next(x, y, addr) {
         slot.frame = Frame::measure(state);
         slot.state = addr;
-        slot.at_x = x;
-        slot.at_y = y;
         slot.measured = true;
     }
+    slot.at_x = x;
+    slot.at_y = y;
     &slot.frame
+}
+
+/// Hit-tests a touch point against the lock screen PIN keypad buttons.
+pub fn hit_test_pin_pad(x: usize, y: usize) -> Option<char> {
+    const BUTTONS: [(usize, usize, char); 12] = [
+        (160, 480, '1'), (360, 480, '2'), (560, 480, '3'),
+        (160, 620, '4'), (360, 620, '5'), (560, 620, '6'),
+        (160, 760, '7'), (360, 760, '8'), (560, 760, '9'),
+        (160, 900, 'C'), (360, 900, '0'), (560, 900, 'X'),
+    ];
+    for &(cx, cy, ch) in &BUTTONS {
+        let dx = (x as i32) - (cx as i32);
+        let dy = (y as i32) - (cy as i32);
+        if dx * dx + dy * dy <= 48 * 48 {
+            return Some(ch);
+        }
+    }
+    None
+}
+
+fn lock_pin_pad_pixel(color: u32, x: usize, y: usize, state: &LauncherState) -> Option<u32> {
+    if y < LOCK_STATUS_BAND {
+        return None;
+    }
+    let backdrop = Theme::veil(color, 85, false);
+
+    // 1. Header message at y = 250..295
+    let (header, subheader) = if state.lock_state == interos_std::UserLockState::Uninitialized {
+        if state.pin_setup_step == 0 {
+            (b"Set Device PIN" as &[u8], b"Create a 4-digit PIN" as &[u8])
+        } else {
+            (b"Confirm Device PIN" as &[u8], b"Re-enter your 4-digit PIN" as &[u8])
+        }
+    } else if state.auth_error {
+        (b"Incorrect PIN" as &[u8], b"Try again" as &[u8])
+    } else if state.lock_state == interos_std::UserLockState::Lockout {
+        (b"Device Locked Out" as &[u8], b"Account locked after 5 attempts" as &[u8])
+    } else {
+        (b"Enter Device PIN" as &[u8], b"Enter your 4-digit PIN to unlock" as &[u8])
+    };
+
+    if (250..295).contains(&y) {
+        let text_w = text::measure(header, 2);
+        let text_x = (W.saturating_sub(text_w)) / 2;
+        let ink = if state.auth_error { 0xFF5555 } else { 0xFFFFFF };
+        if let Some(c) = test_text_aa(x, y, text_x, 255, 2, header, ink, backdrop) {
+            return Some(c);
+        }
+    }
+    if (300..330).contains(&y) {
+        let text_w = text::measure(subheader, 1);
+        let text_x = (W.saturating_sub(text_w)) / 2;
+        if let Some(c) = test_text(x, y, text_x, 305, 1, subheader, 0x90A0B0) {
+            return Some(c);
+        }
+    }
+
+    // 2. 4 PIN Bullet Dots at y = 345..375: cx = 270, 330, 390, 450
+    if (345..375).contains(&y) && (245..475).contains(&x) {
+        for i in 0..4 {
+            let cx = 270 + i * 60;
+            let cy = 360;
+            let dx = (x as i32) - (cx as i32);
+            let dy = (y as i32) - (cy as i32);
+            let dist_sq = dx * dx + dy * dy;
+            let r = 9;
+            if dist_sq <= r * r {
+                if i < state.pin_len {
+                    return Some(0xFFFFFF);
+                } else if dist_sq >= (r - 2) * (r - 2) {
+                    return Some(0x708090);
+                }
+            }
+        }
+    }
+
+    // 3. 12 Keypad Buttons
+    const ROWS: [(usize, &[u8; 3]); 4] = [
+        (480, &[b'1', b'2', b'3']),
+        (620, &[b'4', b'5', b'6']),
+        (760, &[b'7', b'8', b'9']),
+        (900, &[b'C', b'0', b'X']),
+    ];
+    const COLS: [usize; 3] = [160, 360, 560];
+
+    for &(cy, row_chars) in &ROWS {
+        if y >= cy.saturating_sub(46) && y <= cy + 46 {
+            for col_idx in 0..3 {
+                let cx = COLS[col_idx];
+                if x >= cx.saturating_sub(46) && x <= cx + 46 {
+                    let dx = (x as i32) - (cx as i32);
+                    let dy = (y as i32) - (cy as i32);
+                    let dist_sq = dx * dx + dy * dy;
+                    let r = 44;
+                    if dist_sq <= r * r {
+                        let ch = row_chars[col_idx];
+                        let glyph_w = launcher::font::advance_of(ch, false) * 2;
+                        let gx = cx.saturating_sub(glyph_w / 2);
+                        let gy = cy.saturating_sub(17);
+                        let disc_bg = Theme::veil(backdrop, 55, false);
+                        if let Some(c) = test_text_aa(x, y, gx, gy, 2, &[ch], 0xFFFFFF, disc_bg) {
+                            return Some(c);
+                        }
+                        if dist_sq >= (r - 2) * (r - 2) {
+                            return Some(0x405068);
+                        }
+                        return Some(disc_bg);
+                    }
+                }
+            }
+        }
+    }
+
+    Some(backdrop)
 }
 
 pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     let theme = THEME;
-    // WHY this is the first statement: the boxes every test below reads come from
-    // here, and every one of them is a `text::` or `Theme::blend` measurement that
-    // used to be repeated on this pixel.
     let f = frame_for(x, y, state);
 
     // 1. Full-bleed wallpaper.
     let color = lock_wallpaper_pixel(f, x, y);
+
+    // If the PIN pad is active (or on first-boot uninitialized state), render the PIN pad!
+    if state.pin_pad_visible || state.lock_state == interos_std::UserLockState::Uninitialized {
+        if let Some(pin_color) = lock_pin_pad_pixel(color, x, y, state) {
+            return pin_color;
+        }
+    }
 
     // 2. Status bar. The panel draws its status glyphs in near-black because
     //    they sit on the bright upper sky.

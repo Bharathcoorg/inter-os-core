@@ -66,8 +66,11 @@ pub(super) fn run_left(
 ) -> Option<u32> {
     let h = text::line_height(scale);
     let y0 = rect.y + rect.h.saturating_sub(h) / 2;
+    if y < y0 || y >= y0 + h || x < rect.x {
+        return None;
+    }
     let w = text::measure(run, scale);
-    if y < y0 || y >= y0 + h || x < rect.x || x >= rect.x + w {
+    if x >= rect.x + w {
         return None;
     }
     test_text_aa(x, y, rect.x, y0, scale, run, color, 0xFFFFFFFF)
@@ -82,6 +85,11 @@ pub(super) fn run_right(
     run: &[u8],
     color: u32,
 ) -> Option<u32> {
+    let h = text::line_height(scale);
+    let y0 = rect.y + rect.h.saturating_sub(h) / 2;
+    if y < y0 || y >= y0 + h {
+        return None;
+    }
     let w = text::measure(run, scale);
     if w > rect.w {
         return None;
@@ -99,6 +107,11 @@ pub(super) fn run_center(
     run: &[u8],
     color: u32,
 ) -> Option<u32> {
+    let h = text::line_height(scale);
+    let y0 = rect.y + rect.h.saturating_sub(h) / 2;
+    if y < y0 || y >= y0 + h {
+        return None;
+    }
     let w = text::measure(run, scale);
     if w > rect.w {
         return None;
@@ -181,7 +194,7 @@ impl<'a> Cell<'a> {
 }
 
 pub(super) fn cell_pixel(x: usize, y: usize, theme: &Theme, cell: &Cell) -> u32 {
-    if !cell.contains(x, y) {
+    if !cell.rect.contains(x, y) || !cell.contains(x, y) {
         return theme.bg;
     }
     let inner = cell.rect.inset(1);
@@ -190,6 +203,12 @@ pub(super) fn cell_pixel(x: usize, y: usize, theme: &Theme, cell: &Cell) -> u32 
     }
 
     let pad = cell.rect.inset(space::MD);
+    let h = text::line_height(cell.scale);
+    let text_y0 = pad.y + pad.h.saturating_sub(h) / 2;
+    if y < text_y0 || y >= text_y0 + h {
+        return cell.fill;
+    }
+
     let value_w = text::measure(cell.value, cell.scale).min(pad.w * 50 / 100) + space::SM;
     let value_col = Rect::new(pad.x + pad.w - value_w, pad.y, value_w, pad.h);
     let label_col = Rect::new(pad.x, pad.y, pad.w - value_w - space::SM, pad.h);

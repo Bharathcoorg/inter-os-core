@@ -1,4 +1,4 @@
-﻿//! Live Widgets dashboard.
+//! Live Widgets dashboard.
 //!
 //! WHY `pub`: `render_view` in the crate root dispatches here by view mode.
 //! Geometry and colour come from `launcher::theme`, `launcher::layout` and
@@ -24,8 +24,10 @@
 //! implementation of "rounded rectangle" and "centre this run of text". See the
 //! note at the top of that file about when they move to a `screens/primitives.rs`.
 
+use core::cell::UnsafeCell;
+
 use super::system_space::{
-    cell_pixel, counted, decimal, push, round_contains, run_center, run_left, run_right, Cell, Reading,
+    counted, decimal, push, round_contains, run_center, run_left, run_right, Reading,
     VALUE_MAX,
 };
 use crate::screens::lock::LOCK_DATE_TEXT_LEN;
@@ -243,15 +245,11 @@ fn reading_summary(state: &LauncherState) -> ([u8; VALUE_MAX], usize) {
 // -----------------------------------------------------------------------------
 
 /// The registry's display name for `package`, or `None` if it is not installed.
-///
-/// WHY look it up instead of naming it: the tile says what opens, and what opens
-/// is a package in the live registry whose label and presence both change with
-/// what is installed. A name written here would survive the package being
-/// uninstalled, and the tile would go on offering to open it.
 fn installed_label<'a>(state: &'a LauncherState, package: &str) -> Option<&'a [u8]> {
+    let pkg_bytes = package.as_bytes();
     for i in 0..state.app_count {
         let id_len = state.app_id_lens[i] as usize;
-        if id_len == 0 || &state.app_ids[i][..id_len] != package.as_bytes() {
+        if id_len != pkg_bytes.len() || &state.app_ids[i][..id_len] != pkg_bytes {
             continue;
         }
         let label_len = state.app_label_lens[i] as usize;
@@ -262,81 +260,281 @@ fn installed_label<'a>(state: &'a LauncherState, package: &str) -> Option<&'a [u
     None
 }
 
-/// Paints one entry point: the app's registry name, centred, with a chevron that
-/// is only drawn when the package is actually installed.
-///
-/// WHY an installed tile is tinted and an absent one is recessed: the chevron and
-/// the accent wash are what say "this one opens something", and `main.rs` can only
-/// open a package the registry knows. A tile that keeps its chevron after the
-/// package is uninstalled is a control that presses and does nothing.
-fn entry_pixel(
-    x: usize,
-    y: usize,
-    theme: &Theme,
-    entry: &Entry,
-    state: &LauncherState,
-) -> Option<u32> {
-    let rect = entry.rect;
-    if !round_contains(&rect, radius::CARD, x, y) {
-        return None;
-    }
-    let inner = rect.inset(1);
-    if !round_contains(&inner, radius::CARD.saturating_sub(1), x, y) {
-        return Some(theme.border);
-    }
+// -----------------------------------------------------------------------------
+// Per-frame cached layout & metrics
+// -----------------------------------------------------------------------------
 
-    let installed = installed_label(state, entry.package);
-    let pad = rect.inset(space::MD);
-    let name = match installed {
-        Some(label) => label,
-        // WHY the id rather than a blank: the user should be able to see which
-        // package is missing, and an empty tile tells them nothing.
-        None => entry.package.as_bytes(),
-    };
+#[derive(Clone, Copy)]
+struct EntryFrame {
+    rect: Rect,
+    inner: Rect,
+    fill: u32,
+    border: u32,
+    name_rect: Rect,
+    name_buf: [u8; 32],
+    name_len: usize,
+    name_ink: u32,
+    chevron: Option<Rect>,
+    caption: Option<Rect>,
+}
 
-    let caption_h = if installed.is_none() { text::line_height(type_scale::CAPTION) } else { 0 };
-    let name_rect = Rect::new(pad.x, pad.y, pad.w, pad.h.saturating_sub(caption_h + space::SM));
+#[derive(Clone, Copy)]
+struct RowFrame {
+    rect: Rect,
+    inner: Rect,
+    fill: u32,
+    border: u32,
+    text_y0: usize,
+    text_h: usize,
+    value_col: Rect,
+    value_buf: [u8; VALUE_MAX],
+    value_len: usize,
+    value_ink: u32,
+    label_col: Rect,
+    label_buf: [u8; 32],
+    label_len: usize,
+    label_ink: u32,
+}
 
-    if installed.is_some() {
-        if let Some(c) = run_center(
-            x,
-            y,
-            &name_rect,
-            type_scale::BODY,
-            name,
-            theme.text,
-        ) {
-            return Some(c);
+#[derive(Clone, Copy)]
+struct WidgetsFrame {
+    status_time: [u8; 8],
+    status_time_len: usize,
+    title_rect: Rect,
+    summary_rect: Rect,
+    summary_buf: [u8; VALUE_MAX],
+    summary_len: usize,
+    entries: [EntryFrame; 5],
+    rows: [RowFrame; 10],
+    stack_y: usize,
+    row_stride: usize,
+    bounds: Rect,
+}
+
+impl WidgetsFrame {
+    const fn empty() -> Self {
+        const EMPTY_ENTRY: EntryFrame = EntryFrame {
+            rect: Rect::new(0, 0, 0, 0),
+            inner: Rect::new(0, 0, 0, 0),
+            fill: 0,
+            border: 0,
+            name_rect: Rect::new(0, 0, 0, 0),
+            name_buf: [0u8; 32],
+            name_len: 0,
+            name_ink: 0,
+            chevron: None,
+            caption: None,
+        };
+        const EMPTY_ROW: RowFrame = RowFrame {
+            rect: Rect::new(0, 0, 0, 0),
+            inner: Rect::new(0, 0, 0, 0),
+            fill: 0,
+            border: 0,
+            text_y0: 0,
+            text_h: 0,
+            value_col: Rect::new(0, 0, 0, 0),
+            value_buf: [0u8; VALUE_MAX],
+            value_len: 0,
+            value_ink: 0,
+            label_col: Rect::new(0, 0, 0, 0),
+            label_buf: [0u8; 32],
+            label_len: 0,
+            label_ink: 0,
+        };
+        WidgetsFrame {
+            status_time: [0u8; 8],
+            status_time_len: 0,
+            title_rect: Rect::new(0, 0, 0, 0),
+            summary_rect: Rect::new(0, 0, 0, 0),
+            summary_buf: [0u8; VALUE_MAX],
+            summary_len: 0,
+            entries: [EMPTY_ENTRY; 5],
+            rows: [EMPTY_ROW; 10],
+            stack_y: 0,
+            row_stride: 0,
+            bounds: Rect::new(0, 0, 0, 0),
         }
-        // The chevron every settings and launcher list uses to say "this opens
-        // something", in the accent the tinted card is washed with.
-        let chevron = Rect::new(
-            pad.x + pad.w.saturating_sub(text::measure(b">", type_scale::BODY)),
-            name_rect.y,
-            text::measure(b">", type_scale::BODY),
-            name_rect.h,
+    }
+
+    fn measure(state: &LauncherState) -> Self {
+        let theme = THEME;
+        let mut status_time = [0u8; 8];
+        let status_time_len = state.clock_time.len().min(8);
+        status_time[..status_time_len].copy_from_slice(&state.clock_time[..status_time_len]);
+
+        let content = layout::content_area(CONTENT_PADDING);
+
+        // Entries
+        let mut entries = [Self::empty().entries[0]; 5];
+        for (i, entry) in ENTRIES.iter().enumerate() {
+            let rect = entry.rect;
+            let inner = rect.inset(1);
+            let installed = installed_label(state, entry.package);
+            let pad = rect.inset(space::MD);
+            let name_slice = match installed {
+                Some(label) => label,
+                None => entry.package.as_bytes(),
+            };
+            let mut name_buf = [0u8; 32];
+            let name_len = name_slice.len().min(32);
+            name_buf[..name_len].copy_from_slice(&name_slice[..name_len]);
+
+            let caption_h = if installed.is_none() { text::line_height(type_scale::CAPTION) } else { 0 };
+            let name_rect = Rect::new(pad.x, pad.y, pad.w, pad.h.saturating_sub(caption_h + space::SM));
+
+            let (fill, name_ink, chevron, caption) = if installed.is_some() {
+                let fill = Theme::blend(theme.surface, theme.accent, 22);
+                let chevron = Rect::new(
+                    pad.x + pad.w.saturating_sub(text::measure(b">", type_scale::BODY)),
+                    name_rect.y,
+                    text::measure(b">", type_scale::BODY),
+                    name_rect.h,
+                );
+                (fill, theme.text, Some(chevron), None)
+            } else {
+                let caption = Rect::new(pad.x, name_rect.y + name_rect.h + space::SM, pad.w, caption_h);
+                (theme.surface_sunken, theme.text_muted, None, Some(caption))
+            };
+
+            entries[i] = EntryFrame {
+                rect,
+                inner,
+                fill,
+                border: theme.border,
+                name_rect,
+                name_buf,
+                name_len,
+                name_ink,
+                chevron,
+                caption,
+            };
+        }
+
+        // Title and summary
+        let title_rect = Rect::new(
+            content.x,
+            HEADER_TOP,
+            content.w,
+            text::line_height(WIDGETS_TITLE_SCALE),
         );
-        if let Some(c) = run_right(x, y, &chevron, type_scale::BODY, b">", theme.accent) {
-            return Some(c);
-        }
-        return Some(Theme::blend(theme.surface, theme.accent, 22));
-    }
+        let heading_baseline = HEADER_TOP + text::BASELINE * WIDGETS_TITLE_SCALE;
+        let summary_rect = Rect::new(
+            content.x,
+            heading_baseline - text::BASELINE * ROW_TEXT_SCALE,
+            content.w,
+            text::line_height(ROW_TEXT_SCALE),
+        );
+        let (summary_raw, summary_len) = reading_summary(state);
+        let mut summary_buf = [0u8; VALUE_MAX];
+        summary_buf[..summary_len].copy_from_slice(&summary_raw[..summary_len]);
 
-    if let Some(c) = run_center(x, y, &name_rect, type_scale::BODY, name, theme.text_muted) {
-        return Some(c);
+        // Rows
+        let bottom = content.y + content.h - space::MD;
+        let bounds = Rect::new(content.x, LIST_TOP, content.w, bottom.saturating_sub(LIST_TOP));
+        let row_h = (bounds.h.saturating_sub(ROW_GUTTER * (ROWS.len() - 1)) / ROWS.len())
+            .clamp(ROW_MIN, ROW_MAX);
+        let stack = layout::list(bounds, ROWS.len(), row_h, ROW_GUTTER).unwrap_or(bounds);
+        let row_stride = row_h + ROW_GUTTER;
+        let mut rows = [Self::empty().rows[0]; 10];
+
+        for (i, row_item) in ROWS.iter().enumerate() {
+            if let Some(rect) = layout::list_row(stack, i, ROWS.len(), row_h, ROW_GUTTER) {
+                let inner = rect.inset(1);
+                let value_reading = row_item.value(state);
+                let (fill, value_ink) = value_reading.skin(&theme);
+
+                let pad = rect.inset(space::MD);
+                let h = text::line_height(ROW_TEXT_SCALE);
+                let text_y0 = pad.y + pad.h.saturating_sub(h) / 2;
+
+                let value_w = text::measure(value_reading.as_slice(), ROW_TEXT_SCALE).min(pad.w * 50 / 100) + space::SM;
+                let value_col = Rect::new(pad.x + pad.w - value_w, pad.y, value_w, pad.h);
+                let label_col = Rect::new(pad.x, pad.y, pad.w - value_w - space::SM, pad.h);
+
+                let (v_run, v_len) = text::ellipsize(value_reading.as_slice(), ROW_TEXT_SCALE, value_col.w);
+                let (l_run, l_len) = text::ellipsize(row_item.label(), ROW_TEXT_SCALE, label_col.w);
+
+                let mut value_buf = [0u8; VALUE_MAX];
+                let value_len = v_len.min(VALUE_MAX);
+                value_buf[..value_len].copy_from_slice(&v_run[..value_len]);
+
+                let mut label_buf = [0u8; 32];
+                let label_len = l_len.min(32);
+                label_buf[..label_len].copy_from_slice(&l_run[..label_len]);
+
+                rows[i] = RowFrame {
+                    rect,
+                    inner,
+                    fill,
+                    border: theme.border,
+                    text_y0,
+                    text_h: h,
+                    value_col,
+                    value_buf,
+                    value_len,
+                    value_ink,
+                    label_col,
+                    label_buf,
+                    label_len,
+                    label_ink: theme.text,
+                };
+            }
+        }
+
+        WidgetsFrame {
+            status_time,
+            status_time_len,
+            title_rect,
+            summary_rect,
+            summary_buf,
+            summary_len,
+            entries,
+            rows,
+            stack_y: stack.y,
+            row_stride,
+            bounds,
+        }
     }
-    let caption = Rect::new(pad.x, name_rect.y + name_rect.h + space::SM, pad.w, caption_h);
-    if let Some(c) = run_center(
-        x,
-        y,
-        &caption,
-        type_scale::CAPTION,
-        b"Not installed",
-        theme.text_muted,
-    ) {
-        return Some(c);
+}
+
+struct FrameSlot {
+    state: usize,
+    at_x: usize,
+    at_y: usize,
+    measured: bool,
+    frame: WidgetsFrame,
+}
+
+impl FrameSlot {
+    fn holds_next(&self, x: usize, y: usize, state: usize) -> bool {
+        self.measured
+            && self.state == state
+            && ((x == self.at_x + 1 && y == self.at_y) || (x == 0 && y == self.at_y + 1))
     }
-    Some(theme.surface_sunken)
+}
+
+struct FrameMemo(UnsafeCell<FrameSlot>);
+unsafe impl Sync for FrameMemo {}
+
+static FRAME_MEMO: FrameMemo = FrameMemo(UnsafeCell::new(FrameSlot {
+    state: 0,
+    at_x: 0,
+    at_y: 0,
+    measured: false,
+    frame: WidgetsFrame::empty(),
+}));
+
+fn frame_for(x: usize, y: usize, state: &LauncherState) -> &WidgetsFrame {
+    let addr = state as *const LauncherState as usize;
+    let slot = unsafe { &mut *FRAME_MEMO.0.get() };
+    if !slot.holds_next(x, y, addr) {
+        slot.frame = WidgetsFrame::measure(state);
+        slot.state = addr;
+        slot.measured = true;
+    }
+    slot.at_x = x;
+    slot.at_y = y;
+    &slot.frame
 }
 
 // -----------------------------------------------------------------------------
@@ -344,38 +542,25 @@ fn entry_pixel(
 // -----------------------------------------------------------------------------
 
 /// Top of the heading band.
-///
-/// WHY one step below the status bar and not two: the entry rectangles below are
-/// owned by the input layer and cannot move, so the heading has to fit in whatever
-/// is left above them. See [`WIDGETS_TITLE_SCALE`].
 const HEADER_TOP: usize = STATUS_BAR_HEIGHT + space::SM;
 
 /// The heading's scale.
-///
-/// WHY derived from the space above the first entry rectangle rather than read from
-/// `theme::type_scale`: that band is `ENTRIES[0].rect.y - HEADER_TOP` = 135 - 56 =
-/// 79 px, and a run occupies its whole `GLYPH_H * scale` cell, so 24 * s <= 79
-/// gives s = 3. `type_scale::TITLE` (5) asks for a 120 px cell: the heading is drawn
-/// in full, and then the first entry card paints over its lower half, which is what
-/// the device screendump showed.
 const WIDGETS_TITLE_SCALE: usize = 3;
 
 pub fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     let theme = THEME;
+    let f = frame_for(x, y, state);
 
-    // Status bar: the clock and only the clock. WHY no signal, wifi or battery
-    // glyphs: `LauncherState` carries no reading for any of them, and the kernel's
-    // wireless manager starts with `hardware_present: false`.
-    let bar = Rect::new(0, 0, SCREEN_WIDTH, STATUS_BAR_HEIGHT);
+    // Status bar: the clock and only the clock.
     if y < STATUS_BAR_HEIGHT {
         if state.clock_source_ok {
-            let area = Rect::new(bar.x + CONTENT_PADDING, bar.y, bar.w - CONTENT_PADDING * 2, bar.h);
+            let area = Rect::new(CONTENT_PADDING, 0, SCREEN_WIDTH - CONTENT_PADDING * 2, STATUS_BAR_HEIGHT);
             if let Some(c) = run_left(
                 x,
                 y,
                 &area,
                 type_scale::CAPTION,
-                &state.clock_time,
+                &f.status_time[..f.status_time_len],
                 layout::ink_on(&theme, theme.overlay),
             ) {
                 return c;
@@ -387,83 +572,111 @@ pub fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 
         return theme.overlay_border;
     }
 
-    let content = layout::content_area(CONTENT_PADDING);
-
-    // Entry points. WHY they are tested before everything else: they are controls,
-    // and a reading row drawn over one of them would sit on top of something the
-    // user can press.
-    for entry in ENTRIES.iter() {
-        if let Some(c) = entry_pixel(x, y, &theme, entry, state) {
-            return c;
-        }
-    }
-
-    // Title, and the count of readings behind it. WHY the count is built only once
-    // the pixel is on that line: it walks every row, and this function runs for
-    // every pixel of the surface.
-    //
-    // WHY the two lines share a baseline instead of being stacked: the band between
-    // the status bar and the first entry rectangle is 79 px, which fits one line of
-    // this face at heading size and nothing else. A caption stacked under the
-    // heading needs another 48 px of cell plus a gap, which does not fit before the
-    // first control, so the count is right-aligned on the heading's baseline.
-    //
-    // WHY both are guarded against `ENTRIES[0].rect.y`: those rectangles belong to
-    // the input layer and cannot move, so a heading that outgrows its band is
-    // dropped rather than drawn where the user can press something.
-    let title_rect = Rect::new(
-        content.x,
-        HEADER_TOP,
-        content.w,
-        text::line_height(WIDGETS_TITLE_SCALE),
-    );
-    let heading_baseline = HEADER_TOP + text::BASELINE * WIDGETS_TITLE_SCALE;
-    let summary_rect = Rect::new(
-        content.x,
-        heading_baseline - text::BASELINE * ROW_TEXT_SCALE,
-        content.w,
-        text::line_height(ROW_TEXT_SCALE),
-    );
-    if title_rect.y + title_rect.h <= ENTRIES[0].rect.y {
-        if let Some(c) =
-            run_left(x, y, &title_rect, WIDGETS_TITLE_SCALE, b"Live Widgets", theme.text)
-        {
-            return c;
-        }
-    }
-    if summary_rect.y + summary_rect.h <= ENTRIES[0].rect.y && summary_rect.contains(x, y) {
-        let (summary, summary_len) = reading_summary(state);
-        if let Some(c) = run_right(
-            x,
-            y,
-            &summary_rect,
-            ROW_TEXT_SCALE,
-            &summary[..summary_len],
-            theme.text_muted,
-        ) {
-            return c;
-        }
-    }
-
-    // The readings, as a list laid out from the number of rows rather than from a
-    // set of boxes. WHY the bottom is the content area and not the surface: the
-    // nav bar and the home indicator live below it, and a row that ran under them
-    // would be a row the user could see but not read.
-    let bottom = content.y + content.h - space::MD;
-    let bounds = Rect::new(content.x, LIST_TOP, content.w, bottom.saturating_sub(LIST_TOP));
-    let row_h = (bounds.h.saturating_sub(ROW_GUTTER * (ROWS.len() - 1)) / ROWS.len())
-        .clamp(ROW_MIN, ROW_MAX);
-    if let Some(stack) = layout::list(bounds, ROWS.len(), row_h, ROW_GUTTER) {
-        for (index, row) in ROWS.iter().enumerate() {
-            let Some(rect) = layout::list_row(stack, index, ROWS.len(), row_h, ROW_GUTTER) else {
-                break;
-            };
-            if !rect.contains(x, y) {
-                continue;
+    // 5 Entry points.
+    if (135..=685).contains(&y) {
+        for entry in &f.entries {
+            if entry.rect.contains(x, y) {
+                if !round_contains(&entry.rect, radius::CARD, x, y) {
+                    return theme.bg;
+                }
+                if !round_contains(&entry.inner, radius::CARD.saturating_sub(1), x, y) {
+                    return entry.border;
+                }
+                if y >= entry.name_rect.y && y < entry.name_rect.y + entry.name_rect.h {
+                    if let Some(c) = run_center(
+                        x,
+                        y,
+                        &entry.name_rect,
+                        type_scale::BODY,
+                        &entry.name_buf[..entry.name_len],
+                        entry.name_ink,
+                    ) {
+                        return c;
+                    }
+                    if let Some(ref chevron) = entry.chevron {
+                        if let Some(c) = run_right(x, y, chevron, type_scale::BODY, b">", theme.accent) {
+                            return c;
+                        }
+                    }
+                }
+                if let Some(ref caption) = entry.caption {
+                    if y >= caption.y && y < caption.y + caption.h {
+                        if let Some(c) = run_center(
+                            x,
+                            y,
+                            caption,
+                            type_scale::CAPTION,
+                            b"Not installed",
+                            theme.text_muted,
+                        ) {
+                            return c;
+                        }
+                    }
+                }
+                return entry.fill;
             }
-            let value = row.value(state);
-            let cell = Cell::scaled(rect, radius::CARD, row.label(), &value, ROW_TEXT_SCALE, &theme);
-            return cell_pixel(x, y, &theme, &cell);
+        }
+    }
+
+    // Title and summary
+    if y >= HEADER_TOP && y < ENTRIES[0].rect.y {
+        if let Some(c) = run_left(x, y, &f.title_rect, WIDGETS_TITLE_SCALE, b"Live Widgets", theme.text) {
+            return c;
+        }
+        if f.summary_rect.contains(x, y) {
+            if let Some(c) = run_right(
+                x,
+                y,
+                &f.summary_rect,
+                ROW_TEXT_SCALE,
+                &f.summary_buf[..f.summary_len],
+                theme.text_muted,
+            ) {
+                return c;
+            }
+        }
+    }
+
+    // The readings rows
+    if f.bounds.contains(x, y) {
+        let offset_y = y.saturating_sub(f.stack_y);
+        let index = offset_y / f.row_stride;
+        if index < f.rows.len() {
+            let row = &f.rows[index];
+            if row.rect.contains(x, y) {
+                if !round_contains(&row.rect, radius::CARD, x, y) {
+                    return theme.bg;
+                }
+                if !round_contains(&row.inner, radius::CARD.saturating_sub(1), x, y) {
+                    return row.border;
+                }
+                if y >= row.text_y0 && y < row.text_y0 + row.text_h {
+                    if x >= row.value_col.x {
+                        if let Some(c) = run_right(
+                            x,
+                            y,
+                            &row.value_col,
+                            ROW_TEXT_SCALE,
+                            &row.value_buf[..row.value_len],
+                            row.value_ink,
+                        ) {
+                            return c;
+                        }
+                    } else if x < row.label_col.x + row.label_col.w {
+                        if let Some(c) = run_left(
+                            x,
+                            y,
+                            &row.label_col,
+                            ROW_TEXT_SCALE,
+                            &row.label_buf[..row.label_len],
+                            row.label_ink,
+                        ) {
+                            return c;
+                        }
+                    }
+                }
+                return row.fill;
+            }
         }
     }
 
