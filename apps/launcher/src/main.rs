@@ -1717,6 +1717,7 @@ pub extern "C" fn _start() -> ! {
                                     state.pin_buffer = [0; 8];
                                     state.pin_len = 0;
                                     state.pin_error = 0;
+                                    state.pin_setup_mode = std::user_get_lock_state(std::user_get_current()).ok() == Some(2);
                                     state.current_view = ViewMode::PinEntry;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
