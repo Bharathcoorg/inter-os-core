@@ -446,7 +446,6 @@ impl<'a, D: BlockDevice + ?Sized> InterFs<'a, D> {
             if lba != cur_lba {
                 if dirty && cur_lba != u32::MAX {
                     self.device.write_sector(self.base_lba + cur_lba, &cur_sector)?;
-                    dirty = false;
                 }
                 self.device.read_sector(self.base_lba + lba, &mut cur_sector)?;
                 cur_lba = lba;
