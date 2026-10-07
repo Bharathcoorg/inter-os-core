@@ -332,8 +332,9 @@ fn record_tag(kind: u8, generation: u64, payload: &[u8]) -> [u8; 32] {
 ///
 /// WHY this exists as a function: the declared kinds partition the journal's
 /// slots exhaustively, so a kind cannot be added without giving it a pair, and
-/// giving it a pair must not move the primary region. Kinds 1..=8 own the
-/// primary region; kind 9 and anything after it own the extension region below.
+/// giving it a pair must not move an existing record. Kinds 1..=8 own the
+/// primary region; kind 9 retains its historical extension pair and kind 10
+/// uses the newly reserved pair below it.
 ///
 /// WHY kind 6 is alone in its own pair and must stay that way: it is the record
 /// read under the zero key before the published key exists, so a record
