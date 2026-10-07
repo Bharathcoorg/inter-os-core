@@ -138,6 +138,8 @@ def main():
     must(sock, "conn.state != crate::net::TcpState::Closed", "TCP closed-entry reuse")
     must(net, "else { return reaped; }", "TCP reaping accounting preservation")
     must(sock, "pub fn release_owner(&mut self, owner_task_id: u32)", "TCP owner cleanup")
+    must(sock, "reserve_network_socket(process)", "TCP per-process socket quota reservation")
+    must(sock, "release_network_socket(process)", "TCP per-process socket quota release")
     must(sock, "pub fn reap_closed(&mut self)", "TCP closed-entry reaping")
     must(net, "reap_closed()", "TCP closed-entry network-poll reaping")
     must(net, "transmit_tcp_segment(", "kernel TCP ACK transmission")
