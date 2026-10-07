@@ -69,7 +69,8 @@ pub fn get_pin_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return BG;
     }
 
-    if let Some(c) = test_text_aa(x, y, 48, 150, 3, b"Enter PIN", TEXT, BG) {
+    let heading = if state.pin_setup_mode { b"Set Device PIN".as_slice() } else { b"Enter PIN".as_slice() };
+    if let Some(c) = test_text_aa(x, y, 48, 150, 3, heading, TEXT, BG) {
         return c;
     }
 
@@ -90,7 +91,7 @@ pub fn get_pin_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         if let Some(c) = test_text_aa(x, y, 250, 360, 1, msg, DANGER, BG) {
             return c;
         }
-    } else if let Some(c) = test_text_aa(x, y, 250, 360, 1, b"Enter your device PIN", MUTED, BG) {
+    } else if let Some(c) = test_text_aa(x, y, 250, 360, 1, if state.pin_setup_mode { b"Choose at least 4 digits".as_slice() } else { b"Enter your device PIN".as_slice() }, MUTED, BG) {
         return c;
     }
 
