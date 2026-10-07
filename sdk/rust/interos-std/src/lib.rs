@@ -176,6 +176,7 @@ pub enum SyscallNumber {
     AppRestart = 122,
     AppRuntimeList = 123,
     AppFocus = 124,
+    UserSetCredential = 125,
 }
 
 // -----------------------------------------------------------------------------
@@ -2316,6 +2317,20 @@ pub fn user_unlock(uid: u32, secret: &[u8]) -> Result<(), i64> {
     }
 }
 
+
+/// Establishes the first credential for a locked, credential-less account.
+/// The kernel rejects this operation once a credential already exists.
+pub fn user_set_credential(uid: u32, secret: &[u8]) -> Result<(), i64> {
+    let r = unsafe {
+        syscall3(
+            SyscallNumber::UserSetCredential,
+            uid as u64,
+            secret.as_ptr() as u64,
+            secret.len() as u64,
+        )
+    };
+    if r == 0 { Ok(()) } else { Err(r) }
+}
 /// Locks a user account.
 pub fn user_lock(uid: u32) -> Result<(), i64> {
     let r = unsafe { syscall1(SyscallNumber::UserLock, uid as u64) };
