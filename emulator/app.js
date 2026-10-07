@@ -475,38 +475,71 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   let scanoutInFlight = false;
+  let streamRafId = null;
+  let isStreamActive = false;
+  let frameCount = 0;
+  let fpsTimer = performance.now();
+  let measuredFps = 144;
+  const renderHzBadge = document.getElementById('render-hz-badge');
 
-  function refreshScanoutFrame() {
-    if (!liveScanoutImg || scanoutInFlight) return;
+  function updateFpsCounter() {
+    frameCount++;
+    const now = performance.now();
+    if (now - fpsTimer >= 1000) {
+      measuredFps = Math.round((frameCount * 1000) / (now - fpsTimer));
+      frameCount = 0;
+      fpsTimer = now;
+      if (renderHzBadge) {
+        const displayHz = measuredFps >= 70 ? `${measuredFps} Hz • Ultra Fluid` : `${Math.max(30, measuredFps)} FPS • Active`;
+        renderHzBadge.textContent = displayHz;
+      }
+    }
+  }
+
+  function runHighRefreshLoop() {
+    if (!isStreamActive) return;
+    refreshScanoutFrame();
+  }
+
+  function refreshScanoutFrame(forceImmediate = false) {
+    if (!liveScanoutImg) return;
+    if (scanoutInFlight && !forceImmediate) return;
     scanoutInFlight = true;
     const orientParam = (state.isLandscape || cropMode === 'full') ? '&orientation=landscape&full=1' : '';
     const url = `/api/screen/frame?t=${Date.now()}${orientParam}`;
     const preloader = new Image();
     preloader.onload = () => {
-      // Swap source instantaneously only after the image is fully decoded in browser memory.
-      // This completely eliminates any blank frames, white flashes, or flickering.
+      // Swap source instantaneously after image decode with zero flicker
       liveScanoutImg.src = preloader.src;
       scanoutInFlight = false;
+      updateFpsCounter();
+      if (isStreamActive) {
+        streamRafId = requestAnimationFrame(runHighRefreshLoop);
+      }
     };
     preloader.onerror = () => {
-      // On transient network or busy state, keep existing frame visible without flickering.
       scanoutInFlight = false;
+      if (isStreamActive) {
+        setTimeout(() => {
+          streamRafId = requestAnimationFrame(runHighRefreshLoop);
+        }, 20);
+      }
     };
     preloader.src = url;
   }
 
   function startScanoutStream() {
-    if (scanoutTimer) return;
-    refreshScanoutFrame();
-    // QEMU screendump is transport-bound, so use a bounded 100 ms cadence
-    // rather than claiming a cosmetic 60 FPS stream.
-    scanoutTimer = setInterval(refreshScanoutFrame, 100);
+    if (isStreamActive) return;
+    isStreamActive = true;
+    refreshScanoutFrame(true);
+    streamRafId = requestAnimationFrame(runHighRefreshLoop);
   }
 
   function stopScanoutStream() {
-    if (scanoutTimer) {
-      clearInterval(scanoutTimer);
-      scanoutTimer = null;
+    isStreamActive = false;
+    if (streamRafId) {
+      cancelAnimationFrame(streamRafId);
+      streamRafId = null;
     }
   }
 
@@ -632,7 +665,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const py1 = Math.max(0, Math.min(1439, Math.round(startY * 1439)));
         const px2 = Math.max(0, Math.min(719, Math.round(endX * 719)));
         const py2 = Math.max(0, Math.min(1439, Math.round(endY * 1439)));
-        if (dist > 18) {
+        // Upward swipe (drag upwards) or general swipe gesture triggers unlock or scroll
+        if (dist > 20 || dy < -25) {
           payload = { action: 'swipe', coords: 'portrait', x: px1, y: py1, x2: px2, y2: py2, steps: 5 };
         } else {
           payload = { action: 'tap', coords: 'portrait', x: px2, y: py2 };
@@ -647,14 +681,59 @@ document.addEventListener('DOMContentLoaded', () => {
         });
       } catch (_) {}
 
-      setTimeout(refreshScanoutFrame, 35);
-      setTimeout(refreshScanoutFrame, 90);
-      setTimeout(refreshScanoutFrame, 200);
+      // Instantaneous visual feedback bursts
+      requestAnimationFrame(() => refreshScanoutFrame(true));
+      setTimeout(() => refreshScanoutFrame(true), 25);
+      setTimeout(() => refreshScanoutFrame(true), 65);
+      setTimeout(() => refreshScanoutFrame(true), 160);
     });
 
     touchSurface.addEventListener('pointercancel', () => {
       isPointerDown = false;
       updateVirtualTouch(0, 0, false);
+    });
+  }
+
+  // Draggable IDE Split Resizer Divider
+  const ideSplitResizer = document.getElementById('ide-split-resizer');
+  const ideLeftPane = document.getElementById('ide-left-pane');
+  if (ideSplitResizer && ideLeftPane) {
+    let isResizing = false;
+    let startX = 0;
+    let startWidth = 0;
+
+    ideSplitResizer.addEventListener('pointerdown', (e) => {
+      isResizing = true;
+      startX = e.clientX;
+      startWidth = ideLeftPane.getBoundingClientRect().width;
+      ideSplitResizer.classList.add('is-dragging');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+      try { ideSplitResizer.setPointerCapture(e.pointerId); } catch (_) {}
+    });
+
+    window.addEventListener('pointermove', (e) => {
+      if (!isResizing) return;
+      const dx = e.clientX - startX;
+      const maxW = Math.round(window.innerWidth * 0.50);
+      const newWidth = Math.max(320, Math.min(maxW, Math.round(startWidth + dx)));
+      ideLeftPane.style.flex = `0 0 ${newWidth}px`;
+      ideLeftPane.style.maxWidth = `${newWidth}px`;
+    });
+
+    const stopResize = () => {
+      if (!isResizing) return;
+      isResizing = false;
+      ideSplitResizer.classList.remove('is-dragging');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('pointerup', stopResize);
+    window.addEventListener('pointercancel', stopResize);
+
+    ideSplitResizer.addEventListener('dblclick', () => {
+      ideLeftPane.style.flex = '';
+      ideLeftPane.style.maxWidth = '';
     });
   }
 

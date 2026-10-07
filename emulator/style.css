@@ -93,16 +93,20 @@ html, body.dark-theme {
   z-index: 1000;
   user-select: none;
   box-sizing: border-box;
-  gap: 16px;
+  gap: 12px;
   white-space: nowrap;
+  width: 100%;
+  max-width: 100vw;
+  overflow: hidden;
 }
 
 .brand-group {
   display: flex;
   align-items: center;
-  gap: 12px;
-  flex-shrink: 0;
+  gap: 10px;
+  flex-shrink: 1;
   min-width: 0;
+  overflow: hidden;
 }
 
 .brand-logo-wrap {
@@ -148,14 +152,16 @@ html, body.dark-theme {
 .ide-target-device {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 7px;
-  padding: 0 10px;
+  padding: 0 8px;
   height: 30px;
   box-sizing: border-box;
-  flex-shrink: 0;
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
   transition: all 0.15s ease;
 }
 
@@ -173,6 +179,7 @@ html, body.dark-theme {
   font-size: 0.72rem;
   font-weight: 600;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .chip-icon {
@@ -183,21 +190,25 @@ html, body.dark-theme {
 .target-specs-list {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   border-left: 1px solid rgba(255, 255, 255, 0.1);
-  padding-left: 8px;
+  padding-left: 6px;
   white-space: nowrap;
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .spec-node {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   white-space: nowrap;
   background: rgba(255, 255, 255, 0.035);
-  padding: 1.5px 6px;
+  padding: 1.5px 5px;
   border-radius: 4px;
   border: 1px solid rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
 }
 
 .spec-lbl {
@@ -220,11 +231,29 @@ html, body.dark-theme {
   letter-spacing: 0.01em;
 }
 
+/* Progressive collapse for target device chips on narrower screens */
+@media (max-width: 1680px) {
+  .target-specs-list .spec-node:nth-child(4) { display: none; }
+}
+@media (max-width: 1500px) {
+  .target-specs-list .spec-node:nth-child(3) { display: none; }
+}
+@media (max-width: 1340px) {
+  .target-specs-list .spec-node:nth-child(2) { display: none; }
+}
+@media (max-width: 1200px) {
+  .target-specs-list { display: none; }
+}
+@media (max-width: 960px) {
+  .ide-target-device { display: none; }
+}
+
 .studio-controls {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+  margin-left: auto;
   white-space: nowrap;
 }
 
@@ -392,39 +421,39 @@ html, body.dark-theme {
   flex: 1;
   display: flex;
   flex-direction: row;
-  height: calc(100vh - 44px);
-  max-height: calc(100vh - 44px);
-  padding: 10px 14px;
+  height: calc(100vh - 48px);
+  max-height: calc(100vh - 48px);
+  padding: 6px 12px;
   gap: 0;
   box-sizing: border-box;
   overflow: hidden;
   width: 100%;
+  max-width: 100vw;
 }
 
-/* Left Pane: Device Stage (Strictly Sticky & Centered, Never Scrolls Off-Screen) */
-/* Left Pane: Device Stage (Centered, Never Scrolls Off-Screen) */
+/* Left Pane: Device Stage (Adaptive Width, Never Scrolls Off-Screen) */
 .device-stage.ide-device-pane {
-  flex: 0 0 520px;
-  min-width: 440px;
+  flex: 0 0 auto;
+  width: auto;
+  max-width: 48vw;
+  min-width: 320px;
   display: flex;
   align-items: center;
   justify-content: center;
-  height: calc(100vh - 48px);
-  max-height: calc(100vh - 48px);
+  height: 100%;
+  max-height: 100%;
   overflow: hidden;
   position: relative;
   flex-shrink: 0;
   z-index: 10;
-  padding: 8px 16px;
+  padding: 4px 6px;
   box-sizing: border-box;
 }
 
-
-
 /* Draggable IDE Split Resizer Divider */
 .ide-split-resizer {
-  width: 14px;
-  margin: 0 4px;
+  width: 10px;
+  margin: 0 3px;
   cursor: col-resize;
   display: flex;
   align-items: center;
@@ -446,7 +475,7 @@ html, body.dark-theme {
 
 .resizer-handle {
   position: absolute;
-  width: 4px;
+  width: 3px;
   height: 38px;
   background: rgba(255, 255, 255, 0.2);
   border-radius: 4px;
@@ -468,8 +497,9 @@ html, body.dark-theme {
 
 /* Right Pane: IDE Developer Diagnostics & Hardware Telemetry Profiler */
 .ide-dev-pane {
-  flex: 1;
-  min-width: 420px;
+  flex: 1 1 0%;
+  min-width: 0;
+  max-width: 100%;
   background: #09090B;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 10px;
@@ -479,6 +509,7 @@ html, body.dark-theme {
   min-height: 0;
   overflow: hidden;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+  box-sizing: border-box;
 }
 
 /* --------------------------------------------------------------------------
@@ -571,14 +602,16 @@ html, body.dark-theme {
 
 .hw-cards-grid {
   display: flex;
-  gap: 8px;
-  padding: 8px 12px;
+  gap: 6px;
+  padding: 6px 10px;
   background: #09090C;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
   -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .hw-cards-grid::-webkit-scrollbar {
@@ -598,12 +631,12 @@ html, body.dark-theme {
   background: #111115;
   border: 1px solid rgba(255, 255, 255, 0.07);
   border-radius: 8px;
-  padding: 6px 10px;
+  padding: 5px 8px;
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  flex: 1 0 195px;
-  min-width: 195px;
+  gap: 4px;
+  flex: 1 1 145px;
+  min-width: 135px;
   box-sizing: border-box;
 }
 
@@ -1396,21 +1429,24 @@ html, body.dark-theme {
 /* Responsive */
 @media (max-width: 1280px) {
   .studio-workspace.ide-split-screen {
-    grid-template-columns: 410px minmax(0, 1fr);
-    gap: 12px;
-    padding: 10px 14px;
-  }
-  .hw-cards-grid {
-    grid-template-columns: repeat(2, 1fr);
+    padding: 6px 10px;
   }
 }
 
 @media (max-width: 960px) {
   .studio-workspace.ide-split-screen {
-    grid-template-columns: 1fr;
+    flex-direction: column;
     overflow-y: auto;
     height: auto;
     max-height: none;
+  }
+  .device-stage.ide-device-pane {
+    max-width: 100% !important;
+    width: 100% !important;
+  }
+  .ide-dev-pane {
+    max-width: 100% !important;
+    width: 100% !important;
   }
 }.pkg-format-badge.apk {
   background: rgba(61, 220, 132, 0.15);
@@ -2312,6 +2348,7 @@ body[data-theme="cyberdeck_hud"] .device-screen {
 }
 
 #live-scanout-img,
+#live-scanout-canvas,
 .screen-live-scanout canvas {
   width: 100%;
   height: 100%;
@@ -2320,7 +2357,38 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   user-select: none;
   -webkit-user-drag: none;
   touch-action: none;
-  image-rendering: auto;
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: crisp-edges;
+  image-rendering: pixelated;
+  transform: translateZ(0);
+}
+
+.render-hz-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  color: #10B981;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.62rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 4px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  transition: all 0.2s ease;
+  user-select: none;
+}
+
+.render-hz-badge::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #10B981;
+  box-shadow: 0 0 8px #10B981;
+  animation: pulse-dot 1.5s infinite;
 }
 
 .studio-workspace.smartphone-mode #ide-right-pane {
@@ -2369,14 +2437,14 @@ body[data-theme="cyberdeck_hud"] .device-screen {
 .device-stage.ide-device-pane,
 #device-stage {
   flex: 0 0 auto;
-  min-width: 400px;
+  min-width: 320px;
+  max-width: 48vw;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 4px 12px;
-  height: calc(100vh - 110px);
-  max-height: calc(100vh - 110px);
-  aspect-ratio: 1 / 2;
+  padding: 4px 8px;
+  height: 100%;
+  max-height: 100%;
   overflow: hidden;
   box-sizing: border-box;
 }

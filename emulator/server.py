@@ -739,8 +739,8 @@ def capture_qemu_screen_frame(full_scanout=False, orientation=None):
     mode_key = 'full' if full_scanout else ('landscape' if is_landscape else 'portrait')
     now = time.time()
 
-    # Fast path: return cached frame if captured within 60ms
-    if _last_frame_cache.get(mode_key) and (now - _last_frame_cache['time']) < 0.06:
+    # Fast path: return cached frame if captured within 5ms (high refresh rate friendly)
+    if _last_frame_cache.get(mode_key) and (now - _last_frame_cache['time']) < 0.005:
         return _last_frame_cache[mode_key], "image/png"
 
     # Avoid concurrent disk contention on PPM dump
@@ -763,7 +763,13 @@ def capture_qemu_screen_frame(full_scanout=False, orientation=None):
                 return _last_frame_cache[mode_key], "image/png"
             return None, f"QEMU monitor screendump failed: {resp}"
 
-        time.sleep(0.03)
+        # Fast polling for PPM file availability with sub-millisecond check
+        wait_start = time.time()
+        while not os.path.exists(ppm_path):
+            if time.time() - wait_start > 0.08:
+                break
+            time.sleep(0.001)
+
         if not os.path.exists(ppm_path):
             if _last_frame_cache.get(mode_key):
                 return _last_frame_cache[mode_key], "image/png"
@@ -785,13 +791,13 @@ def capture_qemu_screen_frame(full_scanout=False, orientation=None):
                     right_sample = rgb_img.getpixel((box[2] + (width - box[2]) // 2, height // 2))
                     if left_sample == (0, 0, 0) and right_sample == (0, 0, 0):
                         cropped = img.crop(box)
-                        out_img = cropped.rotate(270, expand=True).resize((1280, 720), Image.Resampling.LANCZOS)
+                        out_img = cropped.rotate(270, expand=True).resize((1280, 720), Image.Resampling.BILINEAR)
                     else:
                         out_img = img
                 else:
                     out_img = img
                 buf = io.BytesIO()
-                out_img.save(buf, format="PNG")
+                out_img.save(buf, format="PNG", compress_level=1)
                 frame_bytes = buf.getvalue()
                 _last_frame_cache['landscape'] = frame_bytes
                 _last_frame_cache['full'] = frame_bytes
@@ -803,10 +809,10 @@ def capture_qemu_screen_frame(full_scanout=False, orientation=None):
                     box = letterbox_box(width, height)
                     cropped = img.crop(box)
                     scaled = cropped.resize(
-                        (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H), Image.Resampling.LANCZOS
+                        (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H), Image.Resampling.BILINEAR
                     )
                     buf = io.BytesIO()
-                    scaled.save(buf, format="PNG")
+                    scaled.save(buf, format="PNG", compress_level=1)
                     frame_bytes = buf.getvalue()
                     _last_frame_cache['portrait'] = frame_bytes
                     _last_frame_cache['time'] = time.time()
