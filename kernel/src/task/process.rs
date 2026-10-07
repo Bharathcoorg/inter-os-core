@@ -435,7 +435,7 @@ pub fn is_leader(task: TaskId) -> bool {
 pub fn set_limits(process: ProcessId, limits: ResourceLimits) -> Result<(), &'static str> {
     let mut table = PROCESS_TABLE.lock();
     let record = table.iter_mut().flatten().find(|r| r.id == process).ok_or("process not found")?;
-    if limits.max_threads == 0 || limits.max_open_files == 0 || limits.max_ipc_endpoints == 0 || limits.max_address_space_bytes < 4096 { return Err("invalid resource limits"); }
+    if limits.max_threads == 0 || limits.max_open_files == 0 || limits.max_network_sockets == 0 || limits.max_ipc_endpoints == 0 || limits.max_address_space_bytes < 4096 { return Err("invalid resource limits"); }
     if record.thread_count > limits.max_threads { return Err("limits below current usage"); }
     if record.open_file_count as u16 > limits.max_open_files { return Err("limits below current open-file usage"); }
     if record.ipc_endpoint_count > limits.max_ipc_endpoints { return Err("limits below current IPC endpoint usage"); }
