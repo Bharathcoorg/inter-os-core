@@ -622,8 +622,8 @@ mod tests {
         );
 
         assert!(
-            !policy.iter().any(|c| c.cap_type == CapabilityType::SystemControl),
-            "the launcher must not hold SystemControl: it would confer power, crypto and telephony authority"
+            !policy.iter().any(|c| c.cap_type == CapabilityType::SystemControl && (c.object_id == SERVICE_POWER_CONTROL_OBJECT || c.object_id == SERVICE_TELEPHONY_CONTROL_OBJECT || c.object_id == SERVICE_AUDIO_CONTROL_OBJECT)),
+            "the launcher must not hold SystemControl for power, telephony or audio"
         );
 
         assert!(

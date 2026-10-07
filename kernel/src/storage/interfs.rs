@@ -379,6 +379,7 @@ impl<'a, D: BlockDevice + ?Sized> InterFs<'a, D> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn bitmap_bit(&mut self, block: u32) -> Result<bool, FsBackendError> {
         if block >= self.superblock.data_sectors { return Err(FsBackendError::CorruptMetadata); }
         let byte_index=block as usize / 8;
@@ -389,6 +390,7 @@ impl<'a, D: BlockDevice + ?Sized> InterFs<'a, D> {
         Ok((sector[byte_index % SECTOR_SIZE] & bit) != 0)
     }
 
+    #[allow(dead_code)]
     fn set_bitmap_bit(&mut self, block: u32, used: bool) -> Result<(), FsBackendError> {
         if block >= self.superblock.data_sectors { return Err(FsBackendError::CorruptMetadata); }
         let byte_index=block as usize / 8;
@@ -404,41 +406,86 @@ impl<'a, D: BlockDevice + ?Sized> InterFs<'a, D> {
 
     fn find_free_extent(&mut self, needed: u32) -> Result<u32, FsBackendError> {
         if needed == 0 { return Ok(0); }
-        let max=self.superblock.data_sectors;
-        let mut run=0u32;
-        let mut start=0u32;
+        let max = self.superblock.data_sectors;
+        let mut run = 0u32;
+        let mut start = 0u32;
+        let mut cur_lba = u32::MAX;
+        let mut cur_sector = [0u8; SECTOR_SIZE];
         for block in 0..max {
-            if !self.bitmap_bit(block)? {
-                if run==0 { start=block; }
-                run+=1;
-                if run>=needed { return Ok(start); }
+            let byte_index = block as usize / 8;
+            let bit = 1u8 << (block % 8);
+            let lba = BITMAP_LBA + (byte_index / SECTOR_SIZE) as u32;
+            if lba != cur_lba {
+                self.device.read_sector(self.base_lba + lba, &mut cur_sector)?;
+                cur_lba = lba;
+            }
+            let used = (cur_sector[byte_index % SECTOR_SIZE] & bit) != 0;
+            if !used {
+                if run == 0 { start = block; }
+                run += 1;
+                if run >= needed { return Ok(start); }
             } else {
-                run=0;
+                run = 0;
             }
         }
         Err(FsBackendError::NoSpace)
     }
 
-    fn mark_extent(&mut self, start: u32, count: u32) -> Result<(), FsBackendError> {
+    fn set_extent_bitmap(&mut self, start: u32, count: u32, used: bool) -> Result<(), FsBackendError> {
+        if count == 0 { return Ok(()); }
         if start.checked_add(count).unwrap_or(u32::MAX) > self.superblock.data_sectors {
             return Err(FsBackendError::CorruptMetadata);
         }
-        for block in start..start+count { self.set_bitmap_bit(block,true)?; }
+        let mut cur_lba = u32::MAX;
+        let mut cur_sector = [0u8; SECTOR_SIZE];
+        let mut dirty = false;
+        for block in start..start + count {
+            let byte_index = block as usize / 8;
+            let bit = 1u8 << (block % 8);
+            let lba = BITMAP_LBA + (byte_index / SECTOR_SIZE) as u32;
+            if lba != cur_lba {
+                if dirty && cur_lba != u32::MAX {
+                    self.device.write_sector(self.base_lba + cur_lba, &cur_sector)?;
+                    dirty = false;
+                }
+                self.device.read_sector(self.base_lba + lba, &mut cur_sector)?;
+                cur_lba = lba;
+            }
+            if used {
+                cur_sector[byte_index % SECTOR_SIZE] |= bit;
+            } else {
+                cur_sector[byte_index % SECTOR_SIZE] &= !bit;
+            }
+            dirty = true;
+        }
+        if dirty && cur_lba != u32::MAX {
+            self.device.write_sector(self.base_lba + cur_lba, &cur_sector)?;
+        }
         Ok(())
+    }
+
+    fn mark_extent(&mut self, start: u32, count: u32) -> Result<(), FsBackendError> {
+        self.set_extent_bitmap(start, count, true)
     }
 
     fn free_extent(&mut self, start: u32, count: u32) -> Result<(), FsBackendError> {
-        if start.checked_add(count).unwrap_or(u32::MAX) > self.superblock.data_sectors {
-            return Err(FsBackendError::CorruptMetadata);
-        }
-        for block in start..start+count { self.set_bitmap_bit(block,false)?; }
-        Ok(())
+        self.set_extent_bitmap(start, count, false)
     }
 
     fn find_inode(&mut self, path: &str) -> Result<Option<(u32, DiskInode)>, FsBackendError> {
+        let mut cur_lba = u32::MAX;
+        let mut cur_sector = [0u8; SECTOR_SIZE];
         for index in 0..MAX_INODES {
-            let inode=self.read_inode(index)?;
-            if inode.used && inode.path()? == path { return Ok(Some((index,inode))); }
+            let lba = INODE_LBA + index / INODES_PER_SECTOR as u32;
+            let offset = (index as usize % INODES_PER_SECTOR) * INODE_SIZE;
+            if lba != cur_lba {
+                self.device.read_sector(self.base_lba + lba, &mut cur_sector)?;
+                cur_lba = lba;
+            }
+            let mut raw = [0u8; INODE_SIZE];
+            raw.copy_from_slice(&cur_sector[offset..offset + INODE_SIZE]);
+            let inode = DiskInode::decode(&raw)?;
+            if inode.used && inode.path()? == path { return Ok(Some((index, inode))); }
         }
         Ok(None)
     }
@@ -453,9 +500,20 @@ impl<'a, D: BlockDevice + ?Sized> InterFs<'a, D> {
     pub fn create_file(&mut self, path: &str, data: &[u8]) -> Result<u32, FsBackendError> {
         Self::validate_path(path)?;
         if self.find_inode(path)?.is_some() { return Err(FsBackendError::InvalidPath); }
-        let mut inode_index=None;
+        let mut inode_index = None;
+        let mut cur_lba = u32::MAX;
+        let mut cur_sector = [0u8; SECTOR_SIZE];
         for index in 0..MAX_INODES {
-            if !self.read_inode(index)?.used { inode_index=Some(index); break; }
+            let lba = INODE_LBA + index / INODES_PER_SECTOR as u32;
+            let offset = (index as usize % INODES_PER_SECTOR) * INODE_SIZE;
+            if lba != cur_lba {
+                self.device.read_sector(self.base_lba + lba, &mut cur_sector)?;
+                cur_lba = lba;
+            }
+            let mut raw = [0u8; INODE_SIZE];
+            raw.copy_from_slice(&cur_sector[offset..offset + INODE_SIZE]);
+            let inode = DiskInode::decode(&raw)?;
+            if !inode.used { inode_index = Some(index); break; }
         }
         let index=inode_index.ok_or(FsBackendError::TooManyFiles)?;
         if data.len() > (self.superblock.data_sectors as usize).saturating_mul(SECTOR_SIZE) {
@@ -597,8 +655,18 @@ impl<'a, D: BlockDevice + ?Sized> InterFs<'a, D> {
     pub fn check_integrity(&mut self) -> Result<FsCheckReport, FsBackendError> {
         let mut report = FsCheckReport { used_inodes: 0, allocated_sectors: 0, referenced_sectors: 0 };
         let mut referenced = alloc::vec![false; self.superblock.data_sectors as usize];
+        let mut cur_inode_lba = u32::MAX;
+        let mut cur_inode_sector = [0u8; SECTOR_SIZE];
         for index in 0..MAX_INODES {
-            let inode = self.read_inode(index)?;
+            let lba = INODE_LBA + index / INODES_PER_SECTOR as u32;
+            let offset = (index as usize % INODES_PER_SECTOR) * INODE_SIZE;
+            if lba != cur_inode_lba {
+                self.device.read_sector(self.base_lba + lba, &mut cur_inode_sector)?;
+                cur_inode_lba = lba;
+            }
+            let mut raw = [0u8; INODE_SIZE];
+            raw.copy_from_slice(&cur_inode_sector[offset..offset + INODE_SIZE]);
+            let inode = DiskInode::decode(&raw)?;
             if !inode.used { continue; }
             report.used_inodes = report.used_inodes.saturating_add(1);
             if inode.path_len == 0 || inode.path_len as usize > MAX_PATH { return Err(FsBackendError::CorruptMetadata); }
@@ -618,8 +686,17 @@ impl<'a, D: BlockDevice + ?Sized> InterFs<'a, D> {
                 report.referenced_sectors = report.referenced_sectors.saturating_add(1);
             }
         }
+        let mut cur_lba = u32::MAX;
+        let mut cur_sector = [0u8; SECTOR_SIZE];
         for block in 0..self.superblock.data_sectors {
-            let marked = self.bitmap_bit(block)?;
+            let byte_index = block as usize / 8;
+            let bit = 1u8 << (block % 8);
+            let lba = BITMAP_LBA + (byte_index / SECTOR_SIZE) as u32;
+            if lba != cur_lba {
+                self.device.read_sector(self.base_lba + lba, &mut cur_sector)?;
+                cur_lba = lba;
+            }
+            let marked = (cur_sector[byte_index % SECTOR_SIZE] & bit) != 0;
             if marked != referenced[block as usize] { return Err(FsBackendError::CorruptMetadata); }
             if marked { report.allocated_sectors = report.allocated_sectors.saturating_add(1); }
         }

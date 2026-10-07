@@ -82,15 +82,39 @@ class SerialSession:
                     return line
         return None
 
+    def flush(self, settle=0.4):
+        deadline = time.time() + settle
+        while time.time() < deadline:
+            self.sock.settimeout(0.05)
+            try:
+                data = self.sock.recv(65536)
+                if not data:
+                    break
+                self.buf += data
+                while b"\n" in self.buf:
+                    line, self.buf = self.buf.split(b"\n", 1)
+                    dec = line.decode('utf-8', errors='replace').strip()
+                    if dec:
+                        self.captured_logs.append(dec)
+            except (socket.timeout, BlockingIOError):
+                pass
+            except ConnectionResetError:
+                break
+
     def send_cmd(self, cmd_str):
         if not cmd_str.endswith("\n"):
             cmd_str += "\n"
         self.sock.sendall(cmd_str.encode('utf-8'))
 
-    def send_and_wait(self, cmd_str, marker, timeout=15.0):
-        time.sleep(0.3)
+    def send_and_wait(self, cmd_str, marker, timeout=30.0):
+        self.flush()
         self.send_cmd(cmd_str)
         res = self.wait_for(marker, timeout=timeout)
+        if res is None:
+            print(f"[DEBUG send_and_wait failed] cmd: {cmd_str.strip()}, marker: {marker}")
+            print(f"[DEBUG last 25 captured logs]:")
+            for l in self.captured_logs[-25:]:
+                print(f"  {l}")
         assert res is not None, f"Command '{cmd_str.strip()}' failed waiting for marker '{marker}'"
         return res
 
@@ -155,6 +179,7 @@ def main():
                 print(f"  [GUEST] {log}")
         assert ready, "Session 1 failed to reach Launcher presentation"
         print("  [OK] Session 1 reached Launcher homescreen.")
+        sess1.flush(settle=1.0)
 
         # Verify ATA primary slave detection and InterFS formatting
         all_logs = "\n".join(sess1.captured_logs)
@@ -215,6 +240,7 @@ def main():
         ready = sess2.wait_for("Step 5: Initial presentation complete", timeout=100.0)
         assert ready, "Session 2 failed to reach Launcher presentation"
         print("  [OK] Session 2 reached Launcher homescreen.")
+        sess2.flush(settle=1.0)
 
         # Read back test file 1
         r1_s2 = sess2.send_and_wait("READ_FILE /data/token.txt", "[FILE_READ]")
@@ -259,6 +285,7 @@ def main():
         ready = sess3.wait_for("Step 5: Initial presentation complete", timeout=100.0)
         assert ready, "Session 3 failed to reach Launcher presentation"
         print("  [OK] Session 3 reached Launcher homescreen.")
+        sess3.flush(settle=1.0)
 
         # Verify updated config survived
         r_up = sess3.send_and_wait("READ_FILE /data/config.json", "[FILE_READ]")

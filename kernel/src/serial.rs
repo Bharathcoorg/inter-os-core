@@ -658,7 +658,20 @@ fn handle_serial_command(cmd: &[u8]) {
     }
 
     if verb.eq_ignore_ascii_case("SYNC") || verb.eq_ignore_ascii_case("FLUSH") {
-        if let Some(vfs) = crate::fs::vfs::VFS.try_lock() {
+        let mut synced = false;
+        for _ in 0..100 {
+            if let Some(vfs) = crate::fs::vfs::VFS.try_lock() {
+                match vfs.sync() {
+                    Ok(_) => crate::serial_println!("[SYNC] status=OK"),
+                    Err(_) => crate::serial_println!("[SYNC] status=ERR"),
+                }
+                synced = true;
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        if !synced {
+            let vfs = crate::fs::vfs::VFS.lock();
             match vfs.sync() {
                 Ok(_) => crate::serial_println!("[SYNC] status=OK"),
                 Err(_) => crate::serial_println!("[SYNC] status=ERR"),

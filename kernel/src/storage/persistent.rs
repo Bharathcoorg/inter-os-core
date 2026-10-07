@@ -377,39 +377,35 @@ fn commit_to(
     let total = drive.sector_count();
     guard_commit(drive, total)?;
 
-    let mut generations = [0u64; TOTAL_SLOT_COUNT as usize];
-    for slot in 0..TOTAL_SLOT_COUNT {
-        let base = slot_base(total, slot).ok_or(PersistentError::Unavailable)?;
-        let mut buf = [0u8; PAYLOAD_CAPACITY];
-        match read_slot(drive, base, &mut buf, kind) {
-            Ok(Some((generation, _))) => generations[slot as usize] = generation,
-            // A slot holding a committed record this commit cannot interpret is
-            // not a reason to refuse the commit: a commit is the repair action.
-            // Its generation is unknown, so it counts as 0, which makes it the
-            // oldest and therefore the write target — the fresh commit replaces
-            // the corrupt record with an authenticated one. The read path gets no
-            // such latitude, because a caller there must be told that something
-            // committed cannot be read.
-            Ok(None) | Err(PersistentError::Corrupt) => {}
-            Err(e) => return Err(e),
-        }
+    let pair_start = pair_start_for_kind(kind).ok_or(PersistentError::Unavailable)?;
+    let a = pair_start;
+    let b = pair_start + 1;
+    let mut gen_a = 0u64;
+    let base_a = slot_base(total, a as u32).ok_or(PersistentError::Unavailable)?;
+    let mut buf = [0u8; PAYLOAD_CAPACITY];
+    match read_slot(drive, base_a, &mut buf, kind) {
+        Ok(Some((generation, _))) => gen_a = generation,
+        Ok(None) | Err(PersistentError::Corrupt) => {}
+        Err(e) => return Err(e),
+    }
+
+    let mut gen_b = 0u64;
+    let base_b = slot_base(total, b as u32).ok_or(PersistentError::Unavailable)?;
+    match read_slot(drive, base_b, &mut buf, kind) {
+        Ok(Some((generation, _))) => gen_b = generation,
+        Ok(None) | Err(PersistentError::Corrupt) => {}
+        Err(e) => return Err(e),
     }
 
     // Keep two slots per record kind. Each kind has an independent alternating
     // pair so a partially written record never replaces the last known-good
     // generation.
-    let pair_start = pair_start_for_kind(kind).ok_or(PersistentError::Unavailable)?;
-    let a = pair_start;
-    let b = pair_start + 1;
-    // WHY the older slot is always the target: an interrupted write can only
-    // damage the slot being written, so the newest surviving generation must be
-    // in the slot this commit does not touch. Writing the older slot is what
-    // makes the previous good state the recovery fallback.
-    let target = if generations[a] <= generations[b] { a } else { b };
-    let next_generation = generations[a].max(generations[b]).saturating_add(1);
+    let target = if gen_a <= gen_b { a } else { b };
+    let next_generation = gen_a.max(gen_b).saturating_add(1);
     let base = slot_base(total, target as u32).ok_or(PersistentError::Unavailable)?;
 
-    for sector in 1..SLOT_SECTORS {
+    let payload_sectors = ((payload.len() + SECTOR_SIZE - 1) / SECTOR_SIZE) as u32;
+    for sector in 1..=payload_sectors {
         let mut buf = [0u8; SECTOR_SIZE];
         let start = ((sector - 1) as usize) * SECTOR_SIZE;
         if start < payload.len() {
@@ -752,11 +748,13 @@ mod tests {
                 "primary slot {slot} must keep its historical address",
             );
         }
-        // Kind 9's pair occupies the sectors immediately below the primary base,
-        // inside the region no other subsystem claims (InterFS ends at 36905).
-        assert_eq!(slot_base(DISK, 16), Some(DISK - 18 * 128));
-        assert_eq!(slot_base(DISK, 17), Some(DISK - 17 * 128));
-        assert!(slot_base(DISK, 18).is_none(), "there is no slot 18");
+        // Extension pairs occupy the sectors immediately below the primary base.
+        // Kind 10 uses slots 16-17; kind 9 retains slots 18-19.
+        assert_eq!(slot_base(DISK, 16), Some(DISK - 20 * 128));
+        assert_eq!(slot_base(DISK, 17), Some(DISK - 19 * 128));
+        assert_eq!(slot_base(DISK, 18), Some(DISK - 18 * 128));
+        assert_eq!(slot_base(DISK, 19), Some(DISK - 17 * 128));
+        assert!(slot_base(DISK, 20).is_none(), "there is no slot 20");
     }
 
     /// Kind 9 — the verified-boot rollback floor — must have a real, durable
