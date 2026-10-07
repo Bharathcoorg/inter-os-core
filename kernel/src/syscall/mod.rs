@@ -188,6 +188,7 @@ pub enum SyscallNumber {
     AppRestart = 122,
     AppRuntimeList = 123,
     AppFocus = 124,
+    UserSetCredential = 125,
 }
 
 /// System call result status codes.
@@ -2188,6 +2189,27 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 crate::settings::HardwareAvailability::Available => 0,
                 crate::settings::HardwareAvailability::SimulatedVirtual => 1,
                 crate::settings::HardwareAvailability::Unavailable => 2,
+            }
+        },
+        125 => {
+            // UserSetCredential: a1 = uid, a2 = secret_ptr, a3 = secret_len.
+            // This is deliberately first-boot-only: once a credential exists,
+            // changing it requires an authenticated credential-change flow.
+            let target_uid = a1 as u32;
+            if let Err(e) = require_user_control_object(target_uid) { return e as i64; }
+            let len = a3 as usize;
+            if len < 4 || len > 64 { return SyscallResult::InvalidArguments as i64; }
+            let mut secret_buf = [0u8; 64];
+            if copy_from_user(&mut secret_buf[..len], a2, len).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let mut mgr = crate::user::USER_MANAGER.lock();
+            match mgr.set_credential(crate::user::UserId(target_uid), &secret_buf[..len]) {
+                Ok(()) => SyscallResult::Success as i64,
+                Err(crate::user::UserError::PermissionDenied) => SyscallResult::PermissionDenied as i64,
+                Err(crate::user::UserError::UserNotFound) => SyscallResult::TargetNotFound as i64,
+                Err(crate::user::UserError::InvalidCredential) => SyscallResult::InvalidArguments as i64,
+                Err(_) => SyscallResult::DeviceError as i64,
             }
         },
         _ => SyscallResult::UnknownSyscall as i64,
