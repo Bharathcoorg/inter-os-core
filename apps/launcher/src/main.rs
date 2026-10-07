@@ -174,6 +174,7 @@ pub struct LauncherState {
     pub pin_buffer: [u8; 8],
     pub pin_len: u8,
     pub pin_error: u8,
+    pub pin_setup_mode: bool,
 }
 
 impl LauncherState {
@@ -203,6 +204,7 @@ impl LauncherState {
             pin_buffer: [0; 8],
             pin_len: 0,
             pin_error: 0,
+            pin_setup_mode: false,
         }
     }
 
@@ -1104,6 +1106,7 @@ pub extern "C" fn _start() -> ! {
                                 state.pin_buffer = [0; 8];
                                 state.pin_len = 0;
                                 state.pin_error = 0;
+                                state.pin_setup_mode = std::user_get_lock_state(std::user_get_current()).ok() == Some(2);
                                 state.current_view = ViewMode::PinEntry;
                                 render_view(surface, &state);
                                 let _ = std::surface_flip(4);
@@ -1188,8 +1191,28 @@ pub extern "C" fn _start() -> ! {
                                 if x >= 130 && x < 430 && y >= 1036 && y < 1126 {
                                     let uid = std::user_get_current();
                                     let len = state.pin_len as usize;
-                                    if len == 0 {
+                                    if len < 4 {
                                         state.pin_error = 1;
+                                    } else if state.pin_setup_mode {
+                                        match std::user_set_credential(uid, &state.pin_buffer[..len]) {
+                                            Ok(()) => {
+                                                let _ = std::user_unlock(uid, &state.pin_buffer[..len]);
+                                                state.pin_buffer = [0; 8];
+                                                state.pin_len = 0;
+                                                state.pin_error = 0;
+                                                state.pin_setup_mode = false;
+                                                state.current_view = ViewMode::HomeScreen;
+                                                render_view(surface, &state);
+                                                let _ = std::surface_flip(4);
+                                                std::log(0, "[LAUNCHER] First-boot credential established; device unlocked.").ok();
+                                                continue;
+                                            }
+                                            Err(_) => {
+                                                state.pin_buffer = [0; 8];
+                                                state.pin_len = 0;
+                                                state.pin_error = 2;
+                                            }
+                                        }
                                     } else if std::user_unlock(uid, &state.pin_buffer[..len]).is_ok() {
                                         state.pin_buffer = [0; 8];
                                         state.pin_len = 0;
@@ -1595,6 +1618,7 @@ pub extern "C" fn _start() -> ! {
                                 state.pin_buffer = [0; 8];
                                 state.pin_len = 0;
                                 state.pin_error = 0;
+                                state.pin_setup_mode = std::user_get_lock_state(std::user_get_current()).ok() == Some(2);
                                 state.current_view = ViewMode::PinEntry;
                                 render_view(surface, &state);
                                 let _ = std::surface_flip(4);
