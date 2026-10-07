@@ -4186,18 +4186,11 @@ pub fn sys_event_poll(interest_mask: u32, timeout_ticks: u32) -> Result<u32, Sys
         let mut reactor = crate::event::EVENT_REACTOR.lock();
         let (ready, block) = reactor.poll(current_id, interest_mask, timeout_ticks, current_ticks);
         if !block {
-            serial_println!(
-                "[EVENT REACTOR] Task {} polled events: interest={:#04X}, triggered={:#04X} (Immediate).",
-                current_id.0,
-                interest_mask,
-                ready
-            );
             return Ok(ready);
         }
         // Task needs to block awaiting event arrival or timer expiration
         let mut sched = SCHEDULER.lock();
         sched.block_task(current_id);
-        crate::serial_println!("[EVENT REACTOR] Task {} blocking on interest={:#04X} timeout={}", current_id.0, interest_mask, timeout_ticks);
         true
     };
 
@@ -4205,7 +4198,6 @@ pub fn sys_event_poll(interest_mask: u32, timeout_ticks: u32) -> Result<u32, Sys
         crate::task::yield_now();
         let mut reactor = crate::event::EVENT_REACTOR.lock();
         let ready = reactor.check_woken(current_id, interest_mask);
-        crate::serial_println!("[EVENT REACTOR] Task {} woke up: ready={:#04X}", current_id.0, ready);
         Ok(ready)
     } else {
         Ok(0)
