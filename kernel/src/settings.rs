@@ -9,7 +9,9 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 const MAX: usize = 4096;
-const KIND: u8 = 3;
+// Journal kind 3 is reserved for publisher trust roots. Settings use the
+// newly allocated kind 10 so unrelated metadata can never overwrite each other.
+const KIND: u8 = 10;
 
 /// Hardware availability status for system settings and features.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
