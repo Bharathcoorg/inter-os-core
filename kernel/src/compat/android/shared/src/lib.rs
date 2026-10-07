@@ -78,18 +78,47 @@ pub fn is_safe_android_path(path: &str, app_package: &str) -> bool {
         canonical.push_str(seg);
     }
 
-    // 4. Must strictly reside within app-private directory or shared external storage
+    // 4. The package owns exactly two namespaces:
+    //    /data/data/<package> and /sdcard/Android/data/<package>.
+    //    Do not authorize the shared-storage parent itself or another
+    //    application's directory. Component boundaries are mandatory so
+    //    "com.example" cannot reach "com.example.evil".
+    if !is_valid_package_name(app_package) {
+        return false;
+    }
     let allowed_app_prefix = format!("/data/data/{}", app_package);
     let app_private = canonical == allowed_app_prefix
         || canonical.strip_prefix(&allowed_app_prefix)
             .map(|rest| rest.starts_with('/'))
             .unwrap_or(false);
-    let shared_prefix = "/sdcard/Android/data";
+    let shared_prefix = format!("/sdcard/Android/data/{}", app_package);
     let shared_storage = canonical == shared_prefix
-        || canonical.strip_prefix(shared_prefix)
+        || canonical.strip_prefix(&shared_prefix)
             .map(|rest| rest.starts_with('/'))
             .unwrap_or(false);
     app_private || shared_storage
+}
+
+fn is_valid_package_name(package: &str) -> bool {
+    if package.is_empty() || package.len() > 255 {
+        return false;
+    }
+    let mut component_len = 0usize;
+    for byte in package.bytes() {
+        if byte == b'.' {
+            if component_len == 0 {
+                return false;
+            }
+            component_len = 0;
+            continue;
+        }
+        let valid = byte.is_ascii_alphanumeric() || byte == b'_';
+        if !valid || (component_len == 0 && byte.is_ascii_digit()) {
+            return false;
+        }
+        component_len += 1;
+    }
+    component_len > 0
 }
 
 /// Virtualized Android sandbox filesystem.
@@ -278,8 +307,17 @@ impl AndroidRuntime {
     }
 
     pub fn spawn_app(&mut self, package_name: &str) -> u32 {
+        // Package identity is part of the filesystem security boundary. Reject
+        // malformed names before constructing any path from untrusted input.
+        if !is_valid_package_name(package_name) {
+            return 0;
+        }
+
         let pid = self.next_pid;
-        self.next_pid += 1;
+        self.next_pid = match self.next_pid.checked_add(1) {
+            Some(next) if next != 0 => next,
+            _ => return 0,
+        };
 
         self.containers.push(AndroidAppContainer {
             pid,
@@ -301,5 +339,39 @@ impl AndroidRuntime {
         } else {
             false
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_storage_is_app_scoped() {
+        assert!(is_safe_android_path("/sdcard/Android/data/com.example/file", "com.example"));
+        assert!(!is_safe_android_path("/sdcard/Android/data/other/file", "com.example"));
+        assert!(!is_safe_android_path("/sdcard/Android/data/com.example.evil/file", "com.example"));
+        assert!(!is_safe_android_path("/data/data/com.example.evil/file", "com.example"));
+        assert!(!is_safe_android_path("/data/data/com.example/../com.example.evil/file", "com.example"));
+    }
+
+    #[test]
+    fn package_names_are_strict() {
+        assert!(is_safe_android_path("/data/data/com.example/file", "com.example"));
+        assert!(!is_safe_android_path("/data/data/com.example/file", "../com.example"));
+        assert!(!is_safe_android_path("/data/data/com.example/file", "com.example/evil"));
+        assert!(!is_safe_android_path("/data/data/com.example/file", ".com.example"));
+        assert!(!is_safe_android_path("/data/data/com.example/file", "com.example."));
+    }
+
+    #[test]
+    fn runtime_refuses_malformed_package_identity() {
+        let mut runtime = AndroidRuntime::new();
+        assert_eq!(runtime.spawn_app("com.example.app"), 1000);
+        assert_eq!(runtime.spawn_app("../escape"), 0);
+        assert_eq!(runtime.spawn_app("com.example/escape"), 0);
+        assert_eq!(runtime.spawn_app("com..example"), 0);
+        assert_eq!(runtime.containers.len(), 1);
     }
 }

@@ -63,64 +63,14 @@ impl VaultBlock {
 pub struct StorageVault {
     vault_key: [u8; 32],
     is_initialized: bool,
-    /// Authentication tags for the envelopes this vault has sealed, most recent
-    /// first.
-    ///
-    /// Decryption must be checked against a tag the kernel produced, not one
-    /// derived from whatever the caller just passed in. There is no persistent
-    /// vault region yet, so the issued tags are the only trustworthy record of
-    /// what was actually sealed; a ciphertext with no matching entry is
-    /// rejected instead of being accepted on a self-comparison.
-    issued: [Option<(u64, [u8; SHA256_DIGEST_LENGTH])>; SEALED_TAG_SLOTS],
 }
-
-const SEALED_TAG_SLOTS: usize = 32;
 
 impl StorageVault {
     pub const fn new() -> Self {
         Self {
             vault_key: [0u8; 32],
             is_initialized: false,
-            issued: [None; SEALED_TAG_SLOTS],
         }
-    }
-
-    /// Records the tag this vault produced for `block_index`, evicting the
-    /// oldest entry when the table is full.
-    fn record_sealed(&mut self, block_index: u64, tag: [u8; SHA256_DIGEST_LENGTH]) {
-        let mut oldest = 0usize;
-        for i in 0..SEALED_TAG_SLOTS {
-            if self.issued[i].is_none() {
-                oldest = i;
-                break;
-            }
-            if let Some((idx, _)) = self.issued[i] {
-                if idx == block_index {
-                    oldest = i;
-                    break;
-                }
-            }
-        }
-        self.issued[oldest] = Some((block_index, tag));
-    }
-
-    /// True when this vault previously sealed exactly this ciphertext for
-    /// `block_index`, verified against the recorded tag.
-    fn matches_sealed(&self, block: &VaultBlock) -> bool {
-        for entry in self.issued.iter().flatten() {
-            if entry.0 != block.block_index {
-                continue;
-            }
-            // Constant-time-ish comparison of the recorded tag.
-            let mut diff = 0u8;
-            for i in 0..SHA256_DIGEST_LENGTH {
-                diff |= entry.1[i] ^ block.hmac_tag[i];
-            }
-            if diff == 0 {
-                return true;
-            }
-        }
-        false
     }
 
     /// Initializes the vault using the hardware keystore DID Master Key (Slot 0).
@@ -308,7 +258,6 @@ impl StorageVault {
             hmac_tag: [0u8; SHA256_DIGEST_LENGTH],
         };
         block.hmac_tag = block.compute_hmac(&self.vault_key);
-        self.record_sealed(block_index, block.hmac_tag);
         Ok(block)
     }
 
@@ -317,14 +266,12 @@ impl StorageVault {
         if !self.is_initialized {
             return Err(VaultError::KeystoreUninitialized);
         }
-        // Two independent requirements. The tag must match the one this vault
-        // issued for this exact envelope, which is what makes tampering
-        // detectable; and it must be the correct tag for the ciphertext under
-        // the vault key, which proves the envelope was produced by this vault.
-        //
-        // Verifying a tag recomputed here from the caller's own ciphertext
-        // would compare a value with itself and accept anything.
-        if !self.matches_sealed(block) || !block.verify(&self.vault_key) {
+        // The HMAC is keyed with the keystore-derived vault key and covers
+        // the IV, block index, and ciphertext. That is the persistent
+        // authenticity record: it survives a reboot because it is stored in
+        // the envelope header. Keeping a second in-RAM tag table here would
+        // make a correctly persisted block impossible to reopen after reboot.
+        if !block.verify(&self.vault_key) {
             return Err(VaultError::IntegrityViolation);
         }
 
@@ -403,17 +350,25 @@ pub fn init() {
     const CANARY_BLOCK: u64 = 0;
     match vault.seal_sector(CANARY_BLOCK, &plaintext) {
         Ok(sealed) => {
+            // Reconstruct the vault object before opening. This deliberately
+            // discards all in-RAM seal history and models the state after a
+            // reboot; only the persistent envelope and keystore-derived key may
+            // authenticate the block.
+            let mut rebooted_vault = StorageVault::new();
+            rebooted_vault
+                .initialize()
+                .expect("vault must reinitialize from the persistent keystore root");
             let mut reopened = [0u8; VAULT_SECTOR_SIZE];
-            match vault.open_sector(CANARY_BLOCK, &mut reopened) {
+            match rebooted_vault.open_sector(CANARY_BLOCK, &mut reopened) {
                 Ok(()) => assert_eq!(
                     reopened, plaintext,
-                    "sealed block must reopen to the original plaintext"
+                    "sealed block must reopen after reconstructing the vault"
                 ),
-                Err(e) => panic!("sealed vault block must reopen: {:?}", e),
+                Err(e) => panic!("sealed vault block must reopen after reboot: {:?}", e),
             }
             let _ = sealed;
             crate::serial_println!(
-                "[TEST] Vault persistence: envelope sealed to disk at LBA {} and reopened.",
+                "[TEST] Vault persistence: envelope sealed to disk at LBA {} and reopened                  through a fresh vault instance.",
                 VAULT_BASE_LBA
             );
         }
@@ -448,7 +403,7 @@ pub fn init() {
     );
 
     crate::serial_println!(
-        "[TEST] Sovereign Encrypted Vault: Key-wrapped AES/HMAC block cipher, sector 42 verified, 1-bit tamper rejected."
+        "[TEST] Sovereign Encrypted Vault: HMAC-authenticated stream cipher, sector 42 verified, 1-bit tamper rejected."
     );
 }
 
@@ -469,6 +424,44 @@ mod tests {
     /// the four operation refusals. The `open_sector` one is the interesting
     /// half: it must refuse *before* touching the disk, or it reports a verdict
     /// about the media for a block that may be perfectly intact.
+    #[test]
+    fn authenticated_block_can_be_opened_by_a_fresh_vault_instance() {
+        // A reboot reconstructs the vault object from the persistent keystore
+        // root; no in-memory seal history may be required to authenticate data.
+        let mut writer = StorageVault::new();
+        writer.vault_key = [0x3Cu8; 32];
+        writer.is_initialized = true;
+
+        let plaintext = [0xA7u8; VAULT_SECTOR_SIZE];
+        let block = writer
+            .encrypt_sector(7, &plaintext, &[0x11u8; 16])
+            .expect("seeded test vault must encrypt");
+
+        let mut reopened = StorageVault::new();
+        reopened.vault_key = [0x3Cu8; 32];
+        reopened.is_initialized = true;
+
+        let recovered = reopened
+            .decrypt_sector(&block)
+            .expect("persistent HMAC must authenticate across a fresh vault instance");
+        assert_eq!(recovered, plaintext);
+
+        let mut tampered = block;
+        tampered.ciphertext[0] ^= 1;
+        assert_eq!(
+            reopened.decrypt_sector(&tampered),
+            Err(VaultError::IntegrityViolation)
+        );
+
+        let mut wrong_key = StorageVault::new();
+        wrong_key.vault_key = [0x3Du8; 32];
+        wrong_key.is_initialized = true;
+        assert_eq!(
+            wrong_key.decrypt_sector(&block),
+            Err(VaultError::IntegrityViolation)
+        );
+    }
+
     #[test]
     fn an_unseeded_vault_refuses_rather_than_deriving_a_key_from_nothing() {
         assert!(
