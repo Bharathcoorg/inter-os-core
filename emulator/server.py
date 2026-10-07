@@ -339,14 +339,14 @@ def inspect_apk(file_bytes):
 
             # Check signatures: modern APK Signature Scheme v2/v3 or v1 JAR signature
             if b'APK Sig Block 42' in file_bytes:
-                metadata["signature_scheme"] = "APK Signature Scheme v2/v3 (Verified)"
+                metadata["signature_scheme"] = "APK Signature Block v2/v3 detected (not cryptographically verified)"
             else:
                 sig_files = [n for n in namelist if n.startswith("META-INF/") and (n.endswith(".RSA") or n.endswith(".DSA") or n.endswith(".EC"))]
                 if sig_files:
                     sig_name = sig_files[0].split('/')[-1]
-                    metadata["signature_scheme"] = f"v1 JAR Signature ({sig_name})"
+                    metadata["signature_scheme"] = f"v1 JAR Signature detected ({sig_name}; not cryptographically verified)"
                 else:
-                    metadata["signature_scheme"] = "Embedded Community Signature"
+                    metadata["signature_scheme"] = "Signature metadata present (not cryptographically verified)"
 
             # Parse classes.dex
             dex_files = [n for n in namelist if n.endswith(".dex")]
@@ -407,7 +407,7 @@ def inspect_apk(file_bytes):
                     metadata["app_name"] = "Fossify File Manager"
                 elif "signal" in metadata["package_id"].lower():
                     metadata["app_name"] = "Signal Messenger"
-                elif metadata["package_id"] != "com.android.app":
+                elif metadata["package_id"]:
                     parts = metadata["package_id"].split(".")
                     metadata["app_name"] = " ".join([p.capitalize() for p in parts[-2:]])
 
@@ -446,7 +446,10 @@ latest_telemetry = {
     },
     "kernel": {
         "uptime_ticks": 0,
-        "framebuffer": {"width": 1280, "height": 720, "bpp": 3, "byte_len": 2764800},
+        # No framebuffer dimensions are claimed until a live QEMU screendump
+        # has actually been decoded. These are telemetry values, not a mode
+        # preference or a host-display assumption.
+        "framebuffer": {"width": None, "height": None, "bpp": None, "byte_len": None},
         "heap": {"pool_size": "1 MiB", "start": "0x444444440000", "status": "Standby"},
         "memory_regions": [],
         "tests_passed": []
@@ -1976,7 +1979,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 capabilities = apk_meta.get("permissions", ["android.permission.INTERNET", "CAP_ACR_CONTAINER"])
                 dex_classes = apk_meta.get("dex_classes", 0)
                 dex_size = apk_meta.get("dex_size", 0)
-                signature = apk_meta.get("signature_scheme", "Verified")
+                signature = apk_meta.get("signature_scheme", "No signature metadata detected")
                 entrypoint = apk_meta.get("main_activity", "")
 
             # Uploaded artifacts are analyzed/transferred only; installation is guest-owned.
@@ -1989,7 +1992,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 "type": app_type,
                 "size": len(body),
                 "sha256": sha256[:16] + "...",
-                "status": "Verified & Sandboxed",
+                "status": "Analyzed; guest installation required",
                 "version": version,
                 "dex_classes": dex_classes,
                 "dex_size": dex_size,
@@ -2002,11 +2005,11 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             # Guest package registry remains the only installed-app authority.
             # Log strict security audit to live UART telemetry console
             serial_lines.append(f"[APP_SIDELOAD] Ingested package '{filename}' (Format: {fmt_str}, Size: {len(body)} bytes).")
-            serial_lines.append(f"[SECURITY_AUDIT] Cryptographic Hash: SHA-256 [{sha256[:16]}...] verified against root.")
+            serial_lines.append(f"[SECURITY_AUDIT] SHA-256 digest computed: [{sha256[:16]}...]; guest trust verification remains authoritative.")
             if is_apk:
-                serial_lines.append(f"[ACR_AUDIT] Verified DEX header: {dex_classes} classes loaded from classes.dex ({dex_size} bytes).")
-                serial_lines.append(f"[ACR_AUDIT] APK Signature: {signature} validated.")
-                serial_lines.append(f"[ACR_SECURITY] Strict Zero Ambient Authority enforced on '{app_id}'. Ambient root DENIED.")
+                serial_lines.append(f"[ACR_AUDIT] DEX header parsed: {dex_classes} classes, {dex_size} bytes; execution has not been started.")
+                serial_lines.append(f"[ACR_AUDIT] APK signature metadata: {signature}. Cryptographic signature verification is not performed by this inspection endpoint.")
+                serial_lines.append(f"[ACR_SECURITY] Declared Android permissions recorded for '{app_id}'; enforcement occurs only in the guest ACR runtime.")
                 serial_lines.append(f"[ACR_SECURITY] Bound {len(capabilities)} declared permissions to Ring 3 Micro-HAL isolated sandbox.")
             else:
                 serial_lines.append(f"[SECURITY_AUDIT] Uploaded artifact '{app_name}' analyzed; guest installation remains authoritative.")

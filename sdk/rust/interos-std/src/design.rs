@@ -354,3 +354,56 @@ pub mod primitives {
 
 pub use crate::font;
 
+
+
+#[cfg(test)]
+mod tests {
+    use super::viewport::{DisplayOrientation, DisplayTransform, LOGICAL_HEIGHT, LOGICAL_WIDTH};
+
+    #[test]
+    fn portrait_transform_uses_the_actual_scanout_dimensions() {
+        let mut transform = DisplayTransform::new(DisplayOrientation::Portrait);
+        transform.scanout_w = 1280;
+        transform.scanout_h = 720;
+
+        assert_eq!(transform.logical_to_scanout(0, 0), Some((460, 0)));
+        assert_eq!(transform.logical_to_scanout(719, 1439), Some((819, 719)));
+    }
+
+    #[test]
+    fn native_portrait_scanout_has_no_letterbox() {
+        let transform = DisplayTransform::new(DisplayOrientation::Portrait);
+        assert_eq!(transform.logical_to_scanout(0, 0), Some((0, 0)));
+        assert_eq!(
+            transform.logical_to_scanout(LOGICAL_WIDTH - 1, LOGICAL_HEIGHT - 1),
+            Some((LOGICAL_WIDTH - 1, LOGICAL_HEIGHT - 1))
+        );
+    }
+
+    #[test]
+    fn landscape_rotation_maps_logical_corners_to_scanout_corners() {
+        let mut right = DisplayTransform::new(DisplayOrientation::LandscapeRight);
+        right.scanout_w = 1280;
+        right.scanout_h = 720;
+        assert_eq!(right.logical_to_scanout(0, 0), Some((0, 719)));
+        assert_eq!(right.logical_to_scanout(719, 1439), Some((1279, 0)));
+
+        let mut left = DisplayTransform::new(DisplayOrientation::LandscapeLeft);
+        left.scanout_w = 1280;
+        left.scanout_h = 720;
+        assert_eq!(left.logical_to_scanout(0, 0), Some((1279, 0)));
+        assert_eq!(left.logical_to_scanout(719, 1439), Some((0, 719)));
+    }
+
+    #[test]
+    fn invalid_points_and_zero_scanout_are_rejected() {
+        let mut transform = DisplayTransform::new(DisplayOrientation::Portrait);
+        transform.scanout_w = 0;
+        assert_eq!(transform.logical_to_scanout(0, 0), None);
+
+        transform.scanout_w = 720;
+        transform.scanout_h = 1440;
+        assert_eq!(transform.logical_to_scanout(720, 0), None);
+        assert_eq!(transform.logical_to_scanout(0, 1440), None);
+    }
+}

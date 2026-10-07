@@ -384,57 +384,66 @@ impl DrmKmsController {
             let x1 = sx.saturating_add(s_w).min(sw);
             let y1 = sy.saturating_add(s_h).min(sh);
 
-            if s_w == 720 && s_h == 1440 && sw == 1280 && sh == 720 {
-                let is_landscape = matches!(self.orientation, DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft);
-                if is_landscape {
-                    let s_width = surface.width as usize;
-                    let is_right = self.orientation == DisplayOrientation::LandscapeRight;
-                    for y in 0..720usize {
-                        let dst_y_offset = y * (self.scanout_width as usize);
-                        let src_x = if is_right {
-                            719usize.saturating_sub(y)
-                        } else {
-                            y
-                        };
-                        for x in 0..1280usize {
-                            let dst_idx = dst_y_offset + x;
-                            let src_y = if is_right {
-                                (x * 1440) / 1280
-                            } else {
-                                1439usize.saturating_sub((x * 1440) / 1280)
-                            };
-                            let src_idx = src_y * s_width + src_x;
-                            if src_idx < surface.pixels.len() {
-                                self.back_buffer[dst_idx] = surface.pixels[src_idx];
-                            }
-                        }
+            // The launcher surface has a stable 720x1440 logical portrait
+            // canvas, but the physical scanout is negotiated per platform. Fit
+            // that canvas to the actual scanout instead of baking in 1280x720.
+            if s_w == 720 && s_h == 1440 && sx == 0 && sy == 0 {
+                let (mut dst_w, mut dst_h) = if 720i64 * sh as i64 <= 1440i64 * sw as i64 {
+                    (
+                        (720u32.saturating_mul(sh) / 1440).max(1).min(self.scanout_width),
+                        self.scanout_height,
+                    )
+                } else {
+                    (
+                        self.scanout_width,
+                        (1440u32.saturating_mul(sw as u32) / 720).max(1).min(self.scanout_height),
+                    )
+                };
+                let landscape = matches!(
+                    self.orientation,
+                    DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft
+                );
+                if landscape {
+                    // Rotated portrait canvas has a 1440x720 aspect ratio.
+                    if 1440i64 * sh as i64 <= 720i64 * sw as i64 {
+                        dst_w = self.scanout_width;
+                        dst_h = (720u32.saturating_mul(sw as u32) / 1440).max(1).min(self.scanout_height);
+                    } else {
+                        dst_w = (1440u32.saturating_mul(sh) / 720).max(1).min(self.scanout_width);
+                        dst_h = self.scanout_height;
                     }
-                    surface.dirty = false;
-                    continue;
                 }
-
-                let dst_x_start = 460usize;
-                let dst_x_end = 820usize;
-                let dst_y_end = 720usize;
-                let s_width = surface.width as usize;
-                for y in 0..dst_y_end {
-                    let dst_y_offset = y * (self.scanout_width as usize);
-                    let src_y0 = y * 2;
-                    let src_y1 = src_y0 + 1;
-                    let src_row0 = src_y0 * s_width;
-                    let src_row1 = src_y1 * s_width;
-                    for x in dst_x_start..dst_x_end {
-                        let dst_idx = dst_y_offset + x;
-                        let src_x = (x - dst_x_start) * 2;
-                        let p00 = surface.pixels[src_row0 + src_x];
-                        let p01 = surface.pixels[src_row0 + src_x + 1];
-                        let p10 = surface.pixels[src_row1 + src_x];
-                        let p11 = surface.pixels[src_row1 + src_x + 1];
-
-                        // Fast 2x2 SSAA box-filter average across all 4 channels (ARGB):
-                        let rb = ((p00 & 0x00FF00FF) + (p01 & 0x00FF00FF) + (p10 & 0x00FF00FF) + (p11 & 0x00FF00FF)) >> 2;
-                        let ag = (((p00 >> 8) & 0x00FF00FF) + ((p01 >> 8) & 0x00FF00FF) + ((p10 >> 8) & 0x00FF00FF) + ((p11 >> 8) & 0x00FF00FF)) >> 2;
-                        self.back_buffer[dst_idx] = (rb & 0x00FF00FF) | ((ag & 0x00FF00FF) << 8);
+                let dst_x = ((sw - dst_w as i32) / 2).max(0) as usize;
+                let dst_y = ((sh - dst_h as i32) / 2).max(0) as usize;
+                let dst_w = dst_w as usize;
+                let dst_h = dst_h as usize;
+                let is_right = self.orientation == DisplayOrientation::LandscapeRight;
+                for dy in 0..dst_h {
+                    let dst_y_offset = (dst_y + dy) * self.scanout_width as usize;
+                    for dx in 0..dst_w {
+                        let (src_x, src_y) = if landscape {
+                            if is_right {
+                                (
+                                    (dy * 720 / dst_h).min(719),
+                                    1439usize.saturating_sub(dx * 1440 / dst_w),
+                                )
+                            } else {
+                                (
+                                    719usize.saturating_sub(dy * 720 / dst_h),
+                                    dx * 1440 / dst_w,
+                                )
+                            }
+                        } else {
+                            (
+                                dx * 720 / dst_w,
+                                dy * 1440 / dst_h,
+                            )
+                        };
+                        let src_idx = src_y * 720 + src_x;
+                        let dst_idx = dst_y_offset + dst_x + dx;
+                        if src_idx < surface.pixels.len() && dst_idx < self.back_buffer.len() {
+                            self.back_buffer[dst_idx] = surface.pixels[src_idx];
+                        }
                     }
                 }
                 surface.dirty = false;
@@ -541,6 +550,46 @@ pub static DRM_KMS: Mutex<DrmKmsController> = Mutex::new(DrmKmsController {
     frame_deadline_ticks: 0,
     frame_dirty: true,
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_mode_accepts_runtime_refresh_without_host_assumptions() {
+        let mut kms = DrmKmsController::new(720, 1440);
+        assert_eq!(kms.set_display_mode(1080, 2400, 144), Ok(()));
+        assert_eq!(kms.scanout_width, 1080);
+        assert_eq!(kms.scanout_height, 2400);
+        assert_eq!(kms.refresh_hz, 144);
+        assert!(kms.set_display_mode(1080, 2400, 0).is_err());
+        assert!(kms.set_display_mode(4096, 2160, 144).is_err());
+    }
+
+    #[test]
+    fn mobile_surface_fits_native_and_landscape_scanouts() {
+        let mut kms = DrmKmsController::new(1280, 720);
+        let id = kms.create_surface(720, 1440, 0, 0x100);
+        assert_ne!(id, 0);
+        kms.surfaces[0].pixels[0] = 0xFF112233;
+        kms.surfaces[0].pixels[720] = 0xFF112233;
+        kms.surfaces[0].pixels[(1439 * 720) + 719] = 0xFF445566;
+        kms.composite();
+        assert_eq!(kms.back_buffer[460], 0xFF112233);
+        assert_eq!(kms.back_buffer[(719 * 1280) + 819], 0xFF445566);
+        assert!(kms.back_buffer.iter().any(|&p| p == 0xFF112233));
+        assert!(kms.back_buffer.iter().any(|&p| p == 0xFF445566));
+
+        kms.set_orientation(DisplayOrientation::LandscapeRight);
+        kms.frame_dirty = true;
+        kms.surfaces[0].dirty = true;
+        kms.composite();
+        assert_eq!(kms.back_buffer[1279], 0xFF112233);
+        assert_eq!(kms.back_buffer[719 * 1280], 0xFF445566);
+
+        assert!(kms.destroy_surface(id));
+    }
+}
 
 /// Automated verification self-test for DRM/KMS surface composition and page flipping.
 pub fn test_drm_kms() {

@@ -18,8 +18,8 @@
  *
  * Guest input contract (unchanged by this cleanup):
  *   POST /api/touch/event  -- tap / swipe, in either the logical portrait space
- *                             (coords:"portrait", 720x1440) or the raw scanout
- *                             space (coords:"guest_framebuffer", 1280x720)
+ *                             (coords:"portrait", logical 720x1440) or the raw scanout
+ *                             space (coords:"guest_framebuffer", observed size)
  *   POST /api/input/key    -- single characters and navigation keycodes
  *   POST /api/hardware/*   -- power and volume HAL
  */
@@ -651,21 +651,28 @@ document.addEventListener('DOMContentLoaded', () => {
 
       let payload;
       if (state.isLandscape || cropMode === 'full') {
-        const gx1 = Math.max(0, Math.min(1279, Math.round(startX * 1279)));
-        const gy1 = Math.max(0, Math.min(719, Math.round(startY * 719)));
-        const gx2 = Math.max(0, Math.min(1279, Math.round(endX * 1279)));
-        const gy2 = Math.max(0, Math.min(719, Math.round(endY * 719)));
+        // Map against the dimensions of the decoded guest scanout rather than
+        // assuming a fixed 1280x720 mode.
+        const fbW = liveScanoutImg?.naturalWidth || 0;
+        const fbH = liveScanoutImg?.naturalHeight || 0;
+        // Never invent a scanout mode. If the current frame has not decoded yet,
+        // input is rejected locally and the next frame will provide dimensions.
+        if (fbW < 1 || fbH < 1) return;
+        const gx1 = Math.max(0, Math.min(fbW - 1, Math.round(startX * (fbW - 1))));
+        const gy1 = Math.max(0, Math.min(fbH - 1, Math.round(startY * (fbH - 1))));
+        const gx2 = Math.max(0, Math.min(fbW - 1, Math.round(endX * (fbW - 1))));
+        const gy2 = Math.max(0, Math.min(fbH - 1, Math.round(endY * (fbH - 1))));
         if (dist > 18) {
-          payload = { action: 'swipe', coords: 'landscape', x: gx1, y: gy1, x2: gx2, y2: gy2, steps: 5 };
+          payload = { action: 'swipe', coords: 'guest_framebuffer', x: gx1, y: gy1, x2: gx2, y2: gy2, steps: 5 };
         } else {
-          payload = { action: 'tap', coords: 'landscape', x: gx2, y: gy2 };
+          payload = { action: 'tap', coords: 'guest_framebuffer', x: gx2, y: gy2 };
         }
       } else {
         const px1 = Math.max(0, Math.min(719, Math.round(startX * 719)));
         const py1 = Math.max(0, Math.min(1439, Math.round(startY * 1439)));
         const px2 = Math.max(0, Math.min(719, Math.round(endX * 719)));
         const py2 = Math.max(0, Math.min(1439, Math.round(endY * 1439)));
-        // Upward swipe (drag upwards) or general swipe gesture triggers unlock or scroll
+        // Logical portrait input remains the stable 720x1440 application space.
         if (dist > 20 || dy < -25) {
           payload = { action: 'swipe', coords: 'portrait', x: px1, y: py1, x2: px2, y2: py2, steps: 5 };
         } else {
