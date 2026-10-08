@@ -778,12 +778,14 @@ document.addEventListener('DOMContentLoaded', () => {
   const touchSurface = screenLiveScanout || liveScanoutImg;
   if (touchSurface) {
     let isPointerDown = false;
+    let downSent = false;
     let startX = 0, startY = 0;
     let lastSentX = 0, lastSentY = 0;
     let lastMoveTime = 0;
 
     touchSurface.addEventListener('pointerdown', (ev) => {
       isPointerDown = true;
+      downSent = false;
       const rect = touchSurface.getBoundingClientRect();
       startX = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
       startY = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
@@ -794,11 +796,6 @@ document.addEventListener('DOMContentLoaded', () => {
       lastMoveTime = performance.now();
       updateVirtualTouch(ev.clientX, ev.clientY, true);
       try { touchSurface.setPointerCapture(ev.pointerId); } catch (_) {}
-      fetch('/api/touch/event', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'down', coords: 'portrait', x: px, y: py, slot: 0 })
-      }).catch(() => {});
     });
 
     touchSurface.addEventListener('pointermove', (ev) => {
@@ -810,7 +807,17 @@ document.addEventListener('DOMContentLoaded', () => {
         const px = Math.max(0, Math.min(719, Math.round(curX * 719)));
         const py = Math.max(0, Math.min(1439, Math.round(curY * 1439)));
         const now = performance.now();
-        if (now - lastMoveTime >= 16 && (Math.abs(px - lastSentX) > 3 || Math.abs(py - lastSentY) > 3)) {
+
+        if (!downSent && (Math.abs(px - lastSentX) > 6 || Math.abs(py - lastSentY) > 6)) {
+          downSent = true;
+          fetch('/api/touch/event', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'down', coords: 'portrait', x: lastSentX, y: lastSentY, slot: 0 })
+          }).catch(() => {});
+        }
+
+        if (downSent && now - lastMoveTime >= 16 && (Math.abs(px - lastSentX) > 3 || Math.abs(py - lastSentY) > 3)) {
           lastMoveTime = now;
           lastSentX = px;
           lastSentY = py;
@@ -859,7 +866,7 @@ document.addEventListener('DOMContentLoaded', () => {
           }).catch(() => {});
         }
       } else {
-        if (dist < 12) {
+        if (!downSent || dist < 12) {
           fetch('/api/touch/event', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -960,62 +967,44 @@ document.addEventListener('DOMContentLoaded', () => {
     setTimeout(refreshScanoutFrame, 280);
   }
 
-  // 1. Swipe Up -> Activity Space (Multitasking)
+  // 1. Activity Space (Multitasking Overview Deck)
   btnGestureActivity?.addEventListener('click', () => {
-    dispatchHardwareGesture('Activity Space (Swipe Up)', {
-      action: 'swipe',
-      coords: 'portrait',
-      x: 360,
-      y: 1400,
-      x2: 360,
-      y2: 800,
-      steps: 6
+    dispatchHardwareGesture('Activity Space', {
+      action: 'recents'
     });
   });
 
-  // 2. Swipe Left -> Go Back
+  // 2. Go Back
   btnGestureBack?.addEventListener('click', () => {
-    dispatchHardwareGesture('Back (Swipe Left)', {
-      action: 'swipe',
-      coords: 'portrait',
-      x: 600,
-      y: 720,
-      x2: 120,
-      y2: 720,
-      steps: 5
+    dispatchHardwareGesture('Back', {
+      action: 'back'
     });
   });
 
-  // 3. Home -> Tap Home Bar
+  // 3. Home
   btnGestureHome?.addEventListener('click', () => {
-    dispatchHardwareGesture('Home (Tap Home Bar)', {
-      action: 'tap',
-      coords: 'portrait',
-      x: 360,
-      y: 1408
+    dispatchHardwareGesture('Home', {
+      action: 'home'
     });
   });
 
-  // 4. Swipe Right -> Quick Controls
+  // 4. Quick Controls Shade
   btnGestureQuick?.addEventListener('click', () => {
-    dispatchHardwareGesture('Quick Controls (Swipe Right)', {
-      action: 'swipe',
-      coords: 'portrait',
-      x: 100,
-      y: 720,
-      x2: 600,
-      y2: 720,
-      steps: 5
-    });
-  });
-
-  // 5. Tap Top -> System Space / Settings
-  btnGestureSystem?.addEventListener('click', () => {
-    dispatchHardwareGesture('System Space (Tap Top Bar)', {
+    dispatchHardwareGesture('Quick Controls', {
       action: 'tap',
       coords: 'portrait',
       x: 360,
-      y: 30
+      y: 25
+    });
+  });
+
+  // 5. System Space
+  btnGestureSystem?.addEventListener('click', () => {
+    dispatchHardwareGesture('System Space', {
+      action: 'tap',
+      coords: 'portrait',
+      x: 360,
+      y: 880
     });
   });
 

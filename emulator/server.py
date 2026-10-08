@@ -975,8 +975,9 @@ class VncScanoutClient:
             self.metrics['frame_us'] = elapsed_us
             self.metrics['frames_total'] += 1
             self.metrics['frames_in_second'] += 1
-            if now - self.metrics['second_start'] >= 1.0:
-                self.metrics['fps'] = self.metrics['frames_in_second'] / (now - self.metrics['second_start'])
+            dt = now - self.metrics['second_start']
+            if dt >= 1.0:
+                self.metrics['fps'] = self.metrics['frames_in_second'] / dt if dt <= 3.0 else float(self.metrics['frames_in_second'])
                 self.metrics['frames_in_second'] = 0
                 self.metrics['second_start'] = now
             _transport_metrics['fps'] = self.metrics['fps']
