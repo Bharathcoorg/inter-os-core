@@ -42,9 +42,16 @@ pub fn dispatch(
 
     match class {
         "android/util/Log" if matches!(method_name, "v" | "d" | "i" | "w" | "e") => {
+            // Android apps are untrusted: logs must not become an unbounded kernel heap sink.
+            const MAX_LOG_ENTRIES: usize = 64;
+            const MAX_LOG_LINE_BYTES: usize = 512;
             let message = string_args.iter().flatten().next().unwrap_or("");
             let mut line = String::from("[ANDROID][LOG] ");
-            line.push_str(message);
+            for ch in message.chars() {
+                if line.len().saturating_add(ch.len_utf8()) > MAX_LOG_LINE_BYTES { break; }
+                line.push(ch);
+            }
+            if logs.len() >= MAX_LOG_ENTRIES { logs.remove(0); }
             logs.push(line);
             Ok(AndroidFrameworkResult::Return(0))
         }
@@ -105,6 +112,17 @@ mod tests {
             dispatch("Landroid/content/Context;", "getSystemService", &[], &mut logs),
             Ok(AndroidFrameworkResult::Service(AndroidFrameworkService::Activity))
         );
+    }
+
+    #[test]
+    fn android_logs_are_bounded_by_entry_count_and_line_size() {
+        let mut logs = Vec::new();
+        let oversized = "x".repeat(4096);
+        for _ in 0..80 {
+            dispatch("Landroid/util/Log;", "i", &[Some(&oversized)], &mut logs).unwrap();
+        }
+        assert_eq!(logs.len(), 64);
+        assert!(logs.iter().all(|line| line.len() <= 512));
     }
 
     #[test]
