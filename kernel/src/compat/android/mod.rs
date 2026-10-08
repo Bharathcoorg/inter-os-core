@@ -58,6 +58,9 @@ pub enum AndroidLaunchError {
 pub struct AndroidRuntime {
     next_pid: u32,
     active_apps: BTreeMap<u32, AndroidAppInstance>,
+    // Keep register/string state per app instead of resetting the VM on every
+    // method call. DEX bytes remain caller-owned and are revalidated per invoke.
+    active_vms: BTreeMap<u32, DalvikVmState>,
     pub windows: AndroidWindowManager,
 }
 
@@ -67,6 +70,7 @@ impl AndroidRuntime {
         Self {
             next_pid: 1000,
             active_apps: BTreeMap::new(),
+            active_vms: BTreeMap::new(),
             windows: AndroidWindowManager::new(),
         }
     }
@@ -90,6 +94,7 @@ impl AndroidRuntime {
         drop(fs);
 
         let surface_id = self.windows.create(task_id).unwrap_or(0);
+        self.active_vms.insert(pid, DalvikVmState::new());
         self.active_apps.insert(
             pid,
             AndroidAppInstance {
@@ -147,15 +152,15 @@ impl AndroidRuntime {
         if !matches!(app.activity_state, AndroidActivityState::Resumed | AndroidActivityState::Started) {
             return Err(AndroidLaunchError::MethodRejected);
         }
-        let mut vm = DalvikVmState::new();
         dex.audit_bytecode().map_err(|_| AndroidLaunchError::MethodRejected)?;
-        let result = vm.invoke_method(dex, class_name, method_name).map_err(|_| AndroidLaunchError::MethodRejected)?;
-        Ok(result)
+        let vm = self.active_vms.get_mut(&pid).ok_or(AndroidLaunchError::MethodRejected)?;
+        vm.invoke_method(dex, class_name, method_name).map_err(|_| AndroidLaunchError::MethodRejected)
     }
 
     /// Terminates an active Android application instance.
     pub fn terminate_app(&mut self, pid: u32) -> bool {
         let Some(app) = self.active_apps.remove(&pid) else { return false; };
+        self.active_vms.remove(&pid);
         if app.surface_id != 0 { let _ = self.windows.destroy(app.surface_id); }
         true
     }
