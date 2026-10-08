@@ -689,9 +689,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // THE GUEST INPUT PATH.
   // Pointer input on the framebuffer is the studio's only gesture surface and it
   // goes straight to the guest over POST /api/touch/event. Coordinates are
-  // mapped into whichever space the guest compositor is being displayed in:
-  //   portrait  -> coords:"portrait"  (logical 720x1440)
-  //   landscape -> coords:"landscape" (scanout 1280x720)
+  // mapped into the canonical logical portrait space (720x1440) or guest framebuffer.
   const touchSurface = screenLiveScanout || liveScanoutImg;
   if (touchSurface) {
     let isPointerDown = false;
@@ -753,18 +751,42 @@ document.addEventListener('DOMContentLoaded', () => {
       const dy = (endY - startY) * rect.height;
       const dist = Math.hypot(dx, dy);
 
-      if (dist < 12) {
-        fetch('/api/touch/event', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'tap', coords: 'portrait', x: px, y: py })
-        }).catch(() => {});
+      if (state.isLandscape || cropMode === 'full') {
+        const fbW = liveScanoutImg?.naturalWidth || 0;
+        const fbH = liveScanoutImg?.naturalHeight || 0;
+        if (fbW < 1 || fbH < 1) return;
+        const scanoutLimitX = Math.min(1279, fbW - 1);
+        const gx1 = Math.max(0, Math.min(scanoutLimitX, Math.round(startX * (fbW - 1))));
+        const gy1 = Math.max(0, Math.min(fbH - 1, Math.round(startY * (fbH - 1))));
+        const gx2 = Math.max(0, Math.min(scanoutLimitX, Math.round(endX * (fbW - 1))));
+        const gy2 = Math.max(0, Math.min(fbH - 1, Math.round(endY * (fbH - 1))));
+        if (dist > 18) {
+          fetch('/api/touch/event', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'swipe', coords: 'guest_framebuffer', x: gx1, y: gy1, x2: gx2, y2: gy2, steps: 5 })
+          }).catch(() => {});
+        } else {
+          fetch('/api/touch/event', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'tap', coords: 'guest_framebuffer', x: gx2, y: gy2 })
+          }).catch(() => {});
+        }
       } else {
-        fetch('/api/touch/event', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'up', coords: 'portrait', x: px, y: py, slot: 0 })
-        }).catch(() => {});
+        if (dist < 12) {
+          fetch('/api/touch/event', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'tap', coords: 'portrait', x: px, y: py })
+          }).catch(() => {});
+        } else {
+          fetch('/api/touch/event', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'up', coords: 'portrait', x: px, y: py, slot: 0 })
+          }).catch(() => {});
+        }
       }
 
       requestAnimationFrame(() => refreshScanoutFrame(true));
