@@ -816,6 +816,15 @@ fn handle_serial_command(cmd: &[u8]) {
         panic!("Controlled diagnostic fault: {}", reason);
     }
 
+    if verb.eq_ignore_ascii_case("POWER_KEY") {
+        let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+        let on = kms.toggle_powered();
+        let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
+        let _ = display.composite_and_flip();
+        crate::serial_println!("[POWER] display_on={} source=device_studio", on);
+        return;
+    }
+
     if verb.eq_ignore_ascii_case("VOLUME") {
         let action = parts.next().unwrap_or("GET");
         let mut audio = crate::audio::AUDIO_MANAGER.lock();
