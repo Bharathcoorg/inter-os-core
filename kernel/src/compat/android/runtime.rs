@@ -116,9 +116,13 @@ impl DalvikVmState {
         let mut steps = 0;
         const STEP_LIMIT: usize = 4096;
 
+        const TOTAL_INSTRUCTION_LIMIT: u64 = 1_000_000;
         while pc < insns.len() && steps < STEP_LIMIT {
+            if self.instructions_executed >= TOTAL_INSTRUCTION_LIMIT {
+                return Err(DalvikVmError::ExecutionStepLimit);
+            }
             steps += 1;
-            self.instructions_executed += 1;
+            self.instructions_executed = self.instructions_executed.saturating_add(1);
 
             let opcode = insns[pc];
 
@@ -449,10 +453,28 @@ impl DalvikVmState {
             }
         }
 
-        if steps >= STEP_LIMIT {
+        if steps >= STEP_LIMIT || pc < insns.len() {
             Err(DalvikVmError::ExecutionStepLimit)
         } else {
             Ok(self.last_return_value)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::dex::create_test_dex;
+
+    #[test]
+    fn cumulative_instruction_budget_fails_closed() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "onCreate", "budget");
+        let dex = DexPackage::parse(&dex_bytes).expect("test DEX should parse");
+        let mut vm = DalvikVmState::new();
+        vm.instructions_executed = 1_000_000;
+        assert_eq!(
+            vm.invoke_method(&dex, "Lorg/interos/Test;", "onCreate"),
+            Err(DalvikVmError::ExecutionStepLimit)
+        );
     }
 }
