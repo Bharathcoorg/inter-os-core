@@ -786,7 +786,6 @@ document.addEventListener('DOMContentLoaded', () => {
   if (touchSurface) {
     let isPointerDown = false;
     let downSent = false;
-    let startX = 0, startY = 0;
     let lastSentX = 0, lastSentY = 0;
     let lastMoveTime = 0;
 
@@ -800,10 +799,8 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       isPointerDown = true;
       downSent = false;
-      startX = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
-      startY = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
-      const px = Math.max(0, Math.min(719, Math.round(startX * 719)));
-      const py = Math.max(0, Math.min(1439, Math.round(startY * 1439)));
+      const px = Math.max(0, Math.min(719, Math.round(((ev.clientX - rect.left) / rect.width) * 719)));
+      const py = Math.max(0, Math.min(1439, Math.round(((ev.clientY - rect.top) / rect.height) * 1439)));
       lastSentX = px;
       lastSentY = py;
       lastMoveTime = performance.now();
