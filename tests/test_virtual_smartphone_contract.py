@@ -87,6 +87,15 @@ def test_android_boundary_does_not_fabricate_framework_or_signature_success():
     assert "return Ok(())" not in verifier
     assert "full Android framework/runtime compatibility is not yet implemented" in runtime
 
+def test_volume_state_is_never_fabricated_when_guest_does_not_confirm():
+    server = read("emulator/server.py")
+    launcher = read("apps/launcher/src/main.rs")
+    assert "cur_vol = 75" not in server
+    assert "'status': 'APPLIED' if success else 'UNCONFIRMED'" in server
+    assert "volume_state_valid" in launcher
+    assert "unwrap_or(75)" not in launcher
+
+
 def test_device_studio_power_on_and_reboot_are_not_reported_as_simulated():
     server = read("emulator/server.py")
     app = read("emulator/app.js")
