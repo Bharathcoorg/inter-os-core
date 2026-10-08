@@ -129,3 +129,16 @@ def test_android_apk_without_dex_is_rejected_before_container_approval():
     assert "if !self.has_classes_dex" in audit
     assert "status: AcrAuditStatus::InvalidApkFormat" in audit
     assert "if !self.has_classes_dex" in audit
+
+
+def test_pointer_stream_has_single_cancel_path_and_no_duplicate_tap():
+    app = read("emulator/app.js")
+    pointer_start = app.index("touchSurface.addEventListener('pointerdown'")
+    pointer_end = app.index("Draggable IDE Split Resizer Divider", pointer_start)
+    pointer_code = app[pointer_start:pointer_end]
+    assert pointer_code.count("touchSurface.addEventListener('pointercancel'") == 1
+    assert "action: 'down', coords: 'portrait'" in pointer_code
+    assert "action: 'move', coords: 'portrait'" in pointer_code
+    assert "action: 'up', coords: 'portrait'" in pointer_code
+    assert "action: 'tap', coords: 'guest_framebuffer'" not in pointer_code
+    assert "action: 'swipe', coords: 'guest_framebuffer'" not in pointer_code
