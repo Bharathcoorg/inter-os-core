@@ -75,3 +75,14 @@ def test_studio_does_not_gate_real_scanout_on_launcher_ready_state():
     app = read("emulator/app.js")
     assert "hasLauncherPresented" not in app
     assert "expose its real scanout" in app
+
+def test_android_boundary_does_not_fabricate_framework_or_signature_success():
+    vfs = read("kernel/src/compat/android/vfs.rs")
+    apk = read("kernel/src/compat/android/apk.rs")
+    runtime = read("kernel/src/compat/android/mod.rs")
+    assert "ANDROID_APP_PROCESS_VIRTUAL_STUB" not in vfs
+    assert "ANDROID_FRAMEWORK_JAR_ISOLATED_CONTAINER_RUNTIME" not in vfs
+    verifier = apk[apk.index("pub fn verify_apk_signature"):apk.index("impl ApkPackage")]
+    assert "Err(ApkError::InvalidSignature)" in verifier
+    assert "return Ok(())" not in verifier
+    assert "full Android framework/runtime compatibility is not yet implemented" in runtime
