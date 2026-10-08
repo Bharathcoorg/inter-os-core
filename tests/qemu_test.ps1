@@ -17,7 +17,7 @@ if ($Gui) {
     Write-Host "====================================================" -ForegroundColor Cyan
     Write-Host " Launching Inter OS v0.1 in Graphical GUI Window... " -ForegroundColor Green
     Write-Host "====================================================" -ForegroundColor Cyan
-    & $qemu -machine q35 -cpu qemu64 -m 1024M -drive "format=raw,file=$img" -serial stdio -name "Inter OS v0.1"
+    & $qemu -machine q35 -cpu qemu64 -m 1024M -drive "format=raw,file=$img,index=0" -device virtio-vga,xres=720,yres=1440 -device qemu-xhci,id=xhci0 -device usb-tablet,bus=xhci0.0 -serial stdio -name "Inter OS v0.1"
 } else {
     Write-Host "====================================================" -ForegroundColor Cyan
     Write-Host " Inter OS v0.1 - Boot Diagnostic Verification       " -ForegroundColor Yellow
@@ -29,7 +29,7 @@ if ($Gui) {
     $log = Join-Path $rootDir "target\test_serial.log"
     if (Test-Path $log) { Remove-Item $log -Force }
 
-    $p = Start-Process -FilePath $qemu -ArgumentList "-machine q35 -cpu qemu64 -m 1024M -drive format=raw,file=`"$img`" -serial file:`"$log`" -display none -no-reboot" -PassThru
+    $p = Start-Process -FilePath $qemu -ArgumentList "-machine q35 -cpu qemu64 -m 1024M -drive format=raw,file=`"$img`",index=0 -serial file:`"$log`" -display none -no-reboot" -PassThru
     Start-Sleep -Seconds 4
     Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
 
@@ -47,7 +47,12 @@ if ($Gui) {
                     Write-Host $_
                 }
             }
-            Write-Host "`n[SUCCESS] Kernel booted and all self-tests verified!" -ForegroundColor Green
+            if ($lines -match "SYSTEM READY") {
+                Write-Host "`n[SUCCESS] Kernel reached its declared system-ready state." -ForegroundColor Green
+            } else {
+                Write-Error "`n[FAIL] Serial output exists, but the guest never declared SYSTEM READY."
+                exit 1
+            }
         } else {
             Write-Host "[NOTE] Headless test completed. Run .\run_gui.bat to view live GUI." -ForegroundColor Cyan
         }
