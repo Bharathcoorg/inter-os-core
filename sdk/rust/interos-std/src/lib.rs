@@ -1110,6 +1110,12 @@ pub fn audio_query_volume() -> Result<u32, i64> {
     }
 }
 
+/// Sets the guest audio manager's master volume and returns the applied value.
+pub fn audio_set_volume(volume_percent: u32) -> Result<u32, i64> {
+    let ret = unsafe { syscall2(SyscallNumber::AudioControl, 7, volume_percent.min(100) as u64) };
+    if ret >= 0 { Ok(ret as u32) } else { Err(ret) }
+}
+
 pub fn battery_query(out_buf: &mut [u8]) -> Result<usize, i64> {
     let ret = unsafe {
         syscall2(
