@@ -1063,8 +1063,12 @@ document.addEventListener('DOMContentLoaded', () => {
   // Power On / Boot Microkernel
   async function bootMicrokernel() {
     isBooting = true;
-    stopScanoutStream();
-    if (screenLiveScanout) screenLiveScanout.style.display = 'none';
+    // Do not replace the guest with a Studio splash. Once QEMU exists, its real
+    // scanout is the only display surface, including black/off and boot frames.
+    if (qemuGlobalStatus?.classList.contains('online')) {
+      if (screenLiveScanout) screenLiveScanout.style.display = 'flex';
+      startScanoutStream();
+    }
 
     logConsole('warn', '[BOOT] Booting InterOS Sovereign Microkernel...');
     showToast('Booting InterOS...');
