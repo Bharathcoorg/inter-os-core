@@ -65,3 +65,9 @@ def test_volume_is_guest_rendered_as_a_system_overlay():
     launcher = read("apps/launcher/src/main.rs")
     assert "render_volume_hud" in launcher
     assert "std::window_set_geometry(4, id, 100, 220, 100, true)" in launcher
+
+
+def test_studio_does_not_gate_real_scanout_on_launcher_ready_state():
+    app = read("emulator/app.js")
+    assert "hasLauncherPresented" not in app
+    assert "expose its real scanout" in app
