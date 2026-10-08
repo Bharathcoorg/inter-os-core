@@ -7,14 +7,11 @@ $ppmPath = Join-Path $rootDir "target\mobile_screen.ppm"
 $pngPath = Join-Path $rootDir "target\mobile_screen.png"
 $artifactPath = if ($env:ARTIFACT_PATH) { $env:ARTIFACT_PATH } else { Join-Path $rootDir "target\inter_os_mobile_screen.png" }
 
-# Kill any existing QEMU
-Get-Process -Name "qemu-system-x86_64" -ErrorAction SilentlyContinue | Stop-Process -Force
-
 if (Test-Path $ppmPath) { Remove-Item $ppmPath -Force }
 if (Test-Path $pngPath) { Remove-Item $pngPath -Force }
 
 Write-Host "Starting QEMU in headless verification mode to capture mobile GUI framebuffer..." -ForegroundColor Cyan
-$p = Start-Process -FilePath $qemu -ArgumentList "-drive format=raw,file=`"$img`" -display none -monitor tcp:127.0.0.1:44446,server,nowait -serial stdio -no-reboot" -PassThru
+$p = Start-Process -FilePath $qemu -ArgumentList "-machine q35 -cpu qemu64 -m 1024M -drive format=raw,file=`"$img`" -display none -monitor tcp:127.0.0.1:44446,server,nowait -serial stdio -no-reboot" -PassThru
 Start-Sleep -Seconds 10
 
 Write-Host "Connecting to QEMU monitor on port 44446..." -ForegroundColor Yellow

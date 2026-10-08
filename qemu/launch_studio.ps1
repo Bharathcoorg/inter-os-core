@@ -27,15 +27,21 @@ if (-not (Test-Path $img)) {
     }
 }
 
-# 2. Kill any lingering QEMU / websockify / python server processes
-Write-Host "[CLEANUP] Stopping any existing processes..." -ForegroundColor Yellow
-Get-Process -Name qemu-system-x86_64 -ErrorAction SilentlyContinue | Stop-Process -Force
-Get-Process -Name websockify -ErrorAction SilentlyContinue | Stop-Process -Force
+$dataPath = if ($env:DATA_DISK_PATH) { $env:DATA_DISK_PATH } else { "$rootDir\target\inter-os-data-master.img" }
+if (-not (Test-Path $dataPath)) {
+    $qemuImg = Resolve-QemuPath "qemu-img.exe"
+    & $qemuImg create -f raw $dataPath 512M | Out-Null
+    Write-Host "[SETUP] Created data disk: $dataPath" -ForegroundColor DarkGray
+}
 
-# 3. Launch QEMU with VNC display (no local SDL window — browser-only)
+# 2. Launch QEMU with VNC display
 Write-Host "[QEMU] Launching QEMU with VNC display on port $vncPort..." -ForegroundColor Cyan
 $qemuArgs = @(
-    "-drive", "format=raw,file=$img",
+    "-machine", "q35",
+    "-cpu", "qemu64",
+    "-m", "1024M",
+    "-drive", "format=raw,file=$img,index=0",
+    "-drive", "format=raw,file=$dataPath,index=1",
     "-display", "vnc=:0",
     "-serial", "tcp:127.0.0.1:4201,server,nowait",
     "-monitor", "tcp:127.0.0.1:44445,server,nowait",
@@ -81,6 +87,9 @@ try {
 } catch {}
 
 Write-Host "[SHUTDOWN] Cleaning up..." -ForegroundColor Yellow
+if ($qemuProcess -and -not $qemuProcess.HasExited) {
+    $qemuProcess | Stop-Process -Force -ErrorAction SilentlyContinue
+}
 $wsProcess | Stop-Process -Force -ErrorAction SilentlyContinue
 $serverProcess | Stop-Process -Force -ErrorAction SilentlyContinue
 Write-Host "[SHUTDOWN] All processes stopped." -ForegroundColor Green

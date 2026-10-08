@@ -18,7 +18,7 @@ Write-Host "Kernel/Boot Image: $bootImg"
 Write-Host "SoC Model:         ARMv8-A Cortex-A57 (64-bit)"
 Write-Host "Memory (RAM):      1024 MiB"
 Write-Host "Peripherals:       PL011 UART, GICv2, VirtIO"
-Write-Host "Fastboot Status:   Valid v2 Android Boot Image (Flashable via fastboot flash boot boot.img)"
+Write-Host "Image Format:      Android v2 Boot Header (QEMU Virt verified; Physical device flashing NOT verified)"
 Write-Host "============================================================`n"
 
 & $qemuExe -M virt -cpu cortex-a57 -m 1024M -kernel $bootImg -serial stdio -display none

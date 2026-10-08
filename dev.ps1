@@ -72,13 +72,12 @@ function Invoke-Run {
         throw "BIOS image not found at $biosImg"
     }
 
-    # Kill any existing QEMU instances
-    Get-Process -Name "qemu-system-x86_64" -ErrorAction SilentlyContinue | Stop-Process -Force
-
     $serialLog = Join-Path $targetDir "serial.log"
     Write-Host "Launching QEMU x86_64 with serial output to: $serialLog" -ForegroundColor Yellow
 
     & $qemu_x86 `
+        -machine q35 `
+        -cpu qemu64 `
         -m 1024M `
         -drive "format=raw,file=$biosImg" `
         -serial "file:$serialLog" `

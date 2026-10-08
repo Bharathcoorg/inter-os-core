@@ -22,9 +22,11 @@ Write-Host "Image: $imagePath"
 Write-Host "QEMU:  $qemuBin"
 
 $qemuArgs = @(
+    "-machine", "q35",
+    "-cpu", "qemu64",
     "-drive", "format=raw,file=$imagePath,index=0",
     "-drive", "format=raw,file=$dataPath,index=1",
-    "-m", "512M",
+    "-m", "1024M",
     "-serial", "stdio",
     "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"
 )

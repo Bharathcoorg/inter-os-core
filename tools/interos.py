@@ -1292,13 +1292,8 @@ def cmd_stop(args):
                 log_success("QEMU microkernel process terminated successfully.")
                 return 0
     except Exception as e:
-        log_warn(f"Studio API unreachable ({e}). Attempting direct process termination...")
-        if sys.platform == "win32":
-            subprocess.run(["taskkill", "/F", "/IM", "qemu-system-*"], capture_output=True)
-        else:
-            subprocess.run(["pkill", "-f", "qemu-system"], capture_output=True)
-        log_success("Terminated local QEMU processes.")
-        return 0
+        log_warn(f"Studio API unreachable ({e}). QEMU process must be stopped via its owning session.")
+        return 1
     return 1
 
 

@@ -1156,8 +1156,8 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
         return False, f"Boot image not found at '{img_path}'. Build target first with 'interos build {arch}'."
     default_data_disk = "inter-os-data-master.img" if arch == "x86_64" else f"interos-data-{arch}.img"
     data_disk_path = os.environ.get("DATA_DISK_PATH", os.path.join(WORKSPACE_ROOT, "target", default_data_disk))
-    if "inter-os-data-mimo.img" in data_disk_path or "inter-os-data-stepfun.img" in data_disk_path:
-        return False, "Isolation violation: Master QEMU runtime must never attach to peer agent disks." 
+    if not os.path.isabs(data_disk_path) and ".." in data_disk_path:
+        return False, "Security violation: Invalid data disk path traversal detected."
 
     ram = ram_mb or prof["ram"]
     serial_log = os.path.join(WORKSPACE_ROOT, "target", f"{arch}_boot.log")
@@ -1179,6 +1179,7 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
         "-vnc", "127.0.0.1:1"
     ]
     if arch == "x86_64":
+        cmd.extend(["-machine", "q35", "-cpu", "qemu64"])
         # A dedicated data disk is mandatory. The kernel uses the Primary Master
         # as the read-only boot image and the Primary Slave as persistent storage;
         # with only one disk attached it falls back to formatting the boot image

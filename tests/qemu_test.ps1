@@ -13,14 +13,11 @@ if (-not (Test-Path $img)) {
     exit 1
 }
 
-# Stop any lingering QEMU instances
-Get-Process -Name "qemu-system-x86_64" -ErrorAction SilentlyContinue | Stop-Process -Force
-
 if ($Gui) {
     Write-Host "====================================================" -ForegroundColor Cyan
     Write-Host " Launching Inter OS v0.1 in Graphical GUI Window... " -ForegroundColor Green
     Write-Host "====================================================" -ForegroundColor Cyan
-    & $qemu -drive "format=raw,file=$img" -serial stdio -name "Inter OS v0.1"
+    & $qemu -machine q35 -cpu qemu64 -m 1024M -drive "format=raw,file=$img" -serial stdio -name "Inter OS v0.1"
 } else {
     Write-Host "====================================================" -ForegroundColor Cyan
     Write-Host " Inter OS v0.1 - Boot Diagnostic Verification       " -ForegroundColor Yellow
@@ -32,7 +29,7 @@ if ($Gui) {
     $log = Join-Path $rootDir "target\test_serial.log"
     if (Test-Path $log) { Remove-Item $log -Force }
 
-    $p = Start-Process -FilePath $qemu -ArgumentList "-drive format=raw,file=`"$img`" -serial file:`"$log`" -display none -no-reboot" -PassThru
+    $p = Start-Process -FilePath $qemu -ArgumentList "-machine q35 -cpu qemu64 -m 1024M -drive format=raw,file=`"$img`" -serial file:`"$log`" -display none -no-reboot" -PassThru
     Start-Sleep -Seconds 4
     Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
 
