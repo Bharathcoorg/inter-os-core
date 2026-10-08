@@ -104,3 +104,11 @@ def test_device_studio_power_on_and_reboot_are_not_reported_as_simulated():
     assert "restart_method = 'backend_relaunch'" in server
     assert "simulated" not in app
     assert "[BOOT_TIMEOUT]" in app
+
+
+def test_device_studio_never_kills_unowned_qemu_processes():
+    server = read("emulator/server.py")
+    stop = server[server.index("def stop_qemu_backend"):server.index("def launch_qemu_profile")]
+    assert "psutil.process_iter" not in stop
+    assert "p.kill()" not in stop
+    assert "Only qemu_subproc, created and owned by" in stop
