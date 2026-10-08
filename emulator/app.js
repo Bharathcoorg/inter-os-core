@@ -430,7 +430,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const res = await fetch('/api/qemu/reboot', { method: 'POST' });
       const data = await res.json();
       if (data.success) {
-        logConsole('ok', `[REBOOT_OK] Hardware state synchronized (system_reset: ${data.qemu_reset ? 'delivered' : 'simulated'}).`);
+        logConsole('ok', `[REBOOT_OK] QEMU restart completed via ${data.restart_method || (data.qemu_reset ? 'monitor_system_reset' : 'backend_relaunch')}.`);
         playBeep(880, 0.08, 'triangle');
       }
     } catch (err) {
@@ -450,8 +450,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (btnRebootKernel) {
           btnRebootKernel.style.pointerEvents = 'auto';
           const span = btnRebootKernel.querySelector('span');
-          if (span) span.textContent = 'Reboot OS';
+          if (span) span.textContent = 'Retry Reboot';
         }
+        logConsole('err', '[BOOT_TIMEOUT] Guest did not report launcher_ready within 45 seconds; scanout remains real, but boot is not marked successful.');
       }
     }, 45000);
   }
