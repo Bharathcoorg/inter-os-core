@@ -74,83 +74,129 @@ pub struct ZipArchive<'a> {
 impl<'a> ZipArchive<'a> {
     /// Parses a raw PKZip archive buffer.
     pub fn parse(data: &'a [u8]) -> Result<Self, ApkError> {
-        if data.len() < 22 {
-            return Err(ApkError::TooSmall);
-        }
+        const EOCD_MIN: usize = 22;
+        const MAX_ENTRIES: usize = 4096;
+        const MAX_MEMBER_BYTES: usize = 128 * 1024 * 1024;
+        if data.len() < EOCD_MIN { return Err(ApkError::TooSmall); }
 
-        // 1. Locate End of Central Directory Record (EOCD) from the end of the buffer
-        let mut eocd_offset = None;
-        let search_start = if data.len() > 65535 + 22 { data.len() - (65535 + 22) } else { 0 };
-        for i in (search_start..=(data.len() - 22)).rev() {
-            let sig = u32::from_le_bytes(data[i..i + 4].try_into().unwrap());
-            if sig == ZIP_END_OF_CENTRAL_DIR_SIG {
-                eocd_offset = Some(i);
+        // EOCD may be preceded by a comment of at most 65535 bytes. Multi-disk
+        // and ZIP64 archives are explicitly unsupported rather than partially parsed.
+        let search_start = data.len().saturating_sub(65535 + EOCD_MIN);
+        let mut eocd = None;
+        for pos in (search_start..=data.len() - EOCD_MIN).rev() {
+            if data.get(pos..pos + 4) == Some(&ZIP_END_OF_CENTRAL_DIR_SIG.to_le_bytes()) {
+                eocd = Some(pos);
                 break;
             }
         }
+        let eocd_pos = eocd.ok_or(ApkError::EndOfCentralDirectoryNotFound)?;
+        let u16_at = |p: usize| -> Result<u16, ApkError> {
+            let end = p.checked_add(2).ok_or(ApkError::InvalidCentralDirectory)?;
+            let b = data.get(p..end).ok_or(ApkError::InvalidCentralDirectory)?;
+            Ok(u16::from_le_bytes([b[0], b[1]]))
+        };
+        let u32_at = |p: usize| -> Result<u32, ApkError> {
+            let end = p.checked_add(4).ok_or(ApkError::InvalidCentralDirectory)?;
+            let b = data.get(p..end).ok_or(ApkError::InvalidCentralDirectory)?;
+            Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        };
+        let disk = u16_at(eocd_pos + 4)?;
+        let cd_disk = u16_at(eocd_pos + 6)?;
+        let disk_entries = u16_at(eocd_pos + 8)? as usize;
+        let total_entries = u16_at(eocd_pos + 10)? as usize;
+        let comment_len = u16_at(eocd_pos + 20)? as usize;
+        if disk != 0 || cd_disk != 0 || disk_entries != total_entries
+            || total_entries == u16::MAX as usize || total_entries > MAX_ENTRIES
+        { return Err(ApkError::InvalidCentralDirectory); }
+        let eocd_end = eocd_pos.checked_add(EOCD_MIN)
+            .and_then(|v| v.checked_add(comment_len))
+            .ok_or(ApkError::InvalidCentralDirectory)?;
+        if eocd_end != data.len() { return Err(ApkError::InvalidCentralDirectory); }
 
-        let eocd_pos = eocd_offset.ok_or(ApkError::EndOfCentralDirectoryNotFound)?;
-        if eocd_pos + 22 > data.len() {
+        let cd_size = u32_at(eocd_pos + 12)? as usize;
+        let cd_offset = u32_at(eocd_pos + 16)? as usize;
+        let cd_end = cd_offset.checked_add(cd_size).ok_or(ApkError::InvalidCentralDirectory)?;
+        if cd_end != eocd_pos || cd_end > data.len() {
             return Err(ApkError::InvalidCentralDirectory);
         }
 
-        let total_entries = u16::from_le_bytes(data[eocd_pos + 10..eocd_pos + 12].try_into().unwrap()) as usize;
-        let cd_size = u32::from_le_bytes(data[eocd_pos + 12..eocd_pos + 16].try_into().unwrap()) as usize;
-        let cd_offset = u32::from_le_bytes(data[eocd_pos + 16..eocd_pos + 20].try_into().unwrap()) as usize;
-
-        if cd_offset + cd_size > data.len() {
-            return Err(ApkError::InvalidCentralDirectory);
-        }
-
-        // 2. Iterate Central Directory headers (PK\x01\x02)
         let mut entries = Vec::with_capacity(total_entries);
         let mut cursor = cd_offset;
-
         for _ in 0..total_entries {
-            if cursor + 46 > data.len() {
-                break;
-            }
-            let sig = u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap());
-            if sig != ZIP_CENTRAL_DIR_SIG {
-                break;
-            }
-
-            let comp_method = u16::from_le_bytes(data[cursor + 10..cursor + 12].try_into().unwrap());
-            let comp_size = u32::from_le_bytes(data[cursor + 20..cursor + 24].try_into().unwrap());
-            let uncomp_size = u32::from_le_bytes(data[cursor + 24..cursor + 28].try_into().unwrap());
-            let name_len = u16::from_le_bytes(data[cursor + 28..cursor + 30].try_into().unwrap()) as usize;
-            let extra_len = u16::from_le_bytes(data[cursor + 30..cursor + 32].try_into().unwrap()) as usize;
-            let comment_len = u16::from_le_bytes(data[cursor + 32..cursor + 34].try_into().unwrap()) as usize;
-            let local_header_offset = u32::from_le_bytes(data[cursor + 42..cursor + 46].try_into().unwrap()) as usize;
-
-            cursor += 46;
-            if cursor + name_len > data.len() {
+            let fixed_end = cursor.checked_add(46).ok_or(ApkError::InvalidCentralDirectory)?;
+            let header = data.get(cursor..fixed_end).ok_or(ApkError::InvalidCentralDirectory)?;
+            if u32::from_le_bytes(header[0..4].try_into().unwrap()) != ZIP_CENTRAL_DIR_SIG {
                 return Err(ApkError::InvalidCentralDirectory);
             }
+            let flags = u16::from_le_bytes([header[8], header[9]]);
+            let method = u16::from_le_bytes([header[10], header[11]]);
+            let compressed = u32::from_le_bytes(header[20..24].try_into().unwrap());
+            let uncompressed = u32::from_le_bytes(header[24..28].try_into().unwrap());
+            let name_len = u16::from_le_bytes([header[28], header[29]]) as usize;
+            let extra_len = u16::from_le_bytes([header[30], header[31]]) as usize;
+            let comment_len = u16::from_le_bytes([header[32], header[33]]) as usize;
+            let local_offset = u32::from_le_bytes(header[42..46].try_into().unwrap()) as usize;
+            if flags & 0x0001 != 0 || compressed == u32::MAX || uncompressed == u32::MAX
+                || uncompressed as usize > MAX_MEMBER_BYTES
+            { return Err(ApkError::InvalidCentralDirectory); }
 
-            let name_bytes = &data[cursor..cursor + name_len];
-            let name = String::from(core::str::from_utf8(name_bytes).unwrap_or(""));
-            cursor += name_len + extra_len + comment_len;
+            let name_start = fixed_end;
+            let name_end = name_start.checked_add(name_len).ok_or(ApkError::InvalidCentralDirectory)?;
+            let record_end = name_end.checked_add(extra_len).and_then(|v| v.checked_add(comment_len))
+                .ok_or(ApkError::InvalidCentralDirectory)?;
+            if record_end > cd_end { return Err(ApkError::InvalidCentralDirectory); }
+            let name = core::str::from_utf8(&data[name_start..name_end])
+                .map_err(|_| ApkError::InvalidCentralDirectory)?;
+            if name.is_empty() || name.starts_with('/') || name.contains('\\')
+                || name.split('/').any(|part| part == "..")
+            { return Err(ApkError::InvalidCentralDirectory); }
 
-            // Resolve payload offset from Local File Header (PK\x03\x04)
-            if local_header_offset + 30 <= data.len() {
-                let local_sig = u32::from_le_bytes(data[local_header_offset..local_header_offset + 4].try_into().unwrap());
-                if local_sig == ZIP_LOCAL_FILE_HEADER_SIG {
-                    let loc_name_len = u16::from_le_bytes(data[local_header_offset + 26..local_header_offset + 28].try_into().unwrap()) as usize;
-                    let loc_extra_len = u16::from_le_bytes(data[local_header_offset + 28..local_header_offset + 30].try_into().unwrap()) as usize;
-                    let data_offset = local_header_offset + 30 + loc_name_len + loc_extra_len;
-
-                    entries.push(ZipFileEntry {
-                        name,
-                        compression_method: comp_method,
-                        compressed_size: comp_size,
-                        uncompressed_size: uncomp_size,
-                        data_offset,
-                    });
+            let local_end = local_offset.checked_add(30).ok_or(ApkError::InvalidCentralDirectory)?;
+            let local = data.get(local_offset..local_end).ok_or(ApkError::InvalidCentralDirectory)?;
+            if u32::from_le_bytes(local[0..4].try_into().unwrap()) != ZIP_LOCAL_FILE_HEADER_SIG {
+                return Err(ApkError::InvalidCentralDirectory);
+            }
+            let local_flags = u16::from_le_bytes([local[6], local[7]]);
+            let local_method = u16::from_le_bytes([local[8], local[9]]);
+            let local_name_len = u16::from_le_bytes([local[26], local[27]]) as usize;
+            let local_extra_len = u16::from_le_bytes([local[28], local[29]]) as usize;
+            if local_flags != flags || local_method != method {
+                return Err(ApkError::InvalidCentralDirectory);
+            }
+            let local_name_end = local_end.checked_add(local_name_len).ok_or(ApkError::InvalidCentralDirectory)?;
+            let payload_start = local_name_end.checked_add(local_extra_len).ok_or(ApkError::InvalidCentralDirectory)?;
+            let local_name = data.get(local_end..local_name_end).ok_or(ApkError::InvalidCentralDirectory)?;
+            if local_name != name.as_bytes() { return Err(ApkError::InvalidCentralDirectory); }
+            let payload_end = payload_start.checked_add(compressed as usize).ok_or(ApkError::InvalidCentralDirectory)?;
+            if payload_end > cd_offset || payload_end > data.len() {
+                return Err(ApkError::InvalidCentralDirectory);
+            }
+            if flags & 0x0008 == 0 {
+                let local_compressed = u32::from_le_bytes(local[18..22].try_into().unwrap());
+                let local_uncompressed = u32::from_le_bytes(local[22..26].try_into().unwrap());
+                if local_compressed != compressed || local_uncompressed != uncompressed {
+                    return Err(ApkError::InvalidCentralDirectory);
                 }
             }
+            entries.push(ZipFileEntry {
+                name: String::from(name),
+                compression_method: method,
+                compressed_size: compressed,
+                uncompressed_size: uncompressed,
+                data_offset: payload_start,
+            });
+            cursor = record_end;
         }
-
+        if cursor != cd_end || entries.len() != total_entries {
+            return Err(ApkError::InvalidCentralDirectory);
+        }
+        // Duplicate names make get_file(name) ambiguous, so reject rather than
+        // silently accepting whichever entry appears first.
+        for i in 0..entries.len() {
+            if entries[..i].iter().any(|entry| entry.name == entries[i].name) {
+                return Err(ApkError::InvalidCentralDirectory);
+            }
+        }
         Ok(Self { data, entries })
     }
 
