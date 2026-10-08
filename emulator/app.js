@@ -794,6 +794,12 @@ document.addEventListener('DOMContentLoaded', () => {
       lastSentX = px;
       lastSentY = py;
       lastMoveTime = performance.now();
+      downSent = true;
+      fetch('/api/touch/event', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'down', coords: 'portrait', x: px, y: py, slot: 0 })
+      }).catch(() => {});
       updateVirtualTouch(ev.clientX, ev.clientY, true);
       try { touchSurface.setPointerCapture(ev.pointerId); } catch (_) {}
     });
@@ -807,15 +813,6 @@ document.addEventListener('DOMContentLoaded', () => {
         const px = Math.max(0, Math.min(719, Math.round(curX * 719)));
         const py = Math.max(0, Math.min(1439, Math.round(curY * 1439)));
         const now = performance.now();
-
-        if (!downSent && (Math.abs(px - lastSentX) > 6 || Math.abs(py - lastSentY) > 6)) {
-          downSent = true;
-          fetch('/api/touch/event', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'down', coords: 'portrait', x: lastSentX, y: lastSentY, slot: 0 })
-          }).catch(() => {});
-        }
 
         if (downSent && now - lastMoveTime >= 16 && (Math.abs(px - lastSentX) > 3 || Math.abs(py - lastSentY) > 3)) {
           lastMoveTime = now;
@@ -866,13 +863,7 @@ document.addEventListener('DOMContentLoaded', () => {
           }).catch(() => {});
         }
       } else {
-        if (!downSent || dist < 12) {
-          fetch('/api/touch/event', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'tap', coords: 'portrait', x: px, y: py })
-          }).catch(() => {});
-        } else {
+        if (downSent) {
           fetch('/api/touch/event', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -884,6 +875,15 @@ document.addEventListener('DOMContentLoaded', () => {
       requestAnimationFrame(() => refreshScanoutFrame(true));
       setTimeout(() => refreshScanoutFrame(true), 25);
       setTimeout(() => refreshScanoutFrame(true), 65);
+    });
+
+    touchSurface.addEventListener('pointercancel', (ev) => {
+      if (!isPointerDown) return;
+      isPointerDown = false;
+      if (downSent) {
+        fetch('/api/touch/event', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'up', coords: 'portrait', x: lastSentX, y: lastSentY, slot: 0 }) }).catch(() => {});
+      }
+      updateVirtualTouch(ev.clientX, ev.clientY, false);
     });
 
     touchSurface.addEventListener('wheel', (ev) => {
