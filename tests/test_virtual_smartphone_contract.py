@@ -154,3 +154,12 @@ def test_power_on_after_guest_acpi_shutdown_uses_monitor_reset_not_serial():
     shutdown_branch = server[server.index("guest_status == 'shutdown'"):server.index("elif vm_alive and action in ('power', 'wake', 'toggle')", server.index("guest_status == 'shutdown'"))]
     assert "send_qemu_monitor_cmd('system_reset')" in shutdown_branch
     assert "send_guest_serial_command('POWER_KEY'" not in shutdown_branch
+
+
+def test_android_runtime_preserves_vm_state_for_each_active_package():
+    runtime = read("kernel/src/compat/android/mod.rs")
+    assert "active_vms: BTreeMap<u32, DalvikVmState>" in runtime
+    assert "self.active_vms.insert(pid, DalvikVmState::new())" in runtime
+    assert "self.active_vms.get_mut(&pid)" in runtime
+    assert "self.active_vms.remove(&pid)" in runtime
+    assert "let mut vm = DalvikVmState::new()" not in runtime
