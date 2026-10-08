@@ -1033,6 +1033,8 @@ def capture_qemu_screen_frame(full_scanout=False, orientation=None, prefer_jpeg=
 
     # Fast path: in-memory VNC client (zero disk I/O, zero PPM)
     if vnc_client.connected and vnc_client.latest_raw_rgba is not None:
+        if (vnc_client.latest_raw_w, vnc_client.latest_raw_h) != (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H):
+            return None, f"Non-canonical VNC scanout {vnc_client.latest_raw_w}x{vnc_client.latest_raw_h}; expected {LOGICAL_SURFACE_W}x{LOGICAL_SURFACE_H}"
         img_bytes, content_type = vnc_client.get_image_frame(prefer_jpeg=prefer_jpeg)
         if img_bytes:
             return img_bytes, content_type
