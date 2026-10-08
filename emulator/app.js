@@ -413,8 +413,8 @@ document.addEventListener('DOMContentLoaded', () => {
   async function executeWarmReboot() {
     isBooting = true;
     hasLauncherPresented = false;
-    stopScanoutStream();
-    if (screenLiveScanout) screenLiveScanout.style.display = 'none';
+    // Keep the real QEMU scanout visible during reset so the guest boot animation,
+    // lock screen and first frame are observable rather than replaced by a Studio splash.
 
     if (btnRebootKernel) {
       btnRebootKernel.style.pointerEvents = 'none';
@@ -709,11 +709,6 @@ document.addEventListener('DOMContentLoaded', () => {
   // is not presenting, the monitor shows nothing rather than a Studio-owned
   // screen that could be mistaken for the guest's.
   function updateDeviceDisplay(isAlive, launcherReady = false) {
-    if (isBooting) {
-      if (screenLiveScanout) screenLiveScanout.style.display = 'none';
-      return;
-    }
-
     if (launcherReady) {
       hasLauncherPresented = true;
     }
