@@ -783,6 +783,22 @@ document.addEventListener('DOMContentLoaded', () => {
   // goes straight to the guest over POST /api/touch/event. Coordinates are
   // mapped into the canonical logical portrait space (720x1440) or guest framebuffer.
   const touchSurface = screenLiveScanout || liveScanoutImg;
+  // HTTP requests can complete out of order on the threaded Studio server. Serialize
+  // pointer transitions so a fast tap can never arrive as UP before DOWN in the guest.
+  let guestTouchQueue = Promise.resolve();
+  function sendGuestTouchEvent(payload) {
+    guestTouchQueue = guestTouchQueue.then(async () => {
+      const response = await fetch('/api/touch/event', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) throw new Error('Guest input rejected: ' + response.status);
+    }).catch((error) => {
+      if (state && state.debugInput) console.warn(error);
+    });
+    return guestTouchQueue;
+  }
   if (touchSurface) {
     let isPointerDown = false;
     let downSent = false;
@@ -805,11 +821,7 @@ document.addEventListener('DOMContentLoaded', () => {
       lastSentY = py;
       lastMoveTime = performance.now();
       downSent = true;
-      fetch('/api/touch/event', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'down', coords: 'portrait', x: px, y: py, slot: 0 })
-      }).catch(() => {});
+      sendGuestTouchEvent({ action: 'down', coords: 'portrait', x: px, y: py, slot: 0 });
       updateVirtualTouch(ev.clientX, ev.clientY, true);
       try { touchSurface.setPointerCapture(ev.pointerId); } catch (_) {}
     });
@@ -829,11 +841,7 @@ document.addEventListener('DOMContentLoaded', () => {
           lastMoveTime = now;
           lastSentX = px;
           lastSentY = py;
-          fetch('/api/touch/event', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'move', coords: 'portrait', x: px, y: py, slot: 0 })
-          }).catch(() => {});
+          sendGuestTouchEvent({ action: 'move', coords: 'portrait', x: px, y: py, slot: 0 });
         }
       }
     });
@@ -848,11 +856,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const endY = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
         const px = Math.max(0, Math.min(719, Math.round(endX * 719)));
         const py = Math.max(0, Math.min(1439, Math.round(endY * 1439)));
-        fetch('/api/touch/event', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'up', coords: 'portrait', x: px, y: py, slot: 0 })
-        }).catch(() => {});
+        sendGuestTouchEvent({ action: 'up', coords: 'portrait', x: px, y: py, slot: 0 });
       }
       downSent = false;
       requestAnimationFrame(() => refreshScanoutFrame(true));
@@ -864,22 +868,14 @@ document.addEventListener('DOMContentLoaded', () => {
       const delta = ev.deltaY;
       const start_y = delta > 0 ? 900 : 500;
       const end_y = delta > 0 ? 500 : 900;
-      fetch('/api/touch/event', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'swipe', coords: 'portrait', x: 360, y: start_y, x2: 360, y2: end_y, steps: 5 })
-      }).catch(() => {});
+      sendGuestTouchEvent({ action: 'swipe', coords: 'portrait', x: 360, y: start_y, x2: 360, y2: end_y, steps: 5 });
       setTimeout(() => refreshScanoutFrame(true), 40);
     }, { passive: false });
 
     touchSurface.addEventListener('pointercancel', () => {
       isPointerDown = false;
       updateVirtualTouch(0, 0, false);
-      fetch('/api/touch/event', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'cancel', coords: 'portrait', x: 360, y: 720, slot: 0 })
-      }).catch(() => {});
+      sendGuestTouchEvent({ action: 'cancel', coords: 'portrait', x: 360, y: 720, slot: 0 });
     });
   }
 
