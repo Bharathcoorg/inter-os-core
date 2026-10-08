@@ -32,6 +32,16 @@ def kill_proc_on_port(p):
                     pass
     except Exception:
         pass
+    if sys.platform == "win32":
+        try:
+            res = subprocess.run(["powershell", "-NoProfile", "-Command", f"(Get-NetTCPConnection -LocalPort {p} -ErrorAction SilentlyContinue).OwningProcess"], capture_output=True, text=True, timeout=5)
+            for line in res.stdout.splitlines():
+                pid = line.strip()
+                if pid and pid.isdigit() and int(pid) > 0:
+                    subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, timeout=3)
+        except Exception:
+            pass
+
 
 
 if hasattr(sys.stdout, 'reconfigure'):
@@ -57,7 +67,10 @@ def send_monitor_cmd(sock, cmd):
     if not sock:
         return ""
     if cmd:
-        sock.sendall((cmd + "\n").encode('utf-8'))
+        try:
+            sock.sendall((cmd + "\n").encode('utf-8'))
+        except (socket.error, OSError):
+            return ""
     resp = b""
     start_t = time.time()
     while time.time() - start_t < 5.0:
