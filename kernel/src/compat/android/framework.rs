@@ -105,6 +105,24 @@ mod tests {
     }
 
     #[test]
+    fn unimplemented_ui_lifecycle_and_service_calls_never_report_success() {
+        let mut logs = Vec::new();
+        for (class, method) in [
+            ("Landroid/app/Activity;", "onCreate"),
+            ("Landroid/widget/TextView;", "setText"),
+            ("Landroid/os/Handler;", "post"),
+            ("Landroid/app/NotificationManager;", "notify"),
+            ("Landroid/content/Context;", "getSystemService"),
+        ] {
+            assert_eq!(
+                dispatch(class, method, &[], &mut logs),
+                Err(AndroidFrameworkError::UnsupportedApi),
+                "{class}->{method} must not return synthetic success"
+            );
+        }
+    }
+
+    #[test]
     fn unsupported_framework_api_fails_closed() {
         let mut logs = Vec::new();
         assert_eq!(
