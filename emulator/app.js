@@ -482,7 +482,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const btnGestureQuick = document.getElementById('btn-gesture-quick');
   const btnGestureSystem = document.getElementById('btn-gesture-system');
 
-  let cropMode = 'portrait'; // 'portrait' (720x1440 cropped) or 'full' (1280x720 complete scanout)
+  let cropMode = 'portrait'; // Canonical guest scanout is native 720x1440 portrait.
   let scanoutTimer = null;
   let isBooting = false;
   let lastFrameSeq = 0;
