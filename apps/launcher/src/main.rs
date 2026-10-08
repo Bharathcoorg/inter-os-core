@@ -1295,6 +1295,7 @@ pub extern "C" fn _start() -> ! {
                     std::log(0, "[LAUNCHER] Got input event!").ok();
                     if input.kind == 7 {
                         match state.current_view {
+                            ViewMode::BootScreen => {}
                             ViewMode::HomeScreen => {
                                 refresh_runtime_recents(&mut state);
                                 state.current_view = ViewMode::ActivitySpace;
@@ -1365,6 +1366,7 @@ pub extern "C" fn _start() -> ! {
                     if input.kind == 9 { continue; }
 
                     match state.current_view {
+                        ViewMode::BootScreen => {}
                         ViewMode::PinEntry => {
                             if input.kind == 1 {
                                 let x = input.x as usize;
