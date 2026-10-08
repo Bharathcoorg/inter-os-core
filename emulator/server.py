@@ -1804,8 +1804,8 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             action = query.get('action', ['get'])[0].upper()
             val = query.get('value', [''])[0]
             cmd = f"VOLUME {val}" if val else f"VOLUME {action}"
-            ok, msg = send_guest_serial_command(cmd)
-            cur_vol = 75
+            ok, msg = send_guest_serial_command(cmd, '[AUDIO]', timeout=3)
+            cur_vol = None
             with telemetry_lock:
                 for line in reversed(serial_lines):
                     if "[AUDIO]" in line and "volume_percent=" in line:
@@ -1813,11 +1813,13 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                         if m:
                             cur_vol = int(m.group(1))
                             break
-            self.send_response(200)
+            # A missing guest report is unknown, not a synthetic 75% reading.
+            success = bool(ok and cur_vol is not None)
+            self.send_response(200 if success else 503)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            self.wfile.write(json.dumps({'success': ok, 'volume_percent': cur_vol, 'status': 'APPLIED'}).encode())
+            self.wfile.write(json.dumps({'success': success, 'volume_percent': cur_vol, 'status': 'APPLIED' if success else 'UNCONFIRMED', 'message': msg}).encode())
             return
 
         if parsed_path.path in ('/api/screen/frame', '/api/qemu/screendump', '/api/screen/scanout'):
