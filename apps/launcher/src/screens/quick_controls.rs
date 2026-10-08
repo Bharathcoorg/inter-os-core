@@ -213,9 +213,11 @@ fn build_qc_frame(_state: &LauncherState) -> QuickControlsFrame {
     let slider_x=36; let slider_w=648; let slider_h=76;
     let brightness_rect=Rect::new(slider_x,404,slider_w,slider_h);
     let volume_rect=Rect::new(slider_x,500,slider_w,slider_h);
-    let mut setting=[0u8;16];
-    let brightness_available=std::settings_get(0,"display.brightness",&mut setting).map(|n| n>0).unwrap_or(false);
-    let brightness_value=if brightness_available { let mut v=0usize; for &b in &setting { if b.is_ascii_digit(){v=v.saturating_mul(10).saturating_add((b-b'0') as usize);} } v.min(100) } else {0};
+    // QEMU has no virtual backlight device wired to the guest yet. A stored
+    // preference is not proof that changing brightness affects emitted pixels.
+    // Keep this control visibly disabled until a real display-power backend exists.
+    let brightness_available = false;
+    let brightness_value = 0usize;
     let volume=std::audio_query_volume();
     let volume_available=volume.is_ok();
     let volume_value=volume.unwrap_or(0).min(100) as usize;
