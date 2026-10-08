@@ -25,6 +25,7 @@ pub enum DalvikVmError {
     ExecutionStepLimit,
     IllegalInstruction(u8),
     SecurityViolationForbiddenApi,
+    UnsupportedFrameworkApi,
 }
 
 /// Execution state of the sovereign Dalvik Virtual Machine.
@@ -392,7 +393,10 @@ impl DalvikVmState {
                     if target.class_name.starts_with("Landroid/") || target.class_name.starts_with("Landroidx/") {
                         match super::framework::dispatch(&target.class_name, &target.method_name, &string_args, &mut self.captured_logs) {
                             Ok(super::framework::AndroidFrameworkResult::Return(value)) => self.last_return_value = value,
-                            Ok(super::framework::AndroidFrameworkResult::Service(_)) => self.last_return_value = 1,
+                            // A service descriptor is not a service invocation. Do not turn
+                            // an unimplemented bridge into a synthetic successful return.
+                            Ok(super::framework::AndroidFrameworkResult::Service(_)) => return Err(DalvikVmError::UnsupportedFrameworkApi),
+                            Err(super::framework::AndroidFrameworkError::UnsupportedApi) => return Err(DalvikVmError::UnsupportedFrameworkApi),
                             Err(_) => return Err(DalvikVmError::SecurityViolationForbiddenApi),
                         }
                     } else {
