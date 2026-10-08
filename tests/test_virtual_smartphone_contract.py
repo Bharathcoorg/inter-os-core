@@ -86,3 +86,12 @@ def test_android_boundary_does_not_fabricate_framework_or_signature_success():
     assert "Err(ApkError::InvalidSignature)" in verifier
     assert "return Ok(())" not in verifier
     assert "full Android framework/runtime compatibility is not yet implemented" in runtime
+
+def test_device_studio_power_on_and_reboot_are_not_reported_as_simulated():
+    server = read("emulator/server.py")
+    app = read("emulator/app.js")
+    assert "monitor_alive = bool(query_qemu_monitor().get('qemu_alive', False))" in server
+    assert "restart_method = 'monitor_system_reset'" in server
+    assert "restart_method = 'backend_relaunch'" in server
+    assert "simulated" not in app
+    assert "[BOOT_TIMEOUT]" in app
