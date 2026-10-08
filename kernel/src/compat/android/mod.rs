@@ -184,8 +184,8 @@ pub fn init() {
     let mut fs = ANDROID_SANDBOX_FS.lock();
     fs.populate_defaults();
     let framework_jar = fs.open_read("/system/framework/framework.jar");
-    assert!(framework_jar.is_ok(), "Android framework.jar must be present in virtual VFS");
-    serial_println!("[OK] Android virtual filesystem hierarchy mounted (/system, /data, /sdcard).");
+    assert_eq!(framework_jar, Err(AndroidFsError::NotFound), "Missing Android framework must remain explicit, never a fabricated stub");
+    serial_println!("[OK] Android sandbox mount points initialized; no synthetic framework binaries are exposed.");
 
     // 2. Test Non-Leakage Boundary: Access to native host private storage MUST FAIL
     let leak_test = fs.open_read("/system/etc/policy.json");
@@ -249,12 +249,12 @@ pub fn init() {
     let parsed_apk = ApkPackage::parse(&test_apk_data).expect("APK parsing must succeed");
     assert_eq!(parsed_apk.manifest.package_name, "org.whispersystems.signal");
     assert!(parsed_apk.has_classes_dex);
-    assert!(parsed_apk.is_signed);
+    assert!(!parsed_apk.is_signed, "Test fixture contains no cryptographic signature");
     assert_eq!(parsed_apk.manifest.permissions.len(), 2);
     let signal_profile = parsed_apk.audit_and_create_container(900);
-    assert_eq!(signal_profile.status, AcrAuditStatus::Approved);
-    assert_eq!(signal_profile.granted_caps_count, 2);
-    serial_println!("[TEST] Android APK Parser: Decoded binary AndroidManifest.xml for 'org.whispersystems.signal' (VERIFIED).");
+    assert_eq!(signal_profile.status, AcrAuditStatus::AttestationFailed);
+    assert_eq!(signal_profile.granted_caps_count, 0);
+    serial_println!("[TEST] Android APK Parser: Binary manifest and DEX decoded; unsigned fixture rejected by attestation.");
 
     // 8. Test Ambient Authority Rejection on Malicious APK
     let rogue_apk_data = create_test_apk("com.rogue.exploit", &["android.permission.INSTALL_PACKAGES"]);
@@ -299,5 +299,5 @@ pub fn init() {
         vm.instructions_executed
     );
 
-    serial_println!("--- [Android Compatibility Boundary Verified: APK/DEX/Binder/VFS] ---\n");
+    serial_println!("--- [Android isolation primitives verified; full Android framework/runtime compatibility is not yet implemented] ---\n");
 }
