@@ -24,3 +24,22 @@ def test_android_package_parser_fails_closed_on_unverified_or_unsupported_conten
     assert "zip.validate_compression()?" in apk
     assert "UnsupportedCompression" in apk
     assert "AttestationFailed" in apk
+
+
+def test_android_runtime_has_audited_launch_and_real_surface_ownership():
+    runtime = read("kernel/src/compat/android/mod.rs")
+    window = read("kernel/src/compat/android/window.rs")
+    assert "launch_verified" in runtime
+    assert "audit_and_create_container" in runtime
+    assert "surface_id" in runtime
+    assert "AndroidActivityState::Resumed" in runtime
+    assert "create_surface" in window
+    assert "destroy_surface_owned" in window
+    assert "MAX_ANDROID_WINDOWS" in window
+
+
+def test_android_vm_rejects_oversized_register_files_and_unbounded_recursion():
+    runtime = read("kernel/src/compat/android/runtime.rs")
+    assert "method.registers_size as usize > self.registers.len()" in runtime
+    assert "self.call_depth >= 32" in runtime
+    assert "STEP_LIMIT: usize = 4096" in runtime
