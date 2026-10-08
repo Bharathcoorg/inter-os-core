@@ -1,4 +1,5 @@
 //! One module per screen, so screens can be edited in parallel.
+pub mod boot;
 //!
 //! WHY this exists: every renderer was a function inside `main.rs`, which meant two
 //! people working on different screens collided on every save, and a single screen
