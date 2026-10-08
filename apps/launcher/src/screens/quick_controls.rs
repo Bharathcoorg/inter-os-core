@@ -208,7 +208,7 @@ fn build_qc_frame(_state: &LauncherState) -> QuickControlsFrame {
         subtitle: LabelRun::new(x0+28,y1+92,type_scale::CAPTION,mobile,TEXT_MUTED) };
     let tile_air = ControlTilePlan { rect: Rect::new(x1,y1,tile_w,tile_h), icon: QcIcon::Airplane,
         title: LabelRun::new(x1+28,y1+64,type_scale::CAPTION,b"Airplane",TEXT_WHITE),
-        subtitle: LabelRun::new(x1+28,y1+92,type_scale::CAPTION,b"Off",TEXT_MUTED) };
+        subtitle: LabelRun::new(x1+28,y1+92,type_scale::CAPTION,b"Unavailable",TEXT_MUTED) };
 
     let slider_x=36; let slider_w=648; let slider_h=76;
     let brightness_rect=Rect::new(slider_x,404,slider_w,slider_h);
@@ -479,8 +479,14 @@ pub fn get_quick_controls_color(x: usize, y: usize, state: &LauncherState) -> u3
                 }
                 let cx = toggle.center_x();
                 let cy = toggle.center_y();
-                if let Some(ic) = draw_qc_icon(f.toggle_icons[i], x, y, cx, cy, TEXT_WHITE) {
+                // These controls have no QEMU-backed flashlight, rotation sensor,
+                // DND policy or airplane-mode service yet. Show them as disabled,
+                // not as live toggles that silently do nothing.
+                if let Some(ic) = draw_qc_icon(f.toggle_icons[i], x, y, cx, cy, TEXT_MUTED) {
                     return ic;
+                }
+                if let Some(label) = test_text(x, y, toggle.x + 25, toggle.y + 54, 1, b"N/A", TEXT_MUTED) {
+                    return label;
                 }
                 return color;
             }
