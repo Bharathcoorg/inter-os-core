@@ -128,6 +128,8 @@ def test_android_apk_without_dex_is_rejected_before_container_approval():
     audit = apk[apk.index("pub fn audit_and_create_container"):]
     assert "if !self.has_classes_dex" in audit
     assert "status: AcrAuditStatus::InvalidApkFormat" in audit
+    assert "MissingDex" in apk
+    assert "ok_or(ApkError::MissingDex)" in apk
     assert "if !self.has_classes_dex" in audit
 
 
