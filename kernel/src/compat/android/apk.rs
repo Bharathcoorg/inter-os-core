@@ -403,78 +403,12 @@ pub fn verify_apk_signature(apk_bytes: &[u8]) -> Result<(), ApkError> {
         return Err(ApkError::TooSmall);
     }
 
-    // 1. Locate End of Central Directory (EOCD)
-    let mut eocd_offset = None;
-    let search_start = if apk_bytes.len() > 65535 + 22 { apk_bytes.len() - (65535 + 22) } else { 0 };
-    for i in (search_start..=(apk_bytes.len() - 22)).rev() {
-        if u32::from_le_bytes(apk_bytes[i..i + 4].try_into().unwrap()) == ZIP_END_OF_CENTRAL_DIR_SIG {
-            eocd_offset = Some(i);
-            break;
-        }
-    }
-    let eocd_idx = eocd_offset.ok_or(ApkError::EndOfCentralDirectoryNotFound)?;
-    let cd_offset = u32::from_le_bytes(apk_bytes[eocd_idx + 16..eocd_idx + 20].try_into().unwrap()) as usize;
-    let cd_size = u32::from_le_bytes(apk_bytes[eocd_idx + 12..eocd_idx + 16].try_into().unwrap()) as usize;
-
-    if cd_offset + cd_size > apk_bytes.len() {
-        return Err(ApkError::InvalidCentralDirectory);
-    }
-
-    // 2. Check for APK Signing Block v2/v3 immediately preceding Central Directory
-    // Footer is 24 bytes: 8 bytes size + 16 bytes magic ("APK Sig Block 42")
-    if cd_offset >= 24 {
-        let footer_start = cd_offset - 24;
-        let magic = &apk_bytes[footer_start + 8..footer_start + 24];
-        if magic == APK_SIG_BLOCK_MAGIC {
-            let block_size_footer = u64::from_le_bytes(apk_bytes[footer_start..footer_start + 8].try_into().unwrap()) as usize;
-            if block_size_footer >= 24 && cd_offset >= block_size_footer + 8 {
-                let block_start = cd_offset - 8 - block_size_footer;
-                let block_size_header = u64::from_le_bytes(apk_bytes[block_start..block_start + 8].try_into().unwrap()) as usize;
-                if block_size_header == block_size_footer {
-                    // Walk ID-value pairs in the APK Signing Block
-                    let mut cur = block_start + 8;
-                    let end = footer_start;
-                    while cur + 12 <= end {
-                        let pair_len = u64::from_le_bytes(apk_bytes[cur..cur + 8].try_into().unwrap()) as usize;
-                        let id = u32::from_le_bytes(apk_bytes[cur + 8..cur + 12].try_into().unwrap());
-                        cur += 12;
-                        if id == APK_SIGNATURE_SCHEME_V2_BLOCK_ID || id == APK_SIGNATURE_SCHEME_V3_BLOCK_ID {
-                            return Ok(());
-                        }
-                        if pair_len > 4 {
-                            cur = cur.saturating_add(pair_len - 4);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 3. Fallback: Verify JAR Signature via META-INF/
-    let zip = ZipArchive::parse(apk_bytes)?;
-    let mut has_cert = false;
-    let mut has_manifest = false;
-
-    for entry in &zip.entries {
-        if entry.name.starts_with("META-INF/") {
-            if entry.name.ends_with(".RSA") || entry.name.ends_with(".DSA") || entry.name.ends_with(".EC") {
-                if let Some(cert_data) = zip.get_file(&entry.name) {
-                    if cert_data.len() > 16 {
-                        has_cert = true;
-                    }
-                }
-            }
-            if entry.name == "META-INF/MANIFEST.MF" || entry.name.ends_with(".SF") {
-                has_manifest = true;
-            }
-        }
-    }
-
-    if has_cert && has_manifest {
-        Ok(())
-    } else {
-        Err(ApkError::InvalidSignature)
-    }
+    // This kernel component currently parses APK structure but does not implement
+    // the cryptographic verification required by APK Signature Scheme v2/v3 or
+    // JAR/X.509 signing. A signing-block ID, certificate filename, or non-empty
+    // certificate payload is not proof of authenticity. Fail closed until a
+    // trusted verifier supplies verified signer identity and content-digest proof.
+    Err(ApkError::InvalidSignature)
 }
 
 impl ApkPackage {
