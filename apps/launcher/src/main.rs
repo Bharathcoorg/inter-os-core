@@ -795,6 +795,53 @@ fn render_band(surface: u32, state: &LauncherState, min_y: usize, max_y: usize) 
 }
 
 #[inline(never)]
+fn volume_hud_pixel(x: usize, y: usize, volume: u8) -> u32 {
+    const W_HUD: usize = 520;
+    const H_HUD: usize = 160;
+    let bg = 0xF01A1B1E;
+    let accent = 0xFFFFFFFF;
+    let track = 0xFF4A4D52;
+    let px = x;
+    let py = y;
+    if px >= W_HUD || py >= H_HUD { return 0; }
+    let dx = if px < 24 { 24 - px } else if px >= W_HUD - 24 { px - (W_HUD - 25) } else { 0 };
+    let dy = if py < 24 { 24 - py } else if py >= H_HUD - 24 { py - (H_HUD - 25) } else { 0 };
+    if dx * dx + dy * dy > 24 * 24 { return 0; }
+    if (py >= 68 && py < 92) {
+        let start = 72usize;
+        let end = 448usize;
+        if px >= start && px < end {
+            let filled = start + ((end - start) * volume as usize / 100);
+            return if px < filled { accent } else { track };
+        }
+    }
+    // Simple vector speaker glyph; no bitmap font and no Studio-side rendering.
+    let speaker = (x >= 70 && x < 105 && y >= 45 && y < 115)
+        || (x >= 52 && x < 70 && y >= 62 && y < 98);
+    if speaker { accent } else { bg }
+}
+
+fn render_volume_hud(surface: u32, volume: u8) {
+    const HUD_W: usize = 520;
+    const HUD_H: usize = 160;
+    let total = HUD_W * HUD_H;
+    let mut offset = 0usize;
+    while offset < total {
+        let count = (total - offset).min(CHUNK);
+        let mut x = offset % HUD_W;
+        let mut y = offset / HUD_W;
+        unsafe {
+            for i in 0..count {
+                CHUNK_BUF[i] = volume_hud_pixel(x, y, volume);
+                x += 1;
+                if x == HUD_W { x = 0; y += 1; }
+            }
+            let _ = std::surface_write(4, surface, offset, &CHUNK_BUF[..count]);
+        }
+        offset += count;
+    }
+}
+
 fn render_view(surface: u32, state: &LauncherState) {
     let frame_start = std::get_ticks(1).ok();
     render_band(surface, state, 0, H);
@@ -1003,6 +1050,11 @@ pub extern "C" fn _start() -> ! {
     std::log(0, "[LAUNCHER USERSPACE] Live launcher online.").ok();
 
     std::log(0, "[LAUNCHER] Step 1: Allocating desktop surface (z=0)...").ok();
+    let volume_surface = std::surface_create(4, 520, 160, 100).ok();
+    if let Some(id) = volume_surface {
+        let _ = std::window_set_geometry(4, id, 100, 220, 100, false);
+    }
+
     let surface = match std::surface_create(4, W as u32, H as u32, 0) {
         Ok(id) => {
             std::log(0, "[LAUNCHER] Step 2: Surface created successfully.").ok();
@@ -1114,6 +1166,22 @@ pub extern "C" fn _start() -> ! {
                         .ok();
                     }
                     _ => {}
+                }
+            }
+
+            if (events & std::EVENT_TIMER_TICK) != 0 {
+                let volume_now = std::audio_query_volume().unwrap_or(state.last_volume_percent as u32).min(100) as u8;
+                let now = std::get_ticks(1).unwrap_or(0);
+                if volume_now != state.last_volume_percent {
+                    state.last_volume_percent = volume_now;
+                    state.volume_hud_until = now.saturating_add(120);
+                    if let Some(id) = volume_surface {
+                        render_volume_hud(id, volume_now);
+                        let _ = std::window_set_geometry(4, id, 100, 220, 100, true);
+                    }
+                } else if state.volume_hud_until != 0 && now >= state.volume_hud_until {
+                    state.volume_hud_until = 0;
+                    if let Some(id) = volume_surface { let _ = std::window_set_geometry(4, id, 100, 220, 100, false); }
                 }
             }
 
