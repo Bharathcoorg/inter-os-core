@@ -850,6 +850,9 @@ fn render_view(surface: u32, state: &LauncherState) {
     let frame_start = std::get_ticks(1).ok();
     render_band(surface, state, 0, H);
     match state.current_view {
+        ViewMode::BootScreen => {
+            std::log(0, "[LAUNCHER] Boot animation frame rendered from guest state.").ok();
+        }
         ViewMode::PinEntry => {
             std::log(0, "[LAUNCHER] render_pin_entry complete: Credential entry presented.").ok();
         }
