@@ -11,7 +11,13 @@ pub fn get_boot_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     let cy = (H / 2) as i32;
     let dx = x as i32 - cx;
     let dy = y as i32 - cy;
-    let distance = (((dx * dx + dy * dy) as u64) as f32).sqrt() as usize;
+    let distance_sq = (dx * dx + dy * dy).max(0) as u32;
+    // Integer square-root keeps the boot renderer freestanding and deterministic.
+    let mut distance = 0u32;
+    while distance.saturating_add(1).saturating_mul(distance.saturating_add(1)) <= distance_sq {
+        distance += 1;
+    }
+    let distance = distance as usize;
 
     let progress = state.boot_progress as usize;
     let ring = 118usize;
