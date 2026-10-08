@@ -46,7 +46,7 @@ mod tests {
     fn boot_progress_changes_rendered_state() {
         let mut state = LauncherState::new();
         state.boot_progress = 100;
-        let a = get_boot_screen_color(478, 242, &state);
+        let a = get_boot_screen_color(478, 720, &state);
         state.boot_progress = 900;
         let b = get_boot_screen_color(478, 242, &state);
         assert_ne!(a, b);
