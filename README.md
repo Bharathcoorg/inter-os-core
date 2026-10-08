@@ -19,7 +19,7 @@
 
 > **Status Notice: Engineering Reality & Verification Status**  
 > InterOS Core is an open-source, bare-metal Rust microkernel and mobile operating system foundation. All user processes execute in isolated virtual address spaces with hardware MMU enforcement (CR3 / TTBR0_EL1 / SATP), capability-based access control, safe syscall memory copies (`UserPtr`), and mandatory Ed25519 cryptographic package attestation.  
-> The current repository includes runtime verification coverage for the canonical x86_64 QEMU smartphone platform and QEMU virt targets for AArch64 and RISC-V 64. Physical smartphone deployment remains experimental bring-up.
+> The repository includes automated source-contract and subsystem tests for the canonical x86_64 QEMU smartphone target and QEMU virt bring-up targets for AArch64 and RISC-V 64. The latest Device Studio/display/input lifecycle changes still require a fresh local QEMU run before they can be described as runtime-verified. Physical smartphone deployment remains experimental bring-up.
 
 ---
 
@@ -60,8 +60,8 @@ See [Platform Reality Contract](docs/PLATFORM_REALITY_CONTRACT.md) and run `pyth
 | **DRM/KMS Multi-Surface Compositor** | Present | **QEMU-verified** | Double-buffered scanout, z-order multi-plane composition, 2×2 SSAA downsampling |
 | **Native Typography & UI Primitives** | Present | **Unit-tested / QEMU-verified** | Proportional 16×24 anti-aliased font (`test_text_aa`), tabular digits, squircle cards |
 | **Native Smartphone Applications** | Present | **QEMU-verified** | 12 first-party apps (Calculator, Dialer, Messages, Settings, Music, Gallery, etc.) |
-| **Android Compatibility Boundary (ACR)**| Emulated / Sandboxed | **Source-only / Unit-tested** | `interos-android-shared`; APK v2/v3 signature check, VFS sandbox, Dalvik bytecode auditor |
-| **Universal Device Studio** | Emulated | **Unit-tested** | `emulator/server.py`; QEMU manager, live HMP/QMP register queries, serial UART stream |
+| **Android Compatibility Boundary (ACR)** | Experimental / Sandboxed | **Source-only / Unit-tested** | Fail-closed APK signature boundary, APK structure/manifest parsing, bounded DEX opcode subset, sandbox VFS and framework bridge; full Android app launch is not supported yet |
+| **Universal Device Studio** | Emulated | **Source-only / Unit-tested** | `emulator/server.py`; QEMU manager, VNC scanout, serial input bridge and live HMP/QMP queries; latest end-to-end guest interaction requires local QEMU verification |
 | **Unified Developer CLI (`interos`)** | Present | **Unit-tested** | `tools/interos.py`; `doctor`, `build`, `test`, `package`, `sign`, `verify`, `install`, `run` |
 | **A/B System Updates & Rollback** | Present | **Unit-tested** | `kernel/src/update.rs`, `kernel/src/recovery.rs`; monotonic versions, boot health counter |
 | **Physical Hardware Deployment** | Experimental | **Source-only** | `docs/PHYSICAL_HARDWARE_FLASHING.md`; Fastboot v2 `boot-aarch64.img` header format |
@@ -176,8 +176,8 @@ InterOS Core features a native smartphone UI pipeline engineered for `#![no_std]
 
 - **Logical vs. Physical Coordinate Space**:
   - **Logical Portrait Resolution**: `720 × 1440` (1:2 aspect ratio) with defined safe area insets (Status bar: 48px, Nav pill: 64px).
-  - **Physical QEMU Scanout**: `1280 × 720` display with centered 360×720 viewport and black letterboxing.
-  - **Kernel Downsampler**: Upgraded to **2×2 SSAA (Super-Sample Anti-Aliasing) box filtering** in `kernel/src/framebuffer.rs`, replacing point sampling to eliminate decimation artifacts.
+  - **QEMU Display Request**: The canonical launchers request a `720 × 1440` VirtIO-VGA mode and expose an absolute USB tablet. The guest's actual negotiated scanout and direct touch path must still be confirmed by the local QEMU audit; a `1280 × 720` fallback path remains supported.
+  - **Framebuffer Presentation**: The kernel uses a software KMS compositor and framebuffer presentation adapter. Anti-aliasing and native portrait mode are implementation goals; final sharpness, frame pacing, and negotiated QEMU resolution require runtime measurement.
 - **Typography Engine (`interos-std::design::font`)**:
   - Proportional 16×24 condensed typeface (`FONT`, `FONT_BOLD`).
   - Tabular digits (11px fixed advance) ensuring clock text never jitters horizontally.
@@ -197,8 +197,8 @@ InterOS Core maintains an isolated, bounded subsystem for Android compatibility:
 
 - **Isolated Shared Library**: `#![no_std]` `interos-android-shared` crate.
 - **Sandbox Filesystem Bounds**: Paths normalized and restricted strictly to `/data/data/<pkg>` and `/sdcard/Android/data/<pkg>`; path traversals rejected.
-- **Signature Parsing**: APK Signature Scheme v2/v3 block inspection (`APK Sig Block 42`) with fallback JAR manifest verification.
-- **Dalvik Bytecode Auditor**: Header checksum verification and instruction boundary validation.
+- **Signature Verification Boundary**: The current kernel parser deliberately rejects APKs because it does not yet cryptographically verify APK Signature Scheme v2/v3 or JAR/X.509 signatures. Signature metadata is not treated as proof of authenticity; signed APK installation remains disabled until a trusted verifier and signer trust policy are implemented.
+- **Bounded DEX Runtime**: A small opcode subset is interpreted with register, instruction-step, and call-depth limits. This is not ART and does not yet run arbitrary Android applications; unsupported opcodes/framework APIs fail closed.
 - **Boundary Reality**: The Android compatibility subsystem is an isolated compatibility layer, **not** a claim of full Android application ecosystem parity. Native `.rapp` applications remain the primary platform target.
 
 ---
