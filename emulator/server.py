@@ -2422,11 +2422,14 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 if data.get('cold') or action in ('cold_reboot', 'relaunch'):
                     stop_qemu_backend()
                     ok, resp = launch_qemu_profile(active_profile_key)
+                    restart_method = 'backend_relaunch'
                 else:
                     ok, resp = send_qemu_monitor_cmd('system_reset')
+                    restart_method = 'monitor_system_reset'
                     if not ok:
                         stop_qemu_backend()
                         ok, resp = launch_qemu_profile(active_profile_key)
+                        restart_method = 'backend_relaunch'
                 self.send_response(200 if ok else 500)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')
@@ -2434,7 +2437,8 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(json.dumps({
                     'success': ok,
                     'action': 'reboot',
-                    'qemu_reset': ok,
+                    'qemu_reset': ok and restart_method == 'monitor_system_reset',
+                    'restart_method': restart_method if ok else 'failed',
                     'message': str(resp)
                 }).encode())
                 return
