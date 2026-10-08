@@ -536,7 +536,88 @@ document.addEventListener('DOMContentLoaded', () => {
     refreshScanoutFrame();
   }
 
+  function renderScanoutPixels(pixels, width, height) {
+    if (scanoutCtx && liveScanoutCanvas) {
+      if (liveScanoutCanvas.width !== width || liveScanoutCanvas.height !== height) {
+        liveScanoutCanvas.width = width;
+        liveScanoutCanvas.height = height;
+      }
+      const imgData = new ImageData(new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, width * height * 4), width, height);
+      scanoutCtx.putImageData(imgData, 0, 0);
+    }
+  }
+
+  let binaryStreamActive = false;
+  let binaryStreamAbort = null;
+
+  async function startPersistentBinaryStream() {
+    if (binaryStreamActive) return;
+    binaryStreamActive = true;
+    if (binaryStreamAbort) binaryStreamAbort.abort();
+    binaryStreamAbort = new AbortController();
+    const signal = binaryStreamAbort.signal;
+
+    try {
+      const resp = await fetch('/api/screen/binary_stream', { signal });
+      if (!resp.ok || !resp.body) {
+        throw new Error(`Binary stream HTTP ${resp.status}`);
+      }
+      const reader = resp.body.getReader();
+      let accumulated = new Uint8Array(0);
+
+      while (isStreamActive && !signal.aborted) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const newBuf = new Uint8Array(accumulated.length + value.length);
+        newBuf.set(accumulated);
+        newBuf.set(value, accumulated.length);
+        accumulated = newBuf;
+
+        while (accumulated.length >= 16) {
+          if (accumulated[0] !== 0x49 || accumulated[1] !== 0x4F || accumulated[2] !== 0x53 || accumulated[3] !== 0x46) {
+            let sync = 1;
+            while (sync < accumulated.length && accumulated[sync] !== 0x49) sync++;
+            accumulated = accumulated.subarray(sync);
+            continue;
+          }
+
+          const view = new DataView(accumulated.buffer, accumulated.byteOffset, 16);
+          const width = view.getUint16(4);
+          const height = view.getUint16(6);
+          const seq = view.getUint32(8);
+          const frameBytes = 16 + width * height * 4;
+
+          if (accumulated.length < frameBytes) {
+            break;
+          }
+
+          const pixelBytes = accumulated.subarray(16, frameBytes);
+          accumulated = accumulated.subarray(frameBytes);
+
+          if (seq > lastFrameSeq) {
+            lastFrameSeq = seq;
+            renderScanoutPixels(pixelBytes, width, height);
+            updateFpsCounter();
+          }
+        }
+      }
+    } catch (err) {
+      if (!signal.aborted) {
+        binaryStreamActive = false;
+        // Fall back to polling
+        if (isStreamActive && !streamRafId) {
+          streamRafId = requestAnimationFrame(runHighRefreshLoop);
+        }
+        setTimeout(startPersistentBinaryStream, 2000);
+      }
+    } finally {
+      binaryStreamActive = false;
+    }
+  }
+
   async function refreshScanoutFrame(forceImmediate = false) {
+    if (binaryStreamActive && !forceImmediate) return;
     if (scanoutInFlight && !forceImmediate) return;
     scanoutInFlight = true;
 
@@ -557,17 +638,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const seq = view.getUint32(8);
             lastFrameSeq = seq;
             const pixels = new Uint8ClampedArray(buffer, 16);
-
-            if (scanoutCtx && liveScanoutCanvas) {
-              if (liveScanoutCanvas.width !== width || liveScanoutCanvas.height !== height) {
-                liveScanoutCanvas.width = width;
-                liveScanoutCanvas.height = height;
-              }
-              const imgData = new ImageData(pixels, width, height);
-              scanoutCtx.putImageData(imgData, 0, 0);
-            }
+            renderScanoutPixels(pixels, width, height);
           }
         }
+      } else if (resp.status === 304) {
+        // Not modified: keep current frame
       } else if (resp.status === 503) {
         await fallbackRefreshFrame();
       }
@@ -576,7 +651,7 @@ document.addEventListener('DOMContentLoaded', () => {
     } finally {
       scanoutInFlight = false;
       updateFpsCounter();
-      if (isStreamActive) {
+      if (isStreamActive && !binaryStreamActive) {
         streamRafId = requestAnimationFrame(runHighRefreshLoop);
       }
     }
@@ -607,12 +682,20 @@ document.addEventListener('DOMContentLoaded', () => {
   function startScanoutStream() {
     if (isStreamActive) return;
     isStreamActive = true;
-    refreshScanoutFrame(true);
-    streamRafId = requestAnimationFrame(runHighRefreshLoop);
+    startPersistentBinaryStream();
+    if (!binaryStreamActive) {
+      refreshScanoutFrame(true);
+      streamRafId = requestAnimationFrame(runHighRefreshLoop);
+    }
   }
 
   function stopScanoutStream() {
     isStreamActive = false;
+    if (binaryStreamAbort) {
+      binaryStreamAbort.abort();
+      binaryStreamAbort = null;
+    }
+    binaryStreamActive = false;
     if (streamRafId) {
       cancelAnimationFrame(streamRafId);
       streamRafId = null;

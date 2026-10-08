@@ -231,6 +231,7 @@ pub enum SyscallResult {
 
 /// Dispatches a cooperative scheduling yield.
 pub fn sys_yield() {
+    crate::serial::service_serial_commands();
     crate::task::yield_now();
 }
 

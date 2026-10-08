@@ -93,40 +93,29 @@ class SerialReader:
         self.captured_logs = []
         self.cmd_log_idx = 0
 
-    def flush(self, settle=0.35):
-        """Discards everything the guest has already produced.
-
-        WHY this is necessary: `wait_for` scans a persistent buffer for a marker
-        string, so without a barrier it can be satisfied by a line produced by an
-        *earlier* action. The test then passes spuriously, or fails depending on
-        whether the stale line happens to have been consumed yet. This was the
-        source of the intermittent "Failed to return to Home" failures: the
-        assertion was racing a leftover "Home surface rendered." rather than
-        observing the response to the tap just sent.
-
-        This does not weaken any assertion. It makes `wait_for` mean what it says:
-        the guest produced this marker *after* the command under test.
-        """
+    def flush(self, settle=0.1):
         deadline = time.time() + settle
         while time.time() < deadline:
-            self.sock.settimeout(0.05)
+            self.sock.settimeout(0.02)
             try:
                 data = self.sock.recv(65536)
                 if not data:
                     break
-                # Keep draining; a marker may be split across reads.
                 self.buf += data
+                while b"\n" in self.buf:
+                    line, self.buf = self.buf.split(b"\n", 1)
+                    decoded = line.decode('utf-8', errors='replace').strip()
+                    if decoded:
+                        self.captured_logs.append(decoded)
             except (socket.timeout, BlockingIOError):
-                pass
+                break
             except ConnectionResetError:
-                time.sleep(0.05)
+                time.sleep(0.02)
+                break
         try:
             self.sock.settimeout(0.2)
         except OSError:
             pass
-        # A marker can straddle the flush boundary, so only whole lines are dropped.
-        cut = self.buf.rfind(b"\n")
-        self.buf = self.buf[cut + 1:] if cut >= 0 else b""
 
     def send(self, line):
         """Flushes stale output, then sends one command line."""

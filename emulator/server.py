@@ -988,6 +988,8 @@ class VncScanoutClient:
         with self.frame_cond:
             if self.seq <= client_seq and self.connected:
                 self.frame_cond.wait(timeout)
+            if self.seq <= client_seq:
+                return None, self.seq
             return self.latest_binary_msg, self.seq
 
     def get_image_frame(self, prefer_jpeg=True):
@@ -1726,6 +1728,33 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_response(304 if client_seq > 0 else 503)
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
+            return
+
+        if parsed_path.path == '/api/screen/binary_stream':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/octet-stream')
+            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Connection', 'close')
+            self.end_headers()
+            last_seq = 0
+            try:
+                while True:
+                    with vnc_client.frame_cond:
+                        while vnc_client.seq <= last_seq and vnc_client.connected:
+                            vnc_client.frame_cond.wait(timeout=0.1)
+                        if not vnc_client.connected:
+                            break
+                        if vnc_client.seq > last_seq:
+                            msg = vnc_client.latest_binary_msg
+                            last_seq = vnc_client.seq
+                        else:
+                            msg = None
+                    if msg:
+                        self.wfile.write(msg)
+                        self.wfile.flush()
+            except (ConnectionResetError, BrokenPipeError, socket.error):
+                pass
             return
 
         if parsed_path.path in ('/api/screen/metrics', '/api/transport/metrics'):

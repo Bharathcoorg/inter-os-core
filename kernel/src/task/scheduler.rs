@@ -551,24 +551,23 @@ impl Scheduler {
 /// Cooperatively yields the CPU to the next ready task.
 ///
 /// Prepares context pointers under the lock, releases the lock,
-/// and executes the hardware context switch.
+/// and executes the hardware context switch atomically with interrupts disabled.
 pub fn yield_now() -> bool {
-    let (prev, next) = {
-        let mut sched = SCHEDULER.lock();
-        sched.prepare_switch()
-    };
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let (prev, next) = {
+            let mut sched = SCHEDULER.lock();
+            sched.prepare_switch()
+        };
 
-    // Scheduler lock is released before service supervision.
-    crate::services::supervise();
-
-    if let (Some(prev_ptr), Some(next_ptr)) = (prev, next) {
-        unsafe {
-            switch_context(prev_ptr, next_ptr);
+        if let (Some(prev_ptr), Some(next_ptr)) = (prev, next) {
+            unsafe {
+                switch_context(prev_ptr, next_ptr);
+            }
+            true
+        } else {
+            false
         }
-        true
-    } else {
-        false
-    }
+    })
 }
 
 /// Invoked from the timer interrupt handler (IRQ 32) to perform preemptive time slicing.
@@ -590,23 +589,28 @@ pub fn on_timer_tick() {
 
 /// Terminates the current task and switches to the next available task.
 pub fn terminate_current() -> ! {
-    let (exiting_id, exit_code, prev, next) = {
-        let mut sched = SCHEDULER.lock();
+    let (exiting_id, exit_code) = {
+        let sched = SCHEDULER.lock();
         let id = sched.current_task_id().unwrap_or(TaskId(0));
         let code = sched.current_task().map(|t| t.exit_code).unwrap_or(0);
-        let (prev, next) = sched.prepare_terminate();
-        (id, code, prev, next)
+        (id, code)
     };
 
-    // Publish the exit only after releasing the scheduler lock. Service
-    // supervision can then safely acquire its registry without lock inversion.
+    // Publish the exit before preparing context switch.
     crate::services::record_exit(exiting_id, exit_code);
 
-    if let (Some(prev_ptr), Some(next_ptr)) = (prev, next) {
-        unsafe {
-            switch_context(prev_ptr, next_ptr);
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let (prev, next) = {
+            let mut sched = SCHEDULER.lock();
+            sched.prepare_terminate()
+        };
+
+        if let (Some(prev_ptr), Some(next_ptr)) = (prev, next) {
+            unsafe {
+                switch_context(prev_ptr, next_ptr);
+            }
         }
-    }
+    });
 
     loop {
         x86_64::instructions::hlt();
