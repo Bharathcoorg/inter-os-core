@@ -27,7 +27,10 @@ def test_guest_power_is_authoritative():
     assert "sys_device_power" in syscall
     assert "std::device_power(0)" in launcher
     assert "std::device_power(1)" in launcher
-    assert "std::device_power(2)" in launcher
+    assert "std::device_power(5)" in launcher
+    serial = read("kernel/src/serial.rs")
+    assert 'verb.eq_ignore_ascii_case("POWER_KEY")' in serial
+    assert "toggle_powered()" in serial
 
 
 def test_boot_and_wake_are_guest_owned():
