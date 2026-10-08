@@ -1216,6 +1216,24 @@ pub extern "C" fn _start() -> ! {
                 let old_clock = state.clock_time;
                 refresh_clock(&mut state);
                 refresh_notifications(&mut state);
+                let volume_now = std::audio_query_volume().unwrap_or(state.last_volume_percent as u32).min(100) as u8;
+                if volume_now != state.last_volume_percent {
+                    state.last_volume_percent = volume_now;
+                    state.volume_hud_until = std::get_ticks(1).unwrap_or(0).saturating_add(180);
+                    if let Some(id) = volume_surface {
+                        render_volume_hud(id, volume_now);
+                        let _ = std::window_set_geometry(4, id, 100, 220, 100, true);
+                        let _ = std::surface_flip(4);
+                    }
+                } else if state.volume_hud_until != 0
+                    && std::get_ticks(1).unwrap_or(0) >= state.volume_hud_until
+                {
+                    state.volume_hud_until = 0;
+                    if let Some(id) = volume_surface {
+                        let _ = std::window_set_geometry(4, id, 100, 220, 100, false);
+                        let _ = std::surface_flip(4);
+                    }
+                }
                 if state.current_view == ViewMode::HomeScreen {
                     if refresh_ticks % 10 == 0 {
                         let previous_count = state.app_count;
