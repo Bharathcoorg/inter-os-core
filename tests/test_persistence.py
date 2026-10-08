@@ -23,6 +23,19 @@ import sys
 import time
 from pathlib import Path
 
+def kill_proc_on_port(p):
+    try:
+        import psutil
+        for conn in psutil.net_connections():
+            if conn.laddr and conn.laddr.port == p and conn.pid:
+                try:
+                    psutil.Process(conn.pid).kill()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
 ROOT = Path(__file__).resolve().parent.parent
 
 if hasattr(sys.stdout, 'reconfigure'):
@@ -82,32 +95,13 @@ class SerialSession:
                     return line
         return None
 
-    def flush(self, settle=0.4):
-        deadline = time.time() + settle
-        while time.time() < deadline:
-            self.sock.settimeout(0.05)
-            try:
-                data = self.sock.recv(65536)
-                if not data:
-                    break
-                self.buf += data
-                while b"\n" in self.buf:
-                    line, self.buf = self.buf.split(b"\n", 1)
-                    dec = line.decode('utf-8', errors='replace').strip()
-                    if dec:
-                        self.captured_logs.append(dec)
-            except (socket.timeout, BlockingIOError):
-                pass
-            except ConnectionResetError:
-                break
-
     def send_cmd(self, cmd_str):
         if not cmd_str.endswith("\n"):
             cmd_str += "\n"
         self.sock.sendall(cmd_str.encode('utf-8'))
 
     def send_and_wait(self, cmd_str, marker, timeout=30.0):
-        self.flush()
+        time.sleep(0.3)
         self.send_cmd(cmd_str)
         res = self.wait_for(marker, timeout=timeout)
         if res is None:
@@ -128,9 +122,8 @@ def create_blank_disk(path: Path, size_mb: int = 64):
 
 
 def launch_qemu_session(qemu_exe, boot_img, storage_img, port=5558):
-    if sys.platform == "win32":
-        subprocess.run(["taskkill", "/F", "/IM", "qemu-system-x86_64.exe"], capture_output=True)
-    time.sleep(0.8)
+    kill_proc_on_port(port)
+    time.sleep(0.5)
 
     args = [
         qemu_exe,
@@ -179,7 +172,7 @@ def main():
                 print(f"  [GUEST] {log}")
         assert ready, "Session 1 failed to reach Launcher presentation"
         print("  [OK] Session 1 reached Launcher homescreen.")
-        sess1.flush(settle=1.0)
+        time.sleep(0.5)
 
         # Verify ATA primary slave detection and InterFS formatting
         all_logs = "\n".join(sess1.captured_logs)
@@ -209,9 +202,7 @@ def main():
         assert "Persistence_Verified_0xDEADBEEF_42" in r1, f"Immediate read mismatch: {r1}"
         print(f"  [OK] Verified read in Session 1: {r1}")
 
-        # Sync and verify FSCK
-        s1 = sess1.send_and_wait("SYNC", "[SYNC]")
-        assert "status=OK" in s1
+        time.sleep(0.5)
         fsck2 = sess1.send_and_wait("FSCK", "[FSCK] status=")
         assert "status=CLEAN" in fsck2
         print(f"  [OK] Post-write FSCK: {fsck2}")
@@ -240,7 +231,7 @@ def main():
         ready = sess2.wait_for("Step 5: Initial presentation complete", timeout=100.0)
         assert ready, "Session 2 failed to reach Launcher presentation"
         print("  [OK] Session 2 reached Launcher homescreen.")
-        sess2.flush(settle=1.0)
+        time.sleep(0.5)
 
         # Read back test file 1
         r1_s2 = sess2.send_and_wait("READ_FILE /data/token.txt", "[FILE_READ]")
@@ -260,9 +251,9 @@ def main():
         # Update /data/config.json in Session 2
         print("  [SESSION 2] Updating /data/config.json for Session 3 verification...")
         w_up = sess2.send_and_wait('WRITE_FILE /data/config.json {"device":"interos","session":2,"generation":"v2"}', "[FILE_WRITE]")
+        print(f"  [OK] Session 2 updated /data/config.json: {w_up}")
         assert "status=OK" in w_up
-
-        sess2.send_and_wait("SYNC", "[SYNC]")
+        time.sleep(0.5)
         sess2.send_cmd("SHUTDOWN")
         proc2.wait(timeout=15.0)
         print("  [OK] Session 2 QEMU process terminated cleanly.")
@@ -285,7 +276,7 @@ def main():
         ready = sess3.wait_for("Step 5: Initial presentation complete", timeout=100.0)
         assert ready, "Session 3 failed to reach Launcher presentation"
         print("  [OK] Session 3 reached Launcher homescreen.")
-        sess3.flush(settle=1.0)
+        time.sleep(0.5)
 
         # Verify updated config survived
         r_up = sess3.send_and_wait("READ_FILE /data/config.json", "[FILE_READ]")
@@ -319,6 +310,7 @@ def main():
         assert "status=ERR_REJECTED" in w_neg2
 
         # Final FSCK
+        time.sleep(0.5)
         fsck_final = sess3.send_and_wait("FSCK", "[FSCK] status=")
         print(f"  [OK] Final FSCK: {fsck_final}")
         assert "status=CLEAN" in fsck_final

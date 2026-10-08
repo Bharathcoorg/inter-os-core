@@ -183,8 +183,8 @@ class SystemContractTests(unittest.TestCase):
         self.assertIn("/api/touch/event", app)
         self.assertIn("/api/input/key", app)
         self.assertIn("0 <= x < 1280 and 0 <= y < 720", server)
-        self.assertIn("scanout_width: 1280", (ROOT / "kernel/src/drivers/display_kms.rs").read_text(encoding="utf-8"))
-        self.assertIn("scanout_height: 720", (ROOT / "kernel/src/drivers/display_kms.rs").read_text(encoding="utf-8"))
+        self.assertIn("scanout_width: 720", (ROOT / "kernel/src/drivers/display_kms.rs").read_text(encoding="utf-8"))
+        self.assertIn("scanout_height: 1440", (ROOT / "kernel/src/drivers/display_kms.rs").read_text(encoding="utf-8"))
 
     def test_studio_does_not_fabricate_serial_command_results(self):
         server = (ROOT / "emulator/server.py").read_text(encoding="utf-8")

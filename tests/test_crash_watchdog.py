@@ -21,6 +21,19 @@ import sys
 import time
 from pathlib import Path
 
+def kill_proc_on_port(p):
+    try:
+        import psutil
+        for conn in psutil.net_connections():
+            if conn.laddr and conn.laddr.port == p and conn.pid:
+                try:
+                    psutil.Process(conn.pid).kill()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
 ROOT = Path(__file__).resolve().parent.parent
 
 if hasattr(sys.stdout, 'reconfigure'):
@@ -102,11 +115,9 @@ def main():
     boot_img = ROOT / "target" / "inter-os-bios.img"
     assert boot_img.exists(), f"Boot image missing: {boot_img}"
 
-    if sys.platform == "win32":
-        subprocess.run(["taskkill", "/F", "/IM", "qemu-system-x86_64.exe"], capture_output=True)
-    time.sleep(0.8)
-
     port = 5560
+    kill_proc_on_port(port)
+    time.sleep(0.5)
     args = [
         qemu_exe,
         "-drive", f"file={boot_img},format=raw,snapshot=on",

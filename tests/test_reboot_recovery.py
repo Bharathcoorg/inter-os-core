@@ -24,6 +24,19 @@ import sys
 import time
 from pathlib import Path
 
+def kill_proc_on_port(p):
+    try:
+        import psutil
+        for conn in psutil.net_connections():
+            if conn.laddr and conn.laddr.port == p and conn.pid:
+                try:
+                    psutil.Process(conn.pid).kill()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
 ROOT = Path(__file__).resolve().parent.parent
 
 if hasattr(sys.stdout, 'reconfigure'):
@@ -142,7 +155,7 @@ def boot_and_verify_boot_signals(qemu_exe, kernel_img, ser_port, session_name):
     print(f"[{session_name}]   [OK] Launcher presentation complete ({time.time()-t0:.2f}s)")
 
     full_log = "\n".join(reader.captured_logs)
-    required_boot signals = [
+    required_boot_signals = [
         ("GDT & TSS Initialization", r"GDT & TSS loaded|Creating GDT"),
         ("Page Tables & Memory Allocator", r"Page tables and physical frame allocator initialized|Kernel PML4 entry"),
         ("Microkernel Hardware & Drivers", r"Serial COM1 online|Hardware Drivers, Memory Management"),
@@ -150,7 +163,7 @@ def boot_and_verify_boot_signals(qemu_exe, kernel_img, ser_port, session_name):
         ("Compositor & Launcher Online", r"Step 5: Initial presentation complete"),
     ]
 
-    for label, pattern in required_boot signals:
+    for label, pattern in required_boot_signals:
         m = re.search(pattern, full_log)
         assert m, f"[{session_name}] Milestone failed: {label} (pattern '{pattern}' not matched)"
         print(f"[{session_name}]   [OK] Milestone verified: {label}")
@@ -178,10 +191,9 @@ def main():
     kernel_img = str(ROOT / "target" / "inter-os-bios.img")
     assert os.path.exists(kernel_img), f"Target kernel image not found: {kernel_img}"
 
-    subprocess.run(["taskkill", "/F", "/IM", "qemu-system-x86_64.exe"], capture_output=True)
-    time.sleep(0.8)
-
     ser_port = 5585
+    kill_proc_on_port(ser_port)
+    time.sleep(0.5)
     proc1 = None
     sock1 = None
     proc2 = None

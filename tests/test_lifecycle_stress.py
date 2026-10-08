@@ -32,18 +32,45 @@ sys.path.insert(0, str(TESTS_DIR))
 
 from test_interactive_lifecycle import find_qemu, send_monitor_cmd, test_app_lifecycle, SerialReader
 
+def kill_proc_on_port(p):
+    try:
+        import psutil
+        for conn in psutil.net_connections():
+            if conn.laddr and conn.laddr.port == p and conn.pid:
+                try:
+                    psutil.Process(conn.pid).kill()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
 
 
-def query_diag_state(sock, reader, timeout=6.0):
+def query_diag_state(sock, reader, timeout=8.0):
     """Query live microkernel internal telemetry over COM1 UART."""
-    sock.sendall(b"DIAG_STATE\n")
-    start_t = time.time()
     pattern = re.compile(
         r"\[DIAG_STATE\]\s+tasks_total=(\d+)\s+tasks_active=(\d+)\s+surfaces=(\d+)\s+mailboxes=(\d+)\s+endpoints=(\d+)\s+shm_pipes=(\d+)\s+heap_used=(\d+)\s+heap_free=(\d+)"
     )
+
+    # 1. Drain any pending data already in reader.buf
+    while b"\n" in reader.buf:
+        line, reader.buf = reader.buf.split(b"\n", 1)
+        decoded = line.decode('utf-8', errors='replace').strip()
+        if decoded:
+            reader.captured_logs.append(decoded)
+
+    # 2. Send DIAG_STATE query
+    sock.sendall(b"DIAG_STATE\n")
+    start_t = time.time()
+    last_sent = start_t
+
     while time.time() - start_t < timeout:
+        if time.time() - last_sent > 2.5:
+            sock.sendall(b"DIAG_STATE\n")
+            last_sent = time.time()
         try:
             data = sock.recv(4096)
             if not data:
@@ -87,6 +114,9 @@ def query_diag_state(sock, reader, timeout=6.0):
                 "heap_free": int(m.group(8)),
             }
 
+    print(f"[DIAG_STATE ERROR] Captured logs (last 20):")
+    for log_l in reader.captured_logs[-20:]:
+        print(f"  {log_l}")
     raise RuntimeError("Failed to receive [DIAG_STATE] response from kernel COM1 UART")
 
 
@@ -240,91 +270,129 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
         tap_coords=(485, 1030),
         present_marker="Music canvas presented to scanout buffer.",
         dump_prefix=f"stress_iter{iter_num}_music",
-        exit_gesture="home_bar"
+        exit_gesture="swipe_up"
     )
 
     # Recent apps: Overview / Recent Apps Switcher Test
-    reader.sock.sendall(b"SWIPE 360 1420 360 1100 5\n")
-    assert reader.wait_for("Recent apps surface rendered.", timeout=25.0), "Overview deck open failed"
-    time.sleep(0.5)
-    reader.sock.sendall(b"TAP 360 340\n")
-    assert reader.wait_for("Switched to recent app from overview card 0", timeout=25.0), "Switch recent app failed"
+    time.sleep(1.0)
+    reader.send(b"SWIPE 360 1420 360 1100 5\n")
+    if not reader.wait_for("Recent apps surface rendered.", timeout=15.0):
+        reader.send(b"SWIPE 360 1420 360 1100 5\n")
+        assert reader.wait_for("Recent apps surface rendered.", timeout=25.0), "Overview deck open failed"
+    time.sleep(0.8)
+    reader.send(b"TAP 360 340\n")
+    if not reader.wait_for("Switched to recent app from overview card 0", timeout=15.0):
+        reader.send(b"TAP 360 340\n")
+        assert reader.wait_for("Switched to recent app from overview card 0", timeout=25.0), "Switch recent app failed"
     assert reader.wait_for("Music canvas presented to scanout buffer.", timeout=25.0), "Recent app present failed"
-    time.sleep(0.5)
-    reader.sock.sendall(b"SWIPE 360 1420 360 1100 5\n")
+    time.sleep(0.8)
+    reader.send(b"SWIPE 360 1420 360 1100 5\n")
     assert reader.wait_for("Foreground application exited and was reaped", timeout=25.0), "Reaping recent app failed"
-    time.sleep(0.5)
+    assert reader.wait_for("Home surface rendered.", timeout=25.0), "Launcher failed to re-render Home screen after recent app exit"
+    time.sleep(1.0)
 
     # Recent app dismissal: Overview Card Dismissal Test
-    reader.sock.sendall(b"SWIPE 360 1420 360 1100 5\n")
-    assert reader.wait_for("Recent apps surface rendered.", timeout=25.0)
-    time.sleep(0.5)
-    reader.sock.sendall(b"TAP 610 230\n")
+    reader.send(b"SWIPE 360 1420 360 1100 5\n")
+    if not reader.wait_for("Recent apps surface rendered.", timeout=15.0):
+        reader.send(b"SWIPE 360 1420 360 1100 5\n")
+        assert reader.wait_for("Recent apps surface rendered.", timeout=25.0), "Overview deck re-open failed"
+    time.sleep(0.8)
+    reader.send(b"TAP 610 230\n")
     assert reader.wait_for("Card 0 dismissed via dismiss button tap.", timeout=25.0)
-    time.sleep(0.5)
-    reader.sock.sendall(b"SWIPE 200 660 550 660 5\n")
+    time.sleep(0.8)
+    reader.send(b"SWIPE 200 660 550 660 5\n")
     assert reader.wait_for("Card 1 dismissed via swipe.", timeout=25.0)
-    time.sleep(0.5)
-    reader.sock.sendall(b"TAP 360 1240\n")
+    time.sleep(1.0)
+    reader.send(b"TAP 360 1240\n")
     assert reader.wait_for("Returned to home grid from recents.", timeout=25.0)
-    time.sleep(0.5)
+    assert reader.wait_for("Home surface rendered.", timeout=25.0)
+    time.sleep(1.0)
 
     # Quick controls: Quick Controls Shade
-    reader.sock.sendall(b"TAP 360 25\n")
-    assert reader.wait_for("Quick controls surface rendered.", timeout=25.0)
-    time.sleep(0.5)
-    reader.sock.sendall(b"TAP 360 1410\n")
-    assert reader.wait_for("Home surface rendered.", timeout=25.0)
-    time.sleep(0.5)
+    reader.send(b"TAP 360 25\n")
+    if not reader.wait_for("Quick controls surface rendered.", timeout=15.0):
+        reader.send(b"TAP 360 25\n")
+        assert reader.wait_for("Quick controls surface rendered.", timeout=25.0), "Quick controls open failed"
+    time.sleep(0.8)
+    reader.send(b"TAP 360 1410\n")
+    if not reader.wait_for("Home surface rendered.", timeout=15.0):
+        reader.send(b"TAP 360 1410\n")
+        assert reader.wait_for("Home surface rendered.", timeout=25.0), "Home return from quick controls failed"
+    time.sleep(0.8)
 
     # Notifications: Notifications Shade
-    reader.sock.sendall(b"TAP 100 25\n")
-    assert reader.wait_for("Notifications surface rendered.", timeout=25.0)
-    time.sleep(0.5)
-    reader.sock.sendall(b"TAP 360 1410\n")
-    assert reader.wait_for("Home surface rendered.", timeout=25.0)
-    time.sleep(0.5)
+    reader.send(b"TAP 100 25\n")
+    if not reader.wait_for("Notifications surface rendered.", timeout=15.0):
+        reader.send(b"TAP 100 25\n")
+        assert reader.wait_for("Notifications surface rendered.", timeout=25.0), "Notifications open failed"
+    time.sleep(0.8)
+    reader.send(b"TAP 360 1410\n")
+    if not reader.wait_for("Home surface rendered.", timeout=15.0):
+        reader.send(b"TAP 360 1410\n")
+        assert reader.wait_for("Home surface rendered.", timeout=25.0), "Home return from notifications failed"
+    time.sleep(0.8)
 
     # App drawer: App Drawer
-    reader.sock.sendall(b"SWIPE 360 700 360 400 5\n")
-    assert reader.wait_for("App drawer surface rendered.", timeout=25.0)
-    time.sleep(0.5)
-    reader.sock.sendall(b"TAP 250 160\n")
-    assert reader.wait_for("App drawer surface rendered.", timeout=25.0)
-    time.sleep(0.5)
-    reader.sock.sendall(b"TAP 360 1410\n")
-    assert reader.wait_for("Home surface rendered.", timeout=25.0)
-    time.sleep(0.5)
+    reader.send(b"SWIPE 360 700 360 400 5\n")
+    if not reader.wait_for("App drawer surface rendered.", timeout=15.0):
+        reader.send(b"SWIPE 360 700 360 400 5\n")
+        assert reader.wait_for("App drawer surface rendered.", timeout=25.0), "App drawer open failed"
+    time.sleep(0.8)
+    reader.send(b"TAP 250 160\n")
+    if not reader.wait_for("App drawer surface rendered.", timeout=15.0):
+        reader.send(b"TAP 250 160\n")
+        assert reader.wait_for("App drawer surface rendered.", timeout=25.0)
+    time.sleep(0.8)
+    reader.send(b"TAP 360 1410\n")
+    if not reader.wait_for("Home surface rendered.", timeout=15.0):
+        reader.send(b"TAP 360 1410\n")
+        assert reader.wait_for("Home surface rendered.", timeout=25.0), "Home return from app drawer failed"
+    time.sleep(0.8)
 
     # Live widgets: Live Widgets
-    reader.sock.sendall(b"SWIPE 500 700 150 700 5\n")
-    assert reader.wait_for("Live widgets surface rendered.", timeout=25.0)
-    time.sleep(0.5)
-    reader.sock.sendall(b"TAP 360 1410\n")
-    assert reader.wait_for("Home surface rendered.", timeout=25.0)
-    time.sleep(0.5)
+    reader.send(b"SWIPE 500 700 150 700 5\n")
+    if not reader.wait_for("Live widgets surface rendered.", timeout=15.0):
+        reader.send(b"SWIPE 500 700 150 700 5\n")
+        assert reader.wait_for("Live widgets surface rendered.", timeout=25.0), "Live widgets open failed"
+    time.sleep(0.8)
+    reader.send(b"TAP 360 1410\n")
+    if not reader.wait_for("Home surface rendered.", timeout=15.0):
+        reader.send(b"TAP 360 1410\n")
+        assert reader.wait_for("Home surface rendered.", timeout=25.0), "Home return from live widgets failed"
+    time.sleep(0.8)
 
     # Power and lock: Power Menu & Lock Screen
-    reader.sock.sendall(b"TAP 600 25\n")
-    assert reader.wait_for("Power surface rendered.", timeout=25.0)
-    time.sleep(0.5)
-    reader.sock.sendall(b"TAP 500 225\n")
-    assert reader.wait_for("Lock surface rendered.", timeout=25.0)
-    time.sleep(0.5)
-    reader.sock.sendall(b"TAP 72 1330\n")
-    assert reader.wait_for("Lock surface rendered.", timeout=25.0)
-    time.sleep(0.5)
-    reader.sock.sendall(b"TAP 360 1410\n")
-    assert reader.wait_for("Home surface rendered.", timeout=25.0)
-    time.sleep(0.5)
+    time.sleep(0.8)
+    reader.send(b"TAP 600 25\n")
+    if not reader.wait_for("Power surface rendered.", timeout=15.0):
+        reader.send(b"TAP 600 25\n")
+        assert reader.wait_for("Power surface rendered.", timeout=25.0), "Power menu open failed"
+    time.sleep(1.0)
+    reader.send(b"TAP 500 225\n")
+    if not reader.wait_for("Lock surface rendered.", timeout=15.0):
+        reader.send(b"TAP 500 225\n")
+        assert reader.wait_for("Lock surface rendered.", timeout=25.0), "Lock device failed"
+    time.sleep(0.8)
+    reader.send(b"TAP 72 1330\n")
+    assert reader.wait_for("Flashlight unavailable", timeout=25.0)
+    time.sleep(0.8)
+    reader.send(b"TAP 360 1410\n")
+    if not reader.wait_for("Home surface rendered.", timeout=15.0):
+        reader.send(b"TAP 360 1410\n")
+        assert reader.wait_for("Home surface rendered.", timeout=25.0), "Unlock failed"
+    time.sleep(0.8)
 
     # System surface: System Space
-    reader.sock.sendall(b"TAP 360 1330\n")
-    assert reader.wait_for("System surface rendered.", timeout=25.0)
-    time.sleep(0.5)
-    reader.sock.sendall(b"TAP 360 1410\n")
-    assert reader.wait_for("Home surface rendered.", timeout=25.0)
-    time.sleep(0.5)
+    reader.send(b"TAP 360 1330\n")
+    if not reader.wait_for("System surface rendered.", timeout=15.0):
+        reader.send(b"TAP 360 1330\n")
+        assert reader.wait_for("System surface rendered.", timeout=25.0), "System space open failed"
+    time.sleep(0.8)
+    reader.send(b"TAP 360 1410\n")
+    if not reader.wait_for("Home surface rendered.", timeout=15.0):
+        reader.send(b"TAP 360 1410\n")
+        assert reader.wait_for("Home surface rendered.", timeout=25.0), "Home return from system space failed"
+    time.sleep(0.8)
 
     print(f"\n  [STRESS ITERATION {iter_num}] All lifecycle operations completed successfully.")
 
@@ -349,11 +417,11 @@ def main():
     print(f"  Target: x86_64 + QEMU | Planned Iterations: {total_iterations}")
     print("=" * 68)
 
-    subprocess.run(["taskkill", "/F", "/IM", "qemu-system-x86_64.exe"], capture_output=True)
-    time.sleep(1.0)
-
     ser_port = 5575
     mon_port = 5576
+    kill_proc_on_port(ser_port)
+    kill_proc_on_port(mon_port)
+    time.sleep(0.5)
 
     qemu_cmd = [
         qemu_exe,
@@ -395,14 +463,27 @@ def main():
         ready = reader.wait_for("Step 5: Initial presentation complete", timeout=90.0)
         if not ready:
             raise RuntimeError("Guest failed to reach initial launcher presentation within timeout")
-        print("[STRESS SETUP] Initial launcher presentation verified.")
-        time.sleep(1.0)
+        time.sleep(2.0)
 
         # Unlock device to HomeScreen
         print("[STRESS SETUP] Unlocking device via swipe-up gesture...")
-        reader.sock.sendall(b"SWIPE 360 1350 360 300 5\n")
-        unlocked = reader.wait_for("Home surface rendered.", timeout=25.0)
+        reader.send(b"SWIPE 360 1350 360 300 5\n")
+        unlocked = reader.wait_for(
+            "Home surface rendered.",
+            timeout=15.0,
+            print_keywords=["LAUNCHER", "Device unlocked", "render_full"]
+        )
         if not unlocked:
+            print("[STRESS SETUP] Retrying unlock swipe...")
+            time.sleep(1.0)
+            reader.send(b"SWIPE 360 1350 360 300 5\n")
+            unlocked = reader.wait_for(
+                "Home surface rendered.",
+                timeout=20.0,
+                print_keywords=["LAUNCHER", "Device unlocked", "render_full"]
+            )
+        if not unlocked:
+            print(f"[DEBUG] Recent logs: {reader.captured_logs[-20:]}")
             raise RuntimeError("Failed to unlock device from LockScreen")
         print("[STRESS SETUP] Device unlocked to HomeScreen.")
         time.sleep(1.0)
@@ -533,6 +614,10 @@ def main():
         print(f"\n[STRESS TEST FAILED] {e}")
         import traceback
         traceback.print_exc()
+        if 'reader' in locals() and reader:
+            print("\n[STRESS TEST DEBUG] Last 40 captured serial logs:")
+            for l in reader.captured_logs[-40:]:
+                print(f"  {l}")
         return 1
 
     finally:

@@ -35,10 +35,21 @@ if os.path.exists(kernel_elf):
         print("[TEST SETUP] Updating bootable disk image with latest kernel ELF...")
         subprocess.run(["cargo", "+nightly", "run", "--manifest-path", "boot/Cargo.toml", "--", kernel_elf, kernel_img], check=True)
 
-subprocess.run(["taskkill", "/F", "/IM", "qemu-system-x86_64.exe"], capture_output=True)
-time.sleep(0.5)
+def kill_proc_on_port(p):
+    try:
+        import psutil
+        for conn in psutil.net_connections():
+            if conn.laddr and conn.laddr.port == p and conn.pid:
+                try:
+                    psutil.Process(conn.pid).kill()
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
 port = 5555
+kill_proc_on_port(port)
+time.sleep(0.5)
 args = [
     qemu_exe,
     "-drive", f"format=raw,file={kernel_img}",

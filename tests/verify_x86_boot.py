@@ -15,6 +15,19 @@ import re
 
 from test_interactive_lifecycle import find_qemu, SerialReader, send_monitor_cmd
 
+def kill_proc_on_port(p):
+    try:
+        import psutil
+        for conn in psutil.net_connections():
+            if conn.laddr and conn.laddr.port == p and conn.pid:
+                try:
+                    psutil.Process(conn.pid).kill()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
 WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def main():
@@ -32,12 +45,11 @@ def main():
             try: os.remove(p)
             except Exception: pass
 
-    if sys.platform == "win32":
-        subprocess.run(["taskkill", "/F", "/IM", "qemu-system-x86_64.exe"], capture_output=True)
-    time.sleep(1.0)
-
     ser_port = 5555
     mon_port = 5556
+    kill_proc_on_port(ser_port)
+    kill_proc_on_port(mon_port)
+    time.sleep(0.5)
 
     args = [
         qemu_exe,

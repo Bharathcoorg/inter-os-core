@@ -21,6 +21,19 @@ import os
 import shutil
 import sys
 
+def kill_proc_on_port(p):
+    try:
+        import psutil
+        for conn in psutil.net_connections():
+            if conn.laddr and conn.laddr.port == p and conn.pid:
+                try:
+                    psutil.Process(conn.pid).kill()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
 
@@ -249,16 +262,16 @@ def main():
 
     assert os.path.exists(kernel_img), f"Kernel image not found at {kernel_img}"
 
-    data_disk = os.path.abspath(r"target\interos-data-x86_64.img")
+    data_disk = os.environ.get("DATA_DISK_PATH", os.path.abspath(r"target\inter-os-data-master.img"))
     if not os.path.exists(data_disk):
         with open(data_disk, "wb") as f:
             f.truncate(512 * 1024 * 1024)
 
-    subprocess.run(["taskkill", "/F", "/IM", "qemu-system-x86_64.exe"], capture_output=True)
-    time.sleep(1.0)
-
     ser_port = 5555
     mon_port = 5556
+    kill_proc_on_port(ser_port)
+    kill_proc_on_port(mon_port)
+    time.sleep(0.5)
 
     args = [
         qemu_exe,
