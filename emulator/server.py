@@ -1250,7 +1250,17 @@ def query_qemu_monitor(host='127.0.0.1', port=44445, timeout=0.35):
                 s.sendall(b'info status\n')
                 time.sleep(0.03)
                 status_raw = s.recv(1024).decode('utf-8', errors='replace')
-                vm_status = "running" if "running" in status_raw else ("paused" if "paused" in status_raw else "active")
+                status_lower = status_raw.lower()
+                if "shutdown" in status_lower:
+                    vm_status = "shutdown"
+                elif "internal error" in status_lower:
+                    vm_status = "error"
+                elif "paused" in status_lower:
+                    vm_status = "paused"
+                elif "running" in status_lower:
+                    vm_status = "running"
+                else:
+                    vm_status = "unknown"
 
                 # 2. info cpus
                 s.sendall(b'info cpus\n')
@@ -2439,11 +2449,23 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 # physical power-button action starts a new guest; it must not be
                 # reported as a successful serial command to a dead VM.
                 process_alive = qemu_subproc is not None and qemu_subproc.poll() is None
-                monitor_alive = bool(query_qemu_monitor().get('qemu_alive', False))
+                monitor_state = query_qemu_monitor()
+                monitor_alive = bool(monitor_state.get('qemu_alive', False))
                 vm_alive = process_alive or monitor_alive
+                guest_status = str(monitor_state.get('status', '')).strip().lower()
                 if not vm_alive and action in ('power', 'wake', 'toggle'):
                     ok, msg = launch_qemu_profile(active_profile_key)
                     result = {'success': ok, 'action': 'power_on', 'qemu_started': ok, 'message': str(msg)}
+                elif vm_alive and guest_status == 'shutdown' and action in ('power', 'wake', 'toggle'):
+                    # The QEMU process/monitor can remain alive after guest ACPI shutdown.
+                    # Serial input cannot wake a halted guest; reset it through QEMU's monitor.
+                    ok, msg = send_qemu_monitor_cmd('system_reset')
+                    restart_method = 'monitor_system_reset'
+                    if not ok:
+                        stop_qemu_backend()
+                        ok, msg = launch_qemu_profile(active_profile_key)
+                        restart_method = 'backend_relaunch'
+                    result = {'success': ok, 'action': 'power_on', 'restart_method': restart_method if ok else 'failed', 'message': str(msg)}
                 elif vm_alive and action in ('power', 'wake', 'toggle'):
                     ok, msg = send_guest_serial_command('POWER_KEY', '[POWER]', timeout=3)
                     result = {'success': ok, 'action': action, 'message': msg}
