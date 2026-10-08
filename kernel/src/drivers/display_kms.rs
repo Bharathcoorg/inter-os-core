@@ -418,31 +418,82 @@ impl DrmKmsController {
                 let dst_w = dst_w as usize;
                 let dst_h = dst_h as usize;
                 let is_right = self.orientation == DisplayOrientation::LandscapeRight;
-                for dy in 0..dst_h {
-                    let dst_y_offset = (dst_y + dy) * self.scanout_width as usize;
-                    for dx in 0..dst_w {
-                        let (src_x, src_y) = if landscape {
-                            if is_right {
-                                (
-                                    (dy * 720 / dst_h).min(719),
-                                    1439usize.saturating_sub(dx * 1440 / dst_w),
-                                )
-                            } else {
-                                (
-                                    719usize.saturating_sub(dy * 720 / dst_h),
-                                    dx * 1440 / dst_w,
-                                )
-                            }
+
+                // Direct identity blit when destination matches canonical canvas
+                if dst_w == 720 && dst_h == 1440 && dst_x == 0 && dst_y == 0
+                    && self.scanout_width == 720 && self.scanout_height == 1440 && !landscape
+                {
+                    self.back_buffer.copy_from_slice(&surface.pixels);
+                    surface.dirty = false;
+                    continue;
+                }
+
+                if landscape {
+                    if is_right {
+                        let y_lut_lr: Vec<usize> = if dst_w <= 1 {
+                            vec![0]
                         } else {
-                            (
-                                dx * 720 / dst_w,
-                                dy * 1440 / dst_h,
-                            )
+                            (0..dst_w).map(|dx| 1439usize.saturating_sub((dx * 1439 + (dst_w - 1) / 2) / (dst_w - 1))).collect()
                         };
-                        let src_idx = src_y * 720 + src_x;
-                        let dst_idx = dst_y_offset + dst_x + dx;
-                        if src_idx < surface.pixels.len() && dst_idx < self.back_buffer.len() {
-                            self.back_buffer[dst_idx] = surface.pixels[src_idx];
+                        let x_lut_lr: Vec<usize> = if dst_h <= 1 {
+                            vec![0]
+                        } else {
+                            (0..dst_h).map(|dy| ((dy * 719 + (dst_h - 1) / 2) / (dst_h - 1)).min(719)).collect()
+                        };
+                        for dy in 0..dst_h {
+                            let src_x = x_lut_lr[dy];
+                            let dst_y_offset = (dst_y + dy) * self.scanout_width as usize;
+                            for dx in 0..dst_w {
+                                let src_y = y_lut_lr[dx];
+                                let src_idx = src_y * 720 + src_x;
+                                let dst_idx = dst_y_offset + dst_x + dx;
+                                if src_idx < surface.pixels.len() && dst_idx < self.back_buffer.len() {
+                                    self.back_buffer[dst_idx] = surface.pixels[src_idx];
+                                }
+                            }
+                        }
+                    } else {
+                        let y_lut_ll: Vec<usize> = if dst_w <= 1 {
+                            vec![0]
+                        } else {
+                            (0..dst_w).map(|dx| (dx * 1439 + (dst_w - 1) / 2) / (dst_w - 1)).collect()
+                        };
+                        let x_lut_ll: Vec<usize> = if dst_h <= 1 {
+                            vec![0]
+                        } else {
+                            (0..dst_h).map(|dy| 719usize.saturating_sub((dy * 719 + (dst_h - 1) / 2) / (dst_h - 1))).collect()
+                        };
+                        for dy in 0..dst_h {
+                            let src_x = x_lut_ll[dy];
+                            let dst_y_offset = (dst_y + dy) * self.scanout_width as usize;
+                            for dx in 0..dst_w {
+                                let src_y = y_lut_ll[dx];
+                                let src_idx = src_y * 720 + src_x;
+                                let dst_idx = dst_y_offset + dst_x + dx;
+                                if src_idx < surface.pixels.len() && dst_idx < self.back_buffer.len() {
+                                    self.back_buffer[dst_idx] = surface.pixels[src_idx];
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    let x_lut: Vec<usize> = if dst_w <= 1 {
+                        vec![0]
+                    } else {
+                        (0..dst_w).map(|dx| (dx * 719 + (dst_w - 1) / 2) / (dst_w - 1)).collect()
+                    };
+                    let y_lut: Vec<usize> = if dst_h <= 1 {
+                        vec![0]
+                    } else {
+                        (0..dst_h).map(|dy| (dy * 1439 + (dst_h - 1) / 2) / (dst_h - 1)).collect()
+                    };
+                    for dy in 0..dst_h {
+                        let src_y = y_lut[dy];
+                        let src_row = &surface.pixels[src_y * 720..(src_y + 1) * 720];
+                        let dst_row_start = (dst_y + dy) * self.scanout_width as usize + dst_x;
+                        for dx in 0..dst_w {
+                            let src_x = x_lut[dx];
+                            self.back_buffer[dst_row_start + dx] = src_row[src_x];
                         }
                     }
                 }
@@ -455,40 +506,67 @@ impl DrmKmsController {
             }
 
             let opacity = surface.opacity;
+            if opacity == 255 {
+                for y in y0..y1 {
+                    let dst_y_offset = (y as usize) * (self.scanout_width as usize);
+                    let src_y = (y - sy) as usize;
+                    let src_y_offset = src_y * (surface.width as usize);
 
-            for y in y0..y1 {
-                let dst_y_offset = (y as usize) * (self.scanout_width as usize);
-                let src_y = (y - sy) as usize;
-                let src_y_offset = src_y * (surface.width as usize);
+                    for x in x0..x1 {
+                        let dst_idx = dst_y_offset + (x as usize);
+                        let src_x = (x - sx) as usize;
+                        let src_idx = src_y_offset + src_x;
 
-                for x in x0..x1 {
-                    let dst_idx = dst_y_offset + (x as usize);
-                    let src_x = (x - sx) as usize;
-                    let src_idx = src_y_offset + src_x;
+                        let src_pixel = surface.pixels[src_idx];
+                        let sa = (src_pixel >> 24) & 0xFF;
+                        if sa == 255 {
+                            self.back_buffer[dst_idx] = src_pixel;
+                        } else if sa > 0 {
+                            let inv_sa = 255 - sa;
+                            let sr = (src_pixel >> 16) & 0xFF;
+                            let sg = (src_pixel >> 8) & 0xFF;
+                            let sb = src_pixel & 0xFF;
+                            let dst_pixel = self.back_buffer[dst_idx];
+                            let dr = (dst_pixel >> 16) & 0xFF;
+                            let dg = (dst_pixel >> 8) & 0xFF;
+                            let db = dst_pixel & 0xFF;
+                            let out_r = ((sr * sa + dr * inv_sa) / 255) & 0xFF;
+                            let out_g = ((sg * sa + dg * inv_sa) / 255) & 0xFF;
+                            let out_b = ((sb * sa + db * inv_sa) / 255) & 0xFF;
+                            self.back_buffer[dst_idx] = (0xFF << 24) | (out_r << 16) | (out_g << 8) | out_b;
+                        }
+                    }
+                }
+            } else {
+                let op = opacity as u32;
+                for y in y0..y1 {
+                    let dst_y_offset = (y as usize) * (self.scanout_width as usize);
+                    let src_y = (y - sy) as usize;
+                    let src_y_offset = src_y * (surface.width as usize);
 
-                    let src_pixel = surface.pixels[src_idx];
-                    let dst_pixel = self.back_buffer[dst_idx];
+                    for x in x0..x1 {
+                        let dst_idx = dst_y_offset + (x as usize);
+                        let src_x = (x - sx) as usize;
+                        let src_idx = src_y_offset + src_x;
 
-                    // Porter-Duff Source-Over alpha blending
-                    let sa = (((src_pixel >> 24) & 0xFF) * (opacity as u32)) / 255;
-                    if sa == 255 {
-                        self.back_buffer[dst_idx] = src_pixel;
-                    } else if sa > 0 {
-                        let inv_sa = 255 - sa;
-
-                        let sr = (src_pixel >> 16) & 0xFF;
-                        let sg = (src_pixel >> 8) & 0xFF;
-                        let sb = src_pixel & 0xFF;
-
-                        let dr = (dst_pixel >> 16) & 0xFF;
-                        let dg = (dst_pixel >> 8) & 0xFF;
-                        let db = dst_pixel & 0xFF;
-
-                        let out_r = ((sr * sa + dr * inv_sa) / 255) & 0xFF;
-                        let out_g = ((sg * sa + dg * inv_sa) / 255) & 0xFF;
-                        let out_b = ((sb * sa + db * inv_sa) / 255) & 0xFF;
-
-                        self.back_buffer[dst_idx] = (0xFF << 24) | (out_r << 16) | (out_g << 8) | out_b;
+                        let src_pixel = surface.pixels[src_idx];
+                        let sa = (((src_pixel >> 24) & 0xFF) * op) / 255;
+                        if sa == 255 {
+                            self.back_buffer[dst_idx] = src_pixel;
+                        } else if sa > 0 {
+                            let inv_sa = 255 - sa;
+                            let sr = (src_pixel >> 16) & 0xFF;
+                            let sg = (src_pixel >> 8) & 0xFF;
+                            let sb = src_pixel & 0xFF;
+                            let dst_pixel = self.back_buffer[dst_idx];
+                            let dr = (dst_pixel >> 16) & 0xFF;
+                            let dg = (dst_pixel >> 8) & 0xFF;
+                            let db = dst_pixel & 0xFF;
+                            let out_r = ((sr * sa + dr * inv_sa) / 255) & 0xFF;
+                            let out_g = ((sg * sa + dg * inv_sa) / 255) & 0xFF;
+                            let out_b = ((sb * sa + db * inv_sa) / 255) & 0xFF;
+                            self.back_buffer[dst_idx] = (0xFF << 24) | (out_r << 16) | (out_g << 8) | out_b;
+                        }
                     }
                 }
             }

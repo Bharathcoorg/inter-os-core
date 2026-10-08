@@ -161,7 +161,7 @@ impl PowerManager {
 
             DvfsGovernor::Powersave => {
                 self.current_freq_mhz = self.min_freq_mhz;
-                self.display_refresh_hz = 60;
+                self.display_refresh_hz = self.select_refresh_rate(60);
             }
 
             DvfsGovernor::Interactive | DvfsGovernor::Schedutil => {
@@ -173,7 +173,7 @@ impl PowerManager {
                     }
                     ThermalTrip::Throttling => {
                         self.current_freq_mhz = self.base_freq_mhz / 2;
-                        self.display_refresh_hz = 60;
+                        self.display_refresh_hz = self.select_refresh_rate(60);
                     }
                     ThermalTrip::Warning => {
                         let target = (self.base_freq_mhz as u64 * 3 / 4) as u32;
@@ -184,15 +184,15 @@ impl PowerManager {
                         if self.battery_valid && !self.is_charging && self.battery_percent < 15 {
                             // Low-power battery saver
                             self.current_freq_mhz = self.base_freq_mhz / 2;
-                            self.display_refresh_hz = 60;
+                            self.display_refresh_hz = self.select_refresh_rate(60);
                         } else if self.touch_boost_active {
                             // Instant ramp to 100% on touch
                             self.current_freq_mhz = self.max_freq_mhz;
-                            self.display_refresh_hz = 120;
+                            self.display_refresh_hz = self.select_refresh_rate(120);
                         } else {
                             // Balanced idle
                             self.current_freq_mhz = (self.base_freq_mhz as u64 * 4 / 5) as u32;
-                            self.display_refresh_hz = 120;
+                            self.display_refresh_hz = self.select_refresh_rate(120);
                         }
                     }
                 }
