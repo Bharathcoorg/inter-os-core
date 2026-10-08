@@ -1298,23 +1298,18 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Volume Controls (Real QEMU / Audio Sync)
-  function adjustVolume(delta) {
-    state.volume = Math.max(0, Math.min(100, state.volume + delta));
-    showToast(`Volume: ${state.volume}%`);
-
-    // Sync to backend audio controller
-    fetch('/api/hardware/volume', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ volume: state.volume })
-    }).then(res => res.json()).then(data => {
-      if (data.attenuation) {
-        logConsole('info', `[AUDIO_HAL] Master volume: ${state.volume}% (${data.attenuation})`);
-      }
-    }).catch(() => {
-      logConsole('info', `[AUDIO_HAL] Master volume set to ${state.volume}%`);
-    });
-
+  async function adjustVolume(delta) {
+    const action = delta > 0 ? 'UP' : 'DOWN';
+    try {
+      const res = await fetch('/api/audio/volume?action=' + action);
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.message || 'guest audio command rejected');
+      state.volume = Number.isFinite(data.volume_percent) ? data.volume_percent : state.volume;
+      showToast(`Volume: ${state.volume}%`);
+      logConsole('info', `[AUDIO_HAL] Guest master volume: ${state.volume}%`);
+    } catch (e) {
+      logConsole('err', '[AUDIO_HAL] Guest volume command failed: ' + e.message);
+    }
     playBeep(380 + state.volume * 5, 0.03, 'sine');
   }
 
