@@ -185,3 +185,21 @@ def test_android_runtime_preserves_vm_state_for_each_active_package():
     assert "self.active_vms.get_mut(&pid)" in runtime
     assert "self.active_vms.remove(&pid)" in runtime
     assert "let mut vm = DalvikVmState::new()" not in runtime
+
+
+
+def test_studio_volume_buttons_have_one_guest_authoritative_handler():
+    app = read("emulator/app.js")
+    assert app.count("emuBtnVolup?.addEventListener('click'") == 1
+    assert app.count("hwBtnVolup?.addEventListener('click'") == 1
+    assert "volume: null" in app
+    assert "state.volume = Math.max(0, Math.min(100, state.volume + delta))" not in app
+
+
+def test_orientation_is_only_committed_after_guest_acknowledgement():
+    server = read("emulator/server.py")
+    handler = server[server.index("if self.path in ('/api/hardware/orientation', '/api/orientation'):"):server.index("if self.path == '/api/hardware/sensor_inject':")]
+    assert "send_guest_serial_command(command[0], command[1], timeout=3)" in handler
+    assert "status': 'UNCONFIRMED'" in handler
+    assert handler.index("if not ok:") < handler.index("current_device_orientation = 'landscape'")
+    assert "'status': 'APPLIED'" in handler
