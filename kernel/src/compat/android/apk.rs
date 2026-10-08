@@ -34,6 +34,7 @@ pub enum ApkError {
     EndOfCentralDirectoryNotFound,
     InvalidCentralDirectory,
     MissingManifest,
+    MissingDex,
     InvalidAxmlHeader,
     InvalidStringPool,
     MalformedXmlChunk,
@@ -517,7 +518,7 @@ impl ApkPackage {
     /// Extracts the raw `classes.dex` binary payload from the APK container.
     pub fn extract_dex_bytes<'a>(&self, apk_bytes: &'a [u8]) -> Result<&'a [u8], ApkError> {
         let zip = ZipArchive::parse(apk_bytes)?;
-        zip.get_file("classes.dex").ok_or(ApkError::MissingManifest)
+        zip.get_file("classes.dex").ok_or(ApkError::MissingDex)
     }
 }
 
