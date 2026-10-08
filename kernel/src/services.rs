@@ -116,6 +116,7 @@ pub fn capability_policy(id: ServiceId, parent_id: TaskId) -> Result<Vec<Service
                 object_id: crate::syscall::user_control_object(crate::user::UserId::GUEST.0),
             });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SystemControl, rights: Rights::INVOKE, object_id: SERVICE_POWER_CONTROL_OBJECT });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SystemControl, rights: Rights::INVOKE, object_id: SERVICE_AUDIO_CONTROL_OBJECT });
         }
         ServiceId::Display => policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FrameBufferDirect, rights: Rights::WRITE, object_id: 1 }),
         ServiceId::Storage => {
@@ -596,8 +597,12 @@ mod tests {
             "the launcher must hold the narrowly-scoped power control capability for real restart/shutdown/display actions"
         );
         assert!(
-            !policy.iter().any(|c| c.cap_type == CapabilityType::SystemControl && (c.object_id == SERVICE_TELEPHONY_CONTROL_OBJECT || c.object_id == SERVICE_AUDIO_CONTROL_OBJECT)),
-            "the launcher must not hold telephony or audio service authority"
+            policy.iter().any(|c| c.cap_type == CapabilityType::SystemControl && c.object_id == SERVICE_AUDIO_CONTROL_OBJECT && c.rights.contains(Rights::INVOKE)),
+            "the launcher needs narrowly-scoped audio authority for real volume controls"
+        );
+        assert!(
+            !policy.iter().any(|c| c.cap_type == CapabilityType::SystemControl && c.object_id == SERVICE_TELEPHONY_CONTROL_OBJECT),
+            "the launcher must not hold telephony service authority"
         );
 
         assert!(
