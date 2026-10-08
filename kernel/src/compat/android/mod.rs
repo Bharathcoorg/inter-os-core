@@ -8,6 +8,7 @@ pub mod apk;
 pub mod binder;
 pub mod bridge;
 pub mod dex;
+pub mod framework;
 pub mod manifest;
 pub mod runtime;
 pub mod vfs;
@@ -15,6 +16,7 @@ pub mod vfs;
 pub use apk::{AcrAuditStatus, AcrContainerProfile, ApkError, ApkPackage, create_test_apk};
 pub use bridge::{AndroidBridgeError, AndroidIntent, AndroidIntentBridge, SovereignIntent};
 pub use dex::{DexError, DexMethod, DexPackage, compute_adler32, create_test_dex};
+pub use framework::{AndroidFrameworkError, AndroidFrameworkResult, AndroidFrameworkService};
 pub use runtime::{DalvikVmError, DalvikVmState};
 
 use alloc::collections::BTreeMap;
