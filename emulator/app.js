@@ -412,7 +412,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Warm Reboot Microkernel Flow (Flicker-Free & Synced)
   async function executeWarmReboot() {
     isBooting = true;
-    hasLauncherPresented = false;
+
     // Keep the real QEMU scanout visible during reset so the guest boot animation,
     // lock screen and first frame are observable rather than replaced by a Studio splash.
 
@@ -1045,7 +1045,7 @@ document.addEventListener('DOMContentLoaded', () => {
           bootCheckInterval = null;
         }
         isBooting = false;
-        hasLauncherPresented = true;
+
         refreshScanoutFrame();
         if (screenLiveScanout) screenLiveScanout.style.display = 'flex';
         startScanoutStream();
