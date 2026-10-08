@@ -1060,15 +1060,16 @@ def capture_qemu_screen_frame(full_scanout=False, orientation=None, prefer_jpeg=
         from PIL import Image
         with Image.open(ppm_path) as img:
             width, height = img.size
-            box = letterbox_box(width, height)
-            target_img = img.crop(box)
+            if (width, height) != (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H):
+                return None, f"Non-canonical guest scanout {width}x{height}; expected {LOGICAL_SURFACE_W}x{LOGICAL_SURFACE_H}"
+            # Native portrait scanout: no Studio crop, scale, or phone-shell substitution.
             buf = io.BytesIO()
             if prefer_jpeg:
-                target_img.save(buf, format="JPEG", quality=85)
+                img.save(buf, format="JPEG", quality=92)
                 encoded_bytes = buf.getvalue()
                 content_type = "image/jpeg"
             else:
-                target_img.save(buf, format="PNG", compress_level=1)
+                img.save(buf, format="PNG", compress_level=1)
                 encoded_bytes = buf.getvalue()
                 content_type = "image/png"
 
