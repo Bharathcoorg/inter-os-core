@@ -90,6 +90,12 @@ impl DalvikVmState {
             return Err(DalvikVmError::InvalidBytecode);
         }
 
+        // The VM has a fixed register file. Reject DEX methods that require more
+        // registers instead of silently aliasing them into another app register.
+        if method.registers_size as usize > self.registers.len() {
+            return Err(DalvikVmError::RegisterOutOfBounds);
+        }
+
         // 2. Read instruction stream parameters from code_item
         let insns_count = u32::from_le_bytes(
             dex.raw[method.code_offset + 12..method.code_offset + 16]
@@ -420,28 +426,6 @@ impl DalvikVmState {
                     self.registers[v_a] = self.registers[v_a].wrapping_mul(self.registers[v_b]);
                     self.string_registers[v_a] = None;
                     pc += 2;
-                }
-                OP_INVOKE_VIRTUAL | OP_INVOKE_DIRECT | OP_INVOKE_STATIC => {
-                    if pc + 6 > insns.len() {
-                        return Err(DalvikVmError::InvalidBytecode);
-                    }
-                    let method_idx = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as usize;
-                    let target_info = if method_idx < dex.methods.len() {
-                        format!("{}.{}", dex.methods[method_idx].class_name, dex.methods[method_idx].method_name)
-                    } else {
-                        format!("method@{}", method_idx)
-                    };
-
-                    // Intercept simulated Android logging calls (android.util.Log.i)
-                    if target_info.contains("android.util.Log") || target_info.contains("Log") {
-                        let msg = self.string_registers[0]
-                            .as_deref()
-                            .unwrap_or("Android Log Message");
-                        self.captured_logs.push(format!("[ACR Log] {}", msg));
-                    }
-
-                    self.last_return_value = 0;
-                    pc += 6; // Standard 35c invoke instruction is 3 code units (6 bytes)
                 }
                 OP_RETURN_VOID => {
                     self.last_return_value = 0;
