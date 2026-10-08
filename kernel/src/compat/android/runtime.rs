@@ -86,7 +86,10 @@ impl DalvikVmState {
             .find(|m| m.class_name == class_name && m.method_name == method_name)
             .ok_or(DalvikVmError::MethodNotFound)?;
 
-        if method.code_offset == 0 || method.code_offset + 16 > dex.raw.len() {
+        let Some(code_header_end) = method.code_offset.checked_add(16) else {
+            return Err(DalvikVmError::InvalidBytecode);
+        };
+        if method.code_offset == 0 || code_header_end > dex.raw.len() {
             return Err(DalvikVmError::InvalidBytecode);
         }
 
@@ -103,13 +106,18 @@ impl DalvikVmState {
                 .map_err(|_| DalvikVmError::InvalidBytecode)?,
         ) as usize;
 
-        let insns_bytes_len = insns_count * 2;
-        let insns_start = method.code_offset + 16;
-        if insns_start + insns_bytes_len > dex.raw.len() {
+        let Some(insns_bytes_len) = insns_count.checked_mul(2) else {
+            return Err(DalvikVmError::InvalidBytecode);
+        };
+        let insns_start = code_header_end;
+        let Some(insns_end) = insns_start.checked_add(insns_bytes_len) else {
+            return Err(DalvikVmError::InvalidBytecode);
+        };
+        if insns_end > dex.raw.len() {
             return Err(DalvikVmError::InvalidBytecode);
         }
 
-        let insns = &dex.raw[insns_start..insns_start + insns_bytes_len];
+        let insns = &dex.raw[insns_start..insns_end];
 
         // 3. Dalvik Register Bytecode Interpreter Loop
         let mut pc: usize = 0;
