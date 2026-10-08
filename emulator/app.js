@@ -702,24 +702,17 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  let hasLauncherPresented = false;
-
   // The live scanout is the only surface the studio shows. There is no boot
   // splash, standby card or lock screen in the chrome to toggle: while the guest
   // is not presenting, the monitor shows nothing rather than a Studio-owned
   // screen that could be mistaken for the guest's.
-  function updateDeviceDisplay(isAlive, launcherReady = false) {
-    if (launcherReady) {
-      hasLauncherPresented = true;
-    }
-
+  function updateDeviceDisplay(isAlive) {
     if (isAlive) {
       // The monitor must never invent a readiness screen. As soon as QEMU is alive,
       // expose its real scanout; boot/lock/off pixels are guest-owned.
       if (screenLiveScanout) screenLiveScanout.style.display = 'flex';
       startScanoutStream();
     } else {
-      hasLauncherPresented = false;
       stopScanoutStream();
       if (screenLiveScanout) screenLiveScanout.style.display = 'none';
     }
