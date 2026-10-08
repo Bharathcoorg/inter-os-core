@@ -403,7 +403,7 @@ impl FramebufferWriter {
 
         self.draw_string(x, y, "[ COMPATIBILITY & APPS ]", 1, COLOR_WHITE, None);
         y += 22;
-        self.draw_string(x, y, "Android:    Isolated MicroVM (ACR)", 1, COLOR_GREEN, None);
+        self.draw_string(x, y, "Android:    Attested APK/DEX/Binder boundary", 1, COLOR_GREEN, None);
         y += 18;
         self.draw_string(x, y, "Workflows:  Gravity Store Engine", 1, COLOR_PURPLE, None);
         y += 18;
