@@ -3422,7 +3422,16 @@ pub fn sys_device_power(action: u32) -> Result<u32, SyscallResult> {
     }
     match action {
         0 => { crate::serial_println!("[POWER] restart requested by authorized system UI."); crate::hal::platform::POWER.reset(); loop { core::hint::spin_loop(); } }
-        1 => { crate::serial_println!("[POWER] shutdown requested by authorized system UI."); crate::hal::platform::POWER.shutdown(); loop { core::hint::spin_loop(); } }
+        1 => {
+            crate::serial_println!("[POWER] shutdown requested by authorized system UI.");
+            {
+                let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+                kms.set_powered(false);
+                let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
+                let _ = display.composite_and_flip();
+            }
+            crate::hal::platform::POWER.shutdown();
+        }
         2 => {
             let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
             let on = kms.toggle_powered();
