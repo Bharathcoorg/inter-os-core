@@ -719,14 +719,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (isAlive) {
-      if (launcherReady || hasLauncherPresented) {
-        if (screenLiveScanout) screenLiveScanout.style.display = 'flex';
-        startScanoutStream();
-      } else {
-        // Guest is alive but has not presented a surface yet: show nothing.
-        if (screenLiveScanout) screenLiveScanout.style.display = 'none';
-      }
-    } else {
+      // The monitor must never invent a readiness screen. As soon as QEMU is alive,
+      // expose its real scanout; boot/lock/off pixels are guest-owned.
+      if (screenLiveScanout) screenLiveScanout.style.display = 'flex';
+      startScanoutStream();
+    } else { else {
       hasLauncherPresented = false;
       stopScanoutStream();
       if (screenLiveScanout) screenLiveScanout.style.display = 'none';
