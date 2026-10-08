@@ -294,11 +294,18 @@ def _cargo_build_manifest(manifest_path, target, bin_name=None):
     log(f"Building {bin_name or manifest_path} [{target}]...")
     env = dict(os.environ)
     if target == "x86_64-unknown-none":
-        env["RUSTFLAGS"] = "-C relocation-model=static -C link-arg=-Ttext=0x00400000 -C link-arg=-z -C link-arg=norelro --cfg curve25519_dalek_backend=\"fiat\""
+        env["RUSTFLAGS"] = "-C relocation-model=static -C link-arg=-Ttext=0x00400000 -C link-arg=-no-pie -C opt-level=3 -C link-arg=-z -C link-arg=norelro --cfg curve25519_dalek_backend=\"fiat\""
     return subprocess.run(cmd, cwd=str(WORKSPACE_ROOT), env=env).returncode
 
 
 def _build_x86_userspace():
+    ps1 = WORKSPACE_ROOT / "tools" / "build_userspace.ps1"
+    if sys.platform == "win32" and ps1.exists():
+        log("Building canonical x86_64 userspace via tools/build_userspace.ps1...")
+        rc = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1)], cwd=str(WORKSPACE_ROOT)).returncode
+        if rc == 0:
+            return True
+        log_warn("build_userspace.ps1 returned error, falling back to manifest builder")
     manifest = _load_x86_userspace_manifest()
     target = manifest["target_triple"]
     output_root = WORKSPACE_ROOT / manifest["output_root"]

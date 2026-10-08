@@ -784,19 +784,15 @@ def capture_qemu_screen_frame(full_scanout=False, orientation=None, prefer_jpeg=
     mode_key = 'full' if full_scanout else ('landscape' if is_landscape else 'portrait')
     now = time.time()
 
-    # Fast path: return cached frame from memory if fresh (< 0.045s)
+    cache_key = f"{mode_key}_jpeg" if prefer_jpeg else mode_key
     cache_age = now - _last_frame_cache.get('time', 0.0)
-    if _last_frame_cache.get(mode_key) and cache_age < 0.045:
-        if prefer_jpeg and _last_frame_cache.get(f"{mode_key}_jpeg"):
-            return _last_frame_cache[f"{mode_key}_jpeg"], "image/jpeg"
-        return _last_frame_cache[mode_key], "image/png"
+    if _last_frame_cache.get(cache_key) and cache_age < 0.040:
+        return _last_frame_cache[cache_key], ("image/jpeg" if prefer_jpeg else "image/png")
 
     # Avoid concurrent disk contention on PPM dump
     if not _capture_lock.acquire(blocking=False):
-        if prefer_jpeg and _last_frame_cache.get(f"{mode_key}_jpeg"):
-            return _last_frame_cache[f"{mode_key}_jpeg"], "image/jpeg"
-        if _last_frame_cache.get(mode_key):
-            return _last_frame_cache[mode_key], "image/png"
+        if _last_frame_cache.get(cache_key):
+            return _last_frame_cache[cache_key], ("image/jpeg" if prefer_jpeg else "image/png")
         return None, "Capture busy"
 
     t0 = time.time()
@@ -810,26 +806,20 @@ def capture_qemu_screen_frame(full_scanout=False, orientation=None, prefer_jpeg=
             t = query_qemu_monitor()
             if not t["qemu_alive"]:
                 launch_qemu_profile(active_profile_key)
-            if prefer_jpeg and _last_frame_cache.get(f"{mode_key}_jpeg"):
-                return _last_frame_cache[f"{mode_key}_jpeg"], "image/jpeg"
-            if _last_frame_cache.get(mode_key):
-                return _last_frame_cache[mode_key], "image/png"
+            if _last_frame_cache.get(cache_key):
+                return _last_frame_cache[cache_key], ("image/jpeg" if prefer_jpeg else "image/png")
             return None, f"QEMU monitor screendump failed: {resp}"
 
         if not os.path.exists(ppm_path):
-            if prefer_jpeg and _last_frame_cache.get(f"{mode_key}_jpeg"):
-                return _last_frame_cache[f"{mode_key}_jpeg"], "image/jpeg"
-            if _last_frame_cache.get(mode_key):
-                return _last_frame_cache[mode_key], "image/png"
+            if _last_frame_cache.get(cache_key):
+                return _last_frame_cache[cache_key], ("image/jpeg" if prefer_jpeg else "image/png")
             return None, "Screendump PPM file not produced"
 
         from PIL import Image
         with Image.open(ppm_path) as img:
             if not check_launcher_ready():
-                if prefer_jpeg and _last_frame_cache.get(f"{mode_key}_jpeg"):
-                    return _last_frame_cache[f"{mode_key}_jpeg"], "image/jpeg"
-                if _last_frame_cache.get(mode_key):
-                    return _last_frame_cache[mode_key], "image/png"
+                if _last_frame_cache.get(cache_key):
+                    return _last_frame_cache[cache_key], ("image/jpeg" if prefer_jpeg else "image/png")
                 return None, "Guest still booting; graphical canvas not ready"
 
             width, height = img.size
@@ -837,35 +827,29 @@ def capture_qemu_screen_frame(full_scanout=False, orientation=None, prefer_jpeg=
             guest_framebuffer_size = (width, height)
             box = letterbox_box(width, height)
 
-            # 1. Portrait crop (720x1440 logical canvas centered in scanout)
-            cropped_portrait = img.crop(box)
-            buf_jpg_p = io.BytesIO()
-            cropped_portrait.save(buf_jpg_p, format="JPEG", quality=90)
-            jpg_bytes_p = buf_jpg_p.getvalue()
-
-            buf_png_p = io.BytesIO()
-            cropped_portrait.save(buf_png_p, format="PNG", compress_level=1)
-            png_bytes_p = buf_png_p.getvalue()
-
-            # 2. Landscape / Full crop
-            if width > 0 and height > 0:
-                rgb_img = img.convert("RGB")
-                left_sample = rgb_img.getpixel((box[0] // 2, height // 2))
-                right_sample = rgb_img.getpixel((box[2] + (width - box[2]) // 2, height // 2))
-                if left_sample == (0, 0, 0) and right_sample == (0, 0, 0):
-                    out_img = cropped_portrait.rotate(270, expand=True)
+            if is_landscape:
+                if width > 0 and height > 0:
+                    rgb_img = img.convert("RGB")
+                    left_sample = rgb_img.getpixel((box[0] // 2, height // 2))
+                    right_sample = rgb_img.getpixel((box[2] + (width - box[2]) // 2, height // 2))
+                    if left_sample == (0, 0, 0) and right_sample == (0, 0, 0):
+                        target_img = img.crop(box).rotate(270, expand=True)
+                    else:
+                        target_img = img
                 else:
-                    out_img = img
+                    target_img = img
             else:
-                out_img = img
+                target_img = img.crop(box)
 
-            buf_jpg_l = io.BytesIO()
-            out_img.save(buf_jpg_l, format="JPEG", quality=90)
-            jpg_bytes_l = buf_jpg_l.getvalue()
-
-            buf_png_l = io.BytesIO()
-            out_img.save(buf_png_l, format="PNG", compress_level=1)
-            png_bytes_l = buf_png_l.getvalue()
+            buf = io.BytesIO()
+            if prefer_jpeg:
+                target_img.save(buf, format="JPEG", quality=85)
+                encoded_bytes = buf.getvalue()
+                content_type = "image/jpeg"
+            else:
+                target_img.save(buf, format="PNG", compress_level=1)
+                encoded_bytes = buf.getvalue()
+                content_type = "image/png"
 
             now_finish = time.time()
             elapsed_us = int((now_finish - t0) * 1_000_000)
@@ -876,22 +860,13 @@ def capture_qemu_screen_frame(full_scanout=False, orientation=None, prefer_jpeg=
                 _transport_metrics['frames_in_second'] = 0
                 _transport_metrics['second_start'] = now_finish
 
-            _last_frame_cache['portrait'] = png_bytes_p
-            _last_frame_cache['portrait_jpeg'] = jpg_bytes_p
-            _last_frame_cache['landscape'] = png_bytes_l
-            _last_frame_cache['landscape_jpeg'] = jpg_bytes_l
-            _last_frame_cache['full'] = png_bytes_l
-            _last_frame_cache['full_jpeg'] = jpg_bytes_l
+            _last_frame_cache[cache_key] = encoded_bytes
             _last_frame_cache['time'] = now_finish
 
-            if prefer_jpeg:
-                return (jpg_bytes_l if is_landscape else jpg_bytes_p), "image/jpeg"
-            return (png_bytes_l if is_landscape else png_bytes_p), "image/png"
+            return encoded_bytes, content_type
     except Exception as e:
-        if prefer_jpeg and _last_frame_cache.get(f"{mode_key}_jpeg"):
-            return _last_frame_cache[f"{mode_key}_jpeg"], "image/jpeg"
-        if _last_frame_cache.get(mode_key):
-            return _last_frame_cache[mode_key], "image/png"
+        if _last_frame_cache.get(cache_key):
+            return _last_frame_cache[cache_key], ("image/jpeg" if prefer_jpeg else "image/png")
         return None, f"Image processing error: {e}"
     finally:
         _capture_lock.release()
@@ -903,7 +878,7 @@ def _background_frame_streamer():
         try:
             if check_launcher_ready():
                 capture_qemu_screen_frame(prefer_jpeg=True)
-            time.sleep(0.015)
+            time.sleep(0.025)
         except Exception:
             time.sleep(0.05)
 
@@ -2657,9 +2632,12 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
 
 
-if __name__ == '__main__':
-    socketserver.TCPServer.allow_reuse_address = True
+class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    daemon_threads = True
+    allow_reuse_address = True
 
+
+if __name__ == '__main__':
     ok, msg = start_qemu_backend()
     print(f"[*] InterOS Studio Backend: {msg}")
 
@@ -2668,7 +2646,7 @@ if __name__ == '__main__':
     serial_thread.start()
 
     try:
-        with socketserver.TCPServer(("127.0.0.1", PORT), StudioAPIHandler) as httpd:
+        with ThreadedTCPServer(("127.0.0.1", PORT), StudioAPIHandler) as httpd:
             url = f"http://localhost:{PORT}"
             print("============================================================")
             print("  INTER OS — Device Studio Server Online")
