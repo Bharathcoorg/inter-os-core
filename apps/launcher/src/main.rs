@@ -146,7 +146,9 @@ pub struct LauncherState {
     pub boot_progress: u16,
     pub boot_started_ticks: u64,
     pub display_was_powered: bool,
+    pub display_power_state_valid: bool,
     pub last_volume_percent: u8,
+    pub volume_state_valid: bool,
     pub volume_hud_until: u64,
     pub clock_time: [u8; 5],
     /// True only while `clock_time` and `date_line` hold a reading the kernel
@@ -196,8 +198,10 @@ impl LauncherState {
             current_view: ViewMode::BootScreen,
             boot_progress: 0,
             boot_started_ticks: 0,
-            display_was_powered: true,
-            last_volume_percent: 75,
+            display_was_powered: false,
+            display_power_state_valid: false,
+            last_volume_percent: 0,
+            volume_state_valid: false,
             volume_hud_until: 0,
             clock_time: [b' '; 5],
             clock_source_ok: false,
@@ -1068,8 +1072,14 @@ pub extern "C" fn _start() -> ! {
 
     let mut state = LauncherState::new();
     state.boot_started_ticks = std::get_ticks(1).unwrap_or(0);
-    state.display_was_powered = std::device_power(5).unwrap_or(1) != 0;
-    state.last_volume_percent = std::audio_query_volume().unwrap_or(75).min(100) as u8;
+    match std::device_power(5) {
+        Ok(powered) => { state.display_was_powered = powered != 0; state.display_power_state_valid = true; }
+        Err(_) => std::log(0, "[LAUNCHER] Display power state unavailable; refusing to assume an on/off state.").ok(),
+    }
+    match std::audio_query_volume() {
+        Ok(volume) => { state.last_volume_percent = volume.min(100) as u8; state.volume_state_valid = true; }
+        Err(_) => std::log(0, "[LAUNCHER] Audio volume unavailable; volume HUD remains inactive until guest state is readable.").ok(),
+    }
     if let Ok(lock_st) = std::user_get_lock_state(1000) {
         state.lock_state = lock_st;
     }
@@ -1182,14 +1192,19 @@ pub extern "C" fn _start() -> ! {
                 } else if state.volume_hud_until != 0 && now >= state.volume_hud_until {
                     state.volume_hud_until = 0;
                     if let Some(id) = volume_surface { let _ = std::window_set_geometry(4, id, 100, 220, 100, false); }
+                    }
                 }
             }
 
             if state.active_child.is_none() && (events & std::EVENT_TIMER_TICK) != 0 {
                 refresh_ticks += 1;
-                let powered = std::device_power(5).unwrap_or(1) != 0;
-                if powered != state.display_was_powered {
-                    state.display_was_powered = powered;
+                if let Ok(power_state) = std::device_power(5) {
+                    let powered = power_state != 0;
+                    if !state.display_power_state_valid {
+                        state.display_was_powered = powered;
+                        state.display_power_state_valid = true;
+                    } else if powered != state.display_was_powered {
+                        state.display_was_powered = powered;
                     if powered {
                         state.current_view = ViewMode::LockScreen;
                         state.pin_pad_visible = false;
@@ -1197,6 +1212,7 @@ pub extern "C" fn _start() -> ! {
                         render_view(surface, &state);
                         let _ = std::surface_flip(4);
                         std::log(0, "[LAUNCHER] Display wake observed; presenting real lock screen.").ok();
+                    }
                     }
                 }
                 if state.current_view == ViewMode::BootScreen {
@@ -1216,9 +1232,13 @@ pub extern "C" fn _start() -> ! {
                 let old_clock = state.clock_time;
                 refresh_clock(&mut state);
                 refresh_notifications(&mut state);
-                let volume_now = std::audio_query_volume().unwrap_or(state.last_volume_percent as u32).min(100) as u8;
-                if volume_now != state.last_volume_percent {
-                    state.last_volume_percent = volume_now;
+                if let Ok(volume) = std::audio_query_volume() {
+                    let volume_now = volume.min(100) as u8;
+                    if !state.volume_state_valid {
+                        state.last_volume_percent = volume_now;
+                        state.volume_state_valid = true;
+                    } else if volume_now != state.last_volume_percent {
+                        state.last_volume_percent = volume_now;
                     state.volume_hud_until = std::get_ticks(1).unwrap_or(0).saturating_add(180);
                     if let Some(id) = volume_surface {
                         render_volume_hud(id, volume_now);
