@@ -1,5 +1,4 @@
 //! One module per screen, so screens can be edited in parallel.
-pub mod boot;
 //!
 //! WHY this exists: every renderer was a function inside `main.rs`, which meant two
 //! people working on different screens collided on every save, and a single screen
@@ -10,6 +9,7 @@ pub mod boot;
 //! meant to adapt to whatever apps and options exist, and hardcoded values are
 //! exactly how it stopped doing that.
 
+pub mod boot;
 pub mod activity;
 pub mod app_drawer;
 pub mod home;
