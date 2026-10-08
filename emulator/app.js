@@ -1144,16 +1144,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Screendump: export exactly what the guest framebuffer contains.
   emuBtnScreenshot?.addEventListener('click', async () => {
-    playShutterSound();
-    // Brief white flash
-    const flash = document.createElement('div');
-    flash.style.cssText = 'position:absolute;inset:0;background:#FFF;z-index:9999;pointer-events:none;transition:opacity 0.25s;';
-    if (screenLiveScanout) screenLiveScanout.appendChild(flash);
-    setTimeout(() => {
-      flash.style.opacity = '0';
-      setTimeout(() => flash.remove(), 250);
-    }, 50);
-
     try {
       const resp = await fetch('/api/screen/frame');
       if (resp.ok) {
