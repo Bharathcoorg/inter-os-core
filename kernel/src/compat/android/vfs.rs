@@ -59,15 +59,8 @@ impl AndroidSandboxFs {
         self.create_directory("/sdcard/Android");
         self.create_directory("/sdcard/Android/data");
 
-        // Populate virtual framework binaries
-        self.create_file(
-            "/system/bin/app_process",
-            b"\x7FELF_ANDROID_APP_PROCESS_VIRTUAL_STUB",
-        );
-        self.create_file(
-            "/system/framework/framework.jar",
-            b"ANDROID_FRAMEWORK_JAR_ISOLATED_CONTAINER_RUNTIME",
-        );
+        // Do not fabricate framework binaries. A path is present only when a real,
+        // validated runtime artifact has been installed into this container.
     }
 
     /// Creates a directory in the virtual Android sandbox.
