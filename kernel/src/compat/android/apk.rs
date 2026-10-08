@@ -461,6 +461,18 @@ impl ApkPackage {
             }
         }
 
+        if !self.has_classes_dex {
+            return AcrContainerProfile {
+                package_name: self.manifest.package_name.clone(),
+                version_code: self.manifest.version_code,
+                target_sdk: self.manifest.target_sdk,
+                status: AcrAuditStatus::InvalidApkFormat,
+                granted_caps_count: 0,
+                denied_perms_count: self.manifest.permissions.len(),
+                memory_quota_bytes: 0,
+            };
+        }
+
         if !self.is_signed {
             return AcrContainerProfile {
                 package_name: self.manifest.package_name.clone(),
