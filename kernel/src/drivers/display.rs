@@ -52,19 +52,36 @@ impl DisplayDriver for KmsDisplayDriver<'_> {
     }
 
     fn composite_and_flip(&mut self) -> Result<u64, &'static str> {
+        #[cfg(target_arch = "x86_64")]
+        let t0 = unsafe { core::arch::x86_64::_rdtsc() };
+
         self.controller.composite();
+
+        #[cfg(target_arch = "x86_64")]
+        let t1 = unsafe { core::arch::x86_64::_rdtsc() };
+
         let flip = self.controller.page_flip();
         crate::framebuffer::present_argb8888(
             &self.controller.front_buffer,
             self.controller.scanout_width,
             self.controller.scanout_height,
         );
-        if flip == 1 || flip % 60 == 0 {
+
+        #[cfg(target_arch = "x86_64")]
+        let t2 = unsafe { core::arch::x86_64::_rdtsc() };
+
+        if flip <= 15 || flip % 30 == 0 {
+            #[cfg(target_arch = "x86_64")]
+            let (comp_cyc, pres_cyc) = (t1.saturating_sub(t0), t2.saturating_sub(t1));
+            #[cfg(not(target_arch = "x86_64"))]
+            let (comp_cyc, pres_cyc) = (0u64, 0u64);
+
             crate::serial_println!(
-                "[KMS] vsync={} page_flips={} refresh_hz={} format=ARGB8888 scanout_w={} scanout_h={}",
+                "[KMS PERF] flip={} compose_cycles={} present_cycles={} total_cycles={} scanout={}x{}",
                 flip,
-                flip,
-                self.controller.refresh_hz,
+                comp_cyc,
+                pres_cyc,
+                comp_cyc + pres_cyc,
                 self.controller.scanout_width,
                 self.controller.scanout_height,
             );
