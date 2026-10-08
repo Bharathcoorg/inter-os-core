@@ -45,7 +45,8 @@ if ($NoDisplay) {
     $qemuArgs += @("-display", "none")
 } else {
     $qemuArgs += @(
-        "-device", "virtio-vga,xres=720,yres=1440",
+        "-vga", "none",
+    "-device", "virtio-vga,xres=720,yres=1440",
         "-device", "qemu-xhci,id=xhci0",
         "-device", "usb-tablet,bus=xhci0.0"
     )
