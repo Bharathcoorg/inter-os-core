@@ -55,43 +55,22 @@ pub fn dispatch(
             logs.push(line);
             Ok(AndroidFrameworkResult::Return(0))
         }
-        "android/app/Activity" if matches!(
-            method_name,
-            "onCreate" | "onStart" | "onResume" | "onPause" | "onStop" | "onDestroy"
-        ) => Ok(AndroidFrameworkResult::Return(0)),
-        "android/view/View" if matches!(method_name, "invalidate" | "requestLayout" | "setVisibility") => {
-            Ok(AndroidFrameworkResult::Return(0))
-        }
-        "android/view/SurfaceView" if method_name == "<init>" => {
-            Ok(AndroidFrameworkResult::Return(1))
-        }
-        "android/widget/TextView" if matches!(method_name, "<init>" | "setText" | "setTextColor" | "setTextSize") => {
-            Ok(AndroidFrameworkResult::Return(0))
-        }
-        "android/widget/Button" if method_name == "<init>" => Ok(AndroidFrameworkResult::Return(0)),
-        "android/os/Bundle" if method_name == "<init>" => Ok(AndroidFrameworkResult::Return(0)),
-        "android/os/Looper" if method_name == "getMainLooper" => Ok(AndroidFrameworkResult::Return(1)),
-        "android/os/Handler" if matches!(method_name, "<init>" | "post" | "postDelayed") => {
-            Ok(AndroidFrameworkResult::Return(1))
-        }
-        "android/content/Context" if method_name == "getSystemService" => {
-            Ok(AndroidFrameworkResult::Service(AndroidFrameworkService::Activity))
-        }
-        "android/content/Context" if method_name == "getFilesDir" => {
-            Ok(AndroidFrameworkResult::Return(1))
-        }
-        "android/app/NotificationManager" if matches!(method_name, "notify" | "cancel") => {
-            Ok(AndroidFrameworkResult::Return(0))
-        }
-        "android/media/AudioManager" if matches!(method_name, "getStreamVolume" | "setStreamVolume") => {
-            Ok(AndroidFrameworkResult::Service(AndroidFrameworkService::Audio))
-        }
-        "android/net/ConnectivityManager" if method_name == "getActiveNetwork" => {
-            Ok(AndroidFrameworkResult::Service(AndroidFrameworkService::Network))
-        }
-        "android/telephony/TelephonyManager" if matches!(method_name, "getNetworkOperator" | "getSimState") => {
-            Ok(AndroidFrameworkResult::Service(AndroidFrameworkService::Telephony))
-        }
+        // Only APIs with an implemented effect are acknowledged. Lifecycle callbacks,
+        // widget mutations, handlers, notifications and service lookups require real
+        // guest objects/services; returning plausible values here would fabricate success.
+        "android/app/Activity"
+        | "android/view/View"
+        | "android/view/SurfaceView"
+        | "android/widget/TextView"
+        | "android/widget/Button"
+        | "android/os/Bundle"
+        | "android/os/Looper"
+        | "android/os/Handler"
+        | "android/content/Context"
+        | "android/app/NotificationManager"
+        | "android/media/AudioManager"
+        | "android/net/ConnectivityManager"
+        | "android/telephony/TelephonyManager" => Err(AndroidFrameworkError::UnsupportedApi),
         _ => Err(AndroidFrameworkError::UnsupportedApi),
     }
 }
@@ -110,7 +89,7 @@ mod tests {
         assert_eq!(logs.len(), 1);
         assert_eq!(
             dispatch("Landroid/content/Context;", "getSystemService", &[], &mut logs),
-            Ok(AndroidFrameworkResult::Service(AndroidFrameworkService::Activity))
+            Err(AndroidFrameworkError::UnsupportedApi)
         );
     }
 
