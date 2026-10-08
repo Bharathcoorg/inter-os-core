@@ -12,6 +12,7 @@ pub mod framework;
 pub mod manifest;
 pub mod runtime;
 pub mod vfs;
+pub mod window;
 
 pub use apk::{AcrAuditStatus, AcrContainerProfile, ApkError, ApkPackage, create_test_apk};
 pub use bridge::{AndroidBridgeError, AndroidIntent, AndroidIntentBridge, SovereignIntent};
@@ -27,6 +28,7 @@ use spin::Mutex;
 pub use binder::{BinderCommand, BinderMediator, BinderReturn, BinderTransaction, BINDER_MEDIATOR};
 pub use manifest::AndroidManifest;
 pub use vfs::{AndroidFsError, AndroidSandboxFs, ANDROID_SANDBOX_FS};
+pub use window::{AndroidActivityState, AndroidWindow, AndroidWindowManager};
 
 use crate::capability::CapabilityTable;
 use crate::serial_println;
@@ -41,12 +43,15 @@ pub struct AndroidAppInstance {
     pub task_id: TaskId,
     pub cap_table: CapabilityTable,
     pub memory_quota_bytes: usize,
+    pub surface_id: u32,
+    pub activity_state: AndroidActivityState,
 }
 
 /// System-wide Android container runtime manager.
 pub struct AndroidRuntime {
     next_pid: u32,
     active_apps: BTreeMap<u32, AndroidAppInstance>,
+    pub windows: AndroidWindowManager,
 }
 
 impl AndroidRuntime {
@@ -55,6 +60,7 @@ impl AndroidRuntime {
         Self {
             next_pid: 1000,
             active_apps: BTreeMap::new(),
+            windows: AndroidWindowManager::new(),
         }
     }
 
@@ -76,6 +82,7 @@ impl AndroidRuntime {
         fs.create_directory(&app_files_dir);
         drop(fs);
 
+        let surface_id = self.windows.create(task_id).unwrap_or(0);
         self.active_apps.insert(
             pid,
             AndroidAppInstance {
@@ -84,7 +91,9 @@ impl AndroidRuntime {
                 target_sdk: manifest.target_sdk,
                 task_id,
                 cap_table,
-                memory_quota_bytes: 64 * 1024 * 1024, // 64 MiB container ceiling
+                memory_quota_bytes: 64 * 1024 * 1024,
+                surface_id,
+                activity_state: AndroidActivityState::Created,
             },
         );
 
@@ -93,7 +102,16 @@ impl AndroidRuntime {
 
     /// Terminates an active Android application instance.
     pub fn terminate_app(&mut self, pid: u32) -> bool {
-        self.active_apps.remove(&pid).is_some()
+        let Some(app) = self.active_apps.remove(&pid) else { return false; };
+        if app.surface_id != 0 { let _ = self.windows.destroy(app.surface_id); }
+        true
+    }
+
+    pub fn set_activity_state(&mut self, pid: u32, state: AndroidActivityState) -> bool {
+        let Some(app) = self.active_apps.get_mut(&pid) else { return false; };
+        app.activity_state = state;
+        if app.surface_id != 0 { self.windows.set_state(app.surface_id, state); }
+        true
     }
 
     /// Returns the number of currently running Android container applications.
