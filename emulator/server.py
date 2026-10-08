@@ -2439,12 +2439,24 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 }).encode())
                 return
             elif action in ('sleep', 'power', 'wake', 'toggle'):
-                ok, msg = send_guest_serial_command('POWER_KEY', '[POWER]', timeout=3)
-                self.send_response(200 if ok else 503)
+                # A real guest ACPI power-off can terminate QEMU. A subsequent
+                # physical power-button action starts a new guest; it must not be
+                # reported as a successful serial command to a dead VM.
+                process_alive = qemu_subproc is not None and qemu_subproc.poll() is None
+                if not process_alive and action in ('power', 'wake', 'toggle'):
+                    ok, msg = launch_qemu_profile(active_profile_key)
+                    result = {'success': ok, 'action': 'power_on', 'qemu_started': ok, 'message': str(msg)}
+                elif process_alive and action in ('power', 'wake', 'toggle'):
+                    ok, msg = send_guest_serial_command('POWER_KEY', '[POWER]', timeout=3)
+                    result = {'success': ok, 'action': action, 'message': msg}
+                else:
+                    ok, msg = send_guest_serial_command('POWER_KEY', '[POWER]', timeout=3)
+                    result = {'success': ok, 'action': action, 'message': msg}
+                self.send_response(200 if result['success'] else 503)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
-                self.wfile.write(json.dumps({'success': ok, 'action': action, 'message': msg}).encode())
+                self.wfile.write(json.dumps(result).encode())
                 return
             else:
                 self.send_response(400)
