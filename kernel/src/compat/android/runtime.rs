@@ -39,6 +39,8 @@ pub struct DalvikVmState {
     pub last_return_value: u32,
     /// Intercepted Android framework logging calls.
     pub captured_logs: Vec<String>,
+    /// Nested DEX calls are bounded to prevent recursive bytecode exhaustion.
+    pub call_depth: u8,
 }
 
 impl DalvikVmState {
@@ -51,11 +53,27 @@ impl DalvikVmState {
             instructions_executed: 0,
             last_return_value: 0,
             captured_logs: Vec::new(),
+            call_depth: 0,
         }
     }
 
     /// Invokes a specific method on a class by name, executing its Dalvik bytecode.
     pub fn invoke_method(
+        &mut self,
+        dex: &DexPackage,
+        class_name: &str,
+        method_name: &str,
+    ) -> Result<u32, DalvikVmError> {
+        if self.call_depth >= 32 {
+            return Err(DalvikVmError::ExecutionStepLimit);
+        }
+        self.call_depth += 1;
+        let result = self.invoke_method_inner(dex, class_name, method_name);
+        self.call_depth -= 1;
+        result
+    }
+
+    fn invoke_method_inner(
         &mut self,
         dex: &DexPackage,
         class_name: &str,
@@ -340,6 +358,29 @@ impl DalvikVmState {
                     } else {
                         pc += 4;
                     }
+                }
+                OP_INVOKE_VIRTUAL | OP_INVOKE_DIRECT | OP_INVOKE_STATIC => {
+                    // Dalvik 35c invoke format: opcode, register-count/register-list, method_idx.
+                    if pc + 6 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let method_index = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as usize;
+                    let target = dex.methods.iter().find(|m| m.method_index == method_index)
+                        .ok_or(DalvikVmError::MethodNotFound)?;
+                    let string_args = [
+                        self.string_registers[(insns[pc + 4] & 0x0F) as usize].as_deref(),
+                        self.string_registers[((insns[pc + 4] >> 4) & 0x0F) as usize].as_deref(),
+                    ];
+                    if target.class_name.starts_with("Landroid/") || target.class_name.starts_with("Landroidx/") {
+                        match super::framework::dispatch(&target.class_name, &target.method_name, &string_args, &mut self.captured_logs) {
+                            Ok(super::framework::AndroidFrameworkResult::Return(value)) => self.last_return_value = value,
+                            Ok(super::framework::AndroidFrameworkResult::Service(_)) => self.last_return_value = 1,
+                            Err(_) => return Err(DalvikVmError::SecurityViolationForbiddenApi),
+                        }
+                    } else {
+                        self.last_return_value = self.invoke_method(dex, &target.class_name, &target.method_name)?;
+                    }
+                    pc += 6;
                 }
                 OP_ADD_INT_2ADDR => {
                     if pc + 2 > insns.len() {
