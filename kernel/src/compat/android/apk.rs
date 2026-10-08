@@ -351,7 +351,10 @@ pub fn decode_axml_manifest(data: &[u8]) -> Result<AndroidManifest, ApkError> {
 
         match chunk_type {
             RES_STRING_POOL_TYPE => {
-                let (pool, _) = AxmlStringPool::decode(data, cursor)?;
+                let (pool, decoded_size) = AxmlStringPool::decode(data, cursor)?;
+                if decoded_size != chunk_size {
+                    return Err(ApkError::MalformedXmlChunk);
+                }
                 string_pool = Some(pool);
             }
             RES_XML_START_ELEMENT_TYPE => {
