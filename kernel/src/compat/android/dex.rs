@@ -93,6 +93,8 @@ pub enum DexError {
 /// Parsed method descriptor from DEX string pool and method ID tables.
 #[derive(Debug, Clone)]
 pub struct DexMethod {
+    /// Stable DEX method_id index used by invoke-* instructions.
+    pub method_index: usize,
     pub class_name: String,
     pub method_name: String,
     pub proto_shorty: String,
@@ -263,6 +265,7 @@ impl<'a> DexPackage<'a> {
                 }
 
                 methods.push(DexMethod {
+                    method_index: last_method_idx as usize,
                     class_name: c_name,
                     method_name: m_name,
                     proto_shorty: p_name,
@@ -302,6 +305,7 @@ impl<'a> DexPackage<'a> {
                 }
 
                 methods.push(DexMethod {
+                    method_index: last_vmethod_idx as usize,
                     class_name: c_name,
                     method_name: m_name,
                     proto_shorty: p_name,
