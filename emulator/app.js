@@ -87,7 +87,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const state = {
     screenOn: true,
-    volume: 70,
+    volume: null,
     isLandscape: false,
     calcMode: 'std',
     audioCtx: null,
@@ -1105,158 +1105,6 @@ document.addEventListener('DOMContentLoaded', () => {
   emuBtnPower?.addEventListener('click', handlePowerAction);
 
   // Hardware Volume Buttons Action
-  async function handleVolume(delta) {
-    try {
-      const res = await fetch(`/api/audio/volume?action=${delta > 0 ? 'UP' : 'DOWN'}`);
-      if (res.ok) {
-        const d = await res.json();
-        if (d.volume_percent !== undefined) {
-          state.volume = d.volume_percent;
-        }
-      }
-    } catch (_) {
-      state.volume = Math.max(0, Math.min(100, state.volume + delta));
-    }
-    showToast(`Volume: ${state.volume}%`);
-    playBeep(delta > 0 ? 800 : 500, 0.04, 'sine');
-  }
-
-  hwBtnVolup?.addEventListener('click', () => handleVolume(5));
-  emuBtnVolup?.addEventListener('click', () => handleVolume(5));
-  hwBtnVoldown?.addEventListener('click', () => handleVolume(-5));
-  emuBtnVoldown?.addEventListener('click', () => handleVolume(-5));
-
-  // Screendump is captured by the single handler further down (the "Take
-  // Screenshot" block), which flashes the chassis and reports the offline case.
-  // A second handler used to be registered here too, so one click downloaded the
-  // same guest framebuffer twice; only the thorough one survives.
-
-  // Rotate Screen button is handled by the comprehensive orientation handler below
-
-  // Warm Reboot Microkernel Button
-  emuBtnReboot?.addEventListener('click', executeWarmReboot);
-
-  // Back / Home / Recents (◁ ○ ▢).
-  // Directly dispatches canonical kernel navigation gestures.
-  emuBtnBack?.addEventListener('click', () => {
-    dispatchHardwareGesture('Back (◁)', {
-      action: 'back',
-      coords: 'portrait',
-      x: 0,
-      y: 0
-    });
-  });
-
-  // Home Button (○)
-  emuBtnHome?.addEventListener('click', () => {
-    dispatchHardwareGesture('Home (○)', {
-      action: 'home',
-      coords: 'portrait',
-      x: 360,
-      y: 1400
-    });
-  });
-
-  // Recents / App Switcher (▢) -> Activity Space
-  emuBtnRecents?.addEventListener('click', () => {
-    dispatchHardwareGesture('Recents / Activity Space (▢)', {
-      action: 'recents',
-      coords: 'portrait',
-      x: 580,
-      y: 1400
-    });
-  });
-
-  // =========================================================================
-  // 4. UART CONSOLE LOGGER
-  // =========================================================================
-  function logConsole(type, text) {
-    if (!telemetryTerminal) return;
-    const line = document.createElement('div');
-    line.className = `term-line ${type}`;
-    if (type === 'pre') {
-      line.textContent = text;
-    } else {
-      const now = new Date();
-      const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}.${String(now.getMilliseconds()).padStart(3, '0')}`;
-      line.textContent = `[${timeStr}] ${text}`;
-    }
-    telemetryTerminal.appendChild(line);
-    while (telemetryTerminal.children.length > 500) {
-      telemetryTerminal.removeChild(telemetryTerminal.firstChild);
-    }
-    telemetryTerminal.scrollTop = telemetryTerminal.scrollHeight;
-  }
-
-  btnClearConsole?.addEventListener('click', () => {
-    if (telemetryTerminal) telemetryTerminal.innerHTML = '';
-  });
-
-  btnPingKernel?.addEventListener('click', () => {
-    logConsole('info', 'PING sent to Ring 0 Microkernel -> ACK received in 0.12ms (PIT IRQ0)');
-  });
-
-  // =========================================================================
-  // 6. ANDROID EMULATOR HARDWARE TOOLBAR & POWER/VOLUME CONTROLS
-  // =========================================================================
-  // WHY: the power button is a device control, not a screen. There is no Studio
-  // overlay to raise any more: the guest owns its lock screen and standby state,
-  // so the studio only tells the hardware HAL to sleep or wake and reports what
-  // it observed. The previous long-press power menu, the Studio lock screen, the
-  // slide-to-unlock track and the OLED sleep overlay were all chrome-owned phone
-  // UI and were removed with them. `togglePower()` also dereferenced
-  // #screen-off-overlay, which has never existed in index.html, so a short press
-  // of the power button threw a TypeError on every click.
-  async function togglePower() {
-    // Device Studio is only the physical-button frontend. The guest owns display
-    // power and reports the resulting state through its authoritative telemetry.
-    try {
-      const res = await fetch('/api/hardware/power', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'toggle' })
-      });
-      if (!res.ok) throw new Error('guest power command rejected');
-      logConsole('info', '[POWER_KEY] Guest display-power transition requested.');
-    } catch (e) {
-      logConsole('err', '[POWER_KEY] Guest display-power command failed: ' + e.message);
-    }
-    playBeep(280, 0.04, 'triangle');
-  }
-
-  // A press longer than 600 ms is the physical long-press that used to open the
-  // Studio power menu. There is no menu in the chrome any more, so the long press
-  // is simply ignored and the short press sleeps/wakes the display.
-  let powerPressTimer = null;
-  let powerPressTriggered = false;
-
-  function handlePowerDown() {
-    powerPressTriggered = false;
-    powerPressTimer = setTimeout(() => {
-      powerPressTriggered = true;
-    }, 600);
-  }
-
-  function handlePowerUp() {
-    if (powerPressTimer) {
-      clearTimeout(powerPressTimer);
-      powerPressTimer = null;
-    }
-    if (!powerPressTriggered) {
-      togglePower();
-    }
-  }
-
-  [hwBtnPower, emuBtnPower].forEach(btn => {
-    btn?.addEventListener('mousedown', handlePowerDown);
-    btn?.addEventListener('mouseup', handlePowerUp);
-    btn?.addEventListener('mouseleave', () => {
-      if (powerPressTimer) { clearTimeout(powerPressTimer); powerPressTimer = null; }
-    });
-    btn?.addEventListener('touchstart', handlePowerDown, { passive: true });
-    btn?.addEventListener('touchend', handlePowerUp, { passive: true });
-  });
-
   // Volume Controls (Real QEMU / Audio Sync)
   async function adjustVolume(delta) {
     const action = delta > 0 ? 'UP' : 'DOWN';
@@ -1270,7 +1118,7 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (e) {
       logConsole('err', '[AUDIO_HAL] Guest volume command failed: ' + e.message);
     }
-    playBeep(380 + state.volume * 5, 0.03, 'sine');
+    if (Number.isFinite(state.volume)) playBeep(380 + state.volume * 5, 0.03, 'sine');
   }
 
   emuBtnVolup?.addEventListener('click', () => adjustVolume(5));
@@ -1326,32 +1174,38 @@ document.addEventListener('DOMContentLoaded', () => {
     showToast('QEMU scanout offline (Standby)');
   });
 
-  // Rotate Screen (Orientation)
+  // Orientation is changed only after the guest acknowledges the request.
   emuBtnRotate?.addEventListener('click', async () => {
-    state.isLandscape = !state.isLandscape;
-    const orient = state.isLandscape ? 'landscape' : 'portrait';
-    cropMode = state.isLandscape ? 'full' : 'portrait';
-    if (state.isLandscape) {
-      stageWrapper.classList.add('landscape');
-      logConsole('info', '[DISPLAY_HAL] Gyroscope event: display rotated to LANDSCAPE (1280x720).');
-      showToast('Screen: Landscape Mode (1280x720)');
-    } else {
-      stageWrapper.classList.remove('landscape');
-      logConsole('info', '[DISPLAY_HAL] Gyroscope event: display rotated to PORTRAIT (720x1440).');
-      showToast('Screen: Portrait Mode (720x1440)');
-    }
-    playBeep(520, 0.03, 'sine');
+    const requestedLandscape = !state.isLandscape;
+    const orient = requestedLandscape ? 'landscape' : 'portrait';
     try {
-      await fetch('/api/hardware/orientation', {
+      const response = await fetch('/api/hardware/orientation', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ orientation: orient })
       });
-    } catch (_) {}
-    refreshScanoutFrame();
-    setTimeout(refreshScanoutFrame, 60);
-    setTimeout(refreshScanoutFrame, 180);
-    setTimeout(refreshScanoutFrame, 350);
+      const result = await response.json();
+      if (!response.ok || result.success === false) {
+        throw new Error(result.error || result.message || 'guest rejected orientation change');
+      }
+      state.isLandscape = requestedLandscape;
+      cropMode = state.isLandscape ? 'full' : 'portrait';
+      if (state.isLandscape) {
+        stageWrapper.classList.add('landscape');
+        logConsole('info', '[DISPLAY_HAL] Guest confirmed landscape orientation.');
+        showToast('Screen: Landscape');
+      } else {
+        stageWrapper.classList.remove('landscape');
+        logConsole('info', '[DISPLAY_HAL] Guest confirmed portrait orientation.');
+        showToast('Screen: Portrait');
+      }
+      refreshScanoutFrame();
+      setTimeout(refreshScanoutFrame, 60);
+      setTimeout(refreshScanoutFrame, 180);
+    } catch (error) {
+      logConsole('err', '[DISPLAY_HAL] Orientation unchanged: ' + error.message);
+      showToast('Orientation change unavailable');
+    }
   });
   // Warm reboot requested through the studio's hardware control. WHY: the previous
   // version drove a staged "teardown -> boot splash -> reveal homescreen"
