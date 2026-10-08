@@ -481,6 +481,7 @@ impl ApkPackage {
     /// Parses an in-memory Android APK container package.
     pub fn parse(apk_bytes: &[u8]) -> Result<Self, ApkError> {
         let zip = ZipArchive::parse(apk_bytes)?;
+        zip.validate_compression()?;
         let manifest_bytes = zip.get_file("AndroidManifest.xml").ok_or(ApkError::MissingManifest)?;
         let manifest = decode_axml_manifest(manifest_bytes)?;
 
