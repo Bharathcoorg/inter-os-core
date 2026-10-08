@@ -467,7 +467,7 @@ impl FramebufferWriter {
     fn draw_status_bar(&mut self) {
         let y = PHONE_Y + 14;
         self.draw_string(PHONE_X + 22, y, "12:45", 1, COLOR_WHITE, Some(COLOR_FRAME_BG));
-        self.draw_string(PHONE_X + PHONE_W - 130, y, "5G  TCB  98%", 1, COLOR_MUTED, Some(COLOR_FRAME_BG));
+        self.draw_string(PHONE_X + PHONE_W - 180, y, "Signal: unavailable", 1, COLOR_MUTED, Some(COLOR_FRAME_BG));
     }
 
     fn draw_dynamic_island(&mut self) {
@@ -1549,32 +1549,34 @@ pub fn init(framebuffer: &'static mut FrameBuffer) {
     FRAMEBUFFER_WRITER.lock().init(framebuffer);
 }
 
-/// Draws the complete phone device shell on screen
+static LAST_CLEAR_BOUNDS: spin::Mutex<(usize, usize, usize, usize)> = spin::Mutex::new((usize::MAX, usize::MAX, usize::MAX, usize::MAX));
+
 /// Presents an ARGB8888 scanout buffer to the bootloader-provided physical framebuffer.
 /// This is the hardware-backed handoff used by the display driver on platforms where
 /// the bootloader exposes a linear framebuffer. No userspace pointer is retained.
 pub fn present_argb8888(pixels: &[u32], width: u32, height: u32) {
-    crate::arch::with_interrupts_disabled(|| {
-        let mut fb = FRAMEBUFFER_WRITER.lock();
-        let info = match fb.info { Some(info) => info, None => return };
-        let src_w = width as usize;
-        let src_h = height as usize;
-        if src_w == 0 || src_h == 0 || pixels.len() < src_w.saturating_mul(src_h) { return; }
+    let mut fb = FRAMEBUFFER_WRITER.lock();
+    let info = match fb.info { Some(info) => info, None => return };
+    let src_w = width as usize;
+    let src_h = height as usize;
+    if src_w == 0 || src_h == 0 || pixels.len() < src_w.saturating_mul(src_h) { return; }
 
-        // Fit the compositor's logical scanout into the real boot framebuffer while
-        // preserving aspect ratio. This keeps the portrait 720x1440 pipeline usable
-        // on landscape QEMU framebuffers without exposing hardware memory to clients.
-        let (dst_w, dst_h) = if src_w.saturating_mul(info.height) <= src_h.saturating_mul(info.width) {
-            let h = info.height;
-            ((src_w * h / src_h).max(1).min(info.width), h)
-        } else {
-            let w = info.width;
-            (w, (src_h * w / src_w).max(1).min(info.height))
-        };
-        let off_x = (info.width - dst_w) / 2;
-        let off_y = (info.height - dst_h) / 2;
+    // Fit the compositor's logical scanout into the real boot framebuffer while
+    // preserving aspect ratio. This keeps the portrait 720x1440 pipeline usable
+    // on landscape QEMU framebuffers without exposing hardware memory to clients.
+    let (dst_w, dst_h) = if src_w.saturating_mul(info.height) <= src_h.saturating_mul(info.width) {
+        let h = info.height;
+        ((src_w * h / src_h).max(1).min(info.width), h)
+    } else {
+        let w = info.width;
+        (w, (src_h * w / src_w).max(1).min(info.height))
+    };
+    let off_x = (info.width - dst_w) / 2;
+    let off_y = (info.height - dst_h) / 2;
 
-        // Clear letterbox borders outside the active viewport only
+    // Clear letterbox borders outside the active viewport only when geometry changes
+    let mut last_bounds = LAST_CLEAR_BOUNDS.lock();
+    if *last_bounds != (off_x, off_y, dst_w, dst_h) {
         if off_x > 0 {
             fb.draw_rect(0, 0, off_x, info.height, COLOR_OBSIDIAN);
             fb.draw_rect(off_x + dst_w, 0, info.width.saturating_sub(off_x + dst_w), info.height, COLOR_OBSIDIAN);
@@ -1583,6 +1585,9 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32) {
             fb.draw_rect(off_x, 0, dst_w, off_y, COLOR_OBSIDIAN);
             fb.draw_rect(off_x, off_y + dst_h, dst_w, info.height.saturating_sub(off_y + dst_h), COLOR_OBSIDIAN);
         }
+        *last_bounds = (off_x, off_y, dst_w, dst_h);
+    }
+    drop(last_bounds);
         if src_w == info.width && src_h == info.height && off_x == 0 && off_y == 0 {
             if let Some(ptr) = fb.buffer_ptr {
                 let bpp = info.bytes_per_pixel;
@@ -1830,8 +1835,7 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32) {
                 }
             }
         }
-    });
-}
+    }
 
 
 pub fn draw_mobile_shell() {

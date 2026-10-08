@@ -198,6 +198,7 @@ pub const HOME_LOG_CAP: usize = 128;
 const LOG_TAIL: &[u8] = b"Home surface rendered.";
 
 /// The surface's bands, measured once per call rather than retyped per pixel.
+#[derive(Clone, Copy)]
 struct Frame {
     greeting: Rect,
     weather: Rect,
@@ -519,6 +520,7 @@ impl DeckPlan {
 /// test and by [`deck_columns`], which must stay cheap enough to call from a tap
 /// handler, while this is the painter's plan and is built once per rendered frame.
 struct Paint {
+    frame: Frame,
     clock: Option<Run>,
     greeting: [Run; 3],
     weather: Run,
@@ -688,6 +690,7 @@ fn build(state: &LauncherState) -> Paint {
     let pill_w = space::XXL * 5;
 
     Paint {
+        frame: f,
         clock,
         greeting,
         weather,
@@ -1405,28 +1408,32 @@ fn nav_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<
 // -----------------------------------------------------------------------------
 
 pub fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
-    let theme = active_theme();
-    let f = frame();
-    // WHY the plan is taken once, up front: it is the only place in this function
-    // where anything other than a pixel test happens.
     let p = paint(x, y, state);
-    if let Some(c) = status_bar_pixel(x, y, &theme, p) {
-        return c;
-    }
-    if let Some(c) = greeting_pixel(x, y, &f, p, &theme) {
-        return c;
-    }
-    if let Some(c) = card_pixel(x, y, &f, p, &theme) {
-        return c;
-    }
-    if let Some(c) = deck_pixel(x, y, &f, p, &theme) {
-        return c;
-    }
-    if let Some(c) = search_pixel(x, y, &f, p, &theme) {
-        return c;
-    }
-    if let Some(c) = nav_pixel(x, y, &f, p, &theme) {
-        return c;
+    let theme = active_theme();
+    if y < STATUS_BAR_HEIGHT {
+        if let Some(c) = status_bar_pixel(x, y, &theme, p) {
+            return c;
+        }
+    } else if y < 168 {
+        if let Some(c) = greeting_pixel(x, y, &p.frame, p, &theme) {
+            return c;
+        }
+    } else if y < 680 {
+        if let Some(c) = card_pixel(x, y, &p.frame, p, &theme) {
+            return c;
+        }
+    } else if y >= 700 && y < 1340 {
+        if let Some(c) = deck_pixel(x, y, &p.frame, p, &theme) {
+            return c;
+        }
+    } else if y >= 1340 && y < 1392 {
+        if let Some(c) = search_pixel(x, y, &p.frame, p, &theme) {
+            return c;
+        }
+    } else if y >= 1392 {
+        if let Some(c) = nav_pixel(x, y, &p.frame, p, &theme) {
+            return c;
+        }
     }
     backdrop(&theme, y)
 }

@@ -15,7 +15,8 @@ use screens::*;
 
 const W: usize = SCREEN_WIDTH;
 const H: usize = SCREEN_HEIGHT;
-const CHUNK: usize = 4096;
+const CHUNK: usize = 32768;
+static mut CHUNK_BUF: [u32; CHUNK] = [0; CHUNK];
 
 // -----------------------------------------------------------------------------
 // Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')
@@ -751,28 +752,40 @@ fn is_drag(kind: u8) -> bool {
 }
 
 #[inline(never)]
-fn render_view(surface: u32, state: &LauncherState) {
+fn render_band(surface: u32, state: &LauncherState, min_y: usize, max_y: usize) {
     let draw = screen_renderer(state.current_view);
-    let frame_start = std::get_ticks(1).ok();
-    let mut chunk = [0u32; CHUNK];
-    let total = W * H;
-    let mut offset = 0;
-    while offset < total {
+    let min_y = min_y.min(H);
+    let max_y = max_y.min(H);
+    if min_y >= max_y {
+        return;
+    }
+    let start_offset = min_y * W;
+    let end_offset = max_y * W;
+    let mut offset = start_offset;
+    while offset < end_offset {
         let _ = std::service_heartbeat(10);
-        let count = (total - offset).min(CHUNK);
+        let count = (end_offset - offset).min(CHUNK);
         let mut x = offset % W;
         let mut y = offset / W;
-        for i in 0..count {
-            chunk[i] = draw(x, y, state);
-            x += 1;
-            if x == W {
-                x = 0;
-                y += 1;
+        unsafe {
+            for i in 0..count {
+                CHUNK_BUF[i] = draw(x, y, state);
+                x += 1;
+                if x == W {
+                    x = 0;
+                    y += 1;
+                }
             }
+            let _ = std::surface_write(4, surface, offset, &CHUNK_BUF[..count]);
         }
-        let _ = std::surface_write(4, surface, offset, &chunk[..count]);
         offset += count;
     }
+}
+
+#[inline(never)]
+fn render_view(surface: u32, state: &LauncherState) {
+    let frame_start = std::get_ticks(1).ok();
+    render_band(surface, state, 0, H);
     match state.current_view {
         ViewMode::PinEntry => {
             std::log(0, "[LAUNCHER] render_pin_entry complete: Credential entry presented.").ok();
@@ -1091,6 +1104,7 @@ pub extern "C" fn _start() -> ! {
 
             if state.active_child.is_none() && (events & std::EVENT_TIMER_TICK) != 0 {
                 refresh_ticks += 1;
+                let old_clock = state.clock_time;
                 refresh_clock(&mut state);
                 refresh_notifications(&mut state);
                 if state.current_view == ViewMode::HomeScreen {
@@ -1102,7 +1116,13 @@ pub extern "C" fn _start() -> ! {
                             render_view(surface, &state);
                             let _ = std::surface_flip(4);
                         }
+                    } else if state.clock_time != old_clock {
+                        render_band(surface, &state, 0, 48);
+                        let _ = std::surface_flip(4);
                     }
+                } else if state.current_view == ViewMode::LockScreen && state.clock_time != old_clock {
+                    render_band(surface, &state, 0, 360);
+                    let _ = std::surface_flip(4);
                 }
             }
 

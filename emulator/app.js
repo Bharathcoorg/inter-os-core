@@ -463,6 +463,17 @@ document.addEventListener('DOMContentLoaded', () => {
   // =========================================================================
   const screenLiveScanout = document.getElementById('screen-live-scanout');
   const liveScanoutImg = document.getElementById('live-scanout-img');
+  const liveScanoutCanvas = document.getElementById('live-scanout-canvas');
+  let scanoutCtx = null;
+  if (liveScanoutCanvas) {
+    liveScanoutCanvas.style.display = 'block';
+    if (liveScanoutImg) liveScanoutImg.style.display = 'none';
+    scanoutCtx = liveScanoutCanvas.getContext('2d', { alpha: false, desynchronized: true });
+    if (scanoutCtx) {
+      scanoutCtx.imageSmoothingEnabled = true;
+      scanoutCtx.imageSmoothingQuality = 'high';
+    }
+  }
 
   // Gestures
   const btnGestureActivity = document.getElementById('btn-gesture-activity');
@@ -474,17 +485,33 @@ document.addEventListener('DOMContentLoaded', () => {
   let cropMode = 'portrait'; // 'portrait' (720x1440 cropped) or 'full' (1280x720 complete scanout)
   let scanoutTimer = null;
   let isBooting = false;
+  let lastFrameSeq = 0;
+  let scanoutInFlight = false;
 
-  // Portrait crop shows the guest's phone-shaped surface; 'full' shows the whole
-  // scanout. Both are the guest's own pixels, so this only changes how much of
-  // the guest's framebuffer the monitor is showing.
   function setScanoutMode(mode) {
     cropMode = mode;
-    refreshScanoutFrame();
+    lastFrameSeq = 0;
+    refreshScanoutFrame(true);
   }
 
   let transportFps = 0;
-  let guestFps = 60;
+  let guestFps = 'Unknown';
+  let measuredFps = 0;
+  let frameCount = 0;
+  let fpsTimer = performance.now();
+  let streamRafId = null;
+  let isStreamActive = true;
+
+  async function queryMetrics() {
+    try {
+      const r = await fetch('/api/screen/metrics');
+      if (r.ok) {
+        const d = await r.json();
+        if (d.transport_fps !== undefined) transportFps = d.transport_fps;
+      }
+    } catch (_) {}
+  }
+  setInterval(queryMetrics, 1000);
 
   function updateFpsCounter() {
     frameCount++;
@@ -507,31 +534,72 @@ document.addEventListener('DOMContentLoaded', () => {
     refreshScanoutFrame();
   }
 
-  function refreshScanoutFrame(forceImmediate = false) {
-    if (!liveScanoutImg) return;
+  async function refreshScanoutFrame(forceImmediate = false) {
     if (scanoutInFlight && !forceImmediate) return;
     scanoutInFlight = true;
-    const orientParam = (state.isLandscape || cropMode === 'full') ? '&orientation=landscape&full=1' : '';
-    const url = `/api/screen/frame?t=${Date.now()}${orientParam}`;
-    const preloader = new Image();
-    preloader.onload = () => {
-      // Swap source instantaneously after image decode with zero flicker
-      liveScanoutImg.src = preloader.src;
+
+    try {
+      const resp = await fetch(`/api/screen/raw?seq=${lastFrameSeq}`);
+      if (resp.status === 200) {
+        const buffer = await resp.arrayBuffer();
+        if (buffer.byteLength >= 16) {
+          const view = new DataView(buffer, 0, 16);
+          const m0 = view.getUint8(0);
+          const m1 = view.getUint8(1);
+          const m2 = view.getUint8(2);
+          const m3 = view.getUint8(3);
+          // Magic 'IOSF' (0x49, 0x4F, 0x53, 0x46)
+          if (m0 === 0x49 && m1 === 0x4F && m2 === 0x53 && m3 === 0x46) {
+            const width = view.getUint16(4);
+            const height = view.getUint16(6);
+            const seq = view.getUint32(8);
+            lastFrameSeq = seq;
+            const pixels = new Uint8ClampedArray(buffer, 16);
+
+            if (scanoutCtx && liveScanoutCanvas) {
+              if (liveScanoutCanvas.width !== width || liveScanoutCanvas.height !== height) {
+                liveScanoutCanvas.width = width;
+                liveScanoutCanvas.height = height;
+              }
+              const imgData = new ImageData(pixels, width, height);
+              scanoutCtx.putImageData(imgData, 0, 0);
+            }
+          }
+        }
+      } else if (resp.status === 503) {
+        await fallbackRefreshFrame();
+      }
+    } catch (_) {
+      await fallbackRefreshFrame();
+    } finally {
       scanoutInFlight = false;
       updateFpsCounter();
       if (isStreamActive) {
         streamRafId = requestAnimationFrame(runHighRefreshLoop);
       }
-    };
-    preloader.onerror = () => {
-      scanoutInFlight = false;
-      if (isStreamActive) {
-        setTimeout(() => {
-          streamRafId = requestAnimationFrame(runHighRefreshLoop);
-        }, 20);
-      }
-    };
-    preloader.src = url;
+    }
+  }
+
+  function fallbackRefreshFrame() {
+    return new Promise((resolve) => {
+      const orientParam = (state.isLandscape || cropMode === 'full') ? '&orientation=landscape&full=1' : '';
+      const url = `/api/screen/frame?t=${Date.now()}${orientParam}`;
+      const img = new Image();
+      img.onload = () => {
+        if (scanoutCtx && liveScanoutCanvas) {
+          if (liveScanoutCanvas.width !== img.naturalWidth || liveScanoutCanvas.height !== img.naturalHeight) {
+            liveScanoutCanvas.width = img.naturalWidth;
+            liveScanoutCanvas.height = img.naturalHeight;
+          }
+          scanoutCtx.drawImage(img, 0, 0);
+        } else if (liveScanoutImg) {
+          liveScanoutImg.src = img.src;
+        }
+        resolve();
+      };
+      img.onerror = () => resolve();
+      img.src = url;
+    });
   }
 
   function startScanoutStream() {
@@ -1000,38 +1068,33 @@ document.addEventListener('DOMContentLoaded', () => {
   emuBtnReboot?.addEventListener('click', executeWarmReboot);
 
   // Back / Home / Recents (◁ ○ ▢).
-  // WHY: the studio has no screens to switch between, so these inject the guest's
-  // own navigation gestures instead. The guest kernel changes its view mode and
-  // redraws its framebuffer; the monitor just shows the result.
+  // Directly dispatches canonical kernel navigation gestures.
   emuBtnBack?.addEventListener('click', () => {
     dispatchHardwareGesture('Back (◁)', {
-      action: 'swipe',
+      action: 'back',
       coords: 'portrait',
-      x: 600,
-      y: 720,
-      x2: 120,
-      y2: 720,
-      steps: 5
+      x: 0,
+      y: 0
     });
   });
 
   // Home Button (○)
   emuBtnHome?.addEventListener('click', () => {
     dispatchHardwareGesture('Home (○)', {
-      action: 'tap',
+      action: 'home',
       coords: 'portrait',
       x: 360,
-      y: 1408
+      y: 1400
     });
   });
 
   // Recents / App Switcher (▢) -> Activity Space
   emuBtnRecents?.addEventListener('click', () => {
     dispatchHardwareGesture('Recents / Activity Space (▢)', {
-      action: 'tap',
+      action: 'recents',
       coords: 'portrait',
       x: 580,
-      y: 1404
+      y: 1400
     });
   });
 

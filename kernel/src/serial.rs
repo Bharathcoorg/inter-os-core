@@ -450,6 +450,31 @@ fn handle_rapp_command(s: &str) -> bool {
         return true;
     }
 
+    if verb.eq_ignore_ascii_case("NAV") {
+        let action = parts.next().map(|v| v.to_ascii_uppercase());
+        let kind = match action.as_deref() {
+            Some("HOME") => Some(crate::input::GestureKind::Home),
+            Some("BACK") => Some(crate::input::GestureKind::Back),
+            Some("RECENTS") | Some("OVERVIEW") => Some(crate::input::GestureKind::Recents),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            let ev = crate::drivers::input::InputEvent::from_canonical(crate::input::GestureEvent {
+                kind,
+                position: crate::input::Point { x: 360, y: 1400 },
+                delta_x: 0,
+                delta_y: 0,
+                pointer_id: 0,
+                scale_milli: 1000,
+            });
+            crate::drivers::input::dispatch_to_focused_window(ev);
+            serial_println!("[COM1 INPUT] NAV {:?}", kind);
+        } else {
+            serial_println!("[COM1 INPUT] REJECT unknown NAV action");
+        }
+        return true;
+    }
+
     if verb.eq_ignore_ascii_case("ORIENTATION") {
         let opt = parts.next().map(|v| v.to_ascii_uppercase());
         let set_kms_orientation = |orient: crate::drivers::display_kms::DisplayOrientation| {

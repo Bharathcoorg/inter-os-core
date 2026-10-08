@@ -1658,7 +1658,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             // SurfaceWrite: a1=display-cap slot, a2=surface id, a3=offset pixels,
             // a4=pixel buffer pointer, a5=pixel count.
             let count = a5 as usize;
-            if count == 0 || count > 4096 { return SyscallResult::InvalidArguments as i64; }
+            if count == 0 || count > 65536 { return SyscallResult::InvalidArguments as i64; }
             let byte_len = match count.checked_mul(core::mem::size_of::<u32>()) {
                 Some(b) => b,
                 None => return SyscallResult::InvalidArguments as i64,
@@ -1670,14 +1670,32 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 Ok(slice) => slice,
                 Err(_) => return SyscallResult::InvalidArguments as i64,
             };
-            let mut pixels = alloc::vec![0u32; count];
-            if user_slice.copy_to_kernel_typed(&mut pixels).is_err() {
+            let owner = match require_display_service(a1 as usize) {
+                Ok(o) => o,
+                Err(e) => return e as i64,
+            };
+            let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+            let surface = match kms.surfaces.iter_mut().find(|s| s.id == a2 as u32) {
+                Some(s) => s,
+                None => return SyscallResult::DeviceError as i64,
+            };
+            if surface.owner_task != owner.0 {
+                return SyscallResult::PermissionDenied as i64;
+            }
+            let offset = a3 as usize;
+            let end = match offset.checked_add(count) {
+                Some(e) => e,
+                None => return SyscallResult::InvalidArguments as i64,
+            };
+            if end > surface.pixels.len() {
                 return SyscallResult::InvalidArguments as i64;
             }
-            match sys_surface_write(a1 as usize, a2 as u32, a3 as usize, &pixels) {
-                Ok(n) => n as i64,
-                Err(e) => e as i64,
+            if user_slice.copy_to_kernel_typed(&mut surface.pixels[offset..end]).is_err() {
+                return SyscallResult::InvalidArguments as i64;
             }
+            surface.dirty = true;
+            kms.frame_dirty = true;
+            count as i64
         }
         74 => {
             // SurfaceDestroy: a1=display-cap slot, a2=surface id
@@ -3287,7 +3305,7 @@ pub fn sys_surface_create(cap_slot: usize, width: u32, height: u32, z_order: u32
 /// Writes bounded ARGB pixels into an owned display surface.
 pub fn sys_surface_write(cap_slot: usize, surface_id: u32, offset: usize, pixels: &[u32]) -> Result<usize, SyscallResult> {
     let owner = require_display_service(cap_slot)?;
-    if pixels.is_empty() || pixels.len() > 4096 {
+    if pixels.is_empty() || pixels.len() > 65536 {
         return Err(SyscallResult::InvalidArguments);
     }
     let mut kms = crate::drivers::display_kms::DRM_KMS.lock();

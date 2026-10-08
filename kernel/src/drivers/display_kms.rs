@@ -429,22 +429,13 @@ impl DrmKmsController {
                 }
 
                 if landscape {
+                    let scanout_w = self.scanout_width as usize;
                     if is_right {
-                        let y_lut_lr: Vec<usize> = if dst_w <= 1 {
-                            vec![0]
-                        } else {
-                            (0..dst_w).map(|dx| 1439usize.saturating_sub((dx * 1439 + (dst_w - 1) / 2) / (dst_w - 1))).collect()
-                        };
-                        let x_lut_lr: Vec<usize> = if dst_h <= 1 {
-                            vec![0]
-                        } else {
-                            (0..dst_h).map(|dy| ((dy * 719 + (dst_h - 1) / 2) / (dst_h - 1)).min(719)).collect()
-                        };
                         for dy in 0..dst_h {
-                            let src_x = x_lut_lr[dy];
-                            let dst_y_offset = (dst_y + dy) * self.scanout_width as usize;
+                            let src_x = if dst_h <= 1 { 0 } else { ((dy * 719 + (dst_h - 1) / 2) / (dst_h - 1)).min(719) };
+                            let dst_y_offset = (dst_y + dy) * scanout_w;
                             for dx in 0..dst_w {
-                                let src_y = y_lut_lr[dx];
+                                let src_y = if dst_w <= 1 { 0 } else { 1439usize.saturating_sub((dx * 1439 + (dst_w - 1) / 2) / (dst_w - 1)) };
                                 let src_idx = src_y * 720 + src_x;
                                 let dst_idx = dst_y_offset + dst_x + dx;
                                 if src_idx < surface.pixels.len() && dst_idx < self.back_buffer.len() {
@@ -453,21 +444,11 @@ impl DrmKmsController {
                             }
                         }
                     } else {
-                        let y_lut_ll: Vec<usize> = if dst_w <= 1 {
-                            vec![0]
-                        } else {
-                            (0..dst_w).map(|dx| (dx * 1439 + (dst_w - 1) / 2) / (dst_w - 1)).collect()
-                        };
-                        let x_lut_ll: Vec<usize> = if dst_h <= 1 {
-                            vec![0]
-                        } else {
-                            (0..dst_h).map(|dy| 719usize.saturating_sub((dy * 719 + (dst_h - 1) / 2) / (dst_h - 1))).collect()
-                        };
                         for dy in 0..dst_h {
-                            let src_x = x_lut_ll[dy];
-                            let dst_y_offset = (dst_y + dy) * self.scanout_width as usize;
+                            let src_x = if dst_h <= 1 { 0 } else { 719usize.saturating_sub((dy * 719 + (dst_h - 1) / 2) / (dst_h - 1)) };
+                            let dst_y_offset = (dst_y + dy) * scanout_w;
                             for dx in 0..dst_w {
-                                let src_y = y_lut_ll[dx];
+                                let src_y = if dst_w <= 1 { 0 } else { (dx * 1439 + (dst_w - 1) / 2) / (dst_w - 1) };
                                 let src_idx = src_y * 720 + src_x;
                                 let dst_idx = dst_y_offset + dst_x + dx;
                                 if src_idx < surface.pixels.len() && dst_idx < self.back_buffer.len() {
@@ -477,23 +458,26 @@ impl DrmKmsController {
                         }
                     }
                 } else {
-                    let x_lut: Vec<usize> = if dst_w <= 1 {
-                        vec![0]
+                    let scanout_w = self.scanout_width as usize;
+                    if dst_w == 360 && dst_h == 720 {
+                        for dy in 0..720 {
+                            let src_y = dy * 2;
+                            let src_row = &surface.pixels[src_y * 720..(src_y + 1) * 720];
+                            let dst_row_start = (dst_y + dy) * scanout_w + dst_x;
+                            let dst_slice = &mut self.back_buffer[dst_row_start..dst_row_start + 360];
+                            for dx in 0..360 {
+                                dst_slice[dx] = src_row[dx * 2];
+                            }
+                        }
                     } else {
-                        (0..dst_w).map(|dx| (dx * 719 + (dst_w - 1) / 2) / (dst_w - 1)).collect()
-                    };
-                    let y_lut: Vec<usize> = if dst_h <= 1 {
-                        vec![0]
-                    } else {
-                        (0..dst_h).map(|dy| (dy * 1439 + (dst_h - 1) / 2) / (dst_h - 1)).collect()
-                    };
-                    for dy in 0..dst_h {
-                        let src_y = y_lut[dy];
-                        let src_row = &surface.pixels[src_y * 720..(src_y + 1) * 720];
-                        let dst_row_start = (dst_y + dy) * self.scanout_width as usize + dst_x;
-                        for dx in 0..dst_w {
-                            let src_x = x_lut[dx];
-                            self.back_buffer[dst_row_start + dx] = src_row[src_x];
+                        for dy in 0..dst_h {
+                            let src_y = if dst_h <= 1 { 0 } else { ((dy * 1439 + (dst_h - 1) / 2) / (dst_h - 1)).min(1439) };
+                            let src_row = &surface.pixels[src_y * 720..(src_y + 1) * 720];
+                            let dst_row_start = (dst_y + dy) * scanout_w + dst_x;
+                            for dx in 0..dst_w {
+                                let src_x = if dst_w <= 1 { 0 } else { ((dx * 719 + (dst_w - 1) / 2) / (dst_w - 1)).min(719) };
+                                self.back_buffer[dst_row_start + dx] = src_row[src_x];
+                            }
                         }
                     }
                 }

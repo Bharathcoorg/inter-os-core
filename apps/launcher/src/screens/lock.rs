@@ -821,10 +821,15 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     let color = lock_wallpaper_pixel(f, x, y);
 
     // If the PIN pad is active (or on first-boot uninitialized state), render the PIN pad!
-    if state.pin_pad_visible || state.lock_state == interos_std::UserLockState::Uninitialized {
+    let pin_active = state.pin_pad_visible || state.lock_state == interos_std::UserLockState::Uninitialized;
+    if pin_active {
         if let Some(pin_color) = lock_pin_pad_pixel(color, x, y, state) {
             return pin_color;
         }
+    } else if y >= 360 && y < 1080 {
+        // Fast path: between the clock/date band (y <= 360) and the padlock/hint (y >= 1080),
+        // there are NO UI elements on the lock screen when PIN pad is inactive.
+        return color;
     }
 
     // 2. Status bar. The panel draws its status glyphs in near-black because

@@ -753,44 +753,294 @@ def send_qemu_monitor_cmd(cmd_str, host='127.0.0.1', port=MONITOR_PORT, timeout=
         return False, "Failed to send monitor command"
 
 
-_last_frame_cache = {
-    'portrait': None,
-    'portrait_jpeg': None,
-    'landscape': None,
-    'landscape_jpeg': None,
-    'full': None,
-    'full_jpeg': None,
-    'time': 0.0,
-}
+current_device_orientation = 'portrait'
+_capture_lock = threading.Lock()
+_last_frame_cache = {}
 _transport_metrics = {
     'fps': 0.0,
     'frame_us': 0,
     'frames_in_second': 0,
     'second_start': time.time(),
 }
-_capture_lock = threading.Lock()
-current_device_orientation = 'portrait'
+
+
+class VncScanoutClient:
+    """
+    Persistent TCP RFB/VNC client connected directly to QEMU's live scanout.
+    Eliminates all disk I/O, PPM files, and synchronous HMP screendump stalls.
+    Maintains an in-memory scanout buffer, extracts phone viewport, and streams
+    raw binary frames and memory-cached images at high refresh rates.
+    """
+    def __init__(self, host='127.0.0.1', port=VNC_PORT):
+        self.host = host
+        self.port = port
+        self.running = True
+        self.connected = False
+        self.width = 1280
+        self.height = 720
+        self.scanout_buf = bytearray(1280 * 720 * 4)
+        self.seq = 0
+        self.lock = threading.Lock()
+        self.frame_cond = threading.Condition(self.lock)
+        self.latest_raw_rgba = None
+        self.latest_raw_w = 0
+        self.latest_raw_h = 0
+        self.latest_raw_seq = 0
+        self.latest_raw_time = 0.0
+        self.latest_binary_msg = None
+        self.latest_jpeg = None
+        self.latest_png = None
+        self.metrics = {
+            'fps': 0.0,
+            'frame_us': 0,
+            'frames_total': 0,
+            'dropped_frames': 0,
+            'second_start': time.time(),
+            'frames_in_second': 0,
+        }
+
+    def start(self):
+        t = threading.Thread(target=self._worker_loop, daemon=True)
+        t.name = "VncScanoutWorker"
+        t.start()
+
+    def _worker_loop(self):
+        while self.running:
+            try:
+                self._run_session()
+            except Exception as e:
+                self.connected = False
+                time.sleep(0.5)
+
+    def _recv_exact(self, s, n):
+        buf = bytearray(n)
+        view = memoryview(buf)
+        pos = 0
+        while pos < n:
+            chunk = s.recv_into(view[pos:])
+            if chunk == 0:
+                raise EOFError("Socket closed")
+            pos += chunk
+        return bytes(buf)
+
+    def _run_session(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(3.0)
+        s.connect((self.host, self.port))
+
+        ver = self._recv_exact(s, 12)
+        if not ver.startswith(b'RFB'):
+            s.close()
+            return
+        s.sendall(b'RFB 003.008\n')
+
+        cnt = self._recv_exact(s, 1)
+        if not cnt:
+            s.close()
+            return
+        self._recv_exact(s, cnt[0])
+        s.sendall(b'\x01')  # Security: None
+        sec_res = self._recv_exact(s, 4)
+        if sec_res != b'\x00\x00\x00\x00':
+            s.close()
+            return
+
+        s.sendall(b'\x01')  # Shared session
+
+        sinit = self._recv_exact(s, 24)
+        w, h = struct.unpack('>HH', sinit[:4])
+        name_len = struct.unpack('>I', sinit[20:24])[0]
+        if name_len > 0:
+            self._recv_exact(s, name_len)
+
+        self.width = w
+        self.height = h
+        global guest_framebuffer_size
+        guest_framebuffer_size = (w, h)
+        self.scanout_buf = bytearray(w * h * 4)
+        self.connected = True
+
+        # Encodings: Raw (0), DesktopSize (-239)
+        s.sendall(struct.pack('>BxHii', 2, 2, 0, -239))
+
+        # Request initial full update
+        s.sendall(struct.pack('>BBHHHH', 3, 0, 0, 0, self.width, self.height))
+        s.settimeout(0.8)
+
+        while self.running:
+            try:
+                hdr = self._recv_exact(s, 4)
+                msg_type, _, num_rects = struct.unpack('>BBH', hdr)
+                if msg_type != 0:
+                    continue
+
+                t_frame_start = time.time()
+                for _ in range(num_rects):
+                    rh = self._recv_exact(s, 12)
+                    rx, ry, rw, rh_val, enc = struct.unpack('>HHHHi', rh)
+                    if enc == -239:
+                        self.width, self.height = rw, rh_val
+                        guest_framebuffer_size = (rw, rh_val)
+                        self.scanout_buf = bytearray(rw * rh_val * 4)
+                        continue
+                    if enc == 0:
+                        total_bytes = rw * rh_val * 4
+                        mv = memoryview(self.scanout_buf)
+                        if rw == self.width and rx == 0:
+                            dst_offset = ry * self.width * 4
+                            pos = 0
+                            while pos < total_bytes:
+                                n = s.recv_into(mv[dst_offset + pos : dst_offset + total_bytes], min(131072, total_bytes - pos))
+                                if n == 0:
+                                    raise EOFError()
+                                pos += n
+                        else:
+                            temp_buf = bytearray(total_bytes)
+                            t_mv = memoryview(temp_buf)
+                            pos = 0
+                            while pos < total_bytes:
+                                n = s.recv_into(t_mv[pos:], min(131072, total_bytes - pos))
+                                if n == 0:
+                                    raise EOFError()
+                                pos += n
+                            for row in range(rh_val):
+                                src_off = row * rw * 4
+                                dst_off = ((ry + row) * self.width + rx) * 4
+                                self.scanout_buf[dst_off : dst_off + rw * 4] = temp_buf[src_off : src_off + rw * 4]
+
+                self._publish_frame(t_frame_start)
+                if self.height < 720 and check_launcher_ready():
+                    break
+                s.sendall(struct.pack('>BBHHHH', 3, 1, 0, 0, self.width, self.height))
+            except socket.timeout:
+                try:
+                    s.sendall(struct.pack('>BBHHHH', 3, 1, 0, 0, self.width, self.height))
+                except Exception:
+                    break
+            except Exception:
+                break
+        s.close()
+        self.connected = False
+
+    def _publish_frame(self, t_start):
+        now = time.time()
+        w, h = self.width, self.height
+        is_landscape = (current_device_orientation == 'landscape')
+        box = letterbox_box(w, h)
+        if not box:
+            return
+
+        off_x, off_y, x2, y2 = box
+        crop_w = x2 - off_x
+        crop_h = y2 - off_y
+
+        try:
+            import numpy as np
+            arr = np.frombuffer(self.scanout_buf, dtype=np.uint8).reshape((h, w, 4))
+            if is_landscape:
+                crop = arr
+                crop_w, crop_h = w, h
+            else:
+                crop = arr[off_y:y2, off_x:x2]
+            rgba = crop[:, :, [2, 1, 0, 3]].tobytes()
+        except Exception:
+            # Fallback pure-python slice & BGRA->RGBA
+            out = bytearray(crop_w * crop_h * 4)
+            for row in range(crop_h):
+                src_row = ((off_y + row) * w + off_x) * 4
+                dst_row = row * crop_w * 4
+                for col in range(crop_w):
+                    s_idx = src_row + col * 4
+                    d_idx = dst_row + col * 4
+                    out[d_idx] = self.scanout_buf[s_idx + 2]      # R
+                    out[d_idx + 1] = self.scanout_buf[s_idx + 1]  # G
+                    out[d_idx + 2] = self.scanout_buf[s_idx]      # B
+                    out[d_idx + 3] = 0xFF                         # A
+            rgba = bytes(out)
+
+        with self.frame_cond:
+            self.seq += 1
+            self.latest_raw_rgba = rgba
+            self.latest_raw_w = crop_w
+            self.latest_raw_h = crop_h
+            self.latest_raw_seq = self.seq
+            self.latest_raw_time = now
+            ts_ms = int(now * 1000) & 0xFFFFFFFF
+            hdr = struct.pack('>4sHHII', b'IOSF', crop_w, crop_h, self.seq, ts_ms)
+            self.latest_binary_msg = hdr + rgba
+            self.latest_jpeg = None
+            self.latest_png = None
+
+            elapsed_us = int((now - t_start) * 1_000_000)
+            self.metrics['frame_us'] = elapsed_us
+            self.metrics['frames_total'] += 1
+            self.metrics['frames_in_second'] += 1
+            if now - self.metrics['second_start'] >= 1.0:
+                self.metrics['fps'] = self.metrics['frames_in_second'] / (now - self.metrics['second_start'])
+                self.metrics['frames_in_second'] = 0
+                self.metrics['second_start'] = now
+            _transport_metrics['fps'] = self.metrics['fps']
+            _transport_metrics['frame_us'] = elapsed_us
+
+            self.frame_cond.notify_all()
+
+    def get_binary_frame(self, client_seq=0, timeout=0.040):
+        with self.frame_cond:
+            if self.seq <= client_seq and self.connected:
+                self.frame_cond.wait(timeout)
+            return self.latest_binary_msg, self.seq
+
+    def get_image_frame(self, prefer_jpeg=True):
+        with self.frame_cond:
+            if not self.latest_raw_rgba:
+                return None, None
+            if prefer_jpeg and self.latest_jpeg:
+                return self.latest_jpeg, "image/jpeg"
+            if not prefer_jpeg and self.latest_png:
+                return self.latest_png, "image/png"
+
+            w, h = self.latest_raw_w, self.latest_raw_h
+            rgba = self.latest_raw_rgba
+
+        from PIL import Image
+        img = Image.frombuffer("RGBA", (w, h), rgba, "raw", "RGBA", 0, 1)
+        rgb_img = img.convert("RGB")
+        buf = io.BytesIO()
+        if prefer_jpeg:
+            rgb_img.save(buf, format="JPEG", quality=85)
+            data = buf.getvalue()
+            with self.frame_cond:
+                self.latest_jpeg = data
+            return data, "image/jpeg"
+        else:
+            rgb_img.save(buf, format="PNG", compress_level=1)
+            data = buf.getvalue()
+            with self.frame_cond:
+                self.latest_png = data
+            return data, "image/png"
+
+
+vnc_client = VncScanoutClient()
+vnc_client.start()
 
 
 def capture_qemu_screen_frame(full_scanout=False, orientation=None, prefer_jpeg=True):
     """
-    Captures live QEMU scanout buffer via persistent monitor screendump.
-    Returns (bytes, content_type) or (None, error_str).
-    Fast in-memory cache return achieves 30-60 FPS throughput.
+    Captures live QEMU scanout buffer. Prefers persistent VNC memory buffer.
+    Falls back to screendump only when VNC client is not yet established.
     """
     global _last_frame_cache, current_device_orientation, _transport_metrics
-    target_orient = orientation or current_device_orientation
-    is_landscape = (target_orient == 'landscape') or full_scanout
-    mode_key = 'full' if full_scanout else ('landscape' if is_landscape else 'portrait')
     now = time.time()
 
-    cache_key = f"{mode_key}_jpeg" if prefer_jpeg else mode_key
-    cache_age = now - _last_frame_cache.get('time', 0.0)
-    if _last_frame_cache.get(cache_key) and cache_age < 0.040:
-        return _last_frame_cache[cache_key], ("image/jpeg" if prefer_jpeg else "image/png")
+    # Fast path: in-memory VNC client (zero disk I/O, zero PPM)
+    if vnc_client.connected and vnc_client.latest_raw_rgba is not None:
+        img_bytes, content_type = vnc_client.get_image_frame(prefer_jpeg=prefer_jpeg)
+        if img_bytes:
+            return img_bytes, content_type
 
-    # Avoid concurrent disk contention on PPM dump
+    # Fallback path if VNC not ready: monitor screendump
     if not _capture_lock.acquire(blocking=False):
+        cache_key = 'portrait_jpeg' if prefer_jpeg else 'portrait'
         if _last_frame_cache.get(cache_key):
             return _last_frame_cache[cache_key], ("image/jpeg" if prefer_jpeg else "image/png")
         return None, "Capture busy"
@@ -802,45 +1052,17 @@ def capture_qemu_screen_frame(full_scanout=False, orientation=None, prefer_jpeg=
         ppm_path = os.path.join(dump_dir, "live_scanout.ppm").replace("\\", "/")
 
         ok, resp = send_qemu_monitor_cmd(f'screendump {ppm_path}')
-        if not ok:
-            t = query_qemu_monitor()
-            if not t["qemu_alive"]:
-                launch_qemu_profile(active_profile_key)
+        if not ok or not os.path.exists(ppm_path):
+            cache_key = 'portrait_jpeg' if prefer_jpeg else 'portrait'
             if _last_frame_cache.get(cache_key):
                 return _last_frame_cache[cache_key], ("image/jpeg" if prefer_jpeg else "image/png")
-            return None, f"QEMU monitor screendump failed: {resp}"
-
-        if not os.path.exists(ppm_path):
-            if _last_frame_cache.get(cache_key):
-                return _last_frame_cache[cache_key], ("image/jpeg" if prefer_jpeg else "image/png")
-            return None, "Screendump PPM file not produced"
+            return None, f"QEMU screendump fallback failed: {resp}"
 
         from PIL import Image
         with Image.open(ppm_path) as img:
-            if not check_launcher_ready():
-                if _last_frame_cache.get(cache_key):
-                    return _last_frame_cache[cache_key], ("image/jpeg" if prefer_jpeg else "image/png")
-                return None, "Guest still booting; graphical canvas not ready"
-
             width, height = img.size
-            global guest_framebuffer_size
-            guest_framebuffer_size = (width, height)
             box = letterbox_box(width, height)
-
-            if is_landscape:
-                if width > 0 and height > 0:
-                    rgb_img = img.convert("RGB")
-                    left_sample = rgb_img.getpixel((box[0] // 2, height // 2))
-                    right_sample = rgb_img.getpixel((box[2] + (width - box[2]) // 2, height // 2))
-                    if left_sample == (0, 0, 0) and right_sample == (0, 0, 0):
-                        target_img = img.crop(box).rotate(270, expand=True)
-                    else:
-                        target_img = img
-                else:
-                    target_img = img
-            else:
-                target_img = img.crop(box)
-
+            target_img = img.crop(box)
             buf = io.BytesIO()
             if prefer_jpeg:
                 target_img.save(buf, format="JPEG", quality=85)
@@ -851,38 +1073,18 @@ def capture_qemu_screen_frame(full_scanout=False, orientation=None, prefer_jpeg=
                 encoded_bytes = buf.getvalue()
                 content_type = "image/png"
 
-            now_finish = time.time()
-            elapsed_us = int((now_finish - t0) * 1_000_000)
-            _transport_metrics['frame_us'] = elapsed_us
-            _transport_metrics['frames_in_second'] += 1
-            if now_finish - _transport_metrics['second_start'] >= 1.0:
-                _transport_metrics['fps'] = _transport_metrics['frames_in_second'] / (now_finish - _transport_metrics['second_start'])
-                _transport_metrics['frames_in_second'] = 0
-                _transport_metrics['second_start'] = now_finish
-
+            cache_key = 'portrait_jpeg' if prefer_jpeg else 'portrait'
             _last_frame_cache[cache_key] = encoded_bytes
-            _last_frame_cache['time'] = now_finish
-
+            _last_frame_cache['time'] = time.time()
             return encoded_bytes, content_type
     except Exception as e:
+        cache_key = 'portrait_jpeg' if prefer_jpeg else 'portrait'
         if _last_frame_cache.get(cache_key):
             return _last_frame_cache[cache_key], ("image/jpeg" if prefer_jpeg else "image/png")
-        return None, f"Image processing error: {e}"
+        return None, f"Capture fallback error: {e}"
     finally:
         _capture_lock.release()
 
-
-def _background_frame_streamer():
-    """Background daemon thread continuously polling QEMU scanout buffer into memory cache."""
-    while True:
-        try:
-            if check_launcher_ready():
-                capture_qemu_screen_frame(prefer_jpeg=True)
-            time.sleep(0.025)
-        except Exception:
-            time.sleep(0.05)
-
-threading.Thread(target=_background_frame_streamer, daemon=True).start()
 
 
 
@@ -1488,14 +1690,58 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         if self.path == '/api/qemu/telemetry':
             t = query_qemu_monitor().copy()
             t["launcher_ready"] = check_launcher_ready()
-            t["transport_fps"] = round(_transport_metrics["fps"], 1)
-            t["transport_frame_us"] = int(_transport_metrics["frame_us"])
-            t["guest_fps"] = 60
+            t["transport_fps"] = round(vnc_client.metrics["fps"], 1) if vnc_client.connected else round(_transport_metrics["fps"], 1)
+            t["transport_frame_us"] = int(vnc_client.metrics["frame_us"]) if vnc_client.connected else int(_transport_metrics["frame_us"])
+            t["vnc_connected"] = vnc_client.connected
+            # Guest FPS from real KMS flips or reported as Unknown
+            t["guest_fps"] = "Unknown"
+            with telemetry_lock:
+                for line in reversed(serial_lines[-200:]):
+                    if "[KMS]" in line and "vsync=" in line:
+                        t["guest_fps"] = 60  # nominal target when KMS active
+                        break
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps(t).encode())
+            return
+
+        if parsed_path.path == '/api/screen/raw':
+            query = urllib.parse.parse_qs(parsed_path.query)
+            try:
+                client_seq = int(query.get('seq', ['0'])[0])
+            except ValueError:
+                client_seq = 0
+            bin_msg, seq = vnc_client.get_binary_frame(client_seq=client_seq, timeout=0.040)
+            if bin_msg:
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/octet-stream')
+                self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.send_header('X-Frame-Seq', str(seq))
+                self.end_headers()
+                self.wfile.write(bin_msg)
+            else:
+                self.send_response(304 if client_seq > 0 else 503)
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+            return
+
+        if parsed_path.path in ('/api/screen/metrics', '/api/transport/metrics'):
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'transport_fps': round(vnc_client.metrics['fps'], 2),
+                'frame_time_us': vnc_client.metrics['frame_us'],
+                'frames_total': vnc_client.metrics['frames_total'],
+                'seq': vnc_client.seq,
+                'vnc_connected': vnc_client.connected,
+                'width': vnc_client.latest_raw_w,
+                'height': vnc_client.latest_raw_h,
+            }).encode())
             return
 
         if parsed_path.path == '/api/screen/stream':
@@ -2272,19 +2518,25 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 else:
                     raise ValueError('unsupported coordinate space')
 
+                slot = int(data.get('slot', 0))
                 if action == 'down':
-                    ok, msg = send_guest_serial_command(f'INPUT_TOUCH DOWN {gx} {gy} 0')
+                    ok, msg = send_guest_serial_command(f'INPUT_TOUCH DOWN {gx} {gy} {slot}')
                 elif action == 'move':
-                    ok, msg = send_guest_serial_command(f'INPUT_TOUCH MOVE {gx} {gy} 0')
+                    ok, msg = send_guest_serial_command(f'INPUT_TOUCH MOVE {gx} {gy} {slot}')
                 elif action == 'up':
-                    ok, msg = send_guest_serial_command(f'INPUT_TOUCH UP {gx} {gy} 0')
+                    ok, msg = send_guest_serial_command(f'INPUT_TOUCH UP {gx} {gy} {slot}')
                 elif action == 'tap':
                     ok, msg = send_guest_serial_command(f'TAP {gx} {gy}')
                 elif action == 'cancel':
-                    ok, msg = send_guest_serial_command(f'INPUT_TOUCH CANCEL {gx} {gy} 0')
+                    ok, msg = send_guest_serial_command(f'INPUT_TOUCH CANCEL {gx} {gy} {slot}')
                 elif action in ('swipe', 'drag'):
                     steps = max(2, min(20, int(data.get('steps', 5))))
                     ok, msg = send_guest_serial_command(f'SWIPE {gx} {gy} {gx2} {gy2} {steps}')
+                elif action in ('home', 'back', 'recents'):
+                    ok, msg = send_guest_serial_command(f'NAV {action.upper()}')
+                elif action == 'nav':
+                    target = str(data.get('target', 'HOME')).upper()
+                    ok, msg = send_guest_serial_command(f'NAV {target}')
                 else:
                     raise ValueError('unsupported touch action')
                 if not ok: raise RuntimeError(msg)
