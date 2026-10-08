@@ -408,8 +408,11 @@ pub fn decode_axml_manifest(data: &[u8]) -> Result<AndroidManifest, ApkError> {
         return Err(ApkError::MalformedXmlChunk);
     }
 
+    // Never invent an application identity when the binary manifest omitted
+    // its package attribute; downstream signing and sandbox policy must bind to
+    // the identity actually declared by the APK.
     if package_name.is_empty() {
-        package_name = String::from("com.unknown.android_app");
+        return Err(ApkError::MalformedXmlChunk);
     }
 
     let mut manifest = AndroidManifest::new(&package_name, version_code, target_sdk);
