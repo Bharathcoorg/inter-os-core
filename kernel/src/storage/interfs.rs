@@ -600,9 +600,7 @@ impl<'a, D: BlockDevice + ?Sized> InterFs<'a, D> {
             old_used: old.used, old_size: old.file_size, old_start: old.start_sector, old_count: old.sector_count,
             new_used: inode.used, new_size: inode.file_size, new_start: inode.start_sector, new_count: inode.sector_count,
         };
-        if let Err(e)=self.write_transaction(&txn) {
-            return Err(e);
-        }
+        self.write_transaction(&txn)?;
         if let Err(e)=self.mark_extent(start,sectors) {
             let _=self.clear_transaction();
             return Err(e);

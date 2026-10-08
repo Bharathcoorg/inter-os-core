@@ -54,12 +54,15 @@ pub fn seal(plaintext: &[u8], out: &mut Vec<u8>) -> Result<(), EncryptionError> 
     get_random_bytes(&mut nonce);
 
     let mut ciphertext = Vec::with_capacity(plaintext.len());
+    let mut stream = [0u8; 32];
     for (i, &byte) in plaintext.iter().enumerate() {
-        let block = (i / 32) as u32;
-        let mut input = [0u8; 20];
-        input[..16].copy_from_slice(&nonce);
-        input[16..20].copy_from_slice(&block.to_be_bytes());
-        let stream = HmacSha256::compute(&key, &input);
+        if i % 32 == 0 {
+            let block = (i / 32) as u32;
+            let mut input = [0u8; 20];
+            input[..16].copy_from_slice(&nonce);
+            input[16..20].copy_from_slice(&block.to_be_bytes());
+            stream = HmacSha256::compute(&key, &input);
+        }
         ciphertext.push(byte ^ stream[i % 32]);
     }
 
@@ -102,12 +105,15 @@ pub fn open(envelope: &[u8], out: &mut [u8]) -> Result<usize, EncryptionError> {
 
     let nonce = &envelope[10..26];
     let ciphertext = &envelope[26..tag_offset];
+    let mut stream = [0u8; 32];
     for i in 0..plain_len {
-        let block = (i / 32) as u32;
-        let mut input = [0u8; 20];
-        input[..16].copy_from_slice(nonce);
-        input[16..20].copy_from_slice(&block.to_be_bytes());
-        let stream = HmacSha256::compute(&key, &input);
+        if i % 32 == 0 {
+            let block = (i / 32) as u32;
+            let mut input = [0u8; 20];
+            input[..16].copy_from_slice(nonce);
+            input[16..20].copy_from_slice(&block.to_be_bytes());
+            stream = HmacSha256::compute(&key, &input);
+        }
         out[i] = ciphertext[i] ^ stream[i % 32];
     }
     Ok(plain_len)

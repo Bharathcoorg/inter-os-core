@@ -390,7 +390,7 @@ impl DrmKmsController {
             if s_w == 720 && s_h == 1440 && sx == 0 && sy == 0 {
                 let (mut dst_w, mut dst_h) = if 720i64 * sh as i64 <= 1440i64 * sw as i64 {
                     (
-                        (720u32.saturating_mul(sh) / 1440).max(1).min(self.scanout_width),
+                        (720u32.saturating_mul(sh as u32) / 1440).max(1).min(self.scanout_width),
                         self.scanout_height,
                     )
                 } else {
@@ -409,7 +409,7 @@ impl DrmKmsController {
                         dst_w = self.scanout_width;
                         dst_h = (720u32.saturating_mul(sw as u32) / 1440).max(1).min(self.scanout_height);
                     } else {
-                        dst_w = (1440u32.saturating_mul(sh) / 720).max(1).min(self.scanout_width);
+                        dst_w = (1440u32.saturating_mul(sh as u32) / 720).max(1).min(self.scanout_width);
                         dst_h = self.scanout_height;
                     }
                 }

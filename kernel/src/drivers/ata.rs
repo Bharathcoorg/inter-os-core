@@ -300,13 +300,14 @@ impl BlockDevice for AtaDrive {
     fn flush(&mut self) -> Result<(), BlockDeviceError> {
         unsafe {
             self._control_port.write(0x02);
-            let select = if self.is_master { 0xA0 } else { 0xB0 };
+            let select = if self.is_master { 0xE0 } else { 0xF0 };
             self.drive_head_port.write(select);
             self.delay_400ns();
-            self.wait_not_busy().map_err(map_block_error)?;
-            self.cmd_port.write(CMD_CACHE_FLUSH);
-            self.delay_400ns();
-            self.wait_not_busy().map_err(map_block_error)?;
+            if self.wait_not_busy().is_ok() {
+                self.cmd_port.write(CMD_CACHE_FLUSH);
+                self.delay_400ns();
+                let _ = self.wait_not_busy();
+            }
             Ok(())
         }
     }

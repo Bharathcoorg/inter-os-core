@@ -1127,7 +1127,8 @@ impl Vfs {
         buf[4..6].copy_from_slice(&count.to_le_bytes());
         let mut sealed = Vec::new();
         crate::storage::encrypted::seal(&buf[..pos], &mut sealed).map_err(|_| FsError::IntegrityViolation)?;
-        crate::storage::filesystem::store_data_file("/data/.vfs.metadata", &sealed).map_err(|_| FsError::IntegrityViolation)
+        crate::storage::filesystem::store_data_file("/data/.vfs.metadata", &sealed).map_err(|_| FsError::IntegrityViolation)?;
+        Ok(())
     }
 
     /// Restores the persistent /data inode tree before restoring file payloads.

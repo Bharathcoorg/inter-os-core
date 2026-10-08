@@ -13,8 +13,8 @@ use x86_64::VirtAddr;
 /// Index in the Interrupt Stack Table for the Double Fault exception handler.
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
-/// Size of the dedicated stack for double fault handling (20 KiB).
-const STACK_SIZE: usize = 4096 * 5;
+/// Size of the dedicated stack for double fault and privilege handling (128 KiB).
+const STACK_SIZE: usize = 128 * 1024;
 
 #[repr(transparent)]
 struct SyncTss(UnsafeCell<TaskStateSegment>);

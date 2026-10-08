@@ -28,6 +28,7 @@ emulator/data/themes/custom_*.theme
 # Agent & IDE caches
 .kilo/
 scratch/
+.worktrees/
 # Cryptographic Private Keys
 *.key
 packages/*.key

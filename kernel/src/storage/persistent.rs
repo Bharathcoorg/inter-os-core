@@ -240,9 +240,9 @@ fn load_latest_from(
     let total = drive.sector_count();
 
     let mut best: Option<(u64, usize)> = None;
+    let mut candidate = alloc::vec![0u8; PAYLOAD_CAPACITY];
     for slot in 0..TOTAL_SLOT_COUNT {
         let Some(base) = slot_base(total, slot) else { continue; };
-        let mut candidate = [0u8; PAYLOAD_CAPACITY];
         if let Some((generation, len)) = read_slot(drive, base, &mut candidate, kind)? {
             // WHY strict `>`: a record is only ever promoted over another one by
             // a strictly newer generation. Re-reading the same generation twice
@@ -382,7 +382,7 @@ fn commit_to(
     let b = pair_start + 1;
     let mut gen_a = 0u64;
     let base_a = slot_base(total, a as u32).ok_or(PersistentError::Unavailable)?;
-    let mut buf = [0u8; PAYLOAD_CAPACITY];
+    let mut buf = alloc::vec![0u8; PAYLOAD_CAPACITY];
     match read_slot(drive, base_a, &mut buf, kind) {
         Ok(Some((generation, _))) => gen_a = generation,
         Ok(None) | Err(PersistentError::Corrupt) => {}

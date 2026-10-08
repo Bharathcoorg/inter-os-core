@@ -85,43 +85,36 @@ impl EventReactor {
     }
 
     /// Posts an event to a designated target task, waking it if it is blocked on that event.
-    pub fn post_event(&mut self, task_id: TaskId, event_mask: u32) {
+    /// Returns true if the target task was waiting and needs to be unblocked in the scheduler.
+    pub fn post_event(&mut self, task_id: TaskId, event_mask: u32) -> bool {
         if let Some(sub) = self.subscriptions.iter_mut().find(|s| s.task_id == task_id) {
             let matched = event_mask & sub.interest_mask;
             if matched != 0 {
                 sub.pending_mask |= matched;
                 if sub.is_waiting {
-                    if let Some(mut sched) = SCHEDULER.try_lock() {
-                        sub.is_waiting = false;
-                        sched.unblock_task(task_id);
-                    }
+                    sub.is_waiting = false;
+                    return true;
                 }
             }
         }
+        false
     }
 
     /// Broadcasts an event to all tasks registered with interest in the event mask.
-    pub fn broadcast_event(&mut self, event_mask: u32) {
-        let mut has_waiters = false;
+    /// Returns the list of tasks that were waiting and need to be unblocked in the scheduler.
+    pub fn broadcast_event(&mut self, event_mask: u32) -> Vec<TaskId> {
+        let mut unblock = Vec::new();
         for sub in self.subscriptions.iter_mut() {
             let matched = event_mask & sub.interest_mask;
             if matched != 0 {
                 sub.pending_mask |= matched;
                 if sub.is_waiting {
-                    has_waiters = true;
+                    sub.is_waiting = false;
+                    unblock.push(sub.task_id);
                 }
             }
         }
-        if has_waiters {
-            if let Some(mut sched) = SCHEDULER.try_lock() {
-                for sub in self.subscriptions.iter_mut() {
-                    if sub.is_waiting && (sub.interest_mask & event_mask) != 0 {
-                        sub.is_waiting = false;
-                        sched.unblock_task(sub.task_id);
-                    }
-                }
-            }
-        }
+        unblock
     }
 
     /// Polls for pending events on behalf of a task.
@@ -169,6 +162,11 @@ impl EventReactor {
         (0, true)
     }
 
+    /// Checks whether a task is currently waiting on events.
+    pub fn is_waiting(&self, task_id: TaskId) -> bool {
+        self.subscriptions.iter().find(|s| s.task_id == task_id).map(|s| s.is_waiting).unwrap_or(false)
+    }
+
     /// Checks and consumes pending events after a task resumes from a blocking wait.
     pub fn check_woken(&mut self, task_id: TaskId, interest_mask: u32) -> u32 {
         if let Some(sub) = self.subscriptions.iter_mut().find(|s| s.task_id == task_id) {
@@ -182,34 +180,23 @@ impl EventReactor {
     }
 
     /// Invoked on hardware timer tick to evaluate deadlines and wake timed-out or event-ready tasks.
-    pub fn on_tick(&mut self, current_ticks: u64) {
-        let mut has_unblock = false;
+    /// Returns the list of tasks whose timeout elapsed or events fired.
+    pub fn on_tick(&mut self, current_ticks: u64) -> Vec<TaskId> {
+        let mut unblock = Vec::new();
         for sub in self.subscriptions.iter_mut() {
             if sub.is_waiting {
-                if (sub.pending_mask & sub.interest_mask) != 0 {
-                    has_unblock = true;
-                } else if sub.wait_until_tick > 0 && current_ticks >= sub.wait_until_tick {
-                    if (sub.interest_mask & EVENT_TIMER_TICK) != 0 {
+                let has_pending = (sub.pending_mask & sub.interest_mask) != 0;
+                let has_timed_out = sub.wait_until_tick > 0 && current_ticks >= sub.wait_until_tick;
+                if has_pending || has_timed_out {
+                    if has_timed_out && (sub.interest_mask & EVENT_TIMER_TICK) != 0 {
                         sub.pending_mask |= EVENT_TIMER_TICK;
                     }
-                    has_unblock = true;
+                    sub.is_waiting = false;
+                    unblock.push(sub.task_id);
                 }
             }
         }
-        if has_unblock {
-            if let Some(mut sched) = SCHEDULER.try_lock() {
-                for sub in self.subscriptions.iter_mut() {
-                    if sub.is_waiting {
-                        let has_pending = (sub.pending_mask & sub.interest_mask) != 0;
-                        let has_timed_out = sub.wait_until_tick > 0 && current_ticks >= sub.wait_until_tick;
-                        if has_pending || has_timed_out {
-                            sub.is_waiting = false;
-                            sched.unblock_task(sub.task_id);
-                        }
-                    }
-                }
-            }
-        }
+        unblock
     }
 
 }
@@ -223,18 +210,52 @@ pub fn cleanup_task(task_id: TaskId) {
 }
 
 pub fn post_event(task_id: TaskId, event_mask: u32) {
-    EVENT_REACTOR.lock().post_event(task_id, event_mask);
+    let unblock = {
+        let mut reactor = EVENT_REACTOR.lock();
+        reactor.post_event(task_id, event_mask)
+    };
+    if unblock {
+        let mut sched = SCHEDULER.lock();
+        sched.unblock_task(task_id);
+    }
 }
 
 /// Broadcasts an event to all interested tasks via the global Event Reactor.
 pub fn broadcast_event(event_mask: u32) {
-    EVENT_REACTOR.lock().broadcast_event(event_mask);
+    let unblock = {
+        let mut reactor = EVENT_REACTOR.lock();
+        reactor.broadcast_event(event_mask)
+    };
+    if !unblock.is_empty() {
+        let mut sched = SCHEDULER.lock();
+        for task_id in unblock {
+            sched.unblock_task(task_id);
+        }
+    }
 }
 
 /// Dispatches timer tick notifications to the global Event Reactor.
 pub fn on_timer_tick(current_ticks: u64) {
-    if let Some(mut reactor) = EVENT_REACTOR.try_lock() {
-        reactor.on_tick(current_ticks);
+    let unblock = if let Some(mut reactor) = EVENT_REACTOR.try_lock() {
+        reactor.on_tick(current_ticks)
+    } else {
+        Vec::new()
+    };
+    if !unblock.is_empty() {
+        if let Some(mut sched) = SCHEDULER.try_lock() {
+            for task_id in unblock {
+                sched.unblock_task(task_id);
+            }
+        } else {
+            // Restore is_waiting so that a subsequent tick will retry the unblock
+            if let Some(mut reactor) = EVENT_REACTOR.try_lock() {
+                for task_id in unblock {
+                    if let Some(sub) = reactor.subscriptions.iter_mut().find(|s| s.task_id == task_id) {
+                        sub.is_waiting = true;
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -240,6 +240,7 @@ pub fn sys_yield() {
 /// via `sys_waitpid`. If no parent is waiting, the scheduler will eventually reclaim it.
 pub fn sys_exit_with_code(exit_code: i32) -> ! {
     if let Some(id) = SCHEDULER.lock().current_task_id() {
+        serial_println!("[PROC] Task {} sys_exit_with_code({}) called.", id.0, exit_code);
         let owner = id.0 as u32;
         let released = crate::net::SOCKET_TABLE.lock().release_owner(owner);
         if released > 0 { serial_println!("[NET] Released {} socket(s) owned by exiting task {}.", released, id.0); }
@@ -265,7 +266,7 @@ pub fn sys_exit_with_code(exit_code: i32) -> ! {
         }
     };
     if parent_id != crate::task::TaskId(0) {
-        crate::event::EVENT_REACTOR.lock().post_event(parent_id, crate::event::EVENT_TIMER_TICK);
+        crate::event::post_event(parent_id, crate::event::EVENT_TIMER_TICK);
     }
     crate::task::terminate_current();
 }
@@ -4180,6 +4181,10 @@ pub fn sys_event_poll(interest_mask: u32, timeout_ticks: u32) -> Result<u32, Sys
     }
     drop(sched);
 
+    // Promptly service any pending serial console commands so host commands
+    // and input events are handled immediately without waiting for Task 0.
+    crate::serial::service_serial_commands();
+
     let current_ticks = crate::interrupts::get_system_ticks();
 
     let should_block = {
@@ -4188,16 +4193,30 @@ pub fn sys_event_poll(interest_mask: u32, timeout_ticks: u32) -> Result<u32, Sys
         if !block {
             return Ok(ready);
         }
-        // Task needs to block awaiting event arrival or timer expiration
-        let mut sched = SCHEDULER.lock();
-        sched.block_task(current_id);
         true
     };
 
     if should_block {
-        crate::task::yield_now();
-        let mut reactor = crate::event::EVENT_REACTOR.lock();
-        let ready = reactor.check_woken(current_id, interest_mask);
+        {
+            let mut sched = SCHEDULER.lock();
+            sched.block_task(current_id);
+        }
+        // Double check whether an event was posted between dropping reactor and locking sched
+        let cancelled = {
+            let reactor = crate::event::EVENT_REACTOR.lock();
+            !reactor.is_waiting(current_id)
+        };
+        if cancelled {
+            let mut sched = SCHEDULER.lock();
+            sched.unblock_task(current_id);
+        } else {
+            crate::task::yield_now();
+        }
+        let ready = {
+            let mut reactor = crate::event::EVENT_REACTOR.lock();
+            reactor.check_woken(current_id, interest_mask)
+        };
+        crate::serial::service_serial_commands();
         Ok(ready)
     } else {
         Ok(0)

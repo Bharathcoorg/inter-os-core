@@ -4,6 +4,7 @@
 //! a bootable BIOS/MBR disk image using the `bootloader` crate.
 
 use anyhow::Context;
+use bootloader::{BiosBoot, BootConfig};
 use std::path::PathBuf;
 
 fn main() -> anyhow::Result<()> {
