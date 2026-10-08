@@ -495,21 +495,30 @@ fn handle_rapp_command(s: &str) -> bool {
         };
         match opt.as_deref() {
             Some("LANDSCAPE") | Some("LANDSCAPE_RIGHT") | Some("LANDSCAPERIGHT") => {
-                set_kms_orientation(crate::drivers::display_kms::DisplayOrientation::LandscapeRight);
+                if !set_kms_orientation(crate::drivers::display_kms::DisplayOrientation::LandscapeRight) {
+                    serial_println!("[DISPLAY_HAL] REJECT orientation controller busy");
+                    return true;
+                }
                 if let Some(mut sm) = crate::sensor::SENSOR_MANAGER.try_lock() {
                     sm.imu.accel = crate::sensor::Vector3D { x: 980, y: 0, z: 0 };
                 }
                 serial_println!("[DISPLAY_HAL] Orientation changed to LandscapeRight. KMS scanout updated to 1280x720 full landscape.");
             }
             Some("LANDSCAPE_LEFT") | Some("LANDSCAPELEFT") => {
-                set_kms_orientation(crate::drivers::display_kms::DisplayOrientation::LandscapeLeft);
+                if !set_kms_orientation(crate::drivers::display_kms::DisplayOrientation::LandscapeLeft) {
+                    serial_println!("[DISPLAY_HAL] REJECT orientation controller busy");
+                    return true;
+                }
                 if let Some(mut sm) = crate::sensor::SENSOR_MANAGER.try_lock() {
                     sm.imu.accel = crate::sensor::Vector3D { x: -980, y: 0, z: 0 };
                 }
                 serial_println!("[DISPLAY_HAL] Orientation changed to LandscapeLeft. KMS scanout updated to 1280x720 full landscape.");
             }
             Some("PORTRAIT") => {
-                set_kms_orientation(crate::drivers::display_kms::DisplayOrientation::Portrait);
+                if !set_kms_orientation(crate::drivers::display_kms::DisplayOrientation::Portrait) {
+                    serial_println!("[DISPLAY_HAL] REJECT orientation controller busy");
+                    return true;
+                }
                 if let Some(mut sm) = crate::sensor::SENSOR_MANAGER.try_lock() {
                     sm.imu.accel = crate::sensor::Vector3D { x: 0, y: 980, z: 0 };
                 }
