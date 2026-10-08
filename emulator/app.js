@@ -741,6 +741,26 @@ document.addEventListener('DOMContentLoaded', () => {
     return { left: renderX, top: renderY, width: renderW, height: renderH };
   }
 
+  function getGuestPointerRect() {
+    const target = liveScanoutCanvas || liveScanoutImg || screenLiveScanout;
+    if (!target) return null;
+    const rect = target.getBoundingClientRect();
+    const aspect = 720 / 1440;
+    const containerAspect = rect.width / Math.max(1, rect.height);
+    let width = rect.width;
+    let height = rect.height;
+    let left = rect.left;
+    let top = rect.top;
+    if (containerAspect > aspect) {
+      width = rect.height * aspect;
+      left = rect.left + (rect.width - width) / 2;
+    } else {
+      height = rect.width / aspect;
+      top = rect.top + (rect.height - height) / 2;
+    }
+    return { left, top, width: Math.max(1, width), height: Math.max(1, height) };
+  }
+
   const virtualTouchDot = document.getElementById('virtual-touch-dot');
   function updateVirtualTouch(clientX, clientY, active) {
     if (!virtualTouchDot || !screenLiveScanout) return;
@@ -748,7 +768,8 @@ document.addEventListener('DOMContentLoaded', () => {
       virtualTouchDot.classList.remove('active');
       return;
     }
-    const screenRect = screenLiveScanout.getBoundingClientRect();
+    const screenRect = getGuestPointerRect();
+    if (!screenRect) return;
     const x = clientX - screenRect.left;
     const y = clientY - screenRect.top;
     virtualTouchDot.style.left = `${x}px`;
@@ -771,7 +792,8 @@ document.addEventListener('DOMContentLoaded', () => {
     touchSurface.addEventListener('pointerdown', (ev) => {
       isPointerDown = true;
       downSent = false;
-      const rect = touchSurface.getBoundingClientRect();
+      const rect = getGuestPointerRect();
+      if (!rect) return;
       startX = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
       startY = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
       const px = Math.max(0, Math.min(719, Math.round(startX * 719)));
@@ -792,7 +814,8 @@ document.addEventListener('DOMContentLoaded', () => {
     touchSurface.addEventListener('pointermove', (ev) => {
       if (isPointerDown) {
         updateVirtualTouch(ev.clientX, ev.clientY, true);
-        const rect = touchSurface.getBoundingClientRect();
+        const rect = getGuestPointerRect();
+        if (!rect) return;
         const curX = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
         const curY = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
         const px = Math.max(0, Math.min(719, Math.round(curX * 719)));
@@ -816,7 +839,8 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!isPointerDown) return;
       isPointerDown = false;
       updateVirtualTouch(ev.clientX, ev.clientY, false);
-      const rect = touchSurface.getBoundingClientRect();
+      const rect = getGuestPointerRect();
+      if (!rect) return;
       const endX = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
       const endY = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
       const px = Math.max(0, Math.min(719, Math.round(endX * 719)));
