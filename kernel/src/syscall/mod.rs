@@ -3421,8 +3421,8 @@ pub fn sys_device_power(action: u32) -> Result<u32, SyscallResult> {
         return Err(SyscallResult::PermissionDenied);
     }
     match action {
-        0 => { crate::serial_println!("[POWER] restart requested by authorized system UI."); crate::hal::traits::PowerController::reset(&crate::hal::platform::POWER); loop { core::hint::spin_loop(); } }
-        1 => { crate::serial_println!("[POWER] shutdown requested by authorized system UI."); crate::hal::traits::PowerController::shutdown(&crate::hal::platform::POWER); loop { core::hint::spin_loop(); } }
+        0 => { crate::serial_println!("[POWER] restart requested by authorized system UI."); crate::hal::platform::POWER.reset(); loop { core::hint::spin_loop(); } }
+        1 => { crate::serial_println!("[POWER] shutdown requested by authorized system UI."); crate::hal::platform::POWER.shutdown(); loop { core::hint::spin_loop(); } }
         2 => {
             let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
             let on = kms.toggle_powered();
