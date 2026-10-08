@@ -43,6 +43,18 @@ def test_boot_and_wake_are_guest_owned():
     assert "get_boot_screen_color" in boot
 
 
+def test_studio_pointer_events_are_serialized_in_guest_order():
+    app = read("emulator/app.js")
+    start = app.index("const touchSurface = screenLiveScanout || liveScanoutImg;")
+    end = app.index("Draggable IDE Split Resizer Divider", start)
+    pointer_code = app[start:end]
+    assert "guestTouchQueue = guestTouchQueue.then" in pointer_code
+    assert "sendGuestTouchEvent({ action: 'down'" in pointer_code
+    assert "sendGuestTouchEvent({ action: 'move'" in pointer_code
+    assert "sendGuestTouchEvent({ action: 'up'" in pointer_code
+    assert "sendGuestTouchEvent({ action: 'cancel'" in pointer_code
+
+
 def test_studio_clicks_have_real_pointer_down_and_up():
     app = read("emulator/app.js")
     down = app.index("action: 'down', coords: 'portrait'")
@@ -50,6 +62,16 @@ def test_studio_clicks_have_real_pointer_down_and_up():
     assert down > pointer_down
     assert "action: 'up', coords: 'portrait'" in app
     assert "action: 'tap', coords: 'portrait'" not in app[pointer_down:app.index("touchSurface.addEventListener('wheel'")]
+
+
+def test_android_execution_and_logging_budgets_are_enforced():
+    runtime = read("kernel/src/compat/android/runtime.rs")
+    framework = read("kernel/src/compat/android/framework.rs")
+    assert "TOTAL_INSTRUCTION_LIMIT: u64 = 1_000_000" in runtime
+    assert "self.instructions_executed >= TOTAL_INSTRUCTION_LIMIT" in runtime
+    assert "steps >= STEP_LIMIT || pc < insns.len()" in runtime
+    assert "MAX_LOG_ENTRIES: usize = 64" in framework
+    assert "MAX_LOG_LINE_BYTES: usize = 512" in framework
 
 
 def test_legacy_kernel_phone_shell_is_not_canonical_boot_path():
