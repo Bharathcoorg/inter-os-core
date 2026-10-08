@@ -1225,18 +1225,18 @@ def start_qemu_backend():
 last_telemetry_query = 0.0
 telemetry_lock = threading.Lock()
 
-def query_qemu_monitor(host='127.0.0.1', port=44445, timeout=0.35):
+def query_qemu_monitor(host='127.0.0.1', port=44445, timeout=0.35, force=False):
     """
     Connects to QEMU HMP monitor at 127.0.0.1:44445 to query real-time
     microkernel registers, CPU execution status, and block device telemetry.
     """
     global last_telemetry_query, latest_telemetry
     now = time.time()
-    if now - last_telemetry_query < 0.8:
+    if not force and now - last_telemetry_query < 0.8:
         return latest_telemetry
 
     with telemetry_lock:
-        if now - last_telemetry_query < 0.8:
+        if not force and now - last_telemetry_query < 0.8:
             return latest_telemetry
 
         last_telemetry_query = now
@@ -2449,7 +2449,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 # physical power-button action starts a new guest; it must not be
                 # reported as a successful serial command to a dead VM.
                 process_alive = qemu_subproc is not None and qemu_subproc.poll() is None
-                monitor_state = query_qemu_monitor()
+                monitor_state = query_qemu_monitor(force=True)
                 monitor_alive = bool(monitor_state.get('qemu_alive', False))
                 vm_alive = process_alive or monitor_alive
                 guest_status = str(monitor_state.get('status', '')).strip().lower()
