@@ -226,5 +226,5 @@ pub fn init() {
         vm.instructions_executed
     );
 
-    serial_println!("--- [Android Compatibility Runtime 100% Isolated & Attested] ---\n");
+    serial_println!("--- [Android Compatibility Boundary Verified: APK/DEX/Binder/VFS] ---\n");
 }
