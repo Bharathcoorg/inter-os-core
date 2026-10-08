@@ -437,18 +437,6 @@ impl ApkPackage {
         let mut granted_caps_count = 0;
         let mut denied_perms_count = 0;
 
-        if !self.is_signed {
-            return AcrContainerProfile {
-                package_name: self.manifest.package_name.clone(),
-                version_code: self.manifest.version_code,
-                target_sdk: self.manifest.target_sdk,
-                status: AcrAuditStatus::AttestationFailed,
-                granted_caps_count: 0,
-                denied_perms_count: self.manifest.permissions.len(),
-                memory_quota_bytes: 0,
-            };
-        }
-
         // Verify that the APK does NOT request forbidden ambient authority
         let forbidden_ambient_perms = [
             "android.permission.INSTALL_PACKAGES",
@@ -471,6 +459,18 @@ impl ApkPackage {
                     memory_quota_bytes: 0,
                 };
             }
+        }
+
+        if !self.is_signed {
+            return AcrContainerProfile {
+                package_name: self.manifest.package_name.clone(),
+                version_code: self.manifest.version_code,
+                target_sdk: self.manifest.target_sdk,
+                status: AcrAuditStatus::AttestationFailed,
+                granted_caps_count: 0,
+                denied_perms_count: self.manifest.permissions.len(),
+                memory_quota_bytes: 0,
+            };
         }
 
         // Map allowable permissions into unforgeable capability tokens
