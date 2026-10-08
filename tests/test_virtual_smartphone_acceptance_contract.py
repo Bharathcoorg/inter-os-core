@@ -57,3 +57,15 @@ def test_android_runtime_is_not_misrepresented_as_full_art_compatibility():
     start = apk.index("pub fn verify_apk_signature")
     end = apk.index("\n}\n", start)
     assert "Err(ApkError::InvalidSignature)" in apk[start:end]
+
+
+
+def test_quick_controls_never_present_unsupported_features_as_working():
+    controls = read("apps/launcher/src/screens/quick_controls.rs")
+    launcher = read("apps/launcher/src/main.rs")
+    sdk = read("sdk/rust/interos-std/src/lib.rs")
+    assert "let brightness_available = false" in controls
+    assert 'b"Unavailable"' in controls
+    assert 'b"N/A"' in controls
+    assert "pub fn audio_set_volume(volume_percent: u32)" in sdk
+    assert "std::audio_set_volume(requested)" in launcher
