@@ -444,7 +444,6 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
                 match key {
                     DecodedKey::Unicode(character) => {
                         crate::serial_print!("{}", character);
-                        crate::framebuffer::on_key_press(character);
                         crate::input::post_char_event(character);
                     }
                     DecodedKey::RawKey(key) => {

@@ -776,6 +776,29 @@ fn handle_serial_command(cmd: &[u8]) {
         panic!("Controlled diagnostic fault: {}", reason);
     }
 
+    if verb.eq_ignore_ascii_case("VOLUME") {
+        let action = parts.next().unwrap_or("GET");
+        let mut audio = crate::audio::AUDIO_MANAGER.lock();
+        if action.eq_ignore_ascii_case("UP") {
+            let cur = audio.volume_percent;
+            audio.set_volume(cur.saturating_add(5).min(100));
+            crate::serial_println!("[AUDIO] volume_percent={} state=unmuted", audio.volume_percent);
+        } else if action.eq_ignore_ascii_case("DOWN") {
+            let cur = audio.volume_percent;
+            audio.set_volume(cur.saturating_sub(5));
+            crate::serial_println!("[AUDIO] volume_percent={} state=unmuted", audio.volume_percent);
+        } else if action.eq_ignore_ascii_case("MUTE") {
+            audio.set_volume(0);
+            crate::serial_println!("[AUDIO] volume_percent=0 state=muted");
+        } else if let Ok(pct) = action.parse::<u8>() {
+            audio.set_volume(pct.min(100));
+            crate::serial_println!("[AUDIO] volume_percent={} state=unmuted", audio.volume_percent);
+        } else {
+            crate::serial_println!("[AUDIO] volume_percent={} state=unmuted", audio.volume_percent);
+        }
+        return;
+    }
+
     // Legacy convenience touch verbs. These accept the same logical portrait
     // coordinates as INPUT_TOUCH and are bounds checked identically: an
     // unchecked point here would be injected straight into the gesture router.

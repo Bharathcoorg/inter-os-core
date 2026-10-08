@@ -59,6 +59,16 @@ impl DisplayDriver for KmsDisplayDriver<'_> {
             self.controller.scanout_width,
             self.controller.scanout_height,
         );
+        if flip == 1 || flip % 60 == 0 {
+            crate::serial_println!(
+                "[KMS] vsync={} page_flips={} refresh_hz={} format=ARGB8888 scanout_w={} scanout_h={}",
+                flip,
+                flip,
+                self.controller.refresh_hz,
+                self.controller.scanout_width,
+                self.controller.scanout_height,
+            );
+        }
         Ok(flip)
     }
 
