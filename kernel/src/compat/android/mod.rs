@@ -122,14 +122,16 @@ impl AndroidRuntime {
             return Err(AndroidLaunchError::AuditRejected);
         }
         let pid = self.spawn_app(&apk.manifest, task_id, cap_table);
-        let Some(app) = self.active_apps.get(&pid) else { return Err(AndroidLaunchError::SurfaceUnavailable); };
-        if app.surface_id == 0 {
-            self.active_apps.remove(&pid);
-            return Err(AndroidLaunchError::SurfaceUnavailable);
-        }
+        let surface_id = match self.active_apps.get(&pid) {
+            Some(app) if app.surface_id != 0 => app.surface_id,
+            _ => {
+                self.active_apps.remove(&pid);
+                return Err(AndroidLaunchError::SurfaceUnavailable);
+            }
+        };
         self.set_activity_state(pid, AndroidActivityState::Started);
         self.set_activity_state(pid, AndroidActivityState::Resumed);
-        serial_println!("[ANDROID] package={} pid={} surface={} state=RESUMED", apk.manifest.package_name, pid, app.surface_id);
+        serial_println!("[ANDROID] package={} pid={} surface={} state=RESUMED", apk.manifest.package_name, pid, surface_id);
         Ok(pid)
     }
 
