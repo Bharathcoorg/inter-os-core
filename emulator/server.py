@@ -47,7 +47,7 @@ launcher_has_booted = False
 # from live screendumps, so Device Studio does not assume a developer has a
 # particular host resolution.
 LOGICAL_SURFACE_W, LOGICAL_SURFACE_H = 720, 1440
-guest_framebuffer_size = (1280, 720)
+guest_framebuffer_size = (720, 1440)
 
 
 def letterbox_box(fb_w, fb_h):
