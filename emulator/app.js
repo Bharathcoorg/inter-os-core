@@ -841,70 +841,25 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
 
-    touchSurface.addEventListener('pointerup', async (ev) => {
+    touchSurface.addEventListener('pointerup', (ev) => {
       if (!isPointerDown) return;
       isPointerDown = false;
       updateVirtualTouch(ev.clientX, ev.clientY, false);
       const rect = getGuestPointerRect();
-      if (!rect) {
-        if (downSent) {
-          fetch('/api/touch/event', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'up', coords: 'portrait', x: lastSentX, y: lastSentY, slot: 0 }) }).catch(() => {});
-        }
-        downSent = false;
-        return;
+      if (rect && downSent) {
+        const endX = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
+        const endY = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
+        const px = Math.max(0, Math.min(719, Math.round(endX * 719)));
+        const py = Math.max(0, Math.min(1439, Math.round(endY * 1439)));
+        fetch('/api/touch/event', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'up', coords: 'portrait', x: px, y: py, slot: 0 })
+        }).catch(() => {});
       }
-      const endX = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
-      const endY = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
-      const px = Math.max(0, Math.min(719, Math.round(endX * 719)));
-      const py = Math.max(0, Math.min(1439, Math.round(endY * 1439)));
-      const dx = (endX - startX) * rect.width;
-      const dy = (endY - startY) * rect.height;
-      const dist = Math.hypot(dx, dy);
-
-      if (state.isLandscape || cropMode === 'full') {
-        const fbW = liveScanoutImg?.naturalWidth || 0;
-        const fbH = liveScanoutImg?.naturalHeight || 0;
-        if (fbW < 1 || fbH < 1) return;
-        const scanoutLimitX = Math.min(1279, fbW - 1);
-        const gx1 = Math.max(0, Math.min(scanoutLimitX, Math.round(startX * (fbW - 1))));
-        const gy1 = Math.max(0, Math.min(fbH - 1, Math.round(startY * (fbH - 1))));
-        const gx2 = Math.max(0, Math.min(scanoutLimitX, Math.round(endX * (fbW - 1))));
-        const gy2 = Math.max(0, Math.min(fbH - 1, Math.round(endY * (fbH - 1))));
-        if (dist > 18) {
-          fetch('/api/touch/event', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'swipe', coords: 'guest_framebuffer', x: gx1, y: gy1, x2: gx2, y2: gy2, steps: 5 })
-          }).catch(() => {});
-        } else {
-          fetch('/api/touch/event', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'tap', coords: 'guest_framebuffer', x: gx2, y: gy2 })
-          }).catch(() => {});
-        }
-      } else {
-        if (downSent) {
-          fetch('/api/touch/event', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'up', coords: 'portrait', x: px, y: py, slot: 0 })
-          }).catch(() => {});
-        }
-      }
-
+      downSent = false;
       requestAnimationFrame(() => refreshScanoutFrame(true));
       setTimeout(() => refreshScanoutFrame(true), 25);
-      setTimeout(() => refreshScanoutFrame(true), 65);
-    });
-
-    touchSurface.addEventListener('pointercancel', (ev) => {
-      if (!isPointerDown) return;
-      isPointerDown = false;
-      if (downSent) {
-        fetch('/api/touch/event', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'up', coords: 'portrait', x: lastSentX, y: lastSentY, slot: 0 }) }).catch(() => {});
-      }
-      updateVirtualTouch(ev.clientX, ev.clientY, false);
     });
 
     touchSurface.addEventListener('wheel', (ev) => {
