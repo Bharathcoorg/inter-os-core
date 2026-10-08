@@ -40,6 +40,7 @@ pub enum ApkError {
     AmbientAuthorityViolation,
     InvalidSignature,
     MalformedSigningBlock,
+    UnsupportedCompression,
 }
 
 /// Audit decision status for Android APK packages.
@@ -155,14 +156,24 @@ impl<'a> ZipArchive<'a> {
     /// Reads uncompressed file payload by filename.
     pub fn get_file(&self, filename: &str) -> Option<&'a [u8]> {
         for entry in &self.entries {
-            if entry.name == filename {
-                let end = entry.data_offset + entry.compressed_size as usize;
-                if end <= self.data.len() {
+            if entry.name == filename && entry.compression_method == 0 {
+                let end = entry.data_offset.checked_add(entry.compressed_size as usize)?;
+                if end <= self.data.len() && entry.uncompressed_size == entry.compressed_size {
                     return Some(&self.data[entry.data_offset..end]);
                 }
             }
         }
         None
+    }
+
+    /// Returns an explicit failure for an APK member that requires a decompressor.
+    pub fn validate_compression(&self) -> Result<(), ApkError> {
+        for entry in &self.entries {
+            if entry.compression_method != 0 {
+                return Err(ApkError::UnsupportedCompression);
+            }
+        }
+        Ok(())
     }
 }
 
