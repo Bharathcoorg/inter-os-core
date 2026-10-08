@@ -327,7 +327,10 @@ pub fn decode_axml_manifest(data: &[u8]) -> Result<AndroidManifest, ApkError> {
     }
 
     let header_size = u16::from_le_bytes(data[2..4].try_into().unwrap()) as usize;
-    let _total_size = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
+    let total_size = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
+    if header_size < 8 || total_size < header_size || total_size > data.len() {
+        return Err(ApkError::MalformedXmlChunk);
+    }
 
     let mut cursor = header_size;
     let mut string_pool = None;
@@ -337,13 +340,13 @@ pub fn decode_axml_manifest(data: &[u8]) -> Result<AndroidManifest, ApkError> {
     let mut target_sdk = 34u32;
     let mut permissions = Vec::new();
 
-    while cursor + 8 <= data.len() {
+    while cursor.checked_add(8).filter(|end| *end <= total_size).is_some() {
         let chunk_type = u16::from_le_bytes(data[cursor..cursor + 2].try_into().unwrap());
-        let _chunk_hdr_size = u16::from_le_bytes(data[cursor + 2..cursor + 4].try_into().unwrap()) as usize;
+        let chunk_header_size = u16::from_le_bytes(data[cursor + 2..cursor + 4].try_into().unwrap()) as usize;
         let chunk_size = u32::from_le_bytes(data[cursor + 4..cursor + 8].try_into().unwrap()) as usize;
-
-        if chunk_size == 0 || cursor + chunk_size > data.len() {
-            break;
+        let chunk_end = cursor.checked_add(chunk_size).ok_or(ApkError::MalformedXmlChunk)?;
+        if chunk_header_size < 8 || chunk_size < chunk_header_size || chunk_end > total_size {
+            return Err(ApkError::MalformedXmlChunk);
         }
 
         match chunk_type {
@@ -353,7 +356,7 @@ pub fn decode_axml_manifest(data: &[u8]) -> Result<AndroidManifest, ApkError> {
             }
             RES_XML_START_ELEMENT_TYPE => {
                 if let Some(ref pool) = string_pool {
-                    if cursor + 36 <= data.len() {
+                    if cursor + 36 <= chunk_end {
                         let name_idx = u32::from_le_bytes(data[cursor + 20..cursor + 24].try_into().unwrap()) as usize;
                         let attr_count = u16::from_le_bytes(data[cursor + 28..cursor + 30].try_into().unwrap()) as usize;
                         let tag_name = pool.get(name_idx).unwrap_or("");
@@ -361,7 +364,7 @@ pub fn decode_axml_manifest(data: &[u8]) -> Result<AndroidManifest, ApkError> {
                         let attr_start = cursor + 36;
                         for a in 0..attr_count {
                             let a_offset = attr_start + a * 20;
-                            if a_offset + 20 > data.len() {
+                            if a_offset.checked_add(20).filter(|end| *end <= chunk_end).is_none() {
                                 break;
                             }
                             let a_name_idx = u32::from_le_bytes(data[a_offset + 4..a_offset + 8].try_into().unwrap()) as usize;
@@ -396,7 +399,10 @@ pub fn decode_axml_manifest(data: &[u8]) -> Result<AndroidManifest, ApkError> {
             _ => {}
         }
 
-        cursor += chunk_size;
+        cursor = chunk_end;
+    }
+    if cursor != total_size {
+        return Err(ApkError::MalformedXmlChunk);
     }
 
     if package_name.is_empty() {
