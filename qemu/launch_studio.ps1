@@ -8,8 +8,8 @@ $qemu = Resolve-QemuPath "qemu-system-x86_64.exe"
 $emulatorDir = "$rootDir\emulator"
 
 # Ports
-$vncPort = 5900
-$wsPort = 6080
+$vncPort = 5901
+$wsPort = 6081
 $httpPort = 4300
 
 Write-Host "============================================================" -ForegroundColor Cyan
@@ -47,7 +47,7 @@ $qemuArgs = @(
     "-device", "qemu-xhci,id=xhci0",
     "-device", "usb-tablet,bus=xhci0.0",
     "-display", "vnc=:0",
-    "-serial", "tcp:127.0.0.1:4201,server,nowait",
+    "-serial", "tcp:127.0.0.1:4301,server,nowait",
     "-monitor", "tcp:127.0.0.1:44445,server,nowait",
     "-name", "Inter OS v0.1"
 )
@@ -76,7 +76,7 @@ Write-Host "  INTER OS Studio is LIVE" -ForegroundColor Green
 Write-Host "  Browser:    $url" -ForegroundColor White
 Write-Host "  QEMU VNC:   localhost:$vncPort" -ForegroundColor White
 Write-Host "  WebSocket:  ws://localhost:$wsPort" -ForegroundColor White
-Write-Host "  Serial:     tcp://localhost:4201" -ForegroundColor White
+Write-Host "  Serial:     tcp://localhost:4301" -ForegroundColor White
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "Press Ctrl+C to stop all processes." -ForegroundColor Yellow
