@@ -2443,10 +2443,12 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 # physical power-button action starts a new guest; it must not be
                 # reported as a successful serial command to a dead VM.
                 process_alive = qemu_subproc is not None and qemu_subproc.poll() is None
-                if not process_alive and action in ('power', 'wake', 'toggle'):
+                monitor_alive = bool(query_qemu_monitor().get('qemu_alive', False))
+                vm_alive = process_alive or monitor_alive
+                if not vm_alive and action in ('power', 'wake', 'toggle'):
                     ok, msg = launch_qemu_profile(active_profile_key)
                     result = {'success': ok, 'action': 'power_on', 'qemu_started': ok, 'message': str(msg)}
-                elif process_alive and action in ('power', 'wake', 'toggle'):
+                elif vm_alive and action in ('power', 'wake', 'toggle'):
                     ok, msg = send_guest_serial_command('POWER_KEY', '[POWER]', timeout=3)
                     result = {'success': ok, 'action': action, 'message': msg}
                 else:
