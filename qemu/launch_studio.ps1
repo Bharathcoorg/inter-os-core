@@ -42,7 +42,7 @@ $qemuArgs = @(
     "-m", "1024M",
     "-drive", "format=raw,file=$img,index=0",
     "-drive", "format=raw,file=$dataPath,index=1",
-    "-device", "virtio-vga",
+    "-device", "virtio-vga,xres=720,yres=1440",
     "-device", "qemu-xhci,id=xhci0",
     "-device", "usb-tablet,bus=xhci0.0",
     "-display", "vnc=:0",
