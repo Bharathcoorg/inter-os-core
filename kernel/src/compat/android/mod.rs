@@ -47,6 +47,13 @@ pub struct AndroidAppInstance {
     pub activity_state: AndroidActivityState,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AndroidLaunchError {
+    AuditRejected,
+    SurfaceUnavailable,
+    MethodRejected,
+}
+
 /// System-wide Android container runtime manager.
 pub struct AndroidRuntime {
     next_pid: u32,
@@ -98,6 +105,50 @@ impl AndroidRuntime {
         );
 
         pid
+    }
+
+
+    /// Launches an APK only after the same guest-side audit used by installation.
+    /// The returned instance owns a real compositor surface; lifecycle state is never
+    /// represented only in Device Studio.
+    pub fn launch_verified(
+        &mut self,
+        apk: &ApkPackage,
+        task_id: TaskId,
+        cap_table: CapabilityTable,
+    ) -> Result<u32, AndroidLaunchError> {
+        let profile = apk.audit_and_create_container(900);
+        if profile.status != AcrAuditStatus::Approved || !apk.has_classes_dex {
+            return Err(AndroidLaunchError::AuditRejected);
+        }
+        let pid = self.spawn_app(&apk.manifest, task_id, cap_table);
+        let Some(app) = self.active_apps.get(&pid) else { return Err(AndroidLaunchError::SurfaceUnavailable); };
+        if app.surface_id == 0 {
+            self.active_apps.remove(&pid);
+            return Err(AndroidLaunchError::SurfaceUnavailable);
+        }
+        self.set_activity_state(pid, AndroidActivityState::Started);
+        self.set_activity_state(pid, AndroidActivityState::Resumed);
+        serial_println!("[ANDROID] package={} pid={} surface={} state=RESUMED", apk.manifest.package_name, pid, app.surface_id);
+        Ok(pid)
+    }
+
+    /// Executes one verified activity method inside the bounded Dalvik runtime.
+    pub fn invoke_verified_method(
+        &mut self,
+        pid: u32,
+        dex: &DexPackage,
+        class_name: &str,
+        method_name: &str,
+    ) -> Result<u32, AndroidLaunchError> {
+        let Some(app) = self.active_apps.get(&pid) else { return Err(AndroidLaunchError::MethodRejected); };
+        if !matches!(app.activity_state, AndroidActivityState::Resumed | AndroidActivityState::Started) {
+            return Err(AndroidLaunchError::MethodRejected);
+        }
+        let mut vm = DalvikVmState::new();
+        dex.audit_bytecode().map_err(|_| AndroidLaunchError::MethodRejected)?;
+        let result = vm.invoke_method(dex, class_name, method_name).map_err(|_| AndroidLaunchError::MethodRejected)?;
+        Ok(result)
     }
 
     /// Terminates an active Android application instance.
