@@ -2439,7 +2439,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                     'message': str(resp)
                 }).encode())
                 return
-            elif action in ('sleep', 'power', 'wake'):
+            elif action in ('sleep', 'power', 'wake', 'toggle'):
                 ok, msg = send_guest_serial_command('POWER_KEY', '[POWER]', timeout=3)
                 self.send_response(200 if ok else 503)
                 self.send_header('Content-Type', 'application/json')
