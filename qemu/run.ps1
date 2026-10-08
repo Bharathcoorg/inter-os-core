@@ -6,7 +6,7 @@ param(
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rootDir = Split-Path -Parent $scriptDir
 $imagePath = "$rootDir\target\inter-os-bios.img"
-$dataPath = "$rootDir\target\inter-os-data-x86_64.img"
+$dataPath = if ($env:DATA_DISK_PATH) { $env:DATA_DISK_PATH } else { "$rootDir\target\inter-os-data-master.img" }
 . (Join-Path $rootDir "tools\qemu_env.ps1")
 $qemuBin = Resolve-QemuPath "qemu-system-x86_64.exe"
 

@@ -658,9 +658,10 @@ document.addEventListener('DOMContentLoaded', () => {
         // Never invent a scanout mode. If the current frame has not decoded yet,
         // input is rejected locally and the next frame will provide dimensions.
         if (fbW < 1 || fbH < 1) return;
-        const gx1 = Math.max(0, Math.min(fbW - 1, Math.round(startX * (fbW - 1))));
+        const scanoutLimitX = Math.min(1279, fbW - 1);
+        const gx1 = Math.max(0, Math.min(scanoutLimitX, Math.round(startX * (fbW - 1))));
         const gy1 = Math.max(0, Math.min(fbH - 1, Math.round(startY * (fbH - 1))));
-        const gx2 = Math.max(0, Math.min(fbW - 1, Math.round(endX * (fbW - 1))));
+        const gx2 = Math.max(0, Math.min(scanoutLimitX, Math.round(endX * (fbW - 1))));
         const gy2 = Math.max(0, Math.min(fbH - 1, Math.round(endY * (fbH - 1))));
         if (dist > 18) {
           payload = { action: 'swipe', coords: 'guest_framebuffer', x: gx1, y: gy1, x2: gx2, y2: gy2, steps: 5 };

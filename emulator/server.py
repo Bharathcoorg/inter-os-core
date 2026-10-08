@@ -859,13 +859,15 @@ def stop_qemu_backend():
 
     try:
         import psutil
-        for p in psutil.process_iter(['pid', 'name']):
+        for p in psutil.process_iter(['pid', 'name', 'cmdline']):
             p_name = p.info.get('name') or ''
             if 'qemu-system' in p_name.lower():
-                try:
-                    p.kill()
-                except Exception:
-                    pass
+                cmdline = ' '.join(p.info.get('cmdline') or [])
+                if 'inter-os-data-master.img' in cmdline or f':{MONITOR_PORT}' in cmdline:
+                    try:
+                        p.kill()
+                    except Exception:
+                        pass
     except Exception:
         pass
 
@@ -898,7 +900,10 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
     img_path = prof["image"]
     if not os.path.exists(img_path):
         return False, f"Boot image not found at '{img_path}'. Build target first with 'interos build {arch}'."
-    data_disk_path = os.path.join(WORKSPACE_ROOT, "target", f"interos-data-{arch}.img")
+    default_data_disk = "inter-os-data-master.img" if arch == "x86_64" else f"interos-data-{arch}.img"
+    data_disk_path = os.environ.get("DATA_DISK_PATH", os.path.join(WORKSPACE_ROOT, "target", default_data_disk))
+    if "inter-os-data-mimo.img" in data_disk_path or "inter-os-data-stepfun.img" in data_disk_path:
+        return False, "Isolation violation: Master QEMU runtime must never attach to peer agent disks." 
 
     ram = ram_mb or prof["ram"]
     serial_log = os.path.join(WORKSPACE_ROOT, "target", f"{arch}_boot.log")
@@ -2139,7 +2144,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 if space in ('landscape', 'logical_landscape') or (space in ('guest', 'guest_framebuffer', 'qemu', 'qemu_framebuffer') and current_device_orientation == 'landscape'):
                     x = int(data.get('x', 0)); y = int(data.get('y', 0))
                     fb_w, fb_h = current_framebuffer_size()
-                    if not (0 <= x < fb_w and 0 <= y < fb_h): raise ValueError('landscape coordinates out of bounds')
+                    if not (0 <= x < fb_w and 0 <= y < fb_h) or not (0 <= x < 1280 and 0 <= y < 720): raise ValueError('landscape coordinates out of bounds')
                     # KMS LandscapeRight maps (x, y) in 1280x720 scanout to mobile surface (719 - y, (x * 1440) // 1280)
                     gx = max(0, min(LOGICAL_SURFACE_W - 1, LOGICAL_SURFACE_W - 1 - (y * LOGICAL_SURFACE_W) // max(1, fb_h)))
                     gy = max(0, min(LOGICAL_SURFACE_H - 1, (x * LOGICAL_SURFACE_H) // max(1, fb_w)))
