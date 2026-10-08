@@ -233,94 +233,79 @@ pub struct AxmlStringPool {
 impl AxmlStringPool {
     /// Decodes a string pool chunk starting at `offset`.
     pub fn decode(data: &[u8], offset: usize) -> Result<(Self, usize), ApkError> {
-        if offset + 28 > data.len() {
+        const MAX_STRINGS: usize = 65536;
+        let header_end = offset.checked_add(28).ok_or(ApkError::InvalidStringPool)?;
+        let header = data.get(offset..header_end).ok_or(ApkError::InvalidStringPool)?;
+        if u16::from_le_bytes([header[0], header[1]]) != RES_STRING_POOL_TYPE {
+            return Err(ApkError::InvalidStringPool);
+        }
+        let chunk_size = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+        let string_count = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
+        let flags = u32::from_le_bytes(header[16..20].try_into().unwrap());
+        let strings_start = u32::from_le_bytes(header[20..24].try_into().unwrap()) as usize;
+        let chunk_end = offset.checked_add(chunk_size).ok_or(ApkError::InvalidStringPool)?;
+        if chunk_size < 28 || chunk_end > data.len() || string_count > MAX_STRINGS {
+            return Err(ApkError::InvalidStringPool);
+        }
+        let offsets_bytes = string_count.checked_mul(4).ok_or(ApkError::InvalidStringPool)?;
+        let offsets_end = header_end.checked_add(offsets_bytes).ok_or(ApkError::InvalidStringPool)?;
+        let strings_base = offset.checked_add(strings_start).ok_or(ApkError::InvalidStringPool)?;
+        if offsets_end > chunk_end || strings_start < 28 + offsets_bytes || strings_base > chunk_end {
             return Err(ApkError::InvalidStringPool);
         }
 
-        let chunk_type = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap());
-        if chunk_type != RES_STRING_POOL_TYPE {
-            return Err(ApkError::InvalidStringPool);
+        fn read_len8(data: &[u8], pos: &mut usize, end: usize) -> Result<usize, ApkError> {
+            let first = *data.get(*pos).filter(|_| *pos < end).ok_or(ApkError::InvalidStringPool)?;
+            *pos += 1;
+            if first & 0x80 == 0 { return Ok(first as usize); }
+            let second = *data.get(*pos).filter(|_| *pos < end).ok_or(ApkError::InvalidStringPool)?;
+            *pos += 1;
+            Ok((((first & 0x7f) as usize) << 8) | second as usize)
+        }
+        fn read_len16(data: &[u8], pos: &mut usize, end: usize) -> Result<usize, ApkError> {
+            let b = data.get(*pos..pos.checked_add(2).ok_or(ApkError::InvalidStringPool)?)
+                .filter(|_| *pos + 2 <= end).ok_or(ApkError::InvalidStringPool)?;
+            let first = u16::from_le_bytes([b[0], b[1]]);
+            *pos += 2;
+            if first & 0x8000 == 0 { return Ok(first as usize); }
+            let b = data.get(*pos..pos.checked_add(2).ok_or(ApkError::InvalidStringPool)?)
+                .filter(|_| *pos + 2 <= end).ok_or(ApkError::InvalidStringPool)?;
+            *pos += 2;
+            Ok((((first & 0x7fff) as usize) << 16) | u16::from_le_bytes([b[0], b[1]]) as usize)
         }
 
-        let chunk_size = u32::from_le_bytes(data[offset + 4..offset + 8].try_into().unwrap()) as usize;
-        let string_count = u32::from_le_bytes(data[offset + 8..offset + 12].try_into().unwrap()) as usize;
-        let flags = u32::from_le_bytes(data[offset + 16..offset + 20].try_into().unwrap());
-        let strings_start = u32::from_le_bytes(data[offset + 20..offset + 24].try_into().unwrap()) as usize;
-
-        let is_utf8 = (flags & (1 << 8)) != 0;
-        let offsets_start = offset + 28;
-
+        let is_utf8 = flags & (1 << 8) != 0;
         let mut strings = Vec::with_capacity(string_count);
-        let strings_data_base = offset + strings_start;
-
         for i in 0..string_count {
-            let off_idx = offsets_start + i * 4;
-            if off_idx + 4 > data.len() {
-                break;
-            }
-            let str_off = u32::from_le_bytes(data[off_idx..off_idx + 4].try_into().unwrap()) as usize;
-            let mut str_ptr = strings_data_base + str_off;
-
-            if str_ptr >= data.len() {
-                strings.push(String::new());
-                continue;
-            }
+            let off_pos = header_end.checked_add(i.checked_mul(4).ok_or(ApkError::InvalidStringPool)?)
+                .ok_or(ApkError::InvalidStringPool)?;
+            let off_bytes = data.get(off_pos..off_pos + 4).ok_or(ApkError::InvalidStringPool)?;
+            let string_offset = u32::from_le_bytes(off_bytes.try_into().unwrap()) as usize;
+            let mut pos = strings_base.checked_add(string_offset).ok_or(ApkError::InvalidStringPool)?;
+            if pos >= chunk_end { return Err(ApkError::InvalidStringPool); }
 
             if is_utf8 {
-                // Length prefix in UTF-8: 1 or 2 bytes for length, 1 or 2 bytes for byte length
-                if str_ptr >= data.len() {
-                    strings.push(String::new());
-                    continue;
+                let _utf16_len = read_len8(data, &mut pos, chunk_end)?;
+                let byte_len = read_len8(data, &mut pos, chunk_end)?;
+                let string_end = pos.checked_add(byte_len).ok_or(ApkError::InvalidStringPool)?;
+                if string_end >= chunk_end || data[string_end] != 0 {
+                    return Err(ApkError::InvalidStringPool);
                 }
-                let char_len = data[str_ptr] as usize;
-                if char_len & 0x80 != 0 {
-                    str_ptr += 2;
-                } else {
-                    str_ptr += 1;
-                }
-
-                if str_ptr >= data.len() {
-                    strings.push(String::new());
-                    continue;
-                }
-                let mut byte_len = data[str_ptr] as usize;
-                if byte_len & 0x80 != 0 {
-                    if str_ptr + 1 < data.len() {
-                        byte_len = ((byte_len & 0x7F) << 8) | (data[str_ptr + 1] as usize);
-                    }
-                    str_ptr += 2;
-                } else {
-                    str_ptr += 1;
-                }
-
-                if str_ptr + byte_len <= data.len() {
-                    let s = core::str::from_utf8(&data[str_ptr..str_ptr + byte_len]).unwrap_or("");
-                    strings.push(String::from(s));
-                } else {
-                    strings.push(String::new());
-                }
+                let value = core::str::from_utf8(&data[pos..string_end])
+                    .map_err(|_| ApkError::InvalidStringPool)?;
+                strings.push(String::from(value));
             } else {
-                // UTF-16 encoding
-                let char_len = u16::from_le_bytes(data[str_ptr..str_ptr + 2].try_into().unwrap()) as usize;
-                str_ptr += 2;
-                if char_len & 0x8000 != 0 {
-                    str_ptr += 2;
+                let char_len = read_len16(data, &mut pos, chunk_end)?;
+                let byte_len = char_len.checked_mul(2).ok_or(ApkError::InvalidStringPool)?;
+                let string_end = pos.checked_add(byte_len).ok_or(ApkError::InvalidStringPool)?;
+                if string_end > chunk_end { return Err(ApkError::InvalidStringPool); }
+                let mut units = Vec::with_capacity(char_len);
+                for pair in data[pos..string_end].chunks_exact(2) {
+                    units.push(u16::from_le_bytes([pair[0], pair[1]]));
                 }
-                let byte_len = char_len * 2;
-                if str_ptr + byte_len <= data.len() {
-                    let mut utf16_chars = Vec::with_capacity(char_len);
-                    for c_idx in 0..char_len {
-                        let c = u16::from_le_bytes(data[str_ptr + c_idx * 2..str_ptr + c_idx * 2 + 2].try_into().unwrap());
-                        utf16_chars.push(c);
-                    }
-                    let s = String::from_utf16_lossy(&utf16_chars);
-                    strings.push(s);
-                } else {
-                    strings.push(String::new());
-                }
+                strings.push(String::from_utf16_lossy(&units));
             }
         }
-
         Ok((Self { strings }, chunk_size))
     }
 
