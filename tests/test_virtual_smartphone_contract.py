@@ -112,3 +112,19 @@ def test_device_studio_never_kills_unowned_qemu_processes():
     assert "psutil.process_iter" not in stop
     assert "p.kill()" not in stop
     assert "Only qemu_subproc, created and owned by" in stop
+
+
+def test_boot_renderer_is_constant_time_and_all_view_matches_cover_boot():
+    boot = read("apps/launcher/src/screens/boot.rs")
+    launcher = read("apps/launcher/src/main.rs")
+    assert "while distance.saturating_add(1)" not in boot
+    assert "distance_sq" in boot
+    assert "ViewMode::BootScreen => {" in launcher
+    assert "Boot presentation complete" in launcher
+
+
+def test_android_apk_without_dex_is_rejected_before_container_approval():
+    apk = read("kernel/src/compat/android/apk.rs")
+    audit = apk[apk.index("pub fn audit_and_create_container"):]
+    assert "if !self.has_classes_dex" in audit
+    assert "status: AcrAuditStatus::InvalidApkFormat" in audit
