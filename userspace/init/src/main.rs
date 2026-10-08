@@ -12,6 +12,7 @@ use interos_std as std;
 
 const SERVICE_BUFFER: usize = 512;
 const POLL_INTERVAL_TICKS: u64 = 100;
+const SERVICES: [u8; 11] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
@@ -22,10 +23,10 @@ pub extern "C" fn _start() -> ! {
     // Ask the authoritative kernel registry to start every declared
     // userspace service. Retry dependency-blocked services so PID 1 does not
     // depend on a duplicated dependency ordering table.
-    let mut remaining = 11u8;
+    let mut remaining = SERVICES.len() as u8;
     while remaining > 0 {
         let mut progress = false;
-        for service_id in 1u8..=11u8 {
+        for &service_id in &SERVICES {
             match std::service_start(service_id) {
                 Ok(_) => progress = true,
                 Err(_) => {}
@@ -89,7 +90,7 @@ pub extern "C" fn _start() -> ! {
                     std::log(0, "[PID1] Service registry returned no active services.").ok();
                 }
             }
-            for service_id in [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] {
+            for &service_id in &SERVICES {
                 if std::service_recover_failed(service_id).is_ok() {
                     std::log(
                         0,

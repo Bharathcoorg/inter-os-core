@@ -183,6 +183,11 @@ pub fn poll_serial_rx() {
         let byte = unsafe { rbr.read() };
         count += 1;
 
+        // Discard null bytes (break conditions / UART line noise / socket handshake padding)
+        if byte == 0 {
+            continue;
+        }
+
         // WHY an overflow marker rather than a silent drop: a line longer than the
         // buffer must not be dispatched as if it were complete, and must not be
         // discarded without trace either. The marker makes the truncation visible
@@ -215,6 +220,7 @@ pub fn poll_serial_rx() {
 /// Dispatches any complete serial command lines. Must be called from a normal
 /// (non-interrupt) context.
 pub fn service_serial_commands() {
+    poll_serial_rx();
     loop {
         // Copy the line out and release the lock before dispatching:
         // handle_serial_command prints, and printing while holding RX_BUF would
@@ -239,10 +245,10 @@ pub fn service_serial_commands() {
 
         let mut start = 0usize;
         let mut end = len;
-        while start < end && (local[start] as char).is_ascii_whitespace() {
+        while start < end && ((local[start] as char).is_ascii_whitespace() || local[start] == 0) {
             start += 1;
         }
-        while end > start && (local[end - 1] as char).is_ascii_whitespace() {
+        while end > start && ((local[end - 1] as char).is_ascii_whitespace() || local[end - 1] == 0) {
             end -= 1;
         }
         if start == end {
@@ -544,7 +550,7 @@ fn handle_rapp_command(s: &str) -> bool {
 
 fn handle_serial_command(cmd: &[u8]) {
     let s = if let Ok(s) = core::str::from_utf8(cmd) {
-        s.trim()
+        s.trim_matches(|c: char| c.is_ascii_whitespace() || c == '\0')
     } else {
         return;
     };
@@ -658,7 +664,7 @@ fn handle_serial_command(cmd: &[u8]) {
         }
 
         let mut synced = false;
-        for _ in 0..10_000 {
+        for _ in 0..100_000 {
             if let Some(mut vfs) = crate::fs::vfs::VFS.try_lock() {
                 vfs.create_file(path, content.as_bytes(), false);
                 match vfs.sync() {
@@ -680,19 +686,28 @@ fn handle_serial_command(cmd: &[u8]) {
         if let Some(path) = parts.next() {
             if path.contains("..") || path.contains("//") {
                 crate::serial_println!("[FILE_READ] path={} status=ERR_REJECTED", path);
-            } else if let Some(vfs) = crate::fs::vfs::VFS.try_lock() {
-                let mut out = [0u8; 1024];
-                match vfs.read_file_by_path(path, &mut out) {
-                    Ok(n) => {
-                        let content = core::str::from_utf8(&out[..n]).unwrap_or("<binary>");
-                        crate::serial_println!("[FILE_READ] path={} status=OK content={}", path, content);
-                    }
-                    Err(_) => {
-                        crate::serial_println!("[FILE_READ] path={} status=NOT_FOUND", path);
-                    }
-                }
             } else {
-                crate::serial_println!("[FILE_READ] path={} status=ERR_LOCKED", path);
+                let mut read_done = false;
+                for _ in 0..100_000 {
+                    if let Some(vfs) = crate::fs::vfs::VFS.try_lock() {
+                        let mut out = [0u8; 1024];
+                        match vfs.read_file_by_path(path, &mut out) {
+                            Ok(n) => {
+                                let content = core::str::from_utf8(&out[..n]).unwrap_or("<binary>");
+                                crate::serial_println!("[FILE_READ] path={} status=OK content={}", path, content);
+                            }
+                            Err(_) => {
+                                crate::serial_println!("[FILE_READ] path={} status=NOT_FOUND", path);
+                            }
+                        }
+                        read_done = true;
+                        break;
+                    }
+                    core::hint::spin_loop();
+                }
+                if !read_done {
+                    crate::serial_println!("[FILE_READ] path={} status=ERR_LOCKED", path);
+                }
             }
         }
         return;
@@ -700,7 +715,7 @@ fn handle_serial_command(cmd: &[u8]) {
 
     if verb.eq_ignore_ascii_case("SYNC") || verb.eq_ignore_ascii_case("FLUSH") {
         let mut synced = false;
-        for _ in 0..10_000 {
+        for _ in 0..100_000 {
             if let Some(vfs) = crate::fs::vfs::VFS.try_lock() {
                 match vfs.sync() {
                     Ok(_) => crate::serial_println!("[SYNC] status=OK"),
@@ -719,7 +734,7 @@ fn handle_serial_command(cmd: &[u8]) {
 
     if verb.eq_ignore_ascii_case("FSCK") || verb.eq_ignore_ascii_case("FS_CHECK") {
         let mut executed = false;
-        for _ in 0..10_000 {
+        for _ in 0..100_000 {
             if let Some(mut ata) = crate::drivers::ATA_PRIMARY.try_lock() {
                 if let Some(drive) = ata.as_mut() {
                     let total = drive.sector_count();
