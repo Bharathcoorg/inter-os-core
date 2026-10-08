@@ -46,7 +46,7 @@ $qemuArgs = @(
     "-device", "virtio-vga,edid=on,xres=720,yres=1440",
     "-device", "qemu-xhci,id=xhci0",
     "-device", "usb-tablet,bus=xhci0.0",
-    "-display", "vnc=:0",
+    "-display", "vnc=:1",
     "-serial", "tcp:127.0.0.1:4301,server,nowait",
     "-monitor", "tcp:127.0.0.1:44445,server,nowait",
     "-name", "Inter OS v0.1"
