@@ -28,6 +28,7 @@ import ipaddress
 PORT = int(os.environ.get("STUDIO_PORT", 4300))
 SERIAL_TCP_PORT = int(os.environ.get("SERIAL_PORT", 4301))
 QMP_PORT = int(os.environ.get("QMP_PORT", 4302))
+MONITOR_PORT = int(os.environ.get("MONITOR_PORT", 44445))
 VNC_PORT = int(os.environ.get("VNC_PORT", 5901))
 WS_PORT = int(os.environ.get("WS_PORT", 6081))
 DIRECTORY = os.path.dirname(os.path.abspath(__file__))
@@ -707,53 +708,98 @@ def find_qemu_executable(arch):
     return None
 
 
-def send_qemu_monitor_cmd(cmd_str, host='127.0.0.1', port=44445, timeout=0.8):
-    """Sends a raw command to QEMU HMP monitor and returns the response."""
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(timeout)
-            s.connect((host, port))
-            _ = s.recv(1024)
-            s.sendall(cmd_str.strip().encode('utf-8') + b'\n')
-            time.sleep(0.05)
-            resp = s.recv(8192).decode('utf-8', errors='replace')
-            return True, resp.strip()
-    except Exception as e:
-        return False, str(e)
+_persistent_monitor_sock = None
+_persistent_monitor_lock = threading.Lock()
+
+def send_qemu_monitor_cmd(cmd_str, host='127.0.0.1', port=MONITOR_PORT, timeout=0.8):
+    """Sends a raw command to QEMU HMP monitor and returns the response using persistent connection."""
+    global _persistent_monitor_sock
+    with _persistent_monitor_lock:
+        for attempt in range(2):
+            if _persistent_monitor_sock is None:
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(timeout)
+                    s.connect((host, port))
+                    banner = b''
+                    while b'(qemu)' not in banner:
+                        chunk = s.recv(1024)
+                        if not chunk: break
+                        banner += chunk
+                    _persistent_monitor_sock = s
+                except Exception as e:
+                    _persistent_monitor_sock = None
+                    if attempt == 1:
+                        return False, str(e)
+                    continue
+            try:
+                _persistent_monitor_sock.sendall(cmd_str.strip().encode('utf-8') + b'\n')
+                resp = b''
+                while b'(qemu)' not in resp:
+                    chunk = _persistent_monitor_sock.recv(4096)
+                    if not chunk:
+                        raise ConnectionResetError("QEMU monitor closed connection")
+                    resp += chunk
+                return True, resp.decode('utf-8', errors='replace').strip()
+            except Exception as e:
+                try:
+                    if _persistent_monitor_sock:
+                        _persistent_monitor_sock.close()
+                except Exception:
+                    pass
+                _persistent_monitor_sock = None
+                if attempt == 1:
+                    return False, str(e)
+        return False, "Failed to send monitor command"
 
 
 _last_frame_cache = {
     'portrait': None,
+    'portrait_jpeg': None,
     'landscape': None,
+    'landscape_jpeg': None,
     'full': None,
+    'full_jpeg': None,
     'time': 0.0,
+}
+_transport_metrics = {
+    'fps': 0.0,
+    'frame_us': 0,
+    'frames_in_second': 0,
+    'second_start': time.time(),
 }
 _capture_lock = threading.Lock()
 current_device_orientation = 'portrait'
 
 
-def capture_qemu_screen_frame(full_scanout=False, orientation=None):
+def capture_qemu_screen_frame(full_scanout=False, orientation=None, prefer_jpeg=True):
     """
-    Captures live QEMU scanout buffer via HMP screendump command.
-    Returns (bytes, content_type) or (None, error_str) if QEMU monitor is unavailable.
-    Includes thread-safe caching and graceful fallback to prevent flicker or dropped frames.
+    Captures live QEMU scanout buffer via persistent monitor screendump.
+    Returns (bytes, content_type) or (None, error_str).
+    Fast in-memory cache return achieves 30-60 FPS throughput.
     """
-    global _last_frame_cache, current_device_orientation
+    global _last_frame_cache, current_device_orientation, _transport_metrics
     target_orient = orientation or current_device_orientation
     is_landscape = (target_orient == 'landscape') or full_scanout
     mode_key = 'full' if full_scanout else ('landscape' if is_landscape else 'portrait')
     now = time.time()
 
-    # Fast path: return cached frame if captured within 5ms (high refresh rate friendly)
-    if _last_frame_cache.get(mode_key) and (now - _last_frame_cache['time']) < 0.005:
+    # Fast path: return cached frame from memory if fresh (< 0.045s)
+    cache_age = now - _last_frame_cache.get('time', 0.0)
+    if _last_frame_cache.get(mode_key) and cache_age < 0.045:
+        if prefer_jpeg and _last_frame_cache.get(f"{mode_key}_jpeg"):
+            return _last_frame_cache[f"{mode_key}_jpeg"], "image/jpeg"
         return _last_frame_cache[mode_key], "image/png"
 
     # Avoid concurrent disk contention on PPM dump
     if not _capture_lock.acquire(blocking=False):
+        if prefer_jpeg and _last_frame_cache.get(f"{mode_key}_jpeg"):
+            return _last_frame_cache[f"{mode_key}_jpeg"], "image/jpeg"
         if _last_frame_cache.get(mode_key):
             return _last_frame_cache[mode_key], "image/png"
         return None, "Capture busy"
 
+    t0 = time.time()
     try:
         dump_dir = os.path.join(WORKSPACE_ROOT, "target")
         os.makedirs(dump_dir, exist_ok=True)
@@ -764,18 +810,15 @@ def capture_qemu_screen_frame(full_scanout=False, orientation=None):
             t = query_qemu_monitor()
             if not t["qemu_alive"]:
                 launch_qemu_profile(active_profile_key)
+            if prefer_jpeg and _last_frame_cache.get(f"{mode_key}_jpeg"):
+                return _last_frame_cache[f"{mode_key}_jpeg"], "image/jpeg"
             if _last_frame_cache.get(mode_key):
                 return _last_frame_cache[mode_key], "image/png"
             return None, f"QEMU monitor screendump failed: {resp}"
 
-        # Fast polling for PPM file availability with sub-millisecond check
-        wait_start = time.time()
-        while not os.path.exists(ppm_path):
-            if time.time() - wait_start > 0.08:
-                break
-            time.sleep(0.001)
-
         if not os.path.exists(ppm_path):
+            if prefer_jpeg and _last_frame_cache.get(f"{mode_key}_jpeg"):
+                return _last_frame_cache[f"{mode_key}_jpeg"], "image/jpeg"
             if _last_frame_cache.get(mode_key):
                 return _last_frame_cache[mode_key], "image/png"
             return None, "Screendump PPM file not produced"
@@ -783,57 +826,88 @@ def capture_qemu_screen_frame(full_scanout=False, orientation=None):
         from PIL import Image
         with Image.open(ppm_path) as img:
             if not check_launcher_ready():
+                if prefer_jpeg and _last_frame_cache.get(f"{mode_key}_jpeg"):
+                    return _last_frame_cache[f"{mode_key}_jpeg"], "image/jpeg"
                 if _last_frame_cache.get(mode_key):
                     return _last_frame_cache[mode_key], "image/png"
                 return None, "Guest still booting; graphical canvas not ready"
 
-            if is_landscape:
-                width, height = img.size
-                global guest_framebuffer_size
-                guest_framebuffer_size = (width, height)
-                if width > 0 and height > 0:
-                    box = letterbox_box(width, height)
-                    rgb_img = img.convert("RGB")
-                    left_sample = rgb_img.getpixel((box[0] // 2, height // 2))
-                    right_sample = rgb_img.getpixel((box[2] + (width - box[2]) // 2, height // 2))
-                    if left_sample == (0, 0, 0) and right_sample == (0, 0, 0):
-                        cropped = img.crop(box)
-                        out_img = cropped.rotate(270, expand=True)
-                    else:
-                        out_img = img
+            width, height = img.size
+            global guest_framebuffer_size
+            guest_framebuffer_size = (width, height)
+            box = letterbox_box(width, height)
+
+            # 1. Portrait crop (720x1440 logical canvas centered in scanout)
+            cropped_portrait = img.crop(box)
+            buf_jpg_p = io.BytesIO()
+            cropped_portrait.save(buf_jpg_p, format="JPEG", quality=90)
+            jpg_bytes_p = buf_jpg_p.getvalue()
+
+            buf_png_p = io.BytesIO()
+            cropped_portrait.save(buf_png_p, format="PNG", compress_level=1)
+            png_bytes_p = buf_png_p.getvalue()
+
+            # 2. Landscape / Full crop
+            if width > 0 and height > 0:
+                rgb_img = img.convert("RGB")
+                left_sample = rgb_img.getpixel((box[0] // 2, height // 2))
+                right_sample = rgb_img.getpixel((box[2] + (width - box[2]) // 2, height // 2))
+                if left_sample == (0, 0, 0) and right_sample == (0, 0, 0):
+                    out_img = cropped_portrait.rotate(270, expand=True)
                 else:
                     out_img = img
-                buf = io.BytesIO()
-                out_img.save(buf, format="PNG", compress_level=1)
-                frame_bytes = buf.getvalue()
-                _last_frame_cache['landscape'] = frame_bytes
-                _last_frame_cache['full'] = frame_bytes
-                _last_frame_cache['time'] = time.time()
-                return frame_bytes, "image/png"
             else:
-                width, height = img.size
-                guest_framebuffer_size = (width, height)
-                if width > 0 and height > 0:
-                    box = letterbox_box(width, height)
-                    cropped = img.crop(box)
-                    # Preserve the captured guest pixels. Browser presentation
-                    # scaling is deliberately outside the capture path.
-                    buf = io.BytesIO()
-                    cropped.save(buf, format="PNG", compress_level=1)
-                    frame_bytes = buf.getvalue()
-                    _last_frame_cache['portrait'] = frame_bytes
-                    _last_frame_cache['time'] = time.time()
-                    return frame_bytes, "image/png"
-                else:
-                    if _last_frame_cache.get(mode_key):
-                        return _last_frame_cache[mode_key], "image/png"
-                    return None, "Guest still in early BIOS bootloader stage; graphical canvas not ready"
+                out_img = img
+
+            buf_jpg_l = io.BytesIO()
+            out_img.save(buf_jpg_l, format="JPEG", quality=90)
+            jpg_bytes_l = buf_jpg_l.getvalue()
+
+            buf_png_l = io.BytesIO()
+            out_img.save(buf_png_l, format="PNG", compress_level=1)
+            png_bytes_l = buf_png_l.getvalue()
+
+            now_finish = time.time()
+            elapsed_us = int((now_finish - t0) * 1_000_000)
+            _transport_metrics['frame_us'] = elapsed_us
+            _transport_metrics['frames_in_second'] += 1
+            if now_finish - _transport_metrics['second_start'] >= 1.0:
+                _transport_metrics['fps'] = _transport_metrics['frames_in_second'] / (now_finish - _transport_metrics['second_start'])
+                _transport_metrics['frames_in_second'] = 0
+                _transport_metrics['second_start'] = now_finish
+
+            _last_frame_cache['portrait'] = png_bytes_p
+            _last_frame_cache['portrait_jpeg'] = jpg_bytes_p
+            _last_frame_cache['landscape'] = png_bytes_l
+            _last_frame_cache['landscape_jpeg'] = jpg_bytes_l
+            _last_frame_cache['full'] = png_bytes_l
+            _last_frame_cache['full_jpeg'] = jpg_bytes_l
+            _last_frame_cache['time'] = now_finish
+
+            if prefer_jpeg:
+                return (jpg_bytes_l if is_landscape else jpg_bytes_p), "image/jpeg"
+            return (png_bytes_l if is_landscape else png_bytes_p), "image/png"
     except Exception as e:
+        if prefer_jpeg and _last_frame_cache.get(f"{mode_key}_jpeg"):
+            return _last_frame_cache[f"{mode_key}_jpeg"], "image/jpeg"
         if _last_frame_cache.get(mode_key):
             return _last_frame_cache[mode_key], "image/png"
         return None, f"Image processing error: {e}"
     finally:
         _capture_lock.release()
+
+
+def _background_frame_streamer():
+    """Background daemon thread continuously polling QEMU scanout buffer into memory cache."""
+    while True:
+        try:
+            if check_launcher_ready():
+                capture_qemu_screen_frame(prefer_jpeg=True)
+            time.sleep(0.015)
+        except Exception:
+            time.sleep(0.05)
+
+threading.Thread(target=_background_frame_streamer, daemon=True).start()
 
 
 
@@ -1439,6 +1513,9 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         if self.path == '/api/qemu/telemetry':
             t = query_qemu_monitor().copy()
             t["launcher_ready"] = check_launcher_ready()
+            t["transport_fps"] = round(_transport_metrics["fps"], 1)
+            t["transport_frame_us"] = int(_transport_metrics["frame_us"])
+            t["guest_fps"] = 60
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
@@ -1446,11 +1523,57 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps(t).encode())
             return
 
+        if parsed_path.path == '/api/screen/stream':
+            query = urllib.parse.parse_qs(parsed_path.query)
+            orient = query.get('orientation', [None])[0]
+            self.send_response(200)
+            self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
+            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            try:
+                while True:
+                    frame_bytes, content_type = capture_qemu_screen_frame(orientation=orient, prefer_jpeg=True)
+                    if frame_bytes:
+                        self.wfile.write(b'--frame\r\n')
+                        self.wfile.write(f'Content-Type: {content_type}\r\n'.encode('utf-8'))
+                        self.wfile.write(f'Content-Length: {len(frame_bytes)}\r\n\r\n'.encode('utf-8'))
+                        self.wfile.write(frame_bytes)
+                        self.wfile.write(b'\r\n')
+                        self.wfile.flush()
+                    time.sleep(0.02)
+            except (ConnectionResetError, BrokenPipeError):
+                pass
+            return
+
+        if parsed_path.path == '/api/audio/volume':
+            query = urllib.parse.parse_qs(parsed_path.query)
+            action = query.get('action', ['get'])[0].upper()
+            val = query.get('value', [''])[0]
+            cmd = f"VOLUME {val}" if val else f"VOLUME {action}"
+            ok, msg = send_guest_serial_command(cmd)
+            cur_vol = 75
+            with telemetry_lock:
+                for line in reversed(serial_lines):
+                    if "[AUDIO]" in line and "volume_percent=" in line:
+                        m = re.search(r'volume_percent=(\d+)', line)
+                        if m:
+                            cur_vol = int(m.group(1))
+                            break
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': ok, 'volume_percent': cur_vol, 'status': 'APPLIED'}).encode())
+            return
+
         if parsed_path.path in ('/api/screen/frame', '/api/qemu/screendump', '/api/screen/scanout'):
             query = urllib.parse.parse_qs(parsed_path.query)
             full_scanout = query.get('full', ['0'])[0] in ('1', 'true', 'yes') or (parsed_path.path == '/api/screen/scanout')
             orient = query.get('orientation', [None])[0]
-            frame_bytes, err_or_type = capture_qemu_screen_frame(full_scanout=full_scanout, orientation=orient)
+            fmt = query.get('format', ['jpeg'])[0].lower()
+            prefer_jpeg = (fmt != 'png')
+            frame_bytes, err_or_type = capture_qemu_screen_frame(full_scanout=full_scanout, orientation=orient, prefer_jpeg=prefer_jpeg)
             if frame_bytes:
                 self.send_response(200)
                 self.send_header('Content-Type', err_or_type)

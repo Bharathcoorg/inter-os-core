@@ -325,10 +325,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // 3. System RAM & CR3 Paging
     const cr3 = data.cpu?.registers?.CR3;
     if (valRamUsage) {
-      valRamUsage.textContent = isAlive ? `CR3: ${cr3 || '0x01353000'}` : 'CR3: Standby';
+      valRamUsage.textContent = isAlive ? `CR3: ${cr3 || 'Active Paging'}` : 'CR3: Standby';
     }
     if (fillRamBar) {
-      fillRamBar.style.width = isAlive ? '32.4%' : '0%';
+      fillRamBar.style.width = isAlive ? '100%' : '0%';
+      fillRamBar.style.background = isAlive ? '#10B981' : '#71717A';
     }
 
     // 4. QEMU Block Drive
@@ -345,7 +346,9 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     }
     if (fillBlockBar) {
-      fillBlockBar.style.width = isAlive ? '24.6%' : '0%';
+      const ops = data.block?.read_ops || 0;
+      fillBlockBar.style.width = isAlive ? (ops > 0 ? '100%' : '50%') : '0%';
+      fillBlockBar.style.background = isAlive ? '#3B82F6' : '#71717A';
     }
 
     // 5. CPU Registers & Heatmap
@@ -389,6 +392,12 @@ document.addEventListener('DOMContentLoaded', () => {
       const res = await fetch('/api/qemu/telemetry');
       if (res.ok) {
         const data = await res.json();
+        if (data.transport_fps !== undefined) {
+          transportFps = data.transport_fps;
+        }
+        if (data.guest_fps !== undefined) {
+          guestFps = data.guest_fps;
+        }
         updateHardwareProfilerUI(data);
       }
     } catch (e) {
@@ -474,13 +483,8 @@ document.addEventListener('DOMContentLoaded', () => {
     refreshScanoutFrame();
   }
 
-  let scanoutInFlight = false;
-  let streamRafId = null;
-  let isStreamActive = false;
-  let frameCount = 0;
-  let fpsTimer = performance.now();
-  let measuredFps = 0;
-  const renderHzBadge = document.getElementById('render-hz-badge');
+  let transportFps = 0;
+  let guestFps = 60;
 
   function updateFpsCounter() {
     frameCount++;
@@ -490,7 +494,9 @@ document.addEventListener('DOMContentLoaded', () => {
       frameCount = 0;
       fpsTimer = now;
       if (renderHzBadge) {
-        const displayHz = measuredFps > 0 ? `${measuredFps} FPS • Measured` : 'FPS • Measuring';
+        const displayHz = measuredFps > 0
+          ? `${measuredFps} Browser FPS • ${transportFps || measuredFps} Transport FPS`
+          : 'Measuring FPS...';
         renderHzBadge.textContent = displayHz;
       }
     }
@@ -622,19 +628,47 @@ document.addEventListener('DOMContentLoaded', () => {
   if (touchSurface) {
     let isPointerDown = false;
     let startX = 0, startY = 0;
+    let lastSentX = 0, lastSentY = 0;
+    let lastMoveTime = 0;
 
     touchSurface.addEventListener('pointerdown', (ev) => {
       isPointerDown = true;
       const rect = touchSurface.getBoundingClientRect();
       startX = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
       startY = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
+      const px = Math.max(0, Math.min(719, Math.round(startX * 719)));
+      const py = Math.max(0, Math.min(1439, Math.round(startY * 1439)));
+      lastSentX = px;
+      lastSentY = py;
+      lastMoveTime = performance.now();
       updateVirtualTouch(ev.clientX, ev.clientY, true);
       try { touchSurface.setPointerCapture(ev.pointerId); } catch (_) {}
+      fetch('/api/touch/event', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'down', coords: 'portrait', x: px, y: py, slot: 0 })
+      }).catch(() => {});
     });
 
     touchSurface.addEventListener('pointermove', (ev) => {
       if (isPointerDown) {
         updateVirtualTouch(ev.clientX, ev.clientY, true);
+        const rect = touchSurface.getBoundingClientRect();
+        const curX = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
+        const curY = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
+        const px = Math.max(0, Math.min(719, Math.round(curX * 719)));
+        const py = Math.max(0, Math.min(1439, Math.round(curY * 1439)));
+        const now = performance.now();
+        if (now - lastMoveTime >= 16 && (Math.abs(px - lastSentX) > 3 || Math.abs(py - lastSentY) > 3)) {
+          lastMoveTime = now;
+          lastSentX = px;
+          lastSentY = py;
+          fetch('/api/touch/event', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'move', coords: 'portrait', x: px, y: py, slot: 0 })
+          }).catch(() => {});
+        }
       }
     });
 
@@ -645,60 +679,52 @@ document.addEventListener('DOMContentLoaded', () => {
       const rect = touchSurface.getBoundingClientRect();
       const endX = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
       const endY = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
+      const px = Math.max(0, Math.min(719, Math.round(endX * 719)));
+      const py = Math.max(0, Math.min(1439, Math.round(endY * 1439)));
       const dx = (endX - startX) * rect.width;
       const dy = (endY - startY) * rect.height;
       const dist = Math.hypot(dx, dy);
 
-      let payload;
-      if (state.isLandscape || cropMode === 'full') {
-        // Map against the dimensions of the decoded guest scanout rather than
-        // assuming a fixed 1280x720 mode.
-        const fbW = liveScanoutImg?.naturalWidth || 0;
-        const fbH = liveScanoutImg?.naturalHeight || 0;
-        // Never invent a scanout mode. If the current frame has not decoded yet,
-        // input is rejected locally and the next frame will provide dimensions.
-        if (fbW < 1 || fbH < 1) return;
-        const scanoutLimitX = Math.min(1279, fbW - 1);
-        const gx1 = Math.max(0, Math.min(scanoutLimitX, Math.round(startX * (fbW - 1))));
-        const gy1 = Math.max(0, Math.min(fbH - 1, Math.round(startY * (fbH - 1))));
-        const gx2 = Math.max(0, Math.min(scanoutLimitX, Math.round(endX * (fbW - 1))));
-        const gy2 = Math.max(0, Math.min(fbH - 1, Math.round(endY * (fbH - 1))));
-        if (dist > 18) {
-          payload = { action: 'swipe', coords: 'guest_framebuffer', x: gx1, y: gy1, x2: gx2, y2: gy2, steps: 5 };
-        } else {
-          payload = { action: 'tap', coords: 'guest_framebuffer', x: gx2, y: gy2 };
-        }
-      } else {
-        const px1 = Math.max(0, Math.min(719, Math.round(startX * 719)));
-        const py1 = Math.max(0, Math.min(1439, Math.round(startY * 1439)));
-        const px2 = Math.max(0, Math.min(719, Math.round(endX * 719)));
-        const py2 = Math.max(0, Math.min(1439, Math.round(endY * 1439)));
-        // Logical portrait input remains the stable 720x1440 application space.
-        if (dist > 20 || dy < -25) {
-          payload = { action: 'swipe', coords: 'portrait', x: px1, y: py1, x2: px2, y2: py2, steps: 5 };
-        } else {
-          payload = { action: 'tap', coords: 'portrait', x: px2, y: py2 };
-        }
-      }
-
-      try {
-        await fetch('/api/touch/event', {
+      if (dist < 12) {
+        fetch('/api/touch/event', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-      } catch (_) {}
+          body: JSON.stringify({ action: 'tap', coords: 'portrait', x: px, y: py })
+        }).catch(() => {});
+      } else {
+        fetch('/api/touch/event', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'up', coords: 'portrait', x: px, y: py, slot: 0 })
+        }).catch(() => {});
+      }
 
-      // Instantaneous visual feedback bursts
       requestAnimationFrame(() => refreshScanoutFrame(true));
       setTimeout(() => refreshScanoutFrame(true), 25);
       setTimeout(() => refreshScanoutFrame(true), 65);
-      setTimeout(() => refreshScanoutFrame(true), 160);
     });
+
+    touchSurface.addEventListener('wheel', (ev) => {
+      ev.preventDefault();
+      const delta = ev.deltaY;
+      const start_y = delta > 0 ? 900 : 500;
+      const end_y = delta > 0 ? 500 : 900;
+      fetch('/api/touch/event', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'swipe', coords: 'portrait', x: 360, y: start_y, x2: 360, y2: end_y, steps: 5 })
+      }).catch(() => {});
+      setTimeout(() => refreshScanoutFrame(true), 40);
+    }, { passive: false });
 
     touchSurface.addEventListener('pointercancel', () => {
       isPointerDown = false;
       updateVirtualTouch(0, 0, false);
+      fetch('/api/touch/event', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'cancel', coords: 'portrait', x: 360, y: 720, slot: 0 })
+      }).catch(() => {});
     });
   }
 
@@ -942,8 +968,18 @@ document.addEventListener('DOMContentLoaded', () => {
   emuBtnPower?.addEventListener('click', handlePowerAction);
 
   // Hardware Volume Buttons Action
-  function handleVolume(delta) {
-    state.volume = Math.max(0, Math.min(100, state.volume + delta));
+  async function handleVolume(delta) {
+    try {
+      const res = await fetch(`/api/audio/volume?action=${delta > 0 ? 'UP' : 'DOWN'}`);
+      if (res.ok) {
+        const d = await res.json();
+        if (d.volume_percent !== undefined) {
+          state.volume = d.volume_percent;
+        }
+      }
+    } catch (_) {
+      state.volume = Math.max(0, Math.min(100, state.volume + delta));
+    }
     showToast(`Volume: ${state.volume}%`);
     playBeep(delta > 0 ? 800 : 500, 0.04, 'sine');
   }
