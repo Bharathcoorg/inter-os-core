@@ -2494,20 +2494,40 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             except Exception:
                 data = {}
             target_orient = str(data.get('orientation', '')).strip().lower()
-            if target_orient in ('landscape', 'landscape_right', 'landscaperight', 'horizontal'):
-                current_device_orientation = 'landscape'
-                send_guest_serial_command('ORIENTATION LANDSCAPE')
-            elif target_orient in ('landscape_left', 'landscapeleft'):
-                current_device_orientation = 'landscape'
-                send_guest_serial_command('ORIENTATION LANDSCAPE_LEFT')
-            elif target_orient in ('portrait', 'vertical'):
-                current_device_orientation = 'portrait'
-                send_guest_serial_command('ORIENTATION PORTRAIT')
-            else:
-                current_device_orientation = 'landscape' if current_device_orientation == 'portrait' else 'portrait'
-                send_guest_serial_command('ORIENTATION ' + current_device_orientation.upper())
+            choices = {
+                'landscape': ('ORIENTATION LANDSCAPE', '[DISPLAY_HAL] Orientation changed to LandscapeRight.'),
+                'landscape_right': ('ORIENTATION LANDSCAPE_RIGHT', '[DISPLAY_HAL] Orientation changed to LandscapeRight.'),
+                'landscaperight': ('ORIENTATION LANDSCAPERIGHT', '[DISPLAY_HAL] Orientation changed to LandscapeRight.'),
+                'horizontal': ('ORIENTATION LANDSCAPE', '[DISPLAY_HAL] Orientation changed to LandscapeRight.'),
+                'landscape_left': ('ORIENTATION LANDSCAPE_LEFT', '[DISPLAY_HAL] Orientation changed to LandscapeLeft.'),
+                'landscapeleft': ('ORIENTATION LANDSCAPELEFT', '[DISPLAY_HAL] Orientation changed to LandscapeLeft.'),
+                'portrait': ('ORIENTATION PORTRAIT', '[DISPLAY_HAL] Orientation changed to Portrait.'),
+                'vertical': ('ORIENTATION PORTRAIT', '[DISPLAY_HAL] Orientation changed to Portrait.'),
+            }
+            command = choices.get(target_orient)
+            if command is None:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Unsupported orientation'}).encode())
+                return
 
-            # Invalidate cached frames immediately
+            ok, guest_message = send_guest_serial_command(command[0], command[1], timeout=3)
+            if not ok:
+                self.send_response(503)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'success': False,
+                    'status': 'UNCONFIRMED',
+                    'error': 'Guest did not confirm orientation change',
+                    'detail': guest_message,
+                }).encode())
+                return
+
+            current_device_orientation = 'landscape' if target_orient.startswith('landscape') or target_orient in ('horizontal', 'landscaperight') else 'portrait'
             _last_frame_cache['time'] = 0
             _last_frame_cache.pop('portrait', None)
             _last_frame_cache.pop('landscape', None)
@@ -2519,7 +2539,9 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({
                 'success': True,
+                'status': 'APPLIED',
                 'orientation': current_device_orientation,
+                'guest_confirmation': guest_message,
                 'scanout': f'{guest_framebuffer_size[0]}x{guest_framebuffer_size[1]}'
             }).encode())
             return
