@@ -791,10 +791,15 @@ document.addEventListener('DOMContentLoaded', () => {
     let lastMoveTime = 0;
 
     touchSurface.addEventListener('pointerdown', (ev) => {
+      if (ev.button !== 0) return;
+      const rect = getGuestPointerRect();
+      if (!rect) {
+        isPointerDown = false;
+        downSent = false;
+        return;
+      }
       isPointerDown = true;
       downSent = false;
-      const rect = getGuestPointerRect();
-      if (!rect) return;
       startX = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
       startY = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
       const px = Math.max(0, Math.min(719, Math.round(startX * 719)));
@@ -841,7 +846,13 @@ document.addEventListener('DOMContentLoaded', () => {
       isPointerDown = false;
       updateVirtualTouch(ev.clientX, ev.clientY, false);
       const rect = getGuestPointerRect();
-      if (!rect) return;
+      if (!rect) {
+        if (downSent) {
+          fetch('/api/touch/event', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'up', coords: 'portrait', x: lastSentX, y: lastSentY, slot: 0 }) }).catch(() => {});
+        }
+        downSent = false;
+        return;
+      }
       const endX = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
       const endY = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
       const px = Math.max(0, Math.min(719, Math.round(endX * 719)));
