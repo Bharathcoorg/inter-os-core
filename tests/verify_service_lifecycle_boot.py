@@ -91,9 +91,9 @@ def static_gate():
 
     must(lifecycle, "QEMU", "interactive QEMU lifecycle verifier")
 
-    print("M10 static gate: PASS")
-    print("M11 static gate: PASS")
-    print("M12 static gate: PASS")
+    print("Service Manager Static Gate: PASS")
+    print("Service Supervision Static Gate: PASS")
+    print("Lifecycle Architecture Static Gate: PASS")
     return 0
 
 def runtime_gate():
@@ -106,7 +106,7 @@ def runtime_gate():
         result = subprocess.run(command, cwd=str(ROOT))
         if result.returncode != 0:
             return result.returncode
-    print("M12 runtime gate: PASS")
+    print("Interactive Lifecycle Runtime Gate: PASS")
     return 0
 
 def main():

@@ -277,6 +277,8 @@ def main():
 
     args = [
         qemu_exe,
+        "-machine", "q35",
+        "-cpu", "qemu64",
         "-drive", f"format=raw,file={kernel_img},index=0",
         "-drive", f"format=raw,file={data_disk},index=1",
         "-m", "1024M",

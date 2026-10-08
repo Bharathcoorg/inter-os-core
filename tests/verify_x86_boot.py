@@ -1,8 +1,8 @@
 """
-InterOS Core — x86_64 QEMU Boot & Milestone Verification
+InterOS Core — x86_64 QEMU Boot & Contract Verification
 
 Verifies that the x86_64 microkernel and userspace stack boots in QEMU,
-reaches every mandatory boot milestone, spawns PID 1, initializes the
+reaches every mandatory boot invariant, spawns PID 1, initializes the
 compositor/launcher, and produces an authentic framebuffer screendump.
 """
 
@@ -63,6 +63,8 @@ def main():
 
     args = [
         qemu_exe,
+        "-machine", "q35",
+        "-cpu", "qemu64",
         "-drive", f"format=raw,file={kernel_img}",
         "-snapshot",
         "-m", "1024M",
@@ -131,7 +133,7 @@ def main():
             time.sleep(0.5)
 
         full_log = "\n".join(reader.captured_logs)
-        milestones = [
+        boot_invariants = [
             ("GDT & TSS Initialization", r"GDT & TSS loaded|Creating GDT"),
             ("Page Tables & Memory Setup", r"Page tables and physical frame allocator initialized|Kernel PML4 entry"),
             ("Physical Frame Allocator", r"Page tables and physical frame allocator initialized"),
@@ -142,12 +144,12 @@ def main():
         ]
 
         all_passed = True
-        print("\n--- [Verifying Invariants & Milestones] ---")
-        for name, pattern in milestones:
+        print("\n--- [Verifying Kernel & Userspace Boot Invariants] ---")
+        for name, pattern in boot_invariants:
             if re.search(pattern, full_log):
                 print(f"  [OK] {name}")
             else:
-                print(f"  [FAIL] Missing required milestone: {name}")
+                print(f"  [FAIL] Missing required boot invariant: {name}")
                 all_passed = False
 
         run_start_time = getattr(sys, "_run_start_time", 0)

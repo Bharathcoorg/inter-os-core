@@ -130,6 +130,8 @@ def boot_and_verify_boot_signals(qemu_exe, kernel_img, ser_port, session_name):
     print(f"\n[{session_name}] Launching QEMU instance...")
     qemu_cmd = [
         qemu_exe,
+        "-machine", "q35",
+        "-cpu", "qemu64",
         "-drive", f"format=raw,file={kernel_img}",
         "-snapshot",
         "-m", "1024M",
@@ -165,8 +167,8 @@ def boot_and_verify_boot_signals(qemu_exe, kernel_img, ser_port, session_name):
 
     for label, pattern in required_boot_signals:
         m = re.search(pattern, full_log)
-        assert m, f"[{session_name}] Milestone failed: {label} (pattern '{pattern}' not matched)"
-        print(f"[{session_name}]   [OK] Milestone verified: {label}")
+        assert m, f"[{session_name}] Boot invariant failed: {label} (pattern '{pattern}' not matched)"
+        print(f"[{session_name}]   [OK] Boot invariant verified: {label}")
 
     time.sleep(0.5)
     diag = reader.query_diag_state()

@@ -64,41 +64,65 @@ class SerialSession:
         self.sock = sock
         self.buf = b""
         self.captured_logs = []
+        self.cmd_log_idx = 0
 
-    def read_line(self, timeout=1.0):
-        self.sock.settimeout(timeout)
+    def flush(self, settle=0.1):
+        deadline = time.time() + settle
+        while time.time() < deadline:
+            self.sock.settimeout(0.02)
+            try:
+                data = self.sock.recv(65536)
+                if not data:
+                    break
+                self.buf += data
+                while b"\n" in self.buf:
+                    line, self.buf = self.buf.split(b"\n", 1)
+                    decoded = line.decode('utf-8', errors='replace').strip()
+                    if decoded:
+                        self.captured_logs.append(decoded)
+            except (socket.timeout, BlockingIOError):
+                break
+            except ConnectionResetError:
+                time.sleep(0.02)
+                break
+        try:
+            self.sock.settimeout(0.2)
+        except OSError:
+            pass
+
+    def send_cmd(self, cmd_str):
+        self.flush()
+        self.cmd_log_idx = len(self.captured_logs)
+        if not cmd_str.endswith("\n"):
+            cmd_str += "\n"
+        self.sock.sendall(cmd_str.encode('utf-8'))
+
+    def wait_for(self, marker, timeout=60.0):
+        # Check logs already captured since last command
+        for log in self.captured_logs[self.cmd_log_idx:]:
+            if marker in log:
+                return log
+
         start = time.time()
         while time.time() - start < timeout:
-            if b"\n" in self.buf:
-                line, self.buf = self.buf.split(b"\n", 1)
-                dec = line.decode('utf-8', errors='replace').strip()
-                if dec:
-                    self.captured_logs.append(dec)
-                return dec
             try:
                 data = self.sock.recv(4096)
                 if not data:
                     break
                 self.buf += data
+                while b"\n" in self.buf:
+                    line, self.buf = self.buf.split(b"\n", 1)
+                    decoded = line.decode('utf-8', errors='replace').strip()
+                    if decoded:
+                        self.captured_logs.append(decoded)
+                        if marker in decoded:
+                            return decoded
             except socket.timeout:
                 continue
             except ConnectionResetError:
+                time.sleep(0.05)
                 break
         return None
-
-    def wait_for(self, marker, timeout=60.0):
-        start = time.time()
-        while time.time() - start < timeout:
-            line = self.read_line(timeout=0.5)
-            if line is not None:
-                if marker in line:
-                    return line
-        return None
-
-    def send_cmd(self, cmd_str):
-        if not cmd_str.endswith("\n"):
-            cmd_str += "\n"
-        self.sock.sendall(cmd_str.encode('utf-8'))
 
     def send_and_wait(self, cmd_str, marker, timeout=30.0):
         time.sleep(0.3)
@@ -127,9 +151,14 @@ def launch_qemu_session(qemu_exe, boot_img, storage_img, port=5558):
 
     args = [
         qemu_exe,
-        "-drive", f"file={boot_img},format=raw,snapshot=on",
-        "-drive", f"file={storage_img},format=raw,index=1,media=disk",
+        "-machine", "q35",
+        "-cpu", "qemu64",
         "-m", "1024M",
+        "-device", "piix3-ide,id=ide",
+        "-drive", f"file={boot_img},format=raw,if=none,id=bootd,snapshot=on",
+        "-device", "ide-hd,bus=ide.0,unit=0,drive=bootd,bootindex=1",
+        "-drive", f"file={storage_img},format=raw,if=none,id=datad",
+        "-device", "ide-hd,bus=ide.0,unit=1,drive=datad",
         "-display", "none",
         "-chardev", f"socket,id=ser0,host=127.0.0.1,port={port},server=on,wait=off",
         "-serial", "chardev:ser0",
@@ -226,7 +255,7 @@ def main():
     # SESSION 2: Independent QEMU Process with SAME disk; verify state survived
     # =========================================================================
     print("\n--- [SESSION 2: Cross-Process Reboot & Persistence Verification] ---")
-    proc2, sock2, sess2 = launch_qemu_session(qemu_exe, boot_img, storage_img, port=5558)
+    proc2, sock2, sess2 = launch_qemu_session(qemu_exe, boot_img, storage_img, port=5560)
     try:
         ready = sess2.wait_for("Step 5: Initial presentation complete", timeout=100.0)
         assert ready, "Session 2 failed to reach Launcher presentation"
@@ -271,7 +300,7 @@ def main():
     # SESSION 3: Multi-generation update verification & Negative tests
     # =========================================================================
     print("\n--- [SESSION 3: Multi-Generation & Negative Testing] ---")
-    proc3, sock3, sess3 = launch_qemu_session(qemu_exe, boot_img, storage_img, port=5558)
+    proc3, sock3, sess3 = launch_qemu_session(qemu_exe, boot_img, storage_img, port=5562)
     try:
         ready = sess3.wait_for("Step 5: Initial presentation complete", timeout=100.0)
         assert ready, "Session 3 failed to reach Launcher presentation"
