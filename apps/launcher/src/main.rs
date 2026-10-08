@@ -1777,6 +1777,26 @@ pub extern "C" fn _start() -> ! {
                             if input.kind == 1 {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
+                                // The volume slider controls the guest audio manager;
+                                // it is not a decorative fill in the shade.
+                                if (500..576).contains(&y) && (36..684).contains(&x) {
+                                    let requested = (((x - 36) * 100) / 648).min(100) as u32;
+                                    match std::audio_set_volume(requested) {
+                                        Ok(applied) => {
+                                            state.last_volume_percent = applied.min(100) as u8;
+                                            state.volume_state_valid = true;
+                                            state.volume_hud_until = std::get_ticks(1).unwrap_or(0).saturating_add(180);
+                                            if let Some(id) = volume_surface {
+                                                render_volume_hud(id, state.last_volume_percent);
+                                                let _ = std::window_set_geometry(4, id, 100, 220, 100, true);
+                                                let _ = std::surface_flip(4);
+                                            }
+                                            std::log(0, "[LAUNCHER] Quick Controls volume slider applied to guest audio manager.").ok();
+                                        }
+                                        Err(_) => std::log(0, "[LAUNCHER] Volume control unavailable; guest state unchanged.").ok(),
+                                    }
+                                    break;
+                                }
                                 if (630..740).contains(&y) && (375..680).contains(&x) {
                                     state.current_view = ViewMode::PowerMenu;
                                     render_view(surface, &state);
