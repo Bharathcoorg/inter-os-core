@@ -723,7 +723,7 @@ document.addEventListener('DOMContentLoaded', () => {
       // expose its real scanout; boot/lock/off pixels are guest-owned.
       if (screenLiveScanout) screenLiveScanout.style.display = 'flex';
       startScanoutStream();
-    } else { else {
+    } else {
       hasLauncherPresented = false;
       stopScanoutStream();
       if (screenLiveScanout) screenLiveScanout.style.display = 'none';
