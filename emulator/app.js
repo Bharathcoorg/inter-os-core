@@ -513,6 +513,8 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   setInterval(queryMetrics, 1000);
 
+  const renderHzBadge = document.getElementById('render-hz-badge');
+
   function updateFpsCounter() {
     frameCount++;
     const now = performance.now();
