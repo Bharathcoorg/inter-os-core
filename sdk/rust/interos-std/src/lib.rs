@@ -177,6 +177,7 @@ pub enum SyscallNumber {
     AppRuntimeList = 123,
     AppFocus = 124,
     UserSetCredential = 126,
+    DevicePower = 127,
 }
 
 // -----------------------------------------------------------------------------
@@ -1094,6 +1095,10 @@ pub fn sensor_read(out: &mut [u8]) -> Result<usize, i64> {
         Err(ret)
     }
 }
+
+/// Controls the authoritative virtual-smartphone power path.
+/// 0=restart, 1=power off, 2=toggle display, 3=volume up, 4=volume down, 5=display state.
+pub fn device_power(action: u32) -> Result<u32, i64> { let ret = unsafe { syscall1(SyscallNumber::DevicePower, action as u64) }; if ret >= 0 { Ok(ret as u32) } else { Err(ret) } }
 
 /// Queries mobile battery fuel gauge telemetry (voltage, SoC %, capacity, charging status).
 pub fn audio_query_volume() -> Result<u32, i64> {
