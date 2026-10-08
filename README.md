@@ -6,7 +6,7 @@
 ![Language: Pure Rust](https://img.shields.io/badge/Language-Pure%20Rust%20%23!%5Bno__std%5D-orange.svg)
 ![Architectures: x86_64 / AArch64 / RISC-V 64](https://img.shields.io/badge/Architectures-x86__64%20%7C%20AArch64%20%7C%20RISC--V%2064-success.svg)
 ![Build: Reproducible](https://img.shields.io/badge/Build-Reproducible-blue.svg)
-![Verification: QEMU-Gated](https://img.shields.io/badge/Verification-QEMU--Gated-brightgreen.svg)
+![Verification: Local Audit Required](https://img.shields.io/badge/Verification-Local%20Audit%20Required-yellow.svg)
 
 ### **The Sovereign, Open-Source Rust Mobile Operating System Foundation**
 *A memory-safe, capability-based microkernel mobile platform for x86_64, AArch64, and RISC-V 64.*
@@ -18,7 +18,7 @@
 ---
 
 > **Status Notice: Engineering Reality & Verification Status**  
-> InterOS Core is an open-source, bare-metal Rust microkernel and mobile operating system foundation. All user processes execute in isolated virtual address spaces with hardware MMU enforcement (CR3 / TTBR0_EL1 / SATP), capability-based access control, safe syscall memory copies (`UserPtr`), and mandatory Ed25519 cryptographic package attestation.  
+> InterOS Core is an open-source, bare-metal Rust microkernel and mobile operating system foundation. The intended platform enforces per-process virtual address spaces (CR3 / TTBR0_EL1 / SATP), capability-based access control, and safe syscall memory copies (`UserPtr`). Native `.rapp` packages have an Ed25519 attestation path; this does not mean Android APK signatures are verified.  
 > The repository includes automated source-contract and subsystem tests for the canonical x86_64 QEMU smartphone target and QEMU virt bring-up targets for AArch64 and RISC-V 64. The latest Device Studio/display/input lifecycle changes still require a fresh local QEMU run before they can be described as runtime-verified. Physical smartphone deployment remains experimental bring-up.
 
 ---
@@ -59,7 +59,7 @@ See [Platform Reality Contract](docs/PLATFORM_REALITY_CONTRACT.md) and run `pyth
 | **Process Lifecycle & Multitasking** | Present | **Unit-tested / QEMU-verified** | Ring-3 preemptive scheduler, PID tracking, `WaitPid` & `ExitWithCode` syscalls |
 | **DRM/KMS Multi-Surface Compositor** | Present | **QEMU-verified** | Double-buffered scanout, z-order multi-plane composition, 2×2 SSAA downsampling |
 | **Native Typography & UI Primitives** | Present | **Unit-tested / QEMU-verified** | Proportional 16×24 anti-aliased font (`test_text_aa`), tabular digits, squircle cards |
-| **Native Smartphone Applications** | Present | **QEMU-verified** | 12 first-party apps (Calculator, Dialer, Messages, Settings, Music, Gallery, etc.) |
+| **Native Smartphone Applications** | Emulated / in development | **Unit-tested / partial QEMU coverage** | 12 first-party app targets; end-to-end usability and lifecycle acceptance still require the local Device Studio audit |
 | **Android Compatibility Boundary (ACR)** | Experimental / Sandboxed | **Source-only / Unit-tested** | Fail-closed APK signature boundary, APK structure/manifest parsing, bounded DEX opcode subset, sandbox VFS and framework bridge; full Android app launch is not supported yet |
 | **Universal Device Studio** | Emulated | **Source-only / Unit-tested** | `emulator/server.py`; QEMU manager, VNC scanout, serial input bridge and live HMP/QMP queries; latest end-to-end guest interaction requires local QEMU verification |
 | **Unified Developer CLI (`interos`)** | Present | **Unit-tested** | `tools/interos.py`; `doctor`, `build`, `test`, `package`, `sign`, `verify`, `install`, `run` |
