@@ -12,6 +12,15 @@ use spin::Mutex;
 use crate::capability::{CapabilityTable, CapabilityType, Rights};
 use crate::task::TaskId;
 
+/// Capability object namespace for Android Binder services.
+/// A caller must hold IpcSend against the exact target object; a generic Binder
+/// capability must never authorize arbitrary service handles.
+pub const BINDER_SERVICE_OBJECT_BASE: u64 = 0x4249_4E44_0000_0000;
+
+pub const fn binder_service_object(handle: u32) -> u64 {
+    BINDER_SERVICE_OBJECT_BASE | handle as u64
+}
+
 /// Android Binder transaction command codes written to `/dev/binder`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -91,12 +100,26 @@ impl BinderMediator {
         transaction: &BinderTransaction,
     ) -> Result<BinderReturn, BinderReturn> {
         // ServiceManager query (Handle 0, Code 1 = getService)
+        if transaction.data.len() > 64 * 1024 {
+            self.audit_log.push(BinderSecurityAudit {
+                caller_task: caller,
+                target_handle: transaction.target_handle,
+                code: transaction.code,
+                reason: "Android Binder payload exceeds bounded transaction size",
+            });
+            return Err(BinderReturn::BrSecurityDenied);
+        }
         if transaction.target_handle == 0 {
+            // ServiceManager enumeration is intentionally read-only and carries no
+            // arbitrary transaction payload or native capability.
+            if transaction.code != 1 || !transaction.data.is_empty() {
+                return Err(BinderReturn::BrSecurityDenied);
+            }
             return Ok(BinderReturn::BrTransactionComplete);
         }
 
         // Bounded Service Call: Verify capability token
-        if caller_caps.verify(cap_slot, CapabilityType::IpcSend, Rights::WRITE).is_err() {
+        if caller_caps.authorize_object(CapabilityType::IpcSend, Rights::WRITE, binder_service_object(transaction.target_handle)) == false {
             self.audit_log.push(BinderSecurityAudit {
                 caller_task: caller,
                 target_handle: transaction.target_handle,
