@@ -53,14 +53,10 @@ guest_framebuffer_size = (720, 1440)
 def letterbox_box(fb_w, fb_h):
     """Returns the phone-surface rect (left, top, right, bottom) in a fb_w x fb_h scanout.
 
-    WHY: the destination rectangle is the guest's, not ours. The kernel fits the
-    logical portrait surface by its limiting axis and centres it
-    (kernel/src/framebuffer.rs present_argb8888); for a 720x1440 surface in a
-    1280x720 scanout that is a 360x720 rectangle at x=460, which is exactly what
-    the portrait fast path in kernel/src/drivers/display_kms.rs composite()
-    hardcodes. Deriving it here means the crop follows whatever framebuffer size
-    a profile actually reports instead of assuming 1280x720, and the studio and
-    the guest cannot disagree about where the phone surface is.
+    WHY: the destination rectangle is guest-derived, not Studio-owned. The canonical
+    QEMU profile requests a native 720x1440 portrait scanout; this helper remains
+    defensive for older profiles and derives the displayed guest rectangle from
+    the live framebuffer geometry without inventing any phone UI.
     """
     if fb_w <= 0 or fb_h <= 0:
         return None
