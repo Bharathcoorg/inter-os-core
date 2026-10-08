@@ -131,6 +131,7 @@ impl AndroidRuntime {
             Some(app) if app.surface_id != 0 => app.surface_id,
             _ => {
                 self.active_apps.remove(&pid);
+                self.active_vms.remove(&pid);
                 return Err(AndroidLaunchError::SurfaceUnavailable);
             }
         };
