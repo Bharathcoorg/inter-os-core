@@ -97,6 +97,7 @@ pub fn test_text_aa(
 // -----------------------------------------------------------------------------
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
+    BootScreen,
     HomeScreen,
     ActivitySpace,
     QuickControls,
@@ -142,6 +143,11 @@ impl NotificationRecord {
 
 pub struct LauncherState {
     pub current_view: ViewMode,
+    pub boot_progress: u16,
+    pub boot_started_ticks: u64,
+    pub display_was_powered: bool,
+    pub last_volume_percent: u8,
+    pub volume_hud_until: u64,
     pub clock_time: [u8; 5],
     /// True only while `clock_time` and `date_line` hold a reading the kernel
     /// actually returned. WHY it exists: with no RTC authority granted to this
@@ -187,7 +193,12 @@ pub struct LauncherState {
 impl LauncherState {
     pub const fn new() -> Self {
         Self {
-            current_view: ViewMode::LockScreen,
+            current_view: ViewMode::BootScreen,
+            boot_progress: 0,
+            boot_started_ticks: 0,
+            display_was_powered: true,
+            last_volume_percent: 75,
+            volume_hud_until: 0,
             clock_time: [b' '; 5],
             clock_source_ok: false,
             clock_source_reported: false,
@@ -682,6 +693,7 @@ type ScreenPixelFn = fn(usize, usize, &LauncherState) -> u32;
 /// Resolves a view to its renderer once, before any pixel is drawn.
 fn screen_renderer(view: ViewMode) -> ScreenPixelFn {
     match view {
+        ViewMode::BootScreen => screens::boot::get_boot_screen_color,
         ViewMode::HomeScreen => get_home_color,
         ViewMode::ActivitySpace => get_activity_color,
         ViewMode::QuickControls => get_quick_controls_color,
@@ -1003,6 +1015,9 @@ pub extern "C" fn _start() -> ! {
     };
 
     let mut state = LauncherState::new();
+    state.boot_started_ticks = std::get_ticks(1).unwrap_or(0);
+    state.display_was_powered = std::device_power(5).unwrap_or(1) != 0;
+    state.last_volume_percent = std::audio_query_volume().unwrap_or(75).min(100) as u8;
     if let Ok(lock_st) = std::user_get_lock_state(1000) {
         state.lock_state = lock_st;
     }
@@ -1104,6 +1119,32 @@ pub extern "C" fn _start() -> ! {
 
             if state.active_child.is_none() && (events & std::EVENT_TIMER_TICK) != 0 {
                 refresh_ticks += 1;
+                let powered = std::device_power(5).unwrap_or(1) != 0;
+                if powered != state.display_was_powered {
+                    state.display_was_powered = powered;
+                    if powered {
+                        state.current_view = ViewMode::LockScreen;
+                        state.pin_pad_visible = false;
+                        state.pin_len = 0;
+                        render_view(surface, &state);
+                        let _ = std::surface_flip(4);
+                        std::log(0, "[LAUNCHER] Display wake observed; presenting real lock screen.").ok();
+                    }
+                }
+                if state.current_view == ViewMode::BootScreen {
+                    let elapsed = std::get_ticks(1).unwrap_or(state.boot_started_ticks).saturating_sub(state.boot_started_ticks);
+                    state.boot_progress = ((elapsed.min(180) * 1000) / 180) as u16;
+                    render_view(surface, &state);
+                    let _ = std::surface_flip(4);
+                    if elapsed >= 180 {
+                        state.current_view = ViewMode::LockScreen;
+                        state.boot_progress = 1000;
+                        render_view(surface, &state);
+                        let _ = std::surface_flip(4);
+                        std::log(0, "[LAUNCHER] Boot presentation complete; lock screen is now guest-owned.").ok();
+                    }
+                    continue;
+                }
                 let old_clock = state.clock_time;
                 refresh_clock(&mut state);
                 refresh_notifications(&mut state);
@@ -2014,26 +2055,17 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
-                                // Card 2: Restart (y: 285..360, x: 60..660)
+                                // Card 2: Restart
                                 if in_card2 {
-                                    std::log(0, "[LAUNCHER] Power menu: System restart confirmed.")
-                                        .ok();
-                                    state.current_view = ViewMode::HomeScreen;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Power menu: requesting real system restart.").ok();
+                                    let _ = std::device_power(0);
                                     break;
                                 }
 
-                                // Card 3: Power off (y: 380..455, x: 60..660)
+                                // Card 3: Power off
                                 if in_card3 {
-                                    std::log(
-                                        0,
-                                        "[LAUNCHER] Power menu: System power off confirmed.",
-                                    )
-                                    .ok();
-                                    state.current_view = ViewMode::HomeScreen;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Power menu: requesting real system power off.").ok();
+                                    let _ = std::device_power(1);
                                     break;
                                 }
 
