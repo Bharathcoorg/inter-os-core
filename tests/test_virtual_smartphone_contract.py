@@ -147,6 +147,7 @@ def test_pointer_stream_has_single_cancel_path_and_no_duplicate_tap():
 def test_power_on_after_guest_acpi_shutdown_uses_monitor_reset_not_serial():
     server = read("emulator/server.py")
     assert 'if "shutdown" in status_lower' in server
+    assert "query_qemu_monitor(force=True)" in server
     assert "guest_status == 'shutdown'" in server
     shutdown_branch = server[server.index("guest_status == 'shutdown'"):server.index("elif vm_alive and action in ('power', 'wake', 'toggle')", server.index("guest_status == 'shutdown'"))]
     assert "send_qemu_monitor_cmd('system_reset')" in shutdown_branch
