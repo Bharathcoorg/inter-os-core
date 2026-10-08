@@ -1221,9 +1221,15 @@ pub extern "C" fn _start() -> ! {
                 }
                 if state.current_view == ViewMode::BootScreen {
                     let elapsed = std::get_ticks(1).unwrap_or(state.boot_started_ticks).saturating_sub(state.boot_started_ticks);
-                    state.boot_progress = ((elapsed.min(180) * 1000) / 180) as u16;
-                    render_view(surface, &state);
-                    let _ = std::surface_flip(4);
+                    let next_progress = ((elapsed.min(180) * 1000) / 180) as u16;
+                    if next_progress != state.boot_progress {
+                        state.boot_progress = next_progress;
+                        // The animated ring and progress indicator occupy only this band.
+                        // Redrawing the entire million-pixel portrait surface on every
+                        // timer tick made startup visibly stall under QEMU TCG.
+                        render_band(surface, &state, H / 2 - 130, (H / 2 + 220).min(H));
+                        let _ = std::surface_flip(4);
+                    }
                     if elapsed >= 180 {
                         state.current_view = ViewMode::LockScreen;
                         state.boot_progress = 1000;
