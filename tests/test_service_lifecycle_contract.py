@@ -168,7 +168,7 @@ def main() -> None:
          "PID1 complete service bootstrap evidence")
     must(pid1, 'abi_bytes != b"1" || state != b"running"',
          "PID1 rejects non-running/invalid ABI registry entries")
-    must(pid1, "seen == 0x07ff", "PID1 requires all eleven services")
+    must(pid1, "fn declared_service_ids", "registry-driven service discovery")
 
 
     # Process and capability architecture must be userspace-owned and isolated.
@@ -246,3 +246,18 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def test_pid1_does_not_duplicate_the_kernel_service_set():
+    pid1 = PID1.read_text(encoding="utf-8")
+    assert "const SERVICES: [u8; 11]" not in pid1
+    assert "for service_id in 1u8..=11u8" not in pid1
+    assert "seen == 0x07ff" not in pid1
+
+def test_boot_recovery_is_durable_and_health_confirmation_is_wired():
+    recovery = (ROOT / "kernel/src/recovery.rs").read_text(encoding="utf-8")
+    services = SERVICES.read_text(encoding="utf-8")
+    for token in ("pub durable: bool", "RecoveryError", "fn commit_transition", "persistent::commit_kind", "RecoveryError::Storage", "RecoveryError::CorruptRecord", "RecoveryError::NotDurable"):
+        assert token in recovery
+    assert "let all_critical_running" in services
+    assert "recovery.confirm_boot()" in services

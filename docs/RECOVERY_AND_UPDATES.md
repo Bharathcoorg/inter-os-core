@@ -35,8 +35,9 @@ The boot recovery controller manages slot state transitions across system reboot
 - **Dual-Slot Structure**: `BootSlot::A` and `BootSlot::B`.
 - **Boot States**: `Unknown`, `Pending`, `Success`, `Failed`.
 - **Boot Attempt Budget**: Tracks boot attempts with a maximum retry ceiling (`max_attempts = 3`).
-- **Confirmation Boundary**: Upon reaching a healthy userspace state (PID 1 and launcher initialized), the system marks `BootOutcome::Success` and updates `last_good = active`.
-- **Automatic Rollback**: If the new slot fails to boot or crashes before confirmation (`attempts >= 3`), the bootloader deterministically selects `last_good`, rolling back to the previous known-healthy system partition.
+- **Durable Confirmation Boundary**: The kernel confirms a boot only after all registered critical userspace services report `Running`, and the confirmation is journalled before the recovery state advances.
+- **Durable Failure Semantics**: Recovery is fail-closed. If the journal cannot be read, is malformed, or a transition cannot be persisted, the kernel does not claim a healthy boot and leaves confirmation disabled.
+- **Bounded Rollback Policy**: When a pending boot reaches `max_attempts = 3`, the recovery controller exposes `last_good` as the recovery slot. Selecting and switching the physical boot slot remains a platform bootloader/update-backend responsibility; the common kernel does not claim to perform that hardware-specific switch.
 
 ---
 

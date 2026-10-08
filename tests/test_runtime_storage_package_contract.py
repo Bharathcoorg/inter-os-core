@@ -435,3 +435,12 @@ def test_userspace_thread_creation_registers_its_ipc_mailbox():
     block = scheduler[scheduler.index("pub fn spawn_user_thread"):scheduler.index("/// Returns a reference to the currently running task.")]
     assert "self.tasks.push(tcb);" in block
     assert "crate::ipc::IPC_ROUTER.lock().register_task(id);" in block
+
+
+def test_boot_recovery_transitions_require_durable_journal_commit():
+    source = (ROOT / "kernel/src/recovery.rs").read_text(encoding="utf-8")
+    assert "pub durable: bool" in source
+    assert "fn commit_transition" in source
+    assert "Self::persist_record(&next)" in source
+    assert "return Err(RecoveryError::NotDurable)" in source
+    assert "RecoveryError::CorruptRecord" in source

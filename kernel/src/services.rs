@@ -480,43 +480,12 @@ pub fn heartbeat_for_task(id: ServiceId, task_id: TaskId) -> Result<(), &'static
 
 /// Supervises all registered services and marks missing, terminated, or
 /// heartbeat-stale workers as failed. Recovery remains an explicit PID 1 action.
-pub fn supervise() {
-    let _lifecycle = SERVICE_LIFECYCLE_LOCK.lock();
-    let now = crate::interrupts::get_system_ticks();
-    // Lock order is scheduler -> registry. Exit paths already follow this
-    // order, so supervision must never acquire registry before scheduler.
-    let sched = SCHEDULER.lock();
-    let mut states = [None; 12];
-    let records = *SERVICE_RECORDS.lock();
-    for idx in 1..records.len() {
-        let Some(record) = records[idx] else { continue; };
-        if record.state == ServiceState::Starting {
-            let started = SERVICE_STARTED_AT[idx].load(Ordering::Acquire);
-            states[idx] = Some(if now.saturating_sub(started) > SERVICE_START_TIMEOUT_TICKS { ServiceState::Failed } else { ServiceState::Starting });
-            continue;
-        }
-        if !matches!(record.state, ServiceState::Running) {
-            states[idx] = Some(record.state);
-            continue;
-        }
-        let stale = now.saturating_sub(SERVICE_HEARTBEATS[idx].load(Ordering::Acquire))
-            > HEARTBEAT_TIMEOUT_TICKS;
-        let failed = match sched.get_task(record.task) {
-            Some(task) => matches!(task.state, crate::task::TaskState::Terminated | crate::task::TaskState::Zombie),
-            None => true,
-        };
-        states[idx] = Some(if failed || stale { ServiceState::Failed } else { ServiceState::Running });
-    }
-    drop(sched);
-    let mut registry = SERVICE_RECORDS.lock();
-    for idx in 1..registry.len() {
-        if let (Some(record), Some(state)) = (records[idx], states[idx]) {
-            if record.state == ServiceState::Running && state == ServiceState::Failed {
-                SERVICE_FAILURES[idx].fetch_add(1, Ordering::Relaxed);
-            }
-            registry[idx] = Some(ServiceRecord { id: record.id, task: record.task, state, generation: record.generation });
-        }
-    }
+pub fn supervise(){
+ let _lifecycle=SERVICE_LIFECYCLE_LOCK.lock();let now=crate::interrupts::get_system_ticks();let sched=SCHEDULER.lock();let mut states=[None;12];let records=*SERVICE_RECORDS.lock();
+ for idx in 1..records.len(){let Some(record)=records[idx]else{continue;};if record.state==ServiceState::Starting{let started=SERVICE_STARTED_AT[idx].load(Ordering::Acquire);states[idx]=Some(if now.saturating_sub(started)>SERVICE_START_TIMEOUT_TICKS{ServiceState::Failed}else{ServiceState::Starting});continue;}if !matches!(record.state,ServiceState::Running){states[idx]=Some(record.state);continue;}let stale=now.saturating_sub(SERVICE_HEARTBEATS[idx].load(Ordering::Acquire))>HEARTBEAT_TIMEOUT_TICKS;let failed=match sched.get_task(record.task){Some(task)=>matches!(task.state,crate::task::TaskState::Terminated|crate::task::TaskState::Zombie),None=>true};states[idx]=Some(if failed||stale{ServiceState::Failed}else{ServiceState::Running});}
+ drop(sched);let mut registry=SERVICE_RECORDS.lock();for idx in 1..registry.len(){if let(Some(record),Some(state))=(records[idx],states[idx]){if record.state==ServiceState::Running&&state==ServiceState::Failed{SERVICE_FAILURES[idx].fetch_add(1,Ordering::Relaxed);}registry[idx]=Some(ServiceRecord{id:record.id,task:record.task,state,generation:record.generation});}}
+ let all_critical_running=(1..registry.len()).all(|idx|match registry[idx]{Some(record)=>!descriptor(record.id).critical||record.state==ServiceState::Running,None=>false});drop(registry);
+ if all_critical_running{let mut recovery=crate::recovery::BOOT_RECOVERY.lock();if recovery.record.outcome!=crate::recovery::BootOutcome::Success{match recovery.confirm_boot(){Ok(())=>crate::serial_println!("[RECOVERY] boot health confirmed after all critical services reached Running."),Err(error)=>crate::serial_println!("[RECOVERY] boot health confirmation deferred because durable state is unavailable ({:?}).",error),}}}
 }
 /// Serializes the authoritative service registry for diagnostics.
 pub fn snapshot(out: &mut [u8]) -> usize {

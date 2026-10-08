@@ -12,32 +12,18 @@ use interos_std as std;
 
 const SERVICE_BUFFER: usize = 512;
 const POLL_INTERVAL_TICKS: u64 = 100;
-const SERVICES: [u8; 11] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     std::log(0, "[PID1] Inter OS userspace init started in Ring 3.").ok();
 
-    // Service-manager bootstrap. PID 1, not kernel_main, owns the
-    // startup ordering of the userspace service set.
-    // Ask the authoritative kernel registry to start every declared
-    // userspace service. Retry dependency-blocked services so PID 1 does not
-    // depend on a duplicated dependency ordering table.
-    let mut remaining = 11u8;
+    // PID 1 discovers declared services from the authoritative kernel registry.
+    let mut remaining = SERVICE_RETRY_ROUNDS;
     while remaining > 0 {
-        let mut progress = false;
-        for service_id in 1u8..=11u8 {
-            match std::service_start(service_id) {
-                Ok(_) => progress = true,
-                Err(_) => {}
-            }
-        }
-        if registry_has_all_running_services_after_query() {
-            break;
-        }
-        if !progress {
-            break;
-        }
+        let mut service_buf = [0u8; SERVICE_BUFFER];
+        let Ok(len) = std::service_list(&mut service_buf) else { break; };
+        let progress = start_declared_services(&service_buf[..len]);
+        if registry_has_all_running_services(&service_buf[..len]) || !progress { break; }
         remaining -= 1;
     }
 
@@ -90,8 +76,10 @@ pub extern "C" fn _start() -> ! {
                     std::log(0, "[PID1] Service registry returned no active services.").ok();
                 }
             }
-            for service_id in 1u8..=11u8 {
-                if std::service_recover_failed(service_id).is_ok() {
+            let mut recovery_buf = [0u8; SERVICE_BUFFER];
+            if let Ok(recovery_len) = std::service_list(&mut recovery_buf) {
+                for service_id in declared_service_ids(&recovery_buf[..recovery_len]).iter().copied().flatten() {
+                    if std::service_recover_failed(service_id).is_ok() {
                     std::log(
                         0,
                         "[PID1] Recovered a failed service through the lifecycle ABI.",
@@ -134,51 +122,12 @@ pub extern "C" fn _start() -> ! {
     }
 }
 
-fn registry_has_all_running_services_after_query() -> bool {
-    let mut service_buf = [0u8; SERVICE_BUFFER];
-    match std::service_list(&mut service_buf) {
-        Ok(len) => registry_has_all_running_services(&service_buf[..len]),
-        Err(_) => false,
-    }
-}
-
-fn registry_has_all_running_services(buf: &[u8]) -> bool {
-    let mut seen: u16 = 0;
-    for line in buf.split(|b| *b == b'\n') {
-        if line.is_empty() {
-            continue;
-        }
-        let mut fields = line.split(|b| *b == b'|');
-        let Some(id_bytes) = fields.next() else {
-            continue;
-        };
-        let Some(abi_bytes) = fields.next() else {
-            continue;
-        };
-        let Some(state) = fields.next() else {
-            continue;
-        };
-        if abi_bytes != b"1" || state != b"running" {
-            continue;
-        }
-        let id = match id_bytes {
-            b"1" => 1u8,
-            b"2" => 2,
-            b"3" => 3,
-            b"4" => 4,
-            b"5" => 5,
-            b"6" => 6,
-            b"7" => 7,
-            b"8" => 8,
-            b"9" => 9,
-            b"10" => 10,
-            b"11" => 11,
-            _ => continue,
-        };
-        seen |= 1u16 << (id - 1);
-    }
-    seen == 0x07ff
-}
+const SERVICE_RETRY_ROUNDS: u8 = 16;
+fn parse_service_id(bytes:&[u8])->Option<u8>{if bytes.is_empty(){return None;}let mut id=0u16;for byte in bytes{if !byte.is_ascii_digit(){return None;}id=id.checked_mul(10)?.checked_add((byte-b'0')as u16)?;if id>u8::MAX as u16{return None;}}let id=id as u8;if id==0{None}else{Some(id)}}
+fn declared_service_ids(buf:&[u8])->[Option<u8>;32]{let mut ids=[None;32];let mut count=0usize;for line in buf.split(|b|*b==b'\n'){let Some(id_bytes)=line.split(|b|*b==b'|').next()else{continue;};let Some(id)=parse_service_id(id_bytes)else{continue;};if count<ids.len(){ids[count]=Some(id);count+=1;}}ids}
+fn start_declared_services(buf:&[u8])->bool{let mut progress=false;for service_id in declared_service_ids(buf).iter().copied().flatten(){if std::service_start(service_id).is_ok(){progress=true;}}progress}
+fn registry_has_all_running_services_after_query()->bool{let mut service_buf=[0u8;SERVICE_BUFFER];match std::service_list(&mut service_buf){Ok(len)=>registry_has_all_running_services(&service_buf[..len]),Err(_)=>false}}
+fn registry_has_all_running_services(buf:&[u8])->bool{let mut declared=0usize;let mut running=0usize;for line in buf.split(|b|*b==b'\n'){if line.is_empty(){continue;}let mut fields=line.split(|b|*b==b'|');let Some(id_bytes)=fields.next()else{continue;};let Some(abi_bytes)=fields.next()else{continue;};let Some(state)=fields.next()else{continue;};if parse_service_id(id_bytes).is_none()||abi_bytes!=b"1"{continue;}declared+=1;if state==b"running"{running+=1;}}declared>0&&running==declared}
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
