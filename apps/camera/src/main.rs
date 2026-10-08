@@ -804,12 +804,18 @@ pub extern "C" fn _start() -> ! {
                             "[CAMERA APP] Navigation gesture recognized. Returning to launcher.",
                         )
                         .ok();
-                        let _ = std::surface_destroy(6, surface);
+                        if surface > 0 {
+                            let _ = std::surface_destroy(6, surface);
+                        }
+                        std::log(0, "[CAMERA APP] Requesting exit...").ok();
                         std::exit_with_code(0);
                     }
                     if input.kind == 1 {
                         if handle_camera_touch(&mut camera, input.x, input.y) {
-                            let _ = std::surface_destroy(6, surface);
+                            if surface > 0 {
+                                let _ = std::surface_destroy(6, surface);
+                            }
+                            std::log(0, "[CAMERA APP] Requesting exit...").ok();
                             std::exit_with_code(0);
                         }
                         render_camera_ui(surface, &camera);

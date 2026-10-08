@@ -39,7 +39,7 @@
 //! corner radius measures 41 logical px, larger than any `radius` token, so the
 //! theme's radius scale would need a step near 40 to match it.
 
-use crate::{test_text, LauncherState};
+use crate::{test_text, test_text_aa, LauncherState};
 use launcher::layout::{self, Rect};
 use launcher::text;
 use launcher::theme::{
@@ -401,6 +401,22 @@ impl Run {
             return None;
         }
         test_text(px, py, self.x, self.y, self.scale, &self.bytes[..self.len], ink)
+    }
+
+    /// Anti-aliased render of this run with caller-chosen ink and background.
+    fn pixel_aa(&self, px: usize, py: usize, ink: u32, bg: u32) -> Option<u32> {
+        self.pixel_inked_aa(px, py, ink, bg)
+    }
+
+    /// Anti-aliased render of this run with caller-chosen ink and background.
+    fn pixel_inked_aa(&self, px: usize, py: usize, ink: u32, bg: u32) -> Option<u32> {
+        if self.len == 0 {
+            return None;
+        }
+        if px < self.x || px - self.x >= self.w || py < self.y || py - self.y >= self.h {
+            return None;
+        }
+        test_text_aa(px, py, self.x, self.y, self.scale, &self.bytes[..self.len], ink, bg)
     }
 }
 

@@ -1279,7 +1279,7 @@ pub extern "C" fn _start() -> ! {
                                 }
                             }
 
-                            if (is_drag(input.kind) && input.dy >= 60) {
+                            if is_drag(input.kind) && input.dy >= 60 {
                                 state.pin_buffer = [0; 8];
                                 state.pin_len = 0;
                                 state.pin_error = 0;
