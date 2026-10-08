@@ -53,3 +53,9 @@ def test_legacy_kernel_phone_shell_is_not_canonical_boot_path():
     main = read("kernel/src/main.rs")
     assert "draw_mobile_shell()" not in main
     assert "redraw_phone()" not in main
+
+
+def test_reboot_keeps_guest_scanout_visible_in_studio():
+    app = read("emulator/app.js")
+    assert "Keep the real QEMU scanout visible during reset" in app
+    assert "if (isBooting) {" not in app[app.index("function updateDeviceDisplay"):app.index("// Exact sub-rectangle")]
