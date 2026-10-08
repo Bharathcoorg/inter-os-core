@@ -6,13 +6,13 @@
   "cpu": "qemu64",
   "memory_mb": 1024,
   "display": {
-    "width": 1280,
-    "height": 720,
+    "width": 720,
+    "height": 1440,
     "pixel_format": "ARGB8888",
-    "backend": "vga-vnc"
+    "backend": "virtio-vga-vnc"
   },
   "input": {
-    "coordinate_space": "display-pixels",
+    "coordinate_space": "portrait-logical-pixels",
     "max_slots": 5,
     "touch_protocol": "INPUT_TOUCH",
     "keyboard_protocol": "INPUT_KEY"
