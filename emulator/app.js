@@ -808,11 +808,16 @@ document.addEventListener('DOMContentLoaded', () => {
     touchSurface.addEventListener('pointerdown', (ev) => {
       if (ev.button !== 0) return;
       const rect = getGuestPointerRect();
-      if (!rect) {
+      if (!rect
+        || ev.clientX < rect.left || ev.clientX >= rect.left + rect.width
+        || ev.clientY < rect.top || ev.clientY >= rect.top + rect.height) {
+        // Bezel and letterbox pixels are monitor chrome, not guest coordinates.
+        // Never clamp a bezel click into a real tap on the guest's edge pixels.
         isPointerDown = false;
         downSent = false;
         return;
       }
+      ev.preventDefault();
       isPointerDown = true;
       downSent = false;
       const px = Math.max(0, Math.min(719, Math.round(((ev.clientX - rect.left) / rect.width) * 719)));
