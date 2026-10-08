@@ -84,7 +84,8 @@ impl<'a> ZipArchive<'a> {
         let search_start = data.len().saturating_sub(65535 + EOCD_MIN);
         let mut eocd = None;
         for pos in (search_start..=data.len() - EOCD_MIN).rev() {
-            if data.get(pos..pos + 4) == Some(&ZIP_END_OF_CENTRAL_DIR_SIG.to_le_bytes()) {
+            let signature = ZIP_END_OF_CENTRAL_DIR_SIG.to_le_bytes();
+            if data.get(pos..pos + 4).map(|bytes| bytes == signature.as_slice()).unwrap_or(false) {
                 eocd = Some(pos);
                 break;
             }
