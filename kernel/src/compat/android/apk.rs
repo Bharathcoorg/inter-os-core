@@ -632,15 +632,11 @@ pub fn create_test_apk(package: &str, permissions: &[&str]) -> Vec<u8> {
         "Hello from Signal on Inter OS!",
     );
 
-    // - AndroidManifest.xml
-    // - classes.dex
-    // - META-INF/MANIFEST.MF
-    // - META-INF/CERT.RSA
-    let files: [(&str, &[u8]); 4] = [
+    // This fixture deliberately has no signature material. Tests must not confuse
+    // a filename or synthetic certificate-shaped bytes with cryptographic proof.
+    let files: [(&str, &[u8]); 2] = [
         ("AndroidManifest.xml", &axml),
         ("classes.dex", &test_dex),
-        ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\nCreated-By: InterOS ACR Test\r\n"),
-        ("META-INF/CERT.RSA", b"PKCS7_CERTIFICATE_SIGNATURE_PAYLOAD_TEST_DATA"),
     ];
 
     let mut cd_entries = Vec::new();
