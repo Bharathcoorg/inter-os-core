@@ -28,3 +28,11 @@ def test_dalvik_runtime_remains_bounded_and_fails_closed_for_unsupported_framewo
     assert "TOTAL_INSTRUCTION_LIMIT: u64 = 1_000_000" in source
     assert "UnsupportedFrameworkApi" in source
     assert "return Err(DalvikVmError::UnsupportedFrameworkApi)" in source
+
+
+
+def test_manifest_identity_is_never_synthesized():
+    source = (ROOT / "kernel/src/compat/android/apk.rs").read_text(encoding="utf-8")
+    assert 'String::from("com.unknown.android_app")' not in source
+    assert "if package_name.is_empty()" in source
+    assert "return Err(ApkError::MalformedXmlChunk)" in source
