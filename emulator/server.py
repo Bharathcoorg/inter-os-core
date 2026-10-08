@@ -1110,19 +1110,9 @@ def stop_qemu_backend():
             pass
         qemu_subproc = None
 
-    try:
-        import psutil
-        for p in psutil.process_iter(['pid', 'name', 'cmdline']):
-            p_name = p.info.get('name') or ''
-            if 'qemu-system' in p_name.lower():
-                cmdline = ' '.join(p.info.get('cmdline') or [])
-                if 'inter-os-data-master.img' in cmdline or f':{MONITOR_PORT}' in cmdline:
-                    try:
-                        p.kill()
-                    except Exception:
-                        pass
-    except Exception:
-        pass
+    # Never discover and kill arbitrary QEMU processes by executable name,
+    # shared disk path, or monitor port. Only qemu_subproc, created and owned by
+    # this Device Studio server process, may be terminated here.
 
     latest_telemetry["qemu_alive"] = False
     latest_telemetry["status"] = "standby"
