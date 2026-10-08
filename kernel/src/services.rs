@@ -592,8 +592,12 @@ mod tests {
         );
 
         assert!(
-            !policy.iter().any(|c| c.cap_type == CapabilityType::SystemControl && (c.object_id == SERVICE_POWER_CONTROL_OBJECT || c.object_id == SERVICE_TELEPHONY_CONTROL_OBJECT || c.object_id == SERVICE_AUDIO_CONTROL_OBJECT)),
-            "the launcher must not hold SystemControl for power, telephony or audio"
+            policy.iter().any(|c| c.cap_type == CapabilityType::SystemControl && c.object_id == SERVICE_POWER_CONTROL_OBJECT && c.rights.contains(Rights::INVOKE)),
+            "the launcher must hold the narrowly-scoped power control capability for real restart/shutdown/display actions"
+        );
+        assert!(
+            !policy.iter().any(|c| c.cap_type == CapabilityType::SystemControl && (c.object_id == SERVICE_TELEPHONY_CONTROL_OBJECT || c.object_id == SERVICE_AUDIO_CONTROL_OBJECT)),
+            "the launcher must not hold telephony or audio service authority"
         );
 
         assert!(
