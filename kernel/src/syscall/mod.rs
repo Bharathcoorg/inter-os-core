@@ -3431,8 +3431,12 @@ pub fn sys_device_power(action: u32) -> Result<u32, SyscallResult> {
             crate::serial_println!("[POWER] display_on={} source=system_control", on);
             Ok(on as u32)
         }
-        3 => { let mut audio = crate::audio::AUDIO_MANAGER.lock(); let cur = audio.volume_percent; audio.set_volume(cur.saturating_add(5).min(100)); crate::serial_println!("[AUDIO] volume_percent={} state=unmuted source=system_control", audio.volume_percent); Ok(audio.volume_percent as u32) }
-        4 => { let mut audio = crate::audio::AUDIO_MANAGER.lock(); let cur = audio.volume_percent; audio.set_volume(cur.saturating_sub(5)); crate::serial_println!("[AUDIO] volume_percent={} state=unmuted source=system_control", audio.volume_percent); Ok(audio.volume_percent as u32) }
+        3 => {
+            if require_system_control_object(crate::services::SERVICE_AUDIO_CONTROL_OBJECT).is_err() { return Err(SyscallResult::PermissionDenied); }
+            let mut audio = crate::audio::AUDIO_MANAGER.lock(); let cur = audio.volume_percent; audio.set_volume(cur.saturating_add(5).min(100)); crate::serial_println!("[AUDIO] volume_percent={} state=unmuted source=system_control", audio.volume_percent); Ok(audio.volume_percent as u32) }
+        4 => {
+            if require_system_control_object(crate::services::SERVICE_AUDIO_CONTROL_OBJECT).is_err() { return Err(SyscallResult::PermissionDenied); }
+            let mut audio = crate::audio::AUDIO_MANAGER.lock(); let cur = audio.volume_percent; audio.set_volume(cur.saturating_sub(5)); crate::serial_println!("[AUDIO] volume_percent={} state=unmuted source=system_control", audio.volume_percent); Ok(audio.volume_percent as u32) }
         5 => { let kms = crate::drivers::display_kms::DRM_KMS.lock(); Ok(kms.powered as u32) }
         _ => Err(SyscallResult::InvalidArguments),
     }
