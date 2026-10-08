@@ -1219,23 +1219,19 @@ document.addEventListener('DOMContentLoaded', () => {
   // UI and were removed with them. `togglePower()` also dereferenced
   // #screen-off-overlay, which has never existed in index.html, so a short press
   // of the power button threw a TypeError on every click.
-  function togglePower() {
-    if (state.screenOn) {
-      state.screenOn = false;
-      logConsole('info', '[POWER_HAL] Display turned OFF (Low-Power OLED Sleep).');
-      fetch('/api/hardware/power', {
+  async function togglePower() {
+    // Device Studio is only the physical-button frontend. The guest owns display
+    // power and reports the resulting state through its authoritative telemetry.
+    try {
+      const res = await fetch('/api/hardware/power', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'sleep' })
-      }).catch(() => {});
-    } else {
-      state.screenOn = true;
-      logConsole('info', '[POWER_HAL] Display woke UP. The guest presents its own lock screen.');
-      fetch('/api/hardware/power', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'wake' })
-      }).catch(() => {});
+        body: JSON.stringify({ action: 'toggle' })
+      });
+      if (!res.ok) throw new Error('guest power command rejected');
+      logConsole('info', '[POWER_KEY] Guest display-power transition requested.');
+    } catch (e) {
+      logConsole('err', '[POWER_KEY] Guest display-power command failed: ' + e.message);
     }
     playBeep(280, 0.04, 'triangle');
   }
