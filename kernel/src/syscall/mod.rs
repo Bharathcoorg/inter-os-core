@@ -189,6 +189,7 @@ pub enum SyscallNumber {
     AppRuntimeList = 123,
     AppFocus = 124,
     UserSetCredential = 126,
+    DevicePower = 127,
 }
 
 /// System call result status codes.
@@ -1898,6 +1899,9 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             SyscallResult::Success => 0,
             e => e as i64,
         },
+        127 => {
+            match sys_device_power(a1 as u32) { Ok(value) => value as i64, Err(e) => e as i64 }
+        },
         126 => {
             // UserSetCredential: a1 = uid, a2 = secret_ptr, a3 = secret_len, a4 = old_secret_ptr, a5 = old_secret_len
             let target_uid = a1 as u32;
@@ -3408,6 +3412,30 @@ pub fn sys_power_set_profile(profile_idx: u32) -> Result<u32, SyscallResult> {
     let mut gov = crate::drivers::pmic::DVFS_GOVERNOR.lock();
     gov.set_manual_profile(profile);
     Ok(profile.frequency_mhz())
+}
+
+/// Controls the virtual smartphone's authoritative power path.
+/// action: 0=restart, 1=power off, 2=toggle display, 3=volume up, 4=volume down, 5=display state.
+pub fn sys_device_power(action: u32) -> Result<u32, SyscallResult> {
+    if require_system_control_object(crate::services::SERVICE_POWER_CONTROL_OBJECT).is_err() {
+        return Err(SyscallResult::PermissionDenied);
+    }
+    match action {
+        0 => { crate::serial_println!("[POWER] restart requested by authorized system UI."); crate::hal::traits::PowerController::reset(&crate::hal::platform::POWER); loop { core::hint::spin_loop(); } }
+        1 => { crate::serial_println!("[POWER] shutdown requested by authorized system UI."); crate::hal::traits::PowerController::shutdown(&crate::hal::platform::POWER); loop { core::hint::spin_loop(); } }
+        2 => {
+            let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+            let on = kms.toggle_powered();
+            let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
+            let _ = display.composite_and_flip();
+            crate::serial_println!("[POWER] display_on={} source=system_control", on);
+            Ok(on as u32)
+        }
+        3 => { let mut audio = crate::audio::AUDIO_MANAGER.lock(); let cur = audio.volume_percent; audio.set_volume(cur.saturating_add(5).min(100)); crate::serial_println!("[AUDIO] volume_percent={} state=unmuted source=system_control", audio.volume_percent); Ok(audio.volume_percent as u32) }
+        4 => { let mut audio = crate::audio::AUDIO_MANAGER.lock(); let cur = audio.volume_percent; audio.set_volume(cur.saturating_sub(5)); crate::serial_println!("[AUDIO] volume_percent={} state=unmuted source=system_control", audio.volume_percent); Ok(audio.volume_percent as u32) }
+        5 => { let kms = crate::drivers::display_kms::DRM_KMS.lock(); Ok(kms.powered as u32) }
+        _ => Err(SyscallResult::InvalidArguments),
+    }
 }
 
 /// Fills user buffer with cryptographically secure random bytes from hardware TRNG.
