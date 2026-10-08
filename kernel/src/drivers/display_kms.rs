@@ -107,6 +107,8 @@ pub struct DrmKmsController {
     /// Set whenever a surface, display mode, or orientation changes. The compositor
     /// can reuse the already-composed back buffer when the scene is unchanged.
     pub frame_dirty: bool,
+    /// Authoritative guest display-power state. When false the compositor scanout is black.
+    pub powered: bool,
 }
 
 impl DrmKmsController {
@@ -127,7 +129,25 @@ impl DrmKmsController {
             refresh_hz: 60,
             frame_deadline_ticks: 0,
             frame_dirty: true,
+            powered: true,
         }
+    }
+
+    /// Sets the authoritative display power state. Surfaces remain intact so wake is instantaneous.
+    pub fn set_powered(&mut self, powered: bool) {
+        if self.powered == powered { return; }
+        self.powered = powered;
+        self.frame_dirty = true;
+        if !powered {
+            self.front_buffer.fill(0xFF000000);
+            self.back_buffer.fill(0xFF000000);
+        }
+    }
+
+    pub fn toggle_powered(&mut self) -> bool {
+        let next = !self.powered;
+        self.set_powered(next);
+        next
     }
 
     /// Allocates a new client surface for application rendering.
@@ -348,6 +368,12 @@ impl DrmKmsController {
     /// Composites all visible surfaces onto the back buffer in z-order.
     pub fn composite(&mut self) {
         self.ensure_buffers();
+        if !self.powered {
+            self.back_buffer.fill(0xFF000000);
+            for surface in self.surfaces.iter_mut() { surface.dirty = false; }
+            self.frame_dirty = false;
+            return;
+        }
         if !self.frame_dirty && self.surfaces.iter().all(|s| !s.dirty) {
             return;
         }
@@ -611,6 +637,7 @@ pub static DRM_KMS: Mutex<DrmKmsController> = Mutex::new(DrmKmsController {
     refresh_hz: 60,
     frame_deadline_ticks: 0,
     frame_dirty: true,
+    powered: true,
 });
 
 #[cfg(test)]
