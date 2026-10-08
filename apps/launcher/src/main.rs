@@ -1205,14 +1205,15 @@ pub extern "C" fn _start() -> ! {
                         state.display_power_state_valid = true;
                     } else if powered != state.display_was_powered {
                         state.display_was_powered = powered;
-                    if powered {
-                        state.current_view = ViewMode::LockScreen;
-                        state.pin_pad_visible = false;
-                        state.pin_len = 0;
-                        render_view(surface, &state);
-                        let _ = std::surface_flip(4);
-                        std::log(0, "[LAUNCHER] Display wake observed; presenting real lock screen.").ok();
-                    }
+                        if powered {
+                            state.current_view = ViewMode::LockScreen;
+                            state.pin_pad_visible = false;
+                            state.pin_len = 0;
+                            state.auth_error = false;
+                            render_view(surface, &state);
+                            let _ = std::surface_flip(4);
+                            std::log(0, "[LAUNCHER] Display wake observed; presenting real lock screen.").ok();
+                        }
                     }
                 }
                 if state.current_view == ViewMode::BootScreen {
