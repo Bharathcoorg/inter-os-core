@@ -1180,6 +1180,8 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
     ]
     if arch == "x86_64":
         cmd.extend(["-machine", "q35", "-cpu", "qemu64"])
+        # Real virtual display and absolute pointer hardware for the canonical phone VM.
+        cmd.extend(["-device", "virtio-vga", "-device", "qemu-xhci,id=xhci0", "-device", "usb-tablet,bus=xhci0.0"])
         # A dedicated data disk is mandatory. The kernel uses the Primary Master
         # as the read-only boot image and the Primary Slave as persistent storage;
         # with only one disk attached it falls back to formatting the boot image
@@ -2438,8 +2440,8 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 }).encode())
                 return
             elif action in ('sleep', 'power', 'wake'):
-                send_guest_serial_command('POWER_KEY')
-                self.send_response(200)
+                ok, msg = send_guest_serial_command('POWER_KEY', '[POWER]', timeout=3)
+                self.send_response(200 if ok else 503)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
