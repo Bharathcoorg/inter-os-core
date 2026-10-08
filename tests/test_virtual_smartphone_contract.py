@@ -59,3 +59,9 @@ def test_reboot_keeps_guest_scanout_visible_in_studio():
     app = read("emulator/app.js")
     assert "Keep the real QEMU scanout visible during reset" in app
     assert "if (isBooting) {" not in app[app.index("function updateDeviceDisplay"):app.index("// Exact sub-rectangle")]
+
+
+def test_volume_is_guest_rendered_as_a_system_overlay():
+    launcher = read("apps/launcher/src/main.rs")
+    assert "render_volume_hud" in launcher
+    assert "std::window_set_geometry(4, id, 100, 220, 100, true)" in launcher
