@@ -1381,6 +1381,24 @@ def is_safe_proxy_url(url_str):
         return False, f"Invalid URL: {e}"
 
 
+class _SsrfGuardedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Re-validates every redirect hop with the same SSRF boundary.
+
+    urllib follows redirects implicitly *after* the original URL was checked,
+    so a public host could answer 302 "Location: http://127.0.0.1:44445/" and
+    bounce the proxy onto the QEMU monitor or link-local metadata. Each hop
+    must pass is_safe_proxy_url before it is followed.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        safe, reason = is_safe_proxy_url(newurl)
+        if not safe:
+            raise urllib.error.HTTPError(
+                req.full_url, 502, f"SSRF Blocked on redirect: {reason}", headers, fp
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def verify_and_install_rapp(body, pkg_name):
     """Validate and install the canonical binary RAPP v2 format.
 
@@ -1617,15 +1635,78 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
         self.send_header('Pragma', 'no-cache')
         self.send_header('Expires', '0')
-        self.send_header('Access-Control-Allow-Origin', '*')
         super().end_headers()
 
+    # Largest request body the API will buffer. Content-Length is entirely
+    # client-controlled, so an unbounded read lets any local page advertise a
+    # multi-gigabyte payload and exhaust memory before a single payload byte
+    # is inspected.
+    MAX_POST_BYTES = 64 * 1024 * 1024
+
+    def _send_json(self, status, payload):
+        """Writes a JSON response so rejections match regular replies."""
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _bounded_content_length(self):
+        """Validates Content-Length before any body is buffered.
+
+        Returns the byte count when the header is sane and within
+        MAX_POST_BYTES; otherwise answers 400/413 itself and returns None so
+        the caller can stop. Oversized bodies are drained (up to 1 MiB) and the
+        connection is closed, mirroring the /api/qemu/cmd payload guard, so
+        unread bytes cannot desynchronise a keep-alive stream.
+        """
+        raw = self.headers.get('Content-Length', '0')
+        try:
+            length = int(raw)
+        except (TypeError, ValueError):
+            length = -1
+        if length < 0:
+            self._send_json(400, {'success': False, 'error': 'Invalid Content-Length'})
+            return None
+        if length > self.MAX_POST_BYTES:
+            self._drain_body(min(length, 1024 * 1024))
+            self.send_response(413)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Connection', 'close')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return None
+        return length
+
+    def _origin_allowed(self):
+        """Same-host enforcement for every Studio API request.
+
+        The Studio API is a local control surface (QEMU monitor, serial,
+        guest filesystem). A page on another origin that declares its Origin
+        must not be able to drive those endpoints or read guest telemetry, so
+        requests are only accepted when the Origin matches the Host they were
+        sent to. Requests without an Origin (curl, the Python tools, asset
+        loads) remain allowed.
+        """
+        origin = self.headers.get('Origin')
+        if origin is None:
+            return True
+        try:
+            netloc = urllib.parse.urlparse(origin).netloc
+        except ValueError:
+            return False
+        host = self.headers.get('Host') or ''
+        return bool(netloc) and netloc.lower() == host.lower()
+
     def do_GET(self):
+        if not self._origin_allowed():
+            self._send_json(403, {'success': False, 'error': 'Cross-origin request rejected'})
+            return
         parsed_path = urllib.parse.urlparse(self.path)
         if self.path.startswith('/api/serial'):
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             after = 0
             if '?after=' in self.path:
@@ -1660,7 +1741,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             t = query_qemu_monitor()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             launcher_ready = check_launcher_ready()
             response = json.dumps({
@@ -1681,18 +1761,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(response.encode())
             return
 
-        if self.path == '/api/qemu/profiles':
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            response = json.dumps({
-                'active_profile': active_profile_key,
-                'profiles': SUPPORTED_PROFILES
-            })
-            self.wfile.write(response.encode())
-            return
-
         if self.path == '/api/qemu/telemetry':
             t = query_qemu_monitor().copy()
             t["launcher_ready"] = check_launcher_ready()
@@ -1708,7 +1776,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                         break
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps(t).encode())
             return
@@ -1724,13 +1791,11 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/octet-stream')
                 self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.send_header('X-Frame-Seq', str(seq))
                 self.end_headers()
                 self.wfile.write(bin_msg)
             else:
                 self.send_response(304 if client_seq > 0 else 503)
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
             return
 
@@ -1738,7 +1803,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-Type', 'application/octet-stream')
             self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.send_header('Connection', 'close')
             self.end_headers()
             last_seq = 0
@@ -1761,10 +1825,9 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 pass
             return
 
-        if parsed_path.path in ('/api/screen/metrics', '/api/transport/metrics'):
+        if parsed_path.path == '/api/screen/metrics':
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({
                 'transport_fps': round(vnc_client.metrics['fps'], 2),
@@ -1775,29 +1838,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 'width': vnc_client.latest_raw_w,
                 'height': vnc_client.latest_raw_h,
             }).encode())
-            return
-
-        if parsed_path.path == '/api/screen/stream':
-            query = urllib.parse.parse_qs(parsed_path.query)
-            orient = query.get('orientation', [None])[0]
-            self.send_response(200)
-            self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
-            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            try:
-                while True:
-                    frame_bytes, content_type = capture_qemu_screen_frame(orientation=orient, prefer_jpeg=True)
-                    if frame_bytes:
-                        self.wfile.write(b'--frame\r\n')
-                        self.wfile.write(f'Content-Type: {content_type}\r\n'.encode('utf-8'))
-                        self.wfile.write(f'Content-Length: {len(frame_bytes)}\r\n\r\n'.encode('utf-8'))
-                        self.wfile.write(frame_bytes)
-                        self.wfile.write(b'\r\n')
-                        self.wfile.flush()
-                    time.sleep(0.02)
-            except (ConnectionResetError, BrokenPipeError):
-                pass
             return
 
         if parsed_path.path == '/api/audio/volume':
@@ -1818,35 +1858,8 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             success = bool(ok and cur_vol is not None)
             self.send_response(200 if success else 503)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({'success': success, 'volume_percent': cur_vol, 'status': 'APPLIED' if success else 'UNCONFIRMED', 'message': msg}).encode())
-            return
-
-        if parsed_path.path in ('/api/screen/frame', '/api/qemu/screendump', '/api/screen/scanout'):
-            query = urllib.parse.parse_qs(parsed_path.query)
-            full_scanout = query.get('full', ['0'])[0] in ('1', 'true', 'yes') or (parsed_path.path == '/api/screen/scanout')
-            orient = query.get('orientation', [None])[0]
-            fmt = query.get('format', ['jpeg'])[0].lower()
-            prefer_jpeg = (fmt != 'png')
-            frame_bytes, err_or_type = capture_qemu_screen_frame(full_scanout=full_scanout, orientation=orient, prefer_jpeg=prefer_jpeg)
-            if frame_bytes:
-                self.send_response(200)
-                self.send_header('Content-Type', err_or_type)
-                self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(frame_bytes)
-            else:
-                self.send_response(503)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps({
-                    'success': False,
-                    'status': 'UNAVAILABLE',
-                    'error': err_or_type or 'Scanout buffer unavailable'
-                }).encode())
             return
 
         if parsed_path.path == '/api/browser/proxy':
@@ -1863,7 +1876,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             if not safe:
                 self.send_response(403)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': f"SSRF Blocked: {reason}"}).encode())
                 return
@@ -1874,7 +1886,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                     'Accept-Language': 'en-US,en;q=0.9'
                 })
-                with urllib.request.urlopen(req, timeout=6) as response:
+                with urllib.request.build_opener(_SsrfGuardedRedirectHandler).open(req, timeout=6) as response:
                     raw_data = response.read(1048576) # Read up to 1MB
                     content_type = response.headers.get('Content-Type', 'text/html')
                     text_content = raw_data.decode('utf-8', errors='ignore')
@@ -1895,7 +1907,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
 
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({
                     'success': True,
@@ -1906,7 +1917,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             except Exception as e:
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({
                     'success': False,
@@ -1919,7 +1929,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             active = get_active_theme()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({
                 'themes': [active],
@@ -1927,45 +1936,10 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             }).encode())
             return
 
-        if parsed_path.path == '/api/themes/current':
-            active = get_active_theme()
-            active['id'] = active.get('theme_id', 'bento_glass')
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps({'success': True, 'theme': active, 'active_theme': active, **active}).encode())
-            return
-
-        if self.path.startswith('/api/apps/audit'):
-            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            target = query.get('id', [''])[0] or query.get('filename', [''])[0]
-            ok, error, catalog = guest_package_catalog()
-            found = next((a for a in catalog if a.get('id') == target), None)
-            self.send_response(200 if ok else 503)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            if found:
-                self.wfile.write(json.dumps({
-                    'success': True,
-                    'source': 'GUEST_REGISTRY',
-                    'package': found,
-                    'authority': 'guest'
-                }).encode())
-            else:
-                self.wfile.write(json.dumps({
-                    'success': False,
-                    'source': 'GUEST_REGISTRY',
-                    'error': error or 'Package not present in guest registry'
-                }).encode())
-            return
-
         if self.path == '/api/apps/list':
             ok, error, catalog = guest_package_catalog()
             self.send_response(200 if ok else 503)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({
                 'success': ok,
@@ -1981,7 +1955,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             rapp_apps = [a for a in catalog if a.get('id')]
             self.send_response(200 if ok else 503)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({
                 'success': ok,
@@ -1996,7 +1969,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         if self.path == '/api/telephony/status':
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({
                 'success': True,
@@ -2007,7 +1979,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         if self.path == '/api/telephony/sms/list':
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             messages = extract_guest_subsystem("telephony", "[TELEPHONY]").get("sms_messages", [])
             self.wfile.write(json.dumps({'success': True, 'messages': messages, 'source': 'KERNEL_TELEMETRY' if messages else 'UNAVAILABLE'}).encode())
@@ -2016,32 +1987,14 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         if self.path == '/api/pmic/status':
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             pmic_info = extract_guest_subsystem("pmic", "[PMIC]")
             self.wfile.write(json.dumps({'success': True, 'pmic': pmic_info}).encode())
             return
 
-        if self.path == '/api/kms/status':
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps({'success': True, 'kms': extract_guest_subsystem("kms", "[KMS]")}).encode())
-            return
-
-        if self.path == '/api/touch/status':
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps({'success': True, 'touch': extract_guest_subsystem("touch", "[TOUCH]")}).encode())
-            return
-
         if self.path == '/api/kernel/processes':
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             procs = extract_real_processes()
             alive = query_qemu_monitor()["qemu_alive"]
@@ -2054,48 +2007,12 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             }).encode())
             return
 
-        if self.path == '/api/kernel/memory':
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            mem = extract_real_memory()
-            self.wfile.write(json.dumps({'success': True, 'memory': mem}).encode())
-            return
-
         if self.path == '/api/kernel/ipc':
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             ipc_events = extract_real_ipc()
             self.wfile.write(json.dumps({'success': True, 'events': ipc_events, 'total': len(ipc_events)}).encode())
-            return
-
-        if self.path == '/api/kernel/capabilities':
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            caps = extract_real_capabilities()
-            self.wfile.write(json.dumps({'success': True, 'capabilities': caps, 'total': len(caps)}).encode())
-            return
-
-        if self.path.startswith('/api/fs/list'):
-            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            rel_path = query.get('path', ['/'])[0]
-            ok, error, entries = guest_fs_list('/' + rel_path.strip('/'))
-            self.send_response(200 if ok else 503)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps({
-                'success': ok,
-                'source': 'GUEST_VFS',
-                'path': '/' + rel_path.strip('/'),
-                'entries': entries,
-                **({'error': error} if error else {})
-            }).encode())
             return
 
         super().do_GET()
@@ -2121,13 +2038,18 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             pass
 
     def do_POST(self):
+        if not self._origin_allowed():
+            self._send_json(403, {'success': False, 'error': 'Cross-origin request rejected'})
+            return
         # Orientation state is module-level; without this declaration the
         # assignment below would make the name function-local and every touch
         # payload that consults the orientation would raise UnboundLocalError.
         global serial_lines, current_device_orientation
 
         if self.path == '/api/rapp/trust':
-            content_length = int(self.headers.get('Content-Length', 0))
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
             body = self.rfile.read(content_length)
             try:
                 data = json.loads(body.decode('utf-8'))
@@ -2144,19 +2066,19 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 )
                 self.send_response(200 if ok else 409)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({"success": ok, "message": msg, "source": "QEMU_COM1"}).encode())
             except Exception as e:
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({"success": False, "error": str(e)}).encode())
             return
 
         if self.path == '/api/rapp/install':
-            content_length = int(self.headers.get('Content-Length', 0))
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
             raw_pkg_name = self.headers.get('X-Package-Name', 'unnamed.rapp')
             if '..' in raw_pkg_name or '/' in raw_pkg_name or '\\' in raw_pkg_name:
                 # Drain the request body before responding. Leaving it unread
@@ -2166,7 +2088,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 self._drain_body(content_length)
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': 'Path traversal in package name is strictly forbidden'}).encode())
                 return
@@ -2178,7 +2099,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 serial_lines.append(f"[RAPP_REJECT] Package '{pkg_name}' rejected: {msg}")
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': msg}).encode())
                 return
@@ -2192,7 +2112,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 serial_lines.append(f"[RAPP_REJECT] Guest install failed for '{pkg_name}': {guest_msg}")
                 self.send_response(409)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({
                     'success': False,
@@ -2208,13 +2127,14 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({'success': True, 'package': app_entry}).encode())
             return
 
         if self.path in ('/api/rapp/uninstall', '/api/apps/uninstall'):
-            content_length = int(self.headers.get('Content-Length', 0))
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
             post_body = self.rfile.read(content_length)
             try:
                 data = json.loads(post_body.decode('utf-8'))
@@ -2228,7 +2148,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 )
                 self.send_response(200 if guest_ok else 409)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({
                     'success': guest_ok,
@@ -2244,7 +2163,9 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if self.path in ('/api/apps/launch', '/api/rapp/launch'):
-            content_length = int(self.headers.get('Content-Length', 0))
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
             body = self.rfile.read(content_length)
             try:
                 data = json.loads(body.decode('utf-8'))
@@ -2254,7 +2175,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 ok, msg = send_guest_serial_command(f"RAPP_LAUNCH {app_id}", "[RAPP_HOST] LAUNCHED", timeout=12)
                 self.send_response(200 if ok else 409)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({"success": ok, "message": msg, "app_id": app_id, "source": "QEMU_COM1"}).encode())
             except Exception as e:
@@ -2265,7 +2185,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         if self.path == '/api/rapp/ipc':
             self.send_response(409)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({
                 'success': False,
@@ -2275,7 +2194,9 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             }).encode())
             return
         if self.path.startswith('/api/apps/upload'):
-            content_length = int(self.headers.get('Content-Length', 0))
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
             body = self.rfile.read(content_length)
 
             query = urllib.parse.urlparse(self.path).query
@@ -2284,7 +2205,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             if '..' in raw_query_fname or '/' in raw_query_fname or '\\' in raw_query_fname:
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': 'Path traversal in filename is strictly forbidden'}).encode())
                 return
@@ -2312,7 +2232,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 # Do not silently reinterpret a ZIP/JSON package as executable.
                 self.send_response(409)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({
                     'success': False,
@@ -2403,28 +2322,31 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({'success': True, 'package': app_entry}).encode())
             return
 
-        if self.path in ('/api/hardware/power', '/api/power', '/api/reboot', '/api/qemu/reboot', '/api/restart', '/api/qemu/restart', '/api/reset', '/api/qemu/reset'):
-            content_length = int(self.headers.get('Content-Length', 0))
+        if self.path in ('/api/qemu/reboot', '/api/qemu/reset'):
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
             body = self.rfile.read(content_length) if content_length > 0 else b'{}'
             try:
                 data = json.loads(body.decode('utf-8'))
             except Exception:
                 data = {}
             action = str(data.get('action', 'reboot')).strip().lower()
-            if action in ('reboot', 'restart', 'reset', 'cold_reboot', 'relaunch') or self.path in ('/api/reboot', '/api/qemu/reboot', '/api/restart', '/api/qemu/restart', '/api/reset', '/api/qemu/reset'):
+            if action in ('reboot', 'restart', 'reset', 'cold_reboot', 'relaunch') or self.path in ('/api/qemu/reboot', '/api/qemu/reset'):
                 global launcher_has_booted, last_reboot_cursor
                 launcher_has_booted = False
                 with telemetry_lock:
                     last_reboot_cursor = len(serial_lines)
                 _last_frame_cache['time'] = 0
+                # capture_qemu_screen_frame only ever writes the portrait
+                # keys; popping retired landscape/full keys left the stale
+                # JPEG frame alive across reboots.
+                _last_frame_cache.pop('portrait_jpeg', None)
                 _last_frame_cache.pop('portrait', None)
-                _last_frame_cache.pop('landscape', None)
-                _last_frame_cache.pop('full', None)
                 if data.get('cold') or action in ('cold_reboot', 'relaunch'):
                     stop_qemu_backend()
                     ok, resp = launch_qemu_profile(active_profile_key)
@@ -2438,7 +2360,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                         restart_method = 'backend_relaunch'
                 self.send_response(200 if ok else 500)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({
                     'success': ok,
@@ -2478,20 +2399,20 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                     result = {'success': ok, 'action': action, 'message': msg}
                 self.send_response(200 if result['success'] else 503)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps(result).encode())
                 return
             else:
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': f"Unknown power action '{action}'"}).encode())
                 return
 
         if self.path in ('/api/hardware/orientation', '/api/orientation'):
-            content_length = int(self.headers.get('Content-Length', 0))
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
             body = self.rfile.read(content_length) if content_length > 0 else b'{}'
             try:
                 data = json.loads(body.decode('utf-8'))
@@ -2512,7 +2433,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             if command is None:
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': 'Unsupported orientation'}).encode())
                 return
@@ -2521,7 +2441,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             if not ok:
                 self.send_response(503)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({
                     'success': False,
@@ -2533,13 +2452,14 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
 
             current_device_orientation = 'landscape' if target_orient.startswith('landscape') or target_orient in ('horizontal', 'landscaperight') else 'portrait'
             _last_frame_cache['time'] = 0
+            # capture_qemu_screen_frame only ever writes the portrait keys;
+            # popping retired landscape/full keys left the stale JPEG frame
+            # alive across orientation changes.
+            _last_frame_cache.pop('portrait_jpeg', None)
             _last_frame_cache.pop('portrait', None)
-            _last_frame_cache.pop('landscape', None)
-            _last_frame_cache.pop('full', None)
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({
                 'success': True,
@@ -2553,7 +2473,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         if self.path == '/api/hardware/sensor_inject':
             self.send_response(409)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({
                 'success': False,
@@ -2563,7 +2482,9 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             }).encode())
             return
         if self.path == '/api/touch/event':
-            content_length = int(self.headers.get('Content-Length', 0))
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
             body = self.rfile.read(content_length) if content_length > 0 else b'{}'
             try:
                 data = json.loads(body.decode('utf-8'))
@@ -2632,7 +2553,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 if not ok: raise RuntimeError(msg)
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': True, 'status': 'DISPATCHED', 'source': 'UART_COM1', 'action': action, 'coordinate_space': space, 'guest': {'x': gx, 'y': gy}}).encode())
             except (ValueError, TypeError, json.JSONDecodeError, RuntimeError) as exc:
@@ -2643,7 +2563,9 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if self.path == '/api/input/key':
-            content_length = int(self.headers.get('Content-Length', 0))
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
             body = self.rfile.read(content_length) if content_length > 0 else b'{}'
             try:
                 data = json.loads(body.decode('utf-8'))
@@ -2692,7 +2614,9 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if self.path == '/api/serial/write':
-            content_length = int(self.headers.get('Content-Length', 0))
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
             body = self.rfile.read(content_length)
             try:
                 data = json.loads(body.decode('utf-8'))
@@ -2736,7 +2660,9 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if self.path == '/api/themes/apply':
-            content_length = int(self.headers.get('Content-Length', 0))
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
             body = self.rfile.read(content_length) if content_length > 0 else b'{}'
             try:
                 data = json.loads(body.decode('utf-8'))
@@ -2747,7 +2673,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             if not raw_id:
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': 'Missing theme_id'}).encode())
                 return
@@ -2758,14 +2683,12 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             if not os.path.exists(target_theme) and not os.path.exists(target_json):
                 self.send_response(404)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': 'Theme not found'}).encode())
                 return
 
             self.send_response(409)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({
                 'success': False,
@@ -2777,7 +2700,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         if self.path == '/api/themes/save':
             self.send_response(409)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({
                 'success': False,
@@ -2789,7 +2711,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         if self.path == '/api/themes/bootloader':
             self.send_response(409)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({
                 'success': False,
@@ -2806,7 +2727,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_response(413)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Connection', 'close')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': 'Payload too large'}).encode())
                 return
@@ -2817,7 +2737,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             except Exception:
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': 'Malformed JSON'}).encode())
                 return
@@ -2825,7 +2744,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             if not isinstance(data, dict) or 'cmd' not in data:
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': 'Missing cmd field'}).encode())
                 return
@@ -2834,7 +2752,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             if not isinstance(raw_cmd, str):
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': 'cmd must be a string'}).encode())
                 return
@@ -2843,7 +2760,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             if len(raw_cmd) > 256:
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': 'cmd exceeds maximum length (256 chars)'}).encode())
                 return
@@ -2852,7 +2768,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             if any(c in raw_cmd for c in ('\n', '\r', ';', '|', '&', '`', '$', '>', '<')):
                 self.send_response(403)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': 'Command injection or chaining detected.'}).encode())
                 return
@@ -2862,7 +2777,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             if not tokens:
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': 'Empty command'}).encode())
                 return
@@ -2872,7 +2786,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             if base_op not in ALLOWED_BASE_OPS:
                 self.send_response(403)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': f'Command operation \'{base_op}\' restricted in Studio security sandbox.'}).encode())
                 return
@@ -2887,7 +2800,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 if len(tokens) > 1 and tokens[1].lower() not in ALLOWED_INFO_SUBCMDS:
                     self.send_response(403)
                     self.send_header('Content-Type', 'application/json')
-                    self.send_header('Access-Control-Allow-Origin', '*')
                     self.end_headers()
                     self.wfile.write(json.dumps({'success': False, 'error': f'Subcommand \'info {tokens[1]}\' restricted in Studio security sandbox.'}).encode())
                     return
@@ -2895,7 +2807,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 if len(tokens) > 2:
                     self.send_response(403)
                     self.send_header('Content-Type', 'application/json')
-                    self.send_header('Access-Control-Allow-Origin', '*')
                     self.end_headers()
                     self.wfile.write(json.dumps({'success': False, 'error': 'Malformed help query.'}).encode())
                     return
@@ -2903,7 +2814,6 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 if len(tokens) < 2:
                     self.send_response(400)
                     self.send_header('Content-Type', 'application/json')
-                    self.send_header('Access-Control-Allow-Origin', '*')
                     self.end_headers()
                     self.wfile.write(json.dumps({'success': False, 'error': f'Missing argument for \'{base_op}\' operation'}).encode())
                     return
@@ -2911,13 +2821,14 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             ok, resp = send_qemu_monitor_cmd(raw_cmd)
             self.send_response(200 if ok else 500)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({'success': ok, 'output': resp}).encode())
             return
 
         if self.path == '/api/fs/read':
-            content_length = int(self.headers.get('Content-Length', 0))
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
             body = self.rfile.read(content_length) if content_length > 0 else b'{}'
             try:
                 data = json.loads(body.decode('utf-8'))
@@ -2927,20 +2838,20 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             if not is_safe_guest_path(path):
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': 'Invalid or unsafe guest path'}).encode())
                 return
             ok, err, content = guest_fs_read(path)
             self.send_response(200 if ok else 500)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            self.wfile.write(json.dumps({'success': ok, 'path': path, 'content': content, 'error': err}).encode())
+            self.wfile.write(json.dumps({'success': ok, 'source': 'GUEST_VFS', 'path': path, 'content': content, 'error': err}).encode())
             return
 
         if self.path == '/api/fs/write':
-            content_length = int(self.headers.get('Content-Length', 0))
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
             body = self.rfile.read(content_length) if content_length > 0 else b'{}'
             try:
                 data = json.loads(body.decode('utf-8'))
@@ -2951,24 +2862,24 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             if not is_safe_guest_path(path, writable=True):
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({'success': False, 'error': 'Invalid or unsafe guest write path'}).encode())
                 return
             ok, err = guest_fs_write(path, content)
             self.send_response(200 if ok else 500)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            self.wfile.write(json.dumps({'success': ok, 'path': path, 'error': err}).encode())
+            self.wfile.write(json.dumps({'success': ok, 'source': 'GUEST_VFS', 'path': path, 'error': err}).encode())
             return
 
         self.send_response(404)
         self.end_headers()
 
     def do_OPTIONS(self):
+        if not self._origin_allowed():
+            self._send_json(403, {'success': False, 'error': 'Cross-origin request rejected'})
+            return
         self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.end_headers()
