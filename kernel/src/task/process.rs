@@ -81,7 +81,13 @@ pub fn register_leader(task: TaskId, parent_task: TaskId) -> Option<ProcessId> {
 }
 
 pub fn process_for_task(task: TaskId) -> Option<ProcessId> {
-    THREAD_TABLE.lock().iter().flatten().find(|r| r.task == task).map(|r| r.process)
+    for _ in 0..10_000 {
+        if let Some(threads) = THREAD_TABLE.try_lock() {
+            return threads.iter().flatten().find(|r| r.task == task).map(|r| r.process);
+        }
+        core::hint::spin_loop();
+    }
+    None
 }
 
 pub fn bind_user_for_task(task: TaskId, user_id: u32) -> Result<(), &'static str> {
@@ -98,7 +104,13 @@ pub fn user_for_task(task: TaskId) -> Option<u32> {
 }
 
 pub fn record_for_process(process: ProcessId) -> Option<ProcessRecord> {
-    PROCESS_TABLE.lock().iter().flatten().find(|r| r.id == process).copied()
+    for _ in 0..10_000 {
+        if let Some(table) = PROCESS_TABLE.try_lock() {
+            return table.iter().flatten().find(|r| r.id == process).copied();
+        }
+        core::hint::spin_loop();
+    }
+    None
 }
 
 pub fn set_background(task: TaskId, now: u64) -> Result<(), &'static str> {
@@ -142,6 +154,10 @@ pub fn suspend(task: TaskId, now: u64) -> Result<(), &'static str> {
         r.state = ProcessState::Suspended;
         r.background_started_ticks = now;
         r.background_cpu_ticks = 0;
+        drop(table);
+        if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
+            sched.block_task(task);
+        }
         Ok(())
     } else { Err("process cannot be suspended") }
 }
@@ -154,6 +170,10 @@ pub fn wake(task: TaskId) -> Result<(), &'static str> {
         r.state = ProcessState::Background;
         r.background_started_ticks = crate::interrupts::get_system_ticks();
         r.background_cpu_ticks = 0;
+        drop(table);
+        if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
+            sched.unblock_task(task);
+        }
         Ok(())
     } else { Err("process is not suspended") }
 }
@@ -225,26 +245,30 @@ pub fn consume_background_network(task: TaskId, bytes: usize) -> Result<(), &'st
 
 pub fn account_background_cpu_tick(task: TaskId) {
     let Some(process) = process_for_task(task) else { return; };
-    let mut table = PROCESS_TABLE.lock();
-    if let Some(r) = table.iter_mut().flatten().find(|r| r.id == process) {
-        if r.state == ProcessState::Background {
-            r.background_cpu_ticks = r.background_cpu_ticks.saturating_add(1);
+    if let Some(mut table) = PROCESS_TABLE.try_lock() {
+        if let Some(r) = table.iter_mut().flatten().find(|r| r.id == process) {
+            if r.state == ProcessState::Background {
+                r.background_cpu_ticks = r.background_cpu_ticks.saturating_add(1);
+            }
         }
     }
 }
 
 pub fn enforce_background_budget() -> usize {
-    let mut table = PROCESS_TABLE.lock();
-    let mut suspended = 0;
-    for r in table.iter_mut().flatten() {
-        if r.state == ProcessState::Background
-            && r.background_cpu_ticks >= r.limits.max_background_cpu_ticks
-        {
-            r.state = ProcessState::Suspended;
-            suspended += 1;
+    if let Some(mut table) = PROCESS_TABLE.try_lock() {
+        let mut suspended = 0;
+        for r in table.iter_mut().flatten() {
+            if r.state == ProcessState::Background
+                && r.background_cpu_ticks >= r.limits.max_background_cpu_ticks
+            {
+                r.state = ProcessState::Suspended;
+                suspended += 1;
+            }
         }
+        suspended
+    } else {
+        0
     }
-    suspended
 }
 
 pub fn can_reserve_ipc_endpoint(process: ProcessId) -> Result<(), &'static str> {

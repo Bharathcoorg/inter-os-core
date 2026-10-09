@@ -132,10 +132,11 @@ impl Scheduler {
         };
         let mut tcb = TaskControlBlock::new("user_thread", crate::task::user::user_process_entry, cap_table, priority);
         let id = tcb.id;
-        let user_stack_top = {
+        let (user_stack_top, cr3_frame) = {
             let mut pt = shared_space.lock();
+            let frame = pt.frame();
             match crate::task::user::map_user_thread_stack(&mut pt, id) {
-                Ok(top) => top,
+                Ok(top) => (top, frame),
                 Err(e) => {
                     crate::task::process::cancel_thread_reservation(process_id);
                     crate::task::process::release_address_space(process_id, crate::task::user::USER_STACK_SIZE);
@@ -146,6 +147,7 @@ impl Scheduler {
         tcb.process_id = Some(process_id);
         tcb.user_entry = user_entry;
         tcb.user_stack_top = user_stack_top;
+        tcb.cr3_frame = Some(cr3_frame);
         tcb.page_table = Some(shared_space.clone());
         if let Err(e) = crate::task::process::bind_reserved_thread(process_id, id) {
             let rollback = {
@@ -268,12 +270,7 @@ impl Scheduler {
         let mut best_idx = None;
         let mut best_priority = 0u8;
         while next_idx != current_idx {
-            if self.tasks[next_idx].state == TaskState::Ready
-                && self.tasks[next_idx].process_id.map(|pid| {
-                    crate::task::process::record_for_process(pid)
-                        .map(|r| matches!(r.state, crate::task::process::ProcessState::Running | crate::task::process::ProcessState::Background))
-                        .unwrap_or(false)
-                }).unwrap_or(true) {
+            if self.tasks[next_idx].state == TaskState::Ready {
                 let p = self.tasks[next_idx].priority;
                 if best_idx.is_none() || p > best_priority {
                     best_idx = Some(next_idx);
@@ -310,9 +307,9 @@ impl Scheduler {
             crate::gdt::set_tss_rsp0(x86_64::VirtAddr::new(next_stack_top));
         }
 
-        // Switch to incoming task's isolated hardware address space (CR3)
-        if let Some(ref pt) = self.tasks[next_idx].page_table {
-            pt.lock().switch_to();
+        // Switch to incoming task's isolated hardware address space (CR3) without locking
+        if let Some(frame) = self.tasks[next_idx].cr3_frame {
+            crate::memory::switch_to_task_page_table(frame);
         } else {
             // Kernel task: switch back to clean kernel PML4
             crate::memory::switch_to_kernel_page_table();
@@ -528,9 +525,8 @@ impl Scheduler {
                 TaskState::Zombie => "Zombie",
                 TaskState::Terminated => "Terminated",
             };
-            let cr3 = task.page_table
-                .as_ref()
-                .map(|pt| pt.lock().frame().start_address().as_u64())
+            let cr3 = task.cr3_frame
+                .map(|f| f.start_address().as_u64())
                 .unwrap_or_else(|| crate::memory::kernel_pml4().start_address().as_u64());
             crate::serial_println!(
                 "[PROC] pid={} name={} state={} prio={} ticks={} caps={} kstack={} ppid={} cr3={:#x}",

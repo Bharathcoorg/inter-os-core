@@ -496,6 +496,7 @@ pub fn spawn_user_process_with_limits(
     }
 
     let mut tcb = crate::task::TaskControlBlock::new(name, user_process_entry, caps, priority);
+    tcb.cr3_frame = Some(pt.frame());
     tcb.page_table = Some(alloc::sync::Arc::new(spin::Mutex::new(pt)));
     tcb.user_entry = user_entry;
     tcb.user_stack_top = user_stack_top;

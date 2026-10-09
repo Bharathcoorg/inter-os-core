@@ -108,6 +108,8 @@ pub struct TaskControlBlock {
     pub priority: u8,
     /// Dedicated hardware virtual memory address space (CR3 Page Table).
     pub page_table: Option<SharedAddressSpace>,
+    /// Cached physical frame for CR3 switch, accessible without spinlock contention.
+    pub cr3_frame: Option<x86_64::structures::paging::PhysFrame<x86_64::structures::paging::Size4KiB>>,
     /// Virtual address of userspace entry point (Ring 3 RIP).
     pub user_entry: usize,
     /// Virtual address of userspace stack top (Ring 3 RSP).
@@ -160,6 +162,7 @@ impl TaskControlBlock {
             cpu_ticks: 0,
             priority,
             page_table: None,
+            cr3_frame: None,
             user_entry: 0,
             user_stack_top: 0,
             process_id: None,
@@ -170,6 +173,7 @@ impl TaskControlBlock {
 
     /// Attaches an isolated hardware page table to this task.
     pub fn with_page_table(mut self, pt: crate::memory::TaskPageTable) -> Self {
+        self.cr3_frame = Some(pt.frame());
         self.page_table = Some(Arc::new(Mutex::new(pt)));
         self
     }
@@ -187,8 +191,9 @@ impl TaskControlBlock {
             stack: Box::new([]),
             cap_table,
             cpu_ticks: 0,
-            priority: 6,
+            priority: 0,
             page_table: None,
+            cr3_frame: None,
             user_entry: 0,
             user_stack_top: 0,
             process_id: None,
