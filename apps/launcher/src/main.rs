@@ -195,6 +195,11 @@ pub struct LauncherState {
     pub auth_error: bool,
     pub pin_error: u8,
     pub pin_setup_mode: bool,
+    /// Contextual task 0 on the HomeScreen Today card. WHY carried as state: the
+    /// tap handler used to log "toggled" without flipping anything, so the log
+    /// described a change that never happened. The log below fires only because
+    /// this bit actually moved.
+    pub task0_done: bool,
 }
 
 impl LauncherState {
@@ -241,6 +246,7 @@ impl LauncherState {
             auth_error: false,
             pin_error: 0,
             pin_setup_mode: false,
+            task0_done: false,
         }
     }
 
@@ -971,43 +977,54 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
     let x = x as usize;
     let y = y as usize;
 
-    if (410..=450).contains(&x) && (240..=280).contains(&y) {
-        return package_id_by_suffix(state, b"file_manager").or_else(|| package_id_by_suffix(state, b"files"));
-    }
-    if (390..=430).contains(&x) && (1160..=1200).contains(&y) {
-        return package_id_by_suffix(state, b"gallery");
-    }
+    // WHY view-scoped: the fixed bands below describe the AppDrawer grid and the
+    // HomeScreen deck/dock. Tested unscoped, they also fired from the content
+    // gaps of Notifications, SystemSpace, LiveWidgets and the lock surfaces,
+    // launching dialer/messages/camera/files/browser from pixels that draw no
+    // such control. Both live call sites (AppDrawer, HomeScreen) stay covered.
+    let in_grid_view = matches!(
+        state.current_view,
+        ViewMode::AppDrawer | ViewMode::HomeScreen
+    );
+    if in_grid_view {
+        if (410..=450).contains(&x) && (240..=280).contains(&y) {
+            return package_id_by_suffix(state, b"file_manager").or_else(|| package_id_by_suffix(state, b"files"));
+        }
+        if (390..=430).contains(&x) && (1160..=1200).contains(&y) {
+            return package_id_by_suffix(state, b"gallery");
+        }
 
-    // 1. Direct app launch matrix (used by integration & lifecycle verification suites)
-    if (330..=370).contains(&y) {
-        if (160..=200).contains(&x) {
-            return package_id_by_suffix(state, b"settings").or(Some("org.interos.settings"));
-        } else if (465..=505).contains(&x) {
-            return package_id_by_suffix(state, b"terminal").or(Some("org.interos.terminal"));
-        }
-    } else if (500..=540).contains(&y) {
-        if (160..=200).contains(&x) {
-            return package_id_by_suffix(state, b"calculator").or(Some("org.interos.calculator"));
-        } else if (465..=505).contains(&x) {
-            return package_id_by_suffix(state, b"vault").or(Some("org.interos.vault"));
-        }
-    } else if (670..=710).contains(&y) {
-        if (160..=200).contains(&x) {
-            return package_id_by_suffix(state, b"camera").or(Some("org.interos.camera"));
-        } else if (465..=505).contains(&x) {
-            return package_id_by_suffix(state, b"dialer").or(Some("org.interos.dialer"));
-        }
-    } else if (840..=880).contains(&y) {
-        if (160..=200).contains(&x) {
-            return package_id_by_suffix(state, b"browser").or(Some("org.interos.browser"));
-        } else if (465..=505).contains(&x) {
-            return package_id_by_suffix(state, b"messages").or(Some("org.interos.messages"));
-        }
-    } else if (1010..=1050).contains(&y) {
-        if (160..=200).contains(&x) {
-            return package_id_by_suffix(state, b"calendar").or(Some("org.interos.calendar"));
-        } else if (465..=505).contains(&x) {
-            return package_id_by_suffix(state, b"music").or(Some("org.interos.music"));
+        // 1. Direct app launch matrix (used by integration & lifecycle verification suites)
+        if (330..=370).contains(&y) {
+            if (160..=200).contains(&x) {
+                return package_id_by_suffix(state, b"settings").or(Some("org.interos.settings"));
+            } else if (465..=505).contains(&x) {
+                return package_id_by_suffix(state, b"terminal").or(Some("org.interos.terminal"));
+            }
+        } else if (500..=540).contains(&y) {
+            if (160..=200).contains(&x) {
+                return package_id_by_suffix(state, b"calculator").or(Some("org.interos.calculator"));
+            } else if (465..=505).contains(&x) {
+                return package_id_by_suffix(state, b"vault").or(Some("org.interos.vault"));
+            }
+        } else if (670..=710).contains(&y) {
+            if (160..=200).contains(&x) {
+                return package_id_by_suffix(state, b"camera").or(Some("org.interos.camera"));
+            } else if (465..=505).contains(&x) {
+                return package_id_by_suffix(state, b"dialer").or(Some("org.interos.dialer"));
+            }
+        } else if (840..=880).contains(&y) {
+            if (160..=200).contains(&x) {
+                return package_id_by_suffix(state, b"browser").or(Some("org.interos.browser"));
+            } else if (465..=505).contains(&x) {
+                return package_id_by_suffix(state, b"messages").or(Some("org.interos.messages"));
+            }
+        } else if (1010..=1050).contains(&y) {
+            if (160..=200).contains(&x) {
+                return package_id_by_suffix(state, b"calendar").or(Some("org.interos.calendar"));
+            } else if (465..=505).contains(&x) {
+                return package_id_by_suffix(state, b"music").or(Some("org.interos.music"));
+            }
         }
     }
 
@@ -1040,23 +1057,30 @@ fn resolve_app_at_touch<'a>(state: &'a LauncherState, x: u32, y: u32) -> Option<
         }
     }
 
-    // 4. Row 0 of Quick Action Dock: Phone, Messages, Camera
-    if (500..640).contains(&y) || (700..1000).contains(&y) {
-        if (48..238).contains(&x) {
-            return package_id_by_suffix(state, b"dialer");
-        } else if (265..455).contains(&x) {
-            return package_id_by_suffix(state, b"messages");
-        } else if (482..672).contains(&x) {
-            return package_id_by_suffix(state, b"camera");
+    // 4. HomeScreen dock tiles: scoped to the view that draws them, and narrowed
+    // to the drawn DOCK_TILES (row 0: y 700..980, row 1: y 1020..1300). WHY: the
+    // old bands (500..640/660..800/700..1000/1020..1320) covered the Today card
+    // and the search gap, so a tap on card content launched dialer/messages/
+    // camera/files/browser from a pixel that draws no such tile (WRONG-APP).
+    if state.current_view == ViewMode::HomeScreen {
+        // 4. Row 0 of Quick Action Dock: Phone, Messages, Camera
+        if (700..980).contains(&y) {
+            if (48..238).contains(&x) {
+                return package_id_by_suffix(state, b"dialer");
+            } else if (265..455).contains(&x) {
+                return package_id_by_suffix(state, b"messages");
+            } else if (482..672).contains(&x) {
+                return package_id_by_suffix(state, b"camera");
+            }
         }
-    }
 
-    // 5. Row 1 of Quick Action Dock: Files, Browser
-    if (660..800).contains(&y) || (1020..1320).contains(&y) {
-        if (48..238).contains(&x) {
-            return package_id_by_suffix(state, b"file_manager").or_else(|| package_id_by_suffix(state, b"files"));
-        } else if (265..455).contains(&x) {
-            return package_id_by_suffix(state, b"browser");
+        // 5. Row 1 of Quick Action Dock: Files, Browser
+        if (1020..1300).contains(&y) {
+            if (48..238).contains(&x) {
+                return package_id_by_suffix(state, b"file_manager").or_else(|| package_id_by_suffix(state, b"files"));
+            } else if (265..455).contains(&x) {
+                return package_id_by_suffix(state, b"browser");
+            }
         }
     }
 
@@ -1147,7 +1171,16 @@ pub extern "C" fn _start() -> ! {
                     Ok(()) => {
                         state.active_child = None;
                         refresh_runtime_recents(&mut state);
-                        state.current_view = ViewMode::HomeScreen;
+                        // WHY lock-aware: the old code always landed on
+                        // HomeScreen, so a camera launched from the lock screen
+                        // exited past the lock onto an unlocked home grid. A
+                        // still-locked device returns to its lock screen; every
+                        // unlock path still goes through user_unlock.
+                        state.current_view = if state.lock_state == std::UserLockState::Unlocked {
+                            ViewMode::HomeScreen
+                        } else {
+                            ViewMode::LockScreen
+                        };
                         let mut discard = std::InputEvent {
                             kind: 0,
                             x: 0,
@@ -1511,10 +1544,16 @@ pub extern "C" fn _start() -> ! {
                                     while std::input_event_poll(&mut drain).is_ok() {}
                                     break;
                                 }
-                                // Horizontal swipe-to-dismiss on cards
+                                // Horizontal swipe-to-dismiss on cards. WHY these bands:
+                                // they are the drawn WORKSPACE_CARDS in
+                                // screens/activity.rs (card0 120..390, card1
+                                // 420..690, card2 720..990). The old bands
+                                // (200..480/520..800/840..1120) straddled the gaps,
+                                // so a swipe starting between cards dismissed the
+                                // wrong one (WRONG-CARD).
                                 if input.dx.abs() >= 40 {
                                     let y = input.y as usize;
-                                    if (200..480).contains(&y) {
+                                    if (120..390).contains(&y) {
                                         if state.recent_task_ids[0] > 0 {
                                             let _ = std::app_stop(state.recent_task_ids[0]);
                                         }
@@ -1532,7 +1571,7 @@ pub extern "C" fn _start() -> ! {
                                         };
                                         while std::input_event_poll(&mut drain).is_ok() {}
                                         break;
-                                    } else if (520..800).contains(&y) {
+                                    } else if (420..690).contains(&y) {
                                         if state.recent_task_ids[1] > 0 {
                                             let _ = std::app_stop(state.recent_task_ids[1]);
                                         }
@@ -1550,7 +1589,7 @@ pub extern "C" fn _start() -> ! {
                                         };
                                         while std::input_event_poll(&mut drain).is_ok() {}
                                         break;
-                                    } else if (840..1120).contains(&y) {
+                                    } else if (720..990).contains(&y) {
                                         if state.recent_task_ids[2] > 0 {
                                             let _ = std::app_stop(state.recent_task_ids[2]);
                                         }
@@ -1575,8 +1614,16 @@ pub extern "C" fn _start() -> ! {
                             if input.kind == 1 {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
-                                // Card 0 dismiss badge: x in 580..664, y in 200..260
-                                if (200..260).contains(&y) && (580..664).contains(&x) {
+                                // WHY badge-first, badge-exact: the drawn dismiss badges
+                                // are 48x48 at x 586..634, y 206..254 / 526..574 /
+                                // 846..894 (see CARD*_DISMISS in screens/activity.rs),
+                                // and the bodies are the drawn WORKSPACE_CARDS
+                                // (x 32.., y 120..390 / 420..690 / 720..990) minus
+                                // the badge column. The old bands were shifted into
+                                // the gaps, so taps near a card edge hit the wrong
+                                // card (WRONG-CARD launch).
+                                // Card 0 dismiss badge: x in 586..634, y in 206..254
+                                if (206..254).contains(&y) && (586..634).contains(&x) {
                                     if state.recent_task_ids[0] > 0 {
                                         let _ = std::app_stop(state.recent_task_ids[0]);
                                     }
@@ -1600,7 +1647,7 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
                                 // Tap Card 0 body to switch
-                                else if (200..480).contains(&y) && (56..580).contains(&x) {
+                                else if (120..390).contains(&y) && (32..586).contains(&x) {
                                     let Some(target) = state.recent_id(0) else {
                                         break;
                                     };
@@ -1635,8 +1682,8 @@ pub extern "C" fn _start() -> ! {
                                         break;
                                     }
                                 }
-                                // Card 1 dismiss badge: x in 580..664, y in 520..580
-                                else if (520..580).contains(&y) && (580..664).contains(&x) {
+                                // Card 1 dismiss badge: x in 586..634, y in 526..574
+                                else if (526..574).contains(&y) && (586..634).contains(&x) {
                                     if state.recent_task_ids[1] > 0 {
                                         let _ = std::app_stop(state.recent_task_ids[1]);
                                     }
@@ -1660,7 +1707,7 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
                                 // Tap Card 1 body to switch
-                                else if (520..800).contains(&y) && (56..580).contains(&x) {
+                                else if (420..690).contains(&y) && (32..586).contains(&x) {
                                     let Some(target) = state.recent_id(1) else {
                                         break;
                                     };
@@ -1695,8 +1742,8 @@ pub extern "C" fn _start() -> ! {
                                         break;
                                     }
                                 }
-                                // Card 2 dismiss badge: x in 580..664, y in 840..900
-                                else if (840..900).contains(&y) && (580..664).contains(&x) {
+                                // Card 2 dismiss badge: x in 586..634, y in 846..894
+                                else if (846..894).contains(&y) && (586..634).contains(&x) {
                                     if state.recent_task_ids[2] > 0 {
                                         let _ = std::app_stop(state.recent_task_ids[2]);
                                     }
@@ -1720,7 +1767,7 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
                                 // Tap Card 2 body to switch
-                                else if (840..1120).contains(&y) && (56..580).contains(&x) {
+                                else if (720..990).contains(&y) && (32..586).contains(&x) {
                                     let Some(target) = state.recent_id(2) else {
                                         break;
                                     };
@@ -1755,8 +1802,9 @@ pub extern "C" fn _start() -> ! {
                                         break;
                                     }
                                 }
-                                // Return / Close button or Home bar
-                                else if (1200..1300).contains(&y) || y >= 1400 {
+                                // Close pill (drawn CLOSE_BTN: x 260..460, y 1220..1264)
+                                // or the home indicator bar.
+                                else if ((1220..1264).contains(&y) && (260..460).contains(&x)) || y >= 1400 {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
@@ -1860,6 +1908,14 @@ pub extern "C" fn _start() -> ! {
                                     let _ = std::surface_flip(4);
                                     std::log(0, "[LAUNCHER] Power menu opened from System Space.")
                                         .ok();
+                                    break;
+                                }
+                                // WHY gated to the drawn System card (x 40..680, y
+                                // 730..840 -- CARD_R4 in screens/system_space.rs):
+                                // any tap anywhere used to launch the settings app,
+                                // including taps on the Device/Network/Personal/Apps
+                                // cards that draw no such affordance.
+                                if !(730..840).contains(&y) || !(40..680).contains(&x) {
                                     break;
                                 }
                                 if let Ok(task_id) = std::app_launch("org.interos.settings") {
@@ -2043,14 +2099,19 @@ pub extern "C" fn _start() -> ! {
                                     }
                                 }
 
-                                // Camera circle button
+                                // Camera circle button. WHY the view stays locked: the
+                                // old code flipped to HomeScreen under the camera, so
+                                // exiting the camera reaped straight onto the home
+                                // grid past the lock (first-boot bypass by
+                                // side-effect). The camera runs as a foreground
+                                // child over the lock screen instead.
                                 let c_dx = (x as i32) - LOCK_BTN_R_CX;
                                 let c_dy = (y as i32) - LOCK_BTN_CY;
                                 if c_dx * c_dx + c_dy * c_dy <= LOCK_BTN_R * LOCK_BTN_R {
                                     if let Ok(task_id) = std::app_launch("org.interos.camera") {
                                         state.push_recent("org.interos.camera", task_id);
                                         state.active_child = Some(task_id);
-                                        state.current_view = ViewMode::HomeScreen;
+                                        state.current_view = ViewMode::LockScreen;
                                         std::log(
                                             0,
                                             "[LAUNCHER] Camera launched from lock screen shortcut.",
@@ -2387,8 +2448,13 @@ pub extern "C" fn _start() -> ! {
                             if input.kind == 1 {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
-                                // Clear All button (300..355, 260..460) or (690..750, 260..460)
-                                if ((300..355).contains(&y) || (690..750).contains(&y)) && (260..460).contains(&x) {
+                                // WHY exactly the drawn pill: the old bands
+                                // ((300..355)/(690..750) with swapped axes) cleared
+                                // from pixels that draw no control -- a destructive
+                                // action on a phantom band. The drawn CLEAR_BTN in
+                                // screens/notifications.rs (x 260..460, y 708..752)
+                                // is the only pixel region that clears.
+                                if screens::notifications::CLEAR_BTN.contains(x, y) {
                                     let _ = std::notification_cancel("", 0);
                                     state.notifications = [NotificationRecord::EMPTY; 8];
                                     state.notification_count = 0;
@@ -2713,6 +2779,11 @@ pub extern "C" fn _start() -> ! {
 
                                 // Today card / System status card task checkbox (x: 60..100, y: 300..340)
                                 if (60..100).contains(&x) && (300..340).contains(&y) {
+                                    // WHY flip real state: the log below used to fire
+                                    // with no state behind it. `task0_done` is the
+                                    // bit this control owns, so the log reports an
+                                    // actual change.
+                                    state.task0_done = !state.task0_done;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
                                     std::log(0, "[LAUNCHER] Contextual task 0 toggled.").ok();
@@ -2753,8 +2824,14 @@ pub extern "C" fn _start() -> ! {
                                     }
                                 }
 
-                                // Universal search bar tap: opens System Space
-                                if ((840..915).contains(&y) || (1290..1365).contains(&y)) && (40..680).contains(&x) {
+                                // Universal search bar tap: opens System Space. WHY one
+                                // band: the old second band (840..915) sat inside the
+                                // drawn deck tiles, so taps on real tiles opened
+                                // System Space instead of launching. The drawn search
+                                // bar is x 40..680, y 1320..1384 (see frame() in
+                                // screens/home.rs) and it is the only tap that opens
+                                // System Space.
+                                if (1320..1384).contains(&y) && (40..680).contains(&x) {
                                     state.current_view = ViewMode::SystemSpace;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);

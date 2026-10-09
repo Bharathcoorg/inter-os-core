@@ -41,8 +41,11 @@ const PILL_INACTIVE_TEXT: u32 = 0xFF777773;
 const CARD_X: usize = 32;
 const CARD_W: usize = SCREEN_WIDTH - 64; // 656
 
-// Clear all button pill centered at x in 260..460, y in 820..868
-const CLEAR_BTN: Rect = Rect::new(SCREEN_WIDTH / 2 - 100, 830, 200, 44);
+// Clear-all pill, drawn below the last event card: x in 260..460, y in 708..752.
+// WHY this y: the event cards occupy 206..700 (five 94px cards on a 100px
+// pitch), so 708..752 is the first band that both clears the cards and contains
+// the pinned clear tap at (360, 720). The shell hit-tests this exact rect.
+pub const CLEAR_BTN: Rect = Rect::new(SCREEN_WIDTH / 2 - 100, 708, 200, 44);
 const HOME_PILL: Rect = Rect::new(SCREEN_WIDTH / 2 - 90, SCREEN_HEIGHT - 20, 180, 5);
 
 // -----------------------------------------------------------------------------
@@ -229,7 +232,9 @@ fn build_notifications_frame(state: &LauncherState) -> NotificationsFrame {
     let mut cards: [Option<EventCardPlan>; 5] = [None, None, None, None, None];
     for i in 0..count {
         let rec = state.notifications[i];
-        let y = 210 + i * 108;
+        // WHY a 100px pitch: five 94px cards starting at 206 end at 700, leaving
+        // the drawn clear-all pill at 708..752 clear of the last card.
+        let y = 206 + i * 100;
         let title_bytes: &[u8] = if rec.title_len > 0 { &rec.title[..rec.title_len as usize] } else { b"Notification" };
         let subtitle_bytes: &[u8] = if rec.body_len > 0 {
             &rec.body[..rec.body_len as usize]
@@ -366,7 +371,7 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
         }
     }
 
-    // 6. Clear All Pill (y: 830..874)
+    // 6. Clear All Pill (y: 708..752, x: 260..460 -- see CLEAR_BTN)
     if CLEAR_BTN.contains(x, y) {
         if rounded_contains(CLEAR_BTN, x, y, 22) {
             color = 0xFFF1F5F9;

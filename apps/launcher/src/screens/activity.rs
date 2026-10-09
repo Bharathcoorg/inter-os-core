@@ -206,10 +206,14 @@ struct ActivityFrame {
 
 fn build_activity_frame(state: &LauncherState) -> ActivityFrame {
     // 1. Status Bar Clock
+    // WHY empty when there is no reading: the previous fallback drew `b"09:20"`,
+    // a plausible-looking time with no RTC read behind it, on the surface a user
+    // reads as the state of their device. `LabelRun::new` with an empty run inks
+    // nothing, so the clock is simply absent until the kernel answers.
     let clock_slice: &[u8] = if state.clock_time[0] != b' ' {
         &state.clock_time
     } else {
-        b"09:20"
+        b""
     };
     let clock = LabelRun::new(48, 14, type_scale::CAPTION, clock_slice, TEXT_WHITE);
 

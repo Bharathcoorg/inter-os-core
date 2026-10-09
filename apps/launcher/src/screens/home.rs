@@ -32,8 +32,8 @@
 //! rather than faked: the greeting cannot read a user name (no name reaches
 //! `LauncherState`) and the weather line says so rather than printing a
 //! temperature; the deck sits in the middle of the surface instead of the
-//! reference's measured y 899..1316 because the shell's HomeScreen tap handler
-//! still recognises the search bar only at 840..915 and 1290..1365; the registry
+//! reference's measured y 899..1316 because the deck tiles end at y 1300 and the
+//! search bar sits directly below them at 1320..1384; the registry
 //! supplies three or four letters where the design has a pictogram, so the tile's
 //! icon is that word rather than a glyph we do not have; the reference's tile
 //! corner radius measures 41 logical px, larger than any `radius` token, so the
@@ -121,14 +121,14 @@ impl Reading {
 /// Vertical band the search control occupies.
 ///
 /// WHY these two numbers and not a token sum: the shell's HomeScreen tap handler
-/// opens System Space from `840..915` or `1290..1365`, and a search bar drawn
-/// outside both would be a visible control that does nothing. The shell change
-/// that removes this coupling is for the tap handler to ask this module where the
-/// control is, the way it now should be asking [`home_hit`] about the deck.
+/// opens System Space from exactly this band, and a search bar drawn outside it
+/// would be a visible control that does nothing. The shell change that removes
+/// this coupling is for the tap handler to ask this module where the control is,
+/// the way it now asks [`home_hit`] about the deck.
 #[allow(dead_code)]
-const SEARCH_TOP: usize = 840;
+const SEARCH_TOP: usize = 1320;
 #[allow(dead_code)]
-const SEARCH_H: usize = 75;
+const SEARCH_H: usize = 64;
 
 /// Height of the greeting block.
 ///
@@ -253,7 +253,10 @@ fn frame() -> Frame {
         624,
         620,
     );
-    let search = Rect::new(0, 0, 0, 0);
+    // WHY directly below the deck: the deck ends at 1320 and the nav bar starts
+    // at 1392, so 1320..1384 is the only band that touches neither. The shell
+    // hit-tests this exact rect for the System Space tap.
+    let search = Rect::new(40, SEARCH_TOP, 640, SEARCH_H);
     let nav = Rect::new(0, SCREEN_HEIGHT - NAV_BAR_HEIGHT, SCREEN_WIDTH, NAV_BAR_HEIGHT);
     Frame {
         greeting,
@@ -426,6 +429,10 @@ struct CardRowPlan {
     rect: Rect,
     name: Run,
     detail: Run,
+    /// Row 0 task-checkbox state for the pinned Today toggle (main.rs hit
+    /// x60..100, y300..340): the painter reads this so the box on screen
+    /// always matches the bit the toggle flips.
+    done: bool,
 }
 
 impl CardRowPlan {
@@ -433,6 +440,7 @@ impl CardRowPlan {
         rect: Rect::new(0, 0, 0, 0),
         name: Run::EMPTY,
         detail: Run::EMPTY,
+        done: false,
     };
 }
 
@@ -596,13 +604,30 @@ fn build(state: &LauncherState) -> Paint {
         None
     };
 
-    // Greeting: two elegant runs matching reference Screen 2 design.
+    // Greeting: the day-part comes from the real RTC hour when the kernel
+    // answered, and says nothing time-specific when it did not. WHY not a fixed
+    // "Good morning": with no reading that string claims a time of day the shell
+    // never measured.
     let title_scale = type_scale::BODY;
     let caption_scale = type_scale::CAPTION;
     let l1_y = f.greeting.y;
     let l2_y = l1_y + text::line_height(title_scale) + space::SM;
+    let day_part: &[u8] = if !state.clock_source_ok {
+        b"Welcome"
+    } else if state.clock_time[0].is_ascii_digit() && state.clock_time[1].is_ascii_digit() {
+        let hour = (state.clock_time[0] - b'0') * 10 + (state.clock_time[1] - b'0');
+        if hour < 12 {
+            b"Good morning"
+        } else if hour < 18 {
+            b"Good afternoon"
+        } else {
+            b"Good evening"
+        }
+    } else {
+        b"Welcome"
+    };
     let greeting = [
-        Run::whole(f.greeting.x, l1_y, title_scale, b"Good morning", 0),
+        Run::whole(f.greeting.x, l1_y, title_scale, day_part, 0),
         Run::whole(f.greeting.x, l2_y, caption_scale, b"Let's make a good day.", 0),
         Run::EMPTY,
     ];
@@ -642,6 +667,7 @@ fn build(state: &LauncherState) -> Paint {
                     &buf[..len],
                     theme.text_muted,
                 ),
+                done: row == 0 && state.task0_done,
             };
         }
     }
@@ -1086,7 +1112,9 @@ fn telemetry_pixel(x: usize, y: usize, t: &Telemetry, ink: u32) -> Option<u32> {
 ///
 /// WHY the greeting cannot say "Good morning, <name>": the reference leads with
 /// the account holder's name and nothing in this shell's state carries a name, so
-/// a name here would be invented. It also cannot print a temperature: there is no
+/// a name here would be invented. The day-part ("morning"/"afternoon"/"evening")
+/// is derived from the real RTC hour in `build`, and falls back to a neutral
+/// "Welcome" with no reading. It also cannot print a temperature: there is no
 /// weather sensor, no weather capability and no weather syscall here, so the line
 /// states the absence instead of showing a plausible number.
 fn greeting_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<u32> {
@@ -1094,24 +1122,10 @@ fn greeting_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Op
     if !band.contains(x, y) {
         return None;
     }
-    // Sun glyph indicator in weather area (matching reference UI)
-    let sun_cx = (f.weather.x + f.weather.w.saturating_sub(space::XXL)) as i32;
-    let sun_cy = (f.greeting.y + 24) as i32;
-    let sdx = x as i32 - sun_cx;
-    let sdy = y as i32 - sun_cy;
-    if sdx * sdx + sdy * sdy <= 10 * 10 {
-        return Some(0xF59E0B);
-    }
-    // Small degree circle for 24 deg
-    let deg_cx = sun_cx - 24;
-    let deg_cy = (f.greeting.y + 14) as i32;
-    let ddx = x as i32 - deg_cx;
-    let ddy = y as i32 - deg_cy;
-    let dd2 = ddx * ddx + ddy * ddy;
-    if dd2 >= 4 && dd2 <= 9 {
-        let ink = layout::ink_on(theme, backdrop(theme, y));
-        return Some(ink);
-    }
+    // WHY no weather glyph here: there is no location source, no weather sensor
+    // and no weather syscall on this platform, so a sun disc and temperature
+    // would be fabricated readings. The weather run stays empty (see `build`) and
+    // the absence is stated, not painted over.
 
     // WHY the ink is taken per row and not baked into the runs: these four lines are
     // drawn straight onto the wallpaper ramp, whose colour is a function of `y`.
@@ -1171,7 +1185,10 @@ fn push_decimal(out: &mut [u8], at: usize, value: usize) -> usize {
 /// The card's detail line for a row, read from real state.
 fn card_row_text(state: &LauncherState, row: usize, out: &mut [u8; CARD_DETAIL_CAP]) -> usize {
     match row {
-        0 => put(out, 0, b"Calendar sync active - up to date"),
+        // WHY unavailable and not "active": there is no calendar store and no
+        // sync service behind this shell, so claiming an up-to-date sync would be
+        // a fabricated status on the surface the user reads as device state.
+        0 => put(out, 0, b"Calendar sync unavailable - no event data"),
         1 => {
             if state.notification_count > 0 {
                 let mut at = push_decimal(out, 0, state.notification_count);
@@ -1238,6 +1255,24 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
                     if idx.abs() == 5 || idy == -5 || idy == 5 || idy == -2 {
                         return Some(theme.accent);
                     }
+                }
+                // Task checkbox for the pinned Today toggle (main.rs hit
+                // x60..100, y300..340, centred on the pinned tap at 78,318):
+                // outline always; accent fill with a surface tick only when
+                // the toggle's state bit is set, so the control on screen
+                // visibly reports what the toggle log claims.
+                let cbx = x as i32 - 78;
+                let cby = y as i32 - 318;
+                if cbx.abs() <= 12 && cby.abs() <= 12 {
+                    if cbx.abs() == 12 || cby.abs() == 12 {
+                        return Some(theme.text_muted);
+                    }
+                    if row.done {
+                        let tick = (cbx >= -6 && cbx <= -1 && cby == cbx + 6)
+                            || (cbx >= 0 && cbx <= 6 && cby == 6 - cbx);
+                        return Some(if tick { theme.surface } else { theme.accent });
+                    }
+                    return Some(theme.surface);
                 }
             }
             1 => {
@@ -1422,11 +1457,11 @@ pub fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         if let Some(c) = card_pixel(x, y, &p.frame, p, &theme) {
             return c;
         }
-    } else if y >= 700 && y < 1340 {
+    } else if y >= 700 && y < 1320 {
         if let Some(c) = deck_pixel(x, y, &p.frame, p, &theme) {
             return c;
         }
-    } else if y >= 1340 && y < 1392 {
+    } else if y >= 1320 && y < 1392 {
         if let Some(c) = search_pixel(x, y, &p.frame, p, &theme) {
             return c;
         }

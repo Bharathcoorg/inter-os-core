@@ -142,12 +142,13 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 return c;
             }
         }
-        // Battery glyph at (650, 16)
+        // Battery glyph outline + terminal at (650, 16). WHY outline only: there
+        // is no fuel gauge bound to this shell, so a filled cell would be a
+        // measurement the shell never took.
         if x >= 648 && x <= 672 && y >= 17 && y <= 31 {
             let is_body = x <= 668 && (x == 648 || x == 668 || y == 17 || y == 31);
             let is_terminal = x >= 669 && y >= 21 && y <= 27;
-            let is_fill = x >= 651 && x <= 663 && y >= 20 && y <= 28;
-            if is_body || is_terminal || is_fill {
+            if is_body || is_terminal {
                 return 0xFFCBD5E1;
             }
         }

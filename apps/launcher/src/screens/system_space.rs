@@ -608,7 +608,9 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
         if let Some(c) = test_text_aa(x, y, 105, 617, 2, b"Power", TEXT_DARK, 0xFFFFFFFF) {
             return c;
         }
-        if let Some(c) = test_text_aa(x, y, 65, 667, 1, b"Battery, Charging", TEXT_MUTED, 0xFFFFFFFF) {
+        // WHY "Power options" and not "Charging": the subtitle names the section,
+        // and "Charging" would claim a live charge state this shell never measured.
+        if let Some(c) = test_text_aa(x, y, 65, 667, 1, b"Battery, Power options", TEXT_MUTED, 0xFFFFFFFF) {
             return c;
         }
         return bg;
