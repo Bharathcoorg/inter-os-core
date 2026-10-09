@@ -430,7 +430,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         kernel::serial::service_serial_commands();
         kernel::services::supervise();
         if !kernel::task::yield_now() {
-            x86_64::instructions::hlt();
+            x86_64::instructions::interrupts::enable_and_hlt();
         }
     }
 }

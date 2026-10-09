@@ -9,6 +9,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use uart_16550::backend::PioBackend;
 use uart_16550::{Config, Uart16550Tty};
+use crate::drivers::display::DisplayDriver;
 use crate::storage::block::BlockDevice;
 
 /// Global spinlock-protected COM1 serial port interface.
@@ -92,7 +93,7 @@ static RX_BUF: Mutex<RxState> = Mutex::new(RxState::new());
 /// first and the two would execute as one garbled command. Four slots is ample
 /// for a human or a test harness, and the overflow is reported rather than
 /// silently dropping the oldest.
-const RX_QUEUE_SLOTS: usize = 16;
+const RX_QUEUE_SLOTS: usize = 32;
 
 struct RxState {
     /// Line currently being accumulated.
@@ -163,58 +164,49 @@ impl RxState {
 /// every `serial_println!` it performs writes into a 16-byte hardware FIFO from
 /// inside the handler, so a response long enough to fill it loses bytes.
 ///
-/// The symptom was intermittent and misleading: a `TAP` sent over the serial
-/// console would sometimes appear to do nothing at all, which looked like a UI
-/// defect and sent the investigation into the launcher and compositor.
-///
-/// The handler now only accumulates bytes, which is bounded and cannot block on
-/// anything but the short `RX_BUF` lock. Dispatch happens in
-/// `service_serial_commands`, called from the main loop.
+/// The handler now only accumulates bytes atomically under `without_interrupts`.
+/// Dispatch happens in `service_serial_commands`, called from the main loop.
 pub fn poll_serial_rx() {
-    let mut lsr = Port::<u8>::new(0x3FD);
-    let mut rbr = Port::<u8>::new(0x3F8);
+    #[cfg(not(test))]
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut lsr = Port::<u8>::new(0x3FD);
+        let mut rbr = Port::<u8>::new(0x3F8);
 
-    let mut count = 0;
-    while count < 64 {
         let status = unsafe { lsr.read() };
         if (status & 1) == 0 {
-            break;
-        }
-        let byte = unsafe { rbr.read() };
-        count += 1;
-
-        // Discard null bytes (break conditions / UART line noise / socket handshake padding)
-        if byte == 0 {
-            continue;
+            return;
         }
 
-        // WHY an overflow marker rather than a silent drop: a line longer than the
-        // buffer must not be dispatched as if it were complete, and must not be
-        // discarded without trace either. The marker makes the truncation visible
-        // to the command handler.
         let mut state = RX_BUF.lock();
-        if byte == b'\n' || byte == b'\r' {
-            // A line is complete. WHY it is queued rather than executed here: the
-            // handler must not launch apps or print. WHY it is queued rather than
-            // flushed by the next newline: two commands can arrive before the main
-            // loop runs, and concatenating them would execute one as a garbled
-            // prefix of the other.
-            if state.overflowed {
-                // Discard the truncated line rather than executing a prefix of it.
-                state.len = 0;
-                state.overflowed = false;
-            } else if state.len > 0 {
-                state.push_current_line();
-                state.len = 0;
+        let mut cur_status = status;
+        let mut count = 0;
+        while count < 128 {
+            if (cur_status & 1) == 0 {
+                break;
             }
-        } else if state.len < 511 {
-            let idx = state.len;
-            state.buf[idx] = byte;
-            state.len += 1;
-        } else {
-            state.overflowed = true;
+            let byte = unsafe { rbr.read() };
+            count += 1;
+
+            if byte != 0 {
+                if byte == b'\n' || byte == b'\r' {
+                    if state.overflowed {
+                        state.len = 0;
+                        state.overflowed = false;
+                    } else if state.len > 0 {
+                        state.push_current_line();
+                        state.len = 0;
+                    }
+                } else if state.len < 511 {
+                    let idx = state.len;
+                    state.buf[idx] = byte;
+                    state.len += 1;
+                } else {
+                    state.overflowed = true;
+                }
+            }
+            cur_status = unsafe { lsr.read() };
         }
-    }
+    });
 }
 
 /// Dispatches any complete serial command lines. Must be called from a normal
@@ -227,10 +219,21 @@ pub fn service_serial_commands() {
         // block the interrupt handler that fills it.
         let mut local = [0u8; 512];
         let (len, dropped) = {
-            let mut state = RX_BUF.lock();
-            let dropped = state.dropped;
-            state.dropped = 0;
-            (state.pop_line(&mut local), dropped)
+            #[cfg(not(test))]
+            let res = x86_64::instructions::interrupts::without_interrupts(|| {
+                let mut state = RX_BUF.lock();
+                let dropped = state.dropped;
+                state.dropped = 0;
+                (state.pop_line(&mut local), dropped)
+            });
+            #[cfg(test)]
+            let res = {
+                let mut state = RX_BUF.lock();
+                let dropped = state.dropped;
+                state.dropped = 0;
+                (state.pop_line(&mut local), dropped)
+            };
+            res
         };
         if dropped > 0 {
             serial_println!(
