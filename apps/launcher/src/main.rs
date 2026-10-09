@@ -1234,7 +1234,7 @@ pub extern "C" fn _start() -> ! {
                     let now = std::get_ticks(1).unwrap_or(state.power_transition_started_ticks);
                     let elapsed = now.saturating_sub(state.power_transition_started_ticks);
                     state.power_transition_progress = ((elapsed.min(60) * 1000) / 60) as u16;
-                    render_band(surface, &state, 0, H);
+                    render_band(surface, &state, H / 2 - 130, (H / 2 + 220).min(H));
                     let _ = std::surface_flip(4);
                     if elapsed >= 60 {
                         let action = state.power_transition_action as u32;

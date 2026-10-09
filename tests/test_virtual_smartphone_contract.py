@@ -250,3 +250,10 @@ def test_android_invoke_uses_real_register_frames_and_full_35c_register_list():
     assert "caller_strings = self.string_registers.clone()" in runtime
     assert "self.registers[base + i] = caller_registers[arg_registers[i]]" in runtime
     assert "invoke_format_35c_decodes_all_register_slots_and_rejects_bad_counts" in runtime
+
+
+def test_power_transition_uses_bounded_dirty_band_for_animation_frames():
+    launcher = read("apps/launcher/src/main.rs")
+    transition = launcher[launcher.index("if state.current_view == ViewMode::PowerTransition"):launcher.index("if state.current_view == ViewMode::BootScreen")]
+    assert "render_band(surface, &state, H / 2 - 130, (H / 2 + 220).min(H))" in transition
+    assert "render_band(surface, &state, 0, H)" not in transition
