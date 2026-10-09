@@ -4,7 +4,7 @@
 //! pointer/gesture pipeline used by touch and Device Studio. It never fabricates
 //! movement when the controller or mouse is unavailable.
 
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use x86_64::instructions::port::Port;
 use crate::input::TouchPhase;
 
@@ -22,6 +22,12 @@ static PACKET_1: AtomicU8 = AtomicU8::new(0);
 static POINTER_X: AtomicI32 = AtomicI32::new(360);
 static POINTER_Y: AtomicI32 = AtomicI32::new(720);
 static LEFT_BUTTON_DOWN: AtomicBool = AtomicBool::new(false);
+const EVENT_CAPACITY: usize = 64;
+static EVENT_WRITE: AtomicUsize = AtomicUsize::new(0);
+static EVENT_READ: AtomicUsize = AtomicUsize::new(0);
+static EVENT_X: [AtomicU32; EVENT_CAPACITY] = [const { AtomicU32::new(0) }; EVENT_CAPACITY];
+static EVENT_Y: [AtomicU32; EVENT_CAPACITY] = [const { AtomicU32::new(0) }; EVENT_CAPACITY];
+static EVENT_PHASE: [AtomicU8; EVENT_CAPACITY] = [const { AtomicU8::new(0) }; EVENT_CAPACITY];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MousePacket { dx: i32, dy: i32, left_down: bool, overflow: bool }
@@ -43,6 +49,16 @@ fn wait_input_empty() -> bool {
         core::hint::spin_loop();
     }
     false
+}
+
+fn wait_output_any() -> Option<u8> {
+    let mut status = Port::<u8>::new(CONTROLLER_STATUS);
+    let mut data = Port::<u8>::new(DATA_PORT);
+    for _ in 0..WAIT_LIMIT {
+        if unsafe { status.read() } & 0x01 != 0 { return Some(unsafe { data.read() }); }
+        core::hint::spin_loop();
+    }
+    None
 }
 
 fn wait_output_full() -> Option<u8> {
@@ -83,7 +99,7 @@ fn mouse_command(command: u8) -> bool {
 /// Returns false without stopping boot when a PS/2 controller is absent.
 pub fn init() -> bool {
     if !controller_command(0xA8) || !controller_command(0x20) { return false; }
-    let Some(mut command_byte) = wait_output_full() else { return false; };
+    let Some(mut command_byte) = wait_output_any() else { return false; };
     command_byte |= 0x02; // enable IRQ12
     command_byte &= !0x20; // enable auxiliary clock
     if !controller_command(0x60) || !controller_data(command_byte) { return false; }
@@ -95,6 +111,34 @@ pub fn init() -> bool {
     INITIALIZED.store(true, Ordering::Release);
     crate::serial_println!("[INPUT] QEMU PS/2 mouse reporting enabled; logical portrait pointer ready.");
     true
+}
+
+fn enqueue_event(x: u32, y: u32, phase: u8) {
+    let write = EVENT_WRITE.load(Ordering::Relaxed);
+    let read = EVENT_READ.load(Ordering::Acquire);
+    if write.wrapping_sub(read) >= EVENT_CAPACITY { return; }
+    let slot = write % EVENT_CAPACITY;
+    EVENT_X[slot].store(x, Ordering::Relaxed);
+    EVENT_Y[slot].store(y, Ordering::Relaxed);
+    EVENT_PHASE[slot].store(phase, Ordering::Relaxed);
+    EVENT_WRITE.store(write.wrapping_add(1), Ordering::Release);
+}
+
+/// Delivers queued pointer contacts outside IRQ context, where normal kernel locks are safe.
+pub fn drain_events() {
+    loop {
+        let read = EVENT_READ.load(Ordering::Acquire);
+        let write = EVENT_WRITE.load(Ordering::Acquire);
+        if read == write { break; }
+        let slot = read % EVENT_CAPACITY;
+        let x = EVENT_X[slot].load(Ordering::Relaxed);
+        let y = EVENT_Y[slot].load(Ordering::Relaxed);
+        let phase = EVENT_PHASE[slot].load(Ordering::Relaxed);
+        if EVENT_READ.compare_exchange(read, read.wrapping_add(1), Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            let phase = match phase { 0 => TouchPhase::Down, 1 => TouchPhase::Move, _ => TouchPhase::Up };
+            crate::input::post_mouse_event(x, y, phase);
+        }
+    }
 }
 
 /// Called by IRQ12. The handler does no allocation and uses only bounded atomic work.
@@ -123,11 +167,11 @@ pub fn handle_irq_byte() {
             POINTER_X.store(x, Ordering::Release);
             POINTER_Y.store(y, Ordering::Release);
             if packet.left_down && !old_down {
-                crate::input::post_mouse_event(x as u32, y as u32, TouchPhase::Down);
+                enqueue_event(x as u32, y as u32, 0);
             } else if packet.left_down {
-                crate::input::post_mouse_event(x as u32, y as u32, TouchPhase::Move);
+                enqueue_event(x as u32, y as u32, 1);
             } else if old_down {
-                crate::input::post_mouse_event(x as u32, y as u32, TouchPhase::Up);
+                enqueue_event(x as u32, y as u32, 2);
             }
         }
     }
