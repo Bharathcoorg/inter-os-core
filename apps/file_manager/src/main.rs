@@ -3,10 +3,12 @@
 //! Native Ring-3 graphical application executing in User Mode:
 //! - DRM/KMS Client Surface allocation (z=200) and double-buffered scanout presentation
 //! - Real-time block device capacity query via microkernel storage driver
-//! - Dynamic VFS directory traversal & file system exploration
+//! - Startup VFS directory query whose received bytes are reported in the log
+//!   only: no directory entry list is parsed or rendered
 //! - Internal Storage capacity queried from the storage service; usage is shown only when real telemetry is available.
-//! - Tactile Category Shortcuts (Recent, Images, Docs, Downloads)
-//! - Interactive directory navigation with hierarchical path breadcrumbs
+//! - Tactile category rows (Recent, Images, Videos, Documents, Downloads,
+//!   Internal Storage, Cloud) with a visible selection highlight
+//! - Single screen: no subdirectory navigation and no path breadcrumbs are drawn
 //! - Asynchronous event reactor loop handling touch interactions and home gestures
 //! - Graceful lifecycle supervision and clean return to Launcher
 
@@ -59,6 +61,49 @@ fn test_text(
 }
 
 // -----------------------------------------------------------------------------
+// Counted Log Assembly (no allocator in this no_std app)
+// -----------------------------------------------------------------------------
+
+/// Formats `v` as decimal ASCII into `out`; returns the bytes written.
+fn fmt_u64(mut v: u64, out: &mut [u8]) -> usize {
+    if out.is_empty() {
+        return 0;
+    }
+    if v == 0 {
+        out[0] = b'0';
+        return 1;
+    }
+    let mut digits = [0u8; 20];
+    let mut n = 0usize;
+    while v > 0 && n < 20 {
+        digits[n] = b'0' + (v % 10) as u8;
+        v /= 10;
+        n += 1;
+    }
+    let n = n.min(out.len());
+    for i in 0..n {
+        out[i] = digits[n - 1 - i];
+    }
+    n
+}
+
+/// Builds `prefix ++ decimal(value) ++ suffix` into `buf` and returns its length.
+/// WHY: measured values only exist at runtime, so they are assembled into a
+/// stack buffer before being logged.
+fn log_counted(prefix: &str, value: u64, suffix: &str) {
+    let mut buf = [0u8; 192];
+    let p = prefix.len().min(buf.len());
+    buf[..p].copy_from_slice(&prefix.as_bytes()[..p]);
+    let v = fmt_u64(value, &mut buf[p..]);
+    let n = p + v;
+    let s = suffix.len().min(buf.len().saturating_sub(n));
+    buf[n..n + s].copy_from_slice(&suffix.as_bytes()[..s]);
+    if let Ok(msg) = core::str::from_utf8(&buf[..n + s]) {
+        std::log(0, msg).ok();
+    }
+}
+
+// -----------------------------------------------------------------------------
 // VFS Entry Representation
 // Runtime entries must come from the kernel VFS; no synthetic inventory is embedded.
 // -----------------------------------------------------------------------------
@@ -71,11 +116,14 @@ pub struct VfsItem {
     pub color_accent: u32,
 }
 
+/// The app ships no embedded file inventory: `ITEMS_ALL` stays empty until a
+/// real VFS listing can populate it (WHY: the platform truth contract pins the
+/// empty ledger, and nothing on screen may invent file names).
+#[allow(dead_code)]
 const ITEMS_ALL: [VfsItem; 0] = [];
 
 pub struct FileManagerApp {
     pub selected_shortcut: usize,
-    pub selected_row: usize,
     pub storage_capacity_bytes: u64,
     pub current_path: &'static str,
 }
@@ -84,7 +132,6 @@ impl FileManagerApp {
     pub const fn new() -> Self {
         Self {
             selected_shortcut: 0,
-            selected_row: 0,
             storage_capacity_bytes: 0,
             current_path: "/data",
         }
@@ -148,6 +195,18 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         if y == row_start_y + row_h - 1 {
             return BORDER_SUBTLE;
         }
+
+        // WHY: this highlight is what makes the tap handler's selection visible —
+        // the selected row gets a raised background and a left accent bar, so the
+        // control reports a real state change instead of an invisible one.
+        // It is applied only inside the selected row's own band, so no tint
+        // bleeds into the padding below the last row.
+        let row_selected =
+            app.selected_shortcut == row_idx && y >= row_start_y && y < row_start_y + row_h;
+        if row_selected && x < 44 {
+            return ACCENT_SKY;
+        }
+        let row_bg = if row_selected { SURFACE_RAISED } else { BG_DARK };
 
         let center_y = row_start_y + (if row_idx == 5 { 40 } else { 45 });
         let icon_cx = 64i32;
@@ -231,28 +290,10 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             }
         }
 
-        return BG_DARK;
+        return row_bg;
     }
 
-    // 3. Navigation Gesture Hint at bottom (y: 1250..1380)
-    if y >= 1250 && y < 1380 {
-        // Arrow pointing left "<-"
-        if y >= 1280 && y < 1300 && x >= 140 && x < 210 {
-            let ax = (x as i32) - 170;
-            let ay = (y as i32) - 1290;
-            if (ay == 0 && ax >= -24 && ax <= 24) || (ax <= -10 && (ax + 24).abs() == ay.abs()) {
-                return TEXT_PRIMARY;
-            }
-        }
-        if let Some(c) = test_text(x, y, 240, 1282, 2, b"Swipe from left", TEXT_PRIMARY) {
-            return c;
-        }
-        if let Some(c) = test_text(x, y, 240, 1308, 2, b"Go back", TEXT_MUTED) {
-            return c;
-        }
-    }
-
-    // 4. Home Gesture Pill (x: 260..460, y: 1418..1424)
+    // 3. Home Gesture Pill (x: 260..460, y: 1418..1424)
     if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
         return TEXT_MUTED;
     }
@@ -304,15 +345,23 @@ pub extern "C" fn _start() -> ! {
         .ok();
     }
 
-    // Enumerate initial VFS directory
+    // Enumerate initial VFS directory. WHY byte counts: the payload is received
+    // but never parsed or rendered, so claiming a successful parse would be false.
     let mut entries = [0u8; 1024];
-    if let Ok(n) = std::fs_list(3, "/data", &mut entries) {
-        if n > 0 {
-            std::log(
-                0,
-                "[FILE_MANAGER] VFS directory '/data' parsed successfully.",
-            )
-            .ok();
+    match std::fs_list(3, "/data", &mut entries) {
+        Ok(n) => {
+            log_counted(
+                "[FILE_MANAGER] fs_list('/data'): ",
+                n as u64,
+                " bytes of directory entries received; not parsed or rendered.",
+            );
+        }
+        Err(code) => {
+            log_counted(
+                "[FILE_MANAGER] fs_list('/data') refused, code -",
+                code.unsigned_abs(),
+                "; no directory data received.",
+            );
         }
     }
 
@@ -378,58 +427,40 @@ pub extern "C" fn _start() -> ! {
                             std::exit_with_code(0);
                         }
 
-                        // Category Shortcuts (y: 235..335)
-                        if (235..335).contains(&y) {
-                            if (24..176).contains(&x) {
-                                app.selected_shortcut = 0;
-                                app.current_path = "/recent";
-                            } else if (197..349).contains(&x) {
-                                app.selected_shortcut = 1;
-                                app.current_path = "/media/images";
-                            } else if (370..522).contains(&x) {
-                                app.selected_shortcut = 2;
-                                app.current_path = "/docs";
-                            } else if (543..695).contains(&x) {
-                                app.selected_shortcut = 3;
-                                app.current_path = "/downloads";
-                            }
+                        // Category rows are drawn as a vertical list (y 150..800,
+                        // x 36..684; rows of 90px, Internal Storage 110px).
+                        // WHY row-shaped hit test: the previous horizontal band
+                        // logged a filter switch for taps that hit nothing, missed
+                        // the rows that are actually drawn, and had no visible
+                        // effect. The selection and the log now happen together,
+                        // only inside the row that was really tapped, and the
+                        // renderer highlights the selected row.
+                        if (150..800).contains(&y) && (36..684).contains(&x) {
+                            let shortcut = if y < 240 {
+                                0 // Recent
+                            } else if y < 330 {
+                                1 // Images
+                            } else if y < 420 {
+                                2 // Videos
+                            } else if y < 510 {
+                                3 // Documents
+                            } else if y < 600 {
+                                4 // Downloads
+                            } else if y < 710 {
+                                5 // Internal Storage
+                            } else {
+                                6 // Cloud
+                            };
+                            app.selected_shortcut = shortcut;
+                            // `current_path` keeps the directory that was really
+                            // queried ("/data"): no navigation happens, so no new
+                            // path is claimed.
                             std::log(0, "[FILE_MANAGER] Category filter shortcut switched.").ok();
                             if surface > 0 {
                                 render_file_manager_ui(surface, &app);
                                 let _ = std::surface_flip(6);
                             }
                             break;
-                        }
-
-                        // Directory & File Row Hit-test (y: 410..1320)
-                        if (410..1320).contains(&y) && x >= 24 && x < 696 {
-                            let row = (y - 410) / 100;
-                            if row < ITEMS_ALL.len() {
-                                app.selected_row = row;
-                                let item = &ITEMS_ALL[row];
-                                if item.is_dir {
-                                    app.current_path = match row {
-                                        0 => "/system",
-                                        1 => "/apps",
-                                        2 => "/docs",
-                                        3 => "/media",
-                                        4 => "/packages",
-                                        _ => "/data",
-                                    };
-                                    std::log(0, "[FILE_MANAGER] Navigated to subdirectory.").ok();
-                                } else {
-                                    std::log(
-                                        0,
-                                        "[FILE_MANAGER] File selected: inspection modal requested.",
-                                    )
-                                    .ok();
-                                }
-                                if surface > 0 {
-                                    render_file_manager_ui(surface, &app);
-                                    let _ = std::surface_flip(6);
-                                }
-                                break;
-                            }
                         }
                     }
                 }
