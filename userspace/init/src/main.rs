@@ -23,7 +23,13 @@ pub extern "C" fn _start() -> ! {
         let mut service_buf = [0u8; SERVICE_BUFFER];
         let Ok(len) = std::service_list(&mut service_buf) else { break; };
         let progress = start_declared_services(&service_buf[..len]);
-        if registry_has_all_running_services(&service_buf[..len]) || !progress { break; }
+        let Ok(len) = std::service_list(&mut service_buf) else { break; };
+        if registry_has_all_running_services(&service_buf[..len]) {
+            break;
+        }
+        if !progress {
+            break;
+        }
         remaining -= 1;
     }
 
@@ -80,11 +86,12 @@ pub extern "C" fn _start() -> ! {
             if let Ok(recovery_len) = std::service_list(&mut recovery_buf) {
                 for service_id in declared_service_ids(&recovery_buf[..recovery_len]).iter().copied().flatten() {
                     if std::service_recover_failed(service_id).is_ok() {
-                    std::log(
-                        0,
-                        "[PID1] Recovered a failed service through the lifecycle ABI.",
-                    )
-                    .ok();
+                        std::log(
+                            0,
+                            "[PID1] Recovered a failed service through the lifecycle ABI.",
+                        )
+                        .ok();
+                    }
                 }
             }
             last_poll = now;
@@ -123,11 +130,94 @@ pub extern "C" fn _start() -> ! {
 }
 
 const SERVICE_RETRY_ROUNDS: u8 = 16;
-fn parse_service_id(bytes:&[u8])->Option<u8>{if bytes.is_empty(){return None;}let mut id=0u16;for byte in bytes{if !byte.is_ascii_digit(){return None;}id=id.checked_mul(10)?.checked_add((byte-b'0')as u16)?;if id>u8::MAX as u16{return None;}}let id=id as u8;if id==0{None}else{Some(id)}}
-fn declared_service_ids(buf:&[u8])->[Option<u8>;32]{let mut ids=[None;32];let mut count=0usize;for line in buf.split(|b|*b==b'\n'){let Some(id_bytes)=line.split(|b|*b==b'|').next()else{continue;};let Some(id)=parse_service_id(id_bytes)else{continue;};if count<ids.len(){ids[count]=Some(id);count+=1;}}ids}
-fn start_declared_services(buf:&[u8])->bool{let mut progress=false;for service_id in declared_service_ids(buf).iter().copied().flatten(){if std::service_start(service_id).is_ok(){progress=true;}}progress}
-fn registry_has_all_running_services_after_query()->bool{let mut service_buf=[0u8;SERVICE_BUFFER];match std::service_list(&mut service_buf){Ok(len)=>registry_has_all_running_services(&service_buf[..len]),Err(_)=>false}}
-fn registry_has_all_running_services(buf:&[u8])->bool{let mut declared=0usize;let mut running=0usize;for line in buf.split(|b|*b==b'\n'){if line.is_empty(){continue;}let mut fields=line.split(|b|*b==b'|');let Some(id_bytes)=fields.next()else{continue;};let Some(abi_bytes)=fields.next()else{continue;};let Some(state)=fields.next()else{continue;};if parse_service_id(id_bytes).is_none()||abi_bytes!=b"1"{continue;}declared+=1;if state==b"running"{running+=1;}}declared>0&&running==declared}
+
+fn parse_service_id(bytes: &[u8]) -> Option<u8> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut id = 0u16;
+    for byte in bytes {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        id = id.checked_mul(10)?.checked_add((byte - b'0') as u16)?;
+        if id > u8::MAX as u16 {
+            return None;
+        }
+    }
+    let id = id as u8;
+    if id == 0 {
+        None
+    } else {
+        Some(id)
+    }
+}
+
+fn declared_service_ids(buf: &[u8]) -> [Option<u8>; 32] {
+    let mut ids = [None; 32];
+    let mut count = 0usize;
+    for line in buf.split(|b| *b == b'\n') {
+        let Some(id_bytes) = line.split(|b| *b == b'|').next() else {
+            continue;
+        };
+        let Some(id) = parse_service_id(id_bytes) else {
+            continue;
+        };
+        if count < ids.len() {
+            ids[count] = Some(id);
+            count += 1;
+        }
+    }
+    ids
+}
+
+fn start_declared_services(buf: &[u8]) -> bool {
+    let mut progress = false;
+    for service_id in declared_service_ids(buf).iter().copied().flatten() {
+        if std::service_start(service_id).is_ok() {
+            progress = true;
+        }
+    }
+    progress
+}
+
+#[allow(dead_code)]
+fn registry_has_all_running_services_after_query() -> bool {
+    let mut service_buf = [0u8; SERVICE_BUFFER];
+    match std::service_list(&mut service_buf) {
+        Ok(len) => registry_has_all_running_services(&service_buf[..len]),
+        Err(_) => false,
+    }
+}
+
+fn registry_has_all_running_services(buf: &[u8]) -> bool {
+    let mut declared = 0usize;
+    let mut running = 0usize;
+    for line in buf.split(|b| *b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let mut fields = line.split(|b| *b == b'|');
+        let Some(id_bytes) = fields.next() else {
+            continue;
+        };
+        let Some(abi_bytes) = fields.next() else {
+            continue;
+        };
+        let Some(state) = fields.next() else {
+            continue;
+        };
+        if parse_service_id(id_bytes).is_none() {
+            continue;
+        }
+        declared += 1;
+        if abi_bytes != b"1" || state != b"running" {
+            continue;
+        }
+        running += 1;
+    }
+    declared > 0 && running == declared
+}
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
