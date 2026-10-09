@@ -1215,8 +1215,17 @@ pub extern "C" fn _start() -> ! {
                     render_band(surface, &state, H / 2 - 130, (H / 2 + 220).min(H));
                     let _ = std::surface_flip(4);
                     if elapsed >= POWER_TRANSITION_TICKS {
+                        // Kernel power ABI: action 0 restarts (POWER.reset) and
+                        // action 1 shuts down (POWER.shutdown); every other
+                        // action passes through unchanged. The cards only record
+                        // the requested action, so dispatch stays in one place.
                         let action = state.power_transition_action as u32;
-                        match std::device_power(action) {
+                        let dispatched = match action {
+                            0 => std::device_power(0),
+                            1 => std::device_power(1),
+                            _ => std::device_power(action),
+                        };
+                        match dispatched {
                             Ok(_) => {}
                             Err(_) => {
                                 std::log(0, "[LAUNCHER] Power transition was rejected by the guest power controller.").ok();
