@@ -11,10 +11,14 @@ def read(path: str) -> str:
 def test_canonical_qemu_exposes_native_portrait_display_and_absolute_pointer():
     launch = read("qemu/launch_studio.ps1")
     server = read("emulator/server.py")
-    for source in (launch, server):
-        assert "virtio-vga,xres=720,yres=1440" in source
-        assert "ps2-mouse" in source
-        assert "usb-tablet" not in source
+    assert "virtio-vga,edid=on,xres=720,yres=1440" in launch
+    assert "ps2-mouse" in launch
+    x86_start = server.index('if arch == "x86_64":')
+    x86_end = server.index('elif arch == "aarch64":', x86_start)
+    x86_profile = server[x86_start:x86_end]
+    assert "virtio-vga,edid=on,xres=720,yres=1440" in x86_profile
+    assert "ps2-mouse" in x86_profile
+    assert "usb-tablet" not in x86_profile
 
 
 def test_guest_power_is_authoritative():

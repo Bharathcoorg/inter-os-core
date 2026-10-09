@@ -1196,7 +1196,7 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
     # show and no VNC pixels to stream.
     if arch in ("aarch64", "riscv64"):
         cmd.extend(["-device", "virtio-gpu-pci", "-device", "usb-ehci,id=usb0"])
-        cmd.extend(["-device", "usb-kbd", "-device", "usb-tablet", "bus=usb0.0"])
+        # This guest does not implement an EHCI/USB HID driver yet; browser-to-guest input remains explicit serial injection on these non-canonical profiles.
 
     try:
         serial_lines.clear()
