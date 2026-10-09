@@ -645,7 +645,7 @@ SUPPORTED_PROFILES = {
         "boot_type": "BIOS/MBR Bootloader",
         "image": os.path.join(WORKSPACE_ROOT, "target", "inter-os-bios.img"),
         "status": "Primary QEMU Phone contract",
-        "display": {"backend": "vnc", "host": "127.0.0.1", "port": 5901, "websocket_port": 6081, "guest_width": 1280, "guest_height": 720},
+        "display": {"backend": "vnc", "host": "127.0.0.1", "port": 5901, "websocket_port": 6081, "guest_width": 720, "guest_height": 1440},
         "serial": {"host": "127.0.0.1", "port": 4301},
         "monitor": {"host": "127.0.0.1", "port": 44445},
     },
@@ -772,9 +772,9 @@ class VncScanoutClient:
         self.port = port
         self.running = True
         self.connected = False
-        self.width = 1280
-        self.height = 720
-        self.scanout_buf = bytearray(1280 * 720 * 4)
+        self.width = LOGICAL_SURFACE_W
+        self.height = LOGICAL_SURFACE_H
+        self.scanout_buf = bytearray(LOGICAL_SURFACE_W * LOGICAL_SURFACE_H * 4)
         self.seq = 0
         self.lock = threading.Lock()
         self.frame_cond = threading.Condition(self.lock)
@@ -905,8 +905,6 @@ class VncScanoutClient:
                                 self.scanout_buf[dst_off : dst_off + rw * 4] = temp_buf[src_off : src_off + rw * 4]
 
                 self._publish_frame(t_frame_start)
-                if self.height < 720 and check_launcher_ready():
-                    break
                 s.sendall(struct.pack('>BBHHHH', 3, 1, 0, 0, self.width, self.height))
             except socket.timeout:
                 try:
