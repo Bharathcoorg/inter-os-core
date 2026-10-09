@@ -241,3 +241,12 @@ def test_power_menu_uses_guest_owned_shutdown_and_restart_transition():
     assert "get_power_transition_color" in transition
     assert "std::device_power(0)" not in launcher[launcher.index("// Card 2: Restart"):launcher.index("// Card 3: Power off")]
     assert "std::device_power(1)" not in launcher[launcher.index("// Card 3: Power off"):launcher.index("// Card 4: Emergency")]
+
+
+def test_android_invoke_uses_real_register_frames_and_full_35c_register_list():
+    runtime = read("kernel/src/compat/android/runtime.rs")
+    assert "fn decode_invoke_registers" in runtime
+    assert "caller_registers = self.registers" in runtime
+    assert "caller_strings = self.string_registers.clone()" in runtime
+    assert "self.registers[base + i] = caller_registers[arg_registers[i]]" in runtime
+    assert "invoke_format_35c_decodes_all_register_slots_and_rejects_bad_counts" in runtime

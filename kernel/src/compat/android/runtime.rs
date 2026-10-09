@@ -29,6 +29,21 @@ pub enum DalvikVmError {
     ObjectHeapLimitExceeded,
 }
 
+/// Decodes Dalvik format 35c's C/D/E/F/G register list and validates the count.
+fn decode_invoke_registers(insns: &[u8], pc: usize) -> Result<([usize; 5], usize), DalvikVmError> {
+    if pc.checked_add(6).filter(|end| *end <= insns.len()).is_none() { return Err(DalvikVmError::InvalidBytecode); }
+    let count = (insns[pc + 1] >> 4) as usize;
+    if count > 5 { return Err(DalvikVmError::InvalidBytecode); }
+    let regs = [
+        (insns[pc + 4] & 0x0f) as usize,
+        (insns[pc + 4] >> 4) as usize,
+        (insns[pc + 5] & 0x0f) as usize,
+        (insns[pc + 5] >> 4) as usize,
+        (insns[pc + 1] & 0x0f) as usize,
+    ];
+    Ok((regs, count))
+}
+
 /// Bounded object allocated by one isolated Dalvik VM instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DalvikObject {
@@ -408,28 +423,43 @@ impl DalvikVmState {
                     }
                 }
                 OP_INVOKE_VIRTUAL | OP_INVOKE_DIRECT | OP_INVOKE_STATIC => {
-                    // Dalvik 35c invoke format: opcode, register-count/register-list, method_idx.
-                    if pc + 6 > insns.len() {
-                        return Err(DalvikVmError::InvalidBytecode);
-                    }
+                    if pc + 6 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let (arg_registers, arg_count) = decode_invoke_registers(insns, pc)?;
                     let method_index = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as usize;
                     let target = dex.methods.iter().find(|m| m.method_index == method_index)
                         .ok_or(DalvikVmError::MethodNotFound)?;
+                    let target_class = target.class_name.clone();
+                    let target_method = target.method_name.clone();
+                    let target_registers_size = target.registers_size as usize;
+                    let target_ins_size = target.ins_size as usize;
+                    if arg_count != target_ins_size || target_ins_size > target_registers_size || target_registers_size > self.registers.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
                     let string_args = [
-                        self.string_registers[(insns[pc + 4] & 0x0F) as usize].as_deref(),
-                        self.string_registers[((insns[pc + 4] >> 4) & 0x0F) as usize].as_deref(),
+                        if arg_count > 0 { self.string_registers[arg_registers[0]].as_deref() } else { None },
+                        if arg_count > 1 { self.string_registers[arg_registers[1]].as_deref() } else { None },
                     ];
-                    if target.class_name.starts_with("Landroid/") || target.class_name.starts_with("Landroidx/") {
-                        match super::framework::dispatch(&target.class_name, &target.method_name, &string_args, &mut self.captured_logs) {
+                    if target_class.starts_with("Landroid/") || target_class.starts_with("Landroidx/") {
+                        match super::framework::dispatch(&target_class, &target_method, &string_args, &mut self.captured_logs) {
                             Ok(super::framework::AndroidFrameworkResult::Return(value)) => self.last_return_value = value,
-                            // A service descriptor is not a service invocation. Do not turn
-                            // an unimplemented bridge into a synthetic successful return.
                             Ok(super::framework::AndroidFrameworkResult::Service(_)) => return Err(DalvikVmError::UnsupportedFrameworkApi),
                             Err(super::framework::AndroidFrameworkError::UnsupportedApi) => return Err(DalvikVmError::UnsupportedFrameworkApi),
                             Err(_) => return Err(DalvikVmError::SecurityViolationForbiddenApi),
                         }
                     } else {
-                        self.last_return_value = self.invoke_method(dex, &target.class_name, &target.method_name)?;
+                        let caller_registers = self.registers;
+                        let caller_strings = self.string_registers.clone();
+                        let base = target_registers_size - target_ins_size;
+                        self.registers = [0; 32];
+                        self.string_registers = [None; 32];
+                        for i in 0..arg_count {
+                            self.registers[base + i] = caller_registers[arg_registers[i]];
+                            self.string_registers[base + i] = caller_strings[arg_registers[i]].clone();
+                        }
+                        let result = self.invoke_method(dex, &target_class, &target_method);
+                        self.registers = caller_registers;
+                        self.string_registers = caller_strings;
+                        self.last_return_value = result?;
                     }
                     pc += 6;
                 }
@@ -506,6 +536,16 @@ impl DalvikVmState {
 mod tests {
     use super::*;
     use super::super::dex::create_test_dex;
+
+    #[test]
+    fn invoke_format_35c_decodes_all_register_slots_and_rejects_bad_counts() {
+        let bytes = [OP_INVOKE_STATIC, 0x53, 0x02, 0x00, 0x10, 0x43];
+        let (registers, count) = decode_invoke_registers(&bytes, 0).unwrap();
+        assert_eq!(count, 5);
+        assert_eq!(registers, [0, 1, 3, 4, 3]);
+        let malformed = [OP_INVOKE_STATIC, 0x63, 0, 0, 0, 0];
+        assert_eq!(decode_invoke_registers(&malformed, 0), Err(DalvikVmError::InvalidBytecode));
+    }
 
     #[test]
     fn object_allocations_have_distinct_vm_local_identity_and_a_hard_limit() {
