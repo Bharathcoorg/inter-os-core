@@ -235,7 +235,7 @@
             <span class="hw-panel-title">HARDWARE PROFILER &amp; TELEMETRY</span>
           </div>
           <div class="hw-panel-meta">
-            <span class="render-hz-badge" id="render-hz-badge" title="Live Display Refresh Rate & Frame Pacing">144 Hz &bull; Ultra Fluid</span>
+            <span class="render-hz-badge" id="render-hz-badge" title="Live Display Refresh Rate & Frame Pacing">Measuring FPS...</span>
             <span class="hw-panel-badge" id="qemu-hal-badge" style="color: #71717A; border-color: rgba(255, 255, 255, 0.1);">QEMU &bull; STANDBY</span>
             <button class="btn-hw-collapse" id="btn-toggle-hw-panel" title="Toggle Hardware Profiler Cards View">
               <span class="hw-collapse-text">Compact</span>
@@ -281,30 +281,12 @@
           <div class="hw-card heatmap-card">
             <div class="hw-card-top">
               <span class="hw-card-name">CPU &bull; x86_64 / AArch64</span>
-              <span class="hw-card-val" id="val-cpu-state">Ring 0 Safe &bull; HLT</span>
-            </div>
-            <div class="cpu-heatmap-matrix" id="cpu-heatmap-matrix">
-              <span class="heat-cell lvl-2" title="Core 0"></span>
-              <span class="heat-cell lvl-3" title="Core 0 Cache L1"></span>
-              <span class="heat-cell lvl-1" title="Core 0 ALU"></span>
-              <span class="heat-cell lvl-4" title="Core 1"></span>
-              <span class="heat-cell lvl-2" title="Core 1 FPU"></span>
-              <span class="heat-cell lvl-3" title="Ring Bus"></span>
-              <span class="heat-cell lvl-1" title="Memory Controller"></span>
-              <span class="heat-cell lvl-2" title="CR3 Paging Walker"></span>
-              <span class="heat-cell lvl-3" title="8259 Dual PIC"></span>
-              <span class="heat-cell lvl-2" title="16550 UART COM1"></span>
-              <span class="heat-cell lvl-4" title="VBE Framebuffer"></span>
-              <span class="heat-cell lvl-1" title="PCIe Root"></span>
-              <span class="heat-cell lvl-2" title="Ring 3 Sandbox"></span>
-              <span class="heat-cell lvl-3" title="MMU Guard"></span>
-              <span class="heat-cell lvl-2" title="IDT Gates"></span>
-              <span class="heat-cell lvl-1" title="PIT Clock"></span>
+              <span class="hw-card-val" id="val-cpu-state">CPU state &hellip;</span>
             </div>
             <div class="hw-card-sub">
-              <span id="val-cpu-rip">RIP: <strong>0x000001000000DC4D</strong></span>
+              <span id="val-cpu-rip">RIP: <strong>&hellip;</strong></span>
               <span class="sub-sep">&bull;</span>
-              <span id="val-cpu-tid">TID: Active</span>
+              <span id="val-cpu-tid">TID: &hellip;</span>
             </div>
           </div>
 
@@ -325,11 +307,11 @@
               </div>
               <div class="bus-stat-item">
                 <span class="bus-stat-lbl">DISPLAY</span>
-                <span class="bus-stat-v">1280&times;720 VBE</span>
+                <span class="bus-stat-v">720&times;1440 scanout</span>
               </div>
             </div>
             <div class="hw-card-sub">
-              <span id="val-system-ticks">Ticks: Live Heartbeat</span>
+              <span id="val-system-ticks">System Timer: PIT</span>
               <span class="sub-sep">&bull;</span>
               <span>Bare-Metal Microkernel</span>
             </div>
@@ -374,11 +356,11 @@
           </button>
           <button class="panel-tab" data-tab="tab-telephony">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
-            Cellular &amp; 3GPP RIL
+            Telephony &amp; Baseband
           </button>
           <button class="panel-tab" data-tab="tab-pmic">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="6" width="18" height="12" rx="2"/><line x1="23" y1="11" x2="23" y2="13"/></svg>
-            PMIC &amp; DVFS Power
+            PMIC Fuel Gauge
           </button>
           <button class="panel-tab" data-tab="tab-kms">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
@@ -421,7 +403,7 @@
         <div class="tab-content" id="tab-processes">
           <div class="memmap-header">
             <strong>Ring 0 / Ring 3 Multitasking Process Table (TCBs)</strong>
-            <span class="badge-chip" id="proc-count-badge" style="color: #10B981; border-color: rgba(16, 185, 129, 0.3);">Live Scheduler</span>
+            <span class="badge-chip" id="proc-count-badge" style="color: #94A3B8; border-color: rgba(255, 255, 255, 0.1);">&hellip;</span>
           </div>
           <div style="margin-bottom: 12px; display: flex; gap: 8px; align-items: center;">
             <button class="btn-console-act" id="btn-refresh-procs">Refresh Processes</button>
@@ -452,7 +434,7 @@
         <div class="tab-content" id="tab-packages">
           <div class="memmap-header">
             <strong>Sovereign Rust App Packages (.rapp)</strong>
-            <span class="badge-chip" id="pkg-count-badge" style="color: #10B981; border-color: rgba(16, 185, 129, 0.3);">9 Packages Active</span>
+            <span class="badge-chip" id="pkg-count-badge" style="color: #94A3B8; border-color: rgba(255, 255, 255, 0.1);">&hellip;</span>
           </div>
 
           <!-- Sideload Dropzone -->
@@ -492,28 +474,28 @@
             <span class="badge-chip">x86_64 Long Mode</span>
           </div>
           <div class="registers-grid" id="registers-grid">
-            <div class="reg-box"><span class="reg-name">RAX</span><span class="reg-val" id="reg-rax">0x0000018000014D01</span></div>
-            <div class="reg-box"><span class="reg-name">RBX</span><span class="reg-val" id="reg-rbx">0x0000000000004F98</span></div>
-            <div class="reg-box"><span class="reg-name">RCX</span><span class="reg-val" id="reg-rcx">0x0000000000029400</span></div>
-            <div class="reg-box"><span class="reg-name">RDX</span><span class="reg-val" id="reg-rdx">0x0000000000000001</span></div>
-            <div class="reg-box"><span class="reg-name">RSI</span><span class="reg-val" id="reg-rsi">0x0000000000000000</span></div>
-            <div class="reg-box"><span class="reg-name">RDI</span><span class="reg-val" id="reg-rdi">0x000001000003E900</span></div>
-            <div class="reg-box"><span class="reg-name">RBP</span><span class="reg-val" id="reg-rbp">0x0000000000000000</span></div>
-            <div class="reg-box"><span class="reg-name">RSP</span><span class="reg-val" id="reg-rsp">0x0000018000014DA8</span></div>
-            <div class="reg-box"><span class="reg-name">R8</span><span class="reg-val" id="reg-r8">0x000001000003BD28</span></div>
-            <div class="reg-box"><span class="reg-name">R9</span><span class="reg-val" id="reg-r9">0x00000000000000B8</span></div>
-            <div class="reg-box"><span class="reg-name">R10</span><span class="reg-val" id="reg-r10">0x000000000F080501</span></div>
-            <div class="reg-box"><span class="reg-name">R11</span><span class="reg-val" id="reg-r11">0x0000010000007E3D</span></div>
-            <div class="reg-box"><span class="reg-name">R12</span><span class="reg-val" id="reg-r12">0x0000000000006290</span></div>
-            <div class="reg-box"><span class="reg-name">R13</span><span class="reg-val" id="reg-r13">0x0000000000007728</span></div>
-            <div class="reg-box"><span class="reg-name">R14</span><span class="reg-val" id="reg-r14">0x0000038000000000</span></div>
-            <div class="reg-box"><span class="reg-name">R15</span><span class="reg-val" id="reg-r15">0x00000000000077A0</span></div>
-            <div class="reg-box highlight"><span class="reg-name">RIP</span><span class="reg-val" id="reg-rip">0x000001000000DC4D</span></div>
-            <div class="reg-box"><span class="reg-name">RFLAGS</span><span class="reg-val" id="reg-rflags">0x00000202</span></div>
-            <div class="reg-box highlight"><span class="reg-name">CR0</span><span class="reg-val" id="reg-cr0">0x80010011</span></div>
-            <div class="reg-box highlight"><span class="reg-name">CR3</span><span class="reg-val" id="reg-cr3">0x0000000001353000</span></div>
-            <div class="reg-box"><span class="reg-name">CR4</span><span class="reg-val" id="reg-cr4">0x00000020</span></div>
-            <div class="reg-box"><span class="reg-name">EFER</span><span class="reg-val" id="reg-efer">0x0000000000000D00</span></div>
+            <div class="reg-box"><span class="reg-name">RAX</span><span class="reg-val" id="reg-rax">&hellip;</span></div>
+            <div class="reg-box"><span class="reg-name">RBX</span><span class="reg-val" id="reg-rbx">&hellip;</span></div>
+            <div class="reg-box"><span class="reg-name">RCX</span><span class="reg-val" id="reg-rcx">&hellip;</span></div>
+            <div class="reg-box"><span class="reg-name">RDX</span><span class="reg-val" id="reg-rdx">&hellip;</span></div>
+            <div class="reg-box"><span class="reg-name">RSI</span><span class="reg-val" id="reg-rsi">&hellip;</span></div>
+            <div class="reg-box"><span class="reg-name">RDI</span><span class="reg-val" id="reg-rdi">&hellip;</span></div>
+            <div class="reg-box"><span class="reg-name">RBP</span><span class="reg-val" id="reg-rbp">&hellip;</span></div>
+            <div class="reg-box"><span class="reg-name">RSP</span><span class="reg-val" id="reg-rsp">&hellip;</span></div>
+            <div class="reg-box"><span class="reg-name">R8</span><span class="reg-val" id="reg-r8">&hellip;</span></div>
+            <div class="reg-box"><span class="reg-name">R9</span><span class="reg-val" id="reg-r9">&hellip;</span></div>
+            <div class="reg-box"><span class="reg-name">R10</span><span class="reg-val" id="reg-r10">&hellip;</span></div>
+            <div class="reg-box"><span class="reg-name">R11</span><span class="reg-val" id="reg-r11">&hellip;</span></div>
+            <div class="reg-box"><span class="reg-name">R12</span><span class="reg-val" id="reg-r12">&hellip;</span></div>
+            <div class="reg-box"><span class="reg-name">R13</span><span class="reg-val" id="reg-r13">&hellip;</span></div>
+            <div class="reg-box"><span class="reg-name">R14</span><span class="reg-val" id="reg-r14">&hellip;</span></div>
+            <div class="reg-box"><span class="reg-name">R15</span><span class="reg-val" id="reg-r15">&hellip;</span></div>
+            <div class="reg-box highlight"><span class="reg-name">RIP</span><span class="reg-val" id="reg-rip">&hellip;</span></div>
+            <div class="reg-box"><span class="reg-name">RFLAGS</span><span class="reg-val" id="reg-rflags">&hellip;</span></div>
+            <div class="reg-box highlight"><span class="reg-name">CR0</span><span class="reg-val" id="reg-cr0">&hellip;</span></div>
+            <div class="reg-box highlight"><span class="reg-name">CR3</span><span class="reg-val" id="reg-cr3">&hellip;</span></div>
+            <div class="reg-box"><span class="reg-name">CR4</span><span class="reg-val" id="reg-cr4">&hellip;</span></div>
+            <div class="reg-box"><span class="reg-name">EFER</span><span class="reg-val" id="reg-efer">&hellip;</span></div>
           </div>
         </div>
 
@@ -556,9 +538,9 @@
             </div>
             <div class="memmap-row">
               <span class="reg-type">VBE Linear Framebuffer</span>
-              <code>0x00000000FD000000 - 0x00000000FD2A3000</code>
-              <span>2,764,800 Bytes</span>
-              <span class="cap-badge ok">1280&times;720 BGR TrueColor</span>
+              <code>0x00000000FD000000 - 0x00000000FD3F4800</code>
+              <span>4,147,200 Bytes</span>
+              <span class="cap-badge ok">720&times;1440 TrueColor (32-bit)</span>
             </div>
           </div>
         </div>
@@ -571,21 +553,21 @@
                 <span class="cap-name">cap:display:framebuffer_scanout</span>
                 <span class="cap-badge ok">Granted</span>
               </div>
-              <span class="cap-val">Scope: Ring 3 Shared Display Memory (1280x720)</span>
+              <span class="cap-val">Scope: Ring 3 Shared Display Memory (720x1440)</span>
             </div>
             <div class="capability-item">
               <div class="cap-header">
                 <span class="cap-name">cap:audio:pcm_playback</span>
-                <span class="cap-badge ok">Granted</span>
+                <span class="cap-badge" style="background: rgba(239, 68, 68, 0.2); color: #EF4444;">Not provisioned</span>
               </div>
-              <span class="cap-val">Target: Intel HDA / PulseAudio Output Stream</span>
+              <span class="cap-val">No audio device is attached to this device profile</span>
             </div>
             <div class="capability-item">
               <div class="cap-header">
                 <span class="cap-name">cap:vfs:isolated_sandbox</span>
                 <span class="cap-badge ok">Enforced</span>
               </div>
-              <span class="cap-val">Path: /data/apps/[app_id] (Zero Ambient Root Access)</span>
+              <span class="cap-val">Path: /data/data/[package] (Zero Ambient Root Access)</span>
             </div>
             <div class="capability-item">
               <div class="cap-header">
@@ -636,7 +618,7 @@
           <div class="appdev-header">
             <div class="appdev-title">
               <strong>InterOS Userspace SDK &amp; IPC Monitor</strong>
-              <span>Real-time Ring 3 Syscall &amp; IPC Trace</span>
+              <span>Ring 3 task counters &amp; IPC surfaces</span>
             </div>
             <button class="btn-dev-action" id="btn-trigger-hotreload" title="Simulate Hot-Reload">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
@@ -656,21 +638,18 @@
           <!-- IPC Stream Monitor Table -->
           <div class="appdev-ipc-title">LIVE IPC MESSAGE BUS (SHM PIPE 0..3)</div>
           <div class="appdev-ipc-stream" id="appdev-ipc-stream">
-            <div class="ipc-row"><span class="ipc-time">00:00:12</span><span class="ipc-from">app:music</span><span class="ipc-arrow">&rarr;</span><span class="ipc-to">hal:audio</span><span class="ipc-op">DMA_BUF_REFILL</span><span class="ipc-size">512B</span></div>
-            <div class="ipc-row"><span class="ipc-time">00:00:11</span><span class="ipc-from">app:dialer</span><span class="ipc-arrow">&rarr;</span><span class="ipc-to">srv:ril</span><span class="ipc-op">AT_D_CARRIER</span><span class="ipc-size">64B</span></div>
-            <div class="ipc-row"><span class="ipc-time">00:00:09</span><span class="ipc-from">app:files</span><span class="ipc-arrow">&rarr;</span><span class="ipc-to">srv:vault</span><span class="ipc-op">SECTOR_VERIFY</span><span class="ipc-size">128B</span></div>
-            <div class="ipc-row"><span class="ipc-time">00:00:07</span><span class="ipc-from">app:messages</span><span class="ipc-arrow">&rarr;</span><span class="ipc-to">srv:ril</span><span class="ipc-op">SMS_TX_PDU</span><span class="ipc-size">140B</span></div>
+            <div class="telemetry-empty" style="padding: 16px; text-align: center;">No per-pipe IPC telemetry is exposed on this surface; live guest messages are listed in the IPC Inspector tab.</div>
           </div>
 
           <!-- Ring 3 Allocator Stats -->
           <div class="appdev-stats-grid">
             <div class="appdev-stat-card">
               <span class="stat-lbl">ACTIVE WASM/ELF TASKS</span>
-              <strong class="stat-val" id="stat-active-tasks">8 Processes</strong>
+              <strong class="stat-val" id="stat-active-tasks">&hellip;</strong>
             </div>
             <div class="appdev-stat-card">
               <span class="stat-lbl">IPC LATENCY</span>
-              <strong class="stat-val" style="color: #10B981;">0.42 &mu;s (Futex)</strong>
+              <strong class="stat-val" style="color: #94A3B8;">Unavailable</strong>
             </div>
             <div class="appdev-stat-card">
               <span class="stat-lbl">VAULT SECTORS</span>
@@ -706,22 +685,22 @@
         <!-- Tab: Cellular Baseband & 3GPP RIL -->
         <div class="tab-content" id="tab-telephony">
           <div class="memmap-header">
-            <strong>Cellular Baseband Modem &amp; 3GPP RIL Engine</strong>
-            <span class="badge-chip" id="tel-signal-badge" style="color: #10B981; border-color: rgba(16, 185, 129, 0.3);">5G SA &bull; -82 dBm</span>
+            <strong>Baseband &amp; Telephony Status</strong>
+            <span class="badge-chip" id="tel-signal-badge" style="color: #94A3B8; border-color: rgba(255, 255, 255, 0.1);">No baseband</span>
           </div>
 
           <div class="appdev-stats-grid" style="margin-bottom: 16px;">
             <div class="appdev-stat-card">
               <span class="stat-lbl">CALL STATE</span>
-              <strong class="stat-val" id="tel-call-state" style="color: #10B981;">IDLE</strong>
+              <strong class="stat-val" id="tel-call-state" style="color: #94A3B8;">Offline (no baseband)</strong>
             </div>
             <div class="appdev-stat-card">
               <span class="stat-lbl">OPERATOR CARRIER</span>
-              <strong class="stat-val" id="tel-carrier-val">InterCell 5G SA</strong>
+              <strong class="stat-val" id="tel-carrier-val">No baseband</strong>
             </div>
             <div class="appdev-stat-card">
               <span class="stat-lbl">PDP MOBILE DATA</span>
-              <strong class="stat-val" id="tel-data-status" style="color: #10B981;">ENABLED (IPv4/IPv6)</strong>
+              <strong class="stat-val" id="tel-data-status" style="color: #94A3B8;">No baseband</strong>
             </div>
           </div>
 
@@ -757,46 +736,29 @@
           </div>
         </div>
 
-        <!-- Tab: PMIC Fuel Gauge & DVFS Governor -->
+        <!-- Tab: PMIC Fuel Gauge Telemetry -->
         <div class="tab-content" id="tab-pmic">
           <div class="memmap-header">
-            <strong>PMIC Coulomb Counter &amp; Interactive DVFS Governor</strong>
-            <span class="badge-chip" id="pmic-soc-badge" style="color: #10B981; border-color: rgba(16, 185, 129, 0.3);">96% SoC</span>
+            <strong>PMIC Fuel Gauge Telemetry</strong>
+            <span class="badge-chip" id="pmic-soc-badge" style="color: #94A3B8; border-color: rgba(255, 255, 255, 0.1);">Standby</span>
           </div>
 
           <div class="appdev-stats-grid" style="margin-bottom: 16px;">
             <div class="appdev-stat-card">
               <span class="stat-lbl">BATTERY VOLTAGE</span>
-              <strong class="stat-val" id="pmic-voltage-val">4210 mV</strong>
+              <strong class="stat-val" id="pmic-voltage-val">Unavailable</strong>
             </div>
             <div class="appdev-stat-card">
               <span class="stat-lbl">BATTERY TEMP</span>
-              <strong class="stat-val" id="pmic-temp-val" style="color: #10B981;">31.8 &deg;C (Normal)</strong>
+              <strong class="stat-val" id="pmic-temp-val" style="color: #94A3B8;">Unavailable</strong>
             </div>
             <div class="appdev-stat-card">
               <span class="stat-lbl">CPU CLOCK FREQUENCY</span>
-              <strong class="stat-val" id="pmic-freq-val" style="color: #3B82F6;">1600 MHz</strong>
+              <strong class="stat-val" id="pmic-freq-val" style="color: #3B82F6;">Unavailable</strong>
             </div>
             <div class="appdev-stat-card">
               <span class="stat-lbl">CURRENT DRAW</span>
-              <strong class="stat-val" id="pmic-current-val">-380 mA</strong>
-            </div>
-          </div>
-
-          <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-glass); border-radius: 12px; padding: 14px; margin-bottom: 16px;">
-            <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.5px; color: var(--text-secondary); margin-bottom: 10px;">INTERACTIVE DVFS GOVERNOR PROFILE SELECTOR</div>
-            <div style="display: flex; gap: 8px;">
-              <button class="btn-console-act dvfs-btn" data-profile="PowerSave">PowerSave (800 MHz)</button>
-              <button class="btn-console-act dvfs-btn active" data-profile="Balanced" style="background: rgba(16, 185, 129, 0.2); border-color: #10B981;">Balanced (1600 MHz)</button>
-              <button class="btn-console-act dvfs-btn" data-profile="Performance">Performance (2400 MHz)</button>
-              <button class="btn-console-act dvfs-btn" data-profile="Turbo">Turbo (3200 MHz)</button>
-            </div>
-          </div>
-
-          <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-glass); border-radius: 12px; padding: 14px;">
-            <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.5px; color: var(--text-secondary); margin-bottom: 8px;">THERMAL THROTTLING THRESHOLD MONITOR</div>
-            <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.6;">
-              Automated hardware safety constraint: Core temperatures exceeding <strong>70.0 &deg;C</strong> trigger immediate thermal governor downclocking to PowerSave (800 MHz) with IRQ priority elevation to protect mobile silicon.
+              <strong class="stat-val" id="pmic-current-val">Unavailable</strong>
             </div>
           </div>
         </div>
@@ -805,7 +767,6 @@
         <div class="tab-content" id="tab-kms">
           <div class="memmap-header">
             <strong>DRM/KMS Multi-Surface Compositor &amp; Scanout Planes</strong>
-            <span class="badge-chip" id="kms-flips-badge" style="color: #10B981; border-color: rgba(16, 185, 129, 0.3);">3120 Page Flips</span>
           </div>
 
           <div class="appdev-stats-grid" style="margin-bottom: 16px;">
@@ -814,25 +775,12 @@
               <strong class="stat-val" style="color: #10B981;">Double-Buffered (Page Flip)</strong>
             </div>
             <div class="appdev-stat-card">
-              <span class="stat-lbl">FRONT BUFFER</span>
-              <strong class="stat-val" id="kms-front-buf" style="font-family: var(--font-mono); font-size: 13px;">0xFD000000</strong>
-            </div>
-            <div class="appdev-stat-card">
-              <span class="stat-lbl">BACK BUFFER</span>
-              <strong class="stat-val" id="kms-back-buf" style="font-family: var(--font-mono); font-size: 13px;">0xFD800000</strong>
-            </div>
-            <div class="appdev-stat-card">
               <span class="stat-lbl">REFRESH RATE</span>
               <strong class="stat-val" style="color: #3B82F6;">60 Hz VSYNC</strong>
             </div>
           </div>
 
-          <div style="margin-bottom: 12px; display: flex; gap: 8px; align-items: center;">
-            <button class="btn-console-act" id="btn-kms-flip">Trigger Hardware Page Flip</button>
-            <span style="font-size: 11px; color: var(--text-secondary);">Swaps front &amp; back scanout addresses synchronously on VBLANK</span>
-          </div>
-
-          <table class="packages-table">
+                  <table class="packages-table">
             <thead>
               <tr>
                 <th>PLANE ID</th>
@@ -853,7 +801,7 @@
         <div class="tab-content" id="tab-touch">
           <div class="memmap-header">
             <strong>Capacitive Multi-Touch Digitizer &amp; Gesture Engine</strong>
-            <span class="badge-chip" id="touch-slots-badge" style="color: #10B981; border-color: rgba(16, 185, 129, 0.3);">5 Contact Slots Active</span>
+            <span class="badge-chip" id="touch-slots-badge" style="color: #10B981; border-color: rgba(16, 185, 129, 0.3);">5 contact slots supported</span>
           </div>
 
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;">
@@ -893,83 +841,6 @@
       </div>
     </aside>
   </main>
-
-  <!-- Strict Package Manager Security Audit Modal -->
-  <div class="modal-overlay" id="modal-strict-audit">
-    <div class="audit-modal-box">
-      <div class="audit-modal-header">
-        <div class="audit-header-title">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#10B981" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-          <span>Strict Package Manager &bull; Security Audit Enclave</span>
-        </div>
-        <button class="audit-close-btn" id="btn-close-audit">&times;</button>
-      </div>
-      <div class="audit-modal-body">
-        <div class="audit-section">
-          <span class="audit-sec-lbl">Package Integrity &amp; Cryptographic Signatures</span>
-          <div class="audit-info-grid">
-            <div class="audit-grid-cell">
-              <span class="audit-cell-lbl">PACKAGE ID</span>
-              <span class="audit-cell-val" id="audit-pkg-id">org.fossify.filemanager</span>
-            </div>
-            <div class="audit-grid-cell">
-              <span class="audit-cell-lbl">VERSION</span>
-              <span class="audit-cell-val" id="audit-pkg-version">1.6.1 (API 34)</span>
-            </div>
-            <div class="audit-grid-cell">
-              <span class="audit-cell-lbl">BINARY SIZE</span>
-              <span class="audit-cell-val" id="audit-pkg-size">9.51 MB (classes.dex: 6.6 MB)</span>
-            </div>
-            <div class="audit-grid-cell">
-              <span class="audit-cell-lbl">SIGNATURE SCHEME</span>
-              <span class="audit-cell-val" id="audit-pkg-sig" style="color: #10B981;">APK Scheme v2/v3 Verified</span>
-            </div>
-            <div class="audit-grid-cell">
-              <span class="audit-cell-lbl">DEX BYTECODE CLASSES</span>
-              <span class="audit-cell-val" id="audit-pkg-dex">6,207 Classes Defined</span>
-            </div>
-            <div class="audit-grid-cell">
-              <span class="audit-cell-lbl">RUNTIME TARGET</span>
-              <span class="audit-cell-val" id="audit-pkg-runtime" style="color: #38BDF8;">Android 14 ACR (ART JIT)</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="audit-section">
-          <span class="audit-sec-lbl">Ring 3 Zero Ambient Authority Policy</span>
-          <div class="audit-info-grid">
-            <div class="audit-grid-cell">
-              <span class="audit-cell-lbl">AMBIENT ROOT AUTHORITY</span>
-              <span class="audit-cell-val" style="color: #EF4444;">DENIED (Zero Ambient Authority)</span>
-            </div>
-            <div class="audit-grid-cell">
-              <span class="audit-cell-lbl">STORAGE BOUNDARY</span>
-              <span class="audit-cell-val" style="color: #10B981;">Scoped VFS Sandbox</span>
-            </div>
-            <div class="audit-grid-cell">
-              <span class="audit-cell-lbl">RAW SOCKET INTERCEPT</span>
-              <span class="audit-cell-val" style="color: #10B981;">Zero-Trust Socket Gateway</span>
-            </div>
-            <div class="audit-grid-cell">
-              <span class="audit-cell-lbl">SURFACE SCANOUT</span>
-              <span class="audit-cell-val">Wayland Zero-Copy Direct</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="audit-section">
-          <span class="audit-sec-lbl">Declared Android Permissions &amp; Sandbox Status</span>
-          <div class="audit-perms-list" id="audit-perms-list">
-            <!-- Populated dynamically -->
-          </div>
-        </div>
-      </div>
-      <div class="audit-modal-footer">
-        <button class="btn btn-secondary" id="btn-modal-dismiss">Close Inspector</button>
-        <button class="btn btn-primary" id="btn-modal-launch-app" style="background: #10B981; color: #000;">Launch in ACR Sandbox</button>
-      </div>
-    </div>
-  </div>
 
   <!-- Official Lucide Vector Icon Library (Fork & Evolution of Feather Icons) -->
   <script src="/node_modules/lucide/dist/umd/lucide.min.js" onerror="this.onerror=null;this.src='https://unpkg.com/lucide@latest/dist/umd/lucide.js'"></script>

@@ -250,7 +250,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const valCpuState = document.getElementById('val-cpu-state');
   const valCpuRip = document.getElementById('val-cpu-rip');
   const valCpuTid = document.getElementById('val-cpu-tid');
-  const cpuHeatmapMatrix = document.getElementById('cpu-heatmap-matrix');
 
   // Register element mapping
   const regMap = {
@@ -1351,6 +1350,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function renderPackagesRows() {
       packagesTableBody.innerHTML = '';
+      const countBadge = document.getElementById('pkg-count-badge');
+      if (countBadge) {
+        const n = state.installedPackages.length;
+        countBadge.textContent = n > 0 ? `${n} Package${n === 1 ? '' : 's'} Installed` : 'No packages reported';
+      }
       state.installedPackages.forEach(pkg => {
         const tr = document.createElement('tr');
         const capsList = Array.isArray(pkg.capabilities) ? pkg.capabilities.join(', ') : 'Ring 3 Standard';
@@ -1358,7 +1362,7 @@ document.addEventListener('DOMContentLoaded', () => {
           <td><strong>${escapeHtml(pkg.name)}</strong></td>
           <td><span class="pkg-badge" style="background: rgba(16, 185, 129, 0.15); color: #10B981; border: 1px solid rgba(16, 185, 129, 0.3);">${escapeHtml(pkg.format || 'Rust App Package (.rapp)')}</span></td>
           <td><code>${escapeHtml(pkg.filename)}</code></td>
-          <td><span style="color: #10B981; font-size: 11px;">${escapeHtml(pkg.status || 'Verified (Ed25519)')}</span><br><code style="font-size: 10px; color: var(--text-secondary);">${escapeHtml(pkg.sha256 || 'SHA-256 Valid')}</code></td>
+          <td><span style="color: #10B981; font-size: 11px;">${escapeHtml(pkg.status || 'Status unavailable')}</span><br><code style="font-size: 10px; color: var(--text-secondary);">${escapeHtml(pkg.sha256 || 'SHA-256 unavailable')}</code></td>
           <td><span style="font-size: 11px; color: var(--text-secondary);">${escapeHtml(capsList)}</span></td>
           <td><button class="btn-launch-pkg btn-console-act" data-pkg-id="${escapeHtml(pkg.id)}" style="padding: 2px 8px;">Launch</button></td>
         `;
@@ -1401,6 +1405,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // --- Process Table Population ---
   const procsTableBody = document.getElementById('procs-table-body');
   const procCountBadge = document.getElementById('proc-count-badge');
+  const statActiveTasks = document.getElementById('stat-active-tasks');
   const btnRefreshProcs = document.getElementById('btn-refresh-procs');
 
   function populateProcessesTable() {
@@ -1412,6 +1417,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const procs = (data && data.processes) ? data.processes : [];
         if (procCountBadge) {
           procCountBadge.textContent = `${procs.length} Tasks Active`;
+        }
+        if (statActiveTasks) {
+          statActiveTasks.textContent = procs.length > 0 ? `${procs.length} Processes` : 'Standby';
         }
         if (procs.length === 0) {
           procsTableBody.innerHTML = `<tr><td colspan="10" style="text-align:center; padding: 24px; color: var(--text-secondary);">QEMU Microkernel Standby &bull; Click "Boot Microkernel" to inspect live tasks</td></tr>`;
@@ -1436,6 +1444,8 @@ document.addEventListener('DOMContentLoaded', () => {
         });
       })
       .catch(() => {
+        if (statActiveTasks) statActiveTasks.textContent = 'Standby';
+        if (procCountBadge) procCountBadge.textContent = 'Standby — offline';
         if (procsTableBody) {
           procsTableBody.innerHTML = `<tr><td colspan="10" style="text-align:center; padding: 18px; color: var(--text-secondary);">Standby &bull; Offline</td></tr>`;
         }
@@ -1500,13 +1510,22 @@ document.addEventListener('DOMContentLoaded', () => {
           if (d && d.telephony) {
             const t = d.telephony;
             if (callStateEl) {
-              callStateEl.textContent = t.call_state;
+              // The guest telemetry carries no call_state key while no
+              // baseband is registered; interpolating it directly would render
+              // the literal text "undefined" in the Call State field.
+              const callState = t.call_state || (t.status === 'AVAILABLE' ? 'Offline (no baseband)' : 'No telemetry');
+              callStateEl.textContent = callState;
               callStateEl.style.color = t.call_state === 'ACTIVE' ? '#10B981' : '#94A3B8';
             }
-            if (carrierValEl) carrierValEl.textContent = t.operator;
+            if (carrierValEl) {
+              carrierValEl.textContent = t.operator || (t.status === 'AVAILABLE' ? 'No baseband' : 'No telemetry');
+            }
             if (dataStatusEl) {
-              dataStatusEl.textContent = t.pdp_data ? 'ENABLED (5G PDP)' : 'DISABLED';
-              dataStatusEl.style.color = t.pdp_data ? '#10B981' : '#EF4444';
+              // No baseband means no PDP context can exist; report that rather
+              // than a generic "disabled" that implies a toggleable state.
+              const dataOn = !!t.pdp_data;
+              dataStatusEl.textContent = dataOn ? 'ENABLED (5G PDP)' : (t.status === 'AVAILABLE' ? 'No baseband' : 'No telemetry');
+              dataStatusEl.style.color = dataOn ? '#10B981' : '#94A3B8';
             }
             // WHY: #phone-sim-badge was a signal-strength pill in the removed
             // phone status bar. The PDP state above is the Studio's report.
@@ -1539,24 +1558,35 @@ document.addEventListener('DOMContentLoaded', () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ number: num })
-      }).then(() => {
-        showToast(`Dialing ${num} via 3GPP Baseband...`);
-        refreshTel();
-      });
+      })
+        .then(r => r.json())
+        .then(d => {
+          // The server answers with the guest's real capability state; only a
+          // genuine success may be reported as a placed call.
+          showToast(d.success ? `Dialing ${num}...` : (d.error || 'Dial rejected'));
+          refreshTel();
+        })
+        .catch(() => showToast('Studio unreachable'));
     });
 
     btnHangup?.addEventListener('click', () => {
-      fetch('/api/telephony/hangup', { method: 'POST' }).then(() => {
-        showToast('Call terminated (ATH).');
-        refreshTel();
-      });
+      fetch('/api/telephony/hangup', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+          showToast(d.success ? 'Call ended.' : (d.error || 'Hang-up rejected'));
+          refreshTel();
+        })
+        .catch(() => showToast('Studio unreachable'));
     });
 
     btnToggleData?.addEventListener('click', () => {
-      fetch('/api/telephony/data/toggle', { method: 'POST' }).then(() => {
-        showToast('PDP Context Mobile Data toggled.');
-        refreshTel();
-      });
+      fetch('/api/telephony/data/toggle', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+          showToast(d.success ? 'Mobile data toggled.' : (d.error || 'Data toggle rejected'));
+          refreshTel();
+        })
+        .catch(() => showToast('Studio unreachable'));
     });
 
     btnSendSms?.addEventListener('click', () => {
@@ -1567,11 +1597,18 @@ document.addEventListener('DOMContentLoaded', () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ recipient: recip, text })
-      }).then(() => {
-        showToast(`SMS sent to ${recip}`);
-        if (smsTextInput) smsTextInput.value = '';
-        refreshTel();
-      });
+      })
+        .then(r => r.json())
+        .then(d => {
+          if (d.success) {
+            showToast(`SMS sent to ${recip}`);
+            if (smsTextInput) smsTextInput.value = '';
+          } else {
+            showToast(d.error || 'SMS rejected');
+          }
+          refreshTel();
+        })
+        .catch(() => showToast('Studio unreachable'));
     });
 
     btnRunAt?.addEventListener('click', () => {
@@ -1584,10 +1621,18 @@ document.addEventListener('DOMContentLoaded', () => {
       .then(r => r.json())
       .then(res => {
         if (atOutput) {
-          atOutput.innerHTML += `<div><span style="color: #3B82F6;">&gt; ${escapeHtml(cmd)}</span><br><span style="color: #10B981;">${escapeHtml(res.response)}</span></div>`;
+          const reply = res.success ? String(res.response ?? '') : (res.error || 'command rejected');
+          const color = res.success ? '#10B981' : '#EF4444';
+          atOutput.innerHTML += `<div><span style="color: #3B82F6;">&gt; ${escapeHtml(cmd)}</span><br><span style="color: ${color};">${escapeHtml(reply)}</span></div>`;
           atOutput.scrollTop = atOutput.scrollHeight;
         }
         refreshTel();
+      })
+      .catch(() => {
+        if (atOutput) {
+          atOutput.innerHTML += `<div><span style="color: #3B82F6;">&gt; ${escapeHtml(cmd)}</span><br><span style="color: #EF4444;">Studio unreachable</span></div>`;
+          atOutput.scrollTop = atOutput.scrollHeight;
+        }
       });
     });
 
@@ -1596,14 +1641,13 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   wireTelephony();
 
-  // --- PMIC & DVFS Power Governor ---
+  // --- PMIC Power Telemetry ---
   function wirePmic() {
     const voltEl = document.getElementById('pmic-voltage-val');
     const tempEl = document.getElementById('pmic-temp-val');
     const freqEl = document.getElementById('pmic-freq-val');
     const currEl = document.getElementById('pmic-current-val');
     const socBadge = document.getElementById('pmic-soc-badge');
-    const dvfsBtns = document.querySelectorAll('.dvfs-btn');
 
     function refreshPmic() {
       fetch('/api/pmic/status')
@@ -1615,6 +1659,7 @@ document.addEventListener('DOMContentLoaded', () => {
               if (voltEl) voltEl.textContent = 'Unavailable';
               if (tempEl) tempEl.textContent = 'Unavailable';
               if (freqEl) freqEl.textContent = 'Unavailable';
+              if (currEl) currEl.textContent = 'Unavailable';
               if (socBadge) socBadge.textContent = 'Standby';
               // WHY: #phone-battery and #battery-gauge-level were the battery
               // readout of the removed phone status bar. The SoC badge above is
@@ -1623,6 +1668,7 @@ document.addEventListener('DOMContentLoaded', () => {
               if (voltEl) voltEl.textContent = `${p.voltage_mv} mV`;
               if (tempEl) tempEl.textContent = `${p.temp_c} \u00B0C`;
               if (freqEl) freqEl.textContent = `${p.cpu_freq_mhz} MHz`;
+              if (currEl) currEl.textContent = p.current_ma !== undefined ? `${p.current_ma} mA` : 'Unavailable';
               if (socBadge) socBadge.textContent = `${p.battery_pct}% SoC`;
             }
           }
@@ -1630,54 +1676,10 @@ document.addEventListener('DOMContentLoaded', () => {
         .catch(() => {});
     }
 
-    dvfsBtns.forEach(btn => {
-      btn.addEventListener('click', () => {
-        const prof = btn.dataset.profile;
-        dvfsBtns.forEach(b => {
-          b.classList.remove('active');
-          b.style.background = '';
-          b.style.borderColor = '';
-        });
-        btn.classList.add('active');
-        btn.style.background = 'rgba(16, 185, 129, 0.2)';
-        btn.style.borderColor = '#10B981';
-        fetch('/api/pmic/profile', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ profile: prof })
-        }).then(() => {
-          showToast(`DVFS Governor: Switched to ${prof}`);
-          refreshPmic();
-        });
-      });
-    });
-
     setInterval(refreshPmic, 5000);
     refreshPmic();
   }
   wirePmic();
-
-  // --- DRM/KMS Compositor ---
-  function wireKms() {
-    const btnFlip = document.getElementById('btn-kms-flip');
-    const flipsBadge = document.getElementById('kms-flips-badge');
-    const frontEl = document.getElementById('kms-front-buf');
-    const backEl = document.getElementById('kms-back-buf');
-
-    btnFlip?.addEventListener('click', () => {
-      fetch('/api/kms/flip', { method: 'POST' })
-        .then(r => r.json())
-        .then(d => {
-          if (d && d.kms) {
-            if (flipsBadge) flipsBadge.textContent = `${d.kms.page_flips} Page Flips`;
-            if (frontEl) frontEl.textContent = d.kms.front_buffer;
-            if (backEl) backEl.textContent = d.kms.back_buffer;
-            showToast(`KMS Page Flip #${d.kms.page_flips} • guest timing`);
-          }
-        });
-    });
-  }
-  wireKms();
 
   // --- Touch & Gestures ---
   function wireTouch() {
@@ -1810,7 +1812,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Initial boot greeting
   logConsole('info', 'InterOS Core Microkernel v8.2 Studio initialized.');
-  logConsole('ok', 'Universal Rust Mobile Platform: RISC-V 64 / ARM64 / x86_64 targets live.');
+  logConsole('ok', 'Universal Rust Mobile Platform: RISC-V 64 / ARM64 / x86_64 targets supported.');
 
   // Initialize Lucide icons on boot
   if (window.lucide && typeof window.lucide.createIcons === 'function') {
