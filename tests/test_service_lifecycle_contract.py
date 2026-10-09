@@ -107,7 +107,13 @@ def main() -> None:
          "cross-parent service stop rejection")
     must(services, "static SERVICE_LIFECYCLE_LOCK: spin::Mutex<()>",
          "serialized lifecycle transition lock")
-    must(services, "let _lifecycle = SERVICE_LIFECYCLE_LOCK.lock();",
+    # WHY try_lock spellings below: a blocking lock in syscall context deadlocks
+    # permanently on this uniprocessor port (syscalls run with IF masked by
+    # IA32_FMASK, so a preempted holder can never release). Observed live: a
+    # service heartbeat spun forever on SERVICE_RECORDS with RFLAGS.IF=0 while
+    # QEMU sat at 101% CPU. Serialization is preserved — contention backs off
+    # with an honest busy error instead of wedging the guest.
+    must(services, "SERVICE_LIFECYCLE_LOCK.try_lock()",
          "lifecycle lock acquisition")
     must(services, "fn start_locked(id: ServiceId, parent_id: TaskId)",
          "non-recursive locked start helper")
@@ -216,9 +222,10 @@ def main() -> None:
     must((ROOT / "userspace/system-service/src/lib.rs").read_text(), "ci-fault-injection", "service crash fault-injection test hook")
     must(CI_WORKFLOW, "--features ci-fault-injection", "QEMU crash-recovery validation mode")
 
-    # Supervisor must inspect scheduler state before mutating the registry.
-    must(services, "let sched = SCHEDULER.lock();", "supervisor scheduler lock")
-    must(services, "let mut registry = SERVICE_RECORDS.lock();",
+    # Supervisor must inspect scheduler state before mutating the registry
+    # (order preserved; acquisitions are non-blocking per the note above).
+    must(services, "SCHEDULER.try_lock()", "supervisor scheduler lock")
+    must(services, "SERVICE_RECORDS.try_lock()",
          "supervisor registry update")
     must(sched, "tcb.parent_id = parent_id;", "scheduler parent assignment")
 

@@ -12,13 +12,14 @@ def test_canonical_qemu_uses_portrait_scanout_and_guest_supported_pointer_hardwa
     backend = read("emulator/server.py")
     for source in (launcher, backend):
         assert "virtio-vga,edid=on,xres=720,yres=1440" in source
-        # The guest implements a PS/2 mouse driver
-        # (kernel/src/drivers/ps2_mouse.rs) and no USB HID stack, so the
-        # canonical profiles attach ps2-mouse. The earlier usb-tablet /
-        # qemu-xhci expectations predate that boundary and cannot coexist with
-        # the "usb-tablet not in x86_profile" contract in
-        # test_virtual_smartphone_contract.py.
-        assert "ps2-mouse" in source
+        # WHY no `ps2-mouse` device flag: no such QEMU device exists (QEMU
+        # 11.1.0 `-device help` lists only ISA `i8042`, which q35 already
+        # includes), and passing it aborts the VM instantly ("expects a
+        # pluggable device type", observed live with an empty boot log). The
+        # guest's PS/2 driver talks to the built-in i8042 ports, and Studio
+        # pointer input travels as absolute COM1 touch injection, so neither
+        # canonical profile needs a -device pointer flag at all.
+        assert "ps2-mouse" not in source
 
 
 def test_device_studio_displays_guest_scanout_without_a_browser_readiness_gate():
