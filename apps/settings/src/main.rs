@@ -68,9 +68,17 @@ pub struct SettingsApp {
     pub ble_beacon_enabled: bool,
     pub auto_brightness: bool,
     pub security_enforced: bool,
-    pub cached_battery_soc: u8,
-    pub cached_temp_c: u8,
     pub terminal_enabled: bool,
+    /// Recorded outcome of the RTC query for the About card.
+    pub rtc: TelemetryState,
+    /// Raw RTC payload exactly as the platform reported it.
+    /// Only meaningful when `rtc == TelemetryState::Reported`.
+    pub rtc_time: [u8; 64],
+    pub rtc_time_len: usize,
+    /// `about.os_version` read from the settings store; length 0 when the
+    /// store did not answer, so the card never shows a compile-time literal.
+    pub os_version: [u8; 24],
+    pub os_version_len: usize,
     /// Recorded outcome of the wireless HAL query for the last refresh.
     pub wireless: TelemetryState,
     /// Recorded outcome of the battery / power query for the last refresh.
@@ -90,9 +98,14 @@ impl SettingsApp {
             ble_beacon_enabled: false,
             auto_brightness: false,
             security_enforced: true,
-            cached_battery_soc: 0,
-            cached_temp_c: 0,
             terminal_enabled: false,
+            // WHY: Unavailable/zero until the About screen's queries answer;
+            // a card must never render a value that was never read.
+            rtc: TelemetryState::Unavailable,
+            rtc_time: [0u8; 64],
+            rtc_time_len: 0,
+            os_version: [0u8; 24],
+            os_version_len: 0,
             // WHY: default to Unavailable so a query that never ran is never
             // rendered as if hardware had answered.
             wireless: TelemetryState::Unavailable,
@@ -329,6 +342,13 @@ impl SettingsApp {
         // confirmed wall-clock reading.
         match std::rtc_get_time(&mut rtc_buf) {
             Ok(len) if len > 0 => {
+                // Record the reading so the About card renders the payload the
+                // platform actually returned instead of a fixed "unavailable"
+                // line that ignored this successful query.
+                let n = len.min(self.rtc_time.len());
+                self.rtc_time[..n].copy_from_slice(&rtc_buf[..n]);
+                self.rtc_time_len = n;
+                self.rtc = TelemetryState::Reported;
                 std::log(
                     0,
                     "[SETTINGS APP] System time as reported by the platform RTC service:",
@@ -337,6 +357,8 @@ impl SettingsApp {
                 std::log(0, core::str::from_utf8(&rtc_buf[..len]).unwrap_or("<non-utf8>")).ok();
             }
             Ok(_) => {
+                self.rtc_time_len = 0;
+                self.rtc = TelemetryState::Unavailable;
                 std::log(
                     0,
                     "[SETTINGS APP] RTC service returned an empty payload; system time unknown.",
@@ -344,9 +366,34 @@ impl SettingsApp {
                 .ok();
             }
             Err(_) => {
+                self.rtc_time_len = 0;
+                self.rtc = TelemetryState::Unavailable;
                 std::log(
                     0,
                     "[SETTINGS APP] RTC query refused by the kernel; system time unknown.",
+                )
+                .ok();
+            }
+        }
+        // WHY: the About card used to print a compile-time "0.8.2" literal.
+        // Read the authoritative value from the settings store through
+        // capability slot 3 (the FileSystemRead slot that reads power.profile);
+        // when the store does not answer, the card reports that instead.
+        let mut ver_buf = [0u8; 24];
+        match std::settings_get(3, "about.os_version", &mut ver_buf) {
+            Ok(n) if n > 0 => {
+                let n = n.min(self.os_version.len());
+                self.os_version[..n].copy_from_slice(&ver_buf[..n]);
+                self.os_version_len = n;
+                std::log(0, "[SETTINGS APP] about.os_version read from the settings store.").ok();
+                std::log(0, core::str::from_utf8(&self.os_version[..n]).unwrap_or("<non-utf8>"))
+                    .ok();
+            }
+            _ => {
+                self.os_version_len = 0;
+                std::log(
+                    0,
+                    "[SETTINGS APP] about.os_version not reported by the settings store; version unknown.",
                 )
                 .ok();
             }
@@ -450,6 +497,37 @@ fn test_text(
     color: u32,
 ) -> Option<u32> {
     std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, BG_DARK, false)
+}
+
+/// Composes the About card's version line from the settings store's answer.
+///
+/// WHY: the card previously rendered a compile-time "Version: 0.8.2 ..."
+/// literal; this builds the same line from `version` (capped at 16 bytes so
+/// it cannot grow into the card badge) and falls back to an explicit
+/// "not reported" line when the store did not answer.
+fn compose_version_line(out: &mut [u8], version: &[u8]) -> usize {
+    const PREFIX: &[u8] = b"Version: ";
+    const SUFFIX: &[u8] = b" (x86_64 Sovereign Microkernel)";
+    const UNKNOWN: &[u8] = b"Version: not reported by the settings store";
+    if version.is_empty() {
+        let n = UNKNOWN.len().min(out.len());
+        out[..n].copy_from_slice(&UNKNOWN[..n]);
+        return n;
+    }
+    let mut i = 0usize;
+    for &b in PREFIX.iter().chain(version.iter().take(16)) {
+        if i < out.len() {
+            out[i] = b;
+            i += 1;
+        }
+    }
+    if i + SUFFIX.len() <= out.len() {
+        for &b in SUFFIX {
+            out[i] = b;
+            i += 1;
+        }
+    }
+    i
 }
 
 #[inline(never)]
@@ -782,7 +860,10 @@ fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                     if let Some(c) = test_text(x, y, 60, 210, 2, b"InterOS Core", TEXT_PRIMARY) {
                         return c;
                     }
-                    if let Some(c) = test_text(x, y, 60, 270, 1, b"Version: 0.8.2 (x86_64 Sovereign Microkernel)", ACCENT_SKY) {
+                    let mut version_line = [0u8; 64];
+                    let version_len =
+                        compose_version_line(&mut version_line, &app.os_version[..app.os_version_len]);
+                    if let Some(c) = test_text(x, y, 60, 270, 1, &version_line[..version_len], ACCENT_SKY) {
                         return c;
                     }
                     if let Some(c) = render_badge(x, y, 520, 206, b"UNAVAILABLE", TEXT_MUTED) {
@@ -806,7 +887,7 @@ fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                     }
                     return SURFACE_DARK;
                 }
-                // Card 2: RTC
+                // Card 2: RTC (rendered from the recorded query outcome)
                 if x >= 24 && x < W - 24 && y >= 520 && y < 670 {
                     if let Some(c) = render_card_frame(x, y, 520, 670, BORDER_SUBTLE) {
                         return c;
@@ -814,10 +895,36 @@ fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                     if let Some(c) = test_text(x, y, 60, 550, 2, b"Hardware Real-Time Clock", TEXT_PRIMARY) {
                         return c;
                     }
-                    if let Some(c) = test_text(x, y, 60, 610, 1, b"Clock synchronization unavailable", TEXT_MUTED) {
+                    if app.rtc == TelemetryState::Reported {
+                        // Show the payload the RTC service actually returned.
+                        if let Some(c) = test_text(
+                            x,
+                            y,
+                            60,
+                            610,
+                            1,
+                            &app.rtc_time[..app.rtc_time_len],
+                            ACCENT_SKY,
+                        ) {
+                            return c;
+                        }
+                    } else if let Some(c) = test_text(
+                        x,
+                        y,
+                        60,
+                        610,
+                        1,
+                        b"No RTC reading (query failed or was refused)",
+                        TEXT_MUTED,
+                    ) {
                         return c;
                     }
-                    if let Some(c) = render_badge(x, y, 510, 546, b"UNAVAILABLE", TEXT_MUTED) {
+                    let (badge, badge_col) = if app.rtc == TelemetryState::Reported {
+                        (&b"REPORTED"[..], SUCCESS_EMERALD)
+                    } else {
+                        (&b"UNAVAILABLE"[..], TEXT_MUTED)
+                    };
+                    if let Some(c) = render_badge(x, y, 510, 546, badge, badge_col) {
                         return c;
                     }
                     return SURFACE_DARK;
@@ -997,34 +1104,42 @@ pub extern "C" fn _start() -> ! {
                             && input.x >= 32 && input.x < (W - 32) as u32
                         {
                             settings.toggle_terminal();
-                        } else if input.y >= 110 && input.y < 170 && input.x >= 24 {
-                            let tapped = ((input.x - 24) / 136) as usize;
-                            settings.current_tab = match tapped {
-                                0 => SettingsTab::Wireless,
-                                1 => SettingsTab::PowerAndBattery,
-                                2 => SettingsTab::ThermalsAndSensors,
-                                3 => SettingsTab::SecurityAndPrivacy,
-                                _ => SettingsTab::AboutDevice,
-                            };
-                        } else {
-                            let next_tab = match settings.current_tab {
-                                SettingsTab::Wireless => SettingsTab::PowerAndBattery,
-                                SettingsTab::PowerAndBattery => SettingsTab::ThermalsAndSensors,
-                                SettingsTab::ThermalsAndSensors => SettingsTab::SecurityAndPrivacy,
-                                SettingsTab::SecurityAndPrivacy => SettingsTab::AboutDevice,
-                                SettingsTab::AboutDevice => SettingsTab::Wireless,
-                            };
-                            settings.current_tab = next_tab;
+                        } else if (110..158).contains(&input.y) && input.x >= 24 {
+                            // WHY: the hit cell now matches the drawn tab cell
+                            // exactly (col pitch 136, drawn width 124, y
+                            // 110..158 from the strip at 104..164), so taps on
+                            // the strip background no longer switch tabs.
+                            let col = ((input.x - 24) / 136) as usize;
+                            let col_x = 24 + col as u32 * 136;
+                            if col <= 4 && input.x < col_x + 124 {
+                                let previous = settings.current_tab;
+                                settings.current_tab = match col {
+                                    0 => SettingsTab::Wireless,
+                                    1 => SettingsTab::PowerAndBattery,
+                                    2 => SettingsTab::ThermalsAndSensors,
+                                    3 => SettingsTab::SecurityAndPrivacy,
+                                    _ => SettingsTab::AboutDevice,
+                                };
+                                // WHY: the old fall-through advanced the tab on
+                                // *any* content tap (cards looked interactive but
+                                // silently navigated); content taps are now
+                                // inert, and the log only claims a switch that
+                                // actually happened.
+                                if settings.current_tab != previous {
+                                    std::log(
+                                        0,
+                                        "[SETTINGS APP] Normalized touch event processed; tab switched.",
+                                    )
+                                    .ok();
+                                }
+                            }
                         }
+                        // Content taps are intentionally inert: the cards are
+                        // status displays, not hidden tab controls.
                         if surface > 0 {
                             render_settings_ui(surface, &settings);
                             let _ = std::surface_flip(6);
                         }
-                        std::log(
-                            0,
-                            "[SETTINGS APP] Normalized touch event processed; tab switched.",
-                        )
-                        .ok();
                     }
                 }
             }
