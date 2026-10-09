@@ -468,8 +468,7 @@ extern "x86-interrupt" fn irq4_com1_handler(_stack_frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn irq12_touch_digitizer_handler(_stack_frame: InterruptStackFrame) {
-    let mut port = Port::new(0x60);
-    let _byte: u8 = unsafe { port.read() };
+    crate::drivers::ps2_mouse::handle_irq_byte();
     unsafe {
         PICS.lock().notify_end_of_interrupt(44);
     }

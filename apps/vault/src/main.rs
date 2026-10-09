@@ -144,19 +144,24 @@ impl VaultApp {
     }
 
     /// Ingests hardware entropy for a 16-byte initialization vector.
-    pub fn generate_iv(&self) -> [u8; 16] {
+    pub fn generate_iv(&self) -> Option<[u8; 16]> {
         let mut iv = [0u8; 16];
         if let Ok(n) = std::devfs_read("/dev/urandom", &mut iv) {
             if n == 16 && iv != [0u8; 16] {
-                return iv;
+                return Some(iv);
             }
         }
-        [0xA5; 16]
+        // Encryption must fail closed if entropy is unavailable. A fixed IV
+        // would create deterministic cryptographic state and must never be used.
+        None
     }
 
     /// Performs an authenticated encryption and decryption test on a target sector.
     pub fn test_sector_roundtrip(&mut self, sector_id: u64, payload_tag: &[u8]) -> bool {
-        let iv = self.generate_iv();
+        let Some(iv) = self.generate_iv() else {
+            std::log(0, "[VAULT APP] Entropy unavailable; refusing sector verification.").ok();
+            return false;
+        };
         let mut sector_buf = [0u8; 512];
         let copy_len = payload_tag.len().min(64);
         sector_buf[..copy_len].copy_from_slice(&payload_tag[..copy_len]);
@@ -320,9 +325,9 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
 
             let is_active = vault.master_key_derived && vault.media_key_derived;
             let (status_text, status_color) = if is_active {
-                (&b"ENCLAVE ACTIVE"[..], SUCCESS_EMERALD)
+                (&b"KEYS DERIVED"[..], SUCCESS_EMERALD)
             } else {
-                (&b"KEYSTORE SYNC"[..], ACCENT_AMBER)
+                (&b"UNAVAILABLE"[..], TEXT_MUTED)
             };
 
             if let Some(c) = test_text(x, y, 480, 42, 2, status_text, status_color) {
@@ -353,11 +358,12 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
         if let Some(c) = test_text(x, y, 44, 126, 2, b"HARDWARE ENCRYPTED STORAGE", TEXT_PRIMARY) {
             return c;
         }
-        if let Some(c) = test_text(x, y, 44, 150, 1, b"AES-256-XTS & ChaCha20-Poly1305 Verified", TEXT_MUTED) {
+        if let Some(c) = test_text(x, y, 44, 150, 1, b"Cryptographic verification is determined by runtime checks", TEXT_MUTED) {
             return c;
         }
 
-        // Multi-Segment Storage Bar (y: 176..206, x: 44..W-44)
+        // Each segment reflects the corresponding sector's actual last
+        // round-trip verification result; it is not a storage-utilization bar.
         if (176..206).contains(&y) && x >= 44 && x < W - 44 {
             let rel_x = x - 44;
             let seg_w = (W - 88) / 6;
@@ -366,20 +372,20 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             if in_seg_x >= seg_w - 3 {
                 return SURFACE_DARK;
             }
-            return match seg_idx {
-                0 => 0xFF38BDF8, // Sector 100
-                1 => 0xFF10B981, // Sector 200
-                2 => 0xFFA855F7, // Sector 201
-                3 => 0xFFFFB800, // Sector 202
-                4 => 0xFFF43F5E, // Sector 203
-                _ => 0xFF06B6D4, // Sector 204
-            };
+            let verified = vault.sectors[seg_idx].map_or(false, |s| s.authenticated);
+            return if verified { SUCCESS_EMERALD } else { TEXT_MUTED };
         }
 
-        if let Some(c) = test_text(x, y, 44, 222, 1, b"3,072 / 3,072 BYTES ALLOCATED - 100% HEALTH", ACCENT_SKY) {
+        if let Some(c) = test_text(x, y, 44, 222, 1, b"Sector verification is shown on each partition", ACCENT_SKY) {
             return c;
         }
-        if let Some(c) = test_text(x, y, 44, 240, 1, b"Hardware Master Key & Multi-Sector Ledger Online", TEXT_MUTED) {
+        let key_status: &[u8] = match (vault.master_key_derived, vault.media_key_derived) {
+            (true, true) => &b"Root and storage keys derived"[..],
+            (true, false) => &b"Root key derived; storage key unavailable"[..],
+            (false, true) => &b"Storage key derived; root key unavailable"[..],
+            (false, false) => &b"Root and storage keys unavailable"[..],
+        };
+        if let Some(c) = test_text(x, y, 44, 240, 1, key_status, TEXT_MUTED) {
             return c;
         }
 
@@ -436,12 +442,12 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
 
             // Middle Description & Details
             let (desc, sub) = match idx {
-                0 => (&b"Root Keystore & Identity"[..], &b"512B Block - Master Attestation"[..]),
-                1 => (&b"General Media & Documents"[..], &b"512B Block - Sovereign Containers"[..]),
-                2 => (&b"Camera Photos & ISP Vision"[..], &b"512B Block - Encrypted AES-XTS"[..]),
-                3 => (&b"Encrypted Messages & P2P"[..], &b"512B Block - Wire Ledger"[..]),
-                4 => (&b"Calendar Events & Agenda"[..], &b"512B Block - Encrypted Timeline"[..]),
-                _ => (&b"Audio Tracks & Studio"[..], &b"512B Block - Music Synthesizer"[..]),
+                0 => (&b"Root Keystore & Identity"[..], &b"Logical sector 100"[..]),
+                1 => (&b"General Media & Documents"[..], &b"Logical sector 200"[..]),
+                2 => (&b"Camera Photos & ISP Vision"[..], &b"Logical sector 201"[..]),
+                3 => (&b"Encrypted Messages & P2P"[..], &b"Logical sector 202"[..]),
+                4 => (&b"Calendar Events & Agenda"[..], &b"Logical sector 203"[..]),
+                _ => (&b"Audio Tracks & Studio"[..], &b"Logical sector 204"[..]),
             };
 
             if let Some(c) = test_text(x, y, 160, cy + 32, 2, desc, TEXT_PRIMARY) {

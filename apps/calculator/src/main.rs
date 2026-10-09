@@ -138,8 +138,8 @@ const ROW_Y: [usize; 5] = [440, 610, 780, 950, 1120];
 fn get_button_action(row: usize, col: usize) -> Option<char> {
     match (row, col) {
         (0, 0) => Some('C'),
-        (0, 1) => Some('('),
-        (0, 2) => Some(')'),
+        (0, 1) => Some('B'),
+        (0, 2) => Some('%'),
         (0, 3) => Some('/'),
         (1, 0) => Some('7'),
         (1, 1) => Some('8'),
@@ -155,7 +155,7 @@ fn get_button_action(row: usize, col: usize) -> Option<char> {
         (3, 3) => Some('+'),
         (4, 0) => Some('~'), // +/- toggle
         (4, 1) => Some('0'),
-        (4, 2) => Some('.'),
+        (4, 2) => Some('^'),
         (4, 3) => Some('='),
         _ => None,
     }
@@ -168,20 +168,8 @@ fn get_button_action(row: usize, col: usize) -> Option<char> {
 fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
     // 1. Status Bar & Header Title (y: 0..110)
     if y < 110 {
-        // Clock "09:20" at x: 48, y: 20
-        if y >= 20 && y < 36 {
-            if let Some(c) = test_text(x, y, 48, 20, 2, b"09:20", TEXT_PRIMARY) {
-                return c;
-            }
-        }
-
-        // Wi-Fi / Battery indicator at top right
-        if y >= 20 && y < 36 {
-            if let Some(c) = test_text(x, y, 620, 20, 2, b"100%", TEXT_MUTED) {
-                return c;
-            }
-        }
-
+        // Time, radio and battery values come from system services; none is
+        // currently bound to this app. Leave the status band truthful.
         // Canonical App Title: "Calculator" (bold display font at x: 48, y: 64)
         if y >= 64 && y < 96 {
             if let Some(c) = test_text(x, y, 48, 64, 3, b"Calculator", TEXT_PRIMARY) {
@@ -341,6 +329,33 @@ fn render_calculator_ui(surface: u32, calc: &CalculatorState) {
     }
 }
 
+fn handle_keyboard_key(calc: &mut CalculatorState, code: u32) -> bool {
+    use std::input_key_code;
+    match code {
+        48..=57 => calc.push_digit((code - 48) as i64),
+        43 => calc.set_operation('+'),
+        45 => calc.set_operation('-'),
+        42 => calc.set_operation('*'),
+        47 => calc.set_operation('/'),
+        61 | input_key_code::ENTER => { calc.evaluate(); }
+        99 | input_key_code::ESCAPE => calc.clear(),
+        input_key_code::BACKSPACE => {
+            calc.current_operand /= 10;
+            calc.result_mode = false;
+        }
+        37 => {
+            calc.current_operand /= 100;
+            calc.result_mode = false;
+        }
+        94 => {
+            calc.current_operand = calc.current_operand.saturating_mul(calc.current_operand);
+            calc.result_mode = true;
+        }
+        _ => return false,
+    }
+    true
+}
+
 fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> (bool, Option<&'static str>) {
     // Check if exit / back button or home gesture bar pressed
     if (x >= 24 && x < 100 && y >= 28 && y < 68) || (x >= 240 && x <= 480 && y >= 1400) {
@@ -381,6 +396,21 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> (bool, Opti
                             '~' => {
                                 calc.toggle_sign();
                                 None
+                            }
+                            'B' => {
+                                calc.current_operand /= 10;
+                                calc.result_mode = false;
+                                Some("[CALCULATOR] Backspace applied.")
+                            }
+                            '%' => {
+                                calc.current_operand /= 100;
+                                calc.result_mode = false;
+                                Some("[CALCULATOR] Integer percent applied.")
+                            }
+                            '^' => {
+                                calc.current_operand = calc.current_operand.saturating_mul(calc.current_operand);
+                                calc.result_mode = true;
+                                Some("[CALCULATOR] Square applied.")
                             }
                             _ => None,
                         };
@@ -449,6 +479,13 @@ pub extern "C" fn _start() -> ! {
                 scale_milli: 1000,
             };
             while std::input_event_poll(&mut input).is_ok() {
+                if let Some(key) = input.key_event() {
+                    if key.pressed && handle_keyboard_key(&mut calc, key.code) {
+                        render_calculator_ui(surface, &calc);
+                        let _ = std::surface_flip(6);
+                    }
+                    continue;
+                }
                 if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
                     std::log(
                         0,

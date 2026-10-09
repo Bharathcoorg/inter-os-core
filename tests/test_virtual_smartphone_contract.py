@@ -11,10 +11,14 @@ def read(path: str) -> str:
 def test_canonical_qemu_exposes_native_portrait_display_and_absolute_pointer():
     launch = read("qemu/launch_studio.ps1")
     server = read("emulator/server.py")
-    for source in (launch, server):
-        assert "virtio-vga,xres=720,yres=1440" in source
-        assert "qemu-xhci" in source
-        assert "usb-tablet" in source
+    assert "virtio-vga,edid=on,xres=720,yres=1440" in launch
+    assert "ps2-mouse" in launch
+    x86_start = server.index('if arch == "x86_64":')
+    x86_end = server.index('elif arch == "aarch64":', x86_start)
+    x86_profile = server[x86_start:x86_end]
+    assert "virtio-vga,edid=on,xres=720,yres=1440" in x86_profile
+    assert "ps2-mouse" in x86_profile
+    assert "usb-tablet" not in x86_profile
 
 
 def test_guest_power_is_authoritative():
@@ -203,3 +207,79 @@ def test_orientation_is_only_committed_after_guest_acknowledgement():
     assert "status': 'UNCONFIRMED'" in handler
     assert handler.index("if not ok:") < handler.index("current_device_orientation = 'landscape'")
     assert "'status': 'APPLIED'" in handler
+
+
+def test_android_dalvik_objects_are_vm_local_bounded_and_indexes_fail_closed():
+    runtime = read("kernel/src/compat/android/runtime.rs")
+    assert "const MAX_DALVIK_OBJECTS: usize = 256" in runtime
+    assert "fn allocate_object(&mut self, class_descriptor: &str)" in runtime
+    assert "self.allocate_object(class_descriptor)?" in runtime
+    assert "non-null synthetic object reference" not in runtime
+    assert "dex.strings.get(str_idx).ok_or(DalvikVmError::InvalidBytecode)?" in runtime
+    assert "dex.types.get(type_idx).is_none()" in runtime
+    assert "object_allocations_have_distinct_vm_local_identity_and_a_hard_limit" in runtime
+
+
+def test_qemu_mouse_reaches_the_canonical_input_router():
+    driver = read("kernel/src/drivers/ps2_mouse.rs")
+    input_mod = read("kernel/src/input/mod.rs")
+    interrupts = read("kernel/src/interrupts.rs")
+    assert "fn decode_packet" in driver
+    assert "crate::input::post_mouse_event" in driver
+    assert "fn post_mouse_event" in input_mod
+    assert "post_pointer_contact(InputSource::Mouse" in input_mod
+    assert "crate::drivers::ps2_mouse::handle_irq_byte()" in interrupts
+
+
+def test_power_menu_uses_guest_owned_shutdown_and_restart_transition():
+    launcher = read("apps/launcher/src/main.rs")
+    transition = read("apps/launcher/src/screens/power_transition.rs")
+    assert "ViewMode::PowerTransition" in launcher
+    assert "power_transition_started_ticks" in launcher
+    assert "elapsed >= 60" in launcher
+    assert "std::device_power(action)" in launcher
+    assert "get_power_transition_color" in transition
+    assert "std::device_power(0)" not in launcher[launcher.index("// Card 2: Restart"):launcher.index("// Card 3: Power off")]
+    assert "std::device_power(1)" not in launcher[launcher.index("// Card 3: Power off"):launcher.index("// Card 4: Emergency")]
+
+
+def test_android_invoke_uses_real_register_frames_and_full_35c_register_list():
+    runtime = read("kernel/src/compat/android/runtime.rs")
+    assert "fn decode_invoke_registers" in runtime
+    assert "caller_registers = self.registers" in runtime
+    assert "caller_strings = self.string_registers.clone()" in runtime
+    assert "self.registers[base + i] = caller_registers[arg_registers[i]]" in runtime
+    assert "invoke_format_35c_decodes_all_register_slots_and_rejects_bad_counts" in runtime
+
+
+def test_power_transition_uses_bounded_dirty_band_for_animation_frames():
+    launcher = read("apps/launcher/src/main.rs")
+    transition = launcher[launcher.index("if state.current_view == ViewMode::PowerTransition"):launcher.index("if state.current_view == ViewMode::BootScreen")]
+    assert "render_band(surface, &state, H / 2 - 130, (H / 2 + 220).min(H))" in transition
+    assert "render_band(surface, &state, 0, H)" not in transition
+
+
+def test_power_transition_is_long_enough_for_a_visible_guest_animation():
+    launcher = read("apps/launcher/src/main.rs")
+    assert "const POWER_TRANSITION_TICKS: u64 = 220" in launcher
+    assert "elapsed.min(POWER_TRANSITION_TICKS)" in launcher
+    assert "if elapsed >= POWER_TRANSITION_TICKS" in launcher
+
+
+def test_android_log_dispatch_prefers_message_argument_over_tag():
+    framework = read("kernel/src/compat/android/framework.rs")
+    assert "string_args.get(1).and_then(|value| *value)" in framework
+
+
+def test_android_invoke_rejects_registers_outside_the_callers_declared_frame():
+    runtime = read("kernel/src/compat/android/runtime.rs")
+    assert "arg_registers[..arg_count].iter().any(|register| *register >= method.registers_size as usize)" in runtime
+    assert "return Err(DalvikVmError::RegisterOutOfBounds)" in runtime
+
+
+def test_android_compatibility_scope_is_not_misrepresented_as_full_art_or_ring3_isolation():
+    runtime = read("kernel/src/compat/android/runtime.rs")
+    android = read("kernel/src/compat/android/mod.rs")
+    assert "not ART or a separate Ring-3 Android" in runtime
+    assert "does not yet provide a separate Ring-3 Android app process" in android
+    assert "Ring 3 isolated memory" not in runtime

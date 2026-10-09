@@ -1,8 +1,9 @@
 //! Android Compatibility Runtime & Zone 4 Isolation
 //!
-//! Provides the execution boundary for untrusted Android application packages (.apk).
-//! Employs a zero-trust mediator that strictly walls off Android workloads from
-//! native Inter OS private storage, sovereign cryptographic keys, and raw microkernel IPC.
+//! Provides APK parsing, security auditing, intent/Binder mediation, sandbox metadata,
+//! and a bounded Dalvik interpreter for the implemented opcode/API subset. The current
+//! interpreter is kernel-mediated; this module is not a full Android framework/ART port
+//! and does not yet provide a separate Ring-3 Android app process for arbitrary APKs.
 pub use interos_android_shared;
 pub mod apk;
 pub mod binder;
@@ -34,7 +35,8 @@ use crate::capability::CapabilityTable;
 use crate::serial_println;
 use crate::task::TaskId;
 
-/// Represents an isolated Android guest application instance.
+/// Represents ACR application metadata associated with a guest task. This record alone
+/// does not create a separate kernel process or provide full Android process isolation.
 #[derive(Debug, Clone)]
 pub struct AndroidAppInstance {
     pub pid: u32,
@@ -45,6 +47,8 @@ pub struct AndroidAppInstance {
     pub memory_quota_bytes: usize,
     pub surface_id: u32,
     pub activity_state: AndroidActivityState,
+    /// APK-bound bytecode payload; invocation must use these exact verified bytes.
+    pub classes_dex: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +58,7 @@ pub enum AndroidLaunchError {
     MethodRejected,
 }
 
-/// System-wide Android container runtime manager.
+/// System-wide Android compatibility lifecycle manager for the currently supported subset.
 pub struct AndroidRuntime {
     next_pid: u32,
     active_apps: BTreeMap<u32, AndroidAppInstance>,
@@ -106,6 +110,7 @@ impl AndroidRuntime {
                 memory_quota_bytes: 64 * 1024 * 1024,
                 surface_id,
                 activity_state: AndroidActivityState::Created,
+                classes_dex: Vec::new(),
             },
         );
 
@@ -126,7 +131,9 @@ impl AndroidRuntime {
         if profile.status != AcrAuditStatus::Approved || !apk.has_classes_dex {
             return Err(AndroidLaunchError::AuditRejected);
         }
+        if apk.classes_dex.is_empty() { return Err(AndroidLaunchError::AuditRejected); }
         let pid = self.spawn_app(&apk.manifest, task_id, cap_table);
+        if let Some(app) = self.active_apps.get_mut(&pid) { app.classes_dex = apk.classes_dex.clone(); }
         let surface_id = match self.active_apps.get(&pid) {
             Some(app) if app.surface_id != 0 => app.surface_id,
             _ => {
@@ -150,12 +157,33 @@ impl AndroidRuntime {
         method_name: &str,
     ) -> Result<u32, AndroidLaunchError> {
         let Some(app) = self.active_apps.get(&pid) else { return Err(AndroidLaunchError::MethodRejected); };
-        if !matches!(app.activity_state, AndroidActivityState::Resumed | AndroidActivityState::Started) {
+        if !matches!(app.activity_state, AndroidActivityState::Resumed | AndroidActivityState::Started)
+            || app.classes_dex.is_empty()
+            || app.classes_dex.as_slice() != dex.raw {
             return Err(AndroidLaunchError::MethodRejected);
         }
         dex.audit_bytecode().map_err(|_| AndroidLaunchError::MethodRejected)?;
         let vm = self.active_vms.get_mut(&pid).ok_or(AndroidLaunchError::MethodRejected)?;
         vm.invoke_method(dex, class_name, method_name).map_err(|_| AndroidLaunchError::MethodRejected)
+    }
+
+    /// Resolves a live Android container from its registered guest task identity.
+    pub fn pid_for_task(&self, task_id: TaskId) -> Option<u32> {
+        self.active_apps.iter().find_map(|(pid, app)| if app.task_id == task_id { Some(*pid) } else { None })
+    }
+
+    /// Invokes an APK-bound method in its persistent VM and returns executed opcode count.
+    pub fn invoke_verified_method_count(
+        &mut self,
+        pid: u32,
+        dex: &DexPackage,
+        class_name: &str,
+        method_name: &str,
+    ) -> Result<u32, AndroidLaunchError> {
+        let before = self.active_vms.get(&pid).ok_or(AndroidLaunchError::MethodRejected)?.instructions_executed;
+        self.invoke_verified_method(pid, dex, class_name, method_name)?;
+        let after = self.active_vms.get(&pid).ok_or(AndroidLaunchError::MethodRejected)?.instructions_executed;
+        Ok(after.saturating_sub(before).min(u32::MAX as u64) as u32)
     }
 
     /// Terminates an active Android application instance.

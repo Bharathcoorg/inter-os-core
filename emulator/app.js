@@ -305,14 +305,14 @@ document.addEventListener('DOMContentLoaded', () => {
         qemuGlobalStatus.classList.remove('online');
       }
       qemuGlobalStatus.title = isAlive
-        ? `QEMU Microkernel: ${data.status || 'running'} (Mode: ${data.mode || 'live'})`
+        ? `QEMU Microkernel: ${data.status ?? 'status unavailable'} (Mode: ${data.mode ?? 'mode unavailable'})`
         : 'QEMU Microkernel: Standby';
     }
 
     // 2. Hardware Profiler Top Badge
     if (qemuHalBadge) {
       if (isAlive) {
-        qemuHalBadge.textContent = 'QEMU / BARE-METAL • LIVE';
+        qemuHalBadge.textContent = 'QEMU • LIVE';
         qemuHalBadge.style.color = '#10B981';
         qemuHalBadge.style.borderColor = 'rgba(16, 185, 129, 0.3)';
       } else {
@@ -325,45 +325,51 @@ document.addEventListener('DOMContentLoaded', () => {
     // 3. System RAM & CR3 Paging
     const cr3 = data.cpu?.registers?.CR3;
     if (valRamUsage) {
-      valRamUsage.textContent = isAlive ? `CR3: ${cr3 || 'Active Paging'}` : 'CR3: Standby';
+      valRamUsage.textContent = isAlive
+        ? `RAM usage unavailable • CR3: ${cr3 ?? 'Unavailable'}`
+        : 'RAM usage unavailable';
     }
     if (fillRamBar) {
-      fillRamBar.style.width = isAlive ? '100%' : '0%';
-      fillRamBar.style.background = isAlive ? '#10B981' : '#71717A';
+      fillRamBar.style.width = '0%'; // No guest RAM-usage metric is currently exposed.
+      fillRamBar.style.background = '#71717A';
+      if (fillRamBar.parentElement) fillRamBar.parentElement.style.display = 'none';
     }
 
     // 4. QEMU Block Drive
     if (valBlockName) {
-      valBlockName.textContent = isAlive ? (data.block?.file || 'inter-os-bios.img') : 'Standby / Offline';
+      valBlockName.textContent = isAlive ? (data.block?.file || 'Block image unavailable') : 'Standby / Offline';
     }
     if (valBlockIo) {
       if (isAlive) {
-        const readMb = data.block?.read_bytes ? (data.block.read_bytes / (1024 * 1024)).toFixed(2) + ' MB' : '0 MB';
-        const ops = data.block?.read_ops || 0;
-        valBlockIo.innerHTML = `Device: <strong>${data.block?.device || 'ide0-hd0'}</strong> &bull; Read: <strong>${readMb} (${ops} ops)</strong>`;
+        const readBytes = Number.isFinite(data.block?.read_bytes) ? data.block.read_bytes : null;
+        const ops = Number.isFinite(data.block?.read_ops) ? data.block.read_ops : null;
+        const readValue = readBytes === null ? 'Unavailable' : (readBytes / (1024 * 1024)).toFixed(2) + ' MB';
+        const opsValue = ops === null ? '' : ` (${ops} ops)`;
+        const device = data.block?.device || 'Device identity unavailable';
+        valBlockIo.textContent = `Device: ${device} • Read: ${readValue}${opsValue}`;
       } else {
-        valBlockIo.innerHTML = 'Device: <strong>Standby</strong> &bull; QEMU Inactive';
+        valBlockIo.textContent = 'Device: unavailable • Read: unavailable';
       }
     }
     if (fillBlockBar) {
-      const ops = data.block?.read_ops || 0;
-      fillBlockBar.style.width = isAlive ? (ops > 0 ? '100%' : '50%') : '0%';
-      fillBlockBar.style.background = isAlive ? '#3B82F6' : '#71717A';
+      fillBlockBar.style.width = '0%'; // IO counters do not measure utilization.
+      fillBlockBar.style.background = '#71717A';
+      if (fillBlockBar.parentElement) fillBlockBar.parentElement.style.display = 'none';
     }
 
     // 5. CPU Registers & Heatmap
     if (valCpuState) {
       if (isAlive) {
-        valCpuState.textContent = data.cpu?.halted ? 'Ring 0 Safe • HLT (Idle Wait)' : 'Ring 0 Active • Running';
+        valCpuState.textContent = typeof data.cpu?.halted !== 'boolean' ? 'CPU state unavailable' : (data.cpu.halted ? 'CPU halted • HLT (Idle Wait)' : 'CPU telemetry reports active');
       } else {
         valCpuState.textContent = 'Standby (Offline)';
       }
     }
     if (valCpuRip) {
-      valCpuRip.innerHTML = `RIP: <strong>${isAlive ? (data.cpu?.rip || 'Offline') : 'Offline'}</strong>`;
+      valCpuRip.textContent = `RIP: ${isAlive && data.cpu?.rip != null ? data.cpu.rip : 'Unavailable'}`;
     }
     if (valCpuTid) {
-      valCpuTid.textContent = `TID: ${isAlive ? (data.cpu?.thread_id || 'Active') : 'Offline'}`;
+      valCpuTid.textContent = `TID: ${isAlive && data.cpu?.thread_id != null ? data.cpu.thread_id : 'Unavailable'}`;
     }
 
     // 6. CPU Registers Tab Update
@@ -743,10 +749,19 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function getGuestPointerRect() {
-    const target = liveScanoutCanvas || liveScanoutImg || screenLiveScanout;
+    // Prefer the visible scanout. The canvas element exists in the DOM while
+    // hidden, so choosing it merely because it exists produces a zero-sized
+    // hit target and makes every guest click silently miss.
+    const visible = (element) => {
+      if (!element) return false;
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+    };
+    const target = [liveScanoutCanvas, liveScanoutImg, screenLiveScanout].find(visible);
     if (!target) return null;
     const rect = target.getBoundingClientRect();
-    const aspect = 720 / 1440;
+    const aspect = state.isLandscape ? (1280 / 720) : (720 / 1440);
     const containerAspect = rect.width / Math.max(1, rect.height);
     let width = rect.width;
     let height = rect.height;
@@ -778,110 +793,128 @@ document.addEventListener('DOMContentLoaded', () => {
     virtualTouchDot.classList.add('active');
   }
 
+  function guestPointerGeometry() {
+    return state.isLandscape
+      ? { width: 1280, height: 720, coords: 'guest_framebuffer' }
+      : { width: 720, height: 1440, coords: 'portrait' };
+  }
+
   // THE GUEST INPUT PATH.
-  // Pointer input on the framebuffer is the studio's only gesture surface and it
-  // goes straight to the guest over POST /api/touch/event. Coordinates are
-  // mapped into the canonical logical portrait space (720x1440) or guest framebuffer.
+  // Pointer input is mapped to the visible scanout and normalized by the server
+  // into the kernel's canonical logical coordinate space.
   const touchSurface = screenLiveScanout || liveScanoutImg;
-  // HTTP requests can complete out of order on the threaded Studio server. Serialize
-  // pointer transitions so a fast tap can never arrive as UP before DOWN in the guest.
+  // Serialize all guest contacts so DOWN/MOVE/UP/CANCEL retain order even
+  // when the threaded Studio server handles requests concurrently.
   let guestTouchQueue = Promise.resolve();
   function sendGuestTouchEvent(payload) {
-    guestTouchQueue = guestTouchQueue.then(async () => {
+    const request = guestTouchQueue.then(async () => {
       const response = await fetch('/api/touch/event', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
-      if (!response.ok) throw new Error('Guest input rejected: ' + response.status);
-    }).catch((error) => {
+      if (!response.ok) {
+        let detail = '';
+        try {
+          const body = await response.json();
+          detail = body && body.error ? ': ' + body.error : '';
+        } catch (_) {}
+        throw new Error('Guest input rejected: ' + response.status + detail);
+      }
+      return response.json();
+    });
+    // Keep the queue usable after a failed request, while returning the actual
+    // request promise to the caller so failures are never reported as success.
+    guestTouchQueue = request.catch((error) => {
       if (state && state.debugInput) console.warn(error);
     });
-    return guestTouchQueue;
+    return request;
   }
   if (touchSurface) {
     let isPointerDown = false;
     let downSent = false;
+    let activePointerId = null;
     let lastSentX = 0, lastSentY = 0;
     let lastMoveTime = 0;
+    touchSurface.style.touchAction = 'none';
+    touchSurface.style.userSelect = 'none';
+
+    const mapPoint = (clientX, clientY) => {
+      const rect = getGuestPointerRect();
+      if (!rect || clientX < rect.left || clientX >= rect.left + rect.width
+        || clientY < rect.top || clientY >= rect.top + rect.height) return null;
+      const geometry = guestPointerGeometry();
+      return {
+        x: Math.max(0, Math.min(geometry.width - 1, Math.round(((clientX - rect.left) / rect.width) * (geometry.width - 1)))),
+        y: Math.max(0, Math.min(geometry.height - 1, Math.round(((clientY - rect.top) / rect.height) * (geometry.height - 1)))),
+        coords: geometry.coords
+      };
+    };
 
     touchSurface.addEventListener('pointerdown', (ev) => {
-      if (ev.button !== 0) return;
-      const rect = getGuestPointerRect();
-      if (!rect
-        || ev.clientX < rect.left || ev.clientX >= rect.left + rect.width
-        || ev.clientY < rect.top || ev.clientY >= rect.top + rect.height) {
-        // Bezel and letterbox pixels are monitor chrome, not guest coordinates.
-        // Never clamp a bezel click into a real tap on the guest's edge pixels.
-        isPointerDown = false;
-        downSent = false;
-        return;
-      }
+      if (ev.button !== 0 || isPointerDown) return;
+      const point = mapPoint(ev.clientX, ev.clientY);
+      if (!point) return;
       ev.preventDefault();
+      try { touchSurface.focus({ preventScroll: true }); } catch (_) { touchSurface.focus(); }
       isPointerDown = true;
-      downSent = false;
-      const px = Math.max(0, Math.min(719, Math.round(((ev.clientX - rect.left) / rect.width) * 719)));
-      const py = Math.max(0, Math.min(1439, Math.round(((ev.clientY - rect.top) / rect.height) * 1439)));
-      lastSentX = px;
-      lastSentY = py;
-      lastMoveTime = performance.now();
       downSent = true;
-      sendGuestTouchEvent({ action: 'down', coords: 'portrait', x: px, y: py, slot: 0 });
+      activePointerId = ev.pointerId;
+      lastSentX = point.x;
+      lastSentY = point.y;
+      lastMoveTime = performance.now();
+      sendGuestTouchEvent({ action: 'down', coords: point.coords, x: point.x, y: point.y, slot: 0 });
       updateVirtualTouch(ev.clientX, ev.clientY, true);
       try { touchSurface.setPointerCapture(ev.pointerId); } catch (_) {}
     });
 
     touchSurface.addEventListener('pointermove', (ev) => {
-      if (isPointerDown) {
-        updateVirtualTouch(ev.clientX, ev.clientY, true);
-        const rect = getGuestPointerRect();
-        if (!rect) return;
-        const curX = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
-        const curY = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
-        const px = Math.max(0, Math.min(719, Math.round(curX * 719)));
-        const py = Math.max(0, Math.min(1439, Math.round(curY * 1439)));
-        const now = performance.now();
-
-        if (downSent && now - lastMoveTime >= 16 && (Math.abs(px - lastSentX) > 3 || Math.abs(py - lastSentY) > 3)) {
-          lastMoveTime = now;
-          lastSentX = px;
-          lastSentY = py;
-          sendGuestTouchEvent({ action: 'move', coords: 'portrait', x: px, y: py, slot: 0 });
-        }
+      if (!isPointerDown || activePointerId !== ev.pointerId) return;
+      updateVirtualTouch(ev.clientX, ev.clientY, true);
+      const point = mapPoint(ev.clientX, ev.clientY);
+      if (!point) return;
+      const now = performance.now();
+      if (downSent && now - lastMoveTime >= 16
+        && (Math.abs(point.x - lastSentX) > 3 || Math.abs(point.y - lastSentY) > 3)) {
+        lastMoveTime = now;
+        lastSentX = point.x;
+        lastSentY = point.y;
+        sendGuestTouchEvent({ action: 'move', coords: point.coords, x: point.x, y: point.y, slot: 0 });
       }
     });
 
-    touchSurface.addEventListener('pointerup', (ev) => {
-      if (!isPointerDown) return;
+    const finishPointer = (ev, action) => {
+      if (!isPointerDown || activePointerId !== ev.pointerId) return;
+      const geometry = guestPointerGeometry();
+      const point = mapPoint(ev.clientX, ev.clientY) || {
+        x: lastSentX, y: lastSentY, coords: geometry.coords
+      };
       isPointerDown = false;
-      updateVirtualTouch(ev.clientX, ev.clientY, false);
-      const rect = getGuestPointerRect();
-      if (rect && downSent) {
-        const endX = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
-        const endY = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
-        const px = Math.max(0, Math.min(719, Math.round(endX * 719)));
-        const py = Math.max(0, Math.min(1439, Math.round(endY * 1439)));
-        sendGuestTouchEvent({ action: 'up', coords: 'portrait', x: px, y: py, slot: 0 });
-      }
       downSent = false;
-      requestAnimationFrame(() => refreshScanoutFrame(true));
-      setTimeout(() => refreshScanoutFrame(true), 25);
-    });
+      activePointerId = null;
+      updateVirtualTouch(ev.clientX, ev.clientY, false);
+      sendGuestTouchEvent({ action, coords: point.coords, x: point.x, y: point.y, slot: 0 });
+      if (action === 'up') {
+        requestAnimationFrame(() => refreshScanoutFrame(true));
+        setTimeout(() => refreshScanoutFrame(true), 25);
+      }
+    };
+
+    touchSurface.addEventListener('pointerup', (ev) => finishPointer(ev, 'up'));
+    touchSurface.addEventListener('pointercancel', (ev) => finishPointer(ev, 'cancel'));
+    touchSurface.addEventListener('lostpointercapture', (ev) => finishPointer(ev, 'cancel'));
 
     touchSurface.addEventListener('wheel', (ev) => {
       ev.preventDefault();
-      const delta = ev.deltaY;
-      const start_y = delta > 0 ? 900 : 500;
-      const end_y = delta > 0 ? 500 : 900;
-      sendGuestTouchEvent({ action: 'swipe', coords: 'portrait', x: 360, y: start_y, x2: 360, y2: end_y, steps: 5 });
+      const geometry = guestPointerGeometry();
+      const x = Math.floor(geometry.width / 2);
+      const startY = ev.deltaY > 0 ? Math.floor(geometry.height * 0.68) : Math.floor(geometry.height * 0.35);
+      const endY = ev.deltaY > 0 ? Math.floor(geometry.height * 0.35) : Math.floor(geometry.height * 0.68);
+      sendGuestTouchEvent({
+        action: 'swipe', coords: geometry.coords, x, y: startY, x2: x, y2: endY, steps: 5
+      });
       setTimeout(() => refreshScanoutFrame(true), 40);
     }, { passive: false });
-
-    touchSurface.addEventListener('pointercancel', () => {
-      isPointerDown = false;
-      updateVirtualTouch(0, 0, false);
-      sendGuestTouchEvent({ action: 'cancel', coords: 'portrait', x: 360, y: 720, slot: 0 });
-    });
   }
 
   // Draggable IDE Split Resizer Divider
@@ -1627,45 +1660,75 @@ document.addEventListener('DOMContentLoaded', () => {
   function wireTouch() {
     const pad = document.getElementById('touchpad-surface');
     const gesturesStream = document.getElementById('touch-gestures-stream');
-    let isDown = false;
-    let startX = 0, startY = 0;
-    let downTime = 0;
+    if (!pad) return;
 
-    pad?.addEventListener('mousedown', (e) => {
-      isDown = true;
-      startX = e.offsetX;
-      startY = e.offsetY;
-      downTime = Date.now();
+    let activePointer = null;
+    let lastX = 0;
+    let lastY = 0;
+    let lastMoveTime = 0;
+
+    const mapPoint = (event) => {
+      const rect = pad.getBoundingClientRect();
+      if (!rect.width || !rect.height) return null;
+      return {
+        x: Math.max(0, Math.min(719, Math.round(((event.clientX - rect.left) / rect.width) * 719))),
+        y: Math.max(0, Math.min(1439, Math.round(((event.clientY - rect.top) / rect.height) * 1439)))
+      };
+    };
+
+    const report = (message, ok) => {
+      if (!gesturesStream) return;
+      const row = document.createElement('div');
+      row.textContent = '[TOUCHPAD] ' + message;
+      row.style.color = ok ? '#10B981' : '#F59E0B';
+      gesturesStream.prepend(row);
+      while (gesturesStream.childElementCount > 50) gesturesStream.lastElementChild?.remove();
+    };
+
+    pad.addEventListener('pointerdown', (event) => {
+      if (activePointer !== null || (event.pointerType === 'mouse' && event.button !== 0)) return;
+      const point = mapPoint(event);
+      if (!point) return;
+      event.preventDefault();
+      activePointer = event.pointerId;
+      lastX = point.x;
+      lastY = point.y;
+      lastMoveTime = performance.now();
+      pad.classList.add('touch-active');
       pad.style.background = 'rgba(16, 185, 129, 0.15)';
+      try { pad.setPointerCapture(event.pointerId); } catch (_) {}
+      sendGuestTouchEvent({ action: 'down', coords: 'portrait', x: point.x, y: point.y, slot: 1 })
+        .then(() => report('Contact down dispatched to guest.', true))
+        .catch(() => report('Guest rejected contact down.', false));
     });
 
-    pad?.addEventListener('mouseup', (e) => {
-      if (!isDown) return;
-      isDown = false;
+    pad.addEventListener('pointermove', (event) => {
+      if (activePointer !== event.pointerId) return;
+      const point = mapPoint(event);
+      if (!point) return;
+      const now = performance.now();
+      if (now - lastMoveTime < 16 || (Math.abs(point.x - lastX) < 2 && Math.abs(point.y - lastY) < 2)) return;
+      lastMoveTime = now;
+      lastX = point.x;
+      lastY = point.y;
+      sendGuestTouchEvent({ action: 'move', coords: 'portrait', x: point.x, y: point.y, slot: 1 });
+    });
+
+    const finishContact = (event, action) => {
+      if (activePointer !== event.pointerId) return;
+      const point = mapPoint(event) || { x: lastX, y: lastY };
+      activePointer = null;
+      pad.classList.remove('touch-active');
       pad.style.background = 'rgba(0,0,0,0.6)';
-      const duration = Date.now() - downTime;
-      const dx = e.offsetX - startX;
-      const dy = e.offsetY - startY;
+      sendGuestTouchEvent({ action, coords: 'portrait', x: point.x, y: point.y, slot: 1 })
+        .then(() => report(action === 'up' ? 'Contact released by guest.' : 'Contact cancelled by guest.', true))
+        .catch(() => report('Guest rejected contact ' + action + '.', false));
+    };
 
-      let gType = 'Tap';
-      if (duration >= 500 && Math.abs(dx) < 10 && Math.abs(dy) < 10) {
-        gType = 'LongPress';
-      } else if (Math.abs(dx) > 20 || Math.abs(dy) > 20) {
-        gType = 'Pan';
-      }
-
-      fetch('/api/touch/event', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: gType, x: e.offsetX, y: e.offsetY })
-      })
-      .then(r => r.json())
-      .then(res => {
-        if (gesturesStream && res.gesture) {
-          const g = res.gesture;
-          gesturesStream.innerHTML = `<div>[TOUCH] Recognized: <strong style="color: #10B981;">${g.type}</strong> at (${g.x}, ${g.y}) &bull; ${g.time}</div>` + gesturesStream.innerHTML;
-        }
-      });
+    pad.addEventListener('pointerup', (event) => finishContact(event, 'up'));
+    pad.addEventListener('pointercancel', (event) => finishContact(event, 'cancel'));
+    pad.addEventListener('lostpointercapture', (event) => {
+      if (activePointer === event.pointerId) finishContact(event, 'cancel');
     });
   }
   wireTouch();
@@ -1686,6 +1749,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // is the single guest input surface and it maps both crop modes correctly.
   window.addEventListener('keydown', async (e) => {
     if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable)) return;
+    // Do not steal shortcuts or typing from Device Studio panels and controls.
+    // The guest receives keyboard input only while its own display has focus.
+    if (!touchSurface || document.activeElement !== touchSurface) return;
     const navigationKeys = new Set([
       'Enter', 'Escape', 'Backspace', 'Tab',
       'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
@@ -1698,7 +1764,7 @@ document.addEventListener('DOMContentLoaded', () => {
         await fetch('/api/input/key', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ key: e.key, code: e.key.codePointAt(0) })
+          body: JSON.stringify({ key: e.key })
         });
       } catch (_) {}
     }

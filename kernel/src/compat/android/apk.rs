@@ -427,6 +427,8 @@ pub fn decode_axml_manifest(data: &[u8]) -> Result<AndroidManifest, ApkError> {
 pub struct ApkPackage {
     pub manifest: AndroidManifest,
     pub has_classes_dex: bool,
+    /// Exact `classes.dex` payload extracted from this APK for verified runtime binding.
+    pub classes_dex: Vec<u8>,
     pub is_signed: bool,
     pub file_count: usize,
     pub total_size_bytes: usize,
@@ -464,12 +466,14 @@ impl ApkPackage {
         let manifest_bytes = zip.get_file("AndroidManifest.xml").ok_or(ApkError::MissingManifest)?;
         let manifest = decode_axml_manifest(manifest_bytes)?;
 
-        let has_classes_dex = zip.get_file("classes.dex").is_some();
+        let classes_dex = zip.get_file("classes.dex").map(|bytes| bytes.to_vec()).unwrap_or_default();
+        let has_classes_dex = !classes_dex.is_empty();
         let is_signed = verify_apk_signature(apk_bytes).is_ok();
 
         Ok(Self {
             manifest,
             has_classes_dex,
+            classes_dex,
             is_signed,
             file_count: zip.entries.len(),
             total_size_bytes: apk_bytes.len(),

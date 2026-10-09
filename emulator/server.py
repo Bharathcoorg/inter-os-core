@@ -645,7 +645,7 @@ SUPPORTED_PROFILES = {
         "boot_type": "BIOS/MBR Bootloader",
         "image": os.path.join(WORKSPACE_ROOT, "target", "inter-os-bios.img"),
         "status": "Primary QEMU Phone contract",
-        "display": {"backend": "vnc", "host": "127.0.0.1", "port": 5901, "websocket_port": 6081, "guest_width": 1280, "guest_height": 720},
+        "display": {"backend": "vnc", "host": "127.0.0.1", "port": 5901, "websocket_port": 6081, "guest_width": 720, "guest_height": 1440},
         "serial": {"host": "127.0.0.1", "port": 4301},
         "monitor": {"host": "127.0.0.1", "port": 44445},
     },
@@ -772,9 +772,9 @@ class VncScanoutClient:
         self.port = port
         self.running = True
         self.connected = False
-        self.width = 1280
-        self.height = 720
-        self.scanout_buf = bytearray(1280 * 720 * 4)
+        self.width = LOGICAL_SURFACE_W
+        self.height = LOGICAL_SURFACE_H
+        self.scanout_buf = bytearray(LOGICAL_SURFACE_W * LOGICAL_SURFACE_H * 4)
         self.seq = 0
         self.lock = threading.Lock()
         self.frame_cond = threading.Condition(self.lock)
@@ -905,8 +905,6 @@ class VncScanoutClient:
                                 self.scanout_buf[dst_off : dst_off + rw * 4] = temp_buf[src_off : src_off + rw * 4]
 
                 self._publish_frame(t_frame_start)
-                if self.height < 720 and check_launcher_ready():
-                    break
                 s.sendall(struct.pack('>BBHHHH', 3, 1, 0, 0, self.width, self.height))
             except socket.timeout:
                 try:
@@ -1170,7 +1168,7 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
     if arch == "x86_64":
         cmd.extend(["-machine", "q35", "-cpu", "qemu64"])
         # Real virtual display and absolute pointer hardware for the canonical phone VM.
-        cmd.extend(["-vga", "none", "-device", "virtio-vga,edid=on,xres=720,yres=1440", "-device", "qemu-xhci,id=xhci0", "-device", "usb-tablet,bus=xhci0.0"])
+        cmd.extend(["-vga", "none", "-device", "virtio-vga,edid=on,xres=720,yres=1440", "-device", "ps2-mouse"])
         # A dedicated data disk is mandatory. The kernel uses the Primary Master
         # as the read-only boot image and the Primary Slave as persistent storage;
         # with only one disk attached it falls back to formatting the boot image
@@ -1196,7 +1194,7 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
     # show and no VNC pixels to stream.
     if arch in ("aarch64", "riscv64"):
         cmd.extend(["-device", "virtio-gpu-pci", "-device", "usb-ehci,id=usb0"])
-        cmd.extend(["-device", "usb-kbd", "-device", "usb-tablet", "bus=usb0.0"])
+        # This guest does not implement an EHCI/USB HID driver yet; browser-to-guest input remains explicit serial injection on these non-canonical profiles.
 
     try:
         serial_lines.clear()

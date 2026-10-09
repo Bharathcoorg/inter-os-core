@@ -181,6 +181,15 @@ pub fn route_touch_target(x: u32, y: u32) -> Option<(crate::gui::WindowId, u64)>
 }
 
 pub fn post_touch_event(slot: u8, x: u32, y: u32, pressure: u16, phase: TouchPhase) {
+    post_pointer_contact(InputSource::DeviceStudio, slot, x, y, pressure, phase);
+}
+
+/// Routes a real emulated/physical mouse contact through the canonical gesture pipeline.
+pub fn post_mouse_event(x: u32, y: u32, phase: TouchPhase) {
+    post_pointer_contact(InputSource::Mouse, 0, x, y, if phase == TouchPhase::Up { 0 } else { 512 }, phase);
+}
+
+fn post_pointer_contact(source: InputSource, slot: u8, x: u32, y: u32, pressure: u16, phase: TouchPhase) {
     if phase == TouchPhase::Down {
         if let Some(mut comp) = crate::gui::GRAVITY_COMPOSITOR.try_lock() {
             let _ = comp.trigger_force_takeover();
@@ -195,7 +204,7 @@ pub fn post_touch_event(slot: u8, x: u32, y: u32, pressure: u16, phase: TouchPha
         TouchPhase::Cancel => PointerPhase::Cancel,
     };
     let pointer = PointerEvent::new(
-        InputSource::DeviceStudio,
+        source,
         CoordinateSpace::LogicalPortrait,
         slot,
         pointer_phase,

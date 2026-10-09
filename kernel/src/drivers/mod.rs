@@ -17,6 +17,7 @@ pub mod i2c_mmio;
 pub mod input;
 pub mod pci;
 pub mod pmic;
+pub mod ps2_mouse;
 pub mod sdhci;
 pub mod touch_gestures;
 pub mod touch_i2c;

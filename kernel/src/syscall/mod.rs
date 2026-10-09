@@ -234,6 +234,7 @@ pub enum SyscallResult {
 /// Dispatches a cooperative scheduling yield.
 pub fn sys_yield() {
     crate::serial::service_serial_commands();
+    crate::drivers::ps2_mouse::drain_events();
     crate::task::yield_now();
 }
 
@@ -3915,21 +3916,22 @@ pub fn sys_camera_capture(
 /// Invokes a verified Dalvik method inside the sandboxed ACR Virtual Machine runtime.
 /// Returns the number of Dalvik opcodes executed.
 pub fn sys_dex_invoke_method(dex_data: &[u8], method_spec: &str) -> Result<u32, SyscallResult> {
-    require_system_control()?;
     use crate::compat::android::dex::DexPackage;
-    use crate::compat::android::runtime::DalvikVmState;
+    use crate::compat::android::ANDROID_RUNTIME;
 
     let dex = DexPackage::parse(dex_data).map_err(|_| SyscallResult::IntegrityViolation)?;
     let _ = dex.audit_bytecode().map_err(|_| SyscallResult::PermissionDenied)?;
-
     let mut parts = method_spec.split("->");
-    let class_name = parts.next().ok_or(SyscallResult::InvalidArguments)?;
-    let method_name = parts.next().ok_or(SyscallResult::InvalidArguments)?;
+    let class_name = parts.next().filter(|value| !value.is_empty()).ok_or(SyscallResult::InvalidArguments)?;
+    let method_name = parts.next().filter(|value| !value.is_empty()).ok_or(SyscallResult::InvalidArguments)?;
+    if parts.next().is_some() { return Err(SyscallResult::InvalidArguments); }
 
-    let mut vm = DalvikVmState::new();
-    let _ = vm.invoke_method(&dex, class_name, method_name).map_err(|_| SyscallResult::PermissionDenied)?;
-
-    Ok(vm.instructions_executed as u32)
+    let task_id = sys_get_task_id();
+    if task_id.0 == 0 { return Err(SyscallResult::PermissionDenied); }
+    let mut runtime = ANDROID_RUNTIME.lock();
+    let pid = runtime.pid_for_task(task_id).ok_or(SyscallResult::PermissionDenied)?;
+    runtime.invoke_verified_method_count(pid, &dex, class_name, method_name)
+        .map_err(|_| SyscallResult::PermissionDenied)
 }
 
 

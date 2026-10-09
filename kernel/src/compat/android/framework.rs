@@ -45,7 +45,9 @@ pub fn dispatch(
             // Android apps are untrusted: logs must not become an unbounded kernel heap sink.
             const MAX_LOG_ENTRIES: usize = 64;
             const MAX_LOG_LINE_BYTES: usize = 512;
-            let message = string_args.iter().flatten().copied().next().unwrap_or("");
+            // Android `Log.d(tag, msg)` passes the tag first and the message second;
+            // prefer the message and fall back to a lone argument.
+            let message = string_args.get(1).and_then(|value| *value).or_else(|| string_args.first().and_then(|value| *value)).unwrap_or("");
             let mut line = String::from("[ANDROID][LOG] ");
             for ch in message.chars() {
                 if line.len().saturating_add(ch.len_utf8()) > MAX_LOG_LINE_BYTES { break; }

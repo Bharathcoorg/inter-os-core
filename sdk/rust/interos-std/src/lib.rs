@@ -1468,6 +1468,56 @@ pub struct InputEvent {
     pub scale_milli: u32,
 }
 
+/// Kind value used by the kernel's normalized input pipeline for keyboard events.
+pub const INPUT_EVENT_KIND_KEY: u8 = 11;
+
+/// Reserved key codes used by the normalized keyboard pipeline.
+pub mod input_key_code {
+    pub const ENTER: u32 = 0x10000;
+    pub const ESCAPE: u32 = 0x10001;
+    pub const BACKSPACE: u32 = 0x10002;
+    pub const TAB: u32 = 0x10003;
+    pub const ARROW_UP: u32 = 0x10004;
+    pub const ARROW_DOWN: u32 = 0x10005;
+    pub const ARROW_LEFT: u32 = 0x10006;
+    pub const ARROW_RIGHT: u32 = 0x10007;
+    pub const HOME: u32 = 0x10008;
+    pub const END: u32 = 0x10009;
+    pub const PAGE_UP: u32 = 0x1000A;
+    pub const PAGE_DOWN: u32 = 0x1000B;
+}
+
+/// Keyboard event decoded from the normalized 24-byte input record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InputKeyEvent {
+    pub code: u32,
+    pub pressed: bool,
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub meta: bool,
+}
+
+impl InputEvent {
+    /// Returns a keyboard event when this normalized input record is a key event.
+    /// The x field carries the code point/key code, y carries key-down state,
+    /// and scale_milli carries modifier bits for this event kind.
+    pub fn key_event(&self) -> Option<InputKeyEvent> {
+        if self.kind != INPUT_EVENT_KIND_KEY {
+            return None;
+        }
+        let modifiers = self.scale_milli;
+        Some(InputKeyEvent {
+            code: self.x,
+            pressed: self.y != 0,
+            shift: modifiers & 1 != 0,
+            ctrl: modifiers & 2 != 0,
+            alt: modifiers & 4 != 0,
+            meta: modifiers & 8 != 0,
+        })
+    }
+}
+
 /// Polls the normalized touch/input event pipeline.
 pub fn input_event_poll(out: &mut InputEvent) -> Result<(), i64> {
     let mut buf = [0u8; 24];
