@@ -536,6 +536,11 @@ document.addEventListener('DOMContentLoaded', () => {
   // element stays hidden with no src so a missing frame can never surface as
   // broken-image alt text on the phone screen.
   let hasLiveFrame = false;
+  // Displayed frame size in pixels. The canvas may show a guest-derived slice
+  // (e.g. the 360x720 phone crop of a 1280x720 landscape desktop) rather than
+  // the full logical surface; the pointer map must scale through it.
+  let displayedFrameW = 0;
+  let displayedFrameH = 0;
   function setSurfaceState(mode) {
     const live = (mode === 'live');
     hasLiveFrame = live;
@@ -614,9 +619,10 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function renderScanoutPixels(pixels, width, height) {
-    // Never resize the phone surface to a wrong geometry: only canonical
-    // guest scanouts (portrait 720x1440, landscape 1280x720) are displayed.
-    if (!((width === 720 && height === 1440) || (width === 1280 && height === 720))) return false;
+    // Never resize the phone surface to a wrong geometry: only guest-derived
+    // frames are displayed (native portrait 720x1440, the 360x720 phone slice
+    // of a landscape desktop, or full landscape 1280x720).
+    if (!((width === 720 && height === 1440) || (width === 360 && height === 720) || (width === 1280 && height === 720))) return false;
     if (!pixels || pixels.byteLength < width * height * 4) return false;
     if (scanoutCtx && liveScanoutCanvas) {
       if (liveScanoutCanvas.width !== width || liveScanoutCanvas.height !== height) {
@@ -625,6 +631,8 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       const imgData = new ImageData(new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, width * height * 4), width, height);
       scanoutCtx.putImageData(imgData, 0, 0);
+      displayedFrameW = width;
+      displayedFrameH = height;
       setSurfaceState('live');
       return true;
     }
@@ -763,6 +771,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // The canvas is the single visible surface; the hidden legacy <img>
         // element is never fed so it cannot show broken-image alt text.
         if (!((img.naturalWidth === 720 && img.naturalHeight === 1440)
+          || (img.naturalWidth === 360 && img.naturalHeight === 720)
           || (img.naturalWidth === 1280 && img.naturalHeight === 720))) {
           resolve();
           return;
@@ -773,6 +782,8 @@ document.addEventListener('DOMContentLoaded', () => {
             liveScanoutCanvas.height = img.naturalHeight;
           }
           scanoutCtx.drawImage(img, 0, 0);
+          displayedFrameW = img.naturalWidth;
+          displayedFrameH = img.naturalHeight;
           setSurfaceState('live');
         }
         resolve();
@@ -960,13 +971,21 @@ document.addEventListener('DOMContentLoaded', () => {
       // A tap on a dead surface must never silently inject: mapping is
       // disabled until a real guest frame is displayed on the live canvas.
       if (!hasLiveFrame || !liveScanoutCanvas || liveScanoutCanvas.style.display === 'none') return null;
+      if (!displayedFrameW || !displayedFrameH) return null;
       const rect = getGuestPointerRect();
       if (!rect || clientX < rect.left || clientX >= rect.left + rect.width
         || clientY < rect.top || clientY >= rect.top + rect.height) return null;
       const geometry = guestPointerGeometry();
+      // The wire keeps the guest's logical spaces (portrait 720x1440,
+      // landscape framebuffer 1280x720), but the canvas may show a smaller
+      // guest-derived slice (the 360x720 phone crop). Map the client point
+      // into displayed pixels first, then scale to the wire space: assuming
+      // 1:1 here sent every touch to twice its intended position.
+      const sx = ((clientX - rect.left) / rect.width) * (displayedFrameW - 1);
+      const sy = ((clientY - rect.top) / rect.height) * (displayedFrameH - 1);
       return {
-        x: Math.max(0, Math.min(geometry.width - 1, Math.round(((clientX - rect.left) / rect.width) * (geometry.width - 1)))),
-        y: Math.max(0, Math.min(geometry.height - 1, Math.round(((clientY - rect.top) / rect.height) * (geometry.height - 1)))),
+        x: Math.max(0, Math.min(geometry.width - 1, Math.round(sx * (geometry.width - 1) / (displayedFrameW - 1)))),
+        y: Math.max(0, Math.min(geometry.height - 1, Math.round(sy * (geometry.height - 1) / (displayedFrameH - 1)))),
         coords: geometry.coords
       };
     };

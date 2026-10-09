@@ -63,6 +63,16 @@ def is_canonical_scanout(w, h):
     return (w, h) in CANONICAL_SCANOUT_SIZES
 
 
+# Published phone-frame sizes. The VNC desktop is validated above, but the
+# published crop differs by orientation: a native 720x1440 portrait desktop
+# publishes whole, a 1280x720 landscape desktop in portrait orientation
+# publishes its centred 360x720 phone slice, and landscape orientation
+# publishes the whole 1280x720 desktop. All three are guest-derived crops,
+# never invented pixels; the browser scales the slice to the phone chassis
+# with smoothing, exactly like a hardware emulator viewport.
+PHONE_FRAME_SIZES = frozenset(((720, 1440), (360, 720), (1280, 720)))
+
+
 def letterbox_box(fb_w, fb_h):
     """Returns the phone-surface rect (left, top, right, bottom) in a fb_w x fb_h scanout.
 
@@ -1225,7 +1235,13 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
         # The x86_64 profile launches with the canonical scanout declared in
         # SUPPORTED_PROFILES: "guest_width": 720, "guest_height": 1440, wired
         # into the EDID below so the guest KMS modesets exactly 720x1440.
-        cmd.extend(["-vga", "none", "-device", "virtio-vga,edid=on,xres=720,yres=1440", "-device", "ps2-mouse"])
+        # WHY no -device pointer flag: q35 already exposes the i8042 PS/2
+        # controller that the guest's ps2_mouse driver talks to, and this
+        # QEMU build rejects `-device ps2-mouse` ("expects a pluggable device
+        # type"), which killed the VM instantly. A usb-tablet was tried, but
+        # the guest has no USB HID stack, so it booted yet moved nothing.
+        # Studio pointer input travels as absolute COM1 touch injection.
+        cmd.extend(["-vga", "none", "-device", "virtio-vga,edid=on,xres=720,yres=1440"])
         # A dedicated data disk is mandatory. The kernel uses the Primary Master
         # as the read-only boot image and the Primary Slave as persistent storage;
         # with only one disk attached it falls back to formatting the boot image
@@ -1896,9 +1912,10 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
 
         if parsed_path.path == '/api/screen/frame':
             # Single-shot canonical guest frame for the screenshot control and
-            # the canvas polling fallback. Serves only live canonical scanouts
-            # (portrait 720x1440, landscape 1280x720); anything else is an
-            # honest 503 so the phone never shows a broken image.
+            # the canvas polling fallback. Serves only live guest-derived frames
+            # (native portrait 720x1440, portrait phone slice 360x720, or full
+            # landscape 1280x720); anything else is an honest 503 so the phone
+            # never shows a broken image.
             query = urllib.parse.parse_qs(parsed_path.query)
             prefer_jpeg = query.get('format', ['jpeg'])[0].lower() != 'png'
             img_bytes, mime_or_reason = None, 'No guest frame available'
@@ -1906,7 +1923,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 live_canonical = (
                     vnc_client.connected
                     and vnc_client.latest_raw_rgba is not None
-                    and (vnc_client.latest_raw_w, vnc_client.latest_raw_h) in CANONICAL_SCANOUT_SIZES
+                    and (vnc_client.latest_raw_w, vnc_client.latest_raw_h) in PHONE_FRAME_SIZES
                 )
             if live_canonical:
                 img_bytes, mime_or_reason = vnc_client.get_image_frame(prefer_jpeg=prefer_jpeg)

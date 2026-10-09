@@ -44,7 +44,8 @@ $qemuArgs = @(
     "-drive", "format=raw,file=$dataPath,index=1",
     "-vga", "none",
     "-device", "virtio-vga,edid=on,xres=720,yres=1440",
-    "-device", "ps2-mouse",
+    # No -device pointer flag: q35 already exposes the i8042 PS/2 controller
+    # the guest driver uses, and this QEMU build rejects `-device ps2-mouse`.
     "-display", "vnc=:1",
     "-serial", "tcp:127.0.0.1:4301,server,nowait",
     "-monitor", "tcp:127.0.0.1:44445,server,nowait",
