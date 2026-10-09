@@ -3,10 +3,10 @@
 //! Full production interactive terminal shell executing in Ring 3 (User Mode):
 //! - Comprehensive Command Line Interpreter (CLI) supporting:
 //!   - `help`: Command documentation and syntax guide
-//!   - `status`: Microkernel execution metrics and uptime
-//!   - `ps`: Active process list and protection domains
-//!   - `mem`: Paging and memory allocation diagnostics
-//!   - `caps`: Capability table inspection
+//!   - `status`: Identity banner plus real uptime ticks (`std::get_ticks`)
+//!   - `ps`: Task record count as reported by `std::app_runtime_list`
+//!   - `mem`: Honest refusal — no heap/paging metrics are exposed to this app
+//!   - `caps`: Static capability policy statement (no runtime inspection API)
 //!   - `share <mime> <uri> <target>`: Sovereign Share Sheet cross-app bus dispatch
 //!   - `dma <pipe> <payload>`: Zero-Copy DMA shared memory pipe streaming
 //!   - `ping`: Local loopback diagnostic
@@ -54,6 +54,92 @@ fn test_text(
     std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, BG_DARK, false)
 }
 
+// -----------------------------------------------------------------------------
+// Counted Text Assembly (no allocator in this no_std app)
+// -----------------------------------------------------------------------------
+
+/// Formats `v` as decimal ASCII into `out`; returns the bytes written.
+fn fmt_u64(mut v: u64, out: &mut [u8]) -> usize {
+    if out.is_empty() {
+        return 0;
+    }
+    if v == 0 {
+        out[0] = b'0';
+        return 1;
+    }
+    let mut digits = [0u8; 20];
+    let mut n = 0usize;
+    while v > 0 && n < 20 {
+        digits[n] = b'0' + (v % 10) as u8;
+        v /= 10;
+        n += 1;
+    }
+    let n = n.min(out.len());
+    for i in 0..n {
+        out[i] = digits[n - 1 - i];
+    }
+    n
+}
+
+/// Builds `prefix ++ decimal(value) ++ suffix` into `buf` and returns its length.
+/// WHY: measured values (task counts, ticks, dispatch tokens) only exist at
+/// runtime, so they are assembled into a stack buffer before being displayed.
+fn build_counted(buf: &mut [u8], prefix: &[u8], value: u64, suffix: &[u8]) -> usize {
+    let p = prefix.len().min(buf.len());
+    buf[..p].copy_from_slice(&prefix[..p]);
+    let v = fmt_u64(value, &mut buf[p..]);
+    let n = p + v;
+    let s = suffix.len().min(buf.len().saturating_sub(n));
+    buf[n..n + s].copy_from_slice(&suffix[..s]);
+    n + s
+}
+
+/// Logs `prefix ++ decimal(value) ++ suffix` as one kernel log line.
+fn log_counted(prefix: &str, value: u64, suffix: &str) {
+    let mut buf = [0u8; 192];
+    let n = build_counted(&mut buf, prefix.as_bytes(), value, suffix.as_bytes());
+    if let Ok(msg) = core::str::from_utf8(&buf[..n]) {
+        std::log(0, msg).ok();
+    }
+}
+
+/// Reads the hardware tick counter, probing each capability slot for one that
+/// holds `TimerTickRead` (WHY: the slot holding that capability varies per task).
+fn probe_ticks() -> Result<u64, i64> {
+    let mut last = -1i64;
+    for slot in 0..12usize {
+        match std::get_ticks(slot) {
+            Ok(t) => return Ok(t),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+/// Counts the newline-terminated task records `app_runtime_list` returned,
+/// passing the syscall's own error code through when the query is refused.
+/// WHY: the syscall reports a byte length, not a task count, so records are
+/// counted from the payload; a truncated trailing record that never received
+/// its terminator is not counted as a whole task.
+fn count_runtime_tasks() -> Result<usize, i64> {
+    let mut buf = [0u8; 2048];
+    let n = std::app_runtime_list(&mut buf)?;
+    let payload = &buf[..n.min(buf.len())];
+    let mut count = 0usize;
+    let mut in_record = false;
+    for b in payload.iter() {
+        if *b == b'\n' {
+            if in_record {
+                count += 1;
+            }
+            in_record = false;
+        } else {
+            in_record = true;
+        }
+    }
+    Ok(count)
+}
+
 /// Command entry in terminal history.
 #[derive(Debug, Clone, Copy)]
 pub struct HistoryEntry {
@@ -61,10 +147,38 @@ pub struct HistoryEntry {
     pub status: i64,
 }
 
+/// Byte capacity of one rendered console line. WHY owned bytes: command output
+/// (task counts, uptime ticks, dispatch results) is only known at runtime and
+/// this no_std app has no allocator, so every line carries a fixed buffer.
+const LINE_CAP: usize = 128;
+
 #[derive(Debug, Clone, Copy)]
 pub struct ConsoleLine {
-    pub text: &'static str,
+    pub text: [u8; LINE_CAP],
+    pub len: usize,
     pub color: u32,
+}
+
+impl ConsoleLine {
+    /// Builds a line from a compile-time string literal (usable in `const fn`).
+    pub const fn from_static(text: &'static str, color: u32) -> Self {
+        let bytes = text.as_bytes();
+        let mut buf = [0u8; LINE_CAP];
+        let mut i = 0;
+        while i < bytes.len() && i < LINE_CAP {
+            buf[i] = bytes[i];
+            i += 1;
+        }
+        Self {
+            text: buf,
+            len: i,
+            color,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.text[..self.len]
+    }
 }
 
 /// Sovereign Intent Terminal Shell state engine.
@@ -79,22 +193,22 @@ pub struct TerminalApp {
 impl TerminalApp {
     pub const fn new() -> Self {
         let mut lines = [None; 18];
-        lines[0] = Some(ConsoleLine {
-            text: "InterOS Sovereign Shell [Ring 3 CPL=3]",
-            color: TEXT_MUTED,
-        });
-        lines[1] = Some(ConsoleLine {
-            text: "Isolated memory, token capabilities enforced.",
-            color: ACCENT_SKY,
-        });
-        lines[2] = Some(ConsoleLine {
-            text: "Tap quick commands below for diagnostics.",
-            color: TEXT_MUTED,
-        });
-        lines[3] = Some(ConsoleLine {
-            text: "interos@sovereign:~$ _",
-            color: SUCCESS_EMERALD,
-        });
+        lines[0] = Some(ConsoleLine::from_static(
+            "InterOS Sovereign Shell [Ring 3 CPL=3]",
+            TEXT_MUTED,
+        ));
+        lines[1] = Some(ConsoleLine::from_static(
+            "Isolated memory, token capabilities enforced.",
+            ACCENT_SKY,
+        ));
+        lines[2] = Some(ConsoleLine::from_static(
+            "Tap quick commands below for diagnostics.",
+            TEXT_MUTED,
+        ));
+        lines[3] = Some(ConsoleLine::from_static(
+            "interos@sovereign:~$ _",
+            SUCCESS_EMERALD,
+        ));
         Self {
             history: [None; 8],
             history_count: 0,
@@ -104,16 +218,35 @@ impl TerminalApp {
         }
     }
 
-    pub fn push_line(&mut self, text: &'static str, color: u32) {
+    pub fn push_line(&mut self, text: &str, color: u32) {
+        self.push_line_bytes(text.as_bytes(), color);
+    }
+
+    pub fn push_line_bytes(&mut self, text: &[u8], color: u32) {
+        let mut line = ConsoleLine {
+            text: [0; LINE_CAP],
+            len: 0,
+            color,
+        };
+        let n = text.len().min(LINE_CAP);
+        line.text[..n].copy_from_slice(&text[..n]);
+        line.len = n;
         if self.line_count < 18 {
-            self.lines[self.line_count] = Some(ConsoleLine { text, color });
+            self.lines[self.line_count] = Some(line);
             self.line_count += 1;
         } else {
             for i in 0..17 {
                 self.lines[i] = self.lines[i + 1];
             }
-            self.lines[17] = Some(ConsoleLine { text, color });
+            self.lines[17] = Some(line);
         }
+    }
+
+    /// Pushes `prefix ++ decimal(value) ++ suffix` as a single console line.
+    pub fn push_counted(&mut self, prefix: &str, value: u64, suffix: &str, color: u32) {
+        let mut buf = [0u8; LINE_CAP];
+        let n = build_counted(&mut buf, prefix.as_bytes(), value, suffix.as_bytes());
+        self.push_line_bytes(&buf[..n], color);
     }
 
     /// Records an executed command in the history ledger.
@@ -126,7 +259,9 @@ impl TerminalApp {
 
     /// Executes a built-in terminal command and renders to console.
     pub fn execute_command(&mut self, cmd_line: &'static str) {
-        if self.line_count > 0 && self.lines[self.line_count - 1].map_or(false, |l| l.text.starts_with("interos@")) {
+        if self.line_count > 0
+            && self.lines[self.line_count - 1].map_or(false, |l| l.as_bytes().starts_with(b"interos@"))
+        {
             self.line_count -= 1;
         }
 
@@ -144,53 +279,114 @@ impl TerminalApp {
             "status" => {
                 self.push_line("interos@sovereign:~$ status", SUCCESS_EMERALD);
                 self.push_line("InterOS Core Mobile Platform | CPL=3 Isolated", ACCENT_SKY);
-                std::log(0, "[TERMINAL] Status: InterOS Core Mobile Platform | CPL=3 User Separation | Memory Isolated").ok();
-                self.record_history("status", 0);
+                // WHY: the uptime comes from the real 1 kHz hardware timer. If no
+                // capability slot grants TimerTickRead, the screen says so instead
+                // of inventing a metric.
+                match probe_ticks() {
+                    Ok(ticks) => {
+                        self.push_counted(
+                            "status: uptime ",
+                            ticks,
+                            " ticks since boot (1 kHz).",
+                            TEXT_PRIMARY,
+                        );
+                        log_counted(
+                            "[TERMINAL] Status: uptime ",
+                            ticks,
+                            " ticks read from the hardware timer.",
+                        );
+                        self.record_history("status", 0);
+                    }
+                    Err(code) => {
+                        self.push_line("status: uptime unavailable; get_ticks refused.", TEXT_MUTED);
+                        log_counted(
+                            "[TERMINAL] Status: uptime unavailable, get_ticks error ",
+                            code.unsigned_abs(),
+                            ".",
+                        );
+                        self.record_history("status", code);
+                    }
+                }
             }
             "ps" => {
                 self.push_line("interos@sovereign:~$ ps", SUCCESS_EMERALD);
-                self.push_line("ps: 16 tasks active in userspace (Ring 3 isolated).", TEXT_PRIMARY);
-                std::log(
-                    0,
-                    "[TERMINAL] ps: 16 tasks active in userspace (Ring 3 isolated).",
-                )
-                .ok();
-                self.record_history("ps", 0);
+                // WHY: the task count is read from the runtime list; a fixed
+                // number would claim a measurement that was never taken.
+                match count_runtime_tasks() {
+                    Ok(count) => {
+                        self.push_counted(
+                            "ps: ",
+                            count as u64,
+                            " other tasks (app_runtime_list).",
+                            TEXT_PRIMARY,
+                        );
+                        log_counted(
+                            "[TERMINAL] ps: app_runtime_list reported ",
+                            count as u64,
+                            " task records.",
+                        );
+                        self.record_history("ps", 0);
+                    }
+                    Err(code) => {
+                        self.push_line("ps: unavailable; app_runtime_list refused.", TEXT_MUTED);
+                        log_counted(
+                            "[TERMINAL] ps: app_runtime_list refused, error ",
+                            code.unsigned_abs(),
+                            "; task count unavailable.",
+                        );
+                        self.record_history("ps", code);
+                    }
+                }
             }
             "mem" => {
                 self.push_line("interos@sovereign:~$ mem", SUCCESS_EMERALD);
-                self.push_line("mem: 4-level paging active, 1024 KiB dynamic heap.", TEXT_PRIMARY);
-                std::log(
-                    0,
-                    "[TERMINAL] mem: 4-level paging active, 1024 KiB dynamic kernel heap.",
-                )
-                .ok();
-                self.record_history("mem", 0);
+                // WHY: no heap or paging query exists on this platform, so the
+                // command reports the absence instead of a plausible-sounding stat.
+                // History records -1: no syscall ran, so there is no kernel code —
+                // -1 marks "no data available".
+                self.push_line("mem: unavailable; no heap or paging", TEXT_MUTED);
+                self.push_line("metrics are exposed to this app.", TEXT_MUTED);
+                std::log(0, "[TERMINAL] mem: no heap/paging metrics are exposed; nothing was queried.").ok();
+                self.record_history("mem", -1);
             }
             "caps" => {
                 self.push_line("interos@sovereign:~$ caps", SUCCESS_EMERALD);
-                self.push_line("caps: Capability table enforced (zero ambient authority).", TEXT_PRIMARY);
-                std::log(
-                    0,
-                    "[TERMINAL] caps: Capability token table enforced (zero ambient authority).",
-                )
-                .ok();
+                // WHY: this is a static policy statement, not an inspection: the
+                // platform exposes no capability-table query to Ring 3.
+                self.push_line("caps: policy: zero ambient authority", TEXT_PRIMARY);
+                self.push_line("caps: (statement only; no inspection API).", TEXT_MUTED);
+                std::log(0, "[TERMINAL] caps: static policy statement; no runtime capability inspection exists.").ok();
                 self.record_history("caps", 0);
             }
             "share" => {
                 self.push_line("interos@sovereign:~$ share", SUCCESS_EMERALD);
-                let _ = std::share_sheet_dispatch(
+                // WHY: the dispatch Result decides the message — a refused intent
+                // is reported as refused, never as a success.
+                match std::share_sheet_dispatch(
                     "text/uri-list",
                     "interos://files/documents",
                     Some("interos.terminal"),
-                );
-                self.push_line("Share: Dispatched intent via Sovereign Bus.", ACCENT_SKY);
-                std::log(
-                    0,
-                    "[TERMINAL APP] Share: Dispatched cross-app intent via Sovereign Share Bus.",
-                )
-                .ok();
-                self.record_history("share", 0);
+                ) {
+                    Ok(token) => {
+                        self.push_counted("Share: accepted, token ", token, ".", ACCENT_SKY);
+                        log_counted("[TERMINAL APP] Share: dispatch accepted, token ", token, ".");
+                        self.record_history("share", 0);
+                    }
+                    Err(code) => {
+                        self.push_counted(
+                            "Share: dispatch refused, code -",
+                            code.unsigned_abs(),
+                            ".",
+                            TEXT_MUTED,
+                        );
+                        log_counted(
+                            "[TERMINAL APP] Share: dispatch refused, code -",
+                            code.unsigned_abs(),
+                            ".",
+                        );
+                        self.record_history("share", code);
+                    }
+                }
             }
             "dma" => {
                 self.push_line("interos@sovereign:~$ dma", SUCCESS_EMERALD);
@@ -199,13 +395,14 @@ impl TerminalApp {
                     Ok(_) => {
                         self.push_line("DMA: test payload transfer acknowledged by Pipe 3.", SUCCESS_EMERALD);
                         std::log(0, "[TERMINAL APP] DMA test payload transfer acknowledged by Pipe 3.").ok();
+                        self.record_history("dma", 0);
                     }
-                    Err(_) => {
+                    Err(code) => {
                         self.push_line("DMA: Pipe 3 transfer unavailable or refused.", TEXT_MUTED);
                         std::log(0, "[TERMINAL APP] DMA test payload transfer failed or was refused.").ok();
+                        self.record_history("dma", code);
                     }
                 }
-                self.record_history("dma", 0);
             }
             "ping" => {
                 self.push_line("interos@sovereign:~$ ping", SUCCESS_EMERALD);
@@ -280,7 +477,7 @@ fn get_terminal_pixel(x: usize, y: usize, term: &TerminalApp) -> u32 {
             let line_y0 = 114 + line_idx * 32;
             if y >= line_y0 && y < line_y0 + 16 {
                 if let Some(line) = term.lines[line_idx] {
-                    if let Some(c) = test_text(x, y, 28, line_y0, 2, line.text.as_bytes(), line.color) {
+                    if let Some(c) = test_text(x, y, 28, line_y0, 2, line.as_bytes(), line.color) {
                         return c;
                     }
                 }
