@@ -432,14 +432,12 @@ impl DalvikVmState {
                     let target_method = target.method_name.clone();
                     let target_registers_size = target.registers_size as usize;
                     let target_ins_size = target.ins_size as usize;
-                    if arg_count != target_ins_size || target_ins_size > target_registers_size || target_registers_size > self.registers.len() {
-                        return Err(DalvikVmError::InvalidBytecode);
-                    }
+                    let is_framework = target_class.starts_with("Landroid/") || target_class.starts_with("Landroidx/");
                     let string_args = [
                         if arg_count > 0 { self.string_registers[arg_registers[0]].as_deref() } else { None },
                         if arg_count > 1 { self.string_registers[arg_registers[1]].as_deref() } else { None },
                     ];
-                    if target_class.starts_with("Landroid/") || target_class.starts_with("Landroidx/") {
+                    if is_framework {
                         match super::framework::dispatch(&target_class, &target_method, &string_args, &mut self.captured_logs) {
                             Ok(super::framework::AndroidFrameworkResult::Return(value)) => self.last_return_value = value,
                             Ok(super::framework::AndroidFrameworkResult::Service(_)) => return Err(DalvikVmError::UnsupportedFrameworkApi),
@@ -447,6 +445,9 @@ impl DalvikVmState {
                             Err(_) => return Err(DalvikVmError::SecurityViolationForbiddenApi),
                         }
                     } else {
+                        if arg_count != target_ins_size || target_ins_size > target_registers_size || target_registers_size > self.registers.len() {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
                         let caller_registers = self.registers;
                         let caller_strings = self.string_registers.clone();
                         let base = target_registers_size - target_ins_size;
