@@ -1237,10 +1237,11 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
         # into the EDID below so the guest KMS modesets exactly 720x1440.
         # WHY no -device pointer flag: q35 already exposes the i8042 PS/2
         # controller that the guest's ps2_mouse driver talks to, and this
-        # QEMU build rejects `-device ps2-mouse` ("expects a pluggable device
-        # type"), which killed the VM instantly. A usb-tablet was tried, but
-        # the guest has no USB HID stack, so it booted yet moved nothing.
-        # Studio pointer input travels as absolute COM1 touch injection.
+        # QEMU build rejects a PS/2 mouse device flag ("expects a pluggable
+        # device type"), which killed the VM instantly. An absolute USB
+        # pointer was tried, but the guest has no USB HID stack, so it
+        # booted yet moved nothing. Studio pointer input travels as
+        # absolute COM1 touch injection.
         cmd.extend(["-vga", "none", "-device", "virtio-vga,edid=on,xres=720,yres=1440"])
         # A dedicated data disk is mandatory. The kernel uses the Primary Master
         # as the read-only boot image and the Primary Slave as persistent storage;
