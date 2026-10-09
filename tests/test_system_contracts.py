@@ -178,7 +178,11 @@ class SystemContractTests(unittest.TestCase):
         self.assertIn("INPUT_TOUCH DOWN", server)
         self.assertIn("/api/input/key", server)
         self.assertIn("INPUT_KEY", server)
-        self.assertIn("codePointAt(0)", app)
+        # Characters are encoded to Unicode code points at the server boundary
+        # (`INPUT_KEY {ord(key)}`); the client sends the raw {key} payload since
+        # the navigation-key contract landed (2ad962b) and no longer computes
+        # codePointAt(0) itself.
+        self.assertIn('f"INPUT_KEY {ord(key)}"', server)
         self.assertIn("Math.min(719", app)
         self.assertIn("/api/touch/event", app)
         self.assertIn("/api/input/key", app)

@@ -135,9 +135,13 @@ def test_studio_keyboard_uses_server_key_contract():
 
 def test_system_gesture_directions_are_explicit():
     source = (ROOT / "kernel/src/input/router.rs").read_text()
-    assert "1 if dx >= 40 => GestureKind::Back" in source
-    assert "2 if dx <= -40 => GestureKind::Recents" in source
-    assert "3 if dy <= -40 => GestureKind::Home" in source
+    # The bounds were consolidated into one named constant when the edge
+    # classifier was extracted (same value, same three directions), so assert
+    # both the constant and each explicit arm against it.
+    assert "const EDGE_SWIPE_MIN: i32 = 40;" in source
+    assert "1 if dx >= EDGE_SWIPE_MIN => GestureKind::Back" in source
+    assert "2 if dx <= -EDGE_SWIPE_MIN => GestureKind::Recents" in source
+    assert "3 if dy <= -EDGE_SWIPE_MIN => GestureKind::Home" in source
 
 
 def test_launcher_uses_real_registry_for_drawer_and_recent_surfaces():

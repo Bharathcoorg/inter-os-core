@@ -7,13 +7,18 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def test_canonical_qemu_uses_portrait_scanout_and_real_absolute_pointer_hardware():
+def test_canonical_qemu_uses_portrait_scanout_and_guest_supported_pointer_hardware():
     launcher = read("qemu/launch_studio.ps1")
     backend = read("emulator/server.py")
     for source in (launcher, backend):
         assert "virtio-vga,edid=on,xres=720,yres=1440" in source
-        assert "qemu-xhci,id=xhci0" in source
-        assert "usb-tablet,bus=xhci0.0" in source
+        # The guest implements a PS/2 mouse driver
+        # (kernel/src/drivers/ps2_mouse.rs) and no USB HID stack, so the
+        # canonical profiles attach ps2-mouse. The earlier usb-tablet /
+        # qemu-xhci expectations predate that boundary and cannot coexist with
+        # the "usb-tablet not in x86_profile" contract in
+        # test_virtual_smartphone_contract.py.
+        assert "ps2-mouse" in source
 
 
 def test_device_studio_displays_guest_scanout_without_a_browser_readiness_gate():

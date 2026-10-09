@@ -125,7 +125,12 @@ def test_volume_state_is_never_fabricated_when_guest_does_not_confirm():
 def test_device_studio_power_on_and_reboot_are_not_reported_as_simulated():
     server = read("emulator/server.py")
     app = read("emulator/app.js")
-    assert "monitor_alive = bool(query_qemu_monitor().get('qemu_alive', False))" in server
+    # Liveness must come from a live HMP query. The original one-line
+    # `query_qemu_monitor()` form (d4c006c) was restructured by 2ce79a6 into a
+    # single forced query whose result also reports guest_status, so assert the
+    # current equivalent rather than a cached process flag.
+    assert "monitor_state = query_qemu_monitor(force=True)" in server
+    assert "monitor_alive = bool(monitor_state.get('qemu_alive', False))" in server
     assert "restart_method = 'monitor_system_reset'" in server
     assert "restart_method = 'backend_relaunch'" in server
     assert "simulated" not in app
@@ -236,7 +241,10 @@ def test_power_menu_uses_guest_owned_shutdown_and_restart_transition():
     transition = read("apps/launcher/src/screens/power_transition.rs")
     assert "ViewMode::PowerTransition" in launcher
     assert "power_transition_started_ticks" in launcher
-    assert "elapsed >= 60" in launcher
+    # The transition ran for 60 ticks when this contract was written (826d96e);
+    # 7fefc38 lengthened it to POWER_TRANSITION_TICKS and added the dedicated
+    # long-enough assertion below without updating this line.
+    assert "elapsed >= POWER_TRANSITION_TICKS" in launcher
     assert "std::device_power(action)" in launcher
     assert "get_power_transition_color" in transition
     assert "std::device_power(0)" not in launcher[launcher.index("// Card 2: Restart"):launcher.index("// Card 3: Power off")]
