@@ -145,7 +145,11 @@
                    ================================================================ -->
               <div class="screen-live-scanout" id="screen-live-scanout" tabindex="0" role="application" aria-label="InterOS guest display. Click to focus, then use the keyboard to interact." style="display: flex;">
                 <canvas id="live-scanout-canvas" class="live-scanout-canvas" width="720" height="1440" style="display: none;"></canvas>
-                <img id="live-scanout-img" src="/api/screen/frame" alt="InterOS guest framebuffer — the guest kernel renders the entire device UI into this scanout" draggable="false" />
+                <img id="live-scanout-img" alt="InterOS guest framebuffer — the guest kernel renders the entire device UI into this scanout" draggable="false" style="display: none;" />
+                <div id="scanout-no-signal" class="scanout-no-signal">
+                  <div class="no-signal-title">No guest frame</div>
+                  <div class="no-signal-sub">Standby — boot the device to start the live scanout</div>
+                </div>
                 <div id="virtual-touch-dot" class="virtual-touch-dot"></div>
               </div>
             </div>

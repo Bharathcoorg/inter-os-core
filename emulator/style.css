@@ -2361,6 +2361,36 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   transform: translateZ(0);
 }
 
+/* Honest Studio-owned standby card: shown instead of the live canvas only
+   when no real guest frame is displayed. Never a fake readiness screen. */
+.scanout-no-signal {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: #000000;
+  color: #71717A;
+  text-align: center;
+  padding: 24px;
+  user-select: none;
+  pointer-events: none;
+}
+
+.scanout-no-signal .no-signal-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: #A1A1AA;
+}
+
+.scanout-no-signal .no-signal-sub {
+  font-size: 0.75rem;
+  color: #71717A;
+}
+
 .render-hz-badge {
   display: inline-flex;
   align-items: center;

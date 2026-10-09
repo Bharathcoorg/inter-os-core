@@ -85,6 +85,25 @@ document.addEventListener('DOMContentLoaded', () => {
     }, duration);
   };
 
+  // Studio console logger. Called ~30x across flows (reboot, ping, volume,
+  // telephony, IPC); it was referenced but never defined, so any hit path
+  // threw ReferenceError and aborted the handler. Lines are escaped, level
+  // colored, and the buffer is capped so the DOM cannot grow without bound.
+  window.logConsole = function(level, msg) {
+    try {
+      const terminal = document.getElementById('telemetry-terminal');
+      if (!terminal) return;
+      const colors = { ok: '#10B981', err: '#EF4444', warn: '#F59E0B', info: '#38BDF8' };
+      const line = document.createElement('div');
+      line.className = 'console-line console-' + String(level);
+      const time = new Date().toISOString().slice(11, 19);
+      line.innerHTML = `<span style="color:#71717A">[${time}]</span> <span style="color:${colors[level] || '#E4E4E7'}">[${escapeHtml(String(level).toUpperCase())}]</span> <span>${escapeHtml(String(msg))}</span>`;
+      terminal.appendChild(line);
+      while (terminal.children.length > 300) terminal.removeChild(terminal.firstChild);
+      terminal.scrollTop = terminal.scrollHeight;
+    } catch (_) {}
+  };
+
   const state = {
     screenOn: true,
     volume: null,
@@ -133,6 +152,36 @@ document.addEventListener('DOMContentLoaded', () => {
   const telemetryTerminal = document.getElementById('telemetry-terminal');
   const btnClearConsole = document.getElementById('btn-clear-console');
   const btnPingKernel = document.getElementById('btn-ping-kernel');
+  const btnDismissMobileWarn = document.getElementById('btn-dismiss-mobile-warn');
+
+  btnClearConsole?.addEventListener('click', () => {
+    if (telemetryTerminal) telemetryTerminal.innerHTML = '';
+    showToast('Telemetry console cleared');
+  });
+
+  btnPingKernel?.addEventListener('click', async () => {
+    try {
+      const resp = await fetch('/api/serial/write', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: 'PING' })
+      });
+      const data = await resp.json();
+      if (data.success) {
+        logConsole('info', '[PING] Guest microkernel ping dispatched via COM1.');
+        showToast('Ping sent to microkernel');
+      } else {
+        logConsole('err', '[PING] Kernel ping rejected: ' + (data.error || 'offline'));
+      }
+    } catch (e) {
+      logConsole('err', '[PING] Network error: ' + e.message);
+    }
+  });
+
+  btnDismissMobileWarn?.addEventListener('click', () => {
+    const banner = document.getElementById('mobile-warning-banner');
+    if (banner) banner.style.display = 'none';
+  });
 
   // Stage & Chassis
   const stageWrapper = document.getElementById('emulator-stage-wrapper');
@@ -150,6 +199,13 @@ document.addEventListener('DOMContentLoaded', () => {
   const emuBtnBack = document.getElementById('emu-btn-back');
   const emuBtnHome = document.getElementById('emu-btn-home');
   const emuBtnRecents = document.getElementById('emu-btn-recents');
+
+  // Navigation Gesture Guide Buttons (below phone chassis)
+  const btnGestureActivity = document.getElementById('btn-gesture-activity');
+  const btnGestureBack = document.getElementById('btn-gesture-back');
+  const btnGestureHome = document.getElementById('btn-gesture-home');
+  const btnGestureQuick = document.getElementById('btn-gesture-quick');
+  const btnGestureSystem = document.getElementById('btn-gesture-system');
 
   // Physical Side Buttons on chassis
   const hwBtnPower = document.getElementById('hw-btn-power');
@@ -432,10 +488,14 @@ document.addEventListener('DOMContentLoaded', () => {
     playBeep(440, 0.1, 'square');
 
     try {
-      const res = await fetch('/api/qemu/reboot', { method: 'POST' });
+      const res = await fetch('/api/qemu/reboot', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cold: true, action: 'reboot' })
+      });
       const data = await res.json();
       if (data.success) {
-        logConsole('ok', `[REBOOT_OK] QEMU restart completed via ${data.restart_method || (data.qemu_reset ? 'monitor_system_reset' : 'backend_relaunch')}.`);
+        logConsole('ok', `[REBOOT_OK] QEMU restart completed via ${data.restart_method || 'backend_relaunch'}.`);
         playBeep(880, 0.08, 'triangle');
       }
     } catch (err) {
@@ -470,9 +530,21 @@ document.addEventListener('DOMContentLoaded', () => {
   const screenLiveScanout = document.getElementById('screen-live-scanout');
   const liveScanoutImg = document.getElementById('live-scanout-img');
   const liveScanoutCanvas = document.getElementById('live-scanout-canvas');
+  const scanoutNoSignal = document.getElementById('scanout-no-signal');
+  // Single visible surface: exactly one of the live canvas or the honest
+  // Studio-owned "No guest frame" standby card is shown. The legacy <img>
+  // element stays hidden with no src so a missing frame can never surface as
+  // broken-image alt text on the phone screen.
+  let hasLiveFrame = false;
+  function setSurfaceState(mode) {
+    const live = (mode === 'live');
+    hasLiveFrame = live;
+    if (liveScanoutCanvas) liveScanoutCanvas.style.display = live ? 'block' : 'none';
+    if (liveScanoutImg) liveScanoutImg.style.display = 'none';
+    if (scanoutNoSignal) scanoutNoSignal.style.display = live ? 'none' : 'flex';
+  }
   let scanoutCtx = null;
   if (liveScanoutCanvas) {
-    liveScanoutCanvas.style.display = 'block';
     if (liveScanoutImg) liveScanoutImg.style.display = 'none';
     scanoutCtx = liveScanoutCanvas.getContext('2d', { alpha: false, desynchronized: true });
     if (scanoutCtx) {
@@ -480,13 +552,9 @@ document.addEventListener('DOMContentLoaded', () => {
       scanoutCtx.imageSmoothingQuality = 'high';
     }
   }
+  setSurfaceState('no-signal');
 
-  // Gestures
-  const btnGestureActivity = document.getElementById('btn-gesture-activity');
-  const btnGestureBack = document.getElementById('btn-gesture-back');
-  const btnGestureHome = document.getElementById('btn-gesture-home');
-  const btnGestureQuick = document.getElementById('btn-gesture-quick');
-  const btnGestureSystem = document.getElementById('btn-gesture-system');
+  // Gesture button handles are declared once with the other toolbar controls above.
 
   let cropMode = 'portrait'; // Canonical guest scanout is native 720x1440 portrait.
   let scanoutTimer = null;
@@ -546,6 +614,10 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function renderScanoutPixels(pixels, width, height) {
+    // Never resize the phone surface to a wrong geometry: only canonical
+    // guest scanouts (portrait 720x1440, landscape 1280x720) are displayed.
+    if (!((width === 720 && height === 1440) || (width === 1280 && height === 720))) return false;
+    if (!pixels || pixels.byteLength < width * height * 4) return false;
     if (scanoutCtx && liveScanoutCanvas) {
       if (liveScanoutCanvas.width !== width || liveScanoutCanvas.height !== height) {
         liveScanoutCanvas.width = width;
@@ -553,7 +625,10 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       const imgData = new ImageData(new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, width * height * 4), width, height);
       scanoutCtx.putImageData(imgData, 0, 0);
+      setSurfaceState('live');
+      return true;
     }
+    return false;
   }
 
   let binaryStreamActive = false;
@@ -598,7 +673,17 @@ document.addEventListener('DOMContentLoaded', () => {
           const width = view.getUint16(4);
           const height = view.getUint16(6);
           const seq = view.getUint32(8);
+          // Sanity-bound untrusted frame dimensions before framing: a corrupt
+          // stream must resync, not grow the buffer without bound.
+          if (width < 1 || height < 1 || width > 4096 || height > 4096) {
+            accumulated = accumulated.subarray(16);
+            continue;
+          }
           const frameBytes = 16 + width * height * 4;
+          if (frameBytes > 32 * 1024 * 1024) {
+            accumulated = accumulated.subarray(16);
+            continue;
+          }
 
           if (accumulated.length < frameBytes) {
             break;
@@ -609,8 +694,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
           if (seq > lastFrameSeq) {
             lastFrameSeq = seq;
-            renderScanoutPixels(pixelBytes, width, height);
-            updateFpsCounter();
+            if (renderScanoutPixels(pixelBytes, width, height)) updateFpsCounter();
           }
         }
       }
@@ -676,14 +760,20 @@ document.addEventListener('DOMContentLoaded', () => {
       const url = `/api/screen/frame?t=${Date.now()}${orientParam}`;
       const img = new Image();
       img.onload = () => {
+        // The canvas is the single visible surface; the hidden legacy <img>
+        // element is never fed so it cannot show broken-image alt text.
+        if (!((img.naturalWidth === 720 && img.naturalHeight === 1440)
+          || (img.naturalWidth === 1280 && img.naturalHeight === 720))) {
+          resolve();
+          return;
+        }
         if (scanoutCtx && liveScanoutCanvas) {
           if (liveScanoutCanvas.width !== img.naturalWidth || liveScanoutCanvas.height !== img.naturalHeight) {
             liveScanoutCanvas.width = img.naturalWidth;
             liveScanoutCanvas.height = img.naturalHeight;
           }
           scanoutCtx.drawImage(img, 0, 0);
-        } else if (liveScanoutImg) {
-          liveScanoutImg.src = img.src;
+          setSurfaceState('live');
         }
         resolve();
       };
@@ -722,12 +812,17 @@ document.addEventListener('DOMContentLoaded', () => {
   function updateDeviceDisplay(isAlive) {
     if (isAlive) {
       // The monitor must never invent a readiness screen. As soon as QEMU is alive,
-      // expose its real scanout; boot/lock/off pixels are guest-owned.
+      // expose its real scanout; boot/lock/off pixels are guest-owned. Until the
+      // first real frame arrives the honest Studio-owned standby card is shown.
       if (screenLiveScanout) screenLiveScanout.style.display = 'flex';
+      if (!hasLiveFrame) setSurfaceState('no-signal');
       startScanoutStream();
     } else {
       stopScanoutStream();
-      if (screenLiveScanout) screenLiveScanout.style.display = 'none';
+      // Stay visible on the standby card: hiding the whole surface would leave
+      // a bare chassis with no honest state.
+      if (screenLiveScanout) screenLiveScanout.style.display = 'flex';
+      setSurfaceState('no-signal');
     }
   }
 
@@ -811,9 +906,24 @@ document.addEventListener('DOMContentLoaded', () => {
   const touchSurface = screenLiveScanout || liveScanoutImg;
   // Serialize all guest contacts so DOWN/MOVE/UP/CANCEL retain order even
   // when the threaded Studio server handles requests concurrently.
+  // Pointermove coalescing: every move is tagged and the newest move per slot
+  // is remembered. A queued move superseded by a newer one resolves without a
+  // POST, so a fast drag sends the latest position instead of a stale backlog.
+  // Only waiting moves are ever skipped, so DOWN/MOVE/UP/CANCEL order is kept.
   let guestTouchQueue = Promise.resolve();
+  let guestTouchSequence = 0;
+  const latestMoveSequenceBySlot = {};
   function sendGuestTouchEvent(payload) {
+    let moveSequence = 0;
+    if (payload.action === 'move') {
+      guestTouchSequence += 1;
+      moveSequence = guestTouchSequence;
+      latestMoveSequenceBySlot[payload.slot || 0] = moveSequence;
+    }
     const request = guestTouchQueue.then(async () => {
+      if (payload.action === 'move' && latestMoveSequenceBySlot[payload.slot || 0] !== moveSequence) {
+        return { success: true, coalesced: true };
+      }
       const response = await fetch('/api/touch/event', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -842,10 +952,14 @@ document.addEventListener('DOMContentLoaded', () => {
     let activePointerId = null;
     let lastSentX = 0, lastSentY = 0;
     let lastMoveTime = 0;
+    let deadTapToastAt = 0;
     touchSurface.style.touchAction = 'none';
     touchSurface.style.userSelect = 'none';
 
     const mapPoint = (clientX, clientY) => {
+      // A tap on a dead surface must never silently inject: mapping is
+      // disabled until a real guest frame is displayed on the live canvas.
+      if (!hasLiveFrame || !liveScanoutCanvas || liveScanoutCanvas.style.display === 'none') return null;
       const rect = getGuestPointerRect();
       if (!rect || clientX < rect.left || clientX >= rect.left + rect.width
         || clientY < rect.top || clientY >= rect.top + rect.height) return null;
@@ -860,7 +974,16 @@ document.addEventListener('DOMContentLoaded', () => {
     touchSurface.addEventListener('pointerdown', (ev) => {
       if (ev.button !== 0 || isPointerDown) return;
       const point = mapPoint(ev.clientX, ev.clientY);
-      if (!point) return;
+      if (!point) {
+        // Honest feedback instead of a silent no-op: at most one notice per
+        // few seconds so a dead-surface drag does not spam toasts.
+        const now = performance.now();
+        if (now - deadTapToastAt > 2500) {
+          deadTapToastAt = now;
+          showToast('No guest frame — input unavailable');
+        }
+        return;
+      }
       ev.preventDefault();
       try { touchSurface.focus({ preventScroll: true }); } catch (_) { touchSurface.focus(); }
       isPointerDown = true;
@@ -1205,7 +1328,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Screendump: export exactly what the guest framebuffer contains.
   emuBtnScreenshot?.addEventListener('click', async () => {
     try {
-      const resp = await fetch('/api/screen/frame');
+      const resp = await fetch('/api/screen/frame?format=png');
       if (resp.ok) {
         const blob = await resp.blob();
         const url = URL.createObjectURL(blob);
@@ -1266,6 +1389,20 @@ document.addEventListener('DOMContentLoaded', () => {
   function triggerReboot() {
     executeWarmReboot();
   }
+
+  emuBtnReboot?.addEventListener('click', triggerReboot);
+
+  emuBtnBack?.addEventListener('click', () => {
+    dispatchHardwareGesture('Back', { action: 'back' });
+  });
+
+  emuBtnHome?.addEventListener('click', () => {
+    dispatchHardwareGesture('Home', { action: 'home' });
+  });
+
+  emuBtnRecents?.addEventListener('click', () => {
+    dispatchHardwareGesture('Recents', { action: 'recents' });
+  });
   // =========================================================================
   // 12. MULTI-FORMAT APPLICATION SIDELOADING (.app, .rap, .wasm, .apk)
   // =========================================================================

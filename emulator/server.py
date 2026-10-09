@@ -49,6 +49,19 @@ launcher_has_booted = False
 LOGICAL_SURFACE_W, LOGICAL_SURFACE_H = 720, 1440
 guest_framebuffer_size = (720, 1440)
 
+# Canonical guest scanout geometries. The x86_64 phone profile requests a
+# native 720x1440 portrait scanout via EDID; landscape presents 1280x720. A VNC
+# session reporting any other desktop size is stale or transitional (e.g. a
+# 200x400 shadow while the live desktop is 1280x720): publishing it would crop
+# the phone surface to the wrong geometry, so the session is resynchronised
+# instead of streaming stale pixels.
+CANONICAL_SCANOUT_SIZES = frozenset(((720, 1440), (1280, 720)))
+MAX_SCANOUT_DIM = 4096
+
+
+def is_canonical_scanout(w, h):
+    return (w, h) in CANONICAL_SCANOUT_SIZES
+
 
 def letterbox_box(fb_w, fb_h):
     """Returns the phone-surface rect (left, top, right, bottom) in a fb_w x fb_h scanout.
@@ -800,6 +813,28 @@ class VncScanoutClient:
         t.name = "VncScanoutWorker"
         t.start()
 
+    def _invalidate_cached_frame(self):
+        """Drops the published frame so consumers see 503, not stale pixels."""
+        with self.frame_cond:
+            self.latest_raw_rgba = None
+            self.latest_raw_w = 0
+            self.latest_raw_h = 0
+            self.latest_binary_msg = None
+            self.latest_jpeg = None
+            self.latest_png = None
+            self.frame_cond.notify_all()
+
+    def _abort_session(self, s, reason):
+        """Tears down a stale session and forces a resync instead of publishing it."""
+        self._invalidate_cached_frame()
+        try:
+            s.close()
+        except Exception:
+            pass
+        self.connected = False
+        time.sleep(0.75)
+        raise ConnectionError(reason)
+
     def _worker_loop(self):
         while self.running:
             try:
@@ -846,9 +881,14 @@ class VncScanoutClient:
         sinit = self._recv_exact(s, 24)
         w, h = struct.unpack('>HH', sinit[:4])
         name_len = struct.unpack('>I', sinit[20:24])[0]
+        if name_len > 65536:
+            self._abort_session(s, f"VNC server name too large ({name_len})")
         if name_len > 0:
             self._recv_exact(s, name_len)
 
+        if w <= 0 or h <= 0 or w > MAX_SCANOUT_DIM or h > MAX_SCANOUT_DIM or not is_canonical_scanout(w, h):
+            # Stale or transitional session: never publish crops from it.
+            self._abort_session(s, f"non-canonical VNC desktop size {w}x{h}")
         self.width = w
         self.height = h
         global guest_framebuffer_size
@@ -875,34 +915,42 @@ class VncScanoutClient:
                     rh = self._recv_exact(s, 12)
                     rx, ry, rw, rh_val, enc = struct.unpack('>HHHHi', rh)
                     if enc == -239:
+                        if (rw <= 0 or rh_val <= 0 or rw > MAX_SCANOUT_DIM or rh_val > MAX_SCANOUT_DIM
+                                or not is_canonical_scanout(rw, rh_val)):
+                            self._abort_session(s, f"non-canonical VNC desktop size {rw}x{rh_val}")
                         self.width, self.height = rw, rh_val
                         guest_framebuffer_size = (rw, rh_val)
                         self.scanout_buf = bytearray(rw * rh_val * 4)
                         continue
-                    if enc == 0:
-                        total_bytes = rw * rh_val * 4
-                        mv = memoryview(self.scanout_buf)
-                        if rw == self.width and rx == 0:
-                            dst_offset = ry * self.width * 4
-                            pos = 0
-                            while pos < total_bytes:
-                                n = s.recv_into(mv[dst_offset + pos : dst_offset + total_bytes], min(131072, total_bytes - pos))
-                                if n == 0:
-                                    raise EOFError()
-                                pos += n
-                        else:
-                            temp_buf = bytearray(total_bytes)
-                            t_mv = memoryview(temp_buf)
-                            pos = 0
-                            while pos < total_bytes:
-                                n = s.recv_into(t_mv[pos:], min(131072, total_bytes - pos))
-                                if n == 0:
-                                    raise EOFError()
-                                pos += n
-                            for row in range(rh_val):
-                                src_off = row * rw * 4
-                                dst_off = ((ry + row) * self.width + rx) * 4
-                                self.scanout_buf[dst_off : dst_off + rw * 4] = temp_buf[src_off : src_off + rw * 4]
+                    if enc != 0:
+                        # Only Raw was negotiated; anything else cannot be
+                        # decoded, so resync rather than desynchronise the stream.
+                        self._abort_session(s, f"unsupported VNC encoding {enc}")
+                    if (rw <= 0 or rh_val <= 0 or rx + rw > self.width or ry + rh_val > self.height):
+                        self._abort_session(s, "VNC rect out of bounds")
+                    total_bytes = rw * rh_val * 4
+                    mv = memoryview(self.scanout_buf)
+                    if rw == self.width and rx == 0:
+                        dst_offset = ry * self.width * 4
+                        pos = 0
+                        while pos < total_bytes:
+                            n = s.recv_into(mv[dst_offset + pos : dst_offset + total_bytes], min(131072, total_bytes - pos))
+                            if n == 0:
+                                raise EOFError()
+                            pos += n
+                    else:
+                        temp_buf = bytearray(total_bytes)
+                        t_mv = memoryview(temp_buf)
+                        pos = 0
+                        while pos < total_bytes:
+                            n = s.recv_into(t_mv[pos:], min(131072, total_bytes - pos))
+                            if n == 0:
+                                raise EOFError()
+                            pos += n
+                        for row in range(rh_val):
+                            src_off = row * rw * 4
+                            dst_off = ((ry + row) * self.width + rx) * 4
+                            self.scanout_buf[dst_off : dst_off + rw * 4] = temp_buf[src_off : src_off + rw * 4]
 
                 self._publish_frame(t_frame_start)
                 s.sendall(struct.pack('>BBHHHH', 3, 1, 0, 0, self.width, self.height))
@@ -913,7 +961,13 @@ class VncScanoutClient:
                     break
             except Exception:
                 break
-        s.close()
+        try:
+            s.close()
+        except Exception:
+            pass
+        # The session is gone: withdraw its pixels so the screen routes answer
+        # 503 instead of serving a dead session's last frame as live.
+        self._invalidate_cached_frame()
         self.connected = False
 
     def _publish_frame(self, t_start):
@@ -1838,6 +1892,44 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 'width': vnc_client.latest_raw_w,
                 'height': vnc_client.latest_raw_h,
             }).encode())
+            return
+
+        if parsed_path.path == '/api/screen/frame':
+            # Single-shot canonical guest frame for the screenshot control and
+            # the canvas polling fallback. Serves only live canonical scanouts
+            # (portrait 720x1440, landscape 1280x720); anything else is an
+            # honest 503 so the phone never shows a broken image.
+            query = urllib.parse.parse_qs(parsed_path.query)
+            prefer_jpeg = query.get('format', ['jpeg'])[0].lower() != 'png'
+            img_bytes, mime_or_reason = None, 'No guest frame available'
+            with vnc_client.frame_cond:
+                live_canonical = (
+                    vnc_client.connected
+                    and vnc_client.latest_raw_rgba is not None
+                    and (vnc_client.latest_raw_w, vnc_client.latest_raw_h) in CANONICAL_SCANOUT_SIZES
+                )
+            if live_canonical:
+                img_bytes, mime_or_reason = vnc_client.get_image_frame(prefer_jpeg=prefer_jpeg)
+            monitor_alive = bool(query_qemu_monitor().get('qemu_alive'))
+            if img_bytes is None and monitor_alive:
+                # VNC session not established but the guest is alive: fall back
+                # to the existing capture pipeline (live screendump, canonical
+                # portrait only) rather than inventing pixels.
+                img_bytes, mime_or_reason = capture_qemu_screen_frame(prefer_jpeg=prefer_jpeg)
+            if img_bytes is not None and (live_canonical or monitor_alive):
+                self.send_response(200)
+                self.send_header('Content-Type', mime_or_reason)
+                self.send_header('Content-Length', str(len(img_bytes)))
+                self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+                self.end_headers()
+                self.wfile.write(img_bytes)
+            else:
+                self.send_response(503)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+                self.end_headers()
+                reason = mime_or_reason if (img_bytes is None and mime_or_reason) else 'No guest frame available'
+                self.wfile.write(json.dumps({'success': False, 'error': reason}).encode())
             return
 
         if parsed_path.path == '/api/audio/volume':
