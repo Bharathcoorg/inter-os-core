@@ -460,9 +460,11 @@ document.addEventListener('DOMContentLoaded', () => {
           guestFps = data.guest_fps;
         }
         updateHardwareProfilerUI(data);
+        updateGuestBootSurface({ qemuAlive: !!data.qemu_alive, launcherReady: !!data.launcher_ready });
       }
     } catch (e) {
       updateHardwareProfilerUI({ qemu_alive: false, status: 'offline' });
+      updateGuestBootSurface({ qemuAlive: false, launcherReady: false });
     }
   }
 
@@ -470,8 +472,13 @@ document.addEventListener('DOMContentLoaded', () => {
   fetchHardwareTelemetry();
   setInterval(fetchHardwareTelemetry, 1500);
 
-  // Warm Reboot Microkernel Flow (Flicker-Free & Synced)
+  // Header restart flow. This is the single restart affordance of the Studio:
+  // the header control drives the same stop -> launch sequence as
+  // restartStudioGuest (which falls back to a QEMU-monitor reset for a guest
+  // this Studio process does not own), so there is exactly one restart path
+  // in the client instead of a second power bar under the device.
   async function executeWarmReboot() {
+    if (bootFacts.busy) return;   // a restart request is already in flight
     isBooting = true;
 
     // Keep the real QEMU scanout visible during reset so the guest boot animation,
@@ -483,24 +490,24 @@ document.addEventListener('DOMContentLoaded', () => {
       if (span) span.textContent = 'Rebooting...';
     }
 
-    logConsole('warn', '[KERNEL_EVENT] Warm reboot signal dispatched to hardware controller...');
+    logConsole('warn', '[KERNEL_EVENT] Guest restart requested from the Studio header; stop -> launch flow dispatched...');
     showToast('Rebooting InterOS...');
     playBeep(440, 0.1, 'square');
 
-    try {
-      const res = await fetch('/api/qemu/reboot', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cold: true, action: 'reboot' })
-      });
-      const data = await res.json();
-      if (data.success) {
-        logConsole('ok', `[REBOOT_OK] QEMU restart completed via ${data.restart_method || 'backend_relaunch'}.`);
-        playBeep(880, 0.08, 'triangle');
+    // The real verdict (server messages, monitor fallback, honest errors) is
+    // logged and toasted by restartStudioGuest itself.
+    const restarted = await restartStudioGuest();
+    if (!restarted) {
+      isBooting = false;
+      if (bootCheckInterval) clearInterval(bootCheckInterval);
+      if (btnRebootKernel) {
+        btnRebootKernel.style.pointerEvents = 'auto';
+        const span = btnRebootKernel.querySelector('span');
+        if (span) span.textContent = 'Retry Reboot';
       }
-    } catch (err) {
-      logConsole('err', `[REBOOT_ERROR] Failed to send reboot: ${err.message}`);
+      return;
     }
+    playBeep(880, 0.08, 'triangle');
 
     if (bootCheckInterval) clearInterval(bootCheckInterval);
     bootCheckInterval = setInterval(checkLauncherBootReady, 400);
@@ -1225,6 +1232,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const resp = await fetch('/api/qemu/status');
       const data = await resp.json();
       describeObservedTarget(data);
+      updateGuestBootSurface({ qemuAlive: !!data.qemu, launcherReady: !!data.launcher_ready });
       if (data.launcher_ready) {
         if (bootCheckInterval) {
           clearInterval(bootCheckInterval);
@@ -1966,9 +1974,308 @@ document.addEventListener('DOMContentLoaded', () => {
   // was already painted once above; this repaints it from a fresh /api/apps/list.
   populatePackagesTable();
 
-  // Initial boot greeting
-  logConsole('info', 'InterOS Core Microkernel v8.2 Studio initialized.');
-  logConsole('ok', 'Universal Rust Mobile Platform: RISC-V 64 / ARM64 / x86_64 targets supported.');
+  // =========================================================================
+  // PHONE-FRAME BOOT SURFACE: boot splash
+  // Everything in this section is driven by real data only:
+  //   - /api/serial carries the guest's real COM1 output (the boot log of the
+  //     current session mirrored by the server, plus the live UART stream);
+  //   - /api/qemu/status launcher_ready is the server's readiness gate over
+  //     live guest evidence (check_launcher_ready in server.py);
+  //   - /api/qemu/telemetry qemu_alive is the real guest liveness.
+  // No log line, boot stage, percentage or timing is invented here: the splash
+  // lists milestones that were actually observed on COM1 (or by the readiness
+  // gate), anything not yet observed stays visibly pending, and an unknown
+  // value is labelled as unknown.
+  // =========================================================================
+  const BOOT_MILESTONES = [
+    {
+      id: 'firmware',
+      label: 'Firmware / bootloader',
+      // The bootloader stage's own COM1 output (4th-stage + BIOS boot banners).
+      match: (line) => /^INFO : (4th Stage|BIOS boot|Framebuffer info)/.test(line),
+    },
+    {
+      id: 'kernel',
+      label: 'Kernel online',
+      match: (line) => line.includes('[BOOT] Serial COM1 online'),
+    },
+    {
+      id: 'display',
+      label: 'Display HAL / compositor',
+      match: (line) => line.includes('[GUI] Low-level display/compositor infrastructure online')
+        || line.startsWith('[DISPLAY_HAL]')
+        || line.includes('[TASK compositor'),
+    },
+    {
+      id: 'launcher',
+      label: 'Launcher presenting',
+      // No serial pattern: this milestone is set from the server's
+      // launcher_ready gate, which flips only on live guest evidence.
+      readiness: true,
+    },
+  ];
+
+  const phoneSurface = { built: false };
+  const bootFacts = {
+    qemuAlive: false,
+    launcherReady: false,
+    busy: false,        // a Start/Restart request is in flight
+    sessionStart: 0,    // Date.now() at the observed guest start (0 = unknown)
+    stageEvidence: {},  // milestone id -> the real line that proved it
+  };
+
+  function ensurePhoneFrameSurface() {
+    if (phoneSurface.built) return phoneSurface;
+    const deviceScreen = document.getElementById('device-screen');
+    if (!deviceScreen) return null;
+
+    // The Studio's Live console (the serial panel in the Activity drawer) is
+    // the only serial view: there is deliberately NO console overlay inside
+    // the bezel and NO Console chip on the chassis — the in-frame console was
+    // vetoed as redundant clutter.
+
+    // Boot splash: logo/wordmark animation plus a milestone checklist whose
+    // ticks are real observed boot signals, never a timed or fake progress bar.
+    const splash = document.createElement('div');
+    splash.id = 'phone-boot-splash';
+    splash.className = 'phone-boot-splash';
+    splash.innerHTML = [
+      '<div class="pbs-logo" aria-hidden="true">',
+      '  <svg viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">',
+      '    <path class="pbs-hex-outer" d="M14 2.5L3.5 8.5V20.5L14 26.5L24.5 20.5V8.5L14 2.5Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>',
+      '    <path class="pbs-hex-inner" d="M14 7.5L8 11V18L14 21.5L20 18V11L14 7.5Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>',
+      '    <circle class="pbs-core" cx="14" cy="14.5" r="2.5" fill="currentColor"/>',
+      '  </svg>',
+      '</div>',
+      '<div class="pbs-wordmark">InterOS</div>',
+      '<div class="pbs-sub" id="pbs-sub">Waiting for guest serial output&hellip;</div>',
+      '<ol class="pbs-stages" id="pbs-stages"></ol>',
+      '<div class="pbs-elapsed" id="pbs-elapsed">elapsed unknown</div>',
+    ].join('');
+    deviceScreen.appendChild(splash);
+
+    // There is deliberately NO second power/restart bar under the device: the
+    // Studio header keeps the single restart affordance (see executeWarmReboot,
+    // which drives the same stop -> launch flow as restartStudioGuest), so a
+    // duplicate Start/Restart button and its power state label are not
+    // rendered here.
+
+    Object.assign(phoneSurface, {
+      built: true,
+      splash,
+      stageList: splash.querySelector('#pbs-stages'),
+      sub: splash.querySelector('#pbs-sub'),
+      elapsed: splash.querySelector('#pbs-elapsed'),
+    });
+    renderPhoneFrameSurface();
+    return phoneSurface;
+  }
+
+  // Shorten an observed evidence line to fit the milestone row (the row's own
+  // title attribute keeps the full text).
+  function truncateEvidence(text) {
+    const s = String(text);
+    return s.length > 52 ? s.slice(0, 51) + '\u2026' : s;
+  }
+
+  // Mark boot milestones that this real line proves. Only observed lines move
+  // the splash forward; nothing advances on a timer.
+  function noteBootMilestone(text) {
+    const line = String(text);
+    let changed = false;
+    for (const milestone of BOOT_MILESTONES) {
+      if (milestone.readiness || bootFacts.stageEvidence[milestone.id]) continue;
+      if (milestone.match && milestone.match(line)) {
+        bootFacts.stageEvidence[milestone.id] = line;
+        changed = true;
+      }
+    }
+    if (changed) renderPhoneFrameSurface();
+  }
+
+  // Liveness + readiness from the Studio's real guest endpoints. A start
+  // transition (stopped -> alive) begins a new boot session for the splash.
+  function updateGuestBootSurface({ qemuAlive = false, launcherReady = false } = {}) {
+    const wasAlive = bootFacts.qemuAlive;
+    bootFacts.qemuAlive = !!qemuAlive;
+    bootFacts.launcherReady = !!launcherReady;
+    if (launcherReady) {
+      bootFacts.stageEvidence.launcher = 'launcher_ready reported by /api/qemu/status';
+    } else {
+      delete bootFacts.stageEvidence.launcher;
+    }
+    if (!wasAlive && bootFacts.qemuAlive) bootFacts.sessionStart = Date.now();
+    if (!bootFacts.qemuAlive) bootFacts.sessionStart = 0;
+    renderPhoneFrameSurface();
+  }
+
+  function renderPhoneFrameSurface() {
+    const surface = ensurePhoneFrameSurface();
+    if (!surface || !surface.built) return;
+    // The frame carries only the boot splash now: the in-frame serial console
+    // and its Console chip were removed (the Studio's Live console is the one
+    // serial view), so nothing is docked to the bottom of the bezel and the
+    // splash always owns the FULL frame while the guest boots.
+    renderBootSplash();
+  }
+
+  function renderBootSplash() {
+    const surface = ensurePhoneFrameSurface();
+    if (!surface || !surface.built || !surface.stageList) return;
+    const show = bootFacts.qemuAlive && !bootFacts.launcherReady;
+    surface.splash.classList.toggle('is-visible', show);
+    if (!show) return;
+
+    const signature = BOOT_MILESTONES.map(m => (bootFacts.stageEvidence[m.id] ? '1' : '0')).join('');
+    if (surface.stageList.dataset.signature !== signature) {
+      surface.stageList.dataset.signature = signature;
+      surface.stageList.innerHTML = BOOT_MILESTONES.map((m) => {
+        const evidence = bootFacts.stageEvidence[m.id];
+        const evidenceHtml = evidence
+          ? `<span class="pbs-evidence" title="${escapeHtml(evidence)}">${escapeHtml(truncateEvidence(evidence))}</span>`
+          : '<span class="pbs-evidence pending">not observed yet</span>';
+        return `<li class="${evidence ? 'done' : 'pending'}">`
+          + `<span class="pbs-mark">${evidence ? '\u25CF' : '\u25CB'}</span>`
+          + `<span class="pbs-label">${escapeHtml(m.label)}</span>`
+          + evidenceHtml + '</li>';
+      }).join('');
+    }
+    if (surface.sub) {
+      const done = BOOT_MILESTONES.filter(m => bootFacts.stageEvidence[m.id]).length;
+      surface.sub.textContent = `${done} of ${BOOT_MILESTONES.length} boot milestones observed`;
+    }
+    updateSplashElapsed();
+  }
+
+  function updateSplashElapsed() {
+    const surface = phoneSurface;
+    if (!surface || !surface.built || !surface.elapsed) return;
+    if (!bootFacts.sessionStart) {
+      surface.elapsed.textContent = 'elapsed unknown (guest started before this page attached)';
+      return;
+    }
+    surface.elapsed.textContent = 't+' + ((Date.now() - bootFacts.sessionStart) / 1000).toFixed(1) + 's';
+  }
+  setInterval(updateSplashElapsed, 250);
+
+  // 1-click Start / Restart of the real guest, driven by the Studio header's
+  // single restart control (executeWarmReboot). Two real server verbs:
+  // POST /api/qemu/stop terminates the QEMU this Studio launched (a no-op
+  // when nothing runs) and POST /api/qemu/launch starts the profile again.
+  // Every message shown is the server's own verdict. Resolves true only when
+  // a verb really reported success.
+  async function restartStudioGuest() {
+    if (bootFacts.busy) return false;
+    bootFacts.busy = true;
+    renderPhoneFrameSurface();
+    try {
+      const stopResp = await fetch('/api/qemu/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}'
+      });
+      const stopData = await stopResp.json().catch(() => ({}));
+      if (!stopResp.ok || stopData.success === false) {
+        if (stopData.owned === false) {
+          // The guest outlived this server process, so nothing in it may be
+          // killed. Fall back to the supported warm reset through QEMU's
+          // monitor and report that verb's real verdict.
+          const warmResp = await fetch('/api/qemu/reboot', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'reboot' })
+          });
+          const warmData = await warmResp.json().catch(() => ({}));
+          if (!warmResp.ok || warmData.success === false) {
+            throw new Error(warmData.error || warmData.message || ('warm reset failed (HTTP ' + warmResp.status + ')'));
+          }
+          logConsole('ok', '[POWER] Guest was launched by an earlier Studio process; warm reset via ' + (warmData.restart_method || 'QEMU monitor') + '.');
+          showToast('Guest reset via QEMU monitor (not a cold restart)');
+          bootFacts.sessionStart = Date.now();
+          bootFacts.stageEvidence = {};
+          renderPhoneFrameSurface();
+          return true;
+        }
+        throw new Error(stopData.error || stopData.message || ('stop failed (HTTP ' + stopResp.status + ')'));
+      }
+      logConsole('info', '[POWER] ' + (stopData.message || 'Guest stopped'));
+      bootFacts.sessionStart = Date.now();
+      bootFacts.stageEvidence = {};
+      renderPhoneFrameSurface();
+
+      const launchResp = await fetch('/api/qemu/launch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile: 'x86_64' })
+      });
+      const launchData = await launchResp.json().catch(() => ({}));
+      if (!launchResp.ok || launchData.success === false) {
+        throw new Error(launchData.message || ('launch failed (HTTP ' + launchResp.status + ')'));
+      }
+      logConsole('ok', '[POWER] ' + (launchData.message || 'Guest started'));
+      showToast(launchData.message || 'Guest started');
+      return true;
+    } catch (e) {
+      logConsole('err', '[POWER] Guest restart failed: ' + e.message);
+      showToast('Guest restart failed: ' + e.message);
+      return false;
+    } finally {
+      bootFacts.busy = false;
+      renderPhoneFrameSurface();
+    }
+  }
+
+  // =========================================================================
+  // GUEST SERIAL STREAM (COM1)
+  // The console header promises "Ring 0 Live Serial Log". This polls the
+  // server's /api/serial ring buffer (the real kernel UART output) and appends
+  // it; before this existed the panel showed only Studio-side events plus a
+  // fabricated boot greeting, while the actual serial log was never read by
+  // any frontend code. First fetch anchors the cursor and renders only the
+  // tail so a reload does not dump the whole boot log; afterwards only new
+  // lines are appended. A cursor ahead of `total` means QEMU was relaunched
+  // and the ring buffer restarted, so the cursor is re-anchored. Every line
+  // also feeds the boot-milestone detector, so the Studio Live console and the
+  // boot splash are views of the same real guest output.
+  (function streamGuestSerial() {
+    const terminal = document.getElementById('telemetry-terminal');
+    if (!terminal) return;
+    const MAX_BACKFILL_LINES = 150;
+    let cursor = null;
+    const appendSerial = (text) => {
+      noteBootMilestone(text);
+      try {
+        const line = document.createElement('div');
+        line.className = 'console-line console-serial';
+        const time = new Date().toISOString().slice(11, 19);
+        line.innerHTML = `<span style="color:#71717A">[${time}]</span> <span style="color:#A1A1AA">[UART]</span> <span>${escapeHtml(String(text))}</span>`;
+        terminal.appendChild(line);
+        while (terminal.children.length > 300) terminal.removeChild(terminal.firstChild);
+        terminal.scrollTop = terminal.scrollHeight;
+      } catch (_) {}
+    };
+    const poll = async () => {
+      try {
+        const resp = await fetch(`/api/serial?after=${cursor === null ? 0 : cursor}`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const total = Number(data.total) || 0;
+        const lines = Array.isArray(data.lines) ? data.lines : [];
+        if (cursor === null) {
+          const skip = Math.max(0, lines.length - MAX_BACKFILL_LINES);
+          for (let i = skip; i < lines.length; i++) appendSerial(lines[i]);
+          cursor = total;
+        } else if (total < cursor) {
+          cursor = total;
+        } else {
+          for (const l of lines) appendSerial(l);
+          cursor = total;
+        }
+      } catch (_) {}
+    };
+    poll();
+    setInterval(poll, 1000);
+  })();
 
   // Initialize Lucide icons on boot
   if (window.lucide && typeof window.lucide.createIcons === 'function') {

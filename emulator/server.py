@@ -39,6 +39,8 @@ serial_lines = []
 serial_socket_conn = None
 serial_socket_lock = threading.Lock()
 telemetry_lock = threading.Lock()
+# Bumped on every QEMU (re)launch; readers compare it to detect stale sockets.
+serial_epoch = 0
 launcher_has_booted = False
 
 # Guest scanout geometry.
@@ -137,12 +139,12 @@ def check_launcher_ready():
         if any("[LAUNCHER]" in line for line in serial_lines) or any("name=launcher" in line for line in serial_lines):
             launcher_has_booted = True
             return True
-    # Disk boot log check if serial_lines memory buffer was rotated
-    cand_logs = [
-        current_serial_log_path,
-        os.path.join(WORKSPACE_ROOT, "target", "x86_64_boot.log"),
-        os.path.join(WORKSPACE_ROOT, "target", "x86_boot.log"),
-    ]
+    # Disk boot log check if the serial_lines memory buffer was rotated. Only
+    # the log this server rewrote for the CURRENT boot session may latch
+    # readiness: a historical log from an earlier session describes a guest
+    # that is not the one running now, so its [LAUNCHER] lines must not mark a
+    # boot-looping guest as ready.
+    cand_logs = [current_serial_log_path] if serial_log_is_session else []
     for log_path in cand_logs:
         if log_path and os.path.exists(log_path):
             try:
@@ -507,20 +509,44 @@ def start_websockify_if_needed():
         latest_telemetry["websockify_alive"] = False
 
 current_serial_log_path = os.path.join(os.path.dirname(DIRECTORY), "target", "x86_boot.log")
+# True only while current_serial_log_path names a log THIS server rewrote for
+# the QEMU instance it launched. The workspace also carries a historical
+# target/x86_boot.log from earlier sessions (tens of thousands of lines,
+# including [LAUNCHER] markers from healthy boots); merging that file into the
+# live serial stream served a stale tail as live guest output and latched
+# launcher readiness for a guest that never presented its launcher.
+serial_log_is_session = False
 
 def serial_stream_worker():
-    """Background worker continuously pulling UART lines from QEMU COM1 TCP port (4201)."""
+    """Background worker continuously pulling UART lines from QEMU COM1 TCP port (4201).
+
+    Reconnects with short backoff whenever the connection dies, errors, or a
+    QEMU relaunch bumps `serial_epoch`; never exits.
+    """
     global serial_lines, serial_socket_conn, current_serial_log_path
     buf = ""
+    backoff = 0.25
     while True:
+        conn = None
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                conn = s
                 s.settimeout(1.5)
                 s.connect(('127.0.0.1', SERIAL_TCP_PORT))
+                try:
+                    # Windows: detect a peer killed without FIN/RST within ~3s
+                    # instead of spinning on recv timeouts forever.
+                    s.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 2000, 500))
+                except (OSError, AttributeError):
+                    pass
                 with serial_socket_lock:
                     serial_socket_conn = s
+                backoff = 0.25
+                seen_epoch = serial_epoch
                 s.settimeout(0.8)
                 while True:
+                    if serial_epoch != seen_epoch:
+                        break  # QEMU relaunched: drop this stale single-client
                     try:
                         chunk = s.recv(1024)
                         if not chunk:
@@ -542,11 +568,15 @@ def serial_stream_worker():
                                     except Exception:
                                         pass
                     except socket.timeout:
-                        continue
-        except Exception:
+                        continue  # quiet guest is fine; epoch/keepalive checked
+        except Exception as e:
+            print(f"[serial] reconnect in {backoff:.2f}s: {e}")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 1.5)
+        finally:
             with serial_socket_lock:
-                serial_socket_conn = None
-            time.sleep(1.5)
+                if serial_socket_conn is conn:
+                    serial_socket_conn = None  # never leave a closed fd published
 
 
 def send_guest_serial_command(command, wait_for=None, timeout=12):
@@ -817,11 +847,19 @@ class VncScanoutClient:
             'second_start': time.time(),
             'frames_in_second': 0,
         }
+        self._force_reconnect = False
 
     def start(self):
         t = threading.Thread(target=self._worker_loop, daemon=True)
         t.name = "VncScanoutWorker"
         t.start()
+
+    def force_reconnect(self):
+        """Drop the current RFB session so the worker re-handshakes the new QEMU."""
+        self._force_reconnect = True
+        with self.frame_cond:
+            self.connected = False
+            self._invalidate_cached_frame()
 
     def _invalidate_cached_frame(self):
         """Drops the published frame so consumers see 503, not stale pixels."""
@@ -836,6 +874,7 @@ class VncScanoutClient:
 
     def _abort_session(self, s, reason):
         """Tears down a stale session and forces a resync instead of publishing it."""
+        print(f"[vnc] {reason}; tearing down and resyncing")
         self._invalidate_cached_frame()
         try:
             s.close()
@@ -846,12 +885,23 @@ class VncScanoutClient:
         raise ConnectionError(reason)
 
     def _worker_loop(self):
+        backoff = 0.5
         while self.running:
             try:
                 self._run_session()
+                backoff = 0.5
             except Exception as e:
+                print(f"[vnc] session error, retry in {backoff:.2f}s: {e}")
                 self.connected = False
-                time.sleep(0.5)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 2.0)
+                continue
+            finally:
+                self.connected = False
+            if self._force_reconnect:
+                self._force_reconnect = False
+                backoff = 0.25
+            time.sleep(backoff)
 
     def _recv_exact(self, s, n):
         buf = bytearray(n)
@@ -913,7 +963,7 @@ class VncScanoutClient:
         s.sendall(struct.pack('>BBHHHH', 3, 0, 0, 0, self.width, self.height))
         s.settimeout(0.8)
 
-        while self.running:
+        while self.running and not self._force_reconnect:
             try:
                 hdr = self._recv_exact(s, 4)
                 msg_type, _, num_rects = struct.unpack('>BBH', hdr)
@@ -965,6 +1015,8 @@ class VncScanoutClient:
                 self._publish_frame(t_frame_start)
                 s.sendall(struct.pack('>BBHHHH', 3, 1, 0, 0, self.width, self.height))
             except socket.timeout:
+                if self._force_reconnect:
+                    break
                 try:
                     s.sendall(struct.pack('>BBHHHH', 3, 1, 0, 0, self.width, self.height))
                 except Exception:
@@ -1068,7 +1120,7 @@ class VncScanoutClient:
         rgb_img = img.convert("RGB")
         buf = io.BytesIO()
         if prefer_jpeg:
-            rgb_img.save(buf, format="JPEG", quality=85)
+            rgb_img.save(buf, format="JPEG", quality=90)
             data = buf.getvalue()
             with self.frame_cond:
                 self.latest_jpeg = data
@@ -1152,6 +1204,27 @@ def capture_qemu_screen_frame(full_scanout=False, orientation=None, prefer_jpeg=
 
 
 
+def notify_qemu_relaunched():
+    """Release reader sockets bound to the previous QEMU instance.
+
+    QEMU's `-serial tcp:...,server,nowait` serves exactly one client, so the
+    old client must be dropped for the new instance to be claimed. The serial
+    worker reconnects within ~250 ms; the VNC worker re-handshakes and
+    republishes metrics on its next session.
+    """
+    global serial_epoch
+    with serial_socket_lock:
+        serial_epoch += 1
+        old = serial_socket_conn
+        serial_socket_conn = None
+    if old is not None:
+        try:
+            old.close()  # forces recv() EOF in the worker
+        except OSError:
+            pass
+    vnc_client.force_reconnect()
+
+
 def stop_qemu_backend():
     """Stops any running QEMU and websockify processes managed by this instance."""
     global qemu_subproc, ws_subproc, launcher_has_booted
@@ -1171,6 +1244,7 @@ def stop_qemu_backend():
         except Exception:
             pass
         qemu_subproc = None
+        notify_qemu_relaunched()
 
     # Never discover and kill arbitrary QEMU processes by executable name,
     # shared disk path, or monitor port. Only qemu_subproc, created and owned by
@@ -1185,9 +1259,53 @@ def stop_qemu_backend():
     latest_telemetry["cpu"]["registers"] = {}
 
 
+def qemu_x86_accel_candidates(exe):
+    """Ordered accelerator chain for the x86_64 profile (fastest first).
+
+    `qemu-system-x86_64 -accel help` lists what this host build accepts; WHPX
+    (Windows Hypervisor Platform) is only requested when it is listed, and
+    plain TCG is always the last candidate, so a WHPX that cannot start the
+    machine falls back instead of failing the launch. Set
+    INTEROS_QEMU_FORCE_TCG=1 to pin TCG (used to compare boot timings).
+    """
+    chain = []
+    if os.environ.get("INTEROS_QEMU_FORCE_TCG") != "1":
+        try:
+            probe = subprocess.run(
+                [exe, "-accel", "help"], capture_output=True, text=True, timeout=8)
+            listed = (probe.stdout or "") + (probe.stderr or "")
+            if re.search(r"(?im)^\s*whpx\s*$", listed):
+                # kernel-irqchip=off is the conservative WHPX mode: the
+                # hypervisor does not own IRQ chip routing, which is the
+                # configuration QEMU documents as working without an
+                # enlightened guest.
+                chain.append("whpx,kernel-irqchip=off")
+        except Exception:
+            pass  # no probe result -> straight to TCG
+    chain.append("tcg")
+    return chain
+
+
+def qemu_process_survives_startup(proc, grace=0.5):
+    """True while the process is still alive after `grace` seconds.
+
+    Only used to validate a hardware accelerator: a rejected `-accel whpx`
+    aborts during machine init (well inside this window), while a guest that
+    got this far keeps running. TCG launches are never probed, so the normal
+    launch path keeps its original latency.
+    """
+    deadline = time.time() + grace
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            return False
+        time.sleep(0.05)
+    return True
+
+
 def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
     """Launches a real QEMU instance for the specified target device profile."""
     global qemu_subproc, active_profile_key, current_serial_log_path, launcher_has_booted, last_reboot_cursor
+    global serial_log_is_session
     launcher_has_booted = False
     with telemetry_lock:
         last_reboot_cursor = len(serial_lines)
@@ -1217,6 +1335,9 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
     try:
         with open(current_serial_log_path, "w", encoding="utf-8") as f:
             f.write(f"=== QEMU {arch} Boot Session ===\n")
+        # The log above was just rewritten for this boot, so it may feed
+        # /api/serial and the launcher-readiness gate until the next launch.
+        serial_log_is_session = True
     except Exception:
         pass
 
@@ -1242,6 +1363,15 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
         # pointer was tried, but the guest has no USB HID stack, so it
         # booted yet moved nothing. Studio pointer input travels as
         # absolute COM1 touch injection.
+        # WHY not `-device ramfb`: tried as the QEMU-level native-portrait
+        # console; with any position/order it aborts the prebuilt bootloader's
+        # VBE enumeration after mode 0x144 (falls back to mode 0x143) and
+        # stage-4 then #GPs at its protected-mode entry -> double fault ->
+        # triple fault (5/5 runs, `-d int,cpu_reset` forensics: #GP err=8 at
+        # pc=0x96ff with IDT still the real-mode IVT). Same image with only
+        # virtio-vga boots to PID1. The bootloader stages ship as binary
+        # blobs in crates.io `bootloader` 0.11.17, so this is not patchable
+        # here; virtio-vga + EDID keeps the guest KMS 720x1440 scanout.
         cmd.extend(["-vga", "none", "-device", "virtio-vga,edid=on,xres=720,yres=1440"])
         # A dedicated data disk is mandatory. The kernel uses the Primary Master
         # as the read-only boot image and the Primary Slave as persistent storage;
@@ -1270,14 +1400,41 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
         cmd.extend(["-device", "virtio-gpu-pci", "-device", "usb-ehci,id=usb0"])
         # This guest does not implement an EHCI/USB HID driver yet; browser-to-guest input remains explicit serial injection on these non-canonical profiles.
 
+    # The x86_64 profile tries the host's hardware accelerator first and always
+    # keeps plain TCG as the last candidate, so a WHPX that cannot start this
+    # machine falls back instead of failing the launch. Other profiles keep
+    # QEMU's default accelerator exactly as before.
+    accel_candidates = qemu_x86_accel_candidates(exe) if arch == "x86_64" else [None]
     try:
         serial_lines.clear()
-        qemu_subproc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        active_profile_key = profile_key
-        # QEMU owns the VNC listener; bridge startup must happen after the VM exists.
-        start_websockify_if_needed()
-        serial_lines.append(f"[STUDIO] Launched QEMU {arch} microkernel instance (PID {qemu_subproc.pid}).")
-        return True, f"QEMU {arch} started (PID {qemu_subproc.pid})"
+        last_error = None
+        for accel in accel_candidates:
+            attempt = list(cmd)
+            if accel:
+                attempt.extend(["-accel", accel])
+            try:
+                proc = subprocess.Popen(attempt, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception as e:
+                last_error = e
+                continue
+            if accel and not qemu_process_survives_startup(proc):
+                serial_lines.append(
+                    f"[STUDIO] Accelerator '{accel}' did not start this machine; retrying with TCG.")
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
+                continue
+            qemu_subproc = proc
+            active_profile_key = profile_key
+            # QEMU owns the VNC listener; bridge startup must happen after the VM exists.
+            start_websockify_if_needed()
+            accel_note = f" accel={accel}" if accel else ""
+            serial_lines.append(
+                f"[STUDIO] Launched QEMU {arch} microkernel instance (PID {proc.pid}){accel_note}.")
+            return True, f"QEMU {arch} started (PID {proc.pid}, accelerator {accel or 'default'})"
+        return False, f"Failed to spawn QEMU: {last_error}"
     except Exception as e:
         return False, f"Failed to spawn QEMU: {e}"
 
@@ -1297,10 +1454,19 @@ def start_qemu_backend():
 last_telemetry_query = 0.0
 telemetry_lock = threading.Lock()
 
-def query_qemu_monitor(host='127.0.0.1', port=44445, timeout=0.35, force=False):
+def query_qemu_monitor(host='127.0.0.1', port=MONITOR_PORT, timeout=0.35, force=False):
     """
-    Connects to QEMU HMP monitor at 127.0.0.1:44445 to query real-time
-    microkernel registers, CPU execution status, and block device telemetry.
+    Queries real-time microkernel registers, CPU execution status, and block
+    device telemetry from the QEMU HMP monitor at 127.0.0.1:44445.
+
+    Every read goes through send_qemu_monitor_cmd(): QEMU's HMP accepts a
+    single client, and that helper owns the server's one persistent monitor
+    connection with read-until-'(qemu)' framing. This function used to open
+    its own private socket; with the persistent connection already holding
+    the port, the private connect() sat unaccepted in QEMU's listen backlog,
+    recv() timed out, and the VNC fallback silently returned the last cached
+    snapshot as live state - an early-boot real-mode RIP was displayed while
+    the kernel was already running in long mode.
     """
     global last_telemetry_query, latest_telemetry
     now = time.time()
@@ -1313,85 +1479,79 @@ def query_qemu_monitor(host='127.0.0.1', port=44445, timeout=0.35, force=False):
 
         last_telemetry_query = now
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(timeout)
-                s.connect((host, port))
-                _ = s.recv(1024)
+            def monitor(cmd):
+                ok, resp = send_qemu_monitor_cmd(
+                    cmd, host=host, port=port, timeout=max(float(timeout), 0.8))
+                if not ok:
+                    raise OSError(f"monitor command failed: {resp}")
+                return resp
 
-                # 1. info status
-                s.sendall(b'info status\n')
-                time.sleep(0.03)
-                status_raw = s.recv(1024).decode('utf-8', errors='replace')
-                status_lower = status_raw.lower()
-                if "shutdown" in status_lower:
-                    vm_status = "shutdown"
-                elif "internal error" in status_lower:
-                    vm_status = "error"
-                elif "paused" in status_lower:
-                    vm_status = "paused"
-                elif "running" in status_lower:
-                    vm_status = "running"
-                else:
-                    vm_status = "unknown"
+            # 1. info status
+            status_lower = monitor('info status').lower()
+            if "shutdown" in status_lower:
+                vm_status = "shutdown"
+            elif "internal error" in status_lower:
+                vm_status = "error"
+            elif "paused" in status_lower:
+                vm_status = "paused"
+            elif "running" in status_lower:
+                vm_status = "running"
+            else:
+                vm_status = "unknown"
 
-                # 2. info cpus
-                s.sendall(b'info cpus\n')
-                time.sleep(0.03)
-                cpus_raw = s.recv(1024).decode('utf-8', errors='replace')
-                thread_match = re.search(r'thread_id=(\d+)', cpus_raw)
-                thread_id = f"PID-{thread_match.group(1)}" if thread_match else "Core0"
-                is_halted = "halted" in cpus_raw
+            # 2. info cpus
+            cpus_raw = monitor('info cpus')
+            thread_match = re.search(r'thread_id=(\d+)', cpus_raw)
+            thread_id = f"PID-{thread_match.group(1)}" if thread_match else "Core0"
+            is_halted = "halted" in cpus_raw
 
-                # 3. info registers
-                s.sendall(b'info registers\n')
-                time.sleep(0.06)
-                regs_raw = s.recv(8192).decode('utf-8', errors='replace')
+            # 3. info registers
+            regs_raw = monitor('info registers')
 
-                # 4. info block
-                s.sendall(b'info block\n')
-                time.sleep(0.03)
-                block_raw = s.recv(4096).decode('utf-8', errors='replace')
+            # 4. info block
+            block_raw = monitor('info block')
 
-                # Parse registers into map
-                reg_dict = {}
-                for match in re.finditer(r'\b([A-Z0-9]+)\s*=\s*([0-9a-fA-F]{4,16})\b', regs_raw):
-                    reg_name = match.group(1).upper()
-                    reg_val = "0x" + match.group(2).upper()
-                    reg_dict[reg_name] = reg_val
+            # Parse registers into a map. The dict is REPLACED, never merged:
+            # update() used to leave keys from older parses (previous boots,
+            # earlier CPU modes) visible as if they were current state.
+            reg_dict = {}
+            for match in re.finditer(r'\b([A-Z0-9]+)\s*=\s*([0-9a-fA-F]{4,16})\b', regs_raw):
+                reg_name = match.group(1).upper()
+                reg_val = "0x" + match.group(2).upper()
+                reg_dict[reg_name] = reg_val
 
-                rip_val = reg_dict.get("RIP") or reg_dict.get("EIP") or "0x0000000000000000"
-                if "HLT=1" in regs_raw:
-                    is_halted = True
-                elif "HLT=0" in regs_raw:
-                    is_halted = False
+            rip_val = reg_dict.get("RIP") or reg_dict.get("EIP") or "Unavailable"
+            if "HLT=1" in regs_raw:
+                is_halted = True
+            elif "HLT=0" in regs_raw:
+                is_halted = False
 
-                block_device = "ide0-hd0"
-                block_file = "inter-os-bios.img"
-                block_match = re.search(r'([\w\-]+)\s*\([^)]*\):\s*(.+?)(?:\s*\(|\r|\n)', block_raw)
-                if block_match:
-                    block_device = block_match.group(1)
-                    full_path = block_match.group(2).strip()
-                    block_file = full_path.split('\\')[-1].split('/')[-1]
+            block_device = "ide0-hd0"
+            block_file = "inter-os-bios.img"
+            block_match = re.search(r'([\w\-]+)\s*\([^)]*\):\s*(.+?)(?:\s*\(|\r|\n)', block_raw)
+            if block_match:
+                block_device = block_match.group(1)
+                full_path = block_match.group(2).strip()
+                block_file = full_path.split('\\')[-1].split('/')[-1]
 
-                latest_telemetry["qemu_alive"] = True
-                latest_telemetry["status"] = vm_status
-                latest_telemetry["mode"] = "qemu_live"
-                latest_telemetry["cpu"]["thread_id"] = thread_id
-                latest_telemetry["cpu"]["halted"] = is_halted
-                latest_telemetry["cpu"]["rip"] = rip_val
-                if reg_dict:
-                    latest_telemetry["cpu"]["registers"].update(reg_dict)
-                latest_telemetry["block"]["device"] = block_device
-                latest_telemetry["block"]["file"] = block_file
+            latest_telemetry["qemu_alive"] = True
+            latest_telemetry["status"] = vm_status
+            latest_telemetry["mode"] = "qemu_live"
+            latest_telemetry["cpu"]["thread_id"] = thread_id
+            latest_telemetry["cpu"]["halted"] = is_halted
+            latest_telemetry["cpu"]["rip"] = rip_val
+            latest_telemetry["cpu"]["registers"] = reg_dict
+            latest_telemetry["block"]["device"] = block_device
+            latest_telemetry["block"]["file"] = block_file
 
-                try:
-                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s_ws:
-                        s_ws.settimeout(0.08)
-                        latest_telemetry["websockify_alive"] = (s_ws.connect_ex(('127.0.0.1', WS_PORT)) == 0)
-                except Exception:
-                    latest_telemetry["websockify_alive"] = False
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s_ws:
+                    s_ws.settimeout(0.08)
+                    latest_telemetry["websockify_alive"] = (s_ws.connect_ex(('127.0.0.1', WS_PORT)) == 0)
+            except Exception:
+                latest_telemetry["websockify_alive"] = False
 
-                return latest_telemetry
+            return latest_telemetry
         except Exception:
             # Fallback: check VNC port 5900
             try:
@@ -1401,6 +1561,13 @@ def query_qemu_monitor(host='127.0.0.1', port=44445, timeout=0.35, force=False):
                     latest_telemetry["qemu_alive"] = True
                     latest_telemetry["status"] = "running"
                     latest_telemetry["mode"] = "qemu_vnc_only"
+                    # The monitor could not answer: report the CPU state as
+                    # unavailable instead of replaying the last cached parse
+                    # as live telemetry.
+                    latest_telemetry["cpu"]["rip"] = "Unavailable"
+                    latest_telemetry["cpu"]["thread_id"] = "Unavailable"
+                    latest_telemetry["cpu"]["halted"] = None
+                    latest_telemetry["cpu"]["registers"] = {}
                     return latest_telemetry
             except Exception:
                 pass
@@ -1787,9 +1954,14 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 except (ValueError, IndexError):
                     after = 0
 
-            # Sync with live QEMU serial log on disk if available
-            boot_log = os.path.join(os.path.dirname(DIRECTORY), "target", "x86_boot.log")
-            if os.path.exists(boot_log):
+            # Sync with the live QEMU serial log on disk if available. Only the
+            # log this server rewrote for the current boot session is read: the
+            # historical target/x86_boot.log from earlier sessions is longer
+            # than the in-memory ring, so merging it appended a stale tail as
+            # if it were live guest output and pushed the real lines (and their
+            # order) into the middle of the buffer.
+            boot_log = current_serial_log_path if serial_log_is_session else None
+            if boot_log and os.path.exists(boot_log):
                 try:
                     with open(boot_log, "r", encoding="utf-8", errors="replace") as f:
                         disk_lines = [l.strip() for l in f if l.strip()]
@@ -2467,6 +2639,58 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             })
             return
 
+        if self.path == '/api/qemu/stop':
+            # End-to-end guest stop for the Studio's Start/Restart control.
+            # stop_qemu_backend() only ever terminates the QEMU process this
+            # server launched (never an arbitrary qemu-system-x86_64), and a
+            # guest that is not running is a successful no-op rather than an
+            # error, so the client can call this route unconditionally.
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
+            if content_length > 0:
+                self.rfile.read(content_length)
+            proc = qemu_subproc
+            process_alive = bool(proc and proc.poll() is None)
+            monitor_alive = bool(query_qemu_monitor(force=True).get('qemu_alive'))
+            was_running = process_alive or monitor_alive
+            if was_running and proc is None:
+                # A guest is alive but was launched by an earlier Studio
+                # process. stop_qemu_backend() must never kill a QEMU it does
+                # not own, so answer with that truth instead of reporting a
+                # stop that did not happen.
+                self._send_json(409, {
+                    'success': False,
+                    'was_running': True,
+                    'stopped': False,
+                    'owned': False,
+                    'error': ('QEMU is running but was not launched by this Studio '
+                              'server process; it was left untouched. The Reboot OS '
+                              'control resets it through the QEMU monitor instead.'),
+                })
+                return
+            stop_qemu_backend()
+            if proc is not None:
+                try:
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
+            still_running = bool(proc and proc.poll() is None)
+            if still_running:
+                message = f"QEMU (PID {proc.pid}) did not exit after the stop request"
+            elif was_running:
+                message = f"QEMU stopped (PID {proc.pid})" if proc is not None else "QEMU stopped"
+            else:
+                message = "QEMU is not running"
+            self._send_json(500 if still_running else 200, {
+                'success': not still_running,
+                'was_running': was_running,
+                'stopped': bool(was_running and not still_running),
+                'owned': True,
+                'message': message,
+            })
+            return
+
         if self.path in (
             '/api/telephony/dial', '/api/telephony/hangup',
             '/api/telephony/data/toggle', '/api/telephony/sms/send',
@@ -3061,7 +3285,18 @@ if __name__ == '__main__':
     print(f"[*] InterOS Studio Backend: {msg}")
 
     start_websockify_if_needed()
-    serial_thread = threading.Thread(target=serial_stream_worker, daemon=True)
+
+    def _serial_supervisor():
+        """Nothing may kill the UART reader silently; restart it if it ever dies."""
+        while True:
+            try:
+                serial_stream_worker()
+            except BaseException as e:
+                print(f"[serial] worker died ({e!r}); restarting in 1s")
+                time.sleep(1)
+
+    serial_thread = threading.Thread(target=_serial_supervisor, daemon=True,
+                                     name="SerialStreamWorker")
     serial_thread.start()
 
     try:

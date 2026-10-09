@@ -638,13 +638,19 @@ html, body.dark-theme {
   flex: 1 1 145px;
   min-width: 135px;
   box-sizing: border-box;
+  /* Long unbroken tokens (file paths, register values) may break instead of
+     overflowing the card; inherited by all text inside the card. */
+  overflow-wrap: anywhere;
 }
 
 .hw-card-top {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 6px;
+  /* Let the value drop onto its own line (and wrap) when it cannot fit next to
+     the card label, so long real values are never clipped or ellipsized. */
+  flex-wrap: wrap;
+  gap: 2px 6px;
 }
 
 .hw-card-name {
@@ -660,7 +666,14 @@ html, body.dark-theme {
   font-size: 0.69rem;
   font-weight: 600;
   color: var(--white-pure);
-  white-space: nowrap;
+  /* All real telemetry values must render in full: allow natural wrapping
+     (two/three lines when needed) instead of nowrap overflow clipping. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  min-width: 0;
+  max-width: 100%;
+  margin-left: auto;
+  text-align: right;
 }
 
 .hw-bar-track {
@@ -683,11 +696,13 @@ html, body.dark-theme {
   font-size: 0.61rem;
   color: var(--white-dim);
   display: flex;
-  align-items: center;
-  gap: 4px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* Wrap sub-values (heap, paging, block IO, RIP/TID, ticks) onto extra lines
+     instead of ellipsizing/hidden-clipping them. */
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .hw-card-sub strong {
@@ -766,9 +781,10 @@ html, body.dark-theme {
   font-family: var(--font-mono);
   color: var(--white-soft);
   font-weight: 500;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* Wrap long bus values (e.g. "720×1440 scanout") instead of clipping them. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  min-width: 0;
 }
 
 /* --------------------------------------------------------------------------
@@ -2319,7 +2335,9 @@ body[data-theme="cyberdeck_hud"] .device-screen {
     font-size: 0.58rem;
   }
   .hw-card-val {
-    font-size: 0.63rem;
+    /* Raised from 0.63rem: real telemetry values stay at the ~0.68rem
+       readability floor even in compact (short-viewport) mode. */
+    font-size: 0.68rem;
   }
   .hw-bar-track {
     height: 4px;
@@ -2644,14 +2662,165 @@ body[data-theme="cyberdeck_hud"] .device-screen {
 .gesture-btn:active {
   transform: scale(0.96);
 }
+/* Boot-ring animation used by the in-frame boot splash logo (pure CSS, no
+   external resources). The old timed bootFillAnim progress bar is gone: a
+   width that animates on a timer describes progress that nothing observed. */
 @keyframes bootRingSpin {
   100% { transform: rotate(360deg); }
 }
-@keyframes bootFillAnim {
-  0% { width: 0%; }
-  25% { width: 35%; }
-  60% { width: 70%; }
-  100% { width: 95%; }
+@keyframes bootLogoPulse {
+  0%, 100% { transform: scale(1); opacity: 0.9; }
+  50% { transform: scale(1.06); opacity: 1; }
 }
+@keyframes bootWordmarkSweep {
+  0% { background-position: 120% 0; }
+  100% { background-position: -20% 0; }
+}
+
+/* ==========================================================================
+   Phone-frame boot surface (mounted by app.js):
+      .phone-boot-splash        boot splash with real-milestone checklist
+   These layers sit OVER the real guest scanout and never replace guest
+   pixels; what they show comes from /api/serial and the readiness gate.
+   The in-frame serial console (Console chip + overlay docked to the bottom
+   of the bezel) was removed as redundant clutter: the Studio Live console
+   is the one serial view, so the boot splash always owns the FULL frame.
+   The duplicate Start/Restart power bar and its guest state label were
+   removed: the Studio header owns the single restart control.
+   ========================================================================== */
+
+.phone-boot-splash {
+  position: absolute;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px 18px;
+  text-align: center;
+  background:
+    radial-gradient(120% 60% at 50% 18%, rgba(16, 185, 129, 0.10), transparent 62%),
+    radial-gradient(100% 70% at 50% 100%, rgba(59, 130, 246, 0.08), transparent 60%),
+    rgba(2, 2, 4, 0.92);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.6s ease, visibility 0.6s ease;
+}
+.phone-boot-splash.is-visible {
+  opacity: 1;
+  visibility: visible;
+}
+
+.pbs-logo {
+  position: relative;
+  width: 74px;
+  height: 74px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #10B981;
+}
+.pbs-logo svg {
+  width: 52px;
+  height: 52px;
+  animation: bootLogoPulse 2.8s ease-in-out infinite;
+}
+.pbs-logo::before {
+  content: '';
+  position: absolute;
+  inset: -8px;
+  border-radius: 50%;
+  background: conic-gradient(from 0deg, transparent 0%, rgba(16, 185, 129, 0.55) 22%, transparent 45%);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2px));
+  animation: bootRingSpin 3.2s linear infinite;
+}
+.pbs-hex-inner {
+  opacity: 0.55;
+}
+.pbs-wordmark {
+  font-family: 'Outfit', 'Inter', sans-serif;
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 3px;
+  background: linear-gradient(100deg, #A1A1AA 20%, #FFFFFF 42%, #10B981 60%, #A1A1AA 80%);
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: bootWordmarkSweep 3.6s linear infinite;
+}
+.pbs-sub {
+  color: #94A3B8;
+  font-size: 11.5px;
+  font-family: var(--font-mono, monospace);
+  letter-spacing: 0.3px;
+}
+.pbs-stages {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 10px 12px;
+  width: 100%;
+  max-width: 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  text-align: left;
+}
+.pbs-stages li {
+  display: grid;
+  grid-template-columns: 12px 1fr;
+  grid-template-areas: 'mark label' '. evidence';
+  align-items: center;
+  column-gap: 8px;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  row-gap: 1px;
+}
+.pbs-stages .pbs-mark {
+  grid-area: mark;
+  font-size: 9px;
+  line-height: 1;
+}
+.pbs-stages .pbs-label {
+  grid-area: label;
+  color: #D4D4D8;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+.pbs-stages .pbs-evidence {
+  grid-area: evidence;
+  font-size: 9.5px;
+  color: #10B981;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pbs-stages .pbs-evidence.pending {
+  color: #52525B;
+}
+.pbs-stages li.done .pbs-mark {
+  color: #10B981;
+  text-shadow: 0 0 8px rgba(16, 185, 129, 0.8);
+}
+.pbs-stages li.pending .pbs-mark,
+.pbs-stages li.pending .pbs-label {
+  color: #71717A;
+}
+.pbs-elapsed {
+  color: #52525B;
+  font-size: 10px;
+  font-family: var(--font-mono, monospace);
+  letter-spacing: 0.4px;
+  margin-top: 4px;
+}
+
+
 
 
