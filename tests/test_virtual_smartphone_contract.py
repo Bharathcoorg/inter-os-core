@@ -13,8 +13,8 @@ def test_canonical_qemu_exposes_native_portrait_display_and_absolute_pointer():
     server = read("emulator/server.py")
     for source in (launch, server):
         assert "virtio-vga,xres=720,yres=1440" in source
-        assert "qemu-xhci" in source
-        assert "usb-tablet" in source
+        assert "ps2-mouse" in source
+        assert "usb-tablet" not in source
 
 
 def test_guest_power_is_authoritative():
@@ -214,3 +214,14 @@ def test_android_dalvik_objects_are_vm_local_bounded_and_indexes_fail_closed():
     assert "dex.strings.get(str_idx).ok_or(DalvikVmError::InvalidBytecode)?" in runtime
     assert "dex.types.get(type_idx).is_none()" in runtime
     assert "object_allocations_have_distinct_vm_local_identity_and_a_hard_limit" in runtime
+
+
+def test_qemu_mouse_reaches_the_canonical_input_router():
+    driver = read("kernel/src/drivers/ps2_mouse.rs")
+    input_mod = read("kernel/src/input/mod.rs")
+    interrupts = read("kernel/src/interrupts.rs")
+    assert "fn decode_packet" in driver
+    assert "crate::input::post_mouse_event" in driver
+    assert "fn post_mouse_event" in input_mod
+    assert "post_pointer_contact(InputSource::Mouse" in input_mod
+    assert "crate::drivers::ps2_mouse::handle_irq_byte()" in interrupts

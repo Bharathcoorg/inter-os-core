@@ -1170,7 +1170,7 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
     if arch == "x86_64":
         cmd.extend(["-machine", "q35", "-cpu", "qemu64"])
         # Real virtual display and absolute pointer hardware for the canonical phone VM.
-        cmd.extend(["-vga", "none", "-device", "virtio-vga,edid=on,xres=720,yres=1440", "-device", "qemu-xhci,id=xhci0", "-device", "usb-tablet,bus=xhci0.0"])
+        cmd.extend(["-vga", "none", "-device", "virtio-vga,edid=on,xres=720,yres=1440", "-device", "ps2-mouse"])
         # A dedicated data disk is mandatory. The kernel uses the Primary Master
         # as the read-only boot image and the Primary Slave as persistent storage;
         # with only one disk attached it falls back to formatting the boot image

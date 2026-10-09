@@ -77,6 +77,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // 5. Initialize 8259 PIC controllers (PIT timer deferred until scheduler start)
     kernel::interrupts::init_pics();
     serial_println!("[OK] Dual 8259 PIC remapped (IRQs 32-47).");
+    if !kernel::drivers::ps2_mouse::init() {
+        serial_println!("[INPUT] PS/2 mouse unavailable; continuing with other configured input transports.");
+    }
 
     // 6. Initialize virtual memory page tables and physical frame allocator
     let phys_mem_offset_raw = boot_info
