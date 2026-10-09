@@ -2,7 +2,8 @@
 //!
 //! Native Ring-3 graphical application executing in User Mode:
 //! - DRM/KMS Client Surface allocation (z=200) and double-buffered scanout presentation
-//! - Light 3-column photo tile layout (procedural gradients, no fake metadata)
+//! - Light 3-column photo tile layout when media exists (procedural gradients,
+//!   no fake metadata) and an honest empty-state frame while `PHOTOS` is empty
 //! - Full-screen photo inspection modal (light-themed)
 //! - Segmented Filter Tabs (All, Albums, Favorites) & Bottom Navigation Bar
 //! - Asynchronous event reactor loop handling touch interactions and home gestures
@@ -437,8 +438,36 @@ fn get_gallery_color(x: usize, y: usize, app: &GalleryApp) -> u32 {
         return BG_DARK;
     }
 
-    // 3. 3-column grid (y: 200..1280), no text inside tiles.
+    // 3. Photo grid (y: 200..1280), no text inside tiles.
     if y >= 200 && y < 1280 {
+        // WHY gated: tiles are only drawn while the PHOTOS ledger holds media.
+        // With an empty ledger this band shows the empty state instead of
+        // fabricating 15 photo tiles that no storage produced.
+        if has_no_media() {
+            // Empty-state picture frame pictogram, centred in the grid band.
+            if test_empty_gallery_frame(x, y, 360, 560) {
+                return TEXT_MUTED;
+            }
+            if y >= 660 && y < 676 {
+                if let Some(c) = test_text(x, y, 208, 660, 2, b"No media in storage", TEXT_PRIMARY) {
+                    return c;
+                }
+            }
+            if y >= 692 && y < 700 {
+                if let Some(c) = test_text(
+                    x,
+                    y,
+                    204,
+                    692,
+                    1,
+                    b"PHOTOS ledger is empty; nothing to show.",
+                    TEXT_MUTED,
+                ) {
+                    return c;
+                }
+            }
+            return BG_DARK;
+        }
         const GRID_TOP: usize = 200;
         const TILE_H: usize = 200;
         const STRIDE: usize = 216; // 200 + 16 gap
@@ -657,6 +686,29 @@ pub extern "C" fn _start() -> ! {
                                     let _ = std::surface_flip(6);
                                 }
                                 break;
+                            }
+                        }
+
+                        // Header controls: search and add. WHY honest no-op logs:
+                        // there is no media index to search and no importer to add
+                        // media, so the taps report that absence instead of
+                        // pretending a feature ran (same pattern as the lock-screen
+                        // torch, which logs its unavailability).
+                        if app.inspecting_photo.is_none() {
+                            let s_dx = (x as i32) - 600;
+                            let s_dy = (y as i32) - 92;
+                            if s_dx * s_dx + s_dy * s_dy <= 16 * 16 {
+                                std::log(
+                                    0,
+                                    "[GALLERY] Search tapped: no media index exists; search is not implemented.",
+                                )
+                                .ok();
+                            } else if (640..672).contains(&x) && (76..108).contains(&y) {
+                                std::log(
+                                    0,
+                                    "[GALLERY] Add tapped: media import is not implemented.",
+                                )
+                                .ok();
                             }
                         }
 
