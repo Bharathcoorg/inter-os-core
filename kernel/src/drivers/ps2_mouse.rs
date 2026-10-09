@@ -121,7 +121,7 @@ fn enqueue_event(x: u32, y: u32, phase: u8) {
         let mut current_read = read;
         while write.wrapping_sub(current_read) >= EVENT_CAPACITY {
             match EVENT_READ.compare_exchange_weak(current_read, current_read.wrapping_add(1), Ordering::AcqRel, Ordering::Acquire) {
-                Ok(_) => { current_read = current_read.wrapping_add(1); break; }
+                Ok(_) => break,
                 Err(actual) => current_read = actual,
             }
         }
