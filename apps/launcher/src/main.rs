@@ -1613,6 +1613,7 @@ pub extern "C" fn _start() -> ! {
                                         state.active_child = Some(state.recent_task_ids[0]);
                                         true
                                     } else if let Ok(tid) = std::app_launch(target_str) {
+                                        let _ = std::app_focus(tid);
                                         state.active_child = Some(tid);
                                         state.recent_task_ids[0] = tid;
                                         true
@@ -1672,6 +1673,7 @@ pub extern "C" fn _start() -> ! {
                                         state.active_child = Some(state.recent_task_ids[1]);
                                         true
                                     } else if let Ok(tid) = std::app_launch(target_str) {
+                                        let _ = std::app_focus(tid);
                                         state.active_child = Some(tid);
                                         state.recent_task_ids[1] = tid;
                                         true
@@ -1731,6 +1733,7 @@ pub extern "C" fn _start() -> ! {
                                         state.active_child = Some(state.recent_task_ids[2]);
                                         true
                                     } else if let Ok(tid) = std::app_launch(target_str) {
+                                        let _ = std::app_focus(tid);
                                         state.active_child = Some(tid);
                                         state.recent_task_ids[2] = tid;
                                         true
