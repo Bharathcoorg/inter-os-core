@@ -2121,7 +2121,10 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             pass
 
     def do_POST(self):
-        global serial_lines
+        # Orientation state is module-level; without this declaration the
+        # assignment below would make the name function-local and every touch
+        # payload that consults the orientation would raise UnboundLocalError.
+        global serial_lines, current_device_orientation
 
         if self.path == '/api/rapp/trust':
             content_length = int(self.headers.get('Content-Length', 0))

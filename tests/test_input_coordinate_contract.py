@@ -24,6 +24,19 @@ def test_studio_declares_every_touch_coordinate_space():
     assert "is_portrait = data.get('coords')" not in source
 
 
+def test_studio_post_handler_declares_orientation_global():
+    source = (ROOT / "emulator/server.py").read_text()
+    post = source[source.index("def do_POST"):]
+    # The rotation endpoint inside do_POST assigns current_device_orientation.
+    # Without a global declaration the name became function-local, so the
+    # landscape/guest_framebuffer touch branch (which reads it) raised
+    # UnboundLocalError on every landscape contact.
+    assert "global serial_lines, current_device_orientation" in post
+    assert post.index("global serial_lines, current_device_orientation") < post.index(
+        "current_device_orientation = 'landscape'"
+    )
+
+
 def test_browser_studio_uses_explicit_spaces():
     source = (ROOT / "emulator/app.js").read_text()
     assert "coords: 'portrait'" in source
