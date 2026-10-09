@@ -27,7 +27,7 @@ pub const RECOVERY_RECORD_KIND:u8=7;
 const RECOVERY_RECORD_LEN:usize=16;
 fn encode(record:&BootRecord)->[u8;RECOVERY_RECORD_LEN]{let mut out=[0u8;RECOVERY_RECORD_LEN];out[0]=record.active as u8;out[1]=record.last_good as u8;out[2]=record.outcome as u8;out[3]=record.attempts;out[4]=record.max_attempts;out}
 fn decode(bytes:&[u8])->Option<BootRecord>{if bytes.len()!=RECOVERY_RECORD_LEN||bytes[0]>1||bytes[1]>1||bytes[2]>3||bytes[4]==0{return None;}Some(BootRecord{active:if bytes[0]==0{BootSlot::A}else{BootSlot::B},last_good:if bytes[1]==0{BootSlot::A}else{BootSlot::B},outcome:match bytes[2]{0=>BootOutcome::Unknown,1=>BootOutcome::Pending,2=>BootOutcome::Success,_=>BootOutcome::Failed},attempts:bytes[3],max_attempts:bytes[4]})}
-pub struct BootRecovery{pub record:BootRecord,pub durable:bool}
+pub struct BootRecovery{pub record:BootRecord,pub durable: bool}
 impl BootRecovery{
  pub const fn new()->Self{Self{record:BootRecord::new(BootSlot::A),durable:false}}
  pub fn restore(&mut self)->Result<(),RecoveryError>{let mut buf=[0u8;RECOVERY_RECORD_LEN];match persistent::load_latest_kind(&mut buf,RECOVERY_RECORD_KIND){Ok(None)=>{self.durable=true;Ok(())}Ok(Some((_,len)))=>{self.record=decode(&buf[..len]).ok_or(RecoveryError::CorruptRecord)?;self.durable=true;Ok(())}Err(_)=>{self.durable=false;Err(RecoveryError::Storage)}}}

@@ -1168,8 +1168,8 @@ impl Vfs {
             pos += plen;
             if kind == 3 {
                 if self.inodes.contains_key(&InodeId(id)) {
-                    // The primary inode record already persists the complete nlink
-                    // count. Alias records restore path identity only; incrementing
+                    // The primary inode record already persists the complete nlink count.
+                    // Alias records restore path identity only; incrementing
                     // again here would double-count links after every reboot.
                     self.hard_links.insert(path.to_string(), InodeId(id));
                 }

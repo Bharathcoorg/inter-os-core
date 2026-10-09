@@ -5,7 +5,6 @@ target/
 **/*.log
 dist/
 apps/*/bin/
-!apps/test_app/bin/test_app.elf
 
 # IDE & OS files
 .idea/

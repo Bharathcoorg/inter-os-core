@@ -267,8 +267,8 @@ impl TaskPageTable {
         }
 
         // Mapping is transactional: any page-table frames allocated by this
-        // operation are unlinked before their frames are recycled. The caller
-        // retains ownership of the leaf frame on failure.
+        // operation are unlinked before their frames are recycled.
+        // The caller retains ownership of the leaf frame on failure.
         let allocated_before = self.allocated_frames.len();
         let rollback = |
             table: &mut Self,
