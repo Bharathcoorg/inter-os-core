@@ -579,14 +579,14 @@ fn get_calendar_pixel(
                 if let Some(c) = test_text(x, y, 208, 706, 2, b"No Scheduled Events", TEXT_PRIMARY) {
                     return c;
                 }
-                if let Some(c) = test_text(x, y, 236, 736, 1, b"Hardware RTC Civil Clock Active", SUCCESS_EMERALD) {
+                if let Some(c) = test_text(x, y, 236, 760, 1, if app.date_known { &b"RTC date available"[..] } else { &b"RTC date unavailable"[..] }, TEXT_MUTED) {
                     return c;
                 }
 
-                // Action Button: "+ Schedule Event" (x: 230..490, y: 776..824)
-                if x >= 230 && x < 490 && y >= 776 && y < 824 {
+                // Action Button: "+ Schedule Event" (x: 230..490, y: 800..856)
+                if x >= 230 && x < 490 && y >= 800 && y < 856 {
                     let bx = (x - 230).min(489 - x);
-                    let by = (y - 776).min(823 - y);
+                    let by = (y - 800).min(855 - y);
                     if bx < 24 && by < 24 {
                         let cdx = (24 - bx) as isize;
                         let cdy = (24 - by) as isize;
@@ -595,7 +595,7 @@ fn get_calendar_pixel(
                         }
                     }
 
-                    if let Some(c) = test_text(x, y, 248, 792, 2, b"+ New Event", ACCENT_SKY) {
+                    if let Some(c) = test_text(x, y, 248, 804, 2, b"+ New Event", ACCENT_SKY) {
                         return c;
                     }
 

@@ -557,10 +557,10 @@ fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                     if let Some(c) = test_text(x, y, 60, 210, 2, b"Wi-Fi Network", TEXT_PRIMARY) {
                         return c;
                     }
-                    if let Some(c) = test_text(x, y, 60, 250, 1, b"Hardware Status: Unavailable (No Radio)", TEXT_MUTED) {
+                    if let Some(c) = test_text(x, y, 60, 270, 1, if app.wireless == TelemetryState::Reported { &b"Wireless telemetry received"[..] } else { &b"Radio status unavailable"[..] }, if app.wireless == TelemetryState::Reported { SUCCESS_EMERALD } else { TEXT_MUTED }) {
                         return c;
                     }
-                    if let Some(c) = render_badge(x, y, 500, 206, b"UNAVAILABLE", TEXT_MUTED) {
+                    if let Some(c) = render_badge(x, y, 500, 206, if app.wireless == TelemetryState::Reported { &b"REPORTED"[..] } else { &b"UNAVAILABLE"[..] }, if app.wireless == TelemetryState::Reported { SUCCESS_EMERALD } else { TEXT_MUTED }) {
                         return c;
                     }
                     return SURFACE_DARK;
@@ -573,7 +573,7 @@ fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                     if let Some(c) = test_text(x, y, 60, 380, 2, b"Bluetooth & BLE", TEXT_PRIMARY) {
                         return c;
                     }
-                    if let Some(c) = test_text(x, y, 60, 420, 1, b"Hardware Status: Unavailable (No Adapter)", TEXT_MUTED) {
+                    if let Some(c) = test_text(x, y, 60, 440, 1, b"Bluetooth status unavailable", TEXT_MUTED) {
                         return c;
                     }
                     if let Some(c) = render_badge(x, y, 500, 376, b"UNAVAILABLE", TEXT_MUTED) {
@@ -589,7 +589,7 @@ fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                     if let Some(c) = test_text(x, y, 60, 550, 2, b"Cellular Baseband", TEXT_PRIMARY) {
                         return c;
                     }
-                    if let Some(c) = test_text(x, y, 60, 590, 1, b"Hardware Status: Unavailable (No SIM)", TEXT_MUTED) {
+                    if let Some(c) = test_text(x, y, 60, 610, 1, b"Cellular status unavailable", TEXT_MUTED) {
                         return c;
                     }
                     if let Some(c) = render_badge(x, y, 500, 546, b"UNAVAILABLE", TEXT_MUTED) {
@@ -607,10 +607,10 @@ fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                     if let Some(c) = test_text(x, y, 60, 210, 2, b"Battery Fuel Gauge", TEXT_PRIMARY) {
                         return c;
                     }
-                    if let Some(c) = test_text(x, y, 60, 250, 1, b"Hardware Status: Simulated Power Bus", TEXT_MUTED) {
+                    if let Some(c) = test_text(x, y, 60, 270, 1, if app.battery == TelemetryState::Reported { &b"Battery payload received"[..] } else { &b"Battery telemetry unavailable"[..] }, TEXT_MUTED) {
                         return c;
                     }
-                    if let Some(c) = render_badge(x, y, 510, 206, b"SIMULATED", WARNING_AMBER) {
+                    if let Some(c) = render_badge(x, y, 510, 206, if app.battery == TelemetryState::Reported { &b"REPORTED"[..] } else { &b"UNAVAILABLE"[..] }, if app.battery == TelemetryState::Reported { SUCCESS_EMERALD } else { TEXT_MUTED }) {
                         return c;
                     }
                     return SURFACE_DARK;
@@ -623,26 +623,26 @@ fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                     if let Some(c) = test_text(x, y, 60, 380, 2, b"CPU Frequency Scaling", TEXT_PRIMARY) {
                         return c;
                     }
-                    if let Some(c) = test_text(x, y, 60, 420, 1, b"Active Profile: Balanced (1200 MHz)", ACCENT_SKY) {
+                    if let Some(c) = test_text(x, y, 60, 440, 1, b"Governor telemetry unavailable", ACCENT_SKY) {
                         return c;
                     }
-                    if let Some(c) = render_badge(x, y, 520, 376, b"BALANCED", ACCENT_SKY) {
+                    if let Some(c) = render_badge(x, y, 520, 376, b"UNAVAILABLE", TEXT_MUTED) {
                         return c;
                     }
                     return SURFACE_DARK;
                 }
                 // Card 2: Thermal Governor
                 if x >= 24 && x < W - 24 && y >= 520 && y < 670 {
-                    if let Some(c) = render_card_frame(x, y, 520, 670, SUCCESS_EMERALD) {
+                    if let Some(c) = render_card_frame(x, y, 520, 670, BORDER_SUBTLE) {
                         return c;
                     }
                     if let Some(c) = test_text(x, y, 60, 550, 2, b"Thermal Governor", TEXT_PRIMARY) {
                         return c;
                     }
-                    if let Some(c) = test_text(x, y, 60, 590, 1, b"Dynamic Voltage and Frequency Scaling Active", SUCCESS_EMERALD) {
+                    if let Some(c) = test_text(x, y, 60, 610, 1, b"DVFS state unavailable", TEXT_MUTED) {
                         return c;
                     }
-                    if let Some(c) = render_badge(x, y, 530, 546, b"OPTIMAL", SUCCESS_EMERALD) {
+                    if let Some(c) = render_badge(x, y, 530, 546, b"UNAVAILABLE", TEXT_MUTED) {
                         return c;
                     }
                     return SURFACE_DARK;
@@ -657,10 +657,10 @@ fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                     if let Some(c) = test_text(x, y, 60, 210, 2, b"CPU Core Temperature", TEXT_PRIMARY) {
                         return c;
                     }
-                    if let Some(c) = test_text(x, y, 60, 250, 1, b"Hardware Status: Simulated Sensor Bus", TEXT_MUTED) {
+                    if let Some(c) = test_text(x, y, 60, 270, 1, if app.thermal == TelemetryState::Reported { &b"Thermal payload received"[..] } else { &b"Temperature telemetry unavailable"[..] }, TEXT_MUTED) {
                         return c;
                     }
-                    if let Some(c) = render_badge(x, y, 510, 206, b"SIMULATED", WARNING_AMBER) {
+                    if let Some(c) = render_badge(x, y, 510, 206, if app.thermal == TelemetryState::Reported { &b"REPORTED"[..] } else { &b"UNAVAILABLE"[..] }, if app.thermal == TelemetryState::Reported { SUCCESS_EMERALD } else { TEXT_MUTED }) {
                         return c;
                     }
                     return SURFACE_DARK;
@@ -673,10 +673,10 @@ fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                     if let Some(c) = test_text(x, y, 60, 380, 2, b"6-Axis Motion Sensor", TEXT_PRIMARY) {
                         return c;
                     }
-                    if let Some(c) = test_text(x, y, 60, 420, 1, b"Accelerometer and Gyroscope Telemetry", TEXT_MUTED) {
+                    if let Some(c) = test_text(x, y, 60, 440, 1, if app.sensor == TelemetryState::Reported { &b"Sensor payload received; values not parsed"[..] } else { &b"Sensor values unavailable"[..] }, TEXT_MUTED) {
                         return c;
                     }
-                    if let Some(c) = render_badge(x, y, 510, 376, b"SIMULATED", WARNING_AMBER) {
+                    if let Some(c) = render_badge(x, y, 510, 376, if app.sensor == TelemetryState::Reported { &b"REPORTED"[..] } else { &b"UNAVAILABLE"[..] }, if app.sensor == TelemetryState::Reported { SUCCESS_EMERALD } else { TEXT_MUTED }) {
                         return c;
                     }
                     return SURFACE_DARK;
@@ -689,10 +689,10 @@ fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                     if let Some(c) = test_text(x, y, 60, 550, 2, b"Ambient Light Sensor", TEXT_PRIMARY) {
                         return c;
                     }
-                    if let Some(c) = test_text(x, y, 60, 590, 1, b"Photodiode Lux Sensor Bus", TEXT_MUTED) {
+                    if let Some(c) = test_text(x, y, 60, 610, 1, if app.sensor == TelemetryState::Reported { &b"Sensor payload received; lux not parsed"[..] } else { &b"Light sensor telemetry unavailable"[..] }, TEXT_MUTED) {
                         return c;
                     }
-                    if let Some(c) = render_badge(x, y, 510, 546, b"SIMULATED", WARNING_AMBER) {
+                    if let Some(c) = render_badge(x, y, 510, 546, if app.sensor == TelemetryState::Reported { &b"REPORTED"[..] } else { &b"UNAVAILABLE"[..] }, if app.sensor == TelemetryState::Reported { SUCCESS_EMERALD } else { TEXT_MUTED }) {
                         return c;
                     }
                     return SURFACE_DARK;
@@ -701,48 +701,48 @@ fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
             SettingsTab::SecurityAndPrivacy => {
                 // Card 0: Keystore
                 if x >= 24 && x < W - 24 && y >= 180 && y < 330 {
-                    if let Some(c) = render_card_frame(x, y, 180, 330, SUCCESS_EMERALD) {
+                    if let Some(c) = render_card_frame(x, y, 180, 330, BORDER_SUBTLE) {
                         return c;
                     }
                     if let Some(c) = test_text(x, y, 60, 210, 2, b"Hardware Keystore", TEXT_PRIMARY) {
                         return c;
                     }
-                    if let Some(c) = test_text(x, y, 60, 250, 1, b"Cryptographic Root Key Sealed in Hardware", SUCCESS_EMERALD) {
+                    if let Some(c) = test_text(x, y, 60, 270, 1, b"Keystore status unavailable", TEXT_MUTED) {
                         return c;
                     }
-                    if let Some(c) = render_badge(x, y, 520, 206, b"ENFORCED", SUCCESS_EMERALD) {
+                    if let Some(c) = render_badge(x, y, 520, 206, b"UNAVAILABLE", TEXT_MUTED) {
                         return c;
                     }
                     return SURFACE_DARK;
                 }
                 // Card 1: Vault
                 if x >= 24 && x < W - 24 && y >= 350 && y < 500 {
-                    if let Some(c) = render_card_frame(x, y, 350, 500, SUCCESS_EMERALD) {
+                    if let Some(c) = render_card_frame(x, y, 350, 500, BORDER_SUBTLE) {
                         return c;
                     }
                     if let Some(c) = test_text(x, y, 60, 380, 2, b"Storage Vault Encryption", TEXT_PRIMARY) {
                         return c;
                     }
-                    if let Some(c) = test_text(x, y, 60, 420, 1, b"Sectors 200-205 Cryptographically Sealed", SUCCESS_EMERALD) {
+                    if let Some(c) = test_text(x, y, 60, 440, 1, b"Vault encryption status unavailable", TEXT_MUTED) {
                         return c;
                     }
-                    if let Some(c) = render_badge(x, y, 510, 376, b"ENCRYPTED", SUCCESS_EMERALD) {
+                    if let Some(c) = render_badge(x, y, 510, 376, b"UNAVAILABLE", TEXT_MUTED) {
                         return c;
                     }
                     return SURFACE_DARK;
                 }
                 // Card 2: Privacy Shield
                 if x >= 24 && x < W - 24 && y >= 520 && y < 670 {
-                    if let Some(c) = render_card_frame(x, y, 520, 670, SUCCESS_EMERALD) {
+                    if let Some(c) = render_card_frame(x, y, 520, 670, BORDER_SUBTLE) {
                         return c;
                     }
                     if let Some(c) = test_text(x, y, 60, 550, 2, b"Privacy Shield Filter", TEXT_PRIMARY) {
                         return c;
                     }
-                    if let Some(c) = test_text(x, y, 60, 590, 1, b"Anti-Tracking Query & Header Sanitizer Active", SUCCESS_EMERALD) {
+                    if let Some(c) = test_text(x, y, 60, 610, 1, b"Privacy filter status unavailable", TEXT_MUTED) {
                         return c;
                     }
-                    if let Some(c) = render_badge(x, y, 540, 546, b"ACTIVE", SUCCESS_EMERALD) {
+                    if let Some(c) = render_badge(x, y, 540, 546, b"UNAVAILABLE", TEXT_MUTED) {
                         return c;
                     }
                     return SURFACE_DARK;
@@ -782,10 +782,10 @@ fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                     if let Some(c) = test_text(x, y, 60, 210, 2, b"InterOS Core", TEXT_PRIMARY) {
                         return c;
                     }
-                    if let Some(c) = test_text(x, y, 60, 250, 1, b"Version: 0.8.2 (x86_64 Sovereign Microkernel)", ACCENT_SKY) {
+                    if let Some(c) = test_text(x, y, 60, 270, 1, b"Version: 0.8.2 (x86_64 Sovereign Microkernel)", ACCENT_SKY) {
                         return c;
                     }
-                    if let Some(c) = render_badge(x, y, 520, 206, b"VERIFIED", SUCCESS_EMERALD) {
+                    if let Some(c) = render_badge(x, y, 520, 206, b"UNAVAILABLE", TEXT_MUTED) {
                         return c;
                     }
                     return SURFACE_DARK;
@@ -798,7 +798,7 @@ fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                     if let Some(c) = test_text(x, y, 60, 380, 2, b"Platform Microkernel", TEXT_PRIMARY) {
                         return c;
                     }
-                    if let Some(c) = test_text(x, y, 60, 420, 1, b"Capability Security & VFS Block Storage", TEXT_MUTED) {
+                    if let Some(c) = test_text(x, y, 60, 440, 1, b"Capability Security & VFS Block Storage", TEXT_MUTED) {
                         return c;
                     }
                     if let Some(c) = render_badge(x, y, 530, 376, b"RING 0", ACCENT_SKY) {
@@ -808,16 +808,16 @@ fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                 }
                 // Card 2: RTC
                 if x >= 24 && x < W - 24 && y >= 520 && y < 670 {
-                    if let Some(c) = render_card_frame(x, y, 520, 670, SUCCESS_EMERALD) {
+                    if let Some(c) = render_card_frame(x, y, 520, 670, BORDER_SUBTLE) {
                         return c;
                     }
                     if let Some(c) = test_text(x, y, 60, 550, 2, b"Hardware Real-Time Clock", TEXT_PRIMARY) {
                         return c;
                     }
-                    if let Some(c) = test_text(x, y, 60, 590, 1, b"Civil Wall-Clock Synchronization Active", TEXT_MUTED) {
+                    if let Some(c) = test_text(x, y, 60, 610, 1, b"Clock synchronization unavailable", TEXT_MUTED) {
                         return c;
                     }
-                    if let Some(c) = render_badge(x, y, 510, 546, b"RTC SYNC", SUCCESS_EMERALD) {
+                    if let Some(c) = render_badge(x, y, 510, 546, b"UNAVAILABLE", TEXT_MUTED) {
                         return c;
                     }
                     return SURFACE_DARK;

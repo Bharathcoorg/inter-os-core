@@ -98,23 +98,12 @@ impl FileManagerApp {
 fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
     // 1. Status Bar & Clean Header (y: 0..140)
     if y < 140 {
-        // Clock "09:20" at x: 48, y: 36
-        if y >= 36 && y < 52 {
-            if let Some(c) = test_text(x, y, 48, 36, 2, b"09:20", TEXT_PRIMARY) {
-                return c;
-            }
-        }
+        // Clock and battery indicators are omitted until live guest services
+        // expose real readings. Never paint plausible but fabricated values.
 
-        // Status indicators at top right (x: 620..664, y: 36..52)
-        if y >= 36 && y < 52 {
-            if let Some(c) = test_text(x, y, 620, 36, 2, b"100%", TEXT_MUTED) {
-                return c;
-            }
-        }
-
-        // Title: "Files" at x: 48, y: 76 (scale 4)
+        // Title: "Files" at x: 48, y: 64 (scale 3)
         if y >= 76 && y < 108 {
-            if let Some(c) = test_text(x, y, 48, 76, 4, b"Files", TEXT_PRIMARY) {
+            if let Some(c) = test_text(x, y, 48, 64, 3, b"Files", TEXT_PRIMARY) {
                 return c;
             }
         }
@@ -222,12 +211,12 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 if let Some(c) = test_text(x, y, 108, row_start_y + 24, 2, b"Internal Storage", TEXT_PRIMARY) {
                     return c;
                 }
-                let usage_text = if app.storage_capacity_bytes > 0 {
-                    b"42 GB / 128 GB"
+                let capacity_status: &[u8] = if app.storage_capacity_bytes > 0 {
+                    b"Capacity detected; usage unavailable"
                 } else {
-                    b"42 GB / 128 GB"
+                    b"Storage capacity unavailable"
                 };
-                if let Some(c) = test_text(x, y, 108, row_start_y + 56, 2, usage_text, TEXT_MUTED) {
+                if let Some(c) = test_text(x, y, 108, row_start_y + 56, 1, capacity_status, TEXT_MUTED) {
                     return c;
                 }
             }

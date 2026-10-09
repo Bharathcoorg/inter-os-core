@@ -195,7 +195,7 @@ const H: usize = 1440;
 const CHUNK: usize = 4096;
 
 #[inline(never)]
-fn get_messages_pixel(x: usize, y: usize, _active_idx: usize) -> u32 {
+fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp) -> u32 {
     // 1. Status Bar & Header (y: 0..96)
     if y < 96 {
         if y >= 94 {
@@ -235,7 +235,7 @@ fn get_messages_pixel(x: usize, y: usize, _active_idx: usize) -> u32 {
                 }
             }
 
-            if let Some(c) = test_text(x, y, 548, 40, 2, b"P2P E2EE", SUCCESS_EMERALD) {
+            if let Some(c) = test_text(x, y, 548, 40, 2, b"NO TRANSPORT", TEXT_MUTED) {
                 return c;
             }
 
@@ -361,39 +361,18 @@ fn get_messages_pixel(x: usize, y: usize, _active_idx: usize) -> u32 {
                 if let Some(c) = test_text(x, y, 196, 370, 2, b"No Conversations Yet", TEXT_PRIMARY) {
                     return c;
                 }
-                if let Some(c) = test_text(x, y, 232, 404, 1, b"Encrypted P2P Wire Client Active", SUCCESS_EMERALD) {
+                if let Some(c) = test_text(x, y, 204, 430, 1, b"Messaging transport unavailable", TEXT_MUTED) {
                     return c;
                 }
-                if let Some(c) = test_text(x, y, 240, 426, 1, b"Hardware Keystore Slot 3 Ready", TEXT_MUTED) {
+                if let Some(c) = test_text(x, y, 220, 458, 1, if messages.keystore_derived { &b"Encryption key available"[..] } else { &b"Encryption key unavailable"[..] }, TEXT_MUTED) {
                     return c;
                 }
 
-                // Action Button: "+ Start New Chat" (x: 220..500, y: 476..528)
-                if x >= 220 && x < 500 && y >= 476 && y < 528 {
-                    let bx = (x - 220).min(499 - x);
-                    let by = (y - 476).min(527 - y);
-                    if bx < 24 && by < 24 {
-                        let cdx = (24 - bx) as isize;
-                        let cdy = (24 - by) as isize;
-                        if cdx * cdx + cdy * cdy >= 576 {
-                            return SURFACE_DARK;
-                        }
-                    }
-
-                    if let Some(c) = test_text(x, y, 236, 494, 2, b"+ Start New Chat", ACCENT_SKY) {
-                        return c;
-                    }
-
-                    if bx < 2 || by < 2 {
-                        return ACCENT_SKY;
-                    }
-                    return 0xFF132338;
+                // No compose action is shown until a real messaging transport
+                // and peer-selection backend exist.
+                if let Some(c) = test_text(x, y, 212, 520, 1, b"New chats require a configured messaging backend", TEXT_MUTED) {
+                    return c;
                 }
-
-                if rx < 2 || ry < 2 {
-                    return BORDER_SUBTLE;
-                }
-                return SURFACE_DARK;
             }
         } else {
             // Render actual conversation threads
@@ -481,7 +460,7 @@ fn get_messages_pixel(x: usize, y: usize, _active_idx: usize) -> u32 {
     BG_DARK
 }
 
-fn render_messages_ui(surface: u32, active_idx: usize) {
+fn render_messages_ui(surface: u32, messages: &MessagesApp) {
     let mut chunk = [0u32; CHUNK];
     let total = W * H;
     let mut offset = 0;
@@ -490,7 +469,7 @@ fn render_messages_ui(surface: u32, active_idx: usize) {
         let mut x = offset % W;
         let mut y = offset / W;
         for i in 0..count {
-            chunk[i] = get_messages_pixel(x, y, active_idx);
+            chunk[i] = get_messages_pixel(x, y, messages);
             x += 1;
             if x == W {
                 x = 0;
@@ -573,7 +552,7 @@ pub extern "C" fn _start() -> ! {
     }
 
     if surface > 0 {
-        render_messages_ui(surface, messages.active_thread_idx);
+        render_messages_ui(surface, &messages);
         let _ = std::surface_flip(6);
         std::log(
             0,
@@ -628,7 +607,7 @@ pub extern "C" fn _start() -> ! {
                                     messages.active_thread_idx = card_idx;
                                     std::audio_haptic_click().ok();
                                     if surface > 0 {
-                                        render_messages_ui(surface, messages.active_thread_idx);
+                                        render_messages_ui(surface, &messages);
                                         let _ = std::surface_flip(6);
                                     }
                                 }

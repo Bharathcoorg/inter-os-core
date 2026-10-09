@@ -320,45 +320,9 @@ fn get_gallery_color(x: usize, y: usize, app: &GalleryApp) -> u32 {
 
     // 1. Header (y: 0..140)
     if y < 140 {
-        // Status bar time "09:20" at x48 scale1 muted (y~28).
-        if y >= 28 && y < 36 {
-            if let Some(c) = test_text(x, y, 48, 28, 1, b"09:20", TEXT_MUTED) {
-                return c;
-            }
-        }
-
-        // Signal bars near x600 (small bars in primary).
-        {
-            let mut hit_signal = false;
-            let mut i = 0;
-            while i < 4 {
-                let bx = 598 + i * 7;
-                let bh = 4 + i * 3;
-                let top = 40usize.saturating_sub(bh);
-                if x >= bx && x < bx + 4 && y >= top && y < 40 {
-                    hit_signal = true;
-                    break;
-                }
-                i += 1;
-            }
-            if hit_signal {
-                return TEXT_PRIMARY;
-            }
-        }
-
-        // Battery glyph at x648..680.
-        if x >= 648 && x < 678 && y >= 28 && y < 40 {
-            if y == 28 || y == 39 || x == 648 || x == 677 {
-                return TEXT_PRIMARY;
-            }
-            if x >= 650 && x < 668 && y >= 30 && y < 37 {
-                return TEXT_PRIMARY;
-            }
-        }
-        if x >= 678 && x < 681 && y >= 32 && y < 36 {
-            return TEXT_PRIMARY;
-        }
-
+        // Time, radio signal and battery are not reported to this app. The
+        // shared system status service must provide real readings before these
+        // indicators are rendered.
         // Bold title "Photos" scale4 at x48 y76.
         if y >= 76 && y < 108 {
             if let Some(c) = test_text(x, y, 48, 76, 4, b"Photos", TEXT_PRIMARY) {

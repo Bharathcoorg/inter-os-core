@@ -195,23 +195,22 @@ impl TerminalApp {
             "dma" => {
                 self.push_line("interos@sovereign:~$ dma", SUCCESS_EMERALD);
                 let payload = b"DMA::TERMINAL::STREAM_PACKET";
-                let _ = std::shm_pipe_transfer(3, payload, 0x01);
-                self.push_line("DMA: High-throughput packet streamed via Pipe 3.", SUCCESS_EMERALD);
-                std::log(
-                    0,
-                    "[TERMINAL APP] DMA: High-throughput packet streamed via Pipe 3.",
-                )
-                .ok();
+                match std::shm_pipe_transfer(3, payload, 0x01) {
+                    Ok(_) => {
+                        self.push_line("DMA: test payload transfer acknowledged by Pipe 3.", SUCCESS_EMERALD);
+                        std::log(0, "[TERMINAL APP] DMA test payload transfer acknowledged by Pipe 3.").ok();
+                    }
+                    Err(_) => {
+                        self.push_line("DMA: Pipe 3 transfer unavailable or refused.", TEXT_MUTED);
+                        std::log(0, "[TERMINAL APP] DMA test payload transfer failed or was refused.").ok();
+                    }
+                }
                 self.record_history("dma", 0);
             }
             "ping" => {
                 self.push_line("interos@sovereign:~$ ping", SUCCESS_EMERALD);
-                self.push_line("ping: Loopback interface online (127.0.0.1: 0.1ms).", SUCCESS_EMERALD);
-                std::log(
-                    0,
-                    "[TERMINAL APP] ping: Loopback interface online (127.0.0.1).",
-                )
-                .ok();
+                self.push_line("ping: unavailable; no ICMP/network probe is implemented.", TEXT_MUTED);
+                std::log(0, "[TERMINAL APP] ping unavailable: no network probe was executed.").ok();
                 self.record_history("ping", 0);
             }
             _ => {}

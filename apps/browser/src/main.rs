@@ -63,6 +63,11 @@ pub struct BrowserApp {
     pub pages_loaded: u32,
     pub trackers_blocked: u32,
     pub active_socket_id: Option<u64>,
+    /// User-edited address text. No page is claimed loaded without a real transport.
+    pub address: [u8; 64],
+    pub address_len: usize,
+    pub address_focused: bool,
+    pub navigation_unavailable: bool,
 }
 
 impl BrowserApp {
@@ -73,6 +78,10 @@ impl BrowserApp {
             pages_loaded: 0,
             trackers_blocked: 0,
             active_socket_id: None,
+            address: [0; 64],
+            address_len: 0,
+            address_focused: false,
+            navigation_unavailable: false,
         }
     }
 
@@ -382,44 +391,36 @@ fn get_browser_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
                     }
                 }
             }
-            // Placeholder text.
-            if let Some(c) = test_text(x, y, 96, 92, 1, b"Search or type URL", TEXT_MUTED) {
-                return c;
+            // Editable guest-rendered address field; the capsule clips overflow.
+            let address_text = &app.address[..app.address_len.min(app.address.len())];
+            if !address_text.is_empty() {
+                if let Some(c) = test_text(x, y, 96, 92, 1, address_text, TEXT_PRIMARY) {
+                    return c;
+                }
+            } else if !app.address_focused {
+                if let Some(c) = test_text(x, y, 96, 92, 1, b"Search or type URL", TEXT_MUTED) {
+                    return c;
+                }
+            }
+            if app.address_focused {
+                let cursor_x = (96 + std::design::font::measure(address_text, 1)).min(626);
+                if x == cursor_x && y >= 88 && y < 112 {
+                    return ACCENT_SKY;
+                }
             }
             return SURFACE_DARK;
         }
 
-        // Status bar row y0..40: time + signal/battery glyphs on BG.
+        // Time, radio signal and battery are not reported to this app.
+        // Keep this band neutral until a shared system status service provides
+        // real readings; never draw sample values or fabricated icons.
         if y < 60 {
-            if let Some(c) = test_text(x, y, 48, 16, 1, b"09:20", TEXT_PRIMARY) {
+            return BG_DARK;
+        }
+        if app.navigation_unavailable && y >= 132 && y < 156 {
+            if let Some(c) = test_text(x, y, 48, 132, 1, b"Navigation unavailable: no network transport", TEXT_MUTED) {
                 return c;
             }
-            // Signal bars: 4 ascending bars baseline y36, x600..636.
-            {
-                let bars = [(600usize, 28usize), (610, 24), (620, 20), (630, 16)];
-                for (bx, top) in bars {
-                    if x >= bx && x < bx + 6 && y >= top && y < 38 {
-                        return TEXT_PRIMARY;
-                    }
-                }
-            }
-            // Battery outline x652..686 y18..32 + nub + fill.
-            {
-                if x >= 652 && x < 686 && y >= 18 && y < 32 {
-                    if x == 652 || x == 685 || y == 18 || y == 31 {
-                        return TEXT_PRIMARY;
-                    }
-                    // Fill level ~70%.
-                    if x >= 654 && x < 676 {
-                        return TEXT_PRIMARY;
-                    }
-                    return BG_DARK;
-                }
-                if x >= 686 && x < 690 && y >= 22 && y < 28 {
-                    return TEXT_PRIMARY;
-                }
-            }
-            return BG_DARK;
         }
         return BG_DARK;
     }
@@ -587,6 +588,31 @@ fn get_browser_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
     BG_DARK
 }
 
+fn handle_browser_key(app: &mut BrowserApp, key: std::InputKeyEvent) -> bool {
+    use std::input_key_code;
+    if !key.pressed || !app.address_focused {
+        return false;
+    }
+    match key.code {
+        input_key_code::ESCAPE => app.address_focused = false,
+        input_key_code::ENTER => {
+            app.address_focused = false;
+            app.navigation_unavailable = true;
+            std::log(0, "[BROWSER APP] Address submitted; navigation unavailable because no network transport is bound.").ok();
+        }
+        input_key_code::BACKSPACE => {
+            app.address_len = app.address_len.saturating_sub(1);
+        }
+        code if (32..=126).contains(&code) && app.address_len < app.address.len() => {
+            app.address[app.address_len] = code as u8;
+            app.address_len += 1;
+            app.navigation_unavailable = false;
+        }
+        _ => return false,
+    }
+    true
+}
+
 fn render_browser_ui(surface: u32, app: &BrowserApp) {
     let mut chunk = [0u32; CHUNK];
     let total = W * H;
@@ -658,6 +684,13 @@ pub extern "C" fn _start() -> ! {
                         scale_milli: 1000,
                     };
                     while std::input_event_poll(&mut input).is_ok() {
+                        if let Some(key) = input.key_event() {
+                            if handle_browser_key(&mut browser, key) && surface > 0 {
+                                render_browser_ui(surface, &browser);
+                                let _ = std::surface_flip(6);
+                            }
+                            continue;
+                        }
                         if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
                             std::log(
                                 0,
@@ -681,11 +714,16 @@ pub extern "C" fn _start() -> ! {
                                 std::exit_with_code(0);
                             }
 
-                            // Tapping the search pill gives haptic feedback only; no navigation.
-                            if input.x >= 36 && input.x < 684 && input.y >= 70 && input.y < 130
-                            {
+                            // Tapping the address pill focuses the editable native field.
+                            if input.x >= 36 && input.x < 684 && input.y >= 70 && input.y < 130 {
+                                browser.address_focused = true;
+                                browser.navigation_unavailable = false;
                                 let _ = std::audio_haptic_click();
-                                std::log(0, "[BROWSER APP] Search pill tapped; haptic feedback only.").ok();
+                                std::log(0, "[BROWSER APP] Address field focused for keyboard input.").ok();
+                                if surface > 0 {
+                                    render_browser_ui(surface, &browser);
+                                    let _ = std::surface_flip(6);
+                                }
                             }
 
                             // Check bookmark card taps (ledger is empty: no-op).
