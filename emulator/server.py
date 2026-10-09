@@ -1167,7 +1167,10 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
     ]
     if arch == "x86_64":
         cmd.extend(["-machine", "q35", "-cpu", "qemu64"])
-        # Real virtual display and absolute pointer hardware for the canonical phone VM.
+        # Real virtual display and pointer hardware for the canonical phone VM.
+        # The x86_64 profile launches with the canonical scanout declared in
+        # SUPPORTED_PROFILES: "guest_width": 720, "guest_height": 1440, wired
+        # into the EDID below so the guest KMS modesets exactly 720x1440.
         cmd.extend(["-vga", "none", "-device", "virtio-vga,edid=on,xres=720,yres=1440", "-device", "ps2-mouse"])
         # A dedicated data disk is mandatory. The kernel uses the Primary Master
         # as the read-only boot image and the Primary Slave as persistent storage;
@@ -2600,7 +2603,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                     if p2 is None: raise ValueError('coordinates outside letterboxed phone canvas')
                     gx2, gy2 = p2
                 else:
-                    raise ValueError('unsupported coordinate space')
+                    raise ValueError('unknown coordinate space')
 
                 slot = int(data.get('slot', 0))
                 if action == 'down':
