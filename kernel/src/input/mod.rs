@@ -129,10 +129,16 @@ pub fn init() {
 }
 
 pub fn post_char_event(c: char) {
-    INPUT_QUEUE.lock().push(InputEvent::Key {
-        char_code: c,
-        pressed: true,
-    });
+    for _ in 0..10_000 {
+        if let Some(mut q) = INPUT_QUEUE.try_lock() {
+            q.push(InputEvent::Key {
+                char_code: c,
+                pressed: true,
+            });
+            break;
+        }
+        core::hint::spin_loop();
+    }
     post_key_event(KeyEvent {
         source: InputSource::Keyboard,
         action: KeyAction::Down,
@@ -145,20 +151,40 @@ pub fn post_char_event(c: char) {
 }
 
 pub fn post_key_event(event: KeyEvent) {
-    INPUT_QUEUE.lock().push(InputEvent::KeyEvent(event));
+    for _ in 0..10_000 {
+        if let Some(mut q) = INPUT_QUEUE.try_lock() {
+            q.push(InputEvent::KeyEvent(event));
+            break;
+        }
+        core::hint::spin_loop();
+    }
     let normalized = crate::drivers::input::InputEvent::from_key(event);
-    crate::drivers::input::INPUT_PIPELINE.lock().push(normalized);
+    for _ in 0..10_000 {
+        if let Some(mut pipe) = crate::drivers::input::INPUT_PIPELINE.try_lock() {
+            pipe.push(normalized);
+            break;
+        }
+        core::hint::spin_loop();
+    }
     crate::drivers::input::dispatch_to_focused_window(normalized);
     crate::event::broadcast_event(crate::event::EVENT_TOUCH_INPUT);
 }
 
 pub fn route_touch_target(x: u32, y: u32) -> Option<(crate::gui::WindowId, u64)> {
-    crate::gui::WINDOW_MANAGER.lock().hit_test(x, y)
+    for _ in 0..10_000 {
+        if let Some(mut wm) = crate::gui::WINDOW_MANAGER.try_lock() {
+            return wm.hit_test(x, y);
+        }
+        core::hint::spin_loop();
+    }
+    None
 }
 
 pub fn post_touch_event(slot: u8, x: u32, y: u32, pressure: u16, phase: TouchPhase) {
     if phase == TouchPhase::Down {
-        let _ = crate::gui::GRAVITY_COMPOSITOR.lock().trigger_force_takeover();
+        if let Some(mut comp) = crate::gui::GRAVITY_COMPOSITOR.try_lock() {
+            let _ = comp.trigger_force_takeover();
+        }
     }
 
     let ticks = crate::interrupts::get_system_ticks();
@@ -177,27 +203,56 @@ pub fn post_touch_event(slot: u8, x: u32, y: u32, pressure: u16, phase: TouchPha
         y as i32,
     );
 
-    let gesture_opt = TOUCH_DIGITIZER.lock().update_touch(slot, x, y, pressure, phase);
-    let mut q = INPUT_QUEUE.lock();
-    q.push(InputEvent::Touch(TouchPoint {
-        slot,
-        x,
-        y,
-        pressure,
-        phase,
-    }));
-    if let Some(gesture) = gesture_opt {
-        q.push(InputEvent::Gesture(gesture));
-    }
-    drop(q);
+    let gesture_opt = {
+        let mut g = None;
+        for _ in 0..10_000 {
+            if let Some(mut dig) = TOUCH_DIGITIZER.try_lock() {
+                g = dig.update_touch(slot, x, y, pressure, phase);
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        g
+    };
 
-    let gesture = INPUT_ROUTER
-        .lock()
-        .dispatch_pointer_at(pointer, 720, 24, ticks);
+    for _ in 0..10_000 {
+        if let Some(mut q) = INPUT_QUEUE.try_lock() {
+            q.push(InputEvent::Touch(TouchPoint {
+                slot,
+                x,
+                y,
+                pressure,
+                phase,
+            }));
+            if let Some(gesture) = gesture_opt {
+                q.push(InputEvent::Gesture(gesture));
+            }
+            break;
+        }
+        core::hint::spin_loop();
+    }
+
+    let gesture = {
+        let mut g = None;
+        for _ in 0..10_000 {
+            if let Some(mut router) = INPUT_ROUTER.try_lock() {
+                g = router.dispatch_pointer_at(pointer, 720, 24, ticks);
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        g
+    };
 
     if let Some(gesture) = gesture {
         let event = crate::drivers::input::InputEvent::from_canonical(gesture);
-        crate::drivers::input::INPUT_PIPELINE.lock().push(event);
+        for _ in 0..10_000 {
+            if let Some(mut pipe) = crate::drivers::input::INPUT_PIPELINE.try_lock() {
+                pipe.push(event);
+                break;
+            }
+            core::hint::spin_loop();
+        }
         crate::drivers::input::dispatch_to_focused_window(event);
         crate::event::broadcast_event(crate::event::EVENT_TOUCH_INPUT);
     } else if phase == TouchPhase::Move || phase == TouchPhase::Down {

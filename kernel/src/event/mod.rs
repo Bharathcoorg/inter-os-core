@@ -49,6 +49,36 @@ pub struct EventSubscription {
     pub is_waiting: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct UnblockList {
+    pub tasks: [TaskId; 32],
+    pub len: usize,
+}
+
+impl UnblockList {
+    pub const fn new() -> Self {
+        Self {
+            tasks: [TaskId(0); 32],
+            len: 0,
+        }
+    }
+
+    pub fn push(&mut self, id: TaskId) {
+        if self.len < self.tasks.len() {
+            self.tasks[self.len] = id;
+            self.len += 1;
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn as_slice(&self) -> &[TaskId] {
+        &self.tasks[..self.len]
+    }
+}
+
 /// Sovereign Event Reactor managing event registrations, posting, and task wakeups.
 pub struct EventReactor {
     subscriptions: Vec<EventSubscription>,
@@ -102,8 +132,8 @@ impl EventReactor {
 
     /// Broadcasts an event to all tasks registered with interest in the event mask.
     /// Returns the list of tasks that were waiting and need to be unblocked in the scheduler.
-    pub fn broadcast_event(&mut self, event_mask: u32) -> Vec<TaskId> {
-        let mut unblock = Vec::new();
+    pub fn broadcast_event(&mut self, event_mask: u32) -> UnblockList {
+        let mut unblock = UnblockList::new();
         for sub in self.subscriptions.iter_mut() {
             let matched = event_mask & sub.interest_mask;
             if matched != 0 {
@@ -180,9 +210,9 @@ impl EventReactor {
     }
 
     /// Invoked on hardware timer tick to evaluate deadlines and wake timed-out or event-ready tasks.
-    /// Returns the list of tasks whose timeout elapsed or events fired.
-    pub fn on_tick(&mut self, current_ticks: u64) -> Vec<TaskId> {
-        let mut unblock = Vec::new();
+    /// Returns the list of tasks whose timeout elapsed or events fired without allocating heap memory.
+    pub fn on_tick(&mut self, current_ticks: u64) -> UnblockList {
+        let mut unblock = UnblockList::new();
         for sub in self.subscriptions.iter_mut() {
             if sub.is_waiting {
                 let has_pending = (sub.pending_mask & sub.interest_mask) != 0;
@@ -206,50 +236,95 @@ pub static EVENT_REACTOR: Mutex<EventReactor> = Mutex::new(EventReactor::new());
 
 /// Posts an event to a designated target task via the global Event Reactor.
 pub fn cleanup_task(task_id: TaskId) {
-    EVENT_REACTOR.lock().cleanup_task(task_id);
+    for _ in 0..10_000 {
+        if let Some(mut reactor) = EVENT_REACTOR.try_lock() {
+            reactor.cleanup_task(task_id);
+            break;
+        }
+        core::hint::spin_loop();
+    }
 }
 
 pub fn post_event(task_id: TaskId, event_mask: u32) {
     let unblock = {
-        let mut reactor = EVENT_REACTOR.lock();
-        reactor.post_event(task_id, event_mask)
+        let mut u = false;
+        for _ in 0..10_000 {
+            if let Some(mut reactor) = EVENT_REACTOR.try_lock() {
+                u = reactor.post_event(task_id, event_mask);
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        u
     };
     if unblock {
-        let mut sched = SCHEDULER.lock();
-        sched.unblock_task(task_id);
+        for _ in 0..10_000 {
+            if let Some(mut sched) = SCHEDULER.try_lock() {
+                sched.unblock_task(task_id);
+                return;
+            }
+            core::hint::spin_loop();
+        }
+        // If scheduler lock was contended, restore is_waiting so on_timer_tick unblocks it
+        if let Some(mut reactor) = EVENT_REACTOR.try_lock() {
+            if let Some(sub) = reactor.subscriptions.iter_mut().find(|s| s.task_id == task_id) {
+                sub.is_waiting = true;
+            }
+        }
     }
 }
 
-/// Broadcasts an event to all interested tasks via the global Event Reactor.
+/// Broadcasts an event to all interested tasks via the global Event Reactor without allocating heap memory.
 pub fn broadcast_event(event_mask: u32) {
     let unblock = {
-        let mut reactor = EVENT_REACTOR.lock();
-        reactor.broadcast_event(event_mask)
+        let mut u = UnblockList::new();
+        for _ in 0..10_000 {
+            if let Some(mut reactor) = EVENT_REACTOR.try_lock() {
+                u = reactor.broadcast_event(event_mask);
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        u
     };
     if !unblock.is_empty() {
-        let mut sched = SCHEDULER.lock();
-        for task_id in unblock {
-            sched.unblock_task(task_id);
+        for _ in 0..10_000 {
+            if let Some(mut sched) = SCHEDULER.try_lock() {
+                for &task_id in unblock.as_slice() {
+                    sched.unblock_task(task_id);
+                }
+                return;
+            }
+            core::hint::spin_loop();
+        }
+        // If scheduler lock was contended, restore is_waiting so on_timer_tick unblocks them
+        if let Some(mut reactor) = EVENT_REACTOR.try_lock() {
+            for &task_id in unblock.as_slice() {
+                if let Some(sub) = reactor.subscriptions.iter_mut().find(|s| s.task_id == task_id) {
+                    sub.is_waiting = true;
+                }
+            }
         }
     }
 }
 
 /// Dispatches timer tick notifications to the global Event Reactor.
+/// Completely allocation-free to prevent deadlocking against the global heap lock during timer interrupts.
 pub fn on_timer_tick(current_ticks: u64) {
     let unblock = if let Some(mut reactor) = EVENT_REACTOR.try_lock() {
         reactor.on_tick(current_ticks)
     } else {
-        Vec::new()
+        UnblockList::new()
     };
     if !unblock.is_empty() {
         if let Some(mut sched) = SCHEDULER.try_lock() {
-            for task_id in unblock {
+            for &task_id in unblock.as_slice() {
                 sched.unblock_task(task_id);
             }
         } else {
             // Restore is_waiting so that a subsequent tick will retry the unblock
             if let Some(mut reactor) = EVENT_REACTOR.try_lock() {
-                for task_id in unblock {
+                for &task_id in unblock.as_slice() {
                     if let Some(sub) = reactor.subscriptions.iter_mut().find(|s| s.task_id == task_id) {
                         sub.is_waiting = true;
                     }

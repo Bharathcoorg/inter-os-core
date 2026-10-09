@@ -51,8 +51,10 @@ pub fn device_read(path: &str, buf: &mut [u8]) -> Result<usize, FsError> {
         }
         DeviceKind::InputEvent0 => {
             // Dequeue next hardware input event from the ring buffer
-            let mut q = INPUT_QUEUE.lock();
-            if let Some(event) = q.pop() {
+            let popped = x86_64::instructions::interrupts::without_interrupts(|| {
+                INPUT_QUEUE.lock().pop()
+            });
+            if let Some(event) = popped {
                 // Pack into a 16-byte fixed binary event record:
                 // [0]: event_type (1: Key, 2: Touch, 3: Gesture)
                 // [1]: slot / pressed

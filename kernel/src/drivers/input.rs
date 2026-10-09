@@ -164,29 +164,48 @@ pub static INPUT_PIPELINE: Mutex<InputPipeline> = Mutex::new(InputPipeline::new(
 pub fn dispatch_to_focused_window(event: InputEvent) {
     let owner = {
         let top_kms_owner = {
-            let kms = crate::drivers::display_kms::DRM_KMS.lock();
-            kms.surfaces.iter()
-                .filter(|s| s.visible && s.input_enabled)
-                .max_by_key(|s| s.z_order)
-                .map(|s| s.owner_task)
+            let mut top = None;
+            for _ in 0..1000 {
+                if let Some(kms) = crate::drivers::display_kms::DRM_KMS.try_lock() {
+                    top = kms.surfaces.iter()
+                        .filter(|s| s.visible && s.input_enabled)
+                        .max_by_key(|s| s.z_order)
+                        .map(|s| s.owner_task);
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+            top
         };
 
         let resolved = if let Some(top_task) = top_kms_owner {
             Some(top_task)
         } else {
             let target = {
-                let mut wm = crate::gui::WINDOW_MANAGER.lock();
-                match event.kind {
-                    InputEventKind::Tap | InputEventKind::DoubleTap | InputEventKind::LongPress =>
-                        wm.hit_test(event.x, event.y).map(|(_, owner)| owner),
-                    InputEventKind::Pan | InputEventKind::Pinch =>
-                        wm.focused_owner().or_else(|| wm.top_visible_owner()),
-                    _ => wm.focused_owner().or_else(|| wm.top_visible_owner()),
+                let mut target_val = None;
+                for _ in 0..1000 {
+                    if let Some(mut wm) = crate::gui::WINDOW_MANAGER.try_lock() {
+                        target_val = match event.kind {
+                            InputEventKind::Tap | InputEventKind::DoubleTap | InputEventKind::LongPress =>
+                                wm.hit_test(event.x, event.y).map(|(_, owner)| owner),
+                            InputEventKind::Pan | InputEventKind::Pinch =>
+                                wm.focused_owner().or_else(|| wm.top_visible_owner()),
+                            _ => wm.focused_owner().or_else(|| wm.top_visible_owner()),
+                        };
+                        break;
+                    }
+                    core::hint::spin_loop();
                 }
+                target_val
             };
             target.or_else(|| {
-                let kms = crate::drivers::display_kms::DRM_KMS.lock();
-                kms.surfaces.iter().rev().find(|s| s.input_enabled).map(|s| s.owner_task)
+                for _ in 0..1000 {
+                    if let Some(kms) = crate::drivers::display_kms::DRM_KMS.try_lock() {
+                        return kms.surfaces.iter().rev().find(|s| s.input_enabled).map(|s| s.owner_task);
+                    }
+                    core::hint::spin_loop();
+                }
+                None
             })
         };
         crate::serial_println!("[INPUT DISPATCH] event={:?} (x={}, y={}) resolved={:?}",
@@ -195,7 +214,13 @@ pub fn dispatch_to_focused_window(event: InputEvent) {
     };
     if let Some(owner) = owner {
         crate::serial_println!("[INPUT DISPATCH] Routing to task {}", owner);
-        INPUT_PIPELINE.lock().route_to_task(TaskId(owner), event);
+        for _ in 0..1000 {
+            if let Some(mut pipe) = INPUT_PIPELINE.try_lock() {
+                pipe.route_to_task(TaskId(owner), event);
+                break;
+            }
+            core::hint::spin_loop();
+        }
         let mut msg = [0u8; 24];
         msg[0] = event.kind as u8;
         msg[4..8].copy_from_slice(&event.x.to_le_bytes());
@@ -203,7 +228,13 @@ pub fn dispatch_to_focused_window(event: InputEvent) {
         msg[12..16].copy_from_slice(&event.dx.to_le_bytes());
         msg[16..20].copy_from_slice(&event.dy.to_le_bytes());
         msg[20..24].copy_from_slice(&event.scale_milli.to_le_bytes());
-        let _ = crate::ipc::IPC_ROUTER.lock().send_direct(TaskId(0), TaskId(owner), 0x494E_5054, &msg);
+        for _ in 0..1000 {
+            if let Some(mut router) = crate::ipc::IPC_ROUTER.try_lock() {
+                let _ = router.send_direct(TaskId(0), TaskId(owner), 0x494E_5054, &msg);
+                break;
+            }
+            core::hint::spin_loop();
+        }
         crate::event::post_event(TaskId(owner), crate::event::EVENT_TOUCH_INPUT);
         crate::serial_println!("[INPUT DISPATCH] Dispatched to task {} complete", owner);
     }
@@ -211,8 +242,15 @@ pub fn dispatch_to_focused_window(event: InputEvent) {
 
 pub fn pump_touch_events() {
     let gestures: alloc::vec::Vec<_> = {
-        let mut touch = crate::drivers::touch_gestures::TOUCH_ENGINE.lock();
-        touch.gesture_queue.drain(..).collect()
+        let mut g = alloc::vec::Vec::new();
+        for _ in 0..1000 {
+            if let Some(mut touch) = crate::drivers::touch_gestures::TOUCH_ENGINE.try_lock() {
+                g = touch.gesture_queue.drain(..).collect();
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        g
     };
     if gestures.is_empty() {
         return;
@@ -220,7 +258,13 @@ pub fn pump_touch_events() {
     for gesture in gestures {
         crate::serial_println!("[INPUT PUMP] gesture={:?}", gesture);
         let event = InputEvent::from_gesture(gesture);
-        INPUT_PIPELINE.lock().push(event);
+        for _ in 0..1000 {
+            if let Some(mut pipe) = INPUT_PIPELINE.try_lock() {
+                pipe.push(event);
+                break;
+            }
+            core::hint::spin_loop();
+        }
         dispatch_to_focused_window(event);
     }
     crate::event::broadcast_event(crate::event::EVENT_TOUCH_INPUT);
