@@ -32,6 +32,24 @@ def test_device_studio_displays_guest_scanout_without_a_browser_readiness_gate()
     assert "hasLauncherPresented" not in body
 
 
+def test_device_studio_stream_starts_stopped_and_reconnects_after_any_close():
+    source = read("emulator/app.js")
+    # The stream used to initialise in the active state, which made the first
+    # startScanoutStream() return early: a page loaded while the guest was
+    # already running never entered the fetch loop or the polling chain.
+    assert "let isStreamActive = false;" in source
+    # A pending reconnect timer must not resurrect the stream after an
+    # explicit stopScanoutStream().
+    assert "if (!isStreamActive) return;" in source
+    # Every termination except an explicit stop (aborted signal) must schedule
+    # the reconnect and a polling fallback; a clean server-side close fell
+    # through with no retry and froze the monitor until a reload.
+    reconnect = "setTimeout(startPersistentBinaryStream, 2000);"
+    assert source.count(reconnect) == 1
+    guard = "if (isStreamActive && !signal.aborted) {"
+    assert source.index(guard) < source.index(reconnect)
+
+
 def test_pointer_events_are_serialized_and_include_down_move_up_and_cancel():
     source = read("emulator/app.js")
     assert "let guestTouchQueue = Promise.resolve()" in source

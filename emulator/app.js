@@ -507,7 +507,10 @@ document.addEventListener('DOMContentLoaded', () => {
   let frameCount = 0;
   let fpsTimer = performance.now();
   let streamRafId = null;
-  let isStreamActive = true;
+  // The stream is off until a live status starts it. Starting in the active
+  // state made the first startScanoutStream() return early, so a page loaded
+  // while the guest was already running never fetched a single frame.
+  let isStreamActive = false;
 
   async function queryMetrics() {
     try {
@@ -558,6 +561,9 @@ document.addEventListener('DOMContentLoaded', () => {
   let binaryStreamAbort = null;
 
   async function startPersistentBinaryStream() {
+    // A reconnect timer from an earlier session must not resurrect the stream
+    // after an explicit stop; only a live session may (re)connect.
+    if (!isStreamActive) return;
     if (binaryStreamActive) return;
     binaryStreamActive = true;
     if (binaryStreamAbort) binaryStreamAbort.abort();
@@ -609,17 +615,18 @@ document.addEventListener('DOMContentLoaded', () => {
           }
         }
       }
-    } catch (err) {
-      if (!signal.aborted) {
-        binaryStreamActive = false;
-        // Fall back to polling
-        if (isStreamActive && !streamRafId) {
-          streamRafId = requestAnimationFrame(runHighRefreshLoop);
-        }
-        setTimeout(startPersistentBinaryStream, 2000);
-      }
+    } catch (_) {
+      // Failures take the shared termination path in the finally block, which
+      // restores polling and schedules the reconnect.
     } finally {
       binaryStreamActive = false;
+      // Every termination other than an explicit stopScanoutStream() (which
+      // aborts the signal) must reconnect: a clean server-side close used to
+      // fall through with no retry and froze the monitor until a reload.
+      if (isStreamActive && !signal.aborted) {
+        streamRafId = requestAnimationFrame(runHighRefreshLoop);
+        setTimeout(startPersistentBinaryStream, 2000);
+      }
     }
   }
 
