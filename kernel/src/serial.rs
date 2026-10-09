@@ -397,25 +397,25 @@ fn handle_rapp_command(s: &str) -> bool {
             Some("CANCEL") => crate::input::TouchPhase::Cancel,
             _ => { serial_println!("[COM1 INPUT] REJECT invalid touch phase"); return true; }
         };
-        let Some(x) = parts.next().and_then(|v| v.parse::<u32>().ok()) else { return true; };
-        let Some(y) = parts.next().and_then(|v| v.parse::<u32>().ok()) else { return true; };
+        let Some(px) = parts.next().and_then(|v| v.parse::<u32>().ok()) else { return true; };
+        let Some(py) = parts.next().and_then(|v| v.parse::<u32>().ok()) else { return true; };
         let Some(slot) = parts.next().and_then(|v| v.parse::<u8>().ok()) else { return true; };
-        // INPUT_TOUCH carries logical portrait coordinates, the same
+        // INPUT_TOUCH carries logical portrait coordinates (px, py), the same
         // CoordinateSpace the compositor, window manager and apps use. Mapping
         // the guest's letterboxed scanout back into UI space here would duplicate
         // the presentation geometry in a second place with different constants,
         // which previously rejected every gesture above the landscape midpoint.
         const LOGICAL_WIDTH: u32 = 720;
         const LOGICAL_HEIGHT: u32 = 1440;
-        if x >= LOGICAL_WIDTH || y >= LOGICAL_HEIGHT || slot >= crate::input::MAX_TOUCH_SLOTS as u8 {
+        if px >= LOGICAL_WIDTH || py >= LOGICAL_HEIGHT || slot >= crate::input::MAX_TOUCH_SLOTS as u8 {
             serial_println!(
                 "[COM1 INPUT] REJECT touch bounds x={} y={} (logical {}x{})",
-                x, y, LOGICAL_WIDTH, LOGICAL_HEIGHT
+                px, py, LOGICAL_WIDTH, LOGICAL_HEIGHT
             );
             return true;
         }
-        crate::input::post_touch_event(slot, x, y, if phase == crate::input::TouchPhase::Up { 0 } else { 512 }, phase);
-        serial_println!("[COM1 INPUT] TOUCH phase={:?} slot={} x={} y={}", phase, slot, x, y);
+        crate::input::post_touch_event(slot, px, py, if phase == crate::input::TouchPhase::Up { 0 } else { 512 }, phase);
+        serial_println!("[COM1 INPUT] TOUCH phase={:?} slot={} x={} y={}", phase, slot, px, py);
         return true;
     }
 
