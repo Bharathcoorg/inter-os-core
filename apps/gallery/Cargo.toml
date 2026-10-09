@@ -10,3 +10,4 @@ interos-std = { path = "../../sdk/rust/interos-std" }
 name = "gallery"
 path = "src/main.rs"
 test = false
+bench = false

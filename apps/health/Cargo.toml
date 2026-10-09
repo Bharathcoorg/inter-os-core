@@ -12,3 +12,4 @@ interos-std = { path = "../../sdk/rust/interos-std" }
 name = "health"
 path = "src/main.rs"
 test = false
+bench = false

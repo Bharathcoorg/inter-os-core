@@ -19,3 +19,4 @@ path = "src/lib.rs"
 name = "launcher"
 path = "src/main.rs"
 test = false
+bench = false
