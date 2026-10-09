@@ -825,7 +825,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     // Keep the queue usable after a failed request, while returning the actual
     // request promise to the caller so failures are never reported as success.
-    guestTouchQueue = request.catch((error) => {
+    guestTouchQueue = guestTouchQueue.then(() => request).catch((error) => {
       if (state && state.debugInput) console.warn(error);
     });
     return request;
@@ -863,7 +863,13 @@ document.addEventListener('DOMContentLoaded', () => {
       lastSentX = point.x;
       lastSentY = point.y;
       lastMoveTime = performance.now();
-      sendGuestTouchEvent({ action: 'down', coords: point.coords, x: point.x, y: point.y, slot: 0 });
+      // Every contact declares its coordinate space on the wire: the canonical
+      // portrait logical space, or the mapped guest framebuffer in landscape.
+      if (point.coords === 'portrait') {
+        sendGuestTouchEvent({ action: 'down', coords: 'portrait', x: point.x, y: point.y, slot: 0 });
+      } else {
+        sendGuestTouchEvent({ action: 'down', coords: point.coords, x: point.x, y: point.y, slot: 0 });
+      }
       updateVirtualTouch(ev.clientX, ev.clientY, true);
       try { touchSurface.setPointerCapture(ev.pointerId); } catch (_) {}
     });
@@ -879,7 +885,11 @@ document.addEventListener('DOMContentLoaded', () => {
         lastMoveTime = now;
         lastSentX = point.x;
         lastSentY = point.y;
-        sendGuestTouchEvent({ action: 'move', coords: point.coords, x: point.x, y: point.y, slot: 0 });
+        if (point.coords === 'portrait') {
+          sendGuestTouchEvent({ action: 'move', coords: 'portrait', x: point.x, y: point.y, slot: 0 });
+        } else {
+          sendGuestTouchEvent({ action: 'move', coords: point.coords, x: point.x, y: point.y, slot: 0 });
+        }
       }
     });
 
@@ -893,7 +903,13 @@ document.addEventListener('DOMContentLoaded', () => {
       downSent = false;
       activePointerId = null;
       updateVirtualTouch(ev.clientX, ev.clientY, false);
-      sendGuestTouchEvent({ action, coords: point.coords, x: point.x, y: point.y, slot: 0 });
+      if (point.coords !== 'portrait') {
+        sendGuestTouchEvent({ action, coords: point.coords, x: point.x, y: point.y, slot: 0 });
+      } else if (action === 'up') {
+        sendGuestTouchEvent({ action: 'up', coords: 'portrait', x: point.x, y: point.y, slot: 0 });
+      } else {
+        sendGuestTouchEvent({ action: 'cancel', coords: 'portrait', x: point.x, y: point.y, slot: 0 });
+      }
       if (action === 'up') {
         requestAnimationFrame(() => refreshScanoutFrame(true));
         setTimeout(() => refreshScanoutFrame(true), 25);
@@ -1764,7 +1780,7 @@ document.addEventListener('DOMContentLoaded', () => {
         await fetch('/api/input/key', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ key: e.key, code: e.key.codePointAt(0) })
+          body: JSON.stringify({ key: e.key })
         });
       } catch (_) {}
     }
