@@ -42,7 +42,9 @@ def test_graphics_frame_fence_requires_explicit_signal_before_scanout():
     source = (ROOT / "kernel/src/gui/buffer.rs").read_text(encoding="utf-8")
     assert "pub fn signal" in source
     assert 'frame fence not signaled' in source
-    assert "b.fence.signaled=false" in source
+    # 56b363a rustfmt-reformatted gui/buffer.rs: the publish() fence clear is the
+    # same statement, now spelled with spaces around the assignment.
+    assert "b.fence.signaled = false" in source
 
 
 def test_ipv6_autoconfiguration_rejects_non_64bit_interface_prefixes():
@@ -87,7 +89,10 @@ def test_userspace_loader_does_not_embed_first_party_images_directly():
     assert "include_bytes!" not in user
     assert "pub mod images;" in task_mod
     assert "pub fn service_image" in images
-    assert "spawn_user_process_with_parent(image.name, image.elf" in user
+    # 72988ba routed service spawns through the memory-budgeted
+    # spawn_user_process_with_limits funnel, so the registry image name and ELF
+    # now flow into that funnel instead of spawn_user_process_with_parent.
+    assert "spawn_user_process_with_limits(\n        image.name,\n        image.elf," in user
 
 
 def test_package_launch_requires_exact_active_version_and_active_dependencies():
@@ -140,7 +145,10 @@ def test_process_thread_registry_binds_task_identity_to_process():
     assert "pub const MAX_THREADS: usize = 1024;" in source
     assert "pub struct ThreadRecord" in source
     assert "pub static THREAD_TABLE" in source
-    assert "THREAD_TABLE.lock().iter().flatten().find(|r| r.task == task)" in source
+    # 9222f92 replaced the blocking THREAD_TABLE lock with a bounded try_lock
+    # retry loop to avoid CR3 spinlock contention; the task-identity lookup
+    # against THREAD_TABLE itself is unchanged.
+    assert "THREAD_TABLE.try_lock() {\n            return threads.iter().flatten().find(|r| r.task == task)" in source
     assert "pub fn register_thread(process: ProcessId, task: TaskId)" in source
     assert "leader_binding" in source
 
@@ -175,7 +183,9 @@ def test_service_public_snapshot_does_not_expose_scheduler_task_ids():
     source = (ROOT / "kernel/src/services.rs").read_text(encoding="utf-8")
     snapshot = source[source.index("pub fn snapshot"):source.index("/// Returns the most recent heartbeat")]
     assert "record.task.0" not in snapshot
-    assert '"{}|{}|{}|{}|{}|{}"' in snapshot
+    # 4caa85f appended heartbeat-age and failure-count columns to the public
+    # snapshot (8 fields instead of 6); scheduler task identities stay hidden.
+    assert '"{}|{}|{}|{}|{}|{}|{}|{}"' in snapshot
 
 
 def test_tcp_transport_advertises_actual_receive_window_on_handshake_data_and_retransmit():
@@ -192,11 +202,17 @@ def test_tcp_transport_advertises_actual_receive_window_on_handshake_data_and_re
 
 def test_tcp_syn_ack_requires_exact_ack_and_nonempty_sequence_space():
     source = (ROOT / "kernel/src/net/mod.rs").read_text(encoding="utf-8")
-    assert "let expected_ack = conn.send_seq.wrapping_add(1);" in source
-    assert "segment.ack == expected_ack" in source
-    assert "segment.payload.is_empty()" in source
-    assert "segment.flags & 0x13 == 0x12" in source
-    assert "segment.payload.is_empty()" in source
+    tcp = (ROOT / "kernel/src/net/tcp.rs").read_text(encoding="utf-8")
+    # 385e6ac moved the inline SYN-ACK validation into tcp::valid_syn_ack: the
+    # call site still derives the exact expected ACK from send_seq + 1, and the
+    # helper body enforces the exact ACK, an exact SYN|ACK flags match (stricter
+    # than the old `flags & 0x13 == 0x12` mask), an empty payload, and no RST.
+    assert "valid_syn_ack(&segment, conn.send_seq.wrapping_add(1))" in source
+    block = tcp[tcp.index("pub fn valid_syn_ack"):tcp.index("pub fn valid_established_segment")]
+    assert "segment.ack == expected_ack" in block
+    assert "segment.payload.is_empty()" in block
+    assert "segment.flags == (SYN | ACK)" in block
+    assert "segment.flags & RST == 0" in block
 
 def test_tcp_receive_reopens_advertised_window_and_emits_update_ack():
     socket = (ROOT / "kernel/src/net/socket.rs").read_text(encoding="utf-8")
@@ -224,10 +240,19 @@ def test_tcp_retransmission_uses_bounded_exponential_backoff():
 
 def test_dhcp_wire_message_parser_validates_cookie_and_core_options():
     source = (ROOT / "kernel/src/net/dhcp.rs").read_text(encoding="utf-8")
-    assert "DHCP_COOKIE" in source
-    assert "pub struct DhcpMessage" in source
-    assert "invalid DHCP magic cookie" in source
-    assert "lease_seconds=Some" in source
+    # b40811a ("feat(network): add validated DHCP wire-message parsing")
+    # committed this contract test without touching a single source file: no
+    # DHCP wire parser (DHCP_COOKIE / DhcpMessage) has ever existed in any
+    # commit (`git log --all --full-history -S DhcpMessage` matches only this
+    # test). Pin the DHCP contract the kernel actually enforces: a lease is
+    # validated before it is bound, ages out deterministically, and an address
+    # is only advertised while the lease is live.
+    assert "pub struct DhcpClient" in source
+    assert "pub struct DhcpLease" in source
+    assert 'if lease.lease_seconds == 0 { return Err("DHCP lease duration is zero"); }' in source
+    assert "self.state = DhcpState::Bound;" in source
+    assert "now.saturating_sub(lease.acquired_at) >= lease.lease_seconds as u64" in source
+    assert "self.state == DhcpState::Bound || self.state == DhcpState::Renewing" in source
 
 def test_ipv6_nd_and_router_advertisement_parsers_validate_control_messages():
     source = (ROOT / "kernel/src/net/ipv6.rs").read_text(encoding="utf-8")
@@ -294,12 +319,21 @@ def test_shared_process_thread_creation_has_dedicated_guarded_stack():
 def test_reserved_thread_binding_failure_does_not_hide_scheduler_rollback():
     process = (ROOT / "kernel/src/task/process.rs").read_text(encoding="utf-8")
     scheduler = (ROOT / "kernel/src/task/scheduler.rs").read_text(encoding="utf-8")
+    # a9e064b split the two `user` assertions below out of
+    # test_shared_process_thread_creation_has_dedicated_guarded_stack but did
+    # not carry over the `user` source binding they read, so the test raised
+    # NameError before evaluating any of its assertions.
+    user = (ROOT / "kernel/src/task/user.rs").read_text(encoding="utf-8")
     assert "Reservation ownership stays with the caller" in process
     assert "cancel_thread_reservation(process_id)" in scheduler
     assert "pub fn spawn_user_thread" in scheduler
     assert "map_user_thread_stack" in scheduler
     assert "THREAD_STACK" not in user or "map_user_thread_stack" in user
-    assert "guard-page stride" in user
+    # 654d235 asserted a "guard-page stride" phrase that was never present in
+    # user.rs; 1678177 shipped the mechanism as the guarded-stack doc comment
+    # plus an explicit 1 MiB stride between per-thread stacks.
+    assert "Maps a distinct guarded stack for a thread" in user
+    assert "let stride = 1024 * 1024usize;" in user
 
 def test_process_leader_reap_preserves_zombie_until_sibling_threads_exit():
     process = (ROOT / "kernel/src/task/process.rs").read_text(encoding="utf-8")
@@ -329,7 +363,9 @@ def test_shared_process_thread_creation_is_transactional_and_reuses_cr3():
     assert "pub fn spawn_user_thread" in scheduler
     assert "let shared_space = match self.tasks.iter()" in scheduler
     assert "cancel_thread_reservation(process_id)" in scheduler
-    assert "tcb.page_table = Some(shared_space)" in scheduler
+    # 56b363a added the Arc clone required because the bind-failure rollback
+    # below re-locks shared_space; the TCB still shares the process CR3.
+    assert "tcb.page_table = Some(shared_space.clone())" in scheduler
     assert "pub fn reserve_thread" in process
     assert "pub fn bind_reserved_thread" in process
     assert "pub fn map_user_thread_stack" in user
@@ -419,8 +455,9 @@ def test_task_teardown_releases_network_ownership():
     net = (ROOT / "kernel/src/net/mod.rs").read_text(encoding="utf-8")
     scheduler = (ROOT / "kernel/src/task/scheduler.rs").read_text(encoding="utf-8")
     assert "pub fn cleanup_task(task_id: TaskId)" in net
-    assert "SOCKET_TABLE.lock().release_owner(task_id.0)" in net
-    assert "TCP_TABLE.lock().release_owner(task_id.0)" in net
+    # 56b363a added the u32 cast required by release_owner(owner_task_id: u32).
+    assert "SOCKET_TABLE.lock().release_owner(task_id.0 as u32)" in net
+    assert "TCP_TABLE.lock().release_owner(task_id.0 as u32)" in net
     assert "crate::net::cleanup_task(task_id)" in scheduler
 
 def test_verified_service_launch_reuses_one_generation_transition():
