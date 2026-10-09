@@ -201,7 +201,6 @@ const LOG_TAIL: &[u8] = b"Home surface rendered.";
 #[derive(Clone, Copy)]
 struct Frame {
     greeting: Rect,
-    weather: Rect,
     card: Rect,
     card_title: Rect,
     card_rows: Rect,
@@ -223,12 +222,6 @@ fn card_h() -> usize {
 fn frame() -> Frame {
     let content = layout::content_area(CONTENT_PADDING);
     let greeting = Rect::new(content.x, 56, content.w, 96);
-    let weather = Rect::new(
-        content.x + content.w / 2,
-        greeting.y,
-        content.w - content.w / 2,
-        greeting.h,
-    );
     let card = Rect::new(
         content.x,
         168,
@@ -260,7 +253,6 @@ fn frame() -> Frame {
     let nav = Rect::new(0, SCREEN_HEIGHT - NAV_BAR_HEIGHT, SCREEN_WIDTH, NAV_BAR_HEIGHT);
     Frame {
         greeting,
-        weather,
         card,
         card_title,
         card_rows,
