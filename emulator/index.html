@@ -143,7 +143,7 @@
                    alone. app.js forwards pointer/keyboard events to the guest via
                    POST /api/touch/event and /api/input/key.
                    ================================================================ -->
-              <div class="screen-live-scanout" id="screen-live-scanout" style="display: flex;">
+              <div class="screen-live-scanout" id="screen-live-scanout" tabindex="0" role="application" aria-label="InterOS guest display. Click to focus, then use the keyboard to interact." style="display: flex;">
                 <canvas id="live-scanout-canvas" class="live-scanout-canvas" width="720" height="1440" style="display: none;"></canvas>
                 <img id="live-scanout-img" src="/api/screen/frame" alt="InterOS guest framebuffer — the guest kernel renders the entire device UI into this scanout" draggable="false" />
                 <div id="virtual-touch-dot" class="virtual-touch-dot"></div>
@@ -248,16 +248,16 @@
           <!-- 1. Real System RAM & CR3 Root Paging -->
           <div class="hw-card">
             <div class="hw-card-top">
-              <span class="hw-card-name">SYSTEM RAM (GUEST)</span>
-              <span class="hw-card-val" id="val-ram-usage">CR3: 0x01353000</span>
+              <span class="hw-card-name">GUEST PAGING</span>
+              <span class="hw-card-val" id="val-ram-usage">RAM usage unavailable • CR3: unavailable</span>
             </div>
-            <div class="hw-bar-track">
-              <div class="hw-bar-fill" id="fill-ram-bar" style="width: 29.5%; background: #10B981;"></div>
+            <div class="hw-bar-track" style="display: none;" aria-hidden="true">
+              <div class="hw-bar-fill" id="fill-ram-bar" style="width: 0%; background: #71717A;"></div>
             </div>
             <div class="hw-card-sub">
-              <span>Heap: <strong id="val-heap-stat">1 MiB Dynamic</strong></span>
+              <span>Heap: <strong id="val-heap-stat">Unavailable</strong></span>
               <span class="sub-sep">&bull;</span>
-              <span id="val-paging-stat">48-Bit 4-Level Paging</span>
+              <span id="val-paging-stat">Paging details unavailable</span>
             </div>
           </div>
 
@@ -265,15 +265,15 @@
           <div class="hw-card">
             <div class="hw-card-top">
               <span class="hw-card-name">QEMU BLOCK DRIVE</span>
-              <span class="hw-card-val" id="val-block-name">inter-os-bios.img</span>
+              <span class="hw-card-val" id="val-block-name">Block image unavailable</span>
             </div>
-            <div class="hw-bar-track">
-              <div class="hw-bar-fill" id="fill-block-bar" style="width: 22.2%; background: #3B82F6;"></div>
+            <div class="hw-bar-track" style="display: none;" aria-hidden="true">
+              <div class="hw-bar-fill" id="fill-block-bar" style="width: 0%; background: #71717A;"></div>
             </div>
             <div class="hw-card-sub">
-              <span id="val-block-io">Read: <strong>1.05 MB (256 ops)</strong></span>
+              <span id="val-block-io">Device: unavailable • Read: unavailable</span>
               <span class="sub-sep">&bull;</span>
-              <span>Raw Kernel Image</span>
+              <span>IO utilization unavailable</span>
             </div>
           </div>
 
@@ -622,7 +622,7 @@
             </div>
             <div class="spec-row">
               <span class="spec-k">Display Subsystem</span>
-              <span class="spec-v">LTPO 120Hz VRR &amp; 1280x720 Linear Framebuffer</span>
+              <span class="spec-v">Display mode: awaiting live guest telemetry</span>
             </div>
             <div class="spec-row">
               <span class="spec-k">Debug Telemetry</span>
@@ -844,10 +844,7 @@
               </tr>
             </thead>
             <tbody id="kms-planes-tbody">
-              <tr><td>0</td><td>Primary Display Scanout</td><td>0</td><td>100%</td><td>0, 0, 720, 1280</td><td>Opaque Direct</td></tr>
-              <tr><td>1</td><td>Mobile Shell Activity Space</td><td>5</td><td>100%</td><td>0, 36, 720, 1208</td><td>Porter-Duff SrcOver</td></tr>
-              <tr><td>2</td><td>System Line Status Bar</td><td>10</td><td>95%</td><td>0, 0, 720, 36</td><td>Alpha Composited</td></tr>
-              <tr><td>3</td><td>Gesture Navigation Bar</td><td>10</td><td>95%</td><td>0, 1244, 720, 36</td><td>Alpha Composited</td></tr>
+              <tr><td colspan="6" class="telemetry-empty">No live compositor-plane telemetry is currently exposed by the guest.</td></tr>
             </tbody>
           </table>
         </div>
