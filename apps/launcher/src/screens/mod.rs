@@ -18,6 +18,7 @@ pub mod lock;
 pub mod notifications;
 pub mod pin;
 pub mod power;
+pub mod power_transition;
 pub mod quick_controls;
 pub mod system_space;
 

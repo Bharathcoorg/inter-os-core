@@ -225,3 +225,15 @@ def test_qemu_mouse_reaches_the_canonical_input_router():
     assert "fn post_mouse_event" in input_mod
     assert "post_pointer_contact(InputSource::Mouse" in input_mod
     assert "crate::drivers::ps2_mouse::handle_irq_byte()" in interrupts
+
+
+def test_power_menu_uses_guest_owned_shutdown_and_restart_transition():
+    launcher = read("apps/launcher/src/main.rs")
+    transition = read("apps/launcher/src/screens/power_transition.rs")
+    assert "ViewMode::PowerTransition" in launcher
+    assert "power_transition_started_ticks" in launcher
+    assert "elapsed >= 60" in launcher
+    assert "std::device_power(action)" in launcher
+    assert "get_power_transition_color" in transition
+    assert "std::device_power(0)" not in launcher[launcher.index("// Card 2: Restart"):launcher.index("// Card 3: Power off")]
+    assert "std::device_power(1)" not in launcher[launcher.index("// Card 3: Power off"):launcher.index("// Card 4: Emergency")]

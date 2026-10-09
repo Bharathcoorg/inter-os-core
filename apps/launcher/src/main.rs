@@ -98,6 +98,7 @@ pub fn test_text_aa(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
     BootScreen,
+    PowerTransition,
     HomeScreen,
     ActivitySpace,
     QuickControls,
@@ -145,6 +146,9 @@ pub struct LauncherState {
     pub current_view: ViewMode,
     pub boot_progress: u16,
     pub boot_started_ticks: u64,
+    pub power_transition_action: u8,
+    pub power_transition_started_ticks: u64,
+    pub power_transition_progress: u16,
     pub display_was_powered: bool,
     pub display_power_state_valid: bool,
     pub last_volume_percent: u8,
@@ -198,6 +202,9 @@ impl LauncherState {
             current_view: ViewMode::BootScreen,
             boot_progress: 0,
             boot_started_ticks: 0,
+            power_transition_action: 0,
+            power_transition_started_ticks: 0,
+            power_transition_progress: 0,
             display_was_powered: false,
             display_power_state_valid: false,
             last_volume_percent: 0,
@@ -698,6 +705,7 @@ type ScreenPixelFn = fn(usize, usize, &LauncherState) -> u32;
 fn screen_renderer(view: ViewMode) -> ScreenPixelFn {
     match view {
         ViewMode::BootScreen => screens::boot::get_boot_screen_color,
+        ViewMode::PowerTransition => screens::power_transition::get_power_transition_color,
         ViewMode::HomeScreen => get_home_color,
         ViewMode::ActivitySpace => get_activity_color,
         ViewMode::QuickControls => get_quick_controls_color,
@@ -1218,6 +1226,26 @@ pub extern "C" fn _start() -> ! {
                             std::log(0, "[LAUNCHER] Display wake observed; presenting real lock screen.").ok();
                         }
                     }
+                }
+                if state.current_view == ViewMode::PowerTransition {
+                    let now = std::get_ticks(1).unwrap_or(state.power_transition_started_ticks);
+                    let elapsed = now.saturating_sub(state.power_transition_started_ticks);
+                    state.power_transition_progress = ((elapsed.min(60) * 1000) / 60) as u16;
+                    render_band(surface, &state, 0, H);
+                    let _ = std::surface_flip(4);
+                    if elapsed >= 60 {
+                        let action = state.power_transition_action as u32;
+                        match std::device_power(action) {
+                            Ok(_) => {}
+                            Err(_) => {
+                                std::log(0, "[LAUNCHER] Power transition was rejected by the guest power controller.").ok();
+                                state.current_view = ViewMode::PowerMenu;
+                                render_view(surface, &state);
+                                let _ = std::surface_flip(4);
+                            }
+                        }
+                    }
+                    continue;
                 }
                 if state.current_view == ViewMode::BootScreen {
                     let elapsed = std::get_ticks(1).unwrap_or(state.boot_started_ticks).saturating_sub(state.boot_started_ticks);
@@ -2197,15 +2225,23 @@ pub extern "C" fn _start() -> ! {
 
                                 // Card 2: Restart
                                 if in_card2 {
-                                    std::log(0, "[LAUNCHER] Power menu: requesting real system restart.").ok();
-                                    let _ = std::device_power(0);
+                                    state.power_transition_action = 0;
+                                    state.power_transition_started_ticks = std::get_ticks(1).unwrap_or(0);
+                                    state.power_transition_progress = 0;
+                                    state.current_view = ViewMode::PowerTransition;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
                                     break;
                                 }
 
                                 // Card 3: Power off
                                 if in_card3 {
-                                    std::log(0, "[LAUNCHER] Power menu: requesting real system power off.").ok();
-                                    let _ = std::device_power(1);
+                                    state.power_transition_action = 1;
+                                    state.power_transition_started_ticks = std::get_ticks(1).unwrap_or(0);
+                                    state.power_transition_progress = 0;
+                                    state.current_view = ViewMode::PowerTransition;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
                                     break;
                                 }
 
