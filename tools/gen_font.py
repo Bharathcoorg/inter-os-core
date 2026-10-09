@@ -1,50 +1,68 @@
 #!/usr/bin/env python3
-"""Generates apps/launcher/src/font.rs -- the launcher's 16x24 condensed bitmap face.
+"""Generates the InterOS 16x24 bitmap face by rasterising Roboto Condensed.
 
-WHY this file exists: 95 glyphs is ~2,300 literal bytes if hand-written, and nobody
-can review or maintain a hex table. Instead each glyph is described here as a few
-strokes in a 16x24 grid -- stems, bars, arcs and diagonals with a stroke width --
-and rasterised to bits by the code below. The design decisions (stem width,
-x-height, proportions, which glyphs overshoot) are all readable in this file; the
-Rust output is a build product.
+WHY this file exists: the typeface is the single biggest legibility lever in
+this project, and the user asked for "commonly used smartphone fonts". The
+previous face described every glyph as parametric strokes -- maintainable, but
+its letterforms were not a face anyone recognises, and at 1x (the size the
+whole UI actually uses) it read poorly. This generator rasterises **Roboto
+Condensed** (the Android family's condensed cut, Apache License 2.0, committed
+under tools/fonts/ with its licence) into the SAME 16x24 grid the firmware
+already uses: baseline below row 19, cap band rows 3..=19, tabular figures at
+advance 11. Every Rust constant, API and test contract is kept; only the
+letterforms change.
 
 HOW TO REGENERATE:
-    python tools/gen_font.py            # writes apps/launcher/src/font.rs
+    python tools/gen_font.py            # writes both font.rs data blocks
     python tools/gen_font.py --report   # also prints the ink/advance table
 
-The output is committed so the firmware builds without running Python. Re-run this
-script whenever a glyph description below changes; the generated file carries a
-header saying so, and must never be hand-edited.
+Outputs (both spliced between marker comments; the Rust constants, API and
+tests live outside the markers and are never touched):
+  * apps/launcher/src/font.rs
+  * sdk/rust/interos-std/src/font.rs
 
-DESIGN (see the constants below; all values are rows in the 16x24 cell):
-    * cell          16 x 24, baseline on row 19, 4 rows of descender below it
-    * cap height    17 rows (3..=19), ascender 16 (4..=19), x-height 12 (8..=19)
-    * stem          2 px on stems and on horizontal bars alike
-    * overshoot     1 px above cap / x-height and below the baseline for every
-                    round-sided letter (C G O Q S c e o s ...) -- this single
-                    detail is most of what stops a bitmap face looking amateur
-    * advance       proportional, one column of sidebearing each side by
-                    default; digits are tabular (identical advance, ink centred)
-    * bold          the same shapes dilated 1 px horizontally and advanced 1 px,
-                    which thickens every stem from 2 to 3 without touching the
-                    crossbars' height
+Requires Pillow (dev-only; the generated Rust is committed, so the firmware
+builds without Python). Both the generator and its output are committed, so
+the data is reproducible and auditable.
+
+RASTERISATION (all the design decisions, in one place):
+ * em        24 px, rendered at 4x (96 px) and area-downsampled to the cell;
+             supersampling stands in for hinting at this size. Probe-verified:
+             cap 'H' lands rows 3..=19, round lowercase rows 7..=19, the
+             ascenders of b d f h k l reach row 2.
+ * baseline  placed on the line below row 19 (cell row 20's top edge).
+ * threshold 0.5 coverage -> ink. Round sides carry a sub-pixel baseline
+             overshoot (~0.35 px in Roboto) that survives downsampling only as
+             ~0.3 coverage in row 20; a second, lower threshold restores that
+             row so 'o c g e s' keep their documented 1px overshoot.
+ * digits    tabular: every figure's ink span is resampled to exactly 8
+             columns and centred in advance 11, so a clock never wobbles.
+ * wide ink  any glyph whose advance would exceed the 16px cell is clamped to
+             16 and its ink resampled to at most 15 columns (W, m).
+ * descenders rows below 23 are area-binned into rows 20..=23, so g j p q y
+             keep their full tail shape instead of being sliced flat.
+ * ascenders ink above row 2 is clipped (Rust bound: ink may start at row 2).
+ * bold      the regular bitmap dilated one pixel right (stems 2 -> 3 px),
+             advance +1 -- a generated weight, exactly as before.
+ * space     blank, advance 6 == Rust FALLBACK_ADVANCE.
+
+The _verify() pass below mirrors every metric assertion the Rust tests in
+apps/launcher/src/font.rs make, so a bad regeneration fails here, loudly,
+instead of in cargo test.
 """
 
-import math
 import os
 import sys
 
+from PIL import Image, ImageDraw, ImageFont
+
 # ---------------------------------------------------------------------------
-# The design grid
+# The design grid (unchanged; these are the firmware's contract)
 # ---------------------------------------------------------------------------
 CELL_W, CELL_H = 16, 24
 CAP_TOP = 3        # first row of a flat-topped capital
 BASE = 19          # last row above the baseline
-ASC_TOP = 4        # b d f h k l t
-XH_TOP = 8         # a c e m n o ...
-DESC_BOT = 23      # g j p q y
-STEM = 2           # stroke width
-
+DESC_BOT = 23      # lowest permitted ink row
 FIRST_CHAR = 32
 LAST_CHAR = 126
 NGLYPH = LAST_CHAR - FIRST_CHAR + 1
@@ -54,6 +72,38 @@ NL = "\n"
 # hand-written API and tests in font.rs live outside them.
 START_MARK = '/// Glyph bitmaps, regular weight'
 END_MARK = 'pub const FALLBACK_ADVANCE'
+SDK_START_MARK = '// >>> tools/gen_font.py rewrites everything'
+SDK_END_MARK = '// <<< generated block ends above this line'
+
+# ---------------------------------------------------------------------------
+# Rasterisation parameters (probe-verified against Roboto Condensed)
+# ---------------------------------------------------------------------------
+SS = 4                    # supersample factor for the FreeType render
+EM = 24                   # em size in cell pixels: cap height lands on 17 rows
+THRESH = 0.5              # coverage -> ink
+OVERSHOOT = 0.20          # coverage that restores the sub-pixel baseline dip
+MIN_TOP = 2               # ink may not start above this row (Rust test bound)
+DIGIT_ADV = 11            # tabular figure advance (Rust test contract)
+DIGIT_INK = 8             # tabular figure ink width (Rust test contract)
+MAX_ADV = CELL_W          # no advance may exceed the cell (Rust test bound)
+SPACE_ADV = 6             # == Rust FALLBACK_ADVANCE
+CANVAS_W, CANVAS_H = 48, 36   # 1x canvas in cell pixels (ink + bearings + tail)
+BASE_LINE = 20            # baseline is the line below row 19
+
+_TTF = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                    'fonts', 'RobotoCondensed-Regular.ttf')
+_font_cache = []
+
+
+def _face_font():
+    """The FreeType face at supersampled size, loaded once."""
+    if not _font_cache:
+        if not os.path.exists(_TTF):
+            raise SystemExit(
+                'missing %s -- Roboto Condensed (Apache-2.0) must sit in '
+                'tools/fonts/ for the face to regenerate' % _TTF)
+        _font_cache.append(ImageFont.truetype(_TTF, EM * SS))
+    return _font_cache[0]
 
 
 class Bmp:
@@ -66,66 +116,6 @@ class Bmp:
         if 0 <= x < CELL_W and 0 <= y < CELL_H:
             self.rows[y][x] = 1
 
-    def fill(self, x0, y0, x1, y1):
-        """Filled rectangle, inclusive on all four edges."""
-        for y in range(y0, y1 + 1):
-            for x in range(x0, x1 + 1):
-                self.px(x, y)
-
-    def stem(self, x, y0, y1, t=STEM):
-        """Vertical stroke: `t` columns wide starting at column `x`."""
-        self.fill(x, y0, x + t - 1, y1)
-
-    def bar(self, x0, x1, y, t=STEM):
-        """Horizontal stroke: `t` rows tall starting at row `y`."""
-        self.fill(x0, y, x1, y + t - 1)
-
-    def seg(self, x0, y0, x1, y1, t=STEM):
-        """Diagonal stroke, stamped as t x t blocks along the run."""
-        self.brush([(x0, y0), (x1, y1)], t)
-
-    def brush(self, pts, t=STEM):
-        """Stamp t x t blocks along a polyline. Points are block top-lefts."""
-        for i in range(len(pts) - 1):
-            ax, ay = pts[i]
-            bx, by = pts[i + 1]
-            dist = math.hypot(bx - ax, by - ay)
-            steps = max(1, int(dist / 0.2))
-            for k in range(steps + 1):
-                u = k / steps
-                x = int(round(ax + (bx - ax) * u))
-                y = int(round(ay + (by - ay) * u))
-                for dy in range(t):
-                    for dx in range(t):
-                        self.px(x + dx, y + dy)
-
-    def arc(self, cx, cy, rx, ry, a0, a1, t=STEM):
-        """Elliptical arc, angles in degrees, y growing downwards.
-
-        0 deg is the right extreme, 90 the bottom, 180 the left, 270 the top.
-        A0 -> A1 sweeps in increasing angle.
-        """
-        sweep = a1 - a0
-        steps = max(16, int(abs(sweep) / 1.0))
-        pts = []
-        for k in range(steps + 1):
-            a = math.radians(a0 + sweep * k / steps)
-            pts.append((cx + rx * math.cos(a), cy + ry * math.sin(a)))
-        self.brush(pts, t)
-
-    def ring(self, cx, cy, rx, ry, t=STEM):
-        self.arc(cx, cy, rx, ry, 0, 360, t)
-
-    def art(self, lines):
-        """Stamp an ASCII-art block; '#' is ink. Used only where strokes cannot
-        describe the shape honestly (& and the two braces)."""
-        y0 = CAP_TOP if all(c in " ." for c in lines[0]) else ASC_TOP
-        for j, line in enumerate(lines):
-            for i, ch in enumerate(line):
-                if ch == "#":
-                    self.px(i, y0 + j)
-
-    # -- queries ------------------------------------------------------------
     def ink(self):
         """(left, right) ink columns and (top, bottom) ink rows, or None."""
         cols = [x for y in range(CELL_H) for x in range(CELL_W) if self.rows[y][x]]
@@ -137,9 +127,10 @@ class Bmp:
     def dilate(self, n=1):
         """Horizontal dilation: every ink pixel also lights `n` columns right.
 
-        WHY right and not both sides: a real bold face keeps its left sidebearing
-        and gains the extra ink on the stem's far side, so 'o' grows from a 2 px
-        stem pair to a 3 px stem pair without shifting inside its own advance.
+        WHY right and not both sides: a real bold face keeps its left
+        sidebearing and gains the extra ink on the stem's far side, so 'o'
+        grows from a 2 px stem pair to a 3 px stem pair without shifting
+        inside its own advance.
         """
         out = [row[:] for row in self.rows]
         for y in range(CELL_H):
@@ -163,708 +154,235 @@ def blank():
 
 
 # ---------------------------------------------------------------------------
-# Glyph descriptions. Each entry draws into a canvas whose x = 0 is the ink's
-# leftmost column; the leading sidebearing is applied when the face is packed.
-#
-# Vertical anchors, from the design:
-#   caps            rows 3..=19          (17 rows)
-#   round caps      rows 2..=20          (1 px overshoot each end)
-#   x-height        rows 8..=19          (12 rows)
-#   round lowercase rows 7..=20          (1 px overshoot each end)
-#   ascenders       row 4                (16 rows)
-#   descenders      row 23
-#
-# A stroked ellipse of vertical radius r centred at cy inks rows cy-r .. cy+r+1,
-# so cy and r are chosen together: a lining bowl is cy=10.5, r=7.5 (rows 3..19),
-# a round bowl is cy=10.5, r=8.5 (rows 2..20). Diagonals end at y=18 so their
-# last stamped row lands on the baseline instead of one below it.
+# Coverage pipeline
 # ---------------------------------------------------------------------------
-GLYPHS = {}
-
-
-def glyph(ch, fn, lsb=1, rsb=1):
-    GLYPHS[ch] = (fn, lsb, rsb)
-
-
-def tabular(ch, fn, advance):
-    """A glyph with a fixed advance, ink centred inside it. WHY: figures that
-    shift as their value changes make a clock tick sideways."""
-    GLYPHS[ch] = (fn, None, advance)
-
-
-# -- digits: lining, cap-height, tabular -------------------------------------
-def d0(g):
-    g.ring(4, 10.5, 3, 7.5)
-
-
-def d1(g):
-    g.stem(2, 3, 19)
-    g.seg(0, 6, 2, 3)
-
-
-def d2(g):
-    g.arc(4, 6.5, 3, 3.5, 185, 375)
-    g.seg(6, 9, 2, 17)
-    g.bar(0, 7, 18)
-
-
-def d3(g):
-    g.arc(4, 7, 3, 4, 190, 450)
-    g.arc(4, 15.5, 3.5, 4.5, 270, 540)
-
-
-def d4(g):
-    g.seg(6, 3, 1, 12)
-    g.bar(0, 7, 12)
-    g.stem(5, 3, 19)
-
-
-def d5(g):
-    g.bar(1, 7, 3)
-    g.stem(1, 3, 10)
-    g.bar(1, 5, 10)
-    g.arc(4, 14.5, 3, 4.5, 270, 450)
-
-
-def d6(g):
-    g.stem(0, 5, 19)
-    g.ring(4, 13.5, 3, 6)
-    g.arc(3, 7, 3, 3, 180, 270)
-
-
-def d7(g):
-    g.bar(0, 7, 3)
-    g.seg(6, 4, 0, 18)
-
-
-def d8(g):
-    g.ring(4, 6.5, 2.5, 3.5)
-    g.ring(4, 15, 3, 4)
-
-
-def d9(g):
-    g.ring(4, 7.5, 3, 4.5)
-    g.stem(7, 10, 18)
-    g.arc(4, 18, 3, 1.5, 0, 90)
-
-
-for _c, _f in zip("0123456789", [d0, d1, d2, d3, d4, d5, d6, d7, d8, d9]):
-    tabular(_c, _f, 11)
-
-
-# -- capitals ---------------------------------------------------------------
-def cA(g):
-    g.fill(4, 3, 6, 5)
-    g.seg(4, 3, 0, 18)
-    g.seg(6, 3, 10, 18)
-    g.bar(2, 8, 11)
-
-
-def cB(g):
-    g.stem(0, 3, 19)
-    g.bar(0, 6, 3)
-    g.bar(0, 6, 10)
-    g.bar(0, 6, 18)
-    g.arc(5.5, 6.5, 2, 3.5, 270, 450)
-    g.arc(5.5, 14, 2, 4, 270, 450)
-
-
-def cC(g):
-    g.arc(5, 10.5, 4, 8.5, 45, 315)
-
-
-def cD(g):
-    g.stem(0, 3, 19)
-    g.bar(0, 5, 3)
-    g.bar(0, 5, 18)
-    g.arc(5, 10.5, 3.5, 8.5, 270, 450)
-
-
-def cE(g):
-    g.stem(0, 3, 19)
-    g.bar(0, 8, 3)
-    g.bar(0, 7, 10)
-    g.bar(0, 8, 18)
-
-
-def cF(g):
-    g.stem(0, 3, 19)
-    g.bar(0, 8, 3)
-    g.bar(0, 7, 10)
-
-
-def cG(g):
-    g.arc(5, 10.5, 4, 8.5, 30, 315)
-    g.bar(5, 9, 12)
-    g.stem(8, 12, 18)
-
-
-def cH(g):
-    g.stem(0, 3, 19)
-    g.stem(8, 3, 19)
-    g.bar(0, 9, 10)
-
-
-def cI(g):
-    g.stem(0, 3, 19)
-
-
-def cJ(g):
-    g.stem(6, 3, 19)
-    g.arc(3.5, 16.5, 2.5, 2, 0, 180)
-
-
-def cK(g):
-    g.stem(0, 3, 19)
-    g.seg(9, 3, 1, 11)
-    g.seg(3, 9, 9, 18)
-
-
-def cL(g):
-    g.stem(0, 3, 19)
-    g.bar(0, 7, 18)
-
-
-def cM(g):
-    g.stem(0, 3, 19)
-    g.stem(11, 3, 19)
-    g.seg(1, 3, 5, 13)
-    g.seg(12, 3, 8, 13)
-
-
-def cN(g):
-    g.stem(0, 3, 19)
-    g.stem(9, 3, 19)
-    g.seg(1, 3, 9, 18)
-
-
-def cO(g):
-    g.ring(5.5, 10.5, 4, 8.5)
-
-
-def cP(g):
-    g.stem(0, 3, 19)
-    g.bar(0, 6, 3)
-    g.bar(0, 6, 10)
-    g.arc(5.5, 6.5, 2.5, 3.5, 270, 450)
-
-
-def cQ(g):
-    g.ring(5.5, 10.5, 4, 8.5)
-    g.seg(6.5, 14.5, 10, 19.5)
-
-
-def cR(g):
-    g.stem(0, 3, 19)
-    g.bar(0, 6, 3)
-    g.bar(0, 6, 10)
-    g.arc(5.5, 6.5, 2.5, 3.5, 270, 450)
-    g.seg(4, 10, 9, 18)
-
-
-def cS(g):
-    g.arc(4.5, 6.5, 3, 4.5, 135, 330)
-    g.arc(4.5, 14.5, 3, 4.5, 315, 495)
-
-
-def cT(g):
-    g.bar(0, 9, 3)
-    g.stem(4, 4, 19)
-
-
-def cU(g):
-    g.stem(0, 3, 13)
-    g.stem(8, 3, 13)
-    g.arc(4.5, 13, 3.5, 5.5, 0, 180)
-
-
-def cV(g):
-    g.seg(0, 3, 5, 18)
-    g.seg(10, 3, 5, 18)
-
-
-def cW(g):
-    g.seg(0, 3, 3, 18)
-    g.seg(3, 18, 6, 3)
-    g.seg(6, 3, 9, 18)
-    g.seg(9, 18, 12, 3)
-
-
-def cX(g):
-    g.seg(0, 3, 9, 18)
-    g.seg(9, 3, 0, 18)
-
-
-def cY(g):
-    g.seg(0, 3, 4, 10)
-    g.seg(9, 3, 4, 10)
-    g.fill(3, 9, 5, 11)
-    g.stem(4, 10, 19)
-
-
-def cZ(g):
-    g.bar(0, 8, 3)
-    g.seg(8, 4, 0, 18)
-    g.bar(0, 8, 18)
-
-
-glyph("A", cA, 1, 1)
-glyph("B", cB, 1, 1)
-glyph("C", cC, 1, 1)
-glyph("D", cD, 1, 1)
-glyph("E", cE, 1, 1)
-glyph("F", cF, 1, 2)
-glyph("G", cG, 1, 1)
-glyph("H", cH, 1, 1)
-glyph("I", cI, 2, 2)
-glyph("J", cJ, 1, 1)
-glyph("K", cK, 1, 1)
-glyph("L", cL, 1, 1)
-glyph("M", cM, 1, 0)
-glyph("N", cN, 1, 1)
-glyph("O", cO, 1, 0)
-glyph("P", cP, 1, 1)
-glyph("Q", cQ, 1, 0)
-glyph("R", cR, 1, 1)
-glyph("S", cS, 1, 1)
-glyph("T", cT, 1, 1)
-glyph("U", cU, 1, 1)
-glyph("V", cV, 1, 1)
-glyph("W", cW, 1, 1)
-glyph("X", cX, 1, 1)
-glyph("Y", cY, 1, 1)
-glyph("Z", cZ, 1, 1)
-
-
-# -- lowercase --------------------------------------------------------------
-def ca(g):
-    g.arc(3.5, 15, 2.5, 4, 340, 700)
-    g.arc(4.5, 11, 2.5, 4, 340, 200)
-    g.stem(6, 8, 19)
-
-
-def cb(g):
-    g.stem(0, 4, 19)
-    g.arc(3.5, 13, 2.5, 6, 300, 660)
-
-
-def cc(g):
-    g.arc(3.5, 13, 2.5, 6, 45, 315)
-
-
-def cd(g):
-    g.stem(5, 4, 19)
-    g.arc(3.5, 13, 2.5, 6, 240, -120)
-
-
-def ce(g):
-    g.bar(0, 6, 13)
-    g.arc(3.5, 13, 2.5, 6, 0, 340)
-
-
-def cf(g):
-    g.stem(2, 5, 19)
-    g.arc(4, 9, 3, 3.5, 270, 180)
-    g.bar(0, 4, 9)
-
-
-def cg(g):
-    g.arc(3.5, 13, 2.5, 6, 340, 700)
-    g.stem(6, 9, 21)
-    g.arc(3.5, 20.5, 2.5, 1.5, 0, 180)
-
-
-def ch(g):
-    g.stem(0, 4, 19)
-    g.arc(3.5, 12.5, 2.5, 4.5, 180, 360)
-    g.stem(6, 12, 19)
-
-
-def ci(g):
-    g.fill(0, 5, 1, 6)
-    g.stem(0, 8, 19)
-
-
-def cj(g):
-    g.fill(2, 5, 3, 6)
-    g.stem(2, 8, 21)
-    g.arc(1.5, 21, 1.5, 2, 0, 180)
-
-
-def ck(g):
-    g.stem(0, 4, 19)
-    g.seg(7, 8, 1, 14)
-    g.seg(3, 12, 7, 18)
-
-
-def cl(g):
-    g.stem(0, 4, 19)
-
-
-def cm(g):
-    g.stem(0, 8, 19)
-    g.stem(5, 8, 19)
-    g.stem(10, 8, 19)
-    g.arc(2.5, 12.5, 2.5, 4.5, 180, 360)
-    g.arc(7.5, 12.5, 2.5, 4.5, 180, 360)
-
-
-def cn(g):
-    g.stem(0, 8, 19)
-    g.arc(3.5, 12.5, 2.5, 4.5, 180, 360)
-    g.stem(6, 12, 19)
-
-
-def co(g):
-    g.ring(3.5, 13, 2.5, 6)
-
-
-def cp(g):
-    g.stem(0, 8, 23)
-    g.ring(3.5, 13, 2.5, 6)
-
-
-def cq(g):
-    g.stem(5, 8, 23)
-    g.ring(3.5, 13, 2.5, 6)
-
-
-def cr(g):
-    g.stem(0, 8, 19)
-    g.arc(3, 12.5, 2.5, 4.5, 180, 330)
-
-
-def cs(g):
-    g.arc(3.5, 10, 2, 3, 135, 330)
-    g.arc(3.5, 16, 2, 3, 315, 495)
-
-
-def ct(g):
-    g.stem(1, 5, 17)
-    g.arc(3.5, 17, 2, 2, 180, 360)
-    g.bar(0, 4, 8)
-
-
-def cu(g):
-    g.stem(0, 8, 15)
-    g.arc(3.5, 14, 2.5, 4, 0, 180)
-    g.stem(5, 8, 15)
-
-
-def cv(g):
-    g.seg(0, 8, 3, 18)
-    g.seg(7, 8, 3, 18)
-
-
-def cw(g):
-    g.seg(0, 8, 2.5, 18)
-    g.seg(2.5, 18, 5, 8)
-    g.seg(5, 8, 7.5, 18)
-    g.seg(7.5, 18, 10, 8)
-
-
-def cx(g):
-    g.seg(0, 8, 7, 18)
-    g.seg(7, 8, 0, 18)
-
-
-def cy(g):
-    g.seg(0, 8, 3.5, 14)
-    g.seg(7, 8, 1, 22)
-
-
-def cz(g):
-    g.bar(0, 6, 8)
-    g.seg(6, 9, 0, 18)
-    g.bar(0, 6, 18)
-
-
-glyph("a", ca, 1, 1)
-glyph("b", cb, 1, 1)
-glyph("c", cc, 1, 1)
-glyph("d", cd, 1, 1)
-glyph("e", ce, 1, 1)
-glyph("f", cf, 1, 2)
-glyph("g", cg, 1, 1)
-glyph("h", ch, 1, 1)
-glyph("i", ci, 2, 2)
-glyph("j", cj, 1, 1)
-glyph("k", ck, 1, 1)
-glyph("l", cl, 2, 2)
-glyph("m", cm, 1, 0)
-glyph("n", cn, 1, 1)
-glyph("o", co, 1, 1)
-glyph("p", cp, 1, 1)
-glyph("q", cq, 1, 1)
-glyph("r", cr, 1, 2)
-glyph("s", cs, 1, 1)
-glyph("t", ct, 1, 2)
-glyph("u", cu, 1, 1)
-glyph("v", cv, 1, 1)
-glyph("w", cw, 1, 1)
-glyph("x", cx, 1, 1)
-glyph("y", cy, 1, 1)
-glyph("z", cz, 1, 1)
-
-
-# -- punctuation and symbols ------------------------------------------------
-def p_space(g):
-    pass
-
-
-def p_excl(g):
-    g.stem(0, 3, 14)
-    g.fill(0, 18, 1, 19)
-
-
-def p_quot(g):
-    g.stem(0, 3, 8)
-    g.stem(3, 3, 8)
-
-
-def p_hash(g):
-    g.stem(2, 3, 19)
-    g.stem(6, 3, 19)
-    g.bar(0, 8, 8)
-    g.bar(0, 8, 14)
-
-
-def p_dollar(g):
-    g.arc(4.5, 9, 3, 4, 135, 330)
-    g.arc(4.5, 15, 3, 4, 315, 495)
-    g.stem(3, 2, 22)
-
-
-def p_pct(g):
-    g.ring(2, 5.5, 1.5, 2)
-    g.ring(7, 16.5, 1.5, 2)
-    g.seg(9, 3, 0, 19)
-
-
-def p_amp(g):
-    # '&' is two stacked bowls and a tail. WHY this and not a proper ampersand
-    # skeleton: at 17 rows the diagonal joins that make a real '&' need a third
-    # stroke crossing, and two bowls plus a tail read correctly at this size.
-    g.arc(2.5, 7.5, 1.5, 3, 340, 200)
-    g.seg(3.5, 10, 0.5, 14)
-    g.arc(3, 15.5, 2.5, 3.5, 25, 195)
-    g.seg(5, 12.5, 9, 19)
-
-
-def p_apos(g):
-    g.stem(0, 3, 8)
-
-
-def p_lpar(g):
-    g.arc(3.5, 11, 2.5, 8, 60, 300)
-
-
-def p_rpar(g):
-    g.arc(1.5, 11, 2.5, 8, 240, 480)
-
-
-def p_star(g):
-    g.seg(0, 7, 6, 13)
-    g.seg(0, 13, 6, 7)
-    g.stem(2, 5, 15)
-
-
-def p_plus(g):
-    g.stem(3, 7, 16)
-    g.bar(0, 6, 11)
-
-
-def p_comma(g):
-    g.fill(1, 17, 2, 18)
-    g.seg(2, 19, 0, 23)
-
-
-def p_dash(g):
-    g.bar(0, 4, 11)
-
-
-def p_dot(g):
-    g.fill(0, 18, 1, 19)
-
-
-def p_slash(g):
-    g.seg(0, 20, 6, 3)
-
-
-def p_colon(g):
-    g.fill(0, 10, 1, 11)
-    g.fill(0, 18, 1, 19)
-
-
-def p_semi(g):
-    g.fill(1, 10, 2, 11)
-    g.fill(1, 17, 2, 18)
-    g.seg(2, 19, 0, 23)
-
-
-def p_lt(g):
-    g.seg(6, 7, 0, 11)
-    g.seg(0, 11, 6, 15)
-
-
-def p_eq(g):
-    g.bar(0, 6, 8)
-    g.bar(0, 6, 13)
-
-
-def p_gt(g):
-    g.seg(0, 7, 6, 11)
-    g.seg(6, 11, 0, 15)
-
-
-def p_quest(g):
-    g.arc(3.5, 6.5, 2.5, 3, 185, 375)
-    g.seg(5, 9, 3, 13)
-    g.fill(3, 18, 4, 19)
-
-
-def p_at(g):
-    g.arc(4.5, 11.5, 4, 6.5, 35, 330)
-    g.arc(4, 11, 2, 2.5, 340, 210)
-    g.stem(6, 9, 14)
-    g.seg(6, 13, 9, 16)
-
-
-def p_lbra(g):
-    g.stem(2, 3, 19)
-    g.bar(0, 2, 3)
-    g.bar(0, 2, 18)
-
-
-def p_bslash(g):
-    g.seg(0, 3, 6, 20)
-
-
-def p_rbra(g):
-    g.stem(1, 3, 19)
-    g.bar(0, 3, 3)
-    g.bar(0, 3, 18)
-
-
-def p_circ(g):
-    g.seg(0, 8, 3.5, 3)
-    g.seg(3.5, 3, 7, 8)
-
-
-def p_under(g):
-    g.bar(0, 9, 21)
-
-
-def p_grave(g):
-    g.seg(0, 3, 2, 6)
-
-
-def p_lcurly(g):
-    g.seg(4, 3, 2, 5)
-    g.seg(2, 5, 2, 9)
-    g.seg(2, 9, 0, 11)
-    g.seg(0, 11, 2, 13)
-    g.seg(2, 13, 2, 17)
-    g.seg(2, 17, 4, 19)
-
-
-def p_bar(g):
-    g.stem(0, 2, 21)
-
-
-def p_rcurly(g):
-    g.seg(0, 3, 2, 5)
-    g.seg(2, 5, 2, 9)
-    g.seg(2, 9, 4, 11)
-    g.seg(4, 11, 2, 13)
-    g.seg(2, 13, 2, 17)
-    g.seg(2, 17, 0, 19)
-
-
-def p_tilde(g):
-    g.arc(2.5, 12, 2.5, 2, 180, 360)
-    g.arc(6.5, 12, 2.5, 2, 0, 180)
-
-
-glyph(" ", p_space, 2, 2)
-glyph("!", p_excl, 2, 2)
-glyph('"', p_quot, 1, 1)
-glyph("#", p_hash, 1, 1)
-glyph("$", p_dollar, 1, 1)
-glyph("%", p_pct, 1, 1)
-glyph("&", p_amp, 1, 1)
-glyph("'", p_apos, 2, 2)
-glyph("(", p_lpar, 1, 1)
-glyph(")", p_rpar, 1, 1)
-glyph("*", p_star, 1, 1)
-glyph("+", p_plus, 1, 1)
-glyph(",", p_comma, 2, 1)
-glyph("-", p_dash, 1, 1)
-glyph(".", p_dot, 2, 2)
-glyph("/", p_slash, 1, 1)
-glyph(":", p_colon, 2, 2)
-glyph(";", p_semi, 2, 1)
-glyph("<", p_lt, 1, 1)
-glyph("=", p_eq, 1, 1)
-glyph(">", p_gt, 1, 1)
-glyph("?", p_quest, 1, 1)
-glyph("@", p_at, 1, 1)
-glyph("[", p_lbra, 1, 1)
-glyph("\\", p_bslash, 1, 1)
-glyph("]", p_rbra, 1, 1)
-glyph("^", p_circ, 1, 1)
-glyph("_", p_under, 1, 1)
-glyph("`", p_grave, 1, 2)
-glyph("{", p_lcurly, 1, 1)
-glyph("|", p_bar, 2, 2)
-glyph("}", p_rcurly, 1, 1)
-glyph("~", p_tilde, 1, 1)
-
-
-# ---------------------------------------------------------------------------
-# Rasterise, then pack
-# ---------------------------------------------------------------------------
-def render():
-    """Returns {char: (regular_bitmap, bold_bitmap, advance)}."""
-    out = {}
-    for ch in range(FIRST_CHAR, LAST_CHAR + 1):
-        key = chr(ch)
-        if key not in GLYPHS:
-            raise SystemExit("no glyph described for %r (0x%02X)" % (key, ch))
-        fn, lsb, rsb = GLYPHS[key]
-        b = blank()
-        fn(b)
-        ink = b.ink()
-        if key == " ":
-            out[key] = (b, b.dilate(), 6)
-            continue
-        if ink is None:
-            raise SystemExit("glyph %r rasterised blank" % key)
-        left, right, top, bottom = ink
-        if key in "0123456789":
-            # Tabular figures: identical advance, ink centred inside it.
-            width = right - left + 1
-            advance = rsb
-            off = 1 + (advance - width - 2) // 2
-            gap = advance - width - off
-            if gap < 1:
-                raise SystemExit("digit %r does not fit its tabular advance" % key)
-        else:
-            off = lsb
-            gap = rsb
-        if off + (right - left + 1) + gap > CELL_W:
-            raise SystemExit("glyph %r is %d columns wide, cell is %d"
-                             % (key, off + (right - left + 1) + gap, CELL_W))
-        shifted = Bmp()
-        for y in range(CELL_H):
-            for x in range(left, right + 1):
-                if b.rows[y][x]:
-                    shifted.px(x - left + off, y)
-        adv = off + (right - left + 1) + gap
-        out[key] = (shifted, shifted.dilate(), adv)
+def _coverage(ch):
+    """1x coverage grid (rows of floats 0..1) for `ch`, baseline-aligned."""
+    font = _face_font()
+    img = Image.new("L", (CANVAS_W * SS, CANVAS_H * SS), 0)
+    ImageDraw.Draw(img).text((0, BASE_LINE * SS), ch, font=font, fill=255,
+                             anchor="ls")
+    px = img.load()
+    grid = []
+    for y in range(CANVAS_H):
+        row = []
+        for x in range(CANVAS_W):
+            acc = 0
+            for dy in range(SS):
+                for dx in range(SS):
+                    acc += px[x * SS + dx, y * SS + dy]
+            row.append(acc / (SS * SS * 255.0))
+        grid.append(row)
+    return grid
+
+
+def _resample_row(row, left, right, n_out):
+    """Area-average the coverage span [left..right] (inclusive) into n_out bins."""
+    width = right - left + 1
+    out = []
+    for i in range(n_out):
+        a = left + i * width / n_out
+        b = left + (i + 1) * width / n_out
+        acc = 0.0
+        n = 0.0
+        col = int(a)
+        while col < b and col < len(row):
+            lo = max(a, col)
+            hi = min(b, col + 1)
+            if hi > lo:
+                acc += row[col] * (hi - lo)
+                n += hi - lo
+            col += 1
+        out.append(acc / n if n > 0 else 0.0)
     return out
 
 
+def _bin_rows(grid, first, last):
+    """Area-bin grid rows [first..last] (inclusive) into exactly 4 rows.
+
+    Used for descenders: Roboto's tails reach ~5-6 rows below the baseline at
+    this em, and the cell reserves 4. Binning preserves the whole tail shape
+    (the hook of a 'g') where clipping would slice it flat.
+    """
+    n = last - first + 1
+    width = len(grid[0])
+    out = []
+    for i in range(4):
+        a = first + i * n / 4.0
+        b = first + (i + 1) * n / 4.0
+        acc = [0.0] * width
+        total = 0.0
+        rowf = a
+        while rowf < b:
+            r = int(rowf)
+            lo = max(a, r)
+            hi = min(b, r + 1)
+            if hi > lo and 0 <= r < len(grid):
+                for x in range(width):
+                    acc[x] += grid[r][x] * (hi - lo)
+                total += hi - lo
+            rowf += 1
+        if total > 0:
+            acc = [v / total for v in acc]
+        out.append(acc)
+    return out
+
+
+def _threshold_row(row, thresh=THRESH):
+    return [1 if v >= thresh else 0 for v in row]
+
+
+def _ink_bbox(rows):
+    top = bot = left = right = None
+    for y, row in enumerate(rows):
+        for x, v in enumerate(row):
+            if v:
+                if top is None:
+                    top = y
+                bot = y
+                if left is None or x < left:
+                    left = x
+                if right is None or x > right:
+                    right = x
+    return (left, right, top, bot)
+
+
+def _build_glyph(ch):
+    """Rasterise `ch` -> (Bmp, advance), honouring every documented contract."""
+    if ch == " ":
+        return blank(), SPACE_ADV
+
+    cov = _coverage(ch)
+
+    # -- vertical fit, in coverage -----------------------------------------
+    # clip above MIN_TOP
+    for y in range(min(MIN_TOP, len(cov))):
+        cov[y] = [0.0] * len(cov[y])
+
+    def _bottom(grid):
+        b = _ink_bbox([_threshold_row(r) for r in grid])
+        return None if b[3] is None else b[3]
+
+    bottom = _bottom(cov)
+    if bottom is not None and bottom > DESC_BOT:
+        # descender: bin rows [BASE+1 .. bottom] into the 4 reserved rows
+        head = cov[: BASE + 1]
+        tail = _bin_rows(cov, BASE + 1, bottom)
+        cov = head + tail
+
+    # -- horizontal fit, in coverage ---------------------------------------
+    thresh_rows = [_threshold_row(r) for r in cov]
+    box = _ink_bbox(thresh_rows)
+    if box[0] is None:
+        raise SystemExit("glyph %r rasterised blank" % ch)
+    left, right = box[0], box[1]
+
+    if ch in "0123456789":
+        n_out, lsb, adv = DIGIT_INK, 1, DIGIT_ADV
+    else:
+        adv = int(round(_face_font().getlength(ch) / SS))
+        if adv > MAX_ADV:
+            adv = MAX_ADV
+        if adv < 2:
+            adv = 2
+        ink_w = right - left + 1
+        n_out = min(ink_w, MAX_ADV - 1)
+        if adv < n_out + 1:
+            n_out = max(1, adv - 1)
+        lsb = min(left, max(0, adv - n_out - 1))
+
+    cell = [[0] * CELL_W for _ in range(CELL_H)]
+    for y in range(CELL_H):
+        span = _resample_row(cov[y], left, right, n_out)
+        for i, v in enumerate(span):
+            if v >= THRESH:
+                cell[y][lsb + i] = 1
+
+    # -- overshoot restoration ---------------------------------------------
+    # Round sides dip ~0.35 px below the baseline; the 0.5 threshold rounds
+    # that away. Restore row BASE+1 where the coverage says a round side is
+    # there, which is what gives 'o c g e s' their documented 1px overshoot.
+    if BASE + 1 < CELL_H and any(cell[BASE]):
+        for x in range(n_out):
+            if cov[BASE + 1][left + x] >= OVERSHOOT:
+                cell[BASE + 1][lsb + x] = 1
+
+    return Bmp.from_rows(cell), adv
+
+
+def render():
+    """Returns {char: (regular_bitmap, bold_bitmap, advance)}."""
+    out = {}
+    for k in range(FIRST_CHAR, LAST_CHAR + 1):
+        ch = chr(k)
+        bmp, adv = _build_glyph(ch)
+        out[ch] = (bmp, bmp.dilate(), adv)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# The contracts the Rust tests make, mirrored here so a bad run fails loud
+# ---------------------------------------------------------------------------
+def _verify(face):
+    def adv(c):
+        return face[c][2]
+
+    def ink(c):
+        return face[c][0].ink()
+
+    problems = []
+    for k in range(FIRST_CHAR, LAST_CHAR + 1):
+        c = chr(k)
+        if c == " ":
+            if ink(c) is not None:
+                problems.append("space must be blank")
+            continue
+        b = ink(c)
+        if b is None:
+            problems.append("glyph %r is blank" % c)
+            continue
+        left, right, top, bot = b
+        if top < MIN_TOP:
+            problems.append("%r starts at row %d, above the ascender" % (c, top))
+        if bot > DESC_BOT:
+            problems.append("%r reaches row %d, past the descender" % (c, bot))
+        if adv(c) > MAX_ADV:
+            problems.append("%r advance %d exceeds the cell" % (c, adv(c)))
+        if right >= adv(c):
+            problems.append("%r ink right %d >= advance %d" % (c, right, adv(c)))
+    for d in "0123456789":
+        if adv(d) != DIGIT_ADV:
+            problems.append("digit %r advance %d != %d (tabular)"
+                            % (d, adv(d), DIGIT_ADV))
+        b = ink(d)
+        if b is not None and b[1] - b[0] + 1 != DIGIT_INK:
+            problems.append("digit %r ink width %d != %d (condensed)"
+                            % (d, b[1] - b[0] + 1, DIGIT_INK))
+    h = ink("H")
+    if h is not None and not (CAP_TOP - 1 <= h[2] <= CAP_TOP + 1
+                              and h[3] in (BASE, BASE + 1)):
+        problems.append("'H' spans rows %d..%d, outside the cap band"
+                        % (h[2], h[3]))
+    for c in "ocges":
+        b = ink(c)
+        if b is None:
+            continue
+        if b[2] > 7:
+            problems.append("%r reaches row %d, below the x-height band" % (c, b[2]))
+        if b[3] < BASE + 1:
+            problems.append("%r stops at row %d, no baseline overshoot" % (c, b[3]))
+    for c in "gjpqy":
+        b = ink(c)
+        if b is not None and b[3] < BASE + 1:
+            problems.append("%r has no descender below the baseline" % c)
+    if problems:
+        raise SystemExit("face violates the Rust test contracts:\n  "
+                         + "\n  ".join(problems))
+
+
+# ---------------------------------------------------------------------------
+# Emission (identical shape to the previous generator's output)
+# ---------------------------------------------------------------------------
 def pack_rows(bmp):
     """One u16 per row, most-significant bit = leftmost pixel."""
     words = []
@@ -875,38 +393,6 @@ def pack_rows(bmp):
                 w |= 1 << (CELL_W - 1 - x)
         words.append(w)
     return words
-
-
-def main():
-    face = render()
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    out = os.path.join(root, 'apps', 'launcher', 'src', 'font.rs')
-    data = data_block(face)
-    if os.path.exists(out):
-        with open(out, encoding='utf-8') as f:
-            src = f.read()
-        start = src.index(START_MARK)
-        end = src.index(END_MARK)
-        if end <= start:
-            raise SystemExit(
-                'font.rs is malformed: the %s definition appears before the '
-                'generated block, so splicing would duplicate it'
-                % END_MARK)
-        src = src[:start] + data + src[end:]
-    else:
-        src = data
-    with open(out, 'w', encoding='utf-8', newline=NL) as f:
-        f.write(src)
-    print('wrote %s: %d glyphs, %d bytes of bitmaps per weight, %d bytes total'
-          % (out, NGLYPH, NGLYPH * CELL_H * 2,
-             NGLYPH * CELL_H * 2 * 2 + NGLYPH * 2))
-    if '--report' in sys.argv:
-        for k in range(FIRST_CHAR, LAST_CHAR + 1):
-            c = chr(k)
-            ink = face[c][0].ink()
-            desc = 'blank' if ink is None else 'ink w=%2d rows %2d..%2d' % (
-                ink[1] - ink[0] + 1, ink[2], ink[3])
-            print('  0x%02X %r adv %2d %s' % (k, c, face[c][2], desc))
 
 
 def data_block(face):
@@ -942,6 +428,41 @@ def data_block(face):
                      str(face[c][2] + (0 if c == " " else 1)) for c in face)))
     lines.append("")
     return "\n".join(lines)
+
+
+def _splice(path, start_mark, end_mark, data, label):
+    with open(path, encoding='utf-8') as f:
+        src = f.read()
+    start = src.index(start_mark)
+    end = src.index(end_mark)
+    if end <= start:
+        raise SystemExit(
+            '%s is malformed: the %s definition appears before the '
+            'generated block, so splicing would duplicate it'
+            % (label, end_mark))
+    src = src[:start] + data + src[end:]
+    with open(path, 'w', encoding='utf-8', newline=NL) as f:
+        f.write(src)
+    print('wrote %s (%d glyphs, %d bytes of bitmaps per weight)'
+          % (label, NGLYPH, NGLYPH * CELL_H * 2))
+
+
+def main():
+    face = render()
+    _verify(face)
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _splice(os.path.join(root, 'apps', 'launcher', 'src', 'font.rs'),
+            START_MARK, END_MARK, data_block(face), 'apps/launcher/src/font.rs')
+    _splice(os.path.join(root, 'sdk', 'rust', 'interos-std', 'src', 'font.rs'),
+            SDK_START_MARK, SDK_END_MARK, data_block(face),
+            'sdk/rust/interos-std/src/font.rs')
+    if '--report' in sys.argv:
+        for k in range(FIRST_CHAR, LAST_CHAR + 1):
+            c = chr(k)
+            ink = face[c][0].ink()
+            desc = 'blank' if ink is None else 'ink w=%2d rows %2d..%2d' % (
+                ink[1] - ink[0] + 1, ink[2], ink[3])
+            print('  0x%02X %r adv %2d %s' % (k, c, face[c][2], desc))
 
 
 if __name__ == "__main__":
