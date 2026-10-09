@@ -203,3 +203,14 @@ def test_orientation_is_only_committed_after_guest_acknowledgement():
     assert "status': 'UNCONFIRMED'" in handler
     assert handler.index("if not ok:") < handler.index("current_device_orientation = 'landscape'")
     assert "'status': 'APPLIED'" in handler
+
+
+def test_android_dalvik_objects_are_vm_local_bounded_and_indexes_fail_closed():
+    runtime = read("kernel/src/compat/android/runtime.rs")
+    assert "const MAX_DALVIK_OBJECTS: usize = 256" in runtime
+    assert "fn allocate_object(&mut self, class_descriptor: &str)" in runtime
+    assert "self.allocate_object(class_descriptor)?" in runtime
+    assert "non-null synthetic object reference" not in runtime
+    assert "dex.strings.get(str_idx).ok_or(DalvikVmError::InvalidBytecode)?" in runtime
+    assert "dex.types.get(type_idx).is_none()" in runtime
+    assert "object_allocations_have_distinct_vm_local_identity_and_a_hard_limit" in runtime

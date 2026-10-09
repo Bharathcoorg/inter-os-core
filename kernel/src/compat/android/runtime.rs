@@ -26,7 +26,17 @@ pub enum DalvikVmError {
     IllegalInstruction(u8),
     SecurityViolationForbiddenApi,
     UnsupportedFrameworkApi,
+    ObjectHeapLimitExceeded,
 }
+
+/// Bounded object allocated by one isolated Dalvik VM instance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DalvikObject {
+    id: u32,
+    class_descriptor: String,
+}
+
+const MAX_DALVIK_OBJECTS: usize = 256;
 
 /// Execution state of the sovereign Dalvik Virtual Machine.
 pub struct DalvikVmState {
@@ -42,6 +52,8 @@ pub struct DalvikVmState {
     pub captured_logs: Vec<String>,
     /// Nested DEX calls are bounded to prevent recursive bytecode exhaustion.
     pub call_depth: u8,
+    objects: Vec<DalvikObject>,
+    next_object_id: u32,
 }
 
 impl DalvikVmState {
@@ -55,7 +67,23 @@ impl DalvikVmState {
             last_return_value: 0,
             captured_logs: Vec::new(),
             call_depth: 0,
+            objects: Vec::new(),
+            next_object_id: 1,
         }
+    }
+
+    /// Allocates an actual VM-local object identity; IDs are never reused during this VM's life.
+    fn allocate_object(&mut self, class_descriptor: &str) -> Result<u32, DalvikVmError> {
+        if self.objects.len() >= MAX_DALVIK_OBJECTS {
+            return Err(DalvikVmError::ObjectHeapLimitExceeded);
+        }
+        if !class_descriptor.starts_with('L') || !class_descriptor.ends_with(';') {
+            return Err(DalvikVmError::InvalidBytecode);
+        }
+        let id = self.next_object_id;
+        self.next_object_id = id.checked_add(1).ok_or(DalvikVmError::ObjectHeapLimitExceeded)?;
+        self.objects.push(DalvikObject { id, class_descriptor: String::from(class_descriptor) });
+        Ok(id)
     }
 
     /// Invokes a specific method on a class by name, executing its Dalvik bytecode.
@@ -224,12 +252,8 @@ impl DalvikVmState {
                     if v_dest >= 32 {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
-                    if str_idx < dex.strings.len() {
-                        let text = &dex.strings[str_idx];
-                        self.string_registers[v_dest] = Some(text.clone());
-                    } else {
-                        self.string_registers[v_dest] = None;
-                    }
+                    let text = dex.strings.get(str_idx).ok_or(DalvikVmError::InvalidBytecode)?;
+                    self.string_registers[v_dest] = Some(text.clone());
                     self.registers[v_dest] = str_idx as u32;
                     pc += 4;
                 }
@@ -247,9 +271,8 @@ impl DalvikVmState {
                     if v_dest >= 32 {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
-                    if str_idx < dex.strings.len() {
-                        self.string_registers[v_dest] = Some(dex.strings[str_idx].clone());
-                    }
+                    let text = dex.strings.get(str_idx).ok_or(DalvikVmError::InvalidBytecode)?;
+                    self.string_registers[v_dest] = Some(text.clone());
                     self.registers[v_dest] = str_idx as u32;
                     pc += 6;
                 }
@@ -262,6 +285,9 @@ impl DalvikVmState {
                     if v_dest >= 32 {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
+                    if dex.types.get(type_idx).is_none() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
                     self.registers[v_dest] = type_idx as u32;
                     self.string_registers[v_dest] = None;
                     pc += 4;
@@ -271,10 +297,13 @@ impl DalvikVmState {
                         return Err(DalvikVmError::InvalidBytecode);
                     }
                     let v_dest = insns[pc + 1] as usize;
+                    let type_idx = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as usize;
                     if v_dest >= 32 {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
-                    self.registers[v_dest] = 1; // non-null synthetic object reference
+                    let class_descriptor = dex.types.get(type_idx).ok_or(DalvikVmError::InvalidBytecode)?;
+                    let object_id = self.allocate_object(class_descriptor)?;
+                    self.registers[v_dest] = object_id;
                     self.string_registers[v_dest] = None;
                     pc += 4;
                 }
@@ -477,6 +506,28 @@ impl DalvikVmState {
 mod tests {
     use super::*;
     use super::super::dex::create_test_dex;
+
+    #[test]
+    fn object_allocations_have_distinct_vm_local_identity_and_a_hard_limit() {
+        let mut vm = DalvikVmState::new();
+        let first = vm.allocate_object("Lorg/interos/First;").unwrap();
+        let second = vm.allocate_object("Lorg/interos/Second;").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(vm.objects[0].id, first);
+        assert_eq!(vm.objects[0].class_descriptor, "Lorg/interos/First;");
+        for _ in 2..MAX_DALVIK_OBJECTS {
+            vm.allocate_object("Lorg/interos/Bounded;").unwrap();
+        }
+        assert_eq!(vm.objects.len(), MAX_DALVIK_OBJECTS);
+        assert_eq!(vm.allocate_object("Lorg/interos/Overflow;"), Err(DalvikVmError::ObjectHeapLimitExceeded));
+    }
+
+    #[test]
+    fn object_allocator_rejects_non_class_descriptors() {
+        let mut vm = DalvikVmState::new();
+        assert_eq!(vm.allocate_object("not-a-class"), Err(DalvikVmError::InvalidBytecode));
+        assert!(vm.objects.is_empty());
+    }
 
     #[test]
     fn cumulative_instruction_budget_fails_closed() {
