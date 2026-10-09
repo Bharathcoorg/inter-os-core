@@ -275,3 +275,11 @@ def test_android_invoke_rejects_registers_outside_the_callers_declared_frame():
     runtime = read("kernel/src/compat/android/runtime.rs")
     assert "arg_registers[..arg_count].iter().any(|register| *register >= method.registers_size as usize)" in runtime
     assert "return Err(DalvikVmError::RegisterOutOfBounds)" in runtime
+
+
+def test_android_compatibility_scope_is_not_misrepresented_as_full_art_or_ring3_isolation():
+    runtime = read("kernel/src/compat/android/runtime.rs")
+    android = read("kernel/src/compat/android/mod.rs")
+    assert "not ART or a separate Ring-3 Android" in runtime
+    assert "does not yet provide a separate Ring-3 Android app process" in android
+    assert "Ring 3 isolated memory" not in runtime

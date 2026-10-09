@@ -1,8 +1,9 @@
 //! Android Compatibility Runtime (ACR) Dalvik Virtual Machine Engine
 //!
-//! Provides a zero-trust, capability-bounded bytecode execution engine that runs
-//! genuine Android Dalvik Executable (`classes.dex`) opcodes in Ring 3 isolated memory
-//! without copying Android Linux kernels, ART runtime, or ambient authority.
+//! Provides a bounded interpreter for a deliberately limited subset of Dalvik bytecode.
+//! This implementation is kernel-mediated and is not ART or a separate Ring-3 Android
+//! runtime. Unsupported opcodes and framework effects fail closed; callers must not
+//! treat this interpreter as general APK compatibility or a process-isolation boundary.
 
 use alloc::string::String;
 use alloc::vec::Vec;

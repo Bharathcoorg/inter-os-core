@@ -1,8 +1,9 @@
 //! Android Compatibility Runtime & Zone 4 Isolation
 //!
-//! Provides the execution boundary for untrusted Android application packages (.apk).
-//! Employs a zero-trust mediator that strictly walls off Android workloads from
-//! native Inter OS private storage, sovereign cryptographic keys, and raw microkernel IPC.
+//! Provides APK parsing, security auditing, intent/Binder mediation, sandbox metadata,
+//! and a bounded Dalvik interpreter for the implemented opcode/API subset. The current
+//! interpreter is kernel-mediated; this module is not a full Android framework/ART port
+//! and does not yet provide a separate Ring-3 Android app process for arbitrary APKs.
 pub use interos_android_shared;
 pub mod apk;
 pub mod binder;
@@ -34,7 +35,8 @@ use crate::capability::CapabilityTable;
 use crate::serial_println;
 use crate::task::TaskId;
 
-/// Represents an isolated Android guest application instance.
+/// Represents ACR application metadata associated with a guest task. This record alone
+/// does not create a separate kernel process or provide full Android process isolation.
 #[derive(Debug, Clone)]
 pub struct AndroidAppInstance {
     pub pid: u32,
@@ -56,7 +58,7 @@ pub enum AndroidLaunchError {
     MethodRejected,
 }
 
-/// System-wide Android container runtime manager.
+/// System-wide Android compatibility lifecycle manager for the currently supported subset.
 pub struct AndroidRuntime {
     next_pid: u32,
     active_apps: BTreeMap<u32, AndroidAppInstance>,
