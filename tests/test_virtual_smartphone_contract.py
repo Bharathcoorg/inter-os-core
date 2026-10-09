@@ -12,12 +12,17 @@ def test_canonical_qemu_exposes_native_portrait_display_and_absolute_pointer():
     launch = read("qemu/launch_studio.ps1")
     server = read("emulator/server.py")
     assert "virtio-vga,edid=on,xres=720,yres=1440" in launch
-    assert "ps2-mouse" in launch
+    # WHY no `ps2-mouse` device flag: no such QEMU device exists (QEMU 11.1.0
+    # `-device help` lists only ISA `i8042`, which q35 already includes), and
+    # passing it aborts the VM instantly ("expects a pluggable device type",
+    # observed live with an empty boot log). Absolute pointer input travels as
+    # COM1 touch injection, which the guest consumes without any -device flag.
+    assert "ps2-mouse" not in launch
     x86_start = server.index('if arch == "x86_64":')
     x86_end = server.index('elif arch == "aarch64":', x86_start)
     x86_profile = server[x86_start:x86_end]
     assert "virtio-vga,edid=on,xres=720,yres=1440" in x86_profile
-    assert "ps2-mouse" in x86_profile
+    assert "ps2-mouse" not in x86_profile
     assert "usb-tablet" not in x86_profile
 
 
