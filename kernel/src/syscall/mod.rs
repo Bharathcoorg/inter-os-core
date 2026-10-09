@@ -4492,7 +4492,9 @@ pub fn sys_service_start(service_id: u8) -> Result<crate::task::TaskId, SyscallR
         _ => return Err(SyscallResult::InvalidArguments),
     };
     let parent_id = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?;
-    crate::services::start(id, parent_id).map_err(|_| SyscallResult::DeviceError)
+    crate::services::start(id, parent_id).map_err(|e| {
+        if crate::services::is_contention(e) { SyscallResult::NotReady } else { SyscallResult::DeviceError }
+    })
 }
 
 fn require_service_manager() -> Result<(), SyscallResult> {
@@ -4617,7 +4619,9 @@ pub fn sys_service_heartbeat(service_id: u8) -> Result<(), SyscallResult> {
         9 => crate::services::ServiceId::Compositor, 10 => crate::services::ServiceId::Launcher, 11 => crate::services::ServiceId::Sensor,
         _ => return Err(SyscallResult::InvalidArguments),
     };
-    crate::services::heartbeat_for_task(id, task_id).map_err(|_| SyscallResult::PermissionDenied)
+    crate::services::heartbeat_for_task(id, task_id).map_err(|e| {
+        if crate::services::is_contention(e) { SyscallResult::NotReady } else { SyscallResult::PermissionDenied }
+    })
 }
 
 pub fn sys_service_recover_failed(service_id: u8) -> Result<u64, SyscallResult> {
@@ -4646,7 +4650,9 @@ pub fn sys_service_stop(service_id: u8) -> Result<(), SyscallResult> {
         _ => return Err(SyscallResult::InvalidArguments),
     };
     let parent_id = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?;
-    crate::services::stop(id, parent_id).map_err(|_| SyscallResult::DeviceError)
+    crate::services::stop(id, parent_id).map_err(|e| {
+        if crate::services::is_contention(e) { SyscallResult::NotReady } else { SyscallResult::DeviceError }
+    })
 }
 
 /// Unified QEMU development bridge launcher for first-party apps and verified RAPPs.

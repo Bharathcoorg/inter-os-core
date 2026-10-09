@@ -152,6 +152,29 @@ pub struct ServiceInfo { pub id: ServiceId, pub abi_version: u16, pub state: Ser
 pub struct ServiceRecord { pub id: ServiceId, pub task: TaskId, pub state: ServiceState, pub generation: u32 }
 
 pub static SERVICE_RECORDS: spin::Mutex<[Option<ServiceRecord>; 12]> = spin::Mutex::new([None; 12]);
+
+/// Locking convention for this registry (read before adding a blocking call).
+///
+/// WHY every acquisition below is `try_lock`: on this uniprocessor port a
+/// syscall runs with IF masked by IA32_FMASK, so a blocking `lock()` in
+/// syscall context deadlocks permanently the moment the holder was preempted
+/// by the timer tick (observed live: a service heartbeat wedged the whole
+/// guest spinning on this mutex with RFLAGS.IF=0). Contended fast paths
+/// report `"service registry busy"` / `"scheduler busy"` and periodic work
+/// (supervision, exit accounting) skips the round; heartbeats and supervision
+/// are idempotent across rounds, so a skipped beat is a delay, never a lie.
+///
+/// `is_contention` lets syscall wrappers report these transient errors as
+/// `NotReady` instead of misreporting them as permission or device failures.
+pub fn is_contention(reason: &'static str) -> bool {
+    matches!(
+        reason,
+        "service registry busy"
+            | "service lifecycle busy"
+            | "scheduler busy"
+            | "ipc router busy"
+    )
+}
 const SERVICE_RESTART_BACKOFF_TICKS: u64 = 1000;
 static SERVICE_HEARTBEATS: [core::sync::atomic::AtomicU64; 12] = [
     core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0),
@@ -188,7 +211,7 @@ static SERVICE_RETRY_AFTER: [core::sync::atomic::AtomicU64; 12] = [
 pub fn init() {
     if SERVICES_INITIALIZED.swap(true, Ordering::AcqRel) { return; }
     {
-        let mut records = SERVICE_RECORDS.lock();
+        let Some(mut records) = SERVICE_RECORDS.try_lock() else { return; };
         records[ServiceId::Init as usize] = Some(ServiceRecord { id: ServiceId::Init, task: TaskId(0), state: ServiceState::Running, generation: 1 });
     }
     // Service definitions are registered but not started here. PID 1 owns
@@ -198,9 +221,11 @@ pub fn init() {
         ServiceId::Power, ServiceId::Modem, ServiceId::Audio, ServiceId::Camera, ServiceId::Sensor,
         ServiceId::Compositor, ServiceId::Launcher,
     ] {
-        SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord {
-            id, task: TaskId(0), state: ServiceState::Declared, generation: 0
-        });
+        if let Some(mut records) = SERVICE_RECORDS.try_lock() {
+            records[id as usize] = Some(ServiceRecord {
+                id, task: TaskId(0), state: ServiceState::Declared, generation: 0
+            });
+        }
     }
     crate::serial_println!("[SERVICE] Service definitions registered; PID 1 controls startup.");
 }
@@ -250,7 +275,7 @@ pub fn resource_limits(id: ServiceId) -> ResourceLimits {
 
 /// Starts one declared service on behalf of userspace PID 1.
 pub fn start(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str> {
-    let _lifecycle = SERVICE_LIFECYCLE_LOCK.lock();
+    let _lifecycle = SERVICE_LIFECYCLE_LOCK.try_lock().ok_or("service lifecycle busy")?;
     start_locked(id, parent_id)
 }
 
@@ -266,13 +291,13 @@ fn start_locked(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str
             return Err(reason);
         }};
     }
-    let existing = SERVICE_RECORDS.lock()[id as usize];
+    let existing = SERVICE_RECORDS.try_lock().ok_or("service registry busy")?[id as usize];
     if let Some(record) = existing {
         if record.state == ServiceState::Running && record.task != TaskId(0) {
             // A lifecycle manager may only observe/reuse services owned by the
             // same PID1 parent. Never turn the idempotent start path into a
             // cross-parent task-disclosure or control primitive.
-            let scheduler = SCHEDULER.lock();
+            let scheduler = SCHEDULER.try_lock().ok_or("scheduler busy")?;
             let task = match scheduler.get_task(record.task) {
                 Some(task) => task,
                 None => bail!("running service task not found"),
@@ -296,7 +321,7 @@ fn start_locked(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str
     let desc = descriptor(id);
     if desc.abi_version != SERVICE_ABI_VERSION { bail!("unsupported service ABI"); }
     for dependency in desc.dependencies {
-        let dep = match SERVICE_RECORDS.lock()[*dependency as usize] {
+        let dep = match SERVICE_RECORDS.try_lock().ok_or("service registry busy")?[*dependency as usize] {
             Some(dep) => dep,
             None => bail!("service dependency not declared"),
         };
@@ -304,35 +329,35 @@ fn start_locked(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str
             bail!("service dependency is not running");
         }
     }
-    let generation = SERVICE_RECORDS.lock()[id as usize].map(|r| r.generation.saturating_add(1)).unwrap_or(1);
-    SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Starting, generation });
+    let generation = SERVICE_RECORDS.try_lock().ok_or("service registry busy")?[id as usize].map(|r| r.generation.saturating_add(1)).unwrap_or(1);
+    SERVICE_RECORDS.try_lock().ok_or("service registry busy")?[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Starting, generation });
     let task = match crate::task::user::spawn_userspace_service(id as u8, parent_id) {
         Ok(task) if task != TaskId(0) => task,
         Ok(_) => bail!("service spawn returned no task"),
         Err(reason) => bail!(reason),
     };
-    crate::ipc::IPC_ROUTER.lock().register_task(task);
+    crate::ipc::IPC_ROUTER.try_lock().ok_or("ipc router busy")?.register_task(task);
     let process = match crate::task::process::process_for_task(task) {
         Some(process) => process,
         None => {
-            let mut scheduler = SCHEDULER.lock();
+            let mut scheduler = SCHEDULER.try_lock().ok_or("scheduler busy")?;
             let _ = scheduler.terminate_task(task, -1);
             let _ = scheduler.reap_child(parent_id, task);
-            SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Failed, generation });
+            SERVICE_RECORDS.try_lock().ok_or("service registry busy")?[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Failed, generation });
             bail!("service process identity missing");
         }
     };
     if crate::task::process::set_limits(process, resource_limits(id)).is_err() {
-        let mut scheduler = SCHEDULER.lock();
+        let mut scheduler = SCHEDULER.try_lock().ok_or("scheduler busy")?;
         let _ = scheduler.terminate_task(task, -1);
         let _ = scheduler.reap_child(parent_id, task);
-        SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Failed, generation });
+        SERVICE_RECORDS.try_lock().ok_or("service registry busy")?[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Failed, generation });
         bail!("service resource limits rejected");
     }
     let now = crate::interrupts::get_system_ticks();
     SERVICE_HEARTBEATS[id as usize].store(now, Ordering::Release);
     SERVICE_STARTED_AT[id as usize].store(now, Ordering::Release);
-    SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task, state: ServiceState::Running, generation });
+    SERVICE_RECORDS.try_lock().ok_or("service registry busy")?[id as usize] = Some(ServiceRecord { id, task, state: ServiceState::Running, generation });
     Ok(task)
 }
 
@@ -345,16 +370,16 @@ pub fn launch_verified_package(
     manifest: &crate::package::RappManifest,
     payload: &[u8],
 ) -> Result<TaskId, &'static str> {
-    let _lifecycle = SERVICE_LIFECYCLE_LOCK.lock();
+    let _lifecycle = SERVICE_LIFECYCLE_LOCK.try_lock().ok_or("service lifecycle busy")?;
 
     if id == ServiceId::Init {
         return Err("init is not a package-launched service");
     }
 
-    let existing = SERVICE_RECORDS.lock()[id as usize];
+    let existing = SERVICE_RECORDS.try_lock().ok_or("service registry busy")?[id as usize];
     if let Some(record) = existing {
         if record.state == ServiceState::Running && record.task != TaskId(0) {
-            let scheduler = SCHEDULER.lock();
+            let scheduler = SCHEDULER.try_lock().ok_or("scheduler busy")?;
             let task = scheduler.get_task(record.task).ok_or("running service task not found")?;
             if task.parent_id != parent_id {
                 return Err("running service is not owned by caller");
@@ -375,48 +400,48 @@ pub fn launch_verified_package(
     }
 
     let generation = existing.map(|r| r.generation.saturating_add(1)).unwrap_or(1);
-    SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Starting, generation });
+    SERVICE_RECORDS.try_lock().ok_or("service registry busy")?[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Starting, generation });
 
     let task = match crate::task::user::spawn_verified_rapp_process(manifest, payload, parent_id) {
         Ok(task) if task != TaskId(0) => task,
         _ => {
-            SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Failed, generation });
+            SERVICE_RECORDS.try_lock().ok_or("service registry busy")?[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Failed, generation });
             return Err("verified service package spawn failed");
         }
     };
 
-    crate::ipc::IPC_ROUTER.lock().register_task(task);
+    crate::ipc::IPC_ROUTER.try_lock().ok_or("ipc router busy")?.register_task(task);
     let process = match crate::task::process::process_for_task(task) {
         Some(process) => process,
         None => {
-            let mut scheduler = SCHEDULER.lock();
+            let mut scheduler = SCHEDULER.try_lock().ok_or("scheduler busy")?;
             let _ = scheduler.terminate_task(task, -1);
             let _ = scheduler.reap_child(parent_id, task);
-            SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Failed, generation });
+            SERVICE_RECORDS.try_lock().ok_or("service registry busy")?[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Failed, generation });
             return Err("service process identity missing");
         }
     };
     if crate::task::process::set_limits(process, resource_limits(id)).is_err() {
-        let mut scheduler = SCHEDULER.lock();
+        let mut scheduler = SCHEDULER.try_lock().ok_or("scheduler busy")?;
         let _ = scheduler.terminate_task(task, -1);
         let _ = scheduler.reap_child(parent_id, task);
-        SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Failed, generation });
+        SERVICE_RECORDS.try_lock().ok_or("service registry busy")?[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Failed, generation });
         return Err("service resource limits rejected");
     }
     SERVICE_HEARTBEATS[id as usize].store(crate::interrupts::get_system_ticks(), Ordering::Release);
     // Reuse the generation computed for the Starting transition; a successful
     // launch is one lifecycle transition, not a second generation bump.
-    SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task, state: ServiceState::Running, generation });
+    SERVICE_RECORDS.try_lock().ok_or("service registry busy")?[id as usize] = Some(ServiceRecord { id, task, state: ServiceState::Running, generation });
     Ok(task)
 }
 
 /// Stops a service task without allowing userspace to terminate arbitrary tasks.
 pub fn stop(id: ServiceId, parent_id: TaskId) -> Result<(), &'static str> {
-    let _lifecycle = SERVICE_LIFECYCLE_LOCK.lock();
+    let _lifecycle = SERVICE_LIFECYCLE_LOCK.try_lock().ok_or("service lifecycle busy")?;
     if id == ServiceId::Init { return Err("init cannot be stopped"); }
-    let record = SERVICE_RECORDS.lock()[id as usize].ok_or("service not declared")?;
+    let record = SERVICE_RECORDS.try_lock().ok_or("service registry busy")?[id as usize].ok_or("service not declared")?;
     if record.task == TaskId(0) { return Ok(()); }
-    let records = *SERVICE_RECORDS.lock();
+    let records = *SERVICE_RECORDS.try_lock().ok_or("service registry busy")?;
     for dependent in 1..records.len() {
         let Some(other) = records[dependent] else { continue; };
         if other.state == ServiceState::Running && descriptor(other.id).dependencies.iter().any(|dep| *dep == id) {
@@ -428,28 +453,28 @@ pub fn stop(id: ServiceId, parent_id: TaskId) -> Result<(), &'static str> {
     // capability; never allow the manager to terminate another owner's task.
     let service_task = record.task;
     {
-        let scheduler = SCHEDULER.lock();
+        let scheduler = SCHEDULER.try_lock().ok_or("scheduler busy")?;
         let task = scheduler.get_task(service_task).ok_or("service task not found")?;
         if task.parent_id != parent_id {
             return Err("service is not owned by caller");
         }
     }
     let termination_result = {
-        let mut scheduler = SCHEDULER.lock();
+        let mut scheduler = SCHEDULER.try_lock().ok_or("scheduler busy")?;
         let result = scheduler.terminate_task(service_task, 0);
         if result.is_ok() { let _ = scheduler.reap_child(parent_id, record.task); }
         result
     };
     termination_result.map_err(|_| "service termination failed")?;
     let generation = record.generation.saturating_add(1);
-    SERVICE_RECORDS.lock()[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Stopped, generation });
+    SERVICE_RECORDS.try_lock().ok_or("service registry busy")?[id as usize] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Stopped, generation });
     Ok(())
 }
 
 
 /// Returns stable public metadata without exposing scheduler task identity.
 pub fn info(id: ServiceId) -> Option<ServiceInfo> {
-    let record = SERVICE_RECORDS.lock()[id as usize]?;
+    let record = SERVICE_RECORDS.try_lock()?[id as usize]?;
     let desc = descriptor(id);
     Some(ServiceInfo { id, abi_version: desc.abi_version, state: record.state, restart: desc.restart, critical: desc.critical, generation: record.generation })
 }
@@ -461,7 +486,7 @@ pub fn lookup(service_id: u8) -> Option<ServiceInfo> {
 
 /// Returns a task ID for a named service when registered.
 pub fn task_id(id: ServiceId) -> Option<TaskId> {
-    SERVICE_RECORDS.lock()[id as usize].map(|r| r.task)
+    SERVICE_RECORDS.try_lock()?[id as usize].map(|r| r.task)
 }
 
 /// Records a service heartbeat. Service workers call this before yielding so
@@ -472,7 +497,7 @@ pub(crate) fn heartbeat(id: ServiceId) {
 }
 
 pub fn heartbeat_for_task(id: ServiceId, task_id: TaskId) -> Result<(), &'static str> {
-    let record = SERVICE_RECORDS.lock()[id as usize].ok_or("service not declared")?;
+    let record = SERVICE_RECORDS.try_lock().ok_or("service registry busy")?[id as usize].ok_or("service not declared")?;
     if record.task != task_id || record.state != ServiceState::Running { return Err("service task mismatch"); }
     SERVICE_HEARTBEATS[id as usize].store(crate::interrupts::get_system_ticks(), Ordering::Release);
     Ok(())
@@ -481,12 +506,23 @@ pub fn heartbeat_for_task(id: ServiceId, task_id: TaskId) -> Result<(), &'static
 
 /// Supervises all registered services and marks missing, terminated, or
 /// heartbeat-stale workers as failed. Recovery remains an explicit PID 1 action.
+/// Best-effort per round: every lock here is `try_lock`, so a contended round
+/// is skipped instead of wedging the caller (see the registry convention).
 pub fn supervise() {
-    let _lifecycle = SERVICE_LIFECYCLE_LOCK.lock();
+    let _lifecycle = match SERVICE_LIFECYCLE_LOCK.try_lock() {
+        Some(guard) => guard,
+        None => return,
+    };
     let now = crate::interrupts::get_system_ticks();
-    let sched = SCHEDULER.lock();
+    let sched = match SCHEDULER.try_lock() {
+        Some(guard) => guard,
+        None => return,
+    };
     let mut states = [None; 12];
-    let records = *SERVICE_RECORDS.lock();
+    let records = match SERVICE_RECORDS.try_lock() {
+        Some(guard) => *guard,
+        None => return,
+    };
     for idx in 1..records.len() {
         let Some(record) = records[idx] else { continue; };
         if record.state == ServiceState::Starting {
@@ -510,7 +546,10 @@ pub fn supervise() {
         states[idx] = Some(if failed || stale { ServiceState::Failed } else { ServiceState::Running });
     }
     drop(sched);
-    let mut registry = SERVICE_RECORDS.lock();
+    let mut registry = match SERVICE_RECORDS.try_lock() {
+        Some(guard) => guard,
+        None => return,
+    };
     for idx in 1..registry.len() {
         if let (Some(record), Some(state)) = (records[idx], states[idx]) {
             if record.state == ServiceState::Running && state == ServiceState::Failed {
@@ -527,7 +566,10 @@ pub fn supervise() {
     drop(registry);
     static CONFIRMATION_ATTEMPTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
     if all_critical_running && !CONFIRMATION_ATTEMPTED.load(Ordering::Acquire) {
-        let mut recovery = crate::recovery::BOOT_RECOVERY.lock();
+        let mut recovery = match crate::recovery::BOOT_RECOVERY.try_lock() {
+            Some(guard) => guard,
+            None => return,
+        };
         if recovery.record.outcome != crate::recovery::BootOutcome::Success {
             CONFIRMATION_ATTEMPTED.store(true, Ordering::Release);
             match recovery.confirm_boot() {
@@ -566,9 +608,17 @@ pub fn last_heartbeat(id: ServiceId) -> u64 {
 }
 
 /// Records a userspace service exit in the authoritative service registry.
+/// Called from the scheduler exit path, so it must never block: a contended
+/// round is skipped and the exit surfaces via heartbeat-stale supervision.
 pub fn record_exit(task_id: TaskId, _exit_code: i32) {
-    let _lifecycle = SERVICE_LIFECYCLE_LOCK.lock();
-    let mut records = SERVICE_RECORDS.lock();
+    let _lifecycle = match SERVICE_LIFECYCLE_LOCK.try_lock() {
+        Some(guard) => guard,
+        None => return,
+    };
+    let mut records = match SERVICE_RECORDS.try_lock() {
+        Some(guard) => guard,
+        None => return,
+    };
     for idx in 1..records.len() {
         if let Some(record) = records[idx] {
             if record.task == task_id {
@@ -585,15 +635,15 @@ pub fn record_exit(task_id: TaskId, _exit_code: i32) {
 
 /// Recovers one failed service when explicitly requested by PID 1.
 pub fn recover_failed(id: ServiceId, parent_id: TaskId) -> Result<(), &'static str> {
-    let _lifecycle = SERVICE_LIFECYCLE_LOCK.lock();
+    let _lifecycle = SERVICE_LIFECYCLE_LOCK.try_lock().ok_or("service lifecycle busy")?;
     if id == ServiceId::Init { return Err("init cannot be recovered"); }
     let idx = id as usize;
-    let record = SERVICE_RECORDS.lock()[idx].ok_or("service not declared")?;
+    let record = SERVICE_RECORDS.try_lock().ok_or("service registry busy")?[idx].ok_or("service not declared")?;
     if record.state != ServiceState::Failed { return Err("service is not failed"); }
     let now = crate::interrupts::get_system_ticks();
     if now < SERVICE_RETRY_AFTER[idx].load(Ordering::Acquire) { return Err("service recovery backoff active"); }
     if record.task != TaskId(0) {
-        let scheduler = SCHEDULER.lock();
+        let scheduler = SCHEDULER.try_lock().ok_or("scheduler busy")?;
         let task = scheduler.get_task(record.task).ok_or("failed service task not found")?;
         if task.parent_id != parent_id {
             return Err("failed service is owned by another parent");
@@ -602,14 +652,14 @@ pub fn recover_failed(id: ServiceId, parent_id: TaskId) -> Result<(), &'static s
             return Err("failed service task is not terminal");
         }
         drop(scheduler);
-        let mut scheduler = SCHEDULER.lock();
+        let mut scheduler = SCHEDULER.try_lock().ok_or("scheduler busy")?;
         let _ = scheduler.reap_child(parent_id, record.task);
     }
     // Consume one bounded recovery attempt only after ownership and terminal-state
     // checks succeed. A rejected cross-parent recovery must not penalize PID1's
     // retry budget.
     SERVICE_RETRY_AFTER[idx].store(now.saturating_add(SERVICE_RESTART_BACKOFF_TICKS), Ordering::Release);
-    SERVICE_RECORDS.lock()[idx] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Declared, generation: record.generation });
+    SERVICE_RECORDS.try_lock().ok_or("service registry busy")?[idx] = Some(ServiceRecord { id, task: TaskId(0), state: ServiceState::Declared, generation: record.generation });
     start_locked(id, parent_id).map(|_| ())
 }
 
