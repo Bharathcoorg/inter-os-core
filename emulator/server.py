@@ -1814,11 +1814,13 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             launcher_ready = check_launcher_ready()
+            # A ready flag latched from a previous session's disk log must not
+            # describe a dead VM: readiness is only meaningful while QEMU runs.
             response = json.dumps({
                 'qemu': t["qemu_alive"],
                 'status': t["status"],
                 'mode': t.get("mode", "standby"),
-                'launcher_ready': launcher_ready,
+                'launcher_ready': bool(launcher_ready and t["qemu_alive"]),
                 'active_profile': active_profile_key,
                 # Report the geometry this machine was actually launched with, so
                 # the studio describes the running target rather than a generic
@@ -1834,7 +1836,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
 
         if self.path == '/api/qemu/telemetry':
             t = query_qemu_monitor().copy()
-            t["launcher_ready"] = check_launcher_ready()
+            t["launcher_ready"] = bool(check_launcher_ready() and t.get("qemu_alive"))
             t["transport_fps"] = round(vnc_client.metrics["fps"], 1) if vnc_client.connected else round(_transport_metrics["fps"], 1)
             t["transport_frame_us"] = int(vnc_client.metrics["frame_us"]) if vnc_client.connected else int(_transport_metrics["frame_us"])
             t["vnc_connected"] = vnc_client.connected
