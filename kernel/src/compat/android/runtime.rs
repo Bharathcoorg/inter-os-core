@@ -425,6 +425,9 @@ impl DalvikVmState {
                 OP_INVOKE_VIRTUAL | OP_INVOKE_DIRECT | OP_INVOKE_STATIC => {
                     if pc + 6 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
                     let (arg_registers, arg_count) = decode_invoke_registers(insns, pc)?;
+                    if arg_registers[..arg_count].iter().any(|register| *register >= method.registers_size as usize) {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
                     let method_index = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as usize;
                     let target = dex.methods.iter().find(|m| m.method_index == method_index)
                         .ok_or(DalvikVmError::MethodNotFound)?;

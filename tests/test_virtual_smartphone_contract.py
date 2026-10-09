@@ -269,3 +269,9 @@ def test_power_transition_is_long_enough_for_a_visible_guest_animation():
 def test_android_log_dispatch_prefers_message_argument_over_tag():
     framework = read("kernel/src/compat/android/framework.rs")
     assert "string_args.get(1).and_then(|value| *value)" in framework
+
+
+def test_android_invoke_rejects_registers_outside_the_callers_declared_frame():
+    runtime = read("kernel/src/compat/android/runtime.rs")
+    assert "arg_registers[..arg_count].iter().any(|register| *register >= method.registers_size as usize)" in runtime
+    assert "return Err(DalvikVmError::RegisterOutOfBounds)" in runtime
