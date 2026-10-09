@@ -6,7 +6,6 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::format;
 use super::dex::{
     DexPackage, OP_NOP, OP_MOVE, OP_MOVE_RESULT, OP_MOVE_EXCEPTION,
     OP_RETURN_VOID, OP_RETURN, OP_RETURN_WIDE,

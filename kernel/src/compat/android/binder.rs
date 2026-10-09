@@ -96,7 +96,7 @@ impl BinderMediator {
         &mut self,
         caller: TaskId,
         caller_caps: &CapabilityTable,
-        cap_slot: usize,
+        _cap_slot: usize,
         transaction: &BinderTransaction,
     ) -> Result<BinderReturn, BinderReturn> {
         // ServiceManager query (Handle 0, Code 1 = getService)

@@ -14,6 +14,7 @@ pub use user_ptr::{
 use crate::capability::{CapError, Capability, CapabilityId, CapabilityTable, CapabilityType, Rights};
 use crate::drivers::{BlockDevice, ATA_PRIMARY, SECTOR_SIZE};
 use crate::drivers::display::DisplayDriver;
+use crate::hal::traits::PowerController;
 use crate::fs::{FileDescriptor, FileStat, FsError, VFS};
 use crate::ipc::{IpcError, IpcMessage, IPC_ROUTER};
 use crate::net::NetError;
@@ -283,6 +284,7 @@ pub fn sys_exit() -> ! {
 /// Returns `Success` if the child has terminated (exit code logged to serial),
 /// or `NotReady` if the child is still running.
 pub fn sys_waitpid(child_id: u64) -> SyscallResult {
+    crate::serial::service_serial_commands();
     let mut sched = SCHEDULER.lock();
     let parent_id = match sched.current_task_id() {
         Some(id) => id,
@@ -1787,7 +1789,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         80 => { sys_window_focus(a1 as usize, a2 as u32, a3 as u32) as i64 }
         104 => { sys_window_set_input(a1 as usize, a2 as u32, a3 != 0) as i64 }
         81 => {
-            let (user_ptr, user_len) = if a3 > 0 { (a2, a3 as usize) } else { (a1, a2 as usize) };
+            let (user_ptr, user_len) = if a1 < 0x1000 && a3 > 0 { (a2, a3 as usize) } else { (a1, a2 as usize) };
             if user_len == 0 || user_len > 4096 { return SyscallResult::InvalidArguments as i64; }
             let cap = user_len.min(512);
             let mut out = [0u8; 512];
@@ -3345,6 +3347,7 @@ pub fn sys_surface_flip(cap_slot: usize) -> Result<u64, SyscallResult> {
 
 /// Polls the normalized userspace input event pipeline.
 pub fn sys_input_event_poll(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    crate::serial::service_serial_commands();
     let sched = SCHEDULER.lock();
     let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
     if !task.cap_table.authorize_capability(CapabilityType::EventPoll, Rights::READ) {
@@ -3421,7 +3424,7 @@ pub fn sys_device_power(action: u32) -> Result<u32, SyscallResult> {
         return Err(SyscallResult::PermissionDenied);
     }
     match action {
-        0 => { crate::serial_println!("[POWER] restart requested by authorized system UI."); crate::hal::platform::POWER.reset(); loop { core::hint::spin_loop(); } }
+        0 => { crate::serial_println!("[POWER] restart requested by authorized system UI."); crate::hal::platform::POWER.reset(); }
         1 => {
             crate::serial_println!("[POWER] shutdown requested by authorized system UI.");
             {
@@ -4248,8 +4251,10 @@ pub fn sys_event_poll(interest_mask: u32, timeout_ticks: u32) -> Result<u32, Sys
     let current_ticks = crate::interrupts::get_system_ticks();
 
     let should_block = {
-        let mut reactor = crate::event::EVENT_REACTOR.lock();
-        let (ready, block) = reactor.poll(current_id, interest_mask, timeout_ticks, current_ticks);
+        let (ready, block) = x86_64::instructions::interrupts::without_interrupts(|| {
+            let mut reactor = crate::event::EVENT_REACTOR.lock();
+            reactor.poll(current_id, interest_mask, timeout_ticks, current_ticks)
+        });
         if !block {
             return Ok(ready);
         }
@@ -4257,25 +4262,27 @@ pub fn sys_event_poll(interest_mask: u32, timeout_ticks: u32) -> Result<u32, Sys
     };
 
     if should_block {
-        {
+        x86_64::instructions::interrupts::without_interrupts(|| {
             let mut sched = SCHEDULER.lock();
             sched.block_task(current_id);
-        }
+        });
         // Double check whether an event was posted between dropping reactor and locking sched
-        let cancelled = {
+        let cancelled = x86_64::instructions::interrupts::without_interrupts(|| {
             let reactor = crate::event::EVENT_REACTOR.lock();
             !reactor.is_waiting(current_id)
-        };
+        });
         if cancelled {
-            let mut sched = SCHEDULER.lock();
-            sched.unblock_task(current_id);
+            x86_64::instructions::interrupts::without_interrupts(|| {
+                let mut sched = SCHEDULER.lock();
+                sched.unblock_task(current_id);
+            });
         } else {
             crate::task::yield_now();
         }
-        let ready = {
+        let ready = x86_64::instructions::interrupts::without_interrupts(|| {
             let mut reactor = crate::event::EVENT_REACTOR.lock();
             reactor.check_woken(current_id, interest_mask)
-        };
+        });
         crate::serial::service_serial_commands();
         Ok(ready)
     } else {
@@ -4598,6 +4605,7 @@ pub fn sys_service_package_launch(cap_slot: usize, path: &str) -> Result<crate::
 }
 
 pub fn sys_service_heartbeat(service_id: u8) -> Result<(), SyscallResult> {
+    crate::serial::service_serial_commands();
     let task_id = SCHEDULER.lock().current_task_id().ok_or(SyscallResult::PermissionDenied)?;
     let id = match service_id {
         1 => crate::services::ServiceId::Display, 2 => crate::services::ServiceId::Input,
