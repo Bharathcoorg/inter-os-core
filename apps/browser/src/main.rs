@@ -1,20 +1,17 @@
-//! Inter OS Native Sovereign Browser & Decentralized Web Client
+//! Inter OS Native Browser Client
 //!
-//! Native decentralized browser client executing in Ring 3 (User Mode):
-//! - Multi-protocol URL parser & sovereign scheme dispatcher:
-//!   * `http://` and `https://`: Standard HTTP/1.1 wire framing
-//!   * `interlayer://`: Sovereign P2P mesh & content-addressed IPFS routing
-//!   * `gemini://`: Lightweight sovereign markdown hypermedia
-//!   * `file://`: Sandboxed local VFS sector documentation
-//! - Capability-guarded Zero-Trust Network Socket engine:
-//!   * Socket binding via microkernel capability table
-//!   * Attestation headers with W3C DID cryptographic proof
-//! - Sovereign Privacy Shield anti-tracking query & header sanitization:
-//!   * Strips adtech fingerprinting (`fbclid`, `utm_*`, `gclid`, `session_tracker`)
-//! - Hypermedia DOM Layout & Gravity Glass fluid inertial touch physics
-//! - Bookmark ledger & browsing history cache
+//! Native Ring-3 (User Mode) browser shell:
+//! - URI parser recognising `http://`, `https://`, `interlayer://` and
+//!   `gemini://`; an address without a supported scheme or host is rejected
+//! - `navigate()` reports the real outcome: this app holds no network socket,
+//!   so no request is issued and no page is claimed to have loaded
+//! - Editable address field with native keyboard input (focus, typing, backspace)
+//! - Quick shortcuts (InterOS, YouTube, GitHub, Add) wired to `navigate()`;
+//!   "Add" only reports that bookmark import is not implemented
+//! - Empty bookmark ledger (`BOOKMARKS`): the platform exposes no bookmark
+//!   store, so none is synthesised
 //! - Navigation acoustic feedback (G5: 784Hz) and tactile haptic response
-//! - Asynchronous event reactor loop handling network packets, IPC intents, and touch physics
+//! - Asynchronous event reactor loop handling touch, keyboard and timer events
 
 #![no_std]
 #![no_main]
@@ -169,7 +166,9 @@ pub fn parse_uri(&self, raw_url: &'static str) -> ParsedUri {
             std::log(0, "[BROWSER APP] Navigation rejected: the address has no host.").ok();
             return false;
         }
-        std::log(0, "[BROWSER APP] Navigation target parsed from the address bar:").ok();
+        // WHY not "from the address bar": this function is also reached from the
+        // quick shortcuts, where no address text was submitted.
+        std::log(0, "[BROWSER APP] Navigation target URL:").ok();
         std::log(0, target_url).ok();
         std::log(
             0,
@@ -723,6 +722,57 @@ pub extern "C" fn _start() -> ! {
                                 if surface > 0 {
                                     render_browser_ui(surface, &browser);
                                     let _ = std::surface_flip(6);
+                                }
+                            }
+
+                            // Quick shortcut capsules (centres y225, radius 32).
+                            // WHY wired to navigate(): these are drawn controls, so
+                            // a tap must perform a real navigation attempt instead
+                            // of silently doing nothing. navigate() reports the
+                            // honest outcome (no transport bound, no page loaded),
+                            // and the header then shows that state.
+                            {
+                                let centers: [(isize, isize); 4] = [
+                                    (100, 225),
+                                    (260, 225),
+                                    (420, 225),
+                                    (580, 225),
+                                ];
+                                let urls: [&'static str; 3] = [
+                                    "https://interos.org",
+                                    "https://www.youtube.com",
+                                    "https://github.com",
+                                ];
+                                let mut shortcut_hit = false;
+                                for (idx, (cx, cy)) in centers.iter().enumerate() {
+                                    let dx = input.x as isize - cx;
+                                    let dy = input.y as isize - cy;
+                                    if dx * dx + dy * dy < 32 * 32 {
+                                        shortcut_hit = true;
+                                        if idx < urls.len() {
+                                            let loaded = browser.navigate(urls[idx]);
+                                            // Surface the attempt's real result in
+                                            // the header line below the address bar.
+                                            browser.navigation_unavailable = !loaded;
+                                        } else {
+                                            // WHY honest log: there is no bookmark
+                                            // store or importer, so "Add" reports the
+                                            // absence instead of faking a bookmark.
+                                            std::log(
+                                                0,
+                                                "[BROWSER APP] Add shortcut tapped: bookmark import is not implemented.",
+                                            )
+                                            .ok();
+                                        }
+                                        break;
+                                    }
+                                }
+                                if shortcut_hit {
+                                    if surface > 0 {
+                                        render_browser_ui(surface, &browser);
+                                        let _ = std::surface_flip(6);
+                                    }
+                                    break;
                                 }
                             }
 
