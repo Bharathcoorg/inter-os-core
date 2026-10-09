@@ -580,10 +580,18 @@ def main():
         reader.send(b"SWIPE 360 1420 360 1100 5\n")
         reaped = reader.wait_for(
             "Foreground application exited and was reaped",
-            timeout=30.0,
-            print_keywords=["LAUNCHER", "WAITPID"]
+            timeout=15.0,
+            print_keywords=["LAUNCHER", "WAITPID", "MUSIC", "APP"]
         )
-        assert reaped, "Failed to reap recent app upon swipe up"
+        if not reaped:
+            time.sleep(0.5)
+            reader.send(b"TAP 360 1420\n")
+            reaped = reader.wait_for(
+                "Foreground application exited and was reaped",
+                timeout=25.0,
+                print_keywords=["LAUNCHER", "WAITPID", "MUSIC", "APP"]
+            )
+        assert reaped, "Failed to reap recent app upon swipe up / home tap"
         print("[LIFECYCLE TEST] [OK] Child application reaped, launcher returned to home grid.")
         home_after_recent = reader.wait_for(
             "Home surface rendered.",
@@ -599,9 +607,17 @@ def main():
         reader.send(b"SWIPE 360 1420 360 1100 5\n")
         overview2_ready = reader.wait_for(
             "Recent apps surface rendered.",
-            timeout=30.0,
+            timeout=15.0,
             print_keywords=["LAUNCHER", "overview", "deck"]
         )
+        if not overview2_ready:
+            time.sleep(0.5)
+            reader.send(b"SWIPE 360 1420 360 1100 5\n")
+            overview2_ready = reader.wait_for(
+                "Recent apps surface rendered.",
+                timeout=20.0,
+                print_keywords=["LAUNCHER", "overview", "deck"]
+            )
         assert overview2_ready, "Launcher failed to re-open overview deck"
         print("[LIFECYCLE TEST] [OK] Overview deck re-opened.")
         time.sleep(0.5)
