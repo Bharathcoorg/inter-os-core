@@ -116,7 +116,16 @@ pub fn init() -> bool {
 fn enqueue_event(x: u32, y: u32, phase: u8) {
     let write = EVENT_WRITE.load(Ordering::Relaxed);
     let read = EVENT_READ.load(Ordering::Acquire);
-    if write.wrapping_sub(read) >= EVENT_CAPACITY { return; }
+    if write.wrapping_sub(read) >= EVENT_CAPACITY {
+        if phase == 1 { return; }
+        let mut current_read = read;
+        while write.wrapping_sub(current_read) >= EVENT_CAPACITY {
+            match EVENT_READ.compare_exchange_weak(current_read, current_read.wrapping_add(1), Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => { current_read = current_read.wrapping_add(1); break; }
+                Err(actual) => current_read = actual,
+            }
+        }
+    }
     let slot = write % EVENT_CAPACITY;
     EVENT_X[slot].store(x, Ordering::Relaxed);
     EVENT_Y[slot].store(y, Ordering::Relaxed);
@@ -160,8 +169,8 @@ pub fn handle_irq_byte() {
         _ => {
             PACKET_INDEX.store(0, Ordering::Release);
             let packet = decode_packet([PACKET_0.load(Ordering::Relaxed), PACKET_1.load(Ordering::Relaxed), byte]);
-            let old_down = LEFT_BUTTON_DOWN.swap(packet.left_down, Ordering::AcqRel);
             if packet.overflow { return; }
+            let old_down = LEFT_BUTTON_DOWN.swap(packet.left_down, Ordering::AcqRel);
             let x = (POINTER_X.load(Ordering::Relaxed) + packet.dx * 4).clamp(0, MAX_X);
             let y = (POINTER_Y.load(Ordering::Relaxed) + packet.dy * 4).clamp(0, MAX_Y);
             POINTER_X.store(x, Ordering::Release);

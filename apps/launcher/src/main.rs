@@ -15,6 +15,7 @@ use screens::*;
 
 const W: usize = SCREEN_WIDTH;
 const H: usize = SCREEN_HEIGHT;
+const POWER_TRANSITION_TICKS: u64 = 220;
 const CHUNK: usize = 32768;
 static mut CHUNK_BUF: [u32; CHUNK] = [0; CHUNK];
 
@@ -1233,10 +1234,10 @@ pub extern "C" fn _start() -> ! {
                 if state.current_view == ViewMode::PowerTransition {
                     let now = std::get_ticks(1).unwrap_or(state.power_transition_started_ticks);
                     let elapsed = now.saturating_sub(state.power_transition_started_ticks);
-                    state.power_transition_progress = ((elapsed.min(60) * 1000) / 60) as u16;
+                    state.power_transition_progress = ((elapsed.min(POWER_TRANSITION_TICKS) * 1000) / POWER_TRANSITION_TICKS) as u16;
                     render_band(surface, &state, H / 2 - 130, (H / 2 + 220).min(H));
                     let _ = std::surface_flip(4);
-                    if elapsed >= 60 {
+                    if elapsed >= POWER_TRANSITION_TICKS {
                         let action = state.power_transition_action as u32;
                         match std::device_power(action) {
                             Ok(_) => {}

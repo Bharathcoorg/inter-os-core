@@ -257,3 +257,15 @@ def test_power_transition_uses_bounded_dirty_band_for_animation_frames():
     transition = launcher[launcher.index("if state.current_view == ViewMode::PowerTransition"):launcher.index("if state.current_view == ViewMode::BootScreen")]
     assert "render_band(surface, &state, H / 2 - 130, (H / 2 + 220).min(H))" in transition
     assert "render_band(surface, &state, 0, H)" not in transition
+
+
+def test_power_transition_is_long_enough_for_a_visible_guest_animation():
+    launcher = read("apps/launcher/src/main.rs")
+    assert "const POWER_TRANSITION_TICKS: u64 = 220" in launcher
+    assert "elapsed.min(POWER_TRANSITION_TICKS)" in launcher
+    assert "if elapsed >= POWER_TRANSITION_TICKS" in launcher
+
+
+def test_android_log_dispatch_prefers_message_argument_over_tag():
+    framework = read("kernel/src/compat/android/framework.rs")
+    assert "string_args.get(1).and_then(|value| *value)" in framework
