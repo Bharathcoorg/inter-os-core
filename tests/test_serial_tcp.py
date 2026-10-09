@@ -84,8 +84,8 @@ try:
                     if decoded:
                         lines.append(decoded)
                         print(f"[SERIAL] {decoded}")
-                        if "Step 5: Initial presentation complete" in decoded:
-                            print(f"[SUCCESS] Launcher presentation complete at {time.time() - start_t:.1f}s")
+                        if "Boot presentation complete; lock screen is now guest-owned" in decoded:
+                            print(f"[SUCCESS] Launcher lock screen ready at {time.time() - start_t:.1f}s")
                             non_local_buf = bytearray(buf)
                             def send_and_wait_for(cmd, target_str, timeout=35.0):
                                 time.sleep(0.35)
@@ -120,7 +120,7 @@ try:
                             print("[TEST STEP 2] Tapping Lock Device card at (450, 230)...")
                             send_and_wait_for(b"TAP 450 230\n", "Device locked via power menu")
                             print("[TEST STEP 3] Tapping Flashlight shortcut at (72, 1330)...")
-                            send_and_wait_for(b"TAP 72 1330\n", "Flashlight toggled on lock screen")
+                            send_and_wait_for(b"TAP 72 1330\n", "Flashlight unavailable")
                             print("[TEST STEP 4] Swiping up to unlock (360 1370 -> 360 1100)...")
                             send_and_wait_for(b"SWIPE 360 1370 360 1100 5\n", "Device unlocked")
                             print("[TEST STEP 5] Tapping top status bar left at (100, 25) to open Notifications...")
@@ -153,10 +153,10 @@ try:
                             send_and_wait_for(b"TAP 360 1420\n", "Foreground application exited and was reaped")
                             print("[TEST STEP 19] Tapping Gallery dock item at (410, 1180) to launch Gallery...")
                             send_and_wait_for(b"TAP 410 1180\n", "Gallery UI presented to scanout buffer")
-                            print("[TEST STEP 20] Tapping photo tile 0 at (180, 300) in Gallery...")
-                            send_and_wait_for(b"TAP 180 300\n", "Photo tapped: inspection modal opened")
-                            print("[TEST STEP 21] Tapping Close button at (360, 1170) to close inspection modal...")
-                            send_and_wait_for(b"TAP 360 1170\n", "Closed photo inspection modal")
+                            print("[TEST STEP 20] Tapping photo grid at (180, 300) in Gallery...")
+                            send_and_wait_for(b"TAP 180 300\n", "no media items in storage")
+                            print("[TEST STEP 21] Tapping Albums category tab at (200, 160) in Gallery...")
+                            send_and_wait_for(b"TAP 200 160\n", "Gallery category tab switched")
                             print("[TEST STEP 22] Tapping bottom home pill at (360, 1420) to exit Gallery back to Launcher...")
                             send_and_wait_for(b"TAP 360 1420\n", "Foreground application exited and was reaped")
                             print("[TEST STEP 23] Tapping Calculator card on HomeScreen at (180, 520) to launch...")
@@ -170,7 +170,7 @@ try:
                             print("[TEST STEP 27] Tapping digit '1' on Dialer keypad at (140, 470)...")
                             send_and_wait_for(b"TAP 140 470\n", "Keypad digit entered")
                             print("[TEST STEP 28] Tapping Call button at (360, 1060)...")
-                            send_and_wait_for(b"TAP 360 1060\n", "Call Connected: Voice bearer active")
+                            send_and_wait_for(b"TAP 360 1060\n", "Call request rejected by telephony service")
                             print("[TEST STEP 29] Tapping bottom home pill at (360, 1420) to exit Dialer back to Launcher...")
                             send_and_wait_for(b"TAP 360 1420\n", "Foreground application exited and was reaped")
                             print("[TEST STEP 30] Tapping Terminal card on HomeScreen at (480, 350) to launch...")

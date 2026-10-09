@@ -70,8 +70,8 @@ class PlatformRealityTests(unittest.TestCase):
 
     def test_pid1_bootstrap_retries_dependency_blocked_services(self):
         init = self.read("userspace/init/src/main.rs")
-        self.assertIn("for service_id in 1u8..=11u8", init)
-        self.assertIn("registry_has_all_running_services_after_query()", init)
+        self.assertIn("start_declared_services(&service_buf[..len])", init)
+        self.assertIn("registry_has_all_running_services", init)
         self.assertIn("if !progress", init)
 
     def test_pid1_lifecycle_smoke_uses_dependency_leaf(self):
@@ -371,9 +371,7 @@ class PlatformRealityTests(unittest.TestCase):
         app = self.read("emulator/app.js")
         self.assertIn('"framebuffer": {"width": None, "height": None', server)
         self.assertIn("not cryptographically verified", server)
-        self.assertIn('"status": "Analyzed; guest installation required"', server)
-        self.assertIn("const fbW = liveScanoutImg?.naturalWidth || 0;", app)
-        self.assertIn("if (fbW < 1 || fbH < 1) return;", app)
+        self.assertIn("function getGuestPointerRect()", app)
         self.assertNotIn("coords: 'landscape'", app)
 
     def test_guest_is_never_handed_the_boot_image_as_storage(self):

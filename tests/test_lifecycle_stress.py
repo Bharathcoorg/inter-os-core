@@ -231,7 +231,7 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
         tap_coords=(180, 860),
         present_marker="Browser canvas presented to scanout buffer.",
         dump_prefix=f"stress_iter{iter_num}_browser",
-        exit_gesture="home_bar"
+        exit_gesture="back"
     )
 
     # App 8: Messages (Row 3, Card 1: x=485, y=860)
@@ -274,26 +274,29 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
     )
 
     # Recent apps: Overview / Recent Apps Switcher Test
-    time.sleep(1.0)
+    time.sleep(1.5)
     reader.send(b"SWIPE 360 1420 360 1100 5\n")
     if not reader.wait_for("Recent apps surface rendered.", timeout=15.0):
+        time.sleep(1.0)
         reader.send(b"SWIPE 360 1420 360 1100 5\n")
         assert reader.wait_for("Recent apps surface rendered.", timeout=25.0), "Overview deck open failed"
-    time.sleep(0.8)
+    time.sleep(1.0)
     reader.send(b"TAP 360 340\n")
     if not reader.wait_for("Switched to recent app from overview card 0", timeout=15.0):
+        time.sleep(1.0)
         reader.send(b"TAP 360 340\n")
         assert reader.wait_for("Switched to recent app from overview card 0", timeout=25.0), "Switch recent app failed"
     assert reader.wait_for("Music canvas presented to scanout buffer.", timeout=25.0), "Recent app present failed"
-    time.sleep(0.8)
+    time.sleep(1.0)
     reader.send(b"SWIPE 360 1420 360 1100 5\n")
     assert reader.wait_for("Foreground application exited and was reaped", timeout=25.0), "Reaping recent app failed"
     assert reader.wait_for("Home surface rendered.", timeout=25.0), "Launcher failed to re-render Home screen after recent app exit"
-    time.sleep(1.0)
+    time.sleep(1.5)
 
     # Recent app dismissal: Overview Card Dismissal Test
     reader.send(b"SWIPE 360 1420 360 1100 5\n")
     if not reader.wait_for("Recent apps surface rendered.", timeout=15.0):
+        time.sleep(1.0)
         reader.send(b"SWIPE 360 1420 360 1100 5\n")
         assert reader.wait_for("Recent apps surface rendered.", timeout=25.0), "Overview deck re-open failed"
     time.sleep(0.8)
@@ -330,14 +333,15 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
     if not reader.wait_for("Home surface rendered.", timeout=15.0):
         reader.send(b"TAP 360 1410\n")
         assert reader.wait_for("Home surface rendered.", timeout=25.0), "Home return from notifications failed"
-    time.sleep(0.8)
+    time.sleep(1.2)
 
     # App drawer: App Drawer
     reader.send(b"SWIPE 360 700 360 400 5\n")
     if not reader.wait_for("App drawer surface rendered.", timeout=15.0):
+        time.sleep(1.0)
         reader.send(b"SWIPE 360 700 360 400 5\n")
         assert reader.wait_for("App drawer surface rendered.", timeout=25.0), "App drawer open failed"
-    time.sleep(0.8)
+    time.sleep(1.0)
     reader.send(b"TAP 250 160\n")
     if not reader.wait_for("App drawer surface rendered.", timeout=15.0):
         reader.send(b"TAP 250 160\n")
@@ -347,19 +351,21 @@ def execute_iteration_operations(reader, monitor_sock, iter_num):
     if not reader.wait_for("Home surface rendered.", timeout=15.0):
         reader.send(b"TAP 360 1410\n")
         assert reader.wait_for("Home surface rendered.", timeout=25.0), "Home return from app drawer failed"
-    time.sleep(0.8)
+    time.sleep(1.5)
 
     # Live widgets: Live Widgets
     reader.send(b"SWIPE 500 700 150 700 5\n")
     if not reader.wait_for("Live widgets surface rendered.", timeout=15.0):
+        time.sleep(1.0)
         reader.send(b"SWIPE 500 700 150 700 5\n")
         assert reader.wait_for("Live widgets surface rendered.", timeout=25.0), "Live widgets open failed"
-    time.sleep(0.8)
+    time.sleep(1.0)
     reader.send(b"TAP 360 1410\n")
     if not reader.wait_for("Home surface rendered.", timeout=15.0):
+        time.sleep(1.0)
         reader.send(b"TAP 360 1410\n")
         assert reader.wait_for("Home surface rendered.", timeout=25.0), "Home return from live widgets failed"
-    time.sleep(0.8)
+    time.sleep(1.0)
 
     # Power and lock: Power Menu & Lock Screen
     time.sleep(0.8)
@@ -423,10 +429,17 @@ def main():
     kill_proc_on_port(mon_port)
     time.sleep(0.5)
 
+    data_disk = os.environ.get("DATA_DISK_PATH", os.path.abspath(r"target\inter-os-data-master.img"))
+    if not os.path.exists(data_disk):
+        with open(data_disk, "wb") as f:
+            f.truncate(512 * 1024 * 1024)
+
     qemu_cmd = [
         qemu_exe,
-        "-drive", f"format=raw,file={kernel_img}",
-        "-snapshot",
+        "-machine", "q35",
+        "-cpu", "qemu64",
+        "-drive", f"format=raw,file={kernel_img},index=0",
+        "-drive", f"format=raw,file={data_disk},index=1",
         "-m", "1024M",
         "-display", "none",
         "-chardev", f"socket,id=ser0,host=127.0.0.1,port={ser_port},server=on,wait=off",
@@ -446,6 +459,10 @@ def main():
 
     try:
         serial_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            serial_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception:
+            pass
         serial_sock.settimeout(6.0)
         serial_sock.connect(('127.0.0.1', ser_port))
         serial_sock.settimeout(0.5)

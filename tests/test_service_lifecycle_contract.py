@@ -147,7 +147,7 @@ def main() -> None:
 
     # Executable contract: PID1 must exercise the complete deterministic
     # lifecycle smoke sequence used by the QEMU vertical slice.
-    must(pid1, "for service_id in 1u8..=11u8",
+    must(pid1, "start_declared_services(&service_buf[..len])",
          "complete system-service bootstrap set")
     must(pid1, "match std::service_stop(11)", "PID1 service stop exercise")
     must(pid1, "std::service_start(11)", "PID1 service restart exercise")

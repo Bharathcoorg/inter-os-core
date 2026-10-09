@@ -42,7 +42,7 @@ def main():
     must(manifest,'"name": "sensord"',"QEMU sensor service manifest")
     must(cargo,'name = "sensord"',"sensor service binary")
     must(pid1,"11","PID1 starts sensor service")
-    must(pid1,"seen == 0x07ff","PID1 validates services 1-11")
+    must(pid1,"registry_has_all_running_services","PID1 validates running services")
     must(service_lib,"pub fn run_sensor()","sensor userspace service loop")
     print("system service boundary contract: PASS")
 if __name__=="__main__":

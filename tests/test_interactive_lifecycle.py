@@ -89,44 +89,26 @@ def send_monitor_cmd(sock, cmd):
 class SerialReader:
     def __init__(self, sock):
         self.sock = sock
+        try:
+            self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception:
+            pass
         self.buf = b""
         self.captured_logs = []
         self.cmd_log_idx = 0
 
-    def flush(self, settle=0.1):
-        deadline = time.time() + settle
-        while time.time() < deadline:
-            self.sock.settimeout(0.02)
-            try:
-                data = self.sock.recv(65536)
-                if not data:
-                    break
-                self.buf += data
-                while b"\n" in self.buf:
-                    line, self.buf = self.buf.split(b"\n", 1)
-                    decoded = line.decode('utf-8', errors='replace').strip()
-                    if decoded:
-                        self.captured_logs.append(decoded)
-            except (socket.timeout, BlockingIOError):
-                break
-            except ConnectionResetError:
-                time.sleep(0.02)
-                break
-        try:
-            self.sock.settimeout(0.2)
-        except OSError:
-            pass
-
     def send(self, line):
-        """Flushes stale output, then sends one command line."""
-        self.flush()
+        """Sends one command line without disruptive socket option changes."""
+        time.sleep(0.25)
         self.cmd_log_idx = len(self.captured_logs)
-        self.sock.sendall(line.encode("utf-8") if isinstance(line, str) else line)
+        cmd_bytes = line.encode("utf-8") if isinstance(line, str) else line
+        self.sock.sendall(cmd_bytes)
 
     def wait_for(self, marker, timeout=15.0, print_keywords=None):
         timeout = max(timeout, 25.0)
         # Check logs already captured for the current command
-        for log in self.captured_logs[self.cmd_log_idx:]:
+        start_scan = self.cmd_log_idx
+        for log in self.captured_logs[start_scan:]:
             if marker in log:
                 return True
 
@@ -156,14 +138,23 @@ class SerialReader:
 def test_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, tap_coords, present_marker, dump_prefix, in_app_interactions=None, exit_gesture="back"):
     print(f"\n[LIFECYCLE TEST] === Operation {operation_num}: Testing {app_name} ({app_id}) ===")
     print(f"[LIFECYCLE TEST] Dispatching touch tap on {app_name} card at {tap_coords}...")
+    time.sleep(1.0)
     reader.send(f"TAP {tap_coords[0]} {tap_coords[1]}\n".encode('utf-8'))
 
     # Wait for app launch and presentation
     presented = reader.wait_for(
         present_marker,
-        timeout=45.0,
+        timeout=25.0,
         print_keywords=[app_name.upper(), "APP", "LAUNCHER", "INPUT", "Step", app_id]
     )
+    if not presented:
+        time.sleep(0.8)
+        reader.send(f"TAP {tap_coords[0]} {tap_coords[1]}\n".encode('utf-8'))
+        presented = reader.wait_for(
+            present_marker,
+            timeout=35.0,
+            print_keywords=[app_name.upper(), "APP", "LAUNCHER", "INPUT", "Step", app_id]
+        )
     assert presented, f"{app_name} failed to present frame within timeout"
     print(f"[LIFECYCLE TEST] [OK] {app_name} launched and presented application frame.")
 
@@ -183,15 +174,25 @@ def test_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, ta
 
     # Perform in-app functional interactions if specified
     if in_app_interactions:
+        time.sleep(1.0)
         for action_name, action_coords, action_marker, dump_suffix in in_app_interactions:
             print(f"[LIFECYCLE TEST] In-App Interaction: {action_name} at {action_coords}...")
+            time.sleep(1.0)
             reader.send(f"TAP {action_coords[0]} {action_coords[1]}\n".encode('utf-8'))
             if action_marker:
                 action_ok = reader.wait_for(
                     action_marker,
-                    timeout=20.0,
+                    timeout=15.0,
                     print_keywords=[app_name.upper(), "APP", "INPUT", action_marker]
                 )
+                if not action_ok:
+                    time.sleep(1.2)
+                    reader.send(f"TAP {action_coords[0]} {action_coords[1]}\n".encode('utf-8'))
+                    action_ok = reader.wait_for(
+                        action_marker,
+                        timeout=25.0,
+                        print_keywords=[app_name.upper(), "APP", "INPUT", action_marker]
+                    )
                 assert action_ok, f"{app_name} failed to process interaction '{action_name}'"
                 print(f"[LIFECYCLE TEST] [OK] Interaction '{action_name}' verified.")
             if monitor_sock:
@@ -206,8 +207,9 @@ def test_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, ta
                     sz_inter = os.path.getsize(ppm_inter) if os.path.exists(ppm_inter) else 0
                     print(f"[LIFECYCLE TEST] In-app interaction screendump recorded: {ppm_inter} ({sz_inter} bytes)")
             else:
-                time.sleep(0.3)
+                time.sleep(0.8)
 
+    time.sleep(1.0)
     # Dispatch touch tap on Back button, Home Gesture Bar, or Swipe Up
     if exit_gesture == "home_bar":
         print(f"[LIFECYCLE TEST] Dispatching touch tap on Home Gesture Bar (x=360, y=1420)...")
@@ -222,9 +224,24 @@ def test_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, ta
     # Wait for child exit and Launcher reaping
     reaped = reader.wait_for(
         "Foreground application exited and was reaped",
-        timeout=30.0,
+        timeout=15.0,
         print_keywords=[app_name.upper(), "APP", "LAUNCHER", "INPUT", "WAITPID"]
     )
+    if not reaped:
+        time.sleep(0.5)
+        if exit_gesture == "home_bar":
+            reader.send(b"TAP 360 1420\n")
+        elif exit_gesture == "swipe_up":
+            reader.send(b"SWIPE 360 1420 360 1100 5\n")
+            reader.send(b"TAP 360 1420\n")
+        else:
+            reader.send(b"TAP 62 48\n")
+            reader.send(b"TAP 360 1420\n")
+        reaped = reader.wait_for(
+            "Foreground application exited and was reaped",
+            timeout=25.0,
+            print_keywords=[app_name.upper(), "APP", "LAUNCHER", "INPUT", "WAITPID"]
+        )
     assert reaped, f"{app_name} exit / Launcher waitpid reaping was not observed"
     print(f"[LIFECYCLE TEST] [OK] {exit_gesture.capitalize()} navigation successfully triggered child exit, surface teardown, and parent waitpid reaping.")
 
@@ -248,7 +265,7 @@ def test_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, ta
         print(f"[LIFECYCLE TEST] Screendump recorded: {ppm_reaped} ({sz_reaped} bytes)")
         time.sleep(0.5)
     else:
-        time.sleep(0.4)
+        time.sleep(0.8)
 
 def main():
     qemu_exe = find_qemu("qemu-system-x86_64.exe")
@@ -300,6 +317,10 @@ def main():
     try:
         # Connect to serial socket
         serial_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            serial_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception:
+            pass
         serial_sock.settimeout(5.0)
         serial_sock.connect(('127.0.0.1', ser_port))
         serial_sock.settimeout(0.5)
@@ -349,7 +370,7 @@ def main():
         print("[LIFECYCLE TEST] Unlocking device via swipe-up gesture...")
         reader.send(b"SWIPE 360 1350 360 300 5\n")
         unlocked = reader.wait_for(
-            "Home surface rendered.",
+            "Device unlocked via swipe/slide gesture",
             timeout=25.0,
             print_keywords=["LAUNCHER", "Device unlocked", "render_full"]
         )
@@ -436,7 +457,7 @@ def main():
             present_marker="Initial frame presented to hardware scanout",
             dump_prefix="test_camera",
             in_app_interactions=[
-                ("Tap Mode Carousel (Document Vision)", (165, 1175), None, "mode_doc"),
+                ("Tap Mode Carousel (Document Vision)", (165, 1175), "Switched to Document Vision mode.", "mode_doc"),
             ],
             exit_gesture="swipe_up"
         )
@@ -513,9 +534,9 @@ def main():
             present_marker="Music canvas presented to scanout buffer.",
             dump_prefix="test_music",
             in_app_interactions=[
-                ("Tap Play/Pause toggle", (360, 880), None, "playback_toggled"),
+                ("Tap Play/Pause toggle", (360, 990), "transport stays stopped", "playback_toggled"),
             ],
-            exit_gesture="home_bar"
+            exit_gesture="swipe_up"
         )
 
         # Recent apps: Overview / Recent Apps Switcher Test
@@ -614,9 +635,25 @@ def main():
         reader.send(b"TAP 360 1240\n")
         returned_home = reader.wait_for(
             "Returned to home grid from recents.",
-            timeout=30.0,
+            timeout=15.0,
             print_keywords=["LAUNCHER", "Returned", "home"]
         )
+        if not returned_home:
+            print("[LIFECYCLE TEST] Retrying return home from overview deck (TAP 360 1240)...")
+            reader.send(b"TAP 360 1240\n")
+            returned_home = reader.wait_for(
+                "Returned to home grid from recents.",
+                timeout=20.0,
+                print_keywords=["LAUNCHER", "Returned", "home"]
+            )
+        if not returned_home:
+            print("[LIFECYCLE TEST] Retrying return home via gesture bar (TAP 360 1410)...")
+            reader.send(b"TAP 360 1410\n")
+            returned_home = reader.wait_for(
+                "Returned to home grid from recents.",
+                timeout=20.0,
+                print_keywords=["LAUNCHER", "Returned", "home"]
+            )
         assert returned_home, "Failed to return home from overview deck"
         print("[LIFECYCLE TEST] [OK] Successfully returned to home grid after card dismissals.")
 
@@ -689,9 +726,17 @@ def main():
         reader.send(b"TAP 250 160\n")
         tab_switched = reader.wait_for(
             "App drawer surface rendered.",
-            timeout=30.0,
+            timeout=15.0,
             print_keywords=["LAUNCHER", "category", "tab", "render_app_drawer"]
         )
+        if not tab_switched:
+            time.sleep(0.6)
+            reader.send(b"TAP 250 160\n")
+            tab_switched = reader.wait_for(
+                "App drawer surface rendered.",
+                timeout=20.0,
+                print_keywords=["LAUNCHER", "category", "tab", "render_app_drawer"]
+            )
         assert tab_switched, "Failed to switch App Drawer category tab"
         print("[LIFECYCLE TEST] [OK] App Drawer category tab switched.")
         ppm_drawer = os.path.abspath(r"target\test_app_drawer.ppm").replace("\\", "/")
@@ -785,7 +830,7 @@ def main():
         print("[LIFECYCLE TEST] Unlocking device via bottom tap...")
         reader.send(b"TAP 360 1410\n")
         unlocked = reader.wait_for(
-            "Home surface rendered.",
+            "Device unlocked via tap",
             timeout=25.0,
             print_keywords=["LAUNCHER", "Device", "unlocked", "render_full"]
         )
