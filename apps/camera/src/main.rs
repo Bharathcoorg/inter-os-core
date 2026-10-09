@@ -704,10 +704,13 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> bool {
     if (1150..1200).contains(&y) {
         if x >= 80 && x < 250 {
             camera.mode = CameraMode::DocumentVision;
+            std::log(0, "[CAMERA APP] Switched to Document Vision mode.").ok();
         } else if x >= 270 && x < 450 {
             camera.mode = CameraMode::Photo;
+            std::log(0, "[CAMERA APP] Switched to Photo mode.").ok();
         } else if x >= 460 && x < 580 {
             camera.mode = CameraMode::Video;
+            std::log(0, "[CAMERA APP] Switched to Video mode.").ok();
         }
         std::audio_haptic_click().ok();
         return false;
@@ -784,8 +787,8 @@ pub extern "C" fn _start() -> ! {
             if (events & std::EVENT_TIMER_TICK) != 0 {
                 if camera.mode == CameraMode::Video {
                     let _ = camera.stream_video_frame();
+                    let _ = std::surface_flip(6);
                 }
-                let _ = std::surface_flip(6);
             }
 
             if (events & std::EVENT_TOUCH_INPUT) != 0 {

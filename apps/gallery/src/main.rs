@@ -745,6 +745,13 @@ pub extern "C" fn _start() -> ! {
                                             let _ = std::surface_flip(6);
                                         }
                                         break;
+                                    } else {
+                                        std::log(
+                                            0,
+                                            "[GALLERY] Photo grid tapped: no media items in storage.",
+                                        )
+                                        .ok();
+                                        break;
                                     }
                                 }
                             }

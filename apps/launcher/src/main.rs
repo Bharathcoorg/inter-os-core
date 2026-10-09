@@ -811,7 +811,7 @@ fn volume_hud_pixel(x: usize, y: usize, volume: u8) -> u32 {
     let dx = if px < 24 { 24 - px } else if px >= W_HUD - 24 { px - (W_HUD - 25) } else { 0 };
     let dy = if py < 24 { 24 - py } else if py >= H_HUD - 24 { py - (H_HUD - 25) } else { 0 };
     if dx * dx + dy * dy > 24 * 24 { return 0; }
-    if (py >= 68 && py < 92) {
+    if py >= 68 && py < 92 {
         let start = 72usize;
         let end = 448usize;
         if px >= start && px < end {
@@ -1077,11 +1077,11 @@ pub extern "C" fn _start() -> ! {
     state.boot_started_ticks = std::get_ticks(1).unwrap_or(0);
     match std::device_power(5) {
         Ok(powered) => { state.display_was_powered = powered != 0; state.display_power_state_valid = true; }
-        Err(_) => std::log(0, "[LAUNCHER] Display power state unavailable; refusing to assume an on/off state.").ok(),
+        Err(_) => { let _ = std::log(0, "[LAUNCHER] Display power state unavailable; refusing to assume an on/off state.").ok(); }
     }
     match std::audio_query_volume() {
         Ok(volume) => { state.last_volume_percent = volume.min(100) as u8; state.volume_state_valid = true; }
-        Err(_) => std::log(0, "[LAUNCHER] Audio volume unavailable; volume HUD remains inactive until guest state is readable.").ok(),
+        Err(_) => { let _ = std::log(0, "[LAUNCHER] Audio volume unavailable; volume HUD remains inactive until guest state is readable.").ok(); }
     }
     if let Ok(lock_st) = std::user_get_lock_state(1000) {
         state.lock_state = lock_st;
@@ -1123,14 +1123,8 @@ pub extern "C" fn _start() -> ! {
             std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK | std::EVENT_IPC_MSG,
             100,
         ) {
-            Ok(ev) => {
-                std::log(0, "[LAUNCHER] event_poll returned Ok").ok();
-                ev
-            }
-            Err(_) => {
-                std::log(0, "[LAUNCHER] event_poll returned Err").ok();
-                continue;
-            }
+            Ok(ev) => ev,
+            Err(_) => continue,
         };
         {
             let _ = std::service_heartbeat(10);
@@ -1179,23 +1173,6 @@ pub extern "C" fn _start() -> ! {
                         .ok();
                     }
                     _ => {}
-                }
-            }
-
-            if (events & std::EVENT_TIMER_TICK) != 0 {
-                let volume_now = std::audio_query_volume().unwrap_or(state.last_volume_percent as u32).min(100) as u8;
-                let now = std::get_ticks(1).unwrap_or(0);
-                if volume_now != state.last_volume_percent {
-                    state.last_volume_percent = volume_now;
-                    state.volume_hud_until = now.saturating_add(120);
-                    if let Some(id) = volume_surface {
-                        render_volume_hud(id, volume_now);
-                        let _ = std::window_set_geometry(4, id, 100, 220, 100, true);
-                    }
-                } else if state.volume_hud_until != 0 && now >= state.volume_hud_until {
-                    state.volume_hud_until = 0;
-                    if let Some(id) = volume_surface { let _ = std::window_set_geometry(4, id, 100, 220, 100, false); }
-                    }
                 }
             }
 
@@ -1294,7 +1271,6 @@ pub extern "C" fn _start() -> ! {
                 dy: 0,
                 scale_milli: 1000,
             };
-            std::log(0, "[LAUNCHER] Polling input events...").ok();
             while (state.active_child.is_none() || state.current_view == ViewMode::LockScreen)
                 && std::input_event_poll(&mut input).is_ok()
             {
@@ -1793,7 +1769,9 @@ pub extern "C" fn _start() -> ! {
                                             }
                                             std::log(0, "[LAUNCHER] Quick Controls volume slider applied to guest audio manager.").ok();
                                         }
-                                        Err(_) => std::log(0, "[LAUNCHER] Volume control unavailable; guest state unchanged.").ok(),
+                                        Err(_) => {
+                                            let _ = std::log(0, "[LAUNCHER] Volume control unavailable; guest state unchanged.").ok();
+                                        }
                                     }
                                     break;
                                 }

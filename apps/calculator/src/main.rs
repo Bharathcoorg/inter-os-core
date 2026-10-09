@@ -439,11 +439,7 @@ pub extern "C" fn _start() -> ! {
 
     // 4. Interactive Event Reactor Loop
     loop {
-        if let Ok(events) = std::event_poll(std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK, 100) {
-            if (events & std::EVENT_TIMER_TICK) != 0 {
-                let _ = std::surface_flip(6);
-            }
-
+        if let Ok(_events) = std::event_poll(std::EVENT_TOUCH_INPUT, 100) {
             let mut input = std::InputEvent {
                 kind: 0,
                 x: 0,
@@ -462,7 +458,7 @@ pub extern "C" fn _start() -> ! {
                     let _ = std::surface_destroy(6, surface);
                     std::exit_with_code(0);
                 }
-                if input.kind == 1 {
+                if input.kind == 1 || input.kind == 2 {
                     let (should_exit, action_logged) =
                         handle_touch_point(&mut calc, input.x, input.y);
                     if let Some(msg) = action_logged {
