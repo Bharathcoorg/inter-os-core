@@ -485,14 +485,34 @@ impl DrmKmsController {
                     }
                 } else {
                     let scanout_w = self.scanout_width as usize;
-                    if dst_w == 360 && dst_h == 720 {
-                        for dy in 0..720 {
-                            let src_y = dy * 2;
-                            let src_row = &surface.pixels[src_y * 720..(src_y + 1) * 720];
+                    if dst_w * 2 == 720 && dst_h * 2 == 1440 {
+                        // WHY box-average instead of point sampling: this is
+                        // the exact-integer 2x portrait shrink (720x1440
+                        // canvas into a half-size phone slice, e.g. the
+                        // 360x720 slice of a 1280x720 landscape scanout).
+                        // Sampling only the top-left pixel of each 2x2 quad
+                        // dropped 3 of 4 source pixels and made glyphs and
+                        // 1px rules shimmer; averaging the quad costs 4 reads
+                        // per destination pixel and stays bounded by the
+                        // destination size (~259k pixels here), inside the
+                        // QEMU-TCG per-flip budget. Fractional ratios below
+                        // keep the cheaper point sample for the same reason.
+                        for dy in 0..dst_h {
+                            let r0 = (dy * 2) * 720;
+                            let r1 = r0 + 720;
                             let dst_row_start = (dst_y + dy) * scanout_w + dst_x;
-                            let dst_slice = &mut self.back_buffer[dst_row_start..dst_row_start + 360];
-                            for dx in 0..360 {
-                                dst_slice[dx] = src_row[dx * 2];
+                            let dst_slice = &mut self.back_buffer[dst_row_start..dst_row_start + dst_w];
+                            for dx in 0..dst_w {
+                                let sx = dx * 2;
+                                let p00 = surface.pixels[r0 + sx];
+                                let p01 = surface.pixels[r0 + sx + 1];
+                                let p10 = surface.pixels[r1 + sx];
+                                let p11 = surface.pixels[r1 + sx + 1];
+                                let a = (((p00 >> 24) + (p01 >> 24) + (p10 >> 24) + (p11 >> 24)) / 4) & 0xFF;
+                                let r = ((((p00 >> 16) & 0xFF) + ((p01 >> 16) & 0xFF) + ((p10 >> 16) & 0xFF) + ((p11 >> 16) & 0xFF)) / 4) & 0xFF;
+                                let g = ((((p00 >> 8) & 0xFF) + ((p01 >> 8) & 0xFF) + ((p10 >> 8) & 0xFF) + ((p11 >> 8) & 0xFF)) / 4) & 0xFF;
+                                let b = (((p00 & 0xFF) + (p01 & 0xFF) + (p10 & 0xFF) + (p11 & 0xFF)) / 4) & 0xFF;
+                                dst_slice[dx] = (a << 24) | (r << 16) | (g << 8) | b;
                             }
                         }
                     } else {
@@ -664,10 +684,16 @@ mod tests {
         kms.surfaces[0].pixels[720] = 0xFF112233;
         kms.surfaces[0].pixels[(1439 * 720) + 719] = 0xFF445566;
         kms.composite();
-        assert_eq!(kms.back_buffer[460], 0xFF112233);
-        assert_eq!(kms.back_buffer[(719 * 1280) + 819], 0xFF445566);
-        assert!(kms.back_buffer.iter().any(|&p| p == 0xFF112233));
-        assert!(kms.back_buffer.iter().any(|&p| p == 0xFF445566));
+        // Geometry is unchanged (centered 360-wide slice at x=460), but the
+        // exact-half portrait shrink now box-averages each 2x2 quad: dst(0,0)
+        // blends two 0xFF112233 taps with two opaque-black neighbours, and
+        // the corner blends one 0xFF445566 tap with three black neighbours.
+        assert_eq!(kms.back_buffer[460], 0xFF081119);
+        assert_eq!(kms.back_buffer[(719 * 1280) + 819], 0xFF111519);
+        // Under point sampling these were the raw tap colors; under the
+        // box-average shrink the taps survive as their blended quads instead.
+        assert!(kms.back_buffer.iter().any(|&p| p == 0xFF081119));
+        assert!(kms.back_buffer.iter().any(|&p| p == 0xFF111519));
 
         kms.set_orientation(DisplayOrientation::LandscapeRight);
         kms.frame_dirty = true;

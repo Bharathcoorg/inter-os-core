@@ -1546,7 +1546,22 @@ pub static FRAMEBUFFER_WRITER: Mutex<FramebufferWriter> = Mutex::new(Framebuffer
 
 /// Initializes the framebuffer console with the bootloader framebuffer.
 pub fn init(framebuffer: &'static mut FrameBuffer) {
+    // Capture the real bootloader-provided mode before handing ownership to
+    // the writer. The boot config only requests a 720x1440 minimum, and
+    // BIOS/VBE firmware may supply a smaller or landscape mode, so the
+    // runtime reports the actual firmware mode here instead of inventing one.
+    let info = framebuffer.info();
     FRAMEBUFFER_WRITER.lock().init(framebuffer);
+    let fmt = match info.pixel_format {
+        PixelFormat::Rgb => "Rgb",
+        PixelFormat::Bgr => "Bgr",
+        PixelFormat::U8 => "U8",
+        _ => "Unknown",
+    };
+    crate::serial_println!(
+        "[DISPLAY_HAL] physical_framebuffer={}x{} stride={} bpp={} fmt={}",
+        info.width, info.height, info.stride, info.bytes_per_pixel, fmt
+    );
 }
 
 static LAST_CLEAR_BOUNDS: spin::Mutex<(usize, usize, usize, usize)> = spin::Mutex::new((usize::MAX, usize::MAX, usize::MAX, usize::MAX));
@@ -1659,6 +1674,14 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32) {
             let bpp = info.bytes_per_pixel;
             let stride_bytes = info.stride * bpp;
             let fmt = info.pixel_format;
+            // WHY exact-integer ratios get their own path: an exact 2x shrink
+            // averages each 2x2 source quad (one filtered tap per destination
+            // pixel, bounded by the destination size), which keeps diagonal
+            // text strokes intact. Fractional ratios stay nearest-neighbor:
+            // a full fixed-point bilinear over up to ~1M destination pixels
+            // per flip is outside the QEMU-TCG CPU budget already noted by
+            // the launcher, so the bounded point sample is the deliberate
+            // tradeoff there, not an oversight.
             let is_2x = (src_w == dst_w * 2) && (src_h == dst_h * 2);
             unsafe {
                 for dy in 0..dst_h {
