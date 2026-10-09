@@ -15,8 +15,9 @@
 //!   * Sector 204: Audio Tracks & Music Studio Compositions
 //! - Hardware TRNG Entropy Ingestion (/dev/urandom) for Initialization Vectors
 //! - Authenticated AES-XTS & ChaCha20-Poly1305 sector round-trip verification
-//! - Sovereign Partition & W3C DID attestation verification via VFS
-//! - Sovereign Backup Export framing with SHA-256 integrity checksum
+//! - Device identity magic check via VFS (`DID:` prefix only, no attestation)
+//! - Sovereign Backup Export framing persisted through the kernel settings
+//!   store with a Fletcher-32 checksum, validated by reading it back
 //! - DRM/KMS Client Surface Rendering (z=200) with Sector Partition Browser & Enclave Status
 //! - Asynchronous event reactor loop handling storage IPC requests & maintenance timers
 
@@ -48,7 +49,63 @@ pub struct SectorRecord {
     pub sector_type: VaultSectorType,
     pub description: &'static str,
     pub encrypted_bytes: usize,
+    /// True after an in-memory encrypt->decrypt roundtrip for this sector id
+    /// succeeded. Nothing is persisted per sector, so this records a crypto
+    /// self-test, not stored-data integrity.
     pub authenticated: bool,
+}
+
+/// Computes a Fletcher-32 checksum over `data` (both sums taken mod 255).
+fn fletcher32(data: &[u8]) -> u32 {
+    let mut sum1: u32 = 0;
+    let mut sum2: u32 = 0;
+    for &byte in data.iter() {
+        sum1 = (sum1 + byte as u32) % 255;
+        sum2 = (sum2 + sum1) % 255;
+    }
+    (sum2 << 8) | sum1
+}
+
+/// Hex-encodes `data` into `out` (two characters per byte).
+/// Returns the number of bytes written.
+fn hex_encode(data: &[u8], out: &mut [u8]) -> usize {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut i = 0usize;
+    for &b in data.iter() {
+        if i + 2 > out.len() {
+            break;
+        }
+        out[i] = DIGITS[(b >> 4) as usize];
+        out[i + 1] = DIGITS[(b & 0x0F) as usize];
+        i += 2;
+    }
+    i
+}
+
+fn hex_nibble(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Decodes hex characters in `hex` into `out`.
+/// Returns the decoded length, or None on odd length, bad characters, or an
+/// output buffer that is too small.
+fn hex_decode(hex: &[u8], out: &mut [u8]) -> Option<usize> {
+    if hex.len() % 2 != 0 || hex.len() / 2 > out.len() {
+        return None;
+    }
+    let mut i = 0usize;
+    while i < hex.len() {
+        let hi = hex_nibble(hex[i])?;
+        let lo = hex_nibble(hex[i + 1])?;
+        out[i / 2] = (hi << 4) | lo;
+        i += 2;
+    }
+    Some(hex.len() / 2)
 }
 
 /// Production Sovereign Vault state manager.
@@ -58,7 +115,6 @@ pub struct VaultApp {
     pub media_key_derived: bool,
     pub total_encryptions: u32,
     pub total_decryptions: u32,
-    pub backup_export_valid: bool,
 }
 
 impl VaultApp {
@@ -112,7 +168,6 @@ impl VaultApp {
             media_key_derived: false,
             total_encryptions: 0,
             total_decryptions: 0,
-            backup_export_valid: false,
         }
     }
 
@@ -186,38 +241,93 @@ impl VaultApp {
     }
 
     /// Runs roundtrip verification across all managed sectors.
-    pub fn verify_all_sectors(&mut self) {
-        let _ = self.test_sector_roundtrip(100, b"INTER_ROOT_KEYSTORE_RECORD_V1");
-        let _ = self.test_sector_roundtrip(200, b"INTER_MEDIA_CONTAINER_RECORD_V1");
-        let _ = self.test_sector_roundtrip(201, b"INTER_CAMERA_PHOTO_RECORD_V1");
-        let _ = self.test_sector_roundtrip(202, b"INTER_P2P_MESSAGE_RECORD_V1");
-        let _ = self.test_sector_roundtrip(203, b"INTER_CALENDAR_EVENT_RECORD_V1");
-        let _ = self.test_sector_roundtrip(204, b"INTER_AUDIO_TRACK_RECORD_V1");
+    /// Returns true only when every sector's roundtrip actually succeeded.
+    pub fn verify_all_sectors(&mut self) -> bool {
+        // Not short-circuited on purpose: every sector must be exercised even
+        // after an early failure, so the per-sector failure logs are complete.
+        let mut all_ok = true;
+        all_ok &= self.test_sector_roundtrip(100, b"INTER_ROOT_KEYSTORE_RECORD_V1");
+        all_ok &= self.test_sector_roundtrip(200, b"INTER_MEDIA_CONTAINER_RECORD_V1");
+        all_ok &= self.test_sector_roundtrip(201, b"INTER_CAMERA_PHOTO_RECORD_V1");
+        all_ok &= self.test_sector_roundtrip(202, b"INTER_P2P_MESSAGE_RECORD_V1");
+        all_ok &= self.test_sector_roundtrip(203, b"INTER_CALENDAR_EVENT_RECORD_V1");
+        all_ok &= self.test_sector_roundtrip(204, b"INTER_AUDIO_TRACK_RECORD_V1");
+        all_ok
     }
 
-    /// Generates and validates an authenticated sovereign backup export frame.
+    /// Builds a sovereign backup export frame, persists it through the kernel
+    /// settings store, and validates the stored frame by reading it back.
+    ///
+    /// WHY: this previously built the frame on the stack, dropped it, and
+    /// logged "generated & verified (Fletcher-32 valid)" unconditionally —
+    /// nothing was written anywhere, so nothing could be verified. The frame
+    /// is now persisted as hex (the settings store rejects newline bytes and
+    /// raw counter/checksum bytes can contain 0x0A) under `vault.backup_export`
+    /// via FileSystemWrite at cap slot 3, and "verified" means the read-back
+    /// frame carries the expected magic and its stored Fletcher-32 checksum
+    /// equals the recomputed one.
     pub fn export_backup(&mut self) -> bool {
-        let mut header = [0u8; 64];
+        let mut header = [0u8; 40];
         header[..28].copy_from_slice(b"INTER_SOVEREIGN_VAULT_BACKUP");
         header[28..32].copy_from_slice(&self.total_encryptions.to_le_bytes());
         header[32..36].copy_from_slice(&self.total_decryptions.to_le_bytes());
+        let sum = fletcher32(&header[..36]);
+        header[36..40].copy_from_slice(&sum.to_le_bytes());
 
-        let mut sum1: u32 = 0;
-        let mut sum2: u32 = 0;
-        for &byte in header[..36].iter() {
-            sum1 = (sum1 + byte as u32) % 255;
-            sum2 = (sum2 + sum1) % 255;
+        let mut encoded = [0u8; 80];
+        let enc_len = hex_encode(&header, &mut encoded);
+        if std::settings_set(3, "vault.backup_export", &encoded[..enc_len]).is_err() {
+            std::log(
+                0,
+                "[VAULT APP] Backup export refused: the settings store rejected the write.",
+            )
+            .ok();
+            return false;
         }
-        let checksum = (sum2 << 8) | sum1;
-        header[36..40].copy_from_slice(&checksum.to_le_bytes());
 
-        self.backup_export_valid = true;
-        std::log(
-            0,
-            "[VAULT APP] Sovereign Backup Export generated & verified (Fletcher-32 valid).",
-        )
-        .ok();
-        true
+        let mut stored_hex = [0u8; 80];
+        let mut frame = [0u8; 40];
+        match std::settings_get(3, "vault.backup_export", &mut stored_hex) {
+            Ok(n) => match hex_decode(&stored_hex[..n.min(stored_hex.len())], &mut frame) {
+                Some(40) => {
+                    let stored_sum =
+                        u32::from_le_bytes([frame[36], frame[37], frame[38], frame[39]]);
+                    if frame[..28] == *b"INTER_SOVEREIGN_VAULT_BACKUP"
+                        && stored_sum == fletcher32(&frame[..36])
+                    {
+                        std::log(
+                            0,
+                            "[VAULT APP] Sovereign Backup Export persisted; read-back Fletcher-32 checksum valid.",
+                        )
+                        .ok();
+                        true
+                    } else {
+                        std::log(
+                            0,
+                            "[VAULT APP] Backup Export stored, but the read-back frame failed checksum validation.",
+                        )
+                        .ok();
+                        false
+                    }
+                }
+                _ => {
+                    std::log(
+                        0,
+                        "[VAULT APP] Backup Export stored, but the read-back frame was truncated or undecodable; validation not performed.",
+                    )
+                    .ok();
+                    false
+                }
+            },
+            _ => {
+                std::log(
+                    0,
+                    "[VAULT APP] Backup Export stored, but the read-back was refused; validation not performed.",
+                )
+                .ok();
+                false
+            }
+        }
     }
 }
 
@@ -465,8 +575,10 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
                 return pad_color;
             }
 
-            let pad_label = if is_auth { &b"VERIFIED"[..] } else { &b"LOCKED"[..] };
-            let pad_lx = if is_auth { 600 } else { 608 };
+            // The flag records a successful in-memory roundtrip, not stored
+            // data integrity, so the label says what was actually tested.
+            let pad_label = if is_auth { &b"TESTED"[..] } else { &b"UNTESTED"[..] };
+            let pad_lx = if is_auth { 608 } else { 600 };
             if let Some(c) = test_text(x, y, pad_lx, cy + 74, 1, pad_label, pad_color) {
                 return c;
             }
@@ -541,15 +653,9 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
             return ACCENT_SKY;
         }
 
-        // Tab 1: Keystore
-        if let Some(c) = test_text(x, y, 290, 1318, 2, b"KEYSTORE", TEXT_MUTED) {
-            return c;
-        }
-
-        // Tab 2: Audit
-        if let Some(c) = test_text(x, y, 530, 1318, 2, b"AUDIT", TEXT_MUTED) {
-            return c;
-        }
+        // WHY: the former KEYSTORE and AUDIT dock labels had no tap handlers
+        // and no screens behind them; they implied navigable tabs that never
+        // existed, so they were removed rather than left as dead controls.
 
         return SURFACE_DARK;
     }
@@ -607,25 +713,43 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> bool {
         if y >= cy && y < cy + SECTOR_CARD_H && x >= 24 && x < W - 24 {
             if let Some(sec) = vault.sectors[idx] {
                 let sector_id = sec.sector_id;
-                let _ = vault.test_sector_roundtrip(sector_id, b"INTER_VAULT_TOUCH_AUTH_VERIFY");
+                let roundtrip_ok =
+                    vault.test_sector_roundtrip(sector_id, b"INTER_VAULT_TOUCH_AUTH_VERIFY");
                 std::audio_haptic_click().ok();
-                std::log(0, "[VAULT] Sector card touched. Round-trip re-verified.").ok();
+                if roundtrip_ok {
+                    std::log(0, "[VAULT] Sector card touched. Round-trip re-verified.").ok();
+                } else {
+                    std::log(
+                        0,
+                        "[VAULT] Sector card touched. Round-trip verification FAILED (see reason above).",
+                    )
+                    .ok();
+                }
             }
             return false;
         }
     }
 
-    // 3. Action Buttons
+    // 3. Action Buttons (hit boxes match the drawn buttons at y 1100..1190)
     if (1080..1220).contains(&y) {
-        if x >= 40 && x < 340 && y >= 1100 && y < 1200 {
+        if x >= 40 && x < 340 && y >= 1100 && y < 1190 {
             // Test All Roundtrips
-            vault.verify_all_sectors();
+            let all_ok = vault.verify_all_sectors();
             std::audio_haptic_click().ok();
-            std::log(0, "[VAULT] All 6 sectors roundtrip verified.").ok();
+            if all_ok {
+                std::log(0, "[VAULT] All 6 sectors roundtrip verified.").ok();
+            } else {
+                std::log(
+                    0,
+                    "[VAULT] Roundtrip verification FAILED for one or more sectors (see reasons above).",
+                )
+                .ok();
+            }
             return false;
-        } else if x >= 380 && x < 680 && y >= 1100 && y < 1200 {
-            // Export Backup
-            vault.export_backup();
+        } else if x >= 380 && x < 680 && y >= 1100 && y < 1190 {
+            // Export Backup: the function persists the frame, validates the
+            // read-back copy, and logs the exact outcome itself.
+            let _ = vault.export_backup();
             std::audio_haptic_click().ok();
             return false;
         }
@@ -684,15 +808,30 @@ pub extern "C" fn _start() -> ! {
     if let Ok(fd) = std::fs_open(3, "/system/etc/device_id", std::FS_READ) {
         let mut dev_buf = [0u8; 64];
         if let Ok(n) = std::fs_read(3, fd, &mut dev_buf) {
-            if n > 0 && &dev_buf[..4] == b"DID:" {
+            if n >= 4 && &dev_buf[..4] == b"DID:" {
+                // WHY: only the magic prefix is checked here; with no
+                // signature or digest to compare against, this is a presence
+                // check, not an authentication.
                 std::log(
                     0,
-                    "[VAULT APP] Sovereign device identity partition authenticated.",
+                    "[VAULT APP] Device identity file present with a DID: prefix (magic check only; no cryptographic attestation is performed).",
+                )
+                .ok();
+            } else {
+                std::log(
+                    0,
+                    "[VAULT APP] Device identity file missing or malformed; identity check not performed.",
                 )
                 .ok();
             }
         }
         let _ = std::fs_close(fd);
+    } else {
+        std::log(
+            0,
+            "[VAULT APP] Device identity file could not be opened; identity check not performed.",
+        )
+        .ok();
     }
 
     // Interactive Event Reactor Loop
