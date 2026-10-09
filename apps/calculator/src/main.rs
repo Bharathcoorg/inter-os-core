@@ -357,11 +357,15 @@ fn handle_keyboard_key(calc: &mut CalculatorState, code: u32) -> bool {
 }
 
 fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> (bool, Option<&'static str>) {
-    // Check if exit / back button or home gesture bar pressed
-    if (x >= 24 && x < 100 && y >= 28 && y < 68) || (x >= 240 && x <= 480 && y >= 1400) {
+    // Home gesture bar exits to the launcher.
+    // WHY: a back-button clause (x 24..100, y 28..68) used to live here, but
+    // this app never draws a back button — the header is empty there — so a
+    // tap on blank header space silently killed the calculator. Navigation
+    // gestures (Back/Home/Recents/Pan/Fling) still exit through the event loop.
+    if x >= 240 && x <= 480 && y >= 1400 {
         std::log(
             0,
-            "[CALCULATOR] Exit button or home gesture tapped. Returning to launcher.",
+            "[CALCULATOR] Home gesture tapped. Returning to launcher.",
         )
         .ok();
         return (true, None);
@@ -495,6 +499,14 @@ pub extern "C" fn _start() -> ! {
                     let _ = std::surface_destroy(6, surface);
                     std::exit_with_code(0);
                 }
+                // WHY: kind 1 is Tap and kind 2 is DoubleTap. The kernel emits
+                // exactly one event per physical release (router.rs classifies
+                // a second press within 300 ticks and TAP_SLOP of the last tap
+                // as DoubleTap), so both kinds mean "a key was pressed here".
+                // Handling only Tap would silently swallow fast repeats of the
+                // same key (e.g. typing 55 in under 300 ms), while firing on
+                // both keeps press-consistent semantics: two presses, two
+                // actions.
                 if input.kind == 1 || input.kind == 2 {
                     let (should_exit, action_logged) =
                         handle_touch_point(&mut calc, input.x, input.y);
