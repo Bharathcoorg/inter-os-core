@@ -96,6 +96,15 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         .expect("Kernel heap initialization failed");
     serial_println!("[OK] Kernel 64 MiB dynamic heap allocator online.");
 
+    // Engage the native 720x1440 DISPI scanout now that BOTH the kernel
+    // page-table mapper and the heap are live: the framebuffer's mapped tail
+    // is extended first (map_mmio_region tracks its pages in a heap Vec),
+    // then (only if provably safe) the physical mode is reprogrammed.
+    // Deferred from framebuffer::init because reprogramming before paging
+    // existed wrote past mapped pages and trapped the guest in a reset loop;
+    // placing it after heap init because the mapping step allocates.
+    kernel::framebuffer::engage_native_mode();
+
     // Run Hardware MMU & Memory Isolation Adversarial Tests
     kernel::memory::run_mmu_adversarial_tests();
 

@@ -2,10 +2,16 @@
 //!
 //! Renders a sleek, modern smartphone device viewport, ambient AI dynamic island,
 //! intent search bar, fluid capability cards (Android MicroVM, .rapp Engine),
-//! system telemetry, and complete native app views directly into the 1280x720 video framebuffer.
+//! system telemetry, and complete native app views directly into the physical
+//! video framebuffer (native 720x1440 portrait scanout, or 1280x720 when the
+//! device is rotated to landscape — see `set_physical_mode`).
 
 use bootloader_api::info::{FrameBuffer, FrameBufferInfo, PixelFormat};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
+use x86_64::instructions::port::Port;
+use x86_64::structures::paging::{PageTable, PageTableFlags};
+use x86_64::{PhysAddr, VirtAddr};
 
 // Color Palette (RGB)
 pub const COLOR_OBSIDIAN: (u8, u8, u8) = (11, 15, 25);    // #0B0F19 (Deep Obsidian)
@@ -24,7 +30,8 @@ pub const COLOR_DARK_SLATE: (u8, u8, u8) = (5, 8, 15);    // #05080F (Terminal D
 pub const COLOR_RED: (u8, u8, u8) = (239, 68, 68);        // #EF4444 (Alert Red)
 pub const COLOR_BLUE: (u8, u8, u8) = (59, 130, 246);      // #3B82F6 (Electric Blue)
 
-// Phone Frame Geometry (Centered on 1280x720 display)
+// Phone Frame Geometry (legacy demo screens: centered on the 1280x720
+// landscape scanout; the launcher pipeline renders through KMS instead)
 pub const PHONE_X: usize = 420;
 pub const PHONE_Y: usize = 12;
 pub const PHONE_W: usize = 440;
@@ -461,7 +468,10 @@ impl FramebufferWriter {
         y += 18;
         self.draw_string(x, y, "PIT Timer:      100 Hz Clock Online", 1, COLOR_GREEN, None);
         y += 18;
-        self.draw_string(x, y, "Resolution:     1280x720 TrueColor", 1, COLOR_CYAN, None);
+        if let Some(inf) = self.info {
+            let res = alloc::format!("Resolution:     {}x{} TrueColor", inf.width, inf.height);
+            self.draw_string(x, y, &res, 1, COLOR_CYAN, None);
+        }
     }
 
     fn draw_status_bar(&mut self) {
@@ -1544,13 +1554,198 @@ impl FramebufferWriter {
 
 pub static FRAMEBUFFER_WRITER: Mutex<FramebufferWriter> = Mutex::new(FramebufferWriter::new());
 
+// ---------------------------------------------------------------------------
+// QEMU Bochs/VBE DISPI mode control
+// ---------------------------------------------------------------------------
+// WHY this exists: the prebuilt bootloader enumerates VBE modes and always
+// selects the *widest* landscape mode (bootloader 0.11 bios-stage-2 vesa.rs:
+// `best.width < mode_info.width`), so even with a 720x1440 minimum requested
+// in the boot config it hands the kernel 1280x720. The phone scanout then had
+// to be downscaled 2:1 into a 360x720 slice of that landscape framebuffer —
+// the root cause of the Studio display looking soft/blurry. The DISPI
+// registers are plain x86 I/O ports, so the kernel reprograms the mode
+// directly from long mode: no BIOS trampoline, no bootloader patch.
+const DISPI_INDEX_PORT: u16 = 0x01CE;
+const DISPI_DATA_PORT: u16 = 0x01CF;
+const DISPI_REG_ID: u16 = 0x00;
+const DISPI_REG_XRES: u16 = 0x01;
+const DISPI_REG_YRES: u16 = 0x02;
+const DISPI_REG_BPP: u16 = 0x03;
+const DISPI_REG_ENABLE: u16 = 0x04;
+const DISPI_REG_VIRT_WIDTH: u16 = 0x06;
+const DISPI_ENABLE: u16 = 0x01;
+const DISPI_LFB_ENABLE: u16 = 0x40;
+const DISPI_ID_MIN: u16 = 0xB0C0;
+const DISPI_ID_MAX: u16 = 0xB0C5;
+
+/// Bytes per pixel used once `engage_native_mode` has proven the mapping
+/// covers the full native frame: 4 (32bpp). `init` deliberately does NOT set
+/// this — the old heuristic ("4 if 720x1440x32 fits, else 3") was broken: it
+/// never checked that the 24bpp fallback (720x1440x3 = 3,110,400 bytes) fit
+/// the bootloader's mapping either, so ANY early engage faulted past the
+/// mapped pages and triple-faulted the guest into a reset loop.
+static DISPI_BPP: Mutex<usize> = Mutex::new(4);
+
+/// Virtual address of the framebuffer buffer as handed over by the bootloader
+/// (the authoritative VA recorded from `buffer_mut().as_mut_ptr()`).
+static FB_BASE_VA: AtomicU64 = AtomicU64::new(0);
+/// Byte length the bootloader actually mapped for the framebuffer
+/// (e.g. 1280x720x3 = 0x2A3000 = 675 pages).
+static FB_MAPPED_BYTES: AtomicUsize = AtomicUsize::new(0);
+/// Bytes of the framebuffer provably covered by kernel page tables: starts at
+/// `FB_MAPPED_BYTES` and grows once `engage_native_mode` successfully maps the
+/// tail. `set_physical_mode` refuses any mode whose frame exceeds this.
+static FB_COVERED_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+/// Rounds a byte count up to the next 4 KiB page boundary.
+fn align_up_4k(bytes: u64) -> u64 {
+    (bytes + 0xFFF) & !0xFFF
+}
+
+/// Translates a virtual address through the *active kernel* page tables
+/// (CR3), reading intermediate tables through the bootloader's physical
+/// direct map. Supports 4 KiB leaves plus 2 MiB/1 GiB huge pages, matching
+/// the pattern of `TaskPageTable::translate` but against the kernel tables.
+fn kernel_translate(vaddr: VirtAddr) -> Option<PhysAddr> {
+    let addr = vaddr.as_u64();
+    let idx = |shift: u32| ((addr >> shift) & 0x1FF) as usize;
+    let phys_offset = crate::memory::phys_mem_offset().as_u64();
+    let table_at = |frame_addr: u64| -> *const PageTable {
+        (VirtAddr::new(phys_offset) + frame_addr).as_ptr::<PageTable>()
+    };
+
+    let (pml4_frame, _) = x86_64::registers::control::Cr3::read();
+    let pml4 = unsafe { &*table_at(pml4_frame.start_address().as_u64()) };
+    let e4 = &pml4[idx(39)];
+    if !e4.flags().contains(PageTableFlags::PRESENT) {
+        return None;
+    }
+
+    let p3 = unsafe { &*table_at(e4.frame().ok()?.start_address().as_u64()) };
+    let e3 = &p3[idx(30)];
+    if !e3.flags().contains(PageTableFlags::PRESENT) {
+        return None;
+    }
+    if e3.flags().contains(PageTableFlags::HUGE_PAGE) {
+        // 1 GiB page leaf.
+        return Some(e3.addr() + (addr & 0x3FFF_FFFF));
+    }
+
+    let p2 = unsafe { &*table_at(e3.frame().ok()?.start_address().as_u64()) };
+    let e2 = &p2[idx(21)];
+    if !e2.flags().contains(PageTableFlags::PRESENT) {
+        return None;
+    }
+    if e2.flags().contains(PageTableFlags::HUGE_PAGE) {
+        // 2 MiB page leaf.
+        return Some(e2.addr() + (addr & 0x1F_FFFF));
+    }
+
+    let p1 = unsafe { &*table_at(e2.frame().ok()?.start_address().as_u64()) };
+    let e1 = &p1[idx(12)];
+    if !e1.flags().contains(PageTableFlags::PRESENT) {
+        return None;
+    }
+    Some(e1.addr() + (addr & 0xFFF))
+}
+
+fn dispi_write(reg: u16, value: u16) {
+    unsafe {
+        let mut index = Port::<u16>::new(DISPI_INDEX_PORT);
+        let mut data = Port::<u16>::new(DISPI_DATA_PORT);
+        index.write(reg);
+        data.write(value);
+    }
+}
+
+fn dispi_read(reg: u16) -> u16 {
+    unsafe {
+        let mut index = Port::<u16>::new(DISPI_INDEX_PORT);
+        let mut data = Port::<u16>::new(DISPI_DATA_PORT);
+        index.write(reg);
+        data.read()
+    }
+}
+
+/// Reprograms the physical scanout to `width` x `height` and updates the
+/// writer's view of the framebuffer so every subsequent blit is 1:1.
+///
+/// Returns false — leaving the current mode untouched — when the DISPI
+/// interface is absent, when the requested frame would write past the pages
+/// actually mapped for the framebuffer (`FB_COVERED_BYTES`), or when the
+/// device rejects the request (readback mismatch), so an unusual firmware
+/// keeps its last honest mode instead of tearing into unmapped memory.
+pub fn set_physical_mode(width: u16, height: u16) -> bool {
+    let id = dispi_read(DISPI_REG_ID);
+    if !(DISPI_ID_MIN..=DISPI_ID_MAX).contains(&id) {
+        return false;
+    }
+    let bpp = *DISPI_BPP.lock();
+    // Safety gate: the scanout frame (and the clear below) must never touch
+    // virtual pages that are not mapped. This is what keeps an early or
+    // orientation-triggered reprogram from repeating the boot-loop fault.
+    let needed = (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(bpp);
+    if FB_COVERED_BYTES.load(Ordering::Acquire) < needed {
+        return false;
+    }
+    let bpp_hw: u16 = if bpp == 4 { 32 } else { 24 };
+    // Standard Bochs sequence: disable, reprogram geometry/depth, pin the
+    // virtual width to the visible width (no panning offset), re-enable with
+    // the linear frame buffer bit.
+    dispi_write(DISPI_REG_ENABLE, 0);
+    dispi_write(DISPI_REG_XRES, width);
+    dispi_write(DISPI_REG_YRES, height);
+    dispi_write(DISPI_REG_BPP, bpp_hw);
+    dispi_write(DISPI_REG_VIRT_WIDTH, width);
+    dispi_write(DISPI_REG_ENABLE, DISPI_ENABLE | DISPI_LFB_ENABLE);
+    if dispi_read(DISPI_REG_XRES) != width
+        || dispi_read(DISPI_REG_YRES) != height
+        || dispi_read(DISPI_REG_BPP) != bpp_hw
+    {
+        return false;
+    }
+
+    let mut fb = FRAMEBUFFER_WRITER.lock();
+    if let Some(info) = fb.info.as_mut() {
+        info.width = width as usize;
+        info.height = height as usize;
+        info.stride = width as usize; // both depths keep pixel-packed rows here
+        info.bytes_per_pixel = bpp;
+        // 24/32bpp DISPI is little-endian BGRX; byte order matches the
+        // bootloader's (16,8,0) -> Bgr mapping the present path already uses.
+        info.pixel_format = PixelFormat::Bgr;
+    }
+    // Re-evaluate letterbox borders on the next present and blank the new
+    // geometry so stale firmware pixels never show through the new mode.
+    *LAST_CLEAR_BOUNDS.lock() = (usize::MAX, usize::MAX, usize::MAX, usize::MAX);
+    fb.clear(COLOR_OBSIDIAN);
+    true
+}
+
 /// Initializes the framebuffer console with the bootloader framebuffer.
+///
+/// Deliberately does NOT reprogram the DISPI scanout: the bootloader only
+/// mapped `mapped_bytes` (0x2A3000 = 675 pages for the 1280x720 firmware
+/// mode) of the 8 MiB VGA BAR, which is far too small for the 720x1440
+/// native frame. Reprogramming here — before the kernel page-table mapper
+/// exists — wrote past the mapped pages and page-faulted into a silent
+/// triple-fault reset loop. Engagement is deferred to `engage_native_mode`,
+/// which runs after `init_memory`.
 pub fn init(framebuffer: &'static mut FrameBuffer) {
     // Capture the real bootloader-provided mode before handing ownership to
     // the writer. The boot config only requests a 720x1440 minimum, and
     // BIOS/VBE firmware may supply a smaller or landscape mode, so the
     // runtime reports the actual firmware mode here instead of inventing one.
     let info = framebuffer.info();
+    // Record the authoritative buffer VA and how much of it is mapped; the
+    // deferred engage path extends exactly the unmapped tail beyond this.
+    let buffer_va = framebuffer.buffer_mut().as_mut_ptr() as usize as u64;
+    let mapped_bytes = framebuffer.buffer_mut().len();
+    FB_BASE_VA.store(buffer_va, Ordering::Release);
+    FB_MAPPED_BYTES.store(mapped_bytes, Ordering::Release);
+    FB_COVERED_BYTES.store(mapped_bytes, Ordering::Release);
     FRAMEBUFFER_WRITER.lock().init(framebuffer);
     let fmt = match info.pixel_format {
         PixelFormat::Rgb => "Rgb",
@@ -1559,9 +1754,112 @@ pub fn init(framebuffer: &'static mut FrameBuffer) {
         _ => "Unknown",
     };
     crate::serial_println!(
-        "[DISPLAY_HAL] physical_framebuffer={}x{} stride={} bpp={} fmt={}",
-        info.width, info.height, info.stride, info.bytes_per_pixel, fmt
+        "[DISPLAY_HAL] physical_framebuffer={}x{} stride={} bpp={} fmt={} fb_va={:#x} mapped_bytes={}",
+        info.width, info.height, info.stride, info.bytes_per_pixel, fmt,
+        buffer_va, mapped_bytes
     );
+    crate::serial_println!(
+        "[DISPLAY_HAL] DISPI native scanout deferred until paging is live (engage_native_mode after init_memory)"
+    );
+}
+
+/// Engages the phone's native 720x1440 DISPI scanout once paging is live.
+///
+/// The native 32bpp frame needs 720x1440x4 = 4,147,200 bytes (1013 pages,
+/// 0x3F5000 rounded), but the bootloader only mapped 0x2A3000 (675 pages) of
+/// the firmware's 1280x720x24 frame. This function maps ONLY the unmapped
+/// tail through the kernel page-table mapper, and refuses to reprogram DISPI
+/// unless the coverage check proves every byte the scanout may touch is
+/// mapped. On any failure it leaves the firmware mode untouched and never
+/// writes pixels beyond mapped bytes.
+///
+/// Must be called after `memory::init_memory` (it needs the mapper and the
+/// direct map) and before displayd's first present.
+pub fn engage_native_mode() {
+    const NATIVE_W: usize = 720;
+    const NATIVE_H: usize = 1440;
+    const BPP: usize = 4;
+
+    let required_bytes = NATIVE_W * NATIVE_H * BPP; // 4,147,200
+    let required_rounded = align_up_4k(required_bytes as u64) as usize; // 1013 pages = 4,149,376 (0x3F5000)
+    let base_va = FB_BASE_VA.load(Ordering::Acquire);
+    let mut covered = FB_COVERED_BYTES.load(Ordering::Acquire);
+
+    if base_va == 0 {
+        crate::serial_println!(
+            "[DISPLAY_HAL] DISPI native scanout unavailable (no framebuffer recorded); keeping firmware mode"
+        );
+        return;
+    }
+
+    if covered < required_rounded {
+        // Extend ONLY the unmapped tail: the bootloader mapped everything
+        // below `covered`, and map_mmio_region fails (with rollback) on any
+        // already-mapped page, so the tail starts at the first page boundary
+        // beyond the recorded mapping.
+        let tail_virt = VirtAddr::new(align_up_4k(base_va + covered as u64));
+        let tail_size =
+            required_rounded - (tail_virt.as_u64() - base_va) as usize;
+        // VA->PA for the tail: the tail pages are by construction NOT mapped,
+        // so translate the last mapped byte and continue from the next page.
+        // The LFB is one contiguous physical BAR region, so physical
+        // contiguity holds across the tail. Fallbacks cover the two known
+        // bootloader layouts if the CR3 walk fails: direct map
+        // (PA = VA - phys_mem_offset) and identity (QEMU firmware LFB at
+        // 0xFE000000 lives in an identity-ish window).
+        let last_mapped_va = VirtAddr::new(base_va + covered as u64 - 1);
+        let phys_offset = crate::memory::phys_mem_offset().as_u64();
+        let tail_phys = match kernel_translate(last_mapped_va) {
+            Some(last_pa) => PhysAddr::new(align_up_4k(last_pa.as_u64() + 1)),
+            None if base_va >= phys_offset => {
+                PhysAddr::new(align_up_4k(base_va - phys_offset + covered as u64))
+            }
+            None => PhysAddr::new(align_up_4k(base_va + covered as u64)),
+        };
+        crate::serial_println!(
+            "[DISPLAY_HAL] extending framebuffer mapping: tail virt={:#x} phys={:#x} size={:#x} ({} pages)",
+            tail_virt.as_u64(), tail_phys.as_u64(), tail_size, tail_size / 4096
+        );
+        match crate::memory::map_mmio_region(tail_phys, tail_size, tail_virt) {
+            Ok(_) => covered = required_rounded,
+            // The mapper rolled the whole tail back and reports it already
+            // mapped: the scanout range is covered either way (safe).
+            Err("MMIO virtual range already mapped") => covered = required_rounded,
+            Err(err) => {
+                crate::serial_println!(
+                    "[DISPLAY_HAL] DISPI native scanout unavailable (tail map failed: {}); keeping firmware mode",
+                    err
+                );
+                return;
+            }
+        }
+        FB_COVERED_BYTES.store(covered, Ordering::Release);
+    }
+
+    if covered < required_bytes {
+        crate::serial_println!(
+            "[DISPLAY_HAL] DISPI native scanout unavailable (covered_bytes={} < required={}); keeping firmware mode",
+            covered, required_bytes
+        );
+        return;
+    }
+
+    // Both modes the runtime may switch between fit inside `covered`:
+    // 720x1440x32 = 4,147,200 and 1280x720x32 = 3,686,400. set_physical_mode
+    // re-checks coverage itself before touching any hardware register.
+    *DISPI_BPP.lock() = BPP;
+    if set_physical_mode(NATIVE_W as u16, NATIVE_H as u16) {
+        crate::serial_println!(
+            "[DISPLAY_HAL] DISPI native scanout 720x1440 engaged (bpp=32, mapped_bytes={})",
+            covered
+        );
+    } else {
+        crate::serial_println!(
+            "[DISPLAY_HAL] DISPI native scanout unavailable (id={:#06x}, covered_bytes={}); keeping firmware mode",
+            dispi_read(DISPI_REG_ID),
+            covered
+        );
+    }
 }
 
 static LAST_CLEAR_BOUNDS: spin::Mutex<(usize, usize, usize, usize)> = spin::Mutex::new((usize::MAX, usize::MAX, usize::MAX, usize::MAX));
