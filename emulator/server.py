@@ -2326,6 +2326,60 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps({'success': True, 'package': app_entry}).encode())
             return
 
+        if self.path == '/api/qemu/launch':
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
+            body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+            except Exception:
+                data = {}
+            profile = str(data.get('profile') or active_profile_key or 'x86_64').strip()
+            # A live guest already satisfies "Power On"; launching a second
+            # QEMU next to the running one would be reported as success while
+            # nothing changed.
+            if query_qemu_monitor(force=True).get('qemu_alive'):
+                self._send_json(200, {
+                    'success': True,
+                    'message': 'QEMU is already running',
+                    'already_running': True,
+                    'profile': profile,
+                })
+                return
+            ok, resp = launch_qemu_profile(profile)
+            self._send_json(200 if ok else 500, {
+                'success': ok,
+                'message': str(resp),
+                'profile': profile,
+            })
+            return
+
+        if self.path in (
+            '/api/telephony/dial', '/api/telephony/hangup',
+            '/api/telephony/data/toggle', '/api/telephony/sms/send',
+            '/api/telephony/at_cmd',
+        ):
+            # The guest registers no baseband backend at all
+            # (kernel/src/telephony/mod.rs: "No physical baseband/SIM backend
+            # registered; runtime state remains offline") and exposes no
+            # serial command that could place a call. Answer with the real
+            # capability state and the live guest telemetry so the UI reports
+            # the truth instead of inventing a successful call. When a baseband
+            # backend and its command surface ever exist, this dispatch is the
+            # single place that must learn about them.
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
+            if content_length > 0:
+                self.rfile.read(content_length)
+            self._send_json(409, {
+                'success': False,
+                'error': 'Baseband offline: the guest registers no physical baseband/SIM backend, so this action cannot be performed.',
+                'telephony': extract_guest_subsystem("telephony", "[TELEPHONY]"),
+            })
+            return
+
         if self.path in ('/api/qemu/reboot', '/api/qemu/reset'):
             content_length = self._bounded_content_length()
             if content_length is None:
