@@ -1764,7 +1764,7 @@ document.addEventListener('DOMContentLoaded', () => {
         await fetch('/api/input/key', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ key: e.key })
+          body: JSON.stringify({ key: e.key, code: e.key.codePointAt(0) })
         });
       } catch (_) {}
     }

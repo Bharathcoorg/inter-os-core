@@ -236,13 +236,7 @@ pub static EVENT_REACTOR: Mutex<EventReactor> = Mutex::new(EventReactor::new());
 
 /// Posts an event to a designated target task via the global Event Reactor.
 pub fn cleanup_task(task_id: TaskId) {
-    for _ in 0..10_000 {
-        if let Some(mut reactor) = EVENT_REACTOR.try_lock() {
-            reactor.cleanup_task(task_id);
-            break;
-        }
-        core::hint::spin_loop();
-    }
+    EVENT_REACTOR.lock().cleanup_task(task_id);
 }
 
 pub fn post_event(task_id: TaskId, event_mask: u32) {

@@ -527,6 +527,7 @@ impl Scheduler {
             };
             let cr3 = task.cr3_frame
                 .map(|f| f.start_address().as_u64())
+                .or_else(|| task.page_table.as_ref().map(|pt| pt.lock().frame().start_address().as_u64()))
                 .unwrap_or_else(|| crate::memory::kernel_pml4().start_address().as_u64());
             crate::serial_println!(
                 "[PROC] pid={} name={} state={} prio={} ticks={} caps={} kstack={} ppid={} cr3={:#x}",
