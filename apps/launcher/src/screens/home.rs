@@ -186,7 +186,10 @@ const TELEMETRY_SIGNAL_BARS: usize = 4;
 const TELEMETRY_BAR_W: usize = 4;
 const TELEMETRY_BAR_GAP: usize = 1;
 const TELEMETRY_BATTERY_W: usize = 28;
-const TELEMETRY_WIFI_W: usize = 6;
+/// Width of the Wi-Fi fan. WHY 16 and not the old 6: the glyph is a dot with
+/// two arcs over it (radius 8 at the widest), so the box has to hold a 15 px
+/// fan; a 6 px box could only ever fit a square, which is what it drew.
+const TELEMETRY_WIFI_W: usize = 16;
 const TELEMETRY_TERM_W: usize = 2;
 const TELEMETRY_GAP: usize = 24;
 
@@ -1040,9 +1043,13 @@ fn status_bar_pixel(x: usize, y: usize, theme: &Theme, p: &Paint) -> Option<u32>
 /// The status bar's hardware glyphs.
 ///
 /// WHY the shapes carry no level: all three readings are [`Reading::Unbound`], so
-/// every glyph is an outline with nothing filled. The fill arithmetic is written
-/// out anyway and reached only through [`Reading::level`], so a bound sensor has
-/// one place to go rather than a colour to change.
+/// nothing is filled with a number this platform cannot measure. Each glyph still
+/// has to READ as what it stands for, though — an empty battery shell is read as
+/// 0 % and a hollow square is read as a checkbox — so the unbound state is drawn
+/// as an explicit "no reading" mark (a dash in the shell, a hollow Wi-Fi dot)
+/// rather than as absence. The fill arithmetic is written out anyway and reached
+/// only through [`Reading::level`], so a bound sensor has one place to go rather
+/// than a colour to change.
 fn telemetry_pixel(x: usize, y: usize, t: &Telemetry, ink: u32) -> Option<u32> {
     let top = TELEMETRY_TOP;
     let bottom = TELEMETRY_TOP + TELEMETRY_H - 1;
@@ -1084,19 +1091,33 @@ fn telemetry_pixel(x: usize, y: usize, t: &Telemetry, ink: u32) -> Option<u32> {
         return None;
     }
 
-    // Wi-Fi: the association dot alone, with no arcs above it. Hollow while there
-    // is no association, filled once there is.
+    // Wi-Fi: a dot with two arcs over it — the universal fan — so the glyph
+    // reads as Wi-Fi whether or not there is an association. The dot is hollow
+    // while there is none.
+    // WHY not the old hollow square: a 6 px empty box is indistinguishable from
+    // an unchecked checkbox and says nothing about radio at all.
     if x >= wifi_x0 && x < wifi_x0 + TELEMETRY_WIFI_W {
-        let dot_top = bottom + 1 - TELEMETRY_WIFI_W;
-        if y < dot_top {
+        let cx = wifi_x0 as i32 + TELEMETRY_WIFI_W as i32 / 2;
+        let dot_cy = bottom as i32 - 2;
+        let dx = x as i32 - cx;
+        let dy = dot_cy - y as i32; // positive above the dot
+        let d2 = dx * dx + dy * dy;
+        const DOT_R: i32 = 2;
+        if d2 <= DOT_R * DOT_R {
+            if wifi().level().is_some() || d2 >= (DOT_R - 1) * (DOT_R - 1) {
+                return Some(ink);
+            }
             return None;
         }
-        let edge = x == wifi_x0
-            || x == wifi_x0 + TELEMETRY_WIFI_W - 1
-            || y == dot_top
-            || y == bottom;
-        if wifi().level().is_some() || edge {
-            return Some(ink);
+        // Two arcs above the dot, clipped to a 45-degree cone about vertical so
+        // they read as a fan rather than a rainbow, and only above the dot so
+        // the glyph stays inside the 17 px band.
+        if dy > DOT_R && dx.abs() <= dy {
+            for r in [5_i32, 8] {
+                if d2 >= r * r && d2 <= (r + 1) * (r + 1) {
+                    return Some(ink);
+                }
+            }
         }
         return None;
     }
@@ -1116,6 +1137,16 @@ fn telemetry_pixel(x: usize, y: usize, t: &Telemetry, ink: u32) -> Option<u32> {
         if let Some(level) = fuel().level() {
             let filled = (TELEMETRY_H - 2) * level as usize / 100;
             if y >= bottom - filled {
+                return Some(ink);
+            }
+        } else {
+            // WHY a dash: an empty shell is read as 0 % charge, and this shell
+            // has no fuel gauge bound, so 0 % would be an invented reading. A
+            // centred dash is the conventional "no reading" mark and keeps the
+            // glyph legible as a battery rather than a dead one.
+            let cy = (top + bottom) / 2;
+            let dash_x = battery_x0 + TELEMETRY_BATTERY_W / 2 - 3;
+            if y == cy && x >= dash_x && x < dash_x + 6 {
                 return Some(ink);
             }
         }
