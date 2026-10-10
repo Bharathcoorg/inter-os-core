@@ -135,11 +135,18 @@ pub fn rasterize_icon_pixel(
 
     let inked = match kind {
         IconKind::Phone => {
-            // Handset silhouette: earpiece, grip, mouthpiece angled gently
-            let top_earpiece = rx >= -5 && rx <= 5 && ry >= -12 && ry <= -8;
-            let bottom_mouthpiece = rx >= -5 && rx <= 5 && ry >= 8 && ry <= 12;
-            let handle = rx >= -3 && rx <= 1 && ry >= -9 && ry <= 9;
-            top_earpiece || bottom_mouthpiece || handle
+            // WHY the diagonal receiver: the old mark was a vertical stem
+            // between two wide bars, which is a serif capital I - at deck size
+            // it read as a letter, not a phone. A handset is the same idea turned
+            // on its side: a grip running along the diagonal with a wider pad at
+            // each end for the ear and the mouthpiece. `u` measures along that
+            // diagonal (top-left to bottom-right) and `v` across it.
+            let u = (rx + ry) / 2;
+            let v = (rx - ry) / 2;
+            let grip = v.abs() <= 2 && u.abs() <= 8;
+            let earpiece = (-11..=-6).contains(&u) && v.abs() <= 4;
+            let mouthpiece = (6..=11).contains(&u) && v.abs() <= 4;
+            grip || earpiece || mouthpiece
         }
         IconKind::Messages => {
             // Rounded speech bubble with bottom-left tail
