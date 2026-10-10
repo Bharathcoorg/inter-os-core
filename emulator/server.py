@@ -2252,11 +2252,18 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                             cur_vol = int(m.group(1))
                             break
             # A missing guest report is unknown, not a synthetic 75% reading.
+            #
+            # WHY the status is `REQUESTED_NOT_APPLIED` and not `APPLIED`: nothing
+            # in the guest's audio path scales output by this value. `play` drives a
+            # PIT tone generator with no amplitude parameter, `pcm.rs` never reads
+            # the manager, and the PCI audio driver writes no mixer register. The
+            # guest echoes back the level that was *stored*, so reporting it as
+            # applied would assert a hardware effect that does not exist.
             success = bool(ok and cur_vol is not None)
             self.send_response(200 if success else 503)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
-            self.wfile.write(json.dumps({'success': success, 'volume_percent': cur_vol, 'status': 'APPLIED' if success else 'UNCONFIRMED', 'message': msg}).encode())
+            self.wfile.write(json.dumps({'success': success, 'volume_percent': cur_vol, 'status': 'REQUESTED_NOT_APPLIED' if success else 'UNBOUND', 'message': msg}).encode())
             return
 
         if parsed_path.path == '/api/browser/proxy':

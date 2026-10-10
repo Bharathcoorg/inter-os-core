@@ -3446,10 +3446,36 @@ pub fn sys_device_power(action: u32) -> Result<u32, SyscallResult> {
         }
         3 => {
             if require_system_control_object(crate::services::SERVICE_AUDIO_CONTROL_OBJECT).is_err() { return Err(SyscallResult::PermissionDenied); }
-            let mut audio = crate::audio::AUDIO_MANAGER.lock(); let cur = audio.volume_percent; audio.set_volume(cur.saturating_add(5).min(100)); crate::serial_println!("[AUDIO] volume_percent={} state=unmuted source=system_control", audio.volume_percent); Ok(audio.volume_percent as u32) }
+            // WHY: stepping needs a level to step *from*, and on this platform no
+            // volume is known until somebody requests one — the old code read a
+            // hardcoded `100` seed here and reported it as the result of a step
+            // that had done nothing. Refuse instead of inventing a base level.
+            let mut audio = crate::audio::AUDIO_MANAGER.lock();
+            match audio.step_volume(5) {
+                Some(requested) => {
+                    crate::serial_println!("[AUDIO] volume_percent={} state=requested applied_to_hardware=no source=system_control", requested);
+                    Ok(requested as u32)
+                }
+                None => {
+                    crate::serial_println!("[AUDIO] volume_percent=UNBOUND state=unbound applied_to_hardware=no source=system_control");
+                    Err(SyscallResult::AudioError)
+                }
+            }
+        }
         4 => {
             if require_system_control_object(crate::services::SERVICE_AUDIO_CONTROL_OBJECT).is_err() { return Err(SyscallResult::PermissionDenied); }
-            let mut audio = crate::audio::AUDIO_MANAGER.lock(); let cur = audio.volume_percent; audio.set_volume(cur.saturating_sub(5)); crate::serial_println!("[AUDIO] volume_percent={} state=unmuted source=system_control", audio.volume_percent); Ok(audio.volume_percent as u32) }
+            let mut audio = crate::audio::AUDIO_MANAGER.lock();
+            match audio.step_volume(-5) {
+                Some(requested) => {
+                    crate::serial_println!("[AUDIO] volume_percent={} state=requested applied_to_hardware=no source=system_control", requested);
+                    Ok(requested as u32)
+                }
+                None => {
+                    crate::serial_println!("[AUDIO] volume_percent=UNBOUND state=unbound applied_to_hardware=no source=system_control");
+                    Err(SyscallResult::AudioError)
+                }
+            }
+        }
         5 => { let kms = crate::drivers::display_kms::DRM_KMS.lock(); Ok(kms.powered as u32) }
         _ => Err(SyscallResult::InvalidArguments),
     }
@@ -3496,10 +3522,25 @@ pub fn sys_audio_control(action: u32, param: u32) -> Result<u32, SyscallResult> 
             Ok(0)
         }
         7 => {
-            audio.set_volume((param.min(100)) as u8);
-            Ok(audio.volume_percent as u32)
+            // WHY: the set path still succeeds — it stores the caller's request —
+            // but it logs `applied_to_hardware=no` because no mixer or PCM
+            // scaling path in this kernel consumes the value. The returned
+            // number is the stored request, not a level confirmed in effect.
+            let stored = audio.set_volume(param.min(100) as u8);
+            crate::serial_println!("[AUDIO] volume_percent={} state=requested applied_to_hardware=no source=audio_control_set", stored);
+            Ok(stored as u32)
         }
-        8 => Ok(audio.volume_percent as u32),
+        // WHY: a query must not answer with a level when none has ever been
+        // requested. Returning `0` (or the old seeded `100`) here is how an
+        // unknown volume turns into a confident-looking meter in userspace, so
+        // the honest answer is the existing audio-specific error.
+        8 => match audio.volume_percent {
+            Some(requested) => Ok(requested as u32),
+            None => {
+                crate::serial_println!("[AUDIO] volume_percent=UNBOUND state=unbound applied_to_hardware=no source=audio_control_query");
+                Err(SyscallResult::AudioError)
+            }
+        },
         _ => Err(SyscallResult::InvalidArguments),
     }
 }

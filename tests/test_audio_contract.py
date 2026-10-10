@@ -12,7 +12,16 @@ assert "pub fn encode_le(&self, out: &mut [u8])" in pcm
 assert "PCM output buffer too small" in pcm
 assert "AUDIO_MAX_BUFFER_FRAMES: usize = 48_000" in audio
 assert "configure_stream" in audio and "start_stream" in audio and "stop_stream" in audio
-assert "volume_percent: u8" in audio
+# WHY `Option<u8>` and not `u8`: the field used to be a `u8` seeded with the
+# literal 100, which is a fabricated level - nothing in the audio path ever
+# applied it. `AudioManager::play` dispatches to a PIT tone generator with no
+# amplitude parameter, `pcm.rs` never reads the manager, and the PCI audio
+# driver writes no mixer register. The type now carries the difference between
+# "no level has ever been established" (`None`, the boot state, which must stay
+# the boot state) and "a level was requested" (`Some`), so no consumer can
+# render a confident percentage for a value no hardware produced.
+assert "volume_percent: Option<u8>" in audio
+assert "volume_percent: None" in audio
 assert "audio.configure_stream" in syscall
 assert "audio.start_stream" in syscall
 assert "audio.stop_stream" in syscall

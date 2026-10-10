@@ -860,22 +860,46 @@ fn handle_serial_command(cmd: &[u8]) {
     if verb.eq_ignore_ascii_case("VOLUME") {
         let action = parts.next().unwrap_or("GET");
         let mut audio = crate::audio::AUDIO_MANAGER.lock();
+        // WHY: `AudioManager::volume_percent` is an `Option<u8>` that boots as
+        // `None`. It used to be a `u8` seeded with a hardcoded `100`, so a bare
+        // `VOLUME GET` reported 100% on a machine that had never measured a
+        // level. `Option<u8>` has no `Display`, and substituting a placeholder
+        // number would put the fabrication straight back into this log line, so
+        // each branch emits the real state instead.
+        //
+        // WHY `UNBOUND` as the token: `emulator/server.py` scrapes this line with
+        // `re.search(r'volume_percent=(\d+)', line)`. A non-digit token simply
+        // does not match, so the host correctly falls into its existing
+        // "no reading" branch (`status: 'UNCONFIRMED'`) rather than being handed
+        // an invented percentage.
+        fn report_volume(audio: &crate::audio::AudioManager) {
+            match audio.volume_percent {
+                Some(requested) => crate::serial_println!(
+                    "[AUDIO] volume_percent={} state=requested applied_to_hardware=no source=serial_console",
+                    requested
+                ),
+                None => crate::serial_println!(
+                    "[AUDIO] volume_percent=UNBOUND state=unbound applied_to_hardware=no source=serial_console"
+                ),
+            }
+        }
         if action.eq_ignore_ascii_case("UP") {
-            let cur = audio.volume_percent;
-            audio.set_volume(cur.saturating_add(5).min(100));
-            crate::serial_println!("[AUDIO] volume_percent={} state=unmuted", audio.volume_percent);
+            // WHY: stepping needs a known level to step *from*. With `None`
+            // stored there is nothing to move, and the old code silently derived
+            // a base from the seeded 100 instead of saying so.
+            audio.step_volume(5);
+            report_volume(&audio);
         } else if action.eq_ignore_ascii_case("DOWN") {
-            let cur = audio.volume_percent;
-            audio.set_volume(cur.saturating_sub(5));
-            crate::serial_println!("[AUDIO] volume_percent={} state=unmuted", audio.volume_percent);
+            audio.step_volume(-5);
+            report_volume(&audio);
         } else if action.eq_ignore_ascii_case("MUTE") {
             audio.set_volume(0);
-            crate::serial_println!("[AUDIO] volume_percent=0 state=muted");
+            report_volume(&audio);
         } else if let Ok(pct) = action.parse::<u8>() {
             audio.set_volume(pct.min(100));
-            crate::serial_println!("[AUDIO] volume_percent={} state=unmuted", audio.volume_percent);
+            report_volume(&audio);
         } else {
-            crate::serial_println!("[AUDIO] volume_percent={} state=unmuted", audio.volume_percent);
+            report_volume(&audio);
         }
         return;
     }
