@@ -169,6 +169,15 @@ pub struct BrowserApp {
     pub address: [u8; 64],
     pub address_len: usize,
     pub address_focused: bool,
+    /// The whole address is selected, so the next character replaces it.
+    ///
+    /// WHY this exists: focusing the bar pre-filled the attempted address into
+    /// the edit buffer and typing appended to it, so tapping a bar reading
+    /// "about:blank" and typing "example" produced "about:blankexample", which
+    /// is not an address anything can navigate to. Android and iOS both select
+    /// the whole field on focus for exactly this reason, and a caret parked at
+    /// the end of the text gave no hint that a selection existed.
+    pub select_all: bool,
     /// Real outcome of the last navigation / action.
     pub status: PageStatus,
 }
@@ -185,6 +194,7 @@ impl BrowserApp {
             address: [0; 64],
             address_len: 0,
             address_focused: false,
+            select_all: false,
             status: PageStatus::Blank,
         };
         let start = b"about:blank";
@@ -335,6 +345,10 @@ struct Frame {
     pill_color: u32,
     show_caret: bool,
     caret_x: usize,
+    /// Width of the selection band across the pill text, 0 when nothing is
+    /// selected. Drawn because a replace-on-type field that shows no selection
+    /// is indistinguishable from an append-at-cursor one until it is too late.
+    select_w: usize,
     /// Honest state block: bold headline (scale chosen to fit) + wrapped body.
     head: [u8; 96],
     head_len: usize,
@@ -357,6 +371,7 @@ impl Frame {
             pill_color: MUTED,
             show_caret: false,
             caret_x: PILL_TEXT_X,
+            select_w: 0,
             head: [0; 96],
             head_len: 0,
             head_scale: 1,
@@ -385,6 +400,11 @@ impl Frame {
         f.pill_len = font::ellipsize(src, 1, PILL_TEXT_MAX, &mut f.pill);
         f.show_caret = app.address_focused;
         f.caret_x = PILL_TEXT_X + font::measure(&f.pill[..f.pill_len], 1);
+        f.select_w = if app.select_all {
+            font::measure(&f.pill[..f.pill_len], 1)
+        } else {
+            0
+        };
 
         // Honest state block content.
         let (head_src, body_src): (&[u8], &[u8]) = match app.status {
@@ -588,12 +608,31 @@ fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
         if let Some(g) = pill_state_glyph(x, y) {
             return g;
         }
+        // Selection band, drawn under the text: the accent washed into the pill
+        // fill, so a chosen address reads as chosen without a hard block of
+        // colour sitting inside a rounded field.
+        //
+        // WHY it is computed and not returned outright: returning the fill as
+        // soon as a pixel is inside the band would return it for the glyph's own
+        // pixels too, painting the text out of existence. The band is instead
+        // handed to the text renderer as the background its anti-aliased edges
+        // blend against, and used as the fill only where no glyph covers the
+        // pixel.
+        let in_sel = f.select_w > 0
+            && x >= PILL_TEXT_X
+            && x < PILL_TEXT_X + f.select_w
+            && y >= PILL_TEXT_Y
+            && y < PILL_TEXT_Y + GLYPH_H;
         let t = &f.pill[..f.pill_len];
         if !t.is_empty() {
-            if let Some(px) = text_px(x, y, PILL_TEXT_X, PILL_TEXT_Y, 1, t, f.pill_color, SURFACE, false)
+            let bg = if in_sel { selection_fill() } else { SURFACE };
+            if let Some(px) = text_px(x, y, PILL_TEXT_X, PILL_TEXT_Y, 1, t, f.pill_color, bg, false)
             {
                 return px;
             }
+        }
+        if in_sel {
+            return selection_fill();
         }
         if f.show_caret
             && x >= f.caret_x
@@ -660,12 +699,28 @@ fn get_browser_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
 }
 
 fn render_browser_ui(surface: u32, app: &BrowserApp) {
+    render_browser_band(surface, app, 0, H);
+}
+
+/// Re-rasterises and writes only rows `y0..y1`.
+///
+/// WHY a band and not a rectangle: a row of the surface is one contiguous run in
+/// the surface buffer, so `offset = y0 * W` writes a band with no stride
+/// bookkeeping. Every band starts on a row boundary, so the running `x`/`y`
+/// cursor below is exact.
+///
+/// WHY this is correct rather than a shortcut: the band is chosen from what the
+/// keystroke actually changed, and a keystroke that can change anything outside
+/// it - navigation, or the first character that clears a previous status - asks
+/// for the whole surface. The pixels outside a requested band are left as they
+/// were drawn, and they are correct because nothing about them changed.
+fn render_browser_band(surface: u32, app: &BrowserApp, y0: usize, y1: usize) {
     let frame = Frame::build(app);
     let mut chunk = [0u32; CHUNK];
-    let total = W * H;
-    let mut offset = 0;
-    while offset < total {
-        let count = (total - offset).min(CHUNK);
+    let mut offset = y0 * W;
+    let end = y1.min(H) * W;
+    while offset < end {
+        let count = (end - offset).min(CHUNK);
         let mut x = offset % W;
         let mut y = offset / W;
         for i in 0..count {
@@ -693,6 +748,26 @@ enum Tap<'a> {
     Leave(&'a str),
 }
 
+/// The fill behind selected address text: the accent at 22% over the pill.
+///
+/// WHY a computed tint and not a fixed colour: the pill and the accent both come
+/// from the theme, so a hard-coded selection colour would drift from them the
+/// moment either changed - which is the same class of bug as hard-coding a
+/// background behind anti-aliased text.
+fn selection_fill() -> u32 {
+    // WHY 38 and not a token amount: at 22 the tint was invisible on the pill's
+    // own fill, and a selection nobody can see is not a selection - the field
+    // still looked like it would append at the caret. 38 reads as a chosen run
+    // without competing with the ink drawn on top of it.
+    const PERCENT: u32 = 38;
+    let t = PERCENT * 256 / 100;
+    let channel = |c: u32, bg: u32| -> u32 { (c * t + bg * (256 - t)) >> 8 };
+    let r = channel((ACCENT >> 16) & 0xFF, (SURFACE >> 16) & 0xFF);
+    let g = channel((ACCENT >> 8) & 0xFF, (SURFACE >> 8) & 0xFF);
+    let b = channel(ACCENT & 0xFF, SURFACE & 0xFF);
+    0xFF00_0000 | (r << 16) | (g << 8) | b
+}
+
 fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
     let (x, y) = (px as usize, py as usize);
 
@@ -716,6 +791,9 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
             app.address_len = n;
         }
         app.address_focused = true;
+        // Select what is already there, so the first keystroke replaces it
+        // instead of being appended to the end of "about:blank".
+        app.select_all = app.address_len > 0;
         app.status = PageStatus::Blank;
         let _ = std::audio_haptic_click();
         std::log(0, "[BROWSER APP] Address field focused for keyboard input.").ok();
@@ -735,15 +813,38 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
     Tap::None
 }
 
-fn handle_browser_key(app: &mut BrowserApp, key: std::InputKeyEvent) -> bool {
+/// Which part of the surface a keystroke changed.
+///
+/// WHY this exists: rendering the browser re-rasterised all 1,036,800 pixels
+/// through `get_browser_pixel` for every single keystroke, so typing a URL cost
+/// the same as a full screen transition. Typing moves the address text, the
+/// caret, and at most the status block - between 72 and 200 of the 1440 rows.
+/// Naming the region lets the renderer skip the rest, which is where the
+/// perceived latency of typing was going.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dirty {
+    /// Nothing changed; do not render.
+    None,
+    /// Only the address text, caret or focus ring moved: the toolbar band.
+    Toolbar,
+    /// Navigation ran or the status block changed: the whole surface.
+    All,
+}
+
+fn handle_browser_key(app: &mut BrowserApp, key: std::InputKeyEvent) -> Dirty {
     use std::input_key_code;
     if !key.pressed || !app.address_focused {
-        return false;
+        return Dirty::None;
     }
     match key.code {
-        input_key_code::ESCAPE => app.address_focused = false,
+        input_key_code::ESCAPE => {
+            app.address_focused = false;
+            app.select_all = false;
+            Dirty::Toolbar
+        }
         input_key_code::ENTER => {
             app.address_focused = false;
+            app.select_all = false;
             // Submitting the typed address performs a real navigation attempt
             // against the real parser and transport state.
             if app.address_len > 0 {
@@ -752,19 +853,46 @@ fn handle_browser_key(app: &mut BrowserApp, key: std::InputKeyEvent) -> bool {
                 target[..n].copy_from_slice(&app.address[..n]);
                 app.navigate(&target[..n]);
             }
+            Dirty::All
         }
         input_key_code::BACKSPACE => {
-            app.address_len = app.address_len.saturating_sub(1);
+            // Backspace over a selection deletes the selection, which is what
+            // every text field does; otherwise it deletes one character.
+            if app.select_all {
+                app.address_len = 0;
+                app.select_all = false;
+            } else {
+                app.address_len = app.address_len.saturating_sub(1);
+            }
+            Dirty::Toolbar
         }
         code if (32..=126).contains(&code) && app.address_len < app.address.len() => {
+            // A character typed over a selection replaces it. Clearing first is
+            // also what makes room: the field is 64 bytes and a full buffer
+            // would otherwise refuse the keystroke outright.
+            if app.select_all {
+                app.address_len = 0;
+                app.select_all = false;
+            }
             app.address[app.address_len] = code as u8;
             app.address_len += 1;
             // Editing again: the previous attempt's message is superseded.
+            //
+            // WHY the status is compared before it is cleared: clearing it can
+            // change the state block far below the toolbar, so on the keystroke
+            // that first clears it the surface genuinely changed everywhere. On
+            // every keystroke after that the status is already Blank, only the
+            // address moved, and the toolbar band is the honest region.
+            let status_moved = app.status != PageStatus::Blank;
             app.status = PageStatus::Blank;
+            if status_moved {
+                Dirty::All
+            } else {
+                Dirty::Toolbar
+            }
         }
-        _ => return false,
+        _ => return Dirty::None,
     }
-    true
 }
 
 fn destroy_and_exit(surface: u32) -> ! {
@@ -820,11 +948,12 @@ pub extern "C" fn _start() -> ! {
                         dy: 0,
                         scale_milli: 1000,
                     };
-                    let mut dirty = false;
+                    let mut dirty = Dirty::None;
                     while std::input_event_poll(&mut input).is_ok() {
                         if let Some(key) = input.key_event() {
-                            if handle_browser_key(&mut browser, key) {
-                                dirty = true;
+                            let changed = handle_browser_key(&mut browser, key);
+                            if changed != Dirty::None {
+                                dirty = Dirty::All;
                             }
                             continue;
                         }
@@ -842,13 +971,22 @@ pub extern "C" fn _start() -> ! {
                                     std::log(0, msg).ok();
                                     return destroy_and_exit(surface);
                                 }
-                                Tap::Redraw => dirty = true,
+                                Tap::Redraw => dirty = Dirty::All,
                                 Tap::None => {}
                             }
                         }
                     }
-                    if dirty && surface > 0 {
-                        render_browser_ui(surface, &browser);
+                    if dirty != Dirty::None && surface > 0 {
+                        match dirty {
+                            Dirty::None => {}
+                            Dirty::Toolbar => {
+                                // The toolbar band, generously: STATUS_H..TOOLBAR_Y1
+                                // covers the pill, its focus ring, and the
+                                // reload/close controls in the same row.
+                                render_browser_band(surface, &browser, STATUS_H, TOOLBAR_Y1);
+                            }
+                            Dirty::All => render_browser_ui(surface, &browser),
+                        }
                         let _ = std::surface_flip(6);
                     }
                 }
