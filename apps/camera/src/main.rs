@@ -8,6 +8,13 @@
 //! - Multimodal neural vision context forwarding to the sovereign AI Context Broker
 //! - Hardware shutter tone & capacitive haptic feedback synthesis
 //! - DRM/KMS Client Surface Rendering (z=200) with Viewfinder Canvas, Mode Carousel, and Circular Shutter
+//! - Affordances whose backing capability is absent are drawn in a recessed
+//!   unavailable treatment and are not hit-tested, instead of being painted live
+//!   and ignored: see `CameraApp::camera_authorised`
+//! - The mode tag reports the frame geometry the camera HAL actually returned,
+//!   and the status badge reports the real count of captures that succeeded
+//! - Banded rendering (`render_camera_band`): only the rows an input actually
+//!   dirtied are re-rasterised, instead of all 1,036,800 pixels on every event
 //! - Asynchronous event reactor loop handling touch controls and timer intervals
 
 #![no_std]
@@ -15,6 +22,7 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
+use std::design::primitives::Rect;
 
 const W: usize = 720;
 const H: usize = 1440;
@@ -66,6 +74,69 @@ pub struct CameraApp {
     /// with PermissionDenied. The previous code discarded that error, kept a lit
     /// `Torch` state locally and rendered it as an active amber pill.
     pub flash_available: bool,
+    /// Whether the kernel granted this task camera authority at all.
+    ///
+    /// WHY probed rather than assumed: `sys_camera_capture` gates every action -
+    /// capture, autofocus state and flash - behind `SystemControl` on the camera
+    /// service object or `HardwarePortIo` on port 0xCA00, and this task is
+    /// spawned with neither. The kernel's own answer is the only honest source
+    /// for "can this app drive a camera", and it is allowed to change (a build
+    /// that binds the HAL would flip it), so the UI follows the probe instead of
+    /// a hard-coded "unavailable". The probe is the read-only autofocus query:
+    /// unlike a flash toggle it changes no hardware state.
+    pub camera_authorised: bool,
+    /// Frame geometry of the last capture that actually succeeded, pre-rendered.
+    ///
+    /// WHY a fixed buffer instead of formatting per pixel: `get_camera_pixel` is
+    /// called once per pixel, so a `format!`-style routine in the hot path would
+    /// run tens of thousands of times for one number. The label is rebuilt when a
+    /// capture succeeds and only read afterwards.
+    pub frame_label: [u8; 16],
+    pub frame_label_len: usize,
+    /// `total_photos` as text, pre-rendered for the same reason as above.
+    pub shots_label: [u8; 16],
+    pub shots_label_len: usize,
+}
+
+/// Label shown before any capture has succeeded: a real answer ("the HAL has not
+/// returned a frame yet"), not a made-up resolution.
+const NO_FRAME_LABEL: [u8; 16] = *b"NO FRAME\0\0\0\0\0\0\0\0";
+/// Label shown when the kernel refused this task camera authority.
+const NO_SENSOR_LABEL: [u8; 16] = *b"NO SENSOR\0\0\0\0\0\0\0";
+/// Badge text when nothing has been captured: `0 SHOTS`.
+const ZERO_SHOTS_LABEL: [u8; 16] = *b"0 SHOTS\0\0\0\0\0\0\0\0\0";
+
+/// Formats `v` as decimal ASCII into `out`; returns the bytes written.
+///
+/// WHY: measured values only exist at runtime, and the app has no allocator.
+fn fmt_u32(mut v: u32, out: &mut [u8]) -> usize {
+    if out.is_empty() {
+        return 0;
+    }
+    if v == 0 {
+        out[0] = b'0';
+        return 1;
+    }
+    let mut digits = [0u8; 10];
+    let mut n = 0usize;
+    while v > 0 && n < 10 {
+        digits[n] = b'0' + (v % 10) as u8;
+        v /= 10;
+        n += 1;
+    }
+    let n = n.min(out.len());
+    for i in 0..n {
+        out[i] = digits[n - 1 - i];
+    }
+    n
+}
+
+/// Copies `src` into a `LEN`-byte label buffer and returns its length.
+fn set_label(dst: &mut [u8; 16], src: &[u8]) -> usize {
+    dst.fill(0);
+    let n = src.len().min(dst.len());
+    dst[..n].copy_from_slice(&src[..n]);
+    n
 }
 
 impl CameraApp {
@@ -82,7 +153,68 @@ impl CameraApp {
             // WHY: fail closed. Assume no flash hardware until a toggle is
             // actually accepted by the backend.
             flash_available: false,
+            // WHY: fail closed here too. `probe_camera_authority` overwrites
+            // this at start-up with the kernel's real answer; until it has, the
+            // app must not claim it can drive a sensor.
+            camera_authorised: false,
+            frame_label: NO_FRAME_LABEL,
+            frame_label_len: 8,
+            shots_label: ZERO_SHOTS_LABEL,
+            shots_label_len: 7,
         }
+    }
+
+    /// Asks the kernel whether this task holds camera authority, and records the
+    /// answer for the UI.
+    ///
+    /// WHY `camera_autofocus_state` and not `camera_toggle_flash`: the autofocus
+    /// query only reads the HAL's current focus state, so probing cannot flip a
+    /// torch on behind the user's back the way a flash probe would.
+    pub fn probe_camera_authority(&mut self) {
+        self.camera_authorised = std::camera_autofocus_state().is_ok();
+        if !self.camera_authorised {
+            // WHY the label, not just the flag: with no authority the mode tag
+            // must say so. The old tag read "48MP PRO" unconditionally, which
+            // advertised a capture resolution and a mode the hardware never
+            // reported and this app can never produce.
+            self.frame_label = NO_SENSOR_LABEL;
+            self.frame_label_len = 9;
+        }
+    }
+
+    /// Rebuilds the two derived labels after the counters move.
+    ///
+    /// WHY a separate step: `total_photos` only advances on a capture that the
+    /// HAL actually returned, and the frame geometry only exists after one, so
+    /// both labels are functions of real results and are recomputed only when a
+    /// result arrives.
+    fn refresh_labels(&mut self) {
+        let shots = if self.total_photos == 1 {
+            &b" SHOT"[..]
+        } else {
+            &b" SHOTS"[..]
+        };
+        let mut buf = [0u8; 16];
+        let mut n = fmt_u32(self.total_photos, &mut buf);
+        for &b in shots {
+            if n < buf.len() {
+                buf[n] = b;
+                n += 1;
+            }
+        }
+        self.shots_label_len = set_label(&mut self.shots_label, &buf[..n]);
+    }
+
+    /// Records the frame geometry the camera HAL reported for a real capture.
+    fn set_frame_geometry(&mut self, w: u32, h: u32) {
+        let mut buf = [0u8; 16];
+        let mut n = fmt_u32(w, &mut buf);
+        if n < buf.len() {
+            buf[n] = b'x';
+            n += 1;
+        }
+        n += fmt_u32(h, &mut buf[n..]);
+        self.frame_label_len = set_label(&mut self.frame_label, &buf[..n]);
     }
 
     /// Toggles the flash/torch hardware and returns the state the hardware
@@ -186,6 +318,11 @@ impl CameraApp {
         std::camera_capture(&mut raw_buf, &mut meta)?;
         self.apply_isp_tone_curve(&mut raw_buf);
 
+        // WHY before the histogram: `meta` is what the camera HAL actually
+        // reported for this frame. Recording it the moment the capture succeeds
+        // is what lets the mode tag show a real resolution instead of a claim.
+        self.set_frame_geometry(meta[0], meta[1]);
+
         let (r, g, b) = self.compute_histogram(&raw_buf);
 
         std::audio_play_tone(880).ok();
@@ -206,9 +343,10 @@ impl CameraApp {
         std::vault_encrypt_sector(self.current_sector, &mut container, &iv)?;
 
         self.total_photos += 1;
+        self.refresh_labels();
         std::log(
             0,
-            "[CAMERA APP] Shutter fired: Captured 160x120 frame, ISP tone-mapped, encrypted to Vault Sector 201.",
+            "[CAMERA APP] Shutter fired: HAL frame returned, ISP tone-mapped, encrypted to Vault Sector 201.",
         ).ok();
 
         Ok(self.total_photos)
@@ -234,6 +372,116 @@ const SUCCESS_EMERALD: u32 = 0xFF16A34A;
 const DANGER_CRIMSON: u32 = 0xFFDC2626;
 const TEXT_PRIMARY: u32 = 0xFFF7F6F2;
 const TEXT_MUTED: u32 = 0xFF777773;
+
+/// Ink for a control that is painted but has nothing behind it.
+///
+/// WHY the border token and not a grey invented here: it is the design system's
+/// own hairline, so "unavailable" reads the same in this app as it does in the
+/// file manager and the gallery, and it stays in step if the token ever moves.
+const DISABLED: u32 = BORDER_SUBTLE;
+
+// -----------------------------------------------------------------------------
+// Screen bands - the single source of truth for both drawing and the
+// `Dirty` -> band mapping used by `render_camera_band`.
+// -----------------------------------------------------------------------------
+const TOP_BAND_Y0: usize = 0;
+/// WHY 110 and not 68: the top row ends at 68, but the hairline that closes the
+/// header is drawn at 108..109, so a band that stopped at the pill would leave a
+/// stale divider on screen.
+const TOP_BAND_Y1: usize = 110;
+
+const VIEWFINDER_Y0: usize = 120;
+const VIEWFINDER_Y1: usize = 1120;
+
+const MODE_STRIP_Y0: usize = 1150;
+const MODE_STRIP_Y1: usize = 1200;
+
+const DOCK_Y0: usize = 1210;
+const DOCK_Y1: usize = H;
+
+// -----------------------------------------------------------------------------
+// Top control row geometry
+//
+// WHY these are named constants: the old renderer and the old hit test each
+// transcribed the same five boxes independently (`x >= 130 && x < 250` and
+// friends), so a control and its tap region were two separate sets of literals
+// that could - and did - drift. Every box below is drawn from it and hit-tested
+// from it.
+// -----------------------------------------------------------------------------
+const TOP_ROW_Y: usize = 28;
+const TOP_ROW_H: usize = 40;
+
+/// Back control, 52 wide: the shell's minimum touch target.
+const BACK_RECT: Rect = Rect::new(24, TOP_ROW_Y, 52, TOP_ROW_H);
+/// Flash / torch pill.
+const FLASH_RECT: Rect = Rect::new(92, TOP_ROW_Y, 120, TOP_ROW_H);
+/// Capture-geometry readout. NOT a control: it reports what the HAL returned.
+const FRAME_RECT: Rect = Rect::new(228, TOP_ROW_Y, 160, TOP_ROW_H);
+/// ISP filter pill (a real, local software filter - genuinely actionable).
+const FILTER_RECT: Rect = Rect::new(404, TOP_ROW_Y, 140, TOP_ROW_H);
+/// Capture counter badge. NOT a control: it reports `total_photos`.
+const SHOTS_RECT: Rect = Rect::new(560, TOP_ROW_Y, 136, TOP_ROW_H);
+
+/// Corner radius of the top-row pills.
+///
+/// WHY 16 and not `draw_pill`'s half-height: these are rounded rectangles, not
+/// capsules. The old shape drew a 16px corner on a 40px control, and switching
+/// to `draw_pill` would round them to 20px and change every control in the row.
+const TOP_PILL_RADIUS: usize = 16;
+
+/// Text baseline row for every scale-1 label in the top row.
+///
+/// WHY derived: the face is `GLYPH_H` (24) rows tall, so a scale-1 run owns 24
+/// rows and must be centred inside the 40px control or its descenders clip.
+const TOP_ROW_TEXT_Y0: usize = TOP_ROW_Y + (TOP_ROW_H - std::design::font::GLYPH_H) / 2;
+
+/// Centre of the flash pictogram inside `FLASH_RECT`.
+const FLASH_ICON_CX: usize = FLASH_RECT.x + 24;
+const FLASH_ICON_CY: usize = FLASH_RECT.y + FLASH_RECT.h / 2;
+/// Text room to the right of the flash pictogram, inside `FLASH_RECT`.
+const FLASH_TEXT_X: usize = FLASH_RECT.x + 32;
+const FLASH_TEXT_W: usize = FLASH_RECT.w - 32 - 8;
+
+/// The system home gesture strip: a 200x6 indicator drawn inside a 240x40 box.
+///
+/// WHY the hit box is larger than the ink, and why both are named: 6px of ink
+/// is not a touch target, so the tap region has to be the whole strip - but the
+/// old code hit-tested `x 240..480 && y >= 1400` with no upper bound on y, a
+/// region that was never drawn, so a tap well above the indicator exited the app.
+const HOME_HIT: Rect = Rect::new(240, 1400, 240, 40);
+const HOME_PILL: Rect = Rect::new(260, 1418, 200, 6);
+
+// Shutter button, as concentric radii about its centre.
+const SHUTTER_CX: usize = 360;
+const SHUTTER_CY: usize = 1310;
+/// Outer white metallic ring.
+const SHUTTER_RING_OUTER: usize = 64;
+/// Concentric track gap between the ring and the core.
+const SHUTTER_RING_INNER: usize = 56;
+/// Inner tactile shutter core.
+const SHUTTER_R_CORE: usize = 48;
+
+/// The in-viewfinder zoom pill, in absolute surface coordinates.
+///
+/// WHY absolute and not viewfinder-relative: the tap handler works in surface
+/// coordinates, and the old code transcribed the pill twice in two different
+/// frames (`rel 276..404 / 874..930` while drawing, `296..424 / 994..1050`
+/// while hit-testing). One rectangle, one frame.
+const ZOOM_PILL: Rect = Rect::new(296, 994, 128, 56);
+
+/// Half-extent of the disabled gallery-thumbnail and lens-flip squares in the
+/// dock. WHY they are never hit-tested: see the dock drawing below.
+const DOCK_SIDEBTN_HALF: usize = 36;
+
+/// Whether a touch at (dx, dy) from the shutter centre is on the shutter.
+///
+/// WHY derived from the drawn radii rather than a hand-written box: the old hit
+/// test was `y 1220..1400 && x 280..440`, a rectangle that included 24px above
+/// and 26px below the painted ring and none of the dock beside it.
+fn shutter_hit(dx: isize, dy: isize) -> bool {
+    let r = SHUTTER_RING_OUTER as isize;
+    dx * dx + dy * dy <= r * r
+}
 
 // -----------------------------------------------------------------------------
 // Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')
@@ -298,44 +546,103 @@ fn test_gallery_icon(x: usize, y: usize, cx: usize, cy: usize) -> bool {
     false
 }
 
+/// The rounded-rect body of a top-row pill.
+///
+/// Returns `(fill, inset_x, inset_y)` when `(x, y)` is inside the pill, or `None`
+/// when it is outside - including the transparent corner pixels, exactly as the
+/// old inline test did. WHY a helper: those eight lines were copy-pasted into
+/// each of the four pill branches, so a change to the corner geometry had to be
+/// applied four times and one of them could be missed.
+#[inline(always)]
+fn top_pill_body(x: usize, y: usize, rect: Rect) -> Option<(u32, usize, usize)> {
+    if !rect.contains(x, y) {
+        return None;
+    }
+    let rx = (x - rect.x).min(rect.x + rect.w - 1 - x);
+    let ry = (y - rect.y).min(rect.y + rect.h - 1 - y);
+    let r = TOP_PILL_RADIUS as isize;
+    if (rx as isize) < r && (ry as isize) < r {
+        let dx = r - rx as isize;
+        let dy = r - ry as isize;
+        if dx * dx + dy * dy >= r * r {
+            return None;
+        }
+    }
+    Some((SURFACE_RAISED, rx, ry))
+}
+
+/// Draws a scale-1 label centred in `rect` at the top row's text row, or
+/// reports that this pixel is not part of the run.
+///
+/// WHY a helper: centring the run is `rect.x + (rect.w - measure) / 2`, and
+/// every top-row label needs it. Measuring per pixel is what the old code did
+/// inline four times; `measure` is a pure sum of advances, so this is cheap and
+/// it keeps the centring identical across all four.
+#[inline(always)]
+fn top_row_label(
+    x: usize,
+    y: usize,
+    rect: Rect,
+    label: &[u8],
+    color: u32,
+) -> Option<u32> {
+    let w = std::design::font::measure(label, 1);
+    if w > rect.w {
+        // WHY draw nothing rather than overflow: a label wider than its control
+        // would run into the next pill, and a truncated run would lie about the
+        // value. `PROBE` returns true for these strings.
+        return None;
+    }
+    let x0 = rect.x + (rect.w - w) / 2;
+    test_text(x, y, x0, TOP_ROW_TEXT_Y0, 1, label, color)
+}
+
+/// Draws a scale-1 label right of the flash pictogram.
+#[inline(always)]
+fn flash_label(x: usize, y: usize, label: &[u8], color: u32) -> Option<u32> {
+    let w = std::design::font::measure(label, 1);
+    if w > FLASH_TEXT_W {
+        return None;
+    }
+    let x0 = FLASH_TEXT_X + (FLASH_TEXT_W - w) / 2;
+    test_text(x, y, x0, TOP_ROW_TEXT_Y0, 1, label, color)
+}
+
 #[inline(never)]
 fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
     // 1. Status Bar & Top Controls (y: 0..110)
-    if y < 110 {
-        if y >= 108 {
+    if y < TOP_BAND_Y1 {
+        if y >= TOP_BAND_Y1 - 2 {
             return BORDER_SUBTLE;
         }
 
-        // Back button (<) at (x: 24..100, y: 28..68)
-        if x >= 24 && x < 100 && y >= 28 && y < 68 {
-            let center_x = 62;
-            let center_y = 48;
-            let dx = (x as isize - center_x as isize).abs();
-            let dy = (y as isize - center_y as isize).abs();
-            if (dx + dy <= 12 && x <= center_x)
-                || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
-            {
+        // Back control. WHY an outline measured from the rectangle's own edges
+        // instead of the old `dx + dy <= 12` stroke: that stroke's apex landed
+        // 22px right of the button's centre, so the glyph was not centred in the
+        // thing it labelled. The chevron is now centred on `BACK_RECT`, and the
+        // box is inset by one pixel so it is never clipped by `contains`.
+        if BACK_RECT.contains(x, y) {
+            let l = (x - BACK_RECT.x) as isize;
+            let r = (BACK_RECT.x + BACK_RECT.w - 1 - x) as isize;
+            let t = (y - BACK_RECT.y) as isize;
+            let b = (BACK_RECT.y + BACK_RECT.h - 1 - y) as isize;
+            let outline = l == 1 || r == 1 || t == 1 || b == 1;
+            let cx = BACK_RECT.x + BACK_RECT.w / 2;
+            let cy = BACK_RECT.y + BACK_RECT.h / 2;
+            let ddx = (x as isize - cx as isize).abs();
+            let ddy = (y as isize - cy as isize).abs();
+            let chevron = (x as isize) <= cx as isize && ddx + ddy <= 9;
+            if outline || chevron {
                 return TEXT_PRIMARY;
             }
             return SURFACE_RAISED;
         }
 
-        // Flash Mode Toggle Pill at (x: 130..250, y: 28..68)
-        // WHY scale 1: scale 2 line height is 48px against a 40px pill so it
-        // clips vertically, and TORCH measures 136px at scale 2 against ~76px
-        // of text room beside the bolt. Scale 1 inks rows 36..60 in 28..68.
-        if x >= 130 && x < 250 && y >= 28 && y < 68 {
-            let rx = (x - 130).min(249 - x);
-            let ry = (y - 28).min(67 - y);
-            if rx < 16 && ry < 16 {
-                let cdx = (16 - rx) as isize;
-                let cdy = (16 - ry) as isize;
-                if cdx * cdx + cdy * cdy >= 256 {
-                    return BG_DARK;
-                }
-            }
-
-            let is_lit = camera.flash_available && (camera.flash == FlashMode::Torch || camera.flash == FlashMode::On);
+        // Flash / torch pill. This is a real control: it issues
+        // `camera_toggle_flash` and reports what the backend answered.
+        if let Some((fill, rx, ry)) = top_pill_body(x, y, FLASH_RECT) {
+            let is_lit =
+                camera.flash_available && (camera.flash == FlashMode::Torch || camera.flash == FlashMode::On);
             let icon_color = if is_lit {
                 ACCENT_AMBER
             } else if !camera.flash_available {
@@ -344,77 +651,53 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                 TEXT_PRIMARY
             };
 
-            if test_lightning(x, y, 154, 48) {
+            if test_lightning(x, y, FLASH_ICON_CX, FLASH_ICON_CY) {
                 return icon_color;
             }
 
-            let label = if !camera.flash_available {
+            let label: &[u8] = if !camera.flash_available {
                 &b"OFF"[..]
             } else if is_lit {
                 &b"TORCH"[..]
             } else {
                 &b"AUTO"[..]
             };
-
-            let scale = 1usize;
-            let tw = std::design::font::measure(label, scale);
-            // Text room right of the bolt: 168..244 (76 wide). OFF=38,
-            // AUTO=53, TORCH=68 at scale 1, all fit; center honestly.
-            let tx0 = 168 + (76usize.saturating_sub(tw)) / 2;
-            if let Some(c) = test_text(x, y, tx0, 36, scale, label, icon_color) {
+            if let Some(c) = flash_label(x, y, label, icon_color) {
                 return c;
             }
 
             if rx < 2 || ry < 2 {
                 return if is_lit { ACCENT_AMBER } else { BORDER_SUBTLE };
             }
-            return SURFACE_RAISED;
+            return fill;
         }
 
-        // Mode Tag Pill at (x: 280..440, y: 28..68)
-        // WHY scale 1: "48MP PRO" measures 194px at scale 2 against a 160px
-        // pill (and 48px line height against 40px height). At scale 1 it is
-        // 97px, centered with 31px side padding; rows 36..60 fit in 28..68.
-        if x >= 280 && x < 440 && y >= 28 && y < 68 {
-            let rx = (x - 280).min(439 - x);
-            let ry = (y - 28).min(67 - y);
-            if rx < 16 && ry < 16 {
-                let cdx = (16 - rx) as isize;
-                let cdy = (16 - ry) as isize;
-                if cdx * cdx + cdy * cdy >= 256 {
-                    return BG_DARK;
-                }
-            }
-
-            let tag: &[u8] = b"48MP PRO";
-            let scale = 1usize;
-            let tw = std::design::font::measure(tag, scale);
-            let tx0 = 280 + (160usize.saturating_sub(tw)) / 2;
-            if let Some(c) = test_text(x, y, tx0, 36, scale, tag, ACCENT_SKY) {
+        // Capture geometry. WHY this is no longer "48MP PRO": that string
+        // advertised a resolution and a shooting mode the hardware never
+        // reported and this app can never produce, and it was painted as if it
+        // were a control. It now reports the frame the HAL actually returned -
+        // "NO SENSOR" when the kernel refused camera authority, "NO FRAME" until
+        // a capture succeeds, then the real `WxH`.
+        if let Some((_fill, rx, ry)) = top_pill_body(x, y, FRAME_RECT) {
+            let label = &camera.frame_label[..camera.frame_label_len];
+            // WHY muted ink and not `DISABLED`: this pill is a readout, not a
+            // control, and it has to stay legible - "NO SENSOR" is the answer to
+            // a question the user is asking. Only its outline is recessed, to
+            // signal that there is nothing to press.
+            let color = if camera.camera_authorised { ACCENT_SKY } else { TEXT_MUTED };
+            if let Some(c) = top_row_label(x, y, FRAME_RECT, label, color) {
                 return c;
             }
-
             if rx < 2 || ry < 2 {
-                return BORDER_SUBTLE;
+                return DISABLED;
             }
             return SURFACE_RAISED;
         }
 
-        // ISP Filter Toggle Pill at (x: 470..610, y: 28..68)
-        // WHY scale 1: CONTRAST measures 212px at scale 2 against a 140px
-        // pill. At scale 1 the longest filter (CONTRAST=106) fits with 17px
-        // side padding; rows 36..60 fit in 28..68. Label centered via measure.
-        if x >= 470 && x < 610 && y >= 28 && y < 68 {
-            let rx = (x - 470).min(609 - x);
-            let ry = (y - 28).min(67 - y);
-            if rx < 16 && ry < 16 {
-                let cdx = (16 - rx) as isize;
-                let cdy = (16 - ry) as isize;
-                if cdx * cdx + cdy * cdy >= 256 {
-                    return BG_DARK;
-                }
-            }
-
+        // ISP filter pill. This is a real control: the filter is applied in
+        // `apply_isp_tone_curve` to the captured buffer, so selecting one
+        // changes what the next capture is tone-mapped with.
+        if let Some((fill, rx, ry)) = top_pill_body(x, y, FILTER_RECT) {
             let (filter_name, filter_color) = match camera.filter {
                 CameraFilter::Normal => (&b"NORMAL"[..], ACCENT_SKY),
                 CameraFilter::Monochrome => (&b"MONO"[..], TEXT_MUTED),
@@ -422,44 +705,25 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                 CameraFilter::Sepia => (&b"SEPIA"[..], ACCENT_AMBER),
                 CameraFilter::NeuralHeatmap => (&b"HEATMAP"[..], DANGER_CRIMSON),
             };
-
-            let scale = 1usize;
-            let tw = std::design::font::measure(filter_name, scale);
-            let label_x = 470 + (140usize.saturating_sub(tw)) / 2;
-            if let Some(c) = test_text(x, y, label_x, 36, scale, filter_name, filter_color) {
+            if let Some(c) = top_row_label(x, y, FILTER_RECT, filter_name, filter_color) {
                 return c;
             }
-
             if rx < 2 || ry < 2 {
                 return filter_color;
             }
-            return SURFACE_RAISED;
+            return fill;
         }
 
-        // NPU Vision AI Badge at (x: 630..696, y: 28..68)
-        // WHY scale 1 with the rest of the row: scale 2 line height (48px)
-        // never fits a 40px pill vertically. "AI" is 20px at scale 1,
-        // centered with 23px side padding; rows 36..60 fit in 28..68.
-        // Badge ends at 696, leaving a 24px right margin to 720: no clipping.
-        if x >= 630 && x < 696 && y >= 28 && y < 68 {
-            let rx = (x - 630).min(695 - x);
-            let ry = (y - 28).min(67 - y);
-            if rx < 16 && ry < 16 {
-                let cdx = (16 - rx) as isize;
-                let cdy = (16 - ry) as isize;
-                if cdx * cdx + cdy * cdy >= 256 {
-                    return BG_DARK;
-                }
-            }
-
-            let badge: &[u8] = b"AI";
-            let scale = 1usize;
-            let tw = std::design::font::measure(badge, scale);
-            let tx0 = 630 + (66usize.saturating_sub(tw)) / 2;
-            if let Some(c) = test_text(x, y, tx0, 36, scale, badge, SUCCESS_EMERALD) {
+        // Capture counter. WHY this is no longer a green "AI" badge: "AI"
+        // asserted a running neural-vision pipeline that this app does not have
+        // - it forwards nothing to any inference broker, and no such service is
+        // bound to it. The badge now reports `total_photos`, a counter that only
+        // advances when `camera_capture` actually returned a frame.
+        if let Some((_fill, rx, ry)) = top_pill_body(x, y, SHOTS_RECT) {
+            let label = &camera.shots_label[..camera.shots_label_len];
+            if let Some(c) = top_row_label(x, y, SHOTS_RECT, label, SUCCESS_EMERALD) {
                 return c;
             }
-
             if rx < 2 || ry < 2 {
                 return SUCCESS_EMERALD;
             }
@@ -469,9 +733,9 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         return BG_DARK;
     }
 
-    // 2. Viewfinder Canvas (y: 120..1120, x: 20..700)
-    if (120..1120).contains(&y) && x >= 20 && x < W - 20 {
-        let rel_y = y - 120;
+    // 2. Viewfinder Canvas (y: VIEWFINDER_Y0..VIEWFINDER_Y1, x: 20..700)
+    if (VIEWFINDER_Y0..VIEWFINDER_Y1).contains(&y) && x >= 20 && x < W - 20 {
+        let rel_y = y - VIEWFINDER_Y0;
         let rel_x = x - 20;
 
         // WHY no live-feed chrome without a frame: framing brackets, a thirds
@@ -537,16 +801,16 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         }
 
         // Zoom pill, fully inside the viewfinder: abs x 296..424, abs y
-        // 994..1050 (rel_x 276..404, rel_y 874..930). The old pill sat at abs
-        // y 1080..1130 with text rows 1098..1146, so its bottom 10px spilled
-        // past the 1120 viewfinder edge and its descenders clipped at 1130;
-        // on-device it read as half-covered by the control strip. This pill
-        // ends 70px above the viewfinder edge and 100px above the 1150 mode
-        // strip, so it can never be covered. "1.0x" measures 78px at scale 2
-        // against 128px width; rows 998..1046 fit in 994..1050.
-        if (874..930).contains(&rel_y) && (276..404).contains(&rel_x) {
-            let rx = (rel_x - 276).min(403 - rel_x);
-            let ry = (rel_y - 874).min(929 - rel_y);
+        // 994..1050. The old pill sat at abs y 1080..1130 with text rows
+        // 1098..1146, so its bottom 10px spilled past the viewfinder edge and
+        // its descenders clipped at 1130; on-device it read as half-covered by
+        // the control strip. This pill ends 70px above the viewfinder edge and
+        // 100px above the mode strip, so it can never be covered.
+        if ZOOM_PILL.contains(x, y) {
+            let rel_zx = x - ZOOM_PILL.x;
+            let rel_zy = y - ZOOM_PILL.y;
+            let rx = rel_zx.min(ZOOM_PILL.w - 1 - rel_zx);
+            let ry = rel_zy.min(ZOOM_PILL.h - 1 - rel_zy);
             if rx < 18 && ry < 18 {
                 let cdx = (18 - rx) as isize;
                 let cdy = (18 - ry) as isize;
@@ -563,9 +827,12 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
 
             let scale = 2usize;
             let tw = std::design::font::measure(zoom_str, scale);
-            let tx0 = 296 + (128usize.saturating_sub(tw)) / 2;
-            // y0 = 994 + (56 - 48) / 2 = 998
-            if let Some(c) = test_text(x, y, tx0, 998, scale, zoom_str, TEXT_PRIMARY) {
+            let tx0 = ZOOM_PILL.x + (ZOOM_PILL.w.saturating_sub(tw)) / 2;
+            // WHY derived: a scale-2 run is 48 rows tall and the pill is 56, so
+            // the run owns the pill minus 4 rows top and bottom. Hard-coding 998
+            // is what let the previous pill's descenders clip.
+            let ty0 = ZOOM_PILL.y + (ZOOM_PILL.h - 48) / 2;
+            if let Some(c) = test_text(x, y, tx0, ty0, scale, zoom_str, TEXT_PRIMARY) {
                 return c;
             }
 
@@ -595,7 +862,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
     // VIDEO=118 (528..646); gaps 49px/100px, never overlapping. Step-down:
     // try scale 2, drop the whole row to scale 1 if any label misses its
     // slot; never truncate mid-word. y0 centers the line height in the strip.
-    if (1150..1200).contains(&y) {
+    if (MODE_STRIP_Y0..MODE_STRIP_Y1).contains(&y) {
         const S0_X: usize = 20;
         const S0_W: usize = 226;
         const S1_X: usize = 247;
@@ -614,9 +881,9 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             scale = 1;
         }
         let lh = std::design::font::line_height(scale);
-        // Strip is 50px tall: y0 = 1150 + (50 - lh) / 2 -> 1151 at scale 2
-        // (inks 1151..1199 inside 1150..1200), 1163 at scale 1.
-        let y0 = 1150 + (50usize.saturating_sub(lh)) / 2;
+        // Strip is 50px tall: y0 = MODE_STRIP_Y0 + (50 - lh) / 2 -> 1151 at
+        // scale 2 (inks 1151..1199 inside 1150..1200), 1163 at scale 1.
+        let y0 = MODE_STRIP_Y0 + (50usize.saturating_sub(lh)) / 2;
 
         // Document (slot 0)
         let is_doc = camera.mode == CameraMode::DocumentVision;
@@ -660,39 +927,55 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         return BG_DARK;
     }
 
-    // 4. Bottom Shutter Dock & Hardware Controls (y: 1210..1440)
-    if (1210..1410).contains(&y) {
-        // Left Gallery Thumbnail Card at (110, 1310)
+    // 4. Bottom Shutter Dock & Hardware Controls (y: DOCK_Y0..DOCK_Y1)
+    if (DOCK_Y0..DOCK_Y1 - 30).contains(&y) {
+        // Left gallery thumbnail. WHY drawn recessed and never hit-tested:
+        // nothing behind it exists to open. The camera HAL exposes no photo roll
+        // and this task holds no media index, so the old amber landscape glyph
+        // promised a library that cannot be listed and the old hit handler had
+        // no branch for it at all - a control that looks live and does nothing.
         let thumb_dx = (x as isize - 110).abs();
-        let thumb_dy = (y as isize - 1310).abs();
-        if thumb_dx <= 36 && thumb_dy <= 36 {
-            if test_gallery_icon(x, y, 110, 1310) {
-                return ACCENT_AMBER;
+        let thumb_dy = (y as isize - SHUTTER_CY as isize).abs();
+        if thumb_dx <= DOCK_SIDEBTN_HALF as isize && thumb_dy <= DOCK_SIDEBTN_HALF as isize {
+            // WHY muted rather than `DISABLED` here: an icon painted in the
+            // hairline token against a #25282A card is nearly invisible, which
+            // is the same defect as the invisible exit hotspot this app's file
+            // manager had. Visible-but-inert is the honest middle.
+            if test_gallery_icon(x, y, 110, SHUTTER_CY) {
+                return TEXT_MUTED;
             }
-            if thumb_dx == 36 || thumb_dy == 36 {
+            if thumb_dx == DOCK_SIDEBTN_HALF as isize || thumb_dy == DOCK_SIDEBTN_HALF as isize {
                 return BORDER_SUBTLE;
             }
             return SURFACE_RAISED;
         }
 
-        // Center Shutter Button at (360, 1310)
-        let sc_x = 360;
-        let sc_y = 1310;
-        let dx = x as isize - sc_x as isize;
-        let dy = y as isize - sc_y as isize;
+        // Center Shutter Button. WHY the disabled treatment: `camera_capture` is
+        // refused with PermissionDenied unless the task holds `SystemControl` on
+        // the camera service object or `HardwarePortIo` on port 0xCA00, and this
+        // task is spawned with neither. Painting the full-brightness ring and
+        // core made a button that provably cannot capture look armed.
+        let dx = x as isize - SHUTTER_CX as isize;
+        let dy = y as isize - SHUTTER_CY as isize;
         let dist_sq = dx * dx + dy * dy;
 
-        // Outer white metallic ring (radius 56..64)
-        if dist_sq <= 64 * 64 && dist_sq >= 56 * 56 {
-            return TEXT_PRIMARY;
+        let outer = (SHUTTER_RING_OUTER * SHUTTER_RING_OUTER) as isize;
+        let inner = (SHUTTER_RING_INNER * SHUTTER_RING_INNER) as isize;
+        let core = (SHUTTER_R_CORE * SHUTTER_R_CORE) as isize;
+
+        // Outer metallic ring.
+        if dist_sq <= outer && dist_sq >= inner {
+            return if camera.camera_authorised { TEXT_PRIMARY } else { DISABLED };
         }
-        // Concentric track gap (radius 48..56)
-        if dist_sq < 56 * 56 && dist_sq >= 48 * 48 {
+        // Concentric track gap.
+        if dist_sq < inner && dist_sq >= core {
             return BG_DARK;
         }
-        // Inner tactile shutter core (radius < 48)
-        if dist_sq < 48 * 48 {
-            if camera.mode == CameraMode::Video {
+        // Inner tactile shutter core.
+        if dist_sq < core {
+            if !camera.camera_authorised {
+                return SURFACE_RAISED;
+            } else if camera.mode == CameraMode::Video {
                 return DANGER_CRIMSON;
             } else if camera.mode == CameraMode::DocumentVision {
                 return ACCENT_SKY;
@@ -701,13 +984,17 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             }
         }
 
-        // Right Lens Flip Button at (610, 1310)
+        // Right Lens Flip Button. WHY drawn recessed and never hit-tested: the
+        // camera HAL exposes `capture_frame` and nothing that selects between a
+        // front and a rear sensor, so there is no lens to flip. The old handler
+        // played a haptic click and changed no state - a control that looked
+        // armed and only pretended to.
         let flip_dx = (x as isize - 610).abs();
-        let flip_dy = (y as isize - 1310).abs();
+        let flip_dy = (y as isize - SHUTTER_CY as isize).abs();
         let flip_r2 = flip_dx * flip_dx + flip_dy * flip_dy;
-        if flip_r2 <= 32 * 32 {
-            if test_flip_arrows(x, y, 610, 1310) {
-                return TEXT_PRIMARY;
+        if flip_r2 <= (DOCK_SIDEBTN_HALF * DOCK_SIDEBTN_HALF) as isize {
+            if test_flip_arrows(x, y, 610, SHUTTER_CY) {
+                return TEXT_MUTED;
             }
             if flip_r2 >= 30 * 30 {
                 return BORDER_SUBTLE;
@@ -719,7 +1006,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
     }
 
     // Home gesture bar at bottom
-    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
+    if HOME_PILL.contains(x, y) {
         return TEXT_MUTED;
     }
 
@@ -727,15 +1014,29 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
 }
 
 fn render_camera_ui(surface: u32, camera: &CameraApp) {
-    let mut chunk = [0u32; CHUNK];
-    let total = W * H;
-    let mut offset = 0;
+    render_camera_band(surface, camera, 0, H);
+}
 
-    while offset < total {
-        let count = (total - offset).min(CHUNK);
+/// Re-rasterises and writes only rows `y0..y1`.
+///
+/// WHY a band and not a rectangle: a row of the surface is one contiguous run in
+/// the surface buffer, so `offset = y0 * W` writes a whole band with no stride
+/// bookkeeping. Every band starts on a row boundary, so the running `x`/`y`
+/// cursor below is exact.
+///
+/// WHY this is correct rather than a shortcut: the band is named after what the
+/// touch actually moved (see `Dirty`), and every row outside it is correct
+/// because nothing about it changed. The old renderer re-rasterised all
+/// 1,036,800 pixels on every touch event, including touches that changed no
+/// state at all.
+fn render_camera_band(surface: u32, camera: &CameraApp, y0: usize, y1: usize) {
+    let mut chunk = [0u32; CHUNK];
+    let mut offset = y0 * W;
+    let end = y1.min(H) * W;
+    while offset < end {
+        let count = (end - offset).min(CHUNK);
         let mut x = offset % W;
         let mut y = offset / W;
-
         for i in 0..count {
             chunk[i] = get_camera_pixel(x, y, camera);
             x += 1;
@@ -744,33 +1045,84 @@ fn render_camera_ui(surface: u32, camera: &CameraApp) {
                 y += 1;
             }
         }
-
         let _ = std::surface_write(6, surface, offset, &chunk[..count]);
         offset += count;
     }
 }
 
-/// Returns true if app should exit back to Launcher.
-fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> bool {
+/// Which rows of the surface a touch actually changed.
+///
+/// WHY this exists: the old loop rendered the whole surface after every tap and
+/// flipped it, whether the tap had changed the flash state, the ISP filter, the
+/// mode or nothing at all. Naming the region lets a tap that changes one pill
+/// cost one band.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dirty {
+    /// Nothing moved; the surface is already correct, so do not render at all.
+    None,
+    /// Flash or ISP filter changed: the top control row only.
+    TopRow,
+    /// Zoom changed: only the viewfinder canvas.
+    Viewfinder,
+    /// More than one band moved: the whole surface.
+    ///
+    /// WHY there is no `ModeStrip` variant even though the strip is one band:
+    /// `mode` is read twice - by the carousel's label colour *and* by the shutter
+    /// core's fill - so no single band covers it. Naming a band that would
+    /// leave half the change stale is worse than naming none.
+    All,
+}
+
+/// Grow a dirty region so one rendered frame covers everything a poll batch
+/// changed.
+///
+/// WHY: `event_poll` can deliver several touches before the app is scheduled
+/// again; rendering only the last region would leave the earlier one stale.
+impl Dirty {
+    fn widen(self, other: Dirty) -> Dirty {
+        match (self, other) {
+            (Dirty::None, d) | (d, Dirty::None) => d,
+            (a, b) if a == b => a,
+            _ => Dirty::All,
+        }
+    }
+}
+
+enum Tap {
+    /// Nothing on screen moved.
+    None,
+    /// The model moved; render the named region.
+    Redraw(Dirty),
+    /// Leave to the launcher, logging this exact reason first.
+    Leave(&'static str),
+}
+
+fn exit_to_launcher(surface: u32) -> ! {
+    if surface > 0 {
+        let _ = std::surface_destroy(6, surface);
+    }
+    std::exit_with_code(0);
+}
+
+fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> Tap {
     let x = x as usize;
     let y = y as usize;
 
-    // 1. Back button in header or Home gesture bar: exit to Launcher
-    if (x >= 24 && x < 100 && y >= 28 && y < 68) || (x >= 240 && x <= 480 && y >= 1400) {
-        std::log(
-            0,
-            "[CAMERA] Back button or home gesture pressed. Exiting to launcher.",
-        )
-        .ok();
-        return true;
+    // 1. Back control or the home gesture strip: exit to the Launcher.
+    // WHY the named rectangles: the old test was `x 24..100 && y 28..68 ||
+    // x 240..480 && y >= 1400`, a second transcription of the header's geometry
+    // with no upper bound on y.
+    if BACK_RECT.contains(x, y) || HOME_HIT.contains(x, y) {
+        return Tap::Leave("[CAMERA] Back control or home gesture pressed. Exiting to launcher.");
     }
 
-    // 2. Flash mode toggle pill
-    if x >= 130 && x < 250 && y >= 28 && y < 68 {
-        // WHY: the flash pill previously advanced the local mode and then
-        // discarded the `Err` from camera_toggle_flash, so the UI showed the next
-        // flash mode (ending in a lit Torch) even though the backend refused the
-        // request. Report the real outcome and keep the pill fail-closed.
+    // 2. Flash mode toggle pill - a real control, backed by `camera_toggle_flash`.
+    //
+    // WHY: the flash pill previously advanced the local mode and then
+    // discarded the `Err` from camera_toggle_flash, so the UI showed the next
+    // flash mode (ending in a lit Torch) even though the backend refused the
+    // request. Report the real outcome and keep the pill fail-closed.
+    if FLASH_RECT.contains(x, y) {
         match camera.toggle_flash() {
             Some(on) => {
                 std::log(
@@ -792,11 +1144,13 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> bool {
             }
         }
         let _ = std::audio_haptic_click();
-        return false;
+        return Tap::Redraw(Dirty::TopRow);
     }
 
-    // 3. ISP filter toggle pill
-    if x >= 470 && x < 610 && y >= 28 && y < 68 {
+    // 3. ISP filter toggle pill - a real control: `apply_isp_tone_curve` applies
+    //    the selected filter to the captured buffer, so it changes the next
+    //    capture rather than only a label.
+    if FILTER_RECT.contains(x, y) {
         camera.filter = match camera.filter {
             CameraFilter::Normal => CameraFilter::Monochrome,
             CameraFilter::Monochrome => CameraFilter::HighContrast,
@@ -805,23 +1159,25 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> bool {
             CameraFilter::NeuralHeatmap => CameraFilter::Normal,
         };
         std::audio_haptic_click().ok();
-        return false;
+        return Tap::Redraw(Dirty::TopRow);
     }
 
-    // 4. Zoom toggle pill in viewfinder (matches render: 296..424, 994..1050)
-    if (994..1050).contains(&y) && (296..424).contains(&x) {
+    // 4. Zoom toggle pill in viewfinder. WHY the shared rectangle: the old test
+    //    re-spelled the pill's coordinates in surface space while the renderer
+    //    spelled them in viewfinder-relative space, so the two could disagree.
+    if ZOOM_PILL.contains(x, y) {
         camera.zoom_x10 = match camera.zoom_x10 {
             10 => 20,
             20 => 50,
             _ => 10,
         };
         std::audio_haptic_click().ok();
-        return false;
+        return Tap::Redraw(Dirty::Viewfinder);
     }
 
-    // 5. Mode Selector Carousel (1150..1200): three equal 226px slots in
-    // 20..700, matching the render slots exactly (50px tall, >=48).
-    if (1150..1200).contains(&y) {
+    // 5. Mode Selector Carousel: three equal 226px slots in 20..700, matching the
+    //    render slots exactly (50px tall, >=48).
+    if (MODE_STRIP_Y0..MODE_STRIP_Y1).contains(&y) {
         if x >= 20 && x < 246 {
             camera.mode = CameraMode::DocumentVision;
             std::log(0, "[CAMERA APP] Switched to Document Vision mode.").ok();
@@ -833,28 +1189,60 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> bool {
             std::log(0, "[CAMERA APP] Switched to Video mode.").ok();
         }
         std::audio_haptic_click().ok();
-        return false;
+        // WHY the whole surface and not just the strip: `mode` is read in two
+        // places - the mode carousel's label colour and the shutter core's fill
+        // (crimson for Video, sky for Document). Rendering only the strip left
+        // the shutter painted in the previous mode's colour, which is exactly
+        // the class of bug banding is supposed to prevent.
+        return Tap::Redraw(Dirty::All);
     }
 
-    // 6. Shutter Button: (360, 1310)
-    if (1220..1400).contains(&y) && (280..440).contains(&x) {
-        if camera.mode == CameraMode::Video {
-            let _ = camera.stream_video_frame();
-        } else {
-            let _ = camera.capture_still_photo();
+    // 6. Shutter Button. WHY gated on the authority probe: the shutter is drawn
+    //    recessed when the kernel refused camera authority, and a recessed
+    //    control that still fired would be the dead affordance again. WHY the
+    //    circle test: it is derived from the radii the renderer draws, where the
+    //    old rectangle included 24px above and 26px below the painted ring.
+    if shutter_hit(x as isize - SHUTTER_CX as isize, y as isize - SHUTTER_CY as isize) {
+        if !camera.camera_authorised {
+            std::log(
+                0,
+                "[CAMERA APP] Shutter unavailable: the kernel refused camera authority for this task.",
+            )
+            .ok();
+            return Tap::None;
         }
-        return false;
+        // WHY report the real outcome: `let _ =` here discarded the refusal, so a
+        // press that captured nothing was indistinguishable from one that did.
+        // The two attempts return different `Ok` types (`u64` frame id, `u32`
+        // shot count), so both are folded to a unit `Ok` and the real `Err` code
+        // is carried through untouched - it is the kernel's answer, never a
+        // constant written here.
+        let outcome: Result<(), i64> = if camera.mode == CameraMode::Video {
+            camera.stream_video_frame().map(|_| ())
+        } else {
+            camera.capture_still_photo().map(|_| ())
+        };
+        match outcome {
+            Ok(()) => return Tap::Redraw(Dirty::All),
+            Err(code) => {
+                let mut buf = [0u8; 32];
+                let prefix = b"[CAMERA APP] Capture refused, code -";
+                let p = prefix.len().min(buf.len());
+                buf[..p].copy_from_slice(&prefix[..p]);
+                let n = p + fmt_u32(code.unsigned_abs() as u32, &mut buf[p..]);
+                if let Ok(msg) = core::str::from_utf8(&buf[..n]) {
+                    std::log(0, msg).ok();
+                }
+                return Tap::None;
+            }
+        }
     }
 
-    // 7. Lens Flip Button: (610, 1310)
-    let flip_dx = (x as isize - 610).abs();
-    let flip_dy = (y as isize - 1310).abs();
-    if flip_dx <= 36 && flip_dy <= 36 {
-        std::audio_haptic_click().ok();
-        return false;
-    }
-
-    false
+    // The dock's gallery thumbnail and lens-flip square are painted recessed and
+    // are deliberately not hit-tested: there is no photo roll to open and no
+    // lens selector to flip, and the old lens branch answered a tap with a
+    // haptic click and no state change at all.
+    Tap::None
 }
 
 #[no_mangle]
@@ -867,8 +1255,27 @@ pub extern "C" fn _start() -> ! {
 
     let mut camera = CameraApp::new();
 
-    // Camera starts in Photo mode without capturing or changing hardware state.
-    // Capture, mode changes and flash controls are driven only by user input.
+    // Ask the kernel whether this task may drive a camera at all.
+    //
+    // WHY before the first frame: the shutter, the capture-geometry readout and
+    // the flash pill are all drawn from this answer, so the very first presented
+    // frame already tells the truth. The probe is a read-only autofocus query
+    // and changes no hardware state, which the comment above this line used to
+    // guarantee for the whole app.
+    camera.probe_camera_authority();
+    if camera.camera_authorised {
+        std::log(
+            0,
+            "[CAMERA APP] Kernel granted camera authority; capture controls are armed.",
+        )
+        .ok();
+    } else {
+        std::log(
+            0,
+            "[CAMERA APP] Kernel refused camera authority for this task; capture controls are shown unavailable.",
+        )
+        .ok();
+    }
 
     // Allocate dedicated KMS Client Surface (z=200)
     std::log(
@@ -906,8 +1313,18 @@ pub extern "C" fn _start() -> ! {
         if let Ok(events) = std::event_poll(std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK, 100) {
             if (events & std::EVENT_TIMER_TICK) != 0 {
                 if camera.mode == CameraMode::Video {
+                    // WHY only redraw when a frame actually arrived: the old
+                    // loop flipped the surface on every 100-tick timer event
+                    // whether or not anything changed, which spent scanout
+                    // bandwidth redisplaying an identical viewfinder. The
+                    // counter only moves when `stream_video_frame` succeeds, so
+                    // comparing it is a real "did the canvas move" test.
+                    let before = camera.total_video_frames;
                     let _ = camera.stream_video_frame();
-                    let _ = std::surface_flip(6);
+                    if camera.total_video_frames != before {
+                        render_camera_band(surface, &camera, VIEWFINDER_Y0, VIEWFINDER_Y1);
+                        let _ = std::surface_flip(6);
+                    }
                 }
             }
 
@@ -920,6 +1337,7 @@ pub extern "C" fn _start() -> ! {
                     dy: 0,
                     scale_milli: 1000,
                 };
+                let mut dirty = Dirty::None;
                 while std::input_event_poll(&mut input).is_ok() {
                     if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
                         std::log(
@@ -927,23 +1345,34 @@ pub extern "C" fn _start() -> ! {
                             "[CAMERA APP] Navigation gesture recognized. Returning to launcher.",
                         )
                         .ok();
-                        if surface > 0 {
-                            let _ = std::surface_destroy(6, surface);
-                        }
-                        std::log(0, "[CAMERA APP] Requesting exit...").ok();
-                        std::exit_with_code(0);
+                        exit_to_launcher(surface);
                     }
                     if input.kind == 1 {
-                        if handle_camera_touch(&mut camera, input.x, input.y) {
-                            if surface > 0 {
-                                let _ = std::surface_destroy(6, surface);
+                        match handle_camera_touch(&mut camera, input.x, input.y) {
+                            Tap::Leave(msg) => {
+                                std::log(0, msg).ok();
+                                exit_to_launcher(surface);
                             }
-                            std::log(0, "[CAMERA APP] Requesting exit...").ok();
-                            std::exit_with_code(0);
+                            Tap::Redraw(d) => dirty = dirty.widen(d),
+                            Tap::None => {}
                         }
-                        render_camera_ui(surface, &camera);
-                        let _ = std::surface_flip(6);
                     }
+                }
+                if dirty != Dirty::None {
+                    match dirty {
+                        Dirty::TopRow => {
+                            render_camera_band(surface, &camera, TOP_BAND_Y0, TOP_BAND_Y1)
+                        }
+                        Dirty::Viewfinder => render_camera_band(
+                            surface,
+                            &camera,
+                            VIEWFINDER_Y0,
+                            VIEWFINDER_Y1,
+                        ),
+                        Dirty::All => render_camera_ui(surface, &camera),
+                        Dirty::None => {}
+                    }
+                    let _ = std::surface_flip(6);
                 }
             }
         }

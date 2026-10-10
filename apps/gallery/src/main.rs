@@ -7,9 +7,15 @@
 //! - Cells only ever render records from the real `PHOTOS` ledger; with an empty
 //!   ledger the band shows the design-system honest empty state, never filler tiles
 //! - Full-screen photo inspection view (light themed) driven by a ledger record
-//! - Segmented filter tabs (All / Albums / Favorites) and a bottom navigation bar
+//! - Segmented filter chips (All / Albums / Favorites) and a bottom section bar,
+//!   both drawn in an explicitly unavailable treatment because this build binds
+//!   no media index, no album map and no place map - see `filters_available`
+//! - Every drawn affordance and its hit region come from the same `Rect`, so a
+//!   tap is accepted exactly where something is painted
 //! - Every string is measured with `interos_std::design::font::measure` /
 //!   `ellipsize` at the coordinates it is drawn at, so text never clips or overlaps
+//! - Banded rendering (`render_gallery_band`): only the rows an input actually
+//!   dirtied are re-rasterised, instead of all 1,036,800 pixels on every event
 //! - Asynchronous event reactor loop, graceful lifecycle supervision and clean
 //!   return to the Launcher
 
@@ -20,6 +26,9 @@ use core::panic::PanicInfo;
 use interos_std as std;
 use std::design::font;
 use std::design::primitives::{draw_pill, draw_rounded_rect, Rect};
+use std::design::radius;
+use std::design::spacing;
+use std::design::touch;
 
 const W: usize = 720;
 const H: usize = 1440;
@@ -70,10 +79,28 @@ const NAV_Y1: usize = 1400;
 const NAV_ICON_CY: usize = 1330;
 const NAV_LABEL_Y: usize = 1356;
 
-const HOME_X0: usize = 240;
-const HOME_X1: usize = 480;
-const HOME_Y0: usize = 1418;
-const HOME_Y1: usize = 1424;
+/// The system home indicator: a 200x6 pill drawn inside the 240x40 gesture
+/// strip that the tap handler accepts.
+///
+/// WHY two rectangles and not one: the drawn indicator is 6px of ink, which is
+/// not a touch target, so the hit box has to be the whole strip - but the strip
+/// itself has to be a rectangle that is actually painted, otherwise the tap
+/// region drifts. The old code tested `x 240..480 && y >= 1400` with no upper
+/// bound on y, a 241x40px region that nothing ever drew, so a tap 18 rows above
+/// the indicator exited the app. Both rectangles live here, so the strip that is
+/// hit-tested is the strip that contains the ink.
+const HOME_HIT: Rect = Rect::new(240, 1400, 240, 40);
+const HOME_PILL: Rect = Rect::new(260, 1418, 200, 6);
+
+/// Rows the filter-chip band owns.
+///
+/// WHY exactly the drawn pill band: `pill_pixel` returns `None` outside
+/// `PILL_Y..PILL_Y + PILL_H`, and every run of text inside it is gated on its
+/// own measured line box, which is inside the pill. No other row can hold a
+/// pixel of this control, so widening the band would re-rasterise rows that
+/// cannot have changed.
+const FILTER_BAND_Y0: usize = PILL_Y;
+const FILTER_BAND_Y1: usize = PILL_Y + PILL_H;
 
 // Inspection view geometry.
 const DETAIL_BAR_H: usize = 112;
@@ -167,9 +194,40 @@ fn has_no_media() -> bool {
     PHOTOS.is_empty()
 }
 
+/// Whether the segmented filter chips can select anything at all.
+///
+/// WHY derived from the ledger and not a hand-set flag: `PHOTOS` is this app's
+/// only media source, and it is filled from real storage. An empty ledger means
+/// there is also no album map and no favourites map behind the row, so `Albums`
+/// and `Favorites` could only ever select the same empty set as `All`. The old
+/// build drew all three chips in the live style and let a tap repaint one of
+/// them, which is a control that looks live and changes nothing a user can see
+/// below it. When this returns false the chips are drawn recessed and are not
+/// hit-tested; when it returns true they are live segmented filters again.
+#[inline]
+fn filters_available() -> bool {
+    !PHOTOS.is_empty()
+}
+
+/// How many bottom-bar destinations this build can actually reach.
+///
+/// WHY 1 and not 3: nothing bound to this app returns an album list or a place
+/// list - the VFS exposes no such index and the platform binds no service that
+/// does - so `Albums` and `Places` had no screen behind them. The old bar let a
+/// tap change a label's ink and called that navigation. Entries at or past this
+/// index are drawn recessed and are not hit-tested.
+const REAL_SECTIONS: usize = 1;
+
+/// Ink for an affordance that is painted but has no capability behind it.
+///
+/// WHY the border tone and not a grey invented here: it is the design system's
+/// own hairline, so an unavailable control reads as recessed chrome against both
+/// the page fill and a card, and it stays in step with the rest of the shell if
+/// the hairline token ever moves.
+const DISABLED: u32 = BORDER;
+
 pub struct GalleryApp {
     pub selected_tab: usize, // 0: All, 1: Albums, 2: Favorites
-    pub bottom_nav: usize,   // 0: Photos, 1: Albums, 2: Places
     pub inspecting_photo: Option<usize>,
 }
 
@@ -177,7 +235,6 @@ impl GalleryApp {
     pub const fn new() -> Self {
         Self {
             selected_tab: 0,
-            bottom_nav: 0,
             inspecting_photo: None,
         }
     }
@@ -304,27 +361,31 @@ fn pill_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
     if y < PILL_Y || y >= PILL_Y + PILL_H {
         return None;
     }
+    let available = filters_available();
     for (i, label) in PILL_LABELS.iter().enumerate() {
         let rect = pill_rect(i);
         if !rect.contains(x, y) {
             continue;
         }
-        let active = app.selected_tab == i;
-        let fill = if active { TEXT } else { SOFT };
-        let shape = draw_pill(
-            x,
-            y,
-            rect,
-            fill,
-            if active { None } else { Some(BORDER) },
-        )?;
+        // WHY the three-way treatment: an available row keeps the live
+        // segmented-control grammar (filled = selected, soft = at rest), and an
+        // unavailable row drops onto the page fill with a hairline and muted ink,
+        // which is how the rest of the shell paints something it cannot do.
+        // It is not hit-tested in that state, so the two agree.
+        let (fill, ink, border) = if !available {
+            (BG, MUTED, Some(BORDER))
+        } else if app.selected_tab == i {
+            (TEXT, INVERSE, None)
+        } else {
+            (SOFT, TEXT, Some(BORDER))
+        };
+        let shape = draw_pill(x, y, rect, fill, border)?;
         if shape != fill {
             return Some(shape);
         }
         let lw = font::measure(label, 2);
         let lx = rect.x + rect.w.saturating_sub(lw) / 2;
-        if let Some(c) = text(x, y, lx, PILL_Y, 2, label, if active { INVERSE } else { TEXT }, fill)
-        {
+        if let Some(c) = text(x, y, lx, PILL_Y, 2, label, ink, fill) {
             return Some(c);
         }
         return Some(fill);
@@ -374,6 +435,22 @@ fn grid_pixel(x: usize, y: usize, _app: &GalleryApp) -> Option<u32> {
         if let Some(c) = text_centered(x, y, MARGIN, 754, W - 2 * MARGIN, 1, note, MUTED, BG) {
             return Some(c);
         }
+        // WHY these two extra lines: they are the on-screen reason the filter
+        // chips above and the two extra section-bar entries below are painted
+        // recessed. Without them a user sees three chips and three tabs that do
+        // nothing and has no way to find out why. Each line is one measured
+        // caption on the row below the previous one (24px cells at 8px pitch),
+        // well clear of the pictogram above and the grid floor below.
+        let filters_note = b"Filters need a media index; none is bound.";
+        if let Some(c) = text_centered(x, y, MARGIN, 786, W - 2 * MARGIN, 1, filters_note, MUTED, BG)
+        {
+            return Some(c);
+        }
+        let sections_note = b"Albums and Places need their own index.";
+        if let Some(c) = text_centered(x, y, MARGIN, 818, W - 2 * MARGIN, 1, sections_note, MUTED, BG)
+        {
+            return Some(c);
+        }
         return Some(BG);
     }
 
@@ -402,9 +479,13 @@ fn grid_pixel(x: usize, y: usize, _app: &GalleryApp) -> Option<u32> {
 }
 
 // -----------------------------------------------------------------------------
-// Bottom navigation
+// Bottom section bar
 // -----------------------------------------------------------------------------
-fn nav_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
+/// WHY the bar takes no `&GalleryApp`: with `REAL_SECTIONS == 1` there is
+/// exactly one reachable destination, so a stored "selected tab" would always be
+/// 0 and would only pretend to be state. The bar marks where this screen is, and
+/// marks the destinations it cannot reach as recessed.
+fn nav_pixel(x: usize, y: usize) -> Option<u32> {
     if y < NAV_Y0 || y >= NAV_Y1 {
         return None;
     }
@@ -417,7 +498,10 @@ fn nav_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
             continue;
         }
         let cx = box_x0 + W / 6;
-        let color = if app.bottom_nav == i { TEXT } else { MUTED };
+        // WHY the hairline ink past the real destinations: it is the same token
+        // the unavailable filter chips use, so "painted but not actionable" looks
+        // identical wherever the user meets it.
+        let color = if i < REAL_SECTIONS { TEXT } else { DISABLED };
         let is_icon = match i {
             0 => tab_photos_icon(x, y, cx, NAV_ICON_CY),
             1 => tab_albums_icon(x, y, cx, NAV_ICON_CY),
@@ -447,6 +531,15 @@ fn nav_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
 // -----------------------------------------------------------------------------
 // Photo inspection view (light)
 // -----------------------------------------------------------------------------
+/// The inspection app bar's back control.
+///
+/// WHY a named constant: the old code wrote `Rect::new(MARGIN, 28, 56, 56)` in
+/// the renderer and again, literally, in the tap handler. Two copies of a
+/// geometry is two chances for the drawn pill and the hit box to disagree, and
+/// 56 is the shell's primary action target, so it is taken from the scale rather
+/// than retyped.
+const DETAIL_BACK: Rect = Rect::new(MARGIN, 28, touch::PRIMARY_ACTION, touch::PRIMARY_ACTION);
+
 fn detail_pixel(x: usize, y: usize, _app: &GalleryApp, idx: usize) -> u32 {
     let Some(photo) = PHOTOS.get(idx) else {
         return BG;
@@ -457,30 +550,39 @@ fn detail_pixel(x: usize, y: usize, _app: &GalleryApp, idx: usize) -> u32 {
         if y == DETAIL_BAR_H - 1 {
             return BORDER;
         }
-        let back = Rect::new(MARGIN, 28, 56, 56);
-        if let Some(c) = draw_pill(x, y, back, SOFT, Some(BORDER)) {
+        if let Some(c) = draw_pill(x, y, DETAIL_BACK, SOFT, Some(BORDER)) {
             if c != SOFT {
                 return c;
             }
-            if chevron_left(x, y, 52, 56, 12) {
+            // WHY the centre is derived, not typed: the chevron apex sits at the
+            // pill's left third and its vertical middle, both taken from
+            // `DETAIL_BACK`, so moving the pill cannot orphan the glyph.
+            let cx = DETAIL_BACK.x + DETAIL_BACK.w / 4;
+            let cy = DETAIL_BACK.y + DETAIL_BACK.h / 2;
+            if chevron_left(x, y, cx, cy, 12) {
                 return TEXT;
             }
             return SOFT;
         }
 
         let title = photo.title.as_bytes();
+        // WHY `DETAIL_BACK.x + DETAIL_BACK.w + spacing::GRID_16` rather than the
+        // literal 96: the run starts a fixed gap past the right edge of the
+        // control it sits beside, so the two cannot collide if the control moves.
+        let text_x = DETAIL_BACK.x + DETAIL_BACK.w + spacing::GRID_16;
+        let text_w = W - text_x - MARGIN;
         if y >= 28 && y < 28 + font::line_height(2) {
             let mut buf = [0u8; 48];
-            let n = font::ellipsize(title, 2, 580, &mut buf);
-            if let Some(c) = text(x, y, 96, 28, 2, &buf[..n], TEXT, SURFACE) {
+            let n = font::ellipsize(title, 2, text_w, &mut buf);
+            if let Some(c) = text(x, y, text_x, 28, 2, &buf[..n], TEXT, SURFACE) {
                 return c;
             }
         }
         let meta = photo.meta.as_bytes();
         if y >= 80 && y < 80 + font::line_height(1) {
             let mut buf = [0u8; 64];
-            let n = font::ellipsize(meta, 1, 580, &mut buf);
-            if let Some(c) = text(x, y, 96, 80, 1, &buf[..n], MUTED, SURFACE) {
+            let n = font::ellipsize(meta, 1, text_w, &mut buf);
+            if let Some(c) = text(x, y, text_x, 80, 1, &buf[..n], MUTED, SURFACE) {
                 return c;
             }
         }
@@ -493,7 +595,7 @@ fn detail_pixel(x: usize, y: usize, _app: &GalleryApp, idx: usize) -> u32 {
             x,
             y,
             Rect::new(MARGIN, DETAIL_VIEW_Y0, W - 2 * MARGIN, DETAIL_VIEW_Y1 - DETAIL_VIEW_Y0),
-            8,
+            radius::SMALL,
             0xFF000000,
             Some(BORDER),
             1,
@@ -516,16 +618,19 @@ fn detail_pixel(x: usize, y: usize, _app: &GalleryApp, idx: usize) -> u32 {
         }
         let label = b"Close";
         let lw = font::measure(label, 2);
-        let lx = CLOSE_X0 + (CLOSE_W - lw) / 2;
-        let ly = CLOSE_Y0 + (CLOSE_H - font::line_height(2)) / 2;
+        let lx = close.x + (close.w.saturating_sub(lw)) / 2;
+        // WHY the measured centring, kept: a 48px glyph cell inside a 56px pill
+        // is 4px of slack top and bottom; anything less and the descenders of
+        // the face clip against the pill edge.
+        let ly = close.y + (close.h.saturating_sub(font::line_height(2))) / 2;
         if let Some(c) = text(x, y, lx, ly, 2, label, TEXT, SOFT) {
             return c;
         }
         return SOFT;
     }
 
-    // Home gesture pill.
-    if y >= HOME_Y0 && y < HOME_Y1 && x >= 260 && x < 460 {
+    // Home gesture indicator.
+    if HOME_PILL.contains(x, y) {
         return MUTED;
     }
 
@@ -557,7 +662,7 @@ fn gallery_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
         return BG;
     }
 
-    // 2. Segmented filter tabs.
+    // 2. Segmented filter chips.
     if let Some(c) = pill_pixel(x, y, app) {
         return c;
     }
@@ -567,13 +672,13 @@ fn gallery_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
         return c;
     }
 
-    // 4. Bottom navigation bar.
-    if let Some(c) = nav_pixel(x, y, app) {
+    // 4. Bottom section bar.
+    if let Some(c) = nav_pixel(x, y) {
         return c;
     }
 
     // 5. Home gesture indicator.
-    if y >= HOME_Y0 && y < HOME_Y1 && x >= 260 && x < 460 {
+    if HOME_PILL.contains(x, y) {
         return MUTED;
     }
 
@@ -581,11 +686,26 @@ fn gallery_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
 }
 
 fn render_gallery_ui(surface: u32, app: &GalleryApp) {
+    render_gallery_band(surface, app, 0, H);
+}
+
+/// Re-rasterises and writes only rows `y0..y1`.
+///
+/// WHY a band and not a rectangle: a row of the surface is one contiguous run in
+/// the surface buffer, so `offset = y0 * W` writes a whole band with no stride
+/// bookkeeping. Every band starts on a row boundary, so the running `x`/`y`
+/// cursor below is exact.
+///
+/// WHY this is correct rather than a shortcut: the band is derived from what the
+/// input actually changed, and the pixels outside it are correct because nothing
+/// about them changed. The old renderer re-rasterised all 1,036,800 pixels on
+/// every event, so a tap that changed nothing cost a full-screen pass.
+fn render_gallery_band(surface: u32, app: &GalleryApp, y0: usize, y1: usize) {
     let mut chunk = [0u32; CHUNK];
-    let total = W * H;
-    let mut offset = 0;
-    while offset < total {
-        let count = (total - offset).min(CHUNK);
+    let mut offset = y0 * W;
+    let end = y1.min(H) * W;
+    while offset < end {
+        let count = (end - offset).min(CHUNK);
         let mut x = offset % W;
         let mut y = offset / W;
         for i in 0..count {
@@ -599,6 +719,130 @@ fn render_gallery_ui(surface: u32, app: &GalleryApp) {
         let _ = std::surface_write(6, surface, offset, &chunk[..count]);
         offset += count;
     }
+}
+
+// -----------------------------------------------------------------------------
+// Input handling. Every region below is hit-tested against the same `Rect` the
+// renderer drew, so a control is accepted exactly where it is painted.
+// -----------------------------------------------------------------------------
+
+/// Which rows of the surface an input actually changed.
+///
+/// WHY this exists: the old loop called `render_gallery_ui` from every branch
+/// that touched the model, which re-rasterised all 1,036,800 pixels - so a tap
+/// on an empty grid, or on one of the two destinations with nothing behind it,
+/// cost a full-screen pass to redraw an identical screen.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dirty {
+    /// Nothing changed; do not render at all.
+    None,
+    /// A filter chip was selected: only the chip row moved.
+    FilterRow,
+    /// A photo was opened in the inspection view: the whole screen is replaced.
+    All,
+}
+
+/// Grow a dirty region so one rendered frame covers everything a poll batch
+/// changed.
+///
+/// WHY: `event_poll` can deliver several taps before the app is scheduled again,
+/// and each of them reports its own band. Rendering only the last one would
+/// leave the earlier tap's pixels stale.
+impl Dirty {
+    fn widen(self, other: Dirty) -> Dirty {
+        match (self, other) {
+            (Dirty::None, d) | (d, Dirty::None) => d,
+            // Every non-`None` region is either the chip row or the whole screen,
+            // so anything combined with the screen stays the screen.
+            _ => Dirty::All,
+        }
+    }
+}
+
+enum Tap {
+    /// Nothing on screen moved; the surface is already correct.
+    None,
+    /// The model moved; render the named region.
+    Redraw(Dirty),
+    /// Leave to the launcher, logging this exact reason first.
+    Leave(&'static str),
+}
+
+fn exit_to_launcher(surface: u32) -> ! {
+    if surface > 0 {
+        let _ = std::surface_destroy(6, surface);
+    }
+    std::exit_with_code(0);
+}
+
+fn handle_tap(app: &mut GalleryApp, x: usize, y: usize) -> Tap {
+    // Bottom home gesture: closes the inspection view, else leaves the app.
+    // WHY `HOME_HIT` and not the raw numbers: the strip that is hit-tested is the
+    // same strip the indicator is drawn in, so the tap region can no longer be a
+    // region nothing was ever painted on.
+    if HOME_HIT.contains(x, y) {
+        if app.inspecting_photo.is_some() {
+            app.inspecting_photo = None;
+            std::log(0, "[GALLERY] Exited photo inspection view.").ok();
+            return Tap::Redraw(Dirty::All);
+        }
+        return Tap::Leave("[GALLERY] Home gesture pressed. Exiting to launcher.");
+    }
+
+    // Inspection view controls.
+    if app.inspecting_photo.is_some() {
+        let close = Rect::new(CLOSE_X0, CLOSE_Y0, CLOSE_W, CLOSE_H);
+        if DETAIL_BACK.contains(x, y) || close.contains(x, y) {
+            app.inspecting_photo = None;
+            std::log(0, "[GALLERY] Closed photo inspection view.").ok();
+            return Tap::Redraw(Dirty::All);
+        }
+        return Tap::None;
+    }
+
+    // Segmented filter chips - hit-tested only when they are drawn live.
+    //
+    // WHY the availability gate: `pill_pixel` draws the row recessed when
+    // `filters_available()` is false, and a recessed control that still accepted
+    // a tap would be exactly the dead affordance this replaces. The two states
+    // are decided by the same function, so they cannot disagree.
+    if filters_available() && y >= FILTER_BAND_Y0 && y < FILTER_BAND_Y1 {
+        for i in 0..PILL_LABELS.len() {
+            if pill_rect(i).contains(x, y) {
+                app.selected_tab = i;
+                std::log(0, "[GALLERY] Gallery filter chip switched.").ok();
+                return Tap::Redraw(Dirty::FilterRow);
+            }
+        }
+        return Tap::None;
+    }
+
+    // Thumbnail grid taps.
+    if y >= GRID_TOP && y < GRID_BOTTOM {
+        if has_no_media() {
+            std::log(
+                0,
+                "[GALLERY] Photo grid tapped: no media items in storage.",
+            )
+            .ok();
+            return Tap::None;
+        }
+        if let (Some(col), Some(row)) = (col_of(x), row_of(y)) {
+            let p_idx = row * 3 + col;
+            if PHOTOS.get(p_idx).is_some() {
+                app.inspecting_photo = Some(p_idx);
+                std::log(0, "[GALLERY] Photo tapped: inspection view opened.").ok();
+                return Tap::Redraw(Dirty::All);
+            }
+        }
+        return Tap::None;
+    }
+
+    // The section bar marks where this screen is. `Albums` and `Places` have no
+    // index behind them, so they are not controls and are not hit-tested - the
+    // old code took the tap, stored a new index and repainted a label colour,
+    // which is the same "looks live, goes nowhere" affordance.
+    Tap::None
 }
 
 // -----------------------------------------------------------------------------
@@ -638,6 +882,7 @@ pub extern "C" fn _start() -> ! {
                     dy: 0,
                     scale_milli: 1000,
                 };
+                let mut dirty = Dirty::None;
                 while std::input_event_poll(&mut input).is_ok() {
                     // Swipe up home gesture -> Return to launcher
                     if input.kind == 4
@@ -651,110 +896,33 @@ pub extern "C" fn _start() -> ! {
                             "[GALLERY] Navigation gesture recognized. Exiting to launcher.",
                         )
                         .ok();
-                        if surface > 0 {
-                            let _ = std::surface_destroy(6, surface);
-                        }
-                        std::exit_with_code(0);
+                        exit_to_launcher(surface);
                     }
 
                     if input.kind == 1 {
-                        let x = input.x as usize;
-                        let y = input.y as usize;
-
-                        // Bottom home pill: closes the inspection view, else exits.
-                        if x >= HOME_X0 && x <= HOME_X1 && y >= 1400 {
-                            if app.inspecting_photo.is_some() {
-                                app.inspecting_photo = None;
-                                std::log(0, "[GALLERY] Exited photo inspection view.").ok();
-                                if surface > 0 {
-                                    render_gallery_ui(surface, &app);
-                                    let _ = std::surface_flip(6);
-                                }
-                                break;
-                            } else {
-                                std::log(0, "[GALLERY] Home gesture pressed. Exiting to launcher.")
-                                    .ok();
-                                if surface > 0 {
-                                    let _ = std::surface_destroy(6, surface);
-                                }
-                                std::exit_with_code(0);
+                        match handle_tap(&mut app, input.x as usize, input.y as usize) {
+                            Tap::Leave(msg) => {
+                                std::log(0, msg).ok();
+                                exit_to_launcher(surface);
                             }
-                        }
-
-                        // Inspection view controls.
-                        if app.inspecting_photo.is_some() {
-                            let back = Rect::new(MARGIN, 28, 56, 56);
-                            let close = Rect::new(CLOSE_X0, CLOSE_Y0, CLOSE_W, CLOSE_H);
-                            if back.contains(x, y) || close.contains(x, y) {
-                                app.inspecting_photo = None;
-                                std::log(0, "[GALLERY] Closed photo inspection view.").ok();
-                                if surface > 0 {
-                                    render_gallery_ui(surface, &app);
-                                    let _ = std::surface_flip(6);
-                                }
-                                break;
-                            }
-                            break;
-                        }
-
-                        // Segmented filter tabs - the hit rectangle is the drawn pill.
-                        if y >= PILL_Y && y < PILL_Y + PILL_H {
-                            for i in 0..PILL_LABELS.len() {
-                                if pill_rect(i).contains(x, y) {
-                                    app.selected_tab = i;
-                                    std::log(0, "[GALLERY] Gallery category tab switched.").ok();
-                                    if surface > 0 {
-                                        render_gallery_ui(surface, &app);
-                                        let _ = std::surface_flip(6);
-                                    }
-                                    break;
-                                }
-                            }
-                            break;
-                        }
-
-                        // Thumbnail grid taps.
-                        if y >= GRID_TOP && y < GRID_BOTTOM {
-                            if has_no_media() {
-                                std::log(
-                                    0,
-                                    "[GALLERY] Photo grid tapped: no media items in storage.",
-                                )
-                                .ok();
-                                break;
-                            }
-                            if let (Some(col), Some(row)) = (col_of(x), row_of(y)) {
-                                let p_idx = row * 3 + col;
-                                if PHOTOS.get(p_idx).is_some() {
-                                    app.inspecting_photo = Some(p_idx);
-                                    std::log(
-                                        0,
-                                        "[GALLERY] Photo tapped: inspection view opened.",
-                                    )
-                                    .ok();
-                                    if surface > 0 {
-                                        render_gallery_ui(surface, &app);
-                                        let _ = std::surface_flip(6);
-                                    }
-                                }
-                            }
-                            break;
-                        }
-
-                        // Bottom navigation tabs (three equal, touch-sized columns).
-                        if y >= NAV_Y0 && y < NAV_Y1 {
-                            let idx = x / (W / 3);
-                            if idx < NAV_LABELS.len() {
-                                app.bottom_nav = idx;
-                                std::audio_haptic_click().ok();
-                                if surface > 0 {
-                                    render_gallery_ui(surface, &app);
-                                    let _ = std::surface_flip(6);
-                                }
-                            }
-                            break;
+                            Tap::Redraw(d) => dirty = dirty.widen(d),
+                            Tap::None => {}
                         }
                     }
+                }
+                if dirty != Dirty::None && surface > 0 {
+                    match dirty {
+                        // The chip row is the only control on this screen whose
+                        // state is local, so it is the only band a chip tap can
+                        // dirty. Everything else that changes state changes the
+                        // whole screen and asks for `All`.
+                        Dirty::FilterRow => {
+                            render_gallery_band(surface, &app, FILTER_BAND_Y0, FILTER_BAND_Y1)
+                        }
+                        Dirty::All => render_gallery_ui(surface, &app),
+                        Dirty::None => {}
+                    }
+                    let _ = std::surface_flip(6);
                 }
             }
         }
