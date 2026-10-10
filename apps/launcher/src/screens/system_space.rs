@@ -351,7 +351,13 @@ fn draw_battery_icon(x: usize, y: usize, cx: usize, cy: usize, tint: u32) -> Opt
         if dx <= -10 || dx >= 7 || dy <= -5 || dy >= 5 {
             return Some(tint);
         }
-        if dx <= 2 {
+        // WHY a centred dash and not `if dx <= 2 { return Some(tint) }`: that arm
+        // filled the left 60% of every shell with no reading behind it, so the
+        // status bar asserted a charge level this shell never measured - on the
+        // one screen that also claims to be a truthful summary of the device.
+        // No fuel gauge is bound, so the glyph says "not known" the same way the
+        // home surface does.
+        if dy == 0 && dx >= -4 && dx <= 3 {
             return Some(tint);
         }
     }
@@ -523,8 +529,14 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
     }
 
     // 2. Large Bold Title: "System"
-    if y >= 56 && y < 96 && x >= 48 && x < 240 {
-        if let Some(c) = test_text_aa(x, y, 48, 60, 3, b"System", TEXT_DARK, 0xFFFFFFFF) {
+    // WHY y0 = 52 and a 72-row gate: a scale-3 run needs GLYPH_H * scale rows, and
+    // the old `y >= 56 && y < 96` window threw away the bottom 36 of 72, so the
+    // title rendered as its own severed upper halves. The run now sits high enough
+    // that its ink (61..109) clears both the status rule at y=48 and the sphere
+    // band that starts at y=115. The x window was 240 while the word measures
+    // ~261px at this scale, so the final `m` was being cut as well.
+    if y >= 49 && y < 124 && x >= 48 && x < 320 {
+        if let Some(c) = test_text_aa(x, y, 48, 52, 3, b"System", TEXT_DARK, 0xFFFFFFFF) {
             return c;
         }
     }
@@ -637,7 +649,11 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
         if let Some(c) = test_text_aa(x, y, 105, 765, 2, b"System", TEXT_DARK, 0xFFFFFFFF) {
             return c;
         }
-        if let Some(c) = test_text_aa(x, y, 105, 800, 1, b"Updates, About, Tools", TEXT_MUTED, 0xFFFFFFFF) {
+        // WHY y0 = 815: rows 1-3 place the caption at title_y0 + GLYPH_H*2 + 2,
+        // which clears the title's 48px line box. Row 4 used a hand-typed 800,
+        // which is 15px too high - the caption's cap top landed at 803, exactly
+        // the title's baseline, so the two lines overprinted each other.
+        if let Some(c) = test_text_aa(x, y, 105, 815, 1, b"Updates, About, Tools", TEXT_MUTED, 0xFFFFFFFF) {
             return c;
         }
         return bg;
