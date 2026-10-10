@@ -474,6 +474,47 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         let rel_y = y - 120;
         let rel_x = x - 20;
 
+        // WHY no live-feed chrome without a frame: framing brackets, a thirds
+        // grid, a focus reticle and a zoom pill together read as a running
+        // camera. `stream_video_frame` returns Err(-95) because no camera HAL is
+        // bound, so this canvas was drawing the grammar of a live sensor over
+        // nothing at all, and nothing on screen ever said otherwise. With zero
+        // received frames the viewfinder now states the absence instead. The
+        // condition is a real counter, not a flag: `total_video_frames` only
+        // advances when the frame call succeeds, so a bound sensor brings the
+        // live chrome back on its own.
+        if camera.total_video_frames == 0 {
+            // The absence, stated in the space the feed would have occupied.
+            // Centred by measured width, not a hand-typed offset.
+            let head = b"No camera sensor bound";
+            let sub = b"Viewfinder inactive - no frames from the camera HAL";
+            let h_w = std::design::font::measure(head, 2);
+            let s_w = std::design::font::measure(sub, 1);
+            if let Some(c) = test_text(
+                x,
+                y,
+                360usize.saturating_sub(h_w / 2),
+                470,
+                2,
+                head,
+                TEXT_PRIMARY,
+            ) {
+                return c;
+            }
+            if let Some(c) = test_text(
+                x,
+                y,
+                360usize.saturating_sub(s_w / 2),
+                530,
+                1,
+                sub,
+                TEXT_MUTED,
+            ) {
+                return c;
+            }
+            return 0xFF080D1A;
+        }
+
         // Viewfinder Outer L-Corner Framing
         let is_top_left = (rel_x <= 30 && rel_y <= 4) || (rel_x <= 4 && rel_y <= 30);
         let is_top_right = (rel_x >= 650 && rel_y <= 4) || (rel_x >= 676 && rel_y <= 30);
