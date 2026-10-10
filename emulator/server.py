@@ -839,6 +839,7 @@ class VncScanoutClient:
         self.latest_binary_msg = None
         self.latest_jpeg = None
         self.latest_png = None
+        self._last_published_rgba = None
         self.metrics = {
             'fps': 0.0,
             'frame_us': 0,
@@ -870,6 +871,7 @@ class VncScanoutClient:
             self.latest_binary_msg = None
             self.latest_jpeg = None
             self.latest_png = None
+            self._last_published_rgba = None
             self.frame_cond.notify_all()
 
     def _abort_session(self, s, reason):
@@ -1013,6 +1015,13 @@ class VncScanoutClient:
                             self.scanout_buf[dst_off : dst_off + rw * 4] = temp_buf[src_off : src_off + rw * 4]
 
                 self._publish_frame(t_frame_start)
+
+                # WHY re-request here: each VNC update request is one-shot, so
+                # without an incremental request after every update the next
+                # damage waits for the 0.8 s read timeout to re-arm the
+                # stream, and every tap visibly lags ~1 s. Incremental
+                # requests carry only dirty rectangles, so the steady state
+                # costs almost nothing and interaction stays live.
                 s.sendall(struct.pack('>BBHHHH', 3, 1, 0, 0, self.width, self.height))
             except socket.timeout:
                 if self._force_reconnect:
@@ -1067,6 +1076,15 @@ class VncScanoutClient:
                     out[d_idx + 2] = self.scanout_buf[s_idx]      # B
                     out[d_idx + 3] = 0xFF                         # A
             rgba = bytes(out)
+
+        # WHY skip identical frames: an idle guest answers the long-poll
+        # re-request with an empty update, and publishing it would tick the
+        # sequence, push megabytes down every stream and re-render the
+        # monitor for zero changed pixels. Only real damage advances the
+        # stream, so transport fps means visible changes per second.
+        if rgba == self._last_published_rgba:
+            return
+        self._last_published_rgba = rgba
 
         with self.frame_cond:
             self.seq += 1
@@ -1212,7 +1230,7 @@ def notify_qemu_relaunched():
     worker reconnects within ~250 ms; the VNC worker re-handshakes and
     republishes metrics on its next session.
     """
-    global serial_epoch
+    global serial_epoch, serial_socket_conn
     with serial_socket_lock:
         serial_epoch += 1
         old = serial_socket_conn
