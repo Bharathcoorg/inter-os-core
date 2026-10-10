@@ -20,7 +20,7 @@ use crate::{test_text, LauncherState};
 use launcher::icons::{self, IconKind};
 use launcher::layout::Rect;
 use launcher::text;
-use launcher::theme::{type_scale, SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT};
+use launcher::theme::{space, type_scale, SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT};
 
 // -----------------------------------------------------------------------------
 // Constants & Colors
@@ -31,7 +31,6 @@ const CARD_BG: u32 = 0xFFFFFFFF; // Pure white surface
 const CARD_BORDER: u32 = 0xFFE1E0DB; // Canonical border
 const TEXT_MAIN: u32 = 0xFF111214; // Canonical near-black primary
 const TEXT_MUTED: u32 = 0xFF777773; // Canonical muted secondary
-const TEXT_HINT: u32 = 0xFF9CA3AF; // Muted hint
 
 const PILL_ACTIVE_BG: u32 = 0xFF111214;
 const PILL_ACTIVE_TEXT: u32 = 0xFFFFFFFF;
@@ -41,10 +40,25 @@ const PILL_INACTIVE_TEXT: u32 = 0xFF777773;
 const CARD_X: usize = 32;
 const CARD_W: usize = SCREEN_WIDTH - 64; // 656
 
+/// Height of one event card, and the pitch its stack advances by.
+const CARD_H: usize = 94;
+const CARD_PITCH: usize = 100;
+/// Top of the card stack when it is full. WHY it is named and not retyped per
+/// card: the stack is anchored to the clear-all pill, and this is the ceiling that
+/// anchor is clamped to, so it has to be one number.
+const CARDS_TOP: usize = 206;
+/// Gap between the card's text column and the card's right edge.
+const CARD_TEXT_INSET: usize = space::MD;
+/// Left edge of the card's text column, past the 52 px icon squircle.
+const CARD_TEXT_X: usize = CARD_X + 86;
+
 // Clear-all pill, drawn below the last event card: x in 260..460, y in 708..752.
-// WHY this y: the event cards occupy 206..700 (five 94px cards on a 100px
-// pitch), so 708..752 is the first band that both clears the cards and contains
-// the pinned clear tap at (360, 720). The shell hit-tests this exact rect.
+// WHY this y: the shell's tap handler in `main.rs` hit-tests this exact rect and
+// nothing else, so the pill cannot move with the number of notifications without
+// the drawn control and the pressed one becoming different rectangles -- a tap on
+// visible pixels that clears nothing, or a clear from pixels that draw nothing.
+// The card stack is anchored to the pill instead (see `build_notifications_frame`),
+// so the pill sits directly under the last card for every notification count.
 pub const CLEAR_BTN: Rect = Rect::new(SCREEN_WIDTH / 2 - 100, 708, 200, 44);
 const HOME_PILL: Rect = Rect::new(SCREEN_WIDTH / 2 - 90, SCREEN_HEIGHT - 20, 180, 5);
 
@@ -147,6 +161,31 @@ impl LabelRun {
         }
     }
 
+    /// A run truncated with an ellipsis if it is wider than `fit`.
+    ///
+    /// WHY this exists here and not only on the centred runs: `new` copies up to
+    /// `RUN_CAP` (64) bytes and draws every one of them, and `pixel` only rejects
+    /// pixels outside the *measured* box -- which is however wide the string turned
+    /// out to be. A 64-byte notification body at the body scale measures about
+    /// 700 px from x 118, which is 100 px past the right edge of a 720 px screen,
+    /// and nothing on the surface noticed.
+    fn fitted(x: usize, y: usize, scale: usize, fit: usize, bytes: &[u8], ink: u32) -> Self {
+        let (buf, len) = text::ellipsize(bytes, scale, fit);
+        let n = len.min(RUN_CAP);
+        let mut held = [0u8; RUN_CAP];
+        held[..n].copy_from_slice(&buf[..n]);
+        LabelRun {
+            x,
+            y,
+            w: text::measure(&held[..n], scale),
+            h: text::line_height(scale),
+            scale,
+            len: n,
+            ink,
+            bytes: held,
+        }
+    }
+
     #[inline]
     fn pixel(&self, px: usize, py: usize) -> Option<u32> {
         if self.len == 0 {
@@ -180,7 +219,6 @@ struct EventCardPlan {
     icon_kind: IconKind,
     title: LabelRun,
     subtitle: LabelRun,
-    time: LabelRun,
 }
 
 #[derive(Clone, Copy)]
@@ -194,7 +232,6 @@ struct NotificationsFrame {
     clock: LabelRun,
     title: LabelRun,
     today_label: LabelRun,
-    yesterday_label: LabelRun,
     pills: [FilterPillPlan; 4],
     cards: [Option<EventCardPlan>; 5],
     card_count: usize,
@@ -227,14 +264,23 @@ fn build_notifications_frame(state: &LauncherState) -> NotificationsFrame {
     } else {
         LabelRun::new(36, 210, type_scale::BODY, b"No notifications", TEXT_MUTED)
     };
-    let yesterday_label = LabelRun::new(36, 650, type_scale::CAPTION, b"", TEXT_MAIN);
 
     let mut cards: [Option<EventCardPlan>; 5] = [None, None, None, None, None];
+    // WHY the stack hangs off the clear-all pill instead of starting at a fixed y:
+    // the pill is the only region the shell treats as "clear", and it cannot move
+    // without the drawn control and the tapped one becoming different rectangles.
+    // Pinning the stack's TOP instead left the pill stranded: with one notification
+    // the last card ended at 300 and the pill sat at 708, so the surface showed a
+    // clear control 400 px under anything it acted on. Anchoring the stack's BOTTOM
+    // to the pill keeps the same layout for a full stack -- five cards at 206, 306,
+    // 406, 506 and 606, the last ending at 700 -- and closes the gap for every
+    // shorter one.
+    let stack_h = count * CARD_H + count.saturating_sub(1) * (CARD_PITCH - CARD_H);
+    let stack_top = (CLEAR_BTN.y - space::SM - stack_h).max(CARDS_TOP);
+    let text_fit = CARD_X + CARD_W - CARD_TEXT_X - CARD_TEXT_INSET;
     for i in 0..count {
         let rec = state.notifications[i];
-        // WHY a 100px pitch: five 94px cards starting at 206 end at 700, leaving
-        // the drawn clear-all pill at 708..752 clear of the last card.
-        let y = 206 + i * 100;
+        let y = stack_top + i * CARD_PITCH;
         let title_bytes: &[u8] = if rec.title_len > 0 { &rec.title[..rec.title_len as usize] } else { b"Notification" };
         let subtitle_bytes: &[u8] = if rec.body_len > 0 {
             &rec.body[..rec.body_len as usize]
@@ -252,18 +298,31 @@ fn build_notifications_frame(state: &LauncherState) -> NotificationsFrame {
             _ => (IconKind::Apps, 0xFFDBEAFE, 0xFF2563EB),
         };
         cards[i] = Some(EventCardPlan {
-            rect: Rect::new(CARD_X, y, CARD_W, 94),
+            rect: Rect::new(CARD_X, y, CARD_W, CARD_H),
             icon_rect: Rect::new(CARD_X + 18, y + 20, 52, 52),
             icon_bg, icon_tint, icon_kind,
-            title: LabelRun::new(CARD_X + 86, y + 16, type_scale::CAPTION, title_bytes, TEXT_MAIN),
-            subtitle: LabelRun::new(CARD_X + 86, y + 40, type_scale::CAPTION, subtitle_bytes, TEXT_MUTED),
-            time: LabelRun::new(CARD_X + 86, y + 64, type_scale::CAPTION, b"Event", TEXT_HINT),
+            // WHY the title is a rung above the body and there is no third line: at
+            // one scale for all three, the only thing separating a notification's
+            // name from its text was their colour, and the third line was the
+            // literal "Event" in every card -- a word that is not a time and never
+            // will be. The record's `timestamp_ticks` is a monotonic count from
+            // boot, and nothing in this shell can turn that into a clock reading:
+            // converting it needs an RTC epoch, and the RTC read is exactly what
+            // `clock_source_ok` says was refused. So the row is dropped rather than
+            // filled with a placeholder that looks like a timestamp.
+            //
+            // WHY the title is `type_scale::BODY` and not `TITLE`: two lines of
+            // `type_scale::BODY` and `type_scale::CAPTION` are 48 + 24 = 72 rows,
+            // which is what fits a 94-row card. A `TITLE` title alone is 72, and
+            // there is no room for the body beneath it.
+            title: LabelRun::fitted(CARD_TEXT_X, y + 12, type_scale::BODY, text_fit, title_bytes, TEXT_MAIN),
+            subtitle: LabelRun::fitted(CARD_TEXT_X, y + 12 + text::line_height(type_scale::BODY) + space::XS, type_scale::CAPTION, text_fit, subtitle_bytes, TEXT_MUTED),
         });
     }
 
     let clear_label = LabelRun::centred(CLEAR_BTN.x, CLEAR_BTN.y + 10, CLEAR_BTN.w, type_scale::CAPTION, b"Clear all", TEXT_MUTED);
     NotificationsFrame {
-        clock, title, today_label, yesterday_label, pills, cards, card_count: count,
+        clock, title, today_label, pills, cards, card_count: count,
         clear_btn: CLEAR_BTN, clear_label, home_pill: HOME_PILL,
     }
 }
@@ -327,10 +386,12 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
     }
 
     // 4. Section Headers
+    //
+    // WHY there is only one: the "Yesterday" header this used to draw was pinned at
+    // y 650 and always held zero bytes, so it never inked a pixel -- and 650 is
+    // inside the card stack now that the stack is anchored to the clear-all pill.
+    // An always-empty header at a hardcoded y is a header waiting to become a lie.
     if let Some(c) = f.today_label.pixel(x, y) {
-        return c;
-    }
-    if let Some(c) = f.yesterday_label.pixel(x, y) {
         return c;
     }
 
@@ -362,20 +423,17 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
                     if let Some(c) = card.subtitle.pixel(x, y) {
                         return c;
                     }
-                    if let Some(c) = card.time.pixel(x, y) {
-                        return c;
-                    }
                     return color;
                 }
             }
         }
     }
 
-    // 6. Clear All Pill (y: 708..752, x: 260..460 -- see CLEAR_BTN)
-    if CLEAR_BTN.contains(x, y) {
-        if rounded_contains(CLEAR_BTN, x, y, 22) {
+    // 6. Clear All Pill (see CLEAR_BTN)
+    if f.clear_btn.contains(x, y) {
+        if rounded_contains(f.clear_btn, x, y, 22) {
             color = 0xFFF1F5F9;
-            if rounded_outline(CLEAR_BTN, x, y, 22) {
+            if rounded_outline(f.clear_btn, x, y, 22) {
                 return 0xFFE2E8F0;
             }
             if let Some(c) = f.clear_label.pixel(x, y) {
