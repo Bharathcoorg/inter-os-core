@@ -195,6 +195,63 @@ const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
 
+// -----------------------------------------------------------------------------
+// Measured header/pill geometry (Screen 10, 720x1440 portrait).
+//
+// All text below is drawn with the SDK design face (16x24 cells, proportional
+// advances) via `test_text_aa`. Every rect/x0/y0 here is derived from
+// `measure`/`line_height` so ink stays inside its container:
+// - Status pill: right-aligned to a 24px right margin (right = W-24 = 696).
+//   The text scale steps 2 -> 1 until measured text + padding fits the space
+//   left of the header title (title end + 24px gap).
+// - Header title: full 24*scale line box inside the header band (bottom 94).
+// - Input/search hints: vertically centered (pill_cy - line_height/2) with
+//   horizontal padding; ellipsized when narrower than the hint.
+// -----------------------------------------------------------------------------
+const PILL_TEXT: &[u8] = b"NO TRANSPORT";
+const PILL_RIGHT: usize = W - 24; // 696
+const PILL_TOP: usize = 28;
+const PILL_BOTTOM: usize = 68; // exclusive
+const PILL_PAD_X: usize = 20;
+
+const TITLE_TEXT: &[u8] = b"Messages";
+const TITLE_X: usize = 116;
+const TITLE_SCALE: usize = 3;
+// WHY: scale 3 has line_height 72; y0=12 gives 12..84, fully inside the
+// header band (border at 94) with 10px clearance. The old y0=36 ran to 108,
+// bleeding past the header border, and the 36..60 draw gate sliced glyphs.
+const TITLE_Y: usize = 12;
+
+#[inline]
+fn pill_text_scale() -> usize {
+    // Keep a 24px gap between the title ink end and the pill's left edge.
+    let title_end = TITLE_X + std::design::font::measure(TITLE_TEXT, TITLE_SCALE);
+    let avail = PILL_RIGHT.saturating_sub(title_end + 24);
+    let mut scale = 2usize;
+    while scale > 1 {
+        let need = std::design::font::measure(PILL_TEXT, scale) + 2 * PILL_PAD_X;
+        if need <= avail {
+            break;
+        }
+        scale -= 1;
+    }
+    scale
+}
+
+#[inline]
+fn pill_left_for(scale: usize) -> usize {
+    let w = std::design::font::measure(PILL_TEXT, scale) + 2 * PILL_PAD_X;
+    PILL_RIGHT.saturating_sub(w)
+}
+
+#[inline]
+fn pill_text_pos(scale: usize) -> (usize, usize) {
+    let left = pill_left_for(scale);
+    let lh = std::design::font::line_height(scale);
+    let cy = (PILL_TOP + PILL_BOTTOM) / 2;
+    (left + PILL_PAD_X, cy.saturating_sub(lh / 2))
+}
+
 #[inline(never)]
 fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp) -> u32 {
     // 1. Status Bar & Header (y: 0..96)
@@ -217,33 +274,47 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp) -> u32 {
             return SURFACE_RAISED;
         }
 
-        // Header Title: "Messages"
-        if y >= 36 && y < 60 {
-            if let Some(c) = test_text(x, y, 116, 36, 3, b"Messages", TEXT_PRIMARY) {
+        // Header Title: "Messages" (full 24*scale line box inside header band).
+        if y >= TITLE_Y && y < TITLE_Y + 24 * TITLE_SCALE {
+            if let Some(c) = test_text(x, y, TITLE_X, TITLE_Y, TITLE_SCALE, TITLE_TEXT, TEXT_PRIMARY) {
                 return c;
             }
         }
 
-        // Security Pill Badge at top-right (x: 520..696, y: 28..68)
-        if x >= 520 && x < 696 && y >= 28 && y < 68 {
-            let rx = (x - 520).min(695 - x);
-            let ry = (y - 28).min(67 - y);
-            if rx < 20 && ry < 20 {
-                let cdx = (20 - rx) as isize;
-                let cdy = (20 - ry) as isize;
-                if cdx * cdx + cdy * cdy >= 400 {
-                    return SURFACE_DARK;
+        // Security Pill Badge, top-right: measured at draw time, right-aligned
+        // to the 24px right margin (PILL_RIGHT = 696). Scale steps 2 -> 1
+        // until the text + padding fits; at scale 1 the text is 153px, so the
+        // pill is 503..696 with the text at (523, 36..60), fully visible.
+        // NOTE: the pill is status display only; it has no touch action, so
+        // there is no touch rect to update. If one is ever added it must use
+        // pill_left_for(pscale)..PILL_RIGHT, y PILL_TOP..PILL_BOTTOM.
+        {
+            let pscale = pill_text_scale();
+            let pleft = pill_left_for(pscale);
+            let (ptx, pty) = pill_text_pos(pscale);
+            let plh = std::design::font::line_height(pscale);
+            if x >= pleft && x < PILL_RIGHT && y >= PILL_TOP && y < PILL_BOTTOM {
+                let rx = (x - pleft).min(PILL_RIGHT - 1 - x);
+                let ry = (y - PILL_TOP).min(PILL_BOTTOM - 1 - y);
+                if rx < 20 && ry < 20 {
+                    let cdx = (20 - rx) as isize;
+                    let cdy = (20 - ry) as isize;
+                    if cdx * cdx + cdy * cdy >= 400 {
+                        return SURFACE_DARK;
+                    }
                 }
-            }
 
-            if let Some(c) = test_text(x, y, 548, 40, 2, b"NO TRANSPORT", TEXT_MUTED) {
-                return c;
-            }
+                if y >= pty && y < pty + plh {
+                    if let Some(c) = test_text(x, y, ptx, pty, pscale, PILL_TEXT, TEXT_MUTED) {
+                        return c;
+                    }
+                }
 
-            if rx < 2 || ry < 2 {
-                return BORDER_SUBTLE;
+                if rx < 2 || ry < 2 {
+                    return BORDER_SUBTLE;
+                }
+                return SURFACE_RAISED;
             }
-            return SURFACE_RAISED;
         }
 
         return SURFACE_DARK;
@@ -278,9 +349,34 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp) -> u32 {
                 return TEXT_MUTED;
             }
 
-            // Search placeholder text
-            if let Some(c) = test_text(x, y, 82, 122, 2, b"Search chats...", TEXT_MUTED) {
-                return c;
+            // Search placeholder text: scale 1 so the full 24px line box fits
+            // the 48px pill (106..154, center 130) with padding; the old
+            // scale-2 text at y0=122 ran 122..170, 16px past the pill bottom.
+            // Horizontally padded (82..676 usable); ellipsized if ever wider.
+            {
+                let hint: &[u8] = b"Search chats...";
+                let hscale = 1usize;
+                let hlh = std::design::font::line_height(hscale);
+                let hcy = (106 + 154) / 2;
+                let hty = hcy - hlh / 2;
+                let htx = 82usize;
+                let max_w = 696 - 20 - htx;
+                if y >= hty && y < hty + hlh {
+                    let w = std::design::font::measure(hint, hscale);
+                    if w <= max_w {
+                        if let Some(c) = test_text(x, y, htx, hty, hscale, hint, TEXT_MUTED) {
+                            return c;
+                        }
+                    } else {
+                        let mut buf = [0u8; 32];
+                        let n = std::design::font::ellipsize(hint, hscale, max_w, &mut buf);
+                        if n > 0 {
+                            if let Some(c) = test_text(x, y, htx, hty, hscale, &buf[..n], TEXT_MUTED) {
+                                return c;
+                            }
+                        }
+                    }
+                }
             }
 
             if rx < 2 || ry < 2 {
@@ -371,8 +467,30 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp) -> u32 {
 
                 // No compose action is shown until a real messaging transport
                 // and peer-selection backend exist.
-                if let Some(c) = test_text(x, y, 212, 520, 1, b"New chats require a configured messaging backend", TEXT_MUTED) {
-                    return c;
+                // WHY centered: the 489px line at the old x0=212 ran 212..701,
+                // 5px past the card's right edge (696). Centering in the
+                // 672px card keeps the full honest string visible; ellipsize
+                // is the fallback if the pill ever narrows. Bytes unchanged.
+                {
+                    let line: &[u8] = b"New chats require a configured messaging backend";
+                    let max_w = 672 - 48;
+                    let w = std::design::font::measure(line, 1);
+                    if w <= max_w {
+                        let bx = 24 + (672 - w) / 2;
+                        if let Some(c) = test_text(x, y, bx, 520, 1, line, TEXT_MUTED) {
+                            return c;
+                        }
+                    } else {
+                        let mut buf = [0u8; 64];
+                        let n = std::design::font::ellipsize(line, 1, max_w, &mut buf);
+                        if n > 0 {
+                            let bw = std::design::font::measure(&buf[..n], 1);
+                            let bx = 24 + (672usize.saturating_sub(bw)) / 2;
+                            if let Some(c) = test_text(x, y, bx, 520, 1, &buf[..n], TEXT_MUTED) {
+                                return c;
+                            }
+                        }
+                    }
                 }
             }
         } else {
@@ -417,8 +535,34 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp) -> u32 {
                 }
             }
 
-            if let Some(c) = test_text(x, y, 52, 1366, 2, b"Type a message...", TEXT_MUTED) {
-                return c;
+            // Input hint: vertically centered (pill_cy 1374 - 48/2 = 1350),
+            // so the 48px line box is 1350..1398 inside the 1344..1404 pill
+            // with 6px pads. The old y0=1366 ran to 1414, 10px past the pill
+            // bottom. Horizontally padded; ellipsized if ever wider.
+            {
+                let hint: &[u8] = b"Type a message...";
+                let hscale = 2usize;
+                let hlh = std::design::font::line_height(hscale);
+                let hcy = (1344 + 1404) / 2;
+                let hty = hcy - hlh / 2;
+                let htx = 52usize;
+                let max_w = 610 - 20 - htx;
+                if y >= hty && y < hty + hlh {
+                    let w = std::design::font::measure(hint, hscale);
+                    if w <= max_w {
+                        if let Some(c) = test_text(x, y, htx, hty, hscale, hint, TEXT_MUTED) {
+                            return c;
+                        }
+                    } else {
+                        let mut buf = [0u8; 32];
+                        let n = std::design::font::ellipsize(hint, hscale, max_w, &mut buf);
+                        if n > 0 {
+                            if let Some(c) = test_text(x, y, htx, hty, hscale, &buf[..n], TEXT_MUTED) {
+                                return c;
+                            }
+                        }
+                    }
+                }
             }
 
             if rx < 2 || ry < 2 {
