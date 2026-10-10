@@ -47,6 +47,16 @@ const DANGER_CRIMSON: u32 = 0xFFEF4444;
 // -----------------------------------------------------------------------------
 // Typography provided by interos_std::design::font
 
+/// Rasterises one text run into the pixel at `(x, y)`.
+///
+/// `bg` is the fill the run is drawn on top of. WHY it is a parameter: the
+/// anti-aliased edges of a glyph are blended toward `bg`, so hard-coding the
+/// page colour handed the selected row's label dark fringes against its own
+/// `SURFACE_RAISED` fill. Callers pass the fill that is actually under the run.
+///
+/// The face is `GLYPH_H` (24) rows tall, so a run at `scale` owns
+/// `GLYPH_H * scale` rows. Clipping to that line box here means a caller can no
+/// longer slice a glyph with a hand-written y window.
 #[inline(always)]
 fn test_text(
     x: usize,
@@ -56,8 +66,12 @@ fn test_text(
     scale: usize,
     text: &[u8],
     color: u32,
+    bg: u32,
 ) -> Option<u32> {
-    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, BG_DARK, false)
+    if x < x0 || y < y0 || y >= y0 + std::design::font::GLYPH_H * scale {
+        return None;
+    }
+    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false)
 }
 
 // -----------------------------------------------------------------------------
@@ -148,9 +162,14 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         // Clock and battery indicators are omitted until live guest services
         // expose real readings. Never paint plausible but fabricated values.
 
-        // Title: "Files" at x: 48, y: 64 (scale 3)
-        if y >= 76 && y < 108 {
-            if let Some(c) = test_text(x, y, 48, 64, 3, b"Files", TEXT_PRIMARY) {
+        // Title: "Files" at x: 48, y: 64 (scale 3).
+        // WHY the full box: the bitmap face is GLYPH_H (24) rows tall, so a
+        // scale-3 run owns 72 rows (64..136). The old window was 76..108 -- 32
+        // rows -- which drew only the top sliver of each letter and severed the
+        // baseline. 136 still clears the header band (ends at 140) and the
+        // category rows (start at 150).
+        if y >= 64 && y < 64 + std::design::font::line_height(3) {
+            if let Some(c) = test_text(x, y, 48, 64, 3, b"Files", TEXT_PRIMARY, BG_DARK) {
                 return c;
             }
         }
@@ -222,7 +241,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 if (idist2 >= 100 && idist2 <= 196) || (idx == 0 && idy >= -10 && idy <= 0) || (idy == 0 && idx >= 0 && idx <= 8) {
                     return TEXT_PRIMARY;
                 }
-                if let Some(c) = test_text(x, y, 108, center_y - 8, 2, b"Recent", TEXT_PRIMARY) {
+                if let Some(c) = test_text(x, y, 108, center_y - 8, 2, b"Recent", TEXT_PRIMARY, row_bg) {
                     return c;
                 }
             }
@@ -231,7 +250,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 if (idx.abs() <= 14 && idy.abs() <= 10) && (idx.abs() >= 12 || idy.abs() >= 8 || ((idx - 5).abs() <= 2 && (idy + 3).abs() <= 2) || (idy >= 2 && idx.abs() <= (10 - idy))) {
                     return TEXT_PRIMARY;
                 }
-                if let Some(c) = test_text(x, y, 108, center_y - 8, 2, b"Images", TEXT_PRIMARY) {
+                if let Some(c) = test_text(x, y, 108, center_y - 8, 2, b"Images", TEXT_PRIMARY, row_bg) {
                     return c;
                 }
             }
@@ -240,7 +259,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 if ((idx >= -14 && idx <= 4 && idy.abs() <= 10) && (idx == -14 || idx == 4 || idy.abs() >= 8)) || (idx >= 6 && idx <= 14 && idy.abs() <= (idx - 5)) {
                     return TEXT_PRIMARY;
                 }
-                if let Some(c) = test_text(x, y, 108, center_y - 8, 2, b"Videos", TEXT_PRIMARY) {
+                if let Some(c) = test_text(x, y, 108, center_y - 8, 2, b"Videos", TEXT_PRIMARY, row_bg) {
                     return c;
                 }
             }
@@ -249,7 +268,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 if (idx.abs() <= 10 && idy.abs() <= 14) && (idx.abs() >= 8 || idy == 12 || (idy == -12 && idx <= 2) || (idy == -2 || idy == 3 || idy == 8)) {
                     return TEXT_PRIMARY;
                 }
-                if let Some(c) = test_text(x, y, 108, center_y - 8, 2, b"Documents", TEXT_PRIMARY) {
+                if let Some(c) = test_text(x, y, 108, center_y - 8, 2, b"Documents", TEXT_PRIMARY, row_bg) {
                     return c;
                 }
             }
@@ -258,7 +277,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 if (idx == 0 && idy >= -12 && idy <= 4) || (idy >= 0 && idy <= 6 && idx.abs() <= (6 - idy)) || (idy == 10 && idx.abs() <= 12) || (idx.abs() == 12 && idy >= 6 && idy <= 10) {
                     return TEXT_PRIMARY;
                 }
-                if let Some(c) = test_text(x, y, 108, center_y - 8, 2, b"Downloads", TEXT_PRIMARY) {
+                if let Some(c) = test_text(x, y, 108, center_y - 8, 2, b"Downloads", TEXT_PRIMARY, row_bg) {
                     return c;
                 }
             }
@@ -278,7 +297,9 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 let label_y0 = row_start_y + 16;
                 let caption_y0 =
                     label_y0 + std::design::font::line_height(2) + 8;
-                if let Some(c) = test_text(x, y, 108, label_y0, 2, b"Internal Storage", TEXT_PRIMARY) {
+                if let Some(c) =
+                    test_text(x, y, 108, label_y0, 2, b"Internal Storage", TEXT_PRIMARY, row_bg)
+                {
                     return c;
                 }
                 let capacity_status: &[u8] = if app.storage_capacity_bytes > 0 {
@@ -286,7 +307,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 } else {
                     b"Storage capacity unavailable"
                 };
-                if let Some(c) = test_text(x, y, 108, caption_y0, 1, capacity_status, TEXT_MUTED) {
+                if let Some(c) = test_text(x, y, 108, caption_y0, 1, capacity_status, TEXT_MUTED, row_bg) {
                     return c;
                 }
             }
@@ -295,7 +316,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 if (idy >= 2 && idy <= 8 && idx.abs() <= 14) || ((idx + 6) * (idx + 6) + idy * idy <= 49) || ((idx - 6) * (idx - 6) + (idy + 2) * (idy + 2) <= 36) {
                     return TEXT_PRIMARY;
                 }
-                if let Some(c) = test_text(x, y, 108, center_y - 8, 2, b"Cloud (Optional)", TEXT_PRIMARY) {
+                if let Some(c) = test_text(x, y, 108, center_y - 8, 2, b"Cloud (Optional)", TEXT_PRIMARY, row_bg) {
                     return c;
                 }
             }
