@@ -129,6 +129,21 @@ fn test_text(
     std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, BG_DARK, false)
 }
 
+/// Rows a `scale`-high text run occupies on the shared bitmap face.
+/// WHY a local `const fn`: this is exactly `font::line_height(scale)`, but that
+/// helper is not `const`, and every run box in this file is derived from a
+/// compile-time constant. Gating a run on anything shorter than this silently
+/// slices the glyphs, so the width is computed once here and reused.
+const fn run_rows(scale: usize) -> usize {
+    scale * std::design::font::GLYPH_H
+}
+
+/// Header band height (y: 0..HEADER_H). Rows at or below it belong to the
+/// display card, so a header run must be centred inside 0..HEADER_H.
+const HEADER_H: usize = 110;
+/// Top of the operation badge's scale-3 line box inside the display card.
+const OP_BADGE_Y0: usize = 140;
+
 // Button layout constants
 const BTN_W: usize = 144;
 const BTN_H: usize = 140;
@@ -167,12 +182,18 @@ fn get_button_action(row: usize, col: usize) -> Option<char> {
 #[inline(never)]
 fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
     // 1. Status Bar & Header Title (y: 0..110)
-    if y < 110 {
+    if y < HEADER_H {
         // Time, radio and battery values come from system services; none is
         // currently bound to this app. Leave the status band truthful.
-        // Canonical App Title: "Calculator" (bold display font at x: 48, y: 64)
-        if y >= 64 && y < 96 {
-            if let Some(c) = test_text(x, y, 48, 64, 3, b"Calculator", TEXT_PRIMARY) {
+        //
+        // Canonical App Title: "Calculator" (display weight at x: 48).
+        // The run is scale 3, so it needs run_rows(3) = 72 rows; the header band
+        // is 110 rows tall, so the full line box is centred in it rather than
+        // gated to a hand-written window that would cut the glyphs in half.
+        let title_rows = run_rows(3);
+        let title_y0 = (HEADER_H - title_rows) / 2;
+        if y >= title_y0 && y < title_y0 + title_rows {
+            if let Some(c) = test_text(x, y, 48, title_y0, 3, b"Calculator", TEXT_PRIMARY) {
                 return c;
             }
         }
@@ -191,8 +212,11 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                 '+' => b"+",
                 _ => b"?",
             };
-            if y >= 140 && y < 164 {
-                if let Some(c) = test_text(x, y, 48, 140, 3, op_sym, ACCENT_SKY) {
+            // Scale-3 badge: the run needs run_rows(3) = 72 rows, not the 24
+            // rows the old gate allowed. OP_BADGE_Y0 + 72 = 212 still clears
+            // the displayed value, whose scale-4 box starts at y = 280.
+            if y >= OP_BADGE_Y0 && y < OP_BADGE_Y0 + run_rows(3) {
+                if let Some(c) = test_text(x, y, 48, OP_BADGE_Y0, 3, op_sym, ACCENT_SKY) {
                     return c;
                 }
             }
