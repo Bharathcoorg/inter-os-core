@@ -1864,10 +1864,63 @@ pub fn engage_native_mode() {
 
 static LAST_CLEAR_BOUNDS: spin::Mutex<(usize, usize, usize, usize)> = spin::Mutex::new((usize::MAX, usize::MAX, usize::MAX, usize::MAX));
 
+/// Maps a half-open **source** (scanout) row band onto the half-open range of
+/// **destination** rows that the present blit has to redraw.
+///
+/// WHY an inverse of the blit's own sampler rather than a scaled estimate: the
+/// scaling loop below samples source row `sy = dy * src_h / dst_h` for
+/// destination row `dy`, so destination row `dy` is stale exactly when
+/// `s0 <= sy < s1`. Inverting that same floor division,
+/// `sy >= s0  <=>  dy >= ceil(s0 * dst_h / src_h)` and
+/// `sy <  s1  <=>  dy <  ceil(s1 * dst_h / src_h)`,
+/// yields a range that is both minimal and exactly the set of rows the full
+/// present would have rewritten. Reusing the blit's formula is what keeps the
+/// banded output byte-identical to the old full-scanout output outside the
+/// skipped rows; a differently-derived mapping would shear the image.
+///
+/// WHY the separate 2x case: the exact-2x branch averages source rows `2*dy`
+/// and `2*dy + 1`, so a destination row depends on *two* source rows and the
+/// point-sample inverse would miss the row above a band that starts on an odd
+/// row. `[s0 / 2, (s1 + 1) / 2)` is the minimal range covering every pair that
+/// intersects the band.
+// WHY an empty band collapses onto its own start row above: it still presents
+/// nothing, but reporting `s0 / 2 .. s0 / 2 + 1` for a band like `(s0, s0)`
+/// would name one destination row that provably has not changed and would also
+/// break monotonicity in `s0`.
+pub(crate) fn present_dst_row_band(band: (usize, usize), src_h: usize, dst_h: usize, is_2x: bool) -> (usize, usize) {
+    if src_h == 0 || dst_h == 0 { return (0, 0); }
+    // Clamp into the source so a stale or over-wide band degrades to "present
+    // everything" rather than reading past the scanout or looping forever.
+    let s0 = band.0.min(src_h);
+    let s1 = band.1.min(src_h).max(s0);
+    if src_h == 0 || dst_h == 0 { return (0, 0); }
+    // u64 keeps the products far from overflowing on any geometry the bounded
+    // scanout budget allows, without a checked-multiply branch per flip.
+    let (d0, d1) = if is_2x {
+        ((s0 / 2) as u64, ((s1 + 1) / 2) as u64)
+    } else {
+        let num0 = s0 as u64 * dst_h as u64;
+        let num1 = s1 as u64 * dst_h as u64;
+        ((num0 + src_h as u64 - 1) / src_h as u64, (num1 + src_h as u64 - 1) / src_h as u64)
+    };
+    let d0 = (d0 as usize).min(dst_h);
+    // An empty band collapses onto its own start row rather than to zero: it
+    // still presents nothing, but the result stays monotone in both band edges
+    // (the 2x formula alone would otherwise report one row for a band like
+    // `(s0, s0)` whose 2-tap pair straddles `s0`).
+    let d1 = if s1 <= s0 { d0 } else { (d1 as usize).min(dst_h) };
+    (d0, d1.max(d0))
+}
+
 /// Presents an ARGB8888 scanout buffer to the bootloader-provided physical framebuffer.
 /// This is the hardware-backed handoff used by the display driver on platforms where
 /// the bootloader exposes a linear framebuffer. No userspace pointer is retained.
-pub fn present_argb8888(pixels: &[u32], width: u32, height: u32) {
+///
+/// `dirty_rows` is a half-open band of **source** (scanout) rows that must be
+/// re-presented; `(0, height)` reproduces the old unconditional full-scanout
+/// copy. A narrower band skips only destination rows that provably hold the
+/// same bytes they already hold on the physical framebuffer.
+pub fn present_argb8888(pixels: &[u32], width: u32, height: u32, dirty_rows: (usize, usize)) {
     let mut fb = FRAMEBUFFER_WRITER.lock();
     let info = match fb.info { Some(info) => info, None => return };
     let src_w = width as usize;
@@ -1901,6 +1954,16 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32) {
         *last_bounds = (off_x, off_y, dst_w, dst_h);
     }
     drop(last_bounds);
+
+    // WHY this is hoisted above the 1:1 fast path: the fast path requires
+    // `src_w == info.width && src_h == info.height`, which forces
+    // `dst_w == info.width && dst_h == info.height` (see the aspect fit above),
+    // so `is_2x` is necessarily false there and `present_dst_row_band`
+    // degenerates to the identity `[s0, s1)` it needs to be. Both loops below
+    // therefore share one mapping.
+    let is_2x = (src_w == dst_w * 2) && (src_h == dst_h * 2);
+    let (dy0, dy1) = present_dst_row_band(dirty_rows, src_h, dst_h, is_2x);
+
         if src_w == info.width && src_h == info.height && off_x == 0 && off_y == 0 {
             if let Some(ptr) = fb.buffer_ptr {
                 let bpp = info.bytes_per_pixel;
@@ -1909,7 +1972,7 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32) {
                 unsafe {
                     match fmt {
                         PixelFormat::Bgr if bpp == 4 => {
-                            for dy in 0..info.height {
+                            for dy in dy0..dy1 {
                                 let row_src = &pixels[dy * src_w..(dy + 1) * src_w];
                                 let mut dst_ptr = ptr.add(dy * stride_bytes);
                                 for &p in row_src {
@@ -1923,7 +1986,7 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32) {
                             return;
                         }
                         PixelFormat::Bgr if bpp == 3 => {
-                            for dy in 0..info.height {
+                            for dy in dy0..dy1 {
                                 let row_src = &pixels[dy * src_w..(dy + 1) * src_w];
                                 let mut dst_ptr = ptr.add(dy * stride_bytes);
                                 for &p in row_src {
@@ -1936,7 +1999,7 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32) {
                             return;
                         }
                         PixelFormat::Rgb if bpp == 4 => {
-                            for dy in 0..info.height {
+                            for dy in dy0..dy1 {
                                 let row_src = &pixels[dy * src_w..(dy + 1) * src_w];
                                 let mut dst_ptr = ptr.add(dy * stride_bytes);
                                 for &p in row_src {
@@ -1950,7 +2013,7 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32) {
                             return;
                         }
                         PixelFormat::Rgb if bpp == 3 => {
-                            for dy in 0..info.height {
+                            for dy in dy0..dy1 {
                                 let row_src = &pixels[dy * src_w..(dy + 1) * src_w];
                                 let mut dst_ptr = ptr.add(dy * stride_bytes);
                                 for &p in row_src {
@@ -1980,9 +2043,8 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32) {
             // per flip is outside the QEMU-TCG CPU budget already noted by
             // the launcher, so the bounded point sample is the deliberate
             // tradeoff there, not an oversight.
-            let is_2x = (src_w == dst_w * 2) && (src_h == dst_h * 2);
             unsafe {
-                for dy in 0..dst_h {
+                for dy in dy0..dy1 {
                     let target_y = off_y + dy;
                     let row_start_ptr = ptr.add(target_y * stride_bytes + off_x * bpp);
                     match fmt {
@@ -2147,7 +2209,7 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32) {
                 }
             }
         } else {
-            for dy in 0..dst_h {
+            for dy in dy0..dy1 {
                 let sy = dy * src_h / dst_h;
                 for dx in 0..dst_w {
                     let sx = dx * src_w / dst_w;
@@ -2158,6 +2220,383 @@ pub fn present_argb8888(pixels: &[u32], width: u32, height: u32) {
         }
     }
 
+
+#[cfg(test)]
+mod present_band_tests {
+    use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    /// Serialises these tests. They drive the single global `FRAMEBUFFER_WRITER`
+    /// and `LAST_CLEAR_BOUNDS` that `present_argb8888` locks, the same way the
+    /// display driver drives them at runtime, so only one may be installed at a
+    /// time.
+    static PRESENT_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
+    /// Physical-framebuffer stand-in for the host test build.
+    ///
+    /// WHY it builds the writer by hand: `FramebufferWriter::init` needs a
+    /// `&'static mut bootloader_api::FrameBuffer`, and `present_argb8888`
+    /// reaches its target through `info` + `buffer_ptr`. Writing those two
+    /// fields is exactly what `init` does, so the present path under test is
+    /// the production one, including the raw-pointer blit.
+    struct FakeFb {
+        bytes: Vec<u8>,
+        width: usize,
+        height: usize,
+        stride: usize,
+        bpp: usize,
+    }
+
+    impl FakeFb {
+        fn new(width: usize, height: usize, bpp: usize) -> Self {
+            let stride = width;
+            Self { bytes: vec![0u8; height * stride * bpp], width, height, stride, bpp }
+        }
+
+        /// Fills with a deterministic non-uniform pattern so that any stray
+        /// write is visible rather than being mistaken for "unchanged".
+        fn poison(&mut self) {
+            for (i, byte) in self.bytes.iter_mut().enumerate() {
+                *byte = (i % 251) as u8;
+            }
+        }
+
+        fn install(&mut self) {
+            let mut fb = FRAMEBUFFER_WRITER.lock();
+            fb.info = Some(FrameBufferInfo {
+                byte_len: self.bytes.len(),
+                width: self.width,
+                height: self.height,
+                pixel_format: PixelFormat::Bgr,
+                bytes_per_pixel: self.bpp,
+                stride: self.stride,
+            });
+            fb.buffer_ptr = Some(self.bytes.as_mut_ptr());
+        }
+
+        fn row(&self, y: usize) -> &[u8] {
+            let start = y * self.stride * self.bpp;
+            &self.bytes[start..start + self.stride * self.bpp]
+        }
+
+        /// The part of row `y` inside the scaled viewport.
+        ///
+        /// WHY the viewport and not the whole row: `present_argb8888` clears the
+        /// letterbox borders through `LAST_CLEAR_BOUNDS` only on a geometry
+        /// change. The tests prime that cache with a warm-up present and then
+        /// poison the buffer, so border columns are deliberately left as poison
+        /// and comparing them would measure the border policy, not the blit.
+        fn viewport_row(&self, y: usize, off_x: usize, dst_w: usize) -> Vec<u8> {
+            let start = y * self.stride * self.bpp + off_x * self.bpp;
+            self.bytes[start..start + dst_w * self.bpp].to_vec()
+        }
+
+        /// Re-reads through the writer so the pointer installed above is
+        /// exercised, not just the local buffer.
+        fn reassert_ptr(&mut self) {
+            let fb = FRAMEBUFFER_WRITER.lock();
+            assert_eq!(fb.buffer_ptr, Some(self.bytes.as_mut_ptr()));
+        }
+    }
+
+    /// Deterministic, non-uniform source image.
+    fn source(src_w: usize, src_h: usize) -> Vec<u32> {
+        (0..src_w * src_h)
+            .map(|i| {
+                let r = (i % 251) as u32;
+                let g = ((i / 7) % 241) as u32;
+                let b = ((i / 53) % 239) as u32;
+                0xFF00_0000 | (r << 16) | (g << 8) | b
+            })
+            .collect()
+    }
+
+    /// Recomputes the aspect fit exactly as `present_argb8888` does.
+    fn fit(src_w: usize, src_h: usize, info_w: usize, info_h: usize) -> (usize, usize, usize, usize) {
+        let (dst_w, dst_h) = if src_w.saturating_mul(info_h) <= src_h.saturating_mul(info_w) {
+            let h = info_h;
+            ((src_w * h / src_h).max(1).min(info_w), h)
+        } else {
+            let w = info_w;
+            (w, (src_h * w / src_w).max(1).min(info_h))
+        };
+        ((info_w - dst_w) / 2, (info_h - dst_h) / 2, dst_w, dst_h)
+    }
+
+    /// The pre-banding present: unconditional full scanout copy, BGR, 4bpp.
+    ///
+    /// WHY it is spelled out here instead of calling the production function:
+    /// the whole point of the test is to compare against the algorithm as it
+    /// was *before* banding, so it must be an independent transcription of the
+    /// old `for dy in 0..dst_h` loop and its source-row arithmetic.
+    fn reference_full_present(dst: &mut [u8], stride: usize, bpp: usize, pixels: &[u32], src_w: usize, src_h: usize, info_w: usize, info_h: usize) {
+        let (off_x, off_y, dst_w, dst_h) = fit(src_w, src_h, info_w, info_h);
+        let stride_bytes = stride * bpp;
+        let is_2x = (src_w == dst_w * 2) && (src_h == dst_h * 2);
+        let exact = src_w == info_w && src_h == info_h && off_x == 0 && off_y == 0;
+        for dy in 0..dst_h.max(if exact { info_h } else { 0 }) {
+            let target_y = if exact { dy } else { off_y + dy };
+            let base = target_y * stride_bytes + off_x * bpp;
+            if exact {
+                for (dx, &p) in pixels[dy * src_w..(dy + 1) * src_w].iter().enumerate() {
+                    let at = base + dx * bpp;
+                    dst[at] = p as u8;
+                    dst[at + 1] = (p >> 8) as u8;
+                    dst[at + 2] = (p >> 16) as u8;
+                    dst[at + 3] = 0xFF;
+                }
+                continue;
+            }
+            if is_2x {
+                let r0 = dy * 2 * src_w;
+                let r1 = r0 + src_w;
+                for dx in 0..dst_w {
+                    let sx = dx * 2;
+                    let (p00, p01, p10, p11) = (pixels[r0 + sx], pixels[r0 + sx + 1], pixels[r1 + sx], pixels[r1 + sx + 1]);
+                    let rb = ((p00 & 0x00FF00FF) + (p01 & 0x00FF00FF) + (p10 & 0x00FF00FF) + (p11 & 0x00FF00FF)) >> 2;
+                    let ag = (((p00 >> 8) & 0x00FF00FF) + ((p01 >> 8) & 0x00FF00FF) + ((p10 >> 8) & 0x00FF00FF) + ((p11 >> 8) & 0x00FF00FF)) >> 2;
+                    let argb = (rb & 0x00FF00FF) | ((ag & 0x00FF00FF) << 8);
+                    let at = base + dx * bpp;
+                    dst[at] = argb as u8;
+                    dst[at + 1] = (argb >> 8) as u8;
+                    dst[at + 2] = (argb >> 16) as u8;
+                    dst[at + 3] = 0xFF;
+                }
+            } else {
+                let sy = dy * src_h / dst_h;
+                for dx in 0..dst_w {
+                    let sx = dx * src_w / dst_w;
+                    let argb = pixels[sy * src_w + sx];
+                    let at = base + dx * bpp;
+                    dst[at] = argb as u8;
+                    dst[at + 1] = (argb >> 8) as u8;
+                    dst[at + 2] = (argb >> 16) as u8;
+                    dst[at + 3] = 0xFF;
+                }
+            }
+        }
+    }
+
+    /// Warms the geometry cache so the present under test only performs blit
+    /// work: `LAST_CLEAR_BOUNDS` records the viewport after the first present,
+    /// and the letterbox clear then only happens on a geometry change.
+    fn warm_up(pixels: &[u32], src_w: usize, src_h: usize) {
+        present_argb8888(pixels, src_w as u32, src_h as u32, (0, src_h));
+    }
+
+    /// Geometries exercised by the byte-level tests: the QEMU portrait case
+    /// (exact 2x downscale into a landscape framebuffer), the 1:1 fast path,
+    /// and a fractional nearest-neighbour scale.
+    fn geometries() -> Vec<(usize, usize, usize, usize)> {
+        vec![(720, 1440, 1280, 720), (64, 64, 64, 64), (64, 64, 1280, 720), (100, 50, 1280, 720)]
+    }
+
+    #[test]
+    fn full_band_present_is_byte_identical_to_the_pre_banding_loop() {
+        let _guard = PRESENT_LOCK.lock();
+        for (src_w, src_h, fb_w, fb_h) in geometries() {
+            let pixels = source(src_w, src_h);
+            let mut fb = FakeFb::new(fb_w, fb_h, 4);
+            fb.install();
+            warm_up(&pixels, src_w, src_h);
+            fb.poison();
+            present_argb8888(&pixels, src_w as u32, src_h as u32, (0, src_h));
+            fb.reassert_ptr();
+
+            let mut expected = vec![0u8; fb.bytes.len()];
+            reference_full_present(&mut expected, fb.stride, fb.bpp, &pixels, src_w, src_h, fb_w, fb_h);
+            let (off_x, off_y, dst_w, dst_h) = fit(src_w, src_h, fb_w, fb_h);
+            // Viewport rows must match the old loop byte for byte.
+            for y in off_y..off_y + dst_h {
+                let got = fb.viewport_row(y, off_x, dst_w);
+                let want = &expected[y * fb.stride * 4 + off_x * 4..y * fb.stride * 4 + (off_x + dst_w) * 4];
+                assert_eq!(got.as_slice(), want, "full-band present diverged from the old full-scanout loop for {}x{} -> {}x{} at row {}", src_w, src_h, fb_w, fb_h, y);
+            }
+            // Every viewport row must have been repainted, and nothing outside
+            // the viewport may have been touched by the blit.
+            for y in 0..fb_h {
+                let painted = fb.viewport_row(y, off_x, dst_w) != poison_row(fb_w, fb_h, 4, y)[off_x * 4..(off_x + dst_w) * 4].to_vec();
+                assert_eq!(painted, y >= off_y && y < off_y + dst_h, "row {y} painted state is wrong for {}x{} -> {}x{}", src_w, src_h, fb_w, fb_h);
+            }
+        }
+    }
+
+    #[test]
+    fn sub_band_present_touches_only_the_mapped_destination_rows() {
+        let _guard = PRESENT_LOCK.lock();
+        for (src_w, src_h, fb_w, fb_h) in geometries() {
+            for (s0, s1) in [(0usize, src_h), (1, 2), (src_h / 3, src_h / 2), (src_h - 1, src_h)] {
+                let pixels = source(src_w, src_h);
+                let mut reference = FakeFb::new(fb_w, fb_h, 4);
+                let mut banded = FakeFb::new(fb_w, fb_h, 4);
+                // Prime the geometry cache for this exact viewport, then poison
+                // so untouched destination bytes are provably untouched.
+                banded.install();
+                warm_up(&pixels, src_w, src_h);
+                reference_full_present(&mut reference.bytes, reference.stride, reference.bpp, &pixels, src_w, src_h, fb_w, fb_h);
+                banded.poison();
+
+                present_argb8888(&pixels, src_w as u32, src_h as u32, (s0, s1));
+
+                let (off_x, off_y, dst_w, dst_h) = fit(src_w, src_h, fb_w, fb_h);
+                let is_2x = (src_w == dst_w * 2) && (src_h == dst_h * 2);
+                let exact = src_w == fb_w && src_h == fb_h && off_x == 0 && off_y == 0;
+                let (d0, d1) = present_dst_row_band((s0, s1), src_h, if exact { fb_h } else { dst_h }, is_2x);
+                for y in 0..fb_h {
+                    let got = banded.viewport_row(y, off_x, dst_w);
+                    let pristine = poison_row(fb_w, fb_h, 4, y)[off_x * 4..(off_x + dst_w) * 4].to_vec();
+                    if y >= off_y + d0 && y < off_y + d1 {
+                        assert_eq!(got, reference.viewport_row(y, off_x, dst_w), "banded row {y} must match a full present ({src_w}x{src_h}->{fb_w}x{fb_h}, band {s0}..{s1})");
+                    } else {
+                        assert_eq!(got, pristine, "row {y} outside band {s0}..{s1} must stay untouched ({src_w}x{src_h}->{fb_w}x{fb_h})");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The deterministic pattern `FakeFb::poison` writes, rebuilt per row.
+    fn poison_row(fb_w: usize, fb_h: usize, bpp: usize, y: usize) -> Vec<u8> {
+        let start = y * fb_w * bpp;
+        (0..fb_w * bpp).map(|i| ((start + i) % 251) as u8).collect()
+    }
+
+    #[test]
+    fn band_saturates_at_both_ends_of_the_scanout() {
+        let _guard = PRESENT_LOCK.lock();
+        let (src_w, src_h, fb_w, fb_h) = (64usize, 64usize, 64usize, 64usize);
+        let pixels = source(src_w, src_h);
+        let mut fb = FakeFb::new(fb_w, fb_h, 4);
+        fb.install();
+        warm_up(&pixels, src_w, src_h);
+
+        // An empty band, an inverted band, and an over-wide band all clamp
+        // instead of reading past the scanout or looping forever.
+        let pristine = poison_all(fb_w, fb_h, 4);
+        for band in [(0usize, 0usize), (src_h, src_h), (30, 10), (usize::MAX, usize::MAX)] {
+            fb.poison();
+            present_argb8888(&pixels, src_w as u32, src_h as u32, band);
+            assert_eq!(fb.bytes, pristine, "band {band:?} must present no rows");
+        }
+
+        // A band that runs off the top saturates to the full scanout and must
+        // equal an unbanded present.
+        let mut full = FakeFb::new(fb_w, fb_h, 4);
+        full.install();
+        warm_up(&pixels, src_w, src_h);
+        present_argb8888(&pixels, src_w as u32, src_h as u32, (0, src_h));
+        // Re-install: the writer holds one buffer at a time, so the measured
+        // present has to point at the buffer being compared.
+        fb.install();
+        fb.poison();
+        present_argb8888(&pixels, src_w as u32, src_h as u32, (0, usize::MAX));
+        assert_eq!(fb.bytes, full.bytes, "an over-wide band must saturate to the full scanout");
+
+        // The last source row alone maps to exactly the last destination row.
+        fb.poison();
+        present_argb8888(&pixels, src_w as u32, src_h as u32, (src_h - 1, src_h));
+        assert_eq!(present_dst_row_band((src_h - 1, src_h), src_h, src_h, false), (src_h - 1, src_h));
+    }
+
+    /// The full poisoned pattern `FakeFb::poison` writes.
+    fn poison_all(fb_w: usize, fb_h: usize, bpp: usize) -> Vec<u8> {
+        let total = fb_w * fb_h * bpp;
+        (0..total).map(|i| (i % 251) as u8).collect()
+    }
+
+    #[test]
+    fn band_to_destination_rows_is_minimal_monotonic_and_in_bounds() {
+        // (src_h, dst_h, is_2x) covering the real QEMU 2x case, the 1:1 case,
+        // fractional nearest-neighbour, up- and down-scaling.
+        let cases = [
+            (1440usize, 720usize, true),   // 720x1440 -> 360x720, exact 2x
+            (1440, 720, false),            // same geometry, point sampler
+            (64, 64, false),               // 1:1 fast path
+            (100, 50, false),              // 2x, point sampler
+            (50, 100, false),              // 2x upscale
+            (37, 91, false),               // non-integer downscale
+            (91, 37, false),               // non-integer upscale
+            (1, 1, false),
+            (1, 8, false),
+        ];
+        for (src_h, dst_h, is_2x) in cases {
+            // WHY the sweep is thinned for tall geometries: the exhaustive
+            // check is O(bands x dst_h), which is 1.5 billion row comparisons
+            // for the real 1440-row case. The thinned sweep keeps every edge,
+            // every 2x pair boundary, and a regular stride over the interior,
+            // which is where an off-by-one in the ceil arithmetic would show.
+            let step = if src_h > 128 { 7 } else { 1 };
+            let mut anchors: Vec<usize> = (0..=src_h).step_by(step).collect();
+            for extra in [1usize, 2] {
+                if extra <= src_h { anchors.push(extra); }
+            }
+            if src_h >= 2 { anchors.push(src_h - 1); }
+            anchors.push(src_h);
+            anchors.sort_unstable();
+            anchors.dedup();
+
+            let mut previous = (0usize, 0usize);
+            for &s0 in &anchors {
+                let mut previous_d1 = 0usize;
+                for &s1 in anchors.iter().filter(|&&value| value >= s0) {
+                    let band = (s0, s1);
+                    let (d0, d1) = present_dst_row_band(band, src_h, dst_h, is_2x);
+
+                    // In bounds and ordered.
+                    assert!(d0 <= d1, "{band:?} -> ({d0},{d1}) inverted");
+                    assert!(d1 <= dst_h, "{band:?} -> ({d0},{d1}) exceeds dst_h={dst_h}");
+
+                    // Exact: a destination row is inside iff the source rows it
+                    // samples intersect the band. This is the property that
+                    // makes a banded present identical to a full one outside the
+                    // band, and it is checked against the blit's own samplers.
+                    for dy in 0..dst_h {
+                        let sampled: Vec<usize> = if is_2x {
+                            vec![dy * 2, dy * 2 + 1]
+                        } else {
+                            vec![dy * src_h / dst_h]
+                        };
+                        let intersects = sampled.iter().any(|&sy| sy >= s0 && sy < s1);
+                        assert_eq!(dy >= d0 && dy < d1, intersects, "src_h={src_h} dst_h={dst_h} is_2x={is_2x} band={band:?} dy={dy}");
+                    }
+
+                    // Monotonic in the band's far edge: a taller band never
+                    // presents fewer rows.
+                    assert!(d1 >= previous_d1, "{band:?} -> ({d0},{d1}) shrank at the far edge from {previous_d1}");
+                    previous_d1 = d1;
+                }
+                // Monotonic in the band's near edge: a lower band never starts
+                // presenting earlier rows than the band above it.
+                let (_, tail_end) = present_dst_row_band((s0, src_h), src_h, dst_h, is_2x);
+                let head = present_dst_row_band((s0, s0), src_h, dst_h, is_2x).0;
+                assert!(head >= previous.0, "band {s0} near edge moved back from {}", previous.0);
+                previous.0 = head;
+                // Set inclusion: widening a band can only add destination rows.
+                let wide = present_dst_row_band((s0.saturating_sub(1), src_h), src_h, dst_h, is_2x);
+                assert!(wide.1 >= tail_end, "widening band {s0}..{src_h} must not shrink its range");
+            }
+            // Edge behaviour: a full band maps to every destination row; an
+            // empty or exhausted one maps to nothing at all.
+            assert_eq!(present_dst_row_band((0, src_h), src_h, dst_h, is_2x), (0, dst_h), "a full band must map to every destination row");
+            for empty in [(0usize, 0usize), (src_h, src_h), (usize::MAX, usize::MAX), (src_h / 2, src_h / 3)] {
+                let (d0, d1) = present_dst_row_band(empty, src_h, dst_h, is_2x);
+                assert_eq!(d0, d1, "empty band {empty:?} must map to no destination rows");
+            }
+            assert_eq!(present_dst_row_band((0, usize::MAX), src_h, dst_h, is_2x), (0, dst_h));
+            // A band reaching the last source row reaches the last destination
+            // row, and the start of the band can never overshoot the scanout.
+            assert_eq!(present_dst_row_band((src_h, src_h + 1), src_h, dst_h, is_2x).1, dst_h);
+            for s0 in anchors.iter() {
+                let (d0, d1) = present_dst_row_band((*s0, src_h), src_h, dst_h, is_2x);
+                assert!(d0 <= d1 && d1 <= dst_h);
+            }
+        }
+        // Degenerate geometry must not panic or divide by zero.
+        assert_eq!(present_dst_row_band((0, 10), 0, 8, false), (0, 0));
+        assert_eq!(present_dst_row_band((0, 10), 8, 0, false), (0, 0));
+    }
+}
 
 pub fn draw_mobile_shell() {
     crate::arch::with_interrupts_disabled(|| {

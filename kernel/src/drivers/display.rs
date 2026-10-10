@@ -61,10 +61,18 @@ impl DisplayDriver for KmsDisplayDriver<'_> {
         let t1 = unsafe { core::arch::x86_64::_rdtsc() };
 
         let flip = self.controller.page_flip();
+        // WHY the band is taken here and not reused: `composite` has already
+        // run, so the controller now holds every row the compositor changed
+        // since the previous flip. Taking it clears it, and the next flip
+        // re-accumulates from zero (or to the full scanout, if something
+        // untrackable changes). The full-scanout default therefore still covers
+        // the first flip after boot and any flip after a geometry change.
+        let dirty_rows = self.controller.take_present_dirty_rows();
         crate::framebuffer::present_argb8888(
             &self.controller.front_buffer,
             self.controller.scanout_width,
             self.controller.scanout_height,
+            dirty_rows,
         );
 
         #[cfg(target_arch = "x86_64")]

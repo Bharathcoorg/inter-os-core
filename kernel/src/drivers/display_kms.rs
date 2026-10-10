@@ -27,6 +27,23 @@ pub const MAX_CLIENT_SURFACES: usize = 32;
 pub const MAX_SURFACE_PIXELS: usize = 1280 * 720;
 pub const MAX_SCANOUT_PIXELS: usize = 3840 * 2160;
 
+/// Grows a half-open row band `band` so that it also covers `[y0, y1)`.
+///
+/// WHY a single growing band rather than a rectangle list: the present path
+/// consumes one contiguous row range, and a band keeps the invariant "rows
+/// outside `band` are unchanged" easy to state and to test. Empty and inverted
+/// ranges are absorbed (`y1 <= band.0` adds nothing), which matters because a
+/// clipped-off surface can produce an empty range.
+fn union_rows(band: &mut (usize, usize), y0: usize, y1: usize) {
+    if y1 <= y0 { return; }
+    if band.1 <= band.0 {
+        *band = (y0, y1);
+        return;
+    }
+    band.0 = band.0.min(y0);
+    band.1 = band.1.max(y1);
+}
+
 pub struct DrmSurface {
     pub id: u32,
     pub x: i32,
@@ -40,6 +57,18 @@ pub struct DrmSurface {
     pub input_enabled: bool,
     pub pixels: Vec<u32>, // 32-bit ARGB pixels
     pub dirty: bool,
+    /// Half-open, surface-local row band `[y0, y1)` whose pixels changed since
+    /// the last composite, in addition to the boolean `dirty` flag.
+    ///
+    /// WHY this exists: `dirty` is only a boolean, but `present_argb8888` can
+    /// only skip scanout rows that provably did not change. Row granularity is
+    /// what lets the present path redraw a handful of rows instead of all
+    /// 1,036,800 pixels. `(0, 0)` means "no row-granular information" and is
+    /// deliberately treated by `composite` as an unknown change (see the
+    /// untracked-write guard there): an empty band must never be mistaken for
+    /// "nothing moved", because pixel mutation can also happen through the raw
+    /// surface-write syscall, which only sets `dirty`.
+    pub dirty_rows: (usize, usize),
     /// Owning userspace task. Surface mutation is restricted to the creator.
     pub owner_task: u64,
 }
@@ -74,6 +103,7 @@ impl DrmSurface {
             input_enabled: true,
             pixels: vec![0xFF000000; size], // default opaque black
             dirty: true,
+            dirty_rows: (0, 0),
             owner_task,
         }
     }
@@ -109,6 +139,19 @@ pub struct DrmKmsController {
     pub frame_dirty: bool,
     /// Authoritative guest display-power state. When false the compositor scanout is black.
     pub powered: bool,
+    /// Half-open band of scanout rows `[y0, y1)` that the next flip must copy
+    /// out to the physical framebuffer.
+    ///
+    /// WHY default to the full scanout: the boot framebuffer starts out holding
+    /// whatever the firmware drew, so the first flip after boot has to push
+    /// every row. The same "present everything" default is re-armed by
+    /// `mark_present_full` for any change whose row extent is not tracked
+    /// exactly (mode/orientation changes, power transitions, surface
+    /// create/destroy/move, and pixel writes that did not come through
+    /// `write_surface_pixels`). Narrowing only ever happens for a band that a
+    /// write actually established, so behaviour is byte-identical to the old
+    /// full-scanout present whenever no narrower band was genuinely earned.
+    pub present_dirty_rows: (usize, usize),
 }
 
 impl DrmKmsController {
@@ -130,7 +173,39 @@ impl DrmKmsController {
             frame_deadline_ticks: 0,
             frame_dirty: true,
             powered: true,
+            present_dirty_rows: (0, height as usize),
         }
+    }
+
+    /// Re-arms the full-scanout present band.
+    ///
+    /// WHY: every mutation that can move pixels we cannot attribute to an exact
+    /// row range calls this, so the flip still presents everything exactly like
+    /// the pre-banding code did. Old behaviour: every flip copied the whole
+    /// 720x1440 front buffer regardless of what changed.
+    pub fn mark_present_full(&mut self) {
+        self.present_dirty_rows = (0, self.scanout_height as usize);
+    }
+
+    /// Widens the pending present band to cover scanout rows `[y0, y1)`.
+    pub fn mark_present_rows(&mut self, y0: usize, y1: usize) {
+        union_rows(&mut self.present_dirty_rows, y0, y1.min(self.scanout_height as usize));
+    }
+
+    /// Returns the pending present band and clears it.
+    ///
+    /// WHY clear to an *empty* band rather than re-arming the full scanout:
+    /// `composite()` already ran and recomputed the entire back buffer before
+    /// the flip, and composition is a pure function of surface pixels plus
+    /// geometry. Rows outside the accumulated band are therefore guaranteed to
+    /// hold the same bytes they held at the previous present, so re-presenting
+    /// them is pure work. Clearing means an idle frame presents nothing instead
+    /// of re-converting 1M pixels; every mutator widens the band back on its
+    /// own, so "nothing was recorded" cannot become stale pixels.
+    pub fn take_present_dirty_rows(&mut self) -> (usize, usize) {
+        let band = self.present_dirty_rows;
+        self.present_dirty_rows = (0, 0);
+        band
     }
 
     /// Sets the authoritative display power state. Surfaces remain intact so wake is instantaneous.
@@ -138,6 +213,10 @@ impl DrmKmsController {
         if self.powered == powered { return; }
         self.powered = powered;
         self.frame_dirty = true;
+        // A sleep fills both buffers with black, so the next flip has to push
+        // every row; a wake re-exposes content that may never have been
+        // presented. Neither transition has a usable row range.
+        self.mark_present_full();
         if !powered {
             self.front_buffer.fill(0xFF000000);
             self.back_buffer.fill(0xFF000000);
@@ -176,6 +255,10 @@ impl DrmKmsController {
         surface.input_enabled = !is_overlay;
         self.surfaces.push(surface);
         self.frame_dirty = true;
+        // A new surface appears on top of whatever was there before, so the rows
+        // it covers are the union of "what it paints" and "what it hides". The
+        // occluded rows are not tracked per-surface, so re-arm the full scanout.
+        self.mark_present_full();
         if crate::gui::WINDOW_MANAGER.lock().create_with_id(
             crate::gui::WindowId(id),
             owner_task,
@@ -201,6 +284,16 @@ impl DrmKmsController {
         surface.pixels[offset..end].copy_from_slice(src);
         surface.dirty = true;
         self.frame_dirty = true;
+        // Record which surface rows moved so `composite` can narrow the present
+        // band instead of re-copying the whole scanout. `offset..end` is a
+        // row-major range of `width`-pixel rows, so the rows touched are
+        // `[offset / width, (end - 1) / width + 1)`.
+        let row_pitch = surface.width as usize;
+        if row_pitch > 0 && src.len() > 0 {
+            let r0 = offset / row_pitch;
+            let r1 = (end - 1) / row_pitch + 1;
+            union_rows(&mut surface.dirty_rows, r0, r1.min(surface.height as usize));
+        }
         Ok(src.len())
     }
 
@@ -210,6 +303,10 @@ impl DrmKmsController {
             let owner = self.surfaces[pos].owner_task;
             self.surfaces.remove(pos);
             self.frame_dirty = true;
+            // Whatever the removed surface covered is now background, and the
+            // surfaces below it become visible again. Neither transition has a
+            // single trackable row range.
+            self.mark_present_full();
             let _ = crate::gui::WINDOW_MANAGER.lock().destroy_if(crate::gui::WindowId(id), Some(owner));
             if self.focused_surface == Some(id) {
                 self.focused_surface = self.surfaces.iter().filter(|s| s.visible && s.input_enabled).max_by_key(|s| s.z_order).map(|s| s.id);
@@ -228,6 +325,8 @@ impl DrmKmsController {
             let owner = self.surfaces[pos].owner_task;
             self.surfaces.remove(pos);
             self.frame_dirty = true;
+            // Same occlusion reveal as `destroy_surface`: full re-present.
+            self.mark_present_full();
             let gui_owner = owner_task.map(|_| owner);
             let _ = crate::gui::WINDOW_MANAGER.lock().destroy_if(crate::gui::WindowId(id), gui_owner);
             if self.focused_surface == Some(id) {
@@ -256,7 +355,11 @@ impl DrmKmsController {
             }
         }
         let removed_count = before - self.surfaces.len();
-        if removed_count > 0 { self.frame_dirty = true; }
+        if removed_count > 0 {
+            self.frame_dirty = true;
+            // Tearing down a task's windows exposes the layers beneath them.
+            self.mark_present_full();
+        }
         removed_count
     }
 
@@ -290,6 +393,10 @@ impl DrmKmsController {
             s.visible = visible;
             s.dirty = true;
             self.frame_dirty = true;
+            // A move relocates the surface and re-orders the stack, so both the
+            // vacated rows and the newly covered rows change with no single
+            // contiguous range to attribute them to.
+            self.mark_present_full();
             true
         } else {
             false
@@ -310,6 +417,8 @@ impl DrmKmsController {
                 crate::gui::WindowRect { x, y, width: s.width, height: s.height },
             );
             self.frame_dirty = true;
+            // See `set_surface_geometry`: vacated and covered rows both change.
+            self.mark_present_full();
             return true;
         }
         false
@@ -357,11 +466,15 @@ impl DrmKmsController {
     pub fn ensure_buffers(&mut self) {
         let Some(size) = (self.scanout_width as usize).checked_mul(self.scanout_height as usize) else { return; };
         if size == 0 || size > MAX_SCANOUT_PIXELS { return; }
+        // Resizing reallocates and re-fills both buffers, so every row of the
+        // front buffer is new content that has never been presented.
         if self.front_buffer.len() != size {
             self.front_buffer.resize(size, 0xFF000000);
+            self.mark_present_full();
         }
         if self.back_buffer.len() != size {
             self.back_buffer.resize(size, 0xFF0B0F19);
+            self.mark_present_full();
         }
     }
 
@@ -372,9 +485,14 @@ impl DrmKmsController {
             self.back_buffer.fill(0xFF000000);
             for surface in self.surfaces.iter_mut() { surface.dirty = false; }
             self.frame_dirty = false;
+            // Suspending blanks the whole scanout, so every row changed.
+            self.mark_present_full();
             return;
         }
         if !self.frame_dirty && self.surfaces.iter().all(|s| !s.dirty) {
+            // Nothing was rewritten: the back buffer still holds the image the
+            // last flip published, so there is nothing new to present and the
+            // band is left exactly as `take_present_dirty_rows` left it (empty).
             return;
         }
         // Clear back buffer to base background color (slate navy: 0xFF0B0F19)
@@ -388,6 +506,12 @@ impl DrmKmsController {
         let sh = self.scanout_height as i32;
 
         let has_mobile_portrait = self.surfaces.iter().any(|s| s.visible && s.width == 720 && s.height == 1440);
+
+        // Scanout rows the flip will have to re-present. Seeded with whatever
+        // the callers already declared dirty; the surface loop narrows it to
+        // exactly the rows each dirty surface actually rewrote, and
+        // `diff_present_rows` below makes the result fail-safe.
+        let mut present_band = self.present_dirty_rows;
 
         for surface in self.surfaces.iter_mut() {
             if !surface.visible || surface.opacity == 0 {
@@ -450,8 +574,28 @@ impl DrmKmsController {
                     && self.scanout_width == 720 && self.scanout_height == 1440 && !landscape
                 {
                     self.back_buffer.copy_from_slice(&surface.pixels);
+                    // WHY the mapping is the identity here: this branch requires
+                    // the destination rect to be exactly `dst_y=0, dst_h=1440`
+                    // over a 720x1440 scanout, and the blit above is a straight
+                    // `copy_from_slice`. Surface row `r` therefore lands on
+                    // scanout row `0 + r`, so the tracked band copies 1:1.
+                    if surface.dirty_rows.1 > surface.dirty_rows.0 {
+                        union_rows(&mut present_band, surface.dirty_rows.0, surface.dirty_rows.1.min(dst_y + dst_h));
+                    }
                     surface.dirty = false;
+                    surface.dirty_rows = (0, 0);
                     continue;
+                }
+
+                // Every remaining branch of this block is a *scaled* launcher
+                // blit (rotation, exact 2x box average, or nearest-neighbour).
+                // Each uses a different vertical mapping between source rows and
+                // destination rows, so rather than invert three different
+                // samplers here, widen to the destination rect the surface
+                // covers: still bounded by this surface, and never wider than
+                // the pre-banding code ever presented.
+                if surface.dirty_rows.1 > surface.dirty_rows.0 {
+                    union_rows(&mut present_band, dst_y, dst_y + dst_h);
                 }
 
                 if landscape {
@@ -528,11 +672,27 @@ impl DrmKmsController {
                     }
                 }
                 surface.dirty = false;
+                surface.dirty_rows = (0, 0);
                 continue;
             }
 
             if x0 >= x1 || y0 >= y1 {
                 continue;
+            }
+
+            // WHY this offset is a constant: the generic blit below copies
+            // surface row `(y - sy)` onto scanout row `y`, so surface row `r`
+            // always lands on scanout row `r + sy`. Intersecting the tracked
+            // band with the rows this blit actually draws (`y0..y1`) yields the
+            // exact scanout rows that changed.
+            if surface.dirty_rows.1 > surface.dirty_rows.0 {
+                let drawn_lo = (y0 - sy) as usize;
+                let drawn_hi = (y1 - sy) as usize;
+                let lo = surface.dirty_rows.0.max(drawn_lo);
+                let hi = surface.dirty_rows.1.min(drawn_hi);
+                if hi > lo {
+                    union_rows(&mut present_band, lo + sy as usize, hi + sy as usize);
+                }
             }
 
             let opacity = surface.opacity;
@@ -601,8 +761,57 @@ impl DrmKmsController {
                 }
             }
             surface.dirty = false;
+            surface.dirty_rows = (0, 0);
         }
+        self.diff_present_rows(&mut present_band);
+        self.present_dirty_rows = present_band;
         self.frame_dirty = false;
+    }
+
+    /// Widens `band` to every scanout row where the freshly composed back
+    /// buffer differs from the front buffer.
+    ///
+    /// WHY this exists even though `write_surface_pixels` already tracks rows:
+    /// userspace does not reach that method. `std::surface_write` maps to
+    /// `SyscallNumber::SurfaceWrite` (73), whose handler writes
+    /// `surface.pixels` directly and only raises `surface.dirty`, so the
+    /// tracked band is empty for every real client frame and would otherwise
+    /// never narrow. Diffing the two scanout buffers is writer-agnostic and
+    /// exact: `front_buffer` is what the previous flip published, so the rows
+    /// that differ are precisely the rows whose on-screen bytes are stale.
+    ///
+    /// WHY it is cheap relative to what it saves: this is a compare-only pass
+    /// over the scanout (1,036,800 `u32` for the 720x1440 case) against the
+    /// ~150M-cycle present it can eliminate, and it runs at most once per
+    /// composited frame.
+    ///
+    /// WHY the union is safe: this only ever *adds* rows to the band. Even if a
+    /// tracked band were mapped wrongly, the diff keeps the flip correct.
+    fn diff_present_rows(&self, band: &mut (usize, usize)) {
+        let scanout_w = self.scanout_width as usize;
+        let scanout_h = self.scanout_height as usize;
+        let needed = match scanout_w.checked_mul(scanout_h) {
+            Some(value) => value,
+            None => { *band = (0, scanout_h); return; }
+        };
+        // Buffers of different lengths (a mode change that has not been
+        // re-allocated yet) have no comparable common prefix to reason about.
+        if self.front_buffer.len() != needed || self.back_buffer.len() != needed {
+            *band = (0, scanout_h);
+            return;
+        }
+        let (front, back) = (&self.front_buffer, &self.back_buffer);
+        let mut y0 = scanout_h;
+        let mut y1 = 0usize;
+        for y in 0..scanout_h {
+            let start = y * scanout_w;
+            let end = start + scanout_w;
+            if front[start..end] != back[start..end] {
+                y0 = y0.min(y);
+                y1 = y + 1;
+            }
+        }
+        if y1 > y0 { union_rows(band, y0, y1); }
     }
 
     pub fn set_display_mode(&mut self, width: u32, height: u32, refresh_hz: u16) -> Result<(), &'static str> {
@@ -617,6 +826,9 @@ impl DrmKmsController {
         self.scanout_height = height;
         self.refresh_hz = refresh_hz;
         self.frame_dirty = true;
+        // New scanout geometry: rows are re-fitted into a different physical
+        // framebuffer layout, so the old present band no longer describes it.
+        self.mark_present_full();
         self.ensure_buffers();
         Ok(())
     }
@@ -624,6 +836,8 @@ impl DrmKmsController {
     pub fn set_orientation(&mut self, orientation: DisplayOrientation) {
         self.orientation = orientation;
         self.frame_dirty = true;
+        // Rotation re-maps every source row onto a different destination row.
+        self.mark_present_full();
     }
 
     pub fn next_frame_deadline(&self) -> u64 { self.frame_deadline_ticks }
@@ -658,6 +872,7 @@ pub static DRM_KMS: Mutex<DrmKmsController> = Mutex::new(DrmKmsController {
     frame_deadline_ticks: 0,
     frame_dirty: true,
     powered: true,
+    present_dirty_rows: (0, 1440),
 });
 
 #[cfg(test)]
