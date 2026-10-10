@@ -306,6 +306,12 @@ const TEXT_MUTED: u32 = 0xFF9AA8BC;
 // -----------------------------------------------------------------------------
 // Typography provided by interos_std::design::font
 
+/// Rasterises one text run into the pixel at `(x, y)`.
+///
+/// WHY the line-box clip: the shared bitmap face is `GLYPH_H` (24) rows tall,
+/// so a run at `scale` owns `GLYPH_H * scale` rows. Clipping to that box here
+/// means no call site can silently slice a glyph with a shorter hand-written
+/// `y` window.
 #[inline(always)]
 fn test_text(
     x: usize,
@@ -316,7 +322,19 @@ fn test_text(
     text: &[u8],
     color: u32,
 ) -> Option<u32> {
+    if x < x0 || y < y0 || y >= y0 + std::design::font::GLYPH_H * scale {
+        return None;
+    }
     std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, BG_DARK, false)
+}
+
+/// Left x that centres `text` at `scale` inside `[x0, x0 + available)`.
+/// WHY: the face is proportional (digits advance 11px at scale 1, letters 5-16),
+/// so a fixed 8px character cell mis-centres every run that is not exactly that
+/// wide. This measures the real advance widths instead.
+#[inline(always)]
+fn centered_x(text: &[u8], scale: usize, x0: usize, available: usize) -> usize {
+    x0 + std::design::font::center_x(text, scale, available)
 }
 
 fn get_month_abbr(month: u8) -> &'static [u8] {
@@ -343,8 +361,32 @@ const CHUNK: usize = 4096;
 
 // Month grid metrics
 const COL_W: usize = 88;
-const ROW_H: usize = 44;
+const COL_PITCH: usize = 97;
+const COL_X0: usize = 22;
+// WHY ROW_H is 48: the bitmap face is GLYPH_H (24) rows, so a scale-2 day
+// numeral owns 24 * 2 = 48 rows. A cell shorter than that cannot contain the
+// numeral no matter where it is placed -- the old ROW_H of 44 clipped every one
+// of the 42 numerals and no digit ever showed its base.
+const ROW_H: usize = 48;
+// WHY ROW_PITCH is 52: it leaves a 4px gutter between adjacent cells so
+// neighbouring rows never share a pixel, and 6 rows * 52 = 312 lands the grid
+// at 144..456, still clear of the agenda band that starts at 470.
+const ROW_PITCH: usize = 52;
+const GRID_ROWS: usize = 6;
 const GRID_START_Y: usize = 144;
+
+// Header / weekday band metrics. WHY 96: the status bar and header own
+// y 0..96 (their rule is 94..96), and the grid owns 144..456, so the weekday
+// run has exactly one full scale-2 line box (96..144) available in the gap.
+const WEEKDAY_Y0: usize = 96;
+const WEEKDAY_SCALE: usize = 2;
+
+// WHY these exist: they are the explicit no-date state drawn when the hardware
+// RTC yields no civil date. They name the absence instead of standing in a
+// month that was never observed.
+const NO_DATE_PILL: &[u8] = b"NO DATE";
+const NO_DATE_HEADLINE: &[u8] = b"NO CIVIL DATE";
+const NO_DATE_DETAIL: &[u8] = b"RTC date unavailable";
 
 #[inline(never)]
 fn get_calendar_pixel(
@@ -378,17 +420,27 @@ fn get_calendar_pixel(
         }
 
         // Header Title: "Calendar"
-        if y >= 36 && y < 60 {
-            if let Some(c) = test_text(x, y, 116, 36, 3, b"Calendar", TEXT_PRIMARY) {
+        // WHY the move and the full box: a scale-3 run needs GLYPH_H * 3 = 72
+        // rows, so the old y0=36 box (36..108) ran straight through the header
+        // band's bottom rule (94..96) and out of the band, and the 36..60 gate
+        // drew 24 of its 72 rows. The run is centred on the same y=48 axis as
+        // the back button and the pill, giving y0 = 48 - 36 = 12 and the box
+        // 12..84, which clears the header band (0..94) untouched.
+        if y >= 12 && y < 12 + std::design::font::line_height(3) {
+            if let Some(c) = test_text(x, y, 116, 12, 3, b"Calendar", TEXT_PRIMARY) {
                 return c;
             }
         }
 
-        // Month & Year Pill Badge at top-right (x: 480..696, y: 28..68)
-        if x >= 480 && x < 696 && y >= 28 && y < 68 {
+        // Month & Year Pill Badge at top-right (x: 480..696, y: 20..76)
+        // WHY the growth: the pill held a scale-2 run, so it must reserve
+        // GLYPH_H * 2 = 48 rows plus its 4px padding, i.e. 56px. The old 28..68
+        // box is 40px and kept only 28 of the run's 48 rows. 20..76 keeps the
+        // same centre (y=48) as the back button.
+        if x >= 480 && x < 696 && y >= 20 && y < 76 {
             // Pill border (radius 20)
             let rx = (x - 480).min(695 - x);
-            let ry = (y - 28).min(67 - y);
+            let ry = (y - 20).min(75 - y);
             if rx < 20 && ry < 20 {
                 let cdx = (20 - rx) as isize;
                 let cdy = (20 - ry) as isize;
@@ -399,18 +451,27 @@ fn get_calendar_pixel(
 
             // Month text: e.g. "OCT 2026"
             let mut month_str = [0u8; 8];
-            let abbr = get_month_abbr(display_month);
-            month_str[0] = abbr[0];
-            month_str[1] = abbr[1];
-            month_str[2] = abbr[2];
-            month_str[3] = b' ';
-            let mut temp_y = display_year;
-            month_str[7] = b'0' + (temp_y % 10) as u8; temp_y /= 10;
-            month_str[6] = b'0' + (temp_y % 10) as u8; temp_y /= 10;
-            month_str[5] = b'0' + (temp_y % 10) as u8; temp_y /= 10;
-            month_str[4] = b'0' + (temp_y % 10) as u8;
+            if app.date_known {
+                let abbr = get_month_abbr(display_month);
+                month_str[0] = abbr[0];
+                month_str[1] = abbr[1];
+                month_str[2] = abbr[2];
+                month_str[3] = b' ';
+                let mut temp_y = display_year;
+                month_str[7] = b'0' + (temp_y % 10) as u8; temp_y /= 10;
+                month_str[6] = b'0' + (temp_y % 10) as u8; temp_y /= 10;
+                month_str[5] = b'0' + (temp_y % 10) as u8; temp_y /= 10;
+                month_str[4] = b'0' + (temp_y % 10) as u8;
+            }
 
-            if let Some(c) = test_text(x, y, 516, 40, 2, &month_str, ACCENT_SKY) {
+            // WHY: with no civil date read from the RTC there is no month to
+            // name. The pill used to show a hardcoded "OCT 2026" stand-in; a
+            // fabricated month badge must not sit next to the honest
+            // "RTC date unavailable" card, so the badge states the absence.
+            let pill_text: &[u8] = if app.date_known { &month_str[..] } else { NO_DATE_PILL };
+            let pill_x = centered_x(pill_text, 2, 480, 216);
+            let pill_y0 = 20 + (56 - std::design::font::line_height(2)) / 2;
+            if let Some(c) = test_text(x, y, pill_x, pill_y0, 2, pill_text, ACCENT_SKY) {
                 return c;
             }
 
@@ -423,26 +484,69 @@ fn get_calendar_pixel(
         return SURFACE_DARK;
     }
 
-    // 2. Weekday Header (y: 114..134)
-    if y >= 114 && y < 134 {
-        const HEADERS: [&[u8]; 7] = [b"S", b"M", b"T", b"W", b"T", b"F", b"S"];
-        for c in 0..7 {
-            let col_x = 22 + c * 97;
-            let center_x = col_x + COL_W / 2;
-            if let Some(color) = test_text(x, y, center_x - 8, 116, 2, HEADERS[c], TEXT_MUTED) {
-                return color;
+    // 2. Weekday Header (y: 96..144)
+    // WHY the band is one full scale-2 line box: the bitmap face is GLYPH_H (24)
+    // rows, so a scale-2 run owns 24 * 2 = 48 rows. The run sits at y0 = 96,
+    // i.e. exactly 96..144 -- the whole gap between the header band (which ends
+    // at 96, its rule occupying 94..96) and the grid (which starts at 144). The
+    // old window was 114..134: 20 rows of a 48-row run, so only the top of each
+    // letter was drawn.
+    if y >= WEEKDAY_Y0 && y < WEEKDAY_Y0 + std::design::font::line_height(WEEKDAY_SCALE) {
+        if app.date_known {
+            const HEADERS: [&[u8]; 7] = [b"S", b"M", b"T", b"W", b"T", b"F", b"S"];
+            for c in 0..7 {
+                let col_x = 22 + c * 97;
+                // WHY: the face is proportional. At scale 1 'S' advances 12px and
+                // 'M'/'W' advance 16px, so the old hand-typed "- 8" cell pushed
+                // every header right of its column centre (measured +3.5 for 'S',
+                // +7.5 for 'M', +6.5 for 'W'). This measures the real widths.
+                let text_x = centered_x(HEADERS[c], WEEKDAY_SCALE, col_x, COL_W);
+                if let Some(color) =
+                    test_text(x, y, text_x, WEEKDAY_Y0, WEEKDAY_SCALE, HEADERS[c], TEXT_MUTED)
+                {
+                    return color;
+                }
+            }
+        } else {
+            // WHY: with no civil date there is no month for these letters to
+            // label. Drawing them would advertise a month grid that is not
+            // there, so the header states the absence instead.
+            let text_x = centered_x(NO_DATE_HEADLINE, WEEKDAY_SCALE, 0, W);
+            if let Some(c) = test_text(x, y, text_x, WEEKDAY_Y0, WEEKDAY_SCALE, NO_DATE_HEADLINE, TEXT_MUTED) {
+                return c;
             }
         }
         return BG_DARK;
     }
 
-    // 3. Month Calendar Grid (6 rows x 7 cols) (y: 144..460)
-    if y >= GRID_START_Y && y < GRID_START_Y + 6 * 52 {
-        let r = (y - GRID_START_Y) / 52;
-        let cell_y = GRID_START_Y + r * 52;
+    // 3. Month Calendar Grid (6 rows x 7 cols) (y: 144..456)
+    if y >= GRID_START_Y && y < GRID_START_Y + GRID_ROWS * ROW_PITCH {
+        // WHY: no civil date means no month. The previous code substituted
+        // (2026, 10) and rendered a complete, weekday-correct October 2026 grid
+        // while the card below honestly said the RTC date was unavailable. That
+        // is invented data presented as observed, so the grid area now states the
+        // absence in the same terms as the card instead of drawing any numeral.
+        if !app.date_known {
+            let detail_y = GRID_START_Y + GRID_ROWS * ROW_PITCH / 2;
+            if let Some(c) = test_text(
+                x,
+                y,
+                centered_x(NO_DATE_DETAIL, 1, 0, W),
+                detail_y,
+                1,
+                NO_DATE_DETAIL,
+                TEXT_MUTED,
+            ) {
+                return c;
+            }
+            return BG_DARK;
+        }
+
+        let r = (y - GRID_START_Y) / ROW_PITCH;
+        let cell_y = GRID_START_Y + r * ROW_PITCH;
         if y < cell_y + ROW_H {
             for c in 0..7 {
-                let col_x = 22 + c * 97;
+                let col_x = COL_X0 + c * COL_PITCH;
                 if x >= col_x && x < col_x + COL_W {
                     let slot_idx = r * 7 + c;
                     let day_num = slot_idx as i32 - start_dow as i32 + 1;
@@ -460,23 +564,28 @@ fn get_calendar_pixel(
                             }
                         }
 
-                        // Day numeral text
+                        // Day numeral text. WHY: the face is proportional, so a
+                        // one- and a two-digit numeral have different widths
+                        // (11px and 22px at scale 1) and both must be centred on
+                        // the real measurement; the old fixed -8 / -16 cell
+                        // pushed them right by 3px and 6px respectively.
                         let d = day_num as u8;
                         let text_color = if is_current { 0xFFFFFFFF } else { TEXT_PRIMARY };
-                        let text_y = cell_y + 14;
+                        // WHY the offset: a scale-2 run is 48 rows and the cell
+                        // is now 48 rows, so it is centred at offset 0. Before,
+                        // the cell was 44 rows and the run started at +14, which
+                        // put its last 18 rows outside the cell.
+                        let text_y = cell_y + (ROW_H - std::design::font::line_height(2)) / 2;
 
-                        if d < 10 {
-                            let text = [b'0' + d];
-                            let text_x = col_x + COL_W / 2 - 8;
-                            if let Some(color) = test_text(x, y, text_x, text_y, 2, &text, text_color) {
-                                return color;
-                            }
+                        let text: [u8; 2] = if d < 10 {
+                            [b'0' + d, 0]
                         } else {
-                            let text = [b'0' + d / 10, b'0' + d % 10];
-                            let text_x = col_x + COL_W / 2 - 16;
-                            if let Some(color) = test_text(x, y, text_x, text_y, 2, &text, text_color) {
-                                return color;
-                            }
+                            [b'0' + d / 10, b'0' + d % 10]
+                        };
+                        let n = if d < 10 { 1 } else { 2 };
+                        let text_x = centered_x(&text[..n], 2, col_x, COL_W);
+                        if let Some(color) = test_text(x, y, text_x, text_y, 2, &text[..n], text_color) {
+                            return color;
                         }
 
                         // Border rim
@@ -498,8 +607,13 @@ fn get_calendar_pixel(
             return BORDER_SUBTLE;
         }
 
-        // Title: "TODAY'S AGENDA"
-        if let Some(c) = test_text(x, y, 28, 498, 2, b"TODAY'S AGENDA", TEXT_MUTED) {
+        // Title: "TODAY'S AGENDA" at y0=480 (scale 2).
+        // WHY: a scale-2 run is GLYPH_H * 2 = 48 rows, so it owns a 48-row box.
+        // At the old y0=498 that box ran to 546 and the band ended at 530, which
+        // cut its last 16 rows and severed the base of every letter. y0=480 puts
+        // the run at 480..528 -- 2px below the 476..478 divider and 2px inside
+        // the band -- so the whole line box fits and nothing below is touched.
+        if let Some(c) = test_text(x, y, 28, 480, 2, b"TODAY'S AGENDA", TEXT_MUTED) {
             return c;
         }
 
@@ -516,7 +630,14 @@ fn get_calendar_pixel(
             }
 
             let badge_str: &[u8] = if AGENDA.is_empty() { b"0 EVENTS" } else { b"EVENTS" };
-            if let Some(c) = test_text(x, y, 576, 499, 1, badge_str, ACCENT_SKY) {
+            // WHY centred on the measured width: the face is proportional, so the
+            // old fixed x=576 was only correct for the one 93px string that
+            // happened to be used; the run is also vertically centred in the
+            // 30px pill now, since at y0=499 its 24 rows ran to 523, one past
+            // the pill's 522.
+            let badge_x = centered_x(badge_str, 1, 550, 146);
+            let badge_y = 492 + (30 - std::design::font::line_height(1)) / 2;
+            if let Some(c) = test_text(x, y, badge_x, badge_y, 1, badge_str, ACCENT_SKY) {
                 return c;
             }
 
@@ -650,14 +771,24 @@ fn get_calendar_pixel(
 }
 
 fn render_calendar_ui(surface: u32, app: &CalendarApp) {
-    let (display_year, display_month, selected_day) = if app.date_known {
-        (app.current_year, app.current_month, Some(app.current_day))
+    // WHY: there is no substitute month. When the RTC yields no civil date the
+    // grid is not laid out from a stand-in value -- `get_calendar_pixel` draws
+    // the explicit no-date state instead. Year 0 / month 0 / 0 days are sentinels
+    // that are never formatted or rendered as a date; they only reach the
+    // `date_known == false` branches.
+    let (display_year, display_month, start_dow, num_days, selected_day) = if app.date_known {
+        let y = app.current_year;
+        let m = app.current_month;
+        (
+            y,
+            m,
+            day_of_week(y, m, 1),
+            days_in_month(y, m),
+            Some(app.current_day),
+        )
     } else {
-        (2026, 10, None)
+        (0, 0, 0, 0, None)
     };
-
-    let start_dow = day_of_week(display_year, display_month, 1);
-    let num_days = days_in_month(display_year, display_month);
 
     let mut chunk = [0u32; CHUNK];
     let total = W * H;
