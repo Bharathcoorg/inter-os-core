@@ -141,7 +141,7 @@ const SECTION_H: usize = CAPTION_H;
 
 const CONNECTIVITY_LABEL_Y: usize = SUMMARY_Y + CAPTION_H + space::LG; // 152
 const CONNECTIVITY_TOP: usize = CONNECTIVITY_LABEL_Y + SECTION_H + space::SM; // 184
-const CONNECTIVITY_ROWS: usize = 3;
+const CONNECTIVITY_ROWS: usize = 2;
 
 // ---- Level block (brightness, volume) --------------------------------------
 
@@ -177,11 +177,17 @@ const BRIGHTNESS_ROW: Rect = Rect::new(PANEL_X, LEVEL_TOP, PANEL_W, LEVEL_H);
 /// handler's hit region -- it would still look right and still be dead. The fix
 /// is to have the handler ask this module for the rectangle, the way the lock
 /// screen exports its disc geometry.
-const VOLUME_SLIDER: Rect = Rect::new(PANEL_X, LEVEL_TOP + LEVEL_H + space::LG, PANEL_W, LEVEL_H);
-
-/// The invariant the comment above depends on, checked by the compiler rather
-/// than by the next reader.
-const _: () = assert!(VOLUME_SLIDER.y == 500 && VOLUME_SLIDER.h == 76);
+/// The volume capsule's rectangle, exported so the handler cannot disagree with
+/// the painter.
+///
+/// WHY it is now `pub` and why the assert that used to sit below it is gone: the
+/// rectangle was private and pinned to y == 500 by a compile-time assert, because
+/// `main.rs` typed the same rectangle in as a literal. That coupling meant a
+/// layout change here broke the build rather than shipping silently - which was
+/// the right failure mode - but it also meant the two could never be moved
+/// together on purpose. The handler now reads this rectangle, so there is one
+/// definition and nothing to keep in step.
+pub const VOLUME_SLIDER: Rect = Rect::new(PANEL_X, LEVEL_TOP + LEVEL_H + space::LG, PANEL_W, LEVEL_H);
 
 // ---- Footer block (a reading card, then the power button) -------------------
 
@@ -234,7 +240,7 @@ const POWER_LABEL_X: usize = POWER_BTN.x + ROW_TEXT_INSET;
 
 const SYSTEM_LABEL_Y: usize = FOOTER_Y + FOOTER_H + space::LG; // 740
 const SYSTEM_TOP: usize = SYSTEM_LABEL_Y + SECTION_H + space::SM; // 772
-const SYSTEM_ROWS: usize = 9;
+const SYSTEM_ROWS: usize = 4;
 
 /// Home indicator, drawn at the foot of the surface.
 ///
@@ -494,21 +500,25 @@ fn battery() -> Value {
 /// WHY each list is written out rather than derived: the order is the reading
 /// order, and it has to exist once, in one place, for the layout, the summary
 /// count and the painter to agree about what the panel contains.
-const CONNECTIVITY_LIST: [PanelRow; CONNECTIVITY_ROWS] =
-    [PanelRow::Wifi, PanelRow::Bluetooth, PanelRow::Cellular];
+const CONNECTIVITY_LIST: [PanelRow; CONNECTIVITY_ROWS] = [PanelRow::Wifi, PanelRow::Bluetooth];
 
 const LEVEL_LIST: [PanelRow; 2] = [PanelRow::Brightness, PanelRow::Volume];
 
+/// The quick toggles, and only the quick toggles.
+///
+/// WHY these four and not the nine this block held: sensors, battery, screen
+/// lock, storage and package count are *readouts*, not controls. Nothing on this
+/// surface acts when they are tapped, so a row that only reports a value is a
+/// settings entry that has wandered into a control centre - and on a target with
+/// no torch, no rotation sensor, no policy service and no radio controller, six
+/// of the nine existed only to say so. They belong in Settings, where a list of
+/// values is what the user asked for. What is left is what a control centre is
+/// for, and nothing else.
 const SYSTEM_LIST: [PanelRow; SYSTEM_ROWS] = [
     PanelRow::Torch,
-    PanelRow::RotationLock,
     PanelRow::DoNotDisturb,
     PanelRow::Airplane,
-    PanelRow::Sensors,
-    PanelRow::Battery,
-    PanelRow::Lock,
-    PanelRow::Storage,
-    PanelRow::Packages,
+    PanelRow::RotationLock,
 ];
 
 const FOOTER_LIST: [PanelRow; 1] = [PanelRow::Notifications];
@@ -518,25 +528,19 @@ const FOOTER_LIST: [PanelRow; 1] = [PanelRow::Notifications];
 /// WHY it is its own constant rather than `ALL_ROWS.len()` at every use site:
 /// the reading table in `measure_frame` is a fixed-size array, and a length
 /// written out in its type is the one place a new row has to be remembered.
-const ALL_ROWS_LEN: usize = 15;
+const ALL_ROWS_LEN: usize = 9;
 
 /// Every row on the surface, in reading order. Used for the headline count, so
 /// it has to be the whole panel rather than one block's worth of it.
 const ALL_ROWS: [PanelRow; ALL_ROWS_LEN] = [
     PanelRow::Wifi,
     PanelRow::Bluetooth,
-    PanelRow::Cellular,
     PanelRow::Brightness,
     PanelRow::Volume,
     PanelRow::Torch,
-    PanelRow::RotationLock,
     PanelRow::DoNotDisturb,
     PanelRow::Airplane,
-    PanelRow::Sensors,
-    PanelRow::Battery,
-    PanelRow::Lock,
-    PanelRow::Storage,
-    PanelRow::Packages,
+    PanelRow::RotationLock,
     PanelRow::Notifications,
 ];
 

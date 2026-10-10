@@ -1907,8 +1907,20 @@ pub extern "C" fn _start() -> ! {
                                 let y = input.y as usize;
                                 // The volume slider controls the guest audio manager;
                                 // it is not a decorative fill in the shade.
-                                if (500..576).contains(&y) && (36..684).contains(&x) {
-                                    let requested = (((x - 36) * 100) / 648).min(100) as u32;
+                                //
+                                // WHY the rectangle comes from the module: this used to
+                                // be a typed `(500..576)` / `(36..684)` literal kept in
+                                // step with the painter by a compile-time assert in
+                                // quick_controls.rs. A layout change broke that assert
+                                // rather than shipping a dead control, which was the
+                                // right failure, but it also meant the two could never
+                                // be moved together deliberately. Asking the painter
+                                // where it drew the capsule makes that impossible.
+                                let vol = screens::quick_controls::VOLUME_SLIDER;
+                                if (vol.y..vol.y + vol.h).contains(&y)
+                                    && (vol.x..vol.x + vol.w).contains(&x)
+                                {
+                                    let requested = ((((x - vol.x) * 100) / vol.w) as u32).min(100);
                                     match std::audio_set_volume(requested) {
                                         Ok(applied) => {
                                             state.last_volume_percent = applied.min(100) as u8;
