@@ -558,6 +558,38 @@ fn pixel(x: usize, y: usize, app: &Authenticator) -> u32 {
         return CARD;
     }
 
+    // ---- card bodies first: content paints over the card surface, so the
+    // bodies are evaluated before the background block below (which returns
+    // the CARD fill for every pixel it does not ink). The old order returned
+    // CARD here for the whole rect, which made every body painter below
+    // unreachable and the cards permanently empty.
+    if (112..372).contains(&y) && (30..690).contains(&x) {
+        if let Some(c) = time_source(x, y, app) {
+            return c;
+        }
+    }
+
+    // ---- card: secret store ----
+    if (392..652).contains(&y) && (30..690).contains(&x) {
+        if let Some(c) = secret_store(x, y, app) {
+            return c;
+        }
+    }
+
+    // ---- card: account ----
+    if (672..1002).contains(&y) && (30..690).contains(&x) {
+        if let Some(c) = account_card(x, y, app) {
+            return c;
+        }
+    }
+
+    // ---- card: keypad ----
+    if (1022..1332).contains(&y) && (30..690).contains(&x) {
+        if let Some(c) = keypad(x, y, app) {
+            return c;
+        }
+    }
+
     let in_card = CARDS.iter().any(|c| y >= c.y0 && y < c.y1 && x >= c.x0 && x < c.x1);
 
     // ---- status strip: the last real platform answer ----
@@ -601,38 +633,6 @@ fn pixel(x: usize, y: usize, app: &Authenticator) -> u32 {
                 return CARD;
             }
         }
-    }
-
-    // ---- card: time source ----
-    if (112..372).contains(&y) && (30..690).contains(&x) {
-        if let Some(c) = time_source(x, y, app) {
-            return c;
-        }
-        return CARD;
-    }
-
-    // ---- card: secret store ----
-    if (392..652).contains(&y) && (30..690).contains(&x) {
-        if let Some(c) = secret_store(x, y, app) {
-            return c;
-        }
-        return CARD;
-    }
-
-    // ---- card: account ----
-    if (672..1002).contains(&y) && (30..690).contains(&x) {
-        if let Some(c) = account_card(x, y, app) {
-            return c;
-        }
-        return CARD;
-    }
-
-    // ---- card: keypad ----
-    if (1022..1332).contains(&y) && (30..690).contains(&x) {
-        if let Some(c) = keypad(x, y, app) {
-            return c;
-        }
-        return CARD;
     }
 
     if (1418..1424).contains(&y) && (260..460).contains(&x) {
