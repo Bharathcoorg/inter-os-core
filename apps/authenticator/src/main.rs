@@ -419,22 +419,39 @@ struct Card {
     caption: &'static [u8],
 }
 
+/// Card geometry on the 8-point grid (margins 24, gaps 8).
+///
+/// Y-budget for the 16x24 design face (line_height(1) = 24, line_height(2) =
+/// 48): header 0..96, card0 104..368 (caption + 3 scale-2 rows + 2 scale-1
+/// note lines), card1 376..648 (caption + 3 label/value row pairs), card2
+/// 656..888 (caption + 128px code digits + bar + 1 line, or caption + title +
+/// 4 lines), card3 896..1336 (caption + echo + 6 key rows + save line),
+/// status strip 1344..1400. Consecutive baselines are always >= the taller
+/// line's height apart.
 const CARDS: [Card; 4] = [
-    Card { x0: 30, y0: 112, x1: 690, y1: 372, caption: b"TIME SOURCE" },
-    Card { x0: 30, y0: 392, x1: 690, y1: 652, caption: b"SECRET STORE" },
-    Card { x0: 30, y0: 672, x1: 690, y1: 1002, caption: b"ACCOUNT" },
-    Card { x0: 30, y0: 1022, x1: 690, y1: 1332, caption: b"ENROL A SECRET (BASE32)" },
+    Card { x0: 24, y0: 104, x1: 696, y1: 368, caption: b"TIME SOURCE" },
+    Card { x0: 24, y0: 376, x1: 696, y1: 648, caption: b"SECRET STORE" },
+    Card { x0: 24, y0: 656, x1: 696, y1: 888, caption: b"ACCOUNT" },
+    Card { x0: 24, y0: 896, x1: 696, y1: 1336, caption: b"ENROL A SECRET (BASE32)" },
 ];
 
-/// Keypad geometry.
-const KEY_X0: usize = 42;
-const KEY_STEP_X: usize = 108;
-const KEY_W: usize = 102;
-const KEY_Y0: usize = 1058;
-const KEY_STEP_Y: usize = 46;
-const KEY_H: usize = 40;
+/// Text column inside every card: 16px card padding, 640px of measured runs.
+const TX: usize = 40;
+const TR: usize = 680;
+const TW: usize = 640;
 
-/// One keypad cell. `None` is a deliberate blank, not a hidden control.
+/// Keypad geometry. Keys are exactly 48px tall (touch minimum) on a 48px
+/// pitch; SAVE spans the last two columns of the bottom row.
+const KEY_X0: usize = 40;
+const KEY_STEP_X: usize = 104;
+const KEY_W: usize = 96;
+const KEY_Y0: usize = 976;
+const KEY_STEP_Y: usize = 48;
+const KEY_H: usize = 48;
+
+/// One keypad cell. SAVE spans the last two columns of the bottom row as a
+/// single wide key; the second SAVE slot only marks the covered column, and
+/// the draw/touch loops skip it so the span is handled once.
 fn key_at(col: usize, row: usize) -> Option<&'static [u8]> {
     const KEYS: [[Option<&[u8]>; 6]; 6] = [
         [Some(b"A"), Some(b"B"), Some(b"C"), Some(b"D"), Some(b"E"), Some(b"F")],
@@ -442,7 +459,7 @@ fn key_at(col: usize, row: usize) -> Option<&'static [u8]> {
         [Some(b"M"), Some(b"N"), Some(b"O"), Some(b"P"), Some(b"Q"), Some(b"R")],
         [Some(b"S"), Some(b"T"), Some(b"U"), Some(b"V"), Some(b"W"), Some(b"X")],
         [Some(b"Y"), Some(b"Z"), Some(b"2"), Some(b"3"), Some(b"4"), Some(b"5")],
-        [Some(b"6"), Some(b"7"), Some(b"DEL"), Some(b"CLR"), None, Some(b"SAVE")],
+        [Some(b"6"), Some(b"7"), Some(b"DEL"), Some(b"CLR"), Some(b"SAVE"), Some(b"SAVE")],
     ];
     KEYS[row][col]
 }
@@ -451,32 +468,57 @@ fn key_at(col: usize, row: usize) -> Option<&'static [u8]> {
 // Rendering
 // -----------------------------------------------------------------------------
 
-/// Left/right field row: label on the left, value right-aligned.
+/// Left/right field row at scale 2: regular label on the left, bold value
+/// right-aligned. Both runs are measured; the value is fitted into whatever
+/// the label leaves so the two can never overlap. Baselines of consecutive
+/// rows must be >= 48 apart.
 #[inline(never)]
-fn field(x: usize, y: usize, top: usize, left: &[u8], right: &[u8], right_color: u32) -> Option<u32> {
-    let right_x = 676usize.saturating_sub(font::text_width(right, 2));
-    if font::text_at(x, y, 44, top, 2, left) {
+fn field_s2(x: usize, y: usize, top: usize, left: &[u8], right: &[u8], right_color: u32) -> Option<u32> {
+    let label_w = font::width(left, 2, false);
+    let vmax = TW.saturating_sub(label_w).saturating_sub(16);
+    let vw = font::fit_width(right, 2, vmax, true);
+    if font::ink(x, y, TX, top, 2, left, TW, MUTED, CARD, false) {
         return Some(MUTED);
     }
-    if font::text_at(x, y, right_x, top, 2, right) {
+    if vmax > 0 && vw > 0 && font::ink(x, y, TR.saturating_sub(vw), top, 2, right, vmax, right_color, CARD, true)
+    {
         return Some(right_color);
     }
     None
 }
 
+/// Scale-1 label line of a two-line probe row (regular, muted).
 #[inline(never)]
-fn line(x: usize, y: usize, top: usize, text: &[u8], color: u32) -> Option<u32> {
-    if font::text_at(x, y, 44, top, 2, text) {
+fn lab_s1(x: usize, y: usize, top: usize, text: &[u8]) -> Option<u32> {
+    if font::ink(x, y, TX, top, 1, text, TW, MUTED, CARD, false) {
+        return Some(MUTED);
+    }
+    None
+}
+
+/// Scale-2 value line of a two-line probe row (bold, left-aligned). The next
+/// baseline must be >= 48 below `top`.
+#[inline(never)]
+fn val_s2(x: usize, y: usize, top: usize, text: &[u8], color: u32) -> Option<u32> {
+    if font::ink(x, y, TX, top, 2, text, TW, color, CARD, true) {
         return Some(color);
     }
     None
 }
 
-/// Right-aligned single field (no left label).
+/// Scale-2 run at the card text column.
 #[inline(never)]
-fn right_field(x: usize, y: usize, top: usize, text: &[u8], color: u32) -> Option<u32> {
-    let x0 = 676usize.saturating_sub(font::text_width(text, 2));
-    if font::text_at(x, y, x0, top, 2, text) {
+fn line_s2(x: usize, y: usize, top: usize, text: &[u8], color: u32, bold: bool) -> Option<u32> {
+    if font::ink(x, y, TX, top, 2, text, TW, color, CARD, bold) {
+        return Some(color);
+    }
+    None
+}
+
+/// Scale-1 run at the card text column.
+#[inline(never)]
+fn line_s1(x: usize, y: usize, top: usize, text: &[u8], color: u32) -> Option<u32> {
+    if font::ink(x, y, TX, top, 1, text, TW, color, CARD, false) {
         return Some(color);
     }
     None
@@ -525,12 +567,12 @@ fn pixel(x: usize, y: usize, app: &Authenticator) -> u32 {
         if y >= 94 {
             return EDGE;
         }
-        if (24..100).contains(&x) && (28..68).contains(&y) {
-            let border = y == 28 || y == 67 || x == 24 || x == 99;
+        if (24..100).contains(&x) && (24..72).contains(&y) {
+            let border = y == 24 || y == 71 || x == 24 || x == 99;
             let chev = (x as isize - 62).abs() + (y as isize - 48).abs() <= 11 && x <= 62;
             return if border || chev { TEXT } else { CARD_RAISED };
         }
-        if font::text_at(x, y, 116, 32, 3, b"Authenticator") {
+        if font::ink(x, y, 116, 24, 2, b"Authenticator", 480, TEXT, CARD, true) {
             return TEXT;
         }
         // Shield badge in header (640, 48)
@@ -563,28 +605,28 @@ fn pixel(x: usize, y: usize, app: &Authenticator) -> u32 {
     // the CARD fill for every pixel it does not ink). The old order returned
     // CARD here for the whole rect, which made every body painter below
     // unreachable and the cards permanently empty.
-    if (112..372).contains(&y) && (30..690).contains(&x) {
+    if (104..368).contains(&y) && (24..696).contains(&x) {
         if let Some(c) = time_source(x, y, app) {
             return c;
         }
     }
 
     // ---- card: secret store ----
-    if (392..652).contains(&y) && (30..690).contains(&x) {
+    if (376..648).contains(&y) && (24..696).contains(&x) {
         if let Some(c) = secret_store(x, y, app) {
             return c;
         }
     }
 
     // ---- card: account ----
-    if (672..1002).contains(&y) && (30..690).contains(&x) {
+    if (656..888).contains(&y) && (24..696).contains(&x) {
         if let Some(c) = account_card(x, y, app) {
             return c;
         }
     }
 
     // ---- card: keypad ----
-    if (1022..1332).contains(&y) && (30..690).contains(&x) {
+    if (896..1336).contains(&y) && (24..696).contains(&x) {
         if let Some(c) = keypad(x, y, app) {
             return c;
         }
@@ -593,9 +635,9 @@ fn pixel(x: usize, y: usize, app: &Authenticator) -> u32 {
     let in_card = CARDS.iter().any(|c| y >= c.y0 && y < c.y1 && x >= c.x0 && x < c.x1);
 
     // ---- status strip: the last real platform answer ----
-    if (1332..1400).contains(&y) && (30..690).contains(&x) {
-        let rx = (x - 30).min(689 - x);
-        let ry = (y - 1332).min(1399 - y);
+    if (1344..1400).contains(&y) && (24..696).contains(&x) {
+        let rx = (x - 24).min(695 - x);
+        let ry = (y - 1344).min(1399 - y);
         if rx < 10 && ry < 10 {
             let cdx = (10 - rx) as isize;
             let cdy = (10 - ry) as isize;
@@ -606,7 +648,8 @@ fn pixel(x: usize, y: usize, app: &Authenticator) -> u32 {
         if rx < 2 || ry < 2 {
             return EDGE;
         }
-        if font::text_at(x, y, 44, 1352, 2, &app.status[..app.status_len]) {
+        if font::ink(x, y, TX, 1358, 1, &app.status[..app.status_len], TW, app.status_color, CARD, false)
+        {
             return app.status_color;
         }
         return CARD;
@@ -627,7 +670,8 @@ fn pixel(x: usize, y: usize, app: &Authenticator) -> u32 {
                 if rx < 2 || ry < 2 {
                     return EDGE;
                 }
-                if font::text_at(x, y, card.x0 + 16, card.y0 + 14, 2, card.caption) {
+                if font::ink(x, y, card.x0 + 16, card.y0 + 14, 1, card.caption, 640, ACCENT, CARD, true)
+                {
                     return ACCENT;
                 }
                 return CARD;
@@ -643,6 +687,9 @@ fn pixel(x: usize, y: usize, app: &Authenticator) -> u32 {
 
 #[inline(never)]
 fn time_source(x: usize, y: usize, app: &Authenticator) -> Option<u32> {
+    // Baselines 118(caption, drawn by the card fallback) / 152 / 208 / 264 /
+    // 316 / 340: every step is >= the taller line's height (24 after scale 1,
+    // 48 after scale 2).
     match app.clock {
         Some(c) => {
             let mut buf = [0u8; 24];
@@ -663,78 +710,78 @@ fn time_source(x: usize, y: usize, app: &Authenticator) -> Option<u32> {
             buf[n] = b':';
             n += 1;
             n += fmt_2(c.second, &mut buf[n..]);
-            if font::text_at(x, y, 44, 152, 2, &buf[..n]) {
-                return Some(TEXT);
+            if let Some(col) = line_s2(x, y, 152, &buf[..n], TEXT, true) {
+                return Some(col);
             }
         }
         None => {
-            if font::text_at(x, y, 44, 152, 3, b"no clock reading") {
-                return Some(WARN);
+            if let Some(col) = line_s2(x, y, 152, b"no clock reading", WARN, true) {
+                return Some(col);
             }
         }
     }
 
     // Unix epoch, from the same read as the wall clock above.
-    let mut v = [0u8; 24];
     if let Some(c) = app.clock {
+        let mut v = [0u8; 24];
         let n = fmt_i64(c.unix_epoch, &mut v);
-        if let Some(col) = field(x, y, 196, b"Unix epoch", &v[..n], TEXT) {
+        if let Some(col) = field_s2(x, y, 208, b"Unix epoch", &v[..n], TEXT) {
             return Some(col);
-        }
-        if font::text_at(x, y, 44, 214, 2, b"rtc_get_time() -> unix_epoch") {
-            return Some(FAINT);
         }
     }
 
     // Whether the clock read was permitted at all.
     let mut word = [0u8; 32];
     let wn = denied_word(app.rtc, &mut word);
-    if let Some(col) = field(x, y, 244, b"Clock read", &word[..wn], app.rtc.color()) {
+    if let Some(col) = field_s2(x, y, 264, b"Clock read", &word[..wn], app.rtc.color()) {
         return Some(col);
     }
 
-    if let Some(col) = line(x, y, 296, b"CMOS RTC is a settable wall clock, not", WARN) {
+    if let Some(col) = line_s1(x, y, 316, b"CMOS RTC is a settable wall clock, not", WARN) {
         return Some(col);
     }
-    line(x, y, 322, b"an attested secure time source.", WARN)
+    line_s1(x, y, 340, b"an attested secure time source.", WARN)
 }
 
 #[inline(never)]
 fn secret_store(x: usize, y: usize, app: &Authenticator) -> Option<u32> {
+    // Two-line probe rows: a scale-1 label naming the slot and the exact
+    // syscall, then the bold scale-2 verdict. Single-line rows cannot hold a
+    // denied status code next to the sector label (measured 658px > 640px),
+    // so every probe reads label-above/value-below. Baselines 390 / 422 /
+    // 446 / 498 / 522 / 572 / 596.
+    if font::ink_right(x, y, TR, 390, 1, b"tap this card to re-probe the platform", TW, FAINT, CARD, false)
+    {
+        return Some(FAINT);
+    }
+
+    if let Some(col) = lab_s1(x, y, 422, b"Keystore slot 1 - keystore_derive(1)") {
+        return Some(col);
+    }
     let mut word = [0u8; 32];
     let wn = denied_word(app.keystore, &mut word);
-    if let Some(col) = field(x, y, 436, b"Keystore slot 1", &word[..wn], app.keystore.color()) {
+    if let Some(col) = val_s2(x, y, 446, &word[..wn], app.keystore.color()) {
         return Some(col);
     }
-    if font::text_at(x, y, 44, 454, 2, b"keystore_derive(1) raw key export") {
-        return Some(FAINT);
-    }
 
+    if let Some(col) = lab_s1(x, y, 498, b"Vault sector 214 - vault_decrypt_sector(214)") {
+        return Some(col);
+    }
     let mut word = [0u8; 32];
     let wn = denied_word(app.vault, &mut word);
-    if let Some(col) = field(x, y, 484, b"Vault sector 214", &word[..wn], app.vault.color()) {
+    if let Some(col) = val_s2(x, y, 522, &word[..wn], app.vault.color()) {
         return Some(col);
     }
-    if font::text_at(x, y, 44, 502, 2, b"vault_decrypt_sector(214) read probe") {
-        return Some(FAINT);
-    }
 
+    if let Some(col) = lab_s1(x, y, 572, b"Enrolled accounts") {
+        return Some(col);
+    }
     let (label, color) = match app.account {
         Account::Enrolled { .. } => (b"1 record, sealed".as_slice(), OK),
         Account::None => (b"no record in sector".as_slice(), MUTED),
         Account::Unreachable => (b"unknown".as_slice(), WARN),
     };
-    if let Some(col) = field(x, y, 532, b"Enrolled accounts", label, color) {
-        return Some(col);
-    }
-
-    if matches!(app.account, Account::Enrolled { .. }) {
-        if let Some(col) = right_field(x, y, 550, b"INTOS-TOTP-SEK01 v1", FAINT) {
-            return Some(col);
-        }
-    }
-
-    line(x, y, 592, b"tap this card to re-probe the platform", FAINT)
+    val_s2(x, y, 596, label, color)
 }
 
 #[inline(never)]
@@ -749,21 +796,18 @@ fn account_card(x: usize, y: usize, app: &Authenticator) -> Option<u32> {
             {
                 Some(v) => v,
                 None => {
-                    return if font::text_at(x, y, 44, 740, 3, b"secret rejected by TOTP") {
-                        Some(WARN)
-                    } else {
-                        None
-                    }
+                    return line_s2(x, y, 702, b"secret rejected by TOTP", WARN, true);
                 }
             };
 
-            // Six 7-segment digits, 2x scaled, centred.
+            // Six 7-segment digits, 2x scaled, centred. 6 * 72 + 5 * 14 =
+            // 502px wide starting at (720 - 502) / 2, rows 702..830.
             let scale = 2usize;
             let digit_w = 36 * scale;
             let gap = 14usize;
             let total_w = TOTP_DIGITS as usize * digit_w + (TOTP_DIGITS as usize - 1) * gap;
             let start_x = (W - total_w) / 2;
-            let top = 726;
+            let top = 702;
             for slot in 0..TOTP_DIGITS as usize {
                 let divisor = pow10(TOTP_DIGITS as u32 - 1 - slot as u32);
                 let d = (code / divisor) % 10;
@@ -782,8 +826,8 @@ fn account_card(x: usize, y: usize, app: &Authenticator) -> Option<u32> {
             let remaining = totp::seconds_remaining(clock.unix_epoch, TOTP_STEP_SECS);
             let bar_x0 = 60usize;
             let bar_x1 = 660usize;
-            let bar_y0 = 884usize;
-            let bar_y1 = 906usize;
+            let bar_y0 = 836usize;
+            let bar_y1 = 848usize;
             if y >= bar_y0 && y < bar_y1 && x >= bar_x0 && x < bar_x1 {
                 let filled = (bar_x1 - bar_x0) * remaining as usize / TOTP_STEP_SECS as usize;
                 if x < bar_x0 + filled {
@@ -792,30 +836,27 @@ fn account_card(x: usize, y: usize, app: &Authenticator) -> Option<u32> {
                 return Some(CARD_RAISED);
             }
 
-            let mut v = [0u8; 24];
-            let n = write_lit(b"step expires in ", &mut v);
-            let n2 = fmt_u64(remaining as u64, &mut v[n..]);
-            let n2 = n2 + write_lit(b"s", &mut v[n + n2..]);
-            if font::text_at(x, y, 44, 928, 2, &v[..n + n2]) {
-                return Some(MUTED);
-            }
-
-            if font::text_at(x, y, 44, 964, 2, b"RFC 6238 TOTP, 6 digits, 30 s step") {
-                return Some(FAINT);
-            }
-            None
+            // Expiry and protocol profile on one measured scale-1 line; the
+            // step count is formatted from TOTP_STEP_SECS, never hard-coded.
+            let mut v = [0u8; 48];
+            let mut n = write_lit(b"step expires in ", &mut v);
+            n += fmt_u64(remaining as u64, &mut v[n..]);
+            n += write_lit(b"s (RFC 6238, ", &mut v[n..]);
+            n += fmt_u64(TOTP_STEP_SECS, &mut v[n..]);
+            n += write_lit(b" s step)", &mut v[n..]);
+            line_s1(x, y, 852, &v[..n], MUTED)
         }
         (Screen::Codes, None) => {
-            if font::text_at(x, y, 44, 730, 3, b"secret stored, no clock") {
-                return Some(WARN);
+            if let Some(col) = line_s2(x, y, 702, b"secret stored, no clock", WARN, true) {
+                return Some(col);
             }
-            if font::text_at(x, y, 44, 780, 2, b"A code cannot be produced without a real") {
-                return Some(MUTED);
+            if let Some(col) = line_s1(x, y, 758, b"A code cannot be produced without a real", MUTED) {
+                return Some(col);
             }
-            if font::text_at(x, y, 44, 810, 2, b"time reading. The clock is unavailable, so") {
-                return Some(MUTED);
+            if let Some(col) = line_s1(x, y, 782, b"time reading. The clock is unavailable, so", MUTED) {
+                return Some(col);
             }
-            line(x, y, 840, b"nothing is shown in its place.", MUTED)
+            line_s1(x, y, 806, b"nothing is shown in its place.", MUTED)
         }
         (Screen::Setup, _) => setup_explanation(x, y, app),
     }
@@ -823,31 +864,32 @@ fn account_card(x: usize, y: usize, app: &Authenticator) -> Option<u32> {
 
 #[inline(never)]
 fn setup_explanation(x: usize, y: usize, app: &Authenticator) -> Option<u32> {
-    if font::text_at(x, y, 44, 730, 3, b"No account enrolled") {
-        return Some(TEXT);
+    // Baselines 702 (scale-2 title) / 758 / 782 / 806 / 830 (scale-1 body).
+    if let Some(col) = line_s2(x, y, 702, b"No account enrolled", TEXT, true) {
+        return Some(col);
     }
 
     if matches!(app.account, Account::Unreachable) {
         // Storage is the thing that is missing, so say that first and say why it
         // matters: a TOTP secret kept in RAM would not survive a reboot and could
         // not be recovered.
-        if font::text_at(x, y, 44, 782, 2, b"Setup is blocked: the storage vault is") {
-            return Some(WARN);
+        if let Some(col) = line_s1(x, y, 758, b"Setup is blocked: the storage vault is", WARN) {
+            return Some(col);
         }
-        if font::text_at(x, y, 44, 812, 2, b"unreachable, so no secret can be kept.") {
-            return Some(WARN);
+        if let Some(col) = line_s1(x, y, 782, b"unreachable, so no secret can be kept.", WARN) {
+            return Some(col);
         }
-        if font::text_at(x, y, 44, 842, 2, b"Nothing is generated in its place: an") {
-            return Some(WARN);
+        if let Some(col) = line_s1(x, y, 806, b"Nothing is generated in its place: an", WARN) {
+            return Some(col);
         }
-        return line(x, y, 872, b"invented secret yields codes that never work.", WARN);
+        return line_s1(x, y, 830, b"invented secret yields codes that never work.", WARN);
     }
 
-    if font::text_at(x, y, 44, 782, 2, b"Type the base32 secret from the") {
-        return Some(MUTED);
+    if let Some(col) = line_s1(x, y, 758, b"Type the base32 secret from the", MUTED) {
+        return Some(col);
     }
-    if font::text_at(x, y, 44, 812, 2, b"service's setup page, then SAVE.") {
-        return Some(MUTED);
+    if let Some(col) = line_s1(x, y, 782, b"service's setup page, then SAVE.", MUTED) {
+        return Some(col);
     }
     let decoded = decoded_len(&app.typed[..app.typed_len]);
     let mut v = [0u8; 32];
@@ -859,7 +901,7 @@ fn setup_explanation(x: usize, y: usize, app: &Authenticator) -> Option<u32> {
         }
         None => (write_lit(b"not valid base32 yet", &mut v), WARN),
     };
-    if font::text_at(x, y, 44, 872, 2, &v[..n]) { Some(color) } else { None }
+    line_s1(x, y, 806, &v[..n], color)
 }
 
 /// Byte length the currently typed base32 text decodes to, if it decodes.
@@ -890,22 +932,29 @@ fn save_state(app: &Authenticator) -> Result<u32, &'static [u8]> {
 
 #[inline(never)]
 fn keypad(x: usize, y: usize, app: &Authenticator) -> Option<u32> {
-    // Typed secret echo.
-    if font::text_at(x, y, 44, 1046, 2, &app.typed[..app.typed_len]) {
-        return Some(TEXT);
-    }
-    if app.typed_len == 0 && font::text_at(x, y, 44, 1046, 2, b"(nothing typed)") {
-        return Some(FAINT);
+    // Typed secret echo, measured and fitted so a long entry can never spill
+    // into the keys below.
+    if app.typed_len == 0 {
+        if let Some(col) = line_s1(x, y, 942, b"(nothing typed)", FAINT) {
+            return Some(col);
+        }
+    } else if let Some(col) = line_s1(x, y, 942, &app.typed[..app.typed_len], TEXT) {
+        return Some(col);
     }
 
     let save = save_state(app);
 
     for row in 0..6usize {
         for col in 0..6usize {
+            // The second SAVE slot is covered by the wide span starting at
+            // column 4; handling it once keeps one touch target per key.
+            if row == 5 && col == 5 {
+                continue;
+            }
             let kx = KEY_X0 + col * KEY_STEP_X;
             let ky = KEY_Y0 + row * KEY_STEP_Y;
             // SAVE spans the last two cells.
-            let kw = if row == 5 && col == 5 { KEY_W + KEY_STEP_X - 6 } else { KEY_W };
+            let kw = if row == 5 && col == 4 { KEY_W + KEY_STEP_X } else { KEY_W };
             if x >= kx && x < kx + kw && y >= ky && y < ky + KEY_H {
                 let Some(label) = key_at(col, row) else { return None };
                 let is_save = label == b"SAVE";
@@ -937,17 +986,21 @@ fn keypad(x: usize, y: usize, app: &Authenticator) -> Option<u32> {
                         EDGE_MUTED
                     });
                 }
-                let tw = font::text_width(label, 2);
-                let tx = kx + (kw - tw) / 2;
-                let ty = ky + (KEY_H - 16) / 2;
-                if font::text_at(x, y, tx, ty, 2, label) {
-                    return Some(if is_save && enabled {
-                        OK
-                    } else if enabled {
-                        TEXT
-                    } else {
-                        FAINT
-                    });
+                // The label scale is chosen by measurement: scale 2 only when
+                // the run and its side padding fit the key rect, else scale 1.
+                // ink_center re-measures and fits, so the label can never
+                // spill out of its key.
+                let sc = if font::width(label, 2, false) + 16 <= kw { 2 } else { 1 };
+                let ty = ky + (KEY_H - sc * 24) / 2;
+                let ink_c = if is_save && enabled {
+                    OK
+                } else if enabled {
+                    TEXT
+                } else {
+                    FAINT
+                };
+                if font::ink_center(x, y, kx, ty, sc, label, kw, ink_c, fill, false) {
+                    return Some(ink_c);
                 }
                 return Some(fill);
             }
@@ -956,22 +1009,17 @@ fn keypad(x: usize, y: usize, app: &Authenticator) -> Option<u32> {
 
     // Why SAVE is disabled, stated on screen rather than left unexplained.
     if let Err(reason) = save {
-        if font::text_at(x, y, 44, 1300, 2, b"SAVE disabled:") {
-            return Some(WARN);
-        }
-        if font::text_at(x, y, 250, 1300, 2, reason) {
-            return Some(WARN);
-        }
+        let mut v = [0u8; 48];
+        let mut n = write_lit(b"SAVE disabled: ", &mut v);
+        n += write_lit(reason, &mut v[n..]);
+        line_s1(x, y, 1272, &v[..n], WARN)
     } else {
-        let mut v = [0u8; 32];
-        let n = write_lit(b"SAVE ready: ", &mut v);
-        let n = n + fmt_u64(save.unwrap_or(0) as u64, &mut v[n..]);
-        let n = n + write_lit(b" decoded bytes", &mut v[n..]);
-        if font::text_at(x, y, 44, 1300, 2, &v[..n]) {
-            return Some(OK);
-        }
+        let mut v = [0u8; 48];
+        let mut n = write_lit(b"SAVE ready: ", &mut v);
+        n += fmt_u64(save.unwrap_or(0) as u64, &mut v[n..]);
+        n += write_lit(b" decoded bytes", &mut v[n..]);
+        line_s1(x, y, 1272, &v[..n], OK)
     }
-    None
 }
 
 // -----------------------------------------------------------------------------
@@ -1012,12 +1060,12 @@ fn handle_touch(app: &mut Authenticator, tx: u32, ty: u32) -> bool {
     let x = tx as usize;
     let y = ty as usize;
 
-    if (24..100).contains(&x) && (28..68).contains(&y) {
+    if (24..100).contains(&x) && (24..72).contains(&y) {
         return true;
     }
 
     // Re-probe the platform from the secret store card.
-    if (392..652).contains(&y) && (30..690).contains(&x) {
+    if (376..648).contains(&y) && (24..696).contains(&x) {
         probe_all(app);
         status(
             app,
@@ -1027,15 +1075,18 @@ fn handle_touch(app: &mut Authenticator, tx: u32, ty: u32) -> bool {
         return false;
     }
 
-    if !(1022..1332).contains(&y) || !(30..690).contains(&x) {
+    if !(896..1336).contains(&y) || !(24..696).contains(&x) {
         return false;
     }
 
     for row in 0..6usize {
         for col in 0..6usize {
+            if row == 5 && col == 5 {
+                continue;
+            }
             let kx = KEY_X0 + col * KEY_STEP_X;
             let ky = KEY_Y0 + row * KEY_STEP_Y;
-            let kw = if row == 5 && col == 5 { KEY_W + KEY_STEP_X - 6 } else { KEY_W };
+            let kw = if row == 5 && col == 4 { KEY_W + KEY_STEP_X } else { KEY_W };
             if x >= kx && x < kx + kw && y >= ky && y < ky + KEY_H {
                 let Some(label) = key_at(col, row) else { return false };
                 return press_key(app, label);

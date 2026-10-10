@@ -1,4 +1,4 @@
-//! Typography helpers over the InterOS design face (`interos_std::design::font`).
+﻿//! Typography helpers over the InterOS design face (`interos_std::design::font`).
 //!
 //! Every string is measured before it is drawn. A run that does not fit the box
 //! the layout reserved for it is truncated with an ellipsis on a character
@@ -9,6 +9,9 @@
 use interos_std::design::font as face;
 
 /// Re-export of the SDK word-wrapping helper (breaks on spaces, never mid-word).
+/// Kept for wrapper parity with the other apps; allowed while no call site
+/// needs multi-line wrapping yet.
+#[allow(unused_imports)]
 pub use interos_std::design::font::wrap_text;
 
 /// Maximum bytes a single fitted run may occupy. Every source run in this app
@@ -138,62 +141,3 @@ pub fn ink_center(
     let cx = x0 + max_w.saturating_sub(w) / 2;
     ink(x, y, cx, y0, scale, text, max_w, color, bg, bold)
 }
-
-// -----------------------------------------------------------------------------
-// Legacy pixel-test API over the design face.
-//
-// These keep the pre-existing `main.rs` call sites compiling unchanged: the
-// old 8x8 cell geometry is replaced by the proportional design face at the
-// same `scale`, so existing screens render in the new typeface at the caller's
-// size. New code should prefer `ink`/`width`, which fit before drawing.
-// -----------------------------------------------------------------------------
-
-/// Advance width of `text` at `scale`, regular weight.
-#[inline]
-pub fn text_width(text: &[u8], scale: usize) -> usize {
-    width(text, scale, false)
-}
-
-/// True when pixel `(x, y)` lands on a lit glyph pixel of `text` drawn with
-/// its top-left at `(x0, y0)`.
-#[inline]
-pub fn text_at(
-    x: usize,
-    y: usize,
-    x0: usize,
-    y0: usize,
-    scale: usize,
-    text: &[u8],
-) -> bool {
-    let s = scale.max(1);
-    let dy = match y.checked_sub(y0) {
-        Some(d) => d,
-        None => return false,
-    };
-    if dy / s >= face::GLYPH_H {
-        return false;
-    }
-    let dx = match x.checked_sub(x0) {
-        Some(d) => d,
-        None => return false,
-    };
-    let mut pen = 0usize;
-    for &c in text {
-        let adv = face::advance_of(c, false) * s;
-        if dx < pen + adv {
-            let col = (dx - pen) / s;
-            let row = dy / s;
-            return face::pixel(c, col, row, false);
-        }
-        pen += adv;
-    }
-    false
-}
-
-/// Left edge that centres `text` within `[x0, x1)` at `scale`.
-#[inline]
-pub fn text_center(x0: usize, x1: usize, scale: usize, text: &[u8]) -> usize {
-    let w = text_width(text, scale);
-    x0 + (x1.saturating_sub(x0).saturating_sub(w)) / 2
-}
-
