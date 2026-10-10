@@ -808,15 +808,21 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
             icon_cy,
             ink: icon_ink,
             badge: Run::EMPTY,
-            label: Run::centred(
-                cell.x,
-                label_y,
-                type_scale::BODY,
-                cell.w.saturating_sub(space::SM * 2),
-                cell.w,
-                label_bytes,
-                theme.text,
-            ),
+            // WHY step the scale down instead of only ellipsizing: at BODY
+            // scale "Messages" measures 188 px against a 174 px fit
+            // (190 px tile less 8 px padding per side), so ellipsizing alone
+            // prints "Messa...". A one-step drop to CAPTION keeps the full
+            // name readable; the ellipsis remains only for names that fit at
+            // no readable scale.
+            label: {
+                let fit = cell.w.saturating_sub(space::SM * 2);
+                let scale = if text::measure(label_bytes, type_scale::BODY) <= fit {
+                    type_scale::BODY
+                } else {
+                    type_scale::CAPTION
+                };
+                Run::centred(cell.x, label_y, scale, fit, cell.w, label_bytes, theme.text)
+            },
             fill,
         };
     }
