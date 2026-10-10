@@ -1155,9 +1155,14 @@ pub extern "C" fn _start() -> ! {
     let mut refresh_ticks: u64 = 0;
 
     loop {
+        // WHY 25 ms and not longer: this timeout is the input-latency floor
+        // for every tap on the lock screen and home grid (a tap that lands
+        // just after a poll waits out the whole quantum before the launcher
+        // even sees it). 25 ms keeps the worst case under a frame at 60 Hz;
+        // the loop still HLTs between wakes, so idle power is unchanged.
         let events = match std::event_poll(
             std::EVENT_TOUCH_INPUT | std::EVENT_TIMER_TICK | std::EVENT_IPC_MSG,
-            100,
+            25,
         ) {
             Ok(ev) => ev,
             Err(_) => continue,
@@ -1971,8 +1976,17 @@ pub extern "C" fn _start() -> ! {
                                         .ok();
                                 }
                             }
-                            // 2. Touch tap
-                            if input.kind == 1 {
+                            // 2. Touch tap. WHY kind 2 as well as kind 1: the
+                            //    kernel's input router emits exactly one event
+                            //    per physical release, and a second press within
+                            //    300 ticks of the last tap *at the same spot*
+                            //    (TAP_SLOP) is classified DoubleTap. A fast
+                            //    repeat of the same PIN digit -- "11", "00" --
+                            //    is exactly that, and handling only Tap silently
+                            //    dropped every such keystroke: two presses must
+                            //    be two digits. Distinct keys are 140+ px apart,
+                            //    far outside TAP_SLOP, so they stay Taps.
+                            if input.kind == 1 || input.kind == 2 {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
 
@@ -2077,21 +2091,30 @@ pub extern "C" fn _start() -> ! {
                                                     }
                                                 }
                                             }
+                                            // Clear-all: the bottom-left "CLR"
+                                            // key empties the entry (the old
+                                            // `X` key's job) and still dismisses
+                                            // the pad on a locked device.
                                             'C' => {
-                                                if state.pin_len > 0 {
-                                                    state.pin_len -= 1;
-                                                    render_view(surface, &state);
-                                                    let _ = std::surface_flip(4);
-                                                }
-                                            }
-                                            'X' => {
                                                 state.pin_len = 0;
+                                                state.pin_buffer = [0; 8];
                                                 state.auth_error = false;
                                                 if state.lock_state == std::UserLockState::Locked {
                                                     state.pin_pad_visible = false;
                                                 }
                                                 render_view(surface, &state);
                                                 let _ = std::surface_flip(4);
+                                            }
+                                            // Backspace: the bottom-right key
+                                            // (backspace pictogram; the old `C`
+                                            // key's job) removes the last digit.
+                                            'D' => {
+                                                if state.pin_len > 0 {
+                                                    state.pin_len -= 1;
+                                                    state.pin_buffer[state.pin_len as usize] = 0;
+                                                    render_view(surface, &state);
+                                                    let _ = std::surface_flip(4);
+                                                }
                                             }
                                             _ => {}
                                         }

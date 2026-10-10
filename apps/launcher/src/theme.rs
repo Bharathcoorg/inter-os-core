@@ -250,11 +250,21 @@ impl Theme {
     ///
     /// WHY a helper: the lock screen needed the same 27% and 36% veils in three
     /// places, and they had already drifted to 27%, 27% and 30%.
+    ///
+    /// The target is an OPAQUE colour in the veil's own direction: white for
+    /// `light`, black otherwise. It used to be built as `(target << 24) |
+    /// 0xFFFFFF`, which kept 0xFFFFFF in the RGB channels for BOTH directions,
+    /// so `light == false` blended towards white instead of black: the lock
+    /// screen's PIN pad backdrop (`veil(wallpaper, 85, false)`) washed out to
+    /// roughly #F3F3F5 (measured: a flat 220-255 range where the wallpaper
+    /// should be), and its white heading and keypad digits -- drawn at 255 on a
+    /// backdrop of 243-255 -- had a contrast of 10/255 and were effectively
+    /// invisible.
     pub fn veil(base: u32, percent: u32, light: bool) -> u32 {
         let p = percent.min(100);
-        let target = if light { 0xFF } else { 0x00 };
         let t = (p * 256) / 100;
-        Theme::blend(base, (target << 24) | 0xFFFFFF, t)
+        let target = if light { 0xFFFFFFFFu32 } else { 0xFF000000u32 };
+        Theme::blend(base, target, t)
     }
 }
 

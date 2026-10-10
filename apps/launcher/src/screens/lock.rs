@@ -699,19 +699,213 @@ fn frame_for(x: usize, y: usize, state: &LauncherState) -> &Frame {
     &slot.frame
 }
 
-/// Hit-tests a touch point against the lock screen PIN keypad buttons.
+// --- PIN keypad -------------------------------------------------------------
+//
+// WHY the grid lives in one place: this keypad used to be written twice -- a
+// flat twelve-entry list inside [`hit_test_pin_pad`] and a separate
+// rows/columns pair inside [`lock_pin_pad_pixel`] -- which had to be kept equal
+// by hand, and any edit to one and not the other produced keys you could draw
+// where you could not tap, or tap where nothing was drawn. Everything below is
+// read by both paths, so a key's position, code and radius are single-sourced.
+
+/// Row centres of the keypad, top to bottom.
+const PIN_ROWS: [usize; 4] = [480, 620, 760, 900];
+/// Column centres of the keypad, left to right.
+const PIN_COLS: [usize; 3] = [160, 360, 560];
+/// The code each cell holds: what [`hit_test_pin_pad`] returns for a tap on it,
+/// and the face [`pin_key_face`] draws on it.
+///
+/// The bottom row is the phone-dialer arrangement. `C` is Clear-all -- the
+/// whole entry, the old `X` key's job, now a labelled key instead of a letter
+/// nobody could guess. `D` is Delete -- the last digit, the old `C` key's job,
+/// drawn as a backspace pictogram. There is no OK/Enter key because there is
+/// nothing for one to do: the fourth digit submits, as it always has.
+const PIN_KEYS: [[char; 3]; 4] = [
+    ['1', '2', '3'],
+    ['4', '5', '6'],
+    ['7', '8', '9'],
+    ['C', '0', 'D'],
+];
+/// Radius of a key in pixels -- the drawn disc *and* the tappable region, which
+/// are deliberately the same circle: every pixel of a key can be tapped and
+/// nothing outside it can be. 96 px across is twice the 48 px minimum touch
+/// target in `theme`. (The keypad used to draw at radius 44 and hit at 48, a
+/// four-pixel annulus of key that was never on screen; one radius removes the
+/// question of which is the real key.)
+const PIN_KEY_R: i32 = 48;
+/// Half the square that rejects a pixel nowhere near a key before the circular
+/// test runs: two pixels of slack so the rim itself is never missed by rounding.
+const PIN_KEY_BOX: usize = (PIN_KEY_R as usize) + 2;
+/// The disc fill: a white veil over the pad backdrop -- the same glass the lock
+/// screen's torch and camera controls are made of -- sheened from
+/// [`PIN_KEY_FILL_TOP`] at the top of the disc down to [`PIN_KEY_FILL_BOTTOM`]
+/// at the bottom, so a resting key reads as a disc lit from above rather than a
+/// flat dot. This is the pad's "press" affordance: the input pipeline reports a
+/// tap (`kind == 1`) only after the finger is up, with no down/up pair, so a
+/// transient pressed frame would need a second render the shell does not have.
+const PIN_KEY_FILL_TOP: u32 = 26;
+const PIN_KEY_FILL_BOTTOM: u32 = 16;
+/// The disc rim: the denser veil the two control discs use, so a keypad key and
+/// a lock-screen control are visibly the same material.
+const PIN_KEY_RIM_PERCENT: u32 = LOCK_BTN_RIM_PERCENT;
+/// The figures' scale: a 17-row cap at scale 3 is 51 px in a 96 px key, the
+/// roughly half-key figure a dialer sets its numbers at. The old scale 2 (34 px)
+/// was a third of the key and read as a table of numbers rather than a keypad.
+const PIN_DIGIT_SCALE: usize = 3;
+/// The `CLR` label's scale: at scale 3 the three letters measure 102 px and
+/// would overhang the disc; at scale 2 they are 68 px inside a 90 px chord, and
+/// a secondary control set below the figures is the hierarchy a dialer wants.
+const PIN_LABEL_SCALE: usize = 2;
+
+/// The cell origin that centres a run's cap ink on `cy`: ink begins
+/// `CAP_TOP * scale` into its cell and stands `CAP_HEIGHT * scale` rows tall.
+///
+/// WHY derived rather than typed: the old keypad hand-typed `cy - 17`, which
+/// put its scale-2 figures six pixels below the disc's centre. This lands the
+/// cap box on the centre for whatever scale is in use, so the next typeface or
+/// scale change cannot re-offset the keys.
+fn pin_face_y(cy: usize, scale: usize) -> usize {
+    cy.saturating_sub(launcher::font::CAP_TOP * scale + launcher::font::CAP_HEIGHT * scale / 2)
+}
+
+/// Backspace pictogram: the conventional left-pointing pentagon, outlined,
+/// with an X through its body. `dx`/`dy` are offsets from the key centre; the
+/// shape spans 64 x 38 and clears the key's rim at every corner.
+///
+/// WHY drawn as geometry and not set as type: the key is a control, not a
+/// character. The face has no backspace glyph, and the three pictograms already
+/// on this surface (padlock, torch, camera) are all drawn this way, so the
+/// keypad's one pictogram belongs to the same family.
+fn lock_backspace_pixel(dx: i32, dy: i32) -> bool {
+    const VX: [i32; 5] = [-32, -8, 32, 32, -8];
+    const VY: [i32; 5] = [0, -19, -19, 19, 19];
+    /// Outline thickness of the pentagon, in pixels.
+    const STROKE: i32 = 3;
+    /// Half the X's stroke, so the X is four pixels thick like the outline.
+    const X_HALF: i32 = 2;
+
+    // Inside the pentagon: every edge must turn the same way about the point.
+    // The vertex order above is consistent, so all five cross products are
+    // non-negative exactly when the point is inside -- and the smallest cross
+    // product over its edge's length is the distance to the nearest edge, which
+    // is what turns the filled pentagon into an outline of STROKE pixels.
+    let mut on_outline = false;
+    for i in 0..5 {
+        let j = (i + 1) % 5;
+        let (ax, ay) = (VX[i], VY[i]);
+        let (ex, ey) = (VX[j] - ax, VY[j] - ay);
+        let cross = ex * (dy - ay) - ey * (dx - ax);
+        if cross < 0 {
+            return false;
+        }
+        if cross * cross <= STROKE * STROKE * (ex * ex + ey * ey) {
+            on_outline = true;
+        }
+    }
+    if on_outline {
+        return true;
+    }
+    // The X in the body: two crossed segments, centred on the rectangle part.
+    lock_seg_hit(dx, dy, 1, -10, 21, 10, X_HALF)
+        || lock_seg_hit(dx, dy, 1, 10, 21, -10, X_HALF)
+}
+
+/// True when `(px, py)` lies within `half` pixels of the segment `a`->`b`.
+///
+/// WHY integers: the closest point is a clamped projection, and clearing the
+/// denominator once (`dist^2 * len2 <= half^2 * len2`) keeps the whole test in
+/// `i32` at these sizes with no square root.
+fn lock_seg_hit(px: i32, py: i32, ax: i32, ay: i32, bx: i32, by: i32, half: i32) -> bool {
+    let (dx, dy) = (bx - ax, by - ay);
+    let len2 = dx * dx + dy * dy;
+    let (ex, ey) = (px - ax, py - ay);
+    let mut t = ex * dx + ey * dy;
+    if t < 0 {
+        t = 0;
+    } else if t > len2 {
+        t = len2;
+    }
+    (ex * ex + ey * ey) * len2 - t * t <= half * half * len2
+}
+
+/// One key's face, drawn over the key's disc: the figure, the `CLR` label or
+/// the backspace pictogram -- chosen from the same cell code
+/// [`hit_test_pin_pad`] returns, so what a key says and what a tap on it does
+/// are read from a single value.
+///
+/// `pin_len` is the live entry length: the backspace pictogram dims while there
+/// is nothing to delete, which is the one state this keypad has (the same
+/// pulled-back ink the torch control uses for a control that cannot act).
+fn pin_key_face(
+    x: usize,
+    y: usize,
+    cx: usize,
+    cy: usize,
+    ch: char,
+    disc: u32,
+    pin_len: u8,
+) -> Option<u32> {
+    match ch {
+        // Clear-all: labelled rather than picted, because "CLR" is what a
+        // dialer says and every user already reads it.
+        'C' => {
+            const LABEL: &[u8] = b"CLR";
+            let x0 = cx.saturating_sub(text::measure(LABEL, PIN_LABEL_SCALE) / 2);
+            test_text_aa(
+                x,
+                y,
+                x0,
+                pin_face_y(cy, PIN_LABEL_SCALE),
+                PIN_LABEL_SCALE,
+                LABEL,
+                THEME.ink_on_dark,
+                disc,
+            )
+        }
+        // Backspace pictogram, dimmed when the entry is already empty.
+        'D' => {
+            if !lock_backspace_pixel((x as i32) - (cx as i32), (y as i32) - (cy as i32)) {
+                return None;
+            }
+            Some(if pin_len == 0 {
+                lock_glyph_dim(&THEME, disc)
+            } else {
+                THEME.ink_on_dark
+            })
+        }
+        // A figure, centred on the disc both ways.
+        digit => {
+            let adv = launcher::font::advance_of(digit as u8, false) * PIN_DIGIT_SCALE;
+            let x0 = cx.saturating_sub(adv / 2);
+            test_text_aa(
+                x,
+                y,
+                x0,
+                pin_face_y(cy, PIN_DIGIT_SCALE),
+                PIN_DIGIT_SCALE,
+                &[digit as u8],
+                THEME.ink_on_dark,
+                disc,
+            )
+        }
+    }
+}
+
+/// Hit-tests a touch point against the lock screen PIN keypad.
+///
+/// Returns the code of the key whose *drawn disc* contains `(x, y)`: rows,
+/// columns, codes and radius all come from [`PIN_ROWS`], [`PIN_COLS`],
+/// [`PIN_KEYS`] and [`PIN_KEY_R`], the same constants
+/// [`lock_pin_pad_pixel`] draws with, so a key's tappable region is exactly its
+/// visible circle.
 pub fn hit_test_pin_pad(x: usize, y: usize) -> Option<char> {
-    const BUTTONS: [(usize, usize, char); 12] = [
-        (160, 480, '1'), (360, 480, '2'), (560, 480, '3'),
-        (160, 620, '4'), (360, 620, '5'), (560, 620, '6'),
-        (160, 760, '7'), (360, 760, '8'), (560, 760, '9'),
-        (160, 900, 'C'), (360, 900, '0'), (560, 900, 'X'),
-    ];
-    for &(cx, cy, ch) in &BUTTONS {
-        let dx = (x as i32) - (cx as i32);
-        let dy = (y as i32) - (cy as i32);
-        if dx * dx + dy * dy <= 48 * 48 {
-            return Some(ch);
+    for (row, &cy) in PIN_ROWS.iter().enumerate() {
+        for (col, &cx) in PIN_COLS.iter().enumerate() {
+            let dx = (x as i32) - (cx as i32);
+            let dy = (y as i32) - (cy as i32);
+            if dx * dx + dy * dy <= PIN_KEY_R * PIN_KEY_R {
+                return Some(PIN_KEYS[row][col]);
+            }
         }
     }
     None
@@ -765,7 +959,9 @@ fn lock_pin_pad_pixel(color: u32, x: usize, y: usize, state: &LauncherState) -> 
             let r = 9;
             if dist_sq <= r * r {
                 if i < state.pin_len as usize {
-                    return Some(0xFFFFFF);
+                    // Filled dots in the theme's accent: the one piece of colour
+                    // on the pad, on the state the user is actually watching.
+                    return Some(THEME.accent);
                 } else if dist_sq >= (r - 2) * (r - 2) {
                     return Some(0x708090);
                 }
@@ -773,40 +969,38 @@ fn lock_pin_pad_pixel(color: u32, x: usize, y: usize, state: &LauncherState) -> 
         }
     }
 
-    // 3. 12 Keypad Buttons
-    const ROWS: [(usize, &[u8; 3]); 4] = [
-        (480, &[b'1', b'2', b'3']),
-        (620, &[b'4', b'5', b'6']),
-        (760, &[b'7', b'8', b'9']),
-        (900, &[b'C', b'0', b'X']),
-    ];
-    const COLS: [usize; 3] = [160, 360, 560];
-
-    for &(cy, row_chars) in &ROWS {
-        if y >= cy.saturating_sub(46) && y <= cy + 46 {
-            for col_idx in 0..3 {
-                let cx = COLS[col_idx];
-                if x >= cx.saturating_sub(46) && x <= cx + 46 {
-                    let dx = (x as i32) - (cx as i32);
-                    let dy = (y as i32) - (cy as i32);
-                    let dist_sq = dx * dx + dy * dy;
-                    let r = 44;
-                    if dist_sq <= r * r {
-                        let ch = row_chars[col_idx];
-                        let glyph_w = launcher::font::advance_of(ch, false) * 2;
-                        let gx = cx.saturating_sub(glyph_w / 2);
-                        let gy = cy.saturating_sub(17);
-                        let disc_bg = Theme::veil(backdrop, 55, false);
-                        if let Some(c) = test_text_aa(x, y, gx, gy, 2, &[ch], 0xFFFFFF, disc_bg) {
-                            return Some(c);
-                        }
-                        if dist_sq >= (r - 2) * (r - 2) {
-                            return Some(0x405068);
-                        }
-                        return Some(disc_bg);
-                    }
-                }
+    // 3. The keypad: twelve circular keys on the shared grid. Rows, columns,
+    //    codes and radius all come from the constants [`hit_test_pin_pad`]
+    //    taps with, so a key is drawn exactly where it is tappable and says
+    //    exactly what a tap on it does.
+    for (row, &cy) in PIN_ROWS.iter().enumerate() {
+        if y < cy.saturating_sub(PIN_KEY_BOX) || y > cy + PIN_KEY_BOX {
+            continue;
+        }
+        for (col, &cx) in PIN_COLS.iter().enumerate() {
+            if x < cx.saturating_sub(PIN_KEY_BOX) || x > cx + PIN_KEY_BOX {
+                continue;
             }
+            let dx = (x as i32) - (cx as i32);
+            let dy = (y as i32) - (cy as i32);
+            let dist_sq = dx * dx + dy * dy;
+            if dist_sq > PIN_KEY_R * PIN_KEY_R {
+                continue;
+            }
+            // The disc: the control glass, sheened from PIN_KEY_FILL_TOP at the
+            // top of the circle to PIN_KEY_FILL_BOTTOM at the bottom. The
+            // pixel's own fill is what the face anti-aliases against.
+            let sheen = (dy + PIN_KEY_R) as u32 * (PIN_KEY_FILL_TOP - PIN_KEY_FILL_BOTTOM)
+                / (2 * PIN_KEY_R as u32);
+            let disc = Theme::veil(backdrop, PIN_KEY_FILL_TOP - sheen, true);
+            let ch = PIN_KEYS[row][col];
+            if let Some(c) = pin_key_face(x, y, cx, cy, ch, disc, state.pin_len) {
+                return Some(c);
+            }
+            if dist_sq >= (PIN_KEY_R - 2) * (PIN_KEY_R - 2) {
+                return Some(Theme::veil(backdrop, PIN_KEY_RIM_PERCENT, true));
+            }
+            return Some(disc);
         }
     }
 
