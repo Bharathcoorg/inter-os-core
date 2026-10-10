@@ -546,7 +546,7 @@ struct EmptyPlan {
 struct StatusPlan {
     clock: Option<Run>,
     battery: Rect,
-    battery_fill: Rect,
+    battery_dash: Rect,
     tip: Rect,
     wifi_centre: (i32, i32),
     bars: [Rect; 4],
@@ -618,7 +618,7 @@ fn build(state: &LauncherState) -> Paint {
             None
         },
         battery,
-        battery_fill: battery.inset(space::SM - 4),
+        battery_dash: battery_dash_rect(battery),
         tip,
             wifi_centre: (wifi.center_x() as i32, wifi.y as i32 + 15),
         bars,
@@ -850,6 +850,25 @@ pub fn get_app_drawer_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     app_tile(x, y, &theme, &p.tiles[slot])
 }
 
+/// The no-reading dash centred in a battery shell.
+///
+/// WHY centred rather than filled: with no fuel gauge bound, a filled cell is a
+/// charge level this shell never measured and an empty one is read as 0%. A
+/// short centred dash says "not known" in the one way that cannot be misread as
+/// a percentage. Height is one text pixel at caption scale so it reads as a mark
+/// rather than a bar.
+fn battery_dash_rect(battery: Rect) -> Rect {
+    let inner = battery.inset(1);
+    let w = 12.min(inner.w / 2);
+    let h = 2;
+    Rect::new(
+        inner.x + (inner.w - w) / 2,
+        inner.y + (inner.h.saturating_sub(h)) / 2,
+        w,
+        h,
+    )
+}
+
 /// Status bar: clock, signal, wifi, battery, on the theme's overlay chrome.
 fn status_bar(x: usize, y: usize, theme: &Theme, s: &StatusPlan) -> u32 {
     if y == STATUS_BAR_HEIGHT - 1 {
@@ -864,14 +883,17 @@ fn status_bar(x: usize, y: usize, theme: &Theme, s: &StatusPlan) -> u32 {
         return c;
     }
 
-    // Battery. WHY hollow: there is no fuel gauge bound to this shell, so a filled
-    // cell would be a measurement the shell never took.
+    // Battery. WHY a dash and not a fill: there is no fuel gauge bound to this
+    // shell, so an empty shell reads as 0% charge and a filled one would be a
+    // measurement this process never took. The dash is the conventional
+    // no-reading mark, and it is the same one the home surface draws, so the
+    // two status bars cannot contradict each other.
     if inside_rounded(s.battery, x, y, radius::CHIP) {
         if !inside_rounded(s.battery.inset(1), x, y, radius::CHIP - 1) {
             return theme.text;
         }
-        if s.battery_fill.contains(x, y) {
-            return theme.success;
+        if s.battery_dash.contains(x, y) {
+            return theme.text_muted;
         }
         return theme.surface_sunken;
     }
