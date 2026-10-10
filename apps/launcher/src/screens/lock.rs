@@ -534,8 +534,15 @@ fn lock_na_box() -> Rect {
 fn lock_na_r_box() -> Rect {
     let w = text::measure(LOCK_NA_TEXT, type_scale::CAPTION);
     let (_, y) = lock_na_origin();
+    // WHY the same clamp [`lock_na_origin`] applies and not a bare subtraction:
+    // the left label is clamped into the surface with a `space::SM` margin, and
+    // this one was not, so the pair was safe only for the two centres that
+    // happen to be in use today. A right-hand control moved inboard would push
+    // its caption off the edge while its neighbour's stayed put.
     Rect::new(
-        (LOCK_BTN_R_CX as usize).saturating_sub(w / 2),
+        (LOCK_BTN_R_CX as usize)
+            .saturating_sub(w / 2)
+            .clamp(space::SM, W.saturating_sub(w + space::SM)),
         y,
         w,
         text::line_height(type_scale::CAPTION),
@@ -570,6 +577,18 @@ struct Frame {
     clock: Rect,
     /// The unlock hint, horizontally centred on the surface.
     hint: Rect,
+    /// The PIN pad's prompt, horizontally centred on the surface.
+    ///
+    /// WHY it is here and not measured inside the pad's pixel function: that
+    /// function used to call `text::measure` over a fourteen-byte string for
+    /// every pixel of a 45-row band -- roughly 32,000 advance walks a frame to
+    /// compute a box that is identical for all of them. That is precisely the
+    /// measurement the module header says this memo exists to keep off the
+    /// per-pixel path, and it had come back through a later edit.
+    pin_heading: Rect,
+    /// The PIN pad's sub-prompt, one scale step below the prompt, on the same
+    /// centring rule.
+    pin_subheading: Rect,
     /// The torch's "N/A" label: an origin *and* an extent, see [`lock_na_box`].
     na: Rect,
     /// The camera disc's "N/A" label, on the same baseline: [`lock_na_r_box`].
@@ -596,6 +615,13 @@ impl Frame {
     /// whose two halves would have to stay in step with the pixel path's.
     fn measure(state: &LauncherState) -> Frame {
         let theme = THEME;
+        // WHY the pad's two runs are measured here even when the pad is not on
+        // screen: `lock_state`, `pin_setup_step` and `auth_error` are read live
+        // from the state per pixel, so measuring conditionally would put a branch
+        // in `Frame::measure` whose two halves would have to stay in step with the
+        // pixel path's. Fourteen and thirty-odd advance lookups a frame is free;
+        // a disagreement between the two is not. See `pin_heading` on `Frame`.
+        let (heading, subheading) = pin_messages(state);
         Frame {
             status_h: text::line_height(LOCK_STATUS_TIME_SCALE),
             date: Rect::new(
@@ -615,6 +641,18 @@ impl Frame {
                 LOCK_HINT_Y,
                 text::measure(LOCK_HINT_TEXT, LOCK_HINT_SCALE),
                 text::line_height(LOCK_HINT_SCALE),
+            ),
+            pin_heading: Rect::new(
+                text::center_x(heading, PIN_HEADING_SCALE, W),
+                PIN_HEADING_Y,
+                text::measure(heading, PIN_HEADING_SCALE),
+                text::line_height(PIN_HEADING_SCALE),
+            ),
+            pin_subheading: Rect::new(
+                text::center_x(subheading, PIN_SUBHEADING_SCALE, W),
+                PIN_SUBHEADING_Y,
+                text::measure(subheading, PIN_SUBHEADING_SCALE),
+                text::line_height(PIN_SUBHEADING_SCALE),
             ),
             na: lock_na_box(),
             na_r: lock_na_r_box(),
@@ -686,6 +724,8 @@ static FRAME_MEMO: FrameMemo = FrameMemo(UnsafeCell::new(FrameSlot {
         date: Rect::new(0, 0, 0, 0),
         clock: Rect::new(0, 0, 0, 0),
         hint: Rect::new(0, 0, 0, 0),
+        pin_heading: Rect::new(0, 0, 0, 0),
+        pin_subheading: Rect::new(0, 0, 0, 0),
         na: Rect::new(0, 0, 0, 0),
         na_r: Rect::new(0, 0, 0, 0),
         ink: 0,
@@ -787,19 +827,58 @@ const PIN_KEY_FILL_BOTTOM: u32 = 16;
 /// The disc rim: the denser veil the two control discs use, so a keypad key and
 /// a lock-screen control are visibly the same material.
 const PIN_KEY_RIM_PERCENT: u32 = LOCK_BTN_RIM_PERCENT;
-/// The figures' scale: a 17-row cap at scale 3 is 51 px in a 96 px key, the
-/// roughly half-key figure a dialer sets its numbers at. The old scale 2 (34 px)
-/// was a third of the key and read as a table of numbers rather than a keypad.
-const PIN_DIGIT_SCALE: usize = 3;
-/// The `CLR` label's scale: at scale 3 the three letters measure 102 px and
-/// would overhang the disc; at scale 2 they are 68 px inside a 90 px chord, and
-/// a secondary control set below the figures is the hierarchy a dialer wants.
+/// The figures' scale.
 ///
-/// WHY 1 and not 2: the chord across the middle of a 96 px disc is 90 px, and at
-/// scale 2 "CLR" measured 90 px, so it ran edge to edge with a 3 px margin on
-/// each side and read as jammed into the circle rather than centred in it. At
-/// scale 1 the label is 45 px, which sits comfortably inside the disc and keeps
-/// the figures at scale 3 as the loudest thing on the key.
+/// WHY 4 and not the 3 this used to be: legibility on this pad is a *weight*
+/// problem first and a size problem second, and weight is the bold face's job,
+/// so the two had to move together. Measured on the committed tables in
+/// `font.rs`, every figure in `FONT` inks columns 1..=8 with a 2-column stem,
+/// so at the old scale 3 a stroke was 6 px against a 51 px cap -- a stem/cap
+/// ratio of 0.118. `FONT_BOLD` inks columns 1..=9 with a 3-column stem, so at
+/// scale 4 a stroke is 12 px against a 68 px cap, 0.176, which is where a phone
+/// dialer sits. In area terms the old figure was 24 x 54 px of ink in a 96 px
+/// disc (0.25 of the key's width) and the new one is 36 x 72 px (0.375); a
+/// 24 px-wide hairline floating in the middle of its key is exactly what "the
+/// numbers are not crystal clear" was describing.
+///
+/// WHY 4 still fits the key: the figure's widest rows sit 18 px either side of
+/// the disc's centre line, where the disc's half-chord is 44.9 px, and its
+/// extreme cap rows are 18 px wide where the half-chord is 33.9 px. The ink
+/// clears the rim on every side, so `PIN_KEY_R` stays the drawn disc *and* the
+/// tappable disc and neither has to grow.
+///
+/// WHY a whole number on both axes: this face is a bitmap and the magnifier is
+/// nearest-neighbour, so only an exact integer multiple keeps every stem an
+/// axis-aligned block of solid ink. Scale 3.5 would resample the outline and
+/// give back the grey fringe this change is removing.
+const PIN_DIGIT_SCALE: usize = 4;
+/// Whether the keypad's faces come from [`launcher::font::FONT_BOLD`].
+///
+/// WHY a named constant and not a bare `true` at the call sites: the heavy cut
+/// is a decision about this one surface, and it is deliberately *not* global.
+/// `main.rs`'s `test_text` and `test_text_aa` both hardcode the regular face, so
+/// the whole shell is set against regular metrics today; bold advances are one
+/// pixel wider for every glyph with ink (11 -> 12 for the figures), which would
+/// move every measured box on every screen. Naming it puts the reason one grep
+/// away from the next person who wonders why the key is bold and its label is not.
+const PIN_DIGIT_BOLD: bool = true;
+/// The `CLR` label's scale.
+///
+/// WHY 1: it has to stay subordinate to the figures, and 1 is the only rung left
+/// below them. Measured on the committed tables, "CLR" is 38 px at scale 1, 76 px
+/// at scale 2 and 114 px at scale 3; the disc's chord across its middle is 96 px,
+/// so scale 3 runs straight off both sides of the key and scale 2 leaves 10 px of
+/// margin and reads as jammed against the rim. Scale 1 is 0.24 of the figure's
+/// cap height and 0.40 of its width, which is the hierarchy a dialer wants.
+///
+/// The numbers this constant's note used to quote (102 / 90 / 45 px against a
+/// 90 px chord) were measured against the pre-condensing fixed 8x8 face, which
+/// this surface no longer draws with; they were stale, and a stale measurement
+/// in a WHY is worse than none.
+///
+/// WHY the regular weight and not the bold one the figures use: weight is the
+/// second axis of hierarchy and the figures have already spent it. The label
+/// stays in the lighter face so it cannot compete with the thing it labels.
 const PIN_LABEL_SCALE: usize = 1;
 
 /// The cell origin that centres a run's cap ink on `cy`: ink begins
@@ -878,9 +957,11 @@ fn lock_seg_hit(px: i32, py: i32, ax: i32, ay: i32, bx: i32, by: i32, half: i32)
 /// [`hit_test_pin_pad`] returns, so what a key says and what a tap on it does
 /// are read from a single value.
 ///
-/// `pin_len` is the live entry length: the backspace pictogram dims while there
-/// is nothing to delete, which is the one state this keypad has (the same
-/// pulled-back ink the torch control uses for a control that cannot act).
+/// `ink` is the colour the figure and the label are drawn in, so the pad's inks
+/// stay named in one place instead of being re-typed at every arm of this
+/// `match`. `pin_len` is the live entry length: the backspace pictogram dims
+/// while there is nothing to delete, which is the one state this keypad has (the
+/// same pulled-back ink the torch control uses for a control that cannot act).
 fn pin_key_face(
     x: usize,
     y: usize,
@@ -888,6 +969,7 @@ fn pin_key_face(
     cy: usize,
     ch: char,
     disc: u32,
+    ink: u32,
     pin_len: u8,
 ) -> Option<u32> {
     match ch {
@@ -903,7 +985,7 @@ fn pin_key_face(
                 pin_face_y(cy, PIN_LABEL_SCALE),
                 PIN_LABEL_SCALE,
                 LABEL,
-                THEME.ink_on_dark,
+                ink,
                 disc,
             )
         }
@@ -915,24 +997,62 @@ fn pin_key_face(
             Some(if pin_len == 0 {
                 lock_glyph_dim(&THEME, disc)
             } else {
-                THEME.ink_on_dark
+                ink
             })
         }
         // A figure, centred on the disc both ways.
-        digit => {
-            let adv = launcher::font::advance_of(digit as u8, false) * PIN_DIGIT_SCALE;
+        //
+        // WHY bold: see `PIN_DIGIT_BOLD`. The regular face's 2-column stem is 6 px
+        // at the old scale 3, and a stem has to be thick enough to survive being
+        // read at a glance from arm's length on a 720 px panel before it is
+        // legible at all.
+        //
+        // WHY `text::rasterize_pixel_bold` and not `test_text_aa`: this is the one
+        // run on the surface the user has to be *certain* of, and it is currently
+        // the softest. `test_text_aa` reads `interos_std`'s two-bit coverage table
+        // and magnifies it with nearest neighbour, so at any integer scale above
+        // one every partially covered outline pixel becomes a `scale` x `scale`
+        // block of a one-third or two-thirds tone. On a #414141 disc with white
+        // ink that reads as a grid of mid greys wrapped round the figure: a haze,
+        // which is the "not crystal clear" symptom in one sentence.
+        // `text::rasterize_pixel_bold` is the same pen walk as `test_text` against
+        // `font::run_pixel` with `bold = true` -- one bit per pixel, still nearest
+        // neighbour -- so a 3-column bold stem magnified 4x is a solid 12 px block
+        // of pure ink with a hard edge and nothing between the ink and the disc.
+        //
+        // WHY this is the right place to want hard edges and the header above it
+        // is not: the header is 34 px of cap and its run is anti-aliased at
+        // scale 2, where coverage buys real curve smoothing for 48 rows of type
+        // read once. The figure is 68 px of cap magnified 4x, where the same
+        // coverage buys nothing but a grey outline and costs the only weight the
+        // glyph has.
+        '0'..='9' => {
+            let digit = ch as u8;
+            // WHY the figure's own bold advance rather than a hand-tuned optical
+            // centre: the figures are tabular, so all ten share one advance and
+            // one ink box, and centring that box is what `text::center_x` does
+            // for every other run on this surface. The face's sidebearing then
+            // leaves the ink 2 px left of the disc's centre line at scale 4 -- 2%
+            // of the key, and identical on all twelve keys, so the row of digits
+            // reads as evenly set rather than twelve separate judgements.
+            let adv = launcher::font::advance_of(digit, PIN_DIGIT_BOLD) * PIN_DIGIT_SCALE;
             let x0 = cx.saturating_sub(adv / 2);
-            test_text_aa(
+            text::rasterize_pixel_bold(
                 x,
                 y,
                 x0,
                 pin_face_y(cy, PIN_DIGIT_SCALE),
                 PIN_DIGIT_SCALE,
-                &[digit as u8],
-                THEME.ink_on_dark,
-                disc,
+                &[digit],
+                ink,
             )
         }
+        // WHY spelled out rather than folded into the arm above as a catch-all:
+        // `PIN_KEYS` holds exactly the ten figures plus `C` and `D`, so this is
+        // unreachable today. A wildcard would silently rasterise any future byte
+        // as a digit; returning `None` draws a bare disc instead, which is a
+        // visible fault rather than a plausible-looking wrong one.
+        _ => None,
     }
 }
 
@@ -965,7 +1085,116 @@ pub fn hit_test_pin_pad(x: usize, y: usize) -> Option<char> {
 /// surface, not a window onto the wallpaper.
 const PIN_PAD_VEIL_PERCENT: u32 = 100;
 
-fn lock_pin_pad_pixel(color: u32, x: usize, y: usize, state: &LauncherState) -> Option<u32> {
+/// The four entry dots: how many, where the first one sits, how far apart they
+/// are, their row, and their radius.
+///
+/// WHY these are named and derived from each other: the dots used to be four
+/// hard-coded centres inside a `345..375` / `245..475` window that was the same
+/// four numbers re-spelled. Moving a dot without also re-typing its window is how
+/// an indicator ends up drawn where the gate can no longer see it. The band and
+/// the span below are computed from these, so there is one place to change.
+const PIN_DOT_COUNT: usize = 4;
+const PIN_DOT_X0: usize = 270;
+const PIN_DOT_PITCH: usize = 60;
+const PIN_DOT_CY: usize = 360;
+const PIN_DOT_R: i32 = 9;
+/// How far past its own radius the dot group's gate reaches.
+///
+/// WHY 6: the old window was `cy - 15 .. cy + 15` against a radius of 9, i.e.
+/// exactly 6 px of slack, and the dots span 351..=369 inside it. Reusing that
+/// slack keeps the accepted set identical to what the pad accepted before while
+/// making it follow the geometry.
+const PIN_DOT_SLACK: i32 = 6;
+
+/// The pad's four inks, written out in full `0xAARRGGBB`.
+///
+/// WHY the alpha byte is written out rather than left off: the literals these
+/// replaced were three bytes each -- `0xFFFFFF`, `0x90A0B0`, `0x708090` and
+/// `0xFF5555` -- which as `0xAARRGGBB` are alpha `0x00`, i.e. fully transparent
+/// ink. Nothing on screen shows it today, because the 720x1440 launcher surface
+/// reaches the scanout through `DisplayKms::composite`'s identity
+/// `copy_from_slice` and `present_argb8888` discards the byte; but the first
+/// presenter that honours alpha would make the heading, the sub-heading and
+/// both halves of the PIN dots disappear. A colour that only works because
+/// nothing reads its alpha is a colour waiting for a bug.
+///
+/// WHY the hues are unchanged: they were chosen against this pad's own black
+/// backdrop. `Theme::LIGHT`'s `text_muted` is a warm grey (119,119,115) and its
+/// `danger` is a deep red (220,38,38); swapping either in would restain the pad
+/// rather than fix it. The pad is the one surface in the shell that draws on a
+/// backdrop it owns rather than on a theme page, and the header does the same.
+const PIN_HEADING_INK: u32 = 0xFFFFFFFF;
+const PIN_SUBHEADING_INK: u32 = 0xFF90A0B0;
+const PIN_ERROR_INK: u32 = 0xFFFF5555;
+const PIN_DOT_EMPTY_INK: u32 = 0xFF708090;
+
+/// The prompt above the keypad and the sub-prompt under it, for the state the
+/// shell is actually in.
+///
+/// WHY one function and not two literals picked at the call site: the same
+/// `lock_state` / `pin_setup_step` / `auth_error` triple decides *both* runs, and
+/// they are measured into the frame from this one answer. Choosing the pair
+/// separately is how "Incorrect PIN" ends up captioned "Enter your 4-digit PIN"
+/// because one arm was edited and the other was not.
+///
+/// WHY the order of the tests matters and is not alphabetical: an uninitialized
+/// device has no credential to be wrong about, so the setup pair is asked for
+/// first; a failed attempt outranks the lockout caption because it is the state
+/// that just changed and the one the user is looking at.
+fn pin_messages(state: &LauncherState) -> (&'static [u8], &'static [u8]) {
+    if state.lock_state == interos_std::UserLockState::Uninitialized {
+        if state.pin_setup_step == 0 {
+            (b"Set Device PIN", b"Create a 4-digit PIN")
+        } else {
+            (b"Confirm Device PIN", b"Re-enter your 4-digit PIN")
+        }
+    } else if state.auth_error {
+        (b"Incorrect PIN", b"Try again")
+    } else if state.lock_state == interos_std::UserLockState::Lockout {
+        (b"Device Locked Out", b"Account locked after 5 attempts")
+    } else {
+        (b"Enter Device PIN", b"Enter your 4-digit PIN to unlock")
+    }
+}
+
+/// The prompt's scale: 2, i.e. a 34 px cap.
+///
+/// WHY 2: it is the line the user reads before every keystroke, and the widest of
+/// the four strings [`pin_messages`] can return -- "Confirm Device PIN" -- measures
+/// 364 px of the surface's 720, so it still clears both edges by 178 px. Scale 3
+/// would be 546 px and leave 87 px, which is inside the sidebearing of the
+/// widest glyph; scale 1 would put a 17 px cap above a keypad whose figures are
+/// 68 px and invert the hierarchy the pad is built on.
+const PIN_HEADING_SCALE: usize = 2;
+/// The sub-prompt's scale: 1, i.e. a 17 px cap -- one rung below the prompt and
+/// two below the figures, which is the ladder the pad reads down: figures, then
+/// prompt, then sub-prompt, then the entry dots.
+const PIN_SUBHEADING_SCALE: usize = 1;
+/// The prompt's cell origin, and the sub-prompt's.
+///
+/// WHY these two numbers and not the `250..295` and `300..330` row windows the
+/// pixel function used to gate on: those windows were typed for the old fixed 8x8
+/// cell, in which a run's ink began on the cell's very first row, so 250 sat five
+/// rows *above* the run's origin and the window stopped at 295 -- eight rows
+/// short of the 48-row line box a scale-2 run occupies from 255.
+///
+/// WHY that survived: every string [`pin_messages`] can return is caps and
+/// spaces, so the 17-row cap box (261..=294 for the prompt) happened to sit
+/// entirely inside the clipped window, and a descender is the only thing that
+/// would have revealed it. A run is now gated on `Rect::contains` over
+/// `text::line_height`, which is the face's own box rather than a remembered
+/// number, so the window follows the next typeface and the next scale by
+/// construction. Nothing moves on screen today; the clip is gone.
+const PIN_HEADING_Y: usize = 255;
+const PIN_SUBHEADING_Y: usize = 305;
+
+fn lock_pin_pad_pixel(
+    color: u32,
+    x: usize,
+    y: usize,
+    state: &LauncherState,
+    f: &Frame,
+) -> Option<u32> {
     let backdrop = Theme::veil(color, PIN_PAD_VEIL_PERCENT, false);
 
     // WHY the pad owns the whole surface, status band included: this returned
@@ -976,69 +1205,103 @@ fn lock_pin_pad_pixel(color: u32, x: usize, y: usize, state: &LauncherState) -> 
     // its own backdrop now.
     if y < LOCK_STATUS_BAND {
         if state.clock_source_ok {
-            if let Some(c) = test_text_aa(
-                x,
-                y,
-                LOCK_STATUS_TIME_X,
-                LOCK_STATUS_TIME_Y,
-                LOCK_STATUS_TIME_SCALE,
-                &state.clock_time,
-                0xFFFFFF,
-                backdrop,
-            ) {
-                return Some(c);
+            // WHY the same gated box as the lock surface's own status clock and not
+            // an open band test: the run is 24 rows tall from `LOCK_STATUS_TIME_Y`
+            // and nothing else, so the 56-row band hands 32 rows to the rasteriser
+            // for a 24-row run.
+            if y >= LOCK_STATUS_TIME_Y && y < LOCK_STATUS_TIME_Y + f.status_h {
+                if let Some(c) = test_text_aa(
+                    x,
+                    y,
+                    LOCK_STATUS_TIME_X,
+                    LOCK_STATUS_TIME_Y,
+                    LOCK_STATUS_TIME_SCALE,
+                    &state.clock_time,
+                    PIN_HEADING_INK,
+                    backdrop,
+                ) {
+                    return Some(c);
+                }
             }
         }
         return Some(backdrop);
     }
 
-    // 1. Header message at y = 250..295
-    let (header, subheader) = if state.lock_state == interos_std::UserLockState::Uninitialized {
-        if state.pin_setup_step == 0 {
-            (b"Set Device PIN" as &[u8], b"Create a 4-digit PIN" as &[u8])
+    // 1. The prompt and its sub-prompt, each gated on its own measured line box
+    //    in the frame rather than on a remembered row window -- see
+    //    [`PIN_HEADING_Y`] for what was wrong with the old windows and why the
+    //    defect was invisible.
+    //
+    //    WHY `pin_messages` is still called per pixel: it is four comparisons and
+    //    no measurement. What this function used to do here was `text::measure`
+    //    over a fourteen-byte string, for every pixel of a 45-row band -- about
+    //    32,000 advance walks a frame to compute a box that is fixed for all of
+    //    them, which is the exact regression the module header is about.
+    let (header, subheader) = pin_messages(state);
+    if f.pin_heading.contains(x, y) {
+        let ink = if state.auth_error {
+            PIN_ERROR_INK
         } else {
-            (b"Confirm Device PIN" as &[u8], b"Re-enter your 4-digit PIN" as &[u8])
-        }
-    } else if state.auth_error {
-        (b"Incorrect PIN" as &[u8], b"Try again" as &[u8])
-    } else if state.lock_state == interos_std::UserLockState::Lockout {
-        (b"Device Locked Out" as &[u8], b"Account locked after 5 attempts" as &[u8])
-    } else {
-        (b"Enter Device PIN" as &[u8], b"Enter your 4-digit PIN to unlock" as &[u8])
-    };
-
-    if (250..295).contains(&y) {
-        let text_w = text::measure(header, 2);
-        let text_x = (W.saturating_sub(text_w)) / 2;
-        let ink = if state.auth_error { 0xFF5555 } else { 0xFFFFFF };
-        if let Some(c) = test_text_aa(x, y, text_x, 255, 2, header, ink, backdrop) {
+            PIN_HEADING_INK
+        };
+        if let Some(c) = test_text_aa(
+            x,
+            y,
+            f.pin_heading.x,
+            f.pin_heading.y,
+            PIN_HEADING_SCALE,
+            header,
+            ink,
+            backdrop,
+        ) {
             return Some(c);
         }
     }
-    if (300..330).contains(&y) {
-        let text_w = text::measure(subheader, 1);
-        let text_x = (W.saturating_sub(text_w)) / 2;
-        if let Some(c) = test_text(x, y, text_x, 305, 1, subheader, 0x90A0B0) {
+    if f.pin_subheading.contains(x, y) {
+        if let Some(c) = test_text(
+            x,
+            y,
+            f.pin_subheading.x,
+            f.pin_subheading.y,
+            PIN_SUBHEADING_SCALE,
+            subheader,
+            PIN_SUBHEADING_INK,
+        ) {
             return Some(c);
         }
     }
 
-    // 2. 4 PIN Bullet Dots at y = 345..375: cx = 270, 330, 390, 450
-    if (345..375).contains(&y) && (245..475).contains(&x) {
-        for i in 0usize..4usize {
-            let cx = 270 + i * 60;
-            let cy = 360;
+    // 2. The four entry dots, on the row under the sub-prompt.
+    //
+    //    WHY the gate is derived from [`PIN_DOT_COUNT`] and friends and not typed:
+    //    the old `345..375` and `245..475` were the same four centres re-spelled,
+    //    so a dot and its gate could be moved independently. The slack reproduces
+    //    the old row band exactly (`cy - 9 - 6 .. cy + 9 + 6` = 345..375) and is
+    //    wider than it across, which is all the group needs.
+    let dot_band = (
+        (PIN_DOT_CY as i32 - PIN_DOT_R - PIN_DOT_SLACK).max(0) as usize,
+        PIN_DOT_CY + PIN_DOT_R as usize + PIN_DOT_SLACK as usize,
+    );
+    let dot_span = (
+        (PIN_DOT_X0 as i32 - PIN_DOT_R - PIN_DOT_SLACK).max(0) as usize,
+        PIN_DOT_X0
+            + (PIN_DOT_COUNT - 1) * PIN_DOT_PITCH
+            + PIN_DOT_R as usize
+            + PIN_DOT_SLACK as usize,
+    );
+    if (dot_band.0..dot_band.1).contains(&y) && (dot_span.0..dot_span.1).contains(&x) {
+        for i in 0usize..PIN_DOT_COUNT {
+            let cx = PIN_DOT_X0 + i * PIN_DOT_PITCH;
             let dx = (x as i32) - (cx as i32);
-            let dy = (y as i32) - (cy as i32);
+            let dy = (y as i32) - (PIN_DOT_CY as i32);
             let dist_sq = dx * dx + dy * dy;
-            let r = 9;
-            if dist_sq <= r * r {
+            if dist_sq <= PIN_DOT_R * PIN_DOT_R {
                 if i < state.pin_len as usize {
                     // Filled dots in the theme's accent: the one piece of colour
                     // on the pad, on the state the user is actually watching.
                     return Some(THEME.accent);
-                } else if dist_sq >= (r - 2) * (r - 2) {
-                    return Some(0x708090);
+                } else if dist_sq >= (PIN_DOT_R - 2) * (PIN_DOT_R - 2) {
+                    return Some(PIN_DOT_EMPTY_INK);
                 }
             }
         }
@@ -1064,12 +1327,29 @@ fn lock_pin_pad_pixel(color: u32, x: usize, y: usize, state: &LauncherState) -> 
             }
             // The disc: the control glass, sheened from PIN_KEY_FILL_TOP at the
             // top of the circle to PIN_KEY_FILL_BOTTOM at the bottom. The
-            // pixel's own fill is what the face anti-aliases against.
+            // pixel's own fill is what the face is read against.
+            //
+            // WHY the ink is the theme's own and not a literal: `THEME` is the
+            // LIGHT theme and the pad's backdrop is opaque black by
+            // construction, so `ink_on_dark` is the theme's answer for "what
+            // colour is type on this" and it moves if the theme ever does. The
+            // measured contrast it gives here is 255 against a disc of 39..65, so
+            // the figure was never low-contrast -- which is why the weight, and
+            // not the palette, is what this pad was missing.
             let sheen = (dy + PIN_KEY_R) as u32 * (PIN_KEY_FILL_TOP - PIN_KEY_FILL_BOTTOM)
                 / (2 * PIN_KEY_R as u32);
             let disc = Theme::veil(backdrop, PIN_KEY_FILL_TOP - sheen, true);
             let ch = PIN_KEYS[row][col];
-            if let Some(c) = pin_key_face(x, y, cx, cy, ch, disc, state.pin_len) {
+            if let Some(c) = pin_key_face(
+                x,
+                y,
+                cx,
+                cy,
+                ch,
+                disc,
+                THEME.ink_on_dark,
+                state.pin_len,
+            ) {
                 return Some(c);
             }
             if dist_sq >= (PIN_KEY_R - 2) * (PIN_KEY_R - 2) {
@@ -1092,7 +1372,7 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     // If the PIN pad is active (or on first-boot uninitialized state), render the PIN pad!
     let pin_active = state.pin_pad_visible || state.lock_state == interos_std::UserLockState::Uninitialized;
     if pin_active {
-        if let Some(pin_color) = lock_pin_pad_pixel(color, x, y, state) {
+        if let Some(pin_color) = lock_pin_pad_pixel(color, x, y, state, f) {
             return pin_color;
         }
     } else if y >= 360 && y < 1080 {
