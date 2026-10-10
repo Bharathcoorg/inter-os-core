@@ -573,6 +573,47 @@ fn icon_runtime(x: usize, y: usize, cx: usize, cy: usize) -> Option<u32> {
     None
 }
 
+// -----------------------------------------------------------------------------
+// Type grid
+// -----------------------------------------------------------------------------
+// WHY ONE LINE PER ROW: the shared face's line box is 24 source rows, so the old
+// "label line + provenance line" row needs 24 + 24 = 48px of pitch. This app
+// draws up to 24 rows in four cards (6 + 9 + 6 + 3), which is 1152px of rows
+// plus four captions and the closing line: more than the 1262px of card space a
+// 720x1440 phone has, before a single pixel of padding. So every row is ONE line
+// box and the provenance sits in the middle column between the label and the
+// verdict. The verdict is measured first, so the middle column is always exactly
+// as wide as it can be and the source is fitted into it - never clipped, never
+// overprinted, never run off the card.
+
+/// Body type scale. The shared face's 17px cap height at scale 1 is the same
+/// cap height the private 8x8 face produced at scale 2.
+const SC: usize = 1;
+
+/// Heading scale (card captions and the app title).
+const HSC: usize = 2;
+
+/// Row pitch: one 24px line box plus a 10px gutter.
+const ROW_PITCH: usize = 34;
+
+/// Left edge of every card row and standalone line.
+const ROW_X0: usize = 44;
+/// Right edge of every card row and standalone line (the card's inner edge).
+const ROW_X1: usize = 676;
+/// Gutter between a row's label, provenance and verdict columns.
+const COL_GAP: usize = 14;
+/// Column ceiling for a row label (the widest one is "Screen orientation").
+const LABEL_W: usize = 176;
+/// Column ceiling for a row verdict (the widest one is the four-zone reading).
+const VERDICT_W: usize = 288;
+/// Column ceiling for a card caption. The widest is "THERMAL & POWER REGULATOR".
+const CAPTION_W: usize = 618;
+
+/// First row baseline box inside a card. WHY +70: the caption is a 48px line box
+/// that starts 14px below the card edge, so 14 + 48 + 8 puts the first row clear
+/// of it.
+const CARD_TOP: usize = 70;
+
 struct Card {
     x0: usize,
     y0: usize,
@@ -581,12 +622,22 @@ struct Card {
     caption: &'static [u8],
 }
 
+// Card heights are sized for the WORST branch each card can draw, not for the
+// branch this platform happens to produce: 6 rows for the bus and power cards,
+// 9 rows plus the closing line for the inventory, 3 for the runtime card.
+// 142 + 294 + 16 + 430 + 16 + 294 + 16 + 192 = 1400, which still leaves the
+// home gesture pill (y 1418) clear.
 const CARDS: [Card; 4] = [
-    Card { x0: 30, y0: 154, x1: 690, y1: 470, caption: b"SENSOR BUS ARCHITECTURE" },
-    Card { x0: 30, y0: 486, x1: 690, y1: 980, caption: b"CHANNEL INVENTORY" },
-    Card { x0: 30, y0: 996, x1: 690, y1: 1264, caption: b"THERMAL & POWER REGULATOR" },
-    Card { x0: 30, y0: 1280, x1: 690, y1: 1404, caption: b"RUNTIME ENVIRONMENT" },
+    Card { x0: 30, y0: 142, x1: 690, y1: 436, caption: b"SENSOR BUS ARCHITECTURE" },
+    Card { x0: 30, y0: 452, x1: 690, y1: 882, caption: b"CHANNEL INVENTORY" },
+    Card { x0: 30, y0: 898, x1: 690, y1: 1192, caption: b"THERMAL & POWER REGULATOR" },
+    Card { x0: 30, y0: 1208, x1: 690, y1: 1400, caption: b"RUNTIME ENVIRONMENT" },
 ];
+
+/// Top of the first row box inside card `idx`.
+const fn card_rows_y(idx: usize) -> usize {
+    CARDS[idx].y0 + CARD_TOP
+}
 
 // -----------------------------------------------------------------------------
 // Rendering
@@ -616,9 +667,9 @@ fn render(surface: u32, app: &Dashboard) {
 
 #[inline(never)]
 fn pixel(x: usize, y: usize, app: &Dashboard) -> u32 {
-    // Header (y: 0..96)
-    if y < 96 {
-        if y >= 94 {
+    // Header (y: 0..92)
+    if y < 92 {
+        if y >= 88 {
             return EDGE;
         }
 
@@ -634,11 +685,14 @@ fn pixel(x: usize, y: usize, app: &Dashboard) -> u32 {
             return c;
         }
 
-        // App Title and Subtitle
-        if font::text_at(x, y, 164, 32, 3, b"Sensors & HAL") {
+        // App Title and Subtitle.
+        // WHY scale 2 and y0 12: a scale-3 run of this title is 423px wide and
+        // would run into the status pill at x 540; the shared face's line box is
+        // 24 rows, so the 48px title occupies 12..60 and the subtitle 62..86.
+        if font::ink(x, y, 164, 12, HSC, b"Sensors & HAL", 376, TEXT, CARD) {
             return TEXT;
         }
-        if font::text_at(x, y, 166, 62, 1, b"DEVICE HARDWARE INVENTORY") {
+        if font::ink(x, y, 164, 62, SC, b"DEVICE HARDWARE INVENTORY", 512, FAINT, CARD) {
             return FAINT;
         }
 
@@ -654,7 +708,8 @@ fn pixel(x: usize, y: usize, app: &Dashboard) -> u32 {
                 return dot_color;
             }
             let status_lbl: &[u8] = if is_present { b"ONLINE" } else { b"INVENTORY" };
-            if font::text_at(x, y, 568, 41, 2, status_lbl) {
+            // Fitted to 568..686 so the label can never cross the pill rim.
+            if font::ink(x, y, 568, 36, SC, status_lbl, 118, dot_color, CARD_RAISED) {
                 return dot_color;
             }
             return CARD_RAISED;
@@ -663,17 +718,20 @@ fn pixel(x: usize, y: usize, app: &Dashboard) -> u32 {
         return CARD;
     }
 
-    // Status Band Card (y: 100..144)
-    if (100..144).contains(&y) && (30..690).contains(&x) {
-        if on_rounded_rect_border(x, y, 30, 100, 690, 144, 6) {
+    // Status Band Card (y: 96..134)
+    if (96..134).contains(&y) && (30..690).contains(&x) {
+        if on_rounded_rect_border(x, y, 30, 96, 690, 134, 6) {
             return EDGE;
         }
-        if in_rounded_rect(x, y, 30, 100, 690, 144, 6) {
-            let (dx, dy) = (x as isize - 46, y as isize - 122);
+        if in_rounded_rect(x, y, 30, 96, 690, 134, 6) {
+            let (dx, dy) = (x as isize - 46, y as isize - 115);
             if dx * dx + dy * dy <= 3 * 3 {
                 return app.status_color;
             }
-            if font::text_at(x, y, 58, 114, 2, &app.status[..app.status_len]) {
+            // WHY scale 1: the longest status line is 523px at scale 1 and
+            // 1046px at scale 2; only the measured run fits the 626px left of
+            // the card's inner rim, so the run is fitted into that box.
+            if font::ink(x, y, 58, 103, SC, &app.status[..app.status_len], 626, app.status_color, CARD_INNER) {
                 return app.status_color;
             }
             return CARD_INNER;
@@ -698,35 +756,26 @@ fn pixel(x: usize, y: usize, app: &Dashboard) -> u32 {
                 return c;
             }
 
-            if font::text_at(x, y, card.x0 + 44, card.y0 + 12, 2, card.caption) {
+            if font::ink(x, y, card.x0 + 40, card.y0 + 14, HSC, card.caption, CAPTION_W, ACCENT, CARD) {
                 return ACCENT;
             }
         }
     }
 
-    if (154..470).contains(&y) && (30..690).contains(&x) {
-        if let Some(c) = sensor_bus_card(x, y, app) {
-            return c;
+    // Card bodies. The bands come from the card rectangles themselves, so a row
+    // can never be drawn outside the card that owns it.
+    if (30..690).contains(&x) {
+        for (idx, card) in CARDS.iter().enumerate() {
+            if (card.y0..card.y1).contains(&y) {
+                let hit = match idx {
+                    0 => sensor_bus_card(x, y, app),
+                    1 => inventory_card(x, y, app),
+                    2 => power_card(x, y, app),
+                    _ => identity_card(x, y, app),
+                };
+                return hit.unwrap_or(CARD);
+            }
         }
-        return CARD;
-    }
-    if (486..980).contains(&y) && (30..690).contains(&x) {
-        if let Some(c) = inventory_card(x, y, app) {
-            return c;
-        }
-        return CARD;
-    }
-    if (996..1264).contains(&y) && (30..690).contains(&x) {
-        if let Some(c) = power_card(x, y, app) {
-            return c;
-        }
-        return CARD;
-    }
-    if (1280..1404).contains(&y) && (30..690).contains(&x) {
-        if let Some(c) = identity_card(x, y, app) {
-            return c;
-        }
-        return CARD;
     }
 
     // Home gesture pill
@@ -737,25 +786,34 @@ fn pixel(x: usize, y: usize, app: &Dashboard) -> u32 {
     BG
 }
 
-/// Label on the left, verdict on the right, provenance underneath.
+/// One row of a card, occupying exactly one line box.
+///
+/// Label on the left, verdict right-aligned at `ROW_X1`, provenance in the
+/// middle column between them. The verdict is measured FIRST, so the middle
+/// column is always the widest it can be; the provenance is then fitted into
+/// that width and can never touch either neighbour or leave the card.
 #[inline(never)]
 fn row(x: usize, y: usize, top: usize, label: &[u8], verdict: &[u8], color: u32, source: &[u8]) -> Option<u32> {
-    if font::text_at(x, y, 44, top, 2, label) {
+    if font::ink(x, y, ROW_X0, top, SC, label, LABEL_W, MUTED, CARD) {
         return Some(MUTED);
     }
-    let vx = 676usize.saturating_sub(font::text_width(verdict, 2));
-    if font::text_at(x, y, vx, top, 2, verdict) {
+    let vx = ROW_X1 - font::fit_width(verdict, SC, VERDICT_W);
+    if font::ink(x, y, vx, top, SC, verdict, VERDICT_W, color, CARD) {
         return Some(color);
     }
-    if font::text_at(x, y, 44, top + 18, 2, source) {
+    let sx = ROW_X0 + font::fit_width(label, SC, LABEL_W) + COL_GAP;
+    let mid = vx.saturating_sub(COL_GAP).saturating_sub(sx);
+    if font::ink(x, y, sx, top, SC, source, mid, FAINT, CARD) {
         return Some(FAINT);
     }
     None
 }
 
+/// A standalone full-width line: fitted to the card's inner box so it can never
+/// run past the card rim.
 #[inline(never)]
 fn line(x: usize, y: usize, top: usize, text: &[u8], color: u32) -> Option<u32> {
-    if font::text_at(x, y, 44, top, 2, text) {
+    if font::ink(x, y, ROW_X0, top, SC, text, ROW_X1 - ROW_X0, color, CARD) {
         return Some(color);
     }
     None
@@ -780,50 +838,65 @@ fn sensor_bus_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
             wn += 1;
         }
     }
-    if let Some(c) = row(x, y, 186, b"Sensor read", &word[..wn], color, b"sensor_read() -> kernel sensor manager") {
+    // Slot 0 is the sensor-read verdict; the branch below owns the slots after
+    // it and `slot` carries the live-service row to the first free one.
+    let top = card_rows_y(0);
+    if let Some(c) = row(x, y, top, b"Sensor read", &word[..wn], color, b"sensor_read() -> kernel sensor manager") {
         return Some(c);
     }
 
+    let mut slot = 1usize;
+    let line_at = |i: usize| top + i * ROW_PITCH;
+
     match &app.telemetry {
         Telemetry::Absent { status, status_len, error, error_len } => {
-            if font::text_at(x, y, 44, 232, 2, b"Kernel says:") {
+            // "Kernel says:" and the kernel's own status string share one row.
+            if font::ink(x, y, ROW_X0, line_at(slot), SC, b"Kernel says:", 128, MUTED, CARD) {
                 return Some(MUTED);
             }
             if *status_len > 0
-                && font::text_at(x, y, 176, 232, 2, &status[..*status_len])
+                && font::ink(x, y, 176, line_at(slot), SC, &status[..*status_len], ROW_X1 - 176 - 4, WARN, CARD)
             {
                 return Some(WARN);
             }
+            slot += 1;
+            // The kernel's error string is wrapped on word boundaries by the
+            // shared face's wrapper and each line is fitted to the full inner
+            // width, instead of being cut at a fixed byte count.
+            let mut err_lines: [&[u8]; 2] = [&[], &[]];
             let err = &error[..*error_len];
-            let split = err.len().min(46);
-            if font::text_at(x, y, 44, 260, 2, &err[..split]) {
-                return Some(TEXT);
+            let n = font::wrap_text(err, SC, ROW_X1 - ROW_X0, 2, &mut err_lines);
+            for i in 0..n {
+                if font::ink(x, y, ROW_X0, line_at(slot + i), SC, err_lines[i], ROW_X1 - ROW_X0, TEXT, CARD) {
+                    return Some(TEXT);
+                }
             }
-            if font::text_at(x, y, 44, 284, 2, &err[split..]) {
-                return Some(TEXT);
-            }
+            slot += n;
         }
         Telemetry::Present { lux, accel, near, orientation, orientation_len } => {
             let mut w = [0u8; 32];
             let n = write_lit(b"lux ", &mut w);
             let n = n + fmt_i64(*lux, &mut w[n..]);
-            if let Some(c) = row(x, y, 232, b"Ambient light", &w[..n], OK, b"sensor_read() -> lux") {
+            if let Some(c) = row(x, y, line_at(slot), b"Ambient light", &w[..n], OK, b"sensor_read() -> lux") {
                 return Some(c);
             }
+            slot += 1;
             let mut w = [0u8; 32];
             let n = write_lit(b"accel y ", &mut w);
             let n = n + fmt_i64(*accel, &mut w[n..]);
-            if let Some(c) = row(x, y, 274, b"Accelerometer", &w[..n], OK, b"sensor_read() -> accel") {
+            if let Some(c) = row(x, y, line_at(slot), b"Accelerometer", &w[..n], OK, b"sensor_read() -> accel") {
                 return Some(c);
             }
+            slot += 1;
             let near_word: &[u8] = if *near { b"near" } else { b"far" };
-            if let Some(c) = row(x, y, 316, b"Proximity", near_word, OK, b"sensor_read() -> near") {
+            if let Some(c) = row(x, y, line_at(slot), b"Proximity", near_word, OK, b"sensor_read() -> near") {
                 return Some(c);
             }
+            slot += 1;
             if let Some(c) = row(
                 x,
                 y,
-                358,
+                line_at(slot),
                 b"Orientation",
                 &orientation[..*orientation_len],
                 OK,
@@ -831,19 +904,23 @@ fn sensor_bus_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
             ) {
                 return Some(c);
             }
+            slot += 1;
         }
         Telemetry::Denied(e) => {
-            if line(x, y, 236, status_name(*e), WARN).is_some() {
+            if line(x, y, line_at(slot), status_name(*e), WARN).is_some() {
                 return Some(WARN);
             }
-            if line(x, y, 260, b"This app holds no sensor control capability.", MUTED).is_some() {
+            slot += 1;
+            if line(x, y, line_at(slot), b"This app holds no sensor control capability.", MUTED).is_some() {
                 return Some(MUTED);
             }
+            slot += 1;
         }
         Telemetry::Malformed => {
-            if line(x, y, 236, b"Payload carried no present field.", MUTED).is_some() {
+            if line(x, y, line_at(slot), b"Payload carried no present field.", MUTED).is_some() {
                 return Some(MUTED);
             }
+            slot += 1;
         }
     }
 
@@ -862,7 +939,7 @@ fn sensor_bus_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
         }
         None => (WARN, write_lit(b"no record", &mut word)),
     };
-    if let Some(c) = row(x, y, 408, b"Sensor service", &word[..wn], svc_color, b"service_query(11)") {
+    if let Some(c) = row(x, y, line_at(slot), b"Sensor service", &word[..wn], svc_color, b"service_query(11)") {
         return Some(c);
     }
     None
@@ -871,9 +948,10 @@ fn sensor_bus_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
 /// Card 2: the inventory.
 #[inline(never)]
 fn inventory_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
+    let top = card_rows_y(1);
     macro_rules! channel {
         ($i:expr, $label:expr, $verdict:expr, $color:expr, $reason:expr) => {{
-            let top = 528 + $i * 42;
+            let top = top + $i * ROW_PITCH;
             if let Some(c) = row(x, y, top, $label, $verdict, $color, $reason) {
                 return Some(c);
             }
@@ -897,11 +975,14 @@ fn inventory_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
             } else {
                 reason
             };
-            let split = reason.len().min(46);
-            channel!(0, b"Accelerometer", b"unavailable", WARN, &reason[..split]);
+            // The reason is handed to `row` whole. `row` measures it and fits it
+            // into the middle column on a character boundary, so it is never cut
+            // mid-word and never leaves the card; the same string is also printed
+            // in full, at full card width, by the sensor bus card above.
+            channel!(0, b"Accelerometer", b"unavailable", WARN, reason);
             channel!(1, b"Gyroscope", b"unavailable", WARN, b"not in sys_sensor_read payload");
-            channel!(2, b"Ambient light", b"unavailable", WARN, &reason[..split]);
-            channel!(3, b"Proximity", b"unavailable", WARN, &reason[..split]);
+            channel!(2, b"Ambient light", b"unavailable", WARN, reason);
+            channel!(3, b"Proximity", b"unavailable", WARN, reason);
         }
     }
 
@@ -925,7 +1006,7 @@ fn inventory_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
     if let Some(c) = row(
         x,
         y,
-        528 + 8 * 42,
+        top + 8 * ROW_PITCH,
         b"Settings inventory",
         &word[..wn],
         color,
@@ -934,27 +1015,31 @@ fn inventory_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
         return Some(c);
     }
 
-    line(x, y, 920, b"Inventory says 'simulated'; the bus says no hardware.", MUTED)
+    // WHY it gets its own row slot: it is the last thing the card says, and
+    // `line` fits it into the card's full inner width on a character boundary,
+    // so a longer variant of this sentence can never run off the card.
+    line(x, y, top + 9 * ROW_PITCH, b"Inventory says 'simulated'; the bus says no hardware.", MUTED)
 }
 
 /// Card 4: runtime facts.
 #[inline(never)]
 fn identity_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
+    let top = card_rows_y(3);
     let mut v = [0u8; 24];
     let n = fmt_u64(app.task_id, &mut v);
-    if let Some(c) = row(x, y, 1314, b"Task id", &v[..n], TEXT, b"get_task_id()") {
+    if let Some(c) = row(x, y, top, b"Task id", &v[..n], TEXT, b"get_task_id()") {
         return Some(c);
     }
 
     let n = fmt_u64(app.surface_id as u64, &mut v);
-    if let Some(c) = row(x, y, 1346, b"Surface", &v[..n], TEXT, b"surface_create(6, 720x1440, z=200)") {
+    if let Some(c) = row(x, y, top + ROW_PITCH, b"Surface", &v[..n], TEXT, b"surface_create(6, 720x1440, z=200)") {
         return Some(c);
     }
 
     match app.ticks {
         Probe::Ok(t) => {
             let n = fmt_u64(t / 1000, &mut v);
-            if let Some(c) = row(x, y, 1378, b"Uptime", &v[..n], TEXT, b"get_ticks() / 1000 = seconds") {
+            if let Some(c) = row(x, y, top + 2 * ROW_PITCH, b"Uptime", &v[..n], TEXT, b"get_ticks() / 1000 = seconds") {
                 return Some(c);
             }
         }
@@ -966,7 +1051,7 @@ fn identity_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
                 w[n] = b')';
                 n += 1;
             }
-            if let Some(c) = row(x, y, 1378, b"Uptime", &w[..n], WARN, b"get_ticks() refused") {
+            if let Some(c) = row(x, y, top + 2 * ROW_PITCH, b"Uptime", &w[..n], WARN, b"get_ticks() refused") {
                 return Some(c);
             }
         }
@@ -977,6 +1062,15 @@ fn identity_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
 /// Card 3: thermal zones and power regulator.
 #[inline(never)]
 fn power_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
+    // Slot counter rather than hard-coded y values: every branch advances it by
+    // exactly the number of rows it drew, so the rows of one branch can never
+    // overprint the rows of the next, and the inventory row always follows the
+    // battery rows. The worst branch (zones + fuel gauge + settings) uses slots
+    // 0..=5, and 968 + 5 * 34 + 24 = 1162 stays inside the card (y1 = 1192).
+    let top = card_rows_y(2);
+    let at = |slot: usize| top + slot * ROW_PITCH;
+    let mut slot = 0usize;
+
     match &app.thermal {
         Thermal::Zones { present, cpu, gpu, battery, modem, charging, state, state_len, throttling } => {
             let mut w = [0u8; 32];
@@ -990,21 +1084,24 @@ fn power_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
             n = n + fmt_i64(*modem, &mut w[n..]);
             let color = if *present { OK } else { WARN };
             let label: &[u8] = b"Thermal zones";
-            if let Some(c) = row(x, y, 1026, label, &w[..n], color, b"thermal_query() -> cpu/gpu/battery/modem") {
+            if let Some(c) = row(x, y, at(slot), label, &w[..n], color, b"thermal_query() -> cpu/gpu/battery/modem") {
                 return Some(c);
             }
+            slot += 1;
             let mut w = [0u8; 32];
             let mut n = write_lit(&state[..*state_len], &mut w);
             n = n + write_lit(if *throttling { b" throttling" } else { b" nominal" }, &mut w[n..]);
-            if let Some(c) = row(x, y, 1068, b"Cooling policy", &w[..n], color, b"thermal_query() -> state, throttling") {
+            if let Some(c) = row(x, y, at(slot), b"Cooling policy", &w[..n], color, b"thermal_query() -> state, throttling") {
                 return Some(c);
             }
+            slot += 1;
             let mut w = [0u8; 24];
             let n = write_lit(b"charging zone ", &mut w);
             let n = n + fmt_i64(*charging, &mut w[n..]);
-            if let Some(c) = row(x, y, 1110, b"Charging", &w[..n], color, b"thermal_query() -> charging") {
+            if let Some(c) = row(x, y, at(slot), b"Charging", &w[..n], color, b"thermal_query() -> charging") {
                 return Some(c);
             }
+            slot += 1;
         }
         Thermal::Refused(e) => {
             let mut w = [0u8; 40];
@@ -1012,14 +1109,16 @@ fn power_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
             let n = n + fmt_i64(*e, &mut w[n..]);
             let n = n + write_lit(b" ", &mut w[n..]);
             let n = n + write_lit(status_name(*e), &mut w[n..]);
-            if let Some(c) = row(x, y, 1026, b"Thermal zones", &w[..n], WARN, b"thermal_query() -> DeviceError when unbound") {
+            if let Some(c) = row(x, y, at(slot), b"Thermal zones", &w[..n], WARN, b"thermal_query() -> DeviceError when unbound") {
                 return Some(c);
             }
+            slot += 1;
         }
         Thermal::Malformed => {
-            if let Some(c) = row(x, y, 1026, b"Thermal zones", b"no data", WARN, b"thermal_query() payload lacked fields") {
+            if let Some(c) = row(x, y, at(slot), b"Thermal zones", b"no data", WARN, b"thermal_query() payload lacked fields") {
                 return Some(c);
             }
+            slot += 1;
         }
     }
 
@@ -1034,21 +1133,24 @@ fn power_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
             n = n + write_lit(b" mV ", &mut w[n..]);
             n = n + fmt_i64(*temp, &mut w[n..]);
             n = n + write_lit(b" C", &mut w[n..]);
-            if let Some(c) = row(x, y, 1152, b"Fuel gauge", &w[..n], OK, b"battery_query() -> present:true") {
+            if let Some(c) = row(x, y, at(slot), b"Fuel gauge", &w[..n], OK, b"battery_query() -> present:true") {
                 return Some(c);
             }
+            slot += 1;
             let mut w = [0u8; 24];
             let n = fmt_i64(*capacity, &mut w);
-            if let Some(c) = row(x, y, 1194, b"Capacity", &w[..n], OK, b"battery_query() -> capacity") {
+            if let Some(c) = row(x, y, at(slot), b"Capacity", &w[..n], OK, b"battery_query() -> capacity") {
                 return Some(c);
             }
+            slot += 1;
         }
         Battery::Absent { governor, governor_len, mhz } => {
             let mut w = [0u8; 40];
             let n = write_lit(b"no fuel gauge", &mut w);
-            if let Some(c) = row(x, y, 1152, b"Battery", &w[..n], WARN, b"battery_query() -> present:false") {
+            if let Some(c) = row(x, y, at(slot), b"Battery", &w[..n], WARN, b"battery_query() -> present:false") {
                 return Some(c);
             }
+            slot += 1;
             let mut w = [0u8; 40];
             let mut n = write_lit(&governor[..*governor_len], &mut w);
             n = n + write_lit(b" ", &mut w[n..]);
