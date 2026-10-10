@@ -74,6 +74,14 @@ def is_canonical_scanout(w, h):
 # with smoothing, exactly like a hardware emulator viewport.
 PHONE_FRAME_SIZES = frozenset(((720, 1440), (360, 720), (1280, 720)))
 
+# How long a monitor-confirmed non-native geometry keeps suppressing the resync.
+# WHY bounded: during boot the guest really does present 1280x720 until it engages
+# native portrait scanout, so a confirmation with no expiry locks the publisher
+# onto the boot framebuffer. Ten seconds is long enough to stop re-probing a
+# genuine landscape guest every frame and short enough that a boot-time
+# confirmation cannot outlive the mode set it mistook for final.
+CONFIRMATION_TTL = 10.0
+
 
 def letterbox_box(fb_w, fb_h):
     """Returns the phone-surface rect (left, top, right, bottom) in a fb_w x fb_h scanout.
@@ -840,10 +848,14 @@ class VncScanoutClient:
         self.latest_jpeg = None
         self.latest_png = None
         self._last_published_rgba = None
-        # Portrait-mode geometry check: `True` once the monitor has confirmed a
-        # non-native desktop is the guest's real state (genuine landscape under a
-        # portrait viewport), `False` while it is still worth asking.
-        self._portrait_mismatch_confirmed = False
+        # When a portrait session's desktop was last confirmed to be the guest's
+        # real geometry, as a timestamp. WHY a timestamp and not a flag: the
+        # guest genuinely does present 1280x720 for the first moments of boot,
+        # before it engages native portrait scanout, so an early probe can
+        # confirm a geometry that is seconds away from changing. A permanent
+        # flag kept the publisher cropping the boot framebuffer for the rest of
+        # the session, which is the failure this whole check exists to stop.
+        self._portrait_mismatch_confirmed_at = 0.0
         self._last_scanout_probe = 0.0
         self.metrics = {
             'fps': 0.0,
@@ -1011,7 +1023,7 @@ class VncScanoutClient:
         self.scanout_buf = bytearray(w * h * 4)
         # A new handshake is the session's own answer about the live surface,
         # so any cached verdict about an off-geometry desktop starts over.
-        self._portrait_mismatch_confirmed = False
+        self._portrait_mismatch_confirmed_at = 0.0
         self._last_scanout_probe = 0.0
         self.connected = True
 
@@ -1105,24 +1117,29 @@ class VncScanoutClient:
         # WHY resync a session whose desktop is not the native portrait surface:
         # the phone profile starts QEMU on the fallback framebuffer and the guest
         # engages native portrait scanout once paging is live, so a session
-        # opened in that window keeps reporting the old geometry forever. The
-        # publisher then cropped that stale desktop into a 360x720 slice and
-        # served the whole phone half-size and zoomed. When the monitor reports
-        # the live surface IS native portrait, this session is describing a
-        # surface that no longer exists, so it is dropped and re-handshaked
-        # rather than published. A guest that really is landscape keeps its
-        # slice, and that answer is cached so it is not re-probed per frame.
-        if (not is_landscape
-                and (w, h) != (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H)
-                and not self._portrait_mismatch_confirmed):
-            live = self._monitor_scanout_size()
-            if live == (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H):
-                self._resync_stale_session(
-                    f"session desktop {w}x{h} but live scanout is "
-                    f"{LOGICAL_SURFACE_W}x{LOGICAL_SURFACE_H}")
-                return
-            if live is not None:
-                self._portrait_mismatch_confirmed = True
+        # opened in that window keeps reporting the old geometry. The publisher
+        # then cropped that stale desktop into a 360x720 slice and served the
+        # whole phone half-size and zoomed. When the monitor reports the live
+        # surface IS native portrait, this session is describing a surface that
+        # no longer exists, so it is dropped and re-handshaked rather than
+        # published. A guest that really is landscape keeps its slice, but that
+        # answer only stands for CONFIRMATION_TTL seconds: during boot the guest
+        # really is 1280x720 for a moment, and a verdict that never expires
+        # would keep the stale crop forever. An unknown answer is not a verdict,
+        # so a failed probe leaves the existing pixels alone.
+        if not is_landscape and (w, h) != (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H):
+            confirmed_for = now - self._portrait_mismatch_confirmed_at
+            if self._portrait_mismatch_confirmed_at and confirmed_for >= CONFIRMATION_TTL:
+                self._portrait_mismatch_confirmed_at = 0.0
+            if not self._portrait_mismatch_confirmed_at:
+                live = self._monitor_scanout_size()
+                if live == (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H):
+                    self._resync_stale_session(
+                        f"session desktop {w}x{h} but live scanout is "
+                        f"{LOGICAL_SURFACE_W}x{LOGICAL_SURFACE_H}")
+                    return
+                if live is not None:
+                    self._portrait_mismatch_confirmed_at = now
         box = letterbox_box(w, h)
         if not box:
             return
