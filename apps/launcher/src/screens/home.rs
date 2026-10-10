@@ -1188,16 +1188,29 @@ fn card_row_text(state: &LauncherState, row: usize, out: &mut [u8; CARD_DETAIL_C
         // a fabricated status on the surface the user reads as device state.
         0 => put(out, 0, b"Calendar sync unavailable - no event data"),
         1 => {
+            // WHY notifications and not messages: this count is the system-wide
+            // notification query, not a per-app message count, so labelling it
+            // "Messages" claimed a messaging state the shell cannot see.
             if state.notification_count > 0 {
                 let mut at = push_decimal(out, 0, state.notification_count);
                 at = put(out, at, b" unread notifications");
                 at
             } else {
-                put(out, 0, b"0 unread messages - all caught up")
+                put(out, 0, b"No new notifications")
             }
         }
         _ => {
-            if state.recent_app_lens[0] > 0 {
+            // WHY the registry label and not the raw id: recents hold package
+            // ids ("org.interos.messages"), which are developer strings, not
+            // something a user should read. `recent_label` resolves the id to
+            // the registry display name ("Messages"); the raw id remains only
+            // as the fallback for an id the registry no longer names.
+            if let Some(label) = state.recent_label(0) {
+                let mut at = put(out, 0, b"Recent: ");
+                let len = label.len().min(out.len().saturating_sub(at));
+                at = put(out, at, &label[..len]);
+                at
+            } else if state.recent_app_lens[0] > 0 {
                 let len = (state.recent_app_lens[0] as usize).min(20);
                 let mut at = put(out, 0, b"Recent: ");
                 at = put(out, at, &state.recent_apps[0][..len]);
@@ -1215,7 +1228,9 @@ fn card_row_text(state: &LauncherState, row: usize, out: &mut [u8; CARD_DETAIL_C
 fn card_row_name(row: usize) -> &'static [u8] {
     match row {
         0 => b"Schedule",
-        1 => b"Messages",
+        // Matches the notification-count detail line above: the row reports
+        // system notifications, so it is named for them.
+        1 => b"Notifications",
         _ => b"Activities",
     }
 }
@@ -1274,7 +1289,7 @@ fn card_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
                 }
             }
             1 => {
-                // Messages: circular indicator dot
+                // Notifications: circular indicator dot
                 if idx * idx + idy * idy <= 4 * 4 {
                     return Some(theme.accent);
                 }
