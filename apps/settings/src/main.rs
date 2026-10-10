@@ -142,9 +142,15 @@ fn contains_run(haystack: &[u8], needle: &[u8]) -> bool {
 pub struct SettingsApp {
     /// `None` = landing grid; `Some(section)` = that category's detail screen.
     pub current_section: Option<Section>,
-    /// Last profile the kernel accepted (initial value is the neutral default
-    /// of a freshly booted system, applied here for control highlight only).
-    pub power_profile: PowerProfile,
+    /// Last profile the kernel accepted.
+///
+/// WHY `None` and not a default: this used to be initialised to
+/// `PowerProfile::Balanced` "for control highlight only", which drew a filled
+/// selected segment at boot - a committed-looking DVFS state that no syscall had
+/// ever reported, sitting directly above the caption "Profile not yet sent to
+/// the kernel". `None` means unknown, and the renderer leaves every segment
+/// unselected until a request is actually applied.
+pub power_profile: Option<PowerProfile>,
     /// Honest outcome of the most recent DVFS profile request.
     pub profile_feedback: ProfileFeedback,
     /// Last DVFS governor id the kernel reported, when the query answered.
@@ -174,7 +180,9 @@ impl SettingsApp {
     pub const fn new() -> Self {
         Self {
             current_section: None,
-            power_profile: PowerProfile::Balanced,
+            // WHY None: nothing has been read from or written to the kernel yet,
+            // so no profile may be shown as selected.
+            power_profile: None,
             profile_feedback: ProfileFeedback::Unattempted,
             governor: None,
             terminal_enabled: false,
@@ -328,7 +336,7 @@ impl SettingsApp {
     pub fn apply_power_profile(&mut self, profile: PowerProfile) {
         match std::power_set_profile(profile.syscall_id()) {
             Ok(mhz) => {
-                self.power_profile = profile;
+                self.power_profile = Some(profile);
                 self.profile_feedback = ProfileFeedback::Applied(mhz);
                 std::log(
                     0,
@@ -518,11 +526,14 @@ impl SettingsApp {
     /// Queries authoritative system settings for developer terminal availability.
     pub fn refresh_developer_options(&mut self) {
         let mut buf = [0u8; 16];
-        // WHY: this read uses capability slot 0 (SerialOutput), which does not
-        // carry settings read rights, so the kernel refuses it. Keep the local
-        // value at the fail-closed default and log that it is unverified rather
-        // than leaving the app to imply a confirmed setting.
-        match std::settings_get(0, "developer.terminal_enabled", &mut buf) {
+        // WHY slot 3: this process holds FileSystemWrite with READ|WRITE in slot
+        // 3 (kernel/src/task/user.rs:802-807) and `sys_settings_get` accepts
+        // exactly that (kernel/src/syscall/mod.rs:4429-4430). It used to pass
+        // slot 0, which is the SerialOutput slot, so every read was refused and
+        // the Developer-terminal row could only ever show its fail-closed
+        // default. Keep the fail-closed default handling below regardless - a
+        // read that is refused must still leave the value unverified.
+        match std::settings_get(3, "developer.terminal_enabled", &mut buf) {
             Ok(n) => {
                 if let Ok(v) = core::str::from_utf8(&buf[..n]) {
                     self.terminal_enabled = v == "true";
@@ -549,12 +560,15 @@ impl SettingsApp {
     pub fn toggle_terminal(&mut self) {
         let desired = !self.terminal_enabled;
         let val: &[u8] = if desired { b"true" } else { b"false" };
-        // WHY: settings_set requires a FileSystemWrite capability in the given
-        // slot. This call passes slot 0, which is the SerialOutput slot, so the
-        // kernel denies the write. The previous code discarded that error and
-        // logged success. Report the real result, and leave the local flag at the
-        // last observed value so the UI never shows an unpersisted toggle.
-        match std::settings_set(0, "developer.terminal_enabled", val) {
+        // WHY slot 3: `sys_settings_set` requires FileSystemWrite with Rights::WRITE
+        // in the given slot, and this process holds exactly that in slot 3
+        // (kernel/src/task/user.rs:802-807, checked at
+        // kernel/src/syscall/mod.rs:4446). It used to pass slot 0, the
+        // SerialOutput slot, so the kernel denied every write and the toggle
+        // could never take effect. Report the real result either way, and leave
+        // the local flag at the last observed value when the write is refused so
+        // the UI never shows an unpersisted toggle.
+        match std::settings_set(3, "developer.terminal_enabled", val) {
             Ok(()) => {
                 self.terminal_enabled = desired;
                 std::log(
@@ -1152,7 +1166,11 @@ fn profile_segment_pixel(x: usize, y: usize, cy: usize, app: &SettingsApp, i: us
         1 => b"Balanced",
         _ => b"PowerSaver",
     };
-    let active = app.power_profile.index() == i;
+    // WHY the `map(...) == Some(i)` guard: `power_profile` is `Option`, so a profile
+    // that has never been read from or applied to the kernel highlights NO
+    // segment. Previously this defaulted to a hardcoded Balanced, which drew a
+    // committed-looking selection the kernel had never reported.
+let active = app.power_profile.map(|p| p.index()) == Some(i);
     if !active
         && !in_round_rect(x, y, sx + 1, cy + 113, SEG_W - 2, SEG_H - 2, 11)
     {
