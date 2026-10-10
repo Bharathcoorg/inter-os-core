@@ -488,7 +488,7 @@ pub const FONT: [u16; 2280] = [
     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
 ];
 
-/// Glyph bitmaps, bold weight, same layout as [`FONT`].
+/// Glyph bitmaps, bold weight: 95 * 24 words, glyph-major.
 pub const FONT_BOLD: [u16; 2280] = [
     // 32 ' '
     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,

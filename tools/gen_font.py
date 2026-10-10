@@ -18,8 +18,14 @@ HOW TO REGENERATE:
 
 Outputs (both spliced between marker comments; the Rust constants, API and
 tests live outside the markers and are never touched):
-  * apps/launcher/src/font.rs
-  * sdk/rust/interos-std/src/font.rs
+  * apps/launcher/src/font.rs            bitmaps + advances only: the shell's
+                                         copy exists for layout math (measure,
+                                         ellipsize, ink bounds), because the
+                                         shell renders through the SDK face it
+                                         does not need the coverage tables
+  * sdk/rust/interos-std/src/font.rs     bitmaps + advances + the 2-bit
+                                         coverage tables the anti-aliased
+                                         `test_text_aa` blitter blends against
 
 Requires Pillow (dev-only; the generated Rust is committed, so the firmware
 builds without Python). Both the generator and its output are committed, so
@@ -31,10 +37,16 @@ RASTERISATION (all the design decisions, in one place):
              cap 'H' lands rows 3..=19, round lowercase rows 7..=19, the
              ascenders of b d f h k l reach row 2.
  * baseline  placed on the line below row 19 (cell row 20's top edge).
- * threshold 0.5 coverage -> ink. Round sides carry a sub-pixel baseline
-             overshoot (~0.35 px in Roboto) that survives downsampling only as
-             ~0.3 coverage in row 20; a second, lower threshold restores that
-             row so 'o c g e s' keep their documented 1px overshoot.
+ * coverage  kept at full precision, then quantised to 2 bits per pixel. The
+             SDK face also stores the levels (FONT_COV / FONT_COV_BOLD, one u32
+             per row: 16 pixels x 2 bits) so the text blitter can blend glyph
+             ink against any background instead of thresholding to hard edges.
+             The binary view is `level >= 2`, i.e. exactly the old 0.5
+             threshold, so every ink contract stays bit-identical. Round sides
+             carry a sub-pixel baseline overshoot (~0.35 px in Roboto) that
+             survives downsampling only as ~0.3 coverage in row 20; the
+             OVERSHOOT restore lifts such cells to full ink, which is what
+             gives 'o c g e s' their documented 1px overshoot.
  * digits    tabular: every figure's ink span is resampled to exactly 8
              columns and centred in advance 11, so a clock never wobbles.
  * wide ink  any glyph whose advance would exceed the 16px cell is clamped to
@@ -72,7 +84,14 @@ NL = "\n"
 # hand-written API and tests in font.rs live outside them.
 START_MARK = '/// Glyph bitmaps, regular weight'
 END_MARK = 'pub const FALLBACK_ADVANCE'
-SDK_START_MARK = '// >>> tools/gen_font.py rewrites everything'
+# The SDK block anchors on the first line the generated data itself emits, so
+# the splice is idempotent. Why not a hand-written marker line: the first run
+# of this generator (cc1e4c4) spliced over exactly such a marker, consumed it
+# and never re-emitted it, which left the SDK file un-spliceable (its start
+# anchor was gone, only the end marker remained). Anchoring on the first
+# generated line cannot happen twice, because that line is part of every
+# regeneration.
+SDK_START_MARK = START_MARK
 SDK_END_MARK = '// <<< generated block ends above this line'
 
 # ---------------------------------------------------------------------------
@@ -107,19 +126,32 @@ def _face_font():
 
 
 class Bmp:
-    """A 16x24 1-bit canvas. Coordinates are pixels; (0,0) is the top-left."""
+    """A 16x24 coverage canvas. Coordinates are pixels; (0,0) is the top-left.
+
+    Each cell holds coverage in 0..1 rather than a hard bit. `ink()` applies the
+    binary threshold (`>= THRESH`) for the metric contracts, and the emitter
+    quantises the same values to 2-bit levels for the anti-aliased blitter, so
+    both views come from one source and cannot drift.
+    """
 
     def __init__(self):
-        self.rows = [[0] * CELL_W for _ in range(CELL_H)]
+        self.rows = [[0.0] * CELL_W for _ in range(CELL_H)]
 
     def px(self, x, y):
         if 0 <= x < CELL_W and 0 <= y < CELL_H:
-            self.rows[y][x] = 1
+            self.rows[y][x] = 1.0
 
     def ink(self):
-        """(left, right) ink columns and (top, bottom) ink rows, or None."""
-        cols = [x for y in range(CELL_H) for x in range(CELL_W) if self.rows[y][x]]
-        rows = [y for y in range(CELL_H) for x in range(CELL_W) if self.rows[y][x]]
+        """(left, right) ink columns and (top, bottom) ink rows, or None.
+
+        Binary view: a cell counts as ink when its coverage reaches THRESH, so
+        every metric contract (cap band, overshoot, descenders, digit width)
+        measures exactly the ink the 1-bit table asserts.
+        """
+        cols = [x for y in range(CELL_H) for x in range(CELL_W)
+                if self.rows[y][x] >= THRESH]
+        rows = [y for y in range(CELL_H) for x in range(CELL_W)
+                if self.rows[y][x] >= THRESH]
         if not cols:
             return None
         return (min(cols), max(cols), min(rows), max(rows))
@@ -136,10 +168,10 @@ class Bmp:
         for y in range(CELL_H):
             row = self.rows[y]
             for x in range(CELL_W):
-                if row[x]:
+                if row[x] >= THRESH:
                     for d in range(1, n + 1):
                         if x + d < CELL_W:
-                            out[y][x + d] = 1
+                            out[y][x + d] = 1.0
         return Bmp.from_rows(out)
 
     @staticmethod
@@ -291,21 +323,22 @@ def _build_glyph(ch):
             n_out = max(1, adv - 1)
         lsb = min(left, max(0, adv - n_out - 1))
 
-    cell = [[0] * CELL_W for _ in range(CELL_H)]
+    cell = [[0.0] * CELL_W for _ in range(CELL_H)]
     for y in range(CELL_H):
         span = _resample_row(cov[y], left, right, n_out)
         for i, v in enumerate(span):
-            if v >= THRESH:
-                cell[y][lsb + i] = 1
+            cell[y][lsb + i] = v
 
     # -- overshoot restoration ---------------------------------------------
-    # Round sides dip ~0.35 px below the baseline; the 0.5 threshold rounds
-    # that away. Restore row BASE+1 where the coverage says a round side is
-    # there, which is what gives 'o c g e s' their documented 1px overshoot.
-    if BASE + 1 < CELL_H and any(cell[BASE]):
+    # Round sides dip ~0.35 px below the baseline; a plain threshold rounds
+    # that away. Where the coverage grid says a round side sits below the
+    # baseline, lift that cell to full ink: the binary view keeps the 1px
+    # overshoot 'o c g e s' are documented to have, and the coverage view
+    # paints it at full weight rather than as a hard new block.
+    if BASE + 1 < CELL_H and any(v >= THRESH for v in cell[BASE]):
         for x in range(n_out):
             if cov[BASE + 1][left + x] >= OVERSHOOT:
-                cell[BASE + 1][lsb + x] = 1
+                cell[BASE + 1][lsb + x] = max(cell[BASE + 1][lsb + x], THRESH)
 
     return Bmp.from_rows(cell), adv
 
@@ -383,39 +416,84 @@ def _verify(face):
 # ---------------------------------------------------------------------------
 # Emission (identical shape to the previous generator's output)
 # ---------------------------------------------------------------------------
-def pack_rows(bmp):
-    """One u16 per row, most-significant bit = leftmost pixel."""
+def pack_rows(bmp, coverage=False):
+    """One word per row: MSB (or top bit pair) is the leftmost pixel.
+
+    `coverage=False` keeps the historical 1-bit u16 packing. `coverage=True`
+    packs the 2-bit coverage level of each of the 16 pixels into a u32, two
+    bits per pixel, so a 24-row glyph is 24 words with no index arithmetic on
+    the reading side beyond the shift. Levels are 0..=3, quantised with
+    round-half-up so a cell at exactly the old 0.5 threshold lands on level 2
+    and stays ink in the binary view.
+    """
     words = []
     for y in range(CELL_H):
         w = 0
         for x in range(CELL_W):
-            if bmp.rows[y][x]:
+            v = bmp.rows[y][x]
+            if coverage:
+                level = min(3, int(v * 3 + 0.5))
+                if level:
+                    w |= level << (2 * (CELL_W - 1 - x))
+            elif v >= THRESH:
                 w |= 1 << (CELL_W - 1 - x)
         words.append(w)
     return words
 
 
-def data_block(face):
+def _emit_bitmaps(face, cov):
+    """Bitmap + advance constants. `cov` adds the 2-bit coverage tables."""
     lines = []
-    lines.append("/// Glyph bitmaps, regular weight: %d * %d words, glyph-major."
-                 % (NGLYPH, CELL_H))
-    lines.append("pub const FONT: [u16; %d] = [" % (NGLYPH * CELL_H))
-    for i, c in enumerate(chr(k) for k in range(FIRST_CHAR, LAST_CHAR + 1)):
-        lines.append("    // %d %r" % (i + FIRST_CHAR, c))
-        rows = pack_rows(face[c][0])
-        for s in range(0, CELL_H, 8):
-            lines.append("    " + ", ".join("0x%04X" % w for w in rows[s:s + 8]) + ",")
-    lines.append("];")
-    lines.append("")
-    lines.append("/// Glyph bitmaps, bold weight, same layout as [`FONT`].")
-    lines.append("pub const FONT_BOLD: [u16; %d] = [" % (NGLYPH * CELL_H))
-    for i, c in enumerate(chr(k) for k in range(FIRST_CHAR, LAST_CHAR + 1)):
-        lines.append("    // %d %r" % (i + FIRST_CHAR, c))
-        rows = pack_rows(face[c][1])
-        for s in range(0, CELL_H, 8):
-            lines.append("    " + ", ".join("0x%04X" % w for w in rows[s:s + 8]) + ",")
-    lines.append("];")
-    lines.append("")
+
+    def table(name, weight, coverage):
+        lines.append("/// Glyph bitmaps, %s weight: %d * %d %s, glyph-major."
+                     % (weight, NGLYPH, CELL_H,
+                        "coverage words (2 bits/pixel)" if coverage else "words"))
+        lines.append("pub const %s: [%s; %d] = ["
+                     % (name, "u32" if coverage else "u16", NGLYPH * CELL_H))
+        for i, c in enumerate(chr(k) for k in
+                              range(FIRST_CHAR, LAST_CHAR + 1)):
+            lines.append("    // %d %r" % (i + FIRST_CHAR, c))
+            rows = pack_rows(face[c][0 if weight == "regular" else 1],
+                             coverage=coverage)
+            for s in range(0, CELL_H, 8):
+                lines.append("    " + ", ".join("0x%08X" if coverage else "0x%04X"
+                                                % w for w in rows[s:s + 8]) + ",")
+        lines.append("];")
+        lines.append("")
+
+    table("FONT", "regular", False)
+    table("FONT_BOLD", "bold", False)
+    if cov:
+        lines.append("/// Per-pixel coverage levels for the regular weight, packed")
+        lines.append("/// two bits per pixel: column `x` of row `y` holds")
+        lines.append("/// `(word >> (2 * (15 - x))) & 0b11`. Level 0..=3 maps to")
+        lines.append("/// alpha 0/85/170/255 for `test_text_aa`, so glyph ink blends")
+        lines.append("/// against any background. `level >= 2` is exactly the ink")
+        lines.append("/// bit in `FONT`, so the two views can never disagree.")
+        lines.append("pub const FONT_COV: [u32; %d] = [" % (NGLYPH * CELL_H))
+        for i, c in enumerate(chr(k) for k in
+                              range(FIRST_CHAR, LAST_CHAR + 1)):
+            lines.append("    // %d %r" % (i + FIRST_CHAR, c))
+            rows = pack_rows(face[c][0], coverage=True)
+            for s in range(0, CELL_H, 8):
+                lines.append("    "
+                             + ", ".join("0x%08X" % w for w in rows[s:s + 8]) + ",")
+        lines.append("];")
+        lines.append("")
+        lines.append("/// Coverage levels for the bold weight, same packing as")
+        lines.append("/// [`FONT_COV`].")
+        lines.append("pub const FONT_COV_BOLD: [u32; %d] = [" % (NGLYPH * CELL_H))
+        for i, c in enumerate(chr(k) for k in
+                              range(FIRST_CHAR, LAST_CHAR + 1)):
+            lines.append("    // %d %r" % (i + FIRST_CHAR, c))
+            rows = pack_rows(face[c][1], coverage=True)
+            for s in range(0, CELL_H, 8):
+                lines.append("    "
+                             + ", ".join("0x%08X" % w for w in rows[s:s + 8]) + ",")
+        lines.append("];")
+        lines.append("")
+
     lines.append("/// Per-glyph advances in pixels, regular weight, indexed by")
     lines.append("/// `glyph_index(c)`.")
     lines.append("pub const ADVANCE: [u8; %d] = [%s];"
@@ -430,7 +508,17 @@ def data_block(face):
     return "\n".join(lines)
 
 
-def _splice(path, start_mark, end_mark, data, label):
+def data_block(face, coverage_tables=False):
+    """The generated block for one font.rs.
+
+    `coverage_tables` is set only for the SDK face: the shell's copy exists for
+    layout maths and renders through the SDK face, so carrying a second copy of
+    the coverage data there would just be dead weight in the launcher image.
+    """
+    return _emit_bitmaps(face, coverage_tables)
+
+
+def _splice(path, start_mark, end_mark, data, label, word_bytes=2):
     with open(path, encoding='utf-8') as f:
         src = f.read()
     start = src.index(start_mark)
@@ -444,18 +532,22 @@ def _splice(path, start_mark, end_mark, data, label):
     with open(path, 'w', encoding='utf-8', newline=NL) as f:
         f.write(src)
     print('wrote %s (%d glyphs, %d bytes of bitmaps per weight)'
-          % (label, NGLYPH, NGLYPH * CELL_H * 2))
+          % (label, NGLYPH, NGLYPH * CELL_H * word_bytes))
 
 
 def main():
     face = render()
     _verify(face)
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # The shell's copy stays bitmap-only: it exists for layout maths and
+    # renders through the SDK face, so it does not need the coverage words.
     _splice(os.path.join(root, 'apps', 'launcher', 'src', 'font.rs'),
-            START_MARK, END_MARK, data_block(face), 'apps/launcher/src/font.rs')
+             START_MARK, END_MARK, data_block(face),
+             'apps/launcher/src/font.rs')
     _splice(os.path.join(root, 'sdk', 'rust', 'interos-std', 'src', 'font.rs'),
-            SDK_START_MARK, SDK_END_MARK, data_block(face),
-            'sdk/rust/interos-std/src/font.rs')
+             SDK_START_MARK, SDK_END_MARK,
+             data_block(face, coverage_tables=True),
+             'sdk/rust/interos-std/src/font.rs', word_bytes=4)
     if '--report' in sys.argv:
         for k in range(FIRST_CHAR, LAST_CHAR + 1):
             c = chr(k)
