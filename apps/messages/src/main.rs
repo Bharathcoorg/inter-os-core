@@ -476,7 +476,12 @@ const CARD_H: usize = 120;
 const CARD_BODY_H: usize = 104;
 
 /// Empty-state card (also the target of the search filter result).
-const EMPTY_CARD: (usize, usize, usize, usize) = (24, 180, 672, 500);
+/// WHY centred and shrunk: the card sat at y 180..680 while its content ran
+/// 260..544, leaving ~790px of void between the card and the composer and
+/// reading as a header that ran out of things to say. The block now floats
+/// centred in the space between the search field and the composer, the way
+/// an empty conversation list does on a modern phone.
+const EMPTY_CARD: (usize, usize, usize, usize) = (24, 560, 672, 340);
 
 #[inline(always)]
 fn in_rect(r: (usize, usize, usize, usize), x: usize, y: usize) -> bool {
@@ -802,7 +807,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     x,
                     y,
                     EMPTY_CARD.0 + (EMPTY_CARD.2.saturating_sub(line_w)) / 2,
-                    380,
+                    670,
                     2,
                     line,
                     TEXT_PRIMARY,
@@ -814,7 +819,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     x,
                     y,
                     EMPTY_CARD.0 + (EMPTY_CARD.2.saturating_sub(sub_w)) / 2,
-                    440,
+                    730,
                     1,
                     sub_line,
                     TEXT_MUTED,
@@ -826,7 +831,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     x,
                     y,
                     EMPTY_CARD.0 + (EMPTY_CARD.2.saturating_sub(q_w)) / 2,
-                    466,
+                    756,
                     1,
                     q_line,
                     TEXT_MUTED,
@@ -843,7 +848,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
         }
 
         if THREADS.is_empty() {
-            // Empty state container card at x: 24..696, y: 180..680
+            // Empty state container card at x: 24..696, y: 560..900, centred between search and composer.
             if in_rect(EMPTY_CARD, x, y) {
                 let rx = (x - EMPTY_CARD.0).min(EMPTY_CARD.0 + EMPTY_CARD.2 - 1 - x);
                 let ry = (y - EMPTY_CARD.1).min(EMPTY_CARD.1 + EMPTY_CARD.3 - 1 - y);
@@ -857,7 +862,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
 
                 // --- Vector Chat Bubble Pictogram at cx: 360, cy: 300 ---
                 let cx = 360;
-                let cy = 300;
+                let cy = 673;
 
                 // Speech bubble body (x: cx - 60..cx + 60, y: cy - 40..cy + 30, radius 18)
                 if x >= cx - 60 && x < cx + 60 && y >= cy - 40 && y < cy + 30 {
@@ -919,7 +924,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     x,
                     y,
                     EMPTY_CARD.0 + std::design::font::center_x(b"No Conversations Yet", 2, EMPTY_CARD.2),
-                    370,
+                    740,
                     2,
                     b"No Conversations Yet",
                     TEXT_PRIMARY,
@@ -927,51 +932,25 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 ) {
                     return c;
                 }
+                // WHY one line and not three: the empty state listed the transport,
+                // the keystore and the missing destination as three separate
+                // diagnostics, which reads as debug output rather than a phone.
+                // Without a transport nothing else matters - the key state still
+                // surfaces in the header pill and in the send outcome, and "no
+                // conversations" already implies no destination. One line states
+                // the user-facing truth; nothing shown is false.
                 if let Some(c) = test_text(
                     x,
                     y,
                     EMPTY_CARD.0
-                        + std::design::font::center_x(b"Messaging transport unavailable", 1, EMPTY_CARD.2),
-                    430,
+                        + std::design::font::center_x(b"Messaging unavailable: no transport", 1, EMPTY_CARD.2),
+                    810,
                     1,
-                    b"Messaging transport unavailable",
+                    b"Messaging unavailable: no transport",
                     TEXT_MUTED,
                     BG_DARK,
                 ) {
                     return c;
-                }
-                let key_line: &[u8] = if messages.keystore_derived {
-                    b"Encryption key available"
-                } else {
-                    b"Encryption key unavailable"
-                };
-                if let Some(c) = test_text(
-                    x,
-                    y,
-                    EMPTY_CARD.0 + std::design::font::center_x(key_line, 1, EMPTY_CARD.2),
-                    458,
-                    1,
-                    key_line,
-                    TEXT_MUTED,
-                    BG_DARK,
-                ) {
-                    return c;
-                }
-
-                // The composer below the list is a real editor, but there is no
-                // peer to address: no thread exists and the platform exposes no
-                // peer-selection backend. Say that once, in place of a compose
-                // action that would have nothing to act on.
-                //
-                // WHY the message changed: the old comment claimed "no compose
-                // action is shown", which was false - a compose field had been
-                // drawn at the bottom of the screen since before this change.
-                {
-                    let line: &[u8] = b"No destination: composing cannot address a peer";
-                    let bx = EMPTY_CARD.0 + std::design::font::center_x(line, 1, EMPTY_CARD.2);
-                    if let Some(c) = test_text(x, y, bx, 520, 1, line, TEXT_MUTED, BG_DARK) {
-                        return c;
-                    }
                 }
             }
         } else {
