@@ -127,7 +127,38 @@ const CAPTION_H: usize = text::GLYPH_H * type_scale::CAPTION; // 24
 
 // ---- Heading block ---------------------------------------------------------
 
-const HEADING_Y: usize = STATUS_BAR_HEIGHT + space::XS; // 52
+/// The panel's content, vertically centred in the space between the status bar
+/// and the home indicator.
+///
+/// WHY centred and not top-anchored: the panel holds nine rows after the
+/// readout rows were removed, which is ~924px of content in ~1344px of space.
+/// Top-anchoring left a ~360px void at the foot while the sections above sat
+/// tight together, which reads as a layout that ran out of things to say. A
+/// shade pulled from the top edge does not have to start at the top edge; the
+/// status bar stays where it is and the content floats centred beneath it, so
+/// the top and bottom voids match and the panel reads as intentional.
+///
+/// WHY a single offset rather than re-derived positions: every Y below hangs
+/// off `HEADING_Y`, so one addition moves the whole panel and no section can be
+/// left behind. `CONTENT_H` is a sum of block *heights*, never of positions, so
+/// there is no const-evaluation cycle through `HEADING_Y`.
+const AVAIL_TOP: usize = STATUS_BAR_HEIGHT + space::LG;
+const AVAIL_BOT: usize = LIST_BOTTOM;
+const CONTENT_H: usize = (BODY_H + HEADING_GAP + CAPTION_H)
+    + (space::LG + SECTION_H + space::SM)
+    + (CONNECTIVITY_ROWS * ROW_H + (CONNECTIVITY_ROWS - 1) * ROW_GUTTER)
+    + space::SM
+    + (LEVEL_H + space::LG + LEVEL_H)
+    + space::XL
+    + SECTION_H
+    + space::SM
+    + FOOTER_H
+    + space::LG
+    + SECTION_H
+    + space::SM
+    + (SYSTEM_ROWS * ROW_H + (SYSTEM_ROWS - 1) * ROW_GUTTER);
+const CONTENT_DY: usize = (AVAIL_BOT - AVAIL_TOP - CONTENT_H) / 2;
+const HEADING_Y: usize = AVAIL_TOP + CONTENT_DY;
 /// WHY `space::XS` and not `0`: the previous panel drew nothing between the
 /// status rule and its first tile at y = 90, so the first thing a reader met was
 /// a control. A heading is what says which surface this is.
@@ -163,10 +194,15 @@ const LEVEL_TEXT_DY: usize = space::SM;
 const LEVEL_TRACK_DY: usize = LEVEL_TEXT_DY + BODY_H + space::XS; // 60
 
 /// Top of the level block.
+///
+/// WHY no value comment here: every Y on this surface moves with `CONTENT_DY`,
+/// so a typed value would go stale the next time the row count changes - which
+/// is exactly what happened to the old "// 400" when the connectivity block
+/// lost a row and the real value became 328.
 const LEVEL_TOP: usize = CONNECTIVITY_TOP
     + CONNECTIVITY_ROWS * ROW_H
     + (CONNECTIVITY_ROWS - 1) * ROW_GUTTER
-    + space::SM; // 400
+    + space::SM;
 
 const BRIGHTNESS_ROW: Rect = Rect::new(PANEL_X, LEVEL_TOP, PANEL_W, LEVEL_H);
 
@@ -191,35 +227,36 @@ pub const VOLUME_SLIDER: Rect = Rect::new(PANEL_X, LEVEL_TOP + LEVEL_H + space::
 
 // ---- Footer block (a reading card, then the power button) -------------------
 
-const DEVICE_LABEL_Y: usize = VOLUME_SLIDER.y + VOLUME_SLIDER.h + space::XL; // 608
+const DEVICE_LABEL_Y: usize = VOLUME_SLIDER.y + VOLUME_SLIDER.h + space::XL;
 
-/// Top of the footer row.
+/// Top of the footer row, derived from the chain like every other block.
 ///
-/// WHY 644 and not `DEVICE_LABEL_Y + SECTION_H + space::MD` (which would be
-/// 648): `main.rs` opens the Power drawer from `(630..740).contains(&y)` and the
-/// button is 72 rows tall, so its top edge has to land inside that window. 644 is
-/// the previous panel's value and is kept rather than nudged, because the drawn
-/// control is not what decides the hit region.
-const FOOTER_Y: usize = 644;
+/// WHY derived and not the fixed 644 it used to be: that value existed because
+/// `main.rs` typed the power window in as `(630..740)` / `(375..680)` literals,
+/// so the button could never move without breaking the handler. The handler now
+/// reads the exported `POWER_BTN`, so the footer sits where the layout puts it -
+/// directly under its section label - and a future row-count change moves it
+/// along with everything else instead of stranding a ~140px gap above it.
+const FOOTER_Y: usize = DEVICE_LABEL_Y + SECTION_H + space::SM;
 const FOOTER_H: usize = 72;
 
 /// The Power button: the only control on this surface that opens another
 /// surface, and the only one with a hit region outside the volume capsule.
 ///
-/// WHY x = 408: the handler's window is `375..680`, so a 272-wide button has to
-/// start at or before 408 to stay inside it. 408 is the largest such x, which is
-/// also what keeps its right edge visually aligned with the panel.
-const POWER_BTN: Rect = Rect::new(408, FOOTER_Y, 272, FOOTER_H);
+/// WHY it is `pub`: the handler in `main.rs` hit-tests this rectangle, and the
+/// volume capsule already proved that a literal typed in two places breaks the
+/// first time the layout moves. One definition, read from both sides.
+pub const POWER_BTN: Rect = Rect::new(408, FOOTER_Y, 272, FOOTER_H);
 
 /// The reading card beside the Power button, bottom-aligned with it.
 ///
 /// WHY its width stops at `space::XXL` short of the button and not `space::MD`:
-/// `main.rs` opens the Power drawer from `(375..680).contains(&x)`, so a card
-/// that reached to 392 would put 17 px of itself inside the button's hit window
-/// -- a reading that opens the power menu when tapped, which is exactly the
-/// drawn-control/hit-region mismatch this file is trying to remove. `space::XXL`
-/// (48) is the largest gutter on the scale that still clears 375, and it also
-/// leaves the destructive action with the clearance it deserves.
+/// the handler hit-tests `POWER_BTN` starting at x 408, so a card that reached
+/// to 392 would put 17 px of itself inside the button's window -- a reading that
+/// opens the power menu when tapped, which is exactly the drawn-control /
+/// hit-region mismatch this file is trying to remove. `space::XXL` (48) is the
+/// largest gutter on the scale that still clears the button, and it also leaves
+/// the destructive action with the clearance it deserves.
 const FOOTER_CARD: Rect = Rect::new(
     PANEL_X,
     FOOTER_Y + (FOOTER_H - ROW_H),
@@ -238,8 +275,8 @@ const POWER_LABEL_X: usize = POWER_BTN.x + ROW_TEXT_INSET;
 
 // ---- Reading list ----------------------------------------------------------
 
-const SYSTEM_LABEL_Y: usize = FOOTER_Y + FOOTER_H + space::LG; // 740
-const SYSTEM_TOP: usize = SYSTEM_LABEL_Y + SECTION_H + space::SM; // 772
+const SYSTEM_LABEL_Y: usize = FOOTER_Y + FOOTER_H + space::LG;
+const SYSTEM_TOP: usize = SYSTEM_LABEL_Y + SECTION_H + space::SM;
 const SYSTEM_ROWS: usize = 4;
 
 /// Home indicator, drawn at the foot of the surface.
@@ -780,7 +817,18 @@ impl QuickControlsFrame {
 ///
 /// `value` is passed in rather than read here so that a kernel query is issued
 /// once per row per frame rather than once per row per row.
-fn build_row(rect: Rect, item: PanelRow, value: &Value, level: Option<u32>, theme: &Theme) -> RowFrame {
+/// `label_scale` is `ROW_SCALE` everywhere except the narrow footer card, where
+/// a full-size "Notifications" plus its value cannot fit and the label would be
+/// ellipsized into "Notifi..." - which states less than drawing nothing, because
+/// it looks truncated rather than unavailable.
+fn build_row(
+    rect: Rect,
+    item: PanelRow,
+    value: &Value,
+    level: Option<u32>,
+    label_scale: usize,
+    theme: &Theme,
+) -> RowFrame {
     let (fill, value_ink) = value.reading.skin(theme);
     // WHY an absent row's *label* is muted along with its value: the previous
     // panel drew every caption in the same ink whether or not anything answered
@@ -788,6 +836,10 @@ fn build_row(rect: Rect, item: PanelRow, value: &Value, level: Option<u32>, them
     // row down is what makes "this control does nothing" legible at a glance.
     let ink = if value.available { theme.text } else { theme.text_muted };
 
+    // WHY the text box stays at the row's scale even when the label steps down:
+// the footer card is still a 64-row row, and its value already renders at
+// VALUE_SCALE inside this same box. The label joins the value at its size;
+// the box is the row's, not the run's.
     let text_h = text::line_height(ROW_SCALE);
     let text_y0 = if item.is_level() {
         rect.y + LEVEL_TEXT_DY
@@ -830,7 +882,7 @@ fn build_row(rect: Rect, item: PanelRow, value: &Value, level: Option<u32>, them
         fill,
         border: theme.border,
         ink,
-        label: LabelRun::left(label_col, ROW_SCALE, item.label(), ink),
+        label: LabelRun::left(label_col, label_scale, item.label(), ink),
         value: LabelRun::right(value_col, VALUE_SCALE, value.bytes(), value_ink),
         track,
         fill_w,
@@ -904,6 +956,7 @@ fn measure_frame(state: &LauncherState) -> QuickControlsFrame {
             *item,
             &values[item_index(*item)],
             None,
+            ROW_SCALE,
             &theme,
         );
     }
@@ -913,8 +966,8 @@ fn measure_frame(state: &LauncherState) -> QuickControlsFrame {
     // and the day one of them is bound its row must be able to light up without
     // the other being told a lie. Today both return `None`.
     let levels = [
-        build_row(BRIGHTNESS_ROW, LEVEL_LIST[0], &values[item_index(LEVEL_LIST[0])], brightness_level(), &theme),
-        build_row(VOLUME_SLIDER, LEVEL_LIST[1], &values[item_index(LEVEL_LIST[1])], volume_level(), &theme),
+        build_row(BRIGHTNESS_ROW, LEVEL_LIST[0], &values[item_index(LEVEL_LIST[0])], brightness_level(), ROW_SCALE, &theme),
+        build_row(VOLUME_SLIDER, LEVEL_LIST[1], &values[item_index(LEVEL_LIST[1])], volume_level(), ROW_SCALE, &theme),
     ];
 
     // WHY the list computes its own row height: the band is fixed and the number
@@ -930,11 +983,17 @@ fn measure_frame(state: &LauncherState) -> QuickControlsFrame {
             *item,
             &values[item_index(*item)],
             None,
+            ROW_SCALE,
             &theme,
         );
     }
 
-    let footer = build_row(FOOTER_CARD, FOOTER_LIST[0], &values[item_index(FOOTER_LIST[0])], None, &theme);
+    // WHY the footer label steps down to the value's scale: the card is 324 wide
+    // against the rows' 648, and "Notifications" at ROW_SCALE plus its value
+    // cannot fit - it rendered as "Notifi...". At VALUE_SCALE the full word
+    // fits beside the count, and label and value agree in size the way they do
+    // in every other row.
+    let footer = build_row(FOOTER_CARD, FOOTER_LIST[0], &values[item_index(FOOTER_LIST[0])], None, VALUE_SCALE, &theme);
 
     QuickControlsFrame {
         clock: LabelRun::left(

@@ -147,6 +147,15 @@ pub struct LauncherState {
     pub current_view: ViewMode,
     pub boot_progress: u16,
     pub boot_started_ticks: u64,
+    /// Boot animation frame phase, advanced once per timer tick while the boot
+    /// screen is up.
+    ///
+    /// WHY it exists alongside `boot_progress`: progress is a step function of
+    /// elapsed time and can sit still between whole-number steps, and a frozen
+    /// input cannot produce motion. The ring comet reads this counter, so the
+    /// mark of "the device is working" never stalls even when progress does.
+    /// It carries no meaning about completion - the bar alone says that.
+    pub boot_frame: u32,
     pub power_transition_action: u8,
     pub power_transition_started_ticks: u64,
     pub power_transition_progress: u16,
@@ -208,6 +217,7 @@ impl LauncherState {
             current_view: ViewMode::BootScreen,
             boot_progress: 0,
             boot_started_ticks: 0,
+            boot_frame: 0,
             power_transition_action: 0,
             power_transition_started_ticks: 0,
             power_transition_progress: 0,
@@ -1373,14 +1383,22 @@ pub extern "C" fn _start() -> ! {
                 if state.current_view == ViewMode::BootScreen {
                     let elapsed = std::get_ticks(1).unwrap_or(state.boot_started_ticks).saturating_sub(state.boot_started_ticks);
                     let next_progress = ((elapsed.min(180) * 1000) / 180) as u16;
+                    // WHY the band re-renders on every tick and not only when
+                    // progress steps: the ring comet reads `boot_frame`, which
+                    // advances per tick, so gating on progress would freeze the
+                    // one element whose job is to never look frozen. The band is
+                    // 350 of the 1440 rows and the present path skips unchanged
+                    // rows, so a per-tick band repaint costs a fraction of the
+                    // full-surface repaint that used to stall startup here.
+                    state.boot_frame = state.boot_frame.wrapping_add(1);
                     if next_progress != state.boot_progress {
                         state.boot_progress = next_progress;
-                        // The animated ring and progress indicator occupy only this band.
-                        // Redrawing the entire million-pixel portrait surface on every
-                        // timer tick made startup visibly stall under QEMU TCG.
-                        render_band(surface, &state, H / 2 - 130, (H / 2 + 220).min(H));
-                        let _ = std::surface_flip(4);
                     }
+                    // The animated ring and progress indicator occupy only this band.
+                    // Redrawing the entire million-pixel portrait surface on every
+                    // timer tick made startup visibly stall under QEMU TCG.
+                    render_band(surface, &state, H / 2 - 130, (H / 2 + 220).min(H));
+                    let _ = std::surface_flip(4);
                     if elapsed >= 180 {
                         state.current_view = ViewMode::LockScreen;
                         state.boot_progress = 1000;
@@ -2002,7 +2020,15 @@ pub extern "C" fn _start() -> ! {
                                     }
                                     break;
                                 }
-                                if (630..740).contains(&y) && (375..680).contains(&x) {
+                                // WHY the rectangle comes from the module: this used to be `(630..740)` /
+                                // `(375..680)` literals, which pinned the footer to y 644 and broke the
+                                // build the first time the layout moved - the right failure, but one that
+                                // also meant the button could never be moved on purpose. The volume
+                                // capsule already proved the pattern: ask the painter where it drew.
+                                let power = screens::quick_controls::POWER_BTN;
+                                if (power.y..power.y + power.h).contains(&y)
+                                    && (power.x..power.x + power.w).contains(&x)
+                                {
                                     state.current_view = ViewMode::PowerMenu;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
