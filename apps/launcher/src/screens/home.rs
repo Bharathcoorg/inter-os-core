@@ -744,14 +744,32 @@ fn build(state: &LauncherState) -> Paint {
 /// WHY the empty message is stored rather than formatted per pixel: an empty deck
 /// was calling `text::ellipsize` and `text::center_x` for every pixel of the whole
 /// deck band, which is 15% of the surface, to draw sixteen glyphs in the middle.
+/// WHY 200 wide at a 30px margin and a 30px gutter: the tiles used to be 190 at a
+/// 48px margin, which left 174px for a name. The widest name in the deck,
+/// "Messages", measures 188px at `type_scale::BODY`, so it missed that fit by 14px
+/// and every label in the deck was set a rung smaller than it needed to be -- 17px
+/// cap height for the name of the app you are about to tap. 200 - 8 of padding
+/// leaves 192, which fits the widest name at BODY, so the deck is set one rung
+/// larger across the board and the longest name still renders whole.
 pub const DOCK_TILES: [Rect; 6] = [
-    Rect::new(48, 700, 190, 280),
-    Rect::new(265, 700, 190, 280),
-    Rect::new(482, 700, 190, 280),
-    Rect::new(48, 1020, 190, 280),
-    Rect::new(265, 1020, 190, 280),
-    Rect::new(482, 1020, 190, 280),
+    Rect::new(30, 700, 200, 280),
+    Rect::new(260, 700, 200, 280),
+    Rect::new(490, 700, 200, 280),
+    Rect::new(30, 1020, 200, 280),
+    Rect::new(260, 1020, 200, 280),
+    Rect::new(490, 1020, 200, 280),
 ];
+
+/// Half-size of a deck tile's pictogram, in pixels: a 60x60 box.
+///
+/// WHY 30 and not the standard 16: the pictogram is authored in a 33px box, which
+/// is a third of the tile's width and reads as a stamp on a card rather than as
+/// the face of the app. 60px is the size a home screen's primary targets use.
+/// WHY it is a home constant and not a change to `icons::rasterize_icon_pixel`:
+/// every other surface - the drawer, activity cards, notification rows - has
+/// geometry that was measured around the 33px glyph, so the size is asked for
+/// where it is needed instead of imposed everywhere.
+pub const DOCK_ICON_EXTENT: i32 = 30;
 
 pub fn find_package_index(state: &LauncherState, suffix: &[u8]) -> Option<usize> {
     for i in 0..state.app_count {
@@ -812,7 +830,10 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
             default_label
         }
     });
-    let label_fit = DOCK_TILES[0].w.saturating_sub(space::SM * 2);
+    // WHY XS and not SM for the padding: the fit is the tile less the inset the
+    // label needs on each side. At SM the widest name missed by 14px and the whole
+    // deck was forced down a rung; at XS it fits and the names are set larger.
+    let label_fit = DOCK_TILES[0].w.saturating_sub(space::XS * 2);
     let widest = label_bytes
         .iter()
         .map(|label| text::measure(label, type_scale::BODY))
@@ -829,8 +850,13 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
         let label_bytes = label_bytes[slot];
 
         let icon_cx = cell.x + cell.w / 2;
-        let icon_cy = cell.y + 110;
-        let label_y = cell.y + 160;
+        // WHY the block is centred rather than at fixed offsets: the tile is 280
+        // tall and its content is a 60px pictogram, a 20px gap and a 48px name
+        // cell, which is 128 -- leaving 76px above and below. The old offsets put
+        // the icon at 110 and the name at 160, which centred a 33px glyph with a
+        // 24px name and left 96px of tile empty under the label.
+        let icon_cy = cell.y + 76 + DOCK_ICON_EXTENT as usize;
+        let label_y = cell.y + 76 + DOCK_ICON_EXTENT as usize * 2 + space::MD + space::XS;
 
         plan.cells[slot] = DeckTilePlan {
             cell,
@@ -1418,7 +1444,15 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
         return Some(theme.border);
     }
     if let Some(kind) = tile.icon {
-        if let Some(c) = launcher::icons::rasterize_icon_pixel(kind, x, y, tile.icon_cx, tile.icon_cy, tile.ink) {
+        if let Some(c) = launcher::icons::rasterize_icon_pixel_scaled(
+            kind,
+            x,
+            y,
+            tile.icon_cx,
+            tile.icon_cy,
+            tile.ink,
+            DOCK_ICON_EXTENT,
+        ) {
             return Some(c);
         }
     } else if let Some(c) = tile.badge.pixel_aa(x, y, tile.badge.ink, tile.fill) {

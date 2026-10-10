@@ -114,6 +114,48 @@ pub fn match_icon_kind(id: &[u8]) -> Option<IconKind> {
     }
 }
 
+/// Rasterises a pictogram into a larger box than the standard `[-16..=16]`.
+///
+/// `extent` is the half-size of the output box in pixels, so `16` reproduces
+/// [`rasterize_icon_pixel`] exactly and anything larger magnifies the glyph.
+/// WHY this exists: the standard glyph is a 33 px box, which is small beside a
+/// 190 px deck tile, and growing it per call site would mean a second copy of
+/// every pictogram. Instead the output pixel is mapped back into the unit box
+/// and a `step x step` neighbourhood is OR-ed, because magnification otherwise
+/// leaves holes where several output pixels share one source pixel.
+///
+/// The glyph is sampled, not re-derived at the new size: strokes keep the same
+/// proportion, so a magnified icon is the same drawing at a larger size rather
+/// than a different, heavier one.
+pub fn rasterize_icon_pixel_scaled(
+    kind: IconKind,
+    px: usize,
+    py: usize,
+    cx: usize,
+    cy: usize,
+    color: u32,
+    extent: i32,
+) -> Option<u32> {
+    let extent = extent.max(16);
+    if (px as i32 - cx as i32).abs() > extent || (py as i32 - cy as i32).abs() > extent {
+        return None;
+    }
+    // How many output pixels share one source pixel at this magnification.
+    let step = ((extent + 15) / 16).max(1);
+    let ox = (px as i32 - cx as i32) * 16 / extent;
+    let oy = (py as i32 - cy as i32) * 16 / extent;
+    for dy in 0..step {
+        for dx in 0..step {
+            let sx = (cx as i32 + ox + dx) as usize;
+            let sy = (cy as i32 + oy + dy) as usize;
+            if let Some(c) = rasterize_icon_pixel(kind, sx, sy, cx, cy, color) {
+                return Some(c);
+            }
+        }
+    }
+    None
+}
+
 /// Evaluates whether the pixel at `(px, py)` falls inside the vector pictogram
 /// of `kind` centered at `(cx, cy)` with standard size bounds `[-16..=16]`.
 ///
