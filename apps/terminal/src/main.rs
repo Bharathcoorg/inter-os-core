@@ -55,6 +55,52 @@ fn test_text(
 }
 
 // -----------------------------------------------------------------------------
+// Text run geometry
+// -----------------------------------------------------------------------------
+
+/// Rows a `scale`-high text run occupies on the shared bitmap face.
+/// WHY a local `const fn`: this is exactly `font::line_height(scale)`, but that
+/// helper is not `const`, and every run box below is derived from a
+/// compile-time constant. Gating a run on anything shorter than this silently
+/// slices the glyphs, so the height is computed once and reused for both the
+/// gate and the pitch of repeated runs.
+const fn run_rows(scale: usize) -> usize {
+    scale * std::design::font::GLYPH_H
+}
+
+/// Header band height: y >= HEADER_H draws the hairline rule, so a header run
+/// has to fit inside 0..HEADER_H.
+const HEADER_H: usize = 94;
+/// Scale of the header title run; it needs run_rows(3) = 72 rows.
+const TITLE_SCALE: usize = 3;
+/// First console line box top. The tallest console buffer (18 lines) ends at
+/// CONSOLE_TOP + 18 * CONSOLE_LINE_ROWS = 978, clear of the pill dock at 1210.
+const CONSOLE_TOP: usize = 114;
+/// Console line pitch == the line box height, so full-height runs stack without
+/// overlapping.
+const CONSOLE_LINE_ROWS: usize = 48;
+
+/// System CPL badge box. Grown from the old 176x40 so the scale-2
+/// "CPL=3 RING" run (228 x 48) fits inside it with padding instead of being
+/// cut at the right and bottom edges. Right edge 700 < 720 and it still clears
+/// the title run, which ends at 116 + font::measure(b"Terminal", 3).
+const BADGE_X0: usize = 440;
+const BADGE_X1: usize = 700;
+const BADGE_Y0: usize = 23;
+const BADGE_H: usize = 48;
+const BADGE_R: usize = 16;
+const BADGE_TEXT: &[u8] = b"CPL=3 RING";
+const BADGE_SCALE: usize = 2;
+
+/// Quick-command pill geometry. Each pill row is 52 rows tall and its scale-2
+/// label is centred in that box, so the label's 48-row box is never clipped.
+const PILL_SCALE: usize = 2;
+const PILL1_Y0: usize = 1222;
+const PILL1_H: usize = 52;
+const PILL2_Y0: usize = 1290;
+const PILL2_H: usize = 52;
+
+// -----------------------------------------------------------------------------
 // Counted Text Assembly (no allocator in this no_std app)
 // -----------------------------------------------------------------------------
 
@@ -418,8 +464,8 @@ impl TerminalApp {
 
 #[inline(never)]
 fn get_terminal_pixel(x: usize, y: usize, term: &TerminalApp) -> u32 {
-    // 1. Status Bar & Header (y: 0..96)
-    if y < 96 {
+    // 1. Status Bar & Header (y: 0..HEADER_H)
+    if y < HEADER_H {
         if y >= 94 {
             return BORDER_SUBTLE;
         }
@@ -438,26 +484,45 @@ fn get_terminal_pixel(x: usize, y: usize, term: &TerminalApp) -> u32 {
             return SURFACE_RAISED;
         }
 
-        // Header Title: "Terminal"
-        if y >= 36 && y < 60 {
-            if let Some(c) = test_text(x, y, 116, 36, 3, b"Terminal", TEXT_PRIMARY) {
+        // Header Title: "Terminal". The run is scale 3 and needs
+        // run_rows(3) = 72 rows, so its line box is centred in the 94-row
+        // header band instead of being gated to a 24-row window that kept
+        // only a third of the glyphs.
+        let title_rows = run_rows(TITLE_SCALE);
+        let title_y0 = (HEADER_H - title_rows) / 2;
+        if y >= title_y0 && y < title_y0 + title_rows {
+            if let Some(c) = test_text(x, y, 116, title_y0, TITLE_SCALE, b"Terminal", TEXT_PRIMARY) {
                 return c;
             }
         }
 
-        // System CPL=3 Badge (x: 520..696, y: 28..68)
-        if x >= 520 && x < 696 && y >= 28 && y < 68 {
-            let rx = (x - 520).min(695 - x);
-            let ry = (y - 28).min(67 - y);
-            if rx < 16 && ry < 16 {
-                let cdx = (16 - rx) as isize;
-                let cdy = (16 - ry) as isize;
-                if cdx * cdx + cdy * cdy >= 256 {
+        // System CPL=3 Badge (x: BADGE_X0..BADGE_X1, y: BADGE_Y0..)
+        if x >= BADGE_X0 && x < BADGE_X1 && y >= BADGE_Y0 && y < BADGE_Y0 + BADGE_H {
+            let rx = (x - BADGE_X0).min(BADGE_X1 - 1 - x);
+            let ry = (y - BADGE_Y0).min(BADGE_Y0 + BADGE_H - 1 - y);
+            if rx < BADGE_R && ry < BADGE_R {
+                let cdx = (BADGE_R - rx) as isize;
+                let cdy = (BADGE_R - ry) as isize;
+                if cdx * cdx + cdy * cdy >= (BADGE_R * BADGE_R) as isize {
                     return BG_DARK;
                 }
             }
 
-            if let Some(c) = test_text(x, y, 540, 42, 2, b"CPL=3 RING", SUCCESS_EMERALD) {
+            // Centre the label in the badge box with real proportional
+            // advances instead of a fixed 8px cell, so the whole run lands
+            // inside the capsule horizontally and vertically.
+            let badge_label_x0 =
+                BADGE_X0 + std::design::font::center_x(BADGE_TEXT, BADGE_SCALE, BADGE_X1 - BADGE_X0);
+            let badge_label_y0 = BADGE_Y0 + (BADGE_H - run_rows(BADGE_SCALE)) / 2;
+            if let Some(c) = test_text(
+                x,
+                y,
+                badge_label_x0,
+                badge_label_y0,
+                BADGE_SCALE,
+                BADGE_TEXT,
+                SUCCESS_EMERALD,
+            ) {
                 return c;
             }
 
@@ -472,10 +537,17 @@ fn get_terminal_pixel(x: usize, y: usize, term: &TerminalApp) -> u32 {
 
     // 2. Terminal Console Canvas (y: 96..1200)
     if y >= 96 && y < 1200 {
-        // Render console lines
+        // Render console lines.
+        //
+        // A console run is scale 2, so its line box is CONSOLE_LINE_ROWS = 48
+        // rows. The old gate admitted 16 of those rows (a third of the glyphs)
+        // while the old 32px pitch would have overlapped full boxes, so the
+        // pitch and the gate are now the same row count: runs stack without
+        // intersecting. 18 lines end at 114 + 18 * 48 = 978, clear of the
+        // quick-command dock that starts at y = 1210.
         for line_idx in 0..term.line_count {
-            let line_y0 = 114 + line_idx * 32;
-            if y >= line_y0 && y < line_y0 + 16 {
+            let line_y0 = CONSOLE_TOP + line_idx * CONSOLE_LINE_ROWS;
+            if y >= line_y0 && y < line_y0 + CONSOLE_LINE_ROWS {
                 if let Some(line) = term.lines[line_idx] {
                     if let Some(c) = test_text(x, y, 28, line_y0, 2, line.as_bytes(), line.color) {
                         return c;
@@ -498,7 +570,10 @@ fn get_terminal_pixel(x: usize, y: usize, term: &TerminalApp) -> u32 {
         }
 
         // Row 1 (y: 1222..1274)
-        if y >= 1222 && y < 1274 {
+        if (PILL1_Y0..PILL1_Y0 + PILL1_H).contains(&y) {
+            // Scale-2 label needs run_rows(2) = 48 rows; centre it in the
+            // 52-row pill so its descenders are not cut by the pill bottom.
+            let label_y0 = PILL1_Y0 + (PILL1_H - run_rows(PILL_SCALE)) / 2;
             let pills = [
                 (24, 176, &b"help"[..]),
                 (194, 346, &b"status"[..]),
@@ -508,7 +583,7 @@ fn get_terminal_pixel(x: usize, y: usize, term: &TerminalApp) -> u32 {
             for (x0, x1, label) in pills {
                 if x >= x0 && x < x1 {
                     let rx = (x - x0).min(x1 - 1 - x);
-                    let ry = (y - 1222).min(1273 - y);
+                    let ry = (y - PILL1_Y0).min(PILL1_Y0 + PILL1_H - 1 - y);
                     if rx < 12 && ry < 12 {
                         let cdx = (12 - rx) as isize;
                         let cdy = (12 - ry) as isize;
@@ -517,9 +592,10 @@ fn get_terminal_pixel(x: usize, y: usize, term: &TerminalApp) -> u32 {
                         }
                     }
 
-                    let cx = x0 + (x1 - x0) / 2;
-                    let tx = cx.saturating_sub(label.len() * 8);
-                    if let Some(c) = test_text(x, y, tx, 1240, 2, label, ACCENT_SKY) {
+                    // Real proportional advance per label instead of a fixed
+                    // 8px-per-character cell, centred in this pill's own width.
+                    let tx = x0 + std::design::font::center_x(label, PILL_SCALE, x1 - x0);
+                    if let Some(c) = test_text(x, y, tx, label_y0, PILL_SCALE, label, ACCENT_SKY) {
                         return c;
                     }
 
@@ -532,7 +608,8 @@ fn get_terminal_pixel(x: usize, y: usize, term: &TerminalApp) -> u32 {
         }
 
         // Row 2 (y: 1290..1342)
-        if y >= 1290 && y < 1342 {
+        if (PILL2_Y0..PILL2_Y0 + PILL2_H).contains(&y) {
+            let label_y0 = PILL2_Y0 + (PILL2_H - run_rows(PILL_SCALE)) / 2;
             let pills = [
                 (24, 176, &b"caps"[..]),
                 (194, 346, &b"ping"[..]),
@@ -542,7 +619,7 @@ fn get_terminal_pixel(x: usize, y: usize, term: &TerminalApp) -> u32 {
             for (x0, x1, label) in pills {
                 if x >= x0 && x < x1 {
                     let rx = (x - x0).min(x1 - 1 - x);
-                    let ry = (y - 1290).min(1341 - y);
+                    let ry = (y - PILL2_Y0).min(PILL2_Y0 + PILL2_H - 1 - y);
                     if rx < 12 && ry < 12 {
                         let cdx = (12 - rx) as isize;
                         let cdy = (12 - ry) as isize;
@@ -551,9 +628,8 @@ fn get_terminal_pixel(x: usize, y: usize, term: &TerminalApp) -> u32 {
                         }
                     }
 
-                    let cx = x0 + (x1 - x0) / 2;
-                    let tx = cx.saturating_sub(label.len() * 8);
-                    if let Some(c) = test_text(x, y, tx, 1308, 2, label, ACCENT_SKY) {
+                    let tx = x0 + std::design::font::center_x(label, PILL_SCALE, x1 - x0);
+                    if let Some(c) = test_text(x, y, tx, label_y0, PILL_SCALE, label, ACCENT_SKY) {
                         return c;
                     }
 
