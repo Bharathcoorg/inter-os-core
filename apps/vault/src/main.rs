@@ -791,7 +791,12 @@ fn header_pixel(x: usize, y: usize) -> u32 {
     if font::ink(x, y, TITLE_X, 20, 2, TITLE, text_max, TEXT, BG, true) {
         return TEXT;
     }
-    if font::ink(x, y, TITLE_X, 52, 1, SUBTITLE, text_max, MUTED, BG, false) {
+    // WHY y=76: the title runs at scale 2 (a 48 px line, ink 20..68), so the
+    // subtitle starts a full line below it and still ends at row 100, inside
+    // the 104 px header band. The old y=52 assumed the previous 8x8 face at
+    // scale 2 (16 px); with the design face it printed the caption straight
+    // through the title's descenders.
+    if font::ink(x, y, TITLE_X, 76, 1, SUBTITLE, text_max, MUTED, BG, false) {
         return MUTED;
     }
     BG
