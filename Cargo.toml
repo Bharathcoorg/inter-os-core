@@ -15,7 +15,6 @@ members = [
     "apps/sensor_dashboard",
     "apps/camera_preview",
     "apps/calculator",
-    "apps/authenticator",
     "apps/health",
     "apps/meshchat",
     "sdk/rust/interos-std",

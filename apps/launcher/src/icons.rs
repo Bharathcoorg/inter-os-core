@@ -79,8 +79,8 @@ pub fn match_icon_kind(id: &[u8]) -> Option<IconKind> {
     {
         Some(IconKind::Terminal)
     } else if id == b"org.interos.vault" || id == b"vault" || id == b"app_vault"
-        || id == b"org.interos.authenticator" || id == b"authenticator" || id == b"VAUL" || id == b"AUTH" || id == b"PASS"
-        || id == b"Vault" || id == b"Authenticator"
+        || id == b"VAUL" || id == b"PASS"
+        || id == b"Vault"
     {
         Some(IconKind::Vault)
     } else if id == b"org.interos.health" || id == b"health" || id == b"HLTH" || id == b"FIT"

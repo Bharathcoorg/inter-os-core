@@ -49,7 +49,6 @@ pub const FIRST_PARTY_PACKAGES: &[PackageDescriptor] = &[
     PackageDescriptor { package_id: "org.interos.music", path: "/packages/org.interos.music.rapp", process_name: "app_music", display_name: "Music", icon: "MUS", category: "Personal" },
     PackageDescriptor { package_id: "org.interos.file_manager", path: "/packages/org.interos.file_manager.rapp", process_name: "app_file_manager", display_name: "Files", icon: "FILE", category: "Work" },
     PackageDescriptor { package_id: "org.interos.gallery", path: "/packages/org.interos.gallery.rapp", process_name: "app_gallery", display_name: "Gallery", icon: "PIC", category: "Personal" },
-    PackageDescriptor { package_id: "org.interos.authenticator", path: "/packages/org.interos.authenticator.rapp", process_name: "authenticator", display_name: "Authenticator", icon: "AUTH", category: "Work" },
     PackageDescriptor { package_id: "org.interos.health", path: "/packages/org.interos.health.rapp", process_name: "health", display_name: "Health", icon: "HEAL", category: "Personal" },
     PackageDescriptor { package_id: "org.interos.meshchat", path: "/packages/org.interos.meshchat.rapp", process_name: "meshchat", display_name: "MeshChat", icon: "MESH", category: "Personal" },
     PackageDescriptor { package_id: "org.interos.hello_world", path: "/packages/org.interos.hello_world.rapp", process_name: "hello_world", display_name: "Hello", icon: "HI", category: "Tools" },

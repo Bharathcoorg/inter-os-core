@@ -3,13 +3,6 @@
 version = 4
 
 [[package]]
-name = "authenticator"
-version = "0.1.0"
-dependencies = [
- "interos-std",
-]
-
-[[package]]
 name = "browser"
 version = "0.1.0"
 dependencies = [

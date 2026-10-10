@@ -4322,7 +4322,6 @@ fn native_first_party_app_available(package_id: &str) -> bool {
             // packages were already described in `FIRST_PARTY_PACKAGES` and seeded active
             // into the registry, but a package missing from this match was filtered straight
             // back out, so the drawer never saw it and the launch arm was unreachable.
-            | "org.interos.authenticator"
             | "org.interos.health"
             | "org.interos.camera_preview"
             | "org.interos.hello_world"
@@ -4700,7 +4699,6 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         "org.interos.music" | "music" | "app_music" => crate::task::user::spawn_app_music(parent),
         "org.interos.file_manager" | "file_manager" | "files" | "app_file_manager" => crate::task::user::spawn_app_file_manager(parent),
         "org.interos.gallery" | "gallery" | "photos" | "app_gallery" => crate::task::user::spawn_app_gallery(parent),
-        "org.interos.authenticator" | "authenticator" => spawn_app_authenticator(parent),
         "org.interos.health" | "health" => spawn_app_health(parent),
         "org.interos.camera_preview" | "camera_preview" => spawn_app_camera_preview(parent),
         "org.interos.hello_world" | "hello_world" => spawn_app_hello_world(parent),
@@ -4723,96 +4721,6 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
 /// separate from the normal userspace syscall path and gated to QEMU.
 pub fn dev_launch_verified_rapp(app_id: &str) -> Result<crate::task::TaskId, SyscallResult> {
     dev_launch_app(app_id)
-}
-
-/// Spawns the Sovereign Authenticator (TOTP) app in Ring 3.
-///
-/// WHY the table is built here rather than in `task::user`: `kernel/src/task/user.rs`
-/// is not part of this change's ownership, and every other first-party spawner already
-/// lives there. This is the same table `spawn_app_camera` builds, in the same slot
-/// order, plus the two capabilities this app's own syscalls require.
-///
-/// WHY the vault object is the caller's own and nothing wider: `sys_vault_crypt`
-/// authorises `StorageRawBlock|INVOKE` against `vault_object_for_user(uid)` only. The
-/// uid is resolved from the kernel-owned process binding, so a grant computed for any
-/// other account cannot satisfy the check and cannot decrypt another account's sectors.
-fn spawn_app_authenticator(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(10);
-    caps.insert(Capability {
-        id: CapabilityId(2901),
-        cap_type: CapabilityType::SerialOutput,
-        rights: Rights::WRITE,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(2902),
-        cap_type: CapabilityType::IpcSend,
-        rights: Rights::WRITE,
-        object_id: id_security.0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(2903),
-        cap_type: CapabilityType::TimerTickRead,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(2904),
-        cap_type: CapabilityType::FileSystemRead,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(2905),
-        cap_type: CapabilityType::EventPoll,
-        rights: Rights::READ.union(Rights::INVOKE),
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(2906),
-        cap_type: CapabilityType::IpcReceive,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(2907),
-        // WHY slot 7 and object 1: `require_display_service` looks for exactly this, and
-        // this app calls `surface_create/write/flip/destroy` with slot 6 like every other
-        // first-party app, which the display-service fallback resolves to this slot.
-        cap_type: CapabilityType::FrameBufferDirect,
-        rights: Rights::WRITE,
-        object_id: 1,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(2908),
-        // WHY RealtimeClockRead and read-only: `sys_rtc_get_time` requires exactly this
-        // narrow capability. It confers no power, crypto or telephony authority, and it is
-        // what lets the app show a real wall clock instead of leaving the field blank.
-        cap_type: CapabilityType::RealtimeClockRead,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(2909),
-        // WHY object-scoped to the caller's own vault: `sys_vault_crypt` authorises
-        // `StorageRawBlock|INVOKE` against `vault_object_for_user(caller_uid)`, and the uid
-        // comes from the kernel-owned process binding. The object-blind variant of this
-        // capability is what the storage service holds for whole-device block IO; granting
-        // that here would let this app touch any account's sectors.
-        cap_type: CapabilityType::StorageRawBlock,
-        rights: Rights::INVOKE,
-        object_id: vault_object_for_user(crate::user::USER_MANAGER.lock().active_user().0),
-    }).ok();
-
-    let id = crate::task::user::spawn_user_process_with_parent(
-        "authenticator",
-        crate::task::images::APP_AUTHENTICATOR_ELF,
-        caps,
-        6,
-        id_security,
-    ).expect("Failed to spawn registered first-party app");
-    serial_println!("[OK] Spawned app_authenticator (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
-    id
 }
 
 /// Spawns the Sovereign Health & Biometric Telemetry app in Ring 3.
@@ -5339,9 +5247,6 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         }
         "org.interos.gallery" | "gallery" | "photos" => {
             crate::task::user::spawn_app_gallery(parent_id)
-        }
-        "org.interos.authenticator" | "authenticator" => {
-            spawn_app_authenticator(parent_id)
         }
         "org.interos.health" | "health" => {
             spawn_app_health(parent_id)

@@ -1360,7 +1360,7 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
     // icon, the name is its caption, and both sit on the tile's own fill. The run
     // was ellipsized to the tile less its padding and placed in `deck_plan`, so this
     // is one bounds test per pixel inside the tile -- and a name longer than the
-    // tile (the registry holds one up to sixteen bytes, e.g. "Authenticator") is
+    // tile (the registry holds one up to sixteen bytes, e.g. "Camera Preview") is
     // already shortened inside the tile by the time it gets here.
     if let Some(c) = tile.label.pixel_aa(x, y, tile.label.ink, tile.fill) {
         return Some(c);
