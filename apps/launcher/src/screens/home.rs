@@ -668,9 +668,15 @@ fn build(state: &LauncherState) -> Paint {
 
     let search_scale = type_scale::BODY;
     let magnifier_r = (text::line_height(search_scale) / 2).max(4) as i32;
-    let search_magnifier = (f.search.x + space::XL, f.search.center_y(), magnifier_r);
-    let search_text_x =
-        f.search.x + space::XL + magnifier_r as usize + space::SM + 2;
+    // WHY the glyph is measured as a whole, not just its ring: the ring plus
+    // its handle is a square of side 2 * (r + handle) anchored top-left at the
+    // centre, so the centre has to sit at least that far inside the pill's left
+    // rounded edge or the handle falls outside the bar. `space::XL` alone put
+    // the ring's left edge on the border and the handle below the pill.
+    let magnifier_span = magnifier_r + TELEMETRY_BAR_W as i32 + 1;
+    let magnifier_x = (f.search.x + space::LG).saturating_add(magnifier_span as usize);
+    let search_magnifier = (magnifier_x, f.search.center_y(), magnifier_r);
+    let search_text_x = magnifier_x + magnifier_span as usize + space::SM;
     let search_room = (f.search.x + f.search.w).saturating_sub(search_text_x).saturating_sub(space::XXL);
     let search_y = f.search.y + f.search.h.saturating_sub(text::line_height(LABEL_SCALE)) / 2;
     let search = if f.search.w > 0 && f.search.h > 0 {
@@ -781,9 +787,15 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
         (Some(launcher::icons::IconKind::Apps), b"apps", b"Apps", theme.text),
     ];
 
-    for (slot, &(icon_kind, suffix, default_label, icon_ink)) in dock_defs.iter().enumerate() {
-        let cell = DOCK_TILES[slot];
-        let label_bytes = if slot == 5 {
+    // WHY one scale for the whole deck: picking a scale per label made "Messages"
+    // (188 px at BODY against a 174 px fit) render a step smaller than its
+    // neighbours, which reads as a rendering fault rather than a long name. The
+    // deck picks the largest scale at which the WIDEST label still fits, so every
+    // tile is set in the same size and the longest name is the only one that
+    // ever has to step down.
+    let label_bytes: [&[u8]; 6] = core::array::from_fn(|slot| {
+        let (_, suffix, default_label, _) = dock_defs[slot];
+        if slot == 5 {
             default_label
         } else if let Some(pkg_idx) = find_package_index(state, suffix).or_else(|| {
             if suffix == b"file_manager" {
@@ -795,7 +807,23 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
             app_label(state, pkg_idx)
         } else {
             default_label
-        };
+        }
+    });
+    let label_fit = DOCK_TILES[0].w.saturating_sub(space::SM * 2);
+    let widest = label_bytes
+        .iter()
+        .map(|label| text::measure(label, type_scale::BODY))
+        .max()
+        .unwrap_or(0);
+    let label_scale = if widest <= label_fit {
+        type_scale::BODY
+    } else {
+        type_scale::CAPTION
+    };
+
+    for (slot, &(icon_kind, _, _, icon_ink)) in dock_defs.iter().enumerate() {
+        let cell = DOCK_TILES[slot];
+        let label_bytes = label_bytes[slot];
 
         let icon_cx = cell.x + cell.w / 2;
         let icon_cy = cell.y + 110;
@@ -808,21 +836,15 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
             icon_cy,
             ink: icon_ink,
             badge: Run::EMPTY,
-            // WHY step the scale down instead of only ellipsizing: at BODY
-            // scale "Messages" measures 188 px against a 174 px fit
-            // (190 px tile less 8 px padding per side), so ellipsizing alone
-            // prints "Messa...". A one-step drop to CAPTION keeps the full
-            // name readable; the ellipsis remains only for names that fit at
-            // no readable scale.
-            label: {
-                let fit = cell.w.saturating_sub(space::SM * 2);
-                let scale = if text::measure(label_bytes, type_scale::BODY) <= fit {
-                    type_scale::BODY
-                } else {
-                    type_scale::CAPTION
-                };
-                Run::centred(cell.x, label_y, scale, fit, cell.w, label_bytes, theme.text)
-            },
+            label: Run::centred(
+                cell.x,
+                label_y,
+                label_scale,
+                label_fit,
+                cell.w,
+                label_bytes,
+                theme.text,
+            ),
             fill,
         };
     }
@@ -1415,9 +1437,19 @@ fn search_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Opti
     if ring.contains(&d2) {
         return Some(ink);
     }
+    // WHY a ray instead of the old `dx - dy <= 2 && dx - r <= handle` test:
+    // that test drew the handle in the band where dx > r, which starts at the
+    // ring's right *edge*, so most of it sat under the ring or outside the pill
+    // and only a stray few pixels below the bar ever showed. The handle is the
+    // diagonal ray leaving the ring at 45 degrees, measured along it from the
+    // centre: t is the distance out (r .. r + handle), w the distance across.
     let handle = TELEMETRY_BAR_W as i32;
-    if dx > r && dy > r && dx - dy <= 2 && dx - r <= handle {
-        return Some(ink);
+    if dx > 0 && dy > 0 {
+        let along = (dx + dy) / 2;
+        let across = (dx - dy).abs();
+        if along >= r + 1 && along <= r + handle && across <= 1 {
+            return Some(ink);
+        }
     }
 
     if let Some(c) = p.search.pixel_aa(x, y, p.search.ink, theme.overlay) {
