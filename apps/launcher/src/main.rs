@@ -814,6 +814,69 @@ fn press_point(input: &std::InputEvent) -> (i64, i64) {
     )
 }
 
+/// Kind the kernel's gesture router reports for a press held past
+/// `LONG_PRESS_TICKS` (500) without travelling further than `TAP_SLOP` (24):
+/// `InputEventKind::LongPress` in `kernel/src/drivers/input.rs`.
+///
+/// WHY it is named here and not used inline: the shell already had a branch whose
+/// comment read "Long-press opens Power Menu" while its condition was
+/// `input.kind == 6`, which is `Back`. A long press therefore did nothing at all,
+/// and the Back button popped the power menu instead. Both faults came from the
+/// same bare literal, so the literal is what gets pinned to a name.
+const LONG_PRESS: u8 = 3;
+
+/// Topmost row of the launcher's bottom navigation band.
+///
+/// WHY 1380 and not the drawn bar's top: `screens/home.rs` fills the nav bar as
+/// `Rect::new(0, SCREEN_HEIGHT - NAV_BAR_HEIGHT, SCREEN_WIDTH, NAV_BAR_HEIGHT)`,
+/// which is y 1376..1440, but the universal search bar above it is drawn at
+/// y 1320..1384 and its tap is answered first in the chain. Rows 1376..1380 are
+/// therefore already claimed by the surface above, and starting the band at its
+/// true top would let one press match both. Every drawn target -- the back
+/// chevron, the home pill at 1416..1423, the recents glyph -- sits inside
+/// 1380..1440, so nothing drawn falls outside this band.
+const NAV_BAR_TOP: usize = 1380;
+
+/// One of the three controls the launcher paints in its bottom navigation bar.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum NavTarget {
+    Back,
+    Home,
+    Recents,
+}
+
+/// Which drawn navigation control a completed tap selected, or `None` if the tap
+/// was nowhere near the bar.
+///
+/// WHY the bar is split into equal thirds rather than three hand-written
+/// rectangles: `screens/home.rs` places its three marks at exactly `nav.w / 6`
+/// (120), `SCREEN_WIDTH / 2` (360) and `nav.w * 5 / 6` (600), which are the
+/// centres of thirds of the 720-wide bar, and its home pill is `space::XXL * 5`
+/// (240) wide centred on 360, so it spans 240..479 -- the middle third exactly.
+/// Deriving the thirds from `SCREEN_WIDTH` therefore puts every drawn mark at the
+/// centre of its own target without restating one number the painter owns, and a
+/// future change of surface width moves the targets with it.
+///
+/// WHY this replaced two overlapping bands: the old rules were "x in 240..=480
+/// and y >= 1400 opens the overview" and "y >= 1380 and x in 520..640 opens the
+/// overview, anything else goes Home". The drawn Home pill spans y 1416..1423,
+/// so the same painted button opened Recents above y 1400 and did nothing below
+/// it, and the drawn back chevron at x 120 fell into the "anything else" arm and
+/// performed Home.
+fn nav_target_at(x: usize, y: usize) -> Option<NavTarget> {
+    if y < NAV_BAR_TOP || x >= SCREEN_WIDTH {
+        return None;
+    }
+    let third = SCREEN_WIDTH / 3;
+    Some(if x < third {
+        NavTarget::Back
+    } else if x < third * 2 {
+        NavTarget::Home
+    } else {
+        NavTarget::Recents
+    })
+}
+
 #[inline(never)]
 fn render_band(surface: u32, state: &LauncherState, min_y: usize, max_y: usize) {
     let draw = screen_renderer(state.current_view);
@@ -2677,8 +2740,20 @@ pub extern "C" fn _start() -> ! {
                             }
                         }
                         ViewMode::HomeScreen => {
-                            // Long-press opens Power Menu
-                            if input.kind == 6 {
+                            // Long-press opens the Power Menu.
+                            //
+                            // WHY `LONG_PRESS` and not a literal 6: this arm was
+                            // written as `input.kind == 6` under a comment that
+                            // said "Long-press opens Power Menu", but 6 is
+                            // `InputEventKind::Back`, not `LongPress` (3). Two
+                            // buttons were therefore dead or wrong: pressing and
+                            // holding the screen did nothing at all, and pressing
+                            // the Back control popped the power menu. The kernel
+                            // reports kind 3 whenever a press is held past
+                            // `LONG_PRESS_TICKS` without leaving `TAP_SLOP`, so
+                            // testing the kind the comment names is what makes
+                            // that comment true.
+                            if input.kind == LONG_PRESS {
                                 state.current_view = ViewMode::PowerMenu;
                                 render_view(surface, &state);
                                 let _ = std::surface_flip(4);
@@ -2697,8 +2772,18 @@ pub extern "C" fn _start() -> ! {
 
                             // 1. Gesture Navigation
                             // Swipe up: bottom bar opens Activity Space, middle opens App Drawer
-                            if (is_drag(input.kind) && input.dy <= -60) || input.kind == 7 || input.kind == 8 {
-                                if input.kind == 7 || input.kind == 8 || input.y >= 1000 {
+                            //
+                            // WHY kinds 7 and 8 no longer appear in this condition:
+                            // both are dispatched and `continue`d by the
+                            // shell-level handlers at the top of this loop, so no
+                            // event with kind 7 or 8 ever reaches here. They were
+                            // listed anyway, which read as "the Home button opens
+                            // the overview" -- Home opens the home screen and
+                            // Recents opens the overview, and having both spelled
+                            // out here is exactly the claim a future edit of the
+                            // early handlers would silently invalidate.
+                            if is_drag(input.kind) && input.dy <= -60 {
+                                if input.y >= 1000 {
                                     refresh_runtime_recents(&mut state);
                                     state.current_view = ViewMode::ActivitySpace;
                                     let mut win_buf = [0u8; 1024];
@@ -2835,26 +2920,6 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
-                                // Tapping bottom home pill opens Activity Space
-                                if (240..=480).contains(&x) && y >= 1400 {
-                                    state.current_view = ViewMode::ActivitySpace;
-                                    let mut win_buf = [0u8; 1024];
-                                    let _ = std::window_list(&mut win_buf);
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] Overview / Recent Apps switcher opened via home bar tap.").ok();
-                                    let mut drain = std::InputEvent {
-                                        kind: 0,
-                                        x: 0,
-                                        y: 0,
-                                        dx: 0,
-                                        dy: 0,
-                                        scale_milli: 1000,
-                                    };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
-
                                 // Tapping top status bar: left opens Notifications, right opens PowerMenu, center opens Quick Controls
                                 if y <= 48 {
                                     if x < 240 {
@@ -2956,22 +3021,56 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
-                                // Bottom Navigation Bar tap (y >= 1380)
-                                if y >= 1380 {
-                                    if (520..640).contains(&x) {
-                                        // Recents button ([])
-                                        state.current_view = ViewMode::ActivitySpace;
-                                        let mut win_buf = [0u8; 1024];
-                                        let _ = std::window_list(&mut win_buf);
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
-                                        std::log(0, "[LAUNCHER] Overview / Recent Apps switcher opened via recents button.").ok();
-                                    } else {
-                                        // Back / Home button
-                                        state.current_view = ViewMode::HomeScreen;
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
-                                        std::log(0, "[LAUNCHER] Returned to home screen via navigation bar.").ok();
+                                // Bottom navigation bar: the three painted targets
+                                // each do the one thing they are drawn to do.
+                                //
+                                // WHY this arm replaced two overlapping bands: the
+                                // old rules were "x in 240..=480 and y >= 1400
+                                // opens the overview" plus "y >= 1380 and x in
+                                // 520..640 opens the overview, anything else goes
+                                // Home". The drawn home pill spans y 1416..1423, so
+                                // the painted Home control opened Recents when hit
+                                // above y 1400 and did nothing at all when hit
+                                // below it, and the drawn back chevron at x 120
+                                // fell into the catch-all and performed Home.
+                                //
+                                // WHY Back reports instead of pretending: the
+                                // launcher home surface is the root of the view
+                                // tree, so there is no screen under it to reveal.
+                                // Saying so in the log is the honest answer; the
+                                // alternative -- a Home re-render -- claimed an
+                                // effect that had already happened.
+                                //
+                                // WHY this stays gated on `Some`: a tap below the
+                                // bar must fall through to the dock test below, and
+                                // that test's third band reaches y 1400 with x
+                                // 490..645, which overlaps the Recents target.
+                                // Without the gate a single press would open the
+                                // overview and then immediately the drawer.
+                                if let Some(target) = nav_target_at(x, y) {
+                                    match target {
+                                        NavTarget::Recents => {
+                                            refresh_runtime_recents(&mut state);
+                                            state.current_view = ViewMode::ActivitySpace;
+                                            let mut win_buf = [0u8; 1024];
+                                            let _ = std::window_list(&mut win_buf);
+                                            render_view(surface, &state);
+                                            let _ = std::surface_flip(4);
+                                            std::log(0, "[LAUNCHER] Overview / Recent Apps switcher opened via recents button.").ok();
+                                        }
+                                        NavTarget::Home => {
+                                            state.current_view = ViewMode::HomeScreen;
+                                            render_view(surface, &state);
+                                            let _ = std::surface_flip(4);
+                                            std::log(0, "[LAUNCHER] Home surface presented via home button.").ok();
+                                        }
+                                        NavTarget::Back => {
+                                            std::log(
+                                                0,
+                                                "[LAUNCHER] Back button at the launcher root: nothing to dismiss.",
+                                            )
+                                            .ok();
+                                        }
                                     }
                                     let mut drain = std::InputEvent {
                                         kind: 0,
