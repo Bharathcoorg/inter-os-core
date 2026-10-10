@@ -782,6 +782,38 @@ fn is_drag(kind: u8) -> bool {
     kind == DRAG_PAN || kind == DRAG_FLING
 }
 
+/// Depth of the top edge band that starts a shade pull, and the travel a pull
+/// must cover before it counts as one.
+///
+/// WHY these are separate: an edge swipe that never leaves the edge is a tap that
+/// happened to start high, and a long travel that started mid-screen is a scroll
+/// or a card dismissal. A shade pull is "pressed at the very top, then dragged
+/// down a real distance".
+const EDGE_PULL_ZONE: i64 = 24;
+const EDGE_PULL_MIN: i64 = 60;
+
+/// The point a completed gesture started at.
+///
+/// WHY this has to be reconstructed: the kernel reports ONE event per finished
+/// gesture, carrying the RELEASE position plus the total displacement
+/// (`kernel/src/input/router.rs`, `InputEvent::from_canonical`). Nothing
+/// downstream ever learns where the finger went down. Every edge test that read
+/// the release position therefore demanded that the finger come back to the edge
+/// before the gesture counted - so a natural pull, pressed at y=20 and dragged
+/// to y=320, arrived with `dy = +300` and `y = 320`, failed an `y <= 120` test,
+/// and fell through to nothing. That is why the notification shade and Quick
+/// Controls could not be reached by touch or trackpad at all, and only answered
+/// to invisible taps inside the status bar.
+///
+/// Recovering the start point is exact rather than heuristic: `dx`/`dy` are the
+/// total displacement from press to release, so press is release minus it.
+fn press_point(input: &std::InputEvent) -> (i64, i64) {
+    (
+        input.x as i64 - input.dx as i64,
+        input.y as i64 - input.dy as i64,
+    )
+}
+
 #[inline(never)]
 fn render_band(surface: u32, state: &LauncherState, min_y: usize, max_y: usize) {
     let draw = screen_renderer(state.current_view);
@@ -2660,9 +2692,27 @@ pub extern "C" fn _start() -> ! {
                                 while std::input_event_poll(&mut drain).is_ok() {}
                                 break;
                             }
-                            // Swipe down: left/center opens Notifications, right opens Quick Controls
-                            if is_drag(input.kind) && input.dy >= 60 && input.y <= 120 {
-                                if input.x < 360 {
+                            // Pull down from the top edge: left opens Notifications,
+                            // right opens Quick Controls.
+                            //
+                            // WHY the press point decides this and not the release
+                            // point: the kernel reports one event per finished gesture
+                            // at the RELEASE position, plus the total displacement. The
+                            // old arm tested `input.y <= 120`, which required the finger
+                            // to travel down and then come back to within 120px of the
+                            // top. A real pull - pressed at y=20, dragged to y=320 -
+                            // arrives with dy = +300 and y = 320, so it matched nothing
+                            // and the shades were unreachable by touch, by finger or by
+                            // trackpad, and answered only to an invisible status-bar tap.
+                            // Splitting on press_x instead of release_x also makes the
+                            // left/right choice stable: the finger cannot slide across
+                            // the midline mid-pull and land in the other shade.
+                            let (press_x, press_y) = press_point(&input);
+                            if is_drag(input.kind)
+                                && input.dy as i64 >= EDGE_PULL_MIN
+                                && press_y <= EDGE_PULL_ZONE
+                            {
+                                if press_x < 360 {
                                     state.current_view = ViewMode::Notifications;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
