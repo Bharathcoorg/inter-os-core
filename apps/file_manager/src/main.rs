@@ -267,7 +267,18 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 if (idx.abs() <= 14 && idy.abs() <= 10) && (idx.abs() >= 12 || idy.abs() >= 8 || (idy == 2 && idx.abs() <= 10)) {
                     return TEXT_PRIMARY;
                 }
-                if let Some(c) = test_text(x, y, 108, row_start_y + 24, 2, b"Internal Storage", TEXT_PRIMARY) {
+                // Two-line stack: label (scale 2, 48px tall) above caption
+                // (scale 1, 24px tall). Measured via
+                // std::design::font::measure: "Internal Storage"@2 = 298px,
+                // "Storage capacity unavailable"@1 = 267px,
+                // "Capacity detected; usage unavailable"@1 = 348px — all fit
+                // in the 576px budget (x 108..684). y0 delta (56) >=
+                // line_height(2) (48), so the bands never share a pixel.
+                // Old y0s (row_start+24 / +56, delta 32) overlapped by 16px.
+                let label_y0 = row_start_y + 16;
+                let caption_y0 =
+                    label_y0 + std::design::font::line_height(2) + 8;
+                if let Some(c) = test_text(x, y, 108, label_y0, 2, b"Internal Storage", TEXT_PRIMARY) {
                     return c;
                 }
                 let capacity_status: &[u8] = if app.storage_capacity_bytes > 0 {
@@ -275,7 +286,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 } else {
                     b"Storage capacity unavailable"
                 };
-                if let Some(c) = test_text(x, y, 108, row_start_y + 56, 1, capacity_status, TEXT_MUTED) {
+                if let Some(c) = test_text(x, y, 108, caption_y0, 1, capacity_status, TEXT_MUTED) {
                     return c;
                 }
             }
