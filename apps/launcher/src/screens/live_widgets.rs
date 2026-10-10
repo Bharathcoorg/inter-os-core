@@ -77,18 +77,44 @@ const LIST_TOP: usize = ENTRIES[4].rect.y + ENTRIES[4].rect.h + space::LG;
 /// `GLYPH_H` = 24 rows per scale step, not the 8 the row heights were sized
 /// against. The row height here is computed from the space the list is given, so
 /// the scale is fixed by the smallest row the list will ever be handed, which is
-/// [`ROW_MIN`]: 24 * 2 = 48 is the largest cell that fits it. At
-/// `type_scale::BODY` (3) the cell is 72 px, which is taller than most rows the
-/// list computes here, so `run_left` pins the run to the row's top edge and drops
-/// the descenders into the gutter below.
+/// [`ROW_MIN`]. At `type_scale::BODY` (2) the cell is 48 px, which is what
+/// [`ROW_MIN`] holds for.
 const ROW_TEXT_SCALE: usize = 2;
+
+/// Vertical and horizontal inset inside a reading row.
+///
+/// WHY the vertical inset is `space::SM` and not `space::MD`: the row has to hold
+/// a 48 px cell plus its padding, and there are ten of them between the last entry
+/// card and the home indicator. At a 16 px inset the floor is 80 px, ten rows plus
+/// gutters need 872 px, and the band is 703 -- so the floor could be honoured and
+/// two readings pushed off the bottom of the surface, which would be a worse lie
+/// than the one it replaced (the heading counts "of 10 readings" whatever it
+/// draws). At 8 px the floor is 64, ten rows land at 66 each and all ten are drawn.
+/// The horizontal inset is unchanged, so no label moves sideways.
+const ROW_PAD_Y: usize = space::SM;
+const ROW_PAD_X: usize = space::MD;
+
 /// Row gutter, on the spacing scale.
-const ROW_GUTTER: usize = space::SM;
+///
+/// WHY `space::XS`: it is what makes ten rows fit the band once the rows are tall
+/// enough to hold their own type. `space::SM` puts the last row's bottom edge one
+/// row past the band, which clips the tail of its descenders -- the same defect
+/// this floor exists to remove, one row up.
+const ROW_GUTTER: usize = space::XS;
 /// Row height bounds. WHY the list does not simply use one token for its rows: the
 /// list is as tall as the content area allows, so a fixed row height leaves a dead
 /// band above the home indicator that grows every time a reading is added. The
-/// ceiling stops a short list becoming slabs; the floor is one whole cell at
-/// [`ROW_TEXT_SCALE`], so no row can ever be shorter than the type inside it.
+/// ceiling stops a short list becoming slabs; the floor is the row's own content,
+/// so no row can ever be shorter than the type inside it.
+///
+/// WHY the floor is a *cell plus its padding* and not just the cell: a row is
+/// inset by [`ROW_PAD_Y`] top and bottom before anything is drawn in it, so a row
+/// that is only as tall as the 48 px cell has 16 px of usable height. `text_y0`
+/// then saturates to the pad's own top edge and the painter's band test
+/// (`y < text_y0 + text_h`) runs past the bottom of the row rectangle, so every row
+/// lost its descender rows: "Packages" and "Appearance" rendered with the tails
+/// sliced flat, and the last rows were cut off the surface entirely. The floor has
+/// to be what the row actually has to contain.
 ///
 /// WHY the parentheses in the expression that uses this: written as a method chain
 /// ending in `.clamp(..)`, `a / ROWS.len().clamp(..)` divides by the clamped count
@@ -96,7 +122,7 @@ const ROW_GUTTER: usize = space::SM;
 /// That is not a typo risk, it is what the surface rendered: ten reading rows ten
 /// pixels tall, eighteen pixels apart, with no room for a line of type and no text
 /// in any of them.
-const ROW_MIN: usize = text::GLYPH_H * ROW_TEXT_SCALE;
+const ROW_MIN: usize = text::GLYPH_H * ROW_TEXT_SCALE + ROW_PAD_Y * 2;
 const ROW_MAX: usize = space::XXL * 2;
 
 // -----------------------------------------------------------------------------
@@ -375,19 +401,36 @@ impl WidgetsFrame {
                 Some(label) => label,
                 None => entry.package.as_bytes(),
             };
-            let mut name_buf = [0u8; 32];
-            let name_len = name_slice.len().min(32);
-            name_buf[..name_len].copy_from_slice(&name_slice[..name_len]);
 
             let caption_h = if installed.is_none() { text::line_height(type_scale::CAPTION) } else { 0 };
-            let name_rect = Rect::new(pad.x, pad.y, pad.w, pad.h.saturating_sub(caption_h + space::SM));
+
+            // WHY the chevron's width is reserved before the name is measured: the
+            // chevron is drawn at the right edge of the same pad the name is
+            // centred in, so a name fitted to the whole padded width runs straight
+            // underneath it. Reserving it here is what makes `name_rect` -- which
+            // is also the centring width -- stop short of the chevron, and the
+            // ellipsize is what turns "too long" into an ellipsised name instead of
+            // a name `run_center` silently refuses to draw.
+            let chevron_w = text::measure(b">", type_scale::BODY);
+            let name_fit = if installed.is_some() {
+                pad.w.saturating_sub(chevron_w + space::SM)
+            } else {
+                pad.w
+            };
+            let name_rect = Rect::new(pad.x, pad.y, name_fit, pad.h.saturating_sub(caption_h + space::SM));
+
+            let (name_fitted, name_fitted_len) =
+                text::ellipsize(name_slice, type_scale::BODY, name_fit);
+            let mut name_buf = [0u8; 32];
+            let name_len = name_fitted_len.min(32);
+            name_buf[..name_len].copy_from_slice(&name_fitted[..name_len]);
 
             let (fill, name_ink, chevron, caption) = if installed.is_some() {
                 let fill = Theme::blend(theme.surface, theme.accent, 22);
                 let chevron = Rect::new(
-                    pad.x + pad.w.saturating_sub(text::measure(b">", type_scale::BODY)),
+                    pad.x + pad.w.saturating_sub(chevron_w),
                     name_rect.y,
-                    text::measure(b">", type_scale::BODY),
+                    chevron_w,
                     name_rect.h,
                 );
                 (fill, theme.text, Some(chevron), None)
@@ -411,25 +454,37 @@ impl WidgetsFrame {
         }
 
         // Title and summary
+        //
+        // WHY the summary sits under the title and not beside it: they are drawn
+        // with `run_left`/`run_right` at different scales, and two runs of
+        // different scales can only share rows if the smaller one is placed from
+        // the larger one's baseline. It was -- `heading_baseline -
+        // text::BASELINE * ROW_TEXT_SCALE` -- and with a 3x title and a 2x summary
+        // that put both runs' ink in 82..115, so the summary's leading "10 " was
+        // drawn under the title's ink and the screen read "of 10 readings".
+        // Stacked line boxes cannot overlap at any pair of scales.
         let title_rect = Rect::new(
             content.x,
             HEADER_TOP,
             content.w,
             text::line_height(WIDGETS_TITLE_SCALE),
         );
-        let heading_baseline = HEADER_TOP + text::BASELINE * WIDGETS_TITLE_SCALE;
         let summary_rect = Rect::new(
             content.x,
-            heading_baseline - text::BASELINE * ROW_TEXT_SCALE,
+            title_rect.y + title_rect.h + WIDGETS_HEADING_GAP,
             content.w,
-            text::line_height(ROW_TEXT_SCALE),
+            text::line_height(WIDGETS_SUMMARY_SCALE),
         );
         let (summary_raw, summary_len) = reading_summary(state);
         let mut summary_buf = [0u8; VALUE_MAX];
         summary_buf[..summary_len].copy_from_slice(&summary_raw[..summary_len]);
 
         // Rows
-        let bottom = content.y + content.h - space::MD;
+        //
+        // WHY the band reaches to the home indicator rather than to the content
+        // area's own padding: the band is what decides how tall a row may be, so
+        // stopping it short would make every row shorter than the type inside it.
+        let bottom = SCREEN_HEIGHT - space::MD - INDICATOR_H - space::SM;
         let bounds = Rect::new(content.x, LIST_TOP, content.w, bottom.saturating_sub(LIST_TOP));
         let row_h = (bounds.h.saturating_sub(ROW_GUTTER * (ROWS.len() - 1)) / ROWS.len())
             .clamp(ROW_MIN, ROW_MAX);
@@ -443,7 +498,16 @@ impl WidgetsFrame {
                 let value_reading = row_item.value(state);
                 let (fill, value_ink) = value_reading.skin(&theme);
 
-                let pad = rect.inset(space::MD);
+                // WHY the pad is built from the two insets and not `rect.inset(..)`:
+                // the vertical inset is what the row's height budget has to carry,
+                // and it is a different token from the horizontal one. See
+                // [`ROW_PAD_Y`].
+                let pad = Rect::new(
+                    rect.x + ROW_PAD_X,
+                    rect.y + ROW_PAD_Y,
+                    rect.w.saturating_sub(ROW_PAD_X * 2),
+                    rect.h.saturating_sub(ROW_PAD_Y * 2),
+                );
                 let h = text::line_height(ROW_TEXT_SCALE);
                 let text_y0 = pad.y + pad.h.saturating_sub(h) / 2;
 
@@ -545,7 +609,38 @@ fn frame_for(x: usize, y: usize, state: &LauncherState) -> &WidgetsFrame {
 const HEADER_TOP: usize = STATUS_BAR_HEIGHT + space::SM;
 
 /// The heading's scale.
-const WIDGETS_TITLE_SCALE: usize = 3;
+///
+/// WHY `type_scale::BODY` and not `type_scale::TITLE`: the heading owns the band
+/// from [`HEADER_TOP`] to the top of the first entry card, and that band is 79
+/// rows tall -- the entry rectangles are the shell's hit regions and cannot move.
+/// A `TITLE` cell is 72 rows, so a title-sized heading leaves 7 rows for the
+/// summary that has to sit under it, and a summary needs 24. The heading therefore
+/// takes the rung below and both lines fit with room to spare.
+///
+/// WHY the two lines are stacked and not sharing a baseline: a shared baseline is
+/// what put them on top of each other in the first place. Two runs of different
+/// scales only share ink rows safely when they are the same size; at 3 and 2 the
+/// summary's cell started 40 rows above the title's baseline, so its ink ran
+/// across the title's and the leading "10 " of "6 of 10 readings" was unreadable.
+const WIDGETS_TITLE_SCALE: usize = type_scale::BODY;
+
+/// The heading's summary line: what the dashboard knows, as dense metadata.
+///
+/// WHY the rung below the heading and not its own size: this line is a count of
+/// what is present and what is not, which is metadata, and `type_scale::CAPTION` is
+/// the rung the theme reserves for exactly that.
+const WIDGETS_SUMMARY_SCALE: usize = type_scale::CAPTION;
+
+/// Gap between the heading's baseline block and its summary block.
+const WIDGETS_HEADING_GAP: usize = space::XS;
+
+/// Width and height of the home indicator drawn at the foot of the surface.
+///
+/// WHY they are named: the painter drew this pill from literals inline while the
+/// layout decided where the reading rows may end from a different number, so the
+/// last row and the pill were two separate guesses about the same edge.
+const INDICATOR_W: usize = space::XL * 4;
+const INDICATOR_H: usize = space::XS;
 
 pub fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     let theme = THEME;
@@ -628,7 +723,7 @@ pub fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 
                 x,
                 y,
                 &f.summary_rect,
-                ROW_TEXT_SCALE,
+                WIDGETS_SUMMARY_SCALE,
                 &f.summary_buf[..f.summary_len],
                 theme.text_muted,
             ) {
@@ -681,15 +776,13 @@ pub fn get_live_widgets_color(x: usize, y: usize, state: &LauncherState) -> u32 
     }
 
     // Home indicator, centred.
-    let indicator_w = space::XL * 4;
-    let indicator_h = space::XS;
     let indicator = Rect::new(
-        (SCREEN_WIDTH - indicator_w) / 2,
-        SCREEN_HEIGHT - space::MD - indicator_h,
-        indicator_w,
-        indicator_h,
+        (SCREEN_WIDTH - INDICATOR_W) / 2,
+        SCREEN_HEIGHT - space::MD - INDICATOR_H,
+        INDICATOR_W,
+        INDICATOR_H,
     );
-    if round_contains(&indicator, indicator_h / 2, x, y) {
+    if round_contains(&indicator, INDICATOR_H / 2, x, y) {
         return Theme::blend(theme.text_muted, theme.bg, 140);
     }
 

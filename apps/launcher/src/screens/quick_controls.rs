@@ -28,6 +28,44 @@ const TEXT_MUTED: u32 = 0xFF777773;
 const SLIDER_BG: u32 = 0xFF35393D;
 const SLIDER_FILL: u32 = 0xFFFFFFFF;
 
+/// Width of a slider's position indicator, and how far in from each end of the
+/// capsule it stops.
+///
+/// WHY it is drawn at all: a capsule that is filled white from end to end is the
+/// same drawing as 100 %. Without a mark at the fill's end there is nothing on
+/// the control that says *where* the level is, so a filled bar read as a maximum
+/// rather than as a position.
+const SLIDER_THUMB_W: usize = 8;
+const SLIDER_THUMB_INSET: usize = 14;
+
+/// Where a slider's caption starts, and the width it may occupy.
+///
+/// WHY it clears the vector icon: the sun and the speaker are centred 44 px in and
+/// reach 16 px past that, so anything set at the capsule's own left edge is drawn
+/// underneath them.
+const SLIDER_CAPTION_X: usize = 80;
+const SLIDER_CAPTION_INSET: usize = 16;
+
+/// Height of a quick-toggle button.
+///
+/// WHY it is 96 and not 72: at 72 the button is exactly twice its corner radius,
+/// so it has no straight middle band at all -- it is a disc -- and a 24-row line
+/// of type cannot be centred inside a 28-row disc. The line was hung off the
+/// bottom instead (`toggle.y + 54`), which put its cell at y 698..722 while the
+/// button's own guard stops at 716, so the last five rows of every glyph were
+/// discarded and the label read as a sliced one. At 96 the pill's straight band is
+/// `top..top + line_height`, which is exactly one line box, so a line centred in
+/// the button is also a line that is entirely inside it.
+const TOGGLE_H: usize = 96;
+
+/// Where the toggle's icon sits inside the button.
+///
+/// WHY it is above the label and not on top of it: the icon's disc is 28 rows
+/// across and the label is 24, and 96 - 24 = 72 of rows sit above the label's
+/// centre line. The icon takes the upper 28 of them, leaving a gap before the
+/// label's ink starts.
+const TOGGLE_ICON_DY: usize = 22;
+
 const POWER_BTN: Rect = Rect::new(408, 644, 272, 72);
 const HOME_PILL: Rect = Rect::new(SCREEN_WIDTH / 2 - 90, SCREEN_HEIGHT - 20, 180, 5);
 
@@ -130,6 +168,29 @@ impl LabelRun {
         }
     }
 
+    /// A run truncated with an ellipsis if it is wider than `fit`.
+    ///
+    /// WHY this exists: `new` copies up to `RUN_CAP` bytes and draws all of them,
+    /// so a long registry string ran off the card it was centred in. `pixel` only
+    /// rejects pixels outside the *measured* box, and that box is however wide the
+    /// string turned out to be, so nothing on screen caught it.
+    fn fitted(x: usize, y: usize, scale: usize, fit: usize, bytes: &[u8], ink: u32) -> Self {
+        let (buf, len) = text::ellipsize(bytes, scale, fit);
+        let n = len.min(RUN_CAP);
+        let mut held = [0u8; RUN_CAP];
+        held[..n].copy_from_slice(&buf[..n]);
+        LabelRun {
+            x,
+            y,
+            w: text::measure(&held[..n], scale),
+            h: text::line_height(scale),
+            scale,
+            len: n,
+            ink,
+            bytes: held,
+        }
+    }
+
     #[inline]
     fn pixel(&self, px: usize, py: usize) -> Option<u32> {
         if self.len == 0 {
@@ -180,18 +241,33 @@ struct QuickControlsFrame {
     brightness_rect: Rect,
     brightness_fill_w: usize,
     brightness_available: bool,
+    brightness_caption: LabelRun,
     volume_rect: Rect,
     volume_fill_w: usize,
     volume_available: bool,
+    volume_thumb: Rect,
+    volume_caption: LabelRun,
     toggles: [Rect; 4],
     toggle_icons: [QcIcon; 4],
+    toggle_labels: [LabelRun; 4],
     power_btn: Rect,
     power_label: LabelRun,
     home_pill: Rect,
 }
 
-fn build_qc_frame(_state: &LauncherState) -> QuickControlsFrame {
-    let clock = LabelRun::new(48, 14, type_scale::CAPTION, b"", TEXT_WHITE);
+fn build_qc_frame(state: &LauncherState) -> QuickControlsFrame {
+    // WHY the clock is gated on the source flag and not on the buffer: with no RTC
+    // authority granted to this shell the read can be refused, and the buffer keeps
+    // whatever it last held. `notifications.rs` and `home.rs` both gate on the same
+    // flag, so a refused read leaves this status bar empty rather than showing a
+    // stale value, and it is the same condition the row below the clock is drawn
+    // under.
+    let clock_slice: &[u8] = if state.clock_source_ok && state.clock_time[0] != b' ' {
+        &state.clock_time
+    } else {
+        b""
+    };
+    let clock = LabelRun::new(48, 14, type_scale::CAPTION, clock_slice, TEXT_WHITE);
     let wifi = match std::settings_hardware_status("wifi") { Ok(1) => b"Virtual".as_slice(), _ => b"Unavailable".as_slice() };
     let bluetooth = match std::settings_hardware_status("bluetooth") { Ok(1) => b"Virtual".as_slice(), _ => b"Unavailable".as_slice() };
     let mobile = match std::settings_hardware_status("cellular") { Ok(1) => b"Virtual".as_slice(), _ => b"Unavailable".as_slice() };
@@ -221,15 +297,86 @@ fn build_qc_frame(_state: &LauncherState) -> QuickControlsFrame {
     let volume=std::audio_query_volume();
     let volume_available=volume.is_ok();
     let volume_value=volume.unwrap_or(0).min(100) as usize;
+    let volume_fill_w=(slider_w*volume_value)/100;
 
-    let toggles=[Rect::new(36,644,76,72),Rect::new(128,644,76,72),Rect::new(220,644,76,72),Rect::new(312,644,76,72)];
+    // WHY a caption on the brightness capsule: `brightness_available` is false, so
+    // `is_filled` is false for every pixel of it, the fill width is 0 and the
+    // capsule drew a sun glyph on an empty track and nothing else. That is the same
+    // drawing as a decoration, and a user cannot tell it from a working slider.
+    // The toggles 164 px below already say "N/A"; this one now names the missing
+    // thing. It prints no number, because there is no backlight to read one from.
+    let caption_y = brightness_rect.y + (slider_h - text::line_height(type_scale::CAPTION)) / 2;
+    let caption_fit = slider_w - SLIDER_CAPTION_X - SLIDER_CAPTION_INSET;
+    let brightness_caption = LabelRun::fitted(
+        slider_x + SLIDER_CAPTION_X,
+        caption_y,
+        type_scale::CAPTION,
+        caption_fit,
+        if brightness_available {
+            b"Brightness"
+        } else {
+            b"Brightness unavailable - no backlight"
+        },
+        if brightness_available { TEXT_WHITE } else { TEXT_MUTED },
+    );
+
+    // WHY the volume caption is conditional: when the guest audio manager answers,
+    // the fill and its thumb already say where the level is and a second line would
+    // only repeat it. When it does not, there is no level to fill and no position
+    // to mark, and the control has to say so instead of drawing an empty track that
+    // looks like a slider at zero.
+    let volume_caption_y = volume_rect.y + (slider_h - text::line_height(type_scale::CAPTION)) / 2;
+    let volume_caption = if volume_available {
+        LabelRun::EMPTY
+    } else {
+        LabelRun::fitted(
+            slider_x + SLIDER_CAPTION_X,
+            volume_caption_y,
+            type_scale::CAPTION,
+            caption_fit,
+            b"Volume unavailable - no audio level",
+            TEXT_MUTED,
+        )
+    };
+
+    // WHY the thumb is clamped inside the capsule: the fill is measured from the
+    // capsule's left edge, so a fill of the full width puts the position mark one
+    // step past the right edge, where the capsule's own rounded test would cut it.
+    let volume_thumb = Rect::new(
+        (volume_rect.x + volume_fill_w)
+            .saturating_sub(SLIDER_THUMB_W / 2)
+            .clamp(volume_rect.x, volume_rect.x + volume_rect.w - SLIDER_THUMB_W),
+        volume_rect.y + SLIDER_THUMB_INSET,
+        SLIDER_THUMB_W,
+        slider_h - SLIDER_THUMB_INSET * 2,
+    );
+
+    let toggles=[Rect::new(36,644,76,TOGGLE_H),Rect::new(128,644,76,TOGGLE_H),Rect::new(220,644,76,TOGGLE_H),Rect::new(312,644,76,TOGGLE_H)];
     let toggle_icons=[QcIcon::Torch,QcIcon::Rotate,QcIcon::Moon,QcIcon::Power];
+    // These controls have no QEMU-backed flashlight, rotation sensor, DND policy or
+    // airplane-mode service yet. Show them as disabled, not as live toggles that
+    // silently do nothing.
+    //
+    // WHY the label is centred on the button's own middle: it used to be placed at
+    // `toggle.y + 54`, which is 22 px below the button's centre line and whose cell
+    // ran past the bottom of the button entirely.
+    let toggle_labels = core::array::from_fn(|i| {
+        LabelRun::centred(
+            toggles[i].x,
+            toggles[i].y + (toggles[i].h - text::line_height(type_scale::CAPTION)) / 2,
+            toggles[i].w,
+            type_scale::CAPTION,
+            b"N/A",
+            TEXT_MUTED,
+        )
+    });
     let power_label=LabelRun::centred(POWER_BTN.x+40,POWER_BTN.y+24,POWER_BTN.w-40,type_scale::CAPTION,b"Power Menu",TEXT_WHITE);
     QuickControlsFrame {
         clock, tiles:[tile_wifi,tile_bt,tile_mobile,tile_air], brightness_rect,
         brightness_fill_w:(slider_w*brightness_value)/100, volume_rect,
-        volume_fill_w:(slider_w*volume_value)/100, brightness_available, volume_available,
-        toggles, toggle_icons, power_btn:POWER_BTN, power_label, home_pill:HOME_PILL,
+        volume_fill_w, brightness_available, brightness_caption, volume_available,
+        volume_thumb, volume_caption, toggles, toggle_icons, toggle_labels,
+        power_btn:POWER_BTN, power_label, home_pill:HOME_PILL,
     }
 }
 
@@ -436,6 +583,10 @@ pub fn get_quick_controls_color(x: usize, y: usize, state: &LauncherState) -> u3
                 return icon_ink;
             }
 
+            if let Some(c) = f.brightness_caption.pixel(x, y) {
+                return c;
+            }
+
             return color;
         }
     }
@@ -467,6 +618,17 @@ pub fn get_quick_controls_color(x: usize, y: usize, state: &LauncherState) -> u3
                 return icon_ink;
             }
 
+            // WHY the position mark is drawn only when there is a level: a thumb
+            // is a claim about where the level is, and with the query refused there
+            // is no level, so a mark would be a claim with nothing behind it.
+            if f.volume_available && f.volume_thumb.contains(x, y) {
+                return SLIDER_BG;
+            }
+
+            if let Some(c) = f.volume_caption.pixel(x, y) {
+                return c;
+            }
+
             return color;
         }
     }
@@ -480,15 +642,15 @@ pub fn get_quick_controls_color(x: usize, y: usize, state: &LauncherState) -> u3
                     return TILE_BORDER;
                 }
                 let cx = toggle.center_x();
-                let cy = toggle.center_y();
+                let cy = toggle.y + TOGGLE_ICON_DY;
                 // These controls have no QEMU-backed flashlight, rotation sensor,
                 // DND policy or airplane-mode service yet. Show them as disabled,
                 // not as live toggles that silently do nothing.
                 if let Some(ic) = draw_qc_icon(f.toggle_icons[i], x, y, cx, cy, TEXT_MUTED) {
                     return ic;
                 }
-                if let Some(label) = test_text(x, y, toggle.x + 25, toggle.y + 54, 1, b"N/A", TEXT_MUTED) {
-                    return label;
+                if let Some(c) = f.toggle_labels[i].pixel(x, y) {
+                    return c;
                 }
                 return color;
             }
