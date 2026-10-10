@@ -31,13 +31,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "camera_preview"
-version = "0.1.0"
-dependencies = [
- "interos-std",
-]
-
-[[package]]
 name = "compositor"
 version = "0.1.0"
 dependencies = [
@@ -66,20 +59,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "health"
-version = "0.1.0"
-dependencies = [
- "interos-std",
-]
-
-[[package]]
-name = "hello_world"
-version = "0.1.0"
-dependencies = [
- "interos-std",
-]
-
-[[package]]
 name = "init"
 version = "0.1.0"
 dependencies = [
@@ -99,13 +78,6 @@ dependencies = [
 
 [[package]]
 name = "launcher"
-version = "0.1.0"
-dependencies = [
- "interos-std",
-]
-
-[[package]]
-name = "meshchat"
 version = "0.1.0"
 dependencies = [
  "interos-std",
@@ -141,13 +113,6 @@ dependencies = [
 
 [[package]]
 name = "terminal"
-version = "0.1.0"
-dependencies = [
- "interos-std",
-]
-
-[[package]]
-name = "test_app"
 version = "0.1.0"
 dependencies = [
  "interos-std",

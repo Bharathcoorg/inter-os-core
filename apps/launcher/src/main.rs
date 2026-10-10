@@ -2587,10 +2587,10 @@ pub extern "C" fn _start() -> ! {
                                         break;
                                     }
                                 }
-                                // Health widget (505..685, 375..680)
+                                // Vault widget (505..685, 375..680)
                                 if (505..685).contains(&y) && (375..680).contains(&x) {
-                                        if let Ok(task_id) = std::app_launch("org.interos.health") {
-                                        state.push_recent("org.interos.health", task_id);
+                                        if let Ok(task_id) = std::app_launch("org.interos.vault") {
+                                        state.push_recent("org.interos.vault", task_id);
                                         state.active_child = Some(task_id);
                                         state.current_view = ViewMode::HomeScreen;
                                         let mut drain = std::InputEvent {

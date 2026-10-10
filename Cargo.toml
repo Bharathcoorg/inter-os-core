@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "apps/test_app",
     "apps/settings",
     "apps/terminal",
     "apps/dialer",
@@ -11,12 +10,8 @@ members = [
     "apps/messages",
     "apps/calendar",
     "apps/music",
-    "apps/hello_world",
     "apps/sensor_dashboard",
-    "apps/camera_preview",
     "apps/calculator",
-    "apps/health",
-    "apps/meshchat",
     "sdk/rust/interos-std",
     "userspace/init",
     "userspace/system-service",

@@ -46,7 +46,7 @@ pub fn match_icon_kind(id: &[u8]) -> Option<IconKind> {
     {
         Some(IconKind::Messages)
     } else if id == b"org.interos.camera" || id == b"camera" || id == b"app_camera"
-        || id == b"org.interos.camera_preview" || id == b"camera_preview" || id == b"CAM"
+        || id == b"CAM"
         || id == b"Camera" || id == b"Camera Preview"
     {
         Some(IconKind::Camera)

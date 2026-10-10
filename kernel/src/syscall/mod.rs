@@ -4322,12 +4322,7 @@ fn native_first_party_app_available(package_id: &str) -> bool {
             // packages were already described in `FIRST_PARTY_PACKAGES` and seeded active
             // into the registry, but a package missing from this match was filtered straight
             // back out, so the drawer never saw it and the launch arm was unreachable.
-            | "org.interos.health"
-            | "org.interos.camera_preview"
-            | "org.interos.hello_world"
-            | "org.interos.meshchat"
             | "org.interos.sensor_dashboard"
-            | "org.interos.test_app"
     )
 }
 
@@ -4699,12 +4694,7 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         "org.interos.music" | "music" | "app_music" => crate::task::user::spawn_app_music(parent),
         "org.interos.file_manager" | "file_manager" | "files" | "app_file_manager" => crate::task::user::spawn_app_file_manager(parent),
         "org.interos.gallery" | "gallery" | "photos" | "app_gallery" => crate::task::user::spawn_app_gallery(parent),
-        "org.interos.health" | "health" => spawn_app_health(parent),
-        "org.interos.camera_preview" | "camera_preview" => spawn_app_camera_preview(parent),
-        "org.interos.hello_world" | "hello_world" => spawn_app_hello_world(parent),
-        "org.interos.meshchat" | "meshchat" => spawn_app_meshchat(parent),
         "org.interos.sensor_dashboard" | "sensor_dashboard" => spawn_app_sensor_dashboard(parent),
-        "org.interos.test_app" | "test_app" => spawn_app_test_app(parent),
         "org.interos.compositor" | "compositor" | "org.interos.launcher" | "launcher" => {
             return Err(SyscallResult::PermissionDenied);
         }
@@ -4721,199 +4711,6 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
 /// separate from the normal userspace syscall path and gated to QEMU.
 pub fn dev_launch_verified_rapp(app_id: &str) -> Result<crate::task::TaskId, SyscallResult> {
     dev_launch_app(app_id)
-}
-
-/// Spawns the Sovereign Health & Biometric Telemetry app in Ring 3.
-///
-/// WHY no sensor capability is granted: `sys_sensor_read` demands
-/// `SystemControl|INVOKE` on the sensor control object, and withholding it is the honest
-/// outcome. The kernel's `SensorManager::is_hardware_present` returns false on this
-/// platform regardless, so a grant would buy no data and only widen authority. The app
-/// renders its "sensor read refused" state, which is a true statement about this device.
-fn spawn_app_health(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(8);
-    caps.insert(Capability {
-        id: CapabilityId(3001),
-        cap_type: CapabilityType::SerialOutput,
-        rights: Rights::WRITE,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3002),
-        cap_type: CapabilityType::IpcSend,
-        rights: Rights::WRITE,
-        object_id: id_security.0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3003),
-        cap_type: CapabilityType::TimerTickRead,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3004),
-        cap_type: CapabilityType::FileSystemRead,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3005),
-        cap_type: CapabilityType::EventPoll,
-        rights: Rights::READ.union(Rights::INVOKE),
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3006),
-        cap_type: CapabilityType::IpcReceive,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3007),
-        cap_type: CapabilityType::FrameBufferDirect,
-        rights: Rights::WRITE,
-        object_id: 1,
-    }).ok();
-
-    let id = crate::task::user::spawn_user_process_with_parent(
-        "health",
-        crate::task::images::APP_HEALTH_ELF,
-        caps,
-        6,
-        id_security,
-    ).expect("Failed to spawn registered first-party app");
-    serial_println!("[OK] Spawned app_health (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
-    id
-}
-
-/// Spawns the Camera Preview / viewfinder app in Ring 3.
-///
-/// WHY no camera capability is granted: `sys_camera_capture` requires
-/// `SystemControl|INVOKE` on the camera control object or `HardwarePortIo` on port 0xCA00.
-/// Neither exists on this board, and `CameraHal::capture_frame` returns an error rather
-/// than generating pixels. The app already distinguishes a refusal from a missing sensor
-/// and renders each honestly, so the grant would change nothing it displays.
-fn spawn_app_camera_preview(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(8);
-    caps.insert(Capability {
-        id: CapabilityId(3101),
-        cap_type: CapabilityType::SerialOutput,
-        rights: Rights::WRITE,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3102),
-        cap_type: CapabilityType::IpcSend,
-        rights: Rights::WRITE,
-        object_id: id_security.0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3103),
-        cap_type: CapabilityType::TimerTickRead,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3104),
-        cap_type: CapabilityType::FileSystemRead,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3105),
-        cap_type: CapabilityType::EventPoll,
-        rights: Rights::READ.union(Rights::INVOKE),
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3106),
-        cap_type: CapabilityType::IpcReceive,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3107),
-        cap_type: CapabilityType::FrameBufferDirect,
-        rights: Rights::WRITE,
-        object_id: 1,
-    }).ok();
-
-    let id = crate::task::user::spawn_user_process_with_parent(
-        "camera_preview",
-        crate::task::images::APP_CAMERA_PREVIEW_ELF,
-        caps,
-        6,
-        id_security,
-    ).expect("Failed to spawn registered first-party app");
-    serial_println!("[OK] Spawned app_camera_preview (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
-    id
-}
-
-/// Spawns the Mesh Chat app in Ring 3.
-///
-/// WHY the network triple and nothing beyond the common base: the app's stated
-/// purpose is to exercise the real local UDP datagram path (`net_socket`,
-/// `net_sendto` to loopback, `net_recvfrom`, `network_poll`), and each of those
-/// is guarded by `NetworkSocket|WRITE`, `NetworkSend|WRITE` and
-/// `NetworkReceive|READ`. `wireless_query` is deliberately NOT granted: its only
-/// guard is the object-blind `require_system_control()`, which would hand this
-/// app power, crypto and telephony authority over the whole device just to read
-/// the radio's own fields. The app renders that probe as a named refusal, which
-/// is the honest result.
-fn spawn_app_meshchat(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(8);
-    caps.insert(Capability {
-        id: CapabilityId(3301),
-        cap_type: CapabilityType::SerialOutput,
-        rights: Rights::WRITE,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3302),
-        cap_type: CapabilityType::IpcReceive,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3303),
-        cap_type: CapabilityType::EventPoll,
-        rights: Rights::READ.union(Rights::INVOKE),
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3304),
-        cap_type: CapabilityType::FrameBufferDirect,
-        rights: Rights::WRITE,
-        object_id: 1,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3305),
-        cap_type: CapabilityType::NetworkSocket,
-        rights: Rights::WRITE,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3306),
-        cap_type: CapabilityType::NetworkSend,
-        rights: Rights::WRITE,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3307),
-        cap_type: CapabilityType::NetworkReceive,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-
-    let id = crate::task::user::spawn_user_process_with_parent(
-        "meshchat",
-        crate::task::images::APP_MESHCHAT_ELF,
-        caps,
-        6,
-        id_security,
-    ).expect("Failed to spawn registered first-party app");
-    serial_println!("[OK] Spawned app_meshchat (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
-    id
 }
 
 /// Spawns the Sensor Dashboard app in Ring 3.
@@ -4973,120 +4770,6 @@ fn spawn_app_sensor_dashboard(id_security: TaskId) -> TaskId {
         id_security,
     ).expect("Failed to spawn registered first-party app");
     serial_println!("[OK] Spawned app_sensor_dashboard (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
-    id
-}
-
-/// Spawns the Test App platform diagnostic in Ring 3.
-///
-/// WHY FrameBufferDirect carries READ as well as WRITE: the surface path
-/// authorizes WRITE on display object 1, but `sys_window_list` — the probe that
-/// shows live compositor geometry including this app's own window — authorizes
-/// READ. Without READ the probe would report a refusal the app was built to
-/// answer. `storage_query` is deliberately left ungranted (it needs
-/// `StorageRawBlock|READ`, which the app's manifest does not declare) so the
-/// app demonstrates a named, capability-attributed refusal on screen.
-fn spawn_app_test_app(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(8);
-    caps.insert(Capability {
-        id: CapabilityId(3501),
-        cap_type: CapabilityType::SerialOutput,
-        rights: Rights::WRITE,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3502),
-        cap_type: CapabilityType::TimerTickRead,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3503),
-        cap_type: CapabilityType::FileSystemRead,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3504),
-        cap_type: CapabilityType::EventPoll,
-        rights: Rights::READ.union(Rights::INVOKE),
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3505),
-        cap_type: CapabilityType::FrameBufferDirect,
-        rights: Rights::READ.union(Rights::WRITE),
-        object_id: 1,
-    }).ok();
-
-    let id = crate::task::user::spawn_user_process_with_parent(
-        "test_app",
-        crate::task::images::APP_TEST_APP_ELF,
-        caps,
-        6,
-        id_security,
-    ).expect("Failed to spawn registered first-party app");
-    serial_println!("[OK] Spawned app_test_app (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
-    id
-}
-
-/// Spawns the Hello World diagnostics app in Ring 3.
-///
-/// WHY the same seven capabilities as every other first-party app and nothing more: this
-/// app reads `/system/etc/policy.json` through `FileSystemRead`, logs through
-/// `SerialOutput`, and draws through `FrameBufferDirect`. It asks for no hardware.
-fn spawn_app_hello_world(id_security: TaskId) -> TaskId {
-    let mut caps = CapabilityTable::new(8);
-    caps.insert(Capability {
-        id: CapabilityId(3201),
-        cap_type: CapabilityType::SerialOutput,
-        rights: Rights::WRITE,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3202),
-        cap_type: CapabilityType::IpcSend,
-        rights: Rights::WRITE,
-        object_id: id_security.0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3203),
-        cap_type: CapabilityType::TimerTickRead,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3204),
-        cap_type: CapabilityType::FileSystemRead,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3205),
-        cap_type: CapabilityType::EventPoll,
-        rights: Rights::READ.union(Rights::INVOKE),
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3206),
-        cap_type: CapabilityType::IpcReceive,
-        rights: Rights::READ,
-        object_id: 0,
-    }).ok();
-    caps.insert(Capability {
-        id: CapabilityId(3207),
-        cap_type: CapabilityType::FrameBufferDirect,
-        rights: Rights::WRITE,
-        object_id: 1,
-    }).ok();
-
-    let id = crate::task::user::spawn_user_process_with_parent(
-        "hello_world",
-        crate::task::images::APP_HELLO_WORLD_ELF,
-        caps,
-        6,
-        id_security,
-    ).expect("Failed to spawn registered first-party app");
-    serial_println!("[OK] Spawned app_hello_world (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
 
@@ -5248,23 +4931,8 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         "org.interos.gallery" | "gallery" | "photos" => {
             crate::task::user::spawn_app_gallery(parent_id)
         }
-        "org.interos.health" | "health" => {
-            spawn_app_health(parent_id)
-        }
-        "org.interos.camera_preview" | "camera_preview" => {
-            spawn_app_camera_preview(parent_id)
-        }
-        "org.interos.hello_world" | "hello_world" => {
-            spawn_app_hello_world(parent_id)
-        }
-        "org.interos.meshchat" | "meshchat" => {
-            spawn_app_meshchat(parent_id)
-        }
         "org.interos.sensor_dashboard" | "sensor_dashboard" => {
             spawn_app_sensor_dashboard(parent_id)
-        }
-        "org.interos.test_app" | "test_app" => {
-            spawn_app_test_app(parent_id)
         }
         _ => {
             crate::serial_println!("[APP_LAUNCH DEBUG] unknown app_id: '{}'", app_id);
