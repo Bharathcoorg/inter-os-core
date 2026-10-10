@@ -321,6 +321,9 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         }
 
         // Flash Mode Toggle Pill at (x: 130..250, y: 28..68)
+        // WHY scale 1: scale 2 line height is 48px against a 40px pill so it
+        // clips vertically, and TORCH measures 136px at scale 2 against ~76px
+        // of text room beside the bolt. Scale 1 inks rows 36..60 in 28..68.
         if x >= 130 && x < 250 && y >= 28 && y < 68 {
             let rx = (x - 130).min(249 - x);
             let ry = (y - 28).min(67 - y);
@@ -353,7 +356,12 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                 &b"AUTO"[..]
             };
 
-            if let Some(c) = test_text(x, y, 174, 42, 2, label, icon_color) {
+            let scale = 1usize;
+            let tw = std::design::font::measure(label, scale);
+            // Text room right of the bolt: 168..244 (76 wide). OFF=38,
+            // AUTO=53, TORCH=68 at scale 1, all fit; center honestly.
+            let tx0 = 168 + (76usize.saturating_sub(tw)) / 2;
+            if let Some(c) = test_text(x, y, tx0, 36, scale, label, icon_color) {
                 return c;
             }
 
@@ -364,6 +372,9 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         }
 
         // Mode Tag Pill at (x: 280..440, y: 28..68)
+        // WHY scale 1: "48MP PRO" measures 194px at scale 2 against a 160px
+        // pill (and 48px line height against 40px height). At scale 1 it is
+        // 97px, centered with 31px side padding; rows 36..60 fit in 28..68.
         if x >= 280 && x < 440 && y >= 28 && y < 68 {
             let rx = (x - 280).min(439 - x);
             let ry = (y - 28).min(67 - y);
@@ -375,7 +386,11 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                 }
             }
 
-            if let Some(c) = test_text(x, y, 304, 42, 2, b"48MP PRO", ACCENT_SKY) {
+            let tag: &[u8] = b"48MP PRO";
+            let scale = 1usize;
+            let tw = std::design::font::measure(tag, scale);
+            let tx0 = 280 + (160usize.saturating_sub(tw)) / 2;
+            if let Some(c) = test_text(x, y, tx0, 36, scale, tag, ACCENT_SKY) {
                 return c;
             }
 
@@ -386,6 +401,9 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         }
 
         // ISP Filter Toggle Pill at (x: 470..610, y: 28..68)
+        // WHY scale 1: CONTRAST measures 212px at scale 2 against a 140px
+        // pill. At scale 1 the longest filter (CONTRAST=106) fits with 17px
+        // side padding; rows 36..60 fit in 28..68. Label centered via measure.
         if x >= 470 && x < 610 && y >= 28 && y < 68 {
             let rx = (x - 470).min(609 - x);
             let ry = (y - 28).min(67 - y);
@@ -405,8 +423,10 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                 CameraFilter::NeuralHeatmap => (&b"HEATMAP"[..], DANGER_CRIMSON),
             };
 
-            let label_x = 540 - (filter_name.len() * 16) / 2;
-            if let Some(c) = test_text(x, y, label_x, 42, 2, filter_name, filter_color) {
+            let scale = 1usize;
+            let tw = std::design::font::measure(filter_name, scale);
+            let label_x = 470 + (140usize.saturating_sub(tw)) / 2;
+            if let Some(c) = test_text(x, y, label_x, 36, scale, filter_name, filter_color) {
                 return c;
             }
 
@@ -417,6 +437,10 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         }
 
         // NPU Vision AI Badge at (x: 630..696, y: 28..68)
+        // WHY scale 1 with the rest of the row: scale 2 line height (48px)
+        // never fits a 40px pill vertically. "AI" is 20px at scale 1,
+        // centered with 23px side padding; rows 36..60 fit in 28..68.
+        // Badge ends at 696, leaving a 24px right margin to 720: no clipping.
         if x >= 630 && x < 696 && y >= 28 && y < 68 {
             let rx = (x - 630).min(695 - x);
             let ry = (y - 28).min(67 - y);
@@ -428,7 +452,11 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                 }
             }
 
-            if let Some(c) = test_text(x, y, 648, 42, 2, b"AI", SUCCESS_EMERALD) {
+            let badge: &[u8] = b"AI";
+            let scale = 1usize;
+            let tw = std::design::font::measure(badge, scale);
+            let tx0 = 630 + (66usize.saturating_sub(tw)) / 2;
+            if let Some(c) = test_text(x, y, tx0, 36, scale, badge, SUCCESS_EMERALD) {
                 return c;
             }
 
@@ -467,10 +495,17 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             return ACCENT_AMBER;
         }
 
-        // Zoom badge overlay at bottom of viewfinder (rel_y: 960..1010, rel_x: 280..400)
-        if (960..1010).contains(&rel_y) && (280..400).contains(&rel_x) {
-            let rx = (rel_x - 280).min(399 - rel_x);
-            let ry = (rel_y - 960).min(1009 - rel_y);
+        // Zoom pill, fully inside the viewfinder: abs x 296..424, abs y
+        // 994..1050 (rel_x 276..404, rel_y 874..930). The old pill sat at abs
+        // y 1080..1130 with text rows 1098..1146, so its bottom 10px spilled
+        // past the 1120 viewfinder edge and its descenders clipped at 1130;
+        // on-device it read as half-covered by the control strip. This pill
+        // ends 70px above the viewfinder edge and 100px above the 1150 mode
+        // strip, so it can never be covered. "1.0x" measures 78px at scale 2
+        // against 128px width; rows 998..1046 fit in 994..1050.
+        if (874..930).contains(&rel_y) && (276..404).contains(&rel_x) {
+            let rx = (rel_x - 276).min(403 - rel_x);
+            let ry = (rel_y - 874).min(929 - rel_y);
             if rx < 18 && ry < 18 {
                 let cdx = (18 - rx) as isize;
                 let cdy = (18 - ry) as isize;
@@ -485,7 +520,11 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                 _ => &b"5.0x"[..],
             };
 
-            if let Some(c) = test_text(x, y, 308, 120 + 978, 2, zoom_str, TEXT_PRIMARY) {
+            let scale = 2usize;
+            let tw = std::design::font::measure(zoom_str, scale);
+            let tx0 = 296 + (128usize.saturating_sub(tw)) / 2;
+            // y0 = 994 + (56 - 48) / 2 = 998
+            if let Some(c) = test_text(x, y, tx0, 998, scale, zoom_str, TEXT_PRIMARY) {
                 return c;
             }
 
@@ -504,34 +543,73 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         return 0xFF080D1A;
     }
 
-    // 3. Mode Selector Carousel (y: 1150..1200)
+    // 3. Mode Selector Carousel (y: 1150..1200, 50px tall, >=48px touch)
+    // WHY three equal slots in 20..700 (outer 20px margins, aligned with the
+    // viewfinder): S0 20..246, S1 247..473, S2 474..700, each 226 wide with
+    // 1px separators. The old row inked DOCUMENTS at 108..352 and PHOTO at
+    // 320..456 at scale 2, a 32px overlap, and y0=1166 left only 34px of the
+    // 50px strip for 48px glyphs so descenders clipped at 1200. Now each
+    // label is centered in its own slot via measure: DOCUMENT=220px at
+    // scale 2 fits its 226px slot (23..243), PHOTO=136 (292..428),
+    // VIDEO=118 (528..646); gaps 49px/100px, never overlapping. Step-down:
+    // try scale 2, drop the whole row to scale 1 if any label misses its
+    // slot; never truncate mid-word. y0 centers the line height in the strip.
     if (1150..1200).contains(&y) {
-        // Document Vision (x: 80..250)
+        const S0_X: usize = 20;
+        const S0_W: usize = 226;
+        const S1_X: usize = 247;
+        const S1_W: usize = 226;
+        const S2_X: usize = 474;
+        const S2_W: usize = 226;
+        const DOC: &[u8] = b"DOCUMENT";
+        const PHO: &[u8] = b"PHOTO";
+        const VID: &[u8] = b"VIDEO";
+
+        let mut scale = 2usize;
+        if std::design::font::measure(DOC, 2) > S0_W
+            || std::design::font::measure(PHO, 2) > S1_W
+            || std::design::font::measure(VID, 2) > S2_W
+        {
+            scale = 1;
+        }
+        let lh = std::design::font::line_height(scale);
+        // Strip is 50px tall: y0 = 1150 + (50 - lh) / 2 -> 1151 at scale 2
+        // (inks 1151..1199 inside 1150..1200), 1163 at scale 1.
+        let y0 = 1150 + (50usize.saturating_sub(lh)) / 2;
+
+        // Document (slot 0)
         let is_doc = camera.mode == CameraMode::DocumentVision;
         let doc_color = if is_doc { TEXT_PRIMARY } else { TEXT_MUTED };
-        if let Some(c) = test_text(x, y, 108, 1166, 2, b"DOCUMENTS", doc_color) {
+        let doc_w = std::design::font::measure(DOC, scale);
+        let doc_x = S0_X + (S0_W.saturating_sub(doc_w)) / 2;
+        if let Some(c) = test_text(x, y, doc_x, y0, scale, DOC, doc_color) {
             return c;
         }
 
-        // Photo (x: 270..450)
+        // Photo (slot 1)
         let is_photo = camera.mode == CameraMode::Photo;
         let photo_color = if is_photo { TEXT_PRIMARY } else { TEXT_MUTED };
-        if let Some(c) = test_text(x, y, 320, 1166, 2, b"PHOTO", photo_color) {
+        let pho_w = std::design::font::measure(PHO, scale);
+        let pho_x = S1_X + (S1_W.saturating_sub(pho_w)) / 2;
+        if let Some(c) = test_text(x, y, pho_x, y0, scale, PHO, photo_color) {
             return c;
         }
 
-        // Video (x: 460..580)
+        // Video (slot 2)
         let is_vid = camera.mode == CameraMode::Video;
         let vid_color = if is_vid { TEXT_PRIMARY } else { TEXT_MUTED };
-        if let Some(c) = test_text(x, y, 480, 1166, 2, b"VIDEO", vid_color) {
+        let vid_w = std::design::font::measure(VID, scale);
+        let vid_x = S2_X + (S2_W.saturating_sub(vid_w)) / 2;
+        if let Some(c) = test_text(x, y, vid_x, y0, scale, VID, vid_color) {
             return c;
         }
 
-        // Active mode indicator underline
+        // Active mode indicator underline, 64px centered in the active slot.
+        // All-caps labels carry no descender ink, so rows 1194..1198 stay clear.
         let is_active_mode = match camera.mode {
-            CameraMode::Photo => x >= 300 && x < 420,
-            CameraMode::Video => x >= 460 && x < 580,
-            CameraMode::DocumentVision => x >= 90 && x < 240,
+            CameraMode::Photo => x >= 328 && x < 392,
+            CameraMode::Video => x >= 555 && x < 619,
+            CameraMode::DocumentVision => x >= 101 && x < 165,
             _ => false,
         };
         if is_active_mode && y >= 1194 && y < 1198 {
@@ -689,8 +767,8 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> bool {
         return false;
     }
 
-    // 4. Zoom toggle pill in viewfinder
-    if (1080..1130).contains(&y) && (300..420).contains(&x) {
+    // 4. Zoom toggle pill in viewfinder (matches render: 296..424, 994..1050)
+    if (994..1050).contains(&y) && (296..424).contains(&x) {
         camera.zoom_x10 = match camera.zoom_x10 {
             10 => 20,
             20 => 50,
@@ -700,15 +778,16 @@ fn handle_camera_touch(camera: &mut CameraApp, x: u32, y: u32) -> bool {
         return false;
     }
 
-    // 5. Mode Selector Carousel (1150..1200)
+    // 5. Mode Selector Carousel (1150..1200): three equal 226px slots in
+    // 20..700, matching the render slots exactly (50px tall, >=48).
     if (1150..1200).contains(&y) {
-        if x >= 80 && x < 250 {
+        if x >= 20 && x < 246 {
             camera.mode = CameraMode::DocumentVision;
             std::log(0, "[CAMERA APP] Switched to Document Vision mode.").ok();
-        } else if x >= 270 && x < 450 {
+        } else if x >= 247 && x < 473 {
             camera.mode = CameraMode::Photo;
             std::log(0, "[CAMERA APP] Switched to Photo mode.").ok();
-        } else if x >= 460 && x < 580 {
+        } else if x >= 474 && x < 700 {
             camera.mode = CameraMode::Video;
             std::log(0, "[CAMERA APP] Switched to Video mode.").ok();
         }
