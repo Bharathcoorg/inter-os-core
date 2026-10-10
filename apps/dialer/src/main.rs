@@ -9,6 +9,31 @@
 //! - Android Compatibility Runtime (ACR) cross-zone intent bridge dispatch
 //! - DRM/KMS Client Surface Rendering (z=200) with Mobile Phone Keypad & Status Display
 //! - Asynchronous event reactor loop handling touch input, modem URCs, and timers
+//!
+//! Typed input (mirrors `apps/browser/src/main.rs`):
+//! - The dialed-number display is now a real keyboard target. `0-9`, `*` and `#`
+//!   append and play the real DTMF tone, BACKSPACE deletes, ENTER dials, ESCAPE
+//!   clears the entry and TAB steps the section. The app previously had no key
+//!   handler at all.
+//!
+//! Live vs. honestly-disabled controls (nothing here is drawn and inert any more):
+//! - The segmented tabs and the bottom dock were both drawn and both dead. They
+//!   now drive one real `DialerSection` state: Keypad and Recents are live;
+//!   Contacts is drawn in the recessed treatment because the platform exposes no
+//!   contact store, and a tap on it reports that rather than doing nothing.
+//! - Recents is backed by a real ledger of every dial attempt this session made
+//!   and the outcome the telephony service actually returned for it.
+//! - The signal bars are drawn from the real `"bars"` field of the modem
+//!   telemetry, not from a boolean. The battery is drawn only when
+//!   `battery_query` actually returned a state-of-charge; otherwise nothing is
+//!   drawn there, as the browser does for telemetry it does not receive.
+//! - The call control is drawn recessed while the number field is empty, because
+//!   there is nothing it could dial.
+//!
+//! Banded rendering:
+//! - `Dirty` + `render_dialer_band(surface, app, y0, y1)` mirror the browser. The
+//!   previous renderer pushed all 1,036,800 pixels through `get_dialer_pixel` for
+//!   every touch event and every keystroke.
 
 #![no_std]
 #![no_main]
@@ -29,6 +54,61 @@ pub enum CallState {
     ActiveCall = 3,
     CallHeld = 4,
     CallEnded = 5,
+}
+
+/// Which content the tabs and the dock select.
+///
+/// WHY an enum with no `Contacts` arm: the platform exposes no contact store
+/// (`CONTACTS_BOOK` is a zero-length array by design), so there is no contacts
+/// screen to select. The tab and the dock slot that used to imply one are drawn
+/// in the recessed, unavailable treatment instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialerSection {
+    /// The 3x4 dial pad and the call controls.
+    Keypad = 0,
+    /// The real ledger of dial attempts made in this session.
+    Recents = 1,
+}
+
+/// Real outcome of the last call attempt, drawn under the dialed number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallOutcome {
+    /// No attempt yet.
+    Idle,
+    /// A dial request is with the telephony service.
+    Dialing,
+    /// The telephony service accepted the call.
+    Active,
+    /// The telephony service refused the call.
+    Refused,
+    /// An emergency dial attempt was refused by the telephony service.
+    EmergencyRefused,
+}
+
+impl CallOutcome {
+    /// Caption drawn under the dialed number. Empty for `Idle` - an empty run is
+    /// never drawn at all, so an idle dialer shows no status line rather than a
+    /// placeholder that could be mistaken for one.
+    fn caption(&self) -> &'static [u8] {
+        match self {
+            CallOutcome::Idle => b"",
+            CallOutcome::Dialing => b"Calling...",
+            CallOutcome::Active => b"Call active",
+            CallOutcome::Refused => b"Call refused by the telephony service",
+            CallOutcome::EmergencyRefused => b"Emergency call refused by the telephony service",
+        }
+    }
+}
+
+/// One real entry in the recents ledger.
+#[derive(Clone, Copy)]
+pub struct CallRecord {
+    pub number: [u8; 32],
+    pub len: usize,
+    /// `true` only when `telephony_dial` returned `Ok`.
+    pub accepted: bool,
+    /// `true` when the entry came from the emergency control.
+    pub emergency: bool,
 }
 
 /// Keypad DTMF frequency pair (low frequency, high frequency in Hz).
@@ -105,6 +185,10 @@ pub struct Contact {
 /// Contacts are populated only from real user/contact state.
 pub static CONTACTS_BOOK: [Contact; 0] = [];
 
+/// Entries the recents ledger keeps. Bounded so the ledger stays a fixed-size
+/// stack allocation; the oldest entry is dropped once it is full.
+const RECENTS_CAP: usize = 5;
+
 /// Production Telephony Dialer state manager.
 pub struct DialerApp {
     pub state: CallState,
@@ -116,6 +200,19 @@ pub struct DialerApp {
     pub calls_completed: u32,
     /// Whether the telephony service actually reported a baseband present.
     pub modem_present: bool,
+    /// Section the tabs and the dock select.
+    pub section: DialerSection,
+    /// Real outcome of the last call attempt.
+    pub outcome: CallOutcome,
+    /// Signal bars as the modem HAL reported them (0..=4), never invented from
+    /// the `present` boolean.
+    pub signal_bars: u8,
+    /// State of charge as `battery_query` reported it. `None` when the kernel
+    /// refused or reported no fuel gauge, in which case nothing is drawn.
+    pub battery_soc: Option<u8>,
+    /// Real ledger of dial attempts, newest first.
+    pub recents: [CallRecord; RECENTS_CAP],
+    pub recents_len: usize,
 }
 
 impl DialerApp {
@@ -131,12 +228,28 @@ impl DialerApp {
             // WHY: fail closed. Until the telephony service reports a baseband,
             // no inbound-call path may be claimed.
             modem_present: false,
+            section: DialerSection::Keypad,
+            outcome: CallOutcome::Idle,
+            signal_bars: 0,
+            battery_soc: None,
+            recents: [CallRecord {
+                number: [0; 32],
+                len: 0,
+                accepted: false,
+                emergency: false,
+            }; RECENTS_CAP],
+            recents_len: 0,
         }
     }
 
     /// Plays dual-tone multi-frequency acoustic feedback for a pressed keypad digit.
     pub fn play_dtmf(&self, digit: char) {
         if let Some(pair) = get_dtmf_frequencies(digit) {
+            // WHY only the high tone: the audio service exposes a single
+            // oscillator (`audio_play_tone`), so only one of the two CCITT
+            // frequencies can ever be emitted. The low tone is reported by
+            // `get_dtmf_frequencies` and drawn in the key sublabel, never
+            // claimed to have sounded.
             std::audio_play_tone(pair.high_freq).ok();
             std::audio_haptic_click().ok();
             std::audio_silence().ok();
@@ -160,13 +273,68 @@ impl DialerApp {
         }
     }
 
+    /// Clears the entry without placing a call.
+    pub fn clear_entry(&mut self) {
+        if self.active_len > 0 {
+            self.active_len = 0;
+            let _ = std::audio_haptic_click();
+        }
+    }
+
+    /// Appends one real dial attempt to the recents ledger, newest first.
+    fn record_call(&mut self, number: &str, accepted: bool, emergency: bool) {
+        let n = number.len().min(self.active_number.len());
+        let mut entry = CallRecord {
+            number: [0u8; 32],
+            len: n,
+            accepted,
+            emergency,
+        };
+        let mut idx = 0usize;
+        while idx < n {
+            entry.number[idx] = number.as_bytes()[idx];
+            idx += 1;
+        }
+        if self.recents_len < RECENTS_CAP {
+            self.recents_len += 1;
+            for i in (1..self.recents_len).rev() {
+                self.recents[i] = self.recents[i - 1];
+            }
+        } else {
+            // The ledger is full: the oldest entry is dropped so the newest
+            // attempt is always the one on screen.
+            for i in (1..RECENTS_CAP).rev() {
+                self.recents[i] = self.recents[i - 1];
+            }
+        }
+        self.recents[0] = entry;
+    }
+
     /// Initiates an outgoing cellular call.
     pub fn dial(&mut self, number: &str) -> Result<(), i64> {
+        self.dial_internal(number, false)
+    }
+
+    /// Places an emergency call after entering the real emergency number.
+    ///
+    /// The platform's emergency pipeline is E911/112; the digits below are the
+    /// number that is actually sent, so the ledger and the status line can both
+    /// name it.
+    pub fn dial_emergency(&mut self) -> Result<(), i64> {
+        self.active_len = 0;
+        self.input_digit('9');
+        self.input_digit('1');
+        self.input_digit('1');
+        self.dial_internal("911", true)
+    }
+
+    fn dial_internal(&mut self, number: &str, emergency: bool) -> Result<(), i64> {
         if number.is_empty() || number.len() > self.active_number.len() {
             return Err(-22);
         }
 
         self.state = CallState::Dialing;
+        self.outcome = CallOutcome::Dialing;
         self.call_duration_secs = 0;
 
         // A call is connected only after the authoritative telephony service
@@ -175,20 +343,28 @@ impl DialerApp {
         match std::telephony_dial(number) {
             Ok(()) => {
                 self.state = CallState::ActiveCall;
+                self.outcome = CallOutcome::Active;
                 std::audio_play_tone(440).ok();
                 std::audio_silence().ok();
                 std::log(0, "[DIALER APP] Telephony service accepted call request.").ok();
+                self.record_call(number, true, emergency);
                 Ok(())
             }
             Err(err) => {
                 self.state = CallState::CallEnded;
+                self.outcome = if emergency {
+                    CallOutcome::EmergencyRefused
+                } else {
+                    CallOutcome::Refused
+                };
                 std::log(0, "[DIALER APP] Call request rejected by telephony service.").ok();
+                self.record_call(number, false, emergency);
                 Err(err)
             }
         }
     }
 
-/// Terminates an active call.
+    /// Terminates an active call.
     ///
     /// Only a call that actually reached the telephony service counts as
     /// completed and only that case releases a channel.
@@ -228,6 +404,15 @@ impl DialerApp {
             .ok();
         }
     }
+
+    /// Steps the section. Contacts is deliberately not a target.
+    pub fn step_section(&mut self) -> DialerSection {
+        self.section = match self.section {
+            DialerSection::Keypad => DialerSection::Recents,
+            DialerSection::Recents => DialerSection::Keypad,
+        };
+        self.section
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -239,6 +424,11 @@ const SURFACE_RAISED: u32 = 0xFFEFEEE9;
 const BORDER_SUBTLE: u32 = 0xFFE1E0DB;
 const TEXT_PRIMARY: u32 = 0xFF111214;
 const TEXT_MUTED: u32 = 0xFF777773;
+/// One step below `SURFACE_RAISED`, so a control that cannot act reads as
+/// pushed in rather than merely tinted.
+const DISABLED_FILL: u32 = 0xFFE6E5E0;
+/// The disabled ink, one step below `TEXT_MUTED`.
+const DISABLED_INK: u32 = 0xFFA9A8A3;
 const ACCENT_SKY: u32 = 0xFF2563EB;
 const SUCCESS_EMERALD: u32 = 0xFF2E8B57;
 const DANGER_CRIMSON: u32 = 0xFFDC2626;
@@ -304,12 +494,26 @@ const TAB2_X1: usize = TAB2_X0 + 152 + 2 * TAB_PAD; // "Recents" measures 152px
 const TAB3_X0: usize = TAB2_X1 + 18;
 const TAB3_X1: usize = TAB3_X0 + 170 + 2 * TAB_PAD; // "Contacts" measures 170px
 const TAB_ACTIVE_FILL: u32 = 0xFF111214;
+const TAB_LABELS: [&[u8]; 3] = [b"Dial", b"Recents", b"Contacts"];
 
 // Dialed-number display card.
 const DISPLAY_X0: usize = 24;
 const DISPLAY_X1: usize = 696;
+const DISPLAY_Y0: usize = 170;
+const DISPLAY_Y1: usize = 380;
+const DISPLAY_W: usize = DISPLAY_X1 - DISPLAY_X0;
 const PLACEHOLDER_SCALE: usize = 2;
 const PLACEHOLDER_Y0: usize = 250;
+/// Real call-outcome caption under the dialed number. A scale-1 run owns
+/// run_rows(1) = 24 rows, so 344..368 clears the 96-row scale-4 digit box at
+/// 240..336 and stays inside the card's 380-row bottom edge.
+const OUTCOME_Y0: usize = 344;
+
+// Backspace control in the display card. Hit-tested against exactly the disc
+// that is drawn (the old hit box was a 75x70 rectangle around a 48 px circle).
+const BACKSPACE_CX: usize = 627;
+const BACKSPACE_CY: usize = 260;
+const BACKSPACE_R: i32 = 24;
 
 // Keypad disc and its two stacked runs.
 const KEY_R: i32 = 50;
@@ -323,9 +527,42 @@ const SOS_R: i32 = 40;
 const SOS_SCALE: usize = 2;
 const SOS_FILL: u32 = 0xFF2A1518;
 
+// Central call control.
+const CALL_CX: usize = 360;
+const CALL_CY: usize = 1065;
+const CALL_R: i32 = 52;
+
+// Contacts shortcut control. The platform exposes no contact store, so this is
+// drawn recessed and says so on tap.
+const CONTACTS_CX: usize = 586;
+const CONTACTS_CY: usize = 1065;
+const CONTACTS_R: i32 = 40;
+
+// Action bar band (the three discs above live in it).
+const ACTION_Y0: usize = 990;
+const ACTION_Y1: usize = 1140;
+
+// Recents ledger geometry. WHY it starts at 424 rather than 410: the first row
+// needs room for a scale-2 run (48 rows) plus a scale-1 run (24 rows) inside an
+// 96 px row, and 410 would push the last of five rows past the action bar.
+const RECENTS_Y0: usize = 424;
+const RECENTS_ROW_H: usize = 96;
+const CONTENT_Y0: usize = 410;
+const CONTENT_Y1: usize = 1140;
+
 // Bottom navigation dock.
+const DOCK_Y0: usize = 1260;
+const DOCK_Y1: usize = 1380;
+const DOCK_ITEM_W: usize = 140;
+/// WHY these x positions: they are the four 140 px slots the previous renderer
+/// hard-coded its labels against, kept so the dock does not move.
+const DOCK_ITEM_X0: [usize; 4] = [48, 208, 368, 528];
+const DOCK_LABELS: [&[u8]; 4] = [b"Favorites", b"Recents", b"Keypad", b"Contacts"];
 const DOCK_LABEL_Y0: usize = 1340;
 const DOCK_LABEL_SCALE: usize = 1;
+/// Icon band inside the dock plate: a scale-1 label below, a 36 px glyph above.
+const DOCK_ICON_Y0: usize = 1290;
+const DOCK_ICON_H: usize = 36;
 
 // Keypad layout constants
 const BTN_W: usize = 180;
@@ -367,191 +604,263 @@ fn get_keypad_sublabel(row: usize, col: usize) -> &'static [u8] {
 }
 
 // -----------------------------------------------------------------------------
+// Telemetry parsing. Both helpers read a real JSON field out of a real syscall
+// payload; neither guesses a default.
+// -----------------------------------------------------------------------------
+
+/// Reads `"<key>":<digits>` out of a JSON payload.
+///
+/// WHY: the modem HAL emits a real `"bars"` field and the fuel gauge emits a
+/// real `"soc"` field. Parsing them is the difference between a signal meter
+/// that reflects the radio and one that reflects a boolean.
+fn json_u8(json: &[u8], key: &str) -> Option<u8> {
+    let pat = key.as_bytes();
+    let mut i = 0usize;
+    while i + pat.len() < json.len() {
+        if &json[i..i + pat.len()] == pat
+            && json[i + pat.len()] == b':'
+            && i + pat.len() > 0
+            && json[i + pat.len() - 1] == b'"'
+        {
+            let mut j = i + pat.len() + 1;
+            let mut v: u32 = 0;
+            let mut any = false;
+            while j < json.len() && json[j].is_ascii_digit() {
+                v = v.saturating_mul(10).saturating_add((json[j] - b'0') as u32);
+                any = true;
+                j += 1;
+            }
+            if any && v <= 255 {
+                return Some(v as u8);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// True when the payload contains the exact literal `"present":true`.
+fn json_present_true(json: &[u8]) -> bool {
+    let pat = b"\"present\":true";
+    if json.len() < pat.len() {
+        return false;
+    }
+    let mut i = 0usize;
+    while i + pat.len() <= json.len() {
+        if &json[i..i + pat.len()] == pat {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+// -----------------------------------------------------------------------------
 // Pixel Color Resolution Engine
 // -----------------------------------------------------------------------------
-#[inline(never)]
-fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
-    // 1. Status Bar & Header (y: 0..HEADER_H)
-    if y < HEADER_H {
-        if y >= 94 {
-            return BORDER_SUBTLE;
-        }
 
-        // Back button (<) at (x: 24..100, y: 28..68)
-        if x >= 24 && x < 100 && y >= 28 && y < 68 {
-            let center_x = 62;
-            let center_y = 48;
-            let dx = (x as isize - center_x as isize).abs();
-            let dy = (y as isize - center_y as isize).abs();
-            if (dx + dy <= 12 && x <= center_x)
-                || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
-            {
-                return TEXT_PRIMARY;
-            }
-            return SURFACE_RAISED;
-        }
+/// Header band: back control, title, real signal bars, real battery.
+fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
+    if y >= HEADER_H {
+        return BORDER_SUBTLE;
+    }
 
-        // Header Title: "Phone". The run is scale 3, so it needs
-        // run_rows(3) = 72 rows; the 94-row header band has room, so the line
-        // box is centred in it instead of being gated to a 24-row window that
-        // kept only 18 of the glyph's 57 ink rows.
-        let title_rows = run_rows(TITLE_SCALE);
-        let title_y0 = (HEADER_H - title_rows) / 2;
-        if y >= title_y0 && y < title_y0 + title_rows {
-            if let Some(c) = test_text(x, y, 120, title_y0, TITLE_SCALE, b"Phone", TEXT_PRIMARY, SURFACE_DARK) {
-                return c;
-            }
+    // Back button (<) at (x: 24..100, y: 28..68)
+    if x >= 24 && x < 100 && y >= 28 && y < 68 {
+        let center_x = 62;
+        let center_y = 48;
+        let dx = (x as isize - center_x as isize).abs();
+        let dy = (y as isize - center_y as isize).abs();
+        if (dx + dy <= 12 && x <= center_x)
+            || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
+        {
+            return TEXT_PRIMARY;
         }
+        return SURFACE_RAISED;
+    }
 
-        // Cellular signal indicator (x: 610..670, y: 40..62)
-        if x >= 610 && x < 670 && y >= 40 && y < 62 {
-            let bar_idx = (x - 610) / 15;
-            let bar_x = (x - 610) % 15;
-            let bar_min_y = 62 - (bar_idx + 1) * 5;
-            if bar_x < 9 && y >= bar_min_y {
-                return if dialer.modem_present { ACCENT_SKY } else { BORDER_SUBTLE };
-            }
-            return SURFACE_DARK;
+    // Header Title: "Phone". The run is scale 3, so it needs
+    // run_rows(3) = 72 rows; the 94-row header band has room, so the line
+    // box is centred in it instead of being gated to a 24-row window that
+    // kept only 18 of the glyph's 57 ink rows.
+    let title_rows = run_rows(TITLE_SCALE);
+    let title_y0 = (HEADER_H - title_rows) / 2;
+    if y >= title_y0 && y < title_y0 + title_rows {
+        if let Some(c) = test_text(x, y, 120, title_y0, TITLE_SCALE, b"Phone", TEXT_PRIMARY, SURFACE_DARK) {
+            return c;
         }
+    }
 
-        // Battery indicator (x: 678..706, y: 44..58)
-        if x >= 678 && x < 706 && y >= 44 && y < 58 {
-            if x == 678 || x == 702 || y == 44 || y == 57 || (x >= 703 && y >= 48 && y < 54) {
-                return TEXT_MUTED;
-            }
-            return SURFACE_DARK;
+    // Cellular signal indicator (x: 610..670, y: 40..62)
+    //
+    // WHY the bar count is real: the previous renderer filled all four bars from
+    // the `modem_present` boolean, so a present-but-idle radio drew a full
+    // signal. `signal_bars` is the `"bars"` field of the modem telemetry.
+    if x >= 610 && x < 670 && y >= 40 && y < 62 {
+        let bar_idx = (x - 610) / 15;
+        let bar_x = (x - 610) % 15;
+        let bar_min_y = 62 - (bar_idx + 1) * 5;
+        if bar_x < 9 && y >= bar_min_y {
+            return if (bar_idx as u8) < dialer.signal_bars {
+                ACCENT_SKY
+            } else {
+                BORDER_SUBTLE
+            };
         }
-
         return SURFACE_DARK;
     }
 
-    // 2. Segmented Navigation Tabs (y: 105..155)
+    // Battery indicator (x: 678..706, y: 44..58)
     //
-    // The scale-2 label needs run_rows(2) = 48 rows, which fits the 50-row band
-    // only when the label is centred in it, and each capsule is sized to its own
-    // proportional label so nothing is cut off at the capsule edge.
-    if (TAB_BAND_Y0..TAB_BAND_Y0 + TAB_BAND_H).contains(&y) {
-        let label_y0 = TAB_BAND_Y0 + (TAB_BAND_H - run_rows(TAB_SCALE)) / 2;
-
-        // Tab 1: "Dial" (Active Capsule: x: 48..150)
-        if x >= TAB1_X0 && x < TAB1_X1 {
-            let label_x0 =
-                TAB1_X0 + std::design::font::center_x(b"Dial", TAB_SCALE, TAB1_X1 - TAB1_X0);
-            if let Some(c) = test_text(
-                x,
-                y,
-                label_x0,
-                label_y0,
-                TAB_SCALE,
-                b"Dial",
-                0xFFFFFFFF,
-                TAB_ACTIVE_FILL,
-            ) {
-                return c;
+    // WHY it is drawn only when the fuel gauge answered: this app holds no
+    // power-control capability, so `battery_query` is refused and there is no
+    // state of charge to draw. An always-drawn empty shell read as "battery at
+    // 0%", which is a hardware claim this app cannot make. The browser takes the
+    // same approach for telemetry it does not receive: draw nothing.
+    if x >= 678 && x < 706 && y >= 44 && y < 58 {
+        if let Some(soc) = dialer.battery_soc {
+            let pct = soc.min(100) as usize;
+            let inner_x0 = 681usize;
+            let inner_x1 = 701usize;
+            let inner_w = inner_x1 - inner_x0;
+            let fill_w = inner_w * pct / 100;
+            // Outline.
+            if x == 678 || x == 702 || y == 44 || y == 57 || (x >= 703 && y >= 48 && y < 54) {
+                return TEXT_MUTED;
             }
-            return TAB_ACTIVE_FILL;
-        }
-        // Tab 2: "Recents" (Inactive: x: 168..352)
-        if x >= TAB2_X0 && x < TAB2_X1 {
-            let label_x0 = TAB2_X0
-                + std::design::font::center_x(b"Recents", TAB_SCALE, TAB2_X1 - TAB2_X0);
-            if let Some(c) = test_text(
-                x,
-                y,
-                label_x0,
-                label_y0,
-                TAB_SCALE,
-                b"Recents",
-                TEXT_MUTED,
-                SURFACE_RAISED,
-            ) {
-                return c;
+            // Real fill from the reported state of charge.
+            if x >= inner_x0 && x < inner_x0 + fill_w && y >= 46 && y < 56 {
+                return TEXT_PRIMARY;
             }
-            return SURFACE_RAISED;
         }
-        // Tab 3: "Contacts" (Inactive: x: 370..572)
-        if x >= TAB3_X0 && x < TAB3_X1 {
-            let label_x0 = TAB3_X0
-                + std::design::font::center_x(b"Contacts", TAB_SCALE, TAB3_X1 - TAB3_X0);
-            if let Some(c) = test_text(
-                x,
-                y,
-                label_x0,
-                label_y0,
-                TAB_SCALE,
-                b"Contacts",
-                TEXT_MUTED,
-                SURFACE_RAISED,
-            ) {
-                return c;
-            }
-            return SURFACE_RAISED;
-        }
+        return SURFACE_DARK;
     }
 
-    // 2b. Call Status & Dialed Number Display (y: 170..380, x: 24..696)
-    if (170..380).contains(&y) && x >= DISPLAY_X0 && x < DISPLAY_X1 {
-        // Dialed Digits Display
-        if dialer.active_len > 0 {
-            let scale = if dialer.active_len <= 10 { 4 } else { 3 };
-            let y0 = 240;
-            // Real proportional advances; digits are tabular but a fixed
-            // 8px-per-character cell is not the face's advance.
-            if y >= y0 && y < y0 + run_rows(scale) {
-                let digits = &dialer.active_number[..dialer.active_len];
-                let total_w = std::design::font::measure(digits, scale);
-                let x0 = W.saturating_sub(total_w) / 2;
-                if let Some(c) = test_text(x, y, x0, y0, scale, digits, TEXT_PRIMARY, BG_DARK) {
-                    return c;
-                }
-            }
-        } else if y >= PLACEHOLDER_Y0 && y < PLACEHOLDER_Y0 + run_rows(PLACEHOLDER_SCALE) {
-            // Placeholder: scale 2 needs run_rows(2) = 48 rows, not the 16 the
-            // old gate admitted, and the card centres the label on its measured
-            // width instead of a hand-typed x0 that parked it ~95px right of
-            // centre.
-            let x0 = DISPLAY_X0
-                + std::design::font::center_x(
-                    b"Enter a phone number",
-                    PLACEHOLDER_SCALE,
-                    DISPLAY_X1 - DISPLAY_X0,
-                );
-            if let Some(c) = test_text(
-                x,
-                y,
-                x0,
-                PLACEHOLDER_Y0,
-                PLACEHOLDER_SCALE,
-                b"Enter a phone number",
-                TEXT_MUTED,
-                BG_DARK,
-            ) {
-                return c;
-            }
-        }
+    SURFACE_DARK
+}
 
-        // Backspace button in display card (627, 260, r: 24)
-        if dialer.active_len > 0 {
-            let bx = 627i32;
-            let by = 260i32;
-            let dx = (x as i32) - bx;
-            let dy = (y as i32) - by;
-            if dx * dx + dy * dy <= 576 {
-                if dx * dx + dy * dy >= 484 {
-                    return DANGER_CRIMSON;
-                }
-                // Backspace icon 'X' inside
-                if dx.abs() <= 7 && dy.abs() <= 7 && (dx == dy || dx == -dy) {
-                    return DANGER_CRIMSON;
-                }
-                return 0xFFFEE2E2;
-            }
+/// Segmented tabs. `Contacts` is drawn in the recessed treatment because there
+/// is no contact store behind it.
+fn tabs_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
+    if !(TAB_BAND_Y0..TAB_BAND_Y0 + TAB_BAND_H).contains(&y) {
+        return BG_DARK;
+    }
+    let label_y0 = TAB_BAND_Y0 + (TAB_BAND_H - run_rows(TAB_SCALE)) / 2;
+    let ranges = [(TAB1_X0, TAB1_X1), (TAB2_X0, TAB2_X1), (TAB3_X0, TAB3_X1)];
+    for (i, (x0, x1)) in ranges.iter().enumerate() {
+        if x < *x0 || x >= *x1 {
+            continue;
         }
+        let w = x1 - x0;
+        // Tab 2 is the only section the contacts tab could ever have opened, and
+        // no contact store exists, so it never takes the active treatment.
+        let active = match dialer.section {
+            DialerSection::Keypad => i == 0,
+            DialerSection::Recents => i == 1,
+        };
+        let (fill, ink) = if active {
+            (TAB_ACTIVE_FILL, 0xFFFFFFFF)
+        } else if i == 2 {
+            (DISABLED_FILL, DISABLED_INK)
+        } else {
+            (SURFACE_RAISED, TEXT_MUTED)
+        };
+        let label_x0 = *x0 + std::design::font::center_x(TAB_LABELS[i], TAB_SCALE, w);
+        if let Some(c) = test_text(x, y, label_x0, label_y0, TAB_SCALE, TAB_LABELS[i], ink, fill) {
+            return c;
+        }
+        return fill;
+    }
+    BG_DARK
+}
 
+/// Dialed-number card: the number, the placeholder, the backspace disc and the
+/// real outcome caption.
+fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
+    if !(DISPLAY_Y0..DISPLAY_Y1).contains(&y) || x < DISPLAY_X0 || x >= DISPLAY_X1 {
         return BG_DARK;
     }
 
-    // 3. Keypad Matrix (y: 410..984)
+    if dialer.active_len > 0 {
+        let scale = if dialer.active_len <= 10 { 4 } else { 3 };
+        let y0 = 240;
+        // Real proportional advances; digits are tabular but a fixed
+        // 8px-per-character cell is not the face's advance.
+        if y >= y0 && y < y0 + run_rows(scale) {
+            let digits = &dialer.active_number[..dialer.active_len];
+            let mut buf = [0u8; 32];
+            let n = std::design::font::ellipsize(digits, scale, DISPLAY_W - 64, &mut buf);
+            let total_w = std::design::font::measure(&buf[..n], scale);
+            let x0 = DISPLAY_X0 + (DISPLAY_W.saturating_sub(total_w)) / 2;
+            if let Some(c) = test_text(x, y, x0, y0, scale, &buf[..n], TEXT_PRIMARY, BG_DARK) {
+                return c;
+            }
+        }
+    } else if y >= PLACEHOLDER_Y0 && y < PLACEHOLDER_Y0 + run_rows(PLACEHOLDER_SCALE) {
+        // Placeholder: scale 2 needs run_rows(2) = 48 rows, not the 16 the
+        // old gate admitted, and the card centres the label on its measured
+        // width instead of a hand-typed x0 that parked it ~95px right of
+        // centre.
+        let x0 = DISPLAY_X0
+            + std::design::font::center_x(
+                b"Enter a phone number",
+                PLACEHOLDER_SCALE,
+                DISPLAY_W,
+            );
+        if let Some(c) = test_text(
+            x,
+            y,
+            x0,
+            PLACEHOLDER_Y0,
+            PLACEHOLDER_SCALE,
+            b"Enter a phone number",
+            TEXT_MUTED,
+            BG_DARK,
+        ) {
+            return c;
+        }
+    }
+
+    // Real outcome of the last call attempt.
+    let caption = dialer.outcome.caption();
+    if !caption.is_empty() {
+        let mut buf = [0u8; 48];
+        let n = std::design::font::ellipsize(caption, 1, DISPLAY_W - 32, &mut buf);
+        if n > 0 {
+            let w = std::design::font::measure(&buf[..n], 1);
+            let cx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(w)) / 2;
+            if let Some(c) = test_text(x, y, cx, OUTCOME_Y0, 1, &buf[..n], TEXT_MUTED, BG_DARK) {
+                return c;
+            }
+        }
+    }
+
+    // Backspace disc, drawn only when there is something to delete.
+    if dialer.active_len > 0 {
+        let dx = (x as i32) - BACKSPACE_CX as i32;
+        let dy = (y as i32) - BACKSPACE_CY as i32;
+        let d2 = dx * dx + dy * dy;
+        if d2 <= BACKSPACE_R * BACKSPACE_R {
+            if d2 >= (BACKSPACE_R - 3) * (BACKSPACE_R - 3) {
+                return DANGER_CRIMSON;
+            }
+            // Backspace icon 'X' inside
+            if dx.abs() <= 7 && dy.abs() <= 7 && (dx == dy || dx == -dy) {
+                return DANGER_CRIMSON;
+            }
+            return 0xFFFEE2E2;
+        }
+    }
+
+    BG_DARK
+}
+
+/// The 3x4 dial pad. Only drawn in the Keypad section.
+///
+/// WHY it takes no state: a key disc is identical whether or not a digit is
+/// already in the entry, so typing never changes a pixel in this region. That is
+/// exactly why the display band is the only band a keystroke repaints.
+fn keypad_pixel(x: usize, y: usize) -> u32 {
     for row in 0..4 {
         let by = ROW_Y[row];
         if y >= by && y < by + BTN_H {
@@ -627,146 +936,326 @@ fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             }
         }
     }
+    BG_DARK
+}
 
-    // 4. Action Bar (y: 990..1140)
-    if (990..1140).contains(&y) {
-        // SOS Button (x: 48..220, centered at 134, 1065, r: 40)
-        let s_dx = (x as i32) - SOS_CX as i32;
-        let s_dy = (y as i32) - SOS_CY as i32;
-        if s_dx * s_dx + s_dy * s_dy <= SOS_R * SOS_R {
-            if s_dx * s_dx + s_dy * s_dy >= 1444 {
-                return 0xFFE11D48;
-            }
-            // "SOS" is scale 2, so it needs run_rows(2) = 48 rows and its
-            // measured 76px width must fit the 80px disc. Both are centred on
-            // the disc: the old x0 = 122 ran 20px past the disc's right edge.
-            let sos_rows = run_rows(SOS_SCALE);
-            let sos_x0 =
-                SOS_CX.saturating_sub(std::design::font::measure(b"SOS", SOS_SCALE) / 2);
-            let sos_y0 = SOS_CY.saturating_sub(sos_rows / 2);
-            if y >= sos_y0 && y < sos_y0 + sos_rows {
-                if let Some(c) = test_text(
-                    x,
-                    y,
-                    sos_x0,
-                    sos_y0,
-                    SOS_SCALE,
-                    b"SOS",
-                    0xFFF43F5E,
-                    SOS_FILL,
-                ) {
-                    return c;
-                }
-            }
-            return SOS_FILL;
+/// Recents ledger, or the honest empty state when nothing has been dialled.
+fn recents_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
+    if dialer.recents_len == 0 {
+        // Headline: a scale-2 run owns 48 rows (620..668).
+        let head: &[u8] = b"No calls yet";
+        let head_x = DISPLAY_X0 + std::design::font::center_x(head, 2, DISPLAY_W);
+        if let Some(c) = test_text(x, y, head_x, 620, 2, head, TEXT_PRIMARY, BG_DARK) {
+            return c;
         }
-
-        // Call / Hangup Central Button (x: 270..450, centered at 360, 1065, r: 52)
-        let c_dx = (x as i32) - 360;
-        let c_dy = (y as i32) - 1065;
-        if c_dx * c_dx + c_dy * c_dy <= 2704 {
-            let is_in_call = dialer.state != CallState::Idle;
-            let bg_color = if is_in_call { DANGER_CRIMSON } else { SUCCESS_EMERALD };
-
-            // Vector Phone Handset
-            if !is_in_call {
-                // Angled handset (green button)
-                let n1 = (c_dx + 12) * (c_dx + 12) + (c_dy + 12) * (c_dy + 12);
-                let n2 = (c_dx - 12) * (c_dx - 12) + (c_dy - 12) * (c_dy - 12);
-                if n1 <= 36 || n2 <= 36 {
-                    return 0xFFFFFFFF;
-                }
-                let diff = c_dx - c_dy;
-                if diff.abs() <= 5 && c_dx >= -12 && c_dx <= 12 && c_dy >= -12 && c_dy <= 12 {
-                    return 0xFFFFFFFF;
-                }
-            } else {
-                // Horizontal hangup handset (red button)
-                let n1 = (c_dx + 14) * (c_dx + 14) + (c_dy - 2) * (c_dy - 2);
-                let n2 = (c_dx - 14) * (c_dx - 14) + (c_dy - 2) * (c_dy - 2);
-                if n1 <= 36 || n2 <= 36 {
-                    return 0xFFFFFFFF;
-                }
-                if c_dy >= -8 && c_dy <= -2 && c_dx >= -14 && c_dx <= 14 {
-                    return 0xFFFFFFFF;
-                }
+        // Body: a scale-1 run owns 24 rows (680..704).
+        let body: &[u8] = b"Every dial attempt and its real outcome is listed here";
+        let mut buf = [0u8; 64];
+        let n = std::design::font::ellipsize(body, 1, DISPLAY_W, &mut buf);
+        if n > 0 {
+            let w = std::design::font::measure(&buf[..n], 1);
+            let bx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(w)) / 2;
+            if let Some(c) = test_text(x, y, bx, 680, 1, &buf[..n], TEXT_MUTED, BG_DARK) {
+                return c;
             }
-
-            return bg_color;
         }
-
-        // Contacts shortcut button (x: 500..672, centered at 586, 1065, r: 40)
-        let ct_dx = (x as i32) - 586;
-        let ct_dy = (y as i32) - 1065;
-        if ct_dx * ct_dx + ct_dy * ct_dy <= 1600 {
-            if ct_dx * ct_dx + ct_dy * ct_dy >= 1444 {
-                return BORDER_SUBTLE;
-            }
-            // Person silhouette
-            if ct_dx * ct_dx + (ct_dy + 8) * (ct_dy + 8) <= 49 {
-                return TEXT_PRIMARY;
-            }
-            if ct_dy >= 2 && ct_dy <= 14 && ct_dx.abs() <= (ct_dy - 2) + 6 {
-                return TEXT_PRIMARY;
-            }
-            return SURFACE_RAISED;
-        }
-
         return BG_DARK;
     }
 
-    // 5. Bottom Navigation Dock (y: 1260..1380)
-    if (1260..1380).contains(&y) && x >= 24 && x < 696 {
-        if y == 1260 || y == 1379 || x == 24 || x == 695 {
+    for i in 0..dialer.recents_len {
+        let row_y = RECENTS_Y0 + i * RECENTS_ROW_H;
+        if y < row_y || y >= row_y + RECENTS_ROW_H {
+            continue;
+        }
+        let rec = &dialer.recents[i];
+        // Text first, plate second: returning the plate colour before the runs
+        // were tested would paint every row's number out of existence.
+        // Number, scale 2: run_rows(2) = 48 rows at row_y + 8.
+        let mut nbuf = [0u8; 32];
+        let nn = std::design::font::ellipsize(&rec.number[..rec.len], 2, DISPLAY_W - 96, &mut nbuf);
+        let nx = DISPLAY_X0 + 24;
+        if let Some(c) = test_text(
+            x,
+            y,
+            nx,
+            row_y + 8,
+            2,
+            &nbuf[..nn],
+            TEXT_PRIMARY,
+            SURFACE_DARK,
+        ) {
+            return c;
+        }
+        // Outcome, scale 1: run_rows(1) = 24 rows at row_y + 56.
+        let out: &[u8] = match (rec.emergency, rec.accepted) {
+            (true, true) => b"Emergency - accepted by telephony",
+            (true, false) => b"Emergency - refused by telephony",
+            (false, true) => b"Accepted by telephony",
+            (false, false) => b"Refused by telephony",
+        };
+        let ox = DISPLAY_X0 + 24;
+        if let Some(c) = test_text(x, y, ox, row_y + 56, 1, out, TEXT_MUTED, SURFACE_DARK) {
+            return c;
+        }
+        // Row plate and divider.
+        if x >= DISPLAY_X0 && x < DISPLAY_X1 {
+            if y == row_y + RECENTS_ROW_H - 1 {
+                return BORDER_SUBTLE;
+            }
+            if rec.emergency {
+                return 0xFFF3E9EC;
+            }
+            return SURFACE_DARK;
+        }
+    }
+    BG_DARK
+}
+
+/// Emergency / call / contacts row. Only drawn in the Keypad section.
+fn action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
+    if !(ACTION_Y0..ACTION_Y1).contains(&y) {
+        return BG_DARK;
+    }
+
+    // SOS Button (centre 134, 1065, r 40)
+    let s_dx = (x as i32) - SOS_CX as i32;
+    let s_dy = (y as i32) - SOS_CY as i32;
+    let s_d2 = s_dx * s_dx + s_dy * s_dy;
+    if s_d2 <= SOS_R * SOS_R {
+        if s_d2 >= 1444 {
+            return 0xFFE11D48;
+        }
+        // "SOS" is scale 2, so it needs run_rows(2) = 48 rows and its
+        // measured 76px width must fit the 80px disc. Both are centred on
+        // the disc: the old x0 = 122 ran 20px past the disc's right edge.
+        let sos_rows = run_rows(SOS_SCALE);
+        let sos_x0 =
+            SOS_CX.saturating_sub(std::design::font::measure(b"SOS", SOS_SCALE) / 2);
+        let sos_y0 = SOS_CY.saturating_sub(sos_rows / 2);
+        if y >= sos_y0 && y < sos_y0 + sos_rows {
+            if let Some(c) = test_text(
+                x,
+                y,
+                sos_x0,
+                sos_y0,
+                SOS_SCALE,
+                b"SOS",
+                0xFFF43F5E,
+                SOS_FILL,
+            ) {
+                return c;
+            }
+        }
+        return SOS_FILL;
+    }
+
+    // Call / Hangup Central Button (centre 360, 1065, r 52)
+    let c_dx = (x as i32) - CALL_CX as i32;
+    let c_dy = (y as i32) - CALL_CY as i32;
+    if c_dx * c_dx + c_dy * c_dy <= CALL_R * CALL_R {
+        let in_call = dialer.state != CallState::Idle;
+        // WHY the recessed treatment: with an empty number field there is
+        // nothing to dial, so `dial("")` returned -22 and the control did
+        // nothing at all while still looking live.
+        let can_call = in_call || dialer.active_len > 0;
+        let bg_color = if in_call {
+            DANGER_CRIMSON
+        } else if can_call {
+            SUCCESS_EMERALD
+        } else {
+            DISABLED_FILL
+        };
+        let glyph = if can_call { 0xFFFFFFFF } else { DISABLED_INK };
+
+        // Vector Phone Handset
+        if !in_call {
+            // Angled handset (green button)
+            let n1 = (c_dx + 12) * (c_dx + 12) + (c_dy + 12) * (c_dy + 12);
+            let n2 = (c_dx - 12) * (c_dx - 12) + (c_dy - 12) * (c_dy - 12);
+            if n1 <= 36 || n2 <= 36 {
+                return glyph;
+            }
+            let diff = c_dx - c_dy;
+            if diff.abs() <= 5 && c_dx >= -12 && c_dx <= 12 && c_dy >= -12 && c_dy <= 12 {
+                return glyph;
+            }
+        } else {
+            // Horizontal hangup handset (red button)
+            let n1 = (c_dx + 14) * (c_dx + 14) + (c_dy - 2) * (c_dy - 2);
+            let n2 = (c_dx - 14) * (c_dx - 14) + (c_dy - 2) * (c_dy - 2);
+            if n1 <= 36 || n2 <= 36 {
+                return glyph;
+            }
+            if c_dy >= -8 && c_dy <= -2 && c_dx >= -14 && c_dx <= 14 {
+                return glyph;
+            }
+        }
+
+        return bg_color;
+    }
+
+    // Contacts shortcut (centre 586, 1065, r 40)
+    //
+    // WHY recessed: no contact store is exposed, so there is nothing behind this
+    // control. It used to look live, emit a haptic click and do nothing at all.
+    let ct_dx = (x as i32) - CONTACTS_CX as i32;
+    let ct_dy = (y as i32) - CONTACTS_CY as i32;
+    if ct_dx * ct_dx + ct_dy * ct_dy <= CONTACTS_R * CONTACTS_R {
+        if ct_dx * ct_dx + ct_dy * ct_dy >= 1444 {
             return BORDER_SUBTLE;
         }
-
-        // 4 tabs across width:
-        // Tab 0: Favorites (x: 48..188)
-        // Tab 1: Recents (x: 208..348)
-        // Tab 2: Keypad (x: 368..508) -> ACTIVE
-        // Tab 3: Contacts (x: 528..668)
-        let is_keypad_tab = (368..508).contains(&x);
-        if is_keypad_tab && (1275..1365).contains(&y) {
-            if y == 1275 || y == 1364 || x == 368 || x == 507 {
-                return ACCENT_SKY;
-            }
+        // Person silhouette
+        if ct_dx * ct_dx + (ct_dy + 8) * (ct_dy + 8) <= 49 {
+            return DISABLED_INK;
         }
-
-        // Tab titles. A scale-1 run needs run_rows(1) = 24 rows; the dock plate runs
-        // to y = 1379, so a box starting at 1340 ends at 1364 and clears both
-        // the icon band above and the plate border below. The old 8-row gate
-        // left 5-row slivers of every label.
-        if y >= DOCK_LABEL_Y0 && y < DOCK_LABEL_Y0 + run_rows(DOCK_LABEL_SCALE) {
-            if let Some(c) = test_text(x, y, 76, DOCK_LABEL_Y0, DOCK_LABEL_SCALE, b"Favorites", TEXT_MUTED, SURFACE_DARK) {
-                return c;
-            }
-            if let Some(c) = test_text(x, y, 248, DOCK_LABEL_Y0, DOCK_LABEL_SCALE, b"Recents", TEXT_MUTED, SURFACE_DARK) {
-                return c;
-            }
-            if let Some(c) = test_text(x, y, 412, DOCK_LABEL_Y0, DOCK_LABEL_SCALE, b"Keypad", ACCENT_SKY, SURFACE_DARK) {
-                return c;
-            }
-            if let Some(c) = test_text(x, y, 568, DOCK_LABEL_Y0, DOCK_LABEL_SCALE, b"Contacts", TEXT_MUTED, SURFACE_DARK) {
-                return c;
-            }
+        if ct_dy >= 2 && ct_dy <= 14 && ct_dx.abs() <= (ct_dy - 2) + 6 {
+            return DISABLED_INK;
         }
+        return DISABLED_FILL;
+    }
 
-        // Tab icons
-        if y >= 1290 && y < 1326 {
-            // Keypad icon (3x3 dots) at (438, 1308)
-            if is_keypad_tab {
-                let dot_dx = (x as i32) - 438;
-                let dot_dy = (y as i32) - 1308;
-                if dot_dx.abs() <= 10 && dot_dy.abs() <= 10 {
-                    if (dot_dx % 8).abs() <= 1 && (dot_dy % 8).abs() <= 1 {
-                        return ACCENT_SKY;
-                    }
+    BG_DARK
+}
+
+/// Bottom navigation dock. Every slot now either drives the section or is drawn
+/// in the recessed, unavailable treatment.
+fn dock_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
+    if !(DOCK_Y0..DOCK_Y1).contains(&y) || x < 24 || x >= 696 {
+        return BG_DARK;
+    }
+    if y == DOCK_Y0 || y == DOCK_Y1 - 1 || x == 24 || x == 695 {
+        return BORDER_SUBTLE;
+    }
+
+    // WHY this mapping: slots 1 (Recents) and 2 (Keypad) are the two sections
+    // that exist. Slots 0 (Favorites) and 3 (Contacts) have no backing store in
+    // the platform, so they are drawn recessed and report that when tapped.
+    // The old renderer hard-coded slot 2 as the active tab and drew all four
+    // labels as if every slot were live.
+    let mut slot = 4usize;
+    for (i, x0) in DOCK_ITEM_X0.iter().enumerate() {
+        if x >= *x0 && x < *x0 + DOCK_ITEM_W {
+            slot = i;
+            break;
+        }
+    }
+    if slot == 4 {
+        return SURFACE_DARK;
+    }
+    let live = slot == 1 || slot == 2;
+    let active = match (slot, dialer.section) {
+        (1, DialerSection::Recents) | (2, DialerSection::Keypad) => true,
+        _ => false,
+    };
+
+    if live && active && y >= 1275 && y < 1365 {
+        if y == 1275 || y == 1364 || x == DOCK_ITEM_X0[slot] || x == DOCK_ITEM_X0[slot] + DOCK_ITEM_W - 1
+        {
+            return ACCENT_SKY;
+        }
+    }
+
+    let ink = if !live {
+        DISABLED_INK
+    } else if active {
+        ACCENT_SKY
+    } else {
+        TEXT_MUTED
+    };
+    // WHY the plate never changes tone: in this light theme the dock plate is
+    // already a step below the page, and the selection is carried by the ink and
+    // the accent outline above. A filled slot would fight the label legibility
+    // the earlier dark-surface version relied on.
+    let plate = SURFACE_DARK;
+
+    // Icon band. A scale-1 label needs run_rows(1) = 24 rows; the dock plate runs
+    // to y = 1379, so a box starting at 1340 ends at 1364 and clears both the
+    // icon band above and the plate border below. The old 8-row gate left
+    // 5-row slivers of every label.
+    let label_x = DOCK_ITEM_X0[slot]
+        + std::design::font::center_x(DOCK_LABELS[slot], DOCK_LABEL_SCALE, DOCK_ITEM_W);
+    if y >= DOCK_LABEL_Y0 && y < DOCK_LABEL_Y0 + run_rows(DOCK_LABEL_SCALE) {
+        if let Some(c) = test_text(
+            x,
+            y,
+            label_x,
+            DOCK_LABEL_Y0,
+            DOCK_LABEL_SCALE,
+            DOCK_LABELS[slot],
+            ink,
+            plate,
+        ) {
+            return c;
+        }
+    }
+
+    // Icons are drawn only for the live slots: there is no icon to show for a
+    // store that does not exist.
+    if live && y >= DOCK_ICON_Y0 && y < DOCK_ICON_Y0 + DOCK_ICON_H {
+        let cx = DOCK_ITEM_X0[slot] + DOCK_ITEM_W / 2;
+        let cy = DOCK_ICON_Y0 + DOCK_ICON_H / 2;
+        if slot == 2 {
+            // Keypad icon: a 3x3 dot grid.
+            let dot_dx = (x as i32) - cx as i32;
+            let dot_dy = (y as i32) - cy as i32;
+            if dot_dx.abs() <= 10 && dot_dy.abs() <= 10 {
+                if (dot_dx % 8).abs() <= 1 && (dot_dy % 8).abs() <= 1 {
+                    return ink;
                 }
             }
+        } else {
+            // Recents icon: a clock face with two hands.
+            let d2 = (x as i32 - cx as i32).pow(2) + (y as i32 - cy as i32).pow(2);
+            if (144..=169).contains(&d2) {
+                return ink;
+            }
+            if y == cy && x >= cx - 7 && x <= cx {
+                return ink;
+            }
+            if x == cx && y >= cy - 9 && y <= cy + 1 {
+                return ink;
+            }
         }
+    }
 
-        return SURFACE_DARK;
+    plate
+}
+
+#[inline(never)]
+fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
+    // 1. Status bar & header (y: 0..94)
+    if y < HEADER_H + 1 {
+        return header_pixel(x, y, dialer);
+    }
+
+    // 2. Segmented navigation tabs (y: 105..155)
+    if (TAB_BAND_Y0..TAB_BAND_Y0 + TAB_BAND_H).contains(&y) {
+        return tabs_pixel(x, y, dialer);
+    }
+
+    // 3. Call status & dialed number display (y: 170..380)
+    if (DISPLAY_Y0..DISPLAY_Y1).contains(&y) {
+        return display_pixel(x, y, dialer);
+    }
+
+    // 4. Section content (y: 410..1140): the dial pad and the call controls in
+    //    the Keypad section, the real call ledger in the Recents section.
+    if (CONTENT_Y0..CONTENT_Y1).contains(&y) {
+        return match dialer.section {
+            DialerSection::Keypad => {
+                let c = keypad_pixel(x, y);
+                if c != BG_DARK {
+                    return c;
+                }
+                action_pixel(x, y, dialer)
+            }
+            DialerSection::Recents => recents_pixel(x, y, dialer),
+        };
+    }
+
+    // 5. Bottom navigation dock (y: 1260..1380)
+    if (DOCK_Y0..DOCK_Y1).contains(&y) {
+        return dock_pixel(x, y, dialer);
     }
 
     // 6. Home Gesture Pill (x: 260..460, y: 1418..1424)
@@ -778,11 +1267,26 @@ fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
 }
 
 fn render_dialer_ui(surface: u32, dialer: &DialerApp) {
+    render_dialer_band(surface, dialer, 0, H);
+}
+
+/// Re-rasterises and writes only rows `y0..y1`.
+///
+/// WHY a band and not a rectangle: a row of the surface is one contiguous run in
+/// the surface buffer, so `offset = y0 * W` writes a band with no stride
+/// bookkeeping. Every band starts on a row boundary, so the running `x`/`y`
+/// cursor below is exact.
+///
+/// WHY this is correct rather than a shortcut: the band is chosen from what the
+/// keystroke actually changed. Typing a digit moves the number and nothing else
+/// - between 170 and 380 of the 1440 rows - and the keypad discs beside it are
+/// identical before and after, so they are left exactly as drawn.
+fn render_dialer_band(surface: u32, dialer: &DialerApp, y0: usize, y1: usize) {
     let mut chunk = [0u32; CHUNK];
-    let total = W * H;
-    let mut offset = 0;
-    while offset < total {
-        let count = (total - offset).min(CHUNK);
+    let mut offset = y0 * W;
+    let end = y1.min(H) * W;
+    while offset < end {
+        let count = (end - offset).min(CHUNK);
         let mut x = offset % W;
         let mut y = offset / W;
         for i in 0..count {
@@ -798,78 +1302,241 @@ fn render_dialer_ui(surface: u32, dialer: &DialerApp) {
     }
 }
 
-/// Returns true if app should exit back to Launcher.
-fn handle_touch_point(dialer: &mut DialerApp, x: u32, y: u32) -> bool {
-    let x = x as usize;
-    let y = y as usize;
+// -----------------------------------------------------------------------------
+// Input handling. Every region below is drawn at the exact same coordinates by
+// get_dialer_pixel (shared constants), so each control is hit-testable where it
+// is rendered.
+// -----------------------------------------------------------------------------
 
-    // 1. Back button in header or Home gesture bar: exit to Launcher
-    if (x >= 24 && x < 100 && y >= 28 && y < 68) || (x >= 240 && x <= 480 && y >= 1400) {
+/// Which part of the surface an action changed.
+///
+/// WHY this exists: rendering the dialer re-rasterised all 1,036,800 pixels
+/// through `get_dialer_pixel` for every touch event and every keystroke, so
+/// typing a number cost the same as a full screen transition.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dirty {
+    /// Nothing changed; do not render.
+    None,
+    /// Only the dialed number / outcome line / backspace disc moved.
+    Display,
+    /// Section, call state or telemetry changed: the whole surface.
+    All,
+}
+
+/// Merges two dirty regions reported in the same input batch.
+///
+/// WHY this exists rather than "last one wins": one `input_event_poll` drain can
+/// carry two keypresses, one of which reaches the display card and one of which
+/// steps the section. Keeping only one would leave the other stale.
+fn merge(a: Dirty, b: Dirty) -> Dirty {
+    if a == Dirty::None {
+        return b;
+    }
+    if b == Dirty::None || a == b {
+        return a;
+    }
+    Dirty::All
+}
+
+enum Tap<'a> {
+    None,
+    Redraw(Dirty),
+    Leave(&'a str),
+}
+
+fn in_circle(x: usize, y: usize, cx: usize, cy: usize, r: i32) -> bool {
+    let dx = (x as i32) - cx as i32;
+    let dy = (y as i32) - cy as i32;
+    dx * dx + dy * dy <= r * r
+}
+
+/// Places the entered number, or hangs up an active call.
+fn toggle_call(dialer: &mut DialerApp) -> Dirty {
+    if dialer.state != CallState::Idle {
+        dialer.hangup();
+        return Dirty::All;
+    }
+    if dialer.active_len == 0 {
+        // Unreachable from a tap: the control is drawn recessed while the entry
+        // is empty. Reachable from the keyboard, so it still reports honestly.
         std::log(
             0,
-            "[DIALER] Back button or home gesture pressed. Exiting to launcher.",
+            "[DIALER] Call requested with no number entered; no telephony request was issued.",
         )
         .ok();
-        return true;
+        return Dirty::None;
+    }
+    let mut num_buf = [0u8; 32];
+    let len = dialer.active_len;
+    num_buf[..len].copy_from_slice(&dialer.active_number[..len]);
+    let Ok(target) = core::str::from_utf8(&num_buf[..len]) else {
+        std::log(0, "[DIALER] Invalid dial string.").ok();
+        return Dirty::None;
+    };
+    if dialer.dial(target).is_ok() {
+        std::log(0, "[DIALER] Telephony service accepted the call.").ok();
+    } else {
+        std::log(0, "[DIALER] Call could not be established.").ok();
+    }
+    Dirty::All
+}
+
+fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
+    let x = px as usize;
+    let y = py as usize;
+
+    // 1. Back control in the header, or the home gesture bar: exit to launcher.
+    if (x >= 24 && x < 100 && y >= 28 && y < 68) || (x >= 240 && x <= 480 && y >= 1400) {
+        return Tap::Leave("[DIALER APP] Back control or home gesture pressed. Exiting to launcher.");
     }
 
-    // 2. Backspace button in display card
-    if x >= 590 && x < 665 && y >= 235 && y < 305 {
+    // 2. Segmented tabs. Slot 2 (Contacts) has no store behind it.
+    if (TAB_BAND_Y0..TAB_BAND_Y0 + TAB_BAND_H).contains(&y) {
+        if x >= TAB1_X0 && x < TAB1_X1 {
+            dialer.section = DialerSection::Keypad;
+            let _ = std::audio_haptic_click();
+            return Tap::Redraw(Dirty::All);
+        }
+        if x >= TAB2_X0 && x < TAB2_X1 {
+            dialer.section = DialerSection::Recents;
+            let _ = std::audio_haptic_click();
+            return Tap::Redraw(Dirty::All);
+        }
+        if x >= TAB3_X0 && x < TAB3_X1 {
+            std::log(
+                0,
+                "[DIALER APP] Contacts tab tapped: the platform exposes no contact store, so there is no contacts screen to open.",
+            )
+            .ok();
+            return Tap::Redraw(Dirty::None);
+        }
+    }
+
+    // 3. Bottom dock. Slots 1 and 2 select a section; 0 and 3 report honestly.
+    if (DOCK_Y0..DOCK_Y1).contains(&y) && x >= 24 && x < 696 {
+        for slot in 0..4 {
+            let x0 = DOCK_ITEM_X0[slot];
+            if x < x0 || x >= x0 + DOCK_ITEM_W {
+                continue;
+            }
+            match slot {
+                1 => {
+                    dialer.section = DialerSection::Recents;
+                    let _ = std::audio_haptic_click();
+                    return Tap::Redraw(Dirty::All);
+                }
+                2 => {
+                    dialer.section = DialerSection::Keypad;
+                    let _ = std::audio_haptic_click();
+                    return Tap::Redraw(Dirty::All);
+                }
+                _ => {
+                    std::log(
+                        0,
+                        "[DIALER APP] Dock slot tapped: no favorites or contacts store exists on this platform, so the slot is unavailable.",
+                    )
+                    .ok();
+                    return Tap::Redraw(Dirty::None);
+                }
+            }
+        }
+    }
+
+    // 4. Backspace disc: hit-tested against exactly the drawn circle.
+    if dialer.active_len > 0 && in_circle(x, y, BACKSPACE_CX, BACKSPACE_CY, BACKSPACE_R) {
         dialer.backspace();
-        return false;
+        return Tap::Redraw(Dirty::Display);
     }
 
-    // 3. Keypad Matrix
-    for row in 0..4 {
-        let by = ROW_Y[row];
-        if y >= by && y < by + BTN_H {
-            for col in 0..3 {
-                let bx = COL_X[col];
-                if x >= bx && x < bx + BTN_W {
-                    if let Some(digit) = get_keypad_char(row, col) {
-                        dialer.input_digit(digit);
-                        std::log(0, "[DIALER] Keypad digit entered.").ok();
+    // 5. Keypad and action row are only live in the Keypad section; in Recents
+    //    the same rows belong to the call ledger.
+    if dialer.section == DialerSection::Keypad {
+        // Keypad Matrix
+        for row in 0..4 {
+            let by = ROW_Y[row];
+            if y >= by && y < by + BTN_H {
+                for col in 0..3 {
+                    let bx = COL_X[col];
+                    if x >= bx && x < bx + BTN_W {
+                        if let Some(digit) = get_keypad_char(row, col) {
+                            dialer.input_digit(digit);
+                            std::log(0, "[DIALER APP] Keypad digit entered.").ok();
+                        }
+                        return Tap::Redraw(Dirty::Display);
                     }
-                    return false;
                 }
+            }
+        }
+
+        // Action Bar: three discs, each hit-tested against its drawn circle.
+        if (ACTION_Y0..ACTION_Y1).contains(&y) {
+            if in_circle(x, y, SOS_CX, SOS_CY, SOS_R) {
+                let _ = dialer.dial_emergency();
+                if dialer.outcome == CallOutcome::EmergencyRefused {
+                    std::log(
+                        0,
+                        "[DIALER APP] Emergency call refused by the telephony service; the outcome is shown under the number.",
+                    )
+                    .ok();
+                } else {
+                    std::log(
+                        0,
+                        "[DIALER APP] Telephony service accepted the emergency call.",
+                    )
+                    .ok();
+                }
+                return Tap::Redraw(Dirty::All);
+            }
+            if in_circle(x, y, CALL_CX, CALL_CY, CALL_R) {
+                return Tap::Redraw(toggle_call(dialer));
+            }
+            if in_circle(x, y, CONTACTS_CX, CONTACTS_CY, CONTACTS_R) {
+                std::log(
+                    0,
+                    "[DIALER APP] Contacts shortcut tapped: no contact store is exposed by this platform.",
+                )
+                .ok();
+                return Tap::Redraw(Dirty::None);
             }
         }
     }
 
-    // 4. Action Bar
-    if (990..1140).contains(&y) {
-        if x >= 48 && x < 220 && y >= 1005 && y < 1125 {
-            // SOS Emergency 911
-            dialer.active_len = 0;
-            dialer.input_digit('9');
-            dialer.input_digit('1');
-            dialer.input_digit('1');
-            let _ = dialer.dial("911");
-            return false;
-        } else if x >= 270 && x < 450 && y >= 995 && y < 1135 {
-            // Call / End toggle
-            if dialer.state == CallState::Idle {
-                let mut num_buf = [0u8; 32];
-                let len = dialer.active_len;
-                num_buf[..len].copy_from_slice(&dialer.active_number[..len]);
-                let Ok(target) = core::str::from_utf8(&num_buf[..len]) else {
-                    std::log(0, "[DIALER] Invalid dial string.").ok();
-                    return false;
-                };
-                if let Err(_) = dialer.dial(target) {
-                    std::log(0, "[DIALER] Call could not be established.").ok();
-                }
-            } else {
-                dialer.hangup();
-            }
-        } else if x >= 500 && x < 672 && y >= 1005 && y < 1125 {
-            // Contacts are loaded from real persisted contact state; no synthetic entries are injected.
-            std::audio_haptic_click().ok();
-            return false;
-        }
-    }
+    Tap::None
+}
 
-    false
+/// Mirrors `handle_browser_key` in `apps/browser/src/main.rs`: printable ASCII,
+/// backspace, escape, enter and tab routed through the dialer's own state.
+fn handle_dialer_key(dialer: &mut DialerApp, key: std::InputKeyEvent) -> Tap<'static> {
+    use std::input_key_code;
+    if !key.pressed {
+        return Tap::None;
+    }
+    match key.code {
+        input_key_code::BACKSPACE => {
+            dialer.backspace();
+            Tap::Redraw(Dirty::Display)
+        }
+        input_key_code::ESCAPE => {
+            dialer.clear_entry();
+            Tap::Redraw(Dirty::Display)
+        }
+        input_key_code::ENTER => Tap::Redraw(toggle_call(dialer)),
+        input_key_code::TAB => {
+            dialer.step_section();
+            std::log(0, "[DIALER APP] Section switched by keyboard.").ok();
+            Tap::Redraw(Dirty::All)
+        }
+        // Dial pad keys only. The keypad's own sublabel letters (ABC, DEF, ...)
+        // are not part of the number entry, so accepting them would let the
+        // display hold something no telephony service could be asked to dial.
+        // `key.code` is a u32, so the literals are widened to match rather than
+        // being cast down.
+        code @ (48u32..=57u32) | code @ (42u32 | 35u32) => {
+            dialer.input_digit(code as u8 as char);
+            Tap::Redraw(Dirty::Display)
+        }
+        _ => Tap::None,
+    }
 }
 
 #[no_mangle]
@@ -889,21 +1556,36 @@ pub extern "C" fn _start() -> ! {
     let mut modem_buf = [0u8; 128];
     match std::telephony_query(&mut modem_buf) {
         Ok(len) if len > 0 => {
-            if let Ok(json_str) = core::str::from_utf8(&modem_buf[..len]) {
-                if json_str.contains("\"present\":true") {
-                    dialer.modem_present = true;
+            let payload = &modem_buf[..len];
+            if json_present_true(payload) {
+                dialer.modem_present = true;
+                std::log(
+                    0,
+                    "[DIALER APP] Baseband Modem: Hardware detected and online.",
+                )
+                .ok();
+            } else {
+                // WHY: the payload simply did not list a present modem.
+                // "Offline" would assert a baseband state the HAL never
+                // reported, so state only what the report actually said.
+                std::log(
+                    0,
+                    "[DIALER APP] Baseband Modem: the telemetry report did not list a present modem.",
+                )
+                .ok();
+            }
+            // WHY parse the real field: the signal meter used to fill all four
+            // bars from the `present` boolean, which is a full-strength reading
+            // for a radio that may be idle. `"bars"` is what the HAL measured.
+            match json_u8(payload, "\"bars\"") {
+                Some(bars) => {
+                    dialer.signal_bars = if bars > 4 { 4 } else { bars };
+                }
+                None => {
+                    dialer.signal_bars = 0;
                     std::log(
                         0,
-                        "[DIALER APP] Baseband Modem: Hardware detected and online.",
-                    )
-                    .ok();
-                } else {
-                    // WHY: the payload simply did not list a present modem.
-                    // "Offline" would assert a baseband state the HAL never
-                    // reported, so state only what the report actually said.
-                    std::log(
-                        0,
-                        "[DIALER APP] Baseband Modem: the telemetry report did not list a present modem.",
+                        "[DIALER APP] Modem telemetry carried no signal bar count; the meter shows no bars.",
                     )
                     .ok();
                 }
@@ -920,6 +1602,51 @@ pub extern "C" fn _start() -> ! {
             std::log(
                 0,
                 "[DIALER APP] Telephony query refused by the kernel; no cellular baseband is available to this app.",
+            )
+            .ok();
+        }
+    }
+
+    // 1b. Battery fuel gauge. WHY query it at all: the header used to draw an
+    // empty battery shell on every launch, which reads as "0%". Either the real
+    // state of charge is drawn or nothing is drawn there.
+    let mut battery_buf = [0u8; 256];
+    match std::battery_query(&mut battery_buf) {
+        Ok(len) if len > 0 => {
+            let payload = &battery_buf[..len];
+            if json_present_true(payload) {
+                match json_u8(payload, "\"soc\"") {
+                    Some(soc) => {
+                        dialer.battery_soc = Some(if soc > 100 { 100 } else { soc });
+                    }
+                    None => {
+                        dialer.battery_soc = None;
+                        std::log(
+                            0,
+                            "[DIALER APP] Fuel gauge reported no state of charge; the battery indicator is left blank.",
+                        )
+                        .ok();
+                    }
+                }
+            } else {
+                std::log(
+                    0,
+                    "[DIALER APP] No battery fuel gauge is present; the battery indicator is left blank.",
+                )
+                .ok();
+            }
+        }
+        Ok(_) => {
+            std::log(
+                0,
+                "[DIALER APP] Battery query returned an empty payload; the battery indicator is left blank.",
+            )
+            .ok();
+        }
+        Err(_) => {
+            std::log(
+                0,
+                "[DIALER APP] Battery query refused by the kernel; the battery indicator is left blank.",
             )
             .ok();
         }
@@ -969,7 +1696,9 @@ pub extern "C" fn _start() -> ! {
                 if dialer.state == CallState::ActiveCall {
                     dialer.call_duration_secs += 1;
                 }
-                let _ = std::surface_flip(6);
+                // WHY no flip here: nothing on the surface is derived from the
+                // call timer, so re-presenting an unchanged frame costs a full
+                // scanout copy for no visible difference.
             }
 
             if (events & std::EVENT_MODEM_URC) != 0 {
@@ -1001,7 +1730,23 @@ pub extern "C" fn _start() -> ! {
                     dy: 0,
                     scale_milli: 1000,
                 };
+                let mut dirty = Dirty::None;
                 while std::input_event_poll(&mut input).is_ok() {
+                    // Keyboard first: the normalized pipeline multiplexes keys
+                    // and touches through the same poll, so a key must be
+                    // recognised before the touch branch sees kind != 1.
+                    if let Some(key) = input.key_event() {
+                        match handle_dialer_key(&mut dialer, key) {
+                            Tap::Leave(msg) => {
+                                std::log(0, msg).ok();
+                                let _ = std::surface_destroy(6, surface);
+                                std::exit_with_code(0);
+                            }
+                            Tap::Redraw(d) => dirty = merge(dirty, d),
+                            Tap::None => {}
+                        }
+                        continue;
+                    }
                     if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
                         std::log(
                             0,
@@ -1012,13 +1757,24 @@ pub extern "C" fn _start() -> ! {
                         std::exit_with_code(0);
                     }
                     if input.kind == 1 {
-                        if handle_touch_point(&mut dialer, input.x, input.y) {
-                            let _ = std::surface_destroy(6, surface);
-                            std::exit_with_code(0);
+                        match handle_tap(&mut dialer, input.x, input.y) {
+                            Tap::Leave(msg) => {
+                                std::log(0, msg).ok();
+                                let _ = std::surface_destroy(6, surface);
+                                std::exit_with_code(0);
+                            }
+                            Tap::Redraw(d) => dirty = merge(dirty, d),
+                            Tap::None => {}
                         }
-                        render_dialer_ui(surface, &dialer);
-                        let _ = std::surface_flip(6);
                     }
+                }
+                if dirty != Dirty::None {
+                    match dirty {
+                        Dirty::None => {}
+                        Dirty::Display => render_dialer_band(surface, &dialer, DISPLAY_Y0, DISPLAY_Y1),
+                        Dirty::All => render_dialer_ui(surface, &dialer),
+                    }
+                    let _ = std::surface_flip(6);
                 }
             }
         }
