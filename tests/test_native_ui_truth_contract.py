@@ -140,7 +140,12 @@ def test_native_keyboard_events_are_decoded_and_used_by_browser_and_calculator()
     assert "if let Some(key) = input.key_event()" in browser
     assert "pub address_focused: bool" in browser
     assert "fn handle_browser_key(app: &mut BrowserApp, key: std::InputKeyEvent)" in browser
-    assert "Navigation unavailable: no network transport" in browser
+    # WHY two strings: the responsive rewrite (f7f2b64) split the old combined
+    # "Navigation unavailable: no network transport" literal into a headline
+    # plus a wrapped body; both halves are asserted so the honest outcome
+    # (parsed, attempted, nothing sent, nothing loaded) stays pinned.
+    assert '(b"Navigation unavailable", BODY_NO_TRANSPORT)' in browser
+    assert "no network transport is bound to this app" in browser
     assert "if let Some(key) = input.key_event()" in calculator
     assert "fn handle_keyboard_key(calc: &mut CalculatorState, code: u32) -> bool" in calculator
 

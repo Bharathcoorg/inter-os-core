@@ -182,7 +182,12 @@ def test_first_party_media_and_browser_surfaces_do_not_bundle_demo_content():
     messages = (ROOT / "apps/messages/src/main.rs").read_text()
     music = (ROOT / "apps/music/src/main.rs").read_text()
     assert "pub static BOOKMARKS: [Bookmark; 0] = [];" in browser
-    assert 'current_url: "about:blank"' in browser
+    # WHY this form: the responsive rewrite (f7f2b64) initializes the address
+    # buffer with `let start = b"about:blank"` copied into `current_url`
+    # instead of the old struct literal, so the old
+    # `current_url: "about:blank"` text is gone while the behavior is kept
+    # (verified: the address bar reads about:blank on-device).
+    assert 'let start = b"about:blank";' in browser
     assert "GET /catalog.json" not in browser
     assert "pub static PHOTOS: [PhotoItem; 0] = [];" in gallery
     assert "Mountain Ridge" not in gallery
