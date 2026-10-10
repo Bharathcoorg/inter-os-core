@@ -858,9 +858,14 @@ class VncScanoutClient:
     def force_reconnect(self):
         """Drop the current RFB session so the worker re-handshakes the new QEMU."""
         self._force_reconnect = True
-        with self.frame_cond:
-            self.connected = False
-            self._invalidate_cached_frame()
+        # WHY no `with self.frame_cond` here: _invalidate_cached_frame takes
+        # it itself, and the condition wraps a non-reentrant lock, so nesting
+        # self-deadlocks the caller while holding the lock once. That wedged
+        # every frame consumer and the relaunch itself: the stop path runs
+        # inside the launch POST, so one nested acquire froze /api/screen/*
+        # and every later launch on this server process.
+        self.connected = False
+        self._invalidate_cached_frame()
 
     def _invalidate_cached_frame(self):
         """Drops the published frame so consumers see 503, not stale pixels."""
