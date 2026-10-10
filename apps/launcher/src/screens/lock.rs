@@ -513,6 +513,22 @@ fn lock_na_box() -> Rect {
     )
 }
 
+/// The camera disc's absence caption, on the same baseline as the torch disc's.
+///
+/// WHY a separate box and not the same rect mirrored: the two discs have
+/// different centres, and a caption that is not measured for its own column is
+/// exactly the mis-centring defect this screen is being fixed for.
+fn lock_na_r_box() -> Rect {
+    let w = text::measure(LOCK_NA_TEXT, type_scale::CAPTION);
+    let (_, y) = lock_na_origin();
+    Rect::new(
+        (LOCK_BTN_R_CX as usize).saturating_sub(w / 2),
+        y,
+        w,
+        text::line_height(type_scale::CAPTION),
+    )
+}
+
 // --- Per-frame metrics -------------------------------------------------------
 // Everything below this line exists because `get_lock_screen_color` runs
 // 1,036,800 times a frame. The values it needs depend on the shell state and on
@@ -543,6 +559,8 @@ struct Frame {
     hint: Rect,
     /// The torch's "N/A" label: an origin *and* an extent, see [`lock_na_box`].
     na: Rect,
+    /// The camera disc's "N/A" label, on the same baseline: [`lock_na_r_box`].
+    na_r: Rect,
     /// Ink for the status bar, the date line and the clock: [`lock_ink`].
     ink: u32,
     /// The ramp, resolved: top stop, brightest tone, shadowed rock, mist, and the
@@ -586,6 +604,7 @@ impl Frame {
                 text::line_height(LOCK_HINT_SCALE),
             ),
             na: lock_na_box(),
+            na_r: lock_na_r_box(),
             ink: lock_ink(&theme),
             top: theme.wallpaper_top,
             horizon: lock_horizon(&theme),
@@ -655,6 +674,7 @@ static FRAME_MEMO: FrameMemo = FrameMemo(UnsafeCell::new(FrameSlot {
         clock: Rect::new(0, 0, 0, 0),
         hint: Rect::new(0, 0, 0, 0),
         na: Rect::new(0, 0, 0, 0),
+        na_r: Rect::new(0, 0, 0, 0),
         ink: 0,
         top: 0,
         horizon: 0,
@@ -709,7 +729,13 @@ fn frame_for(x: usize, y: usize, state: &LauncherState) -> &Frame {
 // read by both paths, so a key's position, code and radius are single-sourced.
 
 /// Row centres of the keypad, top to bottom.
-const PIN_ROWS: [usize; 4] = [480, 620, 760, 900];
+/// WHY these rows sit low: the pad used to run 480..900, which put the last key
+/// at y=948 and left roughly 490px of empty surface below it - the keypad looked
+/// stranded in the upper two thirds with a void under it. A phone puts the keys
+/// in the thumb zone, under the prompt, with the gesture pill below that. The
+/// render and [`hit_test_pin_pad`] both read these constants, so a key's tappable
+/// disc stays exactly its drawn disc.
+const PIN_ROWS: [usize; 4] = [700, 840, 980, 1120];
 /// Column centres of the keypad, left to right.
 const PIN_COLS: [usize; 3] = [160, 360, 560];
 /// The code each cell holds: what [`hit_test_pin_pad`] returns for a tap on it,
@@ -755,7 +781,13 @@ const PIN_DIGIT_SCALE: usize = 3;
 /// The `CLR` label's scale: at scale 3 the three letters measure 102 px and
 /// would overhang the disc; at scale 2 they are 68 px inside a 90 px chord, and
 /// a secondary control set below the figures is the hierarchy a dialer wants.
-const PIN_LABEL_SCALE: usize = 2;
+///
+/// WHY 1 and not 2: the chord across the middle of a 96 px disc is 90 px, and at
+/// scale 2 "CLR" measured 90 px, so it ran edge to edge with a 3 px margin on
+/// each side and read as jammed into the circle rather than centred in it. At
+/// scale 1 the label is 45 px, which sits comfortably inside the disc and keeps
+/// the figures at scale 3 as the loudest thing on the key.
+const PIN_LABEL_SCALE: usize = 1;
 
 /// The cell origin that centres a run's cap ink on `cy`: ink begins
 /// `CAP_TOP * scale` into its cell and stands `CAP_HEIGHT * scale` rows tall.
@@ -911,11 +943,41 @@ pub fn hit_test_pin_pad(x: usize, y: usize) -> Option<char> {
     None
 }
 
+/// How opaque the PIN pad's own backdrop is.
+///
+/// WHY 100 and not 85: `Theme::veil(_, p, false)` blends toward black by `p`, so
+/// at 85 the lock wallpaper still showed through - the hiker silhouette and the
+/// skyline ridge read as smudges and stray marks behind the keys, and the horizon
+/// line cut visibly across the inside of every key disc. A keypad is a control
+/// surface, not a window onto the wallpaper.
+const PIN_PAD_VEIL_PERCENT: u32 = 100;
+
 fn lock_pin_pad_pixel(color: u32, x: usize, y: usize, state: &LauncherState) -> Option<u32> {
+    let backdrop = Theme::veil(color, PIN_PAD_VEIL_PERCENT, false);
+
+    // WHY the pad owns the whole surface, status band included: this returned
+    // None above LOCK_STATUS_BAND, so the caller painted the lock wallpaper
+    // there instead. That wallpaper's upper band is the LIGHT theme's sky, so
+    // the dark PIN screen carried a bright blue strip across its own top with
+    // the clock sitting on it and no separator. The pad draws its own clock on
+    // its own backdrop now.
     if y < LOCK_STATUS_BAND {
-        return None;
+        if state.clock_source_ok {
+            if let Some(c) = test_text_aa(
+                x,
+                y,
+                LOCK_STATUS_TIME_X,
+                LOCK_STATUS_TIME_Y,
+                LOCK_STATUS_TIME_SCALE,
+                &state.clock_time,
+                0xFFFFFF,
+                backdrop,
+            ) {
+                return Some(c);
+            }
+        }
+        return Some(backdrop);
     }
-    let backdrop = Theme::veil(color, 85, false);
 
     // 1. Header message at y = 250..295
     let (header, subheader) = if state.lock_state == interos_std::UserLockState::Uninitialized {
@@ -1151,6 +1213,25 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             y,
             f.na.x,
             f.na.y,
+            type_scale::CAPTION,
+            LOCK_NA_TEXT,
+            lock_paper(&theme, color),
+        ) {
+            return c;
+        }
+    }
+
+    // 8b. The camera disc gets the same absence caption as the torch disc.
+    //     WHY it needs one: the two discs are a matched pair, but only the left
+    //     one was labelled, so the right read as a live control while the left
+    //     stated it was not. Neither hardware is bound here - the camera app
+    //     reports no sensor - so both state it, symmetrically.
+    if f.na_r.contains(x, y) {
+        if let Some(c) = test_text(
+            x,
+            y,
+            f.na_r.x,
+            f.na_r.y,
             type_scale::CAPTION,
             LOCK_NA_TEXT,
             lock_paper(&theme, color),
