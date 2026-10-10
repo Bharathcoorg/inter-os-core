@@ -867,7 +867,12 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             let _ = first;
             for (i, track) in PLAYLIST.iter().take(2).enumerate() {
                 let row_y = 1140 + i * 96;
-                if y >= row_y && y < row_y + 72 {
+                // WHY 80 and not 72: the title owns row_y+4..+52 (scale 2) and
+                // the artist owns row_y+56..+80 (scale 1). The old 72-row gate
+                // cut the artist's last 8 rows - its whole descender band - so
+                // every artist name with g j p q y rendered sliced. The gate is
+                // the runs it contains, nothing less.
+                if y >= row_y && y < row_y + 80 {
                     let selected = i == app.current_track_idx;
                     let title_y = row_y + 4;
                     let mut buf = [0u8; 48];
@@ -890,9 +895,15 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
                     {
                         return c;
                     }
-                    if y == row_y + 95 && x >= MARGIN && x < MARGIN + CONTENT_W {
-                        return BORDER;
-                    }
+                }
+                // WHY the divider lives outside the text gate above: it did not.
+                // `y == row_y + 95` sat inside a gate ending at +72 (now +80), so
+                // it could never be true and the separator simply never drew.
+                // 88 sits 8 below the artist's last row (+80) and 8 above the
+                // next row's first (+96): it belongs to the row gap, not to
+                // either run, so it gets its own band test at the row's level.
+                if y == row_y + 88 && x >= MARGIN && x < MARGIN + CONTENT_W {
+                    return BORDER;
                 }
             }
         }

@@ -10,7 +10,12 @@ use launcher::layout::Rect;
 use launcher::text;
 
 const COLOR_BG_TOP: u32 = 0xFF111214;
-const COLOR_BG_BOT: u32 = 0xFF111214;
+/// WHY darker and not equal: the backdrop used to interpolate between two
+/// identical colours, spending ~10 integer ops per pixel on a ramp with zero
+/// extent. The ramp now darkens toward the foot, which anchors the card stack
+/// instead of floating it on a flat field - the same treatment a phone's
+/// power sheet uses to separate itself from the surface beneath it.
+const COLOR_BG_BOT: u32 = 0xFF0A0C0F;
 
 const COLOR_CARD_FILL: u32 = 0xFF25282A;
 const COLOR_CARD_BORDER: u32 = 0xFF3A3D40;
@@ -26,6 +31,16 @@ const COLOR_CANCEL_TEXT: u32 = 0xFF777773;
 
 const CARD_X: usize = 60;
 const CARD_W: usize = 600;
+/// Left edge of the label zone: the icons sit at cx ~115, so the zone starts
+/// clear of them and runs to 20px short of the card's right edge.
+///
+/// WHY centred in a zone and not on the card: the icon occupies the left
+/// ~90px, so card-centring would push every label right of its row's visual
+/// centre by a different amount per label length. Zone-centring puts
+/// "Emergency" and "Restart" at the same optical distance from the icon
+/// regardless of length - which hand-placed x0 did not.
+const LABEL_ZONE_X: usize = 160;
+const LABEL_ZONE_W: usize = 480;
 const CARD_H: usize = 75;
 const CARD_RADIUS: usize = 24;
 
@@ -151,6 +166,15 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             if is_body || is_terminal {
                 return 0xFFCBD5E1;
             }
+            // WHY a dash inside an empty cell: the outline with a permanent
+            // terminal reads as "battery present, empty", and there is no fuel
+            // gauge bound to this shell. The centred dash is the shell's own
+            // mark for "no reading" - home draws it for unbound sensors and the
+            // lock screen prints N/A for unbound discs - so the power menu does
+            // not report 0% for a measurement it never took.
+            if x >= 654 && x <= 662 && y >= 23 && y <= 25 {
+                return 0xFF777773;
+            }
         }
         return COLOR_BG_TOP;
     }
@@ -166,7 +190,7 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return c;
         }
         // Single centered title text "Lock device" (scale 1, 24px height centered vertically at 190 + 25 = 215)
-        if let Some(c) = test_text_aa(x, y, 175, 215, 1, b"Lock device", COLOR_CARD_TEXT, 0xFF111214) {
+        if let Some(c) = test_text_aa(x, y, LABEL_ZONE_X + text::center_x(b"Lock device", 1, LABEL_ZONE_W), 215, 1, b"Lock device", COLOR_CARD_TEXT, 0xFF111214) {
             return c;
         }
         return COLOR_CARD_FILL;
@@ -183,7 +207,7 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return c;
         }
         // Single centered title text "Restart"
-        if let Some(c) = test_text_aa(x, y, 175, 310, 1, b"Restart", COLOR_CARD_TEXT, 0xFF111214) {
+        if let Some(c) = test_text_aa(x, y, LABEL_ZONE_X + text::center_x(b"Restart", 1, LABEL_ZONE_W), 310, 1, b"Restart", COLOR_CARD_TEXT, 0xFF111214) {
             return c;
         }
         return COLOR_CARD_FILL;
@@ -200,7 +224,7 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return c;
         }
         // Single centered title text "Power off"
-        if let Some(c) = test_text_aa(x, y, 175, 405, 1, b"Power off", COLOR_CARD_TEXT, 0xFF111214) {
+        if let Some(c) = test_text_aa(x, y, LABEL_ZONE_X + text::center_x(b"Power off", 1, LABEL_ZONE_W), 405, 1, b"Power off", COLOR_CARD_TEXT, 0xFF111214) {
             return c;
         }
         return COLOR_CARD_FILL;
@@ -217,7 +241,7 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return c;
         }
         // Single centered title text "Emergency"
-        if let Some(c) = test_text_aa(x, y, 175, 500, 1, b"Emergency", COLOR_EMERGENCY_TEXT, 0xFF111214) {
+        if let Some(c) = test_text_aa(x, y, LABEL_ZONE_X + text::center_x(b"Emergency", 1, LABEL_ZONE_W), 500, 1, b"Emergency", COLOR_EMERGENCY_TEXT, 0xFF111214) {
             return c;
         }
         return COLOR_EMERGENCY_FILL;
@@ -229,7 +253,7 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         if !round_contains(&inner, 26, x, y) {
             return COLOR_CANCEL_BORDER;
         }
-        if let Some(c) = test_text_aa(x, y, 325, 595, 1, b"Cancel", COLOR_CANCEL_TEXT, 0xFF111214) {
+        if let Some(c) = test_text_aa(x, y, CANCEL_RECT.x + text::center_x(b"Cancel", 1, CANCEL_RECT.w), 595, 1, b"Cancel", COLOR_CANCEL_TEXT, 0xFF111214) {
             return c;
         }
         return COLOR_CANCEL_FILL;

@@ -3,7 +3,8 @@
 //! Renders the canonical "Events / Notifications done right" screen from system specifications:
 //! - Crisp light theme background with status bar clock, signals, and battery.
 //! - Header: "Events" with right-side filter control.
-//! - Filter pills: "All" (active), "Messages", "System", "Apps".
+//! - No filter pills: four were drawn here with no filter state behind them
+//!   and removed rather than left as inert controls.
 //! - "Today" section with reference notifications:
 //!   - "New message" (Rama, 2 min ago, green chat bubble)
 //!   - "Meeting reminder" (Team sync at 11:00 AM, 1 hr ago, red calendar)
@@ -32,10 +33,6 @@ const CARD_BORDER: u32 = 0xFFE1E0DB; // Canonical border
 const TEXT_MAIN: u32 = 0xFF111214; // Canonical near-black primary
 const TEXT_MUTED: u32 = 0xFF777773; // Canonical muted secondary
 
-const PILL_ACTIVE_BG: u32 = 0xFF111214;
-const PILL_ACTIVE_TEXT: u32 = 0xFFFFFFFF;
-const PILL_INACTIVE_BG: u32 = 0xFFEFEEE9;
-const PILL_INACTIVE_TEXT: u32 = 0xFF777773;
 
 const CARD_X: usize = 32;
 const CARD_W: usize = SCREEN_WIDTH - 64; // 656
@@ -221,18 +218,10 @@ struct EventCardPlan {
     subtitle: LabelRun,
 }
 
-#[derive(Clone, Copy)]
-struct FilterPillPlan {
-    rect: Rect,
-    bg: u32,
-    label: LabelRun,
-}
-
 struct NotificationsFrame {
     clock: LabelRun,
     title: LabelRun,
     today_label: LabelRun,
-    pills: [FilterPillPlan; 4],
     cards: [Option<EventCardPlan>; 5],
     card_count: usize,
     clear_btn: Rect,
@@ -245,24 +234,20 @@ fn build_notifications_frame(state: &LauncherState) -> NotificationsFrame {
     let clock = LabelRun::new(48, 14, type_scale::CAPTION, clock_slice, TEXT_MAIN);
     let title = LabelRun::new(36, 64, type_scale::BODY, b"Notifications", TEXT_MAIN);
 
-    let pill_y = 124;
-    let pill_h = 36;
-    let pills = [
-        FilterPillPlan { rect: Rect::new(36, pill_y, 68, pill_h), bg: PILL_ACTIVE_BG,
-            label: LabelRun::centred(36, pill_y + 6, 68, type_scale::CAPTION, b"All", PILL_ACTIVE_TEXT) },
-        FilterPillPlan { rect: Rect::new(116, pill_y, 116, pill_h), bg: PILL_INACTIVE_BG,
-            label: LabelRun::centred(116, pill_y + 6, 116, type_scale::CAPTION, b"Messages", PILL_INACTIVE_TEXT) },
-        FilterPillPlan { rect: Rect::new(244, pill_y, 96, pill_h), bg: PILL_INACTIVE_BG,
-            label: LabelRun::centred(244, pill_y + 6, 96, type_scale::CAPTION, b"System", PILL_INACTIVE_TEXT) },
-        FilterPillPlan { rect: Rect::new(352, pill_y, 80, pill_h), bg: PILL_INACTIVE_BG,
-            label: LabelRun::centred(352, pill_y + 6, 80, type_scale::CAPTION, b"Apps", PILL_INACTIVE_TEXT) },
-    ];
-
+    // WHY there are no filter pills on this surface: four pills were drawn here
+    // (All / Messages / System / Apps) with an active treatment on All, but no
+    // filter state exists on the frame and the shell's only Notifications tap
+    // handler tests the clear-all rect. Three pills were inert and one was
+    // permanently active. Wiring them would mean inventing a
+    // package-to-category taxonomy the records do not carry, so they are removed
+    // rather than replaced with a different fiction - the file manager set this
+    // precedent for its own unhandled header glyphs. The section label moves up
+    // into the space the pills occupied.
     let count = state.notification_count.min(state.notifications.len()).min(5);
     let today_label = if count > 0 {
-        LabelRun::new(36, 178, type_scale::CAPTION, b"Recent", TEXT_MAIN)
+        LabelRun::new(36, 124, type_scale::CAPTION, b"Recent", TEXT_MAIN)
     } else {
-        LabelRun::new(36, 210, type_scale::BODY, b"No notifications", TEXT_MUTED)
+        LabelRun::new(36, 124, type_scale::BODY, b"No notifications", TEXT_MUTED)
     };
 
     let mut cards: [Option<EventCardPlan>; 5] = [None, None, None, None, None];
@@ -322,7 +307,7 @@ fn build_notifications_frame(state: &LauncherState) -> NotificationsFrame {
 
     let clear_label = LabelRun::centred(CLEAR_BTN.x, CLEAR_BTN.y + 10, CLEAR_BTN.w, type_scale::CAPTION, b"Clear all", TEXT_MUTED);
     NotificationsFrame {
-        clock, title, today_label, pills, cards, card_count: count,
+        clock, title, today_label, cards, card_count: count,
         clear_btn: CLEAR_BTN, clear_label, home_pill: HOME_PILL,
     }
 }
@@ -357,32 +342,10 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
         if let Some(c) = f.title.pixel(x, y) {
             return c;
         }
-        // Filter / settings sliders icon at right (x: 644..676, y: 72..94)
-        if x >= 644 && x <= 676 && y >= 72 && y <= 94 {
-            let is_line0 = y == 76;
-            let is_line1 = y == 83;
-            let is_line2 = y == 90;
-            let is_knob0 = (x >= 660 && x <= 664) && (y >= 74 && y <= 78);
-            let is_knob1 = (x >= 648 && x <= 652) && (y >= 81 && y <= 85);
-            let is_knob2 = (x >= 664 && x <= 668) && (y >= 88 && y <= 92);
-            if is_line0 || is_line1 || is_line2 || is_knob0 || is_knob1 || is_knob2 {
-                return TEXT_MAIN;
-            }
-        }
+        // WHY no header icon is drawn at the right: a three-line sliders mark
+        // sat here and looked like notification settings, but it had no handler
+        // and opened nothing. It went with the filter pills below.
         return color;
-    }
-
-    // 3. Filter Pills
-    for pill in &f.pills {
-        if pill.rect.contains(x, y) {
-            if rounded_contains(pill.rect, x, y, 18) {
-                color = pill.bg;
-                if let Some(c) = pill.label.pixel(x, y) {
-                    return c;
-                }
-                return color;
-            }
-        }
     }
 
     // 4. Section Headers
