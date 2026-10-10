@@ -204,6 +204,57 @@ struct ActivityFrame {
     home_pill: Rect,
 }
 
+// -----------------------------------------------------------------------------
+// Honest workspace subtitles.
+//
+// The old code drew static strings ("4 apps · 2 tasks", "2 apps · Playing")
+// that claimed knowledge the launcher does not have: tasks live in one global
+// recent stack and are never attributed to workspaces, and there is no media
+// playback state anywhere in LauncherState. Each subtitle is now built from
+// two live facts only: how many tiles this card actually draws, and whether
+// the workspace holds the focused task (one of its package ids matches the
+// active recent). Anything beyond that would be a fabricated status line.
+fn workspace_holds_focus(state: &LauncherState, ids: &[&[u8]]) -> bool {
+    let active = match state.active_child {
+        Some(id) => id,
+        None => return false,
+    };
+    let mut i = 0usize;
+    while i < 3 {
+        if state.recent_task_ids[i] == active {
+            if let Some(lbl) = state.recent_label(i) {
+                for id in ids {
+                    if lbl == *id {
+                        return true;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+const SUB_CAP: usize = 24;
+
+/// "Active now · N apps" when the workspace holds the focused task, else
+/// "N apps". The separator byte renders as a blank in the design face, the
+/// same gap the old literals showed.
+fn card_subtitle(buf: &mut [u8; SUB_CAP], n_apps: u8, active: bool) -> &[u8] {
+    let mut n = 0usize;
+    if active {
+        const LEAD: &[u8] = b"Active now \xb7 ";
+        buf[..LEAD.len()].copy_from_slice(LEAD);
+        n = LEAD.len();
+    }
+    buf[n] = b'0' + n_apps.min(9);
+    n += 1;
+    const TAIL: &[u8] = b" apps";
+    buf[n..n + TAIL.len()].copy_from_slice(TAIL);
+    n += TAIL.len();
+    &buf[..n]
+}
+
 fn build_activity_frame(state: &LauncherState) -> ActivityFrame {
     // 1. Status Bar Clock
     // WHY empty when there is no reading: the previous fallback drew `b"09:20"`,
@@ -229,11 +280,21 @@ fn build_activity_frame(state: &LauncherState) -> ActivityFrame {
     } else {
         LabelRun::new(card0_rect.x + 96, card0_rect.y + 26, type_scale::CAPTION, b"Work", TEXT_WHITE)
     };
-    let card0_subtitle = if state.recent_task_ids[0] > 0 && state.active_child == Some(state.recent_task_ids[0]) {
-        LabelRun::new(card0_rect.x + 96, card0_rect.y + 54, type_scale::CAPTION, b"Active now \xb7 4 apps", 0xFF38BDF8)
-    } else {
-        LabelRun::new(card0_rect.x + 96, card0_rect.y + 54, type_scale::CAPTION, b"4 apps \xb7 2 tasks", TEXT_MUTED)
-    };
+    const WORK_IDS: [&[u8]; 4] = [
+        b"org.interos.file_manager",
+        b"org.interos.calculator",
+        b"org.interos.browser",
+        b"org.interos.calendar",
+    ];
+    let mut card0_sub = [0u8; SUB_CAP];
+    let card0_active = workspace_holds_focus(state, &WORK_IDS);
+    let card0_subtitle = LabelRun::new(
+        card0_rect.x + 96,
+        card0_rect.y + 54,
+        type_scale::CAPTION,
+        card_subtitle(&mut card0_sub, 4, card0_active),
+        if card0_active { 0xFF38BDF8 } else { TEXT_MUTED },
+    );
     let mini_y0 = card0_rect.y + 110;
     let card0_mini = [
         Some(MiniAppTile {
@@ -272,7 +333,20 @@ fn build_activity_frame(state: &LauncherState) -> ActivityFrame {
     let card1_rect = WORKSPACE_CARDS[1];
     let card1_icon_rect = Rect::new(card1_rect.x + 24, card1_rect.y + 24, 56, 56);
     let card1_title = LabelRun::new(card1_rect.x + 96, card1_rect.y + 26, type_scale::CAPTION, b"Personal", TEXT_WHITE);
-    let card1_subtitle = LabelRun::new(card1_rect.x + 96, card1_rect.y + 54, type_scale::CAPTION, b"3 apps \xb7 1 task", TEXT_MUTED);
+    const PERSONAL_IDS: [&[u8]; 3] = [
+        b"org.interos.messages",
+        b"org.interos.dialer",
+        b"org.interos.contacts",
+    ];
+    let mut card1_sub = [0u8; SUB_CAP];
+    let card1_active = workspace_holds_focus(state, &PERSONAL_IDS);
+    let card1_subtitle = LabelRun::new(
+        card1_rect.x + 96,
+        card1_rect.y + 54,
+        type_scale::CAPTION,
+        card_subtitle(&mut card1_sub, 3, card1_active),
+        if card1_active { 0xFF38BDF8 } else { TEXT_MUTED },
+    );
     let mini_y1 = card1_rect.y + 110;
     let card1_mini = [
         Some(MiniAppTile {
@@ -307,7 +381,20 @@ fn build_activity_frame(state: &LauncherState) -> ActivityFrame {
     let card2_rect = WORKSPACE_CARDS[2];
     let card2_icon_rect = Rect::new(card2_rect.x + 24, card2_rect.y + 24, 56, 56);
     let card2_title = LabelRun::new(card2_rect.x + 96, card2_rect.y + 26, type_scale::CAPTION, b"Research", TEXT_WHITE);
-    let card2_subtitle = LabelRun::new(card2_rect.x + 96, card2_rect.y + 54, type_scale::CAPTION, b"5 apps \xb7 3 files", TEXT_MUTED);
+    const RESEARCH_IDS: [&[u8]; 3] = [
+        b"org.interos.terminal",
+        b"org.interos.camera",
+        b"org.interos.vault",
+    ];
+    let mut card2_sub = [0u8; SUB_CAP];
+    let card2_active = workspace_holds_focus(state, &RESEARCH_IDS);
+    let card2_subtitle = LabelRun::new(
+        card2_rect.x + 96,
+        card2_rect.y + 54,
+        type_scale::CAPTION,
+        card_subtitle(&mut card2_sub, 3, card2_active),
+        if card2_active { 0xFF38BDF8 } else { TEXT_MUTED },
+    );
     let mini_y2 = card2_rect.y + 110;
     let card2_mini = [
         Some(MiniAppTile {
@@ -342,7 +429,16 @@ fn build_activity_frame(state: &LauncherState) -> ActivityFrame {
     let card3_rect = WORKSPACE_CARDS[3];
     let card3_icon_rect = Rect::new(card3_rect.x + 24, card3_rect.y + 24, 56, 56);
     let card3_title = LabelRun::new(card3_rect.x + 96, card3_rect.y + 26, type_scale::CAPTION, b"Media", TEXT_WHITE);
-    let card3_subtitle = LabelRun::new(card3_rect.x + 96, card3_rect.y + 54, type_scale::CAPTION, b"2 apps \xb7 Playing", TEXT_MUTED);
+    const MEDIA_IDS: [&[u8]; 2] = [b"org.interos.music", b"org.interos.gallery"];
+    let mut card3_sub = [0u8; SUB_CAP];
+    let card3_active = workspace_holds_focus(state, &MEDIA_IDS);
+    let card3_subtitle = LabelRun::new(
+        card3_rect.x + 96,
+        card3_rect.y + 54,
+        type_scale::CAPTION,
+        card_subtitle(&mut card3_sub, 2, card3_active),
+        if card3_active { 0xFF38BDF8 } else { TEXT_MUTED },
+    );
     let mini_y3 = card3_rect.y + 110;
     let card3_mini = [
         Some(MiniAppTile {
