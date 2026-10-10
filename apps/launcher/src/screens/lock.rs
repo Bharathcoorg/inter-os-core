@@ -46,6 +46,18 @@ pub const LOCK_DATE_TEXT_LEN: usize = 11;
 /// Bottom edge of the status-bar band.
 const LOCK_STATUS_BAND: usize = 56;
 
+/// Left edge shared by the status clock, the date line and the big clock.
+///
+/// WHY one edge and not three: the status clock sat at x 54 while the date and
+/// the clock sat at x 75, so the same time of day was set twice on the same
+/// surface with its two left edges 21px apart, which reads as two unrelated
+/// elements rather than one clock repeated at two sizes. The content block owns
+/// the edge because it is the dominant element and its own documentation already
+/// claimed the edge was "shared by the date line and the clock"; the status clock
+/// now derives its origin from the same constant so they cannot drift apart
+/// again.
+const LOCK_CONTENT_X: usize = 75;
+
 /// Status-bar clock. Reference origin x 13 / y 9, cap height measured at 7 px on
 /// the panel.
 ///
@@ -54,11 +66,12 @@ const LOCK_STATUS_BAND: usize = 56;
 /// reference rows are not device pixels, so the measurement is carried across at
 /// the surface's own vertical ratio, 1440 / 427 = 3.372: 7 x 3.372 = 23.6 device
 /// px, and 23.6 / 17 = 1.39, which is scale 1. Scale 2 would be 34 px, 44% over.
-const LOCK_STATUS_TIME_X: usize = 54;
+/// WHY derived from `LOCK_CONTENT_X`: the status clock and the content block
+/// below it are one clock shown twice, so they start on the same left edge.
+const LOCK_STATUS_TIME_X: usize = LOCK_CONTENT_X;
 const LOCK_STATUS_TIME_Y: usize = 27;
 const LOCK_STATUS_TIME_SCALE: usize = 1;
 /// Left edge shared by the date line and the clock, reference x 18.
-const LOCK_CONTENT_X: usize = 75;
 /// Date line. Reference cap top y 47, cap height measured at 9 px.
 ///
 /// WHY scale 2: 9 x 3.372 = 30.3 device px, and 30.3 / 17 = 1.78, which rounds to

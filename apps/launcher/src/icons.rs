@@ -177,18 +177,27 @@ pub fn rasterize_icon_pixel(
 
     let inked = match kind {
         IconKind::Phone => {
-            // WHY the diagonal receiver: the old mark was a vertical stem
-            // between two wide bars, which is a serif capital I - at deck size
-            // it read as a letter, not a phone. A handset is the same idea turned
-            // on its side: a grip running along the diagonal with a wider pad at
-            // each end for the ear and the mouthpiece. `u` measures along that
-            // diagonal (top-left to bottom-right) and `v` across it.
+            // WHY a bowed receiver and not a bar: the old mark was a uniform
+            // strip with two square ends, and at the size the deck now draws
+            // icons it reads as a diagonal stick rather than a telephone. A
+            // handset is three distinguishable things - a wide rounded
+            // earpiece, a narrower grip, a wide rounded mouthpiece - and the
+            // grip bows so the concave side of the receiver faces the corner,
+            // which is what makes the silhouette read as a phone at all.
+            // `u` runs along the earpiece-to-mouthpiece diagonal (top-left to
+            // bottom-right), `v` across it.
             let u = (rx + ry) / 2;
             let v = (rx - ry) / 2;
-            let grip = v.abs() <= 2 && u.abs() <= 8;
-            let earpiece = (-11..=-6).contains(&u) && v.abs() <= 4;
-            let mouthpiece = (6..=11).contains(&u) && v.abs() <= 4;
-            grip || earpiece || mouthpiece
+            // Each pad is widest 3px in from its centre and tapers to a tip, so
+            // the ends are rounded rather than chopped square.
+            let e = (u + 9).abs();
+            let m = (u - 9).abs();
+            let earpiece = e <= 4 && v.abs() + (e - 1).max(0) <= 5;
+            let mouthpiece = m <= 4 && v.abs() + (m - 1).max(0) <= 5;
+            // The grip is 2px narrower than the pads and bows toward +v.
+            let bow = (u * u) / 36;
+            let grip = u.abs() <= 6 && (v - bow).abs() <= 2;
+            earpiece || mouthpiece || grip
         }
         IconKind::Messages => {
             // Rounded speech bubble with bottom-left tail

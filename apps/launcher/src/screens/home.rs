@@ -760,16 +760,22 @@ pub const DOCK_TILES: [Rect; 6] = [
     Rect::new(490, 1020, 200, 280),
 ];
 
-/// Half-size of a deck tile's pictogram, in pixels: a 60x60 box.
+/// Half-size of a deck tile's pictogram, in pixels: a 48x48 box.
 ///
-/// WHY 30 and not the standard 16: the pictogram is authored in a 33px box, which
-/// is a third of the tile's width and reads as a stamp on a card rather than as
-/// the face of the app. 60px is the size a home screen's primary targets use.
+/// WHY 24 and not the standard 16: the pictogram is authored in a 33px box, which
+/// is a sixth of the tile's width and reads as a stamp on a card rather than as
+/// the face of the app.
+/// WHY 24 and not the 30 this was raised to: at a 60px box the pictograms were
+/// large enough to dominate the tile and to expose how coarse the older glyphs
+/// are - the handset in particular read as a diagonal stick. 48 is exactly 20%
+/// smaller than 60, which is the size this was asked to come back to, and it
+/// leaves the name room to be the thing you read first.
+///
 /// WHY it is a home constant and not a change to `icons::rasterize_icon_pixel`:
 /// every other surface - the drawer, activity cards, notification rows - has
 /// geometry that was measured around the 33px glyph, so the size is asked for
 /// where it is needed instead of imposed everywhere.
-pub const DOCK_ICON_EXTENT: i32 = 30;
+pub const DOCK_ICON_EXTENT: i32 = 24;
 
 pub fn find_package_index(state: &LauncherState, suffix: &[u8]) -> Option<usize> {
     for i in 0..state.app_count {
@@ -851,12 +857,15 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
 
         let icon_cx = cell.x + cell.w / 2;
         // WHY the block is centred rather than at fixed offsets: the tile is 280
-        // tall and its content is a 60px pictogram, a 20px gap and a 48px name
-        // cell, which is 128 -- leaving 76px above and below. The old offsets put
-        // the icon at 110 and the name at 160, which centred a 33px glyph with a
-        // 24px name and left 96px of tile empty under the label.
-        let icon_cy = cell.y + 76 + DOCK_ICON_EXTENT as usize;
-        let label_y = cell.y + 76 + DOCK_ICON_EXTENT as usize * 2 + space::MD + space::XS;
+        // tall and its content is a 48px pictogram, a 20px gap and a 48px name
+        // cell, which is 116 -- leaving 82px above and below. The offsets are
+        // derived from `DOCK_ICON_EXTENT` so changing the icon size moves the
+        // name with it instead of leaving the block lopsided.
+        let block_h = DOCK_ICON_EXTENT as usize * 2 + space::MD + space::XS
+            + text::line_height(type_scale::BODY);
+        let block_y = cell.y + (cell.h.saturating_sub(block_h)) / 2;
+        let icon_cy = block_y + DOCK_ICON_EXTENT as usize;
+        let label_y = block_y + DOCK_ICON_EXTENT as usize * 2 + space::MD + space::XS;
 
         plan.cells[slot] = DeckTilePlan {
             cell,
