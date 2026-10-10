@@ -150,9 +150,18 @@ def test_layout_fixes_reserve_full_glyph_line_height():
     calendar = read("apps/calendar/src/main.rs")
     file_manager = read("apps/file_manager/src/main.rs")
     messages = read("apps/messages/src/main.rs")
-    assert "60, 270, 1" in settings
-    assert "60, 440, 1" in settings
-    assert "60, 610, 1" in settings
+    # WHY these three settings assertions changed: the Settings app was rebuilt
+    # as the design system's "System Space" (light category grid + stack
+    # detail screens), so the old dark tab-layout coordinates ("60, 270, 1"
+    # etc.) no longer exist. The invariant they pinned is unchanged and still
+    # asserted here on the new geometry: every detail row reserves the bold
+    # title's full 48px glyph line (band starts at cy+16), the caption sits a
+    # full 24px line below it (cy+72), and rows with a second caption line
+    # reserve that line too (cy+98) -- i.e. no text band is allowed to start
+    # inside the line box above it.
+    assert "cy + 16," in settings
+    assert "cy + 72," in settings
+    assert "cy + 98," in settings
     assert "236, 760, 1" in calendar
     assert "y >= 800 && y < 856" in calendar
     assert 'test_text(x, y, 48, 64, 3, b"Files"' in file_manager

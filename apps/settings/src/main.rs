@@ -1,8 +1,20 @@
-//! Inter OS Native Sovereign Settings & Telemetry App
+//! Inter OS Core "System Space" — Sovereign Settings & Telemetry App
 //!
-//! Full production settings and system diagnostics app executing in Ring 3 (User Mode):
-//! - Five system-settings categories backed by kernel capability-checked services.
-//! - Interactive setting mutators (Power Profile, Wi-Fi Toggle, Brightness scaling)
+//! Ring 3 (User Mode) presentation of the design system's screen 6,
+//! "System Space" (`Ui Samples/INTEROS_UI_DESIGN_SYSTEM.md`):
+//! - A LIGHT semantic category surface: a 2-column grid of the seven canonical
+//!   categories (Device, Network, Personal, Apps, Power, Security, System).
+//! - Stack navigation: tapping a category pushes a detail screen with a
+//!   48x48 back target that pops back to the landing grid.
+//! - Every hardware/service line is backed by a capability-checked kernel
+//!   query recorded in `SettingsApp`; anything the kernel does not answer is
+//!   rendered with the design system's honest unavailable treatment and never
+//!   with a fabricated value.
+//! - Typography: every text run is measured against the font's advance table
+//!   (`interos_std::design::font::measure*` / `advance_of`) and fitted to its
+//!   box with an explicit ellipsis pass before a pixel is drawn, so no label
+//!   is ever sliced mid-glyph or allowed to collide with a badge or a card
+//!   edge.
 //! - DRM/KMS Client Surface Rendering & Double-Buffered Presentation
 //! - Asynchronous event reactor loop handling touch interactions and lifecycle termination
 
@@ -16,22 +28,88 @@ const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
 
-/// Top-level category tabs in Sovereign Settings.
+// -----------------------------------------------------------------------------
+// System Space categories (design system screen 6)
+// -----------------------------------------------------------------------------
+
+/// The seven semantic System Space categories, in landing-grid order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SettingsTab {
-    Wireless = 0,
-    PowerAndBattery = 1,
-    ThermalsAndSensors = 2,
-    SecurityAndPrivacy = 3,
-    AboutDevice = 4,
+pub enum Section {
+    Device = 0,
+    Network = 1,
+    Personal = 2,
+    Apps = 3,
+    Power = 4,
+    Security = 5,
+    System = 6,
+}
+
+impl Section {
+    pub const COUNT: usize = 7;
+
+    pub fn from_index(i: usize) -> Option<Section> {
+        match i {
+            0 => Some(Section::Device),
+            1 => Some(Section::Network),
+            2 => Some(Section::Personal),
+            3 => Some(Section::Apps),
+            4 => Some(Section::Power),
+            5 => Some(Section::Security),
+            6 => Some(Section::System),
+            _ => None,
+        }
+    }
+
+    /// Detail-screen header title. Static data; no allocation.
+    pub fn title(self) -> &'static [u8] {
+        match self {
+            Section::Device => b"Device",
+            Section::Network => b"Network",
+            Section::Personal => b"Personal",
+            Section::Apps => b"Apps",
+            Section::Power => b"Power",
+            Section::Security => b"Security",
+            Section::System => b"System",
+        }
+    }
 }
 
 /// Dynamic Voltage and Frequency Scaling (DVFS) Governor profiles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PowerProfile {
-    Performance = 0, // 2400 MHz
-    Balanced = 1,    // 1200 MHz
-    PowerSaver = 2,  // 600 MHz
+    Performance = 0,
+    Balanced = 1,
+    PowerSaver = 2,
+}
+
+impl PowerProfile {
+    /// Index of the profile in the on-screen selector row.
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    /// Wire id for `power_set_profile` (kernel: 0=PowerSave, 1=Balanced,
+    /// 2=Performance, 3=Turbo).
+    fn syscall_id(self) -> u32 {
+        match self {
+            PowerProfile::PowerSaver => 0,
+            PowerProfile::Balanced => 1,
+            PowerProfile::Performance => 2,
+        }
+    }
+}
+
+/// Honest record of the most recent DVFS profile request. The kernel gates
+/// `power_set_profile` on SystemControl, so a request can be refused; the UI
+/// must report the real outcome instead of assuming the change landed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileFeedback {
+    /// No request has been made yet in this session.
+    Unattempted,
+    /// The kernel accepted the profile and reported the resulting ceiling (MHz).
+    Applied(u32),
+    /// The kernel refused the request; no governor state was changed.
+    Refused,
 }
 
 /// Outcome of a hardware/service query, recorded so the UI can render an
@@ -62,12 +140,15 @@ fn contains_run(haystack: &[u8], needle: &[u8]) -> bool {
 
 /// Sovereign Settings application state engine.
 pub struct SettingsApp {
-    pub current_tab: SettingsTab,
+    /// `None` = landing grid; `Some(section)` = that category's detail screen.
+    pub current_section: Option<Section>,
+    /// Last profile the kernel accepted (initial value is the neutral default
+    /// of a freshly booted system, applied here for control highlight only).
     pub power_profile: PowerProfile,
-    pub wifi_enabled: bool,
-    pub ble_beacon_enabled: bool,
-    pub auto_brightness: bool,
-    pub security_enforced: bool,
+    /// Honest outcome of the most recent DVFS profile request.
+    pub profile_feedback: ProfileFeedback,
+    /// Last DVFS governor id the kernel reported, when the query answered.
+    pub governor: Option<u32>,
     pub terminal_enabled: bool,
     /// Recorded outcome of the RTC query for the About card.
     pub rtc: TelemetryState,
@@ -92,12 +173,10 @@ pub struct SettingsApp {
 impl SettingsApp {
     pub const fn new() -> Self {
         Self {
-            current_tab: SettingsTab::Wireless,
+            current_section: None,
             power_profile: PowerProfile::Balanced,
-            wifi_enabled: false,
-            ble_beacon_enabled: false,
-            auto_brightness: false,
-            security_enforced: true,
+            profile_feedback: ProfileFeedback::Unattempted,
+            governor: None,
             terminal_enabled: false,
             // WHY: Unavailable/zero until the About screen's queries answer;
             // a card must never render a value that was never read.
@@ -157,7 +236,8 @@ impl SettingsApp {
         }
     }
 
-    /// Queries the battery fuel gauge and reports the real outcome.
+    /// Queries the battery fuel gauge and the DVFS governor and reports the
+    /// real outcome of each.
     pub fn refresh_power(&mut self) {
         let mut profile = [0u8; 32];
         // WHY: this read goes through the FileSystemRead capability slot, which
@@ -179,10 +259,11 @@ impl SettingsApp {
             }
         }
 
-        // WHY: this app never calls power_set_profile/power_set_governor, so the
-        // governor must be read, not asserted. Report the observed governor id.
+        // WHY: the observed governor must be read, not asserted. Record the id
+        // the kernel actually reported so the Power detail can render it.
         match std::power_get_governor() {
             Ok(gov) => {
+                self.governor = Some(gov);
                 std::log(
                     0,
                     match gov {
@@ -198,10 +279,10 @@ impl SettingsApp {
             Err(_) => {
                 // WHY: the governor query requires SystemControl. Report the
                 // refusal instead of the locally cached profile enum.
-                self.battery = TelemetryState::Unavailable;
+                self.governor = None;
                 std::log(
                     0,
-                    "[SETTINGS APP] DVFS governor query refused by the kernel; no governor change was applied.",
+                    "[SETTINGS APP] DVFS governor query refused by the kernel; governor state unknown.",
                 )
                 .ok();
             }
@@ -231,6 +312,35 @@ impl SettingsApp {
                 std::log(
                     0,
                     "[SETTINGS APP] Battery fuel gauge query refused by the kernel; charge level unknown.",
+                )
+                .ok();
+            }
+        }
+    }
+
+    /// Requests a DVFS profile from the kernel and records the real outcome.
+    ///
+    /// WHY the result is recorded rather than assumed: `power_set_profile` is
+    /// gated on the SystemControl authority this app does not hold, so the
+    /// kernel can refuse. The local selection only moves on `Ok`, and the
+    /// reason is rendered verbatim so the control can never claim a change
+    /// that did not happen.
+    pub fn apply_power_profile(&mut self, profile: PowerProfile) {
+        match std::power_set_profile(profile.syscall_id()) {
+            Ok(mhz) => {
+                self.power_profile = profile;
+                self.profile_feedback = ProfileFeedback::Applied(mhz);
+                std::log(
+                    0,
+                    "[SETTINGS APP] Kernel accepted the requested DVFS profile; frequency ceiling reported.",
+                )
+                .ok();
+            }
+            Err(_) => {
+                self.profile_feedback = ProfileFeedback::Refused;
+                std::log(
+                    0,
+                    "[SETTINGS APP] DVFS profile change refused by the kernel; no governor state was changed.",
                 )
                 .ok();
             }
@@ -342,9 +452,9 @@ impl SettingsApp {
         // confirmed wall-clock reading.
         match std::rtc_get_time(&mut rtc_buf) {
             Ok(len) if len > 0 => {
-                // Record the reading so the About card renders the payload the
-                // platform actually returned instead of a fixed "unavailable"
-                // line that ignored this successful query.
+                // Record the reading so the System detail renders the payload
+                // the platform actually returned instead of a fixed
+                // "unavailable" line that ignored this successful query.
                 let n = len.min(self.rtc_time.len());
                 self.rtc_time[..n].copy_from_slice(&rtc_buf[..n]);
                 self.rtc_time_len = n;
@@ -469,34 +579,418 @@ impl SettingsApp {
 }
 
 // -----------------------------------------------------------------------------
-// Visual Design Tokens
+// Visual Design Tokens (canonical light System Space palette)
 // -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFF070B12;
-const SURFACE_DARK: u32 = 0xFF111B2B;
-const SURFACE_RAISED: u32 = 0xFF17243A;
-const BORDER_SUBTLE: u32 = 0xFF26354D;
-const ACCENT_SKY: u32 = 0xFF31C4FF;
-const SUCCESS_EMERALD: u32 = 0xFF56D68A;
-const WARNING_AMBER: u32 = 0xFFFFC043;
-const TEXT_PRIMARY: u32 = 0xFFF4F7FB;
-const TEXT_MUTED: u32 = 0xFF9AA8BC;
+
+const BG: u32 = std::design::color::BACKGROUND; // #F7F6F2 base
+const SURFACE: u32 = std::design::color::SURFACE; // #FFFFFF card surface
+const SOFT: u32 = std::design::color::SURFACE_SOFT; // #EFEEE9 controls / pills
+const BORDER: u32 = std::design::color::BORDER; // #E1E0DB hairlines
+const TEXT: u32 = std::design::color::TEXT; // #111214 primary text
+const TEXT_MUTED: u32 = std::design::color::TEXT_MUTED; // #777773 secondary text
+const ACCENT: u32 = std::design::color::ACCENT; // restrained blue
+const SUCCESS_EMERALD: u32 = std::design::color::SUCCESS; // muted green
+const GESTURE_BAR: u32 = 0xFFC4C3BD; // home indicator pill on the light base
 
 // -----------------------------------------------------------------------------
-// Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')
+// Layout constants (8-point grid; margins 24; touch targets >= 48)
 // -----------------------------------------------------------------------------
-// Typography provided by interos_std::design::font
 
+/// Header height on the landing screen (back target + big title below).
+const HEADER_BOTTOM: usize = 104;
+/// Back button: 48x48 target, top-left, shared by both screens.
+const BACK_X: usize = 24;
+const BACK_Y: usize = 28;
+const BACK_S: usize = 48;
+
+/// Landing grid geometry: 2 columns of 328x136 cards, 16px gutters. The
+/// height reserves two full caption lines so the sample's wrapping subtitles
+/// ("Display, Sound, Gestures") are never sliced mid-phrase.
+const CARD_W: usize = 328;
+const CARD_H: usize = 136;
+const CARD_R: usize = 18;
+const GRID_X: usize = 24;
+const GRID_Y: usize = 200;
+const GRID_GAP: usize = 16;
+
+/// Detail screen geometry: full-width stacked row cards.
+const DETAIL_X: usize = 24;
+const DETAIL_W: usize = 672;
+const DETAIL_TOP: usize = 128;
+const ROW_H: usize = 112;
+const ROW_TALL: usize = 212; // DVFS row (selector + feedback line)
+const ROW_TALL_ALT: usize = 140; // developer terminal row (two caption lines)
+const ROW_GAP: usize = 16;
+const DIVIDER_Y: usize = 104;
+
+/// DVFS profile selector inside the Power detail (three 204x48 segments).
+const SEG_X: usize = DETAIL_X + 24;
+const SEG_W: usize = 204;
+const SEG_GAP: usize = 6;
+const SEG_H: usize = 48;
+
+// -----------------------------------------------------------------------------
+// Typography: measure -> fit -> draw. Nothing is ever clipped by its box.
+// -----------------------------------------------------------------------------
+
+/// Maximum bytes any single fitted run may occupy (source runs are shorter).
+const RUN_CAP: usize = 96;
+
+#[inline]
+fn run_w(text: &[u8], scale: usize, bold: bool) -> usize {
+    if bold {
+        std::design::font::measure_bold(text, scale)
+    } else {
+        std::design::font::measure(text, scale)
+    }
+}
+
+/// Copies `text` into `out`, appending an ellipsis when it does not fit
+/// `max_w` at `scale` in the given weight. Returns the number of bytes
+/// written (0 when even the ellipsis itself cannot fit, so the caller draws
+/// nothing rather than a sliced word).
+fn fit_run(text: &[u8], scale: usize, max_w: usize, bold: bool, out: &mut [u8]) -> usize {
+    if run_w(text, scale, bold) <= max_w {
+        let n = text.len().min(out.len());
+        out[..n].copy_from_slice(&text[..n]);
+        return n;
+    }
+    const DOTS: &[u8] = b"...";
+    let dots_w = run_w(DOTS, scale, bold);
+    if dots_w > max_w || out.len() < 3 {
+        return 0;
+    }
+    let budget = max_w - dots_w;
+    let mut used = 0usize;
+    let mut fit = 0usize;
+    for (i, &c) in text.iter().enumerate() {
+        let adv = std::design::font::advance_of(c, bold) * scale;
+        if used + adv > budget || fit + 3 > out.len() {
+            break;
+        }
+        used += adv;
+        fit = i + 1;
+    }
+    out[..fit].copy_from_slice(&text[..fit]);
+    out[fit..fit + 3].copy_from_slice(DOTS);
+    fit + 3
+}
+
+/// Anti-aliased text draw that (a) only tests pixels inside the run's own
+/// line box, (b) fits the bytes to `max_w` with `fit_run` before touching the
+/// glyph table, so a run can never paint outside the box the layout reserved
+/// for it. `bg` is the surface under the text so the AA blend is correct.
 #[inline(always)]
-fn test_text(
+fn run_ink(
     x: usize,
     y: usize,
     x0: usize,
     y0: usize,
     scale: usize,
     text: &[u8],
+    max_w: usize,
     color: u32,
+    bg: u32,
+    bold: bool,
 ) -> Option<u32> {
-    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, BG_DARK, false)
+    let h = std::design::font::line_height(scale);
+    if y < y0 || y >= y0 + h || x < x0 || x >= x0 + max_w {
+        return None;
+    }
+    let mut buf = [0u8; RUN_CAP];
+    let n = fit_run(text, scale, max_w, bold, &mut buf);
+    if n == 0 {
+        return None;
+    }
+    std::design::font::test_text_aa(x, y, x0, y0, scale, &buf[..n], color, bg, bold)
+}
+
+// -----------------------------------------------------------------------------
+// Shape primitives (rounded rectangles, pills, chevron, category icons)
+// -----------------------------------------------------------------------------
+
+/// Whether `(x, y)` is inside the rounded rectangle `(x0, y0, w, h)`.
+#[inline]
+fn in_round_rect(x: usize, y: usize, x0: usize, y0: usize, w: usize, h: usize, r: usize) -> bool {
+    if x < x0 || y < y0 || x >= x0 + w || y >= y0 + h {
+        return false;
+    }
+    let r = r.min(w / 2).min(h / 2);
+    if r == 0 {
+        return true;
+    }
+    let left = x0 + r;
+    let right = x0 + w - r;
+    let top = y0 + r;
+    let bottom = y0 + h - r;
+    let cx = if x < left {
+        left
+    } else if x >= right {
+        right - 1
+    } else {
+        x
+    };
+    let cy = if y < top {
+        top
+    } else if y >= bottom {
+        bottom - 1
+    } else {
+        y
+    };
+    let dx = x as i32 - cx as i32;
+    let dy = y as i32 - cy as i32;
+    (dx * dx + dy * dy) as usize <= r * r
+}
+
+/// White card with a 1px hairline border; `None` outside the rounded rect.
+#[inline]
+fn card_pixel(x: usize, y: usize, x0: usize, y0: usize, w: usize, h: usize, r: usize) -> Option<u32> {
+    if !in_round_rect(x, y, x0, y0, w, h, r) {
+        return None;
+    }
+    if !in_round_rect(x, y, x0 + 1, y0 + 1, w - 2, h - 2, r.saturating_sub(1)) {
+        return Some(BORDER);
+    }
+    Some(SURFACE)
+}
+
+/// Squared distance from `(x, y)` to the segment `a -> b`.
+fn dist2_to_seg(x: usize, y: usize, ax: i64, ay: i64, bx: i64, by: i64) -> i64 {
+    let px = x as i64;
+    let py = y as i64;
+    let abx = bx - ax;
+    let aby = by - ay;
+    let len2 = (abx * abx + aby * aby).max(1);
+    let mut t = (px - ax) * abx + (py - ay) * aby;
+    if t < 0 {
+        t = 0;
+    } else if t > len2 {
+        t = len2;
+    }
+    let qx = ax + (t * abx) / len2;
+    let qy = ay + (t * aby) / len2;
+    (px - qx) * (px - qx) + (py - qy) * (py - qy)
+}
+
+/// Back chevron: one coherent 2px rounded stroke family, matching the header
+/// control it lives in.
+#[inline]
+fn chevron_ink(x: usize, y: usize, cx: usize, cy: usize, color: u32) -> Option<u32> {
+    let (cx, cy) = (cx as i64, cy as i64);
+    if dist2_to_seg(x, y, cx + 6, cy - 10, cx - 6, cy) <= 4
+        || dist2_to_seg(x, y, cx - 6, cy, cx + 6, cy + 10) <= 4
+    {
+        Some(color)
+    } else {
+        None
+    }
+}
+
+/// 48x48 back control: soft pill with the chevron centred.
+fn back_button_pixel(x: usize, y: usize) -> Option<u32> {
+    if !in_round_rect(x, y, BACK_X, BACK_Y, BACK_S, BACK_S, 14) {
+        return None;
+    }
+    if !in_round_rect(x, y, BACK_X + 1, BACK_Y + 1, BACK_S - 2, BACK_S - 2, 13) {
+        return Some(BORDER);
+    }
+    if let Some(c) = chevron_ink(x, y, BACK_X + BACK_S / 2, BACK_Y + BACK_S / 2, TEXT) {
+        return Some(c);
+    }
+    Some(SOFT)
+}
+
+// Category icon family: rounded geometric marks on a ~24px grid, 2px strokes,
+// monochrome — the same coherent family the launcher's System Space uses.
+#[inline]
+fn icon_device(x: usize, y: usize, cx: usize, cy: usize, tint: u32) -> Option<u32> {
+    let dx = (x as i32) - (cx as i32);
+    let dy = (y as i32) - (cy as i32);
+    if dx >= -7 && dx <= 7 && dy >= -11 && dy <= 11 {
+        let is_border = dx <= -6 || dx >= 6 || dy <= -10 || dy >= 10;
+        let is_speaker = dy == -8 && dx >= -2 && dx <= 2;
+        let is_home = dy == 8 && dx >= -3 && dx <= 3;
+        if is_border || is_speaker || is_home {
+            return Some(tint);
+        }
+    }
+    None
+}
+
+#[inline]
+fn icon_network(x: usize, y: usize, cx: usize, cy: usize, tint: u32) -> Option<u32> {
+    let dx = (x as i32) - (cx as i32);
+    let dy = (y as i32) - (cy as i32);
+    let d2 = dx * dx + dy * dy;
+    if dy <= 3 {
+        if d2 >= 169 && d2 <= 289 && dx.abs() <= 15 {
+            return Some(tint);
+        }
+        if d2 >= 49 && d2 <= 100 && dx.abs() <= 9 {
+            return Some(tint);
+        }
+    }
+    if d2 <= 9 && dy >= 0 {
+        return Some(tint);
+    }
+    None
+}
+
+#[inline]
+fn icon_personal(x: usize, y: usize, cx: usize, cy: usize, tint: u32) -> Option<u32> {
+    let dx = (x as i32) - (cx as i32);
+    let dy = (y as i32) - (cy as i32);
+    let d2 = dx * dx + dy * dy;
+    if d2 >= 121 && d2 <= 169 {
+        return Some(tint);
+    }
+    let h_dy = dy + 4;
+    if dx * dx + h_dy * h_dy <= 16 {
+        return Some(tint);
+    }
+    if dy >= 3 && dy <= 10 && d2 < 121 {
+        let shoulder_w = (11 - dy) * 2;
+        if dx.abs() <= shoulder_w {
+            return Some(tint);
+        }
+    }
+    None
+}
+
+#[inline]
+fn icon_apps(x: usize, y: usize, cx: usize, cy: usize, tint: u32) -> Option<u32> {
+    let dx = (x as i32) - (cx as i32);
+    let dy = (y as i32) - (cy as i32);
+    let in_col1 = dx >= -9 && dx <= -3;
+    let in_col2 = dx >= 3 && dx <= 9;
+    let in_row1 = dy >= -9 && dy <= -3;
+    let in_row2 = dy >= 3 && dy <= 9;
+    if (in_col1 || in_col2) && (in_row1 || in_row2) {
+        return Some(tint);
+    }
+    None
+}
+
+#[inline]
+fn icon_battery(x: usize, y: usize, cx: usize, cy: usize, tint: u32) -> Option<u32> {
+    let dx = (x as i32) - (cx as i32);
+    let dy = (y as i32) - (cy as i32);
+    if dx >= -11 && dx <= 8 && dy >= -6 && dy <= 6 {
+        if dx <= -10 || dx >= 7 || dy <= -5 || dy >= 5 {
+            return Some(tint);
+        }
+        if dx <= 2 {
+            return Some(tint);
+        }
+    }
+    if dx >= 8 && dx <= 11 && dy >= -3 && dy <= 3 {
+        return Some(tint);
+    }
+    None
+}
+
+#[inline]
+fn icon_security(x: usize, y: usize, cx: usize, cy: usize, tint: u32) -> Option<u32> {
+    let dx = (x as i32) - (cx as i32);
+    let dy = (y as i32) - (cy as i32);
+    if dy >= -10 && dy <= 11 && dx.abs() <= 9 {
+        let max_dx = if dy <= 0 {
+            9
+        } else {
+            9 - (dy * 9) / 12
+        };
+        if dx.abs() <= max_dx {
+            let is_edge = dx.abs() >= max_dx - 2 || dy <= -8 || dy >= 9;
+            let is_keyhole = (dx.abs() <= 2 && dy >= -2 && dy <= 4)
+                || (dx * dx + (dy + 3) * (dy + 3) <= 9);
+            if is_edge || is_keyhole {
+                return Some(tint);
+            }
+        }
+    }
+    None
+}
+
+#[inline]
+fn icon_gear(x: usize, y: usize, cx: usize, cy: usize, tint: u32) -> Option<u32> {
+    let dx = (x as i32) - (cx as i32);
+    let dy = (y as i32) - (cy as i32);
+    let d2 = dx * dx + dy * dy;
+    if d2 <= 144 && d2 >= 25 {
+        let is_spoke = dx.abs() <= 3
+            || dy.abs() <= 3
+            || (dx - dy).abs() <= 3
+            || (dx + dy).abs() <= 3;
+        let in_ring = d2 >= 25 && d2 <= 81;
+        if in_ring || (is_spoke && d2 <= 144) {
+            return Some(tint);
+        }
+    }
+    None
+}
+
+type IconFn = fn(usize, usize, usize, usize, u32) -> Option<u32>;
+
+/// Landing grid entry: title, subtitle and icon for one category.
+fn category(i: usize) -> (&'static [u8], &'static [u8], IconFn) {
+    match i {
+        0 => (b"Device", b"Display, Sound, Gestures", icon_device),
+        1 => (b"Network", b"Wi-Fi, Mobile, Bluetooth", icon_network),
+        2 => (b"Personal", b"Accounts, Language, Time", icon_personal),
+        3 => (b"Apps", b"Permissions, Storage", icon_apps),
+        4 => (b"Power", b"Battery, Charging", icon_battery),
+        5 => (b"Security", b"Lock, Encryption", icon_security),
+        _ => (b"System", b"Updates, About, Tools", icon_gear),
+    }
+}
+
+/// Top-left corner of landing card `i` (2-column grid, row-major).
+fn card_origin(i: usize) -> (usize, usize) {
+    let col = i % 2;
+    let row = i / 2;
+    (GRID_X + col * (CARD_W + GRID_GAP), GRID_Y + row * (CARD_H + GRID_GAP))
+}
+
+/// Landing card hit-test: the whole rounded card is the touch target.
+fn landing_card_at(px: u32, py: u32) -> Option<Section> {
+    for i in 0..Section::COUNT {
+        let (cx0, cy0) = card_origin(i);
+        if in_round_rect(px as usize, py as usize, cx0, cy0, CARD_W, CARD_H, CARD_R) {
+            return Section::from_index(i);
+        }
+    }
+    None
+}
+
+// -----------------------------------------------------------------------------
+// Detail screen rows
+// -----------------------------------------------------------------------------
+
+/// Number of rows on each section's detail screen.
+fn row_count(section: Section) -> usize {
+    match section {
+        Section::Apps => 2,
+        Section::System => 4,
+        _ => 3,
+    }
+}
+
+/// Height of row `row` on `section`'s detail screen.
+fn row_h(section: Section, row: usize) -> usize {
+    match (section, row) {
+        (Section::Power, 1) => ROW_TALL,
+        (Section::System, 3) => ROW_TALL_ALT,
+        _ => ROW_H,
+    }
+}
+
+/// Top edge and height of row `row`, stacked from `DETAIL_TOP` with 16px gaps.
+fn detail_row_rect(section: Section, row: usize) -> (usize, usize) {
+    let mut y = DETAIL_TOP;
+    for r in 0..row {
+        y += row_h(section, r) + ROW_GAP;
+    }
+    (y, row_h(section, row))
 }
 
 /// Composes the About card's version line from the settings store's answer.
@@ -530,465 +1024,737 @@ fn compose_version_line(out: &mut [u8], version: &[u8]) -> usize {
     i
 }
 
-#[inline(never)]
-fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
-    // 1. Status Bar & Header (y: 0..96)
-    if y < 96 {
-        if y >= 94 {
-            return BORDER_SUBTLE;
-        }
-
-        // Back button (<) at (x: 24..100, y: 28..68)
-        if x >= 24 && x < 100 && y >= 28 && y < 68 {
-            let center_x = 62;
-            let center_y = 48;
-            let dx = (x as isize - center_x as isize).abs();
-            let dy = (y as isize - center_y as isize).abs();
-            if (dx + dy <= 12 && x <= center_x)
-                || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
-            {
-                return TEXT_PRIMARY;
-            }
-            return SURFACE_RAISED;
-        }
-
-        // Header Title: "Settings"
-        if y >= 36 && y < 60 {
-            if let Some(c) = test_text(x, y, 116, 36, 3, b"Settings", TEXT_PRIMARY) {
-                return c;
-            }
-        }
-
-        // Top right System Badge (x: 540..696, y: 28..68)
-        if x >= 540 && x < 696 && y >= 28 && y < 68 {
-            let rx = (x - 540).min(695 - x);
-            let ry = (y - 28).min(67 - y);
-            if rx < 20 && ry < 20 {
-                let cdx = (20 - rx) as isize;
-                let cdy = (20 - ry) as isize;
-                if cdx * cdx + cdy * cdy >= 400 {
-                    return SURFACE_DARK;
-                }
-            }
-
-            if let Some(c) = test_text(x, y, 574, 40, 2, b"SYSTEM", ACCENT_SKY) {
-                return c;
-            }
-
-            if rx < 2 || ry < 2 {
-                return BORDER_SUBTLE;
-            }
-            return SURFACE_RAISED;
-        }
-
-        return SURFACE_DARK;
+/// Writes `n` as decimal ASCII into `out`; returns the byte count.
+fn write_decimal(n: u32, out: &mut [u8]) -> usize {
+    if out.is_empty() {
+        return 0;
     }
+    if n == 0 {
+        out[0] = b'0';
+        return 1;
+    }
+    let mut digits = [0u8; 10];
+    let mut count = 0usize;
+    let mut v = n;
+    while v > 0 && count < digits.len() {
+        digits[count] = b'0' + (v % 10) as u8;
+        count += 1;
+        v /= 10;
+    }
+    let n_out = count.min(out.len());
+    for i in 0..n_out {
+        out[i] = digits[count - 1 - i];
+    }
+    n_out
+}
 
-    // 2. Category Tab Strip (y: 104..164)
-    if y >= 104 && y < 164 {
-        for t in 0..5 {
-            let col_x = 24 + t * 136;
-            if x >= col_x && x < col_x + 124 && y >= 110 && y < 158 {
-                let is_active = t == app.current_tab as usize;
-                let rx = (x - col_x).min(col_x + 123 - x);
-                let ry = (y - 110).min(157 - y);
-                if rx < 14 && ry < 14 {
-                    let cdx = (14 - rx) as isize;
-                    let cdy = (14 - ry) as isize;
-                    if cdx * cdx + cdy * cdy >= 196 {
-                        return BG_DARK;
-                    }
-                }
+/// Appends `suffix` to `buf[..len]` (truncating the suffix, never the buffer).
+fn push_suffix(buf: &mut [u8], len: usize, suffix: &[u8]) -> usize {
+    let mut i = len;
+    for &b in suffix {
+        if i >= buf.len() {
+            break;
+        }
+        buf[i] = b;
+        i += 1;
+    }
+    i
+}
 
-                let text_color = if is_active { 0xFFFFFFFF } else { TEXT_MUTED };
-                let (label, lx) = match t {
-                    0 => (&b"WIFI"[..], col_x + 30),
-                    1 => (&b"POWER"[..], col_x + 22),
-                    2 => (&b"SENSORS"[..], col_x + 8),
-                    3 => (&b"SECURITY"[..], col_x + 4),
-                    _ => (&b"ABOUT"[..], col_x + 22),
-                };
+/// Pill badge, right-aligned helper: 28px pill, 1px ink border, label centred.
+/// The width is derived from the measured label so the pill always fits its
+/// text and the caller can reserve exactly that much horizontal space.
+fn badge_w(label: &[u8]) -> usize {
+    run_w(label, 1, false) + 24
+}
 
-                if let Some(c) = test_text(x, y, lx, 126, 2, label, text_color) {
+fn badge_pixel(
+    x: usize,
+    y: usize,
+    bx0: usize,
+    by0: usize,
+    label: &[u8],
+    ink: u32,
+    bg: u32,
+) -> Option<u32> {
+    let w = badge_w(label);
+    let h = 28usize;
+    if !in_round_rect(x, y, bx0, by0, w, h, h / 2) {
+        return None;
+    }
+    if !in_round_rect(x, y, bx0 + 1, by0 + 1, w - 2, h - 2, h / 2 - 1) {
+        return Some(ink);
+    }
+    let tw = run_w(label, 1, false);
+    let tx = bx0 + (w - tw) / 2;
+    let ty = by0 + (h - 24) / 2;
+    if let Some(c) = run_ink(x, y, tx, ty, 1, label, tw + 1, ink, bg, false) {
+        return Some(c);
+    }
+    Some(SOFT)
+}
+
+/// Standard row card head: bold title on its own line (never truncated by a
+/// badge, because the title owns the full card width), caption below with the
+/// badge column explicitly reserved, badge right-aligned on the caption line.
+fn row_head(
+    x: usize,
+    y: usize,
+    cy: usize,
+    title: &[u8],
+    caption: &[u8],
+    cap_ink: u32,
+    badge: &[u8],
+    badge_ink: u32,
+) -> Option<u32> {
+    let bw = badge_w(badge);
+    let bx0 = DETAIL_X + DETAIL_W - 24 - bw;
+    let cap_fit = DETAIL_W - 48 - bw - 16;
+    if let Some(c) = run_ink(
+        x,
+        y,
+        DETAIL_X + 24,
+        cy + 16,
+        2,
+        title,
+        DETAIL_W - 48,
+        TEXT,
+        SURFACE,
+        true,
+    ) {
+        return Some(c);
+    }
+    if let Some(c) = run_ink(
+        x,
+        y,
+        DETAIL_X + 24,
+        cy + 72,
+        1,
+        caption,
+        cap_fit,
+        cap_ink,
+        SURFACE,
+        false,
+    ) {
+        return Some(c);
+    }
+    badge_pixel(x, y, bx0, cy + 70, badge, badge_ink, SURFACE)
+}
+
+/// One segment of the DVFS profile selector (204x48, radius 12).
+fn profile_segment_pixel(x: usize, y: usize, cy: usize, app: &SettingsApp, i: usize) -> Option<u32> {
+    let sx = SEG_X + i * (SEG_W + SEG_GAP);
+    if !in_round_rect(x, y, sx, cy + 112, SEG_W, SEG_H, 12) {
+        return None;
+    }
+    let label: &[u8] = match i {
+        0 => b"Performance",
+        1 => b"Balanced",
+        _ => b"PowerSaver",
+    };
+    let active = app.power_profile.index() == i;
+    if !active
+        && !in_round_rect(x, y, sx + 1, cy + 113, SEG_W - 2, SEG_H - 2, 11)
+    {
+        return Some(BORDER);
+    }
+    let fill = if active { TEXT } else { SOFT };
+    let lw = run_w(label, 1, false);
+    let lx = sx + (SEG_W - lw) / 2;
+    let ly = cy + 112 + (SEG_H - 24) / 2;
+    if let Some(c) = run_ink(
+        x,
+        y,
+        lx,
+        ly,
+        1,
+        label,
+        SEG_W - 16,
+        if active { SURFACE } else { TEXT_MUTED },
+        fill,
+        false,
+    ) {
+        return Some(c);
+    }
+    Some(fill)
+}
+
+/// Renders the contents of one detail row for the pixel under test.
+#[allow(clippy::too_many_arguments)]
+fn row_pixel(
+    x: usize,
+    y: usize,
+    app: &SettingsApp,
+    section: Section,
+    row: usize,
+    cy: usize,
+    fill: u32,
+) -> u32 {
+    let _ = fill; // rows are drawn on the white card surface
+    match section {
+        Section::Device => match row {
+            0 => {
+                if let Some(c) = row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Display",
+                    b"No backend attached",
+                    TEXT_MUTED,
+                    b"UNAVAILABLE",
+                    TEXT_MUTED,
+                ) {
                     return c;
                 }
-
-                if rx < 2 || ry < 2 {
-                    return if is_active { ACCENT_SKY } else { BORDER_SUBTLE };
-                }
-
-                return if is_active { 0xFF173552 } else { SURFACE_DARK };
             }
-        }
-        return BG_DARK;
-    }
-
-    // 3. Settings Cards (y: 176..1320)
-    if y >= 176 && y < 1320 {
-        match app.current_tab {
-            SettingsTab::Wireless => {
-                // Card 0: Wi-Fi
-                if x >= 24 && x < W - 24 && y >= 180 && y < 330 {
-                    if let Some(c) = render_card_frame(x, y, 180, 330, BORDER_SUBTLE) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 210, 2, b"Wi-Fi Network", TEXT_PRIMARY) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 270, 1, if app.wireless == TelemetryState::Reported { &b"Wireless telemetry received"[..] } else { &b"Radio status unavailable"[..] }, if app.wireless == TelemetryState::Reported { SUCCESS_EMERALD } else { TEXT_MUTED }) {
-                        return c;
-                    }
-                    if let Some(c) = render_badge(x, y, 500, 206, if app.wireless == TelemetryState::Reported { &b"REPORTED"[..] } else { &b"UNAVAILABLE"[..] }, if app.wireless == TelemetryState::Reported { SUCCESS_EMERALD } else { TEXT_MUTED }) {
-                        return c;
-                    }
-                    return SURFACE_DARK;
-                }
-                // Card 1: Bluetooth
-                if x >= 24 && x < W - 24 && y >= 350 && y < 500 {
-                    if let Some(c) = render_card_frame(x, y, 350, 500, BORDER_SUBTLE) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 380, 2, b"Bluetooth & BLE", TEXT_PRIMARY) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 440, 1, b"Bluetooth status unavailable", TEXT_MUTED) {
-                        return c;
-                    }
-                    if let Some(c) = render_badge(x, y, 500, 376, b"UNAVAILABLE", TEXT_MUTED) {
-                        return c;
-                    }
-                    return SURFACE_DARK;
-                }
-                // Card 2: Cellular
-                if x >= 24 && x < W - 24 && y >= 520 && y < 670 {
-                    if let Some(c) = render_card_frame(x, y, 520, 670, BORDER_SUBTLE) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 550, 2, b"Cellular Baseband", TEXT_PRIMARY) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 610, 1, b"Cellular status unavailable", TEXT_MUTED) {
-                        return c;
-                    }
-                    if let Some(c) = render_badge(x, y, 500, 546, b"UNAVAILABLE", TEXT_MUTED) {
-                        return c;
-                    }
-                    return SURFACE_DARK;
+            1 => {
+                if let Some(c) = row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Sound",
+                    b"No backend attached",
+                    TEXT_MUTED,
+                    b"UNAVAILABLE",
+                    TEXT_MUTED,
+                ) {
+                    return c;
                 }
             }
-            SettingsTab::PowerAndBattery => {
-                // Card 0: Battery
-                if x >= 24 && x < W - 24 && y >= 180 && y < 330 {
-                    if let Some(c) = render_card_frame(x, y, 180, 330, WARNING_AMBER) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 210, 2, b"Battery Fuel Gauge", TEXT_PRIMARY) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 270, 1, if app.battery == TelemetryState::Reported { &b"Battery payload received"[..] } else { &b"Battery telemetry unavailable"[..] }, TEXT_MUTED) {
-                        return c;
-                    }
-                    if let Some(c) = render_badge(x, y, 510, 206, if app.battery == TelemetryState::Reported { &b"REPORTED"[..] } else { &b"UNAVAILABLE"[..] }, if app.battery == TelemetryState::Reported { SUCCESS_EMERALD } else { TEXT_MUTED }) {
-                        return c;
-                    }
-                    return SURFACE_DARK;
-                }
-                // Card 1: DVFS
-                if x >= 24 && x < W - 24 && y >= 350 && y < 500 {
-                    if let Some(c) = render_card_frame(x, y, 350, 500, ACCENT_SKY) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 380, 2, b"CPU Frequency Scaling", TEXT_PRIMARY) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 440, 1, b"Governor telemetry unavailable", ACCENT_SKY) {
-                        return c;
-                    }
-                    if let Some(c) = render_badge(x, y, 520, 376, b"UNAVAILABLE", TEXT_MUTED) {
-                        return c;
-                    }
-                    return SURFACE_DARK;
-                }
-                // Card 2: Thermal Governor
-                if x >= 24 && x < W - 24 && y >= 520 && y < 670 {
-                    if let Some(c) = render_card_frame(x, y, 520, 670, BORDER_SUBTLE) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 550, 2, b"Thermal Governor", TEXT_PRIMARY) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 610, 1, b"DVFS state unavailable", TEXT_MUTED) {
-                        return c;
-                    }
-                    if let Some(c) = render_badge(x, y, 530, 546, b"UNAVAILABLE", TEXT_MUTED) {
-                        return c;
-                    }
-                    return SURFACE_DARK;
-                }
-            }
-            SettingsTab::ThermalsAndSensors => {
-                // Card 0: Core Temp
-                if x >= 24 && x < W - 24 && y >= 180 && y < 330 {
-                    if let Some(c) = render_card_frame(x, y, 180, 330, WARNING_AMBER) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 210, 2, b"CPU Core Temperature", TEXT_PRIMARY) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 270, 1, if app.thermal == TelemetryState::Reported { &b"Thermal payload received"[..] } else { &b"Temperature telemetry unavailable"[..] }, TEXT_MUTED) {
-                        return c;
-                    }
-                    if let Some(c) = render_badge(x, y, 510, 206, if app.thermal == TelemetryState::Reported { &b"REPORTED"[..] } else { &b"UNAVAILABLE"[..] }, if app.thermal == TelemetryState::Reported { SUCCESS_EMERALD } else { TEXT_MUTED }) {
-                        return c;
-                    }
-                    return SURFACE_DARK;
-                }
-                // Card 1: Motion Sensor
-                if x >= 24 && x < W - 24 && y >= 350 && y < 500 {
-                    if let Some(c) = render_card_frame(x, y, 350, 500, WARNING_AMBER) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 380, 2, b"6-Axis Motion Sensor", TEXT_PRIMARY) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 440, 1, if app.sensor == TelemetryState::Reported { &b"Sensor payload received; values not parsed"[..] } else { &b"Sensor values unavailable"[..] }, TEXT_MUTED) {
-                        return c;
-                    }
-                    if let Some(c) = render_badge(x, y, 510, 376, if app.sensor == TelemetryState::Reported { &b"REPORTED"[..] } else { &b"UNAVAILABLE"[..] }, if app.sensor == TelemetryState::Reported { SUCCESS_EMERALD } else { TEXT_MUTED }) {
-                        return c;
-                    }
-                    return SURFACE_DARK;
-                }
-                // Card 2: Light Sensor
-                if x >= 24 && x < W - 24 && y >= 520 && y < 670 {
-                    if let Some(c) = render_card_frame(x, y, 520, 670, WARNING_AMBER) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 550, 2, b"Ambient Light Sensor", TEXT_PRIMARY) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 610, 1, if app.sensor == TelemetryState::Reported { &b"Sensor payload received; lux not parsed"[..] } else { &b"Light sensor telemetry unavailable"[..] }, TEXT_MUTED) {
-                        return c;
-                    }
-                    if let Some(c) = render_badge(x, y, 510, 546, if app.sensor == TelemetryState::Reported { &b"REPORTED"[..] } else { &b"UNAVAILABLE"[..] }, if app.sensor == TelemetryState::Reported { SUCCESS_EMERALD } else { TEXT_MUTED }) {
-                        return c;
-                    }
-                    return SURFACE_DARK;
-                }
-            }
-            SettingsTab::SecurityAndPrivacy => {
-                // Card 0: Keystore
-                if x >= 24 && x < W - 24 && y >= 180 && y < 330 {
-                    if let Some(c) = render_card_frame(x, y, 180, 330, BORDER_SUBTLE) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 210, 2, b"Hardware Keystore", TEXT_PRIMARY) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 270, 1, b"Keystore status unavailable", TEXT_MUTED) {
-                        return c;
-                    }
-                    if let Some(c) = render_badge(x, y, 520, 206, b"UNAVAILABLE", TEXT_MUTED) {
-                        return c;
-                    }
-                    return SURFACE_DARK;
-                }
-                // Card 1: Vault
-                if x >= 24 && x < W - 24 && y >= 350 && y < 500 {
-                    if let Some(c) = render_card_frame(x, y, 350, 500, BORDER_SUBTLE) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 380, 2, b"Storage Vault Encryption", TEXT_PRIMARY) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 440, 1, b"Vault encryption status unavailable", TEXT_MUTED) {
-                        return c;
-                    }
-                    if let Some(c) = render_badge(x, y, 510, 376, b"UNAVAILABLE", TEXT_MUTED) {
-                        return c;
-                    }
-                    return SURFACE_DARK;
-                }
-                // Card 2: Privacy Shield
-                if x >= 24 && x < W - 24 && y >= 520 && y < 670 {
-                    if let Some(c) = render_card_frame(x, y, 520, 670, BORDER_SUBTLE) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 550, 2, b"Privacy Shield Filter", TEXT_PRIMARY) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 610, 1, b"Privacy filter status unavailable", TEXT_MUTED) {
-                        return c;
-                    }
-                    if let Some(c) = render_badge(x, y, 540, 546, b"UNAVAILABLE", TEXT_MUTED) {
-                        return c;
-                    }
-                    return SURFACE_DARK;
-                }
-                // Card 3: Developer terminal (Tappable target: y: 830..1010, x: 32..688)
-                if x >= 32 && x < W - 32 && y >= 830 && y < 1010 {
-                    let accent_bar = if app.terminal_enabled { SUCCESS_EMERALD } else { BORDER_SUBTLE };
-                    if let Some(c) = render_card_frame(x, y, 830, 1010, accent_bar) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 860, 2, b"Developer terminal", TEXT_PRIMARY) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 896, 1, b"Disabled by default", TEXT_MUTED) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 924, 1, b"Config key: developer.terminal_enabled", TEXT_MUTED) {
-                        return c;
-                    }
-                    let (toggle_str, toggle_col) = if app.terminal_enabled {
-                        (&b"ENABLED"[..], SUCCESS_EMERALD)
-                    } else {
-                        (&b"DISABLED"[..], TEXT_MUTED)
-                    };
-                    if let Some(c) = render_badge(x, y, 520, 856, toggle_str, toggle_col) {
-                        return c;
-                    }
-                    return SURFACE_DARK;
-                }
-            }
-            SettingsTab::AboutDevice => {
-                // Card 0: OS
-                if x >= 24 && x < W - 24 && y >= 180 && y < 330 {
-                    if let Some(c) = render_card_frame(x, y, 180, 330, ACCENT_SKY) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 210, 2, b"InterOS Core", TEXT_PRIMARY) {
-                        return c;
-                    }
-                    let mut version_line = [0u8; 64];
-                    let version_len =
-                        compose_version_line(&mut version_line, &app.os_version[..app.os_version_len]);
-                    if let Some(c) = test_text(x, y, 60, 270, 1, &version_line[..version_len], ACCENT_SKY) {
-                        return c;
-                    }
-                    if let Some(c) = render_badge(x, y, 520, 206, b"UNAVAILABLE", TEXT_MUTED) {
-                        return c;
-                    }
-                    return SURFACE_DARK;
-                }
-                // Card 1: Architecture
-                if x >= 24 && x < W - 24 && y >= 350 && y < 500 {
-                    if let Some(c) = render_card_frame(x, y, 350, 500, ACCENT_SKY) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 380, 2, b"Platform Microkernel", TEXT_PRIMARY) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 440, 1, b"Capability Security & VFS Block Storage", TEXT_MUTED) {
-                        return c;
-                    }
-                    if let Some(c) = render_badge(x, y, 530, 376, b"RING 0", ACCENT_SKY) {
-                        return c;
-                    }
-                    return SURFACE_DARK;
-                }
-                // Card 2: RTC (rendered from the recorded query outcome)
-                if x >= 24 && x < W - 24 && y >= 520 && y < 670 {
-                    if let Some(c) = render_card_frame(x, y, 520, 670, BORDER_SUBTLE) {
-                        return c;
-                    }
-                    if let Some(c) = test_text(x, y, 60, 550, 2, b"Hardware Real-Time Clock", TEXT_PRIMARY) {
-                        return c;
-                    }
-                    if app.rtc == TelemetryState::Reported {
-                        // Show the payload the RTC service actually returned.
-                        if let Some(c) = test_text(
-                            x,
-                            y,
-                            60,
-                            610,
-                            1,
-                            &app.rtc_time[..app.rtc_time_len],
-                            ACCENT_SKY,
-                        ) {
-                            return c;
-                        }
-                    } else if let Some(c) = test_text(
-                        x,
-                        y,
-                        60,
-                        610,
-                        1,
-                        b"No RTC reading (query failed or was refused)",
+            _ => {
+                let reported = app.sensor == TelemetryState::Reported;
+                let (caption, cap_ink, badge, badge_ink) = if reported {
+                    (
+                        &b"Sensor payload received; values not parsed"[..],
                         TEXT_MUTED,
-                    ) {
-                        return c;
-                    }
-                    let (badge, badge_col) = if app.rtc == TelemetryState::Reported {
-                        (&b"REPORTED"[..], SUCCESS_EMERALD)
-                    } else {
-                        (&b"UNAVAILABLE"[..], TEXT_MUTED)
-                    };
-                    if let Some(c) = render_badge(x, y, 510, 546, badge, badge_col) {
-                        return c;
-                    }
-                    return SURFACE_DARK;
+                        &b"REPORTED"[..],
+                        SUCCESS_EMERALD,
+                    )
+                } else {
+                    (
+                        &b"Sensor values unavailable"[..],
+                        TEXT_MUTED,
+                        &b"UNAVAILABLE"[..],
+                        TEXT_MUTED,
+                    )
+                };
+                if let Some(c) = row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Motion Sensor",
+                    caption,
+                    cap_ink,
+                    badge,
+                    badge_ink,
+                ) {
+                    return c;
                 }
             }
-        }
-        return BG_DARK;
-    }
-
-    // 4. Home Gesture Pill (x: 260..460, y: 1418..1424)
-    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
-        return TEXT_MUTED;
-    }
-
-    BG_DARK
-}
-
-fn render_card_frame(x: usize, y: usize, y0: usize, y1: usize, accent_col: u32) -> Option<u32> {
-    // Left accent strip
-    if x >= 24 && x < 34 {
-        return Some(accent_col);
-    }
-
-    let rx = (x - 24).min(W - 25 - x);
-    let ry = (y - y0).min(y1 - 1 - y);
-    if rx < 18 && ry < 18 {
-        let cdx = (18 - rx) as isize;
-        let cdy = (18 - ry) as isize;
-        if cdx * cdx + cdy * cdy >= 324 {
-            return Some(BG_DARK);
-        }
-    }
-
-    if rx < 2 || ry < 2 {
-        return Some(BORDER_SUBTLE);
-    }
-    None
-}
-
-fn render_badge(x: usize, y: usize, bx0: usize, by0: usize, label: &[u8], color: u32) -> Option<u32> {
-    let bw = label.len() * 8 + 24;
-    let bh = 28;
-    if x >= bx0 && x < bx0 + bw && y >= by0 && y < by0 + bh {
-        let rx = (x - bx0).min(bx0 + bw - 1 - x);
-        let ry = (y - by0).min(by0 + bh - 1 - y);
-        if rx < 12 && ry < 12 {
-            let cdx = (12 - rx) as isize;
-            let cdy = (12 - ry) as isize;
-            if cdx * cdx + cdy * cdy >= 144 {
-                return Some(SURFACE_DARK);
+        },
+        Section::Network => match row {
+            0 => {
+                let reported = app.wireless == TelemetryState::Reported;
+                let (caption, badge, badge_ink) = if reported {
+                    (
+                        &b"Wireless telemetry received"[..],
+                        &b"REPORTED"[..],
+                        SUCCESS_EMERALD,
+                    )
+                } else {
+                    (
+                        &b"Radio status unavailable"[..],
+                        &b"UNAVAILABLE"[..],
+                        TEXT_MUTED,
+                    )
+                };
+                // WHY no Wi-Fi toggle: the platform exposes no radio-control
+                // syscall to this app, and the design truth contract forbids
+                // dead controls, so the row reports the observed radio state.
+                if let Some(c) = row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Wi-Fi Radio",
+                    caption,
+                    if reported { SUCCESS_EMERALD } else { TEXT_MUTED },
+                    badge,
+                    badge_ink,
+                ) {
+                    return c;
+                }
+            }
+            1 => {
+                if let Some(c) = row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Bluetooth",
+                    b"Bluetooth status unavailable",
+                    TEXT_MUTED,
+                    b"UNAVAILABLE",
+                    TEXT_MUTED,
+                ) {
+                    return c;
+                }
+            }
+            _ => {
+                if let Some(c) = row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Cellular Baseband",
+                    b"Cellular status unavailable",
+                    TEXT_MUTED,
+                    b"UNAVAILABLE",
+                    TEXT_MUTED,
+                ) {
+                    return c;
+                }
+            }
+        },
+        Section::Personal => {
+            let title: &[u8] = match row {
+                0 => b"Accounts",
+                1 => b"Language",
+                _ => b"Date & Time",
+            };
+            if let Some(c) = row_head(
+                x,
+                y,
+                cy,
+                title,
+                b"No backend attached",
+                TEXT_MUTED,
+                b"UNAVAILABLE",
+                TEXT_MUTED,
+            ) {
+                return c;
             }
         }
+        Section::Apps => {
+            let title: &[u8] = match row {
+                0 => b"Permissions",
+                _ => b"Storage",
+            };
+            if let Some(c) = row_head(
+                x,
+                y,
+                cy,
+                title,
+                b"No backend attached",
+                TEXT_MUTED,
+                b"UNAVAILABLE",
+                TEXT_MUTED,
+            ) {
+                return c;
+            }
+        }
+        Section::Power => match row {
+            0 => {
+                let reported = app.battery == TelemetryState::Reported;
+                let (caption, badge, badge_ink) = if reported {
+                    (
+                        &b"Battery payload received"[..],
+                        &b"REPORTED"[..],
+                        SUCCESS_EMERALD,
+                    )
+                } else {
+                    (
+                        &b"Battery telemetry unavailable"[..],
+                        &b"UNAVAILABLE"[..],
+                        TEXT_MUTED,
+                    )
+                };
+                if let Some(c) = row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Battery Fuel Gauge",
+                    caption,
+                    TEXT_MUTED,
+                    badge,
+                    badge_ink,
+                ) {
+                    return c;
+                }
+            }
+            1 => {
+                // CPU frequency scaling: observed governor (real query) plus a
+                // live DVFS profile selector whose result is reported honestly.
+                let (gov_run, gov_ink): (&[u8], u32) = match app.governor {
+                    Some(0) => (b"Governor reported by the kernel: Performance", TEXT_MUTED),
+                    Some(1) => (b"Governor reported by the kernel: Power Saver", TEXT_MUTED),
+                    Some(2) => (b"Governor reported by the kernel: Interactive", TEXT_MUTED),
+                    Some(3) => (b"Governor reported by the kernel: Schedutil", TEXT_MUTED),
+                    _ => (b"DVFS state unavailable", TEXT_MUTED),
+                };
+                let gov_reported = app.governor.is_some();
+                let (gov_badge, gov_badge_ink): (&[u8], u32) = if gov_reported {
+                    (b"REPORTED", SUCCESS_EMERALD)
+                } else {
+                    (b"UNAVAILABLE", TEXT_MUTED)
+                };
+                if let Some(c) = row_head(
+                    x,
+                    y,
+                    cy,
+                    b"CPU Frequency Scaling",
+                    gov_run,
+                    gov_ink,
+                    gov_badge,
+                    gov_badge_ink,
+                ) {
+                    return c;
+                }
+                for i in 0..3 {
+                    if let Some(c) = profile_segment_pixel(x, y, cy, app, i) {
+                        return c;
+                    }
+                }
+                // Honest outcome line for the last profile request.
+                let mut fb = [0u8; 96];
+                let (fb_len, fb_ink) = match app.profile_feedback {
+                    ProfileFeedback::Applied(mhz) => {
+                        let mut i = write_decimal(mhz, &mut fb);
+                        i = push_suffix(&mut fb, i, b" MHz accepted by the kernel");
+                        (i, ACCENT)
+                    }
+                    ProfileFeedback::Refused => {
+                        let s = b"Kernel refused the change; no profile applied";
+                        fb[..s.len()].copy_from_slice(s);
+                        (s.len(), TEXT_MUTED)
+                    }
+                    ProfileFeedback::Unattempted => {
+                        let s = b"Profile not yet sent to the kernel";
+                        fb[..s.len()].copy_from_slice(s);
+                        (s.len(), TEXT_MUTED)
+                    }
+                };
+                if let Some(c) = run_ink(
+                    x,
+                    y,
+                    DETAIL_X + 24,
+                    cy + 172,
+                    1,
+                    &fb[..fb_len],
+                    DETAIL_W - 48,
+                    fb_ink,
+                    SURFACE,
+                    false,
+                ) {
+                    return c;
+                }
+            }
+            _ => {
+                let reported = app.thermal == TelemetryState::Reported;
+                let (caption, badge, badge_ink) = if reported {
+                    (
+                        &b"Thermal payload received"[..],
+                        &b"REPORTED"[..],
+                        SUCCESS_EMERALD,
+                    )
+                } else {
+                    (
+                        &b"Temperature telemetry unavailable"[..],
+                        &b"UNAVAILABLE"[..],
+                        TEXT_MUTED,
+                    )
+                };
+                if let Some(c) = row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Thermal Governor",
+                    caption,
+                    TEXT_MUTED,
+                    badge,
+                    badge_ink,
+                ) {
+                    return c;
+                }
+            }
+        },
+        Section::Security => match row {
+            0 => {
+                if let Some(c) = row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Hardware Keystore",
+                    b"Keystore status unavailable", TEXT_MUTED,
+                    b"UNAVAILABLE", TEXT_MUTED,
+                ) {
+                    return c;
+                }
+            }
+            1 => {
+                if let Some(c) = row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Storage Vault Encryption",
+                    b"Vault encryption status unavailable", TEXT_MUTED,
+                    b"UNAVAILABLE", TEXT_MUTED,
+                ) {
+                    return c;
+                }
+            }
+            _ => {
+                if let Some(c) = row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Privacy Shield Filter",
+                    b"Privacy filter status unavailable", TEXT_MUTED,
+                    b"UNAVAILABLE", TEXT_MUTED,
+                ) {
+                    return c;
+                }
+            }
+        },
+        Section::System => match row {
+            0 => {
+                // Version line built from the settings store's answer.
+                let mut ver = [0u8; 64];
+                let n = compose_version_line(
+                    &mut ver,
+                    &app.os_version[..app.os_version_len],
+                );
+                let reported = app.os_version_len > 0;
+                let (badge, badge_ink) = if reported {
+                    (&b"REPORTED"[..], SUCCESS_EMERALD)
+                } else {
+                    (&b"UNAVAILABLE"[..], TEXT_MUTED)
+                };
+                if let Some(c) = row_head(
+                    x,
+                    y,
+                    cy,
+                    b"InterOS Core",
+                    &ver[..n],
+                    if reported { TEXT } else { TEXT_MUTED },
+                    badge,
+                    badge_ink,
+                ) {
+                    return c;
+                }
+            }
+            1 => {
+                if let Some(c) = row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Platform Microkernel",
+                    b"Capability Security & VFS Block Storage",
+                    TEXT_MUTED,
+                    b"RING 0",
+                    ACCENT,
+                ) {
+                    return c;
+                }
+            }
+            2 => {
+                let reported = app.rtc == TelemetryState::Reported;
+                let mut rbuf = [0u8; 80];
+                let n = if reported {
+                    let src = &app.rtc_time[..app.rtc_time_len];
+                    let n = src.len().min(rbuf.len());
+                    rbuf[..n].copy_from_slice(&src[..n]);
+                    n
+                } else {
+                    let s = b"No RTC reading (query failed or was refused)";
+                    rbuf[..s.len()].copy_from_slice(s);
+                    s.len()
+                };
+                let (badge, badge_ink) = if reported {
+                    (&b"REPORTED"[..], SUCCESS_EMERALD)
+                } else {
+                    (&b"UNAVAILABLE"[..], TEXT_MUTED)
+                };
+                if let Some(c) = row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Hardware Real-Time Clock",
+                    &rbuf[..n],
+                    if reported { ACCENT } else { TEXT_MUTED },
+                    badge,
+                    badge_ink,
+                ) {
+                    return c;
+                }
+            }
+            _ => {
+                // Developer terminal: a real (capability-refused) mutator, so
+                // the row stays tappable; the badge reports the last state the
+                // kernel actually persisted.
+                let (state_run, badge, badge_ink) = if app.terminal_enabled {
+                    (&b"Enabled"[..], &b"ENABLED"[..], SUCCESS_EMERALD)
+                } else {
+                    (
+                        &b"Disabled by default"[..],
+                        &b"DISABLED"[..],
+                        TEXT_MUTED,
+                    )
+                };
+                let bw = badge_w(badge);
+                if let Some(c) = row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Developer terminal",
+                    state_run,
+                    TEXT_MUTED,
+                    badge,
+                    badge_ink,
+                ) {
+                    return c;
+                }
+                if let Some(c) = run_ink(
+                    x,
+                    y,
+                    DETAIL_X + 24,
+                    cy + 98,
+                    1,
+                    b"Config key: developer.terminal_enabled",
+                    DETAIL_W - 48 - bw - 16,
+                    TEXT_MUTED,
+                    SURFACE,
+                    false,
+                ) {
+                    return c;
+                }
+            }
+        },
+    }
+    SURFACE
+}
 
-        if let Some(c) = test_text(x, y, bx0 + 12, by0 + 10, 1, label, color) {
+/// Detail screen pixel: header (back + title + divider) then the stacked rows.
+fn detail_pixel(x: usize, y: usize, app: &SettingsApp, section: Section) -> u32 {
+    if let Some(c) = run_ink(
+        x,
+        y,
+        BACK_X + BACK_S + 16,
+        BACK_Y,
+        2,
+        section.title(),
+        W - (BACK_X + BACK_S + 16) - 24,
+        TEXT,
+        BG,
+        true,
+    ) {
+        return c;
+    }
+    if y == DIVIDER_Y {
+        return BORDER;
+    }
+    for row in 0..row_count(section) {
+        let (cy, ch) = detail_row_rect(section, row);
+        if let Some(fill) = card_pixel(x, y, DETAIL_X, cy, DETAIL_W, ch, CARD_R) {
+            return row_pixel(x, y, app, section, row, cy, fill);
+        }
+    }
+    BG
+}
+
+/// One landing category card: icon, bold title, subtitle wrapped to at most
+/// two measured lines (wrapping, not ellipsis, because the phrases are short
+/// word lists that must stay whole).
+fn landing_card_pixel(x: usize, y: usize, i: usize) -> Option<u32> {
+    let (cx0, cy0) = card_origin(i);
+    if let Some(fill) = card_pixel(x, y, cx0, cy0, CARD_W, CARD_H, CARD_R) {
+        let (title, subtitle, icon) = category(i);
+        if let Some(ic) = icon(x, y, cx0 + 44, cy0 + 48, TEXT) {
+            return Some(ic);
+        }
+        // Title owns the full remaining card width; subtitle below it.
+        if let Some(c) = run_ink(
+            x,
+            y,
+            cx0 + 80,
+            cy0 + 22,
+            2,
+            title,
+            CARD_W - 104,
+            TEXT,
+            fill,
+            true,
+        ) {
             return Some(c);
         }
-
-        if rx < 2 || ry < 2 {
-            return Some(color);
+        let mut lines: [&[u8]; 2] = [&b""[..], &b""[..]];
+        let n = std::design::font::wrap_text(subtitle, 1, CARD_W - 104, 2, &mut lines);
+        for li in 0..n {
+            if let Some(c) = run_ink(
+                x,
+                y,
+                cx0 + 80,
+                cy0 + 78 + li * 24,
+                1,
+                lines[li],
+                CARD_W - 104,
+                TEXT_MUTED,
+                fill,
+                false,
+            ) {
+                return Some(c);
+            }
         }
-        return Some(SURFACE_RAISED);
+        return Some(fill);
     }
     None
 }
+
+/// Landing screen pixel: header back target, big title, hero line, grid.
+fn landing_pixel(x: usize, y: usize) -> u32 {
+    if y >= HEADER_BOTTOM {
+        for i in 0..Section::COUNT {
+            if let Some(c) = landing_card_pixel(x, y, i) {
+                return c;
+            }
+        }
+    }
+    if let Some(c) = run_ink(x, y, GRID_X, 96, 2, b"System Space", W - 48, TEXT, BG, true) {
+        return c;
+    }
+    if let Some(c) = run_ink(
+        x,
+        y,
+        GRID_X,
+        152,
+        1,
+        b"Everything in one place",
+        W - 48,
+        TEXT_MUTED,
+        BG,
+        false,
+    ) {
+        return c;
+    }
+    BG
+}
+
+#[inline(never)]
+fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
+    // Home gesture pill (matches the touch handler's exit region).
+    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
+        return GESTURE_BAR;
+    }
+    // Shared 48x48 back control, top-left of both screens.
+    if let Some(c) = back_button_pixel(x, y) {
+        return c;
+    }
+    match app.current_section {
+        None => landing_pixel(x, y),
+        Some(section) => detail_pixel(x, y, app, section),
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Presentation & event loop
+// -----------------------------------------------------------------------------
 
 fn render_settings_ui(surface: u32, app: &SettingsApp) {
     let mut chunk = [0u32; CHUNK];
@@ -1011,11 +1777,23 @@ fn render_settings_ui(surface: u32, app: &SettingsApp) {
     }
 }
 
+/// Hit-test for the DVFS profile selector segments on the Power detail.
+fn profile_segment_at(px: u32, py: u32) -> Option<usize> {
+    let (cy, _) = detail_row_rect(Section::Power, 1);
+    for i in 0..3 {
+        let sx = SEG_X + i * (SEG_W + SEG_GAP);
+        if in_round_rect(px as usize, py as usize, sx, cy + 112, SEG_W, SEG_H, 12) {
+            return Some(i);
+        }
+    }
+    None
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     std::log(
         0,
-        "[SETTINGS APP (Ring 3)] Sovereign Settings & Diagnostics online.",
+        "[SETTINGS APP (Ring 3)] System Space (Sovereign Settings & Diagnostics) online.",
     )
     .ok();
 
@@ -1034,26 +1812,20 @@ pub extern "C" fn _start() -> ! {
 
     let mut settings = SettingsApp::new();
 
-    // 1. Inspect Wireless Configuration
-    settings.current_tab = SettingsTab::Wireless;
+    // 1. Inspect Wireless Configuration (Network detail)
     settings.refresh_wireless();
 
-    // 2. Inspect Power & Battery State
-    settings.current_tab = SettingsTab::PowerAndBattery;
+    // 2. Inspect Power & Battery State (Power detail)
     settings.refresh_power();
 
-    // 3. Inspect Thermals & Hardware Sensors
-    settings.current_tab = SettingsTab::ThermalsAndSensors;
+    // 3. Inspect Thermals & Hardware Sensors (Power + Device details)
     settings.refresh_thermals_and_sensors();
 
-    // 4. Audit Security & Hardware Keystore
-    settings.current_tab = SettingsTab::SecurityAndPrivacy;
+    // 4. Audit Security & Hardware Keystore (Security detail)
     settings.audit_security();
 
-    // 5. Query About Device & Hardware RTC
-    settings.current_tab = SettingsTab::AboutDevice;
+    // 5. Query About Device & Hardware RTC (System detail)
     settings.display_about_device();
-    settings.current_tab = SettingsTab::SecurityAndPrivacy;
     settings.refresh_developer_options();
 
     // Initial render & presentation
@@ -1089,53 +1861,87 @@ pub extern "C" fn _start() -> ! {
                         std::exit_with_code(0);
                     }
                     if input.kind == 1 {
-                        // Check if Back button or Home gesture bar was tapped: exit cleanly to launcher
-                        if (input.x >= 24 && input.x < 100 && input.y >= 28 && input.y < 68)
-                            || (input.x >= 240 && input.x <= 480 && input.y >= 1400)
-                        {
-                            std::log(0, "[SETTINGS APP] Back button or home gesture pressed. Exiting to launcher.").ok();
+                        // Back control: pop to the landing grid, or exit the
+                        // app when already on the landing grid. Home gesture
+                        // bar always exits to the launcher.
+                        if in_round_rect(
+                            input.x as usize,
+                            input.y as usize,
+                            BACK_X,
+                            BACK_Y,
+                            BACK_S,
+                            BACK_S,
+                            14,
+                        ) {
+                            match settings.current_section {
+                                Some(_) => {
+                                    settings.current_section = None;
+                                    std::log(
+                                        0,
+                                        "[SETTINGS APP] Back navigation: returned to the System Space landing grid.",
+                                    )
+                                    .ok();
+                                }
+                                None => {
+                                    std::log(
+                                        0,
+                                        "[SETTINGS APP] Back button pressed on the root screen. Exiting to launcher.",
+                                    )
+                                    .ok();
+                                    if surface > 0 {
+                                        let _ = std::surface_destroy(6, surface);
+                                    }
+                                    std::exit_with_code(0);
+                                }
+                            }
+                        } else if input.x >= 240 && input.x <= 480 && input.y >= 1400 {
+                            std::log(
+                                0,
+                                "[SETTINGS APP] Home gesture pressed. Exiting to launcher.",
+                            )
+                            .ok();
                             if surface > 0 {
                                 let _ = std::surface_destroy(6, surface);
                             }
                             std::exit_with_code(0);
-                        }
-                        if settings.current_tab == SettingsTab::SecurityAndPrivacy
-                            && input.y >= 830 && input.y < 1010
-                            && input.x >= 32 && input.x < (W - 32) as u32
-                        {
-                            settings.toggle_terminal();
-                        } else if (110..158).contains(&input.y) && input.x >= 24 {
-                            // WHY: the hit cell now matches the drawn tab cell
-                            // exactly (col pitch 136, drawn width 124, y
-                            // 110..158 from the strip at 104..164), so taps on
-                            // the strip background no longer switch tabs.
-                            let col = ((input.x - 24) / 136) as usize;
-                            let col_x = 24 + col as u32 * 136;
-                            if col <= 4 && input.x < col_x + 124 {
-                                let previous = settings.current_tab;
-                                settings.current_tab = match col {
-                                    0 => SettingsTab::Wireless,
-                                    1 => SettingsTab::PowerAndBattery,
-                                    2 => SettingsTab::ThermalsAndSensors,
-                                    3 => SettingsTab::SecurityAndPrivacy,
-                                    _ => SettingsTab::AboutDevice,
-                                };
-                                // WHY: the old fall-through advanced the tab on
-                                // *any* content tap (cards looked interactive but
-                                // silently navigated); content taps are now
-                                // inert, and the log only claims a switch that
-                                // actually happened.
-                                if settings.current_tab != previous {
-                                    std::log(
-                                        0,
-                                        "[SETTINGS APP] Normalized touch event processed; tab switched.",
-                                    )
-                                    .ok();
+                        } else if let Some(section) = settings.current_section {
+                            // Detail-screen controls (hit cells match the drawn
+                            // geometry exactly).
+                            match section {
+                                Section::Power => {
+                                    if let Some(i) = profile_segment_at(input.x, input.y) {
+                                        let profile = match i {
+                                            0 => PowerProfile::Performance,
+                                            1 => PowerProfile::Balanced,
+                                            _ => PowerProfile::PowerSaver,
+                                        };
+                                        settings.apply_power_profile(profile);
+                                    }
                                 }
+                                Section::System => {
+                                    let (cy, ch) = detail_row_rect(Section::System, 3);
+                                    if in_round_rect(
+                                        input.x as usize,
+                                        input.y as usize,
+                                        DETAIL_X,
+                                        cy,
+                                        DETAIL_W,
+                                        ch,
+                                        CARD_R,
+                                    ) {
+                                        settings.toggle_terminal();
+                                    }
+                                }
+                                _ => {}
                             }
+                        } else if let Some(section) = landing_card_at(input.x, input.y) {
+                            settings.current_section = Some(section);
+                            std::log(
+                                0,
+                                "[SETTINGS APP] System Space category opened.",
+                            )
+                            .ok();
                         }
-                        // Content taps are intentionally inert: the cards are
-                        // status displays, not hidden tab controls.
                         if surface > 0 {
                             render_settings_ui(surface, &settings);
                             let _ = std::surface_flip(6);
