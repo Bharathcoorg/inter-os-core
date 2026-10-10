@@ -177,27 +177,40 @@ pub fn rasterize_icon_pixel(
 
     let inked = match kind {
         IconKind::Phone => {
-            // WHY a bowed receiver and not a bar: the old mark was a uniform
-            // strip with two square ends, and at the size the deck now draws
-            // icons it reads as a diagonal stick rather than a telephone. A
-            // handset is three distinguishable things - a wide rounded
-            // earpiece, a narrower grip, a wide rounded mouthpiece - and the
-            // grip bows so the concave side of the receiver faces the corner,
-            // which is what makes the silhouette read as a phone at all.
-            // `u` runs along the earpiece-to-mouthpiece diagonal (top-left to
-            // bottom-right), `v` across it.
-            let u = (rx + ry) / 2;
-            let v = (rx - ry) / 2;
-            // Each pad is widest 3px in from its centre and tapers to a tip, so
-            // the ends are rounded rather than chopped square.
-            let e = (u + 9).abs();
-            let m = (u - 9).abs();
-            let earpiece = e <= 4 && v.abs() + (e - 1).max(0) <= 5;
-            let mouthpiece = m <= 4 && v.abs() + (m - 1).max(0) <= 5;
-            // The grip is 2px narrower than the pads and bows toward +v.
-            let bow = (u * u) / 36;
-            let grip = u.abs() <= 6 && (v - bow).abs() <= 2;
-            earpiece || mouthpiece || grip
+            // WHY a hook and not a bar: two attempts at "two pads on a straight
+            // grip" both read as a dumbbell, because a straight axis with two
+            // blobs is a dumbbell no matter how the blobs taper. The telephone
+            // mark on every modern phone is a single curved hook - one continuous
+            // body sweeping from the earpiece through ~270 degrees to the
+            // mouthpiece, concave side facing the upper-right corner. So this is
+            // drawn as a ring arc, not as parts: everything between r=8 and
+            // r=13 about (1,-1) except a wedge around the north-east diagonal,
+            // with a round pad at each lip of the wedge for the ear and mouth.
+            // The shape was prototyped offline as ASCII art at 1x before landing;
+            // the two previous versions were judged on-device instead, which is
+            // why they shipped looking wrong.
+            let r2 = rx * rx + ry * ry;
+            let in_ring = (81..=225).contains(&r2);
+            // Excluded wedge: within ~40 degrees of the NE diagonal. `s` is
+            // twice the projection onto (1,-1); the wedge test is
+            // `s > |perp| * cot(40deg)` with cot40 ~= 1.19, all in integers so
+            // the freestanding hot path stays free of floats and trig.
+            let s = rx - ry;
+            let in_wedge = s > 0 && 100 * s > 119 * (rx + ry).abs();
+            let arc = in_ring && !in_wedge;
+            // WHY the ring is r=9..15 and not smaller: two hook versions at
+            // r=8..13 read as a small "C" on the 48px deck tile - correct in
+            // outline but too small for the ear and mouth to survive as more
+            // than round caps. Filling the box (512 of 1089 pixels) is what
+            // lets the asymmetry below stay legible at deck size.
+            //
+            // WHY the pads differ: a receiver's earpiece is visibly larger than
+            // its mouthpiece, and that asymmetry is most of what separates a
+            // handset from a symmetric ring at small sizes. Equal pads were
+            // tried and read as a ring with two blobs.
+            let ear = (rx - 1) * (rx - 1) + (ry + 10) * (ry + 10) <= 49;
+            let mouth = (rx - 10) * (rx - 10) + ry * ry <= 25;
+            arc || ear || mouth
         }
         IconKind::Messages => {
             // Rounded speech bubble with bottom-left tail
