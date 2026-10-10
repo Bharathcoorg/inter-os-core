@@ -1651,6 +1651,29 @@ pub extern "C" fn _start() -> ! {
                             if input.kind == 1 {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
+                                // WHY the corner close control is tested before
+                                // everything else: it sits inside the card body at
+                                // x 624..672, while the legacy dismiss badges are a
+                                // separate column at x 586..634, so the two cannot
+                                // claim the same tap and the ordering is not what
+                                // makes it correct. It is first because it is the
+                                // affordance a user actually aims at - a visible X
+                                // in the corner - and a tap anywhere else on the
+                                // card must still fall through to the launch and
+                                // switch behaviour below.
+                                if let Some(task) =
+                                    screens::activity::activity_close_at(&mut state, x, y)
+                                {
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(
+                                        0,
+                                        "[LAUNCHER] App closed from overview card close control.",
+                                    )
+                                    .ok();
+                                    let _ = task;
+                                    continue;
+                                }
                                 // WHY badge-first, badge-exact: the drawn dismiss badges
                                 // are 48x48 at x 586..634, y 206..254 / 526..574 /
                                 // 846..894 (see CARD*_DISMISS in screens/activity.rs),
