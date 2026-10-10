@@ -1,23 +1,117 @@
 //! Inter OS Native Browser Client
 //!
-//! Native Ring-3 (User Mode) browser shell:
+//! Native Ring-3 (User Mode) browser shell, laid out for the 720x1440 phone
+//! viewport as a mobile browser (not a desktop widget):
 //! - URI parser recognising `http://`, `https://`, `interlayer://` and
 //!   `gemini://`; an address without a supported scheme or host is rejected
 //! - `navigate()` reports the real outcome: this app holds no network socket,
 //!   so no request is issued and no page is claimed to have loaded
-//! - Editable address field with native keyboard input (focus, typing, backspace)
-//! - Quick shortcuts (InterOS, YouTube, GitHub, Add) wired to `navigate()`;
-//!   "Add" only reports that bookmark import is not implemented
-//! - Empty bookmark ledger (`BOOKMARKS`): the platform exposes no bookmark
-//!   store, so none is synthesised
+//! - Top chrome: a 56 px address bar with an offline state glyph (the real
+//!   transport state), a reload control that re-issues the real navigation
+//!   attempt, and a close control that leaves to the launcher
+//! - Content viewport renders the honest empty/error state of the last
+//!   navigation attempt - never fabricated page content, thumbnails, bookmarks
+//!   or history. There is no tab strip, no back/forward bar and no shortcut
+//!   row because the app has no tab model, no history to navigate and no
+//!   network transport behind any destination: shortcut tiles would be dead
+//!   controls dressed as content, so they are not drawn
+//! - Every string is fitted at render time with `interos_std::design::font`
+//!   (`measure` / `measure_bold` / `ellipsize` / `wrap_text`): nothing is ever
+//!   clipped, and long addresses are ellipsized with the SDK "..."
 //! - Navigation acoustic feedback (G5: 784Hz) and tactile haptic response
 //! - Asynchronous event reactor loop handling touch, keyboard and timer events
+//!
+//! Geometry: see `scratch/browser_layout/geometry.md` for the y-extent audit
+//! of every region (all on the 8 pt grid, 24 px screen margin).
 
 #![no_std]
 #![no_main]
 
 use core::panic::PanicInfo;
 use interos_std as std;
+use interos_std::design::font;
+use interos_std::design::primitives::{draw_rounded_rect, Rect};
+
+// -----------------------------------------------------------------------------
+// Design tokens (light theme) - shared with the InterOS design system
+// -----------------------------------------------------------------------------
+use interos_std::design::color::{
+    ACCENT, BACKGROUND as BASE, BORDER, SURFACE, TEXT as INK, TEXT_MUTED as MUTED,
+};
+
+// -----------------------------------------------------------------------------
+// Layout constants (720x1440, 8 pt grid, 24 px screen margin)
+// -----------------------------------------------------------------------------
+
+const W: usize = 720;
+const H: usize = 1440;
+const CHUNK: usize = 4096;
+
+/// y 0..48: system status band. This app receives no clock, radio or battery
+/// readings, so the band stays neutral - no sample values are ever drawn.
+const STATUS_H: usize = 48;
+
+/// y 48..120: toolbar (address bar + reload + close).
+const TOOLBAR_Y0: usize = STATUS_H;
+const TOOLBAR_Y1: usize = 120;
+
+/// Address bar: x 24..568, y 56..112 (56 px tall, capsule radius 28).
+const PILL: Rect = Rect::new(24, 56, 544, 56);
+const PILL_R: usize = 28;
+/// Text column inside the pill: state glyph x 40..64, text starts at x 72.
+const PILL_TEXT_X: usize = 72;
+const PILL_TEXT_Y: usize = 72;
+/// 568 (pill right) - 16 (inner padding) - 72 (text origin) = 480.
+const PILL_TEXT_MAX: usize = 480;
+
+/// Reload control: x 584..632, y 60..108 (48x48 touch target).
+const RELOAD_BTN: Rect = Rect::new(584, 60, 48, 48);
+/// Close control: x 648..696, y 60..108 (48x48 touch target).
+const CLOSE_BTN: Rect = Rect::new(648, 60, 48, 48);
+const BTN_R: usize = 14;
+
+/// y 120..1392: content viewport (fills everything between chrome and the
+/// 48 px bottom gesture inset).
+const VIEW_Y0: usize = TOOLBAR_Y1;
+const VIEW_Y1: usize = 1392;
+
+/// Honest empty/error state block: centred in the viewport (y 120..1392),
+/// max text width 608 (56 px margins).
+const STATE_BOX_TOP: usize = VIEW_Y0;
+const STATE_MAX_W: usize = 608;
+const STATE_ICON_H: usize = 56;
+const STATE_GAP_ICON: usize = 24;
+const STATE_GAP_BODY: usize = 16;
+const STATE_LINE_STRIDE: usize = 32; // 24 px line + 8 px leading
+const GLYPH_H: usize = font::GLYPH_H; // 24
+
+/// y 1392..1440: system gesture band (unchanged system convention).
+const GESTURE_PILL: Rect = Rect::new(260, 1418, 200, 6);
+const HOME_X0: usize = 240;
+const HOME_X1: usize = 480;
+const HOME_Y0: usize = 1400;
+
+const PLACEHOLDER: &[u8] = b"Search or type URL";
+
+// Honest state copy: one headline plus a wrapped body per real outcome.
+const BODY_BLANK: &[u8] = b"This browser holds no network transport, so no request has \
+ever been sent. There is no page content, history or bookmarks to show.";
+const BODY_NO_TRANSPORT: &[u8] = b"The address was parsed and a navigation was attempted, \
+but no network transport is bound to this app: no request was sent and no page was loaded.";
+const BODY_INVALID: &[u8] = b"Supported schemes are http, https, interlayer and gemini \
+followed by a host. Even a valid address loads nothing while no transport is bound.";
+
+/// Real outcome of the last action. Nothing here is decorative: each variant
+/// is set by an actual code path (parse rejection or transport absence).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageStatus {
+    /// No navigation attempted yet (startup, or the user started editing).
+    Blank,
+    /// Address parsed fine; the app holds no socket, so nothing was fetched.
+    NoTransport,
+    /// Address rejected by the parser (no scheme, or no host).
+    InvalidAddress,
+}
 
 /// Supported URI schemes.
 #[allow(dead_code)]
@@ -31,17 +125,19 @@ pub enum UriScheme {
     Unknown = 5,
 }
 
-/// Parsed sovereign URI structure.
+/// Parsed sovereign URI structure. Every component is a slice of the raw
+/// address that was parsed.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
-pub struct ParsedUri {
+pub struct ParsedUri<'a> {
     pub scheme: UriScheme,
-    pub host: &'static str,
-    pub path: &'static str,
+    pub host: &'a [u8],
+    pub path: &'a [u8],
     pub port: u16,
 }
 
 /// Sovereign Bookmark entry.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct Bookmark {
     pub title: &'static str,
@@ -49,28 +145,39 @@ pub struct Bookmark {
     pub is_sovereign: bool,
 }
 
-/// Optional bookmarks loaded from real browser state.
+/// Optional bookmarks loaded from real browser state. The platform exposes no
+/// bookmark store, so the ledger is empty and stays empty - nothing is
+/// synthesised to fill the UI.
+#[allow(dead_code)]
 pub static BOOKMARKS: [Bookmark; 0] = [];
 
 /// Production Sovereign Browser state engine.
 #[allow(dead_code)]
 pub struct BrowserApp {
-    pub current_url: &'static str,
+    /// Address of the current/last navigation attempt. Nothing is loaded:
+    /// this app has no transport, so this is the attempted address only.
+    pub current_url: [u8; 64],
+    pub current_url_len: usize,
+    /// Real scroll state. The content viewport never overflows, so the offset
+    /// stays 0 - no scrollbar is drawn because nothing scrolls.
     pub scroll_offset_px: i32,
     pub pages_loaded: u32,
     pub trackers_blocked: u32,
     pub active_socket_id: Option<u64>,
-    /// User-edited address text. No page is claimed loaded without a real transport.
+    /// User-edited address text. No page is claimed loaded without a real
+    /// transport.
     pub address: [u8; 64],
     pub address_len: usize,
     pub address_focused: bool,
-    pub navigation_unavailable: bool,
+    /// Real outcome of the last navigation / action.
+    pub status: PageStatus,
 }
 
 impl BrowserApp {
-    pub const fn new() -> Self {
-        Self {
-            current_url: "about:blank",
+    pub fn new() -> Self {
+        let mut app = Self {
+            current_url: [0; 64],
+            current_url_len: 0,
             scroll_offset_px: 0,
             pages_loaded: 0,
             trackers_blocked: 0,
@@ -78,50 +185,54 @@ impl BrowserApp {
             address: [0; 64],
             address_len: 0,
             address_focused: false,
-            navigation_unavailable: false,
-        }
+            status: PageStatus::Blank,
+        };
+        let start = b"about:blank";
+        app.current_url[..start.len()].copy_from_slice(start);
+        app.current_url_len = start.len();
+        app
     }
 
-    /// Parses a URI string into its protocol scheme, host, and path components.
-///
-/// The previous implementation ignored the URL text and returned a different
-/// fixed host, path and port for every scheme ("remote.web", "sovereign.mesh",
-/// "127.0.0.1:4200"). That reported peers and endpoints that were never in the
-/// address the user navigated to. Every component returned here is a slice of
-/// `raw_url`, so a parsed URI always reflects the actual address.
-pub fn parse_uri(&self, raw_url: &'static str) -> ParsedUri {
-        let (scheme, rest) = if let Some(r) = raw_url.strip_prefix("interlayer://") {
+    fn current_url(&self) -> &[u8] {
+        &self.current_url[..self.current_url_len]
+    }
+
+    /// Parses a URI byte string into its protocol scheme, host, and path
+    /// components. Every returned component is a slice of `raw`, so a parsed
+    /// URI always reflects the actual address the user navigated to.
+    pub fn parse_uri<'a>(&self, raw: &'a [u8]) -> ParsedUri<'a> {
+        let (scheme, rest) = if let Some(r) = raw.strip_prefix(&b"interlayer://"[..]) {
             (UriScheme::InterLayer, r)
-        } else if let Some(r) = raw_url.strip_prefix("https://") {
+        } else if let Some(r) = raw.strip_prefix(&b"https://"[..]) {
             (UriScheme::Https, r)
-        } else if let Some(r) = raw_url.strip_prefix("http://") {
+        } else if let Some(r) = raw.strip_prefix(&b"http://"[..]) {
             (UriScheme::Http, r)
-        } else if let Some(r) = raw_url.strip_prefix("gemini://") {
+        } else if let Some(r) = raw.strip_prefix(&b"gemini://"[..]) {
             (UriScheme::Gemini, r)
         } else {
             return ParsedUri {
                 scheme: UriScheme::Unknown,
-                host: "",
-                path: raw_url,
+                host: &raw[..0],
+                path: raw,
                 port: 0,
             };
         };
 
         // Split the authority from the path at the first '/'.
-        let (authority, path) = match rest.find('/') {
+        let (authority, path) = match rest.iter().position(|&b| b == b'/') {
             Some(i) => (&rest[..i], &rest[i..]),
-            None => (rest, "/"),
+            None => (rest, &rest[..0]),
         };
 
         // Split the host from an explicit ":port" suffix. A port is only
-        // recognised when the suffix is all decimal digits, so a host containing
-        // a colon is not silently misread as host:port.
-        let (host, port) = match authority.rfind(':') {
+        // recognised when the suffix is all decimal digits, so a host
+        // containing a colon is not silently misread as host:port.
+        let (host, port) = match authority.iter().rposition(|&b| b == b':') {
             Some(i) => {
                 let digits = &authority[i + 1..];
                 let mut value: u16 = 0;
                 let mut all_digits = !digits.is_empty();
-                for b in digits.bytes() {
+                for &b in digits {
                     if b.is_ascii_digit() {
                         value = value.saturating_mul(10).saturating_add((b - b'0') as u16);
                     } else {
@@ -146,30 +257,41 @@ pub fn parse_uri(&self, raw_url: &'static str) -> ParsedUri {
         }
     }
 
-    /// Attempts to navigate to a target URL.
+    /// Attempts to navigate to a target address.
     ///
-    /// Returns `true` only when a transport actually fetched something. The
-    /// previous version incremented `pages_loaded` unconditionally and reported
-    /// a rendered DOM, so the page counter claimed loads that never happened.
-    pub fn navigate(&mut self, target_url: &'static str) -> bool {
-        self.current_url = target_url;
+    /// Returns `true` only when a transport actually fetched something. It
+    /// never does: this app opens no socket, so no request is issued, no page
+    /// is counted, and the returned status records the real outcome (invalid
+    /// address vs. no transport).
+    pub fn navigate(&mut self, target: &[u8]) -> bool {
+        // Remember the attempted address so the address bar can show it
+        // truthfully as "attempted, not loaded".
+        let n = target.len().min(self.current_url.len());
+        self.current_url[..n].copy_from_slice(&target[..n]);
+        self.current_url_len = n;
 
-        // A real navigation requires a real transport. This app holds no socket
-        // to any of the parsed endpoints, so nothing is fetched and no page is
-        // counted. Only increment the counter on an actual fetch.
-        let parsed = self.parse_uri(target_url);
+        let parsed = self.parse_uri(target);
         if parsed.scheme == UriScheme::Unknown {
+            self.status = PageStatus::InvalidAddress;
             std::log(0, "[BROWSER APP] Navigation rejected: the address has no supported scheme.").ok();
             return false;
         }
         if parsed.host.is_empty() {
+            self.status = PageStatus::InvalidAddress;
             std::log(0, "[BROWSER APP] Navigation rejected: the address has no host.").ok();
             return false;
         }
-        // WHY not "from the address bar": this function is also reached from the
-        // quick shortcuts, where no address text was submitted.
+        // WHY not "from the address bar": this function is also reached from
+        // the quick shortcuts, where no address text was submitted.
         std::log(0, "[BROWSER APP] Navigation target URL:").ok();
-        std::log(0, target_url).ok();
+        match core::str::from_utf8(target) {
+            Ok(url) => {
+                std::log(0, url).ok();
+            }
+            Err(_) => {
+                std::log(0, "[BROWSER APP] (address is not valid UTF-8)").ok();
+            }
+        }
         std::log(
             0,
             "[BROWSER APP] No transport is bound to this app; no request was issued and no page was loaded.",
@@ -177,8 +299,7 @@ pub fn parse_uri(&self, raw_url: &'static str) -> ParsedUri {
         .ok();
 
         // Navigation Acoustic Feedback & Haptic Click (G5: 784Hz).
-        // WHY: the previous code logged the chime unconditionally after an
-        // ignored Err. Only report it when the audio service accepted the tone.
+        // WHY: only report it when the audio service accepted the tone.
         if std::audio_play_tone(784).is_ok() {
             std::log(0, "[BROWSER APP] Navigation chime emitted (784Hz).").ok();
         } else {
@@ -190,47 +311,244 @@ pub fn parse_uri(&self, raw_url: &'static str) -> ParsedUri {
         }
         let _ = std::audio_silence();
         let _ = std::audio_haptic_click();
+
+        // The attempt reached the transport stage and stopped there.
+        self.status = PageStatus::NoTransport;
         false
     }
 
     /// Reports whether the parsed endpoint has both a host and a port.
+    #[allow(dead_code)]
     pub fn endpoint_is_complete(&self, uri: &ParsedUri) -> bool {
         !uri.host.is_empty() && uri.port != 0
     }
 }
 
 // -----------------------------------------------------------------------------
-// Visual Design Tokens (light theme)
+// Per-frame resolved text. Every string is measured / ellipsized / wrapped ONCE
+// per frame with interos_std::design::font, then rendered from these buffers.
 // -----------------------------------------------------------------------------
-#[allow(dead_code)]
-const BG_DARK: u32 = 0xFFFFFFFF;
-#[allow(dead_code)]
-const SURFACE_DARK: u32 = 0xFFF7F6F2;
-#[allow(dead_code)]
-const SURFACE_RAISED: u32 = 0xFFFFFFFF;
-#[allow(dead_code)]
-const BORDER_SUBTLE: u32 = 0xFFE1E0DB;
-#[allow(dead_code)]
-const TEXT_PRIMARY: u32 = 0xFF111214;
-#[allow(dead_code)]
-const TEXT_MUTED: u32 = 0xFF777773;
-#[allow(dead_code)]
-const ACCENT_SKY: u32 = 0xFF2563EB;
-// Extra icon fills (not part of base tokens).
-#[allow(dead_code)]
-const ICON_RED: u32 = 0xFFDC2626;
-#[allow(dead_code)]
-const ICON_DARK: u32 = 0xFF111214;
-#[allow(dead_code)]
-const WHITE: u32 = 0xFFFFFFFF;
+struct Frame {
+    /// Address bar text, ellipsized to the pill's 480 px text column.
+    pill: [u8; 96],
+    pill_len: usize,
+    pill_color: u32,
+    show_caret: bool,
+    caret_x: usize,
+    /// Honest state block: bold headline (scale chosen to fit) + wrapped body.
+    head: [u8; 96],
+    head_len: usize,
+    head_scale: usize,
+    head_x: usize,
+    head_y: usize,
+    body: [&'static [u8]; 6],
+    body_n: usize,
+    body_x: [usize; 6],
+    body_y: [usize; 6],
+    /// Centre of the offline globe glyph above the headline.
+    icon_cy: usize,
+}
+
+impl Frame {
+    fn build(app: &BrowserApp) -> Self {
+        let mut f = Self {
+            pill: [0; 96],
+            pill_len: 0,
+            pill_color: MUTED,
+            show_caret: false,
+            caret_x: PILL_TEXT_X,
+            head: [0; 96],
+            head_len: 0,
+            head_scale: 1,
+            head_x: 0,
+            head_y: 0,
+            body: [&b""[..]; 6],
+            body_n: 0,
+            body_x: [0; 6],
+            body_y: [0; 6],
+            icon_cy: 0,
+        };
+
+        // Address bar text. While editing, the caret sits on the real buffer;
+        // otherwise the bar shows the attempted address (muted: not loaded)
+        // or the placeholder when there is no address at all.
+        let src: &[u8] = if app.address_len > 0 {
+            &app.address[..app.address_len]
+        } else if app.address_focused {
+            &app.address[..0]
+        } else if app.current_url_len > 0 {
+            app.current_url()
+        } else {
+            PLACEHOLDER
+        };
+        f.pill_color = if app.address_len > 0 { INK } else { MUTED };
+        f.pill_len = font::ellipsize(src, 1, PILL_TEXT_MAX, &mut f.pill);
+        f.show_caret = app.address_focused;
+        f.caret_x = PILL_TEXT_X + font::measure(&f.pill[..f.pill_len], 1);
+
+        // Honest state block content.
+        let (head_src, body_src): (&[u8], &[u8]) = match app.status {
+            PageStatus::Blank => (b"No page is loaded", BODY_BLANK),
+            PageStatus::NoTransport => (b"Navigation unavailable", BODY_NO_TRANSPORT),
+            PageStatus::InvalidAddress => (b"Address cannot be opened", BODY_INVALID),
+        };
+
+        // Headline scale: pick the largest scale that fits the screen width.
+        let max_line = W - 48;
+        let mut head_scale = 2;
+        if font::measure_bold(head_src, 2) > max_line {
+            head_scale = 1;
+        }
+        f.head_scale = head_scale;
+        if font::measure_bold(head_src, head_scale) > max_line {
+            // Bold advances are at most one pixel wider per glyph than the
+            // regular advances `ellipsize` uses, so budget the difference:
+            // measure_bold(result) <= measure(result) + len <= max_line.
+            let budget = max_line.saturating_sub(head_src.len());
+            f.head_len = font::ellipsize(head_src, head_scale, budget, &mut f.head);
+        } else {
+            let n = head_src.len().min(f.head.len());
+            f.head[..n].copy_from_slice(&head_src[..n]);
+            f.head_len = n;
+        }
+        let head_w = font::measure_bold(&f.head[..f.head_len], head_scale);
+        f.head_x = (W - head_w) / 2;
+
+        // Body: word-wrapped by the SDK; wrap_text guarantees every produced
+        // line measures <= STATE_MAX_W at scale 1.
+        let mut lines: [&'static [u8]; 6] = [&b""[..]; 6];
+        f.body_n = font::wrap_text(body_src, 1, STATE_MAX_W, 6, &mut lines);
+        for i in 0..f.body_n {
+            f.body[i] = lines[i];
+            f.body_x[i] = (W - font::measure(lines[i], 1)) / 2;
+        }
+
+        // Vertical placement: centre the block in y 256..1392, snapped to the
+        // 8 pt grid.
+        let head_h = head_scale * GLYPH_H;
+        let body_h = if f.body_n == 0 {
+            0
+        } else {
+            (f.body_n - 1) * STATE_LINE_STRIDE + GLYPH_H
+        };
+        let body_part = if f.body_n == 0 {
+            0
+        } else {
+            STATE_GAP_BODY + body_h
+        };
+        let block_h = STATE_ICON_H + STATE_GAP_ICON + head_h + body_part;
+        let area_h = VIEW_Y1 - STATE_BOX_TOP;
+        let top = (STATE_BOX_TOP + area_h / 2 - block_h / 2) & !7usize;
+        f.icon_cy = top + STATE_ICON_H / 2;
+        f.head_y = top + STATE_ICON_H + STATE_GAP_ICON;
+        let body_y0 = f.head_y + head_h + STATE_GAP_BODY;
+        for i in 0..f.body_n {
+            f.body_y[i] = body_y0 + i * STATE_LINE_STRIDE;
+        }
+
+        f
+    }
+}
 
 // -----------------------------------------------------------------------------
-// Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')
+// Glyphs (24x24-family rounded line geometry, monochrome)
 // -----------------------------------------------------------------------------
-// Typography provided by interos_std::design::font
+
+/// Offline globe inside the address bar: ring, equator, meridian arcs and a
+/// diagonal slash. The slash cuts a background gap through the globe so the
+/// glyph reads as "offline" at 18 px. Returns `Some(bg)` for the gap itself.
+fn pill_state_glyph(x: usize, y: usize) -> Option<u32> {
+    let dx = x as isize - 52;
+    let dy = y as isize - 84;
+    if dx.abs() > 12 || dy.abs() > 12 {
+        return None;
+    }
+    let s = dx + dy;
+    if s.abs() <= 2 {
+        return Some(if s.abs() <= 1 { MUTED } else { SURFACE });
+    }
+    let d2 = dx * dx + dy * dy;
+    if d2 >= 49 && d2 <= 81 {
+        return Some(MUTED); // ring (r 7..9)
+    }
+    if dy >= -1 && dy <= 0 && d2 <= 81 {
+        return Some(MUTED); // equator
+    }
+    // Meridian ellipse (semi-axes 4 x 9): G = dx^2 * 81 + dy^2 * 16.
+    let g = dx * dx * 81 + dy * dy * 16;
+    if g >= 933 && g <= 1296 {
+        return Some(MUTED);
+    }
+    None
+}
+
+/// Close glyph: an 18 px cross, 2 px diagonal strokes.
+fn close_glyph(x: usize, y: usize) -> bool {
+    let cx = CLOSE_BTN.x + CLOSE_BTN.w / 2;
+    let cy = CLOSE_BTN.y + CLOSE_BTN.h / 2;
+    let dx = x as isize - cx as isize;
+    let dy = y as isize - cy as isize;
+    if dx.abs() > 9 || dy.abs() > 9 {
+        return false;
+    }
+    (dx + dy).abs() <= 1 || (dx - dy).abs() <= 1
+}
+
+/// Reload glyph: a 20 px ring with a gap at the top right and an arrow head
+/// pointing into the gap.
+fn reload_glyph(x: usize, y: usize) -> bool {
+    let cx = RELOAD_BTN.x + RELOAD_BTN.w / 2;
+    let cy = RELOAD_BTN.y + RELOAD_BTN.h / 2;
+    let dx = x as isize - cx as isize;
+    let dy = y as isize - cy as isize;
+    let d2 = dx * dx + dy * dy;
+    if d2 >= 81 && d2 <= 100 && !(dx > 4 && dy < -4) {
+        return true; // ring (r 8..10), gap top right
+    }
+    // Arrow head: right-pointing triangle, apex (cx+6, cy-10), base x = cx-2.
+    let t = (cx + 6) as isize - x as isize;
+    if t >= 0 && t <= 8 {
+        let half = 4 - (t * 4) / 8;
+        if (y as isize - (cy as isize - 10)).abs() <= half {
+            return true;
+        }
+    }
+    false
+}
+
+/// Large offline globe in the empty state (56 px box). Same construction as
+/// the address-bar glyph, scaled up; the slash cut uses the base colour.
+fn state_icon(x: usize, y: usize, cy: usize) -> Option<u32> {
+    let dx = x as isize - (W / 2) as isize;
+    let dy = y as isize - cy as isize;
+    if dx.abs() > 30 || dy.abs() > 30 {
+        return None;
+    }
+    let s = dx + dy;
+    if s.abs() <= 3 {
+        return Some(if s.abs() <= 1 { MUTED } else { BASE });
+    }
+    let d2 = dx * dx + dy * dy;
+    if d2 >= 441 && d2 <= 576 {
+        return Some(MUTED); // ring (r 21..24)
+    }
+    if dy >= -1 && dy <= 0 && d2 <= 576 {
+        return Some(MUTED); // equator
+    }
+    // Meridian ellipse (semi-axes 16 x 24): G = dx^2 * 576 + dy^2 * 256.
+    let g = dx * dx * 576 + dy * dy * 256;
+    if g >= 106000 && g <= 147456 {
+        return Some(MUTED);
+    }
+    None
+}
+
+// -----------------------------------------------------------------------------
+// Software rasteriser
+// -----------------------------------------------------------------------------
 
 #[inline(always)]
-fn test_text(
+fn text_px(
     x: usize,
     y: usize,
     x0: usize,
@@ -238,353 +556,183 @@ fn test_text(
     scale: usize,
     text: &[u8],
     color: u32,
+    bg: u32,
+    bold: bool,
 ) -> Option<u32> {
-    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, BG_DARK, false)
+    if x < x0 || y < y0 || y >= y0 + font::GLYPH_H * scale {
+        return None;
+    }
+    font::test_text_aa(x, y, x0, y0, scale, text, color, bg, bold)
 }
 
-const W: usize = 720;
-const H: usize = 1440;
-const CHUNK: usize = 4096;
-
-#[inline(never)]
-fn pill_contains(x: usize, y: usize) -> bool {
-    if x < 36 || x >= 684 || y < 70 || y >= 130 {
-        return false;
+/// y 0..120: neutral status band + toolbar.
+fn toolbar_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
+    // Close control (surface + cross glyph).
+    if let Some(c) = draw_rounded_rect(x, y, CLOSE_BTN, BTN_R, SURFACE, Some(BORDER), 1) {
+        return if close_glyph(x, y) { INK } else { c };
     }
-    if x >= 66 && x < 654 {
-        return true;
+    // Reload control (surface + refresh glyph).
+    if let Some(c) = draw_rounded_rect(x, y, RELOAD_BTN, BTN_R, SURFACE, Some(BORDER), 1) {
+        return if reload_glyph(x, y) { MUTED } else { c };
     }
-    let (cx, cy) = if x < 66 { (66isize, 100isize) } else { (654isize, 100isize) };
-    let dx = x as isize - cx;
-    let dy = y as isize - cy;
-    dx * dx + dy * dy < 30 * 30
-}
-
-#[inline(never)]
-fn pill_border(x: usize, y: usize) -> bool {
-    if !pill_contains(x, y) {
-        return false;
-    }
-    // Inner pill shrunk by 2px: middle rect y72..128, caps radius 28.
-    let inside_inner = if x >= 66 && x < 654 {
-        y >= 72 && y < 128
-    } else {
-        let (cx, cy) = if x < 66 { (66isize, 100isize) } else { (654isize, 100isize) };
-        let dx = x as isize - cx;
-        let dy = y as isize - cy;
-        dx * dx + dy * dy < 28 * 28
-    };
-    !inside_inner
-}
-
-#[inline(never)]
-fn card_contains(x: usize, y: usize) -> bool {
-    if x < 48 || x >= 672 || y < 350 || y >= 700 {
-        return false;
-    }
-    // Rounded corners radius 24.
-    let in_mid_x = x >= 72 && x < 648;
-    let in_mid_y = y >= 350 && y < 700;
-    if in_mid_x && in_mid_y {
-        return true;
-    }
-    let in_x = x >= 48 && x < 672;
-    let in_y_band = y >= 374 && y < 676;
-    if in_x && in_y_band {
-        return true;
-    }
-    let corners = [(72isize, 374isize), (647isize, 374isize), (72, 675), (647, 675)];
-    for (cx, cy) in corners {
-        let dx = x as isize - cx;
-        let dy = y as isize - cy;
-        if dx * dx + dy * dy < 24 * 24 {
-            return true;
+    // Address bar (capsule; accent border while focused).
+    if let Some(c) = draw_rounded_rect(
+        x,
+        y,
+        PILL,
+        PILL_R,
+        SURFACE,
+        Some(if app.address_focused { ACCENT } else { BORDER }),
+        1,
+    ) {
+        if let Some(g) = pill_state_glyph(x, y) {
+            return g;
         }
-    }
-    false
-}
-
-#[inline(never)]
-fn card_border(x: usize, y: usize) -> bool {
-    if !card_contains(x, y) {
-        return false;
-    }
-    // Inner card shrunk by 2px.
-    let x0 = x as isize;
-    let y0 = y as isize;
-    let inner = if x >= 50 && x < 670 && y >= 352 && y < 698 {
-        let in_mid_x = x >= 72 && x < 648 && y >= 352 && y < 698;
-        let in_band = x >= 50 && x < 670 && y >= 374 && y < 676;
-        if in_mid_x || in_band {
-            // Exclude inner corner cutouts radius 22.
-            let corners = [(72isize, 374isize), (647isize, 374isize), (72, 675), (647, 675)];
-            let mut in_corner_cut = false;
-            let outside_core = !(x >= 72 && x < 648) || !(y >= 374 && y < 676);
-            if outside_core {
-                for (cx, cy) in corners {
-                    let dx = x0 - cx;
-                    let dy = y0 - cy;
-                    if dx * dx + dy * dy >= 22 * 22 {
-                        in_corner_cut = true;
-                    }
-                }
-                !in_corner_cut
-            } else {
-                true
-            }
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-    !inner
-}
-
-#[inline(never)]
-fn get_browser_pixel(x: usize, y: usize, app: &BrowserApp) -> u32 {
-    let _ = app.current_url;
-
-    // 1. Header y0..160: status bar + capsule search pill.
-    if y < 160 {
-        // Capsule search pill x36..684 y70..130 radius 30.
-        if pill_contains(x, y) {
-            if pill_border(x, y) {
-                return BORDER_SUBTLE;
-            }
-            // Magnifier icon near x60: ring center (64,100) radius ~7 + handle.
+        let t = &f.pill[..f.pill_len];
+        if !t.is_empty() {
+            if let Some(px) = text_px(x, y, PILL_TEXT_X, PILL_TEXT_Y, 1, t, f.pill_color, SURFACE, false)
             {
-                let dx = x as isize - 64;
-                let dy = y as isize - 100;
-                let d2 = dx * dx + dy * dy;
-                if d2 >= 25 && d2 <= 64 {
-                    return TEXT_MUTED;
-                }
-                // Handle: diagonal from (69,105) to (77,113).
-                let hx = x as isize - 69;
-                let hy = y as isize - 105;
-                if hx >= 0 && hx <= 8 && hy >= 0 && hy <= 8 && (hx - hy).abs() <= 1 {
-                    return TEXT_MUTED;
-                }
+                return px;
             }
-            // Submit arrow "->" glyph near x648: shaft + '>' chevron.
-            {
-                // Shaft: horizontal y99..101, x638..660.
-                if y >= 99 && y <= 101 && x >= 638 && x < 660 {
-                    return TEXT_MUTED;
-                }
-                // Chevron: two diagonal strokes meeting at (662,100).
-                let dx = x as isize - 662;
-                let dy = y as isize - 100;
-                // Upper stroke: from (654,92) to (662,100); lower: (654,108) to (662,100).
-                if dx <= 0 && dx >= -8 {
-                    if (dy + dx).abs() <= 1 && dy <= 0 {
-                        return TEXT_MUTED;
-                    }
-                    if (dy - dx).abs() <= 7 && dy <= 0 {
-                        // tighten: use symmetric check below
-                    }
-                    if (dy + dx).abs() <= 1 && dy >= 0 {
-                        // lower stroke: dy == -dx
-                        return TEXT_MUTED;
-                    }
-                }
-            }
-            // Editable guest-rendered address field; the capsule clips overflow.
-            let address_text = &app.address[..app.address_len.min(app.address.len())];
-            if !address_text.is_empty() {
-                if let Some(c) = test_text(x, y, 96, 92, 1, address_text, TEXT_PRIMARY) {
-                    return c;
-                }
-            } else if !app.address_focused {
-                if let Some(c) = test_text(x, y, 96, 92, 1, b"Search or type URL", TEXT_MUTED) {
-                    return c;
-                }
-            }
-            if app.address_focused {
-                let cursor_x = (96 + std::design::font::measure(address_text, 1)).min(626);
-                if x == cursor_x && y >= 88 && y < 112 {
-                    return ACCENT_SKY;
-                }
-            }
-            return SURFACE_DARK;
         }
+        if f.show_caret
+            && x >= f.caret_x
+            && x < f.caret_x + 2
+            && y >= PILL_TEXT_Y
+            && y < PILL_TEXT_Y + GLYPH_H
+        {
+            return ACCENT;
+        }
+        return c;
+    }
+    BASE
+}
 
-        // Time, radio signal and battery are not reported to this app.
-        // Keep this band neutral until a shared system status service provides
-        // real readings; never draw sample values or fabricated icons.
-        if y < 60 {
-            return BG_DARK;
+/// y 120..1392: the honest state block on the base surface.
+fn viewport_pixel(x: usize, y: usize, f: &Frame) -> u32 {
+    // Offline globe (its slash cut may overlay only its own 60 px box).
+    if let Some(g) = state_icon(x, y, f.icon_cy) {
+        return g;
+    }
+    // Headline.
+    if f.head_len > 0 {
+        if let Some(px) = text_px(
+            x,
+            y,
+            f.head_x,
+            f.head_y,
+            f.head_scale,
+            &f.head[..f.head_len],
+            INK,
+            BASE,
+            true,
+        ) {
+            return px;
         }
-        if app.navigation_unavailable && y >= 132 && y < 156 {
-            if let Some(c) = test_text(x, y, 48, 132, 1, b"Navigation unavailable: no network transport", TEXT_MUTED) {
-                return c;
+    }
+    // Wrapped body lines.
+    for i in 0..f.body_n {
+        if let Some(px) = text_px(x, y, f.body_x[i], f.body_y[i], 1, f.body[i], MUTED, BASE, false)
+        {
+            return px;
+        }
+    }
+    BASE
+}
+
+fn get_browser_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
+    if y < STATUS_H {
+        // Neutral system band: no clock, radio or battery readings are bound
+        // to this app, so none are drawn.
+        return BASE;
+    }
+    if y < TOOLBAR_Y1 {
+        return toolbar_pixel(x, y, app, f);
+    }
+    if y < VIEW_Y1 {
+        return viewport_pixel(x, y, f);
+    }
+    // System gesture band.
+    if GESTURE_PILL.contains(x, y) {
+        return MUTED;
+    }
+    BASE
+}
+
+fn render_browser_ui(surface: u32, app: &BrowserApp) {
+    let frame = Frame::build(app);
+    let mut chunk = [0u32; CHUNK];
+    let total = W * H;
+    let mut offset = 0;
+    while offset < total {
+        let count = (total - offset).min(CHUNK);
+        let mut x = offset % W;
+        let mut y = offset / W;
+        for i in 0..count {
+            chunk[i] = get_browser_pixel(x, y, app, &frame);
+            x += 1;
+            if x == W {
+                x = 0;
+                y += 1;
             }
         }
-        return BG_DARK;
+        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        offset += count;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Input handling. Every region below is drawn at the exact same coordinates by
+// get_browser_pixel (shared Rect constants), so each control is hit-testable
+// where it is rendered.
+// -----------------------------------------------------------------------------
+
+enum Tap<'a> {
+    None,
+    Redraw,
+    Leave(&'a str),
+}
+
+fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
+    let (x, y) = (px as usize, py as usize);
+
+    // System home gesture band: leave to the launcher (unchanged).
+    if x >= HOME_X0 && x < HOME_X1 && y >= HOME_Y0 {
+        return Tap::Leave("[BROWSER APP] Home gesture pressed. Exiting to launcher.");
     }
 
-    // 2. Quick shortcuts y175..295: 4 circular capsules radius 32.
-    if y >= 175 && y < 295 {
-        // Labels y~270 (drawn even outside circles, checked first for text rows).
-        if y >= 270 && y < 278 {
-            if let Some(c) = test_text(x, y, 72, 270, 1, b"InterOS", TEXT_PRIMARY) {
-                return c;
-            }
-            if let Some(c) = test_text(x, y, 232, 270, 1, b"YouTube", TEXT_PRIMARY) {
-                return c;
-            }
-            if let Some(c) = test_text(x, y, 396, 270, 1, b"GitHub", TEXT_PRIMARY) {
-                return c;
-            }
-            if let Some(c) = test_text(x, y, 568, 270, 1, b"Add", TEXT_PRIMARY) {
-                return c;
-            }
-        }
-        let centers = [(100isize, 225isize), (260, 225), (420, 225), (580, 225)];
-        for (idx, (cx, cy)) in centers.iter().enumerate() {
-            let dx = x as isize - *cx;
-            let dy = y as isize - *cy;
-            let d2 = dx * dx + dy * dy;
-            if d2 < 32 * 32 {
-                match idx {
-                    0 => {
-                        // InterOS: raised fill + subtle border + diamond/dot glyph.
-                        if d2 >= 30 * 30 {
-                            return BORDER_SUBTLE;
-                        }
-                        let man = dx.abs() + dy.abs();
-                        if man >= 7 && man <= 10 {
-                            return TEXT_PRIMARY;
-                        }
-                        if d2 <= 4 {
-                            return TEXT_PRIMARY;
-                        }
-                        return SURFACE_RAISED;
-                    }
-                    1 => {
-                        // YouTube: red circle + white play triangle.
-                        let lx = x as isize - 252;
-                        let wy = y as isize - 225;
-                        if x >= 252 && x <= 272 {
-                            let half = (272 - x as isize) / 2;
-                            if wy.abs() <= half && half >= 0 {
-                                let _ = lx;
-                                return WHITE;
-                            }
-                        }
-                        return ICON_RED;
-                    }
-                    2 => {
-                        // GitHub: dark circle + white dot/shape.
-                        if d2 <= 81 {
-                            return WHITE;
-                        }
-                        // Small octocat-ish ears: two dots above center.
-                        if (x as isize - 414).abs() <= 2 && (y as isize - 217).abs() <= 2 {
-                            return WHITE;
-                        }
-                        if (x as isize - 426).abs() <= 2 && (y as isize - 217).abs() <= 2 {
-                            return WHITE;
-                        }
-                        return ICON_DARK;
-                    }
-                    _ => {
-                        // Add: raised fill + "+" glyph.
-                        if d2 >= 30 * 30 {
-                            return BORDER_SUBTLE;
-                        }
-                        if (y as isize - 225).abs() <= 2 && dx.abs() <= 10 {
-                            return TEXT_MUTED;
-                        }
-                        if (x as isize - 580).abs() <= 2 && dy.abs() <= 10 {
-                            return TEXT_MUTED;
-                        }
-                        return SURFACE_RAISED;
-                    }
-                }
-            }
-        }
-        return BG_DARK;
+    // Close control: the only real "leave" action this app has.
+    if CLOSE_BTN.contains(x, y) {
+        let _ = std::audio_haptic_click();
+        return Tap::Leave("[BROWSER APP] Close control pressed. Exiting to launcher.");
     }
 
-    // 3. Discover section y310..1250.
-    if y >= 310 && y < 1250 {
-        // Title "Discover" x48 y320 scale2.
-        if y >= 320 && y < 336 {
-            if let Some(c) = test_text(x, y, 48, 320, 2, b"Discover", TEXT_PRIMARY) {
-                return c;
-            }
+    // Address bar: focus the editable native field, pre-filling the real
+    // attempted address so the caret sits on what would be edited.
+    if PILL.contains(x, y) {
+        if !app.address_focused {
+            let n = app.current_url_len.min(app.address.len());
+            app.address[..n].copy_from_slice(&app.current_url[..n]);
+            app.address_len = n;
         }
-        // Preview card x48..672 y350..700 radius 24.
-        if card_contains(x, y) {
-            if card_border(x, y) {
-                return BORDER_SUBTLE;
-            }
-            // Interior mountain-ridge gradient painting (bands + ridges).
-            let mut base = 0xFFDBEAFE_u32;
-            if y >= 470 && y < 560 {
-                base = 0xFFBFDBFE;
-            } else if y >= 560 && y < 650 {
-                base = 0xFFA9BEDD;
-            } else if y >= 650 {
-                base = 0xFFE2E8F0;
-            }
-            // Far ridge: peak (430,470), base y650.
-            let dxf = (x as isize - 430).abs();
-            let line_far = 470 + dxf * 180 / 300;
-            // Near ridge: peak (220,540), base y700.
-            let dxn = (x as isize - 220).abs();
-            let line_near = 540 + dxn * 160 / 280;
-            let yi = y as isize;
-            if yi >= line_near {
-                return 0xFF475569;
-            }
-            if yi >= line_far && yi < 650 {
-                return 0xFF94A3B8;
-            }
-            // Ridge snow caps: small light band near peaks.
-            if (x as isize - 430).abs() <= 14 && yi >= 470 && yi < 486 {
-                return 0xFFF8FAFC;
-            }
-            if (x as isize - 220).abs() <= 10 && yi >= 540 && yi < 552 {
-                return 0xFFF1F5F9;
-            }
-            return base;
-        }
-        // Headline two lines scale2 at y725.
-        if y >= 725 && y < 741 {
-            if let Some(c) = test_text(x, y, 48, 725, 2, b"Open technology for a", TEXT_PRIMARY) {
-                return c;
-            }
-        }
-        if y >= 747 && y < 763 {
-            if let Some(c) = test_text(x, y, 48, 747, 2, b"better future", TEXT_PRIMARY) {
-                return c;
-            }
-        }
-        // Blurb two lines scale1 at y775+.
-        if y >= 775 && y < 783 {
-            if let Some(c) = test_text(x, y, 48, 775, 1, b"A more private, open and user", TEXT_MUTED) {
-                return c;
-            }
-        }
-        if y >= 789 && y < 797 {
-            if let Some(c) = test_text(x, y, 48, 789, 1, b"controlled internet.", TEXT_MUTED) {
-                return c;
-            }
-        }
-        // Reference the accent token so the light palette stays linked.
-        let _ = ACCENT_SKY;
-        return BG_DARK;
+        app.address_focused = true;
+        app.status = PageStatus::Blank;
+        let _ = std::audio_haptic_click();
+        std::log(0, "[BROWSER APP] Address field focused for keyboard input.").ok();
+        return Tap::Redraw;
     }
 
-    // 4. Home gesture pill x260..460 y1418..1424.
-    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
-        return TEXT_MUTED;
+    // Reload control: re-issue the real navigation attempt for the current
+    // address. It reports the honest outcome (no transport, nothing loaded).
+    if RELOAD_BTN.contains(x, y) {
+        let mut target = [0u8; 64];
+        let n = app.current_url_len.min(target.len());
+        target[..n].copy_from_slice(&app.current_url[..n]);
+        app.navigate(&target[..n]);
+        return Tap::Redraw;
     }
 
-    BG_DARK
+    Tap::None
 }
 
 fn handle_browser_key(app: &mut BrowserApp, key: std::InputKeyEvent) -> bool {
@@ -596,8 +744,14 @@ fn handle_browser_key(app: &mut BrowserApp, key: std::InputKeyEvent) -> bool {
         input_key_code::ESCAPE => app.address_focused = false,
         input_key_code::ENTER => {
             app.address_focused = false;
-            app.navigation_unavailable = true;
-            std::log(0, "[BROWSER APP] Address submitted; navigation unavailable because no network transport is bound.").ok();
+            // Submitting the typed address performs a real navigation attempt
+            // against the real parser and transport state.
+            if app.address_len > 0 {
+                let mut target = [0u8; 64];
+                let n = app.address_len.min(target.len());
+                target[..n].copy_from_slice(&app.address[..n]);
+                app.navigate(&target[..n]);
+            }
         }
         input_key_code::BACKSPACE => {
             app.address_len = app.address_len.saturating_sub(1);
@@ -605,32 +759,19 @@ fn handle_browser_key(app: &mut BrowserApp, key: std::InputKeyEvent) -> bool {
         code if (32..=126).contains(&code) && app.address_len < app.address.len() => {
             app.address[app.address_len] = code as u8;
             app.address_len += 1;
-            app.navigation_unavailable = false;
+            // Editing again: the previous attempt's message is superseded.
+            app.status = PageStatus::Blank;
         }
         _ => return false,
     }
     true
 }
 
-fn render_browser_ui(surface: u32, app: &BrowserApp) {
-    let mut chunk = [0u32; CHUNK];
-    let total = W * H;
-    let mut offset = 0;
-    while offset < total {
-        let count = (total - offset).min(CHUNK);
-        let mut x = offset % W;
-        let mut y = offset / W;
-        for i in 0..count {
-            chunk[i] = get_browser_pixel(x, y, app);
-            x += 1;
-            if x == W {
-                x = 0;
-                y += 1;
-            }
-        }
-        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
-        offset += count;
+fn destroy_and_exit(surface: u32) -> ! {
+    if surface > 0 {
+        let _ = std::surface_destroy(6, surface);
     }
+    std::exit_with_code(0);
 }
 
 #[no_mangle]
@@ -651,9 +792,6 @@ pub extern "C" fn _start() -> ! {
         }
         Err(_) => 0,
     };
-
-    // Ingest and navigate to default sovereign home portal
-    browser.current_url = "about:blank";
 
     if surface > 0 {
         render_browser_ui(surface, &browser);
@@ -682,11 +820,11 @@ pub extern "C" fn _start() -> ! {
                         dy: 0,
                         scale_milli: 1000,
                     };
+                    let mut dirty = false;
                     while std::input_event_poll(&mut input).is_ok() {
                         if let Some(key) = input.key_event() {
-                            if handle_browser_key(&mut browser, key) && surface > 0 {
-                                render_browser_ui(surface, &browser);
-                                let _ = std::surface_flip(6);
+                            if handle_browser_key(&mut browser, key) {
+                                dirty = true;
                             }
                             continue;
                         }
@@ -696,102 +834,22 @@ pub extern "C" fn _start() -> ! {
                                 "[BROWSER APP] Navigation gesture recognized. Exiting to launcher.",
                             )
                             .ok();
-                            if surface > 0 {
-                                let _ = std::surface_destroy(6, surface);
-                            }
-                            std::exit_with_code(0);
+                            return destroy_and_exit(surface);
                         }
                         if input.kind == 1 {
-                            // Check Back button (legacy header) or Home gesture bar: exit cleanly to launcher
-                            if (input.x >= 24 && input.x < 100 && input.y >= 28 && input.y < 68)
-                                || (input.x >= 240 && input.x <= 480 && input.y >= 1400)
-                            {
-                                std::log(0, "[BROWSER APP] Back button or home gesture pressed. Exiting to launcher.").ok();
-                                if surface > 0 {
-                                    let _ = std::surface_destroy(6, surface);
+                            match handle_tap(&mut browser, input.x, input.y) {
+                                Tap::Leave(msg) => {
+                                    std::log(0, msg).ok();
+                                    return destroy_and_exit(surface);
                                 }
-                                std::exit_with_code(0);
-                            }
-
-                            // Tapping the address pill focuses the editable native field.
-                            if input.x >= 36 && input.x < 684 && input.y >= 70 && input.y < 130 {
-                                browser.address_focused = true;
-                                browser.navigation_unavailable = false;
-                                let _ = std::audio_haptic_click();
-                                std::log(0, "[BROWSER APP] Address field focused for keyboard input.").ok();
-                                if surface > 0 {
-                                    render_browser_ui(surface, &browser);
-                                    let _ = std::surface_flip(6);
-                                }
-                            }
-
-                            // Quick shortcut capsules (centres y225, radius 32).
-                            // WHY wired to navigate(): these are drawn controls, so
-                            // a tap must perform a real navigation attempt instead
-                            // of silently doing nothing. navigate() reports the
-                            // honest outcome (no transport bound, no page loaded),
-                            // and the header then shows that state.
-                            {
-                                let centers: [(isize, isize); 4] = [
-                                    (100, 225),
-                                    (260, 225),
-                                    (420, 225),
-                                    (580, 225),
-                                ];
-                                let urls: [&'static str; 3] = [
-                                    "https://interos.org",
-                                    "https://www.youtube.com",
-                                    "https://github.com",
-                                ];
-                                let mut shortcut_hit = false;
-                                for (idx, (cx, cy)) in centers.iter().enumerate() {
-                                    let dx = input.x as isize - cx;
-                                    let dy = input.y as isize - cy;
-                                    if dx * dx + dy * dy < 32 * 32 {
-                                        shortcut_hit = true;
-                                        if idx < urls.len() {
-                                            let loaded = browser.navigate(urls[idx]);
-                                            // Surface the attempt's real result in
-                                            // the header line below the address bar.
-                                            browser.navigation_unavailable = !loaded;
-                                        } else {
-                                            // WHY honest log: there is no bookmark
-                                            // store or importer, so "Add" reports the
-                                            // absence instead of faking a bookmark.
-                                            std::log(
-                                                0,
-                                                "[BROWSER APP] Add shortcut tapped: bookmark import is not implemented.",
-                                            )
-                                            .ok();
-                                        }
-                                        break;
-                                    }
-                                }
-                                if shortcut_hit {
-                                    if surface > 0 {
-                                        render_browser_ui(surface, &browser);
-                                        let _ = std::surface_flip(6);
-                                    }
-                                    break;
-                                }
-                            }
-
-                            // Check bookmark card taps (ledger is empty: no-op).
-                            if input.y >= 120
-                                && input.y < 380
-                                && input.x >= 32
-                                && input.x < (W as u32) - 32
-                            {
-                                let card_idx = ((input.y - 120) / 80) as usize;
-                                if card_idx < BOOKMARKS.len() {
-                                    browser.navigate(BOOKMARKS[card_idx].url);
-                                    if surface > 0 {
-                                        render_browser_ui(surface, &browser);
-                                        let _ = std::surface_flip(6);
-                                    }
-                                }
+                                Tap::Redraw => dirty = true,
+                                Tap::None => {}
                             }
                         }
+                    }
+                    if dirty && surface > 0 {
+                        render_browser_ui(surface, &browser);
+                        let _ = std::surface_flip(6);
                     }
                 }
                 if events & std::EVENT_IPC_MSG != 0 {

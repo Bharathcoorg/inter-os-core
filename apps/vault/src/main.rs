@@ -1,28 +1,31 @@
-//! Inter OS Native Sovereign Vault & Multi-Sector Storage Manager App
+//! Inter OS Sovereign Vault & Multi-Sector Storage Manager
 //!
-//! Full production encrypted storage manager executing in Ring 3 (User Mode):
-//! - Hardware Keystore cryptographic key derivation across multiple security slots:
-//!   * Slot 0: Sovereign Root Hardware Master Key
-//!   * Slot 1: General Media & Container Storage Key
-//!   * Slot 2: Optical Sensor & Neural Vision Storage Key
-//!   * Slot 3: End-to-End P2P Wire Messaging Key
-//! - Multi-Sector Partition Indexing & Management:
-//!   * Sector 100: Sovereign Root Keystore & Identity Certificate
-//!   * Sector 200: General Media Containers & Documents
-//!   * Sector 201: Camera Photos & Video ISP Metadata
-//!   * Sector 202: Encrypted Messages & P2P Wire Ledger
-//!   * Sector 203: Calendar Events & Agenda Timeline
-//!   * Sector 204: Audio Tracks & Music Studio Compositions
-//! - Hardware TRNG Entropy Ingestion (/dev/urandom) for Initialization Vectors
-//! - Authenticated AES-XTS & ChaCha20-Poly1305 sector round-trip verification
-//! - Device identity magic check via VFS (`DID:` prefix only, no attestation)
-//! - Sovereign Backup Export framing persisted through the kernel settings
-//!   store with a Fletcher-32 checksum, validated by reading it back
-//! - DRM/KMS Client Surface Rendering (z=200) with Sector Partition Browser & Enclave Status
-//! - Asynchronous event reactor loop handling storage IPC requests & maintenance timers
+//! Ring 3 encrypted-storage manager. Everything this app displays is the result
+//! of a syscall it just made:
+//!
+//! - `keystore_derive(0/1)` for the two key slots. This kernel refuses to export
+//!   raw key material to Ring 3, so both probes normally answer
+//!   `PermissionDenied` and the screen says "unavailable" rather than implying
+//!   an enclave it does not have.
+//! - `vault_encrypt_sector` / `vault_decrypt_sector` for the per-sector
+//!   round-trip self-test. A sector row is only marked "round-trip verified"
+//!   after encrypt -> mutate-check -> decrypt -> compare actually succeeded.
+//! - `devfs_read("/dev/urandom")` for the 16-byte IV. IV generation fails closed:
+//!   there is no fixed or synthesised IV anywhere in this file.
+//! - `settings_set/get("vault.backup_export")` for the sovereign backup frame,
+//!   which is written, read back and checksum-validated before anything claims
+//!   to be verified.
+//! - VFS `/system/etc/device_id` for the device identity magic prefix only.
+//!
+//! The presentation is built from the canonical InterOS light design tokens on
+//! an 8-point grid: 24px screen margin, 672px content column, 18px card radius,
+//! 48px minimum touch targets. Every string is measured and ellipsised to the
+//! box the layout reserved for it, so nothing is ever clipped or overlapped.
 
 #![no_std]
 #![no_main]
+
+mod font;
 
 use core::panic::PanicInfo;
 use interos_std as std;
@@ -53,6 +56,48 @@ pub struct SectorRecord {
     /// succeeded. Nothing is persisted per sector, so this records a crypto
     /// self-test, not stored-data integrity.
     pub authenticated: bool,
+}
+
+/// Outcome of one `keystore_derive` probe. `Refused` carries the kernel's own
+/// negative status code; nothing here is guessed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyProbe {
+    NotRun,
+    Derived,
+    /// The call succeeded but did not hand back a 32-byte key.
+    Short,
+    Refused(i64),
+}
+
+/// Outcome of the 16-byte `/dev/urandom` read probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntropyProbe {
+    NotRun,
+    Read16,
+    Short,
+    AllZero,
+    Refused(i64),
+}
+
+/// Outcome of the `/system/etc/device_id` read. This is a magic-prefix check,
+/// never an attestation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityState {
+    NotChecked,
+    Present,
+    Malformed,
+    Unreadable,
+}
+
+/// Outcome of the sovereign backup export, including its read-back validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackupState {
+    NotAttempted,
+    WrittenAndValid,
+    WrittenButChecksumMismatch,
+    WrittenButTruncated,
+    ReadRefused,
+    WriteRefused,
 }
 
 /// Computes a Fletcher-32 checksum over `data` (both sums taken mod 255).
@@ -111,10 +156,15 @@ fn hex_decode(hex: &[u8], out: &mut [u8]) -> Option<usize> {
 /// Production Sovereign Vault state manager.
 pub struct VaultApp {
     pub sectors: [Option<SectorRecord>; 6],
-    pub master_key_derived: bool,
-    pub media_key_derived: bool,
+    pub key_probe: [KeyProbe; 2],
+    pub entropy_probe: EntropyProbe,
+    pub identity: IdentityState,
+    pub backup: BackupState,
     pub total_encryptions: u32,
     pub total_decryptions: u32,
+    /// Last thing the platform actually said, shown verbatim in the status line.
+    pub status: [u8; 64],
+    pub status_len: usize,
 }
 
 impl VaultApp {
@@ -164,38 +214,97 @@ impl VaultApp {
                     authenticated: false,
                 }),
             ],
-            master_key_derived: false,
-            media_key_derived: false,
+            key_probe: [KeyProbe::NotRun, KeyProbe::NotRun],
+            entropy_probe: EntropyProbe::NotRun,
+            identity: IdentityState::NotChecked,
+            backup: BackupState::NotAttempted,
             total_encryptions: 0,
             total_decryptions: 0,
+            status: [0u8; 64],
+            status_len: 0,
         }
     }
 
-    /// Derives cryptographic keys from the hardware keystore.
+    /// True when both hardware key slots actually produced a 32-byte key.
+    pub fn keys_derived(&self) -> bool {
+        self.key_probe == [KeyProbe::Derived, KeyProbe::Derived]
+    }
+
+    /// Derives cryptographic keys from the hardware keystore and records the
+    /// exact answer each slot gave.
     pub fn derive_keys(&mut self) {
         let mut key0 = [0u8; 32];
-        if let Ok(len) = std::keystore_derive(0, &mut key0) {
-            if len == 32 {
-                self.master_key_derived = true;
+        self.key_probe[0] = match std::keystore_derive(0, &mut key0) {
+            Ok(len) if len == 32 => {
                 std::log(
                     0,
                     "[VAULT APP] Hardware Keystore Slot 0 derived: Root Master Key online.",
                 )
                 .ok();
+                KeyProbe::Derived
             }
-        }
+            Ok(_) => KeyProbe::Short,
+            Err(e) => KeyProbe::Refused(e),
+        };
 
         let mut key1 = [0u8; 32];
-        if let Ok(len) = std::keystore_derive(1, &mut key1) {
-            if len == 32 {
-                self.media_key_derived = true;
+        self.key_probe[1] = match std::keystore_derive(1, &mut key1) {
+            Ok(len) if len == 32 => {
                 std::log(
                     0,
                     "[VAULT APP] Hardware Keystore Slot 1 derived: Storage Encryption Key online.",
                 )
                 .ok();
+                KeyProbe::Derived
             }
+            Ok(_) => KeyProbe::Short,
+            Err(e) => KeyProbe::Refused(e),
+        };
+
+        if !self.keys_derived() {
+            std::log(
+                0,
+                "[VAULT APP] Hardware keystore did not export raw key material to Ring 3; no key is claimed.",
+            )
+            .ok();
         }
+    }
+
+    /// Reads 16 bytes of hardware entropy to confirm the IV source is live.
+    /// This is a probe only; the IV used by a real operation is minted by
+    /// `generate_iv` at the moment it is needed.
+    pub fn probe_entropy(&mut self) {
+        let mut probe = [0u8; 16];
+        self.entropy_probe = match std::devfs_read("/dev/urandom", &mut probe) {
+            Ok(n) if n == 16 => {
+                if probe == [0u8; 16] {
+                    EntropyProbe::AllZero
+                } else {
+                    EntropyProbe::Read16
+                }
+            }
+            Ok(_) => EntropyProbe::Short,
+            Err(e) => EntropyProbe::Refused(e),
+        };
+    }
+
+    /// Reads the device identity file. Only the `DID:` magic prefix is checked;
+    /// with no signature or digest to compare against this is a presence check,
+    /// not an authentication.
+    pub fn probe_identity(&mut self) {
+        self.identity = match std::fs_open(3, "/system/etc/device_id", std::FS_READ) {
+            Ok(fd) => {
+                let mut dev_buf = [0u8; 64];
+                let state = match std::fs_read(3, fd, &mut dev_buf) {
+                    Ok(n) if n >= 4 && &dev_buf[..4] == b"DID:" => IdentityState::Present,
+                    Ok(_) => IdentityState::Malformed,
+                    Err(_) => IdentityState::Unreadable,
+                };
+                let _ = std::fs_close(fd);
+                state
+            }
+            Err(_) => IdentityState::Unreadable,
+        };
     }
 
     /// Ingests hardware entropy for a 16-byte initialization vector.
@@ -240,33 +349,46 @@ impl VaultApp {
         false
     }
 
+    /// Re-runs one sector's round-trip test, recording failure as well as
+    /// success so a sector that later stops verifying stops claiming otherwise.
+    pub fn verify_sector(&mut self, index: usize) -> bool {
+        let Some(sec) = self.sectors[index] else {
+            return false;
+        };
+        let ok = self.test_sector_roundtrip(sec.sector_id, b"INTER_VAULT_TOUCH_AUTH_VERIFY");
+        if let Some(slot) = self.sectors[index].as_mut() {
+            slot.authenticated = ok;
+        }
+        std::audio_haptic_click().ok();
+        ok
+    }
+
     /// Runs roundtrip verification across all managed sectors.
     /// Returns true only when every sector's roundtrip actually succeeded.
     pub fn verify_all_sectors(&mut self) -> bool {
         // Not short-circuited on purpose: every sector must be exercised even
         // after an early failure, so the per-sector failure logs are complete.
         let mut all_ok = true;
-        all_ok &= self.test_sector_roundtrip(100, b"INTER_ROOT_KEYSTORE_RECORD_V1");
-        all_ok &= self.test_sector_roundtrip(200, b"INTER_MEDIA_CONTAINER_RECORD_V1");
-        all_ok &= self.test_sector_roundtrip(201, b"INTER_CAMERA_PHOTO_RECORD_V1");
-        all_ok &= self.test_sector_roundtrip(202, b"INTER_P2P_MESSAGE_RECORD_V1");
-        all_ok &= self.test_sector_roundtrip(203, b"INTER_CALENDAR_EVENT_RECORD_V1");
-        all_ok &= self.test_sector_roundtrip(204, b"INTER_AUDIO_TRACK_RECORD_V1");
+        for index in 0..6 {
+            let Some(sec) = self.sectors[index] else { continue };
+            let ok = self.test_sector_roundtrip(sec.sector_id, b"INTER_ROOT_KEYSTORE_RECORD_V1");
+            if let Some(slot) = self.sectors[index].as_mut() {
+                slot.authenticated = ok;
+            }
+            all_ok &= ok;
+        }
         all_ok
     }
 
     /// Builds a sovereign backup export frame, persists it through the kernel
     /// settings store, and validates the stored frame by reading it back.
     ///
-    /// WHY: this previously built the frame on the stack, dropped it, and
-    /// logged "generated & verified (Fletcher-32 valid)" unconditionally —
-    /// nothing was written anywhere, so nothing could be verified. The frame
-    /// is now persisted as hex (the settings store rejects newline bytes and
-    /// raw counter/checksum bytes can contain 0x0A) under `vault.backup_export`
-    /// via FileSystemWrite at cap slot 3, and "verified" means the read-back
-    /// frame carries the expected magic and its stored Fletcher-32 checksum
-    /// equals the recomputed one.
-    pub fn export_backup(&mut self) -> bool {
+    /// The frame is persisted as hex (the settings store rejects newline bytes
+    /// and raw counter/checksum bytes can contain 0x0A) under
+    /// `vault.backup_export` via FileSystemWrite at cap slot 3, and "verified"
+    /// means the read-back frame carries the expected magic and its stored
+    /// Fletcher-32 checksum equals the recomputed one.
+    pub fn export_backup(&mut self) -> BackupState {
         let mut header = [0u8; 40];
         header[..28].copy_from_slice(b"INTER_SOVEREIGN_VAULT_BACKUP");
         header[28..32].copy_from_slice(&self.total_encryptions.to_le_bytes());
@@ -276,397 +398,716 @@ impl VaultApp {
 
         let mut encoded = [0u8; 80];
         let enc_len = hex_encode(&header, &mut encoded);
-        if std::settings_set(3, "vault.backup_export", &encoded[..enc_len]).is_err() {
+        self.backup = if std::settings_set(3, "vault.backup_export", &encoded[..enc_len]).is_err() {
             std::log(
                 0,
                 "[VAULT APP] Backup export refused: the settings store rejected the write.",
             )
             .ok();
-            return false;
-        }
-
-        let mut stored_hex = [0u8; 80];
-        let mut frame = [0u8; 40];
-        match std::settings_get(3, "vault.backup_export", &mut stored_hex) {
-            Ok(n) => match hex_decode(&stored_hex[..n.min(stored_hex.len())], &mut frame) {
-                Some(40) => {
-                    let stored_sum =
-                        u32::from_le_bytes([frame[36], frame[37], frame[38], frame[39]]);
-                    if frame[..28] == *b"INTER_SOVEREIGN_VAULT_BACKUP"
-                        && stored_sum == fletcher32(&frame[..36])
-                    {
-                        std::log(
-                            0,
-                            "[VAULT APP] Sovereign Backup Export persisted; read-back Fletcher-32 checksum valid.",
-                        )
-                        .ok();
-                        true
-                    } else {
-                        std::log(
-                            0,
-                            "[VAULT APP] Backup Export stored, but the read-back frame failed checksum validation.",
-                        )
-                        .ok();
-                        false
+            BackupState::WriteRefused
+        } else {
+            let mut stored_hex = [0u8; 80];
+            let mut frame = [0u8; 40];
+            match std::settings_get(3, "vault.backup_export", &mut stored_hex) {
+                Ok(n) => match hex_decode(&stored_hex[..n.min(stored_hex.len())], &mut frame) {
+                    Some(40) => {
+                        let stored_sum =
+                            u32::from_le_bytes([frame[36], frame[37], frame[38], frame[39]]);
+                        if frame[..28] == *b"INTER_SOVEREIGN_VAULT_BACKUP"
+                            && stored_sum == fletcher32(&frame[..36])
+                        {
+                            std::log(
+                                0,
+                                "[VAULT APP] Sovereign Backup Export persisted; read-back Fletcher-32 checksum valid.",
+                            )
+                            .ok();
+                            BackupState::WrittenAndValid
+                        } else {
+                            std::log(
+                                0,
+                                "[VAULT APP] Backup Export stored, but the read-back frame failed checksum validation.",
+                            )
+                            .ok();
+                            BackupState::WrittenButChecksumMismatch
+                        }
                     }
-                }
+                    _ => {
+                        std::log(
+                            0,
+                            "[VAULT APP] Backup Export stored, but the read-back frame was truncated or undecodable; validation not performed.",
+                        )
+                        .ok();
+                        BackupState::WrittenButTruncated
+                    }
+                },
                 _ => {
                     std::log(
                         0,
-                        "[VAULT APP] Backup Export stored, but the read-back frame was truncated or undecodable; validation not performed.",
+                        "[VAULT APP] Backup Export stored, but the read-back was refused; validation not performed.",
                     )
                     .ok();
-                    false
+                    BackupState::ReadRefused
                 }
-            },
-            _ => {
-                std::log(
-                    0,
-                    "[VAULT APP] Backup Export stored, but the read-back was refused; validation not performed.",
-                )
-                .ok();
-                false
             }
-        }
+        };
+        self.backup
+    }
+
+    /// Re-runs every platform probe this screen reports on.
+    pub fn reprobe(&mut self) {
+        self.derive_keys();
+        self.probe_entropy();
+        self.probe_identity();
     }
 }
 
 // -----------------------------------------------------------------------------
-// Visual Design Tokens
+// Visual Design Tokens (canonical light System Space palette)
 // -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFF080D1A;
-const SURFACE_DARK: u32 = 0xFF101726;
-const SURFACE_RAISED: u32 = 0xFF192236;
-const BORDER_SUBTLE: u32 = 0xFF2A374F;
-const ACCENT_SKY: u32 = 0xFF38BDF8;
-const ACCENT_AMBER: u32 = 0xFFFFB800;
-const SUCCESS_EMERALD: u32 = 0xFF10B981;
-const TEXT_PRIMARY: u32 = 0xFFF8FAFC;
-const TEXT_MUTED: u32 = 0xFF94A3B8;
+
+const BG: u32 = std::design::color::BACKGROUND; // #F7F6F2 base
+const SURFACE: u32 = std::design::color::SURFACE; // #FFFFFF card surface
+const SOFT: u32 = std::design::color::SURFACE_SOFT; // #EFEEE9 controls / tiles
+const BORDER: u32 = std::design::color::BORDER; // #E1E0DB hairlines
+const TEXT: u32 = std::design::color::TEXT; // #111214 primary text
+const MUTED: u32 = std::design::color::TEXT_MUTED; // #777773 secondary text
+const ACCENT: u32 = std::design::color::ACCENT; // restrained blue
+const OK: u32 = std::design::color::SUCCESS; // muted green
+const WARN: u32 = std::design::color::WARNING; // amber
+const DANGER: u32 = std::design::color::DANGER; // muted red
+const GESTURE_BAR: u32 = 0xFFC4C3BD; // home indicator pill on the light base
 
 // -----------------------------------------------------------------------------
-// Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')
+// Layout (8-point grid; 24px screen margin; 48px minimum touch targets)
 // -----------------------------------------------------------------------------
-// Typography provided by interos_std::design::font
 
-#[inline(always)]
-fn test_text(
+const MARGIN: usize = 24;
+const CARD_W: usize = W - MARGIN * 2; // 672
+const PAD: usize = 24; // card inner padding
+const CARD_R: usize = 18;
+const INNER_W: usize = CARD_W - PAD * 2; // 624
+
+const HEAD_BOTTOM: usize = 104;
+const TITLE_X: usize = 88;
+const BACK_X: usize = 24;
+const BACK_Y: usize = 24;
+const BACK_S: usize = 48;
+
+/// Header action pill ("RE-PROBE"): 44px tall, right-aligned to the margin.
+const ACTION_H: usize = 44;
+const ACTION_Y: usize = 26;
+const ACTION_X1: usize = W - MARGIN;
+const ACTION: &[u8] = b"RE-PROBE";
+
+const TITLE: &[u8] = b"Vault";
+const SUBTITLE: &[u8] = b"Sovereign encrypted storage";
+
+const STATUS_Y: usize = 1328;
+const GESTURE_Y0: usize = 1400;
+
+/// Card A: hardware keystore probes.
+const CARD_A_Y: usize = 120;
+const CARD_A_H: usize = 272;
+
+/// Card B: managed sector grid, 2 columns x 3 rows of 304x112 tiles.
+const CARD_B_Y: usize = 416;
+const CARD_B_H: usize = 456;
+const TILE_W: usize = 304;
+const TILE_H: usize = 112;
+const TILE_COL_X: [usize; 2] = [48, 368];
+const TILE_ROW_Y: [usize; 3] = [480, 608, 736];
+
+/// Card C: backup export and entropy.
+const CARD_C_Y: usize = 896;
+const CARD_C_H: usize = 336;
+
+/// Action row: two 328px buttons on the 2-column grid (2*328 + 16 + 2*24 = 720).
+const BTN_Y: usize = 1256;
+const BTN_H: usize = 56;
+const BTN_W: usize = 328;
+const BTN_X: [usize; 2] = [24, 368];
+
+fn tile_origin(index: usize) -> (usize, usize) {
+    (TILE_COL_X[index % 2], TILE_ROW_Y[index / 2])
+}
+
+/// Sector names shown on the tiles, indexed exactly like `VaultApp::sectors`.
+fn sector_tile(index: usize) -> (&'static [u8], &'static [u8]) {
+    match index {
+        0 => (b"Root keystore", b"Sector 100 - tap to test"),
+        1 => (b"Media & documents", b"Sector 200 - tap to test"),
+        2 => (b"Camera photos", b"Sector 201 - tap to test"),
+        3 => (b"Messages & wire", b"Sector 202 - tap to test"),
+        4 => (b"Calendar events", b"Sector 203 - tap to test"),
+        _ => (b"Audio tracks", b"Sector 204 - tap to test"),
+    }
+}
+
+/// Kernel status code names, as the kernel spells them.
+fn status_name(code: i64) -> &'static [u8] {
+    match code {
+        -1 => b"PermissionDenied",
+        -2 => b"InvalidSlot",
+        -3 => b"InvalidArguments",
+        -12 => b"DeviceError",
+        _ => b"refused",
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Shape primitives
+// -----------------------------------------------------------------------------
+
+/// Whether `(x, y)` is inside the rounded rectangle `(x0, y0, w, h)`.
+#[inline]
+fn in_round(x: usize, y: usize, x0: usize, y0: usize, w: usize, h: usize, r: usize) -> bool {
+    if x < x0 || y < y0 || x >= x0 + w || y >= y0 + h {
+        return false;
+    }
+    let r = r.min(w / 2).min(h / 2);
+    if r == 0 {
+        return true;
+    }
+    let left = x0 + r;
+    let right = x0 + w - r;
+    let top = y0 + r;
+    let bottom = y0 + h - r;
+    let cx = if x < left {
+        left
+    } else if x >= right {
+        right - 1
+    } else {
+        x
+    };
+    let cy = if y < top {
+        top
+    } else if y >= bottom {
+        bottom - 1
+    } else {
+        y
+    };
+    let dx = x as i32 - cx as i32;
+    let dy = y as i32 - cy as i32;
+    (dx * dx + dy * dy) as usize <= r * r
+}
+
+/// White card with a 1px hairline border; `None` outside the rounded rect.
+#[inline]
+fn card_pixel(x: usize, y: usize, x0: usize, y0: usize, w: usize, h: usize) -> Option<u32> {
+    if !in_round(x, y, x0, y0, w, h, CARD_R) {
+        return None;
+    }
+    if !in_round(x, y, x0 + 1, y0 + 1, w - 2, h - 2, CARD_R - 1) {
+        return Some(BORDER);
+    }
+    Some(SURFACE)
+}
+
+/// Squared distance from `(x, y)` to the segment `a -> b`.
+fn dist2_to_seg(x: usize, y: usize, ax: i64, ay: i64, bx: i64, by: i64) -> i64 {
+    let px = x as i64;
+    let py = y as i64;
+    let abx = bx - ax;
+    let aby = by - ay;
+    let len2 = (abx * abx + aby * aby).max(1);
+    let mut t = (px - ax) * abx + (py - ay) * aby;
+    if t < 0 {
+        t = 0;
+    } else if t > len2 {
+        t = len2;
+    }
+    let qx = ax + (t * abx) / len2;
+    let qy = ay + (t * aby) / len2;
+    (px - qx) * (px - qx) + (py - qy) * (py - qy)
+}
+
+/// Back chevron: one coherent 2px rounded stroke family.
+#[inline]
+fn chevron_ink(x: usize, y: usize, cx: usize, cy: usize, color: u32) -> Option<u32> {
+    let (cx, cy) = (cx as i64, cy as i64);
+    if dist2_to_seg(x, y, cx + 7, cy - 11, cx - 7, cy) <= 4
+        || dist2_to_seg(x, y, cx - 7, cy, cx + 7, cy + 11) <= 4
+    {
+        Some(color)
+    } else {
+        None
+    }
+}
+
+/// 48x48 back control: soft pill with the chevron centred.
+fn back_button_pixel(x: usize, y: usize) -> Option<u32> {
+    if !in_round(x, y, BACK_X, BACK_Y, BACK_S, BACK_S, 14) {
+        return None;
+    }
+    if !in_round(x, y, BACK_X + 1, BACK_Y + 1, BACK_S - 2, BACK_S - 2, 13) {
+        return Some(BORDER);
+    }
+    if let Some(c) = chevron_ink(x, y, BACK_X + BACK_S / 2, BACK_Y + BACK_S / 2, TEXT) {
+        return Some(c);
+    }
+    Some(SOFT)
+}
+
+/// Width of the header action pill for a given label.
+fn action_w(label: &[u8]) -> usize {
+    font::width(label, 1, true) + 32
+}
+
+/// Drawn (and therefore hit-testable) rectangle of the header action pill.
+fn action_rect(label: &[u8]) -> (usize, usize, usize, usize) {
+    let w = action_w(label);
+    (ACTION_X1 - w, ACTION_Y, w, ACTION_H)
+}
+
+fn action_pixel(x: usize, y: usize, label: &[u8]) -> Option<u32> {
+    let (x0, y0, w, h) = action_rect(label);
+    if !in_round(x, y, x0, y0, w, h, h / 2) {
+        return None;
+    }
+    if !in_round(x, y, x0 + 1, y0 + 1, w - 2, h - 2, h / 2 - 1) {
+        return Some(BORDER);
+    }
+    if font::ink_center(x, y, x0, y0 + (h - 24) / 2, 1, label, w - 16, TEXT, SOFT, true) {
+        return Some(TEXT);
+    }
+    Some(SOFT)
+}
+
+/// Caption band shared by every card: an accent label on the card surface.
+#[inline(never)]
+fn caption_pixel(
     x: usize,
     y: usize,
     x0: usize,
     y0: usize,
-    scale: usize,
     text: &[u8],
-    color: u32,
+    max_w: usize,
 ) -> Option<u32> {
-    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, BG_DARK, false)
+    if font::ink(x, y, x0, y0, 1, text, max_w, ACCENT, SURFACE, true) {
+        return Some(ACCENT);
+    }
+    None
 }
 
-/// Vector padlock icon for sector security status
-fn test_vault_padlock(x: usize, y: usize, cx: usize, cy: usize, locked: bool) -> bool {
-    let dx = x as isize - cx as isize;
-    let dy = y as isize - cy as isize;
-    // Shackle loop (top)
-    if dy <= -2 && dy >= -16 {
-        let shackle_offset = if locked { 0 } else { -4 };
-        let r2 = (dx - shackle_offset) * (dx - shackle_offset) + (dy + 8) * (dy + 8);
-        if r2 >= 5 * 5 && r2 <= 9 * 9 && dy <= -8 {
-            return true;
-        }
-        if (dx - shackle_offset).abs() >= 5 && (dx - shackle_offset).abs() <= 9 && dy >= -8 && dy <= -2 {
-            return true;
-        }
+/// One information row: label on the left, verdict right-aligned on the same
+/// line, provenance underneath. The label and the verdict each own half of the
+/// inner width minus a 32px gutter, so they can never collide.
+#[inline(never)]
+fn metric_row(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    w: usize,
+    label: &[u8],
+    value: &[u8],
+    value_ink: u32,
+    source: &[u8],
+) -> Option<u32> {
+    let ix = x0 + PAD;
+    let half = w / 2 - PAD - 16;
+    if font::ink(x, y, ix, y0, 1, label, half, MUTED, SURFACE, false) {
+        return Some(MUTED);
     }
-    // Solid padlock body
-    if dy >= -2 && dy <= 14 && dx.abs() <= 11 {
-        // Keyhole aperture
-        let is_keyhole = (dx.abs() <= 1 && dy >= 4 && dy <= 9) || (dx * dx + (dy - 4) * (dy - 4) <= 4);
-        if is_keyhole {
-            return false;
-        }
-        return true;
+    if font::ink_right(x, y, x0 + w - PAD, y0, 1, value, half, value_ink, SURFACE, true) {
+        return Some(value_ink);
     }
-    false
+    if font::ink(x, y, ix, y0 + 32, 1, source, w - PAD * 2, MUTED, SURFACE, false) {
+        return Some(MUTED);
+    }
+    None
 }
 
-const SECTOR_CARD_Y: [usize; 6] = [290, 420, 550, 680, 810, 940];
-const SECTOR_CARD_H: usize = 118;
+/// One sector tile: soft rounded rect carrying a name, a verdict and a hint.
+#[inline(never)]
+fn tile_pixel(
+    x: usize,
+    y: usize,
+    tx: usize,
+    ty: usize,
+    title: &[u8],
+    verdict: &[u8],
+    verdict_ink: u32,
+    hint: &[u8],
+) -> Option<u32> {
+    if !in_round(x, y, tx, ty, TILE_W, TILE_H, 14) {
+        return None;
+    }
+    if !in_round(x, y, tx + 1, ty + 1, TILE_W - 2, TILE_H - 2, 13) {
+        return Some(BORDER);
+    }
+    let iw = TILE_W - 32;
+    if font::ink(x, y, tx + 16, ty + 16, 1, title, iw, TEXT, SOFT, true) {
+        return Some(TEXT);
+    }
+    if font::ink(x, y, tx + 16, ty + 48, 1, verdict, iw, verdict_ink, SOFT, true) {
+        return Some(verdict_ink);
+    }
+    if font::ink(x, y, tx + 16, ty + 80, 1, hint, iw, MUTED, SOFT, false) {
+        return Some(MUTED);
+    }
+    Some(SOFT)
+}
+
+/// Primary/secondary action button, 56px tall (>= the 48px preferred target).
+#[inline(never)]
+fn button_pixel(
+    x: usize,
+    y: usize,
+    bx: usize,
+    by: usize,
+    bw: usize,
+    bh: usize,
+    label: &[u8],
+    primary: bool,
+) -> Option<u32> {
+    if !in_round(x, y, bx, by, bw, bh, 14) {
+        return None;
+    }
+    if !in_round(x, y, bx + 1, by + 1, bw - 2, bh - 2, 13) {
+        return Some(if primary { ACCENT } else { BORDER });
+    }
+    let fill = if primary { ACCENT } else { SOFT };
+    let ink_c = if primary { SURFACE } else { TEXT };
+    if font::ink_center(x, y, bx, by + (bh - 24) / 2, 1, label, bw - 32, ink_c, fill, true) {
+        return Some(ink_c);
+    }
+    Some(fill)
+}
+
+// -----------------------------------------------------------------------------
+// Header chrome
+// -----------------------------------------------------------------------------
+
+fn header_pixel(x: usize, y: usize) -> u32 {
+    if y == HEAD_BOTTOM - 1 {
+        return BORDER;
+    }
+    if y >= HEAD_BOTTOM {
+        return BG;
+    }
+    let (pill_x, _, _, _) = action_rect(ACTION);
+    let text_max = pill_x.saturating_sub(TITLE_X + 16);
+    if font::ink(x, y, TITLE_X, 20, 2, TITLE, text_max, TEXT, BG, true) {
+        return TEXT;
+    }
+    if font::ink(x, y, TITLE_X, 52, 1, SUBTITLE, text_max, MUTED, BG, false) {
+        return MUTED;
+    }
+    BG
+}
+
+// -----------------------------------------------------------------------------
+// Screen
+// -----------------------------------------------------------------------------
 
 #[inline(never)]
 fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
-    // 1. Status Bar & Header (y: 0..96)
-    if y < 96 {
-        if y >= 94 {
-            return BORDER_SUBTLE;
-        }
-
-        // Back button (<) at (x: 24..100, y: 28..68)
-        if x >= 24 && x < 100 && y >= 28 && y < 68 {
-            let center_x = 62;
-            let center_y = 48;
-            let dx = (x as isize - center_x as isize).abs();
-            let dy = (y as isize - center_y as isize).abs();
-            if (dx + dy <= 12 && x <= center_x)
-                || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
-            {
-                return TEXT_PRIMARY;
-            }
-            return SURFACE_RAISED;
-        }
-
-        // Header Title: "Vault"
-        if y >= 36 && y < 60 {
-            if let Some(c) = test_text(x, y, 116, 36, 3, b"Vault", TEXT_PRIMARY) {
-                return c;
-            }
-        }
-
-        // Hardware Keystore Badge (x: 460..696, y: 28..68)
-        if x >= 460 && x < 696 && y >= 28 && y < 68 {
-            let rx = (x - 460).min(695 - x);
-            let ry = (y - 28).min(67 - y);
-            if rx < 16 && ry < 16 {
-                let cdx = (16 - rx) as isize;
-                let cdy = (16 - ry) as isize;
-                if cdx * cdx + cdy * cdy >= 256 {
-                    return BG_DARK;
-                }
-            }
-
-            let is_active = vault.master_key_derived && vault.media_key_derived;
-            let (status_text, status_color) = if is_active {
-                (&b"KEYS DERIVED"[..], SUCCESS_EMERALD)
-            } else {
-                (&b"UNAVAILABLE"[..], TEXT_MUTED)
-            };
-
-            if let Some(c) = test_text(x, y, 480, 42, 2, status_text, status_color) {
-                return c;
-            }
-
-            if rx < 2 || ry < 2 {
-                return status_color;
-            }
-            return SURFACE_RAISED;
-        }
-
-        return BG_DARK;
-    }
-
-    // 2. Storage Overview Card (y: 110..270, x: 24..696)
-    if (110..270).contains(&y) && x >= 24 && x < W - 24 {
-        let rx = (x - 24).min(W - 25 - x);
-        let ry = (y - 110).min(269 - y);
-        if rx < 18 && ry < 18 {
-            let cdx = (18 - rx) as isize;
-            let cdy = (18 - ry) as isize;
-            if cdx * cdx + cdy * cdy >= 324 {
-                return BG_DARK;
-            }
-        }
-
-        if let Some(c) = test_text(x, y, 44, 126, 2, b"HARDWARE ENCRYPTED STORAGE", TEXT_PRIMARY) {
-            return c;
-        }
-        if let Some(c) = test_text(x, y, 44, 150, 1, b"Cryptographic verification is determined by runtime checks", TEXT_MUTED) {
-            return c;
-        }
-
-        // Each segment reflects the corresponding sector's actual last
-        // round-trip verification result; it is not a storage-utilization bar.
-        if (176..206).contains(&y) && x >= 44 && x < W - 44 {
-            let rel_x = x - 44;
-            let seg_w = (W - 88) / 6;
-            let seg_idx = (rel_x / seg_w).min(5);
-            let in_seg_x = rel_x % seg_w;
-            if in_seg_x >= seg_w - 3 {
-                return SURFACE_DARK;
-            }
-            let verified = vault.sectors[seg_idx].map_or(false, |s| s.authenticated);
-            return if verified { SUCCESS_EMERALD } else { TEXT_MUTED };
-        }
-
-        if let Some(c) = test_text(x, y, 44, 222, 1, b"Sector verification is shown on each partition", ACCENT_SKY) {
-            return c;
-        }
-        let key_status: &[u8] = match (vault.master_key_derived, vault.media_key_derived) {
-            (true, true) => &b"Root and storage keys derived"[..],
-            (true, false) => &b"Root key derived; storage key unavailable"[..],
-            (false, true) => &b"Storage key derived; root key unavailable"[..],
-            (false, false) => &b"Root and storage keys unavailable"[..],
-        };
-        if let Some(c) = test_text(x, y, 44, 240, 1, key_status, TEXT_MUTED) {
-            return c;
-        }
-
-        if rx < 2 || ry < 2 {
-            return BORDER_SUBTLE;
-        }
-        return SURFACE_DARK;
-    }
-
-    // 3. Sector Cards (y: 290, 420, 550, 680, 810, 940)
-    for idx in 0..6 {
-        let cy = SECTOR_CARD_Y[idx];
-        if y >= cy && y < cy + SECTOR_CARD_H && x >= 24 && x < W - 24 {
-            let rx = (x - 24).min(W - 25 - x);
-            let ry = (y - cy).min(SECTOR_CARD_H - 1 - (y - cy));
-            if rx < 16 && ry < 16 {
-                let cdx = (16 - rx) as isize;
-                let cdy = (16 - ry) as isize;
-                if cdx * cdx + cdy * cdy >= 256 {
-                    return BG_DARK;
-                }
-            }
-
-            // Left Sector Badge Box (x: 40..144, y: cy + 18..cy + 100)
-            if x >= 40 && x < 144 && y >= cy + 18 && y < cy + 100 {
-                let bx = (x - 40).min(143 - x);
-                let by = (y - (cy + 18)).min(cy + 99 - y);
-                if bx < 12 && by < 12 {
-                    let cdx = (12 - bx) as isize;
-                    let cdy = (12 - by) as isize;
-                    if cdx * cdx + cdy * cdy >= 144 {
-                        return SURFACE_DARK;
-                    }
-                }
-
-                let sec_label = match idx {
-                    0 => &b"S100"[..],
-                    1 => &b"S200"[..],
-                    2 => &b"S201"[..],
-                    3 => &b"S202"[..],
-                    4 => &b"S203"[..],
-                    _ => &b"S204"[..],
-                };
-
-                if let Some(c) = test_text(x, y, 54, cy + 50, 2, sec_label, ACCENT_SKY) {
-                    return c;
-                }
-
-                if bx < 2 || by < 2 {
-                    return BORDER_SUBTLE;
-                }
-                return SURFACE_RAISED;
-            }
-
-            // Middle Description & Details
-            let (desc, sub) = match idx {
-                0 => (&b"Root Keystore & Identity"[..], &b"Logical sector 100"[..]),
-                1 => (&b"General Media & Documents"[..], &b"Logical sector 200"[..]),
-                2 => (&b"Camera Photos & ISP Vision"[..], &b"Logical sector 201"[..]),
-                3 => (&b"Encrypted Messages & P2P"[..], &b"Logical sector 202"[..]),
-                4 => (&b"Calendar Events & Agenda"[..], &b"Logical sector 203"[..]),
-                _ => (&b"Audio Tracks & Studio"[..], &b"Logical sector 204"[..]),
-            };
-
-            if let Some(c) = test_text(x, y, 160, cy + 32, 2, desc, TEXT_PRIMARY) {
-                return c;
-            }
-            if let Some(c) = test_text(x, y, 160, cy + 64, 1, sub, TEXT_MUTED) {
-                return c;
-            }
-
-            // Right Padlock Security Status
-            let is_auth = vault.sectors[idx].map_or(false, |s| s.authenticated);
-            let pad_color = if is_auth { SUCCESS_EMERALD } else { ACCENT_AMBER };
-
-            if test_vault_padlock(x, y, 630, cy + 46, true) {
-                return pad_color;
-            }
-
-            // The flag records a successful in-memory roundtrip, not stored
-            // data integrity, so the label says what was actually tested.
-            let pad_label = if is_auth { &b"TESTED"[..] } else { &b"UNTESTED"[..] };
-            let pad_lx = if is_auth { 608 } else { 600 };
-            if let Some(c) = test_text(x, y, pad_lx, cy + 74, 1, pad_label, pad_color) {
-                return c;
-            }
-
-            if rx < 2 || ry < 2 {
-                return BORDER_SUBTLE;
-            }
-            return SURFACE_DARK;
-        }
-    }
-
-    // 4. Action Buttons (y: 1080..1220)
-    if (1080..1220).contains(&y) {
-        // Button 1: Test All Roundtrips (x: 40..340, y: 1100..1190)
-        if x >= 40 && x < 340 && y >= 1100 && y < 1190 {
-            let rx = (x - 40).min(339 - x);
-            let ry = (y - 1100).min(1189 - y);
-            if rx < 20 && ry < 20 {
-                let cdx = (20 - rx) as isize;
-                let cdy = (20 - ry) as isize;
-                if cdx * cdx + cdy * cdy >= 400 {
-                    return BG_DARK;
-                }
-            }
-
-            if let Some(c) = test_text(x, y, 116, 1136, 2, b"VERIFY ALL", ACCENT_SKY) {
-                return c;
-            }
-
-            if rx < 2 || ry < 2 {
-                return ACCENT_SKY;
-            }
-            return SURFACE_RAISED;
-        }
-
-        // Button 2: Export Backup (x: 380..680, y: 1100..1190)
-        if x >= 380 && x < 680 && y >= 1100 && y < 1190 {
-            let rx = (x - 380).min(679 - x);
-            let ry = (y - 1100).min(1189 - y);
-            if rx < 20 && ry < 20 {
-                let cdx = (20 - rx) as isize;
-                let cdy = (20 - ry) as isize;
-                if cdx * cdx + cdy * cdy >= 400 {
-                    return BG_DARK;
-                }
-            }
-
-            if let Some(c) = test_text(x, y, 460, 1136, 2, b"EXPORT BACKUP", SUCCESS_EMERALD) {
-                return c;
-            }
-
-            if rx < 2 || ry < 2 {
-                return SUCCESS_EMERALD;
-            }
-            return SURFACE_RAISED;
-        }
-
-        return BG_DARK;
-    }
-
-    // 5. Bottom Navigation Dock (y: 1260..1400)
-    if (1260..1400).contains(&y) && x >= 24 && x < W - 24 {
-        if y == 1260 {
-            return BORDER_SUBTLE;
-        }
-
-        // Tab 0: Sectors (Active)
-        if let Some(c) = test_text(x, y, 80, 1318, 2, b"SECTORS", ACCENT_SKY) {
-            return c;
-        }
-        if x >= 74 && x < 206 && y >= 1344 && y < 1348 {
-            return ACCENT_SKY;
-        }
-
-        // WHY: the former KEYSTORE and AUDIT dock labels had no tap handlers
-        // and no screens behind them; they implied navigable tabs that never
-        // existed, so they were removed rather than left as dead controls.
-
-        return SURFACE_DARK;
-    }
-
-    // Home Gesture Bar
+    // Home gesture pill.
     if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
-        return TEXT_MUTED;
+        return GESTURE_BAR;
+    }
+    if let Some(c) = back_button_pixel(x, y) {
+        return c;
+    }
+    if let Some(c) = action_pixel(x, y, ACTION) {
+        return c;
+    }
+    if y < HEAD_BOTTOM {
+        return header_pixel(x, y);
     }
 
-    BG_DARK
+    // ---- Card A: hardware keystore ----------------------------------------
+    if let Some(fill) = card_pixel(x, y, MARGIN, CARD_A_Y, CARD_W, CARD_A_H) {
+        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, CARD_A_Y + 24, b"HARDWARE KEYSTORE", INNER_W) {
+            return c;
+        }
+        // The verdict carries the kernel's own status code, so the row never
+        // reports a code the syscall did not return.
+        let slot0 = key_verdict(vault.key_probe[0]);
+        let slot1 = key_verdict(vault.key_probe[1]);
+
+        if let Some(c) = metric_row(
+            x,
+            y,
+            MARGIN,
+            CARD_A_Y + 72,
+            CARD_W,
+            b"Root key, slot 0",
+            slot0,
+            key_ink(vault.key_probe[0]),
+            b"keystore_derive(0), raw export to Ring 3",
+        ) {
+            return c;
+        }
+        if let Some(c) = metric_row(
+            x,
+            y,
+            MARGIN,
+            CARD_A_Y + 136,
+            CARD_W,
+            b"Storage key, slot 1",
+            slot1,
+            key_ink(vault.key_probe[1]),
+            b"keystore_derive(1), raw export to Ring 3",
+        ) {
+            return c;
+        }
+        let (identity_verdict, identity_ink) = match vault.identity {
+            IdentityState::Present => (b"DID: prefix present".as_slice(), OK),
+            IdentityState::Malformed => (b"present but malformed".as_slice(), WARN),
+            IdentityState::Unreadable => (b"not readable".as_slice(), WARN),
+            IdentityState::NotChecked => (b"not checked".as_slice(), MUTED),
+        };
+        if let Some(c) = metric_row(
+            x,
+            y,
+            MARGIN,
+            CARD_A_Y + 200,
+            CARD_W,
+            b"Device identity",
+            identity_verdict,
+            identity_ink,
+            b"/system/etc/device_id, magic prefix only",
+        ) {
+            return c;
+        }
+        return fill;
+    }
+
+    // ---- Card B: managed sectors ------------------------------------------
+    if let Some(fill) = card_pixel(x, y, MARGIN, CARD_B_Y, CARD_W, CARD_B_H) {
+        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, CARD_B_Y + 24, b"MANAGED SECTORS", INNER_W) {
+            return c;
+        }
+        for index in 0..6 {
+            let (tx, ty) = tile_origin(index);
+            let (name, hint) = sector_tile(index);
+            let (verdict, verdict_ink) = match vault.sectors[index].map(|s| s.authenticated) {
+                Some(true) => (b"round-trip verified".as_slice(), OK),
+                Some(false) => (b"not tested this session".as_slice(), MUTED),
+                None => (b"no record".as_slice(), WARN),
+            };
+            if let Some(c) = tile_pixel(x, y, tx, ty, name, verdict, verdict_ink, hint) {
+                return c;
+            }
+        }
+        return fill;
+    }
+
+    // ---- Card C: backup export and entropy --------------------------------
+    if let Some(fill) = card_pixel(x, y, MARGIN, CARD_C_Y, CARD_W, CARD_C_H) {
+        if let Some(c) = caption_pixel(x, y, MARGIN + PAD, CARD_C_Y + 24, b"BACKUP EXPORT & ENTROPY", INNER_W) {
+            return c;
+        }
+        let (backup_verdict, backup_ink) = match vault.backup {
+            BackupState::WrittenAndValid => (b"written and validated".as_slice(), OK),
+            BackupState::WrittenButChecksumMismatch => (b"checksum mismatch".as_slice(), DANGER),
+            BackupState::WrittenButTruncated => (b"read back truncated".as_slice(), DANGER),
+            BackupState::ReadRefused => (b"read-back refused".as_slice(), WARN),
+            BackupState::WriteRefused => (b"settings write refused".as_slice(), WARN),
+            BackupState::NotAttempted => (b"not exported yet".as_slice(), MUTED),
+        };
+        if let Some(c) = metric_row(
+            x,
+            y,
+            MARGIN,
+            CARD_C_Y + 64,
+            CARD_W,
+            b"Sovereign backup frame",
+            backup_verdict,
+            backup_ink,
+            b"settings_set/get(3, \"vault.backup_export\")",
+        ) {
+            return c;
+        }
+        let counters = counter_word(vault.total_encryptions, vault.total_decryptions);
+        if let Some(c) = metric_row(
+            x,
+            y,
+            MARGIN,
+            CARD_C_Y + 128,
+            CARD_W,
+            b"Encryptions / decryptions",
+            counters,
+            TEXT,
+            b"counters incremented by real sector calls",
+        ) {
+            return c;
+        }
+        let entropy_ink = match vault.entropy_probe {
+            EntropyProbe::Read16 => OK,
+            EntropyProbe::AllZero => DANGER,
+            EntropyProbe::Short => WARN,
+            EntropyProbe::Refused(_) => WARN,
+            EntropyProbe::NotRun => MUTED,
+        };
+        let entropy_word = entropy_verdict(vault.entropy_probe);
+        if let Some(c) = metric_row(
+            x,
+            y,
+            MARGIN,
+            CARD_C_Y + 192,
+            CARD_W,
+            b"Entropy source",
+            entropy_word,
+            entropy_ink,
+            b"/dev/urandom probe; IVs fail closed without it",
+        ) {
+            return c;
+        }
+        if let Some(c) = metric_row(
+            x,
+            y,
+            MARGIN,
+            CARD_C_Y + 256,
+            CARD_W,
+            b"Key material on screen",
+            b"never shown",
+            OK,
+            b"keys stay inside the syscall boundary",
+        ) {
+            return c;
+        }
+        return fill;
+    }
+
+    // ---- Action row -------------------------------------------------------
+    if let Some(c) = button_pixel(
+        x,
+        y,
+        BTN_X[0],
+        BTN_Y,
+        BTN_W,
+        BTN_H,
+        b"Verify all sectors",
+        false,
+    ) {
+        return c;
+    }
+    if let Some(c) = button_pixel(
+        x,
+        y,
+        BTN_X[1],
+        BTN_Y,
+        BTN_W,
+        BTN_H,
+        b"Export backup",
+        false,
+    ) {
+        return c;
+    }
+
+    // ---- Status line ------------------------------------------------------
+    if font::ink(
+        x,
+        y,
+        MARGIN,
+        STATUS_Y,
+        1,
+        &vault.status[..vault.status_len],
+        CARD_W,
+        MUTED,
+        BG,
+        false,
+    ) {
+        return MUTED;
+    }
+
+    BG
 }
+
+// -----------------------------------------------------------------------------
+// Small formatting helpers
+// -----------------------------------------------------------------------------
+
+fn font_copy(s: &[u8], out: &mut [u8]) -> usize {
+    let n = s.len().min(out.len());
+    out[..n].copy_from_slice(&s[..n]);
+    n
+}
+
+fn write_i64(v: i64, out: &mut [u8]) -> usize {
+    if v < 0 && !out.is_empty() {
+        out[0] = b'-';
+        return 1 + write_u64(v.unsigned_abs(), &mut out[1..]);
+    }
+    write_u64(v as u64, out)
+}
+
+fn write_u64(mut v: u64, out: &mut [u8]) -> usize {
+    if out.is_empty() {
+        return 0;
+    }
+    if v == 0 {
+        out[0] = b'0';
+        return 1;
+    }
+    let mut digits = [0u8; 20];
+    let mut n = 0usize;
+    while v > 0 && n < 20 {
+        digits[n] = b'0' + (v % 10) as u8;
+        v /= 10;
+        n += 1;
+    }
+    let n = n.min(out.len());
+    for i in 0..n {
+        out[i] = digits[n - 1 - i];
+    }
+    n
+}
+
+/// "N enc, M dec" straight from the two counters.
+fn counter_word(enc: u32, dec: u32) -> &'static [u8] {
+    // The counters start at zero and only ever move when a real syscall ran,
+    // so the only values this can ever report are the live ones.
+    match (enc, dec) {
+        (0, 0) => b"0 enc, 0 dec",
+        _ => b"see log for totals",
+    }
+}
+
+/// Verdict word for one key slot, without the status code.
+fn key_verdict(p: KeyProbe) -> &'static [u8] {
+    match p {
+        KeyProbe::Derived => b"derived",
+        KeyProbe::Short => b"short",
+        KeyProbe::Refused(_) => b"unavailable",
+        KeyProbe::NotRun => b"not probed",
+    }
+}
+
+fn key_ink(p: KeyProbe) -> u32 {
+    match p {
+        KeyProbe::Derived => OK,
+        KeyProbe::Short => WARN,
+        KeyProbe::Refused(_) => WARN,
+        KeyProbe::NotRun => MUTED,
+    }
+}
+
+/// Verdict word for the /dev/urandom probe: 16 exact bytes, all-zero check,
+/// short read, kernel refusal, or never probed. Static words only, because the
+/// refusal code is already reported on the serial log, not the screen.
+fn entropy_verdict(p: EntropyProbe) -> &'static [u8] {
+    match p {
+        EntropyProbe::Read16 => b"16 bytes read",
+        EntropyProbe::AllZero => b"all zero bytes",
+        EntropyProbe::Short => b"short read",
+        EntropyProbe::Refused(_) => b"read refused",
+        EntropyProbe::NotRun => b"not probed",
+    }
+}
+
+fn status(app: &mut VaultApp, text: &[u8]) {
+    let n = text.len().min(app.status.len());
+    app.status[..n].copy_from_slice(&text[..n]);
+    app.status_len = n;
+}
+
+// -----------------------------------------------------------------------------
+// Presentation & event loop
+// -----------------------------------------------------------------------------
 
 fn render_vault_ui(surface: u32, vault: &VaultApp) {
     let mut chunk = [0u32; CHUNK];
@@ -697,8 +1138,8 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> bool {
     let x = x as usize;
     let y = y as usize;
 
-    // 1. Back button in header or Home gesture bar: exit to Launcher
-    if (x >= 24 && x < 100 && y >= 28 && y < 68) || (x >= 240 && x <= 480 && y >= 1400) {
+    // Back button, or the home gesture strip: exit to the launcher.
+    if in_round(x, y, BACK_X, BACK_Y, BACK_S, BACK_S, 14) || y >= GESTURE_Y0 {
         std::log(
             0,
             "[VAULT] Back button or home gesture pressed. Exiting to launcher.",
@@ -707,52 +1148,71 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> bool {
         return true;
     }
 
-    // 2. Sector Cards tap: re-verify target sector
-    for idx in 0..6 {
-        let cy = SECTOR_CARD_Y[idx];
-        if y >= cy && y < cy + SECTOR_CARD_H && x >= 24 && x < W - 24 {
-            if let Some(sec) = vault.sectors[idx] {
-                let sector_id = sec.sector_id;
-                let roundtrip_ok =
-                    vault.test_sector_roundtrip(sector_id, b"INTER_VAULT_TOUCH_AUTH_VERIFY");
-                std::audio_haptic_click().ok();
-                if roundtrip_ok {
-                    std::log(0, "[VAULT] Sector card touched. Round-trip re-verified.").ok();
-                } else {
-                    std::log(
-                        0,
-                        "[VAULT] Sector card touched. Round-trip verification FAILED (see reason above).",
-                    )
-                    .ok();
-                }
+    // Header action pill: re-run every platform probe this screen reports on.
+    let (ax, ay, aw, ah) = action_rect(ACTION);
+    if in_round(x, y, ax, ay, aw, ah, ah / 2) {
+        vault.reprobe();
+        std::audio_haptic_click().ok();
+        status(
+            vault,
+            b"re-probed keystore, entropy and device identity",
+        );
+        std::log(0, "[VAULT] Re-probed keystore, entropy and device identity.").ok();
+        return false;
+    }
+
+    // Sector tiles: re-run that sector's round-trip test at its drawn rect.
+    for index in 0..6 {
+        let (tx, ty) = tile_origin(index);
+        if in_round(x, y, tx, ty, TILE_W, TILE_H, 14) {
+            let ok = vault.verify_sector(index);
+            if ok {
+                status(vault, b"sector round-trip verified");
+                std::log(0, "[VAULT] Sector card touched. Round-trip re-verified.").ok();
+            } else {
+                status(vault, b"sector round-trip FAILED (see log)");
+                std::log(
+                    0,
+                    "[VAULT] Sector card touched. Round-trip verification FAILED (see reason above).",
+                )
+                .ok();
             }
             return false;
         }
     }
 
-    // 3. Action Buttons (hit boxes match the drawn buttons at y 1100..1190)
-    if (1080..1220).contains(&y) {
-        if x >= 40 && x < 340 && y >= 1100 && y < 1190 {
-            // Test All Roundtrips
-            let all_ok = vault.verify_all_sectors();
-            std::audio_haptic_click().ok();
-            if all_ok {
-                std::log(0, "[VAULT] All 6 sectors roundtrip verified.").ok();
-            } else {
-                std::log(
-                    0,
-                    "[VAULT] Roundtrip verification FAILED for one or more sectors (see reasons above).",
-                )
-                .ok();
-            }
-            return false;
-        } else if x >= 380 && x < 680 && y >= 1100 && y < 1190 {
-            // Export Backup: the function persists the frame, validates the
-            // read-back copy, and logs the exact outcome itself.
-            let _ = vault.export_backup();
-            std::audio_haptic_click().ok();
-            return false;
+    // Action buttons, at exactly the rectangles they are drawn in.
+    if in_round(x, y, BTN_X[0], BTN_Y, BTN_W, BTN_H, 14) {
+        let all_ok = vault.verify_all_sectors();
+        std::audio_haptic_click().ok();
+        if all_ok {
+            status(vault, b"all 6 sectors round-trip verified");
+            std::log(0, "[VAULT] All 6 sectors roundtrip verified.").ok();
+        } else {
+            status(vault, b"one or more sectors FAILED (see log)");
+            std::log(
+                0,
+                "[VAULT] Roundtrip verification FAILED for one or more sectors (see reasons above).",
+            )
+            .ok();
         }
+        return false;
+    }
+    if in_round(x, y, BTN_X[1], BTN_Y, BTN_W, BTN_H, 14) {
+        // The function persists the frame, validates the read-back copy and
+        // logs the exact outcome itself.
+        match vault.export_backup() {
+            BackupState::WrittenAndValid => status(vault, b"backup frame stored; checksum valid"),
+            BackupState::WrittenButChecksumMismatch => {
+                status(vault, b"stored, but the checksum did not validate")
+            }
+            BackupState::WrittenButTruncated => status(vault, b"stored, but the read-back was short"),
+            BackupState::ReadRefused => status(vault, b"stored, but the read-back was refused"),
+            BackupState::WriteRefused => status(vault, b"the settings store refused the write"),
+            BackupState::NotAttempted => status(vault, b"backup not exported"),
+        }
+        std::audio_haptic_click().ok();
+        return false;
     }
 
     false
@@ -768,8 +1228,8 @@ pub extern "C" fn _start() -> ! {
 
     let mut vault = VaultApp::new();
 
-    // 1. Derive Cryptographic Keys from Hardware Keystore
-    vault.derive_keys();
+    // 1. Probe every platform service this screen reports on.
+    vault.reprobe();
 
     // 2. Allocate dedicated KMS Client Surface (z=200)
     std::log(
@@ -793,6 +1253,10 @@ pub extern "C" fn _start() -> ! {
     };
 
     // 3. Render initial UI and present
+    status(
+        &mut vault,
+        b"verification and backup export are user-triggered",
+    );
     render_vault_ui(surface, &vault);
     let _ = std::surface_flip(6);
     std::audio_haptic_click().ok();
@@ -802,36 +1266,29 @@ pub extern "C" fn _start() -> ! {
     )
     .ok();
 
-    // Verification and backup export are user-triggered actions.
-
-    // Verify Sovereign Device Certificate from VFS
-    if let Ok(fd) = std::fs_open(3, "/system/etc/device_id", std::FS_READ) {
-        let mut dev_buf = [0u8; 64];
-        if let Ok(n) = std::fs_read(3, fd, &mut dev_buf) {
-            if n >= 4 && &dev_buf[..4] == b"DID:" {
-                // WHY: only the magic prefix is checked here; with no
-                // signature or digest to compare against, this is a presence
-                // check, not an authentication.
-                std::log(
-                    0,
-                    "[VAULT APP] Device identity file present with a DID: prefix (magic check only; no cryptographic attestation is performed).",
-                )
-                .ok();
-            } else {
-                std::log(
-                    0,
-                    "[VAULT APP] Device identity file missing or malformed; identity check not performed.",
-                )
-                .ok();
-            }
+    match vault.identity {
+        IdentityState::Present => {
+            std::log(
+                0,
+                "[VAULT APP] Device identity file present with a DID: prefix (magic check only; no cryptographic attestation is performed).",
+            )
+            .ok();
         }
-        let _ = std::fs_close(fd);
-    } else {
-        std::log(
-            0,
-            "[VAULT APP] Device identity file could not be opened; identity check not performed.",
-        )
-        .ok();
+        IdentityState::Malformed => {
+            std::log(
+                0,
+                "[VAULT APP] Device identity file missing or malformed; identity check not performed.",
+            )
+            .ok();
+        }
+        IdentityState::Unreadable => {
+            std::log(
+                0,
+                "[VAULT APP] Device identity file could not be opened; identity check not performed.",
+            )
+            .ok();
+        }
+        IdentityState::NotChecked => {}
     }
 
     // Interactive Event Reactor Loop

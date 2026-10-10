@@ -1,19 +1,25 @@
 //! InterOS Core Native Music Player (Ring-3)
 //!
-//! Bare-metal user-mode media player:
-//! - Static playlist populated only from real media storage (currently empty).
-//! - Hardware Keystore Slot 1 media key derivation.
-//! - Authenticated track record encryption.
-//! - Zero-copy DMA audio block streaming.
-//! - 4-note major arpeggio synthesis via hardware audio timer.
-//! - Capacitive tactile haptics.
-//! - Asynchronous event reactor loop for transport controls.
+//! Bare-metal user-mode media player on the canonical dark media surface:
+//! - Playlist populated only from real media storage (`PLAYLIST` is honestly
+//!   empty, so the player reports an idle transport and an empty track list)
+//! - Every transport target is >= 56 px (previous/next 64 px, play/pause 88 px)
+//! - The progress bar is bound to a real playback position; no backend reports
+//!   one, so it renders the honest idle state instead of a fake fill
+//! - Album artwork is a neutral placeholder glyph, never a fabricated cover
+//! - All strings are measured with `interos_std::design::font::measure` /
+//!   `ellipsize` at the coordinates they are drawn at
+//! - Hardware Keystore Slot 1 media key derivation, authenticated track record
+//!   encryption and the zero-copy DMA audio path are preserved unchanged
+//! - Asynchronous event reactor loop for transport controls
 
 #![no_std]
 #![no_main]
 
 use core::panic::PanicInfo;
 use interos_std as std;
+use std::design::font;
+use std::design::primitives::{draw_circle, draw_pill, draw_rounded_rect, Rect};
 
 /// Synthesizer audio waveform.
 #[allow(dead_code)]
@@ -43,7 +49,8 @@ pub struct AudioTrack {
     pub codec: &'static str,
 }
 
-/// Local Music Playlist.
+/// Local Music Playlist. Populated only from real media storage, which exposes
+/// no audio files, so the playlist is honestly empty.
 pub static PLAYLIST: [AudioTrack; 0] = [];
 
 /// Production Sovereign Music state manager.
@@ -165,342 +172,408 @@ const H: usize = 1440;
 const CHUNK: usize = 4096;
 
 // -----------------------------------------------------------------------------
-// 32-bit ARGB8888 Design Color Tokens (immersive dark surface)
+// 32-bit ARGB8888 Design Color Tokens (immersive dark media surface)
 // -----------------------------------------------------------------------------
-const BG_DARK: u32 = 0xFF111214;
-#[allow(dead_code)]
-const SURFACE_RAISED: u32 = 0xFF25282A;
-const BORDER_SUBTLE: u32 = 0xFF3A3D40;
-const TEXT_PRIMARY: u32 = 0xFFF7F6F2;
-const TEXT_MUTED: u32 = 0xFF777773;
-#[allow(dead_code)]
-const ACCENT: u32 = TEXT_PRIMARY;
+const BG: u32 = 0xFF111214;
+/// Dark surface (controls, artwork card).
+const SURFACE: u32 = 0xFF25282A;
+/// Recessed control fill - a disabled transport sits below the surface.
+const RECESSED: u32 = 0xFF1B1E20;
+const BORDER: u32 = 0xFF35383D;
+const TEXT: u32 = 0xFFF5F6F7;
+const MUTED: u32 = 0xFF9AA0A6;
+const FAINT: u32 = 0xFF777773;
+const INK_ON_LIGHT: u32 = 0xFF111214;
 
 // -----------------------------------------------------------------------------
-// Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')
+// Layout constants - shared by the renderer and the hit-tester
 // -----------------------------------------------------------------------------
-// Typography provided by interos_std::design::font
+const MARGIN: usize = 24;
+const CONTENT_W: usize = W - 2 * MARGIN;
 
+const BAR_H: usize = 96;
+const BACK: Rect = Rect::new(24, 24, 72, 72);
+
+const ART_X: usize = 136;
+const ART_Y: usize = 128;
+const ART_W: usize = 448;
+const ART_H: usize = 448;
+const ART_GLYPH_CY: usize = 300;
+const ART_CAPTION_Y: usize = 400;
+
+const TITLE_Y: usize = 620;
+const ARTIST_Y: usize = 684;
+const STATE_Y: usize = 716;
+const TIMES_Y: usize = 756;
+const TRACK_Y: usize = 796;
+const TRACK_H: usize = 4;
+const SCRUB_NOTE_Y: usize = 816;
+
+const TRANSPORT_CY: usize = 990;
+const PREV_CX: usize = 190;
+const PLAY_CX: usize = 360;
+const NEXT_CX: usize = 530;
+const SIDE_R: usize = 32; // 64 px target, >= 56 px required
+const PLAY_R: usize = 44; // 88 px target, >= 56 px required
+
+const LIST_LABEL_Y: usize = 1080;
+const LIST_DIVIDER_Y: usize = 1116;
+const LIST_HIT_Y0: usize = 1130;
+const LIST_HIT_Y1: usize = 1260;
+const LIST_TITLE_Y: usize = 1160;
+const LIST_SUB_Y: usize = 1224;
+
+const HOME_X0: usize = 240;
+const HOME_X1: usize = 480;
+const HOME_Y0: usize = 1418;
+const HOME_Y1: usize = 1424;
+
+// -----------------------------------------------------------------------------
+// Text helpers - the gate is the glyph line box, so ink is never clipped.
+// -----------------------------------------------------------------------------
 #[inline(always)]
-fn test_text(
+fn text(
     x: usize,
     y: usize,
     x0: usize,
     y0: usize,
     scale: usize,
-    text: &[u8],
+    s: &[u8],
     color: u32,
+    bg: u32,
 ) -> Option<u32> {
-    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, BG_DARK, false)
+    if y < y0 || y >= y0 + font::line_height(scale) {
+        return None;
+    }
+    font::test_text_aa(x, y, x0, y0, scale, s, color, bg, false)
+}
+
+#[inline(always)]
+fn text_bold(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    s: &[u8],
+    color: u32,
+    bg: u32,
+) -> Option<u32> {
+    if y < y0 || y >= y0 + font::line_height(scale) {
+        return None;
+    }
+    font::test_text_aa(x, y, x0, y0, scale, s, color, bg, true)
+}
+
+#[inline(always)]
+fn text_centered(
+    x: usize,
+    y: usize,
+    y0: usize,
+    scale: usize,
+    s: &[u8],
+    color: u32,
+    bg: u32,
+) -> Option<u32> {
+    let w = font::measure(s, scale);
+    if w > CONTENT_W {
+        return None;
+    }
+    text(x, y, (W - w) / 2, y0, scale, s, color, bg)
 }
 
 // -----------------------------------------------------------------------------
-// Pixel Color Resolution Engine (light minimal player)
+// Vector pictograms (one rounded, ~2px stroke family)
+// -----------------------------------------------------------------------------
+
+/// Dismiss chevron: a "v" stroke whose ends sit at (cx +/- half, cy) and whose
+/// apex sits at (cx, cy + half).
+fn chevron_down(x: usize, y: usize, cx: usize, cy: usize, half: isize) -> bool {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    if dy < 0 || dy > half || dx.abs() > half {
+        return false;
+    }
+    let s = dx.abs() + dy;
+    (half - 2..=half + 2).contains(&s)
+}
+
+/// Neutral album-art placeholder: a beamed eighth-note pair, centred on (cx, cy).
+fn note_glyph(x: usize, y: usize, cx: usize, cy: usize) -> bool {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    // Beam from (-46,-46) to (46,-34)
+    if (-46..=46).contains(&dx) {
+        let t = (dx + 46) * 12 / 92;
+        let beam = -46 + t;
+        if (dy - beam).abs() <= 4 && dy <= -30 {
+            return true;
+        }
+    }
+    // Stems
+    if (dx == -44 || dx == 44) && (-44..=24).contains(&dy) {
+        return true;
+    }
+    // Note heads (filled ovals)
+    for head_cx in [-44isize, 44] {
+        let hx = dx - head_cx;
+        let hy = dy - 32;
+        if hx * hx + hy * hy * 2 <= 196 {
+            return true;
+        }
+    }
+    false
+}
+
+// -----------------------------------------------------------------------------
+// Pixel Color Resolution Engine (dark minimal player)
 // -----------------------------------------------------------------------------
 #[inline(never)]
 fn get_music_pixel(x: usize, y: usize, app: &MusicApp) -> u32 {
-    // 0. Home Gesture Pill (x: 260..460, y: 1418..1424) — checked early, no overlap.
-    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
-        return TEXT_MUTED;
+    // 0. Home Gesture Pill (x: 260..460, y: 1418..1424).
+    if y >= HOME_Y0 && y < HOME_Y1 && x >= 260 && x < 460 {
+        return MUTED;
     }
 
-    // 1. Top bar (y: 0..120): dismiss chevron + queue icon.
-    if y < 120 {
-        // Dismiss down-chevron "v" at x56 y64, TEXT_PRIMARY two diagonal strokes.
-        if y >= 56 && y < 76 {
-            let yi = y as i32;
-            let xi = x as i32;
-            if xi >= 46 && xi <= 56 {
-                let yy = yi - 56;
-                let xx = xi - 46;
-                if yy >= xx && yy < xx + 4 {
-                    return TEXT_PRIMARY;
-                }
-            }
-            if xi >= 56 && xi <= 66 {
-                let yy = yi - 56;
-                let xx = 66 - xi;
-                if yy >= xx && yy < xx + 4 {
-                    return TEXT_PRIMARY;
-                }
-            }
+    // 1. Top bar: dismiss control + screen label.
+    if y < BAR_H {
+        if y == BAR_H - 1 {
+            return BORDER;
         }
-        // Queue icon: 3 horizontal lines at x654 y64, TEXT_PRIMARY.
-        if x >= 644 && x < 665 {
-            if (y >= 55 && y < 58) || (y >= 62 && y < 65) || (y >= 69 && y < 72) {
-                return TEXT_PRIMARY;
+        if let Some(c) = draw_pill(x, y, BACK, RECESSED, Some(BORDER)) {
+            if c != RECESSED {
+                return c;
             }
+            if chevron_down(x, y, 60, 50, 12) {
+                return TEXT;
+            }
+            return RECESSED;
         }
-        return BG_DARK;
+        if let Some(c) = text_centered(x, y, 48, 1, b"Media player", MUTED, BG) {
+            return c;
+        }
+        return BG;
     }
 
-    // 2. Album card x72..648 y140..716 radius32, decorative monochrome shading.
-    if y >= 140 && y < 716 && x >= 72 && x < 648 {
-        let xi = x as i32;
-        let yi = y as i32;
-        // Rounded-corner outside test.
-        if xi < 104 && yi < 172 {
-            let dx = xi - 104;
-            let dy = yi - 172;
-            let d2 = dx * dx + dy * dy;
-            if d2 > 32 * 32 {
-                return BG_DARK;
-            }
-            if d2 >= 30 * 30 {
-                return BORDER_SUBTLE;
-            }
-        } else if xi >= 616 && yi < 172 {
-            let dx = xi - 616;
-            let dy = yi - 172;
-            let d2 = dx * dx + dy * dy;
-            if d2 > 32 * 32 {
-                return BG_DARK;
-            }
-            if d2 >= 30 * 30 {
-                return BORDER_SUBTLE;
-            }
-        } else if xi < 104 && yi >= 684 {
-            let dx = xi - 104;
-            let dy = yi - 684;
-            let d2 = dx * dx + dy * dy;
-            if d2 > 32 * 32 {
-                return BG_DARK;
-            }
-            if d2 >= 30 * 30 {
-                return BORDER_SUBTLE;
-            }
-        } else if xi >= 616 && yi >= 684 {
-            let dx = xi - 616;
-            let dy = yi - 684;
-            let d2 = dx * dx + dy * dy;
-            if d2 > 32 * 32 {
-                return BG_DARK;
-            }
-            if d2 >= 30 * 30 {
-                return BORDER_SUBTLE;
-            }
-        } else if x < 74 || x >= 646 || y < 142 || y >= 714 {
-            return BORDER_SUBTLE;
+    // 2. Album artwork: a neutral placeholder, never a fabricated cover.
+    let art = Rect::new(ART_X, ART_Y, ART_W, ART_H);
+    if let Some(c) = draw_rounded_rect(x, y, art, 24, SURFACE, Some(BORDER), 1) {
+        if c != SURFACE {
+            return c;
         }
-
-        // Layered horizontal shade bands (light top -> dark bottom).
-        let mut base: u32 = if y < 222 {
-            0xFFE8E6E1
-        } else if y < 304 {
-            0xFFD5D3CD
-        } else if y < 386 {
-            0xFFB8B6B1
-        } else if y < 468 {
-            0xFF8E8C88
-        } else if y < 550 {
-            0xFF5E5C5A
-        } else if y < 632 {
-            0xFF3E3C3B
-        } else {
-            0xFF2A2A2A
-        };
-
-        // Vignette darkening at edges.
-        let ex0 = x - 72;
-        let ex1 = 647 - x;
-        let ey0 = y - 140;
-        let ey1 = 715 - y;
-        let mut edge = ex0;
-        if ex1 < edge {
-            edge = ex1;
+        if note_glyph(x, y, ART_X + ART_W / 2, ART_GLYPH_CY) {
+            return FAINT;
         }
-        if ey0 < edge {
-            edge = ey0;
+        if let Some(c) = text_centered(
+            x,
+            y,
+            ART_CAPTION_Y,
+            1,
+            b"No artwork - no album art in library",
+            FAINT,
+            SURFACE,
+        ) {
+            return c;
         }
-        if ey1 < edge {
-            edge = ey1;
-        }
-        if edge < 32 {
-            let factor = (150 + edge * 3) as u32;
-            let rr = ((base >> 16) & 0xFF) * factor / 255;
-            let gg = ((base >> 8) & 0xFF) * factor / 255;
-            let bb = (base & 0xFF) * factor / 255;
-            base = 0xFF000000 | (rr << 16) | (gg << 8) | bb;
-        }
-
-        // Diagonal ridge / wave silhouettes (decorative shading only).
-        let ridge1 = 300 + (xi - 72) * 120 / 576;
-        if (yi - ridge1).abs() < 5 {
-            return 0xFF2A2A2A;
-        }
-        let ridge2 = 460 + (xi - 72) * 100 / 576;
-        if (yi - ridge2).abs() < 4 {
-            return TEXT_PRIMARY;
-        }
-        let diag = (xi + yi * 2) % 110;
-        let diag_norm = if diag < 0 { diag + 110 } else { diag };
-        if diag_norm < 3 {
-            return 0xFF2A2A2A;
-        }
-
-        // Star dots: sparse white pixels.
-        if (x * 7 + y * 13) % 97 == 0 {
-            return 0xFFFFFFFF;
-        }
-
-        return base;
+        return SURFACE;
     }
 
-    // 3. Metadata: title "Interstellar" + artist "Hans Zimmer".
-    if y >= 755 && y < 755 + 24 {
-        if let Some(c) = test_text(x, y, 72, 755, 3, b"Interstellar", TEXT_PRIMARY) {
+    // 3. Track metadata from the real playlist (empty -> honest idle copy).
+    let title: &[u8] = match PLAYLIST.get(app.current_track_idx) {
+        Some(t) => t.title.as_bytes(),
+        None => b"No track selected",
+    };
+    {
+        let tw = font::measure(title, 2);
+        if tw <= CONTENT_W {
+            if let Some(c) = text_bold(x, y, (W - tw) / 2, TITLE_Y, 2, title, TEXT, BG) {
+                return c;
+            }
+        }
+    }
+    let artist: &[u8] = match PLAYLIST.get(app.current_track_idx) {
+        Some(t) => t.artist.as_bytes(),
+        None => b"Local library is empty - nothing to play",
+    };
+    if let Some(c) = text_centered(x, y, ARTIST_Y, 1, artist, MUTED, BG) {
+        return c;
+    }
+    let state_label: &[u8] = match app.state {
+        PlaybackState::Playing => b"Playing",
+        PlaybackState::Paused => b"Paused",
+        PlaybackState::Stopped => b"Stopped",
+    };
+    if let Some(c) = text_centered(x, y, STATE_Y, 1, state_label, FAINT, BG) {
+        return c;
+    }
+
+    // 4. Scrubber: bound to a real position; no backend reports one, so the bar
+    //    stays idle (no fill, no knob, unknown duration).
+    if y >= TRACK_Y && y < TRACK_Y + TRACK_H && x >= MARGIN && x < MARGIN + CONTENT_W {
+        return BORDER;
+    }
+    if y >= TIMES_Y && y < TIMES_Y + font::line_height(1) {
+        if let Some(c) = text(x, y, MARGIN, TIMES_Y, 1, b"0:00", FAINT, BG) {
+            return c;
+        }
+        let rem = b"--:--";
+        let rw = font::measure(rem, 1);
+        if let Some(c) = text(x, y, MARGIN + CONTENT_W - rw, TIMES_Y, 1, rem, FAINT, BG) {
             return c;
         }
     }
-    if y >= 795 && y < 795 + 16 {
-        if let Some(c) = test_text(x, y, 72, 795, 2, b"Hans Zimmer", TEXT_MUTED) {
+    if let Some(c) = text_centered(
+        x,
+        y,
+        SCRUB_NOTE_Y,
+        1,
+        b"No media backend reports a playback position",
+        FAINT,
+        BG,
+    ) {
+        return c;
+    }
+
+    // 5. Transport row at y = 990. Targets: 64 / 88 / 64 px, all >= 56 px.
+    //    With an empty library every control renders in the recessed, disabled
+    //    treatment so nothing reads as playing.
+    let active = !PLAYLIST.is_empty();
+
+    {
+        let r = if active { SURFACE } else { RECESSED };
+        if let Some(c) = draw_circle(x, y, PREV_CX, TRANSPORT_CY, SIDE_R, r, Some(BORDER)) {
+            if c != r {
+                return c;
+            }
+            let ink = if active { TEXT } else { FAINT };
+            let dx = (x as isize) - PREV_CX as isize;
+            let dy = (y as isize) - TRANSPORT_CY as isize;
+            // Bar at -14..-10 and a left-pointing triangle.
+            if (-18..=-14).contains(&dx) && dy.abs() <= 10 {
+                return ink;
+            }
+            if (-8..=12).contains(&dx) {
+                let allow = (12 - dx) * 12 / 20;
+                if dy.abs() <= allow {
+                    return ink;
+                }
+            }
+            return r;
+        }
+    }
+
+    {
+        let r = if active { TEXT } else { RECESSED };
+        let ring = if active { None } else { Some(BORDER) };
+        if let Some(c) = draw_circle(x, y, PLAY_CX, TRANSPORT_CY, PLAY_R, r, ring) {
+            if c != r {
+                return c;
+            }
+            let glyph = if active { INK_ON_LIGHT } else { FAINT };
+            let dx = (x as isize) - PLAY_CX as isize;
+            let dy = (y as isize) - TRANSPORT_CY as isize;
+            if app.state == PlaybackState::Playing && active {
+                if ((-14..=-6).contains(&dx) || (6..=14).contains(&dx)) && dy.abs() <= 16 {
+                    return glyph;
+                }
+            } else if dx >= -14 && dx <= 18 {
+                let allow = (18 - dx) * 18 / 32;
+                if dy.abs() <= allow {
+                    return glyph;
+                }
+            }
+            return r;
+        }
+    }
+
+    {
+        let r = if active { SURFACE } else { RECESSED };
+        if let Some(c) = draw_circle(x, y, NEXT_CX, TRANSPORT_CY, SIDE_R, r, Some(BORDER)) {
+            if c != r {
+                return c;
+            }
+            let ink = if active { TEXT } else { FAINT };
+            let dx = (x as isize) - NEXT_CX as isize;
+            let dy = (y as isize) - TRANSPORT_CY as isize;
+            if (14..=18).contains(&dx) && dy.abs() <= 10 {
+                return ink;
+            }
+            if (-12..=8).contains(&dx) {
+                let allow = (dx + 12) * 12 / 20;
+                if dy.abs() <= allow {
+                    return ink;
+                }
+            }
+            return r;
+        }
+    }
+
+    // 6. Track list section: real rows when the library has entries, an honest
+    //    empty state when it does not.
+    if y >= LIST_LABEL_Y && y < LIST_LABEL_Y + font::line_height(1) {
+        if let Some(c) = text(x, y, MARGIN, LIST_LABEL_Y, 1, b"TRACKS", FAINT, BG) {
             return c;
         }
     }
-
-    // 4. Scrubber y860..910: track x72..648 y870 height4 + knob + times.
-    if y >= 870 && y < 874 && x >= 72 && x < 648 {
-        let progress_end = 72 + (648 - 72) * 40 / 100;
-        if x < progress_end {
-            return TEXT_PRIMARY;
-        }
-        return BORDER_SUBTLE;
-    }
-    // Knob circle radius6 at progress end (302, 872).
-    {
-        let progress_end = (72 + (648 - 72) * 40 / 100) as i32;
-        let kdx = x as i32 - progress_end;
-        let kdy = y as i32 - 872;
-        if kdx * kdx + kdy * kdy <= 36 {
-            return TEXT_PRIMARY;
-        }
-    }
-    if y >= 890 && y < 898 {
-        if let Some(c) = test_text(x, y, 72, 890, 1, b"0:00", TEXT_MUTED) {
-            return c;
-        }
-        if let Some(c) = test_text(x, y, 570, 890, 1, b"-04:32", TEXT_MUTED) {
-            return c;
-        }
+    if y == LIST_DIVIDER_Y && x >= MARGIN && x < MARGIN + CONTENT_W {
+        return BORDER;
     }
 
-    // 5. Transport controls y930..1060.
-    // Previous button center (190, 990) r32: bar + left triangle.
-    {
-        let pdx = x as i32 - 190;
-        let pdy = y as i32 - 990;
-        let pd2 = pdx * pdx + pdy * pdy;
-        if pd2 <= 32 * 32 {
-            if pd2 >= 30 * 30 {
-                return BORDER_SUBTLE;
+    match PLAYLIST.first() {
+        None => {
+            if let Some(c) = text_centered(x, y, LIST_TITLE_Y, 2, b"No tracks", TEXT, BG) {
+                return c;
             }
-            if pdx >= -18 && pdx <= -14 && pdy.abs() <= 10 {
-                return TEXT_PRIMARY;
+            if let Some(c) = text_centered(
+                x,
+                y,
+                LIST_SUB_Y,
+                1,
+                b"No audio files were found in local storage",
+                MUTED,
+                BG,
+            ) {
+                return c;
             }
-            if pdx >= -8 && pdx <= 12 {
-                let allow = (pdx + 8) * 12 / 20;
-                if pdy.abs() <= allow {
-                    return TEXT_PRIMARY;
-                }
-            }
-            return SURFACE_RAISED;
         }
-    }
-    // Play button center (360, 990) radius ~44: solid fill + inner glyph.
-    {
-        let cdx = x as i32 - 360;
-        let cdy = y as i32 - 990;
-        let cd2 = cdx * cdx + cdy * cdy;
-        if cd2 <= 44 * 44 {
-            if app.state == PlaybackState::Playing {
-                if ((cdx >= -12 && cdx <= -4) || (cdx >= 4 && cdx <= 12))
-                    && cdy.abs() <= 14
-                {
-                    return BG_DARK;
-                }
-                return TEXT_PRIMARY;
-            }
-            if cdx >= -14 && cdx <= 16 {
-                let allow = (16 - cdx) * 18 / 30;
-                if cdy.abs() <= allow {
-                    return BG_DARK;
-                }
-            }
-            return TEXT_PRIMARY;
-        }
-    }
-    // Next button center (530, 990) r32: right triangle + bar.
-    {
-        let ndx = x as i32 - 530;
-        let ndy = y as i32 - 990;
-        let nd2 = ndx * ndx + ndy * ndy;
-        if nd2 <= 32 * 32 {
-            if nd2 >= 30 * 30 {
-                return BORDER_SUBTLE;
-            }
-            if ndx >= 14 && ndx <= 18 && ndy.abs() <= 10 {
-                return TEXT_PRIMARY;
-            }
-            if ndx >= -12 && ndx <= 8 {
-                let allow = (8 - ndx) * 12 / 20;
-                // Mirror of prev: tip at +8, base at -12.
-                // At ndx=8 allow=0, at ndx=-12 allow=12.
-                if ndy.abs() <= allow {
-                    return TEXT_PRIMARY;
+        Some(first) => {
+            // Rows are laid out only when real media exists: 96 px rows starting
+            // below the divider, each with an ellipsised title and artist.
+            let _ = first;
+            for (i, track) in PLAYLIST.iter().take(2).enumerate() {
+                let row_y = 1140 + i * 96;
+                if y >= row_y && y < row_y + 72 {
+                    let selected = i == app.current_track_idx;
+                    let title_y = row_y + 4;
+                    let mut buf = [0u8; 48];
+                    let n = font::ellipsize(track.title.as_bytes(), 2, CONTENT_W - 64, &mut buf);
+                    if let Some(c) = text(
+                        x,
+                        y,
+                        MARGIN + 40,
+                        title_y,
+                        2,
+                        &buf[..n],
+                        if selected { TEXT } else { MUTED },
+                        BG,
+                    ) {
+                        return c;
+                    }
+                    let mut buf2 = [0u8; 48];
+                    let n2 = font::ellipsize(track.artist.as_bytes(), 1, CONTENT_W - 64, &mut buf2);
+                    if let Some(c) = text(x, y, MARGIN + 40, title_y + 52, 1, &buf2[..n2], FAINT, BG)
+                    {
+                        return c;
+                    }
+                    if y == row_y + 95 && x >= MARGIN && x < MARGIN + CONTENT_W {
+                        return BORDER;
+                    }
                 }
             }
-            return SURFACE_RAISED;
         }
     }
 
-    // 6. Secondary row y1080..1160.
-    // Shuffle glyph at x140: X shape (two crossing strokes).
-    if x >= 118 && x < 162 && y >= 1098 && y < 1142 {
-        let sx = x as i32 - 140;
-        let sy = y as i32 - 1120;
-        if (sx - sy).abs() <= 2 || (sx + sy).abs() <= 2 {
-            return TEXT_MUTED;
-        }
-    }
-    // Heart at x360: two circles + triangle approx.
-    {
-        let h1dx = x as i32 - 350;
-        let h1dy = y as i32 - 1112;
-        if h1dx * h1dx + h1dy * h1dy <= 100 {
-            return TEXT_MUTED;
-        }
-        let h2dx = x as i32 - 370;
-        let h2dy = y as i32 - 1112;
-        if h2dx * h2dx + h2dy * h2dy <= 100 {
-            return TEXT_MUTED;
-        }
-        if y >= 1118 && y < 1138 {
-            let half = 1138 - y as i32;
-            if (x as i32 - 360).abs() <= half {
-                return TEXT_MUTED;
-            }
-        }
-    }
-    // "..." at x580: three dots.
-    {
-        let d1x = x as i32 - 566;
-        let d1y = y as i32 - 1120;
-        if d1x * d1x + d1y * d1y <= 16 {
-            return TEXT_MUTED;
-        }
-        let d2x = x as i32 - 580;
-        let d2y = y as i32 - 1120;
-        if d2x * d2x + d2y * d2y <= 16 {
-            return TEXT_MUTED;
-        }
-        let d3x = x as i32 - 594;
-        let d3y = y as i32 - 1120;
-        if d3x * d3x + d3y * d3y <= 16 {
-            return TEXT_MUTED;
-        }
-    }
-
-    BG_DARK
+    BG
 }
 
 fn render_music_ui(surface: u32, app: &MusicApp) {
@@ -591,9 +664,9 @@ pub extern "C" fn _start() -> ! {
                             let x = input.x as usize;
                             let y = input.y as usize;
 
-                            // Dismiss chevron in top bar or home gesture bar: exit to launcher.
-                            if (x >= 24 && x < 100 && y >= 28 && y < 100)
-                                || (x >= 240 && x <= 480 && y >= 1400)
+                            // Dismiss control in the top bar or home gesture bar.
+                            if BACK.contains(x, y)
+                                || (x >= HOME_X0 && x <= HOME_X1 && y >= 1400)
                             {
                                 std::log(0, "[MUSIC APP] Back button or home gesture pressed. Exiting to launcher.").ok();
                                 if surface > 0 {
@@ -602,11 +675,11 @@ pub extern "C" fn _start() -> ! {
                                 std::exit_with_code(0);
                             }
 
-                            // Previous button (190, 990, r: 32)
+                            // Previous button (190, 990, r: 32) - 64 px target.
                             {
-                                let p_dx = (x as i32) - 190;
-                                let p_dy = (y as i32) - 990;
-                                if p_dx * p_dx + p_dy * p_dy <= 1024 {
+                                let p_dx = (x as i32) - PREV_CX as i32;
+                                let p_dy = (y as i32) - TRANSPORT_CY as i32;
+                                if p_dx * p_dx + p_dy * p_dy <= (SIDE_R * SIDE_R) as i32 {
                                     if !PLAYLIST.is_empty() && music.current_track_idx > 0 {
                                         music.current_track_idx -= 1;
                                     }
@@ -618,11 +691,11 @@ pub extern "C" fn _start() -> ! {
                                 }
                             }
 
-                            // Next button (530, 990, r: 32)
+                            // Next button (530, 990, r: 32) - 64 px target.
                             {
-                                let n_dx = (x as i32) - 530;
-                                let n_dy = (y as i32) - 990;
-                                if n_dx * n_dx + n_dy * n_dy <= 1024 {
+                                let n_dx = (x as i32) - NEXT_CX as i32;
+                                let n_dy = (y as i32) - TRANSPORT_CY as i32;
+                                if n_dx * n_dx + n_dy * n_dy <= (SIDE_R * SIDE_R) as i32 {
                                     if !PLAYLIST.is_empty() && music.current_track_idx + 1 < PLAYLIST.len() {
                                         music.current_track_idx += 1;
                                     }
@@ -634,13 +707,13 @@ pub extern "C" fn _start() -> ! {
                                 }
                             }
 
-                            // Play / Pause center button (360, 990, r: 44)
+                            // Play / Pause control (360, 990, r: 44) - 88 px target.
                             {
-                                let center_x = 360isize;
-                                let center_y = 990isize;
+                                let center_x = PLAY_CX as isize;
+                                let center_y = TRANSPORT_CY as isize;
                                 let dist_sq = (x as isize - center_x).pow(2)
                                     + (y as isize - center_y).pow(2);
-                                if dist_sq < 44 * 44 {
+                                if dist_sq < (PLAY_R * PLAY_R) as isize {
                                     match music.state {
                                         PlaybackState::Playing => {
                                             music.state = PlaybackState::Paused;
@@ -666,6 +739,19 @@ pub extern "C" fn _start() -> ! {
                                         let _ = std::surface_flip(6);
                                     }
                                 }
+                            }
+
+                            // Track list band: honest report when the library is empty.
+                            if x >= MARGIN
+                                && x < MARGIN + CONTENT_W
+                                && y >= LIST_HIT_Y0
+                                && y < LIST_HIT_Y1
+                            {
+                                std::log(
+                                    0,
+                                    "[MUSIC APP] Track list tapped: no audio files in the local library.",
+                                )
+                                .ok();
                             }
                         }
                     }

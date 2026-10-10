@@ -1,60 +1,149 @@
-//! InterOS Native Gallery App (light Photos)
+//! InterOS Native Gallery App (light Photos surface)
 //!
 //! Native Ring-3 graphical application executing in User Mode:
 //! - DRM/KMS Client Surface allocation (z=200) and double-buffered scanout presentation
-//! - Light 3-column photo tile layout when media exists (procedural gradients,
-//!   no fake metadata) and an honest empty-state frame while `PHOTOS` is empty
-//! - Full-screen photo inspection modal (light-themed)
-//! - Segmented Filter Tabs (All, Albums, Favorites) & Bottom Navigation Bar
-//! - Asynchronous event reactor loop handling touch interactions and home gestures
-//! - Graceful lifecycle supervision and clean return to Launcher
+//! - Image-first 3-column thumbnail grid on the canonical 8pt grid:
+//!   `3 x 216 cell + 2 x 12 gutter + 2 x 24 margin = 720` exactly
+//! - Cells only ever render records from the real `PHOTOS` ledger; with an empty
+//!   ledger the band shows the design-system honest empty state, never filler tiles
+//! - Full-screen photo inspection view (light themed) driven by a ledger record
+//! - Segmented filter tabs (All / Albums / Favorites) and a bottom navigation bar
+//! - Every string is measured with `interos_std::design::font::measure` /
+//!   `ellipsize` at the coordinates it is drawn at, so text never clips or overlaps
+//! - Asynchronous event reactor loop, graceful lifecycle supervision and clean
+//!   return to the Launcher
 
 #![no_std]
 #![no_main]
 
 use core::panic::PanicInfo;
 use interos_std as std;
+use std::design::font;
+use std::design::primitives::{draw_pill, draw_rounded_rect, Rect};
 
 const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
 
 // -----------------------------------------------------------------------------
-// 32-bit ARGB8888 Design Color Tokens (light Photos)
+// 32-bit ARGB8888 Design Color Tokens (light Photos surface)
 // -----------------------------------------------------------------------------
-#[allow(dead_code)]
-const BG_DARK: u32 = 0xFFF7F6F2;
-#[allow(dead_code)]
-const SURFACE_DARK: u32 = 0xFFFFFFFF;
-#[allow(dead_code)]
-const SURFACE_RAISED: u32 = 0xFFEFEEE9;
-#[allow(dead_code)]
-const BORDER_SUBTLE: u32 = 0xFFE1E0DB;
-#[allow(dead_code)]
-const TEXT_PRIMARY: u32 = 0xFF111214;
-#[allow(dead_code)]
-const TEXT_MUTED: u32 = 0xFF777773;
-#[allow(dead_code)]
-const ACTIVE_PILL: u32 = 0xFF111214;
-#[allow(dead_code)]
-const WHITE: u32 = 0xFFFFFFFF;
+const BG: u32 = 0xFFF7F6F2;
+const SURFACE: u32 = 0xFFFFFFFF;
+const SOFT: u32 = 0xFFEFEEE9;
+const BORDER: u32 = 0xFFE1E0DB;
+const TEXT: u32 = 0xFF111214;
+const MUTED: u32 = 0xFF777773;
+const INVERSE: u32 = 0xFFFFFFFF;
 
 // -----------------------------------------------------------------------------
-// Embedded 8x8 ASCII Font (Characters 32 ' ' through 126 '~')
+// Layout constants - single source of truth for rendering *and* hit-testing
 // -----------------------------------------------------------------------------
-// Typography provided by interos_std::design::font
+/// Screen margin (8pt grid value).
+const MARGIN: usize = 24;
+/// Grid gutter between columns/rows. 8px gutters with a 24px margin cannot
+/// produce an integer cell on a 720px canvas (720 - 48 - 16 = 656, 656/3 is not
+/// integral), so the gutter is the next 8pt-grid value that divides exactly:
+/// 3 x 216 + 2 x 12 + 2 x 24 = 648 + 24 + 48 = 720.
+const GUTTER: usize = 12;
+const CELL: usize = 216;
+const COL_X: [usize; 3] = [MARGIN, MARGIN + CELL + GUTTER, MARGIN + 2 * (CELL + GUTTER)];
 
+const HEADER_H: usize = 144;
+const TITLE_Y: usize = 44;
+const SUBTITLE_Y: usize = 116;
+
+const PILL_Y: usize = 152;
+const PILL_H: usize = 48;
+const PILL_GAP: usize = 12;
+const PILL_PAD: usize = 20;
+const PILL_MIN_W: usize = 72;
+
+const GRID_TOP: usize = 216;
+const ROW_STRIDE: usize = CELL + GUTTER;
+const ROWS: usize = 4;
+/// 216 + 4 x 216 + 3 x 12 = 1116: the grid stops clear of the bottom bar.
+const GRID_BOTTOM: usize = GRID_TOP + ROWS * CELL + (ROWS - 1) * GUTTER;
+
+const NAV_Y0: usize = 1290;
+const NAV_Y1: usize = 1400;
+const NAV_ICON_CY: usize = 1330;
+const NAV_LABEL_Y: usize = 1356;
+
+const HOME_X0: usize = 240;
+const HOME_X1: usize = 480;
+const HOME_Y0: usize = 1418;
+const HOME_Y1: usize = 1424;
+
+// Inspection view geometry.
+const DETAIL_BAR_H: usize = 112;
+const DETAIL_VIEW_Y0: usize = 128;
+const DETAIL_VIEW_Y1: usize = 800;
+const CLOSE_X0: usize = 232;
+const CLOSE_Y0: usize = 856;
+const CLOSE_W: usize = 256;
+const CLOSE_H: usize = 56;
+
+const PILL_LABELS: [&[u8]; 3] = [b"All", b"Albums", b"Favorites"];
+const NAV_LABELS: [&[u8]; 3] = [b"Photos", b"Albums", b"Places"];
+
+// -----------------------------------------------------------------------------
+// Text rendering helpers - the gate always matches the glyph line box, so
+// glyphs are never clipped mid-row.
+// -----------------------------------------------------------------------------
 #[inline(always)]
-fn test_text(
+fn text(
     x: usize,
     y: usize,
     x0: usize,
     y0: usize,
     scale: usize,
-    text: &[u8],
+    s: &[u8],
     color: u32,
+    bg: u32,
 ) -> Option<u32> {
-    std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, BG_DARK, false)
+    if y < y0 || y >= y0 + font::line_height(scale) {
+        return None;
+    }
+    font::test_text_aa(x, y, x0, y0, scale, s, color, bg, false)
+}
+
+#[inline(always)]
+fn text_bold(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    s: &[u8],
+    color: u32,
+    bg: u32,
+) -> Option<u32> {
+    if y < y0 || y >= y0 + font::line_height(scale) {
+        return None;
+    }
+    font::test_text_aa(x, y, x0, y0, scale, s, color, bg, true)
+}
+
+/// Horizontally centred text inside `[x0, x0 + max_w)`, measured with the real
+/// font metrics so it can never run past its container.
+#[inline(always)]
+fn text_centered(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    max_w: usize,
+    scale: usize,
+    s: &[u8],
+    color: u32,
+    bg: u32,
+) -> Option<u32> {
+    let w = font::measure(s, scale);
+    if w > max_w {
+        return None;
+    }
+    text(x, y, x0 + (max_w - w) / 2, y0, scale, s, color, bg)
 }
 
 // -----------------------------------------------------------------------------
@@ -69,9 +158,10 @@ pub struct PhotoItem {
     pub secondary_color: u32,
 }
 
+/// The device photo ledger. It is populated only from real media storage, which
+/// currently exposes no images, so the ledger is honestly empty.
 pub static PHOTOS: [PhotoItem; 0] = [];
 
-#[allow(dead_code)]
 #[inline]
 fn has_no_media() -> bool {
     PHOTOS.is_empty()
@@ -94,24 +184,25 @@ impl GalleryApp {
 }
 
 // -----------------------------------------------------------------------------
-// Vector Pictogram Engines
+// Vector Pictogram Engines (one rounded line family, 24-grid geometry)
 // -----------------------------------------------------------------------------
-#[allow(dead_code)]
-fn test_empty_gallery_frame(x: usize, y: usize, cx: usize, cy: usize) -> bool {
+
+/// Empty-state picture frame pictogram (frame + sun + ridge).
+fn empty_frame(x: usize, y: usize, cx: usize, cy: usize) -> bool {
     let dx = x as isize - cx as isize;
     let dy = y as isize - cy as isize;
-    if dx.abs() <= 54 && dy.abs() <= 40 {
-        if dx.abs() >= 52 || dy.abs() >= 38 {
+    if dx.abs() <= 60 && dy.abs() <= 48 {
+        if dx.abs() >= 57 || dy.abs() >= 45 {
             return true;
         }
-        let sun_dx = dx + 20;
-        let sun_dy = dy + 14;
-        if sun_dx * sun_dx + sun_dy * sun_dy <= 49 {
+        let sun_dx = dx + 22;
+        let sun_dy = dy + 16;
+        if sun_dx * sun_dx + sun_dy * sun_dy <= 36 {
             return true;
         }
-        if dy >= -4 && dy <= 34 {
-            let m1 = (dx + 10).abs() * 2 <= (dy + 8) * 3;
-            let m2 = (dx - 22).abs() * 2 <= (dy - 4) * 3;
+        if dy >= -6 && dy <= 40 {
+            let m1 = (dx + 12).abs() * 2 <= (dy + 10) * 3;
+            let m2 = (dx - 26).abs() * 2 <= (dy - 4) * 3;
             if m1 || m2 {
                 return true;
             }
@@ -120,8 +211,8 @@ fn test_empty_gallery_frame(x: usize, y: usize, cx: usize, cy: usize) -> bool {
     false
 }
 
-/// Vector icon for Photos tab (small picture frame)
-fn test_tab_photos_icon(x: usize, y: usize, cx: usize, cy: usize) -> bool {
+/// Vector icon for the Photos tab (small picture frame).
+fn tab_photos_icon(x: usize, y: usize, cx: usize, cy: usize) -> bool {
     let dx = x as isize - cx as isize;
     let dy = y as isize - cy as isize;
     if dx.abs() <= 12 && dy.abs() <= 10 {
@@ -138,8 +229,8 @@ fn test_tab_photos_icon(x: usize, y: usize, cx: usize, cy: usize) -> bool {
     false
 }
 
-/// Vector icon for Albums tab (stacked album cards)
-fn test_tab_albums_icon(x: usize, y: usize, cx: usize, cy: usize) -> bool {
+/// Vector icon for the Albums tab (stacked album cards).
+fn tab_albums_icon(x: usize, y: usize, cx: usize, cy: usize) -> bool {
     let dx = x as isize - cx as isize;
     let dy = y as isize - cy as isize;
     let front = (dx >= -8 && dx <= 10 && (dy == -6 || dy == 10))
@@ -149,13 +240,13 @@ fn test_tab_albums_icon(x: usize, y: usize, cx: usize, cy: usize) -> bool {
     front || back
 }
 
-/// Vector icon for Places tab (map pin marker)
-fn test_tab_places_icon(x: usize, y: usize, cx: usize, cy: usize) -> bool {
+/// Vector icon for the Places tab (map pin marker).
+fn tab_places_icon(x: usize, y: usize, cx: usize, cy: usize) -> bool {
     let dx = x as isize - cx as isize;
     let dy = y as isize - cy as isize;
     if dy <= 2 {
         let r2 = dx * dx + (dy + 3) * (dy + 3);
-        if r2 <= 9 * 9 && r2 >= 5 * 5 {
+        if r2 <= 81 && r2 >= 25 {
             return true;
         }
     } else if dy <= 11 && dx.abs() <= (11 - dy) {
@@ -164,415 +255,329 @@ fn test_tab_places_icon(x: usize, y: usize, cx: usize, cy: usize) -> bool {
     false
 }
 
+/// Back chevron stroke (`half` px tall), apex pointing left, centred on (cx, cy).
+fn chevron_left(x: usize, y: usize, cx: usize, cy: usize, half: isize) -> bool {
+    let dx = (x as isize) - (cx as isize);
+    let dy = (y as isize) - (cy as isize);
+    let d = dy.abs();
+    dx <= 0 && d <= half && (dx + d).abs() <= 2
+}
+
 // -----------------------------------------------------------------------------
-// Gradient + pill helpers
+// Gradient helper (photo records carry their own colours)
 // -----------------------------------------------------------------------------
 #[inline(always)]
 fn blend_argb(top: u32, bottom: u32, t: usize) -> u32 {
-    // t in 0..=255
-    let tr = ((top >> 16) & 0xFF) as usize;
-    let tg = ((top >> 8) & 0xFF) as usize;
-    let tb = (top & 0xFF) as usize;
-    let br = ((bottom >> 16) & 0xFF) as usize;
-    let bg = ((bottom >> 8) & 0xFF) as usize;
-    let bb = (bottom & 0xFF) as usize;
-    // Linear interpolation with signed math:
-    let ri = tr as isize + (br as isize - tr as isize) * t as isize / 255;
-    let gi = tg as isize + (bg as isize - tg as isize) * t as isize / 255;
-    let bi = tb as isize + (bb as isize - tb as isize) * t as isize / 255;
+    let tr = ((top >> 16) & 0xFF) as isize;
+    let tg = ((top >> 8) & 0xFF) as isize;
+    let tb = (top & 0xFF) as isize;
+    let br = ((bottom >> 16) & 0xFF) as isize;
+    let bg = ((bottom >> 8) & 0xFF) as isize;
+    let bb = (bottom & 0xFF) as isize;
+    let ri = tr + (br - tr) * t as isize / 255;
+    let gi = tg + (bg - tg) * t as isize / 255;
+    let bi = tb + (bb - tb) * t as isize / 255;
     0xFF000000
         | ((ri.clamp(0, 255) as u32) << 16)
         | ((gi.clamp(0, 255) as u32) << 8)
         | (bi.clamp(0, 255) as u32)
 }
 
-#[inline(always)]
-fn tile_palette(tile_index: usize) -> (u32, u32) {
-    match tile_index % 6 {
-        0 => (0xFFBAE6FD, 0xFF0284C7),
-        1 => (0xFFBBF7D0, 0xFF15803D),
-        2 => (0xFFFEF3C7, 0xFFD97706),
-        3 => (0xFFFCE7F3, 0xFFBE123C),
-        4 => (0xFFF1F5F9, 0xFF64748B),
-        _ => (0xFFCCFBF1, 0xFF0F766E),
+// -----------------------------------------------------------------------------
+// Segmented filter tabs - geometry derived from the real font metrics so the
+// rendered pill and the hit-test are always the same rectangle.
+// -----------------------------------------------------------------------------
+fn pill_rect(index: usize) -> Rect {
+    let mut x = MARGIN;
+    for (i, label) in PILL_LABELS.iter().enumerate() {
+        let w = (font::measure(label, 2) + PILL_PAD * 2).max(PILL_MIN_W);
+        let rect = Rect::new(x, PILL_Y, w, PILL_H);
+        if i == index {
+            return rect;
+        }
+        x += w + PILL_GAP;
     }
+    Rect::new(0, 0, 0, 0)
 }
 
-#[inline(always)]
-fn tile_gradient_color(x: usize, y: usize, tile_index: usize, rel_y: usize, tile_h: usize) -> u32 {
-    let (top, bottom) = tile_palette(tile_index);
-    let t = (rel_y * 255 / tile_h.max(1)).min(255);
-    let base = blend_argb(top, bottom, t);
-    // Diverse per-pixel variation computed from (x+y+tile_index).
-    let seed = x + y + tile_index * 53;
-    let delta = (seed % 17) as isize - 8;
-    let r = (((base >> 16) & 0xFF) as isize + delta).clamp(0, 255) as u32;
-    let g = (((base >> 8) & 0xFF) as isize + delta).clamp(0, 255) as u32;
-    let b = ((base & 0xFF) as isize + delta).clamp(0, 255) as u32;
-    0xFF000000 | (r << 16) | (g << 8) | b
+fn pill_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
+    if y < PILL_Y || y >= PILL_Y + PILL_H {
+        return None;
+    }
+    for (i, label) in PILL_LABELS.iter().enumerate() {
+        let rect = pill_rect(i);
+        if !rect.contains(x, y) {
+            continue;
+        }
+        let active = app.selected_tab == i;
+        let fill = if active { TEXT } else { SOFT };
+        let shape = draw_pill(
+            x,
+            y,
+            rect,
+            fill,
+            if active { None } else { Some(BORDER) },
+        )?;
+        if shape != fill {
+            return Some(shape);
+        }
+        let lw = font::measure(label, 2);
+        let lx = rect.x + rect.w.saturating_sub(lw) / 2;
+        if let Some(c) = text(x, y, lx, PILL_Y, 2, label, if active { INVERSE } else { TEXT }, fill)
+        {
+            return Some(c);
+        }
+        return Some(fill);
+    }
+    None
 }
 
-#[inline(always)]
-fn pill_inside(x: usize, y: usize, x0: usize, x1: usize, y0: usize, y1: usize, r: usize) -> bool {
-    if x < x0 || x >= x1 || y < y0 || y >= y1 {
-        return false;
+// -----------------------------------------------------------------------------
+// Grid band
+// -----------------------------------------------------------------------------
+fn col_of(x: usize) -> Option<usize> {
+    for (i, x0) in COL_X.iter().enumerate() {
+        if x >= *x0 && x < *x0 + CELL {
+            return Some(i);
+        }
     }
-    let cx0 = x0 + r;
-    let cx1 = x1 - r;
-    let cy = (y0 + y1) / 2;
-    if x >= cx0 && x < cx1 {
-        return true;
+    None
+}
+
+fn row_of(y: usize) -> Option<usize> {
+    if y < GRID_TOP || y >= GRID_BOTTOM {
+        return None;
     }
-    let (ccx, in_cap) = if x < cx0 {
-        (cx0, true)
-    } else if x >= cx1 {
-        (cx1.saturating_sub(1), true)
-    } else {
-        (0, false)
+    let rel = y - GRID_TOP;
+    let row = rel / ROW_STRIDE;
+    if row >= ROWS || rel % ROW_STRIDE >= CELL {
+        return None;
+    }
+    Some(row)
+}
+
+fn grid_pixel(x: usize, y: usize, _app: &GalleryApp) -> Option<u32> {
+    if y < GRID_TOP || y >= GRID_BOTTOM {
+        return None;
+    }
+
+    // Honest empty state: the ledger holds no media, so nothing is tiled.
+    if has_no_media() {
+        if empty_frame(x, y, 360, 600) {
+            return Some(MUTED);
+        }
+        let title = b"No images on device";
+        if let Some(c) = text_centered(x, y, MARGIN, 690, W - 2 * MARGIN, 2, title, TEXT, BG) {
+            return Some(c);
+        }
+        let note = b"PHOTOS ledger is empty; nothing to show.";
+        if let Some(c) = text_centered(x, y, MARGIN, 754, W - 2 * MARGIN, 1, note, MUTED, BG) {
+            return Some(c);
+        }
+        return Some(BG);
+    }
+
+    let (Some(col), Some(row)) = (col_of(x), row_of(y)) else {
+        return Some(BG);
     };
-    if !in_cap {
-        return false;
+    let Some(photo) = PHOTOS.get(row * 3 + col) else {
+        return Some(BG);
+    };
+    let x0 = COL_X[col];
+    let y0 = GRID_TOP + row * ROW_STRIDE;
+    let shape = draw_rounded_rect(
+        x,
+        y,
+        Rect::new(x0, y0, CELL, CELL),
+        8,
+        0xFF000000,
+        Some(BORDER),
+        1,
+    )?;
+    if shape == BORDER {
+        return Some(BORDER);
     }
-    let dx = x as isize - ccx as isize;
-    let dy = y as isize - cy as isize;
-    dx * dx + dy * dy <= (r as isize) * (r as isize)
-}
-
-#[inline(always)]
-fn pill_border_px(
-    x: usize,
-    y: usize,
-    x0: usize,
-    x1: usize,
-    y0: usize,
-    y1: usize,
-    r: usize,
-) -> bool {
-    if !pill_inside(x, y, x0, x1, y0, y1, r) {
-        return false;
-    }
-    // Inset by 1px: if still inside the shrunken pill, this is interior.
-    let ix0 = x0 + 1;
-    let ix1 = x1.saturating_sub(1);
-    let iy0 = y0 + 1;
-    let iy1 = y1.saturating_sub(1);
-    let ir = r.saturating_sub(1);
-    if ix1 > ix0 && iy1 > iy0 && pill_inside(x, y, ix0, ix1, iy0, iy1, ir) {
-        return false;
-    }
-    true
+    let t = ((y - y0) * 255 / CELL.max(1)).min(255);
+    Some(blend_argb(photo.primary_color, photo.secondary_color, t))
 }
 
 // -----------------------------------------------------------------------------
-// Pixel Color Resolution Engine
+// Bottom navigation
 // -----------------------------------------------------------------------------
-#[inline(never)]
-fn get_gallery_color(x: usize, y: usize, app: &GalleryApp) -> u32 {
-    // Modal full-screen inspection view (light-themed).
-    if let Some(idx) = app.inspecting_photo {
-        let Some(photo) = PHOTOS.get(idx) else {
-            return BG_DARK;
+fn nav_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
+    if y < NAV_Y0 || y >= NAV_Y1 {
+        return None;
+    }
+    if y == NAV_Y0 {
+        return Some(BORDER);
+    }
+    for (i, label) in NAV_LABELS.iter().enumerate() {
+        let box_x0 = i * (W / 3);
+        if x < box_x0 || x >= box_x0 + W / 3 {
+            continue;
+        }
+        let cx = box_x0 + W / 6;
+        let color = if app.bottom_nav == i { TEXT } else { MUTED };
+        let is_icon = match i {
+            0 => tab_photos_icon(x, y, cx, NAV_ICON_CY),
+            1 => tab_albums_icon(x, y, cx, NAV_ICON_CY),
+            _ => tab_places_icon(x, y, cx, NAV_ICON_CY),
         };
-
-        // Header bar (y: 110..180, x: 30..690)
-        if y >= 110 && y < 180 && x >= 30 && x < 690 {
-            if y >= 125 && y < 141 {
-                if let Some(c) = test_text(x, y, 50, 125, 2, photo.title.as_bytes(), TEXT_PRIMARY)
-                {
-                    return c;
-                }
-            }
-            if y >= 150 && y < 158 {
-                if let Some(c) = test_text(x, y, 50, 150, 1, photo.meta.as_bytes(), TEXT_MUTED) {
-                    return c;
-                }
-            }
-            return SURFACE_RAISED;
+        if is_icon {
+            return Some(color);
         }
-
-        // Large photo viewport (y: 200..1100, x: 30..690)
-        if y >= 200 && y < 1100 && x >= 30 && x < 690 {
-            if y == 200 || y == 1099 || x == 30 || x == 689 {
-                return BORDER_SUBTLE;
-            }
-            let rel_y = y - 200;
-            let t = (rel_y * 255 / 900).min(255);
-            return blend_argb(photo.primary_color, photo.secondary_color, t);
+        if let Some(c) = text_centered(
+            x,
+            y,
+            box_x0,
+            NAV_LABEL_Y,
+            W / 3,
+            1,
+            label,
+            color,
+            SURFACE,
+        ) {
+            return Some(c);
         }
-
-        // Inspection bottom Close pill (x: 230..490, y: 1140..1200)
-        if y >= 1140 && y < 1200 && x >= 230 && x < 490 {
-            if y == 1140 || y == 1199 || x == 230 || x == 489 {
-                return BORDER_SUBTLE;
-            }
-            if y >= 1162 && y < 1178 {
-                if let Some(c) = test_text(x, y, 310, 1162, 2, b"Close", TEXT_PRIMARY) {
-                    return c;
-                }
-            }
-            return SURFACE_RAISED;
-        }
-
-        if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
-            return TEXT_MUTED;
-        }
-        return BG_DARK;
+        return Some(SURFACE);
     }
+    Some(SURFACE)
+}
 
-    // 1. Header (y: 0..140)
-    if y < 140 {
-        // Time, radio signal and battery are not reported to this app. The
-        // shared system status service must provide real readings before these
-        // indicators are rendered.
-        // Bold title "Photos" scale4 at x48 y76.
-        if y >= 76 && y < 108 {
-            if let Some(c) = test_text(x, y, 48, 76, 4, b"Photos", TEXT_PRIMARY) {
+// -----------------------------------------------------------------------------
+// Photo inspection view (light)
+// -----------------------------------------------------------------------------
+fn detail_pixel(x: usize, y: usize, _app: &GalleryApp, idx: usize) -> u32 {
+    let Some(photo) = PHOTOS.get(idx) else {
+        return BG;
+    };
+
+    // App bar: back control + record title/meta, each measured to fit.
+    if y < DETAIL_BAR_H {
+        if y == DETAIL_BAR_H - 1 {
+            return BORDER;
+        }
+        let back = Rect::new(MARGIN, 28, 56, 56);
+        if let Some(c) = draw_pill(x, y, back, SOFT, Some(BORDER)) {
+            if c != SOFT {
+                return c;
+            }
+            if chevron_left(x, y, 52, 56, 12) {
+                return TEXT;
+            }
+            return SOFT;
+        }
+
+        let title = photo.title.as_bytes();
+        if y >= 28 && y < 28 + font::line_height(2) {
+            let mut buf = [0u8; 48];
+            let n = font::ellipsize(title, 2, 580, &mut buf);
+            if let Some(c) = text(x, y, 96, 28, 2, &buf[..n], TEXT, SURFACE) {
                 return c;
             }
         }
-
-        // Search magnifying-glass centered ~(600,92).
-        {
-            let dx = x as isize - 600;
-            let dy = y as isize - 92;
-            let r2 = dx * dx + dy * dy;
-            if r2 <= 100 && r2 >= 64 {
-                return TEXT_PRIMARY;
-            }
-            if dx >= 5 && dx <= 14 && dy >= 5 && dy <= 14 && (dx - dy).abs() <= 2 {
-                return TEXT_PRIMARY;
+        let meta = photo.meta.as_bytes();
+        if y >= 80 && y < 80 + font::line_height(1) {
+            let mut buf = [0u8; 64];
+            let n = font::ellipsize(meta, 1, 580, &mut buf);
+            if let Some(c) = text(x, y, 96, 80, 1, &buf[..n], MUTED, SURFACE) {
+                return c;
             }
         }
-
-        // "+" add glyph at (655,92).
-        if (x >= 654 && x < 657 && y >= 84 && y < 100)
-            || (x >= 647 && x < 664 && y >= 91 && y < 94)
-        {
-            return TEXT_PRIMARY;
-        }
-
-        // Divider line at y94.
-        if y == 94 {
-            return BORDER_SUBTLE;
-        }
-
-        return BG_DARK;
+        return SURFACE;
     }
 
-    // 2. Segmented pills (y: 135..185)
-    if y >= 135 && y < 185 {
-        // "All" capsule x48..150 solid charcoal rounded.
-        if x >= 48 && x < 150 {
-            if y >= 152 && y < 168 {
-                if let Some(c) = test_text(x, y, 75, 152, 2, b"All", WHITE) {
-                    // Only treat as text when the active pill is selected;
-                    // otherwise fall through to inactive styling below.
-                    if app.selected_tab == 0 {
-                        return c;
-                    }
-                }
-                // Inactive text color pass (same geometry, dark text).
-                if app.selected_tab != 0 {
-                    if let Some(c) = test_text(x, y, 75, 152, 2, b"All", TEXT_PRIMARY) {
-                        return c;
-                    }
-                }
-            }
-            if pill_border_px(x, y, 48, 150, 135, 185, 20) {
-                if app.selected_tab == 0 {
-                    return ACTIVE_PILL;
-                }
-                return BORDER_SUBTLE;
-            }
-            if pill_inside(x, y, 48, 150, 135, 185, 20) {
-                if app.selected_tab == 0 {
-                    return ACTIVE_PILL;
-                }
-                return SURFACE_RAISED;
-            }
-        }
-        // "Albums" x165..285 raised with subtle border.
-        if x >= 165 && x < 285 {
-            if y >= 152 && y < 168 {
-                let active = app.selected_tab == 1;
-                let tc = if active { WHITE } else { TEXT_PRIMARY };
-                if let Some(c) = test_text(x, y, 189, 152, 2, b"Albums", tc) {
-                    return c;
-                }
-            }
-            if pill_border_px(x, y, 165, 285, 135, 185, 20) {
-                if app.selected_tab == 1 {
-                    return ACTIVE_PILL;
-                }
-                return BORDER_SUBTLE;
-            }
-            if pill_inside(x, y, 165, 285, 135, 185, 20) {
-                if app.selected_tab == 1 {
-                    return ACTIVE_PILL;
-                }
-                return SURFACE_RAISED;
-            }
-        }
-        // "Favorites" x300..430 same inactive style (scale1 to fit).
-        if x >= 300 && x < 430 {
-            if y >= 156 && y < 164 {
-                let active = app.selected_tab == 2;
-                let tc = if active { WHITE } else { TEXT_PRIMARY };
-                if let Some(c) = test_text(x, y, 329, 156, 1, b"Favorites", tc) {
-                    return c;
-                }
-            }
-            if pill_border_px(x, y, 300, 430, 135, 185, 20) {
-                if app.selected_tab == 2 {
-                    return ACTIVE_PILL;
-                }
-                return BORDER_SUBTLE;
-            }
-            if pill_inside(x, y, 300, 430, 135, 185, 20) {
-                if app.selected_tab == 2 {
-                    return ACTIVE_PILL;
-                }
-                return SURFACE_RAISED;
-            }
-        }
-        return BG_DARK;
-    }
-
-    // 3. Photo grid (y: 200..1280), no text inside tiles.
-    if y >= 200 && y < 1280 {
-        // WHY gated: tiles are only drawn while the PHOTOS ledger holds media.
-        // With an empty ledger this band shows the empty state instead of
-        // fabricating 15 photo tiles that no storage produced.
-        if has_no_media() {
-            // Empty-state picture frame pictogram, centred in the grid band.
-            if test_empty_gallery_frame(x, y, 360, 560) {
-                return TEXT_MUTED;
-            }
-            if y >= 660 && y < 676 {
-                if let Some(c) = test_text(x, y, 208, 660, 2, b"No media in storage", TEXT_PRIMARY) {
-                    return c;
-                }
-            }
-            if y >= 692 && y < 700 {
-                if let Some(c) = test_text(
-                    x,
-                    y,
-                    204,
-                    692,
-                    1,
-                    b"PHOTOS ledger is empty; nothing to show.",
-                    TEXT_MUTED,
-                ) {
-                    return c;
-                }
-            }
-            return BG_DARK;
-        }
-        const GRID_TOP: usize = 200;
-        const TILE_H: usize = 200;
-        const STRIDE: usize = 216; // 200 + 16 gap
-        const ROWS: usize = 5;
-        let col = if (36..236).contains(&x) {
-            Some((0usize, 36usize, 236usize))
-        } else if (260..460).contains(&x) {
-            Some((1usize, 260usize, 460usize))
-        } else if (484..684).contains(&x) {
-            Some((2usize, 484usize, 684usize))
-        } else {
-            None
+    // Image viewport: the record's own colours, nothing fabricated.
+    if y >= DETAIL_VIEW_Y0 && y < DETAIL_VIEW_Y1 && x >= MARGIN && x < W - MARGIN {
+        let shape = match draw_rounded_rect(
+            x,
+            y,
+            Rect::new(MARGIN, DETAIL_VIEW_Y0, W - 2 * MARGIN, DETAIL_VIEW_Y1 - DETAIL_VIEW_Y0),
+            8,
+            0xFF000000,
+            Some(BORDER),
+            1,
+        ) {
+            Some(c) => c,
+            None => return BG,
         };
-        if let Some((c_idx, x0, x1)) = col {
-            let rel_row = y.saturating_sub(GRID_TOP) / STRIDE;
-            if rel_row < ROWS {
-                let y0 = GRID_TOP + rel_row * STRIDE;
-                let y1 = y0 + TILE_H;
-                if y >= y0 && y < y1 {
-                    let tile_index = rel_row * 3 + c_idx;
-                    // Rounded squircle radius 16: cut 16px corners.
-                    let r: usize = 16;
-                    let in_tl = x < x0 + r && y < y0 + r;
-                    let in_tr = x >= x1 - r && y < y0 + r;
-                    let in_bl = x < x0 + r && y >= y1 - r;
-                    let in_br = x >= x1 - r && y >= y1 - r;
-                    if in_tl || in_tr || in_bl || in_br {
-                        let (ccx, ccy) = if in_tl {
-                            (x0 + r, y0 + r)
-                        } else if in_tr {
-                            (x1 - 1 - r, y0 + r)
-                        } else if in_bl {
-                            (x0 + r, y1 - 1 - r)
-                        } else {
-                            (x1 - 1 - r, y1 - 1 - r)
-                        };
-                        let dx = x as isize - ccx as isize;
-                        let dy = y as isize - ccy as isize;
-                        let d2 = dx * dx + dy * dy;
-                        if d2 > (r as isize) * (r as isize) {
-                            return BG_DARK;
-                        }
-                        if d2 >= ((r as isize - 1) * (r as isize - 1)) {
-                            return BORDER_SUBTLE;
-                        }
-                    } else if x == x0 || x == x1 - 1 || y == y0 || y == y1 - 1 {
-                        return BORDER_SUBTLE;
-                    }
-                    let rel_y = y - y0;
-                    return tile_gradient_color(x, y, tile_index, rel_y, TILE_H);
-                }
-            }
+        if shape == BORDER {
+            return BORDER;
         }
-        return BG_DARK;
+        let t = ((y - DETAIL_VIEW_Y0) * 255 / (DETAIL_VIEW_Y1 - DETAIL_VIEW_Y0)).min(255);
+        return blend_argb(photo.primary_color, photo.secondary_color, t);
     }
 
-    // 4. Bottom navigation bar (y: 1290..1400)
-    if y >= 1290 && y < 1400 {
-        if y == 1290 {
-            return BORDER_SUBTLE;
+    // Close control: 256 x 56 pill, label centred on the real metrics.
+    let close = Rect::new(CLOSE_X0, CLOSE_Y0, CLOSE_W, CLOSE_H);
+    if let Some(c) = draw_pill(x, y, close, SOFT, Some(BORDER)) {
+        if c != SOFT {
+            return c;
         }
-        let nav: Option<(usize, usize, usize, &'static [u8])> = if (40..220).contains(&x) {
-            Some((0, 40, 220, &b"Photos"[..]))
-        } else if (270..450).contains(&x) {
-            Some((1, 270, 450, &b"Albums"[..]))
-        } else if (500..680).contains(&x) {
-            Some((2, 500, 680, &b"Places"[..]))
+        let label = b"Close";
+        let lw = font::measure(label, 2);
+        let lx = CLOSE_X0 + (CLOSE_W - lw) / 2;
+        let ly = CLOSE_Y0 + (CLOSE_H - font::line_height(2)) / 2;
+        if let Some(c) = text(x, y, lx, ly, 2, label, TEXT, SOFT) {
+            return c;
+        }
+        return SOFT;
+    }
+
+    // Home gesture pill.
+    if y >= HOME_Y0 && y < HOME_Y1 && x >= 260 && x < 460 {
+        return MUTED;
+    }
+
+    BG
+}
+
+// -----------------------------------------------------------------------------
+// Main screen
+// -----------------------------------------------------------------------------
+#[inline(never)]
+fn gallery_pixel(x: usize, y: usize, app: &GalleryApp) -> u32 {
+    if let Some(idx) = app.inspecting_photo {
+        return detail_pixel(x, y, app, idx);
+    }
+
+    // 1. Header: screen title + a real ledger summary.
+    if y < HEADER_H {
+        if let Some(c) = text_bold(x, y, MARGIN, TITLE_Y, 3, b"Photos", TEXT, BG) {
+            return c;
+        }
+        let summary: &[u8] = if has_no_media() {
+            b"No items on device"
         } else {
-            None
+            b"Items on device"
         };
-
-        if let Some((idx, x0, x1, label)) = nav {
-            let is_sel = app.bottom_nav == idx;
-            let icon_color = if is_sel {
-                TEXT_PRIMARY
-            } else {
-                TEXT_MUTED
-            };
-
-            let cx = x0 + (x1 - x0) / 2;
-            let is_icon = match idx {
-                0 => test_tab_photos_icon(x, y, cx, 1340),
-                1 => test_tab_albums_icon(x, y, cx, 1340),
-                _ => test_tab_places_icon(x, y, cx, 1340),
-            };
-            if is_icon {
-                return icon_color;
-            }
-
-            if y >= 1362 && y < 1370 {
-                let ox = cx.saturating_sub(label.len() * 4);
-                if let Some(c) = test_text(x, y, ox, 1362, 1, label, icon_color) {
-                    return c;
-                }
-            }
+        if let Some(c) = text(x, y, MARGIN, SUBTITLE_Y, 1, summary, MUTED, BG) {
+            return c;
         }
-        return SURFACE_DARK;
+        return BG;
     }
 
-    // 5. Home gesture indicator pill (x: 260..460, y: 1418..1424)
-    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
-        return TEXT_MUTED;
+    // 2. Segmented filter tabs.
+    if let Some(c) = pill_pixel(x, y, app) {
+        return c;
     }
 
-    BG_DARK
+    // 3. Thumbnail grid band (or honest empty state).
+    if let Some(c) = grid_pixel(x, y, app) {
+        return c;
+    }
+
+    // 4. Bottom navigation bar.
+    if let Some(c) = nav_pixel(x, y, app) {
+        return c;
+    }
+
+    // 5. Home gesture indicator.
+    if y >= HOME_Y0 && y < HOME_Y1 && x >= 260 && x < 460 {
+        return MUTED;
+    }
+
+    BG
 }
 
 fn render_gallery_ui(surface: u32, app: &GalleryApp) {
@@ -584,7 +589,7 @@ fn render_gallery_ui(surface: u32, app: &GalleryApp) {
         let mut x = offset % W;
         let mut y = offset / W;
         for i in 0..count {
-            chunk[i] = get_gallery_color(x, y, app);
+            chunk[i] = gallery_pixel(x, y, app);
             x += 1;
             if x == W {
                 x = 0;
@@ -656,11 +661,11 @@ pub extern "C" fn _start() -> ! {
                         let x = input.x as usize;
                         let y = input.y as usize;
 
-                        // Bottom home pill
-                        if x >= 240 && x <= 480 && y >= 1400 {
+                        // Bottom home pill: closes the inspection view, else exits.
+                        if x >= HOME_X0 && x <= HOME_X1 && y >= 1400 {
                             if app.inspecting_photo.is_some() {
                                 app.inspecting_photo = None;
-                                std::log(0, "[GALLERY] Exited photo inspection modal.").ok();
+                                std::log(0, "[GALLERY] Exited photo inspection view.").ok();
                                 if surface > 0 {
                                     render_gallery_ui(surface, &app);
                                     let _ = std::surface_flip(6);
@@ -676,118 +681,76 @@ pub extern "C" fn _start() -> ! {
                             }
                         }
 
-                        // If in modal, tapping Close button exits modal
+                        // Inspection view controls.
                         if app.inspecting_photo.is_some() {
-                            if (1140..1200).contains(&y) && (230..490).contains(&x) {
+                            let back = Rect::new(MARGIN, 28, 56, 56);
+                            let close = Rect::new(CLOSE_X0, CLOSE_Y0, CLOSE_W, CLOSE_H);
+                            if back.contains(x, y) || close.contains(x, y) {
                                 app.inspecting_photo = None;
-                                std::log(0, "[GALLERY] Closed photo inspection modal.").ok();
+                                std::log(0, "[GALLERY] Closed photo inspection view.").ok();
                                 if surface > 0 {
                                     render_gallery_ui(surface, &app);
                                     let _ = std::surface_flip(6);
                                 }
                                 break;
                             }
+                            break;
                         }
 
-                        // Header controls: search and add. WHY honest no-op logs:
-                        // there is no media index to search and no importer to add
-                        // media, so the taps report that absence instead of
-                        // pretending a feature ran (same pattern as the lock-screen
-                        // torch, which logs its unavailability).
-                        if app.inspecting_photo.is_none() {
-                            let s_dx = (x as i32) - 600;
-                            let s_dy = (y as i32) - 92;
-                            if s_dx * s_dx + s_dy * s_dy <= 16 * 16 {
-                                std::log(
-                                    0,
-                                    "[GALLERY] Search tapped: no media index exists; search is not implemented.",
-                                )
-                                .ok();
-                            } else if (640..672).contains(&x) && (76..108).contains(&y) {
-                                std::log(
-                                    0,
-                                    "[GALLERY] Add tapped: media import is not implemented.",
-                                )
-                                .ok();
-                            }
-                        }
-
-                        // Category pills (y: 135..185)
-                        if (135..185).contains(&y) {
-                            if (48..150).contains(&x) {
-                                app.selected_tab = 0;
-                            } else if (165..285).contains(&x) {
-                                app.selected_tab = 1;
-                            } else if (300..430).contains(&x) {
-                                app.selected_tab = 2;
-                            } else {
-                                // Tapped pill row but outside pills: ignore.
-                                break;
-                            }
-                            std::log(0, "[GALLERY] Gallery category tab switched.").ok();
-                            if surface > 0 {
-                                render_gallery_ui(surface, &app);
-                                let _ = std::surface_flip(6);
+                        // Segmented filter tabs - the hit rectangle is the drawn pill.
+                        if y >= PILL_Y && y < PILL_Y + PILL_H {
+                            for i in 0..PILL_LABELS.len() {
+                                if pill_rect(i).contains(x, y) {
+                                    app.selected_tab = i;
+                                    std::log(0, "[GALLERY] Gallery category tab switched.").ok();
+                                    if surface > 0 {
+                                        render_gallery_ui(surface, &app);
+                                        let _ = std::surface_flip(6);
+                                    }
+                                    break;
+                                }
                             }
                             break;
                         }
 
-                        // Photo grid tile taps (y: 200..1280, 3 cols x 5 rows)
-                        if (200..1280).contains(&y) {
-                            let col = if (36..236).contains(&x) {
-                                Some(0)
-                            } else if (260..460).contains(&x) {
-                                Some(1)
-                            } else if (484..684).contains(&x) {
-                                Some(2)
-                            } else {
-                                None
-                            };
-                            if let Some(c) = col {
-                                let rel_row = y.saturating_sub(200) / 216;
-                                // Ignore inter-tile gaps.
-                                let y0 = 200 + rel_row * 216;
-                                if rel_row < 5 && y >= y0 && y < y0 + 200 {
-                                    let p_idx = rel_row * 3 + c;
-                                    if PHOTOS.get(p_idx).is_some() {
-                                        app.inspecting_photo = Some(p_idx);
-                                        std::log(
-                                            0,
-                                            "[GALLERY] Photo tapped: inspection modal opened.",
-                                        )
-                                        .ok();
-                                        if surface > 0 {
-                                            render_gallery_ui(surface, &app);
-                                            let _ = std::surface_flip(6);
-                                        }
-                                        break;
-                                    } else {
-                                        std::log(
-                                            0,
-                                            "[GALLERY] Photo grid tapped: no media items in storage.",
-                                        )
-                                        .ok();
-                                        break;
+                        // Thumbnail grid taps.
+                        if y >= GRID_TOP && y < GRID_BOTTOM {
+                            if has_no_media() {
+                                std::log(
+                                    0,
+                                    "[GALLERY] Photo grid tapped: no media items in storage.",
+                                )
+                                .ok();
+                                break;
+                            }
+                            if let (Some(col), Some(row)) = (col_of(x), row_of(y)) {
+                                let p_idx = row * 3 + col;
+                                if PHOTOS.get(p_idx).is_some() {
+                                    app.inspecting_photo = Some(p_idx);
+                                    std::log(
+                                        0,
+                                        "[GALLERY] Photo tapped: inspection view opened.",
+                                    )
+                                    .ok();
+                                    if surface > 0 {
+                                        render_gallery_ui(surface, &app);
+                                        let _ = std::surface_flip(6);
                                     }
                                 }
                             }
+                            break;
                         }
 
-                        // Bottom navigation tabs (y: 1290..1400)
-                        if (1290..1400).contains(&y) {
-                            if (40..220).contains(&x) {
-                                app.bottom_nav = 0;
-                            } else if (270..450).contains(&x) {
-                                app.bottom_nav = 1;
-                            } else if (500..680).contains(&x) {
-                                app.bottom_nav = 2;
-                            } else {
-                                break;
-                            }
-                            std::audio_haptic_click().ok();
-                            if surface > 0 {
-                                render_gallery_ui(surface, &app);
-                                let _ = std::surface_flip(6);
+                        // Bottom navigation tabs (three equal, touch-sized columns).
+                        if y >= NAV_Y0 && y < NAV_Y1 {
+                            let idx = x / (W / 3);
+                            if idx < NAV_LABELS.len() {
+                                app.bottom_nav = idx;
+                                std::audio_haptic_click().ok();
+                                if surface > 0 {
+                                    render_gallery_ui(surface, &app);
+                                    let _ = std::surface_flip(6);
+                                }
                             }
                             break;
                         }
