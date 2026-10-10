@@ -840,6 +840,11 @@ class VncScanoutClient:
         self.latest_jpeg = None
         self.latest_png = None
         self._last_published_rgba = None
+        # Portrait-mode geometry check: `True` once the monitor has confirmed a
+        # non-native desktop is the guest's real state (genuine landscape under a
+        # portrait viewport), `False` while it is still worth asking.
+        self._portrait_mismatch_confirmed = False
+        self._last_scanout_probe = 0.0
         self.metrics = {
             'fps': 0.0,
             'frame_us': 0,
@@ -878,6 +883,49 @@ class VncScanoutClient:
             self.latest_png = None
             self._last_published_rgba = None
             self.frame_cond.notify_all()
+
+    def _monitor_scanout_size(self):
+        """The guest scanout geometry as QEMU's own monitor reports it.
+
+        WHY the monitor and not this session: an RFB desktop size is fixed at
+        handshake, so it only ever describes the surface that existed when the
+        session opened. A screendump is sized from the live console surface,
+        which is the ground truth for whether this session is describing the
+        present or a boot-time surface. Returns None when the probe fails, and
+        the caller then keeps publishing what it has.
+        """
+        now = time.time()
+        # A screendump writes the whole surface, so a session that is genuinely
+        # off-geometry is probed at most twice a second, not once per frame.
+        if now - self._last_scanout_probe < 2.0:
+            return None
+        self._last_scanout_probe = now
+        path = os.path.join(WORKSPACE_ROOT, "target", "scanout_probe.ppm").replace("\\", "/")
+        try:
+            ok, _ = send_qemu_monitor_cmd(f'screendump {path}')
+            if not ok or not os.path.exists(path):
+                return None
+            with open(path, "rb") as f:
+                header = f.read(64)
+            # P6 header: magic, width, height, maxval.
+            parts = header.split()
+            if len(parts) < 3 or parts[0] != b"P6":
+                return None
+            return (int(parts[1]), int(parts[2]))
+        except Exception:
+            return None
+        finally:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
+    def _resync_stale_session(self, reason):
+        """Drops an RFB session that describes a surface QEMU no longer has."""
+        print(f"[vnc] {reason}; re-handshaking")
+        self._force_reconnect = True
+        self.connected = False
+        self._invalidate_cached_frame()
 
     def _abort_session(self, s, reason):
         """Tears down a stale session and forces a resync instead of publishing it."""
@@ -961,6 +1009,10 @@ class VncScanoutClient:
         global guest_framebuffer_size
         guest_framebuffer_size = (w, h)
         self.scanout_buf = bytearray(w * h * 4)
+        # A new handshake is the session's own answer about the live surface,
+        # so any cached verdict about an off-geometry desktop starts over.
+        self._portrait_mismatch_confirmed = False
+        self._last_scanout_probe = 0.0
         self.connected = True
 
         # Encodings: Raw (0), DesktopSize (-239)
@@ -1050,6 +1102,27 @@ class VncScanoutClient:
         now = time.time()
         w, h = self.width, self.height
         is_landscape = (current_device_orientation == 'landscape')
+        # WHY resync a session whose desktop is not the native portrait surface:
+        # the phone profile starts QEMU on the fallback framebuffer and the guest
+        # engages native portrait scanout once paging is live, so a session
+        # opened in that window keeps reporting the old geometry forever. The
+        # publisher then cropped that stale desktop into a 360x720 slice and
+        # served the whole phone half-size and zoomed. When the monitor reports
+        # the live surface IS native portrait, this session is describing a
+        # surface that no longer exists, so it is dropped and re-handshaked
+        # rather than published. A guest that really is landscape keeps its
+        # slice, and that answer is cached so it is not re-probed per frame.
+        if (not is_landscape
+                and (w, h) != (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H)
+                and not self._portrait_mismatch_confirmed):
+            live = self._monitor_scanout_size()
+            if live == (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H):
+                self._resync_stale_session(
+                    f"session desktop {w}x{h} but live scanout is "
+                    f"{LOGICAL_SURFACE_W}x{LOGICAL_SURFACE_H}")
+                return
+            if live is not None:
+                self._portrait_mismatch_confirmed = True
         box = letterbox_box(w, h)
         if not box:
             return
