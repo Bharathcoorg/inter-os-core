@@ -4438,10 +4438,18 @@ pub fn sys_fs_list(cap_slot: usize, path_ptr: u64, path_len: usize, out: &mut [u
     let mut path = [0u8; 256];
     copy_from_user(&mut path[..path_len], path_ptr, path_len).map_err(|_| SyscallResult::InvalidArguments)?;
     let path = core::str::from_utf8(&path[..path_len]).map_err(|_| SyscallResult::InvalidArguments)?;
-    let sched = SCHEDULER.lock();
-    let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    let task_id = current.id;
-    let n = crate::fs::VFS.lock().list_dir_for_task(task_id, &current.cap_table, cap_slot, path, out).map_err(|e| match e {
+    // WHY the clone and the drop: `list_dir_for_task` resolves the caller's
+    // package through the scheduler (`enforce_app_path` ->
+    // `app_storage_root` -> `app_package_for_task` takes `SCHEDULER`), so
+    // holding this lock across `VFS.lock()` below self-deadlocks the first
+    // caller -- the file manager never presented. Every sibling takes the
+    // same snapshot-and-release shape; this one now does too.
+    let (task_id, cap_table) = {
+        let sched = SCHEDULER.lock();
+        let current = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
+        (current.id, current.cap_table.clone())
+    };
+    let n = crate::fs::VFS.lock().list_dir_for_task(task_id, &cap_table, cap_slot, path, out).map_err(|e| match e {
         FsError::PermissionDenied | FsError::CapabilityError(_) => SyscallResult::PermissionDenied,
         FsError::FileNotFound => SyscallResult::FileNotFound,
         _ => SyscallResult::InvalidArguments,
