@@ -1,19 +1,19 @@
 //! Notifications and Events Shade (Reference Screen 5).
 //!
-//! Renders the canonical "Events / Notifications done right" screen from system specifications:
-//! - Crisp light theme background with status bar clock, signals, and battery.
-//! - Header: "Events" with right-side filter control.
+//! Renders reference screen 5 as the surface the kernel's notification records
+//! actually justify:
+//! - Warm cream theme with status bar clock.
+//! - Header: "Events", matching the reference capture and
+//!   `INTEROS_UI_DESIGN_SYSTEM.md` ("## 5. Events").
 //! - No filter pills: four were drawn here with no filter state behind them
 //!   and removed rather than left as inert controls.
-//! - "Today" section with reference notifications:
-//!   - "New message" (Rama, 2 min ago, green chat bubble)
-//!   - "Meeting reminder" (Team sync at 11:00 AM, 1 hr ago, red calendar)
-//!   - "Download complete" (interos-sdk.zip, 2 hr ago, teal download)
-//!   - "Photo saved" (IMG_20260924.jpg, 3 hr ago, amber gallery)
-//! - "Yesterday" section:
-//!   - "App updated" (Browser, 10:30 PM, blue browser/update)
+//! - "Recent" section label above a stack of real notification cards, one per
+//!   kernel notification record (title/body from the record, never canned
+//!   sample events -- an earlier version listed invented entries such as
+//!   "New message / Rama" and they are gone).
+//! - With no records the surface says "No notifications" rather than drawing
+//!   an empty card stack.
 //! - "Clear all" action pill and bottom swipe-home indicator.
-//! - Dynamic integration with kernel notification subsystem when real alerts arrive.
 
 #![allow(dead_code)]
 
@@ -253,7 +253,12 @@ struct NotificationsFrame {
 fn build_notifications_frame(state: &LauncherState) -> NotificationsFrame {
     let clock_slice: &[u8] = if state.clock_source_ok && state.clock_time[0] != b' ' { &state.clock_time } else { b"" };
     let clock = LabelRun::new(48, 14, type_scale::CAPTION, clock_slice, TEXT_MAIN);
-    let title = LabelRun::new(36, 64, type_scale::BODY, b"Notifications", TEXT_MAIN);
+    // WHY "Events" and not "Notifications": this is reference screen 5, and both
+    // the reference capture and `INTEROS_UI_DESIGN_SYSTEM.md` ("## 5. Events")
+    // name it that. The module doc-comment below already called the header
+    // "Events"; only the drawn string said "Notifications", so the surface was
+    // titled differently from the screen it implements.
+    let title = LabelRun::new(36, 64, type_scale::BODY, b"Events", TEXT_MAIN);
 
     // WHY there are no filter pills on this surface: four pills were drawn here
     // (All / Messages / System / Apps) with an active treatment on All, but no
