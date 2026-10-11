@@ -773,6 +773,13 @@ fn tabs_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         } else {
             (SURFACE_RAISED, TEXT_MUTED)
         };
+        // WHY a pill and not the old square fill: the design draws segmented
+        // tabs as capsules. The text is only asked inside the pill so a glyph
+        // near the label's ends cannot ink the curved cut-outs.
+        let pill = std::design::primitives::Rect::new(*x0, TAB_BAND_Y0, w, TAB_BAND_H);
+        if std::design::primitives::draw_pill(x, y, pill, fill, None).is_none() {
+            continue;
+        }
         let label_x0 = *x0 + std::design::font::center_x(TAB_LABELS[i], TAB_SCALE, w);
         if let Some(c) = test_text(x, y, label_x0, label_y0, TAB_SCALE, TAB_LABELS[i], ink, fill) {
             return c;
