@@ -515,18 +515,9 @@ const BACKSPACE_CX: usize = 627;
 const BACKSPACE_CY: usize = 260;
 const BACKSPACE_R: i32 = 24;
 
-// Keypad disc and its two stacked runs.
-const KEY_R: i32 = 50;
-const KEY_DIGIT_SCALE: usize = 3;
+// Keypad digit scale: scale 2 against the reference's ~34px caps.
+const KEY_DIGIT_SCALE: usize = 2;
 const KEY_SUB_SCALE: usize = 1;
-/// Rows the stacked runs sit above centre. The 96-row stack cannot centre
-/// inside the rim's 92-row interior (±46): centred at cy±48 the sublabel's
-/// lowest ink reaches dy +43, where a glyph with bottom-row ink at |dx| 17 or
-/// more -- the foot of `Z` on the 9 key -- lands outside the rim and reads as
-/// rim grey, so the key says "WXY7". Six rows up puts that foot at dy +37
-/// (inside at |dx| 25) while the digit's top bar stays at dy -45 (inside at
-/// |dx| 8), clearing both ends of the stack.
-const KEY_STACK_LIFT: usize = 6;
 
 // SOS emergency disc.
 const SOS_CX: usize = 134;
@@ -872,9 +863,14 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
 
 /// The 3x4 dial pad. Only drawn in the Keypad section.
 ///
-/// WHY it takes no state: a key disc is identical whether or not a digit is
+/// WHY it takes no state: the keys are identical whether or not a digit is
 /// already in the entry, so typing never changes a pixel in this region. That is
 /// exactly why the display band is the only band a keystroke repaints.
+///
+/// WHY bare digits and no discs: the design draws the pad as unadorned type.
+/// The digit is scale 2 against the reference's ~34px caps; the sublabel stays
+/// scale 1, the smallest legible step. Hit-testing still uses the 180x124
+/// cells below, so the targets do not move with the chrome.
 fn keypad_pixel(x: usize, y: usize) -> u32 {
     for row in 0..4 {
         let by = ROW_Y[row];
@@ -884,70 +880,57 @@ fn keypad_pixel(x: usize, y: usize) -> u32 {
                 if x >= bx && x < bx + BTN_W {
                     let cx = (bx + BTN_W / 2) as i32;
                     let cy = (by + BTN_H / 2) as i32;
-                    let k_dx = (x as i32) - cx;
-                    let k_dy = (y as i32) - cy;
-                    let dist2 = k_dx * k_dx + k_dy * k_dy;
 
-                    if dist2 <= KEY_R * KEY_R {
-                        // Button rim
-                        if dist2 >= 46 * 46 {
-                            return BORDER_SUBTLE;
+                    // The two runs are stacked, not intersecting: the scale-2
+                    // digit box (48 rows) sits on top and the scale-1 sublabel
+                    // box (24 rows) directly beneath it, the 72-row stack
+                    // centred on the cell. The old boxes were cy-24..cy+48
+                    // and cy+12..cy+36, which put the whole sublabel ink
+                    // band inside the digit's.
+                    let digit_rows = run_rows(KEY_DIGIT_SCALE);
+                    let sub_rows = run_rows(KEY_SUB_SCALE);
+                    let stack_y0 =
+                        (cy as usize).saturating_sub((digit_rows + sub_rows) / 2);
+
+                    // Digit text
+                    if let Some(digit) = get_keypad_char(row, col) {
+                        let digit_byte = [digit as u8];
+                        let digit_x0 = (cx as usize).saturating_sub(
+                            std::design::font::measure(&digit_byte, KEY_DIGIT_SCALE) / 2,
+                        );
+                        if let Some(c) = test_text(
+                            x,
+                            y,
+                            digit_x0,
+                            stack_y0,
+                            KEY_DIGIT_SCALE,
+                            &digit_byte,
+                            TEXT_PRIMARY,
+                            BG_DARK,
+                        ) {
+                            return c;
                         }
-
-                        // The two runs are stacked, not intersecting: the
-                        // scale-3 digit box (72 rows) sits on top and the
-                        // scale-1 sublabel box (24 rows) directly beneath it,
-                        // the 96-row stack lifted `KEY_STACK_LIFT` rows above
-                        // centre so both ends clear the rim (see the constant).
-                        // The old boxes were cy-24..cy+48 and cy+12..cy+36,
-                        // which put the whole sublabel ink band inside the
-                        // digit's.
-                        let digit_rows = run_rows(KEY_DIGIT_SCALE);
-                        let sub_rows = run_rows(KEY_SUB_SCALE);
-                        let stack_y0 = (cy as usize)
-                            .saturating_sub((digit_rows + sub_rows) / 2 + KEY_STACK_LIFT);
-
-                        // Digit text
-                        if let Some(digit) = get_keypad_char(row, col) {
-                            let digit_byte = [digit as u8];
-                            let digit_x0 = (cx as usize).saturating_sub(
-                                std::design::font::measure(&digit_byte, KEY_DIGIT_SCALE) / 2,
-                            );
-                            if let Some(c) = test_text(
-                                x,
-                                y,
-                                digit_x0,
-                                stack_y0,
-                                KEY_DIGIT_SCALE,
-                                &digit_byte,
-                                TEXT_PRIMARY,
-                                SURFACE_DARK,
-                            ) {
-                                return c;
-                            }
-                        }
-
-                        // Sublabel text
-                        let sublabel = get_keypad_sublabel(row, col);
-                        if !sublabel.is_empty() {
-                            let sub_w = std::design::font::measure(sublabel, KEY_SUB_SCALE);
-                            let sub_x = (cx as usize).saturating_sub(sub_w / 2);
-                            if let Some(c) = test_text(
-                                x,
-                                y,
-                                sub_x,
-                                stack_y0 + digit_rows,
-                                KEY_SUB_SCALE,
-                                sublabel,
-                                TEXT_MUTED,
-                                SURFACE_DARK,
-                            ) {
-                                return c;
-                            }
-                        }
-
-                        return SURFACE_DARK;
                     }
+
+                    // Sublabel text
+                    let sublabel = get_keypad_sublabel(row, col);
+                    if !sublabel.is_empty() {
+                        let sub_w = std::design::font::measure(sublabel, KEY_SUB_SCALE);
+                        let sub_x = (cx as usize).saturating_sub(sub_w / 2);
+                        if let Some(c) = test_text(
+                            x,
+                            y,
+                            sub_x,
+                            stack_y0 + digit_rows,
+                            KEY_SUB_SCALE,
+                            sublabel,
+                            TEXT_MUTED,
+                            BG_DARK,
+                        ) {
+                            return c;
+                        }
+                    }
+
                     return BG_DARK;
                 }
             }
