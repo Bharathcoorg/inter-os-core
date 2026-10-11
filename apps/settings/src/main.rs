@@ -183,6 +183,67 @@ pub enum WallpaperSource {
     Unread,
 }
 
+/// Which step of the screen-lock flow the panel is on.
+///
+/// WHY a PIN is set from Settings and not at boot: this shell no longer forces
+/// first-boot credential setup, so an owner with no lock gets a plain lock
+/// screen they swipe past. Adding, changing and removing a PIN are all owner
+/// decisions, so all three live in this panel and share one keypad.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenLockMode {
+    /// The overview: status, and the action the current lock state allows.
+    Idle,
+    /// Collecting the PIN currently set, before a change or a removal.
+    EnterCurrent,
+    /// Collecting the replacement PIN.
+    EnterNew,
+    /// Re-collecting the replacement PIN to confirm it.
+    ConfirmNew,
+}
+
+/// What the collected credentials are for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenLockAction {
+    /// No PIN exists: establishing the first one needs no current credential.
+    Establish,
+    /// A PIN exists: replace it. The kernel verifies the current one.
+    Change,
+    /// A PIN exists: remove it. The kernel verifies the current one.
+    Remove,
+}
+
+/// Outcome of the last credential write, reported from what the account layer
+/// actually returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenLockWrite {
+    /// No write attempted since the panel opened.
+    Unattempted,
+    /// The account layer established a PIN; it is now required to unlock.
+    Established,
+    /// The account layer replaced the PIN.
+    Changed,
+    /// The account layer removed the PIN; the lock screen no longer demands one.
+    Removed,
+    /// The account layer refused the write and nothing changed.
+    Refused,
+}
+
+/// What the panel is complaining about, or nothing.
+///
+/// WHY these are numbers and not a rendered string decided at the write site:
+/// the message is chosen where it is drawn, from the state, so a step that
+/// fails and a write that the kernel rejects cannot drift into one sentence
+/// that claims the wrong outcome.
+pub const SL_ERR_NONE: u8 = 0;
+/// Fewer than four digits were submitted.
+pub const SL_ERR_SHORT: u8 = 1;
+/// The two new-PIN entries did not match.
+pub const SL_ERR_MISMATCH: u8 = 2;
+/// The account layer refused the change.
+pub const SL_ERR_REFUSED: u8 = 3;
+/// The PIN typed as the current one was not accepted.
+pub const SL_ERR_NOT_CURRENT: u8 = 4;
+
 /// Reads one wallpaper key out of the settings store and resolves it.
 ///
 /// WHY the two failure modes are distinguished rather than folded into `None`: a
@@ -295,6 +356,35 @@ pub power_profile: Option<PowerProfile>,
     pub wallpaper_source: WallpaperSource,
     /// Outcome of the last write.
     pub wallpaper_write: WallpaperWrite,
+    /// Whether the screen-lock panel is open instead of a section detail.
+    pub screen_lock_open: bool,
+    /// Which step of the credential flow is in progress.
+    pub screen_lock_mode: ScreenLockMode,
+    /// What the collected credentials are for.
+    pub screen_lock_action: ScreenLockAction,
+    /// Digits typed on the visible step.
+    pub screen_lock_buf: [u8; 8],
+    pub screen_lock_len: usize,
+    /// The PIN recorded by the first step, awaited by the confirmation step.
+    pub screen_lock_pending: [u8; 8],
+    pub screen_lock_pending_len: usize,
+    /// The current PIN collected before a change or a removal.
+    pub screen_lock_current: [u8; 8],
+    pub screen_lock_current_len: usize,
+    /// What the panel is complaining about, or `SL_ERR_NONE`.
+    pub screen_lock_error: u8,
+    /// Outcome of the last credential write.
+    pub screen_lock_write: ScreenLockWrite,
+    /// The lock state the account layer reported, read when the panel opened and
+    /// after every write. `None` means the query was refused, which the panel
+    /// says out loud rather than presenting as "no PIN set".
+    pub screen_lock_reported: Option<std::UserLockState>,
+    /// Whether the account layer reports that a credential exists.
+    ///
+    /// WHY a field and not a read at paint time: `settings_get_*`-style queries
+    /// in this app are answered when a surface opens, and a syscall per pixel
+    /// would be absurd. It is re-read on every open and after every write.
+    pub screen_lock_has_credential: Option<bool>,
 }
 
 impl SettingsApp {
@@ -330,6 +420,21 @@ impl SettingsApp {
             // would present an assumption as a reading.
             wallpaper_source: WallpaperSource::Unread,
             wallpaper_write: WallpaperWrite::Unattempted,
+            screen_lock_open: false,
+            screen_lock_mode: ScreenLockMode::Idle,
+            screen_lock_action: ScreenLockAction::Establish,
+            screen_lock_buf: [0; 8],
+            screen_lock_len: 0,
+            screen_lock_pending: [0; 8],
+            screen_lock_pending_len: 0,
+            screen_lock_current: [0; 8],
+            screen_lock_current_len: 0,
+            screen_lock_error: SL_ERR_NONE,
+            screen_lock_write: ScreenLockWrite::Unattempted,
+            // WHY None: the account layer has not been asked yet, and "no PIN is
+            // set" is a reading, not an absence of reading.
+            screen_lock_reported: None,
+            screen_lock_has_credential: None,
         }
     }
 
@@ -768,6 +873,235 @@ impl SettingsApp {
             .unwrap_or(&std::design::walls::SCENES[0])
     }
 
+    // --- Screen lock ---------------------------------------------------------
+    //
+    // Everything below drives the real account layer: `user_get_lock_state` for
+    // what is set, `user_change_credential` to establish or replace a PIN, and
+    // `user_clear_credential` to remove one. Nothing here writes a "PIN set" flag
+    // of its own, because a flag this app keeps is not a lock the kernel enforces.
+
+    /// Whether the account currently holds a credential.
+    ///
+    /// WHY this asks the account layer instead of deriving it from the lock
+    /// state: `Unlocked` is what a credential-less account reports once it has
+    /// been swiped past, so deriving "a PIN is set" from it would have this
+    /// screen claim a lock the account never had -- on the one screen whose job
+    /// is to report exactly that. `None` is a refused query, not a "no".
+    pub fn screen_lock_has_pin(&self) -> bool {
+        self.screen_lock_has_credential == Some(true)
+    }
+
+    /// Opens the panel and reads the account layer's answer.
+    pub fn open_screen_lock(&mut self) {
+        self.screen_lock_open = true;
+        self.screen_lock_mode = ScreenLockMode::Idle;
+        self.screen_lock_action = ScreenLockAction::Establish;
+        self.screen_lock_buf = [0; 8];
+        self.screen_lock_len = 0;
+        self.screen_lock_pending = [0; 8];
+        self.screen_lock_pending_len = 0;
+        self.screen_lock_current = [0; 8];
+        self.screen_lock_current_len = 0;
+        self.screen_lock_error = SL_ERR_NONE;
+        self.screen_lock_write = ScreenLockWrite::Unattempted;
+        self.refresh_screen_lock();
+    }
+
+    /// Re-reads the lock state and the credential's existence from the account layer.
+    pub fn refresh_screen_lock(&mut self) {
+        let uid = std::user_get_current();
+        self.screen_lock_reported = std::user_get_lock_state(uid).ok();
+        self.screen_lock_has_credential = std::user_has_credential(uid).ok();
+    }
+
+    /// Clears the typed entry and returns the panel to its overview.
+    pub fn screen_lock_reset_entry(&mut self) {
+        self.screen_lock_buf = [0; 8];
+        self.screen_lock_len = 0;
+        self.screen_lock_error = SL_ERR_NONE;
+    }
+
+    /// Appends one digit to the entry in progress.
+    pub fn screen_lock_push(&mut self, digit: u8) {
+        if self.screen_lock_len < 8 {
+            self.screen_lock_buf[self.screen_lock_len] = digit;
+            self.screen_lock_len += 1;
+            self.screen_lock_error = SL_ERR_NONE;
+        }
+    }
+
+    /// Deletes the last digit of the entry in progress.
+    pub fn screen_lock_pop(&mut self) {
+        if self.screen_lock_len > 0 {
+            self.screen_lock_len -= 1;
+            self.screen_lock_error = SL_ERR_NONE;
+        }
+    }
+
+    /// Submits the typed entry and advances the flow, calling the account layer
+    /// only when a complete, confirmed credential is in hand.
+    ///
+    /// WHY the confirmation step exists: a PIN typed once and stored makes a slip
+    /// of the finger the device's credential, and the owner then cannot unlock
+    /// their own phone.
+    pub fn screen_lock_submit(&mut self) {
+        let uid = std::user_get_current();
+        let len = self.screen_lock_len;
+        if len < SL_MIN_DIGITS {
+            self.screen_lock_error = SL_ERR_SHORT;
+            return;
+        }
+        match self.screen_lock_mode {
+            ScreenLockMode::EnterCurrent => {
+                let current = self.screen_lock_buf;
+                let current_len = len;
+                if self.screen_lock_action == ScreenLockAction::Remove {
+                    match std::user_clear_credential(uid, &current[..current_len]) {
+                        Ok(()) => {
+                            self.screen_lock_write = ScreenLockWrite::Removed;
+                            self.screen_lock_mode = ScreenLockMode::Idle;
+                            self.screen_lock_error = SL_ERR_NONE;
+                            std::log(
+                                0,
+                                "[SETTINGS APP] Screen lock removed; the account layer reports it credential-less.",
+                            )
+                            .ok();
+                        }
+                        Err(_) => {
+                            // WHY the current PIN is named as the suspect rather
+                            // than "write failed": the kernel only refuses this
+                            // call for an unverified credential, and the panel
+                            // should not tell the user their storage broke.
+                            self.screen_lock_write = ScreenLockWrite::Refused;
+                            self.screen_lock_error = SL_ERR_NOT_CURRENT;
+                            std::log(
+                                0,
+                                "[SETTINGS APP:SECURITY] Credential removal refused: the current PIN did not verify.",
+                            )
+                            .ok();
+                        }
+                    }
+                    self.screen_lock_reset_entry();
+                    self.refresh_screen_lock();
+                    return;
+                }
+                // Change: the current PIN is kept for the account layer to verify
+                // when the replacement is written.
+                self.screen_lock_current = current;
+                self.screen_lock_current_len = current_len;
+                self.screen_lock_reset_entry();
+                self.screen_lock_mode = ScreenLockMode::EnterNew;
+                std::log(0, "[SETTINGS APP] Current PIN accepted; enter the replacement.").ok();
+            }
+            ScreenLockMode::EnterNew => {
+                self.screen_lock_pending = self.screen_lock_buf;
+                self.screen_lock_pending_len = len;
+                self.screen_lock_reset_entry();
+                self.screen_lock_mode = ScreenLockMode::ConfirmNew;
+                std::log(0, "[SETTINGS APP] New PIN recorded; confirm it.").ok();
+            }
+            ScreenLockMode::ConfirmNew => {
+                let pending_len = self.screen_lock_pending_len;
+                if len != pending_len || self.screen_lock_buf[..len] != self.screen_lock_pending[..pending_len] {
+                    self.screen_lock_error = SL_ERR_MISMATCH;
+                    self.screen_lock_pending = [0; 8];
+                    self.screen_lock_pending_len = 0;
+                    self.screen_lock_reset_entry();
+                    self.screen_lock_mode = ScreenLockMode::EnterNew;
+                    std::log(
+                        0,
+                        "[SETTINGS APP:SECURITY] The two new-PIN entries did not match; nothing was written.",
+                    )
+                    .ok();
+                    return;
+                }
+                let new_pin = self.screen_lock_buf;
+                let current = self.screen_lock_current;
+                let current_len = self.screen_lock_current_len;
+                let old: Option<&[u8]> = if self.screen_lock_action == ScreenLockAction::Establish {
+                    None
+                } else {
+                    Some(&current[..current_len])
+                };
+                match std::user_change_credential(uid, &new_pin[..len], old) {
+                    Ok(()) => {
+                        self.screen_lock_write = match self.screen_lock_action {
+                            ScreenLockAction::Establish => ScreenLockWrite::Established,
+                            _ => ScreenLockWrite::Changed,
+                        };
+                        self.screen_lock_mode = ScreenLockMode::Idle;
+                        self.screen_lock_error = SL_ERR_NONE;
+                        std::log(
+                            0,
+                            "[SETTINGS APP:SECURITY] Credential written and persisted by the account layer.",
+                        )
+                        .ok();
+                    }
+                    Err(_) => {
+                        self.screen_lock_write = ScreenLockWrite::Refused;
+                        self.screen_lock_error = SL_ERR_REFUSED;
+                        std::log(
+                            0,
+                            "[SETTINGS APP:SECURITY] Credential change refused by the account layer; nothing was written.",
+                        )
+                        .ok();
+                    }
+                }
+                self.screen_lock_pending = [0; 8];
+                self.screen_lock_pending_len = 0;
+                self.screen_lock_current = [0; 8];
+                self.screen_lock_current_len = 0;
+                self.screen_lock_reset_entry();
+                self.refresh_screen_lock();
+            }
+            ScreenLockMode::Idle => {
+                self.screen_lock_error = SL_ERR_NONE;
+            }
+        }
+    }
+
+    /// Starts a flow from the overview, given the action its button represents.
+    pub fn screen_lock_begin(&mut self, action: ScreenLockAction) {
+        self.screen_lock_action = action;
+        self.screen_lock_buf = [0; 8];
+        self.screen_lock_len = 0;
+        self.screen_lock_pending = [0; 8];
+        self.screen_lock_pending_len = 0;
+        self.screen_lock_current = [0; 8];
+        self.screen_lock_current_len = 0;
+        self.screen_lock_error = SL_ERR_NONE;
+        self.screen_lock_mode = match action {
+            ScreenLockAction::Establish => ScreenLockMode::EnterNew,
+            _ => ScreenLockMode::EnterCurrent,
+        };
+        std::log(
+            0,
+            match action {
+                ScreenLockAction::Establish => "[SETTINGS APP] Enter a new PIN to set a screen lock.\n",
+                ScreenLockAction::Change => "[SETTINGS APP] Enter the current PIN to change it.\n",
+                ScreenLockAction::Remove => "[SETTINGS APP] Enter the current PIN to remove the screen lock.\n",
+            },
+        )
+        .ok();
+    }
+
+    /// Leaves any step in progress, returning to the overview without writing.
+    pub fn screen_lock_cancel_step(&mut self) -> bool {
+        if self.screen_lock_mode == ScreenLockMode::Idle {
+            return false;
+        }
+        self.screen_lock_mode = ScreenLockMode::Idle;
+        self.screen_lock_buf = [0; 8];
+        self.screen_lock_len = 0;
+        self.screen_lock_pending = [0; 8];
+        self.screen_lock_pending_len = 0;
+        self.screen_lock_current = [0; 8];
+        self.screen_lock_current_len = 0;
+        self.screen_lock_error = SL_ERR_NONE;
+        std::log(0, "[SETTINGS APP] Screen lock entry cancelled; nothing was written.").ok();
+        true
+    }
+
     /// Writes the pending selection to the selected targets.
     ///
     /// WHY the outcome is recorded rather than assumed: `settings_set` is gated
@@ -867,6 +1201,7 @@ const TEXT: u32 = std::design::color::TEXT; // #111214 primary text
 const TEXT_MUTED: u32 = std::design::color::TEXT_MUTED; // #777773 secondary text
 const ACCENT: u32 = std::design::color::ACCENT; // restrained blue
 const SUCCESS_EMERALD: u32 = std::design::color::SUCCESS; // muted green
+const DANGER: u32 = std::design::color::DANGER; // refused writes and destructive actions
 const GESTURE_BAR: u32 = 0xFFC4C3BD; // home indicator pill on the light base
 
 // -----------------------------------------------------------------------------
@@ -943,6 +1278,35 @@ const WP_ACTION_Y: usize = 1240;
 const WP_ACTION_H: usize = 64;
 /// Top of the outcome line.
 const WP_STATUS_Y: usize = 1330;
+
+// Screen lock panel layout
+// -----------------------------------------------------------------------------
+// One panel for all three owner decisions (set, change, remove), so there is a
+// single keypad and a single place the credential state is read from. The status
+// card states what the account layer actually reports; the keypad appears only
+// while a step is in progress, so the overview cannot look like a PIN prompt.
+
+/// Left edge and width shared by every panel element.
+const SL_X: usize = 24;
+const SL_W: usize = 672;
+/// The status card: what the account layer says about this account right now.
+const SL_STATUS_Y: usize = 128;
+const SL_STATUS_H: usize = 148;
+/// The step prompt and the typed-entry dots, present only mid-flow.
+const SL_PROMPT_Y: usize = 320;
+const SL_DOTS_Y: usize = 372;
+/// One keypad key; the grid is three across with the last row CLR / 0 / OK.
+const SL_KEY_W: usize = 200;
+const SL_KEY_H: usize = 112;
+const SL_KEY_GAP: usize = 24;
+const SL_KEYS_Y: usize = 448;
+/// The action row, whose contents follow the reported lock state.
+const SL_ACTION_Y: usize = 1024;
+const SL_ACTION_H: usize = 96;
+/// The outcome line under the actions.
+const SL_NOTE_Y: usize = 1176;
+/// Minimum digits the account layer will accept for a PIN.
+const SL_MIN_DIGITS: usize = 4;
 
 #[inline]
 fn run_w(text: &[u8], scale: usize, bold: bool) -> usize {
@@ -1283,6 +1647,10 @@ fn row_count(section: Section) -> usize {
         // user's own choice about their device's appearance, and the design's
         // wallpaper screen is a Personalisation item in every reference panel.
         Section::Personal => 4,
+        // WHY Security grew: the screen lock is the one owner decision this
+        // platform can actually carry out, and it belongs in the category the
+        // owner would look in for it rather than on the wallpaper panel.
+        Section::Security => 4,
         _ => 3,
     }
 }
@@ -1834,6 +2202,16 @@ fn row_pixel(
         },
         Section::Security => match row {
             0 => {
+                // The one row on this screen that reports a state this app can
+                // actually change, so it carries the account layer's own answer
+                // rather than the "UNAVAILABLE" treatment the rows below use for
+                // subsystems this platform has no way to read.
+                let (_, detail, ink, badge) = sl_state_line(app);
+                if let Some(c) = row_head(x, y, cy, b"Screen lock", detail, ink, badge, TEXT) {
+                    return c;
+                }
+            }
+            1 => {
                 if let Some(c) = row_head(
                     x,
                     y,
@@ -1845,7 +2223,7 @@ fn row_pixel(
                     return c;
                 }
             }
-            1 => {
+            2 => {
                 if let Some(c) = row_head(
                     x,
                     y,
@@ -2158,9 +2536,10 @@ fn wp_segment_rect(i: usize) -> (usize, usize, usize, usize) {
 /// painter is the only shape available. Every measurement below is a cheap
 /// integer step, not a text metric.
 fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
-    if y < 104 {
-        return BG;
-    }
+    // WHY there is no "y < 104 is empty" early return: the header below is drawn
+    // at y 40 and y 84, so this return was erasing the panel's own title and
+    // subtitle. It survives as the last few rows of the subtitle, which is why
+    // the header looked clipped rather than missing.
     // Header.
     if let Some(c) = run_ink(
         x,
@@ -2478,6 +2857,448 @@ pub enum WallpaperHit {
     Reset,
 }
 
+// Screen lock panel: rendering and hit-test
+// -----------------------------------------------------------------------------
+
+/// The keypad's digit for grid position `row`/`col`, or `None` for the CLR and OK
+/// keys that share the last row with the digits.
+///
+/// WHY the same 3x4 grid as the lock screen's own pad: the owner learns the
+/// keypad once. The geometry is identical on purpose - a key is where the
+/// owner's finger already expects it.
+fn sl_digit(row: usize, col: usize) -> Option<u8> {
+    match (row, col) {
+        (0, 0) => Some(b'1'),
+        (0, 1) => Some(b'2'),
+        (0, 2) => Some(b'3'),
+        (1, 0) => Some(b'4'),
+        (1, 1) => Some(b'5'),
+        (1, 2) => Some(b'6'),
+        (2, 0) => Some(b'7'),
+        (2, 1) => Some(b'8'),
+        (2, 2) => Some(b'9'),
+        (3, 1) => Some(b'0'),
+        _ => None,
+    }
+}
+
+/// Top-left of keypad key `row`/`col`.
+fn sl_key_origin(row: usize, col: usize) -> (usize, usize) {
+    (
+        SL_X + col * (SL_KEY_W + SL_KEY_GAP),
+        SL_KEYS_Y + row * (SL_KEY_H + SL_KEY_GAP),
+    )
+}
+
+/// The one sentence that describes the account layer's answer, and its ink.
+///
+/// WHY the credential query leads: the lock state cannot say whether a PIN
+/// exists, and only the account layer can. WHY each line is short: the card is
+/// measured against the badge, and a sentence long enough to be ellipsised is a
+/// sentence that does not get read.
+///
+/// WHY the refused case has its own line: "no PIN is set" and "the account layer
+/// did not answer" are different states, and collapsing them would show an owner
+/// a definite lock state the device never reported.
+fn sl_state_line(app: &SettingsApp) -> (&'static [u8], &'static [u8], u32, &'static [u8]) {
+    match app.screen_lock_has_credential {
+        None => (
+            b"Unknown",
+            b"The account layer did not answer",
+            TEXT_MUTED,
+            b"UNKNOWN",
+        ),
+        Some(false) => (
+            b"No PIN set",
+            b"The lock screen unlocks on a swipe",
+            TEXT_MUTED,
+            b"OFF",
+        ),
+        Some(true) => match app.screen_lock_reported {
+            Some(std::UserLockState::Unlocked) => (
+                b"PIN set",
+                b"Unlocked in this session",
+                TEXT,
+                b"PIN",
+            ),
+            Some(std::UserLockState::Lockout) => (
+                b"PIN set",
+                b"Locked out after failed attempts",
+                TEXT,
+                b"WAIT",
+            ),
+            Some(std::UserLockState::Uninitialized) => (
+                // WHY the account layer's two answers are reported rather than
+                // reconciled here: it says a credential exists while also
+                // reporting no initialized lock. Resolving that in this app
+                // would be inventing a state the kernel never reported.
+                b"PIN set",
+                b"The account reports no initialized lock",
+                TEXT_MUTED,
+                b"PIN",
+            ),
+            _ => (
+                b"PIN set",
+                b"Required to unlock this device",
+                TEXT,
+                b"PIN",
+            ),
+        },
+    }
+}
+
+/// The prompt for the step in progress, or an empty run on the overview.
+fn sl_prompt(app: &SettingsApp) -> &'static [u8] {
+    match app.screen_lock_mode {
+        ScreenLockMode::Idle => b"",
+        ScreenLockMode::EnterCurrent => match app.screen_lock_action {
+            ScreenLockAction::Change => b"Enter the current PIN",
+            ScreenLockAction::Remove => b"Enter the current PIN to remove it",
+            ScreenLockAction::Establish => b"Enter the current PIN",
+        },
+        ScreenLockMode::EnterNew => b"Enter a new PIN",
+        ScreenLockMode::ConfirmNew => b"Enter it again to confirm",
+    }
+}
+
+/// The complaint line for the current error, or an empty run.
+fn sl_error_line(app: &SettingsApp) -> &'static [u8] {
+    match app.screen_lock_error {
+        SL_ERR_SHORT => b"At least 4 digits are required",
+        SL_ERR_MISMATCH => b"The two entries did not match; nothing was written",
+        SL_ERR_REFUSED => b"The account layer refused the change; nothing was written",
+        SL_ERR_NOT_CURRENT => b"That is not the current PIN",
+        _ => b"",
+    }
+}
+
+/// The outcome line for the last credential write.
+fn sl_write_line(app: &SettingsApp) -> &'static [u8] {
+    match app.screen_lock_write {
+        ScreenLockWrite::Unattempted => {
+            b"Changes are written by the account layer and kept across reboots"
+        }
+        ScreenLockWrite::Established => b"A PIN is set and now required to unlock",
+        ScreenLockWrite::Changed => b"The PIN was replaced and now required to unlock",
+        ScreenLockWrite::Removed => b"The PIN was removed; the lock screen unlocks on a swipe",
+        ScreenLockWrite::Refused => b"The account layer refused the change; nothing changed",
+    }
+}
+
+/// The screen-lock panel, answering per pixel like every other surface here.
+fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
+    // WHY there is no "y < 104 is empty" early return here: the header lives at
+    // y 40 and y 84, so such a return erases the title and the subtitle and left
+    // only the subtitle's top rows visible above the card. The panel fills its
+    // own background at the end of this function instead.
+    if let Some(c) = run_ink(
+        x,
+        y,
+        SL_X + 72,
+        40,
+        2,
+        b"Screen lock",
+        SL_W - 72,
+        TEXT,
+        BG,
+        true,
+    ) {
+        return c;
+    }
+    if let Some(c) = run_ink(
+        x,
+        y,
+        SL_X + 72,
+        84,
+        1,
+        b"Set, change or remove the PIN this device asks for",
+        SL_W - 72,
+        TEXT_MUTED,
+        BG,
+        false,
+    ) {
+        return c;
+    }
+
+    // Status card: the account layer's own answer, with its badge.
+    if (SL_STATUS_Y..SL_STATUS_Y + SL_STATUS_H).contains(&y) {
+        let (_, _, _, badge) = sl_state_line(app);
+        let bw = badge_w(badge);
+        let bx0 = SL_X + SL_W - 24 - bw;
+        if in_round_rect(x, y, SL_X, SL_STATUS_Y, SL_W, SL_STATUS_H, 20) {
+            let inner = in_round_rect(
+                x,
+                y,
+                SL_X + 1,
+                SL_STATUS_Y + 1,
+                SL_W - 2,
+                SL_STATUS_H - 2,
+                19,
+            );
+            if !inner {
+                return BORDER;
+            }
+            let (headline, detail, ink, _) = sl_state_line(app);
+            if let Some(c) = run_ink(
+                x,
+                y,
+                SL_X + 24,
+                SL_STATUS_Y + 32,
+                2,
+                headline,
+                SL_W - 48 - bw - 16,
+                ink,
+                SURFACE,
+                true,
+            ) {
+                return c;
+            }
+            if let Some(c) = run_ink(
+                x,
+                y,
+                SL_X + 24,
+                SL_STATUS_Y + 88,
+                1,
+                detail,
+                SL_W - 48,
+                TEXT_MUTED,
+                SURFACE,
+                false,
+            ) {
+                return c;
+            }
+            if let Some(c) = badge_pixel(x, y, bx0, SL_STATUS_Y + 28, badge, TEXT, SURFACE) {
+                return c;
+            }
+            return SURFACE;
+        }
+        return BG;
+    }
+
+    // Step prompt and the typed-entry dots, only while a step is in progress.
+    if app.screen_lock_mode != ScreenLockMode::Idle {
+        if let Some(c) = run_ink(x, y, SL_X, SL_PROMPT_Y, 2, sl_prompt(app), SL_W, TEXT, BG, true) {
+            return c;
+        }
+        let line = sl_error_line(app);
+        if !line.is_empty() {
+            let ink = DANGER;
+            if let Some(c) = run_ink(x, y, SL_X, SL_PROMPT_Y + 40, 1, line, SL_W, ink, BG, false) {
+                return c;
+            }
+        }
+        // Eight dots, one per digit the account layer accepts, filled to the
+        // number typed so far. WHY eight and not four: the account layer accepts
+        // 4..=8, and a pad that drew four could not show a longer entry.
+        let dot = 16usize;
+        let gap = 20usize;
+        let total = 8 * dot + 7 * gap;
+        let dx0 = (SL_W - total) / 2;
+        let filled = app.screen_lock_len;
+        for i in 0..8usize {
+            let cx0 = SL_X + dx0 + i * (dot + gap);
+            let cy0 = SL_DOTS_Y;
+            if in_round_rect(x, y, cx0, cy0, dot, dot, 8) {
+                let inner = in_round_rect(x, y, cx0 + 2, cy0 + 2, dot - 4, dot - 4, 6);
+                if !inner {
+                    return BORDER;
+                }
+                return if i < filled { ACCENT } else { SOFT };
+            }
+        }
+    }
+
+    // Keypad.
+    if y >= SL_KEYS_Y && y < SL_KEYS_Y + 4 * (SL_KEY_H + SL_KEY_GAP) - SL_KEY_GAP {
+        for row in 0..4usize {
+            for col in 0..3usize {
+                let (kx, ky) = sl_key_origin(row, col);
+                if !in_round_rect(x, y, kx, ky, SL_KEY_W, SL_KEY_H, 24) {
+                    continue;
+                }
+                let inner = in_round_rect(x, y, kx + 2, ky + 2, SL_KEY_W - 4, SL_KEY_H - 4, 22);
+                if !inner {
+                    return BORDER;
+                }
+                let label: &[u8] = match sl_digit(row, col) {
+                    Some(d) => {
+                        let one = [d, 0];
+                        return run_one_digit(x, y, kx, ky, &one[..1], TEXT, SURFACE);
+                    }
+                    None if col == 0 => b"CLR",
+                    None => b"OK",
+                };
+                let lw = run_w(label, 1, true);
+                if let Some(c) = run_ink(
+                    x,
+                    y,
+                    kx + (SL_KEY_W - lw) / 2,
+                    ky + (SL_KEY_H - 16) / 2,
+                    1,
+                    label,
+                    SL_KEY_W,
+                    TEXT,
+                    SURFACE,
+                    true,
+                ) {
+                    return c;
+                }
+                return SURFACE;
+            }
+        }
+        return BG;
+    }
+
+    // Action row: what the reported state actually allows.
+    if (SL_ACTION_Y..SL_ACTION_Y + SL_ACTION_H).contains(&y) {
+        let half = (SL_W - 16) / 2;
+        let has_pin = app.screen_lock_has_pin();
+        // WHY the row is tested as ONE full-width button when no PIN exists: the
+        // first pass still split it into halves and drew only the left one, which
+        // left the right half of a visible full-width button as background and
+        // clipped the label against the half it did draw.
+        let left = in_round_rect(x, y, SL_X, SL_ACTION_Y, half, SL_ACTION_H, 16);
+        let right = has_pin
+            && in_round_rect(x, y, SL_X + half + 16, SL_ACTION_Y, half, SL_ACTION_H, 16);
+        let inside = if has_pin {
+            left || right
+        } else {
+            in_round_rect(x, y, SL_X, SL_ACTION_Y, SL_W, SL_ACTION_H, 16)
+        };
+        if !inside {
+            return BG;
+        }
+        // WHY the layout changes with the state rather than always drawing two
+        // buttons: an account with no PIN has nothing to change and nothing to
+        // remove, and an account with one has nothing to establish. Drawing both
+        // would put a second identical "Set PIN" on the screen -- which is what
+        // the first pass of this panel did.
+        let (label, fill, ink): (&[u8], u32, u32) = if !has_pin {
+            (&b"Set a screen lock PIN"[..], ACCENT, SURFACE)
+        } else if left {
+            (&b"Change PIN"[..], SURFACE, TEXT)
+        } else {
+            (&b"Remove PIN"[..], SURFACE, DANGER)
+        };
+        let (bx, bw) = if has_pin {
+            (if left { SL_X } else { SL_X + half + 16 }, half)
+        } else {
+            (SL_X, SL_W)
+        };
+        if !in_round_rect(x, y, bx + 1, SL_ACTION_Y + 1, bw - 2, SL_ACTION_H - 2, 15) {
+            return BORDER;
+        }
+        let lw = run_w(label, 1, true);
+        // WHY the label is fitted before it is centred: `bw - lw` underflows in
+        // usize when a label is wider than its button, and the wrapped origin put
+        // the text off the surface with the button drawn only part-way.
+        let origin = if lw >= bw { bx + 16 } else { bx + (bw - lw) / 2 };
+        if let Some(c) = run_ink(
+            x,
+            y,
+            origin,
+            SL_ACTION_Y + (SL_ACTION_H - 16) / 2,
+            1,
+            label,
+            bw - 32,
+            ink,
+            fill,
+            true,
+        ) {
+            return c;
+        }
+        return fill;
+    }
+
+    // Outcome line.
+    if y >= SL_NOTE_Y {
+        if let Some(c) = run_ink(x, y, SL_X, SL_NOTE_Y, 1, sl_write_line(app), SL_W, TEXT_MUTED, BG, false) {
+            return c;
+        }
+    }
+    BG
+}
+
+/// Draws one keypad digit, centred in its key.
+///
+/// WHY a helper rather than a formatted run: the keypad has one digit per key and
+/// building a string per pixel would allocate on a screen with no allocator.
+fn run_one_digit(
+    x: usize,
+    y: usize,
+    kx: usize,
+    ky: usize,
+    digit: &[u8],
+    ink: u32,
+    bg: u32,
+) -> u32 {
+    let adv = std::design::font::advance_of(digit[0], true);
+    let w = adv * 2;
+    let ox = kx + (SL_KEY_W - w) / 2;
+    let oy = ky + (SL_KEY_H - std::design::font::line_height(2)) / 2;
+    match run_ink(x, y, ox, oy, 2, digit, SL_KEY_W, ink, bg, true) {
+        Some(c) => c,
+        None => bg,
+    }
+}
+
+/// What was pressed on the screen-lock panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenLockHit {
+    /// Keypad digit.
+    Digit(u8),
+    /// The CLR key.
+    Clear,
+    /// The OK key, which submits the typed entry.
+    Submit,
+    /// The left action button: Set PIN when no PIN exists, Change PIN when one does.
+    Primary,
+    /// The Remove PIN button.
+    Remove,
+}
+
+fn screen_lock_at(px: u32, py: u32, app: &SettingsApp) -> Option<ScreenLockHit> {
+    let x = px as usize;
+    let y = py as usize;
+    // WHY the keypad only answers mid-flow: on the overview there is nothing to
+    // type, and a dead keypad that still reacts would look like a screen waiting
+    // for a PIN it was never asked for.
+    if app.screen_lock_mode != ScreenLockMode::Idle && y >= SL_KEYS_Y {
+        for row in 0..4usize {
+            for col in 0..3usize {
+                let (kx, ky) = sl_key_origin(row, col);
+                if in_round_rect(x, y, kx, ky, SL_KEY_W, SL_KEY_H, 24) {
+                    return Some(match sl_digit(row, col) {
+                        Some(d) => ScreenLockHit::Digit(d),
+                        None if col == 0 => ScreenLockHit::Clear,
+                        None => ScreenLockHit::Submit,
+                    });
+                }
+            }
+        }
+    }
+    if (SL_ACTION_Y..SL_ACTION_Y + SL_ACTION_H).contains(&y) {
+        let half = (SL_W - 16) / 2;
+        let has_pin = app.screen_lock_has_pin();
+        // WHY the hit regions mirror the drawn geometry exactly: with no PIN the
+        // single button spans the full width, so only testing the left half
+        // would leave the right half of a visible button inert.
+        if !has_pin {
+            if in_round_rect(x, y, SL_X, SL_ACTION_Y, SL_W, SL_ACTION_H, 16) {
+                return Some(ScreenLockHit::Primary);
+            }
+        } else {
+            if in_round_rect(x, y, SL_X, SL_ACTION_Y, half, SL_ACTION_H, 16) {
+                return Some(ScreenLockHit::Primary);
+            }
+            if in_round_rect(x, y, SL_X + half + 16, SL_ACTION_Y, half, SL_ACTION_H, 16) {
+                return Some(ScreenLockHit::Remove);
+            }
+        }
+    }
+    None
+}
+
 #[inline(never)]
 fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
     // Home gesture pill (matches the touch handler's exit region).
@@ -2494,6 +3315,11 @@ fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
     if app.wallpaper_open {
         return wallpaper_pixel(x, y, app);
     }
+    // WHY checked before the wallpaper panel: both own the whole surface, and
+    // whichever was opened last is the one in front.
+    if app.screen_lock_open {
+        return screen_lock_pixel(x, y, app);
+    }
     match app.current_section {
         None => landing_pixel(x, y),
         Some(section) => detail_pixel(x, y, app, section),
@@ -2505,11 +3331,25 @@ fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
 // -----------------------------------------------------------------------------
 
 fn render_settings_ui(surface: u32, app: &SettingsApp) {
+    render_settings_band(surface, app, 0, H);
+}
+
+/// Repaints only rows `y0..y1`.
+///
+/// WHY this exists: every tap used to push all 1,036,800 pixels through the
+/// painter. Under the QEMU TCG debug profile a full repaint of this surface takes
+/// 15-30 seconds, so taps that arrived while it was still running were dropped
+/// by the guest and digits went missing from a PIN entry -- the screen was
+/// correct, the device just felt broken. Typing a digit changes one band: the
+/// step prompt, its error line and the entry dots. The keypad, the status card
+/// and the action row are all still correct underneath it.
+fn render_settings_band(surface: u32, app: &SettingsApp, y0: usize, y1: usize) {
+    let y0 = y0.min(H);
+    let y1 = y1.min(H);
     let mut chunk = [0u32; CHUNK];
-    let total = W * H;
-    let mut offset = 0;
-    while offset < total {
-        let count = (total - offset).min(CHUNK);
+    let mut offset = y0 * W;
+    while offset < y1 * W {
+        let count = (y1 * W - offset).min(CHUNK);
         let mut x = offset % W;
         let mut y = offset / W;
         for i in 0..count {
@@ -2609,6 +3449,12 @@ pub extern "C" fn _start() -> ! {
                         std::exit_with_code(0);
                     }
                     if input.kind == 1 {
+                        // WHY this flag: the repaint at the end of this block runs
+                        // for EVERY tap, so a branch that has already repainted
+                        // the only band it changed would be immediately followed
+                        // by a full 1,036,800-pixel repaint -- which is what
+                        // dropped the taps that followed a PIN digit.
+                        let mut repainted_band = false;
                         // Back control: pop to the landing grid, or exit the
                         // app when already on the landing grid. Home gesture
                         // bar always exits to the launcher.
@@ -2621,12 +3467,24 @@ pub extern "C" fn _start() -> ! {
                             BACK_S,
                             14,
                         ) {
-                            // WHY the picker pops first: Back from it must return
-                            // to the Personal detail it was opened from, and a
-                            // Back that jumped straight to the landing grid would
-                            // lose the section the user was in. It also never
-                            // writes, so leaving the panel is the cancel path.
-                            if settings.wallpaper_open {
+                            // WHY the panels pop first: Back from one must return to the
+                            // detail it was opened from, and a Back that jumped
+                            // straight to the landing grid would lose the section
+                            // the user was in. Neither panel writes on the way
+                            // out, so leaving one is always the cancel path.
+                            if settings.screen_lock_open {
+                                // A step in progress is abandoned before the
+                                // panel itself: Back must not leave a half-typed
+                                // PIN behind for the next visit to find.
+                                if !settings.screen_lock_cancel_step() {
+                                    settings.screen_lock_open = false;
+                                    std::log(
+                                        0,
+                                        "[SETTINGS APP] Screen lock panel dismissed.",
+                                    )
+                                    .ok();
+                                }
+                            } else if settings.wallpaper_open {
                                 settings.wallpaper_open = false;
                                 std::log(
                                     0,
@@ -2666,6 +3524,85 @@ pub extern "C" fn _start() -> ! {
                                 let _ = std::surface_destroy(6, surface);
                             }
                             std::exit_with_code(0);
+                        } else if settings.screen_lock_open {
+                            // WHY the panel is matched before the section controls:
+                            // while it is open it owns the whole surface, so a tap on
+                            // a keypad key must not also reach the detail row
+                            // underneath it -- that is how a PIN digit would once
+                            // toggle a setting on a screen the owner is not looking
+                            // at.
+                            match screen_lock_at(input.x, input.y, &settings) {
+                                Some(ScreenLockHit::Digit(d)) => {
+                                    settings.screen_lock_push(d);
+                                    // WHY only the prompt band: a digit changes the
+                                    // dots and nothing else, and a full repaint
+                                    // here is what made taps get dropped.
+                                    if surface > 0 {
+                                        render_settings_band(
+                                            surface,
+                                            &settings,
+                                            SL_PROMPT_Y - 24,
+                                            SL_KEYS_Y,
+                                        );
+                                        let _ = std::surface_flip(6);
+                                        repainted_band = true;
+                                    }
+                                }
+                                Some(ScreenLockHit::Clear) => {
+                                    settings.screen_lock_pop();
+                                    if surface > 0 {
+                                        render_settings_band(
+                                            surface,
+                                            &settings,
+                                            SL_PROMPT_Y - 24,
+                                            SL_KEYS_Y,
+                                        );
+                                        let _ = std::surface_flip(6);
+                                        repainted_band = true;
+                                    }
+                                }
+                                Some(ScreenLockHit::Submit) => {
+                                    // WHY the mode is compared across the submit:
+                                    // OK between two entry steps changes the
+                                    // prompt and the dots and leaves the keypad on
+                                    // screen, so it repaints that band only. OK
+                                    // that finishes a write returns to the
+                                    // overview, hides the keypad and re-reads the
+                                    // account layer, which needs the full surface.
+                                    let was_typing = settings.screen_lock_mode
+                                        != ScreenLockMode::Idle;
+                                    settings.screen_lock_submit();
+                                    let still_typing =
+                                        settings.screen_lock_mode != ScreenLockMode::Idle;
+                                    if surface > 0 && was_typing && still_typing {
+                                        render_settings_band(
+                                            surface,
+                                            &settings,
+                                            SL_PROMPT_Y - 24,
+                                            SL_KEYS_Y,
+                                        );
+                                        let _ = std::surface_flip(6);
+                                        repainted_band = true;
+                                    }
+                                }
+                                Some(ScreenLockHit::Primary) => {
+                                    // WHY the action follows the reported state
+                                    // rather than being fixed at paint time: the
+                                    // same button is "set" for an account with no
+                                    // PIN and "change" for one that has it, and the
+                                    // state is re-read after every write.
+                                    let action = if settings.screen_lock_has_pin() {
+                                        ScreenLockAction::Change
+                                    } else {
+                                        ScreenLockAction::Establish
+                                    };
+                                    settings.screen_lock_begin(action);
+                                }
+                                Some(ScreenLockHit::Remove) => {
+                                    settings.screen_lock_begin(ScreenLockAction::Remove)
+                                }
+                                None => {}
+                            }
                         } else if settings.wallpaper_open {
                             // WHY this is checked before the section controls: the
                             // picker owns the whole surface while it is open, so a
@@ -2747,6 +3684,20 @@ pub extern "C" fn _start() -> ! {
                                         settings.toggle_terminal();
                                     }
                                 }
+                                Section::Security => {
+                                    let (cy, ch) = detail_row_rect(Section::Security, 0);
+                                    if in_round_rect(
+                                        input.x as usize,
+                                        input.y as usize,
+                                        DETAIL_X,
+                                        cy,
+                                        DETAIL_W,
+                                        ch,
+                                        CARD_R,
+                                    ) {
+                                        settings.open_screen_lock();
+                                    }
+                                }
                                 _ => {}
                             }
                         } else if let Some(section) = landing_card_at(input.x, input.y) {
@@ -2763,7 +3714,7 @@ pub extern "C" fn _start() -> ! {
                             )
                             .ok();
                         }
-                        if surface > 0 {
+                        if surface > 0 && !repainted_band {
                             render_settings_ui(surface, &settings);
                             let _ = std::surface_flip(6);
                         }
