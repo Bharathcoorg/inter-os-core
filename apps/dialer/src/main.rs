@@ -519,6 +519,14 @@ const BACKSPACE_R: i32 = 24;
 const KEY_R: i32 = 50;
 const KEY_DIGIT_SCALE: usize = 3;
 const KEY_SUB_SCALE: usize = 1;
+/// Rows the stacked runs sit above centre. The 96-row stack cannot centre
+/// inside the rim's 92-row interior (±46): centred at cy±48 the sublabel's
+/// lowest ink reaches dy +43, where a glyph with bottom-row ink at |dx| 17 or
+/// more -- the foot of `Z` on the 9 key -- lands outside the rim and reads as
+/// rim grey, so the key says "WXY7". Six rows up puts that foot at dy +37
+/// (inside at |dx| 25) while the digit's top bar stays at dy -45 (inside at
+/// |dx| 8), clearing both ends of the stack.
+const KEY_STACK_LIFT: usize = 6;
 
 // SOS emergency disc.
 const SOS_CX: usize = 134;
@@ -882,13 +890,15 @@ fn keypad_pixel(x: usize, y: usize) -> u32 {
                         // The two runs are stacked, not intersecting: the
                         // scale-3 digit box (72 rows) sits on top and the
                         // scale-1 sublabel box (24 rows) directly beneath it,
-                        // the 96-row stack centring to cy-48..cy+48 inside the
-                        // disc's cy-50..cy+50. The old boxes were cy-24..cy+48
-                        // and cy+12..cy+36, which put the whole sublabel ink
-                        // band inside the digit's.
+                        // the 96-row stack lifted `KEY_STACK_LIFT` rows above
+                        // centre so both ends clear the rim (see the constant).
+                        // The old boxes were cy-24..cy+48 and cy+12..cy+36,
+                        // which put the whole sublabel ink band inside the
+                        // digit's.
                         let digit_rows = run_rows(KEY_DIGIT_SCALE);
                         let sub_rows = run_rows(KEY_SUB_SCALE);
-                        let stack_y0 = (cy as usize).saturating_sub((digit_rows + sub_rows) / 2);
+                        let stack_y0 = (cy as usize)
+                            .saturating_sub((digit_rows + sub_rows) / 2 + KEY_STACK_LIFT);
 
                         // Digit text
                         if let Some(digit) = get_keypad_char(row, col) {
