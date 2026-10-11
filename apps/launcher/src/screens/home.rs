@@ -243,10 +243,14 @@ fn frame() -> Frame {
         card.w - space::LG * 2,
         card.h - space::MD - space::XXL - space::SM,
     );
+    // WHY x 30 and 660 wide: the band must cover the drawn tiles (`DOCK_TILES`
+    // run 30..690 with 30px gutters, the reference's own gutter), or the outer
+    // 18px of both edge columns falls through to the wallpaper. It used to be
+    // 48..672, which clipped exactly that.
     let deck = Rect::new(
-        48,
+        30,
         700,
-        624,
+        660,
         620,
     );
     // WHY directly below the deck: the deck ends at 1320 and the nav bar starts
@@ -802,9 +806,14 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
         slots: 6,
         columns: 3,
         rows: 2,
-        origin_x: 48,
+        // WHY 30 and 230: the origin and pitch must name the drawn grid
+        // (`DOCK_TILES` at x 30/260/490, 200 wide with 30px gutters), or
+        // `slot_at` resolves taps and pixels against a grid the painter never
+        // drew. The pitch used to be 217 from a 48 origin, a third grid that
+        // matched neither the tiles nor the tap ranges.
+        origin_x: 30,
         origin_y: 700,
-        pitch_x: 217,
+        pitch_x: 230,
         pitch_y: 320,
         app_count: 6,
         empty: None,
@@ -948,11 +957,14 @@ fn deck_grid(_state: &LauncherState) -> layout::Grid {
 /// Which catalogue index a touch at (`x`, `y`) lands on, if any.
 #[allow(dead_code)]
 pub fn home_hit(state: &LauncherState, x: usize, y: usize) -> Option<usize> {
-    let col = if (48..238).contains(&x) {
+    // WHY these ranges are the tile rects and not the old 48-based ones: the tap
+    // must answer for exactly what the painter draws (`DOCK_TILES`), or the
+    // outer 18px of both edge columns would launch nothing while showing tile.
+    let col = if (30..230).contains(&x) {
         0
-    } else if (265..455).contains(&x) {
+    } else if (260..460).contains(&x) {
         1
-    } else if (482..672).contains(&x) {
+    } else if (490..690).contains(&x) {
         2
     } else {
         return None;
