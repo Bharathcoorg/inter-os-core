@@ -1,4 +1,4 @@
-﻿//! Typography over the shared InterOS design face (`interos_std::design::font`).
+//! Typography over the shared InterOS design face (`interos_std::design::font`).
 //!
 //! WHY THIS REPLACED THE OLD MODULE: this app used to carry its own 8x8 face
 //! with a fixed 8px-per-character advance and no anti-aliasing. That advance is
@@ -23,12 +23,14 @@ pub const RUN_CAP: usize = 96;
 
 /// Measured width of `text` at `scale`.
 #[inline]
+#[allow(dead_code)]
 pub fn width(text: &[u8], scale: usize) -> usize {
     face::measure(text, scale)
 }
 
 /// Height of one line box at `scale` (24 source rows, so `24 * scale`).
 #[inline]
+#[allow(dead_code)]
 pub fn line_height(scale: usize) -> usize {
     face::line_height(scale)
 }
@@ -110,6 +112,7 @@ pub fn ink(
 
 /// Right-aligned variant of `ink`: identical guarantees, the run ends at `x1`.
 #[inline]
+#[allow(dead_code)]
 pub fn ink_right(
     x: usize,
     y: usize,
@@ -128,6 +131,7 @@ pub fn ink_right(
 
 /// Centred variant of `ink` inside `[x0, x0 + max_w)`.
 #[inline]
+#[allow(dead_code)]
 pub fn ink_center(
     x: usize,
     y: usize,

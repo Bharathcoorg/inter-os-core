@@ -544,6 +544,7 @@ fn sector_tile(index: usize) -> (&'static [u8], &'static [u8]) {
 }
 
 /// Kernel status code names, as the kernel spells them.
+#[allow(dead_code)]
 fn status_name(code: i64) -> &'static [u8] {
     match code {
         -1 => b"PermissionDenied",
@@ -1026,12 +1027,14 @@ fn get_vault_pixel(x: usize, y: usize, vault: &VaultApp) -> u32 {
 // Small formatting helpers
 // -----------------------------------------------------------------------------
 
+#[allow(dead_code)]
 fn font_copy(s: &[u8], out: &mut [u8]) -> usize {
     let n = s.len().min(out.len());
     out[..n].copy_from_slice(&s[..n]);
     n
 }
 
+#[allow(dead_code)]
 fn write_i64(v: i64, out: &mut [u8]) -> usize {
     if v < 0 && !out.is_empty() {
         out[0] = b'-';
@@ -1040,6 +1043,7 @@ fn write_i64(v: i64, out: &mut [u8]) -> usize {
     write_u64(v as u64, out)
 }
 
+#[allow(dead_code)]
 fn write_u64(mut v: u64, out: &mut [u8]) -> usize {
     if out.is_empty() {
         return 0;

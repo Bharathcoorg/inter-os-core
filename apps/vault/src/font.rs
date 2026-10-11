@@ -9,6 +9,7 @@
 use interos_std::design::font as face;
 
 /// Re-export of the SDK word-wrapping helper (breaks on spaces, never mid-word).
+#[allow(unused_imports)]
 pub use interos_std::design::font::wrap_text;
 
 /// Maximum bytes a single fitted run may occupy. Every source run in this app

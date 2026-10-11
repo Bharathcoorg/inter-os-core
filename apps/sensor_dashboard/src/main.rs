@@ -1142,7 +1142,6 @@ fn power_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
             if let Some(c) = row(x, y, at(slot), b"Capacity", &w[..n], OK, b"battery_query() -> capacity") {
                 return Some(c);
             }
-            slot += 1;
         }
         Battery::Absent { governor, governor_len, mhz } => {
             let mut w = [0u8; 40];
@@ -1156,7 +1155,7 @@ fn power_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
             n = n + write_lit(b" ", &mut w[n..]);
             n = n + fmt_i64(*mhz, &mut w[n..]);
             n = n + write_lit(b" MHz", &mut w[n..]);
-            if let Some(c) = row(x, y, 1194, b"DVFS governor", &w[..n], MUTED, b"battery_query() -> governor, mhz") {
+            if let Some(c) = row(x, y, at(slot), b"DVFS governor", &w[..n], MUTED, b"battery_query() -> governor, mhz") {
                 return Some(c);
             }
         }

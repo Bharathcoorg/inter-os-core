@@ -52,6 +52,7 @@ const CHUNK: usize = 4096;
 const STATUS_H: usize = 48;
 
 /// y 48..120: toolbar (address bar + reload + close).
+#[allow(dead_code)]
 const TOOLBAR_Y0: usize = STATUS_H;
 const TOOLBAR_Y1: usize = 120;
 
@@ -963,13 +964,13 @@ pub extern "C" fn _start() -> ! {
                                 "[BROWSER APP] Navigation gesture recognized. Exiting to launcher.",
                             )
                             .ok();
-                            return destroy_and_exit(surface);
+                            destroy_and_exit(surface);
                         }
                         if input.kind == 1 {
                             match handle_tap(&mut browser, input.x, input.y) {
                                 Tap::Leave(msg) => {
                                     std::log(0, msg).ok();
-                                    return destroy_and_exit(surface);
+                                    destroy_and_exit(surface);
                                 }
                                 Tap::Redraw => dirty = Dirty::All,
                                 Tap::None => {}
