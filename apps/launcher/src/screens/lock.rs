@@ -1002,16 +1002,13 @@ fn pin_key_face(
 /// [`lock_pin_pad_pixel`] draws with, so a key's tappable region is exactly its
 /// visible circle.
 pub fn hit_test_pin_pad(x: usize, y: usize) -> Option<char> {
-    for (row, &cy) in PIN_ROWS.iter().enumerate() {
-        for (col, &cx) in PIN_COLS.iter().enumerate() {
-            let dx = (x as i32) - (cx as i32);
-            let dy = (y as i32) - (cy as i32);
-            if dx * dx + dy * dy <= PIN_KEY_R * PIN_KEY_R {
-                return Some(PIN_KEYS[row][col]);
-            }
-        }
-    }
-    None
+    // WHY this delegates: the PadEntry surface in `pin.rs` is what the user sees
+    // and presses, so the hit test resolves a point against that surface's own
+    // key rectangles. The table that used to answer here placed rows at
+    // 700/840/980/1120 while the surface draws 572/700/828/956, so the top row
+    // resolved to nothing and the bottom row resolved to the row above it - a
+    // PIN typed against the surface could be stored as different digits.
+    crate::screens::key_at(x, y)
 }
 
 /// How opaque the PIN pad's own backdrop is.

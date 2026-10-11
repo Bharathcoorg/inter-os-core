@@ -17,7 +17,7 @@
 //! sixteen-app grid whatever the registry held. Nothing in this file knows how
 //! many apps exist.
 
-use crate::{test_text, LauncherState};
+use crate::{test_text_aa, LauncherState};
 use launcher::layout::{self, Rect};
 use launcher::text;
 use launcher::theme::{
@@ -495,15 +495,20 @@ impl Run {
         }
     }
 
-    /// The colour of (`px`, `py`) if this run inks it.
-    fn pixel(&self, px: usize, py: usize) -> Option<u32> {
+    /// The colour of (`px`, `py`) if this run inks it, anti-aliased against `bg`.
+    ///
+    /// WHY this exists beside the 1-bit path: the font rasteriser carries 2-bit
+    /// coverage (`font::coverage`), and a hard-edged glyph over a flat card shows
+    /// a stair-stepped outline that the reference's typography does not have.
+    /// The blend is per covered pixel, so the cost is confined to the glyph.
+    fn pixel_on(&self, px: usize, py: usize, bg: u32) -> Option<u32> {
         if self.len == 0 {
             return None;
         }
         if px < self.x || px - self.x >= self.w || py < self.y || py - self.y >= self.h {
             return None;
         }
-        test_text(px, py, self.x, self.y, self.scale, &self.bytes[..self.len], self.ink)
+        test_text_aa(px, py, self.x, self.y, self.scale, &self.bytes[..self.len], self.ink, bg)
     }
 }
 
@@ -879,7 +884,7 @@ fn status_bar(x: usize, y: usize, theme: &Theme, s: &StatusPlan) -> u32 {
     // per pixel: with no RTC authority granted the read is refused, and drawing a
     // stale or placeholder reading on chrome the user glances at would present an
     // unmeasured value as a measurement.
-    if let Some(c) = s.clock.as_ref().and_then(|r| r.pixel(x, y)) {
+    if let Some(c) = s.clock.as_ref().and_then(|r| r.pixel_on(x, y, theme.bg)) {
         return c;
     }
 
@@ -946,7 +951,7 @@ fn search_field(x: usize, y: usize, field: &Rect, theme: &Theme, p: &Paint) -> u
     // number the drawer's own log line reports, and a field that says how many are
     // installed is a status line that looks like an input. The count is formatted
     // once per frame now, rather than for every pixel of the field.
-    if let Some(c) = p.search.pixel(x, y) {
+    if let Some(c) = p.search.pixel_on(x, y, theme.surface_raised) {
         return c;
     }
     theme.surface_raised
@@ -958,7 +963,7 @@ fn filter_chips(x: usize, y: usize, theme: &Theme, p: &Paint) -> u32 {
         if chip.rect.contains(x, y) {
             let rad = chip.rect.h / 2;
             if inside_rounded(chip.rect, x, y, rad) {
-                if let Some(c) = chip.label.pixel(x, y) {
+                if let Some(c) = chip.label.pixel_on(x, y, theme.surface_raised) {
                     return c;
                 }
                 if chip.active {
@@ -1015,11 +1020,11 @@ fn pagination_dots(x: usize, y: usize, theme: &Theme, p: &Paint) -> u32 {
 /// WHY the body is resolved here: it is a constant, but the old painter re-wrapped it
 /// and re-centred each of its lines for every pixel of the grid area.
 fn empty_catalogue(x: usize, y: usize, theme: &Theme, p: &EmptyPlan) -> u32 {
-    if let Some(c) = p.head.pixel(x, y) {
+    if let Some(c) = p.head.pixel_on(x, y, theme.bg) {
         return c;
     }
     for line in 0..p.body_count {
-        if let Some(c) = p.body[line].pixel(x, y) {
+        if let Some(c) = p.body[line].pixel_on(x, y, theme.bg) {
             return c;
         }
     }
@@ -1043,14 +1048,14 @@ fn app_tile(x: usize, y: usize, theme: &Theme, t: &TilePlan) -> u32 {
             if let Some(c) = launcher::icons::rasterize_icon_pixel(kind, x, y, t.disc.center_x(), t.disc.center_y(), ink) {
                 return c;
             }
-        } else if let Some(c) = t.badge.pixel(x, y) {
+        } else if let Some(c) = t.badge.pixel_on(x, y, theme.surface) {
             return c;
         }
         return theme.surface;
     }
 
     // 2. App name label
-    if let Some(c) = t.label.pixel(x, y) {
+    if let Some(c) = t.label.pixel_on(x, y, theme.bg) {
         return c;
     }
 

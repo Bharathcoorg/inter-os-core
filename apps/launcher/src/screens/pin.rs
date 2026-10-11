@@ -69,7 +69,14 @@ pub fn get_pin_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return BG;
     }
 
-    let heading = if state.pin_setup_mode { b"Set Device PIN".as_slice() } else { b"Enter PIN".as_slice() };
+    // WHY the step is shown: first boot asks for the PIN twice, and a second
+    // screen captioned "Set Device PIN" reads as a reset of the first rather
+    // than a confirmation of it.
+    let heading = if state.pin_setup_mode {
+        if state.pin_setup_step == 0 { b"Set Device PIN".as_slice() } else { b"Confirm Device PIN".as_slice() }
+    } else {
+        b"Enter PIN".as_slice()
+    };
     if let Some(c) = test_text_aa(x, y, 48, 150, 3, heading, TEXT, BG) {
         return c;
     }
@@ -91,7 +98,11 @@ pub fn get_pin_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         if let Some(c) = test_text_aa(x, y, 250, 360, 1, msg, DANGER, BG) {
             return c;
         }
-    } else if let Some(c) = test_text_aa(x, y, 250, 360, 1, if state.pin_setup_mode { b"Choose at least 4 digits".as_slice() } else { b"Enter your device PIN".as_slice() }, MUTED, BG) {
+    } else if state.pin_setup_mode && state.pin_setup_step == 1 {
+        if let Some(c) = test_text_aa(x, y, 250, 360, 1, b"Re-enter the same PIN", MUTED, BG) {
+            return c;
+        }
+    } else if let Some(c) = test_text_aa(x, y, 250, 360, 1, if state.pin_setup_mode { b"Choose 4 to 8 digits".as_slice() } else { b"Enter your device PIN".as_slice() }, MUTED, BG) {
         return c;
     }
 
@@ -130,4 +141,40 @@ pub fn get_pin_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     }
 
     BG
+}
+
+/// The key a point on the PIN surface presses, or `None` outside every key.
+///
+/// WHY this lives beside [`key_rect`]: the hit test and the drawing must agree
+/// about where a key is, and they used to be two separate geometries - the
+/// drawer's own pad table placed its rows at 700/840/980/1120 while this surface
+/// draws them at 572/700/828/956. The top row therefore did not hit-test at all
+/// and the bottom row answered as the row above it, which is why entering a PIN
+/// through the surface could register the wrong digits. Resolving a point
+/// against `key_rect` means there is exactly one pad geometry to change.
+///
+/// `'E'` is the UNLOCK action and `'D'` the DEL action, matching the two buttons
+/// this surface draws beneath the keys.
+pub fn key_at(x: usize, y: usize) -> Option<char> {
+    for row in 0..3 {
+        for col in 0..3 {
+            let rect = key_rect(col, row);
+            if round_contains(&rect, 18, x, y) {
+                return Some(key_digit(col, row) as char);
+            }
+        }
+    }
+    let zero = key_rect(1, 3);
+    if round_contains(&zero, 18, x, y) {
+        return Some('0');
+    }
+    let back = Rect::new(490, 1036, 100, 90);
+    if round_contains(&back, 18, x, y) {
+        return Some('D');
+    }
+    let enter = Rect::new(130, 1036, 300, 90);
+    if round_contains(&enter, 18, x, y) {
+        return Some('E');
+    }
+    None
 }

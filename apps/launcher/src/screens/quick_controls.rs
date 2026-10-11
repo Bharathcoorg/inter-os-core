@@ -748,6 +748,28 @@ impl LabelRun {
             self.ink,
         )
     }
+
+    /// As [`Run::pixel`], anti-aliased against `bg` so a glyph over a flat panel
+    /// does not show a stair-stepped outline.
+    #[inline]
+    fn pixel_on(&self, px: usize, py: usize, bg: u32) -> Option<u32> {
+        if self.len == 0 {
+            return None;
+        }
+        if px < self.x || px >= self.x + self.w || py < self.y || py >= self.y + self.h {
+            return None;
+        }
+        crate::test_text_aa(
+            px,
+            py,
+            self.x,
+            self.y,
+            self.scale,
+            &self.bytes[..self.len],
+            self.ink,
+            bg,
+        )
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -1393,10 +1415,10 @@ fn row_pixel(x: usize, y: usize, row: &RowFrame, theme: &Theme) -> Option<u32> {
     if icon_bits(row.icon, x as i32 - cx as i32, y as i32 - cy as i32) {
         return Some(row.ink);
     }
-    if let Some(c) = row.label.pixel(x, y) {
+    if let Some(c) = row.label.pixel_on(x, y, row.fill) {
         return Some(c);
     }
-    if let Some(c) = row.value.pixel(x, y) {
+    if let Some(c) = row.value.pixel_on(x, y, row.fill) {
         return Some(c);
     }
     Some(row.fill)

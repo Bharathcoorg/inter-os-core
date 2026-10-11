@@ -17,7 +17,7 @@
 
 #![allow(dead_code)]
 
-use crate::{test_text, LauncherState};
+use crate::{test_text, test_text_aa, LauncherState};
 use launcher::icons::{self, IconKind};
 use launcher::layout::Rect;
 use launcher::text;
@@ -201,6 +201,27 @@ impl LabelRun {
             self.ink,
         )
     }
+
+    /// As [`Run::pixel`], anti-aliased against `bg` so a glyph over a flat card
+    /// does not show a stair-stepped outline.
+    fn pixel_on(&self, px: usize, py: usize, bg: u32) -> Option<u32> {
+        if self.len == 0 {
+            return None;
+        }
+        if px < self.x || px >= self.x + self.w || py < self.y || py >= self.y + self.h {
+            return None;
+        }
+        test_text_aa(
+            px,
+            py,
+            self.x,
+            self.y,
+            self.scale,
+            &self.bytes[..self.len],
+            self.ink,
+            bg,
+        )
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -331,7 +352,7 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
 
     // 1. Status Bar (y < 48)
     if y < STATUS_BAR_HEIGHT + 12 {
-        if let Some(c) = f.clock.pixel(x, y) {
+        if let Some(c) = f.clock.pixel_on(x, y, BG_COLOR) {
             return c;
         }
         return color;
@@ -339,7 +360,7 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
 
     // 2. Header
     if y < 120 {
-        if let Some(c) = f.title.pixel(x, y) {
+        if let Some(c) = f.title.pixel_on(x, y, BG_COLOR) {
             return c;
         }
         // WHY no header icon is drawn at the right: a three-line sliders mark
@@ -354,7 +375,7 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
     // y 650 and always held zero bytes, so it never inked a pixel -- and 650 is
     // inside the card stack now that the stack is anchored to the clear-all pill.
     // An always-empty header at a hardcoded y is a header waiting to become a lie.
-    if let Some(c) = f.today_label.pixel(x, y) {
+    if let Some(c) = f.today_label.pixel_on(x, y, BG_COLOR) {
         return c;
     }
 
@@ -380,10 +401,10 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
                     }
 
                     // Labels
-                    if let Some(c) = card.title.pixel(x, y) {
+                    if let Some(c) = card.title.pixel_on(x, y, CARD_BG) {
                         return c;
                     }
-                    if let Some(c) = card.subtitle.pixel(x, y) {
+                    if let Some(c) = card.subtitle.pixel_on(x, y, CARD_BG) {
                         return c;
                     }
                     return color;
@@ -399,7 +420,7 @@ pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32
             if rounded_outline(f.clear_btn, x, y, 22) {
                 return 0xFFE2E8F0;
             }
-            if let Some(c) = f.clear_label.pixel(x, y) {
+            if let Some(c) = f.clear_label.pixel_on(x, y, 0xFFF1F5F9) {
                 return c;
             }
             return color;

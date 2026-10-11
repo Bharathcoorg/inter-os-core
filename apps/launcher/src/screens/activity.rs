@@ -35,7 +35,7 @@
 
 #![allow(dead_code)]
 
-use crate::{test_text, LauncherState};
+use crate::{test_text, test_text_aa, LauncherState};
 use launcher::icons::{self, IconKind};
 use launcher::layout::Rect;
 use launcher::text;
@@ -547,6 +547,28 @@ impl LabelRun {
             self.ink,
         )
     }
+
+    /// As [`Run::pixel`], anti-aliased against `bg` so a glyph over a flat card
+    /// does not show a stair-stepped outline.
+    #[inline]
+    fn pixel_on(&self, px: usize, py: usize, bg: u32) -> Option<u32> {
+        if self.len == 0 {
+            return None;
+        }
+        if px < self.x || px >= self.x + self.w || py < self.y || py >= self.y + self.h {
+            return None;
+        }
+        test_text_aa(
+            px,
+            py,
+            self.x,
+            self.y,
+            self.scale,
+            &self.bytes[..self.len],
+            self.ink,
+            bg,
+        )
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -959,7 +981,7 @@ pub fn get_activity_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 
     // 1. Status Bar (y < 60)
     if y < STATUS_BAR_HEIGHT + 12 {
-        if let Some(c) = f.clock.pixel(x, y) {
+        if let Some(c) = f.clock.pixel_on(x, y, BG_COLOR) {
             return c;
         }
         return color;
@@ -972,10 +994,10 @@ pub fn get_activity_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     // rather than falling through into the card loop, which would otherwise have
     // to reject every pixel here again.
     if y >= STATUS_BAND_TOP && y < WORKSPACE_CARDS[0].y {
-        if let Some(c) = f.status_head.pixel(x, y) {
+        if let Some(c) = f.status_head.pixel_on(x, y, BG_COLOR) {
             return c;
         }
-        if let Some(c) = f.status_body.pixel(x, y) {
+        if let Some(c) = f.status_body.pixel_on(x, y, BG_COLOR) {
             return c;
         }
         return color;
@@ -1012,17 +1034,17 @@ pub fn get_activity_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 }
                 return color;
             }
-            if let Some(c) = card.badge.pixel(x, y) {
+            if let Some(c) = card.badge.pixel_on(x, y, CARD_ICON_BG) {
                 return c;
             }
             return color;
         }
 
         // Title & Subtitle
-        if let Some(c) = card.title.pixel(x, y) {
+        if let Some(c) = card.title.pixel_on(x, y, CARD_BG) {
             return c;
         }
-        if let Some(c) = card.subtitle.pixel(x, y) {
+        if let Some(c) = card.subtitle.pixel_on(x, y, CARD_BG) {
             return c;
         }
 

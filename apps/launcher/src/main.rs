@@ -1534,11 +1534,33 @@ pub extern "C" fn _start() -> ! {
                     render_band(surface, &state, H / 2 - 130, (H / 2 + 220).min(H));
                     let _ = std::surface_flip(4);
                     if elapsed >= 180 {
-                        state.current_view = ViewMode::LockScreen;
-                        state.boot_progress = 1000;
-                        render_view(surface, &state);
-                        let _ = std::surface_flip(4);
-                        std::log(0, "[LAUNCHER] Boot presentation complete; lock screen is now guest-owned.").ok();
+                        // WHY an uninitialized account goes to the credential
+                        // surface and not to the lock screen: the lock screen's
+                        // own pad draws four dots and submits on the fourth
+                        // digit, so it can only ever establish a four-digit PIN.
+                        // The PinEntry surface draws eight dots and a UNLOCK
+                        // key, so it is the one surface that can take the
+                        // 4..=8-digit PIN the account layer accepts - and it
+                        // keeps first boot on the same surface every later
+                        // unlock uses.
+                        if std::user_get_lock_state(std::user_get_current()).ok()
+                            == Some(std::UserLockState::Uninitialized)
+                        {
+                            state.pin_buffer = [0; 8];
+                            state.pin_len = 0;
+                            state.pin_error = 0;
+                            state.pin_setup_mode = true;
+                            state.current_view = ViewMode::PinEntry;
+                            render_view(surface, &state);
+                            let _ = std::surface_flip(4);
+                            std::log(0, "[LAUNCHER] First boot: credential setup presented on the PIN entry surface.").ok();
+                        } else {
+                            state.current_view = ViewMode::LockScreen;
+                            state.boot_progress = 1000;
+                            render_view(surface, &state);
+                            let _ = std::surface_flip(4);
+                            std::log(0, "[LAUNCHER] Boot presentation complete; lock screen is now guest-owned.").ok();
+                        }
                     }
                     continue;
                 }
@@ -1723,6 +1745,38 @@ pub extern "C" fn _start() -> ! {
                                     if len < 4 {
                                         state.pin_error = 1;
                                     } else if state.pin_setup_mode {
+                                        // WHY two steps: a PIN typed once and
+                                        // stored makes a slip of the finger the
+                                        // device's credential, and the owner
+                                        // then cannot unlock their own phone.
+                                        // The first UNLOCK records the entry,
+                                        // the second confirms it against the
+                                        // first and only then stores it.
+                                        if state.pin_setup_step == 0 {
+                                            state.pin_confirm_buffer = state.pin_buffer;
+                                            state.pin_confirm_len = len;
+                                            state.pin_setup_step = 1;
+                                            state.pin_len = 0;
+                                            state.pin_error = 0;
+                                            render_view(surface, &state);
+                                            let _ = std::surface_flip(4);
+                                            std::log(0, "[LAUNCHER] First-boot PIN recorded; confirmation requested.").ok();
+                                            continue;
+                                        }
+                                        let matches = state.pin_buffer[..len]
+                                            == state.pin_confirm_buffer[..state.pin_confirm_len];
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        if !matches {
+                                            state.pin_buffer = [0; 8];
+                                            state.pin_len = 0;
+                                            state.pin_setup_step = 0;
+                                            state.pin_error = 1;
+                                            render_view(surface, &state);
+                                            let _ = std::surface_flip(4);
+                                            std::log(0, "[LAUNCHER:SECURITY] PIN setup entries did not match; restarted.").ok();
+                                            continue;
+                                        }
                                         match std::user_set_credential(uid, &state.pin_buffer[..len]) {
                                             Ok(()) => {
                                                 let _ = std::user_unlock(uid, &state.pin_buffer[..len]);
@@ -1730,6 +1784,7 @@ pub extern "C" fn _start() -> ! {
                                                 state.pin_len = 0;
                                                 state.pin_error = 0;
                                                 state.pin_setup_mode = false;
+                                                state.pin_setup_step = 0;
                                                 state.current_view = ViewMode::HomeScreen;
                                                 render_view(surface, &state);
                                                 let _ = std::surface_flip(4);
@@ -1739,6 +1794,7 @@ pub extern "C" fn _start() -> ! {
                                             Err(_) => {
                                                 state.pin_buffer = [0; 8];
                                                 state.pin_len = 0;
+                                                state.pin_setup_step = 0;
                                                 state.pin_error = 2;
                                             }
                                         }
@@ -2304,6 +2360,15 @@ pub extern "C" fn _start() -> ! {
                                         state.auth_error = false;
                                         match ch {
                                             '0'..='9' => {
+                                                // WHY four and not eight: this is
+                                                // the lock screen's own inline pad,
+                                                // which draws four dots
+                                                // (`PIN_DOT_COUNT` in lock.rs) and
+                                                // has no UNLOCK key - the fourth
+                                                // digit submits. The PinEntry
+                                                // surface (pin.rs) is the one that
+                                                // draws eight dots and a UNLOCK
+                                                // key and accepts 4..=8 digits.
                                                 if state.pin_len < 4 {
                                                     state.pin_buffer[state.pin_len as usize] = ch as u8;
                                                     state.pin_len += 1;
@@ -2321,16 +2386,41 @@ pub extern "C" fn _start() -> ! {
                                                                 let _ = std::surface_flip(4);
                                                             } else {
                                                                 if state.pin_buffer[..4] == state.pin_confirm_buffer[..4] {
-                                                                    let _ = std::user_set_credential(1000, &state.pin_buffer[..4]);
-                                                                    let _ = std::user_unlock(1000, &state.pin_buffer[..4]);
-                                                                    state.lock_state = std::UserLockState::Unlocked;
-                                                                    state.pin_pad_visible = false;
-                                                                    state.pin_setup_step = 0;
-                                                                    state.pin_len = 0;
-                                                                    state.current_view = ViewMode::HomeScreen;
+                                                                    let set = std::user_set_credential(1000, &state.pin_buffer[..4]);
                                                                     render_view(surface, &state);
                                                                     let _ = std::surface_flip(4);
-                                                                    std::log(0, "[LAUNCHER] Owner PIN configured and device unlocked. Home surface rendered.").ok();
+                                                                    // WHY the result is
+                                                                    // checked: this used to
+                                                                    // be discarded, so a
+                                                                    // credential the
+                                                                    // kernel refused to
+                                                                    // accept still produced
+                                                                    // the "PIN configured"
+                                                                    // home screen - and the
+                                                                    // account on disk could
+                                                                    // still have no
+                                                                    // credential at all.
+                                                                    match set {
+                                                                        Ok(()) => {
+                                                                            let _ = std::user_unlock(1000, &state.pin_buffer[..4]);
+                                                                            state.lock_state = std::UserLockState::Unlocked;
+                                                                            state.pin_pad_visible = false;
+                                                                            state.pin_setup_step = 0;
+                                                                            state.pin_len = 0;
+                                                                            state.current_view = ViewMode::HomeScreen;
+                                                                            render_view(surface, &state);
+                                                                            let _ = std::surface_flip(4);
+                                                                            std::log(0, "[LAUNCHER] Owner PIN configured and device unlocked. Home surface rendered.").ok();
+                                                                        }
+                                                                        Err(_) => {
+                                                                            state.auth_error = true;
+                                                                            state.pin_setup_step = 0;
+                                                                            state.pin_len = 0;
+                                                                            render_view(surface, &state);
+                                                                            let _ = std::surface_flip(4);
+                                                                            std::log(0, "[LAUNCHER] Owner PIN was NOT stored: the kernel refused the credential, so the account has no PIN and the lock screen stays up.").ok();
+                                                                        }
+                                                                    }
                                                                     let mut drain = std::InputEvent {
                                                                         kind: 0,
                                                                         x: 0,
@@ -2379,6 +2469,103 @@ pub extern "C" fn _start() -> ! {
                                                             }
                                                         }
                                                     }
+                                                }
+                                            }
+                                            // UNLOCK: submits the entry, whatever
+                                            // its length in 4..=8. WHY it lives
+                                            // here and not on the fourth digit:
+                                            // the surface draws a UNLOCK key and
+                                            // the entry can be six digits, so the
+                                            // key is the only honest end of the
+                                            // entry.
+                                            'E' if state.pin_len >= 4 => {
+                                                let n = state.pin_len as usize;
+                                                if state.lock_state == std::UserLockState::Uninitialized {
+                                                    if state.pin_setup_step == 0 {
+                                                        state.pin_confirm_buffer = state.pin_buffer;
+                                                        state.pin_confirm_len = n;
+                                                        state.pin_setup_step = 1;
+                                                        state.pin_len = 0;
+                                                        render_view(surface, &state);
+                                                        let _ = std::surface_flip(4);
+                                                    } else {
+                                                        if state.pin_buffer[..n] == state.pin_confirm_buffer[..state.pin_confirm_len] {
+                                                            let set = std::user_set_credential(1000, &state.pin_buffer[..n]);
+                                                            render_view(surface, &state);
+                                                            let _ = std::surface_flip(4);
+                                                            // WHY the result is checked: this
+                                                            // used to be discarded, so a
+                                                            // credential the kernel
+                                                            // refused to accept still
+                                                            // produced the "PIN configured"
+                                                            // home screen - and the
+                                                            // account on disk could still
+                                                            // have no credential at all.
+                                                            match set {
+                                                                Ok(()) => {
+                                                                    let _ = std::user_unlock(1000, &state.pin_buffer[..n]);
+                                                                    state.lock_state = std::UserLockState::Unlocked;
+                                                                    state.pin_pad_visible = false;
+                                                                    state.pin_setup_step = 0;
+                                                                    state.pin_len = 0;
+                                                                    state.current_view = ViewMode::HomeScreen;
+                                                                    render_view(surface, &state);
+                                                                    let _ = std::surface_flip(4);
+                                                                    std::log(0, "[LAUNCHER] Owner PIN configured and device unlocked. Home surface rendered.").ok();
+                                                                }
+                                                                Err(_) => {
+                                                                    state.auth_error = true;
+                                                                    state.pin_setup_step = 0;
+                                                                    state.pin_len = 0;
+                                                                    render_view(surface, &state);
+                                                                    let _ = std::surface_flip(4);
+                                                                    std::log(0, "[LAUNCHER] Owner PIN was NOT stored: the kernel refused the credential, so the account has no PIN and the lock screen stays up.").ok();
+                                                                }
+                                                            }
+                                                            let mut drain = std::InputEvent {
+                                                                kind: 0,
+                                                                x: 0,
+                                                                y: 0,
+                                                                dx: 0,
+                                                                dy: 0,
+                                                                scale_milli: 1000,
+                                                            };
+                                                            while std::input_event_poll(&mut drain).is_ok() {}
+                                                            break;
+                                                        } else {
+                                                            state.auth_error = true;
+                                                            state.pin_setup_step = 0;
+                                                            state.pin_len = 0;
+                                                            render_view(surface, &state);
+                                                            let _ = std::surface_flip(4);
+                                                        }
+                                                    }
+                                                } else if std::user_unlock(1000, &state.pin_buffer[..n]).is_ok() {
+                                                    state.lock_state = std::UserLockState::Unlocked;
+                                                    state.pin_pad_visible = false;
+                                                    state.pin_len = 0;
+                                                    state.auth_error = false;
+                                                    state.current_view = ViewMode::HomeScreen;
+                                                    render_view(surface, &state);
+                                                    let _ = std::surface_flip(4);
+                                                    std::log(0, "[LAUNCHER] Device authenticated and unlocked via PIN. Home surface rendered.").ok();
+                                                    let mut drain = std::InputEvent {
+                                                        kind: 0,
+                                                        x: 0,
+                                                        y: 0,
+                                                        dx: 0,
+                                                        dy: 0,
+                                                        scale_milli: 1000,
+                                                    };
+                                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                                    break;
+                                                } else {
+                                                    state.lock_state = std::user_get_lock_state(1000).unwrap_or(std::UserLockState::Locked);
+                                                    state.auth_error = true;
+                                                    state.pin_len = 0;
+                                                    render_view(surface, &state);
+                                                    let _ = std::surface_flip(4);
+                                                    std::log(0, "[LAUNCHER:SECURITY] PIN authentication failed.").ok();
                                                 }
                                             }
                                             // Clear-all: the bottom-left "CLR"
