@@ -771,22 +771,24 @@ pub const DOCK_TILES: [Rect; 6] = [
     Rect::new(490, 1020, 200, 280),
 ];
 
-/// Half-size of a deck tile's pictogram, in pixels: a 48x48 box.
+/// Half-size of a deck tile's pictogram, in pixels: a 33x33 box.
 ///
-/// WHY 24 and not the standard 16: the pictogram is authored in a 33px box, which
-/// is a sixth of the tile's width and reads as a stamp on a card rather than as
-/// the face of the app.
-/// WHY 24 and not the 30 this was raised to: at a 60px box the pictograms were
-/// large enough to dominate the tile and to expose how coarse the older glyphs
-/// are - the handset in particular read as a diagonal stick. 48 is exactly 20%
-/// smaller than 60, which is the size this was asked to come back to, and it
-/// leaves the name room to be the thing you read first.
+/// WHY 16 and not the 24 this was raised to: the pictogram is a geometric
+/// drawing authored in a 33px box, and `rasterize_icon_pixel_scaled` reaches a
+/// larger box by OR-ing a `step x step` neighbourhood of source pixels. At
+/// extent 24 that is step 3, so every one of the 33 source pixels was stamped as
+/// a 3x3 block and the curved pictograms - the handset arc especially - read as
+/// blobs with stair-stepped edges, which is the coarsest thing left on the home
+/// surface. At 16 the step is 1: the glyph is drawn once per pixel, at its own
+/// resolution, so its curves are exact. The reference measures a 28px AppTile
+/// icon (`components.json`), so the native 33px box is also closer to the
+/// design than the 48px box it replaces.
 ///
 /// WHY it is a home constant and not a change to `icons::rasterize_icon_pixel`:
 /// every other surface - the drawer, activity cards, notification rows - has
 /// geometry that was measured around the 33px glyph, so the size is asked for
 /// where it is needed instead of imposed everywhere.
-pub const DOCK_ICON_EXTENT: i32 = 24;
+pub const DOCK_ICON_EXTENT: i32 = 16;
 
 pub fn find_package_index(state: &LauncherState, suffix: &[u8]) -> Option<usize> {
     for i in 0..state.app_count {
