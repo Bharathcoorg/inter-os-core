@@ -2418,12 +2418,22 @@ pub fn user_unlock(uid: u32, secret: &[u8]) -> Result<(), i64> {
 /// Establishes the first credential for a locked, credential-less account.
 /// The kernel rejects this operation once a credential already exists.
 pub fn user_set_credential(uid: u32, secret: &[u8]) -> Result<(), i64> {
+    // WHY five arguments: the kernel's UserSetCredential takes a1=uid,
+    // a2=secret_ptr, a3=secret_len, a4=old_secret_ptr, a5=old_secret_len. This
+    // call establishes a credential on an account that has none, so the old
+    // secret is `None` and must be passed as explicit zeros. Passing three
+    // arguments left a4/a5 holding whatever the register file carried, and the
+    // kernel read a nonzero garbage length as a request to copy an old secret
+    // from a wild pointer, which it refuses - so every first-boot PIN setup
+    // failed its write while the shell reported success.
     let r = unsafe {
-        syscall3(
+        syscall5(
             SyscallNumber::UserSetCredential,
             uid as u64,
             secret.as_ptr() as u64,
             secret.len() as u64,
+            0,
+            0,
         )
     };
     if r == 0 { Ok(()) } else { Err(r) }

@@ -429,9 +429,28 @@ impl UserManager {
         buf[4..20].copy_from_slice(&cred.salt);
         buf[20..52].copy_from_slice(&cred.hash);
         buf[52..56].copy_from_slice(&cred.failed_attempts.to_le_bytes());
-        let mut vfs = VFS.lock();
-        vfs.create_file(&path, &buf, false);
-        let _ = vfs.sync();
+        let outcome = {
+            let mut vfs = VFS.lock();
+            vfs.create_file(&path, &buf, false);
+            vfs.sync()
+        };
+        // WHY the result is reported: this used to be discarded, so a write the
+        // storage layer refused looked exactly like a write that succeeded. The
+        // shell then showed a "PIN set" home screen on the next boot while the
+        // account on disk still had no credential, and nothing in the log said
+        // which of the two had happened.
+        match outcome {
+            Ok(()) => crate::serial_println!(
+                "[USER] Credential persisted to {} and flushed to disk.",
+                path
+            ),
+            Err(_) => crate::serial_println!(
+                "[USER:SECURITY] Credential could not be persisted to {}: the \
+                 filesystem refused the sync. The account has a credential for \
+                 this session only.",
+                path
+            ),
+        }
     }
 
     /// Restores a previously persisted credential from VFS on boot.

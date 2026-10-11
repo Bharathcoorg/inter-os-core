@@ -980,19 +980,26 @@ fn handle_serial_command(cmd: &[u8]) {
         if let Some(pin_str) = parts.next() {
             crate::serial_println!("[COM1 INPUT] Hardware PIN entry received: {} digits.", pin_str.len());
             for c in pin_str.chars() {
+                // WHY these coordinates: they are the centres of the lock screen's
+                // own key cells (`hit_test_pin_pad` in apps/launcher/src/main.rs:
+                // left 130, top 520, cell 140x104, x-step 164, y-step 128; the '0'
+                // row sits at 904..1008 and the CLR/backspace band at 1036..1126).
+                // The previous table was one pad revision behind, so every digit
+                // landed on a different key and this helper scrambled entries
+                // instead of driving them.
                 let coords = match c {
-                    '1' => Some((160, 480)),
-                    '2' => Some((360, 480)),
-                    '3' => Some((560, 480)),
-                    '4' => Some((160, 620)),
-                    '5' => Some((360, 620)),
-                    '6' => Some((560, 620)),
-                    '7' => Some((160, 760)),
-                    '8' => Some((360, 760)),
-                    '9' => Some((560, 760)),
-                    '0' => Some((360, 900)),
-                    'c' | 'C' => Some((160, 900)),
-                    'x' | 'X' => Some((560, 900)),
+                    '1' => Some((200, 572)),
+                    '2' => Some((364, 572)),
+                    '3' => Some((528, 572)),
+                    '4' => Some((200, 700)),
+                    '5' => Some((364, 700)),
+                    '6' => Some((528, 700)),
+                    '7' => Some((200, 828)),
+                    '8' => Some((364, 828)),
+                    '9' => Some((528, 828)),
+                    '0' => Some((364, 956)),
+                    'c' | 'C' => Some((280, 1081)),
+                    'x' | 'X' => Some((540, 1081)),
                     _ => None,
                 };
                 if let Some((x, y)) = coords {
