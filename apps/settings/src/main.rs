@@ -122,6 +122,108 @@ pub enum TelemetryState {
     Reported,
 }
 
+/// Which surface a wallpaper write targets.
+///
+/// WHY this is data and not a string the picker formats: the store holds one key
+/// per surface, so a write is one or two key/value pairs and the choice of which
+/// is exactly this value. A single "both" mode exists because a device whose two
+/// surfaces show different wallpapers by accident is worse than one where the
+/// user never had to think about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WallpaperTarget {
+    Home,
+    Lock,
+    Both,
+}
+
+impl WallpaperTarget {
+    pub const COUNT: usize = 3;
+
+    pub fn label(self) -> &'static [u8] {
+        match self {
+            WallpaperTarget::Home => b"Home",
+            WallpaperTarget::Lock => b"Lock",
+            WallpaperTarget::Both => b"Both",
+        }
+    }
+
+    pub fn from_index(i: usize) -> WallpaperTarget {
+        match i {
+            1 => WallpaperTarget::Lock,
+            2 => WallpaperTarget::Both,
+            _ => WallpaperTarget::Home,
+        }
+    }
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// Outcome of the last wallpaper write, recorded so the picker reports what the
+/// kernel actually did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WallpaperWrite {
+    /// No write has been attempted since the picker was opened.
+    Unattempted,
+    /// The store accepted the write for every key that was targeted.
+    Applied(WallpaperTarget),
+    /// The store refused the write; nothing was changed.
+    Refused,
+}
+
+/// Whether the store answered the wallpaper reads at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WallpaperSource {
+    /// The store answered: `home` and `lock` are whatever it said, which may be
+    /// nothing.
+    Answered,
+    /// The store refused the read, so the current wallpaper is unknown rather
+    /// than default.
+    Unread,
+}
+
+/// Reads one wallpaper key out of the settings store and resolves it.
+///
+/// WHY the two failure modes are distinguished rather than folded into `None`: a
+/// store that answers "nothing is set" and a store that refuses the read are
+/// different things. The first means the device is on the bundled default; the
+/// second means this app cannot know what is on the screen, and the picker says
+/// so instead of showing a wallpaper it never read.
+fn read_stored_scene(
+    key: &[u8],
+) -> Result<Option<&'static std::design::walls::Scene>, ()> {
+    let Ok(key) = core::str::from_utf8(key) else {
+        return Err(());
+    };
+    let mut buf = [0u8; 24];
+    // WHY 24 bytes and not the kernel's 512: the catalogue's longest key is
+    // shorter than that, and the store's own key/value length check is on the
+    // *key*, so a small buffer costs nothing and keeps the frame small.
+    match std::settings_get(3, key, &mut buf) {
+        Ok(n) if n > 0 => {
+            let raw = &buf[..n];
+            let start = raw
+                .iter()
+                .position(|b| *b != b' ' && *b != b'\n' && *b != b'\r');
+            let Some(start) = start else {
+                return Ok(None);
+            };
+            let end = raw[start..]
+                .iter()
+                .position(|b| *b == b' ' || *b == b'\n' || *b == b'\r')
+                .map(|e| start + e)
+                .unwrap_or(raw.len());
+            if end <= start {
+                return Ok(None);
+            }
+            Ok(std::design::walls::Scene::by_key(&raw[start..end]))
+        }
+        Ok(_) => Ok(None),
+        Err(_) => Err(()),
+    }
+}
+
 /// Reports whether `haystack` contains the exact byte sequence `needle`.
 ///
 /// WHY: the telemetry payloads are compact JSON with no allocator, so presence
@@ -174,6 +276,25 @@ pub power_profile: Option<PowerProfile>,
     pub thermal: TelemetryState,
     /// Recorded outcome of the sensor query for the last refresh.
     pub sensor: TelemetryState,
+    /// Whether the wallpaper picker panel is open instead of a section detail.
+    pub wallpaper_open: bool,
+    /// Which surface the next write targets.
+    pub wallpaper_target: WallpaperTarget,
+    /// The wallpaper chosen in the gallery but not yet written.
+    ///
+    /// WHY it is separate from what the store holds: Apply must be a deliberate
+    /// act. A tap on a thumbnail is a *preview*, and the surface the user is
+    /// looking at is the previewed one, so a Back that accidentally committed it
+    /// would change the device's wallpaper without the user asking.
+    pub wallpaper_pending: Option<&'static std::design::walls::Scene>,
+    /// The home wallpaper the store reports, read when the panel opened.
+    pub wallpaper_home: Option<&'static std::design::walls::Scene>,
+    /// The lock wallpaper the store reports, read when the panel opened.
+    pub wallpaper_lock: Option<&'static std::design::walls::Scene>,
+    /// Whether the store answered the wallpaper reads.
+    pub wallpaper_source: WallpaperSource,
+    /// Outcome of the last write.
+    pub wallpaper_write: WallpaperWrite,
 }
 
 impl SettingsApp {
@@ -199,6 +320,16 @@ impl SettingsApp {
             battery: TelemetryState::Unavailable,
             thermal: TelemetryState::Unavailable,
             sensor: TelemetryState::Unavailable,
+            wallpaper_open: false,
+            wallpaper_target: WallpaperTarget::Both,
+            wallpaper_pending: None,
+            wallpaper_home: None,
+            wallpaper_lock: None,
+            // WHY Unread rather than default: nothing has been read yet, and
+            // showing the stock scene as "current" before the store has answered
+            // would present an assumption as a reading.
+            wallpaper_source: WallpaperSource::Unread,
+            wallpaper_write: WallpaperWrite::Unattempted,
         }
     }
 
@@ -590,6 +721,138 @@ impl SettingsApp {
             }
         }
     }
+
+    /// Reads what the settings store holds for both surfaces.
+    ///
+    /// WHY this is a separate method and not part of `open_wallpapers`: the
+    /// Personal detail row shows the current wallpaper, so the row has to be
+    /// able to ask for the same reading the picker would. Doing it in two places
+    /// would mean two readers; doing it per pixel from a painter would mean a
+    /// journal read a million times a frame.
+    pub fn refresh_wallpaper_values(&mut self) {
+        let home = read_stored_scene(b"ui.wallpaper.home");
+        let lock = read_stored_scene(b"ui.wallpaper.lock");
+        match (&home, &lock) {
+            (Ok(_), Ok(_)) => self.wallpaper_source = WallpaperSource::Answered,
+            _ => self.wallpaper_source = WallpaperSource::Unread,
+        }
+        self.wallpaper_home = home.ok().flatten();
+        self.wallpaper_lock = lock.ok().flatten();
+    }
+
+    /// Opens the wallpaper picker over whatever the store currently holds.
+    pub fn open_wallpapers(&mut self) {
+        self.wallpaper_open = true;
+        // WHY the pending selection is cleared: a preview from a previous visit
+        // is not a choice the user still wants, and carrying it would make an
+        // Apply write a wallpaper nobody selected this visit.
+        self.wallpaper_pending = None;
+        self.wallpaper_write = WallpaperWrite::Unattempted;
+        self.refresh_wallpaper_values();
+        std::log(
+            0,
+            "[SETTINGS APP] Wallpaper picker opened; current values read from the settings store.",
+        )
+        .ok();
+    }
+
+    /// The scene the preview strip shows.
+    ///
+    /// WHY it prefers the pending selection: the preview is of what is about to
+    /// be applied, so the user sees the change rather than the current state and
+    /// has to infer it.
+    pub fn wallpaper_preview(&self) -> &'static std::design::walls::Scene {
+        self.wallpaper_pending
+            .or(self.wallpaper_home)
+            .or(self.wallpaper_lock)
+            .unwrap_or(&std::design::walls::SCENES[0])
+    }
+
+    /// Writes the pending selection to the selected targets.
+    ///
+    /// WHY the outcome is recorded rather than assumed: `settings_set` is gated
+    /// on this app's `FileSystemWrite` capability and writes through to a
+    /// disk-backed journal, so a refusal is a real outcome and the picker must
+    /// say so instead of showing the new wallpaper as applied.
+    pub fn apply_wallpaper(&mut self) {
+        let Some(scene) = self.wallpaper_pending else {
+            // WHY this is refused and not defaulted: an Apply with no selection
+            // has nothing to write, and writing the default instead would change
+            // the user's wallpaper when they pressed a button that had no meaning.
+            self.wallpaper_write = WallpaperWrite::Refused;
+            std::log(
+                0,
+                "[SETTINGS APP] Wallpaper Apply pressed with no pending selection; no write attempted.",
+            )
+            .ok();
+            return;
+        };
+        let keys: &[&[u8]] = match self.wallpaper_target {
+            WallpaperTarget::Home => &[b"ui.wallpaper.home"],
+            WallpaperTarget::Lock => &[b"ui.wallpaper.lock"],
+            WallpaperTarget::Both => &[b"ui.wallpaper.home", b"ui.wallpaper.lock"],
+        };
+        let mut ok = true;
+        for key in keys {
+            // WHY the value is written as the catalogue's own key: the launcher
+            // resolves the stored value back through the same catalogue, so a
+            // value that is not a key would make the lookup find nothing and the
+            // shell would report an unknown scene.
+            match std::settings_set(3, core::str::from_utf8(key).unwrap_or(""), scene.key) {
+                Ok(()) => {}
+                Err(_) => ok = false,
+            }
+        }
+        if ok {
+            self.wallpaper_write = WallpaperWrite::Applied(self.wallpaper_target);
+            self.wallpaper_home = match self.wallpaper_target {
+                WallpaperTarget::Lock => self.wallpaper_home,
+                _ => Some(scene),
+            };
+            self.wallpaper_lock = match self.wallpaper_target {
+                WallpaperTarget::Home => self.wallpaper_lock,
+                _ => Some(scene),
+            };
+            self.wallpaper_pending = None;
+            std::log(0, "[SETTINGS APP] Wallpaper written to the settings store.").ok();
+        } else {
+            self.wallpaper_write = WallpaperWrite::Refused;
+            std::log(
+                0,
+                "[SETTINGS APP] The settings store refused the wallpaper write; no wallpaper was changed.",
+            )
+            .ok();
+        }
+    }
+
+    /// Restores the bundled default wallpaper on both surfaces.
+    ///
+    /// WHY it writes rather than deletes: the kernel's settings store has no
+    /// delete, so "reset" has to be expressed as a write of the default key. The
+    /// key written is the catalogue's own default, so a fresh boot and a reset
+    /// boot render the same thing.
+    pub fn reset_wallpaper(&mut self) {
+        let scene = &std::design::walls::SCENES[0];
+        let mut ok = true;
+        for key in ["ui.wallpaper.home", "ui.wallpaper.lock"] {
+            if std::settings_set(3, key, scene.key).is_err() {
+                ok = false;
+            }
+        }
+        self.wallpaper_write = if ok {
+            std::log(0, "[SETTINGS APP] Wallpapers reset to the bundled default.")
+                .ok();
+            WallpaperWrite::Applied(WallpaperTarget::Both)
+        } else {
+            WallpaperWrite::Refused
+        };
+        if ok {
+            self.wallpaper_home = Some(scene);
+            self.wallpaper_lock = Some(scene);
+            self.wallpaper_pending = None;
+        }
+    }
+
 }
 
 // -----------------------------------------------------------------------------
@@ -649,6 +912,37 @@ const SEG_H: usize = 48;
 
 /// Maximum bytes any single fitted run may occupy (source runs are shorter).
 const RUN_CAP: usize = 96;
+
+// -----------------------------------------------------------------------------
+// Wallpaper picker layout
+// -----------------------------------------------------------------------------
+// The panel is laid out from the reference wallpaper screen: a full-bleed
+// preview at the top, a target selector, a gallery of the scenes that actually
+// exist, and the two actions at the bottom. Everything the panel draws is either
+// a scene from the catalogue or a string the catalogue provides, so the screen
+// cannot show a wallpaper that does not exist.
+
+/// Top of the preview strip, under the header.
+const WP_PREVIEW_Y: usize = 120;
+/// Height of the preview strip.
+const WP_PREVIEW_H: usize = 520;
+/// Left edge and width shared by every full-width panel element.
+const WP_X: usize = 24;
+const WP_W: usize = 672;
+/// Top of the target selector.
+const WP_TARGET_Y: usize = 676;
+const WP_TARGET_H: usize = 56;
+/// Top of the gallery.
+const WP_GALLERY_Y: usize = 764;
+/// One gallery cell.
+const WP_CELL_W: usize = 208;
+const WP_CELL_H: usize = 208;
+const WP_CELL_GAP: usize = 24;
+/// Top of the action row.
+const WP_ACTION_Y: usize = 1240;
+const WP_ACTION_H: usize = 64;
+/// Top of the outcome line.
+const WP_STATUS_Y: usize = 1330;
 
 #[inline]
 fn run_w(text: &[u8], scale: usize, bold: bool) -> usize {
@@ -985,6 +1279,10 @@ fn row_count(section: Section) -> usize {
     match section {
         Section::Apps => 2,
         Section::System => 4,
+        // WHY Personal is the only detail that grew: it is the natural home of a
+        // user's own choice about their device's appearance, and the design's
+        // wallpaper screen is a Personalisation item in every reference panel.
+        Section::Personal => 4,
         _ => 3,
     }
 }
@@ -1332,6 +1630,47 @@ fn row_pixel(
             }
         },
         Section::Personal => {
+            // Row 2 is the entry point to the wallpaper picker, so its caption is
+            // what the store currently holds for each surface -- two real stored
+            // values, never a claim about what the wallpaper looks like.
+            if row == 2 {
+                let home = app
+                    .wallpaper_home
+                    .map(|s| s.name)
+                    .unwrap_or(b"not set".as_slice());
+                let lock = app
+                    .wallpaper_lock
+                    .map(|s| s.name)
+                    .unwrap_or(b"not set".as_slice());
+                let mut cap = [0u8; 96];
+                let mut n = 0usize;
+                for chunk in [b"Home: ", home, b"  Lock: ", lock] {
+                    let take = chunk.len().min(cap.len() - n);
+                    cap[n..n + take].copy_from_slice(&chunk[..take]);
+                    n += take;
+                }
+                if let Some(c) = row_head(
+                    x,
+                    y,
+                    cy,
+                    b"Wallpaper",
+                    &cap[..n],
+                    TEXT_MUTED,
+                    if app.wallpaper_source == WallpaperSource::Answered {
+                        b"OPEN"
+                    } else {
+                        b"UNREAD"
+                    },
+                    if app.wallpaper_source == WallpaperSource::Answered {
+                        ACCENT
+                    } else {
+                        TEXT_MUTED
+                    },
+                ) {
+                    return c;
+                }
+                return SURFACE;
+            }
             let title: &[u8] = match row {
                 0 => b"Accounts",
                 1 => b"Language",
@@ -1754,6 +2093,391 @@ fn landing_pixel(x: usize, y: usize) -> u32 {
     BG
 }
 
+// -----------------------------------------------------------------------------
+// Wallpaper picker
+// -----------------------------------------------------------------------------
+
+/// Relative luminance of an `0xAARRGGBB` colour, on the wallpaper's own scale.
+///
+/// WHY this exists on this app and not in the SDK: the picker is the only surface
+/// that has to choose ink for something drawn *on top of* a wallpaper, and the SDK
+/// already provides the wallpaper. A two-line helper here keeps that decision local
+/// instead of exporting a colour utility for one caller.
+fn wall_luma(color: u32) -> u32 {
+    let r = (color >> 16) & 0xFF;
+    let g = (color >> 8) & 0xFF;
+    let b = color & 0xFF;
+    (r * 299 + g * 587 + b * 114) / 1000
+}
+
+/// Top-left corner of gallery cell `i`, laid out three to a row.
+fn wp_cell_origin(i: usize) -> (usize, usize) {
+    let col = i % 3;
+    let row = i / 3;
+    (
+        WP_X + col * (WP_CELL_W + WP_CELL_GAP),
+        WP_GALLERY_Y + row * (WP_CELL_H + WP_CELL_GAP + 48),
+    )
+}
+
+/// Gallery cell hit-test: the whole rounded cell is the target.
+fn wp_cell_at(px: u32, py: u32) -> Option<usize> {
+    for i in 0..std::design::walls::SCENES.len() {
+        let (cx0, cy0) = wp_cell_origin(i);
+        if in_round_rect(px as usize, py as usize, cx0, cy0, WP_CELL_W, WP_CELL_H, 24) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// The preview strip's crop rectangle.
+///
+/// WHY the preview shows a horizontal slice of the scene rather than the whole
+/// of it: a wallpaper is chosen by how it fills a 9:20 screen, so showing the
+/// whole surface at once in a 672x520 box would shrink it to a thumbnail and
+/// hide the part that matters -- whether the horizon lands above or behind the
+/// status bar. The slice shown is the upper half, which is where the sky, the
+/// ridge and the status bar all end up.
+fn wp_preview_slice(scene: &std::design::walls::Scene, x: usize, y: usize) -> u32 {
+    let sy = WP_PREVIEW_Y + (y * 1440) / (WP_PREVIEW_H * 4).min(1440);
+    let sx = WP_X + (x * 720) / WP_W;
+    std::design::walls::scene_pixel(scene, sx.min(719), sy.min(1439), 720, 1440)
+}
+
+/// The target selector's three segments.
+fn wp_segment_rect(i: usize) -> (usize, usize, usize, usize) {
+    let seg_w = (WP_W - 2 * 16) / 3;
+    (WP_X + i * (seg_w + 16), WP_TARGET_Y, seg_w, WP_TARGET_H)
+}
+
+/// The wallpaper picker panel.
+///
+/// WHY the whole panel is one function that answers per pixel: this app has no
+/// allocation, so there is nothing to build ahead of time and a per-pixel
+/// painter is the only shape available. Every measurement below is a cheap
+/// integer step, not a text metric.
+fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
+    if y < 104 {
+        return BG;
+    }
+    // Header.
+    if let Some(c) = run_ink(
+        x,
+        y,
+        WP_X + 72,
+        40,
+        2,
+        b"Wallpaper",
+        WP_W - 72,
+        TEXT,
+        BG,
+        true,
+    ) {
+        return c;
+    }
+    if let Some(c) = run_ink(
+        x,
+        y,
+        WP_X + 72,
+        84,
+        1,
+        b"Shown on the lock screen and the home surface",
+        WP_W - 72,
+        TEXT_MUTED,
+        BG,
+        false,
+    ) {
+        return c;
+    }
+
+    // Preview strip: the scene itself, so what is selected is what is seen.
+    if (WP_PREVIEW_Y..WP_PREVIEW_Y + WP_PREVIEW_H).contains(&y) {
+        let preview = app.wallpaper_preview();
+        let base = wp_preview_slice(preview, x, y);
+        if !in_round_rect(x, y, WP_X, WP_PREVIEW_Y, WP_W, WP_PREVIEW_H, 24) {
+            return BG;
+        }
+        // Name plate over the lower edge of the preview, so the scene in view is
+        // named without covering its sky.
+        //
+        // WHY the plate's polarity is decided from the wallpaper pixel under it
+        // and not from the scene's palette: the plate sits at the bottom of the
+        // strip, which is the scene's foreground half, and a scene whose sky is
+        // light has a dark foreground. Deciding polarity from the sky would put
+        // dark ink on dark rock.
+        if y > WP_PREVIEW_Y + WP_PREVIEW_H - 72
+            && in_round_rect(
+                x,
+                y,
+                WP_X + 20,
+                WP_PREVIEW_Y + WP_PREVIEW_H - 60,
+                WP_W - 40,
+                44,
+                14,
+            )
+        {
+            let dark_under = wall_luma(base) < 96;
+            let (ink, plate) = if dark_under {
+                (0xFFF5F6F7u32, 0xCC111214u32)
+            } else {
+                (0xFF111214u32, 0xCCF7F6F2u32)
+            };
+            if let Some(c) = run_ink(
+                x,
+                y,
+                WP_X + 36,
+                WP_PREVIEW_Y + WP_PREVIEW_H - 48,
+                1,
+                preview.name,
+                WP_W - 72,
+                ink,
+                plate,
+                false,
+            ) {
+                return c;
+            }
+            return plate;
+        }
+        return base;
+    }
+
+    // Target selector.
+    if (WP_TARGET_Y..WP_TARGET_Y + WP_TARGET_H).contains(&y) {
+        for i in 0..WallpaperTarget::COUNT {
+            let (sx0, sy0, sw, sh) = wp_segment_rect(i);
+            if !in_round_rect(x, y, sx0, sy0, sw, sh, 14) {
+                continue;
+            }
+            let selected = WallpaperTarget::from_index(i) == app.wallpaper_target;
+            let fill = if selected { ACCENT } else { SOFT };
+            if !in_round_rect(x + 1, y + 1, sx0 + 1, sy0 + 1, sw - 2, sh - 2, 13) {
+                return BORDER;
+            }
+            let ink = if selected { SURFACE } else { TEXT };
+            let label = WallpaperTarget::from_index(i).label();
+            let lw = run_w(label, 1, true);
+            if let Some(c) = run_ink(
+                x,
+                y,
+                sx0 + (sw - lw) / 2,
+                sy0 + (sh - 16) / 2,
+                1,
+                label,
+                sw,
+                ink,
+                fill,
+                true,
+            ) {
+                return c;
+            }
+            return fill;
+        }
+        return BG;
+    }
+
+    // Gallery.
+    if y >= WP_GALLERY_Y && y < WP_ACTION_Y - 40 {
+        for i in 0..std::design::walls::SCENES.len() {
+            let (cx0, cy0) = wp_cell_origin(i);
+            if !in_round_rect(x, y, cx0, cy0, WP_CELL_W, WP_CELL_H, 24) {
+                continue;
+            }
+            let scene = &std::design::walls::SCENES[i];
+            let is_pending = app.wallpaper_pending == Some(scene);
+            let ring = if is_pending { ACCENT } else { BORDER };
+            if !in_round_rect(x + 3, y + 3, cx0 + 3, cy0 + 3, WP_CELL_W - 6, WP_CELL_H - 6, 22) {
+                return ring;
+            }
+            // Thumbnail: a band of the scene rather than a swatch, so a gallery
+            // entry shows the composition it will paint.
+            //
+            // WHY the band is the scene's *upper three quarters* and why it is
+            // rendered through `scene_pixel` rather than `ramp3`: a daylight
+            // scene's sky stop sits within a few steps of white, so a ramp swatch
+            // of it is invisible against the white card it sits on. The full
+            // composition reaches the dark foreground, which is what makes an
+            // entry recognisable at thumbnail size.
+            let bx = cx0 + 20;
+            let by = cy0 + 16;
+            let bw = WP_CELL_W - 40;
+            let bh = WP_CELL_H - 76;
+            if in_round_rect(x, y, bx, by, bw, bh, 16) {
+                let tx = ((x - bx) * 720) / bw;
+                // Sample the scene's top three quarters: the sky, the ridge line
+                // and part of the foreground, which is the range that actually
+                // distinguishes one wallpaper from another.
+                let ty = ((y - by) * 1080) / bh;
+                return std::design::walls::scene_pixel(
+                    scene,
+                    tx.min(719),
+                    ty.min(1439),
+                    720,
+                    1440,
+                );
+            }
+            let lw = run_w(scene.name, 1, true);
+            if let Some(c) = run_ink(
+                x,
+                y,
+                cx0 + (WP_CELL_W - lw.min(WP_CELL_W - 24)) / 2,
+                cy0 + WP_CELL_H - 48,
+                1,
+                scene.name,
+                WP_CELL_W - 24,
+                TEXT,
+                SURFACE,
+                true,
+            ) {
+                return c;
+            }
+            return SURFACE;
+        }
+        return BG;
+    }
+
+    // Actions.
+    if (WP_ACTION_Y..WP_ACTION_Y + WP_ACTION_H).contains(&y) {
+        let half = (WP_W - 16) / 2;
+        let apply = in_round_rect(x, y, WP_X, WP_ACTION_Y, half, WP_ACTION_H, 16);
+        let reset = in_round_rect(x, y, WP_X + half + 16, WP_ACTION_Y, half, WP_ACTION_H, 16);
+        if !apply && !reset {
+            return BG;
+        }
+        // WHY the Apply press is only drawn enabled and only enabled when a
+        // selection exists: an enabled-looking Apply with nothing to write is the
+        // dead control this app's contract forbids.
+        let enabled = app.wallpaper_pending.is_some();
+        let fill = if apply {
+            if enabled { ACCENT } else { SOFT }
+        } else {
+            SURFACE
+        };
+        let ink = if apply && enabled { SURFACE } else { TEXT_MUTED };
+        if (apply
+            && !in_round_rect(x + 1, y + 1, WP_X + 1, WP_ACTION_Y + 1, half - 2, WP_ACTION_H - 2, 15))
+            || (!apply
+                && !in_round_rect(
+                    x + 1,
+                    y + 1,
+                    WP_X + half + 17,
+                    WP_ACTION_Y + 1,
+                    half - 2,
+                    WP_ACTION_H - 2,
+                    15,
+                ))
+        {
+            return BORDER;
+        }
+        let (label, x0) = if apply {
+            (b"Apply".as_slice(), WP_X)
+        } else {
+            (b"Reset to default".as_slice(), WP_X + half + 16)
+        };
+        let lw = run_w(label, 1, true);
+        if let Some(c) = run_ink(
+            x,
+            y,
+            x0 + (half - lw) / 2,
+            WP_ACTION_Y + (WP_ACTION_H - 16) / 2,
+            1,
+            label,
+            half,
+            ink,
+            fill,
+            true,
+        ) {
+            return c;
+        }
+        return fill;
+    }
+
+    // Outcome line.
+    if y >= WP_STATUS_Y {
+        let (line, ink): (&[u8], u32) = match app.wallpaper_write {
+            WallpaperWrite::Applied(target) => match target {
+                WallpaperTarget::Home => (&b"Applied to the home surface"[..], ACCENT),
+                WallpaperTarget::Lock => (&b"Applied to the lock screen"[..], ACCENT),
+                WallpaperTarget::Both => (&b"Applied to home and lock screens"[..], ACCENT),
+            },
+            WallpaperWrite::Refused => (
+                &b"The settings store refused the write; nothing changed"[..],
+                TEXT_MUTED,
+            ),
+            WallpaperWrite::Unattempted => match app.wallpaper_source {
+                WallpaperSource::Answered => (
+                    &b"Select a wallpaper, then choose a target and apply"[..],
+                    TEXT_MUTED,
+                ),
+                WallpaperSource::Unread => (
+                    &b"The settings store did not answer; the current wallpaper is unknown"[..],
+                    TEXT_MUTED,
+                ),
+            },
+        };
+        if let Some(c) = run_ink(x, y, WP_X, WP_STATUS_Y, 1, line, WP_W, ink, BG, false) {
+            return c;
+        }
+    }
+
+    BG
+}
+
+/// Hit-test for the picker's three interactive regions.
+fn wallpaper_at(px: u32, py: u32) -> Option<WallpaperHit> {
+    if (WP_TARGET_Y..WP_TARGET_Y + WP_TARGET_H).contains(&(py as usize)) {
+        for i in 0..WallpaperTarget::COUNT {
+            let (sx0, sy0, sw, sh) = wp_segment_rect(i);
+            if in_round_rect(px as usize, py as usize, sx0, sy0, sw, sh, 14) {
+                return Some(WallpaperHit::Target(i));
+            }
+        }
+    }
+    if let Some(i) = wp_cell_at(px, py) {
+        return Some(WallpaperHit::Cell(i));
+    }
+    if (WP_ACTION_Y..WP_ACTION_Y + WP_ACTION_H).contains(&(py as usize)) {
+        let half = (WP_W - 16) / 2;
+        if in_round_rect(
+            px as usize,
+            py as usize,
+            WP_X,
+            WP_ACTION_Y,
+            half,
+            WP_ACTION_H,
+            16,
+        ) {
+            return Some(WallpaperHit::Apply);
+        }
+        if in_round_rect(
+            px as usize,
+            py as usize,
+            WP_X + half + 16,
+            WP_ACTION_Y,
+            half,
+            WP_ACTION_H,
+            16,
+        ) {
+            return Some(WallpaperHit::Reset);
+        }
+    }
+    None
+}
+
+/// The picker's interactive regions, resolved to one value so the hit-test's
+/// return type names what was pressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WallpaperHit {
+    /// Segment `n` of the target selector, 0=Home 1=Lock 2=Both.
+    Target(usize),
+    /// Gallery cell `n`.
+    Cell(usize),
+    /// The Apply button.
+    Apply,
+    /// The Reset to default button.
+    Reset,
+}
+
 #[inline(never)]
 fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
     // Home gesture pill (matches the touch handler's exit region).
@@ -1763,6 +2487,12 @@ fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
     // Shared 48x48 back control, top-left of both screens.
     if let Some(c) = back_button_pixel(x, y) {
         return c;
+    }
+    // WHY the panel is matched before the section: it is a screen the user
+    // reached *through* a section, so it must stay in front of the detail it was
+    // opened from rather than overwriting it.
+    if app.wallpaper_open {
+        return wallpaper_pixel(x, y, app);
     }
     match app.current_section {
         None => landing_pixel(x, y),
@@ -1891,6 +2621,19 @@ pub extern "C" fn _start() -> ! {
                             BACK_S,
                             14,
                         ) {
+                            // WHY the picker pops first: Back from it must return
+                            // to the Personal detail it was opened from, and a
+                            // Back that jumped straight to the landing grid would
+                            // lose the section the user was in. It also never
+                            // writes, so leaving the panel is the cancel path.
+                            if settings.wallpaper_open {
+                                settings.wallpaper_open = false;
+                                std::log(
+                                    0,
+                                    "[SETTINGS APP] Wallpaper picker dismissed without applying a change.",
+                                )
+                                .ok();
+                            } else {
                             match settings.current_section {
                                 Some(_) => {
                                     settings.current_section = None;
@@ -1912,6 +2655,7 @@ pub extern "C" fn _start() -> ! {
                                     std::exit_with_code(0);
                                 }
                             }
+                            }
                         } else if input.x >= 240 && input.x <= 480 && input.y >= 1400 {
                             std::log(
                                 0,
@@ -1922,6 +2666,59 @@ pub extern "C" fn _start() -> ! {
                                 let _ = std::surface_destroy(6, surface);
                             }
                             std::exit_with_code(0);
+                        } else if settings.wallpaper_open {
+                            // WHY this is checked before the section controls: the
+                            // picker owns the whole surface while it is open, so a
+                            // tap must not fall through to a detail row underneath
+                            // it -- that is how a wallpaper tap would once toggle a
+                            // setting two screens away.
+                            match wallpaper_at(input.x, input.y) {
+                                Some(WallpaperHit::Target(i)) => {
+                                    settings.wallpaper_target = WallpaperTarget::from_index(i);
+                                    std::log(0, "[SETTINGS APP] Wallpaper target changed.").ok();
+                                }
+                                Some(WallpaperHit::Cell(i)) => {
+                                    // WHY browsing past the catalogue is impossible:
+                                    // the gallery is generated from
+                                    // `walls::SCENES`, so its hit-test cannot name
+                                    // an index the catalogue does not hold.
+                                    if i < std::design::walls::SCENES.len() {
+                                        // WHY the reference is taken straight out
+                                        // of the catalogue: the gallery's cells are
+                                        // the catalogue's scenes, so a selection is
+                                        // a `&'static` scene and no copy of it is
+                                        // ever made into the app's state.
+                                        let scene = &std::design::walls::SCENES[i];
+                                        settings.wallpaper_pending = Some(scene);
+                                        std::log(
+                                            0,
+                                            "[SETTINGS APP] Wallpaper selected for preview; nothing written yet.",
+                                        )
+                                        .ok();
+                                    }
+                                }
+                                Some(WallpaperHit::Apply) => settings.apply_wallpaper(),
+                                Some(WallpaperHit::Reset) => settings.reset_wallpaper(),
+                                None => {}
+                            }
+                        } else if settings.current_section == Some(Section::Personal) {
+                            // WHY the wallpaper row is opened after the picker
+                            // branch: while the picker is open it owns the whole
+                            // surface, and a tap in the panel must not also reach a
+                            // detail row underneath it. With the picker closed this
+                            // branch is the only route into it.
+                            let (cy, ch) = detail_row_rect(Section::Personal, 2);
+                            if in_round_rect(
+                                input.x as usize,
+                                input.y as usize,
+                                DETAIL_X,
+                                cy,
+                                DETAIL_W,
+                                ch,
+                                CARD_R,
+                            ) {
+                                settings.open_wallpapers();
+                            }
                         } else if let Some(section) = settings.current_section {
                             // Detail-screen controls (hit cells match the drawn
                             // geometry exactly).
@@ -1954,6 +2751,12 @@ pub extern "C" fn _start() -> ! {
                             }
                         } else if let Some(section) = landing_card_at(input.x, input.y) {
                             settings.current_section = Some(section);
+                            // WHY the wallpaper reading is refreshed on entry to a
+                            // detail: the Personal row reports what the store holds,
+                            // and the value only changes when another surface (the
+                            // picker, a previous visit) wrote it. Reading it once
+                            // when the detail opens is the whole cost.
+                            settings.refresh_wallpaper_values();
                             std::log(
                                 0,
                                 "[SETTINGS APP] System Space category opened.",
