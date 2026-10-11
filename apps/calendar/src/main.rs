@@ -298,6 +298,18 @@ const ACCENT_SKY: u32 = 0xFF31C4FF;
 #[allow(dead_code)]
 const SUCCESS_EMERALD: u32 = 0xFF56D68A;
 const DANGER_CORAL: u32 = 0xFFFF6B6B;
+
+// Empty-state action button: "+ New Event", centred on the 720px surface.
+// The geometry is derived from the label so the pill is always wider than its
+// own text: label 236px at scale 2 plus 36px of margin per side.
+const ACTION_BTN_LABEL: &[u8] = b"+ New Event";
+const ACTION_BTN_SCALE: usize = 2;
+const ACTION_BTN_W: usize = 308;
+const ACTION_BTN_H: usize = 56;
+const ACTION_BTN_X0: usize = (720 - ACTION_BTN_W) / 2;
+const ACTION_BTN_Y0: usize = 800;
+const ACTION_BTN_X1: usize = ACTION_BTN_X0 + ACTION_BTN_W;
+const ACTION_BTN_Y1: usize = ACTION_BTN_Y0 + ACTION_BTN_H;
 const TEXT_PRIMARY: u32 = 0xFFF4F7FB;
 const TEXT_MUTED: u32 = 0xFF9AA8BC;
 
@@ -705,10 +717,17 @@ fn get_calendar_pixel(
                     return c;
                 }
 
-                // Action Button: "+ Schedule Event" (x: 230..490, y: 800..856)
-                if x >= 230 && x < 490 && y >= 800 && y < 856 {
-                    let bx = (x - 230).min(489 - x);
-                    let by = (y - 800).min(855 - y);
+                // Action button: "+ New Event" on its own rect, sized from the
+                // label. WHY it is not the old 260px box: "+ New Event" measures
+                // 236px at scale 2 and the box left it 224px inside 18px of
+                // padding, so the label's last glyphs ran past the pill's right
+                // edge and were cut (the guest capture read "New Event" with the
+                // final `t` sheared off). The rect is now the label plus a 36px
+                // margin on each side, and the label is centred on it, so the
+                // text and the hit box can never disagree again.
+                if x >= ACTION_BTN_X0 && x < ACTION_BTN_X1 && y >= ACTION_BTN_Y0 && y < ACTION_BTN_Y1 {
+                    let bx = (x - ACTION_BTN_X0).min(ACTION_BTN_X1 - 1 - x);
+                    let by = (y - ACTION_BTN_Y0).min(ACTION_BTN_Y1 - 1 - y);
                     if bx < 24 && by < 24 {
                         let cdx = (24 - bx) as isize;
                         let cdy = (24 - by) as isize;
@@ -717,7 +736,22 @@ fn get_calendar_pixel(
                         }
                     }
 
-                    if let Some(c) = test_text(x, y, 248, 804, 2, b"+ New Event", ACCENT_SKY) {
+                    let label_w = std::design::font::measure(ACTION_BTN_LABEL, ACTION_BTN_SCALE);
+                    let label_x = ACTION_BTN_X0
+                        + (ACTION_BTN_W.saturating_sub(label_w)) / 2;
+                    let label_y = ACTION_BTN_Y0
+                        + (ACTION_BTN_H.saturating_sub(
+                            std::design::font::line_height(ACTION_BTN_SCALE),
+                        )) / 2;
+                    if let Some(c) = test_text(
+                        x,
+                        y,
+                        label_x,
+                        label_y,
+                        ACTION_BTN_SCALE,
+                        ACTION_BTN_LABEL,
+                        ACCENT_SKY,
+                    ) {
                         return c;
                     }
 
