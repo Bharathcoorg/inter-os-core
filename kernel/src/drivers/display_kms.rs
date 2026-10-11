@@ -478,6 +478,30 @@ impl DrmKmsController {
         }
     }
 
+    /// True when the surface loop below is guaranteed to take the identity
+    /// full-cover blit: one 720x1440 surface at the origin over an unrotated
+    /// 720x1440 scanout, which is a `copy_from_slice` replacing every
+    /// back-buffer pixel.
+    ///
+    /// WHY this predicate and not "some surface covers the scanout": a surface
+    /// declares `opacity`, but its *pixels* carry their own alpha, and the
+    /// generic blit blends against the backdrop rather than replacing it. Only
+    /// the identity path overwrites the backdrop outright, so only it makes
+    /// dropping the background fill provably equivalent — a transparent pixel
+    /// lands on the same colour either way.
+    fn identity_full_cover_will_run(&self) -> bool {
+        let landscape = matches!(
+            self.orientation,
+            DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft
+        );
+        if landscape || self.scanout_width != 720 || self.scanout_height != 1440 {
+            return false;
+        }
+        self.surfaces.iter().any(|s| {
+            s.visible && s.opacity != 0 && s.width == 720 && s.height == 1440 && s.x == 0 && s.y == 0
+        })
+    }
+
     /// Composites all visible surfaces onto the back buffer in z-order.
     pub fn composite(&mut self) {
         self.ensure_buffers();
@@ -496,8 +520,26 @@ impl DrmKmsController {
             return;
         }
         // Clear back buffer to base background color (slate navy: 0xFF0B0F19)
+        //
+        // WHY the fill is conditional: the phone's steady state is one opaque
+        // 720x1440 launcher surface covering the whole scanout, and the
+        // identity blit below then overwrites the fill pixel for pixel, so the
+        // fill writes 1,036,800 pixels that are about to be replaced. Dropping
+        // it removes a full-surface write pass from every such frame.
+        //
+        // WHY that is claimed as less work and not as a measured speedup: on
+        // this host, under QEMU's TCG accelerator, the run-to-run spread over
+        // six boots (21.7M to 49.2M total flip cycles) is wider than the change
+        // itself, so the numbers cannot speak for it. What is certain is that
+        // the pass is provably redundant on this path, and a redundant pass
+        // cannot make a frame faster.
+        //
+        // When no identity cover exists the fill runs exactly as before, so a
+        // pixel no surface reaches still lands on the base colour.
         let bg_color = 0xFF0B0F19u32;
-        self.back_buffer.fill(bg_color);
+        if !self.identity_full_cover_will_run() {
+            self.back_buffer.fill(bg_color);
+        }
 
         // Sort surfaces by z_order ascending (lower z painted first)
         self.surfaces.sort_by_key(|s| s.z_order);
@@ -798,6 +840,15 @@ impl DrmKmsController {
         // re-allocated yet) have no comparable common prefix to reason about.
         if self.front_buffer.len() != needed || self.back_buffer.len() != needed {
             *band = (0, scanout_h);
+            return;
+        }
+        // A band that already spans the scanout cannot be widened any further,
+        // so the compare pass has nothing left to add and is skipped outright.
+        // WHY this short-circuit matters: the diff is a full-surface compare,
+        // and it runs on the path where a caller has already declared the
+        // whole frame dirty (boot, a mode change, a surface created) — exactly
+        // the frames that can least afford another scanout pass.
+        if band.1 > band.0 && band.0 == 0 && band.1 >= scanout_h {
             return;
         }
         let (front, back) = (&self.front_buffer, &self.back_buffer);
