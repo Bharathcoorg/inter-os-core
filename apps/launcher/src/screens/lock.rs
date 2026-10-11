@@ -947,10 +947,10 @@ fn pin_key_face(
         //
         // WHY `text::rasterize_pixel_bold` and not `test_text_aa`: this is the one
         // run on the surface the user has to be *certain* of, and it is currently
-        // the softest. `test_text_aa` reads `interos_std`'s two-bit coverage table
+        // the softest. `test_text_aa` reads `interos_std`'s four-bit coverage table
         // and magnifies it with nearest neighbour, so at any integer scale above
         // one every partially covered outline pixel becomes a `scale` x `scale`
-        // block of a one-third or two-thirds tone. On a #414141 disc with white
+        // block of a sixteen-step tone. On a #414141 disc with white
         // ink that reads as a grid of mid greys wrapped round the figure: a haze,
         // which is the "not crystal clear" symptom in one sentence.
         // `text::rasterize_pixel_bold` is the same pen walk as `test_text` against

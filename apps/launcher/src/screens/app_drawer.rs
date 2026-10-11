@@ -497,7 +497,7 @@ impl Run {
 
     /// The colour of (`px`, `py`) if this run inks it, anti-aliased against `bg`.
     ///
-    /// WHY this exists beside the 1-bit path: the font rasteriser carries 2-bit
+    /// WHY this exists beside the 1-bit path: the font rasteriser carries 4-bit
     /// coverage (`font::coverage`), and a hard-edged glyph over a flat card shows
     /// a stair-stepped outline that the reference's typography does not have.
     /// The blend is per covered pixel, so the cost is confined to the glyph.
