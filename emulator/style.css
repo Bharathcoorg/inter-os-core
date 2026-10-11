@@ -2365,6 +2365,15 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   justify-content: center;
 }
 
+/* The guest scanout is a 720x1440 pixel-exact surface, and this element is the
+   only thing between it and the viewer's screen. WHY `pixelated`: the phone
+   chassis is 380px wide inside a 10px bezel, so the 720px frame is drawn at
+   roughly half size, and the browser's default smoothing was interpolating
+   every glyph edge in that halving -- which is what made the whole UI look
+   soft and slightly out of focus in Studio even though the framebuffer itself
+   was exact. Nearest-neighbour at a fractional scale preserves the guest's own
+   edges (still anti-aliased by the firmware) instead of replacing them with the
+   viewer's blur. */
 #live-scanout-img,
 #live-scanout-canvas,
 .screen-live-scanout canvas {
@@ -2375,7 +2384,8 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   user-select: none;
   -webkit-user-drag: none;
   touch-action: none;
-  image-rendering: auto;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
   transform: translateZ(0);
 }
 

@@ -560,8 +560,15 @@ document.addEventListener('DOMContentLoaded', () => {
     if (liveScanoutImg) liveScanoutImg.style.display = 'none';
     scanoutCtx = liveScanoutCanvas.getContext('2d', { alpha: false, desynchronized: true });
     if (scanoutCtx) {
-      scanoutCtx.imageSmoothingEnabled = true;
-      scanoutCtx.imageSmoothingQuality = 'high';
+      // WHY smoothing is OFF here: the canvas is already 1:1 with the guest's
+      // framebuffer, so putImageData never scales anything, and the CSS that
+      // presents the element at chassis size is the only place a resample
+      // happens. Leaving smoothing enabled only mattered for the drawImage
+      // paths, and switching it off guarantees that if a future path does
+      // scale here it shows the guest's own anti-aliased edges rather than a
+      // second, smoothed interpolation of them. The frame is the guest's
+      // pixels exactly; nothing on this side should re-filter them.
+      scanoutCtx.imageSmoothingEnabled = false;
     }
   }
   setSurfaceState('no-signal');
