@@ -1,6 +1,23 @@
 #!/usr/bin/env python3
 """
-Test First-Boot 6-Digit PIN Setup, Confirmation, Persistence and Reboot Unlock.
+Test that a device with no credential boots to the plain lock screen and unlocks
+on a swipe, and that the account layer never claims a credential it does not hold.
+
+WHY the shape of this test changed: the shell no longer forces first-boot PIN
+setup -- a lock is set from Settings > Security instead -- so there is no
+first-boot setup pad to wait for and no credential on a fresh disk. What this
+suite now pins is the contract that replaced it:
+
+  1. A fresh disk reaches the lock screen, and the old "credential setup
+     presented" line never appears (so forced setup cannot creep back).
+  2. The swipe gesture unlocks a device that has no credential.
+  3. After a reboot the same holds, and no credential is "restored" from a disk
+     that never had one.
+
+Credential set/change/remove, and their persistence across a reboot, are driven
+from the Settings > Security panel and are covered by the account layer's unit
+tests in `kernel/src/user/mod.rs` (`user::tests`); driving that panel over
+serial taps proved unreliable because a tap sent during a repaint is dropped.
 """
 
 import os
@@ -163,36 +180,28 @@ def main():
     proc, ser_sock, mon_sock = launch_qemu(boot_img, data_img, ser_port, mon_port)
     reader = SerialReader(ser_sock)
 
-    print("[TEST] Awaiting first-boot PIN setup surface...")
-    ready = reader.wait_for("First boot: credential setup presented", timeout=60.0,
+    print("[TEST] Awaiting the lock screen (no forced credential setup)...")
+    ready = reader.wait_for("lock screen is now guest-owned", timeout=90.0,
                             print_filter=["BOOT", "VFS", "LAUNCHER", "USER", "Step 5"])
-    assert ready, "First boot PIN setup screen not reached!"
-    print("[TEST] First boot PIN setup screen confirmed!")
+    assert ready, "Lock screen not reached on a fresh disk!"
+    print("[TEST] Lock screen presented without a PIN prompt!")
+
+    # WHY this asserts the ABSENCE of a line: this shell no longer forces
+    # first-boot credential setup, so an owner with no lock must reach the plain
+    # lock screen. If a future change puts the setup pad back on the boot path,
+    # this fails loudly instead of the device quietly demanding a PIN again.
+    time.sleep(2.0)
+    assert "First boot: credential setup presented" not in "".join(reader.captured_logs), \
+        "First-boot credential setup is being forced again!"
 
     time.sleep(1.0)
-    print("[TEST] Step 1: Entering PIN 123456C for initial setup...")
-    reader.send("PIN 123456C")
+    print("[TEST] Step 1: Swiping up from the bottom edge to unlock...")
+    reader.send("SWIPE 360 1425 360 1100")
 
-    print("[TEST] Awaiting confirmation request...")
-    confirmed_req = reader.wait_for("confirmation requested", timeout=45.0,
-                                    print_filter=["PIN", "LAUNCHER", "USER", "INPUT"])
-    assert confirmed_req, "PIN confirmation was not requested!"
-    print("[TEST] PIN confirmation request received!")
-
-    time.sleep(1.0)
-    print("[TEST] Step 2: Entering matching PIN 123456C to confirm...")
-    reader.send("PIN 123456C")
-
-    print("[TEST] Awaiting credential persistence & unlock...")
-    persisted = reader.wait_for("Credential persisted to", timeout=45.0,
-                                print_filter=["PIN", "LAUNCHER", "USER", "INPUT", "VFS"])
-    assert persisted, "Credential was not persisted to disk!"
-    print("[TEST] Credential persisted to VFS successfully!")
-
-    unlocked = reader.wait_for("First-boot credential established; device unlocked", timeout=45.0,
-                               print_filter=["PIN", "LAUNCHER", "USER"])
-    assert unlocked, "Device was not unlocked after PIN confirmation!"
-    print("[TEST] Device unlocked to HomeScreen!")
+    unlocked = reader.wait_for("Device unlocked via swipe/slide gesture", timeout=45.0,
+                               print_filter=["LAUNCHER", "USER", "INPUT"])
+    assert unlocked, "A credential-less device did not unlock on the swipe gesture!"
+    print("[TEST] Device unlocked on the swipe gesture, as it must be with no PIN!")
 
     ppm_out = ROOT / "target" / "first_boot_unlocked.ppm"
     screendump(mon_sock, ppm_out)
@@ -211,39 +220,29 @@ def main():
 
     time.sleep(1.5)
 
-    # --- SESSION 2: Reboot with Persisted Credential, Test Lock Screen & Unlock ---
-    print("\n--- Session 2: Rebooting with same disk to verify persistence ---")
+    # --- SESSION 2: Reboot on the same disk, which still holds no credential ---
+    print("\n--- Session 2: Rebooting with same disk ---")
     proc, ser_sock, mon_sock = launch_qemu(boot_img, data_img, ser_port, mon_port)
     reader = SerialReader(ser_sock)
 
-    print("[TEST] Awaiting credential restore and LockScreen presentation...")
-    restored = reader.wait_for("Restored persisted credential for UID=1000", timeout=60.0,
-                               print_filter=["BOOT", "VFS", "USER", "LAUNCHER", "RESTORE"])
-    assert restored, "Credential was not restored on reboot!"
-    print("[TEST] Credential restored from disk successfully!")
-
-    lock_presented = reader.wait_for("lock screen is now guest-owned", timeout=30.0,
-                                     print_filter=["LAUNCHER", "Step 5"])
+    lock_presented = reader.wait_for("lock screen is now guest-owned", timeout=90.0,
+                                     print_filter=["LAUNCHER", "Step 5", "USER"])
     assert lock_presented, "Lock screen was not presented on reboot!"
     print("[TEST] Lock screen presented on reboot!")
 
+    # WHY no credential restore is expected: nothing was ever set, so the disk
+    # holds none. A restore line here would mean the account layer invented one.
+    time.sleep(2.0)
+    assert "Restored persisted credential for UID=1000" not in "".join(reader.captured_logs), \
+        "A credential was restored from a disk that never had one!"
+
     time.sleep(1.0)
-    # Unlock via tap to open PIN entry and PIN 123456C
-    print("[TEST] Tapping lock screen to open PIN entry...")
-    reader.send("TAP 360 800")
-    pin_opened = reader.wait_for("credential entry required", timeout=15.0,
-                                 print_filter=["LAUNCHER", "INPUT"])
-    assert pin_opened, "PIN entry was not opened from lock screen tap!"
-    print("[TEST] PIN entry surface opened!")
-
-    time.sleep(0.5)
-    print("[TEST] Entering PIN 123456C to authenticate...")
-    reader.send("PIN 123456C")
-
-    auth_ok = reader.wait_for("User authentication succeeded; device unlocked", timeout=45.0,
-                              print_filter=["LAUNCHER", "USER", "INPUT"])
-    assert auth_ok, "PIN unlock failed on reboot!"
-    print("[TEST] User authentication succeeded! Device unlocked!")
+    print("[TEST] Unlocking on the swipe gesture after reboot...")
+    reader.send("SWIPE 360 1425 360 1100")
+    unlocked = reader.wait_for("Device unlocked via swipe/slide gesture", timeout=45.0,
+                               print_filter=["LAUNCHER", "USER", "INPUT"])
+    assert unlocked, "Rebooted device demanded a credential it does not have!"
+    print("[TEST] Rebooted device unlocked on the swipe gesture!")
 
     ppm_reboot = ROOT / "target" / "reboot_unlocked.ppm"
     screendump(mon_sock, ppm_reboot)
@@ -259,7 +258,7 @@ def main():
     proc.wait(timeout=5)
 
     print("\n============================================================")
-    print("  ALL FIRST-BOOT, CONFIRM, PERSISTENCE & UNLOCK TESTS PASSED!")
+    print("  ALL BOOT, UNLOCK & CREDENTIAL-STATE TESTS PASSED!")
     print("============================================================")
 
 if __name__ == "__main__":
