@@ -5,6 +5,8 @@
 //! line and native applications retain one visual language.
 
 pub mod walls;
+pub mod face;
+pub mod typeface;
 
 pub mod color {
     // Canonical light system

@@ -8,6 +8,13 @@
 pub mod app;
 pub mod design;
 pub mod font;
+
+// WHY std under test only: the guest build of this crate is `#![no_std]` and must
+// stay that way, but the unit tests want `Vec` and the other collections to
+// build scratch surfaces. This is compiled only for `cargo test`, never for the
+// bare-metal target, so it adds nothing to the image.
+#[cfg(test)]
+extern crate std;
 pub mod service;
 pub mod compositor {
     pub const MAGIC: [u8; 4] = *b"ICMP";
