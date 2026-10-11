@@ -189,6 +189,8 @@ pub enum SyscallNumber {
     AppRestart = 122,
     AppRuntimeList = 123,
     AppFocus = 124,
+    UserHasCredential = 129,
+    UserClearCredential = 128,
     UserSetCredential = 126,
     DevicePower = 127,
 }
@@ -1904,6 +1906,40 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         },
         127 => {
             match sys_device_power(a1 as u32) { Ok(value) => value as i64, Err(e) => e as i64 }
+        },
+        129 => {
+            // UserHasCredential: a1 = uid. Returns 1 or 0. This is deliberately
+            // separate from UserLockState: `Unlocked` is what a credential-less
+            // account reports too, so lock state alone cannot answer whether a
+            // PIN exists.
+            let target_uid = a1 as u32;
+            if let Err(e) = require_user_control_object(target_uid) { return e as i64; }
+            let mgr = crate::user::USER_MANAGER.lock();
+            match mgr.has_credential(crate::user::UserId(target_uid)) {
+                Ok(has) => has as i64,
+                Err(_) => SyscallResult::TargetNotFound as i64,
+            }
+        },
+        128 => {
+            // UserClearCredential: a1 = uid, a2 = secret_ptr, a3 = secret_len
+            // WHY the secret is mandatory here: removing a credential lowers what
+            // the device demands, so it must prove the current one rather than
+            // trusting a caller that only knows the uid.
+            let target_uid = a1 as u32;
+            if let Err(e) = require_user_control_object(target_uid) { return e as i64; }
+            let len = a3 as usize;
+            if len == 0 || len > 64 { return SyscallResult::InvalidArguments as i64; }
+            let mut secret_buf = [0u8; 64];
+            if copy_from_user(&mut secret_buf[..len], a2, len).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let mut mgr = crate::user::USER_MANAGER.lock();
+            match mgr.clear_credential(crate::user::UserId(target_uid), &secret_buf[..len]) {
+                Ok(()) => SyscallResult::Success as i64,
+                Err(crate::user::UserError::AuthenticationFailed) => SyscallResult::PermissionDenied as i64,
+                Err(crate::user::UserError::InvalidCredential) => SyscallResult::InvalidArguments as i64,
+                Err(_) => SyscallResult::TargetNotFound as i64,
+            }
         },
         126 => {
             // UserSetCredential: a1 = uid, a2 = secret_ptr, a3 = secret_len, a4 = old_secret_ptr, a5 = old_secret_len

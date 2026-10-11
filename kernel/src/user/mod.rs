@@ -416,9 +416,83 @@ impl UserManager {
         Ok(())
     }
 
+    /// Whether this account holds a credential at all.
+    ///
+    /// WHY this is a question of its own rather than something read off
+    /// `lock_state`: `Unlocked` does NOT imply a credential. `unlock` sets an
+    /// account with no credential to `Unlocked` as well, so a device that has
+    /// never had a PIN reports `Unlocked` the moment it is swiped past -- and
+    /// deriving "a PIN is set" from that would have Settings claim a lock the
+    /// account does not have, on the very screen that is meant to report it.
+    pub fn has_credential(&self, uid: UserId) -> Result<bool, UserError> {
+        let profile = self.users.get(&uid).ok_or(UserError::UserNotFound)?;
+        Ok(profile.credential.is_some())
+    }
+
     /// Establishes a credential on an account that does not yet have one.
     pub fn set_credential(&mut self, uid: UserId, secret: &[u8]) -> Result<(), UserError> {
         self.change_credential(uid, None, secret)
+    }
+
+    /// Removes an account's credential, leaving it credential-less again.
+    ///
+    /// WHY this exists: `change_credential` rejects an empty secret, so before
+    /// this there was no way to turn a screen lock off once it had been set --
+    /// Settings could add a PIN and never remove one. WHY the old secret is
+    /// required: clearing a credential is the one credential operation that
+    /// *lowers* what the device demands, handing it to anyone holding it, so it
+    /// verifies the current credential exactly where `change_credential` does
+    /// rather than trusting the caller.
+    ///
+    /// The account stays `Locked` afterwards. A credential-less account is
+    /// unlocked by the lock screen's swipe (`unlock` succeeds when
+    /// `credential.is_none()`), so the device is reachable again without the
+    /// state being reported as unlocked before anyone has presented anything.
+    pub fn clear_credential(&mut self, uid: UserId, old_secret: &[u8]) -> Result<(), UserError> {
+        let profile = self.users.get_mut(&uid).ok_or(UserError::UserNotFound)?;
+        let matches = match profile.credential.as_ref() {
+            Some(existing) => existing.verify(old_secret),
+            None => return Err(UserError::InvalidCredential),
+        };
+        if !matches {
+            crate::serial_println!(
+                "[USER:SECURITY] Credential removal refused for UID={}: the current credential did not verify.",
+                uid.0
+            );
+            return Err(UserError::AuthenticationFailed);
+        }
+        profile.credential = None;
+        profile.lock_state = UserLockState::Locked;
+        Self::remove_credential_from_vfs(uid);
+        crate::serial_println!(
+            "[USER:SECURITY] Credential removed for UID={} after verification; the account is credential-less again.",
+            uid.0
+        );
+        Ok(())
+    }
+
+    /// Deletes the persisted credential record so a reboot cannot resurrect a PIN
+    /// the owner has just removed.
+    ///
+    /// WHY the outcome is reported, as it is for the write above: a silent
+    /// failure here would leave the removed PIN on disk, and the next boot would
+    /// come back locked behind a credential Settings no longer reports.
+    pub fn remove_credential_from_vfs(uid: UserId) {
+        let path = format!("/user/{}/vault/.credential", uid.0);
+        let outcome = {
+            let mut vfs = VFS.lock();
+            vfs.unlink(&path).and_then(|_| vfs.sync())
+        };
+        match outcome {
+            Ok(()) => crate::serial_println!(
+                "[USER:SECURITY] Persisted credential removed from {} and flushed to disk.",
+                path
+            ),
+            Err(_) => crate::serial_println!(
+                "[USER:SECURITY] Persisted credential could not be removed from {}: the filesystem refused the operation. The account is credential-less for this session only.",
+                path
+            ),
+        }
     }
 
     /// Persists the salted credential hash to `/user/{uid}/vault/.credential` in VFS.
@@ -575,8 +649,93 @@ pub fn init() {
         if mgr.get_user(UserId::OWNER).and_then(|u| u.credential.as_ref()).is_none() {
             crate::serial_println!(
                 "[USER:SECURITY] Device owner provisioned with NO credential. \
-                 Account requires first-boot credential setup."
+                 The lock screen unlocks on a swipe; a PIN is set from Settings > Security."
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A manager holding one freshly provisioned owner with no credential.
+    fn owner_without_credential() -> UserManager {
+        let mut mgr = UserManager::new();
+        mgr.provision_owner("Device Owner", None, 0).expect("provision owner");
+        mgr
+    }
+
+    /// WHY this is a test and not a comment: the Settings screen for the screen
+    /// lock once derived "a PIN is set" from the lock state, which reported
+    /// `Unlocked` for exactly this account -- so the panel claimed a lock the
+    /// device never had. `Unlocked` says the session is open, not that a
+    /// credential exists.
+    #[test]
+    fn unlocking_a_credential_less_account_does_not_imply_a_credential() {
+        let mut mgr = owner_without_credential();
+        assert_eq!(mgr.has_credential(UserId::OWNER), Ok(false));
+        assert!(mgr.unlock(UserId::OWNER, b"", 0).is_ok());
+        assert_eq!(mgr.get_lock_state(UserId::OWNER).ok(), Some(UserLockState::Unlocked));
+        // The whole point: still no credential, despite being Unlocked.
+        assert_eq!(mgr.has_credential(UserId::OWNER), Ok(false));
+    }
+
+    #[test]
+    fn a_credential_is_established_and_then_verified() {
+        let mut mgr = owner_without_credential();
+        mgr.set_credential(UserId::OWNER, b"123456").expect("set credential");
+        assert_eq!(mgr.has_credential(UserId::OWNER), Ok(true));
+        assert!(mgr.unlock(UserId::OWNER, b"123456", 0).is_ok());
+        assert!(mgr.unlock(UserId::OWNER, b"654321", 0).is_err());
+    }
+
+    #[test]
+    fn changing_a_credential_requires_the_current_one() {
+        let mut mgr = owner_without_credential();
+        mgr.set_credential(UserId::OWNER, b"123456").expect("set credential");
+        assert_eq!(
+            mgr.change_credential(UserId::OWNER, Some(b"000000"), b"654321"),
+            Err(UserError::AuthenticationFailed)
+        );
+        // The old credential is still the one in force.
+        assert!(mgr.unlock(UserId::OWNER, b"123456", 0).is_ok());
+        assert!(mgr
+            .change_credential(UserId::OWNER, Some(b"123456"), b"654321")
+            .is_ok());
+        assert!(mgr.unlock(UserId::OWNER, b"654321", 0).is_ok());
+    }
+
+    #[test]
+    fn clearing_a_credential_requires_the_current_one() {
+        let mut mgr = owner_without_credential();
+        mgr.set_credential(UserId::OWNER, b"123456").expect("set credential");
+        assert_eq!(
+            mgr.clear_credential(UserId::OWNER, b"000000"),
+            Err(UserError::AuthenticationFailed)
+        );
+        assert_eq!(mgr.has_credential(UserId::OWNER), Ok(true));
+        mgr.clear_credential(UserId::OWNER, b"123456")
+            .expect("clear credential");
+        assert_eq!(mgr.has_credential(UserId::OWNER), Ok(false));
+    }
+
+    #[test]
+    fn clearing_refuses_an_account_that_has_no_credential() {
+        let mut mgr = owner_without_credential();
+        assert_eq!(
+            mgr.clear_credential(UserId::OWNER, b"123456"),
+            Err(UserError::InvalidCredential)
+        );
+    }
+
+    #[test]
+    fn an_empty_credential_is_never_accepted() {
+        let mut mgr = owner_without_credential();
+        assert_eq!(
+            mgr.set_credential(UserId::OWNER, b""),
+            Err(UserError::InvalidCredential)
+        );
+        assert_eq!(mgr.has_credential(UserId::OWNER), Ok(false));
     }
 }

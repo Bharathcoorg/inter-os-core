@@ -823,6 +823,26 @@ pub fn spawn_app_settings(id_security: TaskId) -> TaskId {
         rights: Rights::WRITE,
         object_id: 1,
     }).ok();
+    // Credential authority, attenuated to the ACTIVE account only.
+    //
+    // WHY Settings has it: this shell no longer forces a PIN at boot, so the
+    // screen lock is set, changed and removed from Settings > Security. The
+    // account layer gates every credential syscall behind
+    // `user_control_object(uid)`, and without this Settings could only report
+    // "the account layer refused" -- the panel would have been a control that
+    // cannot do what it says.
+    //
+    // WHY this object id and not a blanket SystemControl: it names one account.
+    // Settings can administer the credential of the signed-in owner and no other,
+    // so this cannot lock, unlock or switch to an arbitrary uid, and it grants
+    // no filesystem, network or hardware authority over anything else.
+    let active_uid = crate::user::USER_MANAGER.lock().active_user().0;
+    caps.insert(Capability {
+        id: CapabilityId(1708),
+        cap_type: CapabilityType::SystemControl,
+        rights: Rights::INVOKE,
+        object_id: crate::syscall::user_control_object(active_uid),
+    }).ok();
 
     let id = spawn_user_process_with_parent(
         "app_settings",

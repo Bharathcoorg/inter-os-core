@@ -176,6 +176,8 @@ pub enum SyscallNumber {
     AppRestart = 122,
     AppRuntimeList = 123,
     AppFocus = 124,
+    UserHasCredential = 129,
+    UserClearCredential = 128,
     UserSetCredential = 126,
     DevicePower = 127,
 }
@@ -2434,6 +2436,38 @@ pub fn user_set_credential(uid: u32, secret: &[u8]) -> Result<(), i64> {
             secret.len() as u64,
             0,
             0,
+        )
+    };
+    if r == 0 { Ok(()) } else { Err(r) }
+}
+
+/// Whether the account holds a credential.
+///
+/// WHY this is not `user_get_lock_state`: `Unlocked` is what a credential-less
+/// account reports once it has been swiped past, so the lock state cannot say
+/// whether a PIN exists. `Err` means the account layer refused the query, which
+/// is not the same answer as "no".
+pub fn user_has_credential(uid: u32) -> Result<bool, i64> {
+    let r = unsafe { syscall1(SyscallNumber::UserHasCredential, uid as u64) };
+    match r {
+        0 => Ok(false),
+        1 => Ok(true),
+        err => Err(err),
+    }
+}
+
+/// Removes the screen lock from an account, leaving it credential-less again.
+///
+/// `secret` is the credential currently set: the kernel verifies it before it
+/// clears anything, because this is the one credential operation that lowers
+/// what the device demands. An account with no credential rejects the call.
+pub fn user_clear_credential(uid: u32, secret: &[u8]) -> Result<(), i64> {
+    let r = unsafe {
+        syscall3(
+            SyscallNumber::UserClearCredential,
+            uid as u64,
+            secret.as_ptr() as u64,
+            secret.len() as u64,
         )
     };
     if r == 0 { Ok(()) } else { Err(r) }
