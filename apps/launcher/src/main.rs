@@ -1539,33 +1539,21 @@ pub extern "C" fn _start() -> ! {
                     render_band(surface, &state, H / 2 - 130, (H / 2 + 220).min(H));
                     let _ = std::surface_flip(4);
                     if elapsed >= 180 {
-                        // WHY an uninitialized account goes to the credential
-                        // surface and not to the lock screen: the lock screen's
-                        // own pad draws four dots and submits on the fourth
-                        // digit, so it can only ever establish a four-digit PIN.
-                        // The PinEntry surface draws eight dots and a UNLOCK
-                        // key, so it is the one surface that can take the
-                        // 4..=8-digit PIN the account layer accepts - and it
-                        // keeps first boot on the same surface every later
-                        // unlock uses.
-                        if std::user_get_lock_state(std::user_get_current()).ok()
-                            == Some(std::UserLockState::Uninitialized)
-                        {
-                            state.pin_buffer = [0; 8];
-                            state.pin_len = 0;
-                            state.pin_error = 0;
-                            state.pin_setup_mode = true;
-                            state.current_view = ViewMode::PinEntry;
-                            render_view(surface, &state);
-                            let _ = std::surface_flip(4);
-                            std::log(0, "[LAUNCHER] First boot: credential setup presented on the PIN entry surface.").ok();
-                        } else {
-                            state.current_view = ViewMode::LockScreen;
-                            state.boot_progress = 1000;
-                            render_view(surface, &state);
-                            let _ = std::surface_flip(4);
-                            std::log(0, "[LAUNCHER] Boot presentation complete; lock screen is now guest-owned.").ok();
-                        }
+                        // WHY boot never demands a credential now: an owner who
+                        // has not set a lock gets the plain lock screen, and the
+                        // account layer already unlocks a credential-less owner
+                        // on the swipe gesture - `UserManager::unlock` succeeds
+                        // when `credential.is_none()`. Forcing first-boot PIN
+                        // setup made every device pass through a screen it could
+                        // not skip, and put PIN entry, rather than Settings,
+                        // where a lock is configured. A PIN set from
+                        // Settings > Security is still demanded on every later
+                        // unlock and still survives a reboot.
+                        state.current_view = ViewMode::LockScreen;
+                        state.boot_progress = 1000;
+                        render_view(surface, &state);
+                        let _ = std::surface_flip(4);
+                        std::log(0, "[LAUNCHER] Boot presentation complete; lock screen is now guest-owned.").ok();
                     }
                     continue;
                 }

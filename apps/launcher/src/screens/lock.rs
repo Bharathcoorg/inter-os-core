@@ -1304,8 +1304,12 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     // 1. Full-bleed wallpaper.
     let color = lock_wallpaper_pixel(f, x, y);
 
-    // If the PIN pad is active (or on first-boot uninitialized state), render the PIN pad!
-    let pin_active = state.pin_pad_visible || state.lock_state == interos_std::UserLockState::Uninitialized;
+    // The PIN pad is drawn only when the unlock gesture found a credential and asked
+    // for it (`pin_pad_visible`). It used to also appear whenever the account was
+    // Uninitialized, which existed for the forced first-boot setup; now that boot
+    // presents the plain lock screen, that clause would put a setup pad in front
+    // of an owner who never asked to set a PIN.
+    let pin_active = state.pin_pad_visible;
     if pin_active {
         if let Some(pin_color) = lock_pin_pad_pixel(color, x, y, state, f) {
             return pin_color;
@@ -1394,8 +1398,16 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
 
     // 5. Closed padlock above the centred unlock hint, both on the near-black
     //    foreground where the panel draws them in paper white.
-    if let Some(c) = lock_padlock_pixel(&theme, color, x, y) {
-        return c;
+    //
+    //    WHY only when a credential exists: this shell no longer forces first-boot
+    //    setup, so a device can legitimately reach the lock screen with no PIN at
+    //    all. A closed padlock there would advertise a lock the account does not
+    //    have, and the hint below it already says the true thing - "Swipe up to
+    //    unlock", which is what actually happens.
+    if state.lock_state != interos_std::UserLockState::Uninitialized {
+        if let Some(c) = lock_padlock_pixel(&theme, color, x, y) {
+            return c;
+        }
     }
     // WHY the origin is derived from the measured string: the panel centres the
     // hint on the surface, so the x origin must follow the measured text.
