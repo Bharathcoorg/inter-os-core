@@ -754,12 +754,10 @@ fn build(state: &LauncherState) -> Paint {
 /// was calling `text::ellipsize` and `text::center_x` for every pixel of the whole
 /// deck band, which is 15% of the surface, to draw sixteen glyphs in the middle.
 /// WHY 200 wide at a 30px margin and a 30px gutter: the tiles used to be 190 at a
-/// 48px margin, which left 174px for a name. The widest name in the deck,
-/// "Messages", measures 188px at `type_scale::BODY`, so it missed that fit by 14px
-/// and every label in the deck was set a rung smaller than it needed to be -- 17px
-/// cap height for the name of the app you are about to tap. 200 - 8 of padding
-/// leaves 192, which fits the widest name at BODY, so the deck is set one rung
-/// larger across the board and the longest name still renders whole.
+/// 48px margin, which left 174px for a name. The deck names are set at
+/// `LABEL_SCALE` (CAPTION, a 17px cap -- the smallest step the 16x24 face can
+/// render), so even the widest name fits with room on either side, and the
+/// padding stays XS so short names keep breathing room.
 pub const DOCK_TILES: [Rect; 6] = [
     Rect::new(30, 700, 200, 280),
     Rect::new(260, 700, 200, 280),
@@ -824,11 +822,14 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
     ];
 
     // WHY one scale for the whole deck: picking a scale per label made "Messages"
-    // (188 px at BODY against a 174 px fit) render a step smaller than its
-    // neighbours, which reads as a rendering fault rather than a long name. The
-    // deck picks the largest scale at which the WIDEST label still fits, so every
-    // tile is set in the same size and the longest name is the only one that
-    // ever has to step down.
+    // render a step smaller than its neighbours, which reads as a rendering
+    // fault rather than a long name, so every tile is set in the same size.
+    // WHY `LABEL_SCALE` (CAPTION, a 17px cap) and not BODY: BODY put a 34px cap
+    // on the tile names -- nearly triple the 13px AppTile label the design
+    // tokens name (`components.json`) -- and the widest name filled its tile
+    // edge to edge. CAPTION is the smallest step the 16x24 face can render, so
+    // it is the closest the firmware can come to the token; a registry name
+    // longer than the tile is still ellipsized to the fit by `Run::centred`.
     let label_bytes: [&[u8]; 6] = core::array::from_fn(|slot| {
         let (_, suffix, default_label, _) = dock_defs[slot];
         if slot == 5 {
@@ -845,20 +846,11 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
             default_label
         }
     });
-    // WHY XS and not SM for the padding: the fit is the tile less the inset the
-    // label needs on each side. At SM the widest name missed by 14px and the whole
-    // deck was forced down a rung; at XS it fits and the names are set larger.
+    // WHY XS for the padding: the fit is the tile less the inset the label
+    // needs on each side, and at XS even the widest name fits at `LABEL_SCALE`
+    // with room to spare.
     let label_fit = DOCK_TILES[0].w.saturating_sub(space::XS * 2);
-    let widest = label_bytes
-        .iter()
-        .map(|label| text::measure(label, type_scale::BODY))
-        .max()
-        .unwrap_or(0);
-    let label_scale = if widest <= label_fit {
-        type_scale::BODY
-    } else {
-        type_scale::CAPTION
-    };
+    let label_scale = LABEL_SCALE;
 
     for (slot, &(icon_kind, _, _, icon_ink)) in dock_defs.iter().enumerate() {
         let cell = DOCK_TILES[slot];
@@ -866,12 +858,12 @@ fn deck_plan(state: &LauncherState, theme: &Theme, _deck: Rect) -> DeckPlan {
 
         let icon_cx = cell.x + cell.w / 2;
         // WHY the block is centred rather than at fixed offsets: the tile is 280
-        // tall and its content is a 48px pictogram, a 20px gap and a 48px name
-        // cell, which is 116 -- leaving 82px above and below. The offsets are
+        // tall and its content is a 48px pictogram, a 20px gap and a 24px name
+        // cell, which is 92 -- leaving 94px above and below. The offsets are
         // derived from `DOCK_ICON_EXTENT` so changing the icon size moves the
         // name with it instead of leaving the block lopsided.
         let block_h = DOCK_ICON_EXTENT as usize * 2 + space::MD + space::XS
-            + text::line_height(type_scale::BODY);
+            + text::line_height(label_scale);
         let block_y = cell.y + (cell.h.saturating_sub(block_h)) / 2;
         let icon_cy = block_y + DOCK_ICON_EXTENT as usize;
         let label_y = block_y + DOCK_ICON_EXTENT as usize * 2 + space::MD + space::XS;
