@@ -4,6 +4,8 @@
 //! surfaces, spacing and typography from this module so the launcher, system
 //! line and native applications retain one visual language.
 
+pub mod walls;
+
 pub mod color {
     // Canonical light system
     pub const BACKGROUND: u32 = 0xFFF7F6F2;
