@@ -29,6 +29,7 @@ use core::cell::UnsafeCell;
 use crate::{test_text, test_text_aa, LauncherState, H, W};
 use launcher::layout::{self, Rect};
 use launcher::text;
+use interos_std::design::walls;
 use launcher::theme::*;
 
 /// WHY `Theme::LIGHT`: this is the one surface in the shell whose backdrop is a
@@ -38,9 +39,16 @@ use launcher::theme::*;
 /// swapped for the dark one.
 const THEME: Theme = Theme::LIGHT;
 
-const LOCK_REF_W: usize = 173;
-/// Reference display height, in reference panel pixels.
-const LOCK_REF_H: usize = 427;
+/// Reference panel width, in reference pixels.
+///
+/// WHY this is here and not the catalogue's: the surface's own glyphs and discs
+/// are laid out on the reference panel's grid, so it converts a device pixel to
+/// a panel column. The catalogue carries the same number for its traces and the
+/// crate's tests assert the two are equal, so they cannot drift.
+const LOCK_REF_W: usize = walls::SCENE_REF_W;
+/// Reference display height, in reference panel pixels. Same single-source rule as
+/// [LOCK_REF_W].
+const LOCK_REF_H: usize = walls::SCENE_REF_H;
 /// Longest string the lock surface can render (`Www, DD Mmm`).
 pub const LOCK_DATE_TEXT_LEN: usize = 11;
 /// Bottom edge of the status-bar band.
@@ -128,27 +136,6 @@ const LOCK_NA_TEXT: &[u8] = b"N/A";
 const LOCK_BTN_FILL_PERCENT: u32 = 27;
 const LOCK_BTN_RIM_PERCENT: u32 = 36;
 
-/// Reference height at which the sky's light ends and the valley begins: the mean
-/// of [`LOCK_SKYLINE_FAR`].
-///
-/// WHY this is data and the colours are not: the old ramp was twenty-eight
-/// measured colours written into three stop tables, and a theme change could not
-/// reach them because they were not theme fields. A height is the one thing the
-/// theme cannot express -- it says how far down the frame the light changes
-/// character -- so the heights stayed and the colours became derivations.
-const LOCK_HORIZON_Y: usize = 156;
-/// Reference height of the mist band that sits behind the foreground rock.
-const LOCK_MIST_Y: usize = 244;
-/// Reference height at which the foreground has finished fading to the ramp's
-/// darkest stop.
-///
-/// WHY the foreground reaches its darkest stop early and holds it: the previous
-/// ramp spent the whole bottom third of the frame easing from the mist tone to the
-/// rock tone, so the middle of that band sat at about `#8D9193` -- mid-grey. That
-/// is a backdrop the padlock cannot be read against, and `ink_on` resolving per
-/// pixel from it is how the padlock came out dark navy on grey. The reference
-/// reaches full rock by reference row 300 and stays there.
-const LOCK_ROCK_Y: usize = 330;
 /// How far the sun lifts the right of the frame, as a fraction of the 0..=256
 /// ramp scale, out of a full `across` of 256 at the right edge.
 const LOCK_ACROSS_SPAN: u32 = 256;
@@ -162,96 +149,39 @@ pub const LOCK_MONTH_ABBR: [&[u8; 3]; 12] = [
 ];
 
 // --- Wallpaper -------------------------------------------------------------
-// The panel's wallpaper is a photograph. It is rebuilt here as three tonal bands
-// separated by two silhouettes traced directly out of the panel image: for every
-// one of the 173 panel columns, the first row at which luminance falls below a
-// threshold and stays below it. The two thresholds (far ridge at 180, foreground
-// rock at 55) give the two skylines, and each is kept at one entry per panel
-// column so no traced peak is pooled away.
 //
-// WHY the skylines are the only measured data left on this screen: they say
-// *where the mountains are*, which is a property of the photograph and not of
-// the visual language. Everything else -- every colour, every gap -- is derived
-// from the theme, so swapping `Theme::LIGHT` for `Theme::DARK` restains the
-// whole backdrop without touching a single number below.
-
-/// Far skyline, one entry per reference column (173 wide): the first row at
-/// which that column's luminance falls below 180 and stays below it. Stored
-/// per column rather than pooled so the traced peaks survive exactly.
-const LOCK_SKYLINE_FAR: [u16; LOCK_REF_W] = [
-    161, 161, 161, 160, 159, 159, 160, 159, 159, 158, 158, 157,
-    156, 155, 154, 153, 152, 152, 153, 152, 152, 151, 150, 149,
-    148, 147, 146, 146, 146, 145, 145, 144, 143, 143, 144, 145,
-    146, 146, 148, 148, 148, 149, 151, 152, 153, 154, 155, 156,
-    156, 156, 156, 157, 157, 158, 158, 157, 157, 157, 156, 157,
-    157, 158, 159, 160, 160, 161, 162, 162, 163, 163, 164, 165,
-    166, 167, 167, 166, 166, 166, 165, 165, 165, 164, 164, 163,
-    163, 162, 162, 161, 161, 162, 163, 163, 164, 164, 164, 164,
-    165, 165, 166, 166, 167, 166, 166, 166, 166, 165, 165, 164,
-    163, 163, 163, 162, 161, 161, 160, 159, 158, 157, 156, 155,
-    154, 153, 152, 152, 152, 152, 151, 152, 152, 152, 151, 151,
-    150, 150, 149, 148, 147, 146, 145, 145, 146, 146, 147, 147,
-    148, 149, 150, 151, 151, 151, 151, 152, 153, 154, 155, 155,
-    155, 155, 154, 154, 154, 154, 154, 155, 155, 156, 156, 157,
-    158, 159, 159, 159, 159,
-];
-
-/// Near rock skyline, one entry per reference column: the first row at which
-/// that column's luminance falls below 55 and stays below it for four rows.
-/// WHY columns 25..36 are left as traced: in that band the trace is dominated by
-/// the figure standing on the ridge rather than by the rock behind it, so these
-/// entries sit high and the figure is drawn occluded from the waist down, which
-/// is what the panel shows. Replacing them with the neighbouring rock edge was
-/// tried and made the silhouette read better, but it reproducibly tripped a
-/// latent kernel boot fault (page fault at CR2=0x4, RIP=0x10000139c00, before
-/// the launcher task starts) that has nothing to do with this surface. The
-/// measurement as taken wins.
-const LOCK_SKYLINE_NEAR: [u16; LOCK_REF_W] = [
-    236, 240, 241, 240, 241, 241, 236, 236, 242, 238, 243, 243,
-    243, 240, 244, 241, 244, 242, 245, 245, 245, 245, 246, 246,
-    246, 220, 219, 218, 214, 213, 218, 218, 219, 222, 227, 249,
-    249, 249, 250, 248, 249, 249, 250, 250, 250, 250, 250, 249,
-    250, 250, 250, 250, 251, 251, 252, 252, 253, 254, 254, 255,
-    257, 258, 259, 262, 270, 267, 268, 265, 266, 267, 267, 267,
-    268, 268, 269, 269, 272, 270, 273, 277, 274, 271, 279, 275,
-    275, 273, 276, 272, 272, 272, 272, 272, 271, 271, 272, 272,
-    273, 273, 274, 274, 274, 276, 277, 277, 277, 280, 281, 281,
-    282, 282, 282, 282, 282, 282, 282, 282, 283, 283, 284, 285,
-    285, 284, 284, 285, 286, 290, 292, 288, 288, 288, 288, 287,
-    287, 288, 289, 288, 289, 290, 290, 291, 292, 293, 293, 294,
-    295, 296, 298, 301, 301, 301, 302, 303, 305, 307, 308, 309,
-    309, 310, 310, 311, 311, 311, 311, 310, 310, 309, 310, 310,
-    311, 312, 312, 313, 313,
-];
+// The panel's wallpaper is a photograph. It is rebuilt here as three tonal bands
+// separated by two silhouettes traced directly out of that photograph, for every
+// one of the 173 panel columns. The traces, the reference grid and the three
+// band heights live in `interos_std::design::walls`, the catalogue every
+// wallpaper-conversant surface reads, so a scene can be added or retuned without
+// editing this file.
+// WHY the skylines are the only measured data left here: they say *where the
+// mountains are*, which is a property of the photograph and not of the visual
+// language. Everything else -- every colour, every gap -- comes from the scene's
+// stops, so retuning a scene re-tints the whole backdrop without touching a
+// single number below.
 
 /// The brightest tone in the wallpaper: the sky where the sun sits behind the far
 /// ridge. WHY the ramp's top stop lifted toward the light rather than a measured
 /// cream: a warm horizon cannot be named by any field the theme has, and lifting
 /// the top stop toward its own ink is the one derivation that cannot go stale
-/// when the ramp is retuned.
-fn lock_horizon(theme: &Theme) -> u32 {
-    Theme::blend(theme.wallpaper_top, theme.ink_on_dark, 150)
-}
-
 /// The mountain body just under the far skyline: the ramp's mid stop pulled
-/// toward its bottom stop, because rock in shadow is darker than the sky on it.
-fn lock_shadow(theme: &Theme) -> u32 {
-    Theme::blend(theme.wallpaper_mid, theme.wallpaper_bottom, 80)
-}
-
 /// The mist band behind the foreground: the same mid stop lifted toward the
-/// light, because mist scatters it.
-fn lock_mist(theme: &Theme) -> u32 {
-    Theme::blend(theme.wallpaper_mid, theme.ink_on_dark, 150)
-}
-
 /// The lone figure standing on the near ridge, traced at panel x 25..36 and
 /// y 213..247. The traced rock edge crosses this band at y 213..227, so only the
 /// head and shoulders are above it; the torso and legs below are drawn anyway so
 /// the shape stays right if that edge ever moves, and the rock paints over them.
 /// WHY schematic: the panel's silhouette is 12 x 35 panel px, too little to carry
 /// any reading finer than head, shoulders and two legs.
-fn lock_figure_hit(x: usize, y: usize) -> bool {
+fn lock_figure_hit(scene: &walls::Scene, x: usize, y: usize) -> bool {
+    // WHY the figure is stock-only: it was traced out of the reference lock-screen
+    // panel, which is what the stock scene is built from. A wallpaper chosen from
+    // the catalogue has its own traced ridge, and pasting this panel's figure into
+    // it would put a person from a different photograph on its mountain.
+    if scene.key != b"stock" {
+        return false;
+    }
     if !(715..=833).contains(&y) || !(100..=154).contains(&x) {
         return false;
     }
@@ -302,51 +232,55 @@ fn lock_band(vertical: u32, across: u32) -> u32 {
 
 /// Full-bleed wallpaper layer for the lock surface.
 ///
-/// WHY the ramp arrives in a `&Frame` rather than a `&Theme`: every tone below is
-/// `Theme::blend` of two theme stops, and `blend` is a four-iteration loop with a
-/// bounds check per channel. While `THEME` is a constant the compiler folds all of
-/// them away, which is why they were free until now -- but `screens/app_drawer.rs`
-/// records the plan to replace that constant with the active theme, at which point
-/// every one of them becomes real work on every one of a million pixels. Taking
-/// them from the frame costs nothing today and keeps that change off the hot path.
+/// WHY the scene arrives in the `Frame` rather than as a `&Theme`: the ramp's
+/// tones are `Scene` derivations and its skylines are read per pixel, and this
+/// function is called once for each of the surface's 1,036,800 pixels. Resolving
+/// the stored key into a scene once per surface keeps a byte-string lookup off
+/// the hot path, and it is what lets the lock screen and the home screen draw
+/// independently chosen wallpapers from the same catalogue.
 fn lock_wallpaper_pixel(f: &Frame, x: usize, y: usize) -> u32 {
+    let scene = f.scene;
     let fx = (x * LOCK_REF_W) / W;
     let rel = ((y * LOCK_REF_H) / H) as u16;
-    let far = LOCK_SKYLINE_FAR[fx];
-    let mut near = LOCK_SKYLINE_NEAR[fx];
+    let far = scene.far[fx.min(LOCK_REF_W - 1)];
+    let mut near = scene.near[fx.min(LOCK_REF_W - 1)];
     // WHY the clamp: the two skylines are traced at two independent
     // thresholds, so a dark notch picked up by one can land above the layer it
     // should sit under. A minimum separation stops the layers inverting.
     if near < far + 3 {
         near = far + 3;
     }
+    let horizon_y = scene.horizon_y;
+    let mist_y = scene.mist_y;
+    let rock_y = scene.rock_y;
 
     // WHY a fraction of the ramp rather than a second measured column per band:
-    // the panel's left/right split was one photograph's exposure, and the theme
-    // owns the exposure now. The sun is behind the far ridge on the right, so
-    // every band is lifted toward its own bright end as the frame goes right.
-    let across = ((fx * LOCK_ACROSS_SPAN as usize) / (LOCK_REF_W - 1)).min(256) as u32
+    // the panel's left/right split was one photograph's exposure, and the scene's
+    // stops own the exposure now. The sun is behind the far ridge on the right,
+    // so every band is lifted toward its own bright end as the frame goes right.
+    let across = ((fx * LOCK_ACROSS_SPAN as usize) / (LOCK_REF_W - 1))
+        .min(256) as u32
         * LOCK_ACROSS_PERCENT
         / 256;
 
     if rel < far {
-        let vertical = rel as u32 * 256 / LOCK_HORIZON_Y as u32;
+        let vertical = rel as u32 * 256 / horizon_y as u32;
         Theme::blend(f.top, f.horizon, lock_band(vertical, across))
     } else if rel < near {
-        // WHY saturating: the traced far ridge is not level. Its columns run from
-        // reference row 145 to 167, so a pixel can be below the ridge and above
-        // the nominal horizon height at the same time, and a plain subtraction
-        // there underflows -- which is a panic on this build, not a wrong colour.
-        let vertical = rel.saturating_sub(LOCK_HORIZON_Y as u16) as u32 * 256
-            / (LOCK_MIST_Y - LOCK_HORIZON_Y) as u32;
+        // WHY saturating: the traced far ridge is not level, so a pixel can be
+        // below the ridge and above the nominal horizon height at the same
+        // time, and a plain subtraction there underflows -- which is a panic on
+        // this build, not a wrong colour.
+        let vertical =
+            rel.saturating_sub(horizon_y) as u32 * 256 / (mist_y - horizon_y).max(1) as u32;
         let base = Theme::blend(f.shadow, f.mist, lock_band(vertical, across));
-        if lock_figure_hit(x, y) {
+        if lock_figure_hit(scene, x, y) {
             return lock_figure_ink(f, base);
         }
         base
-    } else if (rel as usize) < LOCK_ROCK_Y {
-        let vertical = rel.saturating_sub(LOCK_MIST_Y as u16) as u32 * 256
-            / (LOCK_ROCK_Y - LOCK_MIST_Y) as u32;
+    } else if (rel as usize) < rock_y as usize {
+        let vertical =
+            rel.saturating_sub(mist_y) as u32 * 256 / (rock_y - mist_y).max(1) as u32;
         Theme::blend(f.mist, f.bottom, lock_band(vertical, across))
     } else {
         // The near rock itself: the ramp's darkest stop, held, with only the sun
@@ -355,16 +289,6 @@ fn lock_wallpaper_pixel(f: &Frame, x: usize, y: usize) -> u32 {
         // face of the foreground ridge.
         Theme::blend(f.bottom, f.mist, across)
     }
-}
-
-/// Ink for the status bar, the date line and the clock.
-///
-/// WHY the theme's own wallpaper ink: those three sit on the wallpaper's upper
-/// region, which is the bright end of that ramp by construction, so this is the
-/// ink the theme pairs with the region and it moves with the ramp instead of
-/// having to be re-measured whenever the ramp changes.
-fn lock_ink(theme: &Theme) -> u32 {
-    theme.wallpaper_ink
 }
 
 /// Ink for anything drawn over the wallpaper's dark end: the padlock, the unlock
@@ -593,8 +517,17 @@ struct Frame {
     na: Rect,
     /// The camera disc's "N/A" label, on the same baseline: [`lock_na_r_box`].
     na_r: Rect,
-    /// Ink for the status bar, the date line and the clock: [`lock_ink`].
+    /// Ink for the status bar, the date line and the clock: the scene's own sky
+    /// ink.
     ink: u32,
+    /// The catalogue entry this frame's wallpaper comes from.
+    ///
+    /// WHY the scene is a field of the memo: its skylines are read per pixel, and
+    /// it is chosen by a value the settings store answers. Resolving it once per
+    /// surface keeps a byte-string comparison and a pointer chase off the hot
+    /// path, and it is what lets the lock and home surfaces draw independently
+    /// chosen wallpapers from one catalogue.
+    scene: &'static walls::Scene,
     /// The ramp, resolved: top stop, brightest tone, shadowed rock, mist, and the
     /// darkest stop the foreground holds.
     top: u32,
@@ -614,7 +547,10 @@ impl Frame {
     /// sixteen advance lookups a frame and keeps this function free of a branch
     /// whose two halves would have to stay in step with the pixel path's.
     fn measure(state: &LauncherState) -> Frame {
-        let theme = THEME;
+        // WHY the scene comes from the state rather than the theme: the lock
+        // wallpaper is a user choice the settings store holds, so resolving it
+        // here is the single place the store's answer becomes geometry.
+        let scene = state.lock_wallpaper;
         // WHY the pad's two runs are measured here even when the pad is not on
         // screen: `lock_state`, `pin_setup_step` and `auth_error` are read live
         // from the state per pixel, so measuring conditionally would put a branch
@@ -656,12 +592,13 @@ impl Frame {
             ),
             na: lock_na_box(),
             na_r: lock_na_r_box(),
-            ink: lock_ink(&theme),
-            top: theme.wallpaper_top,
-            horizon: lock_horizon(&theme),
-            shadow: lock_shadow(&theme),
-            mist: lock_mist(&theme),
-            bottom: theme.wallpaper_bottom,
+            ink: scene.ink,
+            scene,
+            top: scene.top,
+            horizon: scene.horizon(),
+            shadow: scene.shadow(),
+            mist: scene.mist(),
+            bottom: scene.bottom,
         }
     }
 }
@@ -729,6 +666,7 @@ static FRAME_MEMO: FrameMemo = FrameMemo(UnsafeCell::new(FrameSlot {
         na: Rect::new(0, 0, 0, 0),
         na_r: Rect::new(0, 0, 0, 0),
         ink: 0,
+        scene: &walls::SCENES[0],
         top: 0,
         horizon: 0,
         shadow: 0,

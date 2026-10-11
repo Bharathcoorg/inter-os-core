@@ -265,16 +265,17 @@ fn frame() -> Frame {
     }
 }
 
-/// The vertical band the wallpaper ramp reaches at `y`.
+/// The wallpaper at pixel `(x, y)`, scene resolved once per frame.
 ///
-/// WHY a ramp and not `theme.bg`: the reference home panel's wallpaper is a
+/// WHY a scene and not `theme.ramp3`: the reference home panel's wallpaper is a
 /// photograph that runs from a bright sky at the top to a near-black foreground
-/// at the bottom, which is exactly what `Theme::wallpaper_*` stores, and the
-/// App View panel beside it is flat. So the home surface is the one that takes
-/// the ramp, and every piece of ink drawn on it is chosen from the pixel behind
-/// it rather than assumed.
-fn backdrop(theme: &Theme, y: usize) -> u32 {
-    theme.ramp3(((y.min(SCREEN_HEIGHT - 1) * 256) / SCREEN_HEIGHT) as u32)
+/// at the bottom, and the App View panel beside it is flat. So the home surface
+/// is the one that draws a full-bleed wallpaper, and it draws the *same* one the
+/// user chose for it, from the same catalogue the lock screen and the Settings
+/// picker read. Every piece of ink drawn on it is chosen from the pixel behind
+/// it rather than assumed, so the surface reads for any scene.
+fn backdrop(scene: &interos_std::design::walls::Scene, x: usize, y: usize) -> u32 {
+    interos_std::design::walls::scene_pixel(scene, x, y, SCREEN_WIDTH, SCREEN_HEIGHT)
 }
 
 // -----------------------------------------------------------------------------
@@ -524,6 +525,13 @@ impl DeckPlan {
 /// handler, while this is the painter's plan and is built once per rendered frame.
 struct Paint {
     frame: Frame,
+    /// The wallpaper this frame draws behind everything.
+    ///
+    /// WHY it is in the plan: the backdrop is read per pixel by four separate
+    /// painters, and it is chosen by a value the settings store answers. Putting
+    /// the resolved scene in the plan means each of them gets the same one and
+    /// none of them has to resolve a stored key.
+    scene: &'static interos_std::design::walls::Scene,
     clock: Option<Run>,
     greeting: [Run; 3],
     weather: Run,
@@ -736,6 +744,7 @@ fn build(state: &LauncherState) -> Paint {
             GESTURE_PILL_H,
         ),
         telemetry: telemetry_plan(),
+        scene: state.home_wallpaper,
     }
 }
 
@@ -1062,13 +1071,13 @@ fn status_bar_pixel(x: usize, y: usize, theme: &Theme, p: &Paint) -> Option<u32>
     if y >= STATUS_BAR_HEIGHT {
         return None;
     }
-    let ink = layout::ink_on(theme, backdrop(theme, y));
+    let ink = layout::ink_on(theme, backdrop(p.scene, x, y));
 
     // WHY gated on the source rather than drawn from the buffer: with no RTC
     // authority granted to this shell the read can be refused, and a clock is the
     // one thing on this surface a reader takes as a measurement. The gate itself is
     // resolved in the plan, so this is a plain "is the run there" test.
-    if let Some(c) = p.clock.as_ref().and_then(|r| r.pixel_inked_aa(x, y, ink, backdrop(theme, y))) {
+    if let Some(c) = p.clock.as_ref().and_then(|r| r.pixel_inked_aa(x, y, ink, backdrop(p.scene, x, y))) {
         return Some(c);
     }
 
@@ -1215,9 +1224,9 @@ fn greeting_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Op
 
     // WHY the ink is taken per row and not baked into the runs: these four lines are
     // drawn straight onto the wallpaper ramp, whose colour is a function of `y`.
-    let ink = layout::ink_on(theme, backdrop(theme, y));
+    let ink = layout::ink_on(theme, backdrop(p.scene, x, y));
     for run in p.greeting.iter() {
-        if let Some(c) = run.pixel_inked_aa(x, y, ink, backdrop(theme, y)) {
+        if let Some(c) = run.pixel_inked_aa(x, y, ink, backdrop(p.scene, x, y)) {
             return Some(c);
         }
     }
@@ -1540,14 +1549,14 @@ fn nav_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option<
     if !f.nav.contains(x, y) {
         return None;
     }
-    let ink = layout::ink_on(theme, backdrop(theme, y));
+    let ink = layout::ink_on(theme, backdrop(p.scene, x, y));
 
     // Back chevron, then recents: the same order and the same centring as before,
     // with both origins resolved in the plan.
-    if let Some(c) = p.nav_back.pixel_inked_aa(x, y, ink, backdrop(theme, y)) {
+    if let Some(c) = p.nav_back.pixel_inked_aa(x, y, ink, backdrop(p.scene, x, y)) {
         return Some(c);
     }
-    if let Some(c) = p.nav_recents.pixel_inked_aa(x, y, ink, backdrop(theme, y)) {
+    if let Some(c) = p.nav_recents.pixel_inked_aa(x, y, ink, backdrop(p.scene, x, y)) {
         return Some(c);
     }
     // Home pill, the width the theme can name and the height the shell measures.
@@ -1589,7 +1598,7 @@ pub fn get_home_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return c;
         }
     }
-    backdrop(&theme, y)
+    backdrop(p.scene, x, y)
 }
 
 // -----------------------------------------------------------------------------

@@ -109,3 +109,4 @@ mod tests {
         assert_eq!(lit, Theme::DARK.accent);
         assert_ne!(dark, lit);
     }
+}

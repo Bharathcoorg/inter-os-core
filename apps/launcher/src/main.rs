@@ -5,6 +5,8 @@ use core::panic::PanicInfo;
 use interos_std as std;
 
 use launcher::theme::*;
+// Wallpaper catalogue shared with the Settings app that writes it.
+use std::design::walls;
 
 // Visual baseline theme: InterOS Stock
 // WHY one file per screen: every renderer was a function in this file, so two
@@ -195,6 +197,16 @@ pub struct LauncherState {
     pub app_drawer_page: usize,
     pub active_child: Option<u64>,
     pub lock_state: std::UserLockState,
+    /// The wallpaper the home surface renders.
+    ///
+    /// WHY a resolved scene and not a stored key: every surface reads this field
+    /// per pixel, so a per-pixel lookup of a byte string would put a scan on the
+    /// hot path. The key is resolved once, when the settings store answers.
+    pub home_wallpaper: &'static walls::Scene,
+    /// The wallpaper the lock surface renders, independently of the home one.
+    pub lock_wallpaper: &'static walls::Scene,
+    /// Whether the settings store has answered a wallpaper read at all.
+    pub wallpaper_store_answered: bool,
     pub pin_pad_visible: bool,
     pub pin_buffer: [u8; 8],
     pub pin_len: u8,
@@ -247,6 +259,12 @@ impl LauncherState {
             app_drawer_page: 0,
             active_child: None,
             lock_state: std::UserLockState::Uninitialized,
+            // WHY the stock scene rather than the theme's own ramp: the home and
+            // lock wallpapers are read from the settings store, and until that
+            // read answers the shell must draw the wallpaper it shipped with.
+            home_wallpaper: &walls::SCENES[0],
+            lock_wallpaper: &walls::SCENES[0],
+            wallpaper_store_answered: false,
             pin_pad_visible: false,
             pin_buffer: [0u8; 8],
             pin_len: 0,
@@ -336,6 +354,109 @@ impl LauncherState {
         self.recent_apps[2] = [0u8; 32];
         self.recent_app_lens[2] = 0;
         self.recent_task_ids[2] = 0;
+    }
+}
+
+/// Reads one wallpaper key out of the persistent settings store.
+///
+/// WHY slot 3: the kernel resolves settings capabilities by slot index, and
+/// slot 3 of this shell's grant table is `FileSystemRead` with READ rights,
+/// which `sys_settings_get` accepts. No new capability is needed to read a
+/// preference the Settings app already writes.
+fn stored_wallpaper_key(key: &[u8]) -> Option<([u8; 16], usize)> {
+    // WHY the key is checked for a `&str` here rather than at the call site: the
+    // toolkit takes a Rust string, and a byte-slice key that is not valid UTF-8
+    // is a programming error, not a runtime condition. The two keys this reads
+    // are ASCII literals.
+    let key = core::str::from_utf8(key).ok()?;
+    let mut buf = [0u8; 16];
+    // WHY the length comes back with the value: the store fills only `len` bytes
+    // of this buffer, and the catalogue's keys are matched byte-exactly, so the
+    // trailing zero padding must not be allowed to reach the comparison.
+    match std::settings_get(3, key, &mut buf) {
+        Ok(n) if n > 0 && n <= buf.len() => Some((buf, n)),
+        _ => None,
+    }
+}
+
+/// Resolves the stored home and lock wallpaper choices into scenes.
+///
+/// WHY this is called at boot and again when a foreground application exits:
+/// a wallpaper chosen in Settings is written to the disk-backed store by a
+/// different process, and the kernel has no channel that would tell this shell
+/// about it. Re-reading when the shell regains the foreground is the only point
+/// at which the store can have changed, and it costs nothing in the steady
+/// state.
+fn refresh_wallpapers(state: &mut LauncherState) {
+    let mut answered = false;
+    let mut home = None;
+    let mut lock = None;
+    for (key, slot) in [
+        (b"ui.wallpaper.home" as &[u8], 0usize),
+        (b"ui.wallpaper.lock", 1usize),
+    ] {
+        if let Some((raw, n)) = stored_wallpaper_key(key) {
+            answered = true;
+            // WHY the value is trimmed of padding as well as whitespace: the
+            // store is a newline-delimited text file, so a value written by an
+            // older build can carry a trailing newline, and the catalogue looks
+            // keys up byte-exactly. Only the `n` bytes the store filled count;
+            // the zero padding after them is not part of the value.
+            let raw = &raw[..n];
+            let start = raw
+                .iter()
+                .position(|b| *b != b' ' && *b != b'\n' && *b != b'\r');
+            let Some(start) = start else { continue };
+            let end = raw[start..]
+                .iter()
+                .position(|b| *b == b' ' || *b == b'\n' || *b == b'\r')
+                .map(|e| start + e)
+                .unwrap_or(raw.len());
+            if end <= start {
+                continue;
+            }
+            let value = &raw[start..end];
+            // WHY a key the catalogue does not hold is reported rather than
+            // defaulted silently: it means the store and this binary disagree,
+            // and showing the stock wallpaper without saying so would make a
+            // stored choice look applied.
+            match walls::Scene::by_key(value) {
+                Some(scene) => {
+                    if slot == 0 {
+                        home = Some(scene);
+                    } else {
+                        lock = Some(scene);
+                    }
+                }
+                None => {
+                    std::log(
+                        0,
+                        "[LAUNCHER] Stored wallpaper key is not in this build's catalogue; keeping the stock wallpaper.",
+                    )
+                    .ok();
+                }
+            }
+        }
+    }
+    state.wallpaper_store_answered = answered;
+    if let Some(scene) = home {
+        state.home_wallpaper = scene;
+    }
+    if let Some(scene) = lock {
+        state.lock_wallpaper = scene;
+    }
+    if !answered {
+        std::log(
+            0,
+            "[LAUNCHER] Wallpaper preferences unread: the settings store did not answer, so both surfaces use the stock wallpaper.",
+        )
+        .ok();
+    } else {
+        std::log(
+            0,
+            "[LAUNCHER] Wallpaper preferences read from the settings store for both surfaces.",
+        )
+        .ok();
     }
 }
 
@@ -1231,6 +1352,10 @@ pub extern "C" fn _start() -> ! {
     refresh_runtime_recents(&mut state);
     refresh_clock(&mut state);
     refresh_notifications(&mut state);
+    // WHY here and not in the loop: the wallpaper belongs to the surface, so it is
+    // resolved before the first frame is drawn. A preference stored by the Settings
+    // app on a previous boot is therefore on the very first lock screen.
+    refresh_wallpapers(&mut state);
     // WHY the count is reported: an empty catalogue is indistinguishable from a
     // refused read at the call site, because `refresh_package_catalog` maps a
     // permission error to `app_count = 0` and returns. That made a kernel-side
@@ -1281,6 +1406,14 @@ pub extern "C" fn _start() -> ! {
                     Ok(()) => {
                         state.active_child = None;
                         refresh_runtime_recents(&mut state);
+                        // WHY the wallpaper is re-read here rather than polled:
+                        // a wallpaper chosen in Settings is written to the
+                        // disk-backed store by a different process, and the
+                        // kernel has no channel that would tell this shell about
+                        // it. Re-reading when the shell regains the foreground
+                        // is the only point at which the store can have changed,
+                        // and it costs nothing in the steady state.
+                        refresh_wallpapers(&mut state);
                         // WHY lock-aware: the old code always landed on
                         // HomeScreen, so a camera launched from the lock screen
                         // exited past the lock onto an unlocked home grid. A
@@ -1312,6 +1445,7 @@ pub extern "C" fn _start() -> ! {
                         // Child exited or invalid PID: clear active_child
                         state.active_child = None;
                         refresh_runtime_recents(&mut state);
+                        refresh_wallpapers(&mut state);
                         let mut discard = std::InputEvent {
                             kind: 0,
                             x: 0,
