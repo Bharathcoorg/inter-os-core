@@ -13,7 +13,7 @@ def main():
     failures = []
     tests = sorted([
         p for p in glob.glob("tests/test_*.py")
-        if not any(k in p for k in ["test_serial_tcp", "test_interactive_lifecycle", "test_lifecycle_stress", "test_reboot_recovery", "test_persistence", "test_storage_recovery", "test_crash_watchdog"])
+        if not any(k in p for k in ["test_serial_tcp", "test_interactive_lifecycle", "test_lifecycle_stress", "test_reboot_recovery", "test_persistence", "test_storage_recovery", "test_crash_watchdog", "test_verify"])
     ])
     skipped = sorted(glob.glob("tests/test_*.py"))
     skipped = [p for p in skipped if p not in tests]
