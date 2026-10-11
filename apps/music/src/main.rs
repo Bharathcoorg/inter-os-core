@@ -29,6 +29,10 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
+use std::design::color::{
+    DARK_BACKGROUND as BG, DARK_BORDER as BORDER, DARK_SURFACE as SURFACE, DARK_TEXT as TEXT,
+    DARK_TEXT_MUTED as MUTED, TEXT as INK_ON_LIGHT, TEXT_MUTED as FAINT,
+};
 use std::design::font;
 use std::design::primitives::{draw_circle, draw_pill, draw_rounded_rect, Rect};
 
@@ -322,17 +326,20 @@ const CHUNK: usize = 4096;
 
 // -----------------------------------------------------------------------------
 // 32-bit ARGB8888 Design Color Tokens (immersive dark media surface)
+//
+// Every token the renderer uses is an alias of the shared canonical palette in
+// `interos_std::design::color`, so this surface cannot silently drift from the
+// design system the way raw hex literals in this file could. The aliases keep
+// the short local names the renderer already uses. (When reconciled, every
+// literal matched its shared token exactly, so this is a structural fix, not a
+// colour change.)
 // -----------------------------------------------------------------------------
-const BG: u32 = 0xFF111214;
-/// Dark surface (controls, artwork card).
-const SURFACE: u32 = 0xFF25282A;
 /// Recessed control fill - a disabled transport sits below the surface.
+///
+/// The one colour not in the shared palette: it is the step between
+/// `DARK_BACKGROUND` and `DARK_SURFACE` that gives a disabled control its
+/// sunken read, used nowhere else.
 const RECESSED: u32 = 0xFF1B1E20;
-const BORDER: u32 = 0xFF35383D;
-const TEXT: u32 = 0xFFF5F6F7;
-const MUTED: u32 = 0xFF9AA0A6;
-const FAINT: u32 = 0xFF777773;
-const INK_ON_LIGHT: u32 = 0xFF111214;
 
 // -----------------------------------------------------------------------------
 // Layout constants - shared by the renderer and the hit-tester
