@@ -201,7 +201,18 @@ pub fn dispatch_to_focused_window(event: InputEvent) {
             target.or_else(|| {
                 for _ in 0..1000 {
                     if let Some(kms) = crate::drivers::display_kms::DRM_KMS.try_lock() {
-                        return kms.surfaces.iter().rev().find(|s| s.input_enabled).map(|s| s.owner_task);
+                        // WHY visibility is required here as well as in the primary
+                        // path: an app that exited without tearing its surface down
+                        // leaves a hidden, still-input-enabled surface, and routing
+                        // to it silently dropped every event until that app's task id
+                        // was reused. The hit path above only hits visible windows;
+                        // this fallback must not disagree with it.
+                        return kms
+                            .surfaces
+                            .iter()
+                            .rev()
+                            .find(|s| s.input_enabled && s.visible)
+                            .map(|s| s.owner_task);
                     }
                     core::hint::spin_loop();
                 }

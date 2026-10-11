@@ -4995,16 +4995,56 @@ pub fn sys_window_list(out_buf:&mut [u8])->Result<usize,SyscallResult>{
     }
     use core::fmt::Write;
     let mut snaps=[crate::drivers::display_kms::SurfaceSnapshot{id:0,owner_task:0,x:0,y:0,width:0,height:0,z_order:0,opacity:0,visible:false,dirty:false,input_enabled:false};32];
-    let count={let kms=crate::drivers::display_kms::DRM_KMS.lock();kms.surface_snapshot(&mut snaps)};
-    let sched=SCHEDULER.lock();
+    // WHY a bounded acquisition instead of `lock()`: this syscall runs inside the
+    // compositor service's polling loop, and both locks it takes are also held
+    // across full-surface composites by foreground tasks. A blocking `lock()`
+    // there turned a slow repaint into a permanent wedge - the compositor spun
+    // inside the syscall while the holding task could never be rescheduled to
+    // release it, which froze the whole guest. Bounded, the caller retries on
+    // the next pass exactly like every other site in this tree.
+    // WHY the bound is small and not the tree's usual 1000: the caller polls in
+    // a tight loop, so a contended lock here must bail at once. Spinning 1000
+    // times for a lock a foreground task holds across a multi-second composite
+    // would burn the single CPU that composite needs to finish.
+    let mut kms_guard=None;
+    for _ in 0..8 {
+        if let Some(kms)=crate::drivers::display_kms::DRM_KMS.try_lock(){
+            kms_guard=Some(kms);
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    let count={let kms=kms_guard.ok_or(SyscallResult::NotReady)?;kms.surface_snapshot(&mut snaps)};
+    // WHY the names are collected while the scheduler lock is held only for
+    // this copy: the format loop below writes into the caller's buffer and
+    // needs no lock, so the scheduler lock is released before it rather than
+    // spanning the whole loop.
+    let mut names=[("unknown");32];
+    let mut sched_guard=None;
+    for _ in 0..8 {
+        if let Some(sched)=SCHEDULER.try_lock(){
+            sched_guard=Some(sched);
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    let named=if let Some(sched)=sched_guard.as_ref(){
+        for (slot,s) in snaps[..count].iter().enumerate(){
+            names[slot]=sched.get_task(TaskId(s.owner_task)).map(|t|t.name).unwrap_or("unknown");
+        }
+        true
+    } else { false };
+    drop(sched_guard);
     struct W<'a>{b:&'a mut[u8],n:usize}
     impl<'a> Write for W<'a>{fn write_str(&mut self,s:&str)->core::fmt::Result{let k=s.len().min(self.b.len().saturating_sub(self.n));self.b[self.n..self.n+k].copy_from_slice(&s.as_bytes()[..k]);self.n+=k;Ok(())}}
     let capacity = out_buf.len();
     let mut w=W{b:out_buf,n:0};
-    for s in &snaps[..count]{
-        let name=sched.get_task(TaskId(s.owner_task)).map(|t|t.name).unwrap_or("unknown");
-        let _=write!(w,"{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",s.id,s.owner_task,name,s.x,s.y,s.width,s.height,s.z_order,s.opacity,s.visible as u8,s.input_enabled as u8);
-        if w.n>=capacity{break;}
+    if named {
+        for (slot,s) in snaps[..count].iter().enumerate(){
+            let name=names[slot];
+            let _=write!(w,"{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",s.id,s.owner_task,name,s.x,s.y,s.width,s.height,s.z_order,s.opacity,s.visible as u8,s.input_enabled as u8);
+            if w.n>=capacity{break;}
+        }
     }
     Ok(w.n)
 }
