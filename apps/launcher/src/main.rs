@@ -441,9 +441,11 @@ fn refresh_wallpapers(state: &mut LauncherState) {
     state.wallpaper_store_answered = answered;
     if let Some(scene) = home {
         state.home_wallpaper = scene;
+        std::log(0, "[LAUNCHER] Home wallpaper applied from store.").ok();
     }
     if let Some(scene) = lock {
         state.lock_wallpaper = scene;
+        std::log(0, "[LAUNCHER] Lock wallpaper applied from store.").ok();
     }
     if !answered {
         std::log(
@@ -1414,6 +1416,9 @@ pub extern "C" fn _start() -> ! {
                         // is the only point at which the store can have changed,
                         // and it costs nothing in the steady state.
                         refresh_wallpapers(&mut state);
+                        if let Ok(lock_st) = std::user_get_lock_state(1000) {
+                            state.lock_state = lock_st;
+                        }
                         // WHY lock-aware: the old code always landed on
                         // HomeScreen, so a camera launched from the lock screen
                         // exited past the lock onto an unlocked home grid. A
@@ -1780,6 +1785,7 @@ pub extern "C" fn _start() -> ! {
                                         match std::user_set_credential(uid, &state.pin_buffer[..len]) {
                                             Ok(()) => {
                                                 let _ = std::user_unlock(uid, &state.pin_buffer[..len]);
+                                                state.lock_state = std::UserLockState::Unlocked;
                                                 state.pin_buffer = [0; 8];
                                                 state.pin_len = 0;
                                                 state.pin_error = 0;
@@ -1799,6 +1805,7 @@ pub extern "C" fn _start() -> ! {
                                             }
                                         }
                                     } else if std::user_unlock(uid, &state.pin_buffer[..len]).is_ok() {
+                                        state.lock_state = std::UserLockState::Unlocked;
                                         state.pin_buffer = [0; 8];
                                         state.pin_len = 0;
                                         state.pin_error = 0;
