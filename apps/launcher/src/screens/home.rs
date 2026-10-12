@@ -336,7 +336,6 @@ struct Run {
     x: usize,
     y: usize,
     w: usize,
-    h: usize,
     scale: usize,
     len: usize,
     ink: u32,
@@ -368,7 +367,6 @@ impl Run {
         x: 0,
         y: 0,
         w: 0,
-        h: 0,
         scale: 1,
         len: 0,
         ink: 0,
@@ -446,7 +444,7 @@ impl Run {
             x,
             y,
             w,
-            h: text::line_height(scale),
+            
             scale,
             len,
             ink,
@@ -458,6 +456,14 @@ impl Run {
     }
 
     /// The colour of (`px`, `py`) if this run inks it.
+    ///
+    /// Why the attribute: no painter on this surface reaches it -- the greeting
+    /// resolves its own ink per row against the wallpaper and calls
+    /// `pixel_inked_aa`, and the deck's empty message goes through
+    /// `pixel_inked`. The helper stays because a `Run` that can answer a plain
+    /// question about a pixel is the obvious next thing any caller wants, and
+    /// removing it would mean re-deriving it.
+    #[allow(dead_code)]
     fn pixel(&self, px: usize, py: usize) -> Option<u32> {
         self.pixel_inked(px, py, self.ink, 0)
     }

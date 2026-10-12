@@ -60,27 +60,38 @@ pub fn entry_band() -> (usize, usize) {
     (PROMPT_Y, STATUS_Y + launcher::text::line_height(1))
 }
 
-/// The colour of (`x`, `y`) when the run at (`x0`, `y0`) on `scale` inks it,
-/// drawn by the outline rasteriser when it can place the run and by the bitmap
-/// face when it cannot.
-///
-/// WHY the vertical band is a union of both renderers: the outline run's line
-/// box is not the bitmap cell. At the em matching a scale-3 cap the outline's
-/// ascent reaches 75 rows above the run's baseline and its descent 19 rows
-/// below, against the bitmap's 4-rows-above and 4-rows-below (rows 3..23 of a
-/// 24-row cell); measured, the heading's cap ink stops 52 rows above its
-/// baseline and its lowest glyph ends at the baseline. At a scale-1 caption the
-/// figures are 25 and 6, against an ink extent of 18 above and 5 below. A band
-/// measured for the cell alone clips both faces silently, and this surface's
-/// geometry contains the union everywhere it is used: the prompt band is
-/// `y0-15 .. y0+79` against the 294-row gap above the dots, a key's digit band
-/// is `rect.y+26 .. rect.y+89` against a 104-row key, and the status band is
-/// `y0-5 .. y0+26` with the keypad rows 134 below it.
-///
-/// WHY the caller's own control test still comes first: the keys, the discs and
-/// the status bar keep the hit tests and borders they had, so the wider band can
-/// only add rows the control already covers.
-fn text_pixel(
+    /// The colour of (`x`, `y`) when the run at (`x0`, `y0`) on `scale` inks it,
+    /// drawn by the outline rasteriser when it can place the run and by the bitmap
+    /// face when it cannot.
+    ///
+    /// WHY the vertical band is a union of both renderers: the outline run's line
+    /// box is not the bitmap cell. At the em matching a scale-3 cap the outline's
+    /// ascent reaches 75 rows above the run's baseline and its descent 19 rows
+    /// below, against the bitmap's 4-rows-above and 4-rows-below (rows 3..23 of a
+    /// 24-row cell); measured, the heading's cap ink stops 52 rows above its
+    /// baseline and its lowest glyph ends at the baseline. At a scale-1 caption the
+    /// figures are 25 and 6, against an ink extent of 18 above and 5 below. A band
+    /// measured for the cell alone clips both faces silently, and this surface's
+    /// geometry contains the union everywhere it is used: the prompt band is
+    /// `y0-15 .. y0+79` against the 294-row gap above the dots, a key's digit band
+    /// is `rect.y+26 .. rect.y+89` against a 104-row key, and the status band is
+    /// `y0-5 .. y0+26` with the keypad rows 134 below it.
+    ///
+    /// WHY the caller's own control test still comes first: the keys, the discs and
+    /// the status bar keep the hit tests and borders they had, so the wider band can
+    /// only add rows the control already covers.
+    ///
+    /// Why the attribute, and why nothing calls this: every run on this surface is
+    /// one or the other of two things the outline face cannot serve correctly. The
+    /// keypad digits are BOLD at scale 2, and the shipped outline table is Roboto
+    /// Condensed Regular, so routing them through it would de-bold them -- a
+    /// different change from the one this makes. The prompt and status lines are
+    /// scale 1, where the cell is drawn at its native size and there is no
+    /// magnified edge to fix. The funnel is kept because it is the shape any
+    /// caller here would need the day either of those changes, and the doc comment
+    /// records what stands in the way.
+    #[allow(dead_code)]
+    fn text_pixel(
     x: usize,
     y: usize,
     x0: usize,

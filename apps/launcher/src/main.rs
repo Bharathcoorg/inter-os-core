@@ -1010,8 +1010,52 @@ fn nav_target_at(x: usize, y: usize) -> Option<NavTarget> {
     })
 }
 
-#[inline(never)]
+/// Frame clock for the System Space orb, in kernel ticks.
+///
+/// WHY a static and not a field on the state: the painter's signature is shared
+/// by every view, and widening the state to mutable at thirty-odd call sites to
+/// carry one clock nothing else reads would be a signature change for its own
+/// sake. One writer, in the band renderer, and one reader, in the orb painter.
+static mut ORB_TICKS: u64 = 0;
+
+/// The back control's box, shared with the System Space painter so a tap and a
+/// pixel are answered by the same numbers.
+use crate::screens::system_space::{BACK_S, BACK_X, BACK_Y};
+
+/// Rows the System Space orb occupies, and so the band its driver repaints.
+const ORB_BAND_Y0: usize = 200;
+const ORB_BAND_Y1: usize = 310;
+
+/// Ticks between orb frames.
+///
+/// WHY 14: the kernel's tick is 10ms, so this is roughly a seventh of a second.
+/// Fast enough to read as continuous motion at this size, slow enough that the
+/// banded repaint it costs is a small fraction of a frame's budget. A shorter
+/// interval spends more time re-rasterising the orb than on anything else the
+/// shell has to do.
+const ORB_FRAME_TICKS: u64 = 14;
+
 fn render_band(surface: u32, state: &LauncherState, min_y: usize, max_y: usize) {
+    // WHY the clock is sampled here and not in the painter: the orb on the
+    // System Space surface animates, and an animation needs a time source that
+    // changes between frames rather than within one. Sampling once per band
+    // gives every pixel of the frame the same phase -- the orb holds still for
+    // the frame instead of crawling -- and it costs one syscall per repaint
+    // rather than one per pixel.
+    //
+    // WHY a static and not a field on the state: the painter's signature is
+    // shared by every view and every band, and widening the state to mutable at
+    // thirty-odd call sites to carry one clock would be a signature change for a
+    // value nothing else reads.
+    //
+    // WHY a refused read leaves the previous phase rather than zeroing it: a
+    // frame with no clock still has to draw something, and snapping the orb
+    // back to its zero phase on every refused read would make it strobe.
+    if let Ok(ticks) = std::get_ticks(4) {
+        unsafe {
+            ORB_TICKS = ticks;
+        }
+    }
     let draw = screen_renderer(state.current_view);
     let min_y = min_y.min(H);
     let max_y = max_y.min(H);
@@ -1743,6 +1787,26 @@ pub extern "C" fn _start() -> ! {
                         let _ = std::surface_flip(4);
                     }
                 }
+                // The System Space orb is driven, not just drawn.
+                //
+                // WHY a driver is needed at all: the shell repaints on state
+                // change, so a surface that looks the same every frame would hold
+                // one light angle forever. Sampling a clock in the painter gives
+                // every pixel of a frame the same phase, but something still has
+                // to produce the next frame.
+                //
+                // WHY this band and this interval: the orb occupies rows
+                // 115..245, so that is what is re-rasterised -- the title, the
+                // cards and the subtitle are static and re-drawing them would
+                // cost a banded repaint's worth of work for no visible change.
+                // Fourteen ticks is roughly a fifth of a second, which reads as
+                // motion without spending the compositor's whole budget on it.
+                if state.current_view == ViewMode::SystemSpace
+                    && state.active_child.is_none()
+                    && refresh_ticks % ORB_FRAME_TICKS == 0
+                {
+                    render_band(surface, &state, ORB_BAND_Y0, ORB_BAND_Y1);
+                }
                 if state.current_view == ViewMode::HomeScreen {
                     if refresh_ticks % 10 == 0 {
                         let previous_count = state.app_count;
@@ -2471,7 +2535,25 @@ pub extern "C" fn _start() -> ! {
                             if input.kind == 1 {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
-                                if (590..710).contains(&y) && (40..345).contains(&x) {
+                                // WHY the back control is answerable here: it is
+                                // drawn on this surface (screens/system_space.rs,
+                                // BACK_X/BACK_Y/BACK_S) and the Settings app opens
+                                // the same screen with one, so a user who arrived
+                                // from the home surface's search bar previously
+                                // had no control to leave with -- only a gesture.
+                                // Gated to the drawn rect so a tap beside it cannot
+                                // navigate by accident.
+                                if (BACK_Y..BACK_Y + BACK_S).contains(&y)
+                                    && (BACK_X..BACK_X + BACK_S).contains(&x)
+                                {
+                                    state.current_view = ViewMode::HomeScreen;
+                                    render_view(surface, &state);
+                                    let _ = std::surface_flip(4);
+                                    std::log(0, "[LAUNCHER] Back from System Space.")
+                                        .ok();
+                                    break;
+                                }
+                                if (700..820).contains(&y) && (40..345).contains(&x) {
                                     state.current_view = ViewMode::PowerMenu;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
@@ -2480,11 +2562,11 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
                                 // WHY gated to the drawn System card (x 40..680, y
-                                // 730..840 -- CARD_R4 in screens/system_space.rs):
+                                // 790..900 -- CARD_R4 in screens/system_space.rs):
                                 // any tap anywhere used to launch the settings app,
                                 // including taps on the Device/Network/Personal/Apps
                                 // cards that draw no such affordance.
-                                if !(730..840).contains(&y) || !(40..680).contains(&x) {
+                                if !(790..900).contains(&y) || !(40..680).contains(&x) {
                                     break;
                                 }
                                 if let Ok(task_id) = std::app_launch("org.interos.settings") {

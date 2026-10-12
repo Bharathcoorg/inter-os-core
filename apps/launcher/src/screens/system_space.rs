@@ -407,17 +407,181 @@ fn draw_gear_icon(x: usize, y: usize, cx: usize, cy: usize, tint: u32) -> Option
 // 3D Glass Ambient Sphere
 // -----------------------------------------------------------------------------
 
+/// A small sine table in 64ths, indexed by a 64-step turn.
+///
+/// WHY a table and not a series: this is `no_std` integer-only, and the orb
+/// needs a rotating light vector every frame. A fixed-point rotation needs both
+/// sin and cos, and a table makes both a lookup. 64 steps over a full turn is
+/// 5.6 degrees, which at the orb's 52px radius is under half a pixel of light
+/// travel per step -- finer than the shading can resolve.
+const ORB_TURN_STEPS: u32 = 64;
+const ORB_TRIG_SCALE: i32 = 64;
+
+const ORB_SIN: [i32; ORB_TURN_STEPS as usize] = [
+    0, 6, 12, 19, 24, 30, 36, 41, 45, 49, 53, 56, 59, 61, 63, 64, 64, 64, 63, 61, 59, 56, 53, 49,
+    45, 41, 36, 30, 24, 19, 12, 6, 0, -6, -12, -19, -24, -30, -36, -41, -45, -49, -53, -56, -59,
+    -61, -63, -64, -64, -64, -63, -61, -59, -56, -53, -49, -45, -41, -36, -30, -24, -19, -12, -6,
+];
+
 #[inline]
-fn draw_sphere(x: usize, y: usize, cx: usize, cy: usize, r: usize) -> Option<u32> {
+fn orb_sin(step: u32) -> i32 {
+    ORB_SIN[(step % ORB_TURN_STEPS) as usize]
+}
+
+#[inline]
+fn orb_cos(step: u32) -> i32 {
+    // A quarter turn ahead, from the same table.
+    ORB_SIN[((step + ORB_TURN_STEPS / 4) % ORB_TURN_STEPS) as usize]
+}
+
+/// The orb's light direction, rotated to `step` of a turn.
+///
+/// WHY the rotation is in the plane of the surface and not in 3D: the sphere's
+/// normal at a pixel is derived from (dx, dy, z) by the caller, so rotating the
+/// light's (x, y) while leaving z alone sweeps the highlight around the body.
+/// That is the motion that reads as a lit ball turning rather than as the
+/// shading changing.
+#[inline]
+fn orb_light(step: u32) -> (i32, i32, i32) {
+    // A light high and to the left, the same resting angle the static sphere
+    // used, expressed as a unit-ish vector in the table's 64ths.
+    let (lx, ly, lz) = (-3i32, -4i32, 4i32);
+    let s = orb_sin(step);
+    let c = orb_cos(step);
+    (
+        (lx * c - ly * s) / ORB_TRIG_SCALE,
+        (lx * s + ly * c) / ORB_TRIG_SCALE,
+        lz,
+    )
+}
+
+/// The orb's radius for this frame, breathing.
+///
+/// WHY a breath and not a bounce: a radius that grows and shrink on a slow
+/// cycle reads as a body under pressure, and it is the one dimension that can
+/// change without moving anything on the surface, so nothing has to reflow. The
+/// amplitude is two rows around a 52px base, which is 4% -- large enough to see
+/// as life and small enough that the drop shadow below stays put.
+#[inline]
+fn orb_radius(base: usize, ticks: u64) -> usize {
+    let phase = (ticks / 24) as u32; // ~ a few frames per step at 100Hz
+    let delta = orb_sin(phase) / 38; // +/- 2 rows
+    (base as i32 + delta).max(1) as usize
+}
+
+/// The back control: a 48x48 soft pill with a 2px chevron.
+///
+/// WHY this exists on this surface: the Settings app opens the same screen with
+/// a back pill, and so does the reference, but the shell's copy had none -- so a
+/// user who arrived from the home surface's search bar had only a gesture to get
+/// back with. The shape matches the Settings app's so the two agree wherever a
+/// user would compare them.
+pub const BACK_X: usize = 48;
+/// WHY 56 and not the 24 it was: the status rule is at row 48, and a control
+/// starting at 24 sits underneath it -- the top of the pill was drawn over the
+/// rule and the chevron's top was cut by the surface edge. Eight rows past the
+/// rule is the same clearance the reference leaves, and it puts the pill fully
+/// inside the content area where every other control on this surface lives.
+pub const BACK_Y: usize = 56;
+pub const BACK_S: usize = 48;
+pub const BACK_R: usize = interos_std::design::radius::CONTROL;
+
+/// True when (`x`, `y`) is inside a rounded rectangle of `r` corner radius.
+#[inline]
+fn in_round_rect(x: usize, y: usize, rx: usize, ry: usize, rw: usize, rh: usize, r: usize) -> bool {
+    if x < rx || y < ry || x >= rx + rw || y >= ry + rh {
+        return false;
+    }
+    // The four corner boxes; a pixel in one is inside only if it is also inside
+    // that corner's quarter disc.
+    let cx = if x < rx + r {
+        rx + r
+    } else if x >= rx + rw - r {
+        rx + rw - r - 1
+    } else {
+        return true; // Not in a corner box at all.
+    };
+    let cy = if y < ry + r {
+        ry + r
+    } else if y >= ry + rh - r {
+        ry + rh - r - 1
+    } else {
+        return true;
+    };
+    let dx = (x as i32) - (cx as i32);
+    let dy = (y as i32) - (cy as i32);
+    (dx * dx + dy * dy) as u32 <= (r * r) as u32
+}
+
+/// Squared distance from (`x`,`y`) to the segment (`x1`,`y1`)-(`x2`,`y2`).
+///
+/// WHY squared and not the distance itself: this is `no_std` integer-only, and
+/// every comparison this serves is against a squared radius, so a square root
+/// would be computed and then thrown away.
+fn dist2_to_seg(x: usize, y: usize, x1: i64, y1: i64, x2: i64, y2: i64) -> i64 {
+    let vx = x2 - x1;
+    let vy = y2 - y1;
+    let wx = (x as i64) - x1;
+    let wy = (y as i64) - y1;
+    let len2 = vx * vx + vy * vy;
+    let t = if len2 == 0 {
+        0
+    } else {
+        let tt = (wx * vx + wy * vy) * 256 / len2;
+        tt.clamp(0, 256)
+    };
+    let px = x1 + vx * t / 256;
+    let py = y1 + vy * t / 256;
+    let dx = (x as i64) - px;
+    let dy = (y as i64) - py;
+    dx * dx + dy * dy
+}
+
+/// The chevron: two strokes meeting at a point, 2px wide.
+#[inline]
+fn chevron_ink(x: usize, y: usize, cx: usize, cy: usize, color: u32) -> Option<u32> {
+    let (cx, cy) = (cx as i64, cy as i64);
+    if dist2_to_seg(x, y, cx + 6, cy - 10, cx - 6, cy) <= 4
+        || dist2_to_seg(x, y, cx - 6, cy, cx + 6, cy + 10) <= 4
+    {
+        Some(color)
+    } else {
+        None
+    }
+}
+
+/// The whole back control, as a pixel.
+fn back_control_pixel(x: usize, y: usize) -> Option<u32> {
+    if !in_round_rect(x, y, BACK_X, BACK_Y, BACK_S, BACK_S, BACK_R) {
+        return None;
+    }
+    if !in_round_rect(x, y, BACK_X + 1, BACK_Y + 1, BACK_S - 2, BACK_S - 2, BACK_R - 1) {
+        return Some(TEXT_DARK);
+    }
+    if let Some(c) = chevron_ink(x, y, BACK_X + BACK_S / 2, BACK_Y + BACK_S / 2, TEXT_DARK) {
+        return Some(c);
+    }
+    Some(0xFFFFFFFF)
+}
+
+/// Draws the living orb at (`cx`, `cy`) for this frame.
+///
+/// WHY `ticks` is a parameter: the whole animation is a function of the frame
+/// clock, and passing it keeps the function pure -- the same frame drawn twice
+/// gives the same orb, which is what makes a capture reproducible.
+fn draw_orb(x: usize, y: usize, cx: usize, cy: usize, base_r: usize, ticks: u64) -> Option<u32> {
+    let r = orb_radius(base_r, ticks);
     let dx = (x as i32) - (cx as i32);
     let dy = (y as i32) - (cy as i32);
     let d2 = dx * dx + dy * dy;
     let r2 = (r * r) as i32;
 
-    // Contact drop shadow below sphere
+    // Contact drop shadow below the orb. Its scale follows the radius so the
+    // shadow tightens as the body grows, which is what sells them as one object.
     let shadow_dy = dy - 56;
+    let s_rad = (r as i32 * 60) / 52;
     let s_dx = dx;
-    let s_dist = s_dx * s_dx * 100 / (60 * 60) + shadow_dy * shadow_dy * 100 / (10 * 10);
+    let s_dist = s_dx * s_dx * 100 / (s_rad * s_rad) + shadow_dy * shadow_dy * 100 / (10 * 10);
     if s_dist <= 100 && d2 > r2 {
         let alpha = (100 - s_dist) as u32;
         let keep = 256 - (alpha * 65 / 100);
@@ -434,17 +598,29 @@ fn draw_sphere(x: usize, y: usize, cx: usize, cy: usize, r: usize) -> Option<u32
             z += 1;
         }
 
-        let dot = (-3 * dx - 4 * dy + 4 * z) / (r as i32);
-        let diffuse = dot.max(0).min(6);
+        // The light, rotated to this frame's turn.
+        let (lx, ly, lz) = orb_light((ticks / 6) as u32);
+        // The surface normal at this pixel, pointing out of the sphere.
+        let nx = dx;
+        let ny = dy;
+        let nz = z;
+        let dot = (lx * nx + ly * ny + lz * nz) / (r as i32 * 4);
+        let diffuse = (dot / 3).max(0).min(6);
 
-        let spec_dx = dx + 15;
-        let spec_dy = dy + 16;
+        // The specular highlight rides the same rotated direction, offset so it
+        // lands on the upper-left of the lit side rather than on the light
+        // vector itself.
+        let spec_dx = dx + (lx * 5) / 4;
+        let spec_dy = dy + (ly * 5) / 4;
         let spec_d2 = spec_dx * spec_dx + spec_dy * spec_dy;
+        let spec_r = (r * r) / 36;
 
         let mut cr = 24 + diffuse * 8;
         let mut cg = 30 + diffuse * 10;
         let mut cb = 42 + diffuse * 14;
 
+        // A rim that reads as the far side of the body, brightening where the
+        // surface turns away.
         if z <= 12 {
             let rim = (12 - z) * 3;
             cr += rim;
@@ -452,12 +628,15 @@ fn draw_sphere(x: usize, y: usize, cx: usize, cy: usize, r: usize) -> Option<u32
             cb += rim + 5;
         }
 
-        if spec_d2 <= 144 {
-            let spec_intensity = (144 - spec_d2) as i32;
-            cr += spec_intensity * 120 / 144;
-            cg += spec_intensity * 135 / 144;
-            cb += spec_intensity * 155 / 144;
+        let sr2 = (spec_r * spec_r) as i32;
+        if spec_d2 <= sr2 {
+            let spec_intensity = (sr2 - spec_d2) as i32;
+            cr += spec_intensity * 120 / sr2.max(1);
+            cg += spec_intensity * 135 / sr2.max(1);
+            cb += spec_intensity * 155 / sr2.max(1);
         }
+        // A hot core inside the highlight, so the lit side reads as a specular
+        // point rather than a gradient.
         if spec_d2 <= 25 {
             let hot = (25 - spec_d2) as i32;
             cr += hot * 70 / 25;
@@ -476,14 +655,35 @@ fn draw_sphere(x: usize, y: usize, cx: usize, cy: usize, r: usize) -> Option<u32
 // -----------------------------------------------------------------------------
 // Card Geometry
 // -----------------------------------------------------------------------------
+//
+// WHY this stack: the reference screen puts the back control, then the heading,
+// then the orb with its subtitle, then the cards -- and it has room for all of
+// it because the cards only reach two thirds of the way down. The old stack put
+// the heading and the orb in the same 49-row band the back control now needs,
+// which is why the control and the title's first letters overlapped, and it
+// left 600 rows of dead space below the last card. Every band below is measured
+// against the one above it so they cannot drift back into each other.
+//
+// status rule                 0..48
+// back pill                  56..104
+// heading                  112..184   (ink 121..169)
+// orb                      200..310
+// subtitle                 322..344
+// cards  row 1             370..490
+//        row 2             510..630
+//        row 3             650..770
+//        full width        790..900
+const CARD_R1_L: Rect = Rect::new(40, 370, 305, 120);
+const CARD_R1_R: Rect = Rect::new(375, 370, 305, 120);
+const CARD_R2_L: Rect = Rect::new(40, 510, 305, 120);
+const CARD_R2_R: Rect = Rect::new(375, 510, 305, 120);
+const CARD_R3_L: Rect = Rect::new(40, 650, 305, 120); // POWER_ENTRY
+const CARD_R3_R: Rect = Rect::new(375, 650, 305, 120);
+const CARD_R4: Rect = Rect::new(40, 790, 640, 110);
 
-const CARD_R1_L: Rect = Rect::new(40, 295, 305, 120);
-const CARD_R1_R: Rect = Rect::new(375, 295, 305, 120);
-const CARD_R2_L: Rect = Rect::new(40, 435, 305, 120);
-const CARD_R2_R: Rect = Rect::new(375, 435, 305, 120);
-const CARD_R3_L: Rect = Rect::new(40, 590, 305, 120); // POWER_ENTRY
-const CARD_R3_R: Rect = Rect::new(375, 590, 305, 120);
-const CARD_R4: Rect = Rect::new(40, 730, 640, 110);
+/// Rows the orb occupies, and so the band its driver repaints.
+const ORB_BAND_Y0: usize = 200;
+const ORB_BAND_Y1: usize = 310;
 
 const BG_COLOR: u32 = 0xFFF8FAFC;
 const CARD_BG: u32 = 0xFFFFFFFF;
@@ -528,29 +728,61 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
         return CARD_BORDER;
     }
 
-    // 2. Large Bold Title: "System"
+    // 2. Back control, in the reference's position and size.
+    //
+    // WHY it was missing: the Settings app opens this same surface with a `<`
+    // pill at the top-left, and the reference screen has one too, so a user who
+    // reached System Space from the home surface's search bar had no control to
+    // come back with -- the only way out was a gesture. A control that is
+    // airtight on one route in and absent on another is a gap, not a style.
+    //
+    // WHY this shape: the same 48x48 soft pill with a 12-radius corner and a
+    // 2px chevron the Settings app draws, so the two agree where a user would
+    // compare them. `back_control_pixel` is local because the shell and the
+    // Settings app cannot share a module, and a copy that matches is better than
+    // a dependency that would couple the shell's layout to an app's.
+    if let Some(c) = back_control_pixel(x, y) {
+        return c;
+    }
+
+    // 3. Large Bold Title: "System Space"
     // WHY y0 = 52 and a 72-row gate: a scale-3 run needs GLYPH_H * scale rows, and
     // the old `y >= 56 && y < 96` window threw away the bottom 36 of 72, so the
     // title rendered as its own severed upper halves. The run now sits high enough
     // that its ink (61..109) clears both the status rule at y=48 and the sphere
     // band that starts at y=115. The x window was 240 while the word measures
     // ~261px at this scale, so the final `m` was being cut as well.
-    if y >= 49 && y < 124 && x >= 48 && x < 320 {
-        if let Some(c) = test_text_aa(x, y, 48, 52, 3, b"System", TEXT_DARK, 0xFFFFFFFF) {
+    //
+    // WHY the word is "System Space" and not "System": the Settings app titles
+    // this same surface "System Space", so a title of "System" read as a
+    // different screen to a user who had arrived from Settings -- and the name is
+    // the design system's own.
+    //
+    // WHY the window is 576 wide: measured with the face's own advance table,
+    // `text::measure(b"System Space", 3)` is 480px, and the run starts at x 48,
+    // so it ends at 528. 576 leaves 48px of slack on the right at the surface's
+    // own margin, and admits the whole word. The old 320-wide window was cut for
+    // "System" and would have clipped this at "Spac".
+    //
+    // WHY the title still clears the orb band: its ink ends at row 109 and the
+    // band the orb occupies starts at 115, so widening the word horizontally
+    // costs nothing vertically.
+    if y >= ORB_BAND_Y0 - 88 && y < ORB_BAND_Y1 - 126 && x >= 48 && x < 576 {
+        if let Some(c) = test_text_aa(x, y, 48, 112, 3, b"System Space", TEXT_DARK, 0xFFFFFFFF) {
             return c;
         }
     }
 
     // 3. Central 3D Shaded Sphere (cx: 360, cy: 175, r: 52)
-    if y >= 115 && y <= 245 && x >= 290 && x <= 430 {
-        if let Some(c) = draw_sphere(x, y, 360, 175, 52) {
+    if y >= ORB_BAND_Y0 && y <= ORB_BAND_Y1 && x >= 290 && x <= 430 {
+        if let Some(c) = draw_orb(x, y, 360, 255, 52, unsafe { crate::ORB_TICKS }) {
             return c;
         }
     }
 
     // Subtitle under sphere: "Everything in one place"
-    if y >= 248 && y < 270 && x >= 240 && x < 480 {
-        if let Some(c) = test_text_aa(x, y, 252, 250, 1, b"Everything in one place", TEXT_MUTED, 0xFFFFFFFF) {
+    if y >= 324 && y < 348 && x >= 240 && x < 480 {
+        if let Some(c) = test_text_aa(x, y, 252, 324, 1, b"Everything in one place", TEXT_MUTED, 0xFFFFFFFF) {
             return c;
         }
     }
@@ -558,26 +790,26 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
     // 4. Row 1 Cards (y: 295..415)
     // Left: Device
     if let Some(bg) = card_pixel(&CARD_R1_L, x, y) {
-        if let Some(ic) = draw_device_icon(x, y, 75, 332, TEXT_DARK) {
+        if let Some(ic) = draw_device_icon(x, y, 75, 407, TEXT_DARK) {
             return ic;
         }
         if let Some(c) = test_text_aa(x, y, 105, 322, 2, b"Device", TEXT_DARK, 0xFFFFFFFF) {
             return c;
         }
-        if let Some(c) = test_text_aa(x, y, 65, 372, 1, b"Display, Sound, Gestures", TEXT_MUTED, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(x, y, 65, 447, 1, b"Display, Sound, Gestures", TEXT_MUTED, 0xFFFFFFFF) {
             return c;
         }
         return bg;
     }
     // Right: Network
     if let Some(bg) = card_pixel(&CARD_R1_R, x, y) {
-        if let Some(ic) = draw_network_icon(x, y, 410, 332, TEXT_DARK) {
+        if let Some(ic) = draw_network_icon(x, y, 410, 407, TEXT_DARK) {
             return ic;
         }
         if let Some(c) = test_text_aa(x, y, 440, 322, 2, b"Network", TEXT_DARK, 0xFFFFFFFF) {
             return c;
         }
-        if let Some(c) = test_text_aa(x, y, 400, 372, 1, b"Wi-Fi, Mobile, Bluetooth", TEXT_MUTED, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(x, y, 400, 447, 1, b"Wi-Fi, Mobile, Bluetooth", TEXT_MUTED, 0xFFFFFFFF) {
             return c;
         }
         return bg;
@@ -586,26 +818,26 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
     // 5. Row 2 Cards (y: 435..555)
     // Left: Personal
     if let Some(bg) = card_pixel(&CARD_R2_L, x, y) {
-        if let Some(ic) = draw_personal_icon(x, y, 75, 472, TEXT_DARK) {
+        if let Some(ic) = draw_personal_icon(x, y, 75, 547, TEXT_DARK) {
             return ic;
         }
-        if let Some(c) = test_text_aa(x, y, 105, 462, 2, b"Personal", TEXT_DARK, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(x, y, 105, 537, 2, b"Personal", TEXT_DARK, 0xFFFFFFFF) {
             return c;
         }
-        if let Some(c) = test_text_aa(x, y, 65, 512, 1, b"Accounts, Language, Time", TEXT_MUTED, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(x, y, 65, 587, 1, b"Accounts, Language, Time", TEXT_MUTED, 0xFFFFFFFF) {
             return c;
         }
         return bg;
     }
     // Right: Apps
     if let Some(bg) = card_pixel(&CARD_R2_R, x, y) {
-        if let Some(ic) = draw_apps_icon(x, y, 410, 472, TEXT_DARK) {
+        if let Some(ic) = draw_apps_icon(x, y, 410, 547, TEXT_DARK) {
             return ic;
         }
-        if let Some(c) = test_text_aa(x, y, 440, 462, 2, b"Apps", TEXT_DARK, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(x, y, 440, 537, 2, b"Apps", TEXT_DARK, 0xFFFFFFFF) {
             return c;
         }
-        if let Some(c) = test_text_aa(x, y, 400, 512, 1, b"Permissions, Storage", TEXT_MUTED, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(x, y, 400, 587, 1, b"Permissions, Storage", TEXT_MUTED, 0xFFFFFFFF) {
             return c;
         }
         return bg;
@@ -614,28 +846,28 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
     // 6. Row 3 Cards (y: 590..710)
     // Left: Power (POWER_ENTRY)
     if let Some(bg) = card_pixel(&CARD_R3_L, x, y) {
-        if let Some(ic) = draw_battery_icon(x, y, 75, 627, TEXT_DARK) {
+        if let Some(ic) = draw_battery_icon(x, y, 75, 702, TEXT_DARK) {
             return ic;
         }
-        if let Some(c) = test_text_aa(x, y, 105, 617, 2, b"Power", TEXT_DARK, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(x, y, 105, 692, 2, b"Power", TEXT_DARK, 0xFFFFFFFF) {
             return c;
         }
         // WHY "Power options" and not "Charging": the subtitle names the section,
         // and "Charging" would claim a live charge state this shell never measured.
-        if let Some(c) = test_text_aa(x, y, 65, 667, 1, b"Battery, Power options", TEXT_MUTED, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(x, y, 65, 742, 1, b"Battery, Power options", TEXT_MUTED, 0xFFFFFFFF) {
             return c;
         }
         return bg;
     }
     // Right: Security
     if let Some(bg) = card_pixel(&CARD_R3_R, x, y) {
-        if let Some(ic) = draw_security_icon(x, y, 410, 627, TEXT_DARK) {
+        if let Some(ic) = draw_security_icon(x, y, 410, 702, TEXT_DARK) {
             return ic;
         }
-        if let Some(c) = test_text_aa(x, y, 440, 617, 2, b"Security", TEXT_DARK, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(x, y, 440, 692, 2, b"Security", TEXT_DARK, 0xFFFFFFFF) {
             return c;
         }
-        if let Some(c) = test_text_aa(x, y, 400, 667, 1, b"Lock, Encryption", TEXT_MUTED, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(x, y, 400, 742, 1, b"Lock, Encryption", TEXT_MUTED, 0xFFFFFFFF) {
             return c;
         }
         return bg;
@@ -646,14 +878,14 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
         if let Some(ic) = draw_gear_icon(x, y, 75, 785, TEXT_DARK) {
             return ic;
         }
-        if let Some(c) = test_text_aa(x, y, 105, 765, 2, b"System", TEXT_DARK, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(x, y, 105, 832, 2, b"System", TEXT_DARK, 0xFFFFFFFF) {
             return c;
         }
         // WHY y0 = 815: rows 1-3 place the caption at title_y0 + GLYPH_H*2 + 2,
         // which clears the title's 48px line box. Row 4 used a hand-typed 800,
         // which is 15px too high - the caption's cap top landed at 803, exactly
         // the title's baseline, so the two lines overprinted each other.
-        if let Some(c) = test_text_aa(x, y, 105, 815, 1, b"Updates, About, Tools", TEXT_MUTED, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(x, y, 105, 882, 1, b"Updates, About, Tools", TEXT_MUTED, 0xFFFFFFFF) {
             return c;
         }
         return bg;

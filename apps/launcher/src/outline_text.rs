@@ -153,6 +153,12 @@ pub fn em_for_scale(scale: usize) -> u32 {
 /// demand behind the caller's own box test costs one cached lookup per inked
 /// pixel and nothing at all for the rest of the surface -- which is what lets a
 /// single coverage slot serve a frame full of runs.
+    ///
+    /// Why the attribute: the bin target does not call this -- the shell's
+    /// own painters place a run and ask it directly -- but the lib target's tests
+    /// do, and a module that cannot be exercised from its own tests is worse
+    /// than one with an unused helper.
+    #[allow(dead_code)]
     pub fn pixel(
         x: usize,
         baseline: usize,
@@ -314,6 +320,7 @@ impl OutlineRun {
     }
 
     /// The colour of (`px`, `py`) if this run inks it, blended over `bg`.
+    #[allow(dead_code)]
     pub fn pixel(&self, px: usize, py: usize, ink: u32, bg: u32) -> Option<u32> {
         if self.w == 0 {
             return None;
