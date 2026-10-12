@@ -12,6 +12,7 @@ extern crate alloc;
 
 pub mod allocator;
 pub mod capability;
+pub mod console_sink;
 pub mod crypto;
 pub mod display;
 pub mod entry;
@@ -78,6 +79,17 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         uart.init(24_000_000, 115200);
         *UART.lock() = uart;
     }
+
+    // 1a. Give the shared kernel core the console it prints through. Its refusal
+    // notices are the only thing that tells a user why a persistent write did not
+    // land, and the core cannot reach a PL011 register by itself.
+    console_sink::install();
+    // 1b. The extent of this running image, for the boot guard. Supplied from
+    // this platform's own linker bounds because an AArch64 image has no ELF
+    // header at its load base to walk.
+    interos_kernel_core::storage::boot_guard::install_image_extent_source(
+        &storage::AARCH64_IMAGE_EXTENT,
+    );
 
     kprintln!();
     kprintln!("============================================================");
@@ -243,6 +255,15 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         Some("SDHCI hardware unavailable")
     );
     kprintln!("[OK] SDHCI / eMMC 5.1: no fabricated card, completion, or FIFO state is claimed.");
+
+    // 8a. Bind that controller to the shared kernel core's crash-consistent
+    // journal and read through it. The journal is the subsystem extracted from the
+    // x86 kernel; this is the first architecture besides x86 to run it. With no
+    // card and no eMMC region in the platform description it reports that it has
+    // no device, which is the honest answer and the one that must never be read as
+    // "nothing has been committed".
+    storage::bind_journal_device();
+    storage::report_journal_rollback_floor();
 
     // 9. Goodix GT911 Multi-Touch Digitizer Protocol
     kprintln!("--- [Testing Goodix GT911 multi-touch protocol] ---");

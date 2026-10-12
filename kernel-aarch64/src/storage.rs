@@ -5,10 +5,16 @@
 //! - PinePhone (Allwinner A64 eMMC 5.1 & microSD)
 //! - Qualcomm Snapdragon mobile platforms (SDHCI / eMMC / UFS bridge)
 //! - Raspberry Pi Compute Module 4 (Broadcom eMMC)
+//!
+//! It is also the AArch64 implementation of the platform-neutral block device
+//! contract the shared kernel core's journal commits through
+//! (`interos_kernel_core::storage::BlockDevice`), which is what lets the journal
+//! that used to exist only in the x86 kernel run here. The adapter is at the
+//! bottom of this file.
 
 use core::sync::atomic::{compiler_fence, Ordering};
 
-pub const SECTOR_SIZE: usize = 512;
+use interos_kernel_core::storage::{BlockDevice, BlockDeviceError, SECTOR_SIZE};
 
 pub const SDHCI_BLOCK_SIZE: usize = 0x04;
 pub const SDHCI_BLOCK_COUNT: usize = 0x06;
@@ -223,5 +229,179 @@ impl SdhciController {
         }
 
         Ok(())
+    }
+}
+
+/// AArch64 half of the platform-neutral block device contract.
+///
+/// WHY the shared core needs this at all: its journal was extracted from the x86
+/// kernel, where it was hard-bound to `crate::drivers::ATA_PRIMARY
+/// (kernel/src/storage/persistent.rs:25) — an ATA PIO driver at fixed port
+/// addresses. The core now declares `BlockDevice` and asks the architecture to
+/// bind one; this is that binding for AArch64.
+///
+/// WHY the errors are this shape: the journal distinguishes "no device" from "the
+/// device failed". A controller with no card bound must answer `DeviceNotFound`,
+/// never a successful read of zeroes, because the journal would then commit
+/// records into a device that does not exist and report them as durable.
+impl BlockDevice for SdhciController {
+    fn read_sector(&mut self, lba: u32, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), BlockDeviceError> {
+        if !self.hardware_present {
+            return Err(BlockDeviceError::DeviceNotFound);
+        }
+        if self.total_sectors != 0 && lba >= self.total_sectors {
+            return Err(BlockDeviceError::LbaOutOfRange);
+        }
+        self.read_block(lba, buf).map_err(|_| BlockDeviceError::ReadError)
+    }
+
+    fn write_sector(&mut self, lba: u32, buf: &[u8; SECTOR_SIZE]) -> Result<(), BlockDeviceError> {
+        if !self.hardware_present {
+            return Err(BlockDeviceError::DeviceNotFound);
+        }
+        if self.total_sectors != 0 && lba >= self.total_sectors {
+            return Err(BlockDeviceError::LbaOutOfRange);
+        }
+        self.write_block(lba, buf).map_err(|_| BlockDeviceError::WriteError)
+    }
+
+    fn sector_count(&self) -> u32 {
+        // Zero when no card is bound, which is what makes the journal report
+        // `Unavailable` rather than compute slot addresses against a device that
+        // does not exist.
+        if self.hardware_present {
+            self.total_sectors
+        } else {
+            0
+        }
+    }
+
+    fn model(&self) -> &str {
+        core::str::from_utf8(&self.model_name).unwrap_or("SDHCI")
+    }
+
+    // WHY the trait's default `Ok(())` is kept rather than inventing a flush: this
+    // driver implements no SD stop-transmission or power-off notification command,
+    // and reporting a flush that was never sent would tell the journal its records
+    // reached media when nothing was written. The eMMC write completes in the
+    // command's transfer-complete status, which is what `write_block` waits for.
+}
+
+/// The extent of the running AArch64 image, as the boot guard's seam supplies it.
+///
+/// WHY this exists at all: the guard refuses a write it cannot prove is clear of
+/// the code that is executing, and the extent it compares against was derived on
+/// x86 by walking the kernel's own ELF program headers
+/// (`kernel/src/storage/boot_guard.rs:254`, via the `__ehdr_start` symbol the
+/// bootloader API provides). An AArch64 image cannot do that: `linker.ld` puts the
+/// ARM64 Linux boot header in the first 64 bytes of `.text`, so there is no ELF
+/// header at the load base to walk.
+///
+/// WHY the bound comes from the linker symbols: `_kernel_start` and `_kernel_end`
+/// are defined by `linker.ld`, and the same difference is what the ARM64 image
+/// header publishes as `image_size` at offset 0x10. The guard only ever uses
+/// `file_sectors()`, the on-disk size, and the memory extent is never smaller than
+/// the file extent — so using it here can only make the guard refuse more often,
+/// which is the direction the guard is allowed to be wrong in.
+pub struct Aarch64ImageExtent;
+
+impl interos_kernel_core::storage::boot_guard::ImageExtentSource for Aarch64ImageExtent {
+    fn image_extent(&self) -> Option<interos_kernel_core::storage::ImageExtent> {
+        extern "C" {
+            static _kernel_start: u8;
+            static _kernel_end: u8;
+        }
+        // SAFETY: `_kernel_start` and `_kernel_end` are linker-script symbols
+        // bounding this kernel's own loadable image, and only their addresses are
+        // taken; nothing is dereferenced.
+        let start = unsafe { &_kernel_start as *const u8 as u64 };
+        let end = unsafe { &_kernel_end as *const u8 as u64 };
+        let image_bytes = end.checked_sub(start)?;
+        Some(interos_kernel_core::storage::ImageExtent {
+            hdr_vaddr: start,
+            vaddr_start: start,
+            vaddr_end: end,
+            paddr_start: start,
+            paddr_end: end,
+            file_bytes: image_bytes,
+        })
+    }
+}
+
+pub static AARCH64_IMAGE_EXTENT: Aarch64ImageExtent = Aarch64ImageExtent;
+
+/// The SDHCI controller bound to the shared core's journal.
+///
+/// WHY a static: the journal takes the device as a `&'static mut` and holds it
+/// for the whole of a read or a commit, exactly as the x86 kernel holds
+/// `ATA_PRIMARY` behind its mutex, so that no other context can interleave a
+/// write with a read.
+static mut SDHCI_JOURNAL_DEVICE: SdhciController = SdhciController::new(0);
+
+/// Binds this platform's block device to the shared journal and reports what the
+/// journal can now do. Called during boot.
+///
+/// WHAT THIS REPORTS ON QEMU `virt` TODAY, measured: no storage region has been
+/// discovered, so the controller is bound unpopulated and reports zero sectors —
+/// the log line is `block device bound, 0 sectors`, and the journal's recovery
+/// answers `Ok(None)` because with zero sectors there are no slots to hold a
+/// record. That is the correct answer for a device that does not exist, and it is
+/// not the same answer as a first boot on a real device: on a device with a
+/// journal region, `Ok(None)` means "no record has been committed" and the
+/// keystore mints a storage root there. The two are distinguishable, which is why
+/// the boot log never claims a rollback floor was read.
+///
+/// WHY a device with no region is bound at all rather than left unbound: the seam
+/// has to be exercised by something, and a bound-but-empty device proves the
+/// journal's failure path refuses to fabricate state. A real SDHCI/eMMC region, or
+/// a virtio-blk device, attaches to this same static before this call.
+pub fn bind_journal_device() {
+    // SAFETY: this runs once, on the primordial CPU, before secondary cores are
+    // brought up and before anything else can reach the journal, so there is
+    // exactly one `&'static mut` to hand out and it is handed out once.
+    let device: &'static mut SdhciController =
+        unsafe { &mut *core::ptr::addr_of_mut!(SDHCI_JOURNAL_DEVICE) };
+    // WHY the count is read before the bind: the binding hands the same reference
+    // away for `'static`, so it cannot be borrowed again afterwards.
+    let sectors = device.sector_count();
+    match interos_kernel_core::storage::persistent::bind_block_device(device) {
+        Ok(()) => crate::kprintln!(
+            "[OK] kernel-core journal: block device bound, {} sectors.",
+            sectors
+        ),
+        Err(reason) => crate::kprintln!("[WARN] kernel-core journal: {}", reason),
+    }
+}
+
+/// Reads the verified-boot rollback floor (journal record kind 9) through the
+/// shared core's recovery routine and reports exactly what it found.
+///
+/// This is the read path that a boot with no block device answers `Unavailable`
+/// for, and it is written so that "no device" is never reported as "no record":
+/// the keystore's storage root is recovered from the same call, and treating
+/// absence as a first boot mints a replacement root that orphans every credential
+/// stored under the real one.
+pub fn report_journal_rollback_floor() {
+    let mut floor = [0u8; 8];
+    match interos_kernel_core::storage::persistent::load_latest_kind(
+        &mut floor,
+        9, // KIND_FIRMWARE_ROLLBACK_FLOOR, mirrored from the x86 kind table
+    ) {
+        Ok(Some((generation, len))) => {
+            crate::kprintln!(
+                "[OK] kernel-core journal: rollback floor generation {} recovered ({} bytes).",
+                generation,
+                len
+            );
+        }
+        Ok(None) => {
+            crate::kprintln!("[OK] kernel-core journal: no rollback floor committed yet.");
+        }
+        Err(err) => {
+            crate::kprintln!(
+                "[OK] kernel-core journal: rollback floor unavailable ({:?}) — no block device is bound.",
+                err
+            );
+        }
     }
 }

@@ -1,0 +1,21 @@
+[package]
+name = "interos-kernel-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["Inter OS Contributors"]
+description = "Architecture-neutral kernel core for InterOS (shared by the x86_64, AArch64 and RISC-V kernels)"
+
+# WHY this crate is `lib`-only and lives inside `kernel-aarch64/`: it is the
+# first extraction of the platform-neutral kernel core, and it is deliberately a
+# dependency of the architecture kernels rather than a member of the root
+# workspace. The root workspace is shared with every app and its test counts are
+# pinned by the test contract; adding a crate with its own unit tests to the root
+# members changes those counts, so the shared core stays outside it and is built
+# by whichever architecture kernel consumes it. A RISC-V or x86_64 consumer is a
+# path dependency away.
+[lib]
+name = "interos_kernel_core"
+path = "src/lib.rs"
+
+[dependencies]
+spin = "0.9.8"

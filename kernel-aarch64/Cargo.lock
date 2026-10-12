@@ -140,11 +140,19 @@ name = "interos-android-shared"
 version = "0.1.0"
 
 [[package]]
+name = "interos-kernel-core"
+version = "0.1.0"
+dependencies = [
+ "spin",
+]
+
+[[package]]
 name = "kernel-aarch64"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "interos-android-shared",
+ "interos-kernel-core",
  "linked_list_allocator",
  "spin",
 ]

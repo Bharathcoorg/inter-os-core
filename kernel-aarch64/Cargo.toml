@@ -10,3 +10,16 @@ spin = "0.9.8"
 linked_list_allocator = "0.10.6"
 interos-android-shared = { path = "../kernel/src/compat/android/shared" }
 ed25519-dalek = { version = "2.1.1", default-features = false, features = ["alloc"] }
+interos-kernel-core = { path = "kernel-core" }
+
+# WHY this crate has to declare its own profiles: it is excluded from the root
+# workspace (`Cargo.toml` `exclude` list) precisely so the architecture kernels
+# can be built for cross targets, and an excluded package does not inherit the
+# root workspace's `panic = "abort"`. A `#![no_std]` cross build therefore failed
+# with "unwinding panics are not supported without std". The bare-metal targets
+# have no unwinding runtime, so every profile here aborts.
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
