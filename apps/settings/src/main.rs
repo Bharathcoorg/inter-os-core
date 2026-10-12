@@ -2773,23 +2773,31 @@ fn landing_card_pixel(x: usize, y: usize, i: usize) -> Option<u32> {
         ) {
             return Some(c);
         }
-        let mut lines: [&[u8]; 2] = [&b""[..], &b""[..]];
-        let n = std::design::font::wrap_text(subtitle, 1, CARD_TEXT_W, 2, &mut lines);
-        for li in 0..n {
-            if let Some(c) = run_ink(
-                x,
-                y,
-                cx0 + CARD_TEXT_X,
-                cy0 + CARD_PAD + LINE_H + CARD_LINE_GAP + li * (LINE_H + CARD_LINE_GAP),
-                TYPE_H3,
-                lines[li],
-                CARD_TEXT_W,
-                TEXT_MUTED,
-                fill,
-                false,
-            ) {
-                return Some(c);
-            }
+        // WHY one line and not two: the caption used to be wrapped into up to
+        // two lines, but a card is one title plus one caption -- the second
+        // caption line landed on the card's bottom edge and clipped, so the
+        // Power card read "Battery, Charging" over a severed "The". Every
+        // caption in the reference sits on one line, and the ones that do not
+        // fit are ellipsised rather than folded.
+        //
+        // WHY ellipsise rather than truncate silently: a caption cut without a
+        // marker reads as though the category were called that. The marker says
+        // there is more.
+        let mut sub_buf = [0u8; 64];
+        let sub_len = std::design::font::ellipsize(subtitle, 1, CARD_TEXT_W, &mut sub_buf);
+        if let Some(c) = run_ink(
+            x,
+            y,
+            cx0 + CARD_TEXT_X,
+            cy0 + CARD_PAD + LINE_H + CARD_LINE_GAP,
+            TYPE_H3,
+            &sub_buf[..sub_len],
+            CARD_TEXT_W,
+            TEXT_MUTED,
+            fill,
+            false,
+        ) {
+            return Some(c);
         }
         return Some(fill);
     }
