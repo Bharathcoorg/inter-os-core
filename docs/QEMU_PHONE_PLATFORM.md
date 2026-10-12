@@ -26,9 +26,20 @@ The QEMU Phone profile is a reproducible virtual development target. It provides
 | **VNC Endpoint** | `127.0.0.1:5901` (`:1`) | RFB framebuffer and input channel |
 | **WebSocket Bridge** | `127.0.0.1:6081` | noVNC WebSocket bridge for browser access |
 | **Device Studio** | `http://127.0.0.1:4300` | Developer control console |
-| **Scanout Contract** | `1280 × 720` ARGB8888 | Physical display framebuffer |
+| **Scanout Contract** | `720 × 1440` ARGB8888 | Physical display framebuffer |
 | **UI Logical Space** | `720 × 1440` (1:2 aspect) | Mobile portrait layout space |
-| **Downsampler** | 2×2 SSAA box filtering | Integer downsampling to centered 360×720 viewport |
+| **Display Device** | `virtio-vga` with an EDID that pins `xres=720, yres=1440` | The guest KMS modesets exactly this |
+
+> [!NOTE]
+> The scanout and the logical space are the same 720×1440. This document used to
+> describe a 1280×720 landscape scanout downsampled by 2×2 box filtering into a
+> centred 360×720 viewport. That path no longer exists: the kernel now engages
+> native 720×1440×32bpp through the Bochs/VBE DISPI registers that `virtio-vga`
+> exposes (`kernel/src/framebuffer.rs`, `engage_native_mode`), and the launch
+> scripts pin the geometry with `-device virtio-vga,edid=on,xres=720,yres=1440`.
+> A machine-checked contract asserts it (`tests/test_qemu_phone_profile_contract.py`),
+> and five further contract tests assert the same 720×1440 geometry, so the
+> numbers above cannot drift from the launch line without a suite going red.
 
 ---
 
@@ -49,8 +60,8 @@ The QEMU Phone profile is a reproducible virtual development target. It provides
 
 The canonical QEMU input and display coordinate mapping is defined as:
 
-- **Display Scanout**: 1280×720 pixels, origin `(0, 0)` at top-left.
-- **Physical Touch Coordinates**: Unsigned display pixels (`X: 0..=1279`, `Y: 0..=719`).
+- **Display Scanout**: 720×1440 pixels, origin `(0, 0)` at top-left.
+- **Physical Touch Coordinates**: Unsigned display pixels (`X: 0..=719`, `Y: 0..=1439`).
 - **Touch Transport**:
   ```text
   INPUT_TOUCH <DOWN|MOVE|UP|CANCEL> <x> <y> <slot>

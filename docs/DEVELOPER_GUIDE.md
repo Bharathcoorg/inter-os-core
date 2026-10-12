@@ -57,7 +57,7 @@ python tools/interos.py build calculator
 Executes automated test suites across targets:
 ```bash
 # Run workspace unit tests:
-python tools/interos.py test --target workspace
+python tools/interos.py test --target unit
 
 # Run static system contract checks:
 python tools/interos.py test --target contracts
