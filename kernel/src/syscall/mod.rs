@@ -15,7 +15,7 @@ use crate::capability::{CapError, Capability, CapabilityId, CapabilityTable, Cap
 use crate::drivers::{BlockDevice, ATA_PRIMARY, SECTOR_SIZE};
 use crate::drivers::display::DisplayDriver;
 use crate::hal::traits::PowerController;
-use crate::fs::{FileDescriptor, FileStat, FsError, VFS};
+use crate::fs::{FileDescriptor, FileStat, FileType, FsError, VFS};
 use crate::ipc::{IpcError, IpcMessage, IPC_ROUTER};
 use crate::net::NetError;
 use crate::package::{parse_rapp, RappError, RappManifest};
@@ -193,6 +193,10 @@ pub enum SyscallNumber {
     UserClearCredential = 128,
     UserSetCredential = 126,
     DevicePower = 127,
+    // 130 and 131 are the first free numbers above the whole declared table,
+    // so no existing ABI number moves.
+    DisplaySetMode = 130,
+    DisplaySetOrientation = 131,
 }
 
 /// System call result status codes.
@@ -736,6 +740,48 @@ pub fn sys_fs_close(fd: FileDescriptor) -> SyscallResult {
     }
 }
 
+/// Size of the fixed-layout `FsStat` record written to userspace.
+///
+/// WHY a fixed layout rather than a struct dump: `SyscallResult` codes are the
+/// kernel's only contract with a caller, so the record must be exactly this many
+/// bytes on both sides and must not depend on `#[repr]` of a kernel type.
+///
+/// `0..8 inode | 8..12 uid | 12..16 gid | 16..18 mode | 18..20 nlink |
+/// 20..28 atime | 28..36 mtime | 36..44 ctime | 44..48 file type | 48..56 read
+/// only | 56..88 sha256 | 88..96 size`
+const FILE_STAT_BYTES: usize = 96;
+
+/// Serializes a `FileStat` into the `FsStat` userspace record.
+fn encode_file_stat(stat: &FileStat, out: &mut [u8]) -> usize {
+    let mut record = [0u8; FILE_STAT_BYTES];
+    record[..8].copy_from_slice(&stat.inode.0.to_le_bytes());
+    record[8..12].copy_from_slice(&stat.uid.to_le_bytes());
+    record[12..16].copy_from_slice(&stat.gid.to_le_bytes());
+    record[16..18].copy_from_slice(&stat.mode.to_le_bytes());
+    record[18..20].copy_from_slice(&stat.nlink.to_le_bytes());
+    record[20..28].copy_from_slice(&stat.atime.to_le_bytes());
+    record[28..36].copy_from_slice(&stat.mtime.to_le_bytes());
+    record[36..44].copy_from_slice(&stat.ctime.to_le_bytes());
+    record[44..48].copy_from_slice(&file_type_tag(stat.file_type).to_le_bytes());
+    record[48..56].copy_from_slice(&(stat.read_only as u64).to_le_bytes());
+    record[56..88].copy_from_slice(&stat.sha256_digest);
+    record[88..96].copy_from_slice(&(stat.size as u64).to_le_bytes());
+    let to_copy = out.len().min(record.len());
+    out[..to_copy].copy_from_slice(&record[..to_copy]);
+    to_copy
+}
+
+/// Numeric tag for `FileType`, in its declaration order. The values are part of
+/// the `FsStat` ABI.
+fn file_type_tag(file_type: FileType) -> u32 {
+    match file_type {
+        FileType::RegularFile => 0,
+        FileType::Directory => 1,
+        FileType::ReadOnlySystem => 2,
+        FileType::DeviceNode => 3,
+    }
+}
+
 /// Reads file metadata without opening a descriptor.
 pub fn sys_fs_stat(cap_slot: usize, path: &str) -> Result<FileStat, SyscallResult> {
     let sched = SCHEDULER.lock();
@@ -803,6 +849,56 @@ pub fn sys_verify_package(
         RappError::DigestMismatch | RappError::SignatureInvalid | RappError::PublisherUntrusted | RappError::PublisherRevoked | RappError::PackageRevoked | RappError::InvalidPublisherKey => SyscallResult::IntegrityViolation,
         _ => SyscallResult::InvalidArguments,
     })
+}
+
+/// Verifies a signed `.rapp` file and writes its manifest summary into `out_buf`.
+///
+/// WHY the summary rather than the manifest itself: the manifest carries the
+/// publisher's 32-byte key and the 64-byte signature, and a caller that only
+/// needs to know what it is about to install has no use for either. The line is
+/// pipe-delimited in the same shape `sys_fs_list` and `sys_package_registry`
+/// use, so a userspace reader parses all three the same way.
+///
+/// `package_id|major.minor.patch|payload_len\x0a`
+pub fn sys_verify_package_summary(
+    cap_slot: usize,
+    path: &str,
+    out_buf: &mut [u8],
+) -> Result<usize, SyscallResult> {
+    let manifest = sys_verify_package(cap_slot, path)?;
+    use core::fmt::Write;
+    struct SummaryWriter<'a> {
+        buf: &'a mut [u8],
+        pos: usize,
+    }
+    impl<'a> core::fmt::Write for SummaryWriter<'a> {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            let bytes = s.as_bytes();
+            let remaining = self.buf.len().saturating_sub(self.pos);
+            if remaining < bytes.len() {
+                // A truncated summary would report a short package id or a
+                // short version and look like a real one.
+                return Err(core::fmt::Error);
+            }
+            self.buf[self.pos..self.pos + bytes.len()].copy_from_slice(bytes);
+            self.pos += bytes.len();
+            Ok(())
+        }
+    }
+    let mut writer = SummaryWriter { buf: out_buf, pos: 0 };
+    let written = write!(
+        writer,
+        "{}|{}.{}.{}|{}\n",
+        manifest.package_id,
+        manifest.version.0,
+        manifest.version.1,
+        manifest.version.2,
+        manifest.payload_len
+    );
+    if written.is_err() {
+        return Err(SyscallResult::InvalidArguments);
+    }
+    Ok(writer.pos)
 }
 
 
@@ -956,6 +1052,94 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         // FsSync: a1 = fd
         let fd = FileDescriptor(a1 as u32);
         sys_fs_fsync(fd) as i64
+    }
+    12 => {
+        // FsStat: a1 = cap_slot, a2 = path_ptr, a3 = path_len, a4 = out_ptr, a5 = out_len
+        let cap_slot = a1 as usize;
+        let path_len = a3 as usize;
+        if path_len == 0 || path_len > 512 {
+            return SyscallResult::InvalidArguments as i64;
+        }
+        let out_len = a5 as usize;
+        if out_len == 0 || out_len > 128 {
+            return SyscallResult::InvalidArguments as i64;
+        }
+        let mut path_buf = [0u8; 512];
+        let path = match read_user_string(a2, path_len, &mut path_buf) {
+            Ok(s) => s,
+            Err(_) => return SyscallResult::InvalidArguments as i64,
+        };
+        match sys_fs_stat(cap_slot, path) {
+            Ok(stat) => {
+                let mut out = [0u8; FILE_STAT_BYTES];
+                let written = encode_file_stat(&stat, &mut out);
+                if written > out_len {
+                    // A caller that cannot hold the whole record would otherwise
+                    // read a short stat and treat the missing tail as zeroes.
+                    return SyscallResult::InvalidArguments as i64;
+                }
+                if copy_to_user(a4, &out[..written]).is_err() {
+                    return SyscallResult::InvalidArguments as i64;
+                }
+                written as i64
+            }
+            Err(e) => e as i64,
+        }
+    }
+    14 => {
+        // VerifyPackage: a1 = cap_slot, a2 = path_ptr, a3 = path_len, a4 = out_ptr, a5 = out_len
+        let cap_slot = a1 as usize;
+        let path_len = a3 as usize;
+        if path_len == 0 || path_len > 256 {
+            return SyscallResult::InvalidArguments as i64;
+        }
+        let out_len = a5 as usize;
+        if out_len == 0 || out_len > 256 {
+            return SyscallResult::InvalidArguments as i64;
+        }
+        let mut path_buf = [0u8; 256];
+        let path = match read_user_string(a2, path_len, &mut path_buf) {
+            Ok(s) => s,
+            Err(_) => return SyscallResult::InvalidArguments as i64,
+        };
+        let mut out_buf = [0u8; 256];
+        match sys_verify_package_summary(cap_slot, path, &mut out_buf[..out_len]) {
+            Ok(n) => {
+                if copy_to_user(a4, &out_buf[..n]).is_err() {
+                    return SyscallResult::InvalidArguments as i64;
+                }
+                n as i64
+            }
+            Err(e) => e as i64,
+        }
+    }
+    16 => {
+        // WasmExecute: a1 = module_ptr, a2 = module_len, a3 = export_ptr, a4 = export_len
+        //
+        // WHY this is an honest failure and not a real implementation: there is
+        // no wasm binary decoder anywhere in the kernel. `kernel/src/wasm/`
+        // takes modules that are built in code (`WasmModule::add_function`
+        // takes interpreter bytecode, not a `\0asm` module), so there is
+        // nothing here that could turn caller-supplied bytes into a
+        // `WasmModule`. There is also no per-task VM instance registry to key a
+        // submitted module by, no `CapabilityType::WasmExecute` in this
+        // architecture's capability table to gate execution with, and no
+        // serialization of the result, so a nonempty `module_len` would have to
+        // be invented to make this arm look like it did something.
+        //
+        // WHAT WOULD HAVE TO EXIST: (1) a binary-format decoder in
+        // `kernel/src/wasm/` (`WasmModule::from_bytes` or equivalent: magic,
+        // sections, LEB128 types, import/export/memory decoding) -- the
+        // `WasmModule` builder API alone is not enough; (2) a kernel-side VM
+        // instance store keyed by task so a module survives more than one
+        // syscall, in the same module; (3) a `WasmExecute` capability variant
+        // in `kernel/src/capability/` plus its minting for the service that is
+        // allowed to run bytecode, mirroring `kernel-aarch64/src/wasm.rs`; and
+        // (4) an agreed result encoding for this name, in the SDK, next to the
+        // `WasmExecute = 16` variant. Until then the caller is told the verb is
+        // disabled rather than allowed to believe it succeeded.
+        let _ = (a1, a2, a3, a4);
+        SyscallResult::FeatureDisabled as i64
     }
 
         13 => {
@@ -1654,13 +1838,28 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 Err(e) => e as i64,
             }
         }
-        71 => {
-            // TouchPoll
-            match sys_touch_poll() {
-                Ok(code) => code as i64,
-                Err(e) => e as i64,
-            }
-        }
+         71 => {
+             // TouchPoll
+             match sys_touch_poll() {
+                 Ok(code) => code as i64,
+                 Err(e) => e as i64,
+             }
+         }
+         130 => {
+             // DisplaySetMode: a1 = display-cap slot, a2 = width, a3 = height, a4 = refresh_hz
+             match sys_display_set_mode(a1 as usize, a2 as u32, a3 as u32, a4 as u16) {
+                 Ok(()) => SyscallResult::Success as i64,
+                 Err(e) => e as i64,
+             }
+         }
+         131 => {
+             // DisplaySetOrientation: a1 = display-cap slot, a2 = orientation code
+             // (0 = Portrait, 1 = LandscapeRight, 2 = PortraitInverted, 3 = LandscapeLeft)
+             match sys_display_set_orientation(a1 as usize, a2 as u32) {
+                 Ok(()) => SyscallResult::Success as i64,
+                 Err(e) => e as i64,
+             }
+         }
         73 => {
             // SurfaceWrite: a1=display-cap slot, a2=surface id, a3=offset pixels,
             // a4=pixel buffer pointer, a5=pixel count.
@@ -3380,6 +3579,77 @@ pub fn sys_surface_flip(cap_slot: usize) -> Result<u64, SyscallResult> {
     let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
     let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
     display.composite_and_flip().map_err(|_| SyscallResult::DeviceError)
+}
+
+/// Reprograms the scanout to `width` x `height` at `refresh_hz`.
+///
+/// WHY the physical mode is programmed as well: the KMS scanout and the
+/// hardware framebuffer would otherwise disagree, and `present_argb8888`
+/// letterboxes or scales the compositor's output to fit, so a mode change the
+/// display never saw would silently be displayed at the wrong scale.
+///
+/// WHY the KMS guard is dropped first: the COM1 orientation command does the
+/// same, because the display driver and the framebuffer each hold a lock and
+/// nesting them is how a mode change deadlocks the compositor.
+pub fn sys_display_set_mode(cap_slot: usize, width: u32, height: u32, refresh_hz: u16) -> Result<(), SyscallResult> {
+    let _owner = require_display_service(cap_slot)?;
+    // The DISPI geometry registers are 16-bit. A wider value would truncate and
+    // the physical scanout would be reprogrammed to a mode nobody asked for.
+    if width == 0 || height == 0 || width > u16::MAX as u32 || height > u16::MAX as u32 {
+        return Err(SyscallResult::InvalidArguments);
+    }
+    {
+        let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+        kms.set_display_mode(width, height, refresh_hz)
+            .map_err(|_| SyscallResult::InvalidArguments)?;
+    }
+    if !crate::framebuffer::set_physical_mode(width as u16, height as u16) {
+        crate::serial_println!(
+            "[DISPLAY_HAL] WARN: physical scanout {}x{} rejected (absent DISPI or past the mapped pages); the KMS mode changed and the hardware keeps its previous mode.",
+            width, height
+        );
+    }
+    Ok(())
+}
+
+/// Rotates the composited scanout between the four `DisplayOrientation` values.
+///
+/// Codes are the enum's declaration order: 0 = Portrait, 1 = LandscapeRight,
+/// 2 = PortraitInverted, 3 = LandscapeLeft.
+///
+/// WHY the accelerometer vector is deliberately left alone, unlike the COM1
+/// orientation command: that command is emulator plumbing that feeds a rotation
+/// into the input channel so a guest can be poked from outside. An app
+/// requesting a rotation is not evidence that the device was physically turned,
+/// and `sys_sensor_read` already reports "no physical IMU" for that reason.
+pub fn sys_display_set_orientation(cap_slot: usize, orientation: u32) -> Result<(), SyscallResult> {
+    let _owner = require_display_service(cap_slot)?;
+    use crate::drivers::display_kms::DisplayOrientation;
+    let requested = match orientation {
+        0 => DisplayOrientation::Portrait,
+        1 => DisplayOrientation::LandscapeRight,
+        2 => DisplayOrientation::PortraitInverted,
+        3 => DisplayOrientation::LandscapeLeft,
+        _ => return Err(SyscallResult::InvalidArguments),
+    };
+    {
+        let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+        kms.set_orientation(requested);
+    }
+    // Portrait and its inversion present 720x1440; the two landscape
+    // orientations present 1280x720. The guard is dropped first so the display
+    // driver and framebuffer locks are never held together.
+    let (phys_w, phys_h) = match requested {
+        DisplayOrientation::Portrait | DisplayOrientation::PortraitInverted => (720u16, 1440u16),
+        DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft => (1280u16, 720u16),
+    };
+    if !crate::framebuffer::set_physical_mode(phys_w, phys_h) {
+        crate::serial_println!(
+            "[DISPLAY_HAL] WARN: physical scanout {}x{} rejected (absent DISPI or past the mapped pages); the KMS orientation changed and the hardware keeps its previous mode.",
+            phys_w, phys_h
+        );
+    }
+    Ok(())
 }
 
 /// Polls the normalized userspace input event pipeline.

@@ -187,6 +187,10 @@ pub enum SyscallNumber {
     UserClearCredential = 128,
     UserSetCredential = 126,
     DevicePower = 127,
+    // 130 and 131 are the first free numbers above the whole declared table,
+    // so no existing ABI number moves.
+    DisplaySetMode = 130,
+    DisplaySetOrientation = 131,
 }
 
 // -----------------------------------------------------------------------------
@@ -964,6 +968,55 @@ pub fn package_registry(cap_slot: usize, out_buf: &mut [u8]) -> Result<usize, i6
     }
 }
 
+/// Verifies a signed `.rapp` package on disk and writes its manifest summary.
+///
+/// The summary is a newline-terminated, pipe-delimited line in the same shape
+/// `package_registry` and `fs_list` produce, so one parser reads all three:
+/// `package_id|major.minor.patch|payload_len`.
+///
+/// WHY a summary and not a verdict flag: verification either runs and the kernel
+/// reports `IntegrityViolation`, or it does not and the caller sees a specific
+/// error. An `Ok` here means the file's magic, digest, signature, publisher
+/// trust and revocation state all passed, which is exactly what an installer
+/// needs to decide whether to offer the install.
+///
+/// Requires the `FileSystemRead` capability in `cap_slot`.
+pub fn verify_package(cap_slot: usize, path: &str, out_buf: &mut [u8]) -> Result<usize, i64> {
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::VerifyPackage,
+            cap_slot as u64,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Submits WebAssembly bytecode to the kernel for execution.
+///
+/// WHY this always refuses instead of pretending: the kernel's `WasmExecute`
+/// verb has no implementation behind it. There is no wasm binary decoder in
+/// `kernel/src/wasm/` (its `WasmModule` is built in code, one function at a
+/// time, not decoded from a `\0asm` module), no kernel-side VM instance store to
+/// hold a submitted module between calls, and no `WasmExecute` capability in this
+/// architecture's capability table to gate execution with. So the kernel answers
+/// `FeatureDisabled`, and this wrapper returns it rather than manufacturing an
+/// `Ok` that would have a live guest believe bytecode ran.
+///
+/// Calling it is honest reporting, not a supported path; a caller that wants to
+/// run bytecode has to wait for the decoder, the instance store and the
+/// capability described at the kernel arm.
+pub fn wasm_execute(_module: &[u8], _export: &str) -> Result<(), i64> {
+    Err(-19)
+}
+
 /// Queries active mobile SoC platform parameters into `out_buf` JSON string.
 pub fn hal_query_platform(out_buf: &mut [u8]) -> Result<usize, i64> {
     let ret = unsafe {
@@ -1440,6 +1493,15 @@ pub fn surface_destroy(display_cap_slot: usize, surface_id: u32) -> Result<(), i
 }
 
 /// Composites and atomically flips the display scanout.
+pub fn surface_flip(display_cap_slot: usize) -> Result<u64, i64> {
+    let ret = unsafe { syscall5(SyscallNumber::SurfaceFlip, display_cap_slot as u64, 0, 0, 0, 0) };
+    if ret >= 0 {
+        Ok(ret as u64)
+    } else {
+        Err(ret)
+    }
+}
+
 /// Enables or disables pointer/touch hit-testing for an owned window.
 pub fn window_set_input(display_cap_slot: usize, window_id: u32, enabled: bool) -> Result<(), i64> {
     let ret = unsafe {
@@ -1457,10 +1519,58 @@ pub fn window_set_input(display_cap_slot: usize, window_id: u32, enabled: bool) 
     }
 }
 
-pub fn surface_flip(display_cap_slot: usize) -> Result<u64, i64> {
-    let ret = unsafe { syscall1(SyscallNumber::SurfaceFlip, display_cap_slot as u64) };
-    if ret >= 0 {
-        Ok(ret as u64)
+/// Reprograms the scanout resolution and refresh rate.
+///
+/// `display_cap_slot` is the slot holding the `FrameBufferDirect` capability,
+/// exactly as `surface_create` and `surface_flip` take it: the mode is hardware
+/// state, so it is addressable only by the display service, never by an app.
+/// A width or height that does not fit the hardware's 16-bit geometry registers,
+/// or a refresh the panel rejects, comes back as `InvalidArguments` and the
+/// previous mode stays in effect.
+pub fn display_set_mode(
+    display_cap_slot: usize,
+    width: u32,
+    height: u32,
+    refresh_hz: u16,
+) -> Result<(), i64> {
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::DisplaySetMode,
+            display_cap_slot as u64,
+            width as u64,
+            height as u64,
+            refresh_hz as u64,
+            0,
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Rotates the composited scanout.
+///
+/// Why this takes a raw `u32` code instead of a Rust enum: this crate is
+/// `#![no_std]` and is consumed by every arch, and the codes are the kernel's
+/// `DisplayOrientation` declaration order. A caller that invents a code outside
+/// 0..=3 gets `InvalidArguments` rather than a silent no-op.
+///
+/// 0 = Portrait, 1 = LandscapeRight, 2 = PortraitInverted, 3 = LandscapeLeft.
+pub fn display_set_orientation(display_cap_slot: usize, orientation: u32) -> Result<(), i64> {
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::DisplaySetOrientation,
+            display_cap_slot as u64,
+            orientation as u64,
+            0,
+            0,
+            0,
+        )
+    };
+    if ret == 0 {
+        Ok(())
     } else {
         Err(ret)
     }
@@ -1773,6 +1883,102 @@ pub fn fs_fsync(fd: u32) -> Result<(), i64> {
     let ret = unsafe { syscall1(SyscallNumber::FsSync, fd as u64) };
     if ret == 0 {
         Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Size of the fixed-layout `FsStat` record the kernel writes back.
+///
+/// WHY these byte offsets rather than a `#[repr(C)]` mirror of the kernel struct:
+/// the offsets have to stay checkable on both sides of the boundary, and the
+/// parity contract pins `SyscallNumber` rather than kernel structs. Every field
+/// below is little-endian.
+///
+/// `0..8 inode | 8..12 uid | 12..16 gid | 16..18 mode | 18..20 nlink |
+/// 20..28 atime | 28..36 mtime | 36..44 ctime | 44..48 file type | 48..56 read
+/// only | 56..88 sha256 | 88..96 size`
+pub const FILE_STAT_BYTES: usize = 96;
+
+/// A `FileStat` record as the kernel wrote it, decoded from `fs_stat`'s buffer.
+///
+/// WHY a struct and not `fs_stat` returning it directly: `fs_stat` is a syscall
+/// bound to a 96-byte out buffer, and a caller has to know whether its buffer
+/// held the whole record. `fs_stat` returns the byte count it wrote, so a short
+/// read is visible; this type only decodes a complete one and refuses a short or
+/// corrupt buffer rather than filling the missing fields with zeroes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileStatRecord {
+    pub inode: u64,
+    pub uid: u32,
+    pub gid: u32,
+    pub mode: u16,
+    pub nlink: u16,
+    /// 0 = regular file, 1 = directory, 2 = read-only system, 3 = device node.
+    pub file_type: u8,
+    pub atime: u64,
+    pub mtime: u64,
+    pub ctime: u64,
+    pub read_only: bool,
+    pub sha256: [u8; 32],
+    pub size: u64,
+}
+
+impl FileStatRecord {
+    /// Decodes the record, or returns `None` for a short or corrupt buffer.
+    ///
+    /// WHY every field is included: a caller that only wants a size can ignore
+    /// the rest, but one that needs the digest to cross-check the bytes it read
+    /// has to be able to get it, and a stat that hides its own digest is a stat
+    /// the caller has to take on faith.
+    pub fn parse(buf: &[u8]) -> Option<FileStatRecord> {
+        use core::convert::TryInto;
+        if buf.len() < FILE_STAT_BYTES {
+            return None;
+        }
+        Some(FileStatRecord {
+            inode: u64::from_le_bytes(buf[0..8].try_into().ok()?),
+            uid: u32::from_le_bytes(buf[8..12].try_into().ok()?),
+            gid: u32::from_le_bytes(buf[12..16].try_into().ok()?),
+            mode: u16::from_le_bytes(buf[16..18].try_into().ok()?),
+            nlink: u16::from_le_bytes(buf[18..20].try_into().ok()?),
+            atime: u64::from_le_bytes(buf[20..28].try_into().ok()?),
+            mtime: u64::from_le_bytes(buf[28..36].try_into().ok()?),
+            ctime: u64::from_le_bytes(buf[36..44].try_into().ok()?),
+            file_type: buf[44],
+            read_only: buf[48] != 0,
+            sha256: {
+                let mut digest = [0u8; 32];
+                digest.copy_from_slice(&buf[56..88]);
+                digest
+            },
+            size: u64::from_le_bytes(buf[88..96].try_into().ok()?),
+        })
+    }
+}
+
+/// Reads a path's metadata without opening a file descriptor.
+///
+/// `cap_slot` must hold the `FileSystemRead` capability the VFS checks, and
+/// `out` must be at least `FILE_STAT_BYTES` bytes: a shorter buffer is refused
+/// rather than partially decoded, because a truncated stat would report a short
+/// size and a short digest that both look self-consistent.
+pub fn fs_stat(cap_slot: usize, path: &str, out: &mut [u8]) -> Result<usize, i64> {
+    if out.len() < FILE_STAT_BYTES {
+        return Err(-3);
+    }
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::FsStat,
+            cap_slot as u64,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            out.as_mut_ptr() as u64,
+            out.len().min(FILE_STAT_BYTES) as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as usize)
     } else {
         Err(ret)
     }

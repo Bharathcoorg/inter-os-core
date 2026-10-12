@@ -13,6 +13,40 @@ use spin::Mutex;
 use crate::crypto::Sha256;
 use crate::fs::VFS;
 
+/// Path of the persisted account map.
+///
+/// WHY the VFS and not a new journal kind: `storage/persistent.rs` has sixteen
+/// slots in ten two-slot record kinds, `tests/test_storage_contract.py` pins
+/// both `SLOT_COUNT = 16` and `JOURNAL_MAX_KIND = 10`, so no kind can be added,
+/// and every kind 1..=10 is already taken (package registry 1, package
+/// revocation 2, publisher trust roots 3, VFS snapshot 4, package blobs 5,
+/// keystore seed 6, recovery 7, update manifest 8, update activation 9,
+/// settings 10). The credential record already lives in
+/// `/user/{uid}/vault/.credential`, and the whole `/user/` inode tree and its
+/// payloads are sealed and authenticated by the VFS snapshot, so the map needs
+/// no new on-disk region.
+///
+/// WHY a dot-prefixed name: the map is kernel state, not user data. Apps are
+/// confined to `/user/{uid}/apps/{package}` by `enforce_app_path`, so no
+/// ring-3 task can open or overwrite this path; the dot matches the convention
+/// `.credential` already uses for kernel-owned files in the same tree.
+const ACCOUNT_MAP_PATH: &str = "/user/.accounts";
+const ACCOUNT_MAP_MAGIC: [u8; 4] = *b"UACC";
+const ACCOUNT_MAP_VERSION: u32 = 1;
+/// Map header: magic 4, version 4, owner uid 4, next standard uid 4,
+/// provisioned flag 1, record count 2.
+const ACCOUNT_MAP_HEADER: usize = 19;
+/// Record header: uid 4, kind 1, lock state 1, name length 2.
+const ACCOUNT_MAP_RECORD: usize = 8;
+/// The map is bounded by the sixteen-account ceiling in `create_standard_user`.
+const ACCOUNT_MAP_ACCOUNTS: usize = 16;
+const ACCOUNT_MAP_NAME_MAX: usize = 255;
+const ACCOUNT_MAP_CAPACITY: usize =
+    ACCOUNT_MAP_HEADER + ACCOUNT_MAP_ACCOUNTS * (ACCOUNT_MAP_RECORD + ACCOUNT_MAP_NAME_MAX);
+/// Sentinel stored when the map holds no owner (it cannot happen through
+/// `delete_user`, which refuses the owner, but the format has to say so).
+const ACCOUNT_MAP_NO_OWNER: u32 = u32::MAX;
+
 /// Stable user identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct UserId(pub u32);
@@ -132,6 +166,54 @@ pub enum UserError {
     CannotDeleteSystem,
 }
 
+/// On-disk tag for `UserType`. The values are an ABI: a decoded tag that is not
+/// one of these fails the whole map instead of being guessed at.
+fn user_type_tag(kind: UserType) -> u8 {
+    match kind {
+        UserType::Owner => 0,
+        UserType::Standard => 1,
+        UserType::Guest => 2,
+        UserType::Restricted => 3,
+    }
+}
+
+fn user_type_from_tag(tag: u8) -> Option<UserType> {
+    match tag {
+        0 => Some(UserType::Owner),
+        1 => Some(UserType::Standard),
+        2 => Some(UserType::Guest),
+        3 => Some(UserType::Restricted),
+        _ => None,
+    }
+}
+
+/// On-disk tag for `UserLockState`.
+///
+/// `Lockout` loses its deadline on the way to disk because the deadline is
+/// measured in ticks from this boot's counter, which restarts at zero: a
+/// persisted `locked_until_tick` can outlive the boot it was written in and lock
+/// the owner out of their own device for good.
+fn lock_state_tag(state: UserLockState) -> u8 {
+    match state {
+        UserLockState::Uninitialized => 0,
+        UserLockState::Locked => 1,
+        UserLockState::Unlocked => 2,
+        UserLockState::Lockout { .. } => 3,
+    }
+}
+
+fn lock_state_from_tag(tag: u8) -> Option<UserLockState> {
+    match tag {
+        0 => Some(UserLockState::Uninitialized),
+        1 => Some(UserLockState::Locked),
+        2 => Some(UserLockState::Unlocked),
+        3 => Some(UserLockState::Lockout {
+            locked_until_tick: 0,
+        }),
+        _ => None,
+    }
+}
+
 /// Global user and account subsystem manager.
 pub struct UserManager {
     users: BTreeMap<UserId, UserProfile>,
@@ -215,6 +297,8 @@ impl UserManager {
         self.active_user = uid;
         self.is_provisioned = true;
 
+        self.persist_accounts();
+
         crate::serial_println!(
             "[USER] Device owner provisioned: UID={}, Name='{}'",
             uid.0,
@@ -250,6 +334,7 @@ impl UserManager {
         };
 
         self.users.insert(uid, profile);
+        self.persist_accounts();
         crate::serial_println!("[USER] Guest account created: UID={}", uid.0);
         Ok(uid)
     }
@@ -298,6 +383,7 @@ impl UserManager {
         };
 
         self.users.insert(uid, profile);
+        self.persist_accounts();
         crate::serial_println!(
             "[USER] Standard secondary account created: UID={}, Name='{}'",
             uid.0,
@@ -561,6 +647,262 @@ impl UserManager {
         }
     }
 
+    /// Persists the account map so a reboot restores every account that existed.
+    ///
+    /// WHY the map is written separately from the credential: the credential is
+    /// one account's secret and already had a home in the vault. The map is what
+    /// was missing -- `users` is a `BTreeMap` in RAM, so a secondary or guest
+    /// account vanished on reboot while its credential stayed on disk and could
+    /// never be attached to anything again.
+    pub fn persist_accounts(&self) {
+        Self::write_account_map(ACCOUNT_MAP_PATH, self);
+    }
+
+    /// Restores the account map persisted by `persist_accounts`.
+    ///
+    /// Returns false when there is nothing restorable -- a fresh disk, or a
+    /// record that does not parse -- and leaves the manager untouched so the
+    /// caller can fall through to first-boot provisioning.
+    pub fn restore_persisted_accounts(&mut self) -> bool {
+        Self::restore_account_map(ACCOUNT_MAP_PATH, self)
+    }
+
+    /// WHY the path is a parameter rather than the constant at the call sites:
+    /// the map lives in the global VFS, which the host test harness shares
+    /// between tests running on parallel threads. A per-test path keeps each
+    /// test's bytes its own without putting test-only behaviour on the boot path.
+    fn write_account_map(path: &str, mgr: &UserManager) {
+        let mut buf = [0u8; ACCOUNT_MAP_CAPACITY];
+        let len = mgr.encode_account_map(&mut buf);
+        if len == 0 {
+            crate::serial_println!(
+                "[USER:SECURITY] Account map could not be encoded (an account name is longer than {} bytes); accounts stay RAM-only for this boot.",
+                ACCOUNT_MAP_NAME_MAX
+            );
+            return;
+        }
+        let outcome = {
+            let mut vfs = VFS.lock();
+            vfs.mkdir("/user");
+            vfs.create_file(path, &buf[..len], false);
+            vfs.sync()
+        };
+        // WHY the result is reported, as it is for the credential write: a silent
+        // failure here looks exactly like a successful one, and the next boot
+        // then silently drops every secondary and guest account.
+        match outcome {
+            Ok(()) => crate::serial_println!(
+                "[USER] Account map persisted to {} ({} account(s)).",
+                path,
+                mgr.users.len()
+            ),
+            Err(_) => crate::serial_println!(
+                "[USER:SECURITY] Account map could not be persisted to {}: the filesystem refused the sync. Secondary and guest accounts stay RAM-only for this boot.",
+                path
+            ),
+        }
+    }
+
+    fn restore_account_map(path: &str, mgr: &mut UserManager) -> bool {
+        // Read the size first: `read_file_by_path` copies only what fits in the
+        // caller's buffer, so a map longer than the record capacity would come
+        // back truncated and parse as a valid prefix -- a silent subset restore.
+        let (buf, bytes_read) = {
+            let vfs = VFS.lock();
+            let size = vfs.lookup(path).map(|id| vfs.get_size(id)).unwrap_or(0);
+            if size == 0 || size > ACCOUNT_MAP_CAPACITY {
+                return false;
+            }
+            let mut buf = [0u8; ACCOUNT_MAP_CAPACITY];
+            let read = vfs.read_file_by_path(path, &mut buf).unwrap_or(0);
+            (buf, read)
+        };
+        if !mgr.decode_account_map(&buf[..bytes_read]) {
+            return false;
+        }
+        // A map with no owner is not a state the kernel can write: `delete_user`
+        // refuses the owner, so the owner is either in the map or never existed.
+        // Treating it as "no map" is the only answer that cannot resurrect an
+        // account set the device does not have.
+        if mgr.owner_user.is_none() || !mgr.is_provisioned {
+            mgr.users.clear();
+            mgr.owner_user = None;
+            mgr.is_provisioned = false;
+            mgr.next_standard_uid = 1002;
+            return false;
+        }
+
+        // WHY the active user is reset to the owner rather than restored: a
+        // reboot must not resume the session that happened to be foreground when
+        // the disk was last written. `switch_user` remains available to whoever
+        // can present the target account's credential.
+        mgr.active_user = mgr.owner_user.unwrap_or(UserId::SYSTEM);
+
+        // WHY the lock state is clamped on the way in: the persisted value is
+        // the state at the moment the map was written, but a reboot is a new
+        // session. Restoring `Unlocked` would boot straight into whichever
+        // account was open, which is the same rule `load_persisted_credential`
+        // already applies to the credential itself. `Uninitialized` survives
+        // because it means "this account has never had a credential", not "this
+        // session is open".
+        for profile in mgr.users.values_mut() {
+            if matches!(
+                profile.lock_state,
+                UserLockState::Unlocked | UserLockState::Lockout { .. }
+            ) {
+                profile.lock_state = UserLockState::Locked;
+            }
+        }
+
+        // The VFS metadata snapshot already rebuilds the `/user/` tree on mount;
+        // this makes the restore self-sufficient if it does not, so the
+        // per-account credential files below have a directory to live in.
+        let accounts: Vec<(UserId, UserType)> =
+            mgr.users.values().map(|p| (p.uid, p.user_type)).collect();
+        {
+            let mut vfs = VFS.lock();
+            vfs.mkdir("/user");
+            for (uid, kind) in accounts {
+                let storage_path = format!("/user/{}", uid.0);
+                vfs.mkdir(&storage_path);
+                vfs.mkdir(&format!("{}/data", storage_path));
+                vfs.mkdir(&format!("{}/vault", storage_path));
+                if kind != UserType::Guest {
+                    vfs.mkdir(&format!("{}/app_data", storage_path));
+                }
+            }
+        }
+
+        crate::serial_println!(
+            "[USER] Restored {} account(s) from {} (active user UID={}).",
+            mgr.users.len(),
+            path,
+            mgr.active_user.0
+        );
+        true
+    }
+
+    /// Encodes the account map: uid, kind, lock state and display name per account.
+    ///
+    /// Returns 0 when the map cannot be encoded in the bounded buffer, rather
+    /// than writing a truncated map that would restore a subset of accounts.
+    fn encode_account_map(&self, out: &mut [u8]) -> usize {
+        if out.len() < ACCOUNT_MAP_HEADER {
+            return 0;
+        }
+        out[..4].copy_from_slice(&ACCOUNT_MAP_MAGIC);
+        out[4..8].copy_from_slice(&ACCOUNT_MAP_VERSION.to_le_bytes());
+        let owner = self.owner_user.map_or(ACCOUNT_MAP_NO_OWNER, |uid| uid.0);
+        out[8..12].copy_from_slice(&owner.to_le_bytes());
+        out[12..16].copy_from_slice(&self.next_standard_uid.to_le_bytes());
+        out[16] = self.is_provisioned as u8;
+
+        let mut pos = ACCOUNT_MAP_HEADER;
+        let mut count: u16 = 0;
+        for profile in self.users.values() {
+            let name = profile.name.as_bytes();
+            if name.len() > ACCOUNT_MAP_NAME_MAX {
+                return 0;
+            }
+            if pos + ACCOUNT_MAP_RECORD + name.len() > out.len() {
+                break;
+            }
+            out[pos..pos + 4].copy_from_slice(&profile.uid.0.to_le_bytes());
+            out[pos + 4] = user_type_tag(profile.user_type);
+            out[pos + 5] = lock_state_tag(profile.lock_state);
+            out[pos + 6..pos + 8].copy_from_slice(&(name.len() as u16).to_le_bytes());
+            out[pos + 8..pos + 8 + name.len()].copy_from_slice(name);
+            pos += ACCOUNT_MAP_RECORD + name.len();
+            count = count.saturating_add(1);
+        }
+        out[17..19].copy_from_slice(&count.to_le_bytes());
+        pos
+    }
+
+    /// Rebuilds the account map from persisted bytes.
+    ///
+    /// Every field is bounds-checked against `bytes`, and an unknown tag, a name
+    /// that is not UTF-8, or trailing bytes after the last record fail the whole
+    /// map rather than restoring part of it: a partial account set is worse than
+    /// none, because it would silently demote an existing account to a
+    /// first-boot owner and leave its data under another uid.
+    fn decode_account_map(&mut self, bytes: &[u8]) -> bool {
+        if bytes.len() < ACCOUNT_MAP_HEADER || &bytes[..4] != &ACCOUNT_MAP_MAGIC {
+            return false;
+        }
+        if u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) != ACCOUNT_MAP_VERSION {
+            return false;
+        }
+        let owner_uid = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+        let mut next_standard_uid = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
+        let is_provisioned = bytes[16] != 0;
+        let count = u16::from_le_bytes([bytes[17], bytes[18]]) as usize;
+
+        let mut users: BTreeMap<UserId, UserProfile> = BTreeMap::new();
+        let mut pos = ACCOUNT_MAP_HEADER;
+        for _ in 0..count {
+            if pos + ACCOUNT_MAP_RECORD > bytes.len() {
+                return false;
+            }
+            let uid = UserId(u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]));
+            let Some(user_type) = user_type_from_tag(bytes[pos + 4]) else {
+                return false;
+            };
+            let Some(lock_state) = lock_state_from_tag(bytes[pos + 5]) else {
+                return false;
+            };
+            let name_len = u16::from_le_bytes([bytes[pos + 6], bytes[pos + 7]]) as usize;
+            let name_start = pos + ACCOUNT_MAP_RECORD;
+            let name_end = match name_start.checked_add(name_len) {
+                Some(end) => end,
+                None => return false,
+            };
+            if name_end > bytes.len() {
+                return false;
+            }
+            let Ok(name) = core::str::from_utf8(&bytes[name_start..name_end]) else {
+                return false;
+            };
+            users.insert(
+                uid,
+                UserProfile {
+                    uid,
+                    name: name.to_string(),
+                    user_type,
+                    lock_state,
+                    // The credential is restored separately, per account, from
+                    // its vault by `load_persisted_credential`.
+                    credential: None,
+                    storage_path: format!("/user/{}", uid.0),
+                    created_at_tick: 0,
+                },
+            );
+            pos = name_end;
+        }
+        if pos != bytes.len() {
+            return false;
+        }
+        if owner_uid != ACCOUNT_MAP_NO_OWNER && !users.contains_key(&UserId(owner_uid)) {
+            return false;
+        }
+        // WHY the floor: uid 1000 is the owner and 1001 the guest, so a corrupted
+        // or zeroed `next_standard_uid` would let `create_standard_user` hand out
+        // an id that is already taken and overwrite an existing account.
+        if next_standard_uid < 1002 {
+            next_standard_uid = 1002;
+        }
+
+        self.users = users;
+        self.owner_user = if owner_uid == ACCOUNT_MAP_NO_OWNER {
+            None
+        } else {
+            Some(UserId(owner_uid))
+        };
+        self.next_standard_uid = next_standard_uid;
+        self.is_provisioned = is_provisioned;
+        true
+    }
+
     /// Queries the lock state of a user.
     pub fn get_lock_state(&self, uid: UserId) -> Result<UserLockState, UserError> {
         self.users
@@ -602,6 +944,10 @@ impl UserManager {
             self.active_user = self.owner_user.unwrap_or(UserId::SYSTEM);
         }
 
+        // WHY the map is rewritten here: `user_data_cleanup` above already
+        // removed the account's directories, and leaving the map untouched would
+        // bring the deleted account back on the next boot with its data gone.
+        self.persist_accounts();
         crate::serial_println!("[USER] User UID={} deleted.", uid.0);
         Ok(())
     }
@@ -618,6 +964,13 @@ impl UserManager {
         self.owner_user = None;
         self.active_user = UserId::SYSTEM;
         self.is_provisioned = false;
+        // WHY the reset state is written rather than the map being unlinked:
+        // `user_data_cleanup` removes the per-user directories, but the map is
+        // one file outside them, so leaving it behind would make a factory reset
+        // undo itself on the next boot. Writing the empty map is also the form
+        // that survives: `unlink` undoes itself when the VFS metadata snapshot
+        // is refused, while `create_file` does not.
+        self.persist_accounts();
         crate::serial_println!("[USER:FACTORY_RESET] User accounts reset to pristine factory state.");
         Ok(())
     }
@@ -644,9 +997,26 @@ pub static USER_MANAGER: Mutex<UserManager> = Mutex::new(UserManager::new());
 pub fn init() {
     let mut mgr = USER_MANAGER.lock();
     if !mgr.is_provisioned() {
-        let _ = mgr.provision_owner("Device Owner", None, 0);
-        mgr.load_persisted_credential(UserId::OWNER);
-        if mgr.get_user(UserId::OWNER).and_then(|u| u.credential.as_ref()).is_none() {
+        // WHY the map is restored before anything else: the map is what makes
+        // the owner, every secondary user and the guest account exist at all,
+        // and a credential can only be attached to a profile that is already in
+        // the map. Restoring the owner first and the rest never is what made
+        // secondary and guest accounts RAM-only.
+        let restored = mgr.restore_persisted_accounts();
+        if !restored {
+            let _ = mgr.provision_owner("Device Owner", None, 0);
+        }
+        // Every account, not just the owner: `change_credential` writes each
+        // account's credential to that account's own vault, so restoring only
+        // the owner's would bring a secondary account back as credential-less
+        // even though it has a PIN on disk -- and `unlock` opens a
+        // credential-less account on a swipe.
+        let uids: Vec<UserId> = mgr.users.keys().copied().collect();
+        for uid in uids {
+            mgr.load_persisted_credential(uid);
+        }
+        let owner = mgr.owner_user().unwrap_or(UserId::OWNER);
+        if mgr.get_user(owner).and_then(|u| u.credential.as_ref()).is_none() {
             crate::serial_println!(
                 "[USER:SECURITY] Device owner provisioned with NO credential. \
                  The lock screen unlocks on a swipe; a PIN is set from Settings > Security."
@@ -737,5 +1107,166 @@ mod tests {
             Err(UserError::InvalidCredential)
         );
         assert_eq!(mgr.has_credential(UserId::OWNER), Ok(false));
+    }
+
+    /// A manager holding an owner, a secondary user and a guest.
+    fn fully_populated() -> UserManager {
+        let mut mgr = UserManager::new();
+        mgr.provision_owner("Device Owner", Some(b"1234"), 0)
+            .expect("provision owner");
+        mgr.create_standard_user("Second Person", Some(b"2222"), 1)
+            .expect("create standard user");
+        mgr.create_guest(2).expect("create guest");
+        mgr
+    }
+
+    /// Writes `mgr`'s account map to a test path and returns the encoded length.
+    fn write_map_to(mgr: &UserManager, path: &str) {
+        let mut buf = [0u8; ACCOUNT_MAP_CAPACITY];
+        let len = mgr.encode_account_map(&mut buf);
+        assert!(len >= ACCOUNT_MAP_HEADER, "the encoded map has a header");
+        let mut vfs = VFS.lock();
+        vfs.mkdir("/user");
+        vfs.create_file(path, &buf[..len], false);
+    }
+
+    /// The bug this pins: a secondary user, a guest and the owner's uid
+    /// allocation all used to live only in the `users` map in RAM, so a reboot
+    /// restored the owner's credential and nothing else.
+    #[test]
+    fn a_reboot_restores_every_account_that_existed() {
+        let path = "/user/.accounts.test_reboot";
+        let mgr = fully_populated();
+        let standard_uid = mgr
+            .list_users()
+            .into_iter()
+            .find(|p| p.user_type == UserType::Standard)
+            .map(|p| p.uid)
+            .expect("a secondary account was created");
+        write_map_to(&mgr, path);
+
+        // A fresh manager is the reboot.
+        let mut restored = UserManager::new();
+        assert!(UserManager::restore_account_map(path, &mut restored));
+        assert_eq!(restored.is_provisioned(), true);
+        assert_eq!(restored.owner_user(), Some(UserId::OWNER));
+        assert_eq!(restored.active_user(), UserId::OWNER);
+
+        let accounts: Vec<(u32, UserType, String)> = restored
+            .list_users()
+            .into_iter()
+            .map(|p| (p.uid.0, p.user_type, p.name))
+            .collect();
+        assert_eq!(accounts.len(), 3, "owner, secondary and guest all came back");
+        assert!(accounts.contains(&(1000, UserType::Owner, "Device Owner".to_string())), "{:?}", accounts);
+        assert!(
+            accounts.contains(&(standard_uid.0, UserType::Standard, "Second Person".to_string())),
+            "{:?}",
+            accounts
+        );
+        assert!(accounts.contains(&(1001, UserType::Guest, "Guest".to_string())), "{:?}", accounts);
+
+        // The uid allocator must not hand out an id that is already in the map.
+        assert!(restored.next_standard_uid > standard_uid.0);
+    }
+
+    /// A reboot is a new session, so no account may come back unlocked.
+    #[test]
+    fn a_restored_account_is_never_unlocked() {
+        let path = "/user/.accounts.test_lock_clamp";
+        let mut mgr = fully_populated();
+        // The owner was provisioned with a PIN, which `provision_owner` leaves
+        // Unlocked; the guest is Unlocked by design.
+        assert_eq!(mgr.get_lock_state(UserId::OWNER).ok(), Some(UserLockState::Unlocked));
+        assert_eq!(mgr.get_lock_state(UserId::GUEST).ok(), Some(UserLockState::Unlocked));
+        write_map_to(&mgr, path);
+
+        let mut restored = UserManager::new();
+        assert!(UserManager::restore_account_map(path, &mut restored));
+        for profile in restored.list_users() {
+            assert_eq!(
+                profile.lock_state,
+                UserLockState::Locked,
+                "UID={} came back unlocked",
+                profile.uid.0
+            );
+        }
+
+        // `Uninitialized` is not an open session -- it means the account has
+        // never had a credential -- so it survives the round trip.
+        let mgr = owner_without_credential();
+        write_map_to(&mgr, path);
+        let mut restored = UserManager::new();
+        assert!(UserManager::restore_account_map(path, &mut restored));
+        assert_eq!(
+            restored.get_lock_state(UserId::OWNER).ok(),
+            Some(UserLockState::Uninitialized)
+        );
+    }
+
+    /// A deleted account must leave the map, or the next boot brings it back
+    /// with its directories already gone.
+    #[test]
+    fn a_deleted_account_does_not_come_back() {
+        let path = "/user/.accounts.test_delete";
+        let mut mgr = fully_populated();
+        let standard_uid = mgr
+            .list_users()
+            .into_iter()
+            .find(|p| p.user_type == UserType::Standard)
+            .map(|p| p.uid)
+            .expect("a secondary account was created");
+        mgr.delete_user(standard_uid).expect("delete the secondary user");
+
+        write_map_to(&mgr, path);
+        let mut restored = UserManager::new();
+        assert!(UserManager::restore_account_map(path, &mut restored));
+        assert!(restored.get_user(standard_uid).is_none());
+        assert_eq!(restored.list_users().len(), 2);
+    }
+
+    /// A factory reset must be durable: the map goes back to saying "no
+    /// accounts", or the next boot brings back the accounts the reset erased.
+    #[test]
+    fn a_factory_reset_removes_the_persisted_map() {
+        let path = "/user/.accounts.test_factory_reset";
+        let mut mgr = fully_populated();
+        write_map_to(&mgr, path);
+
+        mgr.factory_reset().expect("factory reset");
+        write_map_to(&mgr, path);
+
+        let mut restored = UserManager::new();
+        assert_eq!(UserManager::restore_account_map(path, &mut restored), false);
+        assert_eq!(restored.is_provisioned(), false);
+        assert_eq!(restored.list_users().len(), 0);
+    }
+
+    /// A map that is corrupt, truncated or from a different format must not be
+    /// partly restored.
+    #[test]
+    fn an_unparseable_map_is_refused_rather_than_partly_restored() {
+        let populated = fully_populated();
+        let mut buf = [0u8; ACCOUNT_MAP_CAPACITY];
+        let len = populated.encode_account_map(&mut buf);
+        assert!(len > ACCOUNT_MAP_HEADER);
+
+        let mut mgr = UserManager::new();
+        // Truncated in the middle of the last record.
+        assert_eq!(mgr.decode_account_map(&buf[..len - 1]), false);
+        // A format version this kernel does not know.
+        let mut wrong_version = buf;
+        wrong_version[4] = 0x7F;
+        assert_eq!(mgr.decode_account_map(&wrong_version[..len]), false);
+        // Trailing bytes after the last record.
+        let mut longer = alloc::vec![0u8; len + 1];
+        longer[..len].copy_from_slice(&buf[..len]);
+        assert_eq!(mgr.decode_account_map(&longer), false);
+        // A map that names an owner the records do not contain.
+        let mut orphan_owner = buf;
+        orphan_owner[8] = 0x2A;
+        assert_eq!(mgr.decode_account_map(&orphan_owner[..len]), false);
+
+        assert_eq!(mgr.list_users().len(), 0, "nothing was restored");
     }
 }
