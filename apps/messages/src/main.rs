@@ -33,6 +33,9 @@
 use core::panic::PanicInfo;
 use interos_std as std;
 
+mod store;
+use store::ThreadStore;
+
 /// Status of a messaging conversation thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadStatus {
@@ -42,6 +45,11 @@ pub enum ThreadStatus {
 }
 
 /// Conversation thread summary.
+///
+/// WHY the `allow`: this type only names the element of the intentionally empty
+/// `THREADS` anchor. Real threads are `store::ThreadRecord`, so none of these
+/// `&'static str` fields is ever constructed or read.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct ConversationThread {
     pub peer_name: &'static str,
@@ -52,6 +60,14 @@ pub struct ConversationThread {
 }
 
 /// Conversation directory populated from the real messaging backend.
+///
+/// WHY this stays a zero-length array while the list is realised elsewhere: this
+/// static is the compile-time "no sample data" anchor (an app can never ship a
+/// hardcoded conversation). Real threads live in the bounded, persisted
+/// `store::ThreadStore`, which holds user-typed recipients and messages rather
+/// than `&'static str` literals, so it cannot be a `static`. This array therefore
+/// stays empty on purpose and is never read.
+#[allow(dead_code)]
 pub static THREADS: [ConversationThread; 0] = [];
 
 /// Honest state of the last compose attempt, as reported in the header pill.
@@ -86,6 +102,9 @@ impl HeaderStatus {
 const COMPOSE_CAP: usize = 128;
 /// Bytes the search editor can hold.
 const SEARCH_CAP: usize = 48;
+/// Bytes the recipient editor can hold. Must match `store::RECIP_MAX` so an
+/// edited recipient stores without truncation.
+const RECIP_CAP: usize = 24;
 
 /// Production Sovereign Messages state manager.
 pub struct MessagesApp {
@@ -114,6 +133,14 @@ pub struct MessagesApp {
     pub search_len: usize,
     pub search_focused: bool,
     pub search_select_all: bool,
+    /// Recipient ("To:") editor buffer and its length.
+    pub recip: [u8; RECIP_CAP],
+    pub recip_len: usize,
+    pub recip_focused: bool,
+    pub recip_select_all: bool,
+    /// Real, persisted thread table. The list renders from this, never from a
+    /// hardcoded array.
+    pub store: ThreadStore,
 }
 
 impl MessagesApp {
@@ -136,6 +163,11 @@ impl MessagesApp {
             search_len: 0,
             search_focused: false,
             search_select_all: false,
+            recip: [0; RECIP_CAP],
+            recip_len: 0,
+            recip_focused: false,
+            recip_select_all: false,
+            store: ThreadStore::EMPTY,
         }
     }
 
@@ -250,44 +282,14 @@ impl MessagesApp {
         }
     }
 
-    /// Case-insensitive substring test used by the search field.
-    ///
-    /// WHY this is real work rather than decoration: the search field filters
-    /// the thread ledger through this predicate. With the platform exposing no
-    /// thread backend `THREADS` is empty, so the filter genuinely matches
-    /// nothing and the UI says so - it does not pretend the field is inert.
-    pub fn thread_matches_query(&self, thread: &ConversationThread, query: &[u8]) -> bool {
-        if query.is_empty() || query.len() > SEARCH_CAP {
-            return query.is_empty();
-        }
-        // WHY an explicit fold instead of `to_ascii_lowercase`: that helper is
-        // `core::str`-only, and these fields are `&'static str` in a no_std
-        // binary with no allocator, so the fold is written out.
-        let mut q = [0u8; SEARCH_CAP];
-        q[..query.len()].copy_from_slice(query);
-        lower(&mut q[..query.len()]);
-        let mut name = [0u8; 64];
-        let nb = copy_ascii(thread.peer_name.as_bytes(), &mut name);
-        lower(&mut name[..nb]);
-        if contains(&name[..nb], &q[..query.len()]) {
-            return true;
-        }
-        let mut did = [0u8; 64];
-        let db = copy_ascii(thread.peer_did.as_bytes(), &mut did);
-        lower(&mut did[..db]);
-        contains(&did[..db], &q[..query.len()])
-    }
-
     /// Number of threads that survive the current search query.
+    ///
+    /// WHY this reads the persisted store and not the static anchor: the filter
+    /// is real work over the real list. With zero stored threads it matches
+    /// nothing, and the UI says so - it does not pretend the field is inert.
     pub fn match_count(&self) -> usize {
         let q = &self.search[..self.search_len];
-        let mut n = 0usize;
-        for t in THREADS.iter() {
-            if self.thread_matches_query(t, q) {
-                n += 1;
-            }
-        }
-        n
+        self.store.match_count(q)
     }
 }
 
@@ -298,31 +300,23 @@ fn copy_ascii(src: &[u8], dst: &mut [u8]) -> usize {
     n
 }
 
-/// ASCII lowercase in place.
-fn lower(buf: &mut [u8]) {
-    for b in buf.iter_mut() {
-        if b.is_ascii_uppercase() {
-            *b = b.wrapping_add(32);
+/// Decimal `v` (a small count) into `out`, no leading zeros. Returns the digits.
+fn put_u8(out: &mut [u8; 4], v: u8) -> usize {
+    let mut tmp = [0u8; 4];
+    let mut n = 0usize;
+    let mut x = v;
+    loop {
+        tmp[n] = b'0' + (x % 10);
+        x /= 10;
+        n += 1;
+        if x == 0 {
+            break;
         }
     }
-}
-
-/// Byte-slice substring search (no `core` equivalent is available in `no_std`).
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() {
-        return true;
+    for i in 0..n {
+        out[i] = tmp[n - 1 - i];
     }
-    if needle.len() > haystack.len() {
-        return false;
-    }
-    let mut i = 0usize;
-    while i + needle.len() <= haystack.len() {
-        if &haystack[i..i + needle.len()] == needle {
-            return true;
-        }
-        i += 1;
-    }
-    false
+    n
 }
 
 // -----------------------------------------------------------------------------
@@ -447,6 +441,21 @@ const SEARCH_TEXT_SCALE: usize = 1;
 // -----------------------------------------------------------------------------
 // Compose field geometry (y 1330..1414).
 // -----------------------------------------------------------------------------
+/// Recipient ("To:") editor, drawn between the thread list and the composer.
+///
+/// WHY a separate band: a thread is keyed by its recipient, so composing a
+/// message needs a real recipient field. It reuses the same editor machinery as
+/// the composer and search field, shares its hit-test with its drawing, and
+/// repaints only its own rows on a keystroke.
+const RECIPIENT_BAND_Y0: usize = 1288;
+const RECIPIENT_BAND_Y1: usize = 1330;
+/// The drawn field: x 24..610, y 1292..1328 (corner radius 18).
+const RECIPIENT_FIELD: (usize, usize, usize, usize) = (24, 1292, 586, 36);
+const RECIPIENT_TEXT_X: usize = 64;
+const RECIPIENT_TEXT_MAX_W: usize = 610 - 24 - RECIPIENT_TEXT_X;
+const RECIPIENT_PLACEHOLDER: &[u8] = b"Recipient (name or handle)";
+const RECIPIENT_TEXT_SCALE: usize = 1;
+
 const COMPOSE_BAND_Y0: usize = 1330;
 const COMPOSE_BAND_Y1: usize = 1414;
 /// The drawn field: x 24..610, y 1344..1404 (corner radius 24).
@@ -620,6 +629,7 @@ fn editor_pixel(
 struct Frame {
     pill: PillFrame,
     search: EditorFrame,
+    recipient: EditorFrame,
     compose: EditorFrame,
     /// Index of the first thread row that passes the search filter, or `None`
     /// when nothing matches.
@@ -629,6 +639,8 @@ struct Frame {
 fn build_frame(messages: &MessagesApp) -> Frame {
     let search_y = (SEARCH_FIELD.1 + SEARCH_FIELD.3 / 2)
         .saturating_sub(std::design::font::line_height(SEARCH_TEXT_SCALE) / 2);
+    let recipient_y = (RECIPIENT_FIELD.1 + RECIPIENT_FIELD.3 / 2)
+        .saturating_sub(std::design::font::line_height(RECIPIENT_TEXT_SCALE) / 2);
     let compose_y = (COMPOSE_FIELD.1 + COMPOSE_FIELD.3 / 2)
         .saturating_sub(std::design::font::line_height(COMPOSE_TEXT_SCALE) / 2);
     let filtered = if messages.search_len > 0 && messages.match_count() == 0 {
@@ -648,6 +660,17 @@ fn build_frame(messages: &MessagesApp) -> Frame {
             search_y,
             messages.search_focused,
             messages.search_select_all,
+        ),
+        recipient: build_editor(
+            &messages.recip,
+            messages.recip_len,
+            RECIPIENT_PLACEHOLDER,
+            RECIPIENT_TEXT_SCALE,
+            RECIPIENT_TEXT_MAX_W,
+            RECIPIENT_TEXT_X,
+            recipient_y,
+            messages.recip_focused,
+            messages.recip_select_all,
         ),
         compose: build_editor(
             &messages.compose,
@@ -779,8 +802,9 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
         return BG_DARK;
     }
 
-    // 3. Conversation Thread List / Empty State (y 168..1320)
-    if y >= 168 && y < 1320 {
+    // 3. Conversation Thread List / Empty State (y 168..1288; the recipient
+    //    editor band and the composer sit below this).
+    if y >= 168 && y < RECIPIENT_BAND_Y0 {
         // A search that matched nothing shows the filter's real result instead of
         // the "no conversations yet" card: the field is not decoration, so its
         // outcome has to be visible.
@@ -847,7 +871,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             return BG_DARK;
         }
 
-        if THREADS.is_empty() {
+        if messages.store.is_empty() {
             // Empty state container card at x: 24..696, y: 560..900, centred between search and composer.
             if in_rect(EMPTY_CARD, x, y) {
                 let rx = (x - EMPTY_CARD.0).min(EMPTY_CARD.0 + EMPTY_CARD.2 - 1 - x);
@@ -954,12 +978,14 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 }
             }
         } else {
-            // Render actual conversation threads, filtered by the search field.
+            // Render real conversation threads from the persisted store, filtered
+            // by the search field. Each card shows the recipient, the last stored
+            // message, its local-store count, and a delete affordance.
             let idx = (y - CARD_Y0) / CARD_H;
             let card_offset_y = (y - CARD_Y0) % CARD_H;
             if card_offset_y < CARD_BODY_H && x >= CARD_X0 && x < CARD_X1 {
-                if let Some(t) = THREADS.get(idx) {
-                    if messages.thread_matches_query(t, &messages.search[..messages.search_len]) {
+                if let Some(rec) = messages.store.get(idx) {
+                    if messages.store.matches(idx, &messages.search[..messages.search_len]) {
                         let rx = (x - CARD_X0).min(CARD_X1 - 1 - x);
                         let ry = card_offset_y.min(CARD_BODY_H - 1 - card_offset_y);
                         if rx < 16 && ry < 16 {
@@ -969,14 +995,24 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                                 return BG_DARK;
                             }
                         }
-                        let name = t.peer_name.as_bytes();
-                        let name_x = CARD_X0
-                            + std::design::font::center_x(name, 2, CARD_X1 - CARD_X0);
-                        if let Some(c) = test_text(x, y, name_x, card_offset_y + 16, 2, name, TEXT_PRIMARY, SURFACE_DARK)
-                        {
+                        let selected = idx == messages.active_thread_idx;
+                        let name = rec.recipient();
+                        let name_x =
+                            CARD_X0 + std::design::font::center_x(name, 2, CARD_X1 - CARD_X0);
+                        if let Some(c) = test_text(
+                            x,
+                            y,
+                            name_x,
+                            card_offset_y + 16,
+                            2,
+                            name,
+                            TEXT_PRIMARY,
+                            SURFACE_DARK,
+                        ) {
                             return c;
                         }
-                        let snippet = t.last_snippet.as_bytes();
+                        // Last stored message, ellipsised to the card's text column.
+                        let snippet = rec.last_snippet();
                         let mut buf = [0u8; 48];
                         let n = std::design::font::ellipsize(
                             snippet,
@@ -984,17 +1020,49 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                             CARD_X1 - CARD_X0 - 48,
                             &mut buf,
                         );
+                        // Honest subline: the count of messages this device has
+                        // stored locally. It never implies any were delivered -
+                        // no transport is bound to this app.
+                        let label: &[u8] = b"  (stored locally: ";
+                        let count = rec.count();
+                        let mut sub = [0u8; 96];
+                        let mut sl = 0usize;
+                        if n > 0 {
+                            sub[..n].copy_from_slice(&buf[..n]);
+                            sl = n;
+                        }
+                        let _ = selected;
+                        if sl + label.len() + 5 <= sub.len() {
+                            sub[sl..sl + label.len()].copy_from_slice(label);
+                            sl += label.len();
+                            let mut digit = [0u8; 4];
+                            let dn = put_u8(&mut digit, count);
+                            if sl + dn + 1 <= sub.len() {
+                                sub[sl..sl + dn].copy_from_slice(&digit[..dn]);
+                                sl += dn;
+                                sub[sl] = b')';
+                                sl += 1;
+                            }
+                        }
                         if let Some(c) = test_text(
                             x,
                             y,
                             CARD_X0 + 24,
                             card_offset_y + 68,
                             1,
-                            &buf[..n],
+                            &sub[..sl],
                             TEXT_MUTED,
                             SURFACE_DARK,
                         ) {
                             return c;
+                        }
+                        // Delete affordance: a small x glyph on the card's right.
+                        let dxc = CARD_X1 - 44;
+                        let dyc = card_offset_y + 32;
+                        let gx = x as isize - dxc as isize;
+                        let gy = y as isize - dyc as isize;
+                        if gx.abs() <= 6 && gy.abs() <= 6 && (gx - gy).abs() <= 2 {
+                            return ACCENT_SKY;
                         }
                         if rx < 2 || ry < 2 {
                             return BORDER_SUBTLE;
@@ -1003,6 +1071,35 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     }
                 }
             }
+        }
+        return BG_DARK;
+    }
+
+    // 3b. Recipient editor band (y 1288..1330): a real field the keyboard types
+    //     into, sharing its rect with its hit-test and its own repaint band.
+    if y >= RECIPIENT_BAND_Y0 && y < RECIPIENT_BAND_Y1 {
+        if in_rect(RECIPIENT_FIELD, x, y) {
+            let fx = RECIPIENT_FIELD.0;
+            let fy = RECIPIENT_FIELD.1;
+            let rx = (x - fx).min(fx + RECIPIENT_FIELD.2 - 1 - x);
+            let ry = (y - fy).min(fy + RECIPIENT_FIELD.3 - 1 - y);
+            if rx < 18 && ry < 18 {
+                let cdx = (18 - rx) as isize;
+                let cdy = (18 - ry) as isize;
+                if cdx * cdx + cdy * cdy >= 324 {
+                    return BG_DARK;
+                }
+            }
+            if let Some(c) = test_text(x, y, 40, f.recipient.y, 1, b"To:", TEXT_MUTED, SURFACE_DARK) {
+                return c;
+            }
+            if let Some(c) = editor_pixel(x, y, &f.recipient, messages.recip_focused, SURFACE_DARK) {
+                return c;
+            }
+            if rx < 2 || ry < 2 {
+                return BORDER_SUBTLE;
+            }
+            return SURFACE_DARK;
         }
         return BG_DARK;
     }
@@ -1134,6 +1231,8 @@ enum Dirty {
     None,
     /// Only the search field moved: the y 104..156 band.
     Search,
+    /// Only the recipient field moved: its own band between the list and composer.
+    Recipient,
     /// Only the composer moved: the y 1330..1414 band.
     Compose,
     /// Focus moved between the two fields, or the header pill's label changed:
@@ -1170,6 +1269,8 @@ fn focus_compose(app: &mut MessagesApp) {
     app.compose_focused = true;
     app.search_focused = false;
     app.search_select_all = false;
+    app.recip_focused = false;
+    app.recip_select_all = false;
 }
 
 fn focus_search(app: &mut MessagesApp) {
@@ -1179,29 +1280,101 @@ fn focus_search(app: &mut MessagesApp) {
     app.search_focused = true;
     app.compose_focused = false;
     app.compose_select_all = false;
+    app.recip_focused = false;
+    app.recip_select_all = false;
 }
 
-/// Sends the composed body: seals it into vault sector 202 and clears the
-/// editor. Returns the dirty region.
+fn focus_recipient(app: &mut MessagesApp) {
+    if !app.recip_focused {
+        app.recip_select_all = app.recip_len > 0;
+    }
+    app.recip_focused = true;
+    app.compose_focused = false;
+    app.compose_select_all = false;
+    app.search_focused = false;
+    app.search_select_all = false;
+}
+
+/// Applies an edit to the recipient buffer and names the region it dirtied.
+fn edit_recipient(app: &mut MessagesApp, push: Option<u8>) -> Dirty {
+    match push {
+        Some(b) => {
+            if app.recip_select_all {
+                app.recip_len = 0;
+                app.recip_select_all = false;
+            }
+            if app.recip_len < RECIP_CAP {
+                app.recip[app.recip_len] = b;
+                app.recip_len += 1;
+            }
+        }
+        None => {
+            if app.recip_select_all {
+                app.recip_len = 0;
+                app.recip_select_all = false;
+            } else {
+                app.recip_len = app.recip_len.saturating_sub(1);
+            }
+        }
+    }
+    Dirty::Recipient
+}
+
+/// Sends the composed body to the typed recipient: seals it into vault sector 202
+/// and appends it to the local thread store. Returns the dirty region.
+///
+/// WHY it still never reports delivery: no transport is bound to this app, so
+/// nothing is transmitted. The header pill keeps reporting the real vault
+/// outcome, and the store reports whether the thread was actually persisted.
 fn send_composed(app: &mut MessagesApp) -> Dirty {
     if app.compose_len == 0 {
         // Nothing typed: the control is drawn recessed, so this is unreachable
         // from a tap, but the key path can still ask.
         return Dirty::None;
     }
-    let body_len = app.compose_len;
-    // WHY the copy: `seal_composed` takes `&mut self` (it records the real vault
-    // outcome), so the body cannot be borrowed out of `app` at the same time.
+    if app.recip_len == 0 {
+        // WHY: a thread is keyed by its recipient. With none typed there is
+        // nothing to store and nothing honest to show, so say so and keep the
+        // draft rather than creating a recipient-less thread.
+        std::log(
+            0,
+            "[MESSAGES APP] Send pressed with no recipient; nothing was stored locally.",
+        )
+        .ok();
+        return Dirty::None;
+    }
     let mut body = [0u8; COMPOSE_CAP];
-    let n = copy_ascii(&app.compose[..body_len], &mut body);
+    let n = copy_ascii(&app.compose[..app.compose_len], &mut body);
+    let mut recip = [0u8; RECIP_CAP];
+    let rn = copy_ascii(&app.recip[..app.recip_len], &mut recip);
+    // WHY the seal still runs first: it records the authenticated, encrypted
+    // at-rest copy and the real header-pill outcome, exactly as before.
     let sealed = app.seal_composed(&body[..n]);
     let _ = app.play_bubble_chime();
     if sealed {
         app.total_sent += 1;
+        // Only now, with a real recipient and a sealed body, does the message
+        // join the thread store -- and only if the write is acknowledged.
+        if app.store.append(&recip[..rn], &body[..n]) {
+            std::log(
+                0,
+                "[MESSAGES APP] Message stored to the local thread store; no transport is bound, so it was not transmitted.",
+            )
+            .ok();
+        } else {
+            std::log(
+                0,
+                "[MESSAGES APP] Message sealed but the thread store would not take it; it is not in the thread list.",
+            )
+            .ok();
+        }
     }
     app.compose_len = 0;
+    app.recip_len = 0;
     app.compose_focused = false;
     app.compose_select_all = false;
+    app.recip_focused = false;
+    app.recip_select_all = false;
     // WHY the whole surface: the header pill's label changed with the real vault
     // outcome, and the pill is right-aligned, so its left edge moves too.
     Dirty::All
@@ -1260,18 +1433,46 @@ fn handle_tap(app: &mut MessagesApp, px: u32, py: u32) -> Tap<'static> {
         return Tap::Redraw(Dirty::All);
     }
 
-    // Conversation card: exactly the drawn card row, not the old y 110..470
-    // window that swallowed taps aimed at the search field.
+    // Recipient editor: focus the editable "To:" field.
+    if in_rect(RECIPIENT_FIELD, x, y) {
+        focus_recipient(app);
+        let _ = std::audio_haptic_click();
+        std::log(0, "[MESSAGES APP] Recipient field focused for keyboard input.").ok();
+        return Tap::Redraw(Dirty::All);
+    }
+
+    // Conversation card: exactly the drawn card row. A tap in the card's delete
+    // affordance removes the thread; a tap elsewhere selects it.
     if x >= CARD_X0 && x < CARD_X1 && y >= CARD_Y0 {
         let idx = (y - CARD_Y0) / CARD_H;
-        if (y - CARD_Y0) % CARD_H < CARD_BODY_H {
-            if let Some(t) = THREADS.get(idx) {
-                if app.thread_matches_query(t, &app.search[..app.search_len]) {
-                    app.active_thread_idx = idx;
-                    let _ = std::audio_haptic_click();
-                    return Tap::Redraw(Dirty::All);
+        let coff = (y - CARD_Y0) % CARD_H;
+        if coff < CARD_BODY_H && app.store.matches(idx, &app.search[..app.search_len]) {
+            // Delete affordance, matching the glyph the renderer draws at the
+            // card's right edge (CARD_X1 - 44, card_offset_y + 32).
+            let ddx = x as isize - (CARD_X1 - 44) as isize;
+            let ddy = coff as isize - 32;
+            if ddx.abs() <= 16 && ddy.abs() <= 12 {
+                if app.store.remove(idx) {
+                    std::log(
+                        0,
+                        "[MESSAGES APP] Thread deleted; the deletion was persisted to the settings store.",
+                    )
+                    .ok();
+                    if app.active_thread_idx >= app.store.len() && app.active_thread_idx > 0 {
+                        app.active_thread_idx -= 1;
+                    }
+                } else {
+                    std::log(
+                        0,
+                        "[MESSAGES APP] Thread deletion was not persisted; the store is unchanged.",
+                    )
+                    .ok();
                 }
+                return Tap::Redraw(Dirty::All);
             }
+            app.active_thread_idx = idx.min(app.store.len().saturating_sub(1));
+            let _ = std::audio_haptic_click();
+            return Tap::Redraw(Dirty::All);
         }
     }
 
@@ -1288,15 +1489,32 @@ fn handle_messages_key(app: &mut MessagesApp, key: std::InputKeyEvent) -> Dirty 
     // Escape defocuses. It is checked BEFORE the focus guard so it is the one
     // key that always works, whether or not a field currently has focus.
     if key.code == input_key_code::ESCAPE {
-        let moved = app.compose_focused || app.search_focused;
+        let moved = app.compose_focused || app.search_focused || app.recip_focused;
         app.compose_focused = false;
         app.compose_select_all = false;
         app.search_focused = false;
         app.search_select_all = false;
+        app.recip_focused = false;
+        app.recip_select_all = false;
         return if moved { Dirty::All } else { Dirty::None };
     }
-    if !app.compose_focused && !app.search_focused {
+    if !app.compose_focused && !app.search_focused && !app.recip_focused {
         return Dirty::None;
+    }
+
+    if app.recip_focused {
+        return match key.code {
+            input_key_code::BACKSPACE => edit_recipient(app, None),
+            // Enter hands focus to the message body, the natural next field.
+            input_key_code::ENTER => {
+                focus_compose(app);
+                Dirty::All
+            }
+            code if (32..=126).contains(&code) && app.recip_len < RECIP_CAP => {
+                edit_recipient(app, Some(code as u8))
+            }
+            _ => Dirty::None,
+        };
     }
 
     if app.compose_focused {
@@ -1379,6 +1597,23 @@ pub extern "C" fn _start() -> ! {
     .ok();
 
     let mut messages = MessagesApp::new();
+
+    // Load the real, persisted thread table before the first frame so the list
+    // reflects what storage actually holds (honest Empty/ReadRefused/Invalid
+    // states included), never a seeded list.
+    messages.store = store::ThreadStore::load();
+    // Report the real first-load outcome honestly: Empty is the normal first
+    // boot, and a refused or invalid read must not look like an empty store.
+    let load_note: &str = match messages.store.state {
+        store::StoreState::Empty => "Thread store loaded: no threads are stored yet.",
+        store::StoreState::Loaded => "Thread store loaded from the settings store.",
+        store::StoreState::ReadRefused => "Settings read refused; no stored threads were loaded.",
+        store::StoreState::Invalid => "Stored thread data failed validation; no threads were loaded.",
+        _ => "",
+    };
+    if !load_note.is_empty() {
+        std::log(0, load_note).ok();
+    }
 
     // 1. Ingest Hardware Keystore Key
     messages.derive_messaging_key();
@@ -1502,6 +1737,9 @@ pub extern "C" fn _start() -> ! {
                             Dirty::Search => {
                                 render_messages_band(surface, &messages, SEARCH_Y0, SEARCH_Y1);
                             }
+                            Dirty::Recipient => {
+                                render_messages_band(surface, &messages, RECIPIENT_BAND_Y0, RECIPIENT_BAND_Y1);
+                            }
                             Dirty::Compose => {
                                 render_messages_band(surface, &messages, COMPOSE_BAND_Y0, COMPOSE_BAND_Y1);
                             }
@@ -1538,7 +1776,7 @@ pub extern "C" fn _start() -> ! {
                         "[MESSAGES APP] IPC message event raised; no message body was fetched or decrypted.",
                     )
                     .ok();
-                    if THREADS.is_empty() {
+                    if messages.store.is_empty() {
                         std::log(
                             0,
                             "[MESSAGES APP] No conversation thread exists; nothing could be delivered.",
