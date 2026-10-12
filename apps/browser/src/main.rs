@@ -1,4 +1,4 @@
-﻿//! Inter OS Native Browser Client
+//! Inter OS Native Browser Client
 //!
 //! Native Ring-3 (User Mode) browser shell, laid out for the 720x1440 phone
 //! viewport as a mobile browser (not a desktop widget):
@@ -82,9 +82,6 @@ const RELOAD_BTN: Rect = Rect::new(584, 60, 48, 48);
 const CLOSE_BTN: Rect = Rect::new(648, 60, 48, 48);
 const BTN_R: usize = 14;
 
-/// y 120..1392: content viewport (fills everything between chrome and the
-/// 48 px bottom gesture inset).
-const VIEW_Y0: usize = TOOLBAR_Y1;
 const VIEW_Y1: usize = 1392;
 
 /// History strip directly under the toolbar: three pills and a position
@@ -111,9 +108,8 @@ const ADD_BOOK_BTN: Rect = Rect::new(
 const BOOKS_Y0: usize = 232;
 const BOOK_ROW_H: usize = 72;
 
-/// Honest empty/error state block: centred in the viewport below the bookmark
-/// list, max text width 608 (56 px margins).
-const STATE_BOX_TOP: usize = BOOKS_Y0;
+/// Honest empty/error state block: centred in the space the bookmark list
+/// leaves below it (see `Frame::build`), max text width 608 (56 px margins).
 const STATE_MAX_W: usize = 608;
 const STATE_ICON_H: usize = 56;
 const STATE_GAP_ICON: usize = 24;
@@ -1382,13 +1378,16 @@ impl Frame {
             STATE_GAP_BODY + body_h
         };
         let block_h = STATE_ICON_H + STATE_GAP_ICON + head_h + body_part;
-        let area_h = VIEW_Y1 - STATE_BOX_TOP;
-        let top = (STATE_BOX_TOP + area_h / 2 - block_h / 2) & !7usize;
-        let _ = top;
         // Centred in the space the bookmark list leaves, not in the whole
         // viewport: with bookmarks on screen the state block has to sit below
         // them rather than over them.
-        let top = (list_bottom + (VIEW_Y1 - list_bottom) / 2 - block_h / 2) & !7usize;
+        //
+        // WHY `saturating_sub`: the block is at most a few hundred rows and the
+        // available space is over a thousand, but a `usize` subtraction that ever
+        // wrapped would panic the whole renderer. There is no case in which the
+        // correct answer is a wrapped-around y.
+        let space = VIEW_Y1 - list_bottom;
+        let top = (list_bottom + space / 2).saturating_sub(block_h / 2) & !7usize;
         f.icon_cy = top + STATE_ICON_H / 2;
         f.head_y = top + STATE_ICON_H + STATE_GAP_ICON;
         let body_y0 = f.head_y + head_h + STATE_GAP_BODY;
@@ -2111,6 +2110,56 @@ pub extern "C" fn _start() -> ! {
     .ok();
 
     let mut browser = BrowserApp::new();
+
+    // Bookmark store read. WHY it is reported rather than assumed: the store
+    // panel and the log must agree on whether the list on screen is what storage
+    // holds, and only the syscall's own answer can say so. A read the kernel
+    // refuses is never presented as an empty address book.
+    match browser.bookmarks.state() {
+        BookmarkStoreState::Loaded => {
+            std::log(
+                0,
+                "[BROWSER APP] Bookmarks read back out of the settings store.",
+            )
+            .ok();
+        }
+        BookmarkStoreState::Empty => {
+            std::log(
+                0,
+                "[BROWSER APP] No saved bookmarks: the settings store holds no browser bookmarks key.",
+            )
+            .ok();
+        }
+        BookmarkStoreState::ReadRefused => {
+            std::log(
+                0,
+                "[BROWSER APP] Bookmark read REFUSED by the kernel: this task holds no filesystem capability, so no stored bookmarks were loaded and none will be shown as saved.",
+            )
+            .ok();
+        }
+        BookmarkStoreState::Invalid => {
+            std::log(
+                0,
+                "[BROWSER APP] Stored bookmark bytes failed validation; no bookmarks were loaded from them.",
+            )
+            .ok();
+        }
+        BookmarkStoreState::Untouched
+        | BookmarkStoreState::Written
+        | BookmarkStoreState::WriteRefused
+        | BookmarkStoreState::Full => {
+            std::log(
+                0,
+                "[BROWSER APP] Bookmark store reported a state it cannot be in before any write; no bookmarks are shown as saved.",
+            )
+            .ok();
+        }
+    }
+    std::log(
+        0,
+        "[BROWSER APP] History and bookmarks are real, user-created records. No page content exists: this app holds no transport and no filesystem capability.",
+    )
+    .ok();
 
     // Allocate DRM/KMS Client Surface (z=200)
     let surface = match std::surface_create(6, W as u32, H as u32, 200) {
