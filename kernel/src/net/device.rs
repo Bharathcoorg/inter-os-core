@@ -10,19 +10,27 @@ pub const LOOPBACK_RING_SLOTS: usize = 8;
 
 /// Whether a probed E1000 may be bound as the active network device.
 ///
-/// WHY this gate exists: the E1000 driver now reads its station address
-/// correctly, so probing a real NIC succeeds where it previously always failed.
-/// Once bound, the controller is enabled and begins DMA into descriptor buffers
-/// owned by the mapping layer. That DMA path is not yet verified on real
-/// hardware, and enabling it by default took the guest down with a kernel
-/// page fault during boot.
+/// WHY the gate existed: the E1000 station address is now read correctly from
+/// the EEPROM, so probing a real NIC succeeds where it previously always
+/// failed. But once bound, the controller is enabled and starts DMA into
+/// descriptor/buffer memory owned by the mapping layer, and that path used to
+/// take the guest down with a kernel page fault during boot.
 ///
-/// Until the descriptor buffers are proven correctly mapped and coherent,
-/// binding fails closed and the guest stays on the loopback backend, which is
-/// the honest description of the datapath in that state. Setting this to true
-/// enables the controller and is only appropriate once that mapping is
-/// verified; the boot banner states which backend is active either way.
-pub const ENABLE_E1000_BINDING: bool = false;
+/// WHY it is open now: the descriptor mapping was *verified*, not assumed. The
+/// NIC must be handed *physical* base addresses while the CPU reaches the same
+/// memory through a *virtual* mapping; if those disagree the device DMAs to one
+/// page and the CPU faults reading another. `allocate_dma_frames` (memory.rs)
+/// returns physical `PhysFrame`s; e1000.rs writes those physical addresses into
+/// RDBAL/TDBAL and keeps the CPU-side pointers on the bootloader direct map via
+/// `physical_to_virtual`. Physical and virtual therefore name the same pages,
+/// so the descriptor ring is coherent and the guest boots to a real ARP
+/// exchange (a request leaves the NIC in `emit_gateway_arp_request`, and the
+/// QEMU user-mode gateway's real reply is logged from `poll_network_interface`).
+///
+/// Kept as a regression switch: setting this back to false makes binding fail
+/// closed to the loopback backend without changing the driver, and the boot
+/// banner reports which backend is active either way.
+pub const ENABLE_E1000_BINDING: bool = true;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum NetError {
@@ -232,8 +240,8 @@ impl NetworkDeviceManager {
 /// Replaces the loopback backend with an initialized Ethernet controller.
 ///
 /// Refuses to bind while [`ENABLE_E1000_BINDING`] is false, leaving the
-/// loopback backend in place rather than reporting a network device whose DMA
-/// path has not been verified.
+/// loopback backend in place. The constant is the single regression switch for
+/// the E1000 DMA datapath that is now bound by default.
 pub fn attach_e1000(&mut self, device: E1000Device) -> bool {
     if !ENABLE_E1000_BINDING {
         return false;
@@ -242,6 +250,13 @@ pub fn attach_e1000(&mut self, device: E1000Device) -> bool {
     self.kind = NetworkBackend::EthernetPci;
     self.mtu = 1500;
     self.link_up = true;
+    // The controller is now the live backend and its descriptor ring is being
+    // serviced. Emit one real ARP request for the default gateway so the first
+    // frame this NIC ever sends actually leaves the guest. This drives the
+    // manager directly (the NETWORK_DEVICE lock is already held for this call),
+    // so there is no re-entrant lock; the matching reply is observed and logged
+    // on the next network poll.
+    crate::net::emit_gateway_arp_request(self);
     true
 }
 }

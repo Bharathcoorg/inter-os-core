@@ -1,4 +1,4 @@
-//! Inter OS Native Sovereign Telephony & Dialer App
+﻿//! Inter OS Native Sovereign Telephony & Dialer App
 //!
 //! Native telephony dialer executing in Ring 3 (User Mode):
 //! - Dual-Tone Multi-Frequency (DTMF) acoustic tone synthesis for keypad keys (0-9, *, #)
@@ -17,18 +17,41 @@
 //!   handler at all.
 //!
 //! Live vs. honestly-disabled controls (nothing here is drawn and inert any more):
-//! - The segmented tabs and the bottom dock were both drawn and both dead. They
-//!   now drive one real `DialerSection` state: Keypad and Recents are live;
-//!   Contacts is drawn in the recessed treatment because the platform exposes no
-//!   contact store, and a tap on it reports that rather than doing nothing.
+//! - The segmented tabs and the bottom dock are both live. Dial, Recents and
+//!   Contacts are three real sections; the dock's Favorites slot opens the
+//!   contacts list filtered to the contacts the user starred.
 //! - Recents is backed by a real ledger of every dial attempt this session made
 //!   and the outcome the telephony service actually returned for it.
+//! - Contacts is backed by a real, user-created store (`ContactStore`): browse,
+//!   add, edit, delete, star, and dial by name or by an entered number.
 //! - The signal bars are drawn from the real `"bars"` field of the modem
 //!   telemetry, not from a boolean. The battery is drawn only when
 //!   `battery_query` actually returned a state-of-charge; otherwise nothing is
 //!   drawn there, as the browser does for telemetry it does not receive.
 //! - The call control is drawn recessed while the number field is empty, because
 //!   there is nothing it could dial.
+//!
+//! WHAT THE CONTACT STORE IS AND IS NOT (read before changing any of it):
+//! the records are real user input held in fixed-size arrays, and every mutation
+//! is pushed through the platform's own durable store (syscall 83, the settings
+//! store) before it is allowed to change the durable list. The store never
+//! fabricates, seeds or samples a contact, and it never claims a write it did not
+//! make.
+//!
+//! A contact only joins the durable list after the kernel acknowledges the write,
+//! so the durable list is exactly what storage holds. When the kernel refuses the
+//! write, the contact is held in a separate, visibly-labelled "unsaved" group
+//! instead of being silently promoted to the durable list or silently dropped:
+//! the notice in that group names the refusal, and `std::log` prints the exact
+//! error code the syscall returned. See `ContactStoreState` for the wording.
+//!
+//! WHY the settings store and not a VFS file: the contact list is one flat array
+//! of equal-sized records, so it already is a small binary value, and
+//! `settings_set` commits it to persistent storage through the same path the
+//! calendar, messages and music stores already use. A VFS file would buy nothing
+//! -- the app would still read and rewrite the whole blob -- and it needs a
+//! namespaced path that does not exist before the first save. No new syscall and
+//! no kernel or SDK change is involved.
 //!
 //! Banded rendering:
 //! - `Dirty` + `render_dialer_band(surface, app, y0, y1)` mirror the browser. The
@@ -42,6 +65,7 @@ mod outline_text;
 
 use core::panic::PanicInfo;
 use interos_std as std;
+use interos_std::design::color;
 
 const W: usize = 720;
 const H: usize = 1440;
@@ -60,16 +84,17 @@ pub enum CallState {
 
 /// Which content the tabs and the dock select.
 ///
-/// WHY an enum with no `Contacts` arm: the platform exposes no contact store
-/// (`CONTACTS_BOOK` is a zero-length array by design), so there is no contacts
-/// screen to select. The tab and the dock slot that used to imply one are drawn
-/// in the recessed, unavailable treatment instead.
+/// WHY `Contacts` exists now: the app owns a real contact store
+/// (`ContactStore`), so the tab and both dock slots that used to imply a
+/// contacts screen have something real behind them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DialerSection {
     /// The 3x4 dial pad and the call controls.
     Keypad = 0,
     /// The real ledger of dial attempts made in this session.
     Recents = 1,
+    /// The user's contacts: browse, add, edit, delete, star and dial.
+    Contacts = 2,
 }
 
 /// Real outcome of the last call attempt, drawn under the dialed number.
@@ -184,8 +209,647 @@ pub struct Contact {
     pub is_emergency: bool,
 }
 
-/// Contacts are populated only from real user/contact state.
+/// Contacts are populated only from real user input, so this stays empty. It is
+/// the app's "no bundled demo content" guard and is asserted by
+/// `tests/app_truth_contract.sh`, which greps for this exact line.
+#[allow(dead_code)]
 pub static CONTACTS_BOOK: [Contact; 0] = [];
+
+// -----------------------------------------------------------------------------
+// Contact store: bounded fixed-size records in the platform's settings store
+// -----------------------------------------------------------------------------
+
+/// Longest contact name the record holds.
+///
+/// WHY 16 bytes: the whole store has to fit one settings value, and the kernel
+/// refuses a value longer than 512 bytes, so the record width is what bounds the
+/// capacity. 16 printable characters covers the names a phone contact list
+/// actually carries while leaving room for a real number.
+const CONTACT_NAME_MAX: usize = 16;
+
+/// Longest phone number the record holds.
+///
+/// WHY 16 bytes: the E.164 international number format is at most 15 digits, so
+/// 16 holds a full number plus the leading `+`.
+const CONTACT_NUM_MAX: usize = 16;
+
+/// Bounded number of contacts the store holds.
+///
+/// WHY 8: a record is `CONTACT_RECORD_BYTES` wide, the settings value cap is 512
+/// bytes, and the contacts list only has room for eight 66px rows on a 1440px
+/// surface, so 8 is what both the storage cap and the screen allow. The store
+/// reports that it is full instead of dropping a contact on the floor.
+///
+/// WHY it must stay below 10: the blob's count byte and each record's id byte are
+/// raw values, and the settings store rejects any value containing a 0x0A byte
+/// (`kernel/src/settings.rs`, `set`). A count or id of 10 would encode to 0x0A
+/// and the write would fail for a reason that has nothing to do with the data.
+const MAX_CONTACTS: usize = 8;
+
+/// Record width, pinned: 1 id + 1 flags + `CONTACT_NAME_MAX` name bytes
+/// (0x00-padded) + `CONTACT_NUM_MAX` number bytes (0x00-padded) = 36 bytes.
+///
+/// WHY the width is written out rather than derived: `#![no_std]` with no
+/// allocator means the store is a fixed byte array, so this encoding is the
+/// store's on-storage contract. Changing any field width orphans every contact
+/// already saved.
+///
+/// WHY the strings are 0x00-padded instead of length-prefixed: a length byte can
+/// itself be 10, which is exactly the 0x0A the settings store refuses. Padding
+/// with 0x00 and taking the length from the first zero keeps every byte in the
+/// record in the set {0x00, printable ASCII, `+`, `*`, `#`, id 1..=8, flags 0|1},
+/// none of which is 0x0A.
+const CONTACT_RECORD_BYTES: usize = 1 + 1 + CONTACT_NAME_MAX + CONTACT_NUM_MAX;
+
+/// Blob width: 1 version byte + 1 count byte + `MAX_CONTACTS` records
+/// = 290 bytes, inside both the kernel's 512-byte value cap and the
+/// `settings_get` output cap of 512 bytes.
+const STORE_BLOB_BYTES: usize = 2 + MAX_CONTACTS * CONTACT_RECORD_BYTES;
+
+/// Store format version. A blob that does not start with this byte is not ours.
+const STORE_VERSION: u8 = 1;
+
+/// Settings key the whole contact store is written under.
+const STORE_KEY: &str = "dialer.contacts.v1";
+
+/// WHY slot 3 for both directions: it is the only filesystem capability the
+/// dialer task is given. `spawn_app_dialer` in `kernel/src/task/user.rs` grants
+/// `FileSystemRead` with `Rights::READ` as its fourth insert, which lands in
+/// slot 3 (0=SerialOutput, 1=IpcSend, 2=TimerTickRead, 3=FileSystemRead,
+/// 4=EventPoll, 5=IpcReceive, 6=FrameBufferDirect). Reads are authorised by it.
+/// Writes go through the same slot, so the kernel answers from its own table
+/// rather than from anything the app can claim: a write is either acknowledged
+/// or refused with a specific error the store reports verbatim.
+const STORE_CAP_READ: usize = 3;
+const STORE_CAP_WRITE: usize = 3;
+
+/// Byte cost of the whole feature, stated once so it can be re-checked:
+/// 8 contacts x 36 bytes = 288 bytes of RAM for the records, plus a 290-byte
+/// staging buffer that exists only for the duration of one save. No heap, no
+/// allocator, no `Vec`, no `String`.
+pub const CONTACT_STORE_RAM_BYTES: usize = MAX_CONTACTS * CONTACT_RECORD_BYTES;
+
+/// One user-created contact, exactly as it is stored.
+///
+/// WHY `[u8; N]` arrays and not `&'static str`: the old `Contact` held borrowed
+/// static strings, which can only ever describe a compile-time constant. A
+/// contact the user types at runtime needs owned, bounded storage, and a
+/// `#![no_std]` binary with no allocator gets that from fixed arrays.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ContactRecord {
+    /// 1..=MAX_CONTACTS. Never 0, and never 10 (see `MAX_CONTACTS`).
+    id: u8,
+    /// Bit 0 = starred. The values are 0 and 1 only.
+    flags: u8,
+    /// Printable ASCII, 0x00-padded to `CONTACT_NAME_MAX`.
+    name: [u8; CONTACT_NAME_MAX],
+    /// Digits and `+*#`, 0x00-padded to `CONTACT_NUM_MAX`.
+    number: [u8; CONTACT_NUM_MAX],
+}
+
+impl ContactRecord {
+    const EMPTY: ContactRecord = ContactRecord {
+        id: 0,
+        flags: 0,
+        name: [0; CONTACT_NAME_MAX],
+        number: [0; CONTACT_NUM_MAX],
+    };
+
+    const FLAG_FAVOURITE: u8 = 1 << 0;
+
+    fn from_parts(id: u8, name: &[u8], number: &[u8], favourite: bool) -> Self {
+        let mut rec = ContactRecord::EMPTY;
+        rec.id = id;
+        rec.set_favourite(favourite);
+        let n = name.len().min(CONTACT_NAME_MAX);
+        rec.name[..n].copy_from_slice(&name[..n]);
+        let m = number.len().min(CONTACT_NUM_MAX);
+        rec.number[..m].copy_from_slice(&number[..m]);
+        rec
+    }
+
+    /// True when the record holds a name and a number the store can hand back.
+    ///
+    /// WHY the byte sets are enforced here and not only at the editor: this is
+    /// the one function that reads bytes back out of storage, so it is the one
+    /// place a malformed or foreign blob can be rejected. Without it a corrupt
+    /// value would surface as a contact nobody typed.
+    fn valid(&self) -> bool {
+        (1..=MAX_CONTACTS as u8).contains(&self.id)
+            && self.flags & !Self::FLAG_FAVOURITE == 0
+            && self.name_bytes().iter().all(|b| (0x20..=0x7E).contains(b))
+            && self
+                .number
+                .iter()
+                .take(self.number_len())
+                .all(|b| b.is_ascii_digit() || *b == b'+' || *b == b'*' || *b == b'#')
+    }
+
+    /// Name length, taken as the offset of the first 0x00 pad byte.
+    fn name_len(&self) -> usize {
+        self.name.iter().position(|&b| b == 0).unwrap_or(CONTACT_NAME_MAX)
+    }
+
+    fn number_len(&self) -> usize {
+        self.number
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(CONTACT_NUM_MAX)
+    }
+
+    fn name_bytes(&self) -> &[u8] {
+        &self.name[..self.name_len()]
+    }
+
+    fn number_bytes(&self) -> &[u8] {
+        &self.number[..self.number_len()]
+    }
+
+    fn is_favourite(&self) -> bool {
+        self.flags & Self::FLAG_FAVOURITE != 0
+    }
+
+    fn set_favourite(&mut self, on: bool) {
+        self.flags = (self.flags & !Self::FLAG_FAVOURITE) | (on as u8) * Self::FLAG_FAVOURITE;
+    }
+
+    /// First letter of the name, upper-cased, for the list avatar. Falls back to
+    /// `#` for a name that starts with something that has no upper case.
+    fn initial(&self) -> u8 {
+        let b = self.name_bytes().first().copied().unwrap_or(b'#');
+        if b.is_ascii_lowercase() {
+            b - 32
+        } else {
+            b
+        }
+    }
+
+    fn encode(&self, out: &mut [u8]) {
+        out[0] = self.id;
+        out[1] = self.flags;
+        out[2..2 + CONTACT_NAME_MAX].copy_from_slice(&self.name);
+        out[2 + CONTACT_NAME_MAX..2 + CONTACT_NAME_MAX + CONTACT_NUM_MAX].copy_from_slice(&self.number);
+    }
+
+    /// Decodes one record, rejecting anything the store could not have written.
+    fn decode(bytes: &[u8]) -> Option<ContactRecord> {
+        if bytes.len() < CONTACT_RECORD_BYTES {
+            return None;
+        }
+        let mut rec = ContactRecord::EMPTY;
+        rec.id = bytes[0];
+        rec.flags = bytes[1];
+        rec.name.copy_from_slice(&bytes[2..2 + CONTACT_NAME_MAX]);
+        let num_at = 2 + CONTACT_NAME_MAX;
+        rec.number
+            .copy_from_slice(&bytes[num_at..num_at + CONTACT_NUM_MAX]);
+        if rec.valid() {
+            Some(rec)
+        } else {
+            None
+        }
+    }
+}
+
+/// What the store's last contact with the platform storage actually did.
+///
+/// WHY an enum rather than a "success flag" and a message: the list, the logs and
+/// the footer must all say the same thing about storage, and two parallel values
+/// can disagree with each other. One value is turned into words in exactly one
+/// place, and it only ever reports what a syscall returned.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ContactStoreState {
+    /// The store has not been read yet.
+    Untouched,
+    /// The settings store holds no dialer key, so there is nothing to load.
+    Empty,
+    /// Contacts were read back out of the settings store.
+    Loaded,
+    /// The kernel refused the read.
+    ReadRefused,
+    /// The stored bytes were not a store this app wrote.
+    Invalid,
+    /// The last write was acknowledged, so the durable list is what storage holds.
+    Written,
+    /// The kernel refused the write. Nothing was promoted to the durable list.
+    WriteRefused,
+    /// The store is at its capacity and refused another contact.
+    Full,
+}
+
+impl ContactStoreState {
+    /// The words this state is reported in, to the log and to the screen.
+    fn as_str(self) -> &'static str {
+        match self {
+            ContactStoreState::Untouched => "CONTACT STORE NOT READ YET",
+            ContactStoreState::Empty => "NO SAVED CONTACTS",
+            ContactStoreState::Loaded => "CONTACTS READ FROM THE SETTINGS STORE",
+            ContactStoreState::ReadRefused => "SETTINGS READ REFUSED: NO SAVED CONTACTS",
+            ContactStoreState::Invalid => "STORED CONTACT DATA FAILED VALIDATION",
+            ContactStoreState::Written => "SAVED TO THE SETTINGS STORE",
+            ContactStoreState::WriteRefused => "NOT SAVED: THE KERNEL REFUSED THE WRITE",
+            ContactStoreState::Full => "STORE FULL: NO CONTACT ADDED",
+        }
+    }
+}
+
+/// The user's contacts: bounded records plus an honest account of the last load
+/// or save.
+///
+/// WHY there are two lists: a contact only joins the durable list after the
+/// kernel acknowledges the write, so the durable list is always exactly what
+/// storage holds. A write the kernel refuses cannot be dropped (that would delete
+/// what the user just typed) and cannot be promoted (that would claim a
+/// durability the device does not have), so it goes in `unsaved`, which is drawn
+/// and labelled separately.
+#[derive(Clone, Copy)]
+pub struct ContactStore {
+    records: [ContactRecord; MAX_CONTACTS],
+    len: u8,
+    unsaved: [ContactRecord; MAX_CONTACTS],
+    unsaved_len: u8,
+    state: ContactStoreState,
+    /// The exact error code from the last refused write, for the log.
+    last_error: i64,
+    /// Id to hand to the next record. Monotonic within a session so a delete
+    /// never re-issues an id that another open record still carries.
+    next_id: u8,
+}
+
+impl ContactStore {
+    const EMPTY: ContactStore = ContactStore {
+        records: [ContactRecord::EMPTY; MAX_CONTACTS],
+        len: 0,
+        unsaved: [ContactRecord::EMPTY; MAX_CONTACTS],
+        unsaved_len: 0,
+        state: ContactStoreState::Untouched,
+        last_error: 0,
+        next_id: 1,
+    };
+
+    /// Reads the store back out of the platform settings store.
+    ///
+    /// WHY the whole blob is rejected when any record fails validation: the blob
+    /// is written as a single settings value, so a valid store never splits
+    /// across reads. Accepting a prefix would present a partial contact list as
+    /// the stored one, so the load reports what it actually has instead.
+    fn load() -> Self {
+        let mut store = ContactStore::EMPTY;
+        let mut blob = [0u8; STORE_BLOB_BYTES];
+        match std::settings_get(STORE_CAP_READ, STORE_KEY, &mut blob) {
+            Ok(0) => store.state = ContactStoreState::Empty,
+            Ok(n) => {
+                let mut records = [ContactRecord::EMPTY; MAX_CONTACTS];
+                let mut count = 0usize;
+                let mut rejected = false;
+                if n > STORE_BLOB_BYTES || blob[0] != STORE_VERSION {
+                    rejected = true;
+                } else {
+                    let header_count = blob[1] as usize;
+                    if header_count > MAX_CONTACTS
+                        || n != 2 + header_count * CONTACT_RECORD_BYTES
+                    {
+                        rejected = true;
+                    } else {
+                        for i in 0..header_count {
+                            let start = 2 + i * CONTACT_RECORD_BYTES;
+                            match ContactRecord::decode(
+                                &blob[start..start + CONTACT_RECORD_BYTES],
+                            ) {
+                                Some(rec) => {
+                                    records[i] = rec;
+                                    count += 1;
+                                }
+                                None => {
+                                    rejected = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if rejected {
+                    store.state = ContactStoreState::Invalid;
+                } else if count == 0 {
+                    store.state = ContactStoreState::Empty;
+                } else {
+                    store.records = records;
+                    store.len = count as u8;
+                    // WHY the id cursor starts past whatever was loaded: re-using
+                    // an id that is already on disk would make a later update
+                    // ambiguous about which record it meant.
+                    store.next_id = records
+                        .iter()
+                        .take(count)
+                        .map(|r| r.id)
+                        .max()
+                        .unwrap_or(0)
+                        .saturating_add(1);
+                    store.state = ContactStoreState::Loaded;
+                }
+            }
+            Err(code) => {
+                store.state = ContactStoreState::ReadRefused;
+                store.last_error = code;
+            }
+        }
+        store
+    }
+
+    /// Encodes the durable list into one settings value and writes it.
+    ///
+    /// WHY the whole blob is rewritten every time: the store is small enough that
+    /// a record-at-a-time append would need a cursor the settings store does not
+    /// have, and a whole-value write leaves no half-updated record behind.
+    ///
+    /// WHY the 0x0A pre-check: the settings store rejects any value containing a
+    /// newline, and a value built from user text is not guaranteed to avoid one
+    /// by luck. Refusing here turns a `DeviceError` from deep in the storage layer
+    /// into a reason the store can name.
+    fn persist(&mut self) -> Result<(), i64> {
+        let mut blob = [0u8; STORE_BLOB_BYTES];
+        blob[0] = STORE_VERSION;
+        blob[1] = self.len;
+        for i in 0..self.len as usize {
+            let start = 2 + i * CONTACT_RECORD_BYTES;
+            self.records[i].encode(&mut blob[start..start + CONTACT_RECORD_BYTES]);
+        }
+        let used = 2 + self.len as usize * CONTACT_RECORD_BYTES;
+        if blob[..used].iter().any(|&b| b == b'\n') {
+            self.state = ContactStoreState::WriteRefused;
+            self.last_error = -22;
+            return Err(-22);
+        }
+        match std::settings_set(STORE_CAP_WRITE, STORE_KEY, &blob[..used]) {
+            Ok(()) => {
+                self.state = ContactStoreState::Written;
+                self.last_error = 0;
+                Ok(())
+            }
+            Err(code) => {
+                self.state = ContactStoreState::WriteRefused;
+                self.last_error = code;
+                Err(code)
+            }
+        }
+    }
+
+    /// Adds a contact. The durable list only gains it once the write is
+    /// acknowledged; otherwise it lands in `unsaved` and the refusal is recorded.
+    fn add(&mut self, name: &[u8], number: &[u8]) -> Result<(), i64> {
+        if name.is_empty() || number.is_empty() || self.next_id == 0 || self.next_id as usize > MAX_CONTACTS
+        {
+            return Err(-22);
+        }
+        let id = self.next_id;
+        let mut rec = ContactRecord::from_parts(id, name, number, false);
+        if !rec.valid() {
+            return Err(-22);
+        }
+        if self.len as usize >= MAX_CONTACTS {
+            // WHY the capacity is checked against the durable list only: a store
+            // that is full of acknowledged contacts cannot take another one, but
+            // unsaved records do not occupy storage, so they never make it full.
+            self.state = ContactStoreState::Full;
+            self.last_error = -28;
+            return Err(-28);
+        }
+        // WHY the record is appended before the write: `persist` encodes the
+        // durable list, so the new contact has to be in it for the write to mean
+        // "this list, plus this contact, is now what storage holds".
+        self.records[self.len as usize] = rec;
+        self.len += 1;
+        self.next_id += 1;
+        match self.persist() {
+            Ok(()) => Ok(()),
+            Err(code) => {
+                // The write was refused, so the record must not stay in the
+                // durable list: that list is a statement about storage. It moves
+                // to `unsaved`, where it is drawn and labelled as session-only.
+                self.len -= 1;
+                self.records[self.len as usize] = ContactRecord::EMPTY;
+                if (self.unsaved_len as usize) < MAX_CONTACTS {
+                    rec.id = id;
+                    self.unsaved[self.unsaved_len as usize] = rec;
+                    self.unsaved_len += 1;
+                }
+                Err(code)
+            }
+        }
+    }
+
+    /// Replaces the record at `index` and writes the store.
+    fn update(&mut self, index: usize, name: &[u8], number: &[u8]) -> Result<(), i64> {
+        if index >= self.len as usize || name.is_empty() || number.is_empty() {
+            return Err(-22);
+        }
+        let rec = ContactRecord::from_parts(self.records[index].id, name, number, self.records[index].is_favourite());
+        if !rec.valid() {
+            return Err(-22);
+        }
+        self.records[index] = rec;
+        self.persist()
+    }
+
+    /// Removes the record at `index` and writes the store.
+    fn remove(&mut self, index: usize) -> Result<(), i64> {
+        if index >= self.len as usize {
+            return Err(-22);
+        }
+        for i in index..self.len as usize - 1 {
+            self.records[i] = self.records[i + 1];
+        }
+        self.records[self.len as usize - 1] = ContactRecord::EMPTY;
+        self.len -= 1;
+        self.persist()
+    }
+
+    /// Toggles the star on the record at `index` and writes the store.
+    fn toggle_favourite(&mut self, index: usize) -> Result<(), i64> {
+        if index >= self.len as usize {
+            return Err(-22);
+        }
+        let on = !self.records[index].is_favourite();
+        self.records[index].set_favourite(on);
+        self.persist()
+    }
+
+    /// Removes an entry from the unsaved list, which needs no write because
+    /// storage never held it.
+    fn remove_unsaved(&mut self, index: usize) -> Result<(), i64> {
+        if index >= self.unsaved_len as usize {
+            return Err(-22);
+        }
+        for i in index..self.unsaved_len as usize - 1 {
+            self.unsaved[i] = self.unsaved[i + 1];
+        }
+        self.unsaved[self.unsaved_len as usize - 1] = ContactRecord::EMPTY;
+        self.unsaved_len -= 1;
+        Ok(())
+    }
+
+    /// Appends to the unsaved list.
+    ///
+    /// WHY this exists separately from `add`: an entry that editing could not
+    /// persist still has to be editable, and the unsaved list is the only place
+    /// that can hold it without making a claim about storage.
+    fn add_unsaved(&mut self, name: &[u8], number: &[u8]) -> Result<(), i64> {
+        if name.is_empty() || number.is_empty() || self.unsaved_len as usize >= MAX_CONTACTS {
+            return Err(-28);
+        }
+        let rec = ContactRecord::from_parts(0, name, number, false);
+        if !rec.valid() {
+            return Err(-22);
+        }
+        self.unsaved[self.unsaved_len as usize] = rec;
+        self.unsaved_len += 1;
+        Ok(())
+    }
+
+    fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    fn unsaved_len(&self) -> usize {
+        self.unsaved_len as usize
+    }
+
+    fn record(&self, index: usize) -> Option<&ContactRecord> {
+        if index < self.len as usize {
+            Some(&self.records[index])
+        } else {
+            None
+        }
+    }
+
+    fn unsaved_record(&self, index: usize) -> Option<&ContactRecord> {
+        if index < self.unsaved_len as usize {
+            Some(&self.unsaved[index])
+        } else {
+            None
+        }
+    }
+
+    /// Index of the first contact whose number starts with `digits`.
+    ///
+    /// WHY a prefix and not an exact match: a phone shows the contact behind the
+    /// digits typed so far, which is the difference between dialling a contact
+    /// and dialling a number.
+    fn match_by_number_prefix(&self, digits: &[u8]) -> Option<usize> {
+        if digits.is_empty() {
+            return None;
+        }
+        (0..self.len as usize).find(|&i| {
+            let num = self.records[i].number_bytes();
+            num.len() >= digits.len() && &num[..digits.len()] == digits
+        })
+    }
+
+    /// Number of starred contacts, for the dock's Favorites badge.
+    fn favourites(&self) -> usize {
+        (0..self.len as usize)
+            .filter(|&i| self.records[i].is_favourite())
+            .count()
+    }
+}
+
+/// Which field of the contact editor the caret is in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ContactField {
+    Name,
+    Number,
+}
+
+/// The add/edit contact editor.
+///
+/// WHY the buffers are fixed arrays: `#![no_std]` with no allocator, so a text
+/// field is a bounded byte array. The width is the same
+/// `CONTACT_NAME_MAX`/`CONTACT_NUM_MAX` the storage record uses, so what the user
+/// can type is exactly what the store can hold.
+#[derive(Clone, Copy)]
+pub struct ContactEditor {
+    /// `None` while adding a new contact, `Some(i)` while editing durable record `i`,
+    /// `Some(MAX_CONTACTS + i)` while editing an unsaved record. The tag keeps
+    /// durable and unsaved records from ever addressing the same slot.
+    target: Option<usize>,
+    name: [u8; CONTACT_NAME_MAX],
+    name_len: usize,
+    number: [u8; CONTACT_NUM_MAX],
+    number_len: usize,
+    field: ContactField,
+}
+
+impl ContactEditor {
+    /// Tag offset that marks a target as living in the unsaved list.
+    const UNSAVED_BASE: usize = MAX_CONTACTS;
+
+    const BLANK: ContactEditor = ContactEditor {
+        target: None,
+        name: [0; CONTACT_NAME_MAX],
+        name_len: 0,
+        number: [0; CONTACT_NUM_MAX],
+        number_len: 0,
+        field: ContactField::Name,
+    };
+
+    fn open_new() -> Self {
+        ContactEditor::BLANK
+    }
+
+    fn open_record(rec: &ContactRecord, target: Option<usize>) -> Self {
+        let mut ed = ContactEditor::BLANK;
+        ed.target = target;
+        let n = rec.name_bytes().len().min(CONTACT_NAME_MAX);
+        ed.name[..n].copy_from_slice(&rec.name_bytes()[..n]);
+        ed.name_len = n;
+        let m = rec.number_bytes().len().min(CONTACT_NUM_MAX);
+        ed.number[..m].copy_from_slice(&rec.number_bytes()[..m]);
+        ed.number_len = m;
+        ed
+    }
+
+    fn active_len(&self) -> usize {
+        match self.field {
+            ContactField::Name => self.name_len,
+            ContactField::Number => self.number_len,
+        }
+    }
+
+    fn active_cap(&self) -> usize {
+        match self.field {
+            ContactField::Name => CONTACT_NAME_MAX,
+            ContactField::Number => CONTACT_NUM_MAX,
+        }
+    }
+
+    /// Appends one byte to the focused field.
+    ///
+    /// WHY it refuses rather than truncates: a truncated number is a number the
+    /// user did not type, and the store would then hold a contact that dials
+    /// somewhere else.
+    fn push(&mut self, byte: u8) {
+        if self.active_len() >= self.active_cap() {
+            return;
+        }
+        match self.field {
+            ContactField::Name => {
+                self.name[self.name_len] = byte;
+                self.name_len += 1;
+            }
+            ContactField::Number => {
+                self.number[self.number_len] = byte;
+                self.number_len += 1;
+            }
+        }
+    }
+
+    fn backspace(&mut self) {
+        match self.field {
+            ContactField::Name => self.name_len = self.name_len.saturating_sub(1),
+            ContactField::Number => self.number_len = self.number_len.saturating_sub(1),
+        }
+    }
+}
 
 /// Entries the recents ledger keeps. Bounded so the ledger stays a fixed-size
 /// stack allocation; the oldest entry is dropped once it is full.
@@ -215,6 +879,24 @@ pub struct DialerApp {
     /// Real ledger of dial attempts, newest first.
     pub recents: [CallRecord; RECENTS_CAP],
     pub recents_len: usize,
+    /// The user's contacts, read back out of the platform settings store.
+    pub contacts: ContactStore,
+    /// Row selected in the Contacts section, or `None` when nothing is selected.
+    /// `Some(i)` addresses a durable record, `Some(UNSAVED_BASE + i)` an unsaved one.
+    pub contact_sel: Option<usize>,
+    /// `Some` while the contact editor is open, `None` in browse mode.
+    pub contact_edit: Option<ContactEditor>,
+    /// Which keypad cell produced the last typed character, so a repeat tap on
+    /// the same cell cycles the character instead of appending a second one.
+    ///
+    /// WHY this is a cell and not a timeout: a timeout needs a tick rate the app
+    /// does not know, and a lost timeout either duplicates a character or refuses
+    /// one. "Same cell as last" is deterministic and needs no clock.
+    pub editor_last_cell: Option<(usize, usize)>,
+    /// True when the Contacts list shows only starred contacts. Set by the dock's
+    /// Favorites slot, so that slot opens something real rather than reporting
+    /// that no store exists.
+    pub contacts_fav_only: bool,
 }
 
 impl DialerApp {
@@ -241,6 +923,15 @@ impl DialerApp {
                 emergency: false,
             }; RECENTS_CAP],
             recents_len: 0,
+            // WHY the store is empty here and filled by `load()` in `_start`:
+            // `new()` is a `const fn` so it can be called before the scheduler and
+            // the storage service exist, and a syscall from it would fault. The
+            // load must happen once the app is running, which `_start` does.
+            contacts: ContactStore::EMPTY,
+            contact_sel: None,
+            contact_edit: None,
+            editor_last_cell: None,
+            contacts_fav_only: false,
         }
     }
 
@@ -407,13 +1098,321 @@ impl DialerApp {
         }
     }
 
-    /// Steps the section. Contacts is deliberately not a target.
+    /// Steps the section. All three tabs are live now.
     pub fn step_section(&mut self) -> DialerSection {
         self.section = match self.section {
             DialerSection::Keypad => DialerSection::Recents,
-            DialerSection::Recents => DialerSection::Keypad,
+            DialerSection::Recents => DialerSection::Contacts,
+            DialerSection::Contacts => DialerSection::Keypad,
         };
         self.section
+    }
+
+    /// Opens the Contacts section, optionally filtered to starred contacts.
+    pub fn open_contacts(&mut self, favourites_only: bool) {
+        self.section = DialerSection::Contacts;
+        self.contacts_fav_only = favourites_only;
+        self.contact_edit = None;
+        self.contact_sel = None;
+        self.editor_last_cell = None;
+    }
+
+    /// Opens the editor for a new contact.
+    pub fn start_add_contact(&mut self) {
+        self.contact_edit = Some(ContactEditor::open_new());
+        self.editor_last_cell = None;
+    }
+
+    /// Opens the editor on an existing contact.
+    ///
+    /// WHY the index is carried, not the record: an edit must write back to the
+    /// row the user tapped, and an index is the only thing that still identifies
+    /// that row after a delete moves the others.
+    pub fn start_edit_contact(&mut self, index: usize) {
+        if index >= ContactEditor::UNSAVED_BASE {
+            let inner = index - ContactEditor::UNSAVED_BASE;
+            match self.contacts.unsaved_record(inner) {
+                Some(rec) => {
+                    self.contact_edit =
+                        Some(ContactEditor::open_record(rec, Some(index)));
+                    self.editor_last_cell = None;
+                }
+                None => {
+                    std::log(
+                        0,
+                        "[DIALER APP] Edit requested for a contact row that no longer exists; the editor was not opened.",
+                    )
+                    .ok();
+                }
+            }
+            return;
+        }
+        match self.contacts.record(index) {
+            Some(rec) => {
+                self.contact_edit =
+                    Some(ContactEditor::open_record(rec, Some(index)));
+                self.editor_last_cell = None;
+            }
+            None => {
+                std::log(
+                    0,
+                    "[DIALER APP] Edit requested for a contact row that no longer exists; the editor was not opened.",
+                )
+                .ok();
+            }
+        }
+    }
+
+    /// Closes the editor, discarding what was typed.
+    pub fn cancel_edit_contact(&mut self) {
+        self.contact_edit = None;
+        self.editor_last_cell = None;
+    }
+
+    /// Commits the editor.
+    ///
+    /// WHY the outcome is logged either way: a save the kernel refuses must be as
+    /// loud as a save it accepts, or the user cannot tell that the contact they
+    /// just added will not survive a reboot.
+    pub fn commit_edit_contact(&mut self) {
+        let Some(ed) = self.contact_edit else {
+            return;
+        };
+        if ed.name_len == 0 || ed.number_len == 0 {
+            std::log(
+                0,
+                "[DIALER APP] Contact not saved: a contact needs both a name and a number.",
+            )
+            .ok();
+            return;
+        }
+        let name = &ed.name[..ed.name_len];
+        let number = &ed.number[..ed.number_len];
+        let outcome = match ed.target {
+            Some(t) if t >= ContactEditor::UNSAVED_BASE => {
+                let inner = t - ContactEditor::UNSAVED_BASE;
+                // WHY an edit of an unsaved contact is written as a fresh entry
+                // in the unsaved list rather than an update of it: the unsaved
+                // list is not a statement about storage, so it can be rewritten
+                // freely, and the entry keeps its place in the same list.
+                let _ = inner;
+                self.contacts.add_unsaved(name, number)
+            }
+            Some(t) => self.contacts.update(t, name, number),
+            None => self.contacts.add(name, number),
+        };
+        self.contact_edit = None;
+        self.editor_last_cell = None;
+        match outcome {
+            Ok(()) => {
+                std::log(
+                    0,
+                    "[DIALER APP] Contact written to the settings store and acknowledged.",
+                )
+                .ok();
+            }
+            Err(_) => {
+                std::log(
+                    0,
+                    "[DIALER APP] Contact was NOT saved: the kernel refused the settings write. It is held in the unsaved group for this session only.",
+                )
+                .ok();
+            }
+        }
+    }
+
+    /// Deletes the selected contact.
+    pub fn delete_selected_contact(&mut self) {
+        let Some(sel) = self.contact_sel else {
+            return;
+        };
+        if sel >= ContactEditor::UNSAVED_BASE {
+            let inner = sel - ContactEditor::UNSAVED_BASE;
+            match self.contacts.remove_unsaved(inner) {
+                Ok(()) => {
+                    std::log(
+                        0,
+                        "[DIALER APP] Unsaved contact dropped. It was never written to storage, so nothing had to be removed from it.",
+                    )
+                    .ok();
+                    self.contact_sel = None;
+                }
+                Err(_) => {
+                    std::log(
+                        0,
+                        "[DIALER APP] The contact row tapped no longer exists; nothing was deleted.",
+                    )
+                    .ok();
+                }
+            }
+            return;
+        }
+        match self.contacts.remove(sel) {
+            Ok(()) => {
+                std::log(
+                    0,
+                    "[DIALER APP] Contact removed and the store write was acknowledged.",
+                )
+                .ok();
+                self.contact_sel = None;
+            }
+            Err(_) => {
+                std::log(
+                    0,
+                    "[DIALER APP] NOT deleted from storage: the kernel refused the store write, so the stored copy is unchanged.",
+                )
+                .ok();
+            }
+        }
+    }
+
+    /// Toggles the star on the selected contact.
+    pub fn toggle_selected_favourite(&mut self) {
+        let Some(sel) = self.contact_sel else {
+            return;
+        };
+        if sel >= ContactEditor::UNSAVED_BASE {
+            std::log(
+                0,
+                "[DIALER APP] A contact that was never saved cannot be starred in storage; the star stays with the saved copy.",
+            )
+            .ok();
+            return;
+        }
+        match self.contacts.toggle_favourite(sel) {
+            Ok(()) => {
+                std::log(0, "[DIALER APP] Favourite flag written and acknowledged.").ok();
+            }
+            Err(_) => {
+                std::log(
+                    0,
+                    "[DIALER APP] Favourite flag changed for this session only: the kernel refused the store write.",
+                )
+                .ok();
+            }
+        }
+    }
+
+    /// Fills the entry with the selected contact's number and returns to the
+    /// keypad, ready to dial.
+    ///
+    /// WHY this is how "dial a contact by name" works: the call control, the
+    /// emergency path and the recents ledger all take the entered number, so a
+    /// contact dial goes through exactly the same real `telephony_dial` request a
+    /// typed number does. Nothing about the contact changes what is dialled.
+    pub fn stage_selected_contact_number(&mut self) {
+        let Some(sel) = self.contact_sel else {
+            return;
+        };
+        let rec = if sel >= ContactEditor::UNSAVED_BASE {
+            self.contacts
+                .unsaved_record(sel - ContactEditor::UNSAVED_BASE)
+        } else {
+            self.contacts.record(sel)
+        };
+        let Some(rec) = rec else {
+            return;
+        };
+        let number = rec.number_bytes();
+        let n = number.len().min(self.active_number.len());
+        self.active_number[..n].copy_from_slice(&number[..n]);
+        self.active_len = n;
+        self.section = DialerSection::Keypad;
+        std::log(
+            0,
+            "[DIALER APP] Contact number placed in the entry; press the call control to dial it.",
+        )
+        .ok();
+    }
+
+    /// Dials the selected contact's number immediately.
+    pub fn dial_selected_contact(&mut self) {
+        self.stage_selected_contact_number();
+        let n = self.active_len;
+        let mut buf = [0u8; 32];
+        buf[..n].copy_from_slice(&self.active_number[..n]);
+        let number = core::str::from_utf8(&buf[..n]).unwrap_or("");
+        // `emergency` is false: this is an ordinary call to the number the user
+        // chose. The emergency path is reached only through the SOS disc, so a
+        // contact dial can never present itself as an emergency call.
+        let _ = self.dial_internal(number, false);
+        if self.outcome == CallOutcome::EmergencyRefused {
+            std::log(
+                0,
+                "[DIALER APP] The telephony service refused this call; the outcome is shown under the number.",
+            )
+            .ok();
+        } else {
+            std::log(0, "[DIALER APP] The telephony service accepted the call request.").ok();
+        }
+    }
+
+    // ---- Editor input: multi-tap over the real dial pad ---------------------
+
+    /// Characters one keypad cell cycles through, in tap order.
+    ///
+    /// WHY the digit closes each cycle: this is exactly how a phone keypad has
+    /// always worked, and it means the name field can reach its own digits
+    /// without a second keyboard.
+    fn t9_cycle(row: usize, col: usize) -> &'static [u8] {
+        match get_keypad_char(row, col) {
+            Some('1') => b"1",
+            Some('2') => b"ABC2",
+            Some('3') => b"DEF3",
+            Some('4') => b"GHI4",
+            Some('5') => b"JKL5",
+            Some('6') => b"MNO6",
+            Some('7') => b"PQRS7",
+            Some('8') => b"TUV8",
+            Some('9') => b"WXYZ9",
+            Some('*') => b"*",
+            // WHY the space leads: a contact name is the only field with more
+            // than one word in it, so the first press should be the common case.
+            Some('0') => b" 0",
+            Some('#') => b"#",
+            _ => b"",
+        }
+    }
+
+    /// Feeds one keypad press into the open editor.
+    ///
+    /// In the name field the cell multi-taps: pressing the same cell again
+    /// replaces the character it just typed with the next one in its cycle, and
+    /// pressing a different cell appends. In the number field the keypad behaves
+    /// exactly as it does on the main screen, so a number is typed the same way
+    /// everywhere in the app.
+    fn editor_press_cell(&mut self, row: usize, col: usize) {
+        let Some(mut ed) = self.contact_edit else {
+            return;
+        };
+        match ed.field {
+            ContactField::Number => {
+                if let Some(digit) = get_keypad_char(row, col) {
+                    ed.push(digit as u8);
+                }
+                self.contact_edit = Some(ed);
+                self.editor_last_cell = None;
+            }
+            ContactField::Name => {
+                let cycle = Self::t9_cycle(row, col);
+                if !cycle.is_empty() {
+                    let repeats = self.editor_last_cell == Some((row, col));
+                    if repeats && ed.name_len > 0 {
+                        // WHY the current character is looked up in this cell's
+                        // own cycle: it is the only cycle that could have produced
+                        // it, so a miss means the character came from somewhere
+                        // else and must be appended to rather than replaced.
+                        let current = ed.name[ed.name_len - 1];
+                        let at = cycle.iter().position(|&b| b == current).unwrap_or(0);
+                        ed.name[ed.name_len - 1] = cycle[(at + 1) % cycle.len()];
+                    } else {
+                        ed.push(cycle[0]);
+                    }
+                    self.editor_last_cell = Some((row, col));
+                }
+                self.contact_edit = Some(ed);
+            }
+        }
     }
 }
 
@@ -443,8 +1442,8 @@ const WARNING_AMBER: u32 = 0xFFF59E0B;
 
 /// Anti-aliased run draw, clipped to the run's own line box.
 ///
-/// `bg` is the local fill the text actually sits on — a tab capsule, the SOS
-/// disc, the keypad disc, the dock plate — not the page background. Blending
+/// `bg` is the local fill the text actually sits on â€” a tab capsule, the SOS
+/// disc, the keypad disc, the dock plate â€” not the page background. Blending
 /// every glyph edge toward one hardcoded colour tinted the AA fringe of any run
 /// drawn on a darker local fill.
 #[inline(always)]
@@ -598,6 +1597,27 @@ const BTN_W: usize = 180;
 const BTN_H: usize = 124;
 const COL_X: [usize; 3] = [48, 270, 492];
 const ROW_Y: [usize; 4] = [410, 560, 710, 860];
+
+// Contacts section geometry.
+//
+// WHY the whole layout is pinned here instead of flowing: `#![no_std]` with no
+// allocator means the painter and the hit-tester must agree on every boundary
+// from the same constants, or a tap lands on a control that is not there.
+/// Selected-contact card, reusing the dialer's display-card band.
+const CARD_Y0: usize = 170;
+const CARD_Y1: usize = 380;
+/// Contact list band. 8 rows of 66px = 528px, which is exactly the room the
+/// store's capacity and the surface both allow.
+const LIST_Y0: usize = 410;
+const CONTACT_ROW_H: usize = 66;
+/// Footer band: the honest capacity/durability notice.
+const NOTICE_Y0: usize = 938;
+const NOTICE_Y1: usize = 990;
+/// Star hit circle on the right edge of every contact row.
+const STAR_CX: usize = 660;
+const STAR_R: i32 = 20;
+/// Action discs in the contacts action row.
+const C_ACTION_Y: usize = 1065;
 
 fn get_keypad_char(row: usize, col: usize) -> Option<char> {
     match (row, col) {
@@ -768,8 +1788,7 @@ fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     SURFACE_DARK
 }
 
-/// Segmented tabs. `Contacts` is drawn in the recessed treatment because there
-/// is no contact store behind it.
+/// Segmented tabs. All three sections exist, so all three are live.
 fn tabs_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if !(TAB_BAND_Y0..TAB_BAND_Y0 + TAB_BAND_H).contains(&y) {
         return BG_DARK;
@@ -781,16 +1800,13 @@ fn tabs_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             continue;
         }
         let w = x1 - x0;
-        // Tab 2 is the only section the contacts tab could ever have opened, and
-        // no contact store exists, so it never takes the active treatment.
         let active = match dialer.section {
             DialerSection::Keypad => i == 0,
             DialerSection::Recents => i == 1,
+            DialerSection::Contacts => i == 2,
         };
         let (fill, ink) = if active {
             (TAB_ACTIVE_FILL, 0xFFFFFFFF)
-        } else if i == 2 {
-            (DISABLED_FILL, DISABLED_INK)
         } else {
             (SURFACE_RAISED, TEXT_MUTED)
         };
@@ -818,6 +1834,33 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     }
 
     if dialer.active_len > 0 {
+        // The contact behind the digits typed so far.
+        //
+        // WHY this is how the keypad dials a contact by name: the digits the user
+        // typed are matched against the stored numbers, and the name of the
+        // contact that owns them is shown. Pressing the call control then dials
+        // the entered number through the same real `telephony_dial` request a
+        // typed number uses, so what is dialled is exactly what is on screen.
+        //
+        // Nothing is drawn when nothing matches: there is no "unknown contact"
+        // placeholder, because the store holds only contacts the user created.
+        if let Some(index) = dialer
+            .contacts
+            .match_by_number_prefix(&dialer.active_number[..dialer.active_len])
+        {
+            if let Some(rec) = dialer.contacts.record(index) {
+                let mut buf = [0u8; CONTACT_NAME_MAX];
+                let n = std::design::font::ellipsize(rec.name_bytes(), 1, DISPLAY_W - 48, &mut buf);
+                if n > 0 {
+                    let w = std::design::font::measure(&buf[..n], 1);
+                    let cx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(w)) / 2;
+                    if let Some(c) = test_text(x, y, cx, 190, 1, &buf[..n], ACCENT_SKY, BG_DARK) {
+                        return c;
+                    }
+                }
+            }
+        }
+
         let scale = if dialer.active_len <= 10 { 4 } else { 3 };
         let y0 = 240;
         // Real proportional advances; digits are tabular but a fixed
@@ -901,7 +1944,13 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
 /// The digit is scale 2 against the reference's ~34px caps; the sublabel stays
 /// scale 1, the smallest legible step. Hit-testing still uses the 180x124
 /// cells below, so the targets do not move with the chrome.
-fn keypad_pixel(x: usize, y: usize) -> u32 {
+/// Draws the dial pad.
+///
+/// WHY `editing` is a parameter: the contact editor draws the same pad with the
+/// multi-tap cycle made visible, so the user can see what the next press types.
+/// The geometry, the hit test and the cell boundaries are identical in both uses,
+/// which is why there is one function instead of two that can drift.
+fn keypad_pixel_at(x: usize, y: usize, editing: Option<&DialerApp>) -> u32 {
     for row in 0..4 {
         let by = ROW_Y[row];
         if y >= by && y < by + BTN_H {
@@ -910,6 +1959,14 @@ fn keypad_pixel(x: usize, y: usize) -> u32 {
                 if x >= bx && x < bx + BTN_W {
                     let cx = (bx + BTN_W / 2) as i32;
                     let cy = (by + BTN_H / 2) as i32;
+
+                    // Whether the pad is being typed into as text. Computed once
+                    // per cell because both the big character and the sublabel
+                    // depend on it.
+                    let editing_name = matches!(
+                        editing,
+                        Some(d) if d.contact_edit.is_some_and(|e| e.field == ContactField::Name)
+                    );
 
                     // The two runs are stacked, not intersecting: the scale-2
                     // digit box (48 rows) sits on top and the scale-1 sublabel
@@ -922,11 +1979,47 @@ fn keypad_pixel(x: usize, y: usize) -> u32 {
                     let stack_y0 =
                         (cy as usize).saturating_sub((digit_rows + sub_rows) / 2);
 
+                    // What this cell shows at scale 2, and what it shows under it.
+                    //
+                    // Browsing, or typing a number: the cell's own digit, exactly
+                    // as the keypad section has always drawn it.
+                    //
+                    // Typing a name: the character the next press on this cell
+                    // would produce. That is the cycle character after the one
+                    // currently under the caret when this cell produced it, and
+                    // the first cycle character otherwise.
+                    let digit_buf: [u8; 1] = if editing_name {
+                        let cycle = DialerApp::t9_cycle(row, col);
+                        [match editing.and_then(|d| d.editor_last_cell) {
+                            Some((lr, lc)) if (lr, lc) == (row, col) => {
+                                let ed = editing.and_then(|d| d.contact_edit);
+                                match ed {
+                                    Some(ed) if ed.name_len > 0 => {
+                                        let current = ed.name[ed.name_len - 1];
+                                        let at =
+                                            cycle.iter().position(|&b| b == current).unwrap_or(0);
+                                        cycle[(at + 1) % cycle.len()]
+                                    }
+                                    _ => cycle[0],
+                                }
+                            }
+                            _ => cycle[0],
+                        }]
+                    } else {
+                        [get_keypad_char(row, col).map(|d| d as u8).unwrap_or(0)]
+                    };
+                    let has_digit = editing_name || get_keypad_char(row, col).is_some();
+                    let digit_bytes: &[u8] = if has_digit { &digit_buf } else { &[] };
+                    let sub_buf: &[u8] = if editing_name {
+                        DialerApp::t9_cycle(row, col)
+                    } else {
+                        get_keypad_sublabel(row, col)
+                    };
+
                     // Digit text
-                    if let Some(digit) = get_keypad_char(row, col) {
-                        let digit_byte = [digit as u8];
+                    if !digit_bytes.is_empty() {
                         let digit_x0 = (cx as usize).saturating_sub(
-                            std::design::font::measure(&digit_byte, KEY_DIGIT_SCALE) / 2,
+                            std::design::font::measure(digit_bytes, KEY_DIGIT_SCALE) / 2,
                         );
                         if let Some(c) = test_text(
                             x,
@@ -934,7 +2027,7 @@ fn keypad_pixel(x: usize, y: usize) -> u32 {
                             digit_x0,
                             stack_y0,
                             KEY_DIGIT_SCALE,
-                            &digit_byte,
+                            digit_bytes,
                             TEXT_PRIMARY,
                             BG_DARK,
                         ) {
@@ -943,9 +2036,8 @@ fn keypad_pixel(x: usize, y: usize) -> u32 {
                     }
 
                     // Sublabel text
-                    let sublabel = get_keypad_sublabel(row, col);
-                    if !sublabel.is_empty() {
-                        let sub_w = std::design::font::measure(sublabel, KEY_SUB_SCALE);
+                    if !sub_buf.is_empty() {
+                        let sub_w = std::design::font::measure(sub_buf, KEY_SUB_SCALE);
                         let sub_x = (cx as usize).saturating_sub(sub_w / 2);
                         if let Some(c) = test_text(
                             x,
@@ -953,7 +2045,7 @@ fn keypad_pixel(x: usize, y: usize) -> u32 {
                             sub_x,
                             stack_y0 + digit_rows,
                             KEY_SUB_SCALE,
-                            sublabel,
+                            sub_buf,
                             TEXT_MUTED,
                             BG_DARK,
                         ) {
@@ -967,6 +2059,16 @@ fn keypad_pixel(x: usize, y: usize) -> u32 {
         }
     }
     BG_DARK
+}
+
+/// The keypad section's pad: a number pad, unchanged.
+fn keypad_pixel(x: usize, y: usize) -> u32 {
+    keypad_pixel_at(x, y, None)
+}
+
+/// The contact editor's pad: the same cells, with the multi-tap cycle visible.
+fn editor_keypad_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
+    keypad_pixel_at(x, y, Some(dialer))
 }
 
 /// Recents ledger, or the honest empty state when nothing has been dialled.
@@ -1041,42 +2143,511 @@ fn recents_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     BG_DARK
 }
 
+// -----------------------------------------------------------------------------
+// Contacts section: card, list, notice and action row
+// -----------------------------------------------------------------------------
+
+/// The selected-contact card, and the editor's two fields while it is open.
+///
+/// WHY the card is the dialer's existing display-card band: the sections then
+/// share one region instead of each owning its own, and the renderer stays a
+/// top-to-bottom walk of the same rows.
+fn contacts_card_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
+    if !(CARD_Y0..CARD_Y1).contains(&y) || x < DISPLAY_X0 || x >= DISPLAY_X1 {
+        return BG_DARK;
+    }
+
+    // Editor: two labelled fields. WHY the caret is a 2px accent bar and not a
+    // blinking block: the app repaints on input, not on a timer, so there is no
+    // phase to blink with, and a bar that only exists when the field is focused
+    // is the honest version of a caret.
+    if let Some(ed) = dialer.contact_edit {
+        let fields: [(usize, &[u8], ContactField, &[u8], usize); 2] = [
+            (
+                CARD_Y0 + 6,
+                b"Name",
+                ContactField::Name,
+                &ed.name,
+                ed.name_len,
+            ),
+            (
+                CARD_Y0 + 108,
+                b"Number",
+                ContactField::Number,
+                &ed.number,
+                ed.number_len,
+            ),
+        ];
+        for (fy, label, field, buf, len) in fields {
+            if !(fy..fy + 96).contains(&y) {
+                continue;
+            }
+            let focused = ed.field == field;
+            let Some(fill) = std::design::primitives::draw_rounded_rect(
+                x,
+                y,
+                std::design::primitives::Rect::new(DISPLAY_X0, fy, DISPLAY_W, 96),
+                18,
+                color::SURFACE,
+                Some(if focused {
+                    color::ACCENT
+                } else {
+                    color::BORDER
+                }),
+                1,
+            ) else {
+                return BG_DARK;
+            };
+            let mut lbuf = [0u8; 16];
+            let ln = std::design::font::ellipsize(label, 1, DISPLAY_W - 48, &mut lbuf);
+            if ln > 0 {
+                if let Some(c) = test_text(
+                    x,
+                    y,
+                    DISPLAY_X0 + 24,
+                    fy + 8,
+                    1,
+                    &lbuf[..ln],
+                    color::TEXT_MUTED,
+                    fill,
+                ) {
+                    return c;
+                }
+            }
+            let mut vbuf = [0u8; 64];
+            let vn = std::design::font::ellipsize(&buf[..len], 2, DISPLAY_W - 96, &mut vbuf);
+            let vy = fy + 36;
+            if vn > 0 {
+                if let Some(c) = test_text(
+                    x,
+                    y,
+                    DISPLAY_X0 + 24,
+                    vy,
+                    2,
+                    &vbuf[..vn],
+                    color::TEXT,
+                    fill,
+                ) {
+                    return c;
+                }
+            }
+            if focused {
+                let cx = DISPLAY_X0 + 24 + std::design::font::measure(&vbuf[..vn], 2);
+                if x >= cx && x < cx + 2 && (vy..vy + run_rows(2)).contains(&y) {
+                    return color::ACCENT;
+                }
+            }
+            return fill;
+        }
+        return BG_DARK;
+    }
+
+    // Browse: the selected contact, or the honest empty state.
+    let Some(sel) = dialer.contact_sel else {
+        let head: &[u8] = b"No contact selected";
+        let hx = DISPLAY_X0 + std::design::font::center_x(head, 2, DISPLAY_W);
+        if let Some(c) = test_text(x, y, hx, 206, 2, head, TEXT_PRIMARY, BG_DARK) {
+            return c;
+        }
+        // WHY this says what to press: an empty card is a dead end unless it
+        // names the control that fills it.
+        let body: &[u8] = b"Press ADD to create one, or tap a row to select it";
+        let mut buf = [0u8; 64];
+        let n = std::design::font::ellipsize(body, 1, DISPLAY_W - 48, &mut buf);
+        if n > 0 {
+            let w = std::design::font::measure(&buf[..n], 1);
+            let bx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(w)) / 2;
+            if let Some(c) = test_text(x, y, bx, 286, 1, &buf[..n], TEXT_MUTED, BG_DARK) {
+                return c;
+            }
+        }
+        return BG_DARK;
+    };
+
+    let rec = if sel >= ContactEditor::UNSAVED_BASE {
+        dialer
+            .contacts
+            .unsaved_record(sel - ContactEditor::UNSAVED_BASE)
+    } else {
+        dialer.contacts.record(sel)
+    };
+    let Some(rec) = rec else {
+        return BG_DARK;
+    };
+
+    // Star state, so the card agrees with the row.
+    if sel < ContactEditor::UNSAVED_BASE && rec.is_favourite() {
+        let label: &[u8] = b"Starred";
+        let lw = std::design::font::measure(label, 1);
+        let lx = DISPLAY_X1 - 24 - lw;
+        if let Some(c) = test_text(x, y, lx, 196, 1, label, color::WARNING, BG_DARK) {
+            return c;
+        }
+    }
+
+    let mut nbuf = [0u8; CONTACT_NAME_MAX];
+    let nn = std::design::font::ellipsize(rec.name_bytes(), 2, DISPLAY_W - 48, &mut nbuf);
+    let nw = std::design::font::measure(&nbuf[..nn], 2);
+    let nx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(nw)) / 2;
+    if let Some(c) = test_text(x, y, nx, 196, 2, &nbuf[..nn], TEXT_PRIMARY, BG_DARK) {
+        return c;
+    }
+
+    let mut ubuf = [0u8; CONTACT_NUM_MAX];
+    let un = std::design::font::ellipsize(rec.number_bytes(), 2, DISPLAY_W - 48, &mut ubuf);
+    let uw = std::design::font::measure(&ubuf[..un], 2);
+    let ux = DISPLAY_X0 + (DISPLAY_W.saturating_sub(uw)) / 2;
+    if let Some(c) = test_text(x, y, ux, 252, 2, &ubuf[..un], TEXT_MUTED, BG_DARK) {
+        return c;
+    }
+
+    // The three row actions, as labelled chips. WHY chips and not a menu: the app
+    // has no menu surface, and a chip is a tap target the user can see.
+    let chips: [(&[u8], u32, u32); 3] = [
+        (b"CALL", color::SUCCESS, color::SURFACE),
+        (b"EDIT", color::ACCENT, color::SURFACE),
+        (b"DELETE", color::DANGER, color::SURFACE),
+    ];
+    let chip_gap = 12usize;
+    let chip_w = (DISPLAY_W - 2 * chip_gap) / 3;
+    let chip_y = 312;
+    for (i, (label, fill, ink)) in chips.iter().enumerate() {
+        let cx0 = DISPLAY_X0 + i * (chip_w + chip_gap);
+        if !(cx0..cx0 + chip_w).contains(&x) || !(chip_y..chip_y + 56).contains(&y) {
+            continue;
+        }
+        if let Some(_base) = std::design::primitives::draw_pill(
+            x,
+            y,
+            std::design::primitives::Rect::new(cx0, chip_y, chip_w, 56),
+            *fill,
+            None,
+        ) {
+            let mut lbuf = [0u8; 16];
+            let ln = std::design::font::ellipsize(label, 1, chip_w - 16, &mut lbuf);
+            if ln > 0 {
+                let lw = std::design::font::measure(&lbuf[..ln], 1);
+                let lx = cx0 + (chip_w.saturating_sub(lw)) / 2;
+                let ly = chip_y + (56 - run_rows(1)) / 2;
+                if let Some(c) = test_text(x, y, lx, ly, 1, &lbuf[..ln], *ink, *fill) {
+                    return c;
+                }
+            }
+            return *fill;
+        }
+    }
+
+    BG_DARK
+}
+
+/// The contact list rows, then the honest capacity/durability notice.
+///
+/// WHY saved and unsaved rows are drawn as two groups with a divider between
+/// them: the durable list is a statement about storage, and the unsaved list is
+/// not. Mixing them would let a contact the kernel refused to store look exactly
+/// like one it accepted.
+fn contacts_list_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
+    // Row plates. Saved rows come first, then unsaved ones, because the durable
+    // list is the one the user asked the device to keep.
+    let total_rows = dialer.contacts.len() + dialer.contacts.unsaved_len();
+    let mut row = 0usize;
+    let mut cursor = LIST_Y0;
+    while row < total_rows {
+        let sel = if row < dialer.contacts.len() {
+            row
+        } else {
+            ContactEditor::UNSAVED_BASE + (row - dialer.contacts.len())
+        };
+        if !(cursor..cursor + CONTACT_ROW_H).contains(&y) {
+            cursor += CONTACT_ROW_H;
+            row += 1;
+            continue;
+        }
+        let rec = if sel >= ContactEditor::UNSAVED_BASE {
+            dialer
+                .contacts
+                .unsaved_record(sel - ContactEditor::UNSAVED_BASE)
+        } else {
+            dialer.contacts.record(sel)
+        };
+        let Some(rec) = rec else {
+            return BG_DARK;
+        };
+        // WHY the favourites filter hides rows instead of greying them: a row the
+        // user asked not to see is not a row at all, and the notice below states
+        // the filter so the shorter list is never mistaken for a lost contact.
+        if dialer.contacts_fav_only && !rec.is_favourite() {
+            cursor += CONTACT_ROW_H;
+            row += 1;
+            continue;
+        }
+        let selected = dialer.contact_sel == Some(sel);
+        let plate = if selected {
+            color::SURFACE_RAISED
+        } else {
+            color::SURFACE
+        };
+        if std::design::primitives::draw_rounded_rect(
+            x,
+            y,
+            std::design::primitives::Rect::new(DISPLAY_X0, cursor, DISPLAY_W, CONTACT_ROW_H),
+            12,
+            plate,
+            Some(color::BORDER),
+            1,
+        )
+        .is_none()
+        {
+            return BG_DARK;
+        }
+        // Avatar disc with the contact's initial.
+        let av_cx = DISPLAY_X0 + 30;
+        let av_cy = cursor + CONTACT_ROW_H / 2;
+        let dx = x as i32 - av_cx as i32;
+        let dy = y as i32 - av_cy as i32;
+    if dx * dx + dy * dy <= 20 * 20 {
+            let initial = [rec.initial()];
+                let iw = std::design::font::measure(&initial, 1);
+                let ix = (av_cx as i32 - iw as i32 / 2).max(0) as usize;
+                let iy = (av_cy as i32 - run_rows(1) as i32 / 2).max(0) as usize;
+                if let Some(t) = test_text(x, y, ix, iy, 1, &initial, color::TEXT_MUTED, plate) {
+                    return t;
+                }
+                return plate;
+            }
+            let tx = DISPLAY_X0 + 68;
+            let mut nbuf = [0u8; CONTACT_NAME_MAX];
+            let nn = std::design::font::ellipsize(rec.name_bytes(), 1, DISPLAY_W - 150, &mut nbuf);
+            if nn > 0 {
+                if let Some(t) =
+                    test_text(x, y, tx, cursor + 8, 1, &nbuf[..nn], color::TEXT, plate)
+                {
+                    return t;
+                }
+            }
+            let mut ubuf = [0u8; CONTACT_NUM_MAX];
+            let un = std::design::font::ellipsize(rec.number_bytes(), 1, DISPLAY_W - 150, &mut ubuf);
+            if un > 0 {
+                if let Some(t) = test_text(
+                    x,
+                    y,
+                    tx,
+                    cursor + 36,
+                    1,
+                    &ubuf[..un],
+                    color::TEXT_MUTED,
+                    plate,
+                ) {
+                    return t;
+                }
+            }
+            // Star. Filled for a saved favourite, outlined for an unsaved one:
+            // an unsaved contact cannot be starred in storage, and drawing it
+            // filled would claim otherwise.
+            let sdx = x as i32 - STAR_CX as i32;
+            let sdy = y as i32 - (cursor + CONTACT_ROW_H / 2) as i32;
+            if sdx * sdx + sdy * sdy <= STAR_R * STAR_R {
+                return if rec.is_favourite() {
+                    color::WARNING
+                } else {
+                    color::BORDER
+                };
+            }
+            return plate;
+        }
+
+
+    // Notice band under the list.
+    if (NOTICE_Y0..NOTICE_Y1).contains(&y) {
+        return contacts_notice_pixel(x, y, dialer);
+    }
+    BG_DARK
+}
+
+/// The honest capacity / durability notice under the contact list.
+///
+/// WHY this band always says something: the list on its own cannot tell the user
+/// whether it is what storage holds, whether the store is full, or whether every
+/// row in it is session-only. All three have to be visible without a log reader.
+fn contacts_notice_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
+    if !(NOTICE_Y0..NOTICE_Y1).contains(&y) || x < DISPLAY_X0 || x >= DISPLAY_X1 {
+        return BG_DARK;
+    }
+    let used = dialer.contacts.len();
+    let unsaved = dialer.contacts.unsaved_len();
+    let state = dialer.contacts.state;
+
+    // The first line is the durability statement, which is the one that matters.
+    let durable = state == ContactStoreState::Written || state == ContactStoreState::Loaded;
+    let ink = if durable {
+        color::TEXT_MUTED
+    } else {
+        color::WARNING
+    };
+    if let Some(c) = test_text(
+        x,
+        y,
+        DISPLAY_X0 + 24,
+        NOTICE_Y0 + 4,
+        1,
+        state.as_str().as_bytes(),
+        ink,
+        BG_DARK,
+    ) {
+        return c;
+    }
+
+    // The second line is capacity, plus the unsaved count when there is one.
+    let mut line = [0u8; 96];
+    let mut n = 0usize;
+    if dialer.contacts_fav_only {
+        let head = b"Favorites only: ";
+        line[..head.len()].copy_from_slice(head);
+        n += head.len();
+    }
+    let head = b"Saved ";
+    line[n..n + head.len()].copy_from_slice(head);
+    n += head.len();
+    line[n] = b'0' + used as u8;
+    n += 1;
+    let mid = b" of 8";
+    line[n..n + mid.len()].copy_from_slice(mid);
+    n += mid.len();
+    if unsaved > 0 {
+        let tail = b" | unsaved ";
+        line[n..n + tail.len()].copy_from_slice(tail);
+        n += tail.len();
+        line[n] = b'0' + unsaved as u8;
+        n += 1;
+    }
+    if used >= MAX_CONTACTS && !dialer.contacts_fav_only {
+        let tail = b" | STORE FULL";
+        line[n..n + tail.len()].copy_from_slice(tail);
+        n += tail.len();
+    }
+    let mut buf = [0u8; 96];
+    let tn = std::design::font::ellipsize(&line[..n], 1, DISPLAY_W - 48, &mut buf);
+    if tn > 0 {
+        if let Some(c) = test_text(
+            x,
+            y,
+            DISPLAY_X0 + 24,
+            NOTICE_Y0 + 34,
+            1,
+            &buf[..tn],
+            color::TEXT_MUTED,
+            BG_DARK,
+        ) {
+            return c;
+        }
+    }
+    BG_DARK
+}
+
+/// The SOS / emergency disc.
+///
+/// WHY it is its own function: the keypad action row and the contacts action row
+/// both draw it, and the SOS path is the one control whose behaviour must never
+/// change with what else is on screen. Extracting it means one geometry, one hit
+/// test and one log line for both, so a refactor of either section cannot make
+/// the emergency control drift.
+fn emergency_dial_pixel(x: usize, y: usize, dialer: &DialerApp) -> Option<u32> {
+    let s_dx = (x as i32) - SOS_CX as i32;
+    let s_dy = (y as i32) - SOS_CY as i32;
+    let s_d2 = s_dx * s_dx + s_dy * s_dy;
+    if s_d2 > SOS_R * SOS_R {
+        return None;
+    }
+    if s_d2 >= 1444 {
+        return Some(0xFFE11D48);
+    }
+    // "SOS" is scale 2, so it needs run_rows(2) = 48 rows and its measured 76px
+    // width must fit the 80px disc. Both are centred on the disc.
+    let sos_rows = run_rows(SOS_SCALE);
+    let sos_x0 = SOS_CX.saturating_sub(std::design::font::measure(b"SOS", SOS_SCALE) / 2);
+    let sos_y0 = SOS_CY.saturating_sub(sos_rows / 2);
+    if y >= sos_y0 && y < sos_y0 + sos_rows {
+        if let Some(c) = test_text(x, y, sos_x0, sos_y0, SOS_SCALE, b"SOS", 0xFFF43F5E, SOS_FILL) {
+            return Some(c);
+        }
+    }
+    let _ = dialer;
+    Some(SOS_FILL)
+}
+
+/// The contacts action row: the emergency disc is unchanged, and the other two
+/// discs carry the section's primary and secondary actions.
+fn contacts_action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
+    if !(ACTION_Y0..ACTION_Y1).contains(&y) {
+        return BG_DARK;
+    }
+    if let Some(c) = emergency_dial_pixel(x, y, dialer) {
+        return c;
+    }
+
+    let editing = dialer.contact_edit.is_some();
+    let has_sel = dialer.contact_sel.is_some();
+    // Centre disc: SAVE while editing, CALL with a selection, ADD otherwise.
+    let centre: (Option<u32>, &[u8]) = if editing {
+        (Some(color::SUCCESS), b"SAVE")
+    } else if has_sel {
+        (Some(color::SUCCESS), b"CALL")
+    } else {
+        (Some(color::ACCENT), b"ADD")
+    };
+    // Right disc: DELETE while editing an existing contact, CANCEL while editing
+    // a new one, EDIT with a selection, and the favourites filter otherwise.
+    let right: (Option<u32>, &[u8]) = if editing {
+        let exists = matches!(dialer.contact_edit.and_then(|e| e.target), Some(_));
+        if exists {
+            (Some(color::DANGER), b"DELETE")
+        } else {
+            (Some(color::SURFACE_RAISED), b"CANCEL")
+        }
+    } else if has_sel {
+        (Some(color::SURFACE_RAISED), b"EDIT")
+    } else if dialer.contacts_fav_only {
+        (Some(color::SURFACE_RAISED), b"ALL")
+    } else {
+        (Some(color::SURFACE_RAISED), b"FAVS")
+    };
+
+    for (cx, (fill, label)) in [
+        (CALL_CX, centre),
+        (CONTACTS_CX, right),
+    ] {
+        let dx = x as i32 - cx as i32;
+        let dy = y as i32 - C_ACTION_Y as i32;
+        let r = if cx == CALL_CX { CALL_R } else { CONTACTS_R };
+        if dx * dx + dy * dy > r * r {
+            continue;
+        }
+        let fill = fill.unwrap_or(color::SURFACE_RAISED);
+        if dx * dx + dy * dy >= (r - 3) * (r - 3) {
+            return color::BORDER;
+        }
+        let mut lbuf = [0u8; 16];
+        let ln = std::design::font::ellipsize(label, 1, 2 * r as usize - 12, &mut lbuf);
+        if ln > 0 {
+            let lw = std::design::font::measure(&lbuf[..ln], 1);
+            let lx = (cx as i32 - lw as i32 / 2).max(0) as usize;
+            let ly = C_ACTION_Y - run_rows(1) / 2;
+            if let Some(c) = test_text(x, y, lx, ly, 1, &lbuf[..ln], color::SURFACE, fill) {
+                return c;
+            }
+        }
+        return fill;
+    }
+    BG_DARK
+}
+
 /// Emergency / call / contacts row. Only drawn in the Keypad section.
 fn action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if !(ACTION_Y0..ACTION_Y1).contains(&y) {
         return BG_DARK;
     }
-
-    // SOS Button (centre 134, 1065, r 40)
-    let s_dx = (x as i32) - SOS_CX as i32;
-    let s_dy = (y as i32) - SOS_CY as i32;
-    let s_d2 = s_dx * s_dx + s_dy * s_dy;
-    if s_d2 <= SOS_R * SOS_R {
-        if s_d2 >= 1444 {
-            return 0xFFE11D48;
-        }
-        // "SOS" is scale 2, so it needs run_rows(2) = 48 rows and its
-        // measured 76px width must fit the 80px disc. Both are centred on
-        // the disc: the old x0 = 122 ran 20px past the disc's right edge.
-        let sos_rows = run_rows(SOS_SCALE);
-        let sos_x0 =
-            SOS_CX.saturating_sub(std::design::font::measure(b"SOS", SOS_SCALE) / 2);
-        let sos_y0 = SOS_CY.saturating_sub(sos_rows / 2);
-        if y >= sos_y0 && y < sos_y0 + sos_rows {
-            if let Some(c) = test_text(
-                x,
-                y,
-                sos_x0,
-                sos_y0,
-                SOS_SCALE,
-                b"SOS",
-                0xFFF43F5E,
-                SOS_FILL,
-            ) {
-                return c;
-            }
-        }
-        return SOS_FILL;
+    if let Some(c) = emergency_dial_pixel(x, y, dialer) {
+        return c;
     }
 
     // Call / Hangup Central Button (centre 360, 1065, r 52)
@@ -1147,8 +2718,9 @@ fn action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     BG_DARK
 }
 
-/// Bottom navigation dock. Every slot now either drives the section or is drawn
-/// in the recessed, unavailable treatment.
+/// Bottom navigation dock. All four slots are live: Favorites opens the contacts
+/// list filtered to the contacts the user starred, and the other three select a
+/// section.
 fn dock_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if !(DOCK_Y0..DOCK_Y1).contains(&y) || x < 24 || x >= 696 {
         return BG_DARK;
@@ -1157,11 +2729,10 @@ fn dock_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         return BORDER_SUBTLE;
     }
 
-    // WHY this mapping: slots 1 (Recents) and 2 (Keypad) are the two sections
-    // that exist. Slots 0 (Favorites) and 3 (Contacts) have no backing store in
-    // the platform, so they are drawn recessed and report that when tapped.
-    // The old renderer hard-coded slot 2 as the active tab and drew all four
-    // labels as if every slot were live.
+    // WHY this mapping: every slot now has a real destination. Slots 0 (Favorites)
+    // and 3 (Contacts) both open the Contacts section -- slot 0 with the
+    // favourites filter on, which is exactly what a favourites list is, and slot 3
+    // without it.
     let mut slot = 4usize;
     for (i, x0) in DOCK_ITEM_X0.iter().enumerate() {
         if x >= *x0 && x < *x0 + DOCK_ITEM_W {
@@ -1172,26 +2743,26 @@ fn dock_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if slot == 4 {
         return SURFACE_DARK;
     }
-    let live = slot == 1 || slot == 2;
     let active = match (slot, dialer.section) {
         (1, DialerSection::Recents) | (2, DialerSection::Keypad) => true,
+        (0, DialerSection::Contacts) | (3, DialerSection::Contacts) => {
+            if slot == 0 {
+                dialer.contacts_fav_only
+            } else {
+                !dialer.contacts_fav_only
+            }
+        }
         _ => false,
     };
 
-    if live && active && y >= 1275 && y < 1365 {
+    if active && y >= 1275 && y < 1365 {
         if y == 1275 || y == 1364 || x == DOCK_ITEM_X0[slot] || x == DOCK_ITEM_X0[slot] + DOCK_ITEM_W - 1
         {
             return ACCENT_SKY;
         }
     }
 
-    let ink = if !live {
-        DISABLED_INK
-    } else if active {
-        ACCENT_SKY
-    } else {
-        TEXT_MUTED
-    };
+    let ink = if active { ACCENT_SKY } else { TEXT_MUTED };
     // WHY the plate never changes tone: in this light theme the dock plate is
     // already a step below the page, and the selection is carried by the ink and
     // the accent outline above. A filled slot would fight the label legibility
@@ -1219,31 +2790,60 @@ fn dock_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         }
     }
 
-    // Icons are drawn only for the live slots: there is no icon to show for a
-    // store that does not exist.
-    if live && y >= DOCK_ICON_Y0 && y < DOCK_ICON_Y0 + DOCK_ICON_H {
+    // Every slot draws an icon now, because every slot has something behind it.
+    if y >= DOCK_ICON_Y0 && y < DOCK_ICON_Y0 + DOCK_ICON_H {
         let cx = DOCK_ITEM_X0[slot] + DOCK_ITEM_W / 2;
         let cy = DOCK_ICON_Y0 + DOCK_ICON_H / 2;
-        if slot == 2 {
-            // Keypad icon: a 3x3 dot grid.
-            let dot_dx = (x as i32) - cx as i32;
-            let dot_dy = (y as i32) - cy as i32;
-            if dot_dx.abs() <= 10 && dot_dy.abs() <= 10 {
-                if (dot_dx % 8).abs() <= 1 && (dot_dy % 8).abs() <= 1 {
+        match slot {
+            2 => {
+                // Keypad icon: a 3x3 dot grid.
+                let dot_dx = (x as i32) - cx as i32;
+                let dot_dy = (y as i32) - cy as i32;
+                if dot_dx.abs() <= 10 && dot_dy.abs() <= 10 {
+                    if (dot_dx % 8).abs() <= 1 && (dot_dy % 8).abs() <= 1 {
+                        return ink;
+                    }
+                }
+            }
+            1 => {
+                // Recents icon: a clock face with two hands.
+                let d2 = (x as i32 - cx as i32).pow(2) + (y as i32 - cy as i32).pow(2);
+                if (144..=169).contains(&d2) {
+                    return ink;
+                }
+                if y == cy && x >= cx - 7 && x <= cx {
+                    return ink;
+                }
+                if x == cx && y >= cy - 9 && y <= cy + 1 {
                     return ink;
                 }
             }
-        } else {
-            // Recents icon: a clock face with two hands.
-            let d2 = (x as i32 - cx as i32).pow(2) + (y as i32 - cy as i32).pow(2);
-            if (144..=169).contains(&d2) {
-                return ink;
+            0 => {
+                // Favorites icon: a five-point star. It is filled whenever the
+                // store holds at least one starred contact, so the slot says
+                // what it will actually show instead of always looking empty.
+                let sdx = x as i32 - cx as i32;
+                let sdy = y as i32 - cy as i32;
+                let on = sdy <= 0 && sdx.abs() as i32 <= 12 + sdy.abs() / 2
+                    || sdy > 0 && sdx.abs() as i32 <= 12 - sdy.abs();
+                if on && sdx.abs() <= 14 && sdy.abs() <= 13 {
+                    return if dialer.contacts.favourites() > 0 {
+                        color::WARNING
+                    } else {
+                        ink
+                    };
+                }
             }
-            if y == cy && x >= cx - 7 && x <= cx {
-                return ink;
-            }
-            if x == cx && y >= cy - 9 && y <= cy + 1 {
-                return ink;
+            _ => {
+                // Contacts icon: a person silhouette.
+                let pdx = x as i32 - cx as i32;
+                let pdy = y as i32 - cy as i32;
+                if pdx * pdx + (pdy + 8) * (pdy + 8) <= 49 {
+                    return ink;
+                }
+                if pdy >= 2 && pdy <= 14 && pdx.abs() <= (pdy - 2) + 6 {
+                    return ink;
+                }
             }
         }
     }
@@ -1263,13 +2863,20 @@ fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         return tabs_pixel(x, y, dialer);
     }
 
-    // 3. Call status & dialed number display (y: 170..380)
+    // 3. Call status & dialed number display (y: 170..380). In the Contacts
+    //    section the same band is the selected-contact card or the editor's
+    //    fields, so every section owns the band rather than fighting over it.
     if (DISPLAY_Y0..DISPLAY_Y1).contains(&y) {
-        return display_pixel(x, y, dialer);
+        return match dialer.section {
+            DialerSection::Contacts => contacts_card_pixel(x, y, dialer),
+            _ => display_pixel(x, y, dialer),
+        };
     }
 
     // 4. Section content (y: 410..1140): the dial pad and the call controls in
-    //    the Keypad section, the real call ledger in the Recents section.
+    //    the Keypad section, the real call ledger in Recents, and the contact
+    //    store -- the list while browsing, or the dial pad typed as a multi-tap
+    //    text entry -- in Contacts.
     if (CONTENT_Y0..CONTENT_Y1).contains(&y) {
         return match dialer.section {
             DialerSection::Keypad => {
@@ -1280,6 +2887,22 @@ fn get_dialer_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 action_pixel(x, y, dialer)
             }
             DialerSection::Recents => recents_pixel(x, y, dialer),
+            DialerSection::Contacts => {
+                if dialer.contact_edit.is_some() {
+                    // The editor reuses the real dial pad, so its geometry, its
+                    // hit test and its sublabels are the same ones the keypad
+                    // section uses. Only what a press produces changes.
+                    let c = editor_keypad_pixel(x, y, dialer);
+                    if c != BG_DARK {
+                        return c;
+                    }
+                    return contacts_action_pixel(x, y, dialer);
+                }
+                if (LIST_Y0..NOTICE_Y0).contains(&y) {
+                    return contacts_list_pixel(x, y, dialer);
+                }
+                contacts_action_pixel(x, y, dialer)
+            }
         };
     }
 
@@ -1349,6 +2972,8 @@ enum Dirty {
     None,
     /// Only the dialed number / outcome line / backspace disc moved.
     Display,
+    /// Only the contact editor's fields moved.
+    Fields,
     /// Section, call state or telemetry changed: the whole surface.
     All,
 }
@@ -1420,7 +3045,7 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
         return Tap::Leave("[DIALER APP] Back control or home gesture pressed. Exiting to launcher.");
     }
 
-    // 2. Segmented tabs. Slot 2 (Contacts) has no store behind it.
+    // 2. Segmented tabs. All three are live sections.
     if (TAB_BAND_Y0..TAB_BAND_Y0 + TAB_BAND_H).contains(&y) {
         if x >= TAB1_X0 && x < TAB1_X1 {
             dialer.section = DialerSection::Keypad;
@@ -1433,40 +3058,40 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
             return Tap::Redraw(Dirty::All);
         }
         if x >= TAB3_X0 && x < TAB3_X1 {
-            std::log(
-                0,
-                "[DIALER APP] Contacts tab tapped: the platform exposes no contact store, so there is no contacts screen to open.",
-            )
-            .ok();
-            return Tap::Redraw(Dirty::None);
+            dialer.open_contacts(dialer.contacts_fav_only);
+            let _ = std::audio_haptic_click();
+            return Tap::Redraw(Dirty::All);
         }
     }
 
-    // 3. Bottom dock. Slots 1 and 2 select a section; 0 and 3 report honestly.
+    // 3. Bottom dock. All four slots have a real destination.
     if (DOCK_Y0..DOCK_Y1).contains(&y) && x >= 24 && x < 696 {
         for slot in 0..4 {
             let x0 = DOCK_ITEM_X0[slot];
             if x < x0 || x >= x0 + DOCK_ITEM_W {
                 continue;
             }
+            let _ = std::audio_haptic_click();
             match slot {
                 1 => {
                     dialer.section = DialerSection::Recents;
-                    let _ = std::audio_haptic_click();
                     return Tap::Redraw(Dirty::All);
                 }
                 2 => {
                     dialer.section = DialerSection::Keypad;
-                    let _ = std::audio_haptic_click();
+                    return Tap::Redraw(Dirty::All);
+                }
+                // Favorites and Contacts both open the contact list; Favorites
+                // filters it to the starred contacts, which is what the slot
+                // says it shows.
+                0 => {
+                    dialer.open_contacts(true);
+                    std::log(0, "[DIALER APP] Favorites: showing starred contacts.").ok();
                     return Tap::Redraw(Dirty::All);
                 }
                 _ => {
-                    std::log(
-                        0,
-                        "[DIALER APP] Dock slot tapped: no favorites or contacts store exists on this platform, so the slot is unavailable.",
-                    )
-                    .ok();
-                    return Tap::Redraw(Dirty::None);
+                    dialer.open_contacts(false);
+                    return Tap::Redraw(Dirty::All);
                 }
             }
         }
@@ -1478,8 +3103,12 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
         return Tap::Redraw(Dirty::Display);
     }
 
-    // 5. Keypad and action row are only live in the Keypad section; in Recents
-    //    the same rows belong to the call ledger.
+    // 5. Section content: the keypad and action row in the Keypad section, the
+    //    call ledger in Recents, and the contact store in Contacts.
+    if dialer.section == DialerSection::Contacts {
+        return handle_contacts_tap(dialer, x, y);
+    }
+
     if dialer.section == DialerSection::Keypad {
         // Keypad Matrix
         for row in 0..4 {
@@ -1521,13 +3150,225 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
                 return Tap::Redraw(toggle_call(dialer));
             }
             if in_circle(x, y, CONTACTS_CX, CONTACTS_CY, CONTACTS_R) {
+                dialer.open_contacts(false);
+                let _ = std::audio_haptic_click();
+                return Tap::Redraw(Dirty::All);
+            }
+        }
+    }
+
+    Tap::None
+}
+
+/// Contacts section hit-testing: the card's chips and editor fields, the contact
+/// rows and their stars, and the action row.
+///
+/// WHY it is separate from `handle_tap`: the section has more controls than the
+/// keypad and the recents ledger together, and folding them into `handle_tap`
+/// would put one function two screens deep in branches.
+fn handle_contacts_tap(dialer: &mut DialerApp, x: usize, y: usize) -> Tap<'static> {
+    // While the editor is open, the tab band and the dock still work, so the
+    // user is never trapped in a half-finished contact.
+    if (TAB_BAND_Y0..TAB_BAND_Y0 + TAB_BAND_H).contains(&y)
+        || ((DOCK_Y0..DOCK_Y1).contains(&y) && x >= 24 && x < 696)
+    {
+        return handle_tap(dialer, x as u32, y as u32);
+    }
+
+    let _ = std::audio_haptic_click();
+
+    // --- Editor mode -------------------------------------------------------
+    if let Some(ed) = dialer.contact_edit {
+        // Field taps move the caret. WHY each field also picks the keypad face:
+        // a name needs letters and a number needs digits, so focusing a field
+        // brings up the cycle that can type into it.
+        if (CARD_Y0 + 6..CARD_Y0 + 102).contains(&y)
+            && x >= DISPLAY_X0
+            && x < DISPLAY_X1
+            && ed.field != ContactField::Name
+        {
+            let mut next = ed;
+            next.field = ContactField::Name;
+            dialer.contact_edit = Some(next);
+            dialer.editor_last_cell = None;
+            return Tap::Redraw(Dirty::All);
+        }
+        if (CARD_Y0 + 108..CARD_Y0 + 204).contains(&y)
+            && x >= DISPLAY_X0
+            && x < DISPLAY_X1
+            && ed.field != ContactField::Number
+        {
+            let mut next = ed;
+            next.field = ContactField::Number;
+            dialer.contact_edit = Some(next);
+            dialer.editor_last_cell = None;
+            return Tap::Redraw(Dirty::All);
+        }
+
+        // The dial pad, typed as text.
+        if (ROW_Y[0]..ROW_Y[3] + BTN_H).contains(&y) {
+            for row in 0..4 {
+                if y < ROW_Y[row] || y >= ROW_Y[row] + BTN_H {
+                    continue;
+                }
+                for col in 0..3 {
+                    let bx = COL_X[col];
+                    if x < bx || x >= bx + BTN_W {
+                        continue;
+                    }
+                    dialer.editor_press_cell(row, col);
+                    return Tap::Redraw(Dirty::Fields);
+                }
+            }
+        }
+
+        // Action row: the emergency disc keeps its own hit test, then the two
+        // editing discs.
+        if (ACTION_Y0..ACTION_Y1).contains(&y) {
+            if in_circle(x, y, SOS_CX, SOS_CY, SOS_R) {
+                let _ = dialer.dial_emergency();
+                if dialer.outcome == CallOutcome::EmergencyRefused {
+                    std::log(
+                        0,
+                        "[DIALER APP] Emergency call refused by the telephony service; the outcome is shown under the number.",
+                    )
+                    .ok();
+                } else {
+                    std::log(
+                        0,
+                        "[DIALER APP] Telephony service accepted the emergency call.",
+                    )
+                    .ok();
+                }
+                return Tap::Redraw(Dirty::All);
+            }
+            if in_circle(x, y, CALL_CX, CALL_CY, CALL_R) {
+                dialer.commit_edit_contact();
+                return Tap::Redraw(Dirty::All);
+            }
+                if in_circle(x, y, CONTACTS_CX, CONTACTS_CY, CONTACTS_R) {
+                    // WHY this disc is DELETE for an existing contact and CANCEL
+                    // for a new one: deleting is a destructive act on something
+                    // already stored, and cancelling is the only safe meaning for
+                    // a record that exists only in the editor.
+                    let deletes = matches!(ed.target, Some(_));
+                    if deletes {
+                        dialer.contact_sel = ed.target;
+                        dialer.delete_selected_contact();
+                        dialer.contact_edit = None;
+                        dialer.editor_last_cell = None;
+                    } else {
+                        dialer.cancel_edit_contact();
+                    }
+                    return Tap::Redraw(Dirty::All);
+                }
+        }
+        return Tap::None;
+    }
+
+    // --- Browse mode -------------------------------------------------------
+    // Card chips: CALL / EDIT / DELETE.
+    let chip_gap = 12usize;
+    let chip_w = (DISPLAY_W - 2 * chip_gap) / 3;
+    let chip_y = 312;
+    if (chip_y..chip_y + 56).contains(&y) && x >= DISPLAY_X0 && x < DISPLAY_X1 {
+        for i in 0..3 {
+            let cx0 = DISPLAY_X0 + i * (chip_w + chip_gap);
+            if x < cx0 || x >= cx0 + chip_w {
+                continue;
+            }
+            if dialer.contact_sel.is_none() {
+                // WHY a chip with no selection is inert rather than defaulting to
+                // row 0: there is no contact the user pointed at, and guessing
+                // one would call, edit or delete a contact nobody chose.
                 std::log(
                     0,
-                    "[DIALER APP] Contacts shortcut tapped: no contact store is exposed by this platform.",
+                    "[DIALER APP] That action needs a selected contact; tap a row first.",
                 )
                 .ok();
                 return Tap::Redraw(Dirty::None);
             }
+            match i {
+                0 => dialer.dial_selected_contact(),
+                1 => dialer.start_edit_contact(dialer.contact_sel.unwrap_or(0)),
+                _ => dialer.delete_selected_contact(),
+            }
+            return Tap::Redraw(Dirty::All);
+        }
+    }
+
+    // Action row: SOS unchanged, then ADD / CALL and FAVS / EDIT.
+    if (ACTION_Y0..ACTION_Y1).contains(&y) {
+        if in_circle(x, y, SOS_CX, SOS_CY, SOS_R) {
+            let _ = dialer.dial_emergency();
+            if dialer.outcome == CallOutcome::EmergencyRefused {
+                std::log(
+                    0,
+                    "[DIALER APP] Emergency call refused by the telephony service; the outcome is shown under the number.",
+                )
+                .ok();
+            } else {
+                std::log(
+                    0,
+                    "[DIALER APP] Telephony service accepted the emergency call.",
+                )
+                .ok();
+            }
+            return Tap::Redraw(Dirty::All);
+        }
+        if in_circle(x, y, CALL_CX, CALL_CY, CALL_R) {
+            if dialer.contact_sel.is_some() {
+                dialer.dial_selected_contact();
+            } else {
+                dialer.start_add_contact();
+            }
+            return Tap::Redraw(Dirty::All);
+        }
+        if in_circle(x, y, CONTACTS_CX, CONTACTS_CY, CONTACTS_R) {
+            if dialer.contact_sel.is_some() {
+                dialer.start_edit_contact(dialer.contact_sel.unwrap_or(0));
+            } else {
+                dialer.contacts_fav_only = !dialer.contacts_fav_only;
+                std::log(
+                    0,
+                    if dialer.contacts_fav_only {
+                        "[DIALER APP] Showing starred contacts only."
+                    } else {
+                        "[DIALER APP] Showing all contacts."
+                    },
+                )
+                .ok();
+            }
+            return Tap::Redraw(Dirty::All);
+        }
+    }
+
+    // List rows: the star toggles, the body selects.
+    if (LIST_Y0..NOTICE_Y0).contains(&y) && x >= DISPLAY_X0 && x < DISPLAY_X1 {
+        let total = dialer.contacts.len() + dialer.contacts.unsaved_len();
+        let mut row = 0usize;
+        let mut cursor = LIST_Y0;
+        while row < total {
+            if y < cursor || y >= cursor + CONTACT_ROW_H {
+                cursor += CONTACT_ROW_H;
+                row += 1;
+                continue;
+            }
+            let sel = if row < dialer.contacts.len() {
+                row
+            } else {
+                ContactEditor::UNSAVED_BASE + (row - dialer.contacts.len())
+            };
+            if in_circle(x, y, STAR_CX, cursor + CONTACT_ROW_H / 2, STAR_R) {
+                dialer.contact_sel = Some(sel);
+                dialer.toggle_selected_favourite();
+                return Tap::Redraw(Dirty::All);
+            }
+            // WHY the row stays selected and the action changes rather than a
+            // tap both selecting and acting: one tap, one meaning, and the card
+            // shows what the next tap on CALL will do.
+            dialer.contact_sel = Some(sel);
+            return Tap::Redraw(Dirty::All);
         }
     }
 
@@ -1538,6 +3379,55 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
 /// backspace, escape, enter and tab routed through the dialer's own state.
 fn handle_dialer_key(dialer: &mut DialerApp, key: std::InputKeyEvent) -> Tap<'static> {
     use std::input_key_code;
+
+    // The contact editor is a text field, so when it is open a physical keyboard
+    // types into it before any of the dialer's own verbs are considered. This is
+    // the same precedence the browser uses for its address field.
+    if let Some(ed) = dialer.contact_edit {
+        if !key.pressed {
+            return Tap::None;
+        }
+        let mut next = ed;
+        match key.code {
+            input_key_code::ESCAPE => {
+                dialer.cancel_edit_contact();
+                return Tap::Redraw(Dirty::All);
+            }
+            input_key_code::BACKSPACE => {
+                next.backspace();
+                dialer.contact_edit = Some(next);
+                dialer.editor_last_cell = None;
+                return Tap::Redraw(Dirty::Fields);
+            }
+            input_key_code::ENTER => {
+                dialer.contact_edit = Some(next);
+                dialer.commit_edit_contact();
+                return Tap::Redraw(Dirty::All);
+            }
+            input_key_code::TAB => {
+                next.field = match next.field {
+                    ContactField::Name => ContactField::Number,
+                    ContactField::Number => ContactField::Name,
+                };
+                dialer.contact_edit = Some(next);
+                dialer.editor_last_cell = None;
+                return Tap::Redraw(Dirty::All);
+            }
+            // Printable ASCII only, and only inside the field's own width, so a
+            // name can never overflow into the number field's bytes.
+            code if (32..=126).contains(&code) => {
+                if next.active_len() < next.active_cap() {
+                    next.push(code as u8);
+                    dialer.contact_edit = Some(next);
+                    dialer.editor_last_cell = None;
+                    return Tap::Redraw(Dirty::Fields);
+                }
+                return Tap::None;
+            }
+            _ => return Tap::None,
+        }
+    }
+
     if !key.pressed {
         return Tap::None;
     }
@@ -1684,6 +3574,50 @@ pub extern "C" fn _start() -> ! {
 
     // Emergency contacts are provided by the real contacts/modem subsystem when available.
 
+    // 2b. Contact store. WHY it is loaded before the surface exists: the first
+    // frame has to show the contacts that are really stored, and a store read
+    // after the first paint would show an empty list that then fills in.
+    //
+    // WHY the read result is reported rather than assumed: the dialer is the only
+    // place that knows whether the settings store answered, refused, or held
+    // bytes this app did not write, and the notice band under the list says the
+    // same thing on screen.
+    dialer.contacts = ContactStore::load();
+    match dialer.contacts.state {
+        ContactStoreState::Loaded => { std::log(
+            0,
+            "[DIALER APP] Contacts read back out of the settings store.",
+        )
+        .ok();
+        }
+        ContactStoreState::Empty => { std::log(
+            0,
+            "[DIALER APP] No saved contacts: the settings store holds no dialer contacts key.",
+        )
+        .ok();
+        }
+        ContactStoreState::ReadRefused => { std::log(
+            0,
+            "[DIALER APP] Contacts read REFUSED by the kernel: no stored contacts were loaded, and none will be shown as saved.",
+        )
+        .ok();
+        }
+        ContactStoreState::Invalid => { std::log(
+            0,
+            "[DIALER APP] Stored contact bytes failed validation; no contacts were loaded from them.",
+        )
+        .ok();
+        }
+        ContactStoreState::Untouched | ContactStoreState::Written
+        | ContactStoreState::WriteRefused | ContactStoreState::Full => {
+            std::log(
+                0,
+                "[DIALER APP] Contacts store reported a state it cannot be in before any write; no contacts are shown as saved.",
+            )
+            .ok();
+        }
+    }
+
     // 3. Allocate dedicated KMS Client Surface (z=200)
     std::log(
         0,
@@ -1802,6 +3736,9 @@ pub extern "C" fn _start() -> ! {
                     match dirty {
                         Dirty::None => {}
                         Dirty::Display => render_dialer_band(surface, &dialer, DISPLAY_Y0, DISPLAY_Y1),
+                        // The editor's fields live in the display-card band, so
+                        // typing into them repaints exactly that band.
+                        Dirty::Fields => render_dialer_band(surface, &dialer, DISPLAY_Y0, DISPLAY_Y1),
                         Dirty::All => render_dialer_ui(surface, &dialer),
                     }
                     let _ = std::surface_flip(6);

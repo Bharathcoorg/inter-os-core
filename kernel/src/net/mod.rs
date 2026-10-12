@@ -33,11 +33,20 @@ pub use wireless::{WifiState, WirelessManager, WIRELESS_MANAGER};
 pub use route::{Ipv4Cidr, Route, RoutingTable, MAX_ROUTES};
 
 use spin::Mutex;
+use core::sync::atomic::{AtomicBool, Ordering};
 use crate::capability::{Capability, CapabilityId, CapabilityTable, CapabilityType, Rights};
 use crate::serial_println;
 
 pub const DEFAULT_HOST_IP: Ipv4Address = Ipv4Address([10, 0, 2, 15]);
 pub const DEFAULT_HOST_MAC: MacAddress = MacAddress([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+/// QEMU user-mode (SLIRP) virtual gateway. A real ARP request addressed here is
+/// answered by QEMU with a real reply, which is the end-to-end proof that a
+/// packet left the guest and a response came back.
+pub const GATEWAY_IP: Ipv4Address = Ipv4Address([10, 0, 2, 2]);
+
+/// Set once the first real ARP reply from the gateway has been observed, so the
+/// proof line is logged exactly once rather than on every network poll.
+static LIVE_GATEWAY_ARP_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// Global dynamic ARP resolution cache.
 pub static ARP_TABLE: Mutex<ArpTable> = Mutex::new(ArpTable::new());
@@ -115,6 +124,46 @@ fn resolve_destination_mac(dst_ip: Ipv4Address) -> Result<MacAddress, NetError> 
     drop(requests);
     transmit_arp_request(dst_ip)?;
     Err(NetError::NoPacketAvailable)
+}
+
+/// Transmits one real ARP request for the default gateway through the freshly
+/// bound Ethernet backend and logs that a real frame was handed to the NIC.
+///
+/// Called from `NetworkDeviceManager::attach_e1000` immediately after the E1000
+/// is bound, while the `NETWORK_DEVICE` lock is already held, so it drives the
+/// controller through the passed `&mut` manager and never re-locks. Receipt of
+/// the matching reply is detected and logged in `poll_network_interface`.
+pub fn emit_gateway_arp_request(manager: &mut NetworkDeviceManager) {
+    let info = manager.info();
+    let request = ArpPacket {
+        opcode: ArpOpcode::Request,
+        sender_mac: info.mac,
+        sender_ip: DEFAULT_HOST_IP,
+        target_mac: MacAddress::ZERO,
+        target_ip: GATEWAY_IP,
+    };
+    let mut arp_buf = [0u8; 28];
+    let Ok(arp_len) = request.serialize(&mut arp_buf) else {
+        return;
+    };
+    let frame = EthernetFrame {
+        dst_mac: MacAddress::BROADCAST,
+        src_mac: info.mac,
+        ethertype: EtherType::Arp,
+        payload: &arp_buf[..arp_len],
+    };
+    let mut frame_buf = [0u8; 1514];
+    let Ok(frame_len) = frame.serialize(&mut frame_buf) else {
+        return;
+    };
+    match manager.transmit(&frame_buf[..frame_len]) {
+        Ok(()) => serial_println!(
+            "[NET LIVE] Real ARP who-has {}.{}.{}.{} handed to the {:?} NIC as a {} byte Ethernet frame; awaiting gateway reply.",
+            GATEWAY_IP.0[0], GATEWAY_IP.0[1], GATEWAY_IP.0[2], GATEWAY_IP.0[3],
+            info.kind, frame_len
+        ),
+        Err(e) => serial_println!("[NET LIVE] Real ARP probe transmit failed: {:?}", e),
+    }
 }
 
 /// Sends a UDP datagram over the network stack, verifying caller's capability.
@@ -277,6 +326,23 @@ pub fn poll_network_interface() -> usize {
                 EtherType::Arp => {
                     if let Ok(arp_pkt) = ArpPacket::parse(frame.payload) {
                         ARP_TABLE.lock().insert_at(arp_pkt.sender_ip, arp_pkt.sender_mac, crate::interrupts::get_system_ticks());
+                        // End-to-end proof: the real ARP request emitted when the
+                        // E1000 was bound (emit_gateway_arp_request) left the
+                        // guest, and a real reply came back through the
+                        // controller's RX ring. Log it once, honestly, with the
+                        // reply's real source address, MAC and frame length.
+                        if arp_pkt.opcode == ArpOpcode::Reply
+                            && arp_pkt.sender_ip == GATEWAY_IP
+                            && !LIVE_GATEWAY_ARP_LOGGED.swap(true, Ordering::SeqCst)
+                        {
+                            serial_println!(
+                                "[NET LIVE] Real ARP reply received: gateway {}.{}.{}.{} is at {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}; a real packet left the guest and came back ({} byte Ethernet frame).",
+                                GATEWAY_IP.0[0], GATEWAY_IP.0[1], GATEWAY_IP.0[2], GATEWAY_IP.0[3],
+                                arp_pkt.sender_mac.0[0], arp_pkt.sender_mac.0[1], arp_pkt.sender_mac.0[2],
+                                arp_pkt.sender_mac.0[3], arp_pkt.sender_mac.0[4], arp_pkt.sender_mac.0[5],
+                                len
+                            );
+                        }
                         if let Some(entry) = ARP_REQUESTS.lock().iter_mut().find(|entry| entry.valid && entry.ip == arp_pkt.sender_ip) {
                             entry.valid = false;
                         }
