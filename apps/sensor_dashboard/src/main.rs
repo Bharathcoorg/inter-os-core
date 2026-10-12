@@ -36,6 +36,10 @@
 //! There is no code path in this file that produces a measurement. If a sensor
 //! were bound, the same code would plot it: `read_sensors` returns the live
 //! values and the chart branch is driven entirely by that decode.
+//!
+//! Banded rendering (`render_band`): a tap re-reads the bus, the inventory and
+//! the power regulator, and only the rows those re-reads can move are
+//! re-rasterised, instead of all 1,036,800 pixels on every event.
 
 #![no_std]
 #![no_main]
@@ -640,6 +644,27 @@ const fn card_rows_y(idx: usize) -> usize {
 }
 
 // -----------------------------------------------------------------------------
+// Screen bands - the single source of truth for both the drawing in `pixel`
+// and the `Dirty` -> band mapping used by the input path below.
+// -----------------------------------------------------------------------------
+
+/// Header status pill: drawn at (540, 34, 690, 62) and read from
+/// `app.telemetry`, so a re-read is the only thing that can move it.
+const PILL_X0: usize = 540;
+const PILL_Y0: usize = 34;
+const PILL_X1: usize = 690;
+const PILL_Y1: usize = 62;
+const PILL_R: usize = 6;
+
+/// Status band card: drawn at (30, 96, 690, 134) and read from `app.status`,
+/// which every re-read rewrites.
+const STATUS_X0: usize = 30;
+const STATUS_Y0: usize = 96;
+const STATUS_X1: usize = 690;
+const STATUS_Y1: usize = 134;
+const STATUS_R: usize = 6;
+
+// -----------------------------------------------------------------------------
 // Rendering
 // -----------------------------------------------------------------------------
 
@@ -662,6 +687,101 @@ fn render(surface: u32, app: &Dashboard) {
         }
         let _ = std::surface_write(6, surface, offset, &chunk[..count]);
         offset += count;
+    }
+}
+
+/// Re-rasterises and writes only rows `y0..y1`.
+///
+/// WHY a band and not a rectangle: a row of the surface is one contiguous run in
+/// the surface buffer, so `offset = y0 * W` writes a whole band with no stride
+/// bookkeeping. Every band starts on a row boundary, so the running `x`/`y`
+/// cursor below is exact.
+///
+/// WHY this is correct rather than a shortcut: the band is named after what the
+/// tap actually re-read (see `Dirty`), and every row outside it is correct
+/// because nothing it draws from moved.
+fn render_band(surface: u32, app: &Dashboard, y0: usize, y1: usize) {
+    let mut chunk = [0u32; CHUNK];
+    let mut offset = y0 * W;
+    let end = y1.min(H) * W;
+    while offset < end {
+        let count = (end - offset).min(CHUNK);
+        let mut x = offset % W;
+        let mut y = offset / W;
+        for i in 0..count {
+            chunk[i] = pixel(x, y, app);
+            x += 1;
+            if x == W {
+                x = 0;
+                y += 1;
+            }
+        }
+        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        offset += count;
+    }
+}
+
+/// Which rows of the surface an input actually changed.
+///
+/// WHY this exists: the old loop called `render` for every tap, re-rasterising
+/// all 1,036,800 pixels through `pixel` even though the rows a re-read can move
+/// live in one header pill, one status band and three fixed cards.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dirty {
+    /// Nothing moved; the surface is already correct, so do not render at all.
+    None,
+    /// A tap re-read the sensor bus, the channel inventory and the power
+    /// regulator: the header status pill, the status band and cards 0..=2.
+    ///
+    /// WHY card 3 (RUNTIME ENVIRONMENT) is not in that list: its rows are drawn
+    /// from state no re-read touches - the task id and the surface id are fixed
+    /// at boot and the uptime probe runs once, before the first frame - so its
+    /// rows cannot move and are left exactly as drawn. The home gesture pill
+    /// and the page background are static for the same reason.
+    Refresh,
+    /// A change whose row extent is not tracked exactly: the whole surface.
+    All,
+}
+
+/// Grow a dirty region so one rendered frame covers everything a poll batch
+/// changed.
+///
+/// WHY: `event_poll` can deliver several touches before the app is scheduled
+/// again; rendering only the last region would leave the earlier one stale.
+impl Dirty {
+    fn widen(self, other: Dirty) -> Dirty {
+        match (self, other) {
+            (Dirty::None, d) | (d, Dirty::None) => d,
+            (a, b) if a == b => a,
+            _ => Dirty::All,
+        }
+    }
+}
+
+/// Maps a `Dirty` onto the bands it re-rasterises.
+fn repaint(surface: u32, app: &Dashboard, dirty: Dirty) {
+    match dirty {
+        Dirty::None => {}
+        Dirty::Refresh => {
+            // The status pill is the only header row a re-read can move.
+            render_band(surface, app, PILL_Y0, PILL_Y1);
+            // One contiguous band from the status card down to the bottom of
+            // the last card. WHY contiguous rather than one write per card: the
+            // gaps between the cards are background that is rewritten
+            // identically, and four separate band writes would save 40 rows of
+            // pure background at the cost of three extra surface write calls.
+            //
+            // WHY this reaches the runtime card and not just the status card:
+            // that card draws an Uptime row from `get_ticks()`. The tick
+            // counter is monotonic, so a refresh that leaves the row out of the
+            // band would publish a fresh reading and keep showing the boot
+            // value -- a number that moves only when the app is relaunched,
+            // labelled as seconds since boot. Stopping the band short of it was
+            // correct only because the tick probe ran once at boot; the row is
+            // now re-read with everything else and the band covers it.
+            render_band(surface, app, STATUS_Y0, CARDS[CARDS.len() - 1].y1);
+        }
+        Dirty::All => render(surface, app),
     }
 }
 
@@ -697,8 +817,8 @@ fn pixel(x: usize, y: usize, app: &Dashboard) -> u32 {
         }
 
         // Status pill on top right
-        if in_rounded_rect(x, y, 540, 34, 690, 62, 6) {
-            if on_rounded_rect_border(x, y, 540, 34, 690, 62, 6) {
+        if in_rounded_rect(x, y, PILL_X0, PILL_Y0, PILL_X1, PILL_Y1, PILL_R) {
+            if on_rounded_rect_border(x, y, PILL_X0, PILL_Y0, PILL_X1, PILL_Y1, PILL_R) {
                 return EDGE;
             }
             let is_present = matches!(app.telemetry, Telemetry::Present { .. });
@@ -718,12 +838,12 @@ fn pixel(x: usize, y: usize, app: &Dashboard) -> u32 {
         return CARD;
     }
 
-    // Status Band Card (y: 96..134)
-    if (96..134).contains(&y) && (30..690).contains(&x) {
-        if on_rounded_rect_border(x, y, 30, 96, 690, 134, 6) {
+    // Status Band Card
+    if (STATUS_Y0..STATUS_Y1).contains(&y) && (STATUS_X0..STATUS_X1).contains(&x) {
+        if on_rounded_rect_border(x, y, STATUS_X0, STATUS_Y0, STATUS_X1, STATUS_Y1, STATUS_R) {
             return EDGE;
         }
-        if in_rounded_rect(x, y, 30, 96, 690, 134, 6) {
+        if in_rounded_rect(x, y, STATUS_X0, STATUS_Y0, STATUS_X1, STATUS_Y1, STATUS_R) {
             let (dx, dy) = (x as isize - 46, y as isize - 115);
             if dx * dx + dy * dy <= 3 * 3 {
                 return app.status_color;
@@ -1287,7 +1407,7 @@ pub extern "C" fn _start() -> ! {
     std::log(0, "[SENSORS] Inventory app build: ").ok();
     let _ = n;
 
-    render(surface, &app);
+    repaint(surface, &app, Dirty::All);
     let _ = std::surface_flip(6);
     std::log(0, "[SENSORS] Initial frame presented to hardware scanout.").ok();
 
@@ -1302,6 +1422,7 @@ pub extern "C" fn _start() -> ! {
                     dy: 0,
                     scale_milli: 1000,
                 };
+                let mut dirty = Dirty::None;
                 while std::input_event_poll(&mut input).is_ok() {
                     if matches!(input.kind, 4 | 6 | 7 | 8 | 10) {
                         std::log(0, "[SENSORS] Navigation gesture. Exiting to launcher.").ok();
@@ -1319,15 +1440,23 @@ pub extern "C" fn _start() -> ! {
                         app.thermal = read_thermal();
                         app.battery = read_battery();
                         app.sensor_service = read_sensor_service();
+                        // Re-read the tick probe with the rest, so the Uptime
+                        // row reflects this refresh rather than the boot frame.
+                        // Leaving it out published a fresh reading while the
+                        // surface kept the start-up value.
+                        app.ticks = probe_ticks();
                         app.inv_display = read_inventory("display");
                         app.inv_sensors = read_inventory("sensors");
                         app.inv_battery = read_inventory("battery");
                         app.inv_wifi = read_inventory("wifi");
                         app.inv_cellular = read_inventory("cellular");
                         status(&mut app, b"re-read sensor bus, thermal zones and fuel gauge", ACCENT);
-                        render(surface, &app);
-                        let _ = std::surface_flip(6);
+                        dirty = dirty.widen(Dirty::Refresh);
                     }
+                }
+                if dirty != Dirty::None {
+                    repaint(surface, &app, dirty);
+                    let _ = std::surface_flip(6);
                 }
             }
         }

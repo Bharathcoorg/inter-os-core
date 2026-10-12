@@ -12,6 +12,9 @@
 //!   - `ping`: Local loopback diagnostic
 //! - DRM/KMS Client Surface Rendering (z=200) & Terminal Canvas Presentation
 //! - Circular command history ledger
+//! - Banded rendering (`render_terminal_band`): only the rows an input
+//!   actually dirtied are re-rasterised, instead of all 1,036,800 pixels on
+//!   every event
 //! - Asynchronous event reactor loop handling shell intents and touch commands
 
 #![no_std]
@@ -79,6 +82,13 @@ const CONSOLE_TOP: usize = 114;
 /// Console line pitch == the line box height, so full-height runs stack without
 /// overlapping.
 const CONSOLE_LINE_ROWS: usize = 48;
+/// Lines the console buffer keeps.
+///
+/// WHY a named constant and not the literal 18 sprinkled through the buffer
+/// code: the console band below is derived from it, and a band that drifted
+/// from the buffer it repaints would either miss a line or repaint rows that
+/// hold no text.
+const CONSOLE_LINES: usize = 18;
 
 /// System CPL badge box. Grown from the old 176x40 so the scale-2
 /// "CPL=3 RING" run (228 x 48) fits inside it with padding instead of being
@@ -232,13 +242,13 @@ pub struct TerminalApp {
     pub history: [Option<HistoryEntry>; 8],
     pub history_count: usize,
     pub total_commands_executed: u32,
-    pub lines: [Option<ConsoleLine>; 18],
+    pub lines: [Option<ConsoleLine>; CONSOLE_LINES],
     pub line_count: usize,
 }
 
 impl TerminalApp {
     pub const fn new() -> Self {
-        let mut lines = [None; 18];
+        let mut lines = [None; CONSOLE_LINES];
         lines[0] = Some(ConsoleLine::from_static(
             "InterOS Sovereign Shell [Ring 3 CPL=3]",
             TEXT_MUTED,
@@ -277,14 +287,14 @@ impl TerminalApp {
         let n = text.len().min(LINE_CAP);
         line.text[..n].copy_from_slice(&text[..n]);
         line.len = n;
-        if self.line_count < 18 {
+        if self.line_count < CONSOLE_LINES {
             self.lines[self.line_count] = Some(line);
             self.line_count += 1;
         } else {
-            for i in 0..17 {
+            for i in 0..CONSOLE_LINES - 1 {
                 self.lines[i] = self.lines[i + 1];
             }
-            self.lines[17] = Some(line);
+            self.lines[CONSOLE_LINES - 1] = Some(line);
         }
     }
 
@@ -673,6 +683,103 @@ fn render_terminal_ui(surface: u32, term: &TerminalApp) {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Screen band - the single source of truth for the `Dirty` -> band mapping
+// used by the input path below.
+// -----------------------------------------------------------------------------
+
+/// Rows the console owns: the first line box through the last of the buffer,
+/// `CONSOLE_TOP + CONSOLE_LINES * CONSOLE_LINE_ROWS` = 978.
+///
+/// WHY the buffer's extent and not the 96..1200 canvas the renderer gates on:
+/// the rows below the last line box only ever hold the background and the CRT
+/// scanline wash, and neither is a function of state, so they are left exactly
+/// as drawn instead of being re-rasterised for a command that cannot reach
+/// them.
+const CONSOLE_Y0: usize = CONSOLE_TOP;
+const CONSOLE_Y1: usize = CONSOLE_TOP + CONSOLE_LINES * CONSOLE_LINE_ROWS;
+
+/// Re-rasterises and writes only rows `y0..y1`.
+///
+/// WHY a band and not a rectangle: a row of the surface is one contiguous run in
+/// the surface buffer, so `offset = y0 * W` writes a whole band with no stride
+/// bookkeeping. Every band starts on a row boundary, so the running `x`/`y`
+/// cursor below is exact.
+///
+/// WHY this is correct rather than a shortcut: the band is named after what the
+/// input actually moved (see `Dirty`), and every row outside it is correct
+/// because nothing about it changed. The old renderer re-rasterised all
+/// 1,036,800 pixels on every touch event, including touches that ran no command
+/// at all.
+fn render_terminal_band(surface: u32, term: &TerminalApp, y0: usize, y1: usize) {
+    let mut chunk = [0u32; CHUNK];
+    let mut offset = y0 * W;
+    let end = y1.min(H) * W;
+    while offset < end {
+        let count = (end - offset).min(CHUNK);
+        let mut x = offset % W;
+        let mut y = offset / W;
+        for i in 0..count {
+            chunk[i] = get_terminal_pixel(x, y, term);
+            x += 1;
+            if x == W {
+                x = 0;
+                y += 1;
+            }
+        }
+        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        offset += count;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Input handling
+// -----------------------------------------------------------------------------
+
+/// Which rows of the surface an input actually changed.
+///
+/// WHY this exists: the old loop called `render_terminal_ui` after every tap,
+/// so a touch on blank canvas cost the same 1,036,800-pixel repaint as a
+/// command that scrolled the whole console.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dirty {
+    /// Nothing moved; the surface is already correct, so do not render at all.
+    None,
+    /// A quick command ran and pushed console lines: the console band only.
+    ///
+    /// WHY there is no band for the header or the pill dock: the title, the
+    /// CPL badge and every pill label are compile-time strings, and the
+    /// command ledger is never drawn, so a command cannot move a pixel outside
+    /// the console.
+    Console,
+    /// More than one band moved, or the first frame: the whole surface.
+    All,
+}
+
+/// Grow a dirty region so one rendered frame covers everything a poll batch
+/// changed.
+///
+/// WHY: `event_poll` can deliver several touches before the app is scheduled
+/// again; rendering only the last region would leave the earlier one stale.
+impl Dirty {
+    fn widen(self, other: Dirty) -> Dirty {
+        match (self, other) {
+            (Dirty::None, d) | (d, Dirty::None) => d,
+            (a, b) if a == b => a,
+            _ => Dirty::All,
+        }
+    }
+}
+
+/// Maps a `Dirty` onto the band it re-rasterises.
+fn repaint(surface: u32, term: &TerminalApp, dirty: Dirty) {
+    match dirty {
+        Dirty::None => {}
+        Dirty::Console => render_terminal_band(surface, term, CONSOLE_Y0, CONSOLE_Y1),
+        Dirty::All => render_terminal_ui(surface, term),
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     std::log(
@@ -698,7 +805,7 @@ pub extern "C" fn _start() -> ! {
 
     // Render & present terminal UI
     if surface > 0 {
-        render_terminal_ui(surface, &term);
+        repaint(surface, &term, Dirty::All);
         let _ = std::surface_flip(6);
         std::log(
             0,
@@ -720,6 +827,7 @@ pub extern "C" fn _start() -> ! {
                     dy: 0,
                     scale_milli: 1000,
                 };
+                let mut dirty = Dirty::None;
                 while std::input_event_poll(&mut input).is_ok() {
                     if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
                         std::log(
@@ -775,15 +883,24 @@ pub extern "C" fn _start() -> ! {
 
                         if let Some(cmd) = qcmd {
                             term.execute_command(cmd);
+                            dirty = dirty.widen(Dirty::Console);
                         }
+                        // WHY an unmatched tap stays `Dirty::None`: it hit no
+                        // pill and no exit control, so no state moved and the
+                        // surface is already correct. The old loop rendered the
+                        // whole surface anyway.
 
                         std::audio_haptic_click().ok();
-                        if surface > 0 {
-                            render_terminal_ui(surface, &term);
-                            let _ = std::surface_flip(6);
-                        }
                         std::log(0, "[TERMINAL APP] Normalized touch event received.").ok();
                     }
+                }
+                // WHY once per batch: the drain above can carry several touches
+                // before the app is scheduled again, so the commands are
+                // applied first and the console band is repainted and
+                // presented exactly once at the end.
+                if dirty != Dirty::None && surface > 0 {
+                    repaint(surface, &term, dirty);
+                    let _ = std::surface_flip(6);
                 }
             }
         }

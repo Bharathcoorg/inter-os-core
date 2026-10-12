@@ -17,6 +17,9 @@
 //!   to be verified.
 //! - VFS `/system/etc/device_id` for the device identity magic prefix only.
 //!
+//! Banded rendering (`render_vault_band`): only the rows an input actually
+//! dirtied are re-rasterised, instead of all 1,036,800 pixels on every event.
+//!
 //! The presentation is built from the canonical InterOS light design tokens on
 //! an 8-point grid: 24px screen margin, 672px content column, 18px card radius,
 //! 48px minimum touch targets. Every string is measured and ellipsised to the
@@ -503,6 +506,13 @@ const TITLE: &[u8] = b"Vault";
 const SUBTITLE: &[u8] = b"Sovereign encrypted storage";
 
 const STATUS_Y: usize = 1328;
+/// Rows the status line owns: one scale-1 run at `STATUS_Y`.
+///
+/// WHY `GLYPH_H`: a scale-1 run is exactly one line box tall, and
+/// `font::line_height(1)` is this constant - but that helper takes its scale at
+/// runtime, so the band ceiling is spelled from the shared glyph height instead
+/// of repeating a literal 24 that could drift from the face.
+const STATUS_H: usize = std::design::font::GLYPH_H;
 const GESTURE_Y0: usize = 1400;
 
 /// Card A: hardware keystore probes.
@@ -1142,19 +1152,145 @@ fn render_vault_ui(surface: u32, vault: &VaultApp) {
     }
 }
 
-/// Returns true if app should exit back to Launcher.
-fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> bool {
+/// Re-rasterises and writes only rows `y0..y1`.
+///
+/// WHY a band and not a rectangle: a row of the surface is one contiguous run in
+/// the surface buffer, so `offset = y0 * W` writes a whole band with no stride
+/// bookkeeping. Every band starts on a row boundary, so the running `x`/`y`
+/// cursor below is exact.
+///
+/// WHY this is correct rather than a shortcut: the band is named after what the
+/// touch actually moved (see `Dirty`), and every row outside it is correct
+/// because nothing it draws from changed. The old renderer re-rasterised all
+/// 1,036,800 pixels on every touch event, including touches that landed on
+/// blank canvas and changed nothing.
+fn render_vault_band(surface: u32, vault: &VaultApp, y0: usize, y1: usize) {
+    let mut chunk = [0u32; CHUNK];
+    let mut offset = y0 * W;
+    let end = y1.min(H) * W;
+
+    while offset < end {
+        let count = (end - offset).min(CHUNK);
+        let mut x = offset % W;
+        let mut y = offset / W;
+
+        for i in 0..count {
+            chunk[i] = get_vault_pixel(x, y, vault);
+            x += 1;
+            if x == W {
+                x = 0;
+                y += 1;
+            }
+        }
+
+        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        offset += count;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Input handling
+// -----------------------------------------------------------------------------
+
+/// Which rows of the surface an input actually changed.
+///
+/// WHY this exists: the old loop called `render_vault_ui` for every tap, so a
+/// touch on blank canvas cost the same 1,036,800-pixel repaint as a successful
+/// round-trip over all six sectors.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dirty {
+    /// Nothing moved; the surface is already correct, so do not render at all.
+    None,
+    /// The RE-PROBE pill re-ran the keystore, entropy and identity probes:
+    /// Card A's three verdicts, Card C's entropy verdict and the status line.
+    Reprobe,
+    /// One sector tile was re-verified.
+    ///
+    /// WHY it carries the tile index: the six tiles are drawn from
+    /// `sectors[index].authenticated`, so a tap dirties exactly one tile's row.
+    /// Naming a single "sectors card" band would repaint five tiles that cannot
+    /// have moved, and naming none would force the whole surface. The round-trip
+    /// counters in Card C and the status line move with it.
+    Sector(usize),
+    /// Every sector tile was re-verified: the whole of Card B, the counters row
+    /// in Card C and the status line.
+    VerifyAll,
+    /// The backup frame was exported: Card C's backup verdict and the status
+    /// line.
+    Backup,
+    /// More than one of the regions above moved: the whole surface.
+    All,
+}
+
+/// Grow a dirty region so one rendered frame covers everything a poll batch
+/// changed.
+///
+/// WHY: `event_poll` can deliver several touches before the app is scheduled
+/// again; rendering only the last region would leave the earlier one stale.
+impl Dirty {
+    fn widen(self, other: Dirty) -> Dirty {
+        match (self, other) {
+            (Dirty::None, d) | (d, Dirty::None) => d,
+            (a, b) if a == b => a,
+            _ => Dirty::All,
+        }
+    }
+}
+
+enum Tap {
+    /// Nothing on screen moved.
+    None,
+    /// The model moved; render the named region.
+    Redraw(Dirty),
+    /// Leave to the launcher, logging this exact reason first.
+    Leave(&'static str),
+}
+
+/// Maps a `Dirty` onto the bands it re-rasterises.
+///
+/// WHY a function and not a match at the call site: three of the variants each
+/// walk several disjoint bands - a control and its consequence - and keeping
+/// that walk in one place is what stops a variant from silently losing a band.
+fn repaint(surface: u32, vault: &VaultApp, dirty: Dirty) {
+    match dirty {
+        Dirty::None => {}
+        Dirty::Reprobe => {
+            render_vault_band(surface, vault, CARD_A_Y, CARD_A_Y + CARD_A_H);
+            render_vault_band(surface, vault, CARD_C_Y, CARD_C_Y + CARD_C_H);
+            render_vault_band(surface, vault, STATUS_Y, STATUS_Y + STATUS_H);
+        }
+        Dirty::Sector(index) => {
+            let (_, ty) = tile_origin(index);
+            render_vault_band(surface, vault, ty, ty + TILE_H);
+            render_vault_band(surface, vault, CARD_C_Y, CARD_C_Y + CARD_C_H);
+            render_vault_band(surface, vault, STATUS_Y, STATUS_Y + STATUS_H);
+        }
+        Dirty::VerifyAll => {
+            render_vault_band(surface, vault, CARD_B_Y, CARD_B_Y + CARD_B_H);
+            render_vault_band(surface, vault, CARD_C_Y, CARD_C_Y + CARD_C_H);
+            render_vault_band(surface, vault, STATUS_Y, STATUS_Y + STATUS_H);
+        }
+        Dirty::Backup => {
+            render_vault_band(surface, vault, CARD_C_Y, CARD_C_Y + CARD_C_H);
+            render_vault_band(surface, vault, STATUS_Y, STATUS_Y + STATUS_H);
+        }
+        Dirty::All => render_vault_ui(surface, vault),
+    }
+}
+
+/// Resolves one touch against the controls that are actually drawn and runs it.
+///
+/// Every branch that moves the model reports the region it moved (see `Dirty`);
+/// a touch that lands on no control changes nothing and reports `Tap::None`,
+/// which is what stops an inert tap from costing a full repaint. Returns a
+/// `Tap::Leave` when the app should exit back to the launcher.
+fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
     let x = x as usize;
     let y = y as usize;
 
     // Back button, or the home gesture strip: exit to the launcher.
     if in_round(x, y, BACK_X, BACK_Y, BACK_S, BACK_S, 14) || y >= GESTURE_Y0 {
-        std::log(
-            0,
-            "[VAULT] Back button or home gesture pressed. Exiting to launcher.",
-        )
-        .ok();
-        return true;
+        return Tap::Leave("[VAULT] Back button or home gesture pressed. Exiting to launcher.");
     }
 
     // Header action pill: re-run every platform probe this screen reports on.
@@ -1167,7 +1303,7 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> bool {
             b"re-probed keystore, entropy and device identity",
         );
         std::log(0, "[VAULT] Re-probed keystore, entropy and device identity.").ok();
-        return false;
+        return Tap::Redraw(Dirty::Reprobe);
     }
 
     // Sector tiles: re-run that sector's round-trip test at its drawn rect.
@@ -1186,7 +1322,7 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> bool {
                 )
                 .ok();
             }
-            return false;
+            return Tap::Redraw(Dirty::Sector(index));
         }
     }
 
@@ -1205,7 +1341,7 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> bool {
             )
             .ok();
         }
-        return false;
+        return Tap::Redraw(Dirty::VerifyAll);
     }
     if in_round(x, y, BTN_X[1], BTN_Y, BTN_W, BTN_H, 14) {
         // The function persists the frame, validates the read-back copy and
@@ -1221,10 +1357,10 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> bool {
             BackupState::NotAttempted => status(vault, b"backup not exported"),
         }
         std::audio_haptic_click().ok();
-        return false;
+        return Tap::Redraw(Dirty::Backup);
     }
 
-    false
+    Tap::None
 }
 
 #[no_mangle]
@@ -1266,7 +1402,7 @@ pub extern "C" fn _start() -> ! {
         &mut vault,
         b"verification and backup export are user-triggered",
     );
-    render_vault_ui(surface, &vault);
+    repaint(surface, &vault, Dirty::All);
     let _ = std::surface_flip(6);
     std::audio_haptic_click().ok();
     std::log(
@@ -1316,6 +1452,7 @@ pub extern "C" fn _start() -> ! {
                     dy: 0,
                     scale_milli: 1000,
                 };
+                let mut dirty = Dirty::None;
                 while std::input_event_poll(&mut input).is_ok() {
                     if input.kind == 4 || input.kind == 6 || input.kind == 7 || input.kind == 8 || input.kind == 10 {
                         std::log(
@@ -1327,13 +1464,24 @@ pub extern "C" fn _start() -> ! {
                         std::exit_with_code(0);
                     }
                     if input.kind == 1 {
-                        if handle_vault_touch(&mut vault, input.x, input.y) {
-                            let _ = std::surface_destroy(6, surface);
-                            std::exit_with_code(0);
+                        match handle_vault_touch(&mut vault, input.x, input.y) {
+                            Tap::Leave(msg) => {
+                                std::log(0, msg).ok();
+                                let _ = std::surface_destroy(6, surface);
+                                std::exit_with_code(0);
+                            }
+                            Tap::Redraw(d) => dirty = dirty.widen(d),
+                            Tap::None => {}
                         }
-                        render_vault_ui(surface, &vault);
-                        let _ = std::surface_flip(6);
                     }
+                }
+                // WHY once per batch: the drain above can carry several touches
+                // before the app is scheduled again, and each one only names the
+                // rows it moved, so the merged region is repainted and
+                // presented exactly once instead of once per event.
+                if dirty != Dirty::None {
+                    repaint(surface, &vault, dirty);
+                    let _ = std::surface_flip(6);
                 }
             }
         }

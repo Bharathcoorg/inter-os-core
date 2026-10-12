@@ -6,6 +6,9 @@
 //! - 5x4 rounded mobile keypad matrix with semantic design tokens
 //! - Interactive touch event processing and button hit-testing
 //! - Full arithmetic execution engine: Add, Subtract, Multiply, Divide, Clear, Evaluate
+//! - Banded rendering (`render_calculator_band`): only the rows an input
+//!   actually dirtied are re-rasterised, instead of all 1,036,800 pixels on
+//!   every event
 //! - Graceful lifecycle supervision and clean return to Launcher
 
 #![no_std]
@@ -353,6 +356,106 @@ fn render_calculator_ui(surface: u32, calc: &CalculatorState) {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Screen band - the single source of truth for the `Dirty` -> band mapping
+// used by the input paths below.
+// -----------------------------------------------------------------------------
+
+/// Rows the display card owns (y: 110..410, x: 24..696).
+///
+/// WHY the card and not just the two runs inside it: the operation badge and
+/// the displayed value are the only pixels on this surface that are a function
+/// of state. The header, the keypad and the home gesture pill are drawn from
+/// compile-time constants, so no input can move a pixel outside this band.
+const DISPLAY_Y0: usize = 110;
+const DISPLAY_Y1: usize = 410;
+
+/// Re-rasterises and writes only rows `y0..y1`.
+///
+/// WHY a band and not a rectangle: a row of the surface is one contiguous run in
+/// the surface buffer, so `offset = y0 * W` writes a whole band with no stride
+/// bookkeeping. Every band starts on a row boundary, so the running `x`/`y`
+/// cursor below is exact.
+///
+/// WHY this is correct rather than a shortcut: the band is named after what the
+/// input actually moved (see `Dirty`), and every row outside it is correct
+/// because nothing about it changed. The old renderer re-rasterised all
+/// 1,036,800 pixels on every event, including taps that hit no key at all.
+fn render_calculator_band(surface: u32, calc: &CalculatorState, y0: usize, y1: usize) {
+    let mut chunk = [0u32; CHUNK];
+    let mut offset = y0 * W;
+    let end = y1.min(H) * W;
+    while offset < end {
+        let count = (end - offset).min(CHUNK);
+        let mut x = offset % W;
+        let mut y = offset / W;
+        for i in 0..count {
+            chunk[i] = get_calculator_pixel(x, y, calc);
+            x += 1;
+            if x == W {
+                x = 0;
+                y += 1;
+            }
+        }
+        let _ = std::surface_write(6, surface, offset, &chunk[..count]);
+        offset += count;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Input handling
+// -----------------------------------------------------------------------------
+
+/// Which rows of the surface an input actually changed.
+///
+/// WHY this exists: the old loop called `render_calculator_ui` after every
+/// touch and every keypress, so a single digit re-rasterised all 1,036,800
+/// pixels through `get_calculator_pixel` - the same cost as a full screen
+/// transition, for a change confined to one card.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dirty {
+    /// Nothing moved; the surface is already correct, so do not render at all.
+    None,
+    /// A digit, operator, evaluate, clear, sign, backspace, percent or square
+    /// moved the entry or the active-operation badge: the display card only.
+    Display,
+    /// More than one band moved, or the first frame: the whole surface.
+    All,
+}
+
+/// Grow a dirty region so one rendered frame covers everything a poll batch
+/// changed.
+///
+/// WHY: `event_poll` can deliver several inputs before the app is scheduled
+/// again; rendering only the last region would leave the earlier one stale.
+impl Dirty {
+    fn widen(self, other: Dirty) -> Dirty {
+        match (self, other) {
+            (Dirty::None, d) | (d, Dirty::None) => d,
+            (a, b) if a == b => a,
+            _ => Dirty::All,
+        }
+    }
+}
+
+enum Tap {
+    /// Nothing on screen moved.
+    None,
+    /// The model moved; render the named region.
+    Redraw(Dirty),
+    /// Leave to the launcher, logging this exact reason first.
+    Leave(&'static str),
+}
+
+/// Maps a `Dirty` onto the bands it re-rasterises.
+fn repaint(surface: u32, calc: &CalculatorState, dirty: Dirty) {
+    match dirty {
+        Dirty::None => {}
+        Dirty::Display => render_calculator_band(surface, calc, DISPLAY_Y0, DISPLAY_Y1),
+        Dirty::All => render_calculator_ui(surface, calc),
+    }
+}
+
 fn handle_keyboard_key(calc: &mut CalculatorState, code: u32) -> bool {
     use std::input_key_code;
     match code {
@@ -380,19 +483,20 @@ fn handle_keyboard_key(calc: &mut CalculatorState, code: u32) -> bool {
     true
 }
 
-fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> (bool, Option<&'static str>) {
+/// Resolves one touch against the keys that are actually drawn.
+///
+/// Every branch below mutates state that is drawn inside the display card (see
+/// `Dirty::Display`), so the returned region is the same for all of them; a
+/// touch that lands on no key at all changes nothing and reports `Tap::None`,
+/// which is what stops an inert tap from costing a full repaint.
+fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
     // Home gesture bar exits to the launcher.
     // WHY: a back-button clause (x 24..100, y 28..68) used to live here, but
     // this app never draws a back button — the header is empty there — so a
     // tap on blank header space silently killed the calculator. Navigation
     // gestures (Back/Home/Recents/Pan/Fling) still exit through the event loop.
     if x >= 240 && x <= 480 && y >= 1400 {
-        std::log(
-            0,
-            "[CALCULATOR] Home gesture tapped. Returning to launcher.",
-        )
-        .ok();
-        return (true, None);
+        return Tap::Leave("[CALCULATOR] Home gesture tapped. Returning to launcher.");
     }
 
     for row in 0..5 {
@@ -402,54 +506,58 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> (bool, Opti
                 let bx = COL_X[col] as u32;
                 if x >= bx && x < bx + (BTN_W as u32) {
                     if let Some(action) = get_button_action(row, col) {
-                        let msg = match action {
+                        // WHY the messages are logged here rather than returned:
+                        // the keypad arms are the only thing between the press
+                        // and the log line, and carrying each string back out
+                        // would make the caller reassemble a decision it cannot
+                        // see. The wording is unchanged.
+                        match action {
                             '0'..='9' => {
                                 let digit = (action as u8 - b'0') as i64;
                                 calc.push_digit(digit);
-                                Some("[CALCULATOR] Keypad digit pressed.")
+                                std::log(0, "[CALCULATOR] Keypad digit pressed.").ok();
                             }
                             '+' | '-' | '*' | '/' => {
                                 calc.set_operation(action);
-                                Some("[CALCULATOR] Keypad operator selected.")
+                                std::log(0, "[CALCULATOR] Keypad operator selected.").ok();
                             }
                             '=' => {
                                 let res = calc.evaluate();
                                 let _ = res;
-                                Some("[CALCULATOR] Evaluation completed.")
+                                std::log(0, "[CALCULATOR] Evaluation completed.").ok();
                             }
                             'C' => {
                                 calc.clear();
-                                Some("[CALCULATOR] Clear pressed.")
+                                std::log(0, "[CALCULATOR] Clear pressed.").ok();
                             }
                             '~' => {
                                 calc.toggle_sign();
-                                None
                             }
                             'B' => {
                                 calc.current_operand /= 10;
                                 calc.result_mode = false;
-                                Some("[CALCULATOR] Backspace applied.")
+                                std::log(0, "[CALCULATOR] Backspace applied.").ok();
                             }
                             '%' => {
                                 calc.current_operand /= 100;
                                 calc.result_mode = false;
-                                Some("[CALCULATOR] Integer percent applied.")
+                                std::log(0, "[CALCULATOR] Integer percent applied.").ok();
                             }
                             '^' => {
                                 calc.current_operand = calc.current_operand.saturating_mul(calc.current_operand);
                                 calc.result_mode = true;
-                                Some("[CALCULATOR] Square applied.")
+                                std::log(0, "[CALCULATOR] Square applied.").ok();
                             }
-                            _ => None,
-                        };
-                        return (false, msg);
+                            _ => {}
+                        }
+                        return Tap::Redraw(Dirty::Display);
                     }
-                    return (false, None);
+                    return Tap::None;
                 }
             }
         }
     }
-    (false, None)
+    Tap::None
 }
 
 #[no_mangle]
@@ -487,7 +595,7 @@ pub extern "C" fn _start() -> ! {
     calc.clear();
 
     // 3. Render initial Calculator UI frame and present
-    render_calculator_ui(surface, &calc);
+    repaint(surface, &calc, Dirty::All);
     let _ = std::surface_flip(6);
     std::log(
         0,
@@ -506,11 +614,14 @@ pub extern "C" fn _start() -> ! {
                 dy: 0,
                 scale_milli: 1000,
             };
+            let mut dirty = Dirty::None;
             while std::input_event_poll(&mut input).is_ok() {
                 if let Some(key) = input.key_event() {
                     if key.pressed && handle_keyboard_key(&mut calc, key.code) {
-                        render_calculator_ui(surface, &calc);
-                        let _ = std::surface_flip(6);
+                        // WHY the display band: every key this handler accepts
+                        // moves the entry or the active-operation badge, and
+                        // nothing else on the surface is a function of state.
+                        dirty = dirty.widen(Dirty::Display);
                     }
                     continue;
                 }
@@ -532,18 +643,24 @@ pub extern "C" fn _start() -> ! {
                 // both keeps press-consistent semantics: two presses, two
                 // actions.
                 if input.kind == 1 || input.kind == 2 {
-                    let (should_exit, action_logged) =
-                        handle_touch_point(&mut calc, input.x, input.y);
-                    if let Some(msg) = action_logged {
-                        std::log(0, msg).ok();
+                    match handle_touch_point(&mut calc, input.x, input.y) {
+                        Tap::Leave(msg) => {
+                            std::log(0, msg).ok();
+                            let _ = std::surface_destroy(6, surface);
+                            std::exit_with_code(0);
+                        }
+                        Tap::Redraw(d) => dirty = dirty.widen(d),
+                        Tap::None => {}
                     }
-                    if should_exit {
-                        let _ = std::surface_destroy(6, surface);
-                        std::exit_with_code(0);
-                    }
-                    render_calculator_ui(surface, &calc);
-                    let _ = std::surface_flip(6);
                 }
+            }
+            // WHY once per batch: the drain above can carry several inputs
+            // before this task is scheduled again, and each one only names the
+            // rows it moved, so the merged region is repainted and presented
+            // exactly once instead of once per event.
+            if dirty != Dirty::None {
+                repaint(surface, &calc, dirty);
+                let _ = std::surface_flip(6);
             }
         }
 
