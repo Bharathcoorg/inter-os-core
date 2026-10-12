@@ -1898,7 +1898,29 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             if user_slice.copy_to_kernel_typed(&mut surface.pixels[offset..end]).is_err() {
                 return SyscallResult::InvalidArguments as i64;
             }
+            // Record which surface rows moved, exactly as the safer
+            // `write_surface_pixels` path does.
+            //
+            // WHY this was missing: this syscall is how every client surface
+            // writes its pixels, and it set the dirty flag without the row band,
+            // so every surface in the guest carried a dirty flag with an empty
+            // band. The compositor's row diff papers over that today by
+            // comparing the whole scanout -- which is a full-surface pass per
+            // flip, and the dominant cost in a compositor that a scanout past
+            // 720x1440 needs to narrow. Recording the band here is what makes
+            // the diff redundant rather than load-bearing.
+            let row_pitch = surface.width as usize;
+            let band = if row_pitch > 0 {
+                let r0 = offset / row_pitch;
+                let r1 = (end - 1) / row_pitch + 1;
+                Some((r0, r1.min(surface.height as usize)))
+            } else {
+                None
+            };
             surface.dirty = true;
+            if let Some(band) = band {
+                crate::drivers::display_kms::union_rows(&mut surface.dirty_rows, band.0, band.1);
+            }
             kms.frame_dirty = true;
             count as i64
         }

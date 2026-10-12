@@ -34,7 +34,13 @@ pub const MAX_SCANOUT_PIXELS: usize = 3840 * 2160;
 /// outside `band` are unchanged" easy to state and to test. Empty and inverted
 /// ranges are absorbed (`y1 <= band.0` adds nothing), which matters because a
 /// clipped-off surface can produce an empty range.
-fn union_rows(band: &mut (usize, usize), y0: usize, y1: usize) {
+/// Widens `band` to cover `y0..y1`, half-open.
+///
+/// WHY a helper with a public face: the `SurfaceWrite` syscall needs to record
+/// the same rows the controller's own write path records, and a caller reaching
+/// for its own arithmetic there produces exactly the kind of band that disagrees
+/// with the compositor's. Exported so there is one implementation.
+pub fn union_rows(band: &mut (usize, usize), y0: usize, y1: usize) {
     if y1 <= y0 { return; }
     if band.1 <= band.0 {
         *band = (y0, y1);
