@@ -967,6 +967,26 @@ pub fn spawn_app_dialer(id_security: TaskId) -> TaskId {
         rights: Rights::WRITE,
         object_id: 1,
     }).ok();
+    // WHY the dialer is granted FileSystemWrite: it holds a real persisted
+    // contact store -- 36-byte records, eight of them, 290 bytes of blob -- and
+    // the platform's settings store is where a flat array of equal records
+    // belongs, the same choice messages, calendar and music already make. The
+    // grant the app actually held was FileSystemRead with `Rights::READ`, so
+    // `sys_settings_set` answered PermissionDenied and every contact the user
+    // typed was reported honestly as unsaved while the store was otherwise
+    // complete. A read-only grant to an app whose job is to remember who you
+    // call is not a capability boundary, it is a missing one.
+    //
+    // WHY this is safe: the VFS confines a ring-3 task to its own app storage
+    // (`enforce_app_path`), so the grant cannot reach another app's data or the
+    // system partition. The other four first-party apps with persisted stores
+    // hold the identical grant.
+    caps.insert(Capability {
+        id: CapabilityId(1908),
+        cap_type: CapabilityType::FileSystemWrite,
+        rights: Rights::READ | Rights::WRITE | Rights::GRANT,
+        object_id: 0,
+    }).ok();
 
     let id = spawn_user_process_with_parent(
         "app_dialer",
@@ -1219,6 +1239,29 @@ pub fn spawn_app_browser(id_security: TaskId) -> TaskId {
         id: CapabilityId(2308),
         cap_type: CapabilityType::EventPoll,
         rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
+    // WHY the browser is granted both filesystem capabilities: it holds a real
+    // persisted bookmark store and a real history, and its `parse_uri` now
+    // genuinely produces `file://` and `interlayer://` — both of which need a
+    // file handle. The grant it actually held was none at all, so even
+    // `sys_settings_get` was refused and the two finished stores reported
+    // themselves unsaved rather than looking real.
+    //
+    // Read and write are granted together because they are one capability here:
+    // a bookmark store you cannot write is not a store, and a local document you
+    // cannot open is not a browser. The VFS confines a ring-3 task to its own
+    // app storage (`enforce_app_path`), so neither reaches another app's data.
+    caps.insert(Capability {
+        id: CapabilityId(2309),
+        cap_type: CapabilityType::FileSystemRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2310),
+        cap_type: CapabilityType::FileSystemWrite,
+        rights: Rights::READ | Rights::WRITE | Rights::GRANT,
         object_id: 0,
     }).ok();
 
