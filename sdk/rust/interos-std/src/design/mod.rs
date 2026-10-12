@@ -86,12 +86,80 @@ pub mod motion {
 
 pub mod viewport {
     /// Canonical portrait smartphone logical viewport dimensions (9:18 standard).
+    ///
+    /// WHY this is the authoring space and not the screen: every app in this
+    /// tree lays out in these coordinates, and the reference design system's
+    /// spacing, type rungs and touch targets are all expressed against them. An
+    /// app that renders into a surface of this size needs no coordinate changes
+    /// at all, which is what makes it the safe default.
     pub const LOGICAL_WIDTH: usize = 720;
     pub const LOGICAL_HEIGHT: usize = 1440;
 
     /// Hardware / QEMU scanout dimensions.
+    ///
+    /// WHY these are separate constants rather than aliases: raising the scanout
+    /// buys real detail only if apps paint at that resolution, and an app that
+    /// keeps painting at `LOGICAL_*` while the scanout grows gets an upscale --
+    /// the same soft edges, at a larger surface cost. Keeping the two numbers
+    /// distinct means a surface size is a decision that appears in the code
+    /// instead of a silent consequence.
+    ///
+    /// The cost of raising it, measured against this guest's own limits: a
+    /// 1080x2400 ARGB8888 surface is 10.4MB, and the compositor holds a front
+    /// and a back buffer, so 20.8MB of the 64MB heap before a single app
+    /// surface. `MAX_SURFACE_PIXELS` already grants an explicit exception for
+    /// width <= 1080 && height <= 2400, so the kernel does not block it.
     pub const SCANOUT_WIDTH: usize = LOGICAL_WIDTH;
     pub const SCANOUT_HEIGHT: usize = LOGICAL_HEIGHT;
+
+    /// Integer ratio from the authoring space to the physical scanout.
+    ///
+    /// WHY an integer and not 1080/720: 1080/720 is 1.5, and a half-pixel
+    /// position cannot be expressed to `typeface::raster`, which takes an
+    /// integer pixel origin. A ratio of exactly 1 (the shipped one) keeps every
+    /// glyph advance an integer; a ratio of 2 would too, and is the first one
+    /// worth considering because it is the next resolution that round-trips
+    /// through the rasteriser without rounding the pen.
+    pub const SCALE: usize = SCANOUT_WIDTH / LOGICAL_WIDTH;
+
+    /// Maps a logical coordinate to the pixel that owns it in the physical
+    /// surface.
+    ///
+    /// WHY this exists: it is the one conversion an app needs in order to
+    /// render at a higher scanout without re-authoring its coordinates. A
+    /// painter that receives a physical (px, py) divides back through this to
+    /// get the logical point its layout already knows, and then draws with a
+    /// size scaled by [`SCALE`]. Everything the app already computes -- boxes,
+    /// hit tests, advances -- stays in the authoring space.
+    ///
+    /// The division is a floor rather than a round, so a logical point maps to
+    /// exactly one physical pixel and two logical points never collide onto one
+    /// pixel. That leaves the last physical column and row unused when the
+    /// ratio is not exact, which is the correct failure: an unused row is
+    /// invisible, a collided one is a dropped stroke.
+    #[inline]
+    pub fn logical_to_surface(lx: usize, ly: usize) -> (usize, usize) {
+        (lx * SCALE, ly * SCALE)
+    }
+
+    /// The inverse of [`logical_to_surface`]: the logical point a physical pixel
+    /// belongs to.
+    #[inline]
+    pub fn surface_to_logical(px: usize, py: usize) -> (usize, usize) {
+        (px / SCALE, py / SCALE)
+    }
+
+    /// True when the scanout is the same size as the authoring space, which is
+    /// the shipped configuration.
+    ///
+    /// WHY a caller needs to know: when this is false, a painter must scale the
+    /// sizes it draws with, and forgetting that produces a correctly laid out
+    /// surface with undersized text. A caller that checks it can refuse the
+    /// mismatch rather than draw the wrong thing.
+    #[inline]
+    pub fn scaled() -> bool {
+        SCALE != 1
+    }
 
     /// System safe areas and chrome metrics.
     pub const STATUS_BAR_HEIGHT: usize = 48;
