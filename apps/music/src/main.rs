@@ -29,6 +29,9 @@
 
 use core::panic::PanicInfo;
 use interos_std as std;
+
+mod store;
+use store::TrackStore;
 use std::design::color::{
     DARK_BACKGROUND as BG, DARK_BORDER as BORDER, DARK_SURFACE as SURFACE, DARK_TEXT as TEXT,
     DARK_TEXT_MUTED as MUTED, TEXT as INK_ON_LIGHT, TEXT_MUTED as FAINT,
@@ -66,6 +69,14 @@ pub struct AudioTrack {
 
 /// Local Music Playlist. Populated only from real media storage, which exposes
 /// no audio files, so the playlist is honestly empty.
+///
+/// WHY this stays a zero-length array while the library is realised elsewhere:
+/// this static is the compile-time "no sample data" anchor -- an app can never
+/// ship a hardcoded track. Real tracks live in the bounded, persisted
+/// `store::TrackStore`, which holds user-typed titles and durations rather than
+/// `&'static str` literals, so it cannot be a `static`. This array therefore
+/// stays empty on purpose and is never read.
+#[allow(dead_code)]
 pub static PLAYLIST: [AudioTrack; 0] = [];
 
 /// Production Sovereign Music state manager.
@@ -86,6 +97,18 @@ pub struct MusicApp {
     pub total_dma_buffers_streamed: u32,
     pub keystore_derived: bool,
     pub sector_encrypted: bool,
+    /// Real, persisted local track library. The playlist and the now-playing row
+    /// render from this, never from a hardcoded array.
+    pub store: TrackStore,
+    /// Add-track editor: title buffer, its length, the duration digits the user
+    /// typed (whole seconds), and which field is focused. `add_open` reveals the
+    /// editor in the track list.
+    pub add_title: [u8; ADD_TITLE_CAP],
+    pub add_title_len: usize,
+    pub add_dur: [u8; ADD_DUR_DIGITS],
+    pub add_dur_len: usize,
+    pub add_open: bool,
+    pub add_focus: u8,
 }
 
 impl MusicApp {
@@ -98,6 +121,13 @@ impl MusicApp {
             total_dma_buffers_streamed: 0,
             keystore_derived: false,
             sector_encrypted: false,
+            store: TrackStore::EMPTY,
+            add_title: [0; ADD_TITLE_CAP],
+            add_title_len: 0,
+            add_dur: [0; ADD_DUR_DIGITS],
+            add_dur_len: 0,
+            add_open: false,
+            add_focus: 0,
         }
     }
 
@@ -251,15 +281,16 @@ impl MusicApp {
         // WHY: the transport state and the DMA counter must track real transfers.
         // Returning false here is what stops the caller from reporting playback
         // or counting a buffer that was never streamed.
-        if PLAYLIST.is_empty() {
+        if self.store.is_empty() {
             std::log(0, "[MUSIC APP] No media payload is available for DMA streaming.").ok();
             return false;
         }
-        // A non-empty playlist would require a real DMA descriptor from the media
-        // subsystem. No such descriptor exists yet, so fail closed.
+        // A real library is present, but there is still no audio mixer, no DMA
+        // descriptor and no playback-position source in this guest, so fail
+        // closed: nothing streams and nothing is counted.
         std::log(
             0,
-            "[MUSIC APP] Media present but no DMA descriptor was obtained; no buffer streamed.",
+            "[MUSIC APP] Local library present but no DMA descriptor was obtained; no buffer streamed.",
         )
         .ok();
         false
@@ -275,7 +306,7 @@ impl MusicApp {
     /// Returns `true` only when the selection actually moved. A tap on prev/next
     /// with an empty library changes nothing, so it reports nothing changed.
     pub fn step_track(&mut self, delta: isize) -> bool {
-        if PLAYLIST.is_empty() {
+        if self.store.is_empty() {
             std::log(
                 0,
                 "[MUSIC APP] Track step ignored: the local library is empty, so there is no next or previous track.",
@@ -283,8 +314,8 @@ impl MusicApp {
             .ok();
             return false;
         }
-        let len = PLAYLIST.len() as isize;
-        let cur = self.current_track_idx as isize;
+        let len = self.store.len() as isize;
+        let cur = (self.current_track_idx.min(self.store.len() - 1)) as isize;
         let next = (cur + delta).rem_euclid(len);
         self.current_track_idx = next as usize;
         true
@@ -317,6 +348,77 @@ impl MusicApp {
                 }
             }
         }
+    }
+
+    /// Commits the add-track editor: validates the title and duration, then adds
+    /// the track to the persisted store. The track joins the list only when the
+    /// write is acknowledged; a refusal is logged, never shown as a stored track.
+    fn save_add(&mut self) -> Dirty {
+        if self.add_title_len == 0 {
+            std::log(
+                0,
+                "[MUSIC APP] Add track needs a title; nothing was stored.",
+            )
+            .ok();
+            return Dirty::None;
+        }
+        if self.add_dur_len == 0 {
+            std::log(
+                0,
+                "[MUSIC APP] Add track needs a duration in seconds; nothing was stored.",
+            )
+            .ok();
+            return Dirty::None;
+        }
+        let mut secs: u32 = 0;
+        for i in 0..self.add_dur_len {
+            let b = self.add_dur[i];
+            if !(b'0'..=b'9').contains(&b) {
+                std::log(
+                    0,
+                    "[MUSIC APP] Duration must be digits only; nothing was stored.",
+                )
+                .ok();
+                return Dirty::None;
+            }
+            secs = secs.saturating_mul(10).saturating_add((b - b'0') as u32).min(100_000);
+        }
+        if secs == 0 {
+            std::log(
+                0,
+                "[MUSIC APP] Duration must be at least 1 second; nothing was stored.",
+            )
+            .ok();
+            return Dirty::None;
+        }
+        let mut title = [0u8; ADD_TITLE_CAP];
+        let n = self.add_title_len.min(ADD_TITLE_CAP);
+        title[..n].copy_from_slice(&self.add_title[..n]);
+        if self.store.add(&title[..n], secs) {
+            std::log(
+                0,
+                "[MUSIC APP] Track stored to the local library by title and duration; no audio file is claimed.",
+            )
+            .ok();
+            self.add_title_len = 0;
+            self.add_dur_len = 0;
+            self.add_open = false;
+            self.add_focus = 0;
+            Dirty::All
+        } else {
+            // Report the store's real refusal (capacity or write refusal), never
+            // a track that did not persist.
+            std::log(0, self.store.last_reason()).ok();
+            Dirty::None
+        }
+    }
+
+    /// Discards the add-track editor without storing anything.
+    pub fn cancel_add(&mut self) {
+        self.add_open = false;
+        self.add_focus = 0;
+        self.add_title_len = 0;
+        self.add_dur_len = 0;
     }
 }
 
@@ -402,10 +504,23 @@ const TRANSPORT_Y1: usize = TRANSPORT_CY + PLAY_R;
 
 const LIST_LABEL_Y: usize = 1080;
 const LIST_DIVIDER_Y: usize = 1116;
-const LIST_HIT_Y0: usize = 1130;
-const LIST_HIT_Y1: usize = 1260;
+const LIST_HIT_Y1: usize = 1400;
 const LIST_TITLE_Y: usize = 1160;
 const LIST_SUB_Y: usize = 1224;
+
+/// Track-list row pitch and the pitch body of each row.
+const TRACKLIST_ROW_H: usize = 96;
+/// "ADD TRACK" button on the label row (right side, >= 44 px tall to hit).
+const ADD_BTN: Rect = Rect { x: 24 + 672 - 168, y: 1072, w: 168, h: 40 };
+/// Add-track editor fields, shown while `add_open` in the track-list band.
+const ADD_TITLE_FIELD: Rect = Rect { x: 24, y: 1140, w: 672, h: 48 };
+const ADD_DUR_FIELD: Rect = Rect { x: 24, y: 1196, w: 400, h: 48 };
+const ADD_SAVE_BTN: Rect = Rect { x: 436, y: 1196, w: 128, h: 48 };
+const ADD_CANCEL_BTN: Rect = Rect { x: 576, y: 1196, w: 120, h: 48 };
+/// Title bytes the add editor holds. Matches the store's per-record title width.
+const ADD_TITLE_CAP: usize = 40;
+/// Duration digits the add editor holds (whole seconds, up to 5 digits).
+const ADD_DUR_DIGITS: usize = 5;
 
 const HOME_X0: usize = 240;
 const HOME_X1: usize = 480;
@@ -481,6 +596,55 @@ fn put_u8(out: &mut [u8; 4], v: u8) -> usize {
     }
     for i in 0..n {
         out[i] = tmp[n - 1 - i];
+    }
+    n
+}
+
+/// Formats a stored track duration as `m:ss` (or `h:mm:ss` for an hour or more)
+/// into `out`, returning the length. It is a length the user entered, never a
+/// playback position.
+fn fmt_mmss(out: &mut [u8; 12], secs: u32) -> usize {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    let mut n = 0usize;
+    if h > 0 {
+        let mut hb = [0u8; 4];
+        let hn = fmt_u32_pub(&mut hb, h);
+        out[..hn].copy_from_slice(&hb[..hn]);
+        n += hn;
+        out[n] = b':';
+        n += 1;
+        out[n] = b'0' + (m / 10) as u8;
+        out[n + 1] = b'0' + (m % 10) as u8;
+        n += 2;
+    } else {
+        let mut mb = [0u8; 4];
+        let mn = fmt_u32_pub(&mut mb, m);
+        out[..mn].copy_from_slice(&mb[..mn]);
+        n += mn;
+    }
+    out[n] = b':';
+    out[n + 1] = b'0' + (s / 10) as u8;
+    out[n + 2] = b'0' + (s % 10) as u8;
+    n + 3
+}
+
+/// Decimal `v` into a scratch buffer, no leading zeros. Returns the length.
+fn fmt_u32_pub(scratch: &mut [u8; 4], v: u32) -> usize {
+    let mut tmp = [0u8; 4];
+    let mut n = 0usize;
+    let mut x = v.min(9999);
+    loop {
+        tmp[n] = b'0' + (x % 10) as u8;
+        x /= 10;
+        n += 1;
+        if x == 0 {
+            break;
+        }
+    }
+    for i in 0..n {
+        scratch[i] = tmp[n - 1 - i];
     }
     n
 }
@@ -696,24 +860,39 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         return SURFACE;
     }
 
-    // 3. Track metadata from the real playlist (empty -> honest idle copy).
-    let title: &[u8] = match PLAYLIST.get(app.current_track_idx) {
-        Some(t) => t.title.as_bytes(),
+    // 3. Track metadata from the real, persisted library (empty -> honest idle
+    //    copy). The now-playing row reads from here.
+    let sel: Option<&store::TrackRecord> = app.store.get(app.current_track_idx);
+    let title: &[u8] = match sel {
+        Some(t) => t.title(),
         None => b"No track selected",
     };
     {
-        let tw = font::measure(title, 2);
-        if tw <= CONTENT_W {
-            if let Some(c) = text_bold(x, y, (W - tw) / 2, TITLE_Y, 2, title, TEXT, BG) {
-                return c;
-            }
+        // Ellipsise to the content column so a long real title truncates instead
+        // of vanishing (the old code drew nothing when the title overflowed).
+        let mut tbuf = [0u8; 40];
+        let tn = font::ellipsize(title, 2, CONTENT_W, &mut tbuf);
+        if let Some(c) = text_bold(x, y, (W - font::measure(&tbuf[..tn], 2)) / 2, TITLE_Y, 2, &tbuf[..tn], TEXT, BG) {
+            return c;
         }
     }
-    let artist: &[u8] = match PLAYLIST.get(app.current_track_idx) {
-        Some(t) => t.artist.as_bytes(),
-        None => b"Local library is empty - nothing to play",
-    };
-    if let Some(c) = text_centered(x, y, ARTIST_Y, 1, artist, MUTED, BG) {
+    // Honest sub-caption. With a track it states the stored duration (a length
+    // the user entered, never a playback position); with none it keeps the
+    // empty-library copy exactly as before.
+    if let Some(t) = sel {
+        let mut cap = [0u8; 24];
+        cap[..9].copy_from_slice(b"Duration ");
+        let mut cl = 9usize;
+        let mut db = [0u8; 12];
+        let dn = fmt_mmss(&mut db, t.duration_sec());
+        if cl + dn <= cap.len() {
+            cap[cl..cl + dn].copy_from_slice(&db[..dn]);
+            cl += dn;
+        }
+        if let Some(c) = text_centered(x, y, ARTIST_Y, 1, &cap[..cl], MUTED, BG) {
+            return c;
+        }
+    } else if let Some(c) = text_centered(x, y, ARTIST_Y, 1, b"Local library is empty - nothing to play", MUTED, BG) {
         return c;
     }
     let state_label: &[u8] = match app.state {
@@ -725,36 +904,44 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         return c;
     }
 
-    // 4. Scrubber: bound to a real position; no backend reports one, so the bar
-    //    stays idle (no fill, no knob, unknown duration).
+    // 4. Scrubber: it never moves to an invented position. No audio backend
+    //    reports one, so the bar stays recessed (inert, no fill, no knob) in
+    //    every state; with a track selected the honest duration is shown, and
+    //    elapsed stays 0:00 because nothing actually plays.
     //
     // WHY the recessed fill rather than BORDER: the rule used to be drawn in the
     // same stroke colour as the enabled controls elsewhere on this surface,
     // which read as a seekable track. RECESSED is the one tone in this palette
-    // reserved for something that cannot be acted on, and with no position and
-    // no duration there is nothing to seek.
+    // reserved for something that cannot be acted on, and with no position
+    // there is nothing to seek.
     if y >= TRACK_Y && y < TRACK_Y + TRACK_H && x >= MARGIN && x < MARGIN + CONTENT_W {
         return RECESSED;
     }
     if y >= TIMES_Y && y < TIMES_Y + font::line_height(1) {
+        // Elapsed is truly 0:00: no transport has ever advanced a position.
         if let Some(c) = text(x, y, MARGIN, TIMES_Y, 1, b"0:00", FAINT, BG) {
             return c;
         }
-        let rem = b"--:--";
-        let rw = font::measure(rem, 1);
+        // The right label is the stored duration when one is known, otherwise
+        // the honest unknown. It is a length, not a playback position.
+        let mut db = [0u8; 12];
+        let (rem, rw) = match sel {
+            Some(t) => {
+                let n = fmt_mmss(&mut db, t.duration_sec());
+                (&db[..n] as &[u8], font::measure(&db[..n], 1))
+            }
+            None => (b"--:--" as &[u8], font::measure(b"--:--", 1)),
+        };
         if let Some(c) = text(x, y, MARGIN + CONTENT_W - rw, TIMES_Y, 1, rem, FAINT, BG) {
             return c;
         }
     }
-    if let Some(c) = text_centered(
-        x,
-        y,
-        SCRUB_NOTE_Y,
-        1,
-        b"No media backend reports a playback position",
-        FAINT,
-        BG,
-    ) {
+    let scrub_note: &[u8] = if sel.is_some() {
+        b"No audio backend reports a playback position; the scrubber stays at 0:00"
+    } else {
+        b"No media backend reports a playback position"
+    };
+    if let Some(c) = text_centered(x, y, SCRUB_NOTE_Y, 1, scrub_note, FAINT, BG) {
         return c;
     }
 
@@ -769,7 +956,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
     // 5. Transport row at y = 990. Targets: 64 / 88 / 64 px, all >= 56 px.
     //    With an empty library every control renders in the recessed, disabled
     //    treatment so nothing reads as playing.
-    let active = !PLAYLIST.is_empty();
+    let active = !app.store.is_empty();
 
     {
         let r = if active { SURFACE } else { RECESSED };
@@ -840,83 +1027,155 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
         }
     }
 
-    // 6. Track list section: real rows when the library has entries, an honest
-    //    empty state when it does not.
+    // 6. Track list section: an "ADD TRACK" control, the add editor when it is
+    //    open, real rows when the library has entries, and an honest empty state
+    //    otherwise.
     if y >= LIST_LABEL_Y && y < LIST_LABEL_Y + font::line_height(1) {
         if let Some(c) = text(x, y, MARGIN, LIST_LABEL_Y, 1, b"TRACKS", FAINT, BG) {
             return c;
         }
     }
+    if let Some(c) = draw_pill(x, y, ADD_BTN, SURFACE, Some(BORDER)) {
+        if let Some(c) = text_centered(
+            x,
+            y,
+            ADD_BTN.y + (ADD_BTN.h.saturating_sub(font::line_height(1))) / 2,
+            1,
+            b"ADD TRACK",
+            TEXT,
+            SURFACE,
+        ) {
+            return c;
+        }
+        return c;
+    }
     if y == LIST_DIVIDER_Y && x >= MARGIN && x < MARGIN + CONTENT_W {
         return BORDER;
     }
 
-    match PLAYLIST.first() {
-        None => {
-            if let Some(c) = text_centered(x, y, LIST_TITLE_Y, 2, b"No tracks", TEXT, BG) {
+    if app.add_open {
+        // Add-track editor: a title field, a duration (seconds) field, and
+        // Save / Cancel controls. Shares its rects with the tap handler and with
+        // its own repaint band.
+        if let Some(c) = draw_rounded_rect(x, y, ADD_TITLE_FIELD, 12, SURFACE, Some(BORDER), 1) {
+            if c != SURFACE {
                 return c;
             }
+            let tt = &app.add_title[..app.add_title_len];
+            let shown: &[u8] = if tt.is_empty() { b"Track title" } else { tt };
+            let ty = ADD_TITLE_FIELD.y + (ADD_TITLE_FIELD.h.saturating_sub(font::line_height(1))) / 2;
+            let ink = if tt.is_empty() { FAINT } else { TEXT };
+            if let Some(c) = text(x, y, ADD_TITLE_FIELD.x + 16, ty, 1, shown, ink, SURFACE) {
+                return c;
+            }
+            return SURFACE;
+        }
+        if let Some(c) = draw_rounded_rect(x, y, ADD_DUR_FIELD, 12, SURFACE, Some(BORDER), 1) {
+            if c != SURFACE {
+                return c;
+            }
+            let dd = &app.add_dur[..app.add_dur_len];
+            let shown: &[u8] = if dd.is_empty() { b"duration (s)" } else { dd };
+            let dyy = ADD_DUR_FIELD.y + (ADD_DUR_FIELD.h.saturating_sub(font::line_height(1))) / 2;
+            let ink = if dd.is_empty() { FAINT } else { TEXT };
+            if let Some(c) = text(x, y, ADD_DUR_FIELD.x + 16, dyy, 1, shown, ink, SURFACE) {
+                return c;
+            }
+            return SURFACE;
+        }
+        if let Some(c) = draw_pill(x, y, ADD_SAVE_BTN, SURFACE, Some(BORDER)) {
             if let Some(c) = text_centered(
                 x,
                 y,
-                LIST_SUB_Y,
+                ADD_SAVE_BTN.y + (ADD_SAVE_BTN.h.saturating_sub(font::line_height(1))) / 2,
                 1,
-                b"No audio files were found in local storage",
-                MUTED,
+                b"ADD",
+                TEXT,
+                SURFACE,
+            ) {
+                return c;
+            }
+            return c;
+        }
+        if let Some(c) = draw_pill(x, y, ADD_CANCEL_BTN, RECESSED, Some(BORDER)) {
+            if let Some(c) = text_centered(
+                x,
+                y,
+                ADD_CANCEL_BTN.y + (ADD_CANCEL_BTN.h.saturating_sub(font::line_height(1))) / 2,
+                1,
+                b"CANCEL",
+                FAINT,
+                RECESSED,
+            ) {
+                return c;
+            }
+            return c;
+        }
+        return BG;
+    }
+
+    if app.store.is_empty() {
+        if let Some(c) = text_centered(x, y, LIST_TITLE_Y, 2, b"No tracks", TEXT, BG) {
+            return c;
+        }
+        if let Some(c) = text_centered(
+            x,
+            y,
+            LIST_SUB_Y,
+            1,
+            b"No audio files were found in local storage",
+            MUTED,
+            BG,
+        ) {
+            return c;
+        }
+        return BG;
+    }
+
+    for i in 0..app.store.len() {
+        let row_y = 1140 + i * TRACKLIST_ROW_H;
+        if row_y >= LIST_HIT_Y1 {
+            break;
+        }
+        let t = app.store.get(i).unwrap();
+        if y >= row_y && y < row_y + 80 {
+            let selected = i == app.current_track_idx;
+            let title_y = row_y + 4;
+            // Delete affordance, matching its hit region in the tap handler.
+            let del_x = MARGIN + CONTENT_W - 40;
+            let ddx = x as isize - del_x as isize;
+            let ddy = y as isize - (row_y + 24) as isize;
+            if ddx.abs() <= 6 && ddy.abs() <= 6 && (ddx.abs() - ddy.abs()).abs() <= 2 {
+                return FAINT;
+            }
+            let mut buf = [0u8; 48];
+            let n = font::ellipsize(t.title(), 2, CONTENT_W - 96, &mut buf);
+            if let Some(c) = text(
+                x,
+                y,
+                MARGIN + 8,
+                title_y,
+                2,
+                &buf[..n],
+                if selected { TEXT } else { MUTED },
                 BG,
             ) {
                 return c;
             }
-        }
-        Some(first) => {
-            // Rows are laid out only when real media exists: 96 px rows starting
-            // below the divider, each with an ellipsised title and artist.
-            let _ = first;
-            for (i, track) in PLAYLIST.iter().take(2).enumerate() {
-                let row_y = 1140 + i * 96;
-                // WHY 80 and not 72: the title owns row_y+4..+52 (scale 2) and
-                // the artist owns row_y+56..+80 (scale 1). The old 72-row gate
-                // cut the artist's last 8 rows - its whole descender band - so
-                // every artist name with g j p q y rendered sliced. The gate is
-                // the runs it contains, nothing less.
-                if y >= row_y && y < row_y + 80 {
-                    let selected = i == app.current_track_idx;
-                    let title_y = row_y + 4;
-                    let mut buf = [0u8; 48];
-                    let n = font::ellipsize(track.title.as_bytes(), 2, CONTENT_W - 64, &mut buf);
-                    if let Some(c) = text(
-                        x,
-                        y,
-                        MARGIN + 40,
-                        title_y,
-                        2,
-                        &buf[..n],
-                        if selected { TEXT } else { MUTED },
-                        BG,
-                    ) {
-                        return c;
-                    }
-                    let mut buf2 = [0u8; 48];
-                    let n2 = font::ellipsize(track.artist.as_bytes(), 1, CONTENT_W - 64, &mut buf2);
-                    if let Some(c) = text(x, y, MARGIN + 40, title_y + 52, 1, &buf2[..n2], FAINT, BG)
-                    {
-                        return c;
-                    }
-                }
-                // WHY the divider lives outside the text gate above: it did not.
-                // `y == row_y + 95` sat inside a gate ending at +72 (now +80), so
-                // it could never be true and the separator simply never drew.
-                // 88 sits 8 below the artist's last row (+80) and 8 above the
-                // next row's first (+96): it belongs to the row gap, not to
-                // either run, so it gets its own band test at the row's level.
-                if y == row_y + 88 && x >= MARGIN && x < MARGIN + CONTENT_W {
-                    return BORDER;
-                }
+            // Duration caption from the stored length (never a fake position).
+            let mut db = [0u8; 12];
+            let dn = fmt_mmss(&mut db, t.duration_sec());
+            if let Some(c) = text(x, y, MARGIN + 8, title_y + 52, 1, &db[..dn], FAINT, BG) {
+                return c;
             }
+            return BG;
+        }
+        // Row-gap divider at +88 (see the gate note above the text runs).
+        if y == row_y + 88 && x >= MARGIN && x < MARGIN + CONTENT_W {
+            return BORDER;
         }
     }
-
-    BG
+    return BG;
 }
 
 fn render_music_ui(surface: u32, app: &MusicApp) {
@@ -976,6 +1235,8 @@ enum Dirty {
     /// row. These are disjoint, so `repaint` walks two bands rather than
     /// redrawing the 176 rows of art that sit between them.
     Playback,
+    /// The track-list band moved (add editor, rows, add/save/cancel).
+    Tracklist,
     /// The whole surface.
     All,
 }
@@ -1010,6 +1271,9 @@ fn repaint(surface: u32, app: &MusicApp, dirty: Dirty) {
         Dirty::Playback => {
             render_music_band(surface, app, META_Y0, META_Y1);
             render_music_band(surface, app, TRANSPORT_Y0, TRANSPORT_Y1);
+        }
+        Dirty::Tracklist => {
+            render_music_band(surface, app, LIST_LABEL_Y, LIST_HIT_Y1);
         }
         Dirty::All => render_music_ui(surface, app),
     }
@@ -1079,13 +1343,74 @@ fn handle_tap(app: &mut MusicApp, px: u32, py: u32) -> Tap<'static> {
         return Tap::Redraw(Dirty::None);
     }
 
-    // Track list band: honest report when the library is empty.
-    if x >= MARGIN && x < MARGIN + CONTENT_W && y >= LIST_HIT_Y0 && y < LIST_HIT_Y1 {
+    // ADD TRACK control on the label row opens the add editor.
+    if ADD_BTN.contains(x, y) {
+        app.add_open = true;
+        app.add_focus = 0;
+        app.add_title_len = 0;
+        app.add_dur_len = 0;
+        let _ = std::audio_haptic_click();
+        return Tap::Redraw(Dirty::All);
+    }
+
+    if app.add_open {
+        // Each editor control is hit-tested against the exact rect it is drawn in.
+        if ADD_TITLE_FIELD.contains(x, y) {
+            app.add_focus = 0;
+            let _ = std::audio_haptic_click();
+            return Tap::Redraw(Dirty::All);
+        }
+        if ADD_DUR_FIELD.contains(x, y) {
+            app.add_focus = 1;
+            let _ = std::audio_haptic_click();
+            return Tap::Redraw(Dirty::All);
+        }
+        if ADD_SAVE_BTN.contains(x, y) {
+            return Tap::Redraw(app.save_add());
+        }
+        if ADD_CANCEL_BTN.contains(x, y) {
+            app.cancel_add();
+            std::log(0, "[MUSIC APP] Add track cancelled; nothing was stored.").ok();
+            return Tap::Redraw(Dirty::All);
+        }
+    } else if app.store.is_empty() {
         std::log(
             0,
             "[MUSIC APP] Track list tapped: no audio files in the local library.",
         )
         .ok();
+    } else {
+        // A real row: tap its delete affordance to remove it, tap elsewhere in
+        // the row to select it as now-playing.
+        let ry = y.saturating_sub(1140);
+        let idx = ry / TRACKLIST_ROW_H;
+        let coff = ry % TRACKLIST_ROW_H;
+        if idx < app.store.len() && coff < 80 && x >= MARGIN && x < MARGIN + CONTENT_W {
+            let ddx = x as isize - (MARGIN + CONTENT_W - 40) as isize;
+            let ddy = coff as isize - 24;
+            if ddx.abs() <= 16 && ddy.abs() <= 12 {
+                if app.store.remove(idx) {
+                    std::log(
+                        0,
+                        "[MUSIC APP] Track removed; the deletion was persisted to the settings store.",
+                    )
+                    .ok();
+                    if app.current_track_idx >= app.store.len() && app.current_track_idx > 0 {
+                        app.current_track_idx -= 1;
+                    }
+                } else {
+                    std::log(
+                        0,
+                        "[MUSIC APP] Track deletion was not persisted; the library is unchanged.",
+                    )
+                    .ok();
+                }
+                return Tap::Redraw(Dirty::All);
+            }
+            app.current_track_idx = idx.min(app.store.len().saturating_sub(1));
+            let _ = std::audio_haptic_click();
+            return Tap::Redraw(Dirty::All);
+        }
     }
 
     Tap::None
@@ -1100,6 +1425,50 @@ fn handle_music_key(app: &mut MusicApp, key: std::InputKeyEvent) -> Tap<'static>
     use std::input_key_code;
     if !key.pressed {
         return Tap::None;
+    }
+    // While the add-track editor is open the keyboard types into it; the media
+    // bindings below are suspended so a space types a space rather than pausing.
+    if app.add_open {
+        return match key.code {
+            input_key_code::ESCAPE => {
+                app.cancel_add();
+                Tap::Redraw(Dirty::All)
+            }
+            input_key_code::ENTER => Tap::Redraw(app.save_add()),
+            input_key_code::BACKSPACE => {
+                if app.add_focus == 0 {
+                    app.add_title_len = app.add_title_len.saturating_sub(1);
+                } else {
+                    app.add_dur_len = app.add_dur_len.saturating_sub(1);
+                }
+                Tap::Redraw(Dirty::Tracklist)
+            }
+            input_key_code::ARROW_DOWN => {
+                app.add_focus = 1;
+                Tap::Redraw(Dirty::All)
+            }
+            input_key_code::ARROW_UP => {
+                app.add_focus = 0;
+                Tap::Redraw(Dirty::All)
+            }
+            code if app.add_focus == 0
+                && (32..=126).contains(&code)
+                && app.add_title_len < ADD_TITLE_CAP =>
+            {
+                app.add_title[app.add_title_len] = code as u8;
+                app.add_title_len += 1;
+                Tap::Redraw(Dirty::Tracklist)
+            }
+            code if app.add_focus == 1
+                && (b'0' as u32..=b'9' as u32).contains(&code)
+                && app.add_dur_len < ADD_DUR_DIGITS =>
+            {
+                app.add_dur[app.add_dur_len] = code as u8;
+                app.add_dur_len += 1;
+                Tap::Redraw(Dirty::Tracklist)
+            }
+            _ => Tap::None,
+        };
     }
     match key.code {
         input_key_code::ESCAPE => {
@@ -1152,6 +1521,20 @@ pub extern "C" fn _start() -> ! {
     .ok();
 
     let mut music = MusicApp::new();
+
+    // Load the real, persisted local library before the first frame so the
+    // playlist and the now-playing row reflect what storage actually holds.
+    music.store = store::TrackStore::load();
+    let load_note: &str = match music.store.state {
+        store::StoreState::Empty => "Track store loaded: no tracks are stored yet.",
+        store::StoreState::Loaded => "Track store loaded from the settings store.",
+        store::StoreState::ReadRefused => "Settings read refused; no stored tracks were loaded.",
+        store::StoreState::Invalid => "Stored track data failed validation; no tracks were loaded.",
+        _ => "",
+    };
+    if !load_note.is_empty() {
+        std::log(0, load_note).ok();
+    }
 
     // 1. Hardware Keystore Derivation
     music.derive_keystore_key();
