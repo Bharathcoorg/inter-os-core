@@ -28,6 +28,8 @@
 use core::panic::PanicInfo;
 use interos_std as std;
 
+mod outline_text;
+
 const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
@@ -1580,6 +1582,23 @@ fn fit_run(text: &[u8], scale: usize, max_w: usize, bold: bool, out: &mut [u8]) 
 /// line box, (b) fits the bytes to `max_w` with `fit_run` before touching the
 /// glyph table, so a run can never paint outside the box the layout reserved
 /// for it. `bg` is the surface under the text so the AA blend is correct.
+///
+/// WHY the outline face comes first: `TYPE_DISPLAY` is scale 2, so on the
+/// bitmap face every screen title and keypad digit is a 16x24 cell magnified by
+/// an integer -- a soft ramp where an edge belongs.
+/// `outline_text::place_run` rasterises the real outline at the em that matches
+/// the cell's cap height (17 rows at scale 1, so 17*N*2048/1456 px per em), and
+/// answers for the pixel itself. When it declines -- a run wider than the
+/// coverage buffer, a glyph whose ink would leave this caller's window, or a
+/// weight this app draws bold -- the bitmap face below draws the run exactly as
+/// it did before, so a refusal costs the edge quality and never the text.
+/// Every `TYPE_DISPLAY` call site in this app passes `bold = true`, and the
+/// shipped outline table is Roboto Condensed REGULAR, so today that is what
+/// declines; see `outline_text`'s module header.
+///
+/// WHY the run answers alone when it is placed: the two faces are alternatives,
+/// not layers. Falling through to the bitmap face after an outline run had
+/// already inked a pixel would double-ink every partially covered edge.
 #[inline(always)]
 fn run_ink(
     x: usize,
@@ -1601,6 +1620,11 @@ fn run_ink(
     let n = fit_run(text, scale, max_w, bold, &mut buf);
     if n == 0 {
         return None;
+    }
+    if let Some(run) =
+        outline_text::place_run(x0, y0, scale, &buf[..n], Some(max_w), bold)
+    {
+        return run.pixel(x, y, color, bg);
     }
     std::design::font::test_text_aa(x, y, x0, y0, scale, &buf[..n], color, bg, bold)
 }

@@ -24,6 +24,8 @@ use interos_std as std;
 use std::design::font;
 use std::design::primitives::{draw_pill, Rect};
 
+mod outline_text;
+
 const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
@@ -146,6 +148,25 @@ fn chevron_left(x: usize, y: usize, cx: usize, cy: usize, half: isize) -> bool {
 /// The face is `GLYPH_H` (24) rows tall, so a run at `scale` owns
 /// `GLYPH_H * scale` rows. Clipping to that line box here means a caller can no
 /// longer slice a glyph with a hand-written y window.
+///
+/// WHY the outline face comes first: the title is drawn at scale 3 and the
+/// category labels at scale 2, so on the bitmap face both are a 16x24 cell
+/// magnified by an integer -- a soft ramp where an edge belongs.
+/// `outline_text::place_run` rasterises the real outline at the em that matches
+/// the cell's cap height (17 rows at scale 1, so 17*N*2048/1456 px per em), and
+/// answers for the pixel itself. When it declines -- a run wider than the
+/// coverage buffer, a glyph whose ink would leave this caller's window, or a
+/// weight this app draws bold -- the bitmap face below draws the run exactly as
+/// it did before, so a refusal costs the edge quality and never the text.
+///
+/// WHY the run answers alone when it is placed: the two faces are alternatives,
+/// not layers. Falling through to the bitmap face after an outline run had
+/// already inked a pixel would double-ink every partially covered edge.
+///
+/// WHY no column bound is handed to `place_run`: this funnel's callers gate
+/// their runs by construction -- the title sits 131px into a 720px header and
+/// the widest label ends 301px into the 648px list band -- so no run can reach
+/// the edge the caller would cut it at.
 #[inline(always)]
 fn test_text(
     x: usize,
@@ -159,6 +180,9 @@ fn test_text(
 ) -> Option<u32> {
     if x < x0 || y < y0 || y >= y0 + std::design::font::GLYPH_H * scale {
         return None;
+    }
+    if let Some(run) = outline_text::place_run(x0, y0, scale, text, None, false) {
+        return run.pixel(x, y, color, bg);
     }
     std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false)
 }

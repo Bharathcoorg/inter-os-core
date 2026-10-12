@@ -29,6 +29,7 @@
 #![no_main]
 
 mod font;
+mod outline_text;
 
 use core::panic::PanicInfo;
 use interos_std as std;

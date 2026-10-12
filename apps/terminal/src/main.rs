@@ -23,6 +23,8 @@
 use core::panic::PanicInfo;
 use interos_std as std;
 
+mod outline_text;
+
 const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
@@ -44,6 +46,21 @@ const TEXT_MUTED: u32 = 0xFF94A3B8;
 // -----------------------------------------------------------------------------
 // Typography provided by interos_std::design::font
 
+/// Rasterises one text run into the pixel at `(x, y)`.
+///
+/// WHY the outline face comes first: the console is drawn at scale 2 and the
+/// header title at scale 3, so on the bitmap face both are a 16x24 cell
+/// magnified by an integer -- a soft ramp where an edge belongs.
+/// `outline_text::place_run` rasterises the real outline at the em that matches
+/// the cell's cap height (17 rows at scale 1, so 17*N*2048/1456 px per em), and
+/// answers for the pixel itself. When it declines -- a run wider than the
+/// coverage buffer, a glyph whose ink would leave this caller's window, or a
+/// weight this app draws bold -- the bitmap face below draws the run exactly as
+/// it did before, so a refusal costs the edge quality and never the text.
+///
+/// WHY the run answers alone when it is placed: the two faces are alternatives,
+/// not layers. Falling through to the bitmap face after an outline run had
+/// already inked a pixel would double-ink every partially covered edge.
 #[inline(always)]
 fn test_text(
     x: usize,
@@ -54,6 +71,9 @@ fn test_text(
     text: &[u8],
     color: u32,
 ) -> Option<u32> {
+    if let Some(run) = outline_text::place_run(x0, y0, scale, text, None, false) {
+        return run.pixel(x, y, color, BG_DARK);
+    }
     std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, BG_DARK, false)
 }
 

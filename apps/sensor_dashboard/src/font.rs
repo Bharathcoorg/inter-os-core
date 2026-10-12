@@ -83,6 +83,20 @@ pub fn fit_width(text: &[u8], scale: usize, max_w: usize) -> usize {
 /// paint outside the box the layout reserved for it. `bg` is the surface under
 /// the text so the anti-aliasing blend is correct. Returns true when `(x, y)`
 /// took ink from this run.
+///
+/// WHY the outline face comes first: this app's headings are `HSC` = 2, so on
+/// the bitmap face each one is a 16x24 cell magnified by an integer -- a soft
+/// ramp where an edge belongs. `outline_text::place_run` rasterises the real
+/// outline at the em that matches the cell's cap height (17 rows at scale 1, so
+/// 17*N*2048/1456 px per em), and answers for the pixel itself. When it
+/// declines -- a run wider than the coverage buffer, a glyph whose ink would
+/// leave this caller's window, or a line this app draws bold -- the bitmap face
+/// below draws the run exactly as it did before, so a refusal costs the edge
+/// quality and never the text.
+///
+/// WHY the run answers alone when it is placed: the two faces are alternatives,
+/// not layers. Falling through to the bitmap face after an outline run had
+/// already inked a pixel would double-ink every partially covered edge.
 #[inline]
 pub fn ink(
     x: usize,
@@ -106,6 +120,10 @@ pub fn ink(
     let n = fit(text, scale, max_w, &mut buf);
     if n == 0 {
         return false;
+    }
+    if let Some(run) = crate::outline_text::place_run(x0, y0, scale, &buf[..n], Some(max_w), false)
+    {
+        return run.pixel(x, y, color, bg).is_some();
     }
     face::test_text_aa(x, y, x0, y0, scale, &buf[..n], color, bg, false).is_some()
 }
