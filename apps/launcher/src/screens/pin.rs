@@ -22,6 +22,44 @@ const KEY_GAP: usize = 24;
 const KEY_X: usize = 130;
 const KEY_Y: usize = 520;
 
+/// Row the entry dots sit on.
+///
+/// WHY named: the dots and the band the shell repaints when one fills or empties
+/// are the same number, and they were a literal inside the painter and a second
+/// literal inside the shell when the whole surface was repainted anyway.
+const DOT_Y: usize = 300;
+/// Radius of an entry dot. The painter's gate is `dx*dx + dy*dy <= R * R`.
+const DOT_R: usize = 6;
+/// Row the status line under the dots starts on.
+const STATUS_Y: usize = 360;
+/// Row the prompt starts on.
+const PROMPT_Y: usize = 150;
+
+/// Rows the entry dots occupy.
+///
+/// WHY read back from here: `get_pin_color` gates a dot's ink on the same radius
+/// this band is derived from, so the shell repainting `dots_band()` repaints
+/// exactly the rows a digit can fill or empty.
+pub fn dots_band() -> (usize, usize) {
+    (DOT_Y - DOT_R, DOT_Y + DOT_R + 1)
+}
+
+/// Rows the status line under the dots occupy: the error line, the confirmation
+/// hint, or the prompt for the entry.
+pub fn status_band() -> (usize, usize) {
+    (STATUS_Y, STATUS_Y + launcher::text::line_height(1))
+}
+
+/// Rows from the prompt down to the bottom of the status line.
+///
+/// WHY one band for all of it: every change this surface can make without
+/// leaving it -- a digit, a backspace, a failed submit, the setup step moving
+/// forward -- moves something in this extent and nothing below it. The keypad
+/// rows are invariant state.
+pub fn entry_band() -> (usize, usize) {
+    (PROMPT_Y, STATUS_Y + launcher::text::line_height(1))
+}
+
 #[inline]
 fn round_contains(rect: &Rect, radius: usize, x: usize, y: usize) -> bool {
     if !rect.contains(x, y) { return false; }
@@ -77,32 +115,32 @@ pub fn get_pin_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     } else {
         b"Enter PIN".as_slice()
     };
-    if let Some(c) = test_text_aa(x, y, 48, 150, 3, heading, TEXT, BG) {
+    if let Some(c) = test_text_aa(x, y, 48, PROMPT_Y, 3, heading, TEXT, BG) {
         return c;
     }
 
-    let dot_y = 300usize;
+    let dot_y = DOT_Y;
     let dot_start = 286usize;
     for i in 0..8 {
         let cx = dot_start + i * 22;
         let active = i < state.pin_len as usize;
         let dx = x as i32 - cx as i32;
         let dy = y as i32 - dot_y as i32;
-        if dx * dx + dy * dy <= 36 {
+        if dx * dx + dy * dy <= (DOT_R * DOT_R) as i32 {
             return if active { ACCENT } else { BORDER };
         }
     }
 
     if state.pin_error != 0 {
         let msg = if state.pin_error == 2 { b"No credential configured".as_slice() } else { b"Incorrect PIN".as_slice() };
-        if let Some(c) = test_text_aa(x, y, 250, 360, 1, msg, DANGER, BG) {
+        if let Some(c) = test_text_aa(x, y, 250, STATUS_Y, 1, msg, DANGER, BG) {
             return c;
         }
     } else if state.pin_setup_mode && state.pin_setup_step == 1 {
-        if let Some(c) = test_text_aa(x, y, 250, 360, 1, b"Re-enter the same PIN", MUTED, BG) {
+        if let Some(c) = test_text_aa(x, y, 250, STATUS_Y, 1, b"Re-enter the same PIN", MUTED, BG) {
             return c;
         }
-    } else if let Some(c) = test_text_aa(x, y, 250, 360, 1, if state.pin_setup_mode { b"Choose 4 to 8 digits".as_slice() } else { b"Enter your device PIN".as_slice() }, MUTED, BG) {
+    } else if let Some(c) = test_text_aa(x, y, 250, STATUS_Y, 1, if state.pin_setup_mode { b"Choose 4 to 8 digits".as_slice() } else { b"Enter your device PIN".as_slice() }, MUTED, BG) {
         return c;
     }
 

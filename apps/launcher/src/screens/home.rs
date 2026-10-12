@@ -269,6 +269,28 @@ fn frame() -> Frame {
     }
 }
 
+/// Rows the home surface's system (Today) card occupies.
+///
+/// WHY an accessor and not a band typed in the shell: the painter gates the card
+/// on `frame().card`, so the rows a tap on the card's checkbox can move are that
+/// rectangle's rows. Reading them back from here is what makes the band and the
+/// pixels it names one number held in one place.
+pub fn system_card_band() -> (usize, usize) {
+    let card = frame().card;
+    (card.y, card.y + card.h)
+}
+
+/// Rows the home surface's app deck occupies.
+///
+/// WHY the deck is one band even though the tiles are six rectangles: the six
+/// tiles are stacked two rows deep inside `frame().deck`, and a catalogue
+/// refresh can retitle any of them, so the deck's whole extent is what has to be
+/// re-rasterised. See [`system_card_band`] for why this is a function.
+pub fn deck_band() -> (usize, usize) {
+    let deck = frame().deck;
+    (deck.y, deck.y + deck.h)
+}
+
 /// The wallpaper at pixel `(x, y)`, scene resolved once per frame.
 ///
 /// WHY a scene and not `theme.ramp3`: the reference home panel's wallpaper is a

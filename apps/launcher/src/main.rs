@@ -1089,9 +1089,156 @@ fn render_volume_hud(surface: u32, volume: u8) {
     }
 }
 
-fn render_view(surface: u32, state: &LauncherState) {
+// -----------------------------------------------------------------------------
+// Banded rendering: which rows an input actually changed
+//
+// WHY this exists: every state-changing input used to call `render_view`, which
+// re-rasterised all 1,036,800 pixels and then flipped the surface. The kernel
+// already offers a narrower present (`DrmKmsController::mark_present_rows` via
+// `write_surface_pixels`, plus `diff_present_rows` at flip time), and the other
+// apps in this tree took that offer by mapping each input onto the rows it
+// moved. This is the shell doing the same thing.
+//
+// WHY the shell needs a variant per region rather than one band: the shell is
+// twelve surfaces, and the rows a tap moves are different on each one. Naming
+// the region after what moved is what keeps a band and the painter that draws
+// it from being two numbers held together by hand, so every band below is read
+// back from the screen that owns it (see `Dirty::rows`).
+// -----------------------------------------------------------------------------
+
+/// Which rows of the shell surface an input actually changed.
+///
+/// WHY `None` exists as a value and not as "the caller just does not render":
+/// several inputs move nothing at all -- a tap that lands on no control, or a
+/// button for the view that is already presented. Those must not repaint, and
+/// making the answer a value is what lets one code path serve both.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Dirty {
+    /// Nothing moved; the surface is already correct, so do not render at all.
+    None,
+    /// HomeScreen: the Today / system card, whose only shell-owned state is the
+    /// `task0_done` bit on its first row.
+    HomeCard,
+    /// HomeScreen: the app deck. A catalogue refresh can retitle every tile,
+    /// because a tile's label is the registry's name once the package is
+    /// installed and a default until then.
+    HomeDeck,
+    /// ActivitySpace: the running-count strip above the deck and all three
+    /// recents cards, which shift up when a card is dismissed or closed.
+    ActivityCards,
+    /// AppDrawer: the category chip row.
+    DrawerChips,
+    /// AppDrawer: the page grid and the pagination dots beneath it.
+    DrawerPages,
+    /// LockScreen: the PIN pad's prompt, sub-prompt and entry dots.
+    LockPinPad,
+    /// LockScreen: the PIN pad's entry dots alone. WHY this is separate from
+    /// `LockPinPad`: backspace removes one digit, which cannot move the prompt
+    /// or the sub-prompt, so naming the whole pad would repaint a hundred rows
+    /// of unchanged backdrop.
+    LockPinDots,
+    /// PinEntry: the prompt, the entry dots and the status line under them.
+    PinEntry,
+    /// PinEntry: the entry dots alone.
+    PinEntryDots,
+    /// PinEntry: the status line under the dots -- the error line, or the hint.
+    PinEntryStatus,
+    /// The union of two regions, as row extents.
+    ///
+    /// WHY this variant exists at all: `widen` has to be able to answer "these
+    /// two bands" with one frame. Collapsing to `Dirty::All` would be correct
+    /// but would throw away the rows between the two that provably cannot have
+    /// moved, and answering with "the last one" is the bug the combinator is
+    /// there to prevent.
+    Band(usize, usize),
+    /// Every row: a first frame, a view transition, a wallpaper re-read, a pad
+    /// that appears or disappears, and any change whose row extent is not known
+    /// exactly.
+    All,
+}
+
+impl Dirty {
+    /// The rows this dirty covers, or `None` when it covers the whole surface.
+    ///
+    /// WHY every band is read from the screen that draws it: a band retyped here
+    /// is a band that can disagree with the painter, and the disagreement shows
+    /// up as stale pixels in exactly the rows nobody thought to repaint.
+    fn rows(self) -> Option<(usize, usize)> {
+        match self {
+            Dirty::None => Some((0, 0)),
+            Dirty::HomeCard => Some(screens::home::system_card_band()),
+            Dirty::HomeDeck => Some(screens::home::deck_band()),
+            Dirty::ActivityCards => Some(screens::activity::recents_band()),
+            Dirty::DrawerChips => Some(screens::app_drawer::chips_band()),
+            Dirty::DrawerPages => Some(screens::app_drawer::pages_band()),
+            Dirty::LockPinPad => Some(screens::lock::pin_pad_entry_band()),
+            Dirty::LockPinDots => Some(screens::lock::pin_pad_dot_band()),
+            Dirty::PinEntry => Some(screens::pin::entry_band()),
+            Dirty::PinEntryDots => Some(screens::pin::dots_band()),
+            Dirty::PinEntryStatus => Some(screens::pin::status_band()),
+            Dirty::Band(y0, y1) => Some((y0, y1)),
+            Dirty::All => None,
+        }
+    }
+
+    /// Grows a dirty region so one rendered frame covers everything that moved.
+    ///
+    /// WHY: one `input_event_poll` batch can carry several events before the
+    /// shell is scheduled again, and a single handler can move more than one
+    /// region (a catalogue refresh moves the card and the deck; a digit that
+    /// also clears an error line moves the dots and the status line). Rendering
+    /// only the last region would leave the earlier one stale, and rendering
+    /// the whole surface would repaint rows that provably cannot have moved.
+    /// The union of the two extents is neither.
+    fn widen(self, other: Dirty) -> Dirty {
+        match (self.rows(), other.rows()) {
+            (Some((a0, a1)), Some((b0, b1))) => Dirty::Band(a0.min(b0), a1.max(b1)),
+            // One of them names the whole surface, so the frame must too.
+            _ => Dirty::All,
+        }
+    }
+}
+
+/// Repaints the rows `dirty` names, then presents them.
+///
+/// WHY this sits beside `render_view` instead of replacing it: a whole-surface
+/// repaint has to log and measure exactly as it did before, so that path stays a
+/// call to `render_view`. This is the path for an input that named its rows.
+///
+/// WHY a `None` renders and flips nothing: the surface already holds the right
+/// bytes, and `surface_flip` composites and copies out the whole scanout, so
+/// flipping an unchanged surface is pure cost. The reference apps in this tree
+/// (`camera`, `vault`, `sensor_dashboard`) gate the same way.
+fn present_dirty(surface: u32, state: &LauncherState, dirty: Dirty) {
+    if dirty == Dirty::None {
+        return;
+    }
+    if dirty == Dirty::All {
+        render_view(surface, state);
+        let _ = std::surface_flip(4);
+        return;
+    }
+    let (y0, y1) = dirty.rows().unwrap_or((0, H));
+    if y0 >= y1 {
+        return;
+    }
     let frame_start = std::get_ticks(1).ok();
-    render_band(surface, state, 0, H);
+    render_band(surface, state, y0, y1);
+    // WHY the same line the full path emits: a banded repaint is still a render
+    // of the current view, and the lifecycle harness keys on these substrings.
+    // Dropping them would make a correct band look like a screen that never
+    // rendered.
+    log_view_rendered(state);
+    log_frame_ticks(tick_delta(frame_start, std::get_ticks(1).ok()));
+    let _ = std::surface_flip(4);
+}
+
+/// Emits the current view's render-complete line.
+///
+/// WHY this is its own function: the banded path in [`present_dirty`] and the
+/// full path in [`render_view`] must report the same thing, and one copy of the
+/// match is what guarantees it.
+fn log_view_rendered(state: &LauncherState) {
     match state.current_view {
         ViewMode::BootScreen => {
             std::log(0, "[LAUNCHER] Boot animation frame rendered from guest state.").ok();
@@ -1183,9 +1330,21 @@ fn render_view(surface: u32, state: &LauncherState) {
             .ok();
         }
     }
-    // WHY here and not earlier: the eight substrings above are what the lifecycle
-    // harness matches, and a diagnostic emitted before them could only ever make a
-    // slow frame look like a fast one.
+}
+
+/// Repaints the whole surface and logs the view's render-complete line.
+///
+/// WHY this stays the whole-surface path: a first frame, a view transition, a
+/// wallpaper re-read and a power transition all move every row, so naming a band
+/// for them would claim a precision they do not have. Callers that know better
+/// go through [`present_dirty`].
+fn render_view(surface: u32, state: &LauncherState) {
+    let frame_start = std::get_ticks(1).ok();
+    render_band(surface, state, 0, H);
+    log_view_rendered(state);
+    // WHY here and not earlier: the substrings above are what the lifecycle
+    // harness matches, and a diagnostic emitted before them could only ever make
+    // a slow frame look like a fast one.
     log_frame_ticks(tick_delta(frame_start, std::get_ticks(1).ok()));
 }
 
@@ -1590,8 +1749,21 @@ pub extern "C" fn _start() -> ! {
                         refresh_package_catalog(&mut state);
                         refresh_runtime_recents(&mut state);
                         if previous_count != state.app_count {
-                            render_view(surface, &state);
-                            let _ = std::surface_flip(4);
+                            // WHY the card and the deck and not the whole
+                            // surface: a catalogue refresh can retitle a deck
+                            // tile (a tile shows the registry's display name once
+                            // its package is installed and a default label until
+                            // then) and can change the card's "N apps installed"
+                            // detail line. Nothing else on this surface reads
+                            // `app_count` -- the status bar and the greeting are
+                            // clock-driven, the search bar and the nav bar are
+                            // static -- so re-rasterising those rows would
+                            // repaint 288 rows that cannot have moved.
+                            present_dirty(
+                                surface,
+                                &state,
+                                Dirty::HomeCard.widen(Dirty::HomeDeck),
+                            );
                         }
                     } else if state.clock_time != old_clock {
                         render_band(surface, &state, 0, 48);
@@ -1711,24 +1883,56 @@ pub extern "C" fn _start() -> ! {
                                     hit = true;
                                 }
                                 if hit {
-                                    if state.pin_len < 8 {
+                                    // WHY the recorded flag: a key press on a
+                                    // full eight-digit entry records nothing and
+                                    // clears no error, so the surface is already
+                                    // correct and repainting it would
+                                    // re-rasterise a million identical pixels.
+                                    // That is the inert-input case.
+                                    let recorded = state.pin_len < 8;
+                                    let had_error = state.pin_error != 0;
+                                    if recorded {
                                         state.pin_buffer[state.pin_len as usize] = digit;
                                         state.pin_len += 1;
                                         state.pin_error = 0;
                                     }
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
+                                    // WHY the dots and not the whole surface: a
+                                    // digit fills one more entry dot. The status
+                                    // line is only dragged in when the error line
+                                    // it replaces was showing, which is what
+                                    // `widen` unions rather than overwriting.
+                                    let mut dirty = if recorded {
+                                        Dirty::PinEntryDots
+                                    } else {
+                                        Dirty::None
+                                    };
+                                    if recorded && had_error {
+                                        dirty = dirty.widen(Dirty::PinEntryStatus);
+                                    }
+                                    present_dirty(surface, &state, dirty);
                                     continue;
                                 }
 
                                 if x >= 490 && x < 590 && y >= 1036 && y < 1126 {
-                                    if state.pin_len > 0 {
+                                    let removed = state.pin_len > 0;
+                                    if removed {
                                         state.pin_len -= 1;
                                         state.pin_buffer[state.pin_len as usize] = 0;
                                     }
+                                    let had_error = state.pin_error != 0;
                                     state.pin_error = 0;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
+                                    // Same inert case as the digit key: deleting
+                                    // from an empty entry with no error line
+                                    // showing changes nothing.
+                                    let mut dirty = if removed {
+                                        Dirty::PinEntryDots
+                                    } else {
+                                        Dirty::None
+                                    };
+                                    if had_error {
+                                        dirty = dirty.widen(Dirty::PinEntryStatus);
+                                    }
+                                    present_dirty(surface, &state, dirty);
                                     continue;
                                 }
 
@@ -1751,22 +1955,34 @@ pub extern "C" fn _start() -> ! {
                                             state.pin_setup_step = 1;
                                             state.pin_len = 0;
                                             state.pin_error = 0;
-                                            render_view(surface, &state);
-                                            let _ = std::surface_flip(4);
+                                            // WHY the prompt band: the setup step
+                                            // moving forward rewrites the prompt
+                                            // ("Set Device PIN" becomes "Confirm
+                                            // Device PIN"), swaps the status line
+                                            // and empties the dots -- all three
+                                            // inside this one extent, and nothing
+                                            // below the status line on the
+                                            // keypad moves.
+                                            present_dirty(surface, &state, Dirty::PinEntry);
                                             std::log(0, "[LAUNCHER] First-boot PIN recorded; confirmation requested.").ok();
                                             continue;
                                         }
                                         let matches = state.pin_buffer[..len]
                                             == state.pin_confirm_buffer[..state.pin_confirm_len];
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
+                                        // WHY this frame was dropped rather than
+                                        // banded: nothing in the state has moved
+                                        // yet at this line, so the surface is
+                                        // already correct. The comparison's
+                                        // outcome is repainted immediately below,
+                                        // which makes this render a no-op that
+                                        // cost a full-surface repaint.
+                                        present_dirty(surface, &state, Dirty::None);
                                         if !matches {
                                             state.pin_buffer = [0; 8];
                                             state.pin_len = 0;
                                             state.pin_setup_step = 0;
                                             state.pin_error = 1;
-                                            render_view(surface, &state);
-                                            let _ = std::surface_flip(4);
+                                            present_dirty(surface, &state, Dirty::PinEntry);
                                             std::log(0, "[LAUNCHER:SECURITY] PIN setup entries did not match; restarted.").ok();
                                             continue;
                                         }
@@ -1807,8 +2023,12 @@ pub extern "C" fn _start() -> ! {
                                         state.pin_len = 0;
                                         state.pin_error = 1;
                                     }
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
+                                    // WHY the prompt band: a refused or too-short
+                                    // entry empties the dots and puts the error
+                                    // line up, and the prompt above them is the
+                                    // only other row this surface can move
+                                    // without leaving it.
+                                    present_dirty(surface, &state, Dirty::PinEntry);
                                     continue;
                                 }
                             }
@@ -1861,8 +2081,12 @@ pub extern "C" fn _start() -> ! {
                                             let _ = std::app_stop(state.recent_task_ids[0]);
                                         }
                                         state.dismiss_recent(0);
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
+                                        // WHY the recents deck: dismissing a card
+                                        // shifts the remaining slots up and drops
+                                        // the running count in the strip above
+                                        // the deck, so the whole deck is what
+                                        // moved -- see `activity::recents_band`.
+                                        present_dirty(surface, &state, Dirty::ActivityCards);
                                         std::log(0, "[LAUNCHER] Card 0 dismissed via swipe.").ok();
                                         let mut drain = std::InputEvent {
                                             kind: 0,
@@ -1879,8 +2103,7 @@ pub extern "C" fn _start() -> ! {
                                             let _ = std::app_stop(state.recent_task_ids[1]);
                                         }
                                         state.dismiss_recent(1);
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
+                                        present_dirty(surface, &state, Dirty::ActivityCards);
                                         std::log(0, "[LAUNCHER] Card 1 dismissed via swipe.").ok();
                                         let mut drain = std::InputEvent {
                                             kind: 0,
@@ -1897,8 +2120,7 @@ pub extern "C" fn _start() -> ! {
                                             let _ = std::app_stop(state.recent_task_ids[2]);
                                         }
                                         state.dismiss_recent(2);
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
+                                        present_dirty(surface, &state, Dirty::ActivityCards);
                                         std::log(0, "[LAUNCHER] Card 2 dismissed via swipe.").ok();
                                         let mut drain = std::InputEvent {
                                             kind: 0,
@@ -1930,8 +2152,12 @@ pub extern "C" fn _start() -> ! {
                                 if let Some(task) =
                                     screens::activity::activity_close_at(&mut state, x, y)
                                 {
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
+                                    // `activity_close_at` answers `Some` only when
+                                    // it actually stopped a task and dropped the
+                                    // slot, so this is a real change to the
+                                    // recents deck -- the same rows a swipe
+                                    // dismissal moves.
+                                    present_dirty(surface, &state, Dirty::ActivityCards);
                                     std::log(
                                         0,
                                         "[LAUNCHER] App closed from overview card close control.",
@@ -1954,8 +2180,7 @@ pub extern "C" fn _start() -> ! {
                                         let _ = std::app_stop(state.recent_task_ids[0]);
                                     }
                                     state.dismiss_recent(0);
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
+                                    present_dirty(surface, &state, Dirty::ActivityCards);
                                     std::log(
                                         0,
                                         "[LAUNCHER] Card 0 dismissed via dismiss button tap.",
@@ -2014,8 +2239,7 @@ pub extern "C" fn _start() -> ! {
                                         let _ = std::app_stop(state.recent_task_ids[1]);
                                     }
                                     state.dismiss_recent(1);
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
+                                    present_dirty(surface, &state, Dirty::ActivityCards);
                                     std::log(
                                         0,
                                         "[LAUNCHER] Card 1 dismissed via dismiss button tap.",
@@ -2074,8 +2298,7 @@ pub extern "C" fn _start() -> ! {
                                         let _ = std::app_stop(state.recent_task_ids[2]);
                                     }
                                     state.dismiss_recent(2);
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
+                                    present_dirty(surface, &state, Dirty::ActivityCards);
                                     std::log(
                                         0,
                                         "[LAUNCHER] Card 2 dismissed via dismiss button tap.",
@@ -2367,8 +2590,23 @@ pub extern "C" fn _start() -> ! {
                                                 if state.pin_len < 4 {
                                                     state.pin_buffer[state.pin_len as usize] = ch as u8;
                                                     state.pin_len += 1;
-                                                    render_view(surface, &state);
-                                                    let _ = std::surface_flip(4);
+                                                    // WHY the pad's entry band and
+                                                    // not the whole surface: a digit
+                                                    // fills one dot and clears the
+                                                    // error ink on the prompt, and
+                                                    // both live between the prompt's
+                                                    // origin and the bottom of the
+                                                    // dot gate -- see
+                                                    // `lock::pin_pad_entry_band`.
+                                                     // Nothing on the keypad below
+                                                     // moves, and the pad paints
+                                                     // its whole surface through a
+                                                     // 100% veil
+                                                     // (`PIN_PAD_VEIL_PERCENT`), so
+                                                     // every row the band leaves out
+                                                     // is the pad's own constant
+                                                     // backdrop.
+                                                     present_dirty(surface, &state, Dirty::LockPinPad);
 
                                                     if state.pin_len == 4 {
                                                         if state.lock_state == std::UserLockState::Uninitialized {
@@ -2377,13 +2615,19 @@ pub extern "C" fn _start() -> ! {
                                                                 state.pin_confirm_len = state.pin_len as usize;
                                                                 state.pin_setup_step = 1;
                                                                 state.pin_len = 0;
-                                                                render_view(surface, &state);
-                                                                let _ = std::surface_flip(4);
+                                                                present_dirty(surface, &state, Dirty::LockPinPad);
                                                             } else {
                                                                 if state.pin_buffer[..4] == state.pin_confirm_buffer[..4] {
                                                                     let set = std::user_set_credential(1000, &state.pin_buffer[..4]);
-                                                                    render_view(surface, &state);
-                                                                    let _ = std::surface_flip(4);
+                                                                    // WHY this frame was dropped
+                                                                    // rather than banded: nothing
+                                                                    // in the state has moved at
+                                                                    // this line, so the surface
+                                                                    // is already correct. The
+                                                                    // credential's outcome is
+                                                                    // repainted immediately
+                                                                    // below.
+                                                                    present_dirty(surface, &state, Dirty::None);
                                                                     // WHY the result is
                                                                     // checked: this used to
                                                                     // be discarded, so a
@@ -2395,44 +2639,47 @@ pub extern "C" fn _start() -> ! {
                                                                     // account on disk could
                                                                     // still have no
                                                                     // credential at all.
-                                                                    match set {
-                                                                        Ok(()) => {
-                                                                            let _ = std::user_unlock(1000, &state.pin_buffer[..4]);
-                                                                            state.lock_state = std::UserLockState::Unlocked;
-                                                                            state.pin_pad_visible = false;
-                                                                            state.pin_setup_step = 0;
-                                                                            state.pin_len = 0;
-                                                                            state.current_view = ViewMode::HomeScreen;
-                                                                            render_view(surface, &state);
-                                                                            let _ = std::surface_flip(4);
-                                                                            std::log(0, "[LAUNCHER] Owner PIN configured and device unlocked. Home surface rendered.").ok();
-                                                                        }
-                                                                        Err(_) => {
-                                                                            state.auth_error = true;
-                                                                            state.pin_setup_step = 0;
-                                                                            state.pin_len = 0;
-                                                                            render_view(surface, &state);
-                                                                            let _ = std::surface_flip(4);
-                                                                            std::log(0, "[LAUNCHER] Owner PIN was NOT stored: the kernel refused the credential, so the account has no PIN and the lock screen stays up.").ok();
-                                                                        }
-                                                                    }
-                                                                    let mut drain = std::InputEvent {
-                                                                        kind: 0,
-                                                                        x: 0,
-                                                                        y: 0,
-                                                                        dx: 0,
-                                                                        dy: 0,
-                                                                        scale_milli: 1000,
-                                                                    };
-                                                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                                                    break;
-                                                                } else {
-                                                                    state.auth_error = true;
-                                                                    state.pin_setup_step = 0;
-                                                                    state.pin_len = 0;
-                                                                    render_view(surface, &state);
-                                                                    let _ = std::surface_flip(4);
-                                                                }
+                                                                     match set {
+                                                                         Ok(()) => {
+                                                                             let _ = std::user_unlock(1000, &state.pin_buffer[..4]);
+                                                                             state.lock_state = std::UserLockState::Unlocked;
+                                                                             state.pin_pad_visible = false;
+                                                                             state.pin_setup_step = 0;
+                                                                             state.pin_len = 0;
+                                                                             state.current_view = ViewMode::HomeScreen;
+                                                                             render_view(surface, &state);
+                                                                             let _ = std::surface_flip(4);
+                                                                             std::log(0, "[LAUNCHER] Owner PIN configured and device unlocked. Home surface rendered.").ok();
+                                                                         }
+                                                                         Err(_) => {
+                                                                             state.auth_error = true;
+                                                                             state.pin_setup_step = 0;
+                                                                             state.pin_len = 0;
+                                                                             present_dirty(surface, &state, Dirty::LockPinPad);
+                                                                             std::log(0, "[LAUNCHER] Owner PIN was NOT stored: the kernel refused the credential, so the account has no PIN and the lock screen stays up.").ok();
+                                                                         }
+                                                                     }
+                                                                     let mut drain = std::InputEvent {
+                                                                         kind: 0,
+                                                                         x: 0,
+                                                                         y: 0,
+                                                                         dx: 0,
+                                                                         dy: 0,
+                                                                         scale_milli: 1000,
+                                                                     };
+                                                                     while std::input_event_poll(&mut drain).is_ok() {}
+                                                                     break;
+                                                                 } else {
+                                                                     // WHY the pad's entry band: the setup step
+                                                                     // went back to zero, which restores the
+                                                                     // first prompt, puts the error line up and
+                                                                     // empties the dots. All three are inside
+                                                                     // the band.
+                                                                     state.auth_error = true;
+                                                                     state.pin_setup_step = 0;
+                                                                     state.pin_len = 0;
+                                                                     present_dirty(surface, &state, Dirty::LockPinPad);
+                                                                 }
                                                             }
                                                         } else {
                                                             if std::user_unlock(1000, &state.pin_buffer[..4]).is_ok() {
@@ -2458,8 +2705,7 @@ pub extern "C" fn _start() -> ! {
                                                                 state.lock_state = std::user_get_lock_state(1000).unwrap_or(std::UserLockState::Locked);
                                                                 state.auth_error = true;
                                                                 state.pin_len = 0;
-                                                                render_view(surface, &state);
-                                                                let _ = std::surface_flip(4);
+                                                                present_dirty(surface, &state, Dirty::LockPinPad);
                                                                 std::log(0, "[LAUNCHER:SECURITY] PIN authentication failed.").ok();
                                                             }
                                                         }
@@ -2473,50 +2719,57 @@ pub extern "C" fn _start() -> ! {
                                             // the entry can be six digits, so the
                                             // key is the only honest end of the
                                             // entry.
-                                            'E' if state.pin_len >= 4 => {
-                                                let n = state.pin_len as usize;
-                                                if state.lock_state == std::UserLockState::Uninitialized {
-                                                    if state.pin_setup_step == 0 {
-                                                        state.pin_confirm_buffer = state.pin_buffer;
-                                                        state.pin_confirm_len = n;
-                                                        state.pin_setup_step = 1;
-                                                        state.pin_len = 0;
-                                                        render_view(surface, &state);
-                                                        let _ = std::surface_flip(4);
-                                                    } else {
-                                                        if state.pin_buffer[..n] == state.pin_confirm_buffer[..state.pin_confirm_len] {
-                                                            let set = std::user_set_credential(1000, &state.pin_buffer[..n]);
-                                                            render_view(surface, &state);
-                                                            let _ = std::surface_flip(4);
-                                                            // WHY the result is checked: this
-                                                            // used to be discarded, so a
-                                                            // credential the kernel
-                                                            // refused to accept still
-                                                            // produced the "PIN configured"
-                                                            // home screen - and the
-                                                            // account on disk could still
-                                                            // have no credential at all.
-                                                            match set {
-                                                                Ok(()) => {
-                                                                    let _ = std::user_unlock(1000, &state.pin_buffer[..n]);
-                                                                    state.lock_state = std::UserLockState::Unlocked;
-                                                                    state.pin_pad_visible = false;
-                                                                    state.pin_setup_step = 0;
-                                                                    state.pin_len = 0;
-                                                                    state.current_view = ViewMode::HomeScreen;
-                                                                    render_view(surface, &state);
-                                                                    let _ = std::surface_flip(4);
-                                                                    std::log(0, "[LAUNCHER] Owner PIN configured and device unlocked. Home surface rendered.").ok();
-                                                                }
-                                                                Err(_) => {
-                                                                    state.auth_error = true;
-                                                                    state.pin_setup_step = 0;
-                                                                    state.pin_len = 0;
-                                                                    render_view(surface, &state);
-                                                                    let _ = std::surface_flip(4);
-                                                                    std::log(0, "[LAUNCHER] Owner PIN was NOT stored: the kernel refused the credential, so the account has no PIN and the lock screen stays up.").ok();
-                                                                }
-                                                            }
+                                             'E' if state.pin_len >= 4 => {
+                                                 let n = state.pin_len as usize;
+                                                 if state.lock_state == std::UserLockState::Uninitialized {
+                                                     if state.pin_setup_step == 0 {
+                                                         state.pin_confirm_buffer = state.pin_buffer;
+                                                         state.pin_confirm_len = n;
+                                                         state.pin_setup_step = 1;
+                                                         state.pin_len = 0;
+                                                         // WHY the pad's entry band: the
+                                                         // step moving forward swaps
+                                                         // the prompt, swaps the
+                                                         // sub-prompt and empties the
+                                                         // dots, and all three live in
+                                                         // that band.
+                                                         present_dirty(surface, &state, Dirty::LockPinPad);
+                                                     } else {
+                                                         if state.pin_buffer[..n] == state.pin_confirm_buffer[..state.pin_confirm_len] {
+                                                             let set = std::user_set_credential(1000, &state.pin_buffer[..n]);
+                                                             // Dropped: nothing in the state
+                                                             // has moved at this line, and
+                                                             // the credential's outcome is
+                                                             // repainted immediately below.
+                                                             present_dirty(surface, &state, Dirty::None);
+                                                             // WHY the result is checked: this
+                                                             // used to be discarded, so a
+                                                             // credential the kernel
+                                                             // refused to accept still
+                                                             // produced the "PIN configured"
+                                                             // home screen - and the
+                                                             // account on disk could still
+                                                             // have no credential at all.
+                                                             match set {
+                                                                 Ok(()) => {
+                                                                     let _ = std::user_unlock(1000, &state.pin_buffer[..n]);
+                                                                     state.lock_state = std::UserLockState::Unlocked;
+                                                                     state.pin_pad_visible = false;
+                                                                     state.pin_setup_step = 0;
+                                                                     state.pin_len = 0;
+                                                                     state.current_view = ViewMode::HomeScreen;
+                                                                     render_view(surface, &state);
+                                                                     let _ = std::surface_flip(4);
+                                                                     std::log(0, "[LAUNCHER] Owner PIN configured and device unlocked. Home surface rendered.").ok();
+                                                                 }
+                                                                 Err(_) => {
+                                                                     state.auth_error = true;
+                                                                     state.pin_setup_step = 0;
+                                                                     state.pin_len = 0;
+                                                                     present_dirty(surface, &state, Dirty::LockPinPad);
+                                                                     std::log(0, "[LAUNCHER] Owner PIN was NOT stored: the kernel refused the credential, so the account has no PIN and the lock screen stays up.").ok();
+                                                                 }
+                                                             }
                                                             let mut drain = std::InputEvent {
                                                                 kind: 0,
                                                                 x: 0,
@@ -2527,67 +2780,82 @@ pub extern "C" fn _start() -> ! {
                                                             };
                                                             while std::input_event_poll(&mut drain).is_ok() {}
                                                             break;
-                                                        } else {
-                                                            state.auth_error = true;
-                                                            state.pin_setup_step = 0;
-                                                            state.pin_len = 0;
-                                                            render_view(surface, &state);
-                                                            let _ = std::surface_flip(4);
-                                                        }
-                                                    }
-                                                } else if std::user_unlock(1000, &state.pin_buffer[..n]).is_ok() {
-                                                    state.lock_state = std::UserLockState::Unlocked;
-                                                    state.pin_pad_visible = false;
-                                                    state.pin_len = 0;
-                                                    state.auth_error = false;
-                                                    state.current_view = ViewMode::HomeScreen;
-                                                    render_view(surface, &state);
-                                                    let _ = std::surface_flip(4);
-                                                    std::log(0, "[LAUNCHER] Device authenticated and unlocked via PIN. Home surface rendered.").ok();
-                                                    let mut drain = std::InputEvent {
-                                                        kind: 0,
-                                                        x: 0,
-                                                        y: 0,
-                                                        dx: 0,
-                                                        dy: 0,
-                                                        scale_milli: 1000,
-                                                    };
-                                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                                    break;
-                                                } else {
-                                                    state.lock_state = std::user_get_lock_state(1000).unwrap_or(std::UserLockState::Locked);
-                                                    state.auth_error = true;
-                                                    state.pin_len = 0;
-                                                    render_view(surface, &state);
-                                                    let _ = std::surface_flip(4);
-                                                    std::log(0, "[LAUNCHER:SECURITY] PIN authentication failed.").ok();
-                                                }
-                                            }
-                                            // Clear-all: the bottom-left "CLR"
-                                            // key empties the entry (the old
-                                            // `X` key's job) and still dismisses
-                                            // the pad on a locked device.
-                                            'C' => {
-                                                state.pin_len = 0;
-                                                state.pin_buffer = [0; 8];
-                                                state.auth_error = false;
-                                                if state.lock_state == std::UserLockState::Locked {
-                                                    state.pin_pad_visible = false;
-                                                }
-                                                render_view(surface, &state);
-                                                let _ = std::surface_flip(4);
-                                            }
+                                                         } else {
+                                                             state.auth_error = true;
+                                                             state.pin_setup_step = 0;
+                                                             state.pin_len = 0;
+                                                             present_dirty(surface, &state, Dirty::LockPinPad);
+                                                         }
+                                                     }
+                                                 } else if std::user_unlock(1000, &state.pin_buffer[..n]).is_ok() {
+                                                     state.lock_state = std::UserLockState::Unlocked;
+                                                     state.pin_pad_visible = false;
+                                                     state.pin_len = 0;
+                                                     state.auth_error = false;
+                                                     state.current_view = ViewMode::HomeScreen;
+                                                     render_view(surface, &state);
+                                                     let _ = std::surface_flip(4);
+                                                     std::log(0, "[LAUNCHER] Device authenticated and unlocked via PIN. Home surface rendered.").ok();
+                                                     let mut drain = std::InputEvent {
+                                                         kind: 0,
+                                                         x: 0,
+                                                         y: 0,
+                                                         dx: 0,
+                                                         dy: 0,
+                                                         scale_milli: 1000,
+                                                     };
+                                                     while std::input_event_poll(&mut drain).is_ok() {}
+                                                     break;
+                                                 } else {
+                                                     state.lock_state = std::user_get_lock_state(1000).unwrap_or(std::UserLockState::Locked);
+                                                     state.auth_error = true;
+                                                     state.pin_len = 0;
+                                                     present_dirty(surface, &state, Dirty::LockPinPad);
+                                                     std::log(0, "[LAUNCHER:SECURITY] PIN authentication failed.").ok();
+                                                 }
+                                             }
+                                             // Clear-all: the bottom-left "CLR"
+                                             // key empties the entry (the old
+                                             // `X` key's job) and still dismisses
+                                             // the pad on a locked device.
+                                             'C' => {
+                                                 state.pin_len = 0;
+                                                 state.pin_buffer = [0; 8];
+                                                 state.auth_error = false;
+                                                 let mut dirty = Dirty::LockPinPad;
+                                                 if state.lock_state == std::UserLockState::Locked {
+                                                     state.pin_pad_visible = false;
+                                                     // WHY the whole surface when the pad
+                                                     // hides: the pad's veil, its prompt
+                                                     // and its twelve keys all disappear,
+                                                     // so every row from the status bar
+                                                     // down to the pad's home indicator
+                                                     // reverts to the lock surface. The
+                                                     // prompt band alone would leave the
+                                                     // keypad standing.
+                                                     dirty = dirty.widen(Dirty::All);
+                                                 }
+                                                 present_dirty(surface, &state, dirty);
+                                             }
                                             // Backspace: the bottom-right key
                                             // (backspace pictogram; the old `C`
                                             // key's job) removes the last digit.
-                                            'D' => {
-                                                if state.pin_len > 0 {
-                                                    state.pin_len -= 1;
-                                                    state.pin_buffer[state.pin_len as usize] = 0;
-                                                    render_view(surface, &state);
-                                                    let _ = std::surface_flip(4);
-                                                }
-                                            }
+                                             'D' => {
+                                                 if state.pin_len > 0 {
+                                                     state.pin_len -= 1;
+                                                     state.pin_buffer[state.pin_len as usize] = 0;
+                                                     // WHY the dots and not the whole
+                                                     // pad: backspace removes one
+                                                     // entry dot, and neither the
+                                                     // prompt nor the sub-prompt can
+                                                     // move -- the pad cleared
+                                                     // `auth_error` on entry -- so the
+                                                     // wider band would repaint a
+                                                     // hundred rows of unchanged
+                                                     // backdrop.
+                                                     present_dirty(surface, &state, Dirty::LockPinDots);
+                                                 }
+                                             }
                                             _ => {}
                                         }
                                         continue;
@@ -2846,8 +3114,12 @@ pub extern "C" fn _start() -> ! {
                                 let pages = (state.app_count + 11) / 12;
                                 if state.app_drawer_page + 1 < pages {
                                     state.app_drawer_page += 1;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
+                                    // WHY the pages band: a page turn redraws every
+                                    // tile in the grid and moves the
+                                    // current-page dot. The chips above are the
+                                    // active tab, which a page turn does not
+                                    // touch -- see `app_drawer::pages_band`.
+                                    present_dirty(surface, &state, Dirty::DrawerPages);
                                 }
                                 break;
                             }
@@ -2865,8 +3137,17 @@ pub extern "C" fn _start() -> ! {
                                 if let Some(tab) = screens::app_drawer::app_drawer_chip_at(input.x as usize, input.y as usize) {
                                     state.app_drawer_tab = tab;
                                     state.app_drawer_page = 0;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
+                                    // WHY two bands: a tab switch moves the chip
+                                    // row's active chip AND, because it resets the
+                                    // page to zero, the grid and the dots. One
+                                    // `widen` renders the union of both rather
+                                    // than whichever was named last, which is
+                                    // the whole reason the combinator exists.
+                                    present_dirty(
+                                        surface,
+                                        &state,
+                                        Dirty::DrawerChips.widen(Dirty::DrawerPages),
+                                    );
                                     std::log(0, "[LAUNCHER] App drawer category tab switched.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
@@ -2881,8 +3162,9 @@ pub extern "C" fn _start() -> ! {
                                 }
                                 if let Some(page) = screens::app_drawer::app_drawer_dot_at(&state, input.x as usize, input.y as usize) {
                                     state.app_drawer_page = page;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
+                                    // A dot tap is a page turn, so it moves the
+                                    // same two things the swipe does.
+                                    present_dirty(surface, &state, Dirty::DrawerPages);
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,
@@ -3299,8 +3581,14 @@ pub extern "C" fn _start() -> ! {
                                     // bit this control owns, so the log reports an
                                     // actual change.
                                     state.task0_done = !state.task0_done;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
+                                    // WHY the card band: the checkbox is painted
+                                    // inside the Today card and `task0_done` is
+                                    // read only by this card's first row, so the
+                                    // card's rectangle is the extent that moved
+                                    // (168..658 -- see `home::system_card_band`).
+                                    // The greeting above, the deck below and the
+                                    // nav bar are all untouched by this bit.
+                                    present_dirty(surface, &state, Dirty::HomeCard);
                                     std::log(0, "[LAUNCHER] Contextual task 0 toggled.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
@@ -3402,8 +3690,16 @@ pub extern "C" fn _start() -> ! {
                                         }
                                         NavTarget::Home => {
                                             state.current_view = ViewMode::HomeScreen;
-                                            render_view(surface, &state);
-                                            let _ = std::surface_flip(4);
+                                            // WHY `None`: this arm is only reachable
+                                            // from the HomeScreen view arm, so the
+                                            // home surface is already presented and
+                                            // assigning the view it is already in
+                                            // moves no pixel. This arm used to
+                                            // re-render the whole surface -- the
+                                            // inert-input cost -- while the log line
+                                            // above it already explained that Home
+                                            // answers nothing new here.
+                                            present_dirty(surface, &state, Dirty::None);
                                             std::log(0, "[LAUNCHER] Home surface presented via home button.").ok();
                                         }
                                         NavTarget::Back => {

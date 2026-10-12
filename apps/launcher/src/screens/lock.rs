@@ -1135,6 +1135,36 @@ const PIN_DOT_R: i32 = 9;
 /// making it follow the geometry.
 const PIN_DOT_SLACK: i32 = 6;
 
+/// Rows the pad's four entry dots occupy, as the painter's own gate spans them.
+///
+/// WHY the painter calls this: the dot group's gate was computed inline inside
+/// `lock_pin_pad_pixel`, so the rows a digit moves and the rows the pad actually
+/// draws were one arithmetic expression only the painter could see. The gate now
+/// lives here and the shell reads the same numbers back
+/// (`Dirty::LockPinDots`), so a tap that adds a digit repaints exactly the rows
+/// the dots are drawn in.
+pub fn pin_pad_dot_band() -> (usize, usize) {
+    (
+        (PIN_DOT_CY as i32 - PIN_DOT_R - PIN_DOT_SLACK).max(0) as usize,
+        PIN_DOT_CY + PIN_DOT_R as usize + PIN_DOT_SLACK as usize,
+    )
+}
+
+/// Rows the pad redraws when an entry digit, the prompt or the sub-prompt moves.
+///
+/// WHY this reaches the prompt and not just the dots: entering a digit also
+/// clears `auth_error`, which repaints the prompt's ink and swaps the
+/// sub-prompt's text. Both sit above the dots, so one band from the prompt's
+/// origin down to the dot gate's bottom covers every row one keystroke can move.
+///
+/// WHY it stops at the dot gate and does not reach the keys: a keystroke changes
+/// no key, and the rows below the dots are pad backdrop that the veil paints a
+/// constant over, so they are already correct.
+pub fn pin_pad_entry_band() -> (usize, usize) {
+    let (_, dot_bottom) = pin_pad_dot_band();
+    (PIN_HEADING_Y, dot_bottom)
+}
+
 /// The pad's four inks, written out in full `0xAARRGGBB`.
 ///
 /// WHY the alpha byte is written out rather than left off: the literals these
@@ -1307,10 +1337,7 @@ fn lock_pin_pad_pixel(
     //    so a dot and its gate could be moved independently. The slack reproduces
     //    the old row band exactly (`cy - 9 - 6 .. cy + 9 + 6` = 345..375) and is
     //    wider than it across, which is all the group needs.
-    let dot_band = (
-        (PIN_DOT_CY as i32 - PIN_DOT_R - PIN_DOT_SLACK).max(0) as usize,
-        PIN_DOT_CY + PIN_DOT_R as usize + PIN_DOT_SLACK as usize,
-    );
+    let dot_band = pin_pad_dot_band();
     let dot_span = (
         (PIN_DOT_X0 as i32 - PIN_DOT_R - PIN_DOT_SLACK).max(0) as usize,
         PIN_DOT_X0

@@ -81,6 +81,24 @@ pub const WORKSPACE_CARDS: [Rect; 4] = [
     Rect::new(CARD_X, 1020, CARD_W, 180),
 ];
 
+/// Rows a dismissed or closed recent card can move: the running-count strip
+/// above the deck, and every card in the deck below it.
+///
+/// WHY the whole deck and not just the dismissed card: `dismiss_recent` shifts
+/// the remaining slots up, so card 0 takes card 1's package, card 1 takes card
+/// 2's, and card 2 empties. A band naming one card would leave two stale.
+///
+/// WHY the count strip is inside the band: `running_count` reads the task ids a
+/// close just cleared, so the line above the deck moves with the cards.
+///
+/// WHY index 2 and not the last card: `WORKSPACE_CARDS` has four entries and
+/// `build_card` answers `None` for slot 3, because there are only three recent
+/// slots. Card 3 is therefore never drawn and cannot move.
+pub fn recents_band() -> (usize, usize) {
+    let last = WORKSPACE_CARDS[2];
+    (STATUS_BAND_TOP, last.y + last.h)
+}
+
 /// Left inset of a card's text column, measured from the card's left edge.
 ///
 /// WHY 96 and not the icon's own 24: the icon is 56 wide, and 96 leaves a 16 px

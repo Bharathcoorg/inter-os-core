@@ -118,6 +118,32 @@ fn frame() -> Frame {
     }
 }
 
+/// Rows the category chips occupy.
+///
+/// WHY an accessor: the shell repaints these rows when the active tab changes,
+/// and the rectangle is `frame().chips` -- the same one `app_drawer_chip_at`
+/// hit-tests -- so the band and the pixels are one number. See [`pages_band`]
+/// for the grid's.
+pub fn chips_band() -> (usize, usize) {
+    let f = frame();
+    (f.chips.y, f.chips.y + f.chips.h)
+}
+
+/// Rows the page grid and the pagination dots occupy.
+///
+/// WHY one band and not one per control: a page change redraws every tile and
+/// moves the current-page dot, and the gap between the grid's bottom and the
+/// dots is background that is rewritten identically. Two separate writes would
+/// save 25 rows of pure background at the cost of an extra surface write.
+///
+/// WHY the chips are NOT in this band: they are a separate row and a page change
+/// cannot move them, so including them would repaint a row that is already
+/// correct.
+pub fn pages_band() -> (usize, usize) {
+    let f = frame();
+    (f.grid.y, f.dots.y + f.dots.h)
+}
+
 /// Columns the drawer lays out: strictly 3 columns (3x4 grid) matching Screen 3.
 pub fn drawer_columns(_state: &LauncherState) -> usize {
     3
