@@ -48,8 +48,17 @@ launcher_has_booted = False
 # The logical phone surface is 720x1440. The actual QEMU framebuffer is learned
 # from live screendumps, so Device Studio does not assume a developer has a
 # particular host resolution.
+# The guest's scanout in guest pixels, and the authoring space its shell and
+# apps lay out in. They are separate because a raised scanout only buys detail
+# if apps paint at that resolution; an app that keeps painting at the authoring
+# space gets an upscale, which is a larger surface cost and the same image.
+#
+# 1080x2160 is FHD-class width at the SAME 1:2 shape as the authoring space, so
+# the ratio between them is exactly 1.5 on both axes. The reference design's
+# 1080x2400 is 9:20 and a uniform scale to it does not exist.
+SCANOUT_W, SCANOUT_H = 1080, 2160
 LOGICAL_SURFACE_W, LOGICAL_SURFACE_H = 720, 1440
-guest_framebuffer_size = (720, 1440)
+guest_framebuffer_size = (SCANOUT_W, SCANOUT_H)
 
 # Canonical guest scanout geometries. The x86_64 phone profile requests a
 # native 720x1440 portrait scanout via EDID; landscape presents 1280x720. A VNC
@@ -57,7 +66,7 @@ guest_framebuffer_size = (720, 1440)
 # 200x400 shadow while the live desktop is 1280x720): publishing it would crop
 # the phone surface to the wrong geometry, so the session is resynchronised
 # instead of streaming stale pixels.
-CANONICAL_SCANOUT_SIZES = frozenset(((720, 1440), (1280, 720)))
+CANONICAL_SCANOUT_SIZES = frozenset(((SCANOUT_W, SCANOUT_H), (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H), (1280, 720)))
 MAX_SCANOUT_DIM = 4096
 
 
@@ -108,17 +117,17 @@ DEVICE_PROFILES = {
         "id": "interos_reference",
         "name": "InterOS Reference Phone",
         "description": (
-            "Native 720x1440 portrait scanout the guest KMS selects by EDID. "
-            "This is the stock phone Device Studio displays; it reproduces the "
-            "boot QEMU is launched with today."
+            "Native 1080x2160 FHD-class portrait scanout the guest KMS selects by "
+            "EDID, with 720x1440 as the authoring space the shell and apps lay "
+            "out in. This is the stock phone Device Studio displays."
         ),
-        "guest_geometry": {"width": LOGICAL_SURFACE_W, "height": LOGICAL_SURFACE_H},
+        "guest_geometry": {"width": SCANOUT_W, "height": SCANOUT_H},
         # The guest presents this landscape desktop during boot (before native
         # portrait scanout engages) and in landscape orientation. It is a guest
         # behaviour, not a Studio preference; the reference profile records it
         # so the frame geometry checks match what QEMU actually reports.
         "landscape_geometry": {"width": 1280, "height": 720},
-        "density_dpi": 320,
+        "density_dpi": 480,
         "presentation": {
             "css_max_width_px": 360,
             "aspect_ratio": "1 / 2",
@@ -1680,17 +1689,26 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
         # pc=0x96ff with IDT still the real-mode IVT). Same image with only
         # virtio-vga boots to PID1. The bootloader stages ship as binary
         # blobs in crates.io `bootloader` 0.11.17, so this is not patchable
-        # here; virtio-vga + EDID keeps the guest KMS 720x1440 scanout.
-        # The active device profile decides this EDID geometry: the reference
-        # profile requests the literal native 720x1440 scanout the guest already
-        # selects, and a profile that declares a different geometry requests it
-        # explicitly here. The frame publisher/capture path then withholds frames
-        # and reports honestly if the live scanout is not the geometry asked for.
+        # here; the standard VGA device exposes the same Bochs DISPI registers
+        # and keeps the guest KMS at the requested scanout.
+        #
+        # WHY the standard VGA device and not virtio-vga: virtio-vga's
+        # framebuffer is capped at 8MB of VRAM and cannot present the FHD-class
+        # scanout this device profile asks for -- the guest logs the DISPI mode
+        # as unavailable, falls back, and the result is horizontal banding
+        # because the display mode and the compositor's scanout disagree. The
+        # standard VGA device is the same Bochs DISPI path with tunable VRAM
+        # (`vgamem_mb`), so raising the guest's scanout is a matter of asking
+        # for it here rather than hitting a device limit.
+        #
+        # 32MB covers a 1080x2160 ARGB8888 front and back buffer (19.8MB) with
+        # headroom, which is the size the profile's geometry implies.
         edid_w, edid_h = device_guest_geometry()
-        if (edid_w, edid_h) == (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H):
-            cmd.extend(["-vga", "none", "-device", "virtio-vga,edid=on,xres=720,yres=1440"])
-        else:
-            cmd.extend(["-vga", "none", "-device", f"virtio-vga,edid=on,xres={edid_w},yres={edid_h}"])
+        cmd.extend([
+            "-vga", "none",
+            "-device",
+            f"VGA,edid=on,xres={edid_w},yres={edid_h},vgamem_mb=32",
+        ])
         # A dedicated data disk is mandatory. The kernel uses the Primary Master
         # as the read-only boot image and the Primary Slave as persistent storage;
         # with only one disk attached it falls back to formatting the boot image

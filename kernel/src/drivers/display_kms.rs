@@ -6,7 +6,7 @@
 //! - Multi-surface layer composition with z-ordering, position offsets, and visibility
 //! - Porter-Duff source-over alpha blending (`out = src * a + dst * (1 - a)`)
 //! - Dirty rectangle tracking to minimize memory bandwidth
-//! - Native portrait mobile scanout (720x1440 / 1080x2400) and rotation transforms
+//! - Native portrait mobile scanout (1080x2160 FHD-class / 1280x720 landscape) and rotation transforms
 
 use alloc::vec::Vec;
 use alloc::vec;
@@ -485,9 +485,9 @@ impl DrmKmsController {
     }
 
     /// True when the surface loop below is guaranteed to take the identity
-    /// full-cover blit: one 720x1440 surface at the origin over an unrotated
-    /// 720x1440 scanout, which is a `copy_from_slice` replacing every
-    /// back-buffer pixel.
+    /// full-cover blit: one surface whose width/height are exactly the scanout's,
+    /// placed at the origin over an unrotated scanout, which is a
+    /// `copy_from_slice` replacing every back-buffer pixel.
     ///
     /// WHY this predicate and not "some surface covers the scanout": a surface
     /// declares `opacity`, but its *pixels* carry their own alpha, and the
@@ -495,16 +495,29 @@ impl DrmKmsController {
     /// the identity path overwrites the backdrop outright, so only it makes
     /// dropping the background fill provably equivalent — a transparent pixel
     /// lands on the same colour either way.
+    ///
+    /// WHY the scanout's own size rather than the 720x1440 launcher canvas: the
+    /// whole launcher canvas is only identity when the scanout *is* 720x1440.
+    /// Once the scanout is 1080x2160 the launcher surface takes the scaled blit,
+    /// which is the correct image at the cost of the fill and the interpolation;
+    /// the fast path still belongs to whichever surface matches the scanout
+    /// exactly, so the predicate asks about the scanout's dimensions instead of
+    /// a hardcoded geometry.
     fn identity_full_cover_will_run(&self) -> bool {
         let landscape = matches!(
             self.orientation,
             DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft
         );
-        if landscape || self.scanout_width != 720 || self.scanout_height != 1440 {
+        if landscape || self.scanout_width == 0 || self.scanout_height == 0 {
             return false;
         }
         self.surfaces.iter().any(|s| {
-            s.visible && s.opacity != 0 && s.width == 720 && s.height == 1440 && s.x == 0 && s.y == 0
+            s.visible
+                && s.opacity != 0
+                && s.width == self.scanout_width
+                && s.height == self.scanout_height
+                && s.x == 0
+                && s.y == 0
         })
     }
 
@@ -581,6 +594,34 @@ impl DrmKmsController {
             let y0 = sy.max(0);
             let x1 = sx.saturating_add(s_w).min(sw);
             let y1 = sy.saturating_add(s_h).min(sh);
+
+            // Identity full cover: a surface whose geometry is exactly the
+            // unrotated scanout's, at the origin, is one straight copy. This is
+            // the only blit that replaces the backdrop outright, which is what
+            // makes `identity_full_cover_will_run` allowed to drop the
+            // background fill. It is also what keeps a scanout-matching client
+            // from paying an interpolation it does not need.
+            //
+            // WHY it is ordered before the launcher block: at a 720x1440 scanout
+            // the launcher surface matches this condition too, and the branch
+            // below performs exactly the copy and the same row mapping the old
+            // in-block identity case did, so the two are one path rather than
+            // two.
+            if !matches!(
+                self.orientation,
+                DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft
+            ) && s_w == sw && s_h == sh && sx == 0 && sy == 0
+            {
+                self.back_buffer.copy_from_slice(&surface.pixels);
+                // The copy places surface row r on scanout row r, so the tracked
+                // band maps 1:1, clamped to the scanout height.
+                if surface.dirty_rows.1 > surface.dirty_rows.0 {
+                    union_rows(&mut present_band, surface.dirty_rows.0, surface.dirty_rows.1.min(sh as usize));
+                }
+                surface.dirty = false;
+                surface.dirty_rows = (0, 0);
+                continue;
+            }
 
             // The launcher surface has a stable 720x1440 logical portrait
             // canvas, but the physical scanout is negotiated per platform. Fit
@@ -723,26 +764,49 @@ impl DrmKmsController {
                         // source's own detail at any ratio this compositor runs
                         // -- a 1.5x upscale puts at most one source pixel between
                         // samples, so the error is a sub-percent of a channel.
+                        //
+                        // WHY the source extents are taken from the surface and
+                        // not assumed: the sample position is "how far through
+                        // the destination row am I", and that has to be scaled
+                        // by how far through the *source* row that lands -- the
+                        // two extents are what name the relationship. A constant
+                        // extent instead of the surface's own height/width makes
+                        // the ramp collapse: with a fixed 255 the sampler only
+                        // ever reaches source rows and columns 0..254 of a
+                        // 720x1440 canvas, so a raised scanout shows the
+                        // top-left corner of the launcher blown up to fill it,
+                        // and the last three quarters of every surface never
+                        // appear at all. That is measured, not argued: it is what
+                        // this compositor produced before the extent fix.
+                        let src_pitch = s_w as usize; // 720 for the launcher canvas
+                        let src_last_x = (s_w - 1) as usize;
+                        let src_last_y = (s_h - 1) as usize;
                         let dst_last_x = (dst_w - 1).max(1);
                         let dst_last_y = (dst_h - 1).max(1);
                         for dy in 0..dst_h {
-                            // 8.8 fixed point along each axis.
-                            let fy = dy * 255 * 255 / dst_last_y;
-                            let sy0 = fy >> 8;
-                            let sy1 = (sy0 + 1).min(1439);
+                            // 8.8 fixed point along each axis: destination
+                            // progress mapped onto the source's own extent.
+                            let fy = dy * src_last_y * 256 / dst_last_y;
+                            let sy0 = (fy >> 8).min(src_last_y);
+                            let sy1 = (sy0 + 1).min(src_last_y);
                             let wy = (fy & 0xFF) as u32;
-                            let (r0, r1) = if surface.pixels.len() > sy0 * 720 + 719 {
-                                (sy0 * 720, (sy0 + 1).min(1439) * 720)
+                            let (r0, r1) = if sy1 * src_pitch + src_last_x < surface.pixels.len() {
+                                (sy0 * src_pitch, sy1 * src_pitch)
                             } else {
                                 (0, 0)
                             };
                             let dst_row_start = (dst_y + dy) * scanout_w + dst_x;
                             for dx in 0..dst_w {
-                                let fx = dx * 255 * 255 / dst_last_x;
-                                let sx0 = fx >> 8;
-                                let sx1 = sx0 + 1;
+                                let fx = dx * src_last_x * 256 / dst_last_x;
+                                let sx0 = (fx >> 8).min(src_last_x);
+                                let sx1 = (sx0 + 1).min(src_last_x);
                                 let wx = (fx & 0xFF) as u32;
-                                if sx1 > 719 || sy0 >= 1440 {
+                                // Out-of-surface samples skip rather than read
+                                // past the row. Both taps are already clamped to
+                                // the surface's own last column/row, so this
+                                // rejects only a declared geometry the pixel
+                                // buffer does not honour.
+                                if sx0 >= s_w as usize || sy0 >= s_h as usize {
                                     continue;
                                 }
                                 let i00 = r0 + sx0;
@@ -970,10 +1034,13 @@ impl DrmKmsController {
 }
 
 /// Global static instance of the DRM/KMS Controller.
-/// Canonical portrait scanout matches the 720x1440 launcher surface. The boot framebuffer is a separate presentation target and may be any supported size.
+/// Canonical portrait scanout is the FHD-class 1080x2160 the physical DISPI mode
+/// and `design::viewport::SCANOUT_*` describe: the authoring space stays
+/// 720x1440 and the compositor interpolates the 1.5x gap. The boot framebuffer is
+/// a separate presentation target and may be any supported size.
 pub static DRM_KMS: Mutex<DrmKmsController> = Mutex::new(DrmKmsController {
-    scanout_width: 720,
-    scanout_height: 1440,
+    scanout_width: 1080,
+    scanout_height: 2160,
     format: DrmPixelFormat::Argb8888,
     front_buffer: Vec::new(),
     back_buffer: Vec::new(),
@@ -987,7 +1054,7 @@ pub static DRM_KMS: Mutex<DrmKmsController> = Mutex::new(DrmKmsController {
     frame_deadline_ticks: 0,
     frame_dirty: true,
     powered: true,
-    present_dirty_rows: (0, 1440),
+    present_dirty_rows: (0, 2160),
 });
 
 #[cfg(test)]
@@ -1029,6 +1096,78 @@ mod tests {
             distinct > 2,
             "scaled blit produced only {distinct} tones; it is replicating, not interpolating"
         );
+    }
+
+    #[test]
+    fn fhd_scanout_upscales_the_whole_authored_canvas() {
+        // WHY this test exists: raising the scanout only buys detail if the
+        // whole surface reaches it. The scaled blit's sample position has to be
+        // scaled by the surface's own extent; a constant extent instead makes the
+        // ramp collapse onto the first 255 source rows/columns, so the capture
+        // shows the canvas's top-left corner blown up to fill the screen with
+        // the rest missing. This pins both ends of the range and that every
+        // destination pixel is written.
+        let mut kms = DrmKmsController::new(1080, 2160);
+        kms.set_display_mode(1080, 2160, 60).expect("mode");
+        assert_eq!(kms.front_buffer.len(), 1080 * 2160);
+        assert_eq!(kms.back_buffer.len(), 1080 * 2160);
+
+        let mut s = DrmSurface::new(1, 720, 1440, 0, 0);
+        // Horizontal grayscale ramp: brightness rises with the surface column, so
+        // the destination ramp must span the surface's full width.
+        for y in 0..1440usize {
+            for x in 0..720usize {
+                let v = (x * 255 / 719) as u32;
+                s.pixels[y * 720 + x] = 0xFF000000 | (v << 16) | (v << 8) | v;
+            }
+        }
+        kms.surfaces.push(s);
+        kms.frame_dirty = true;
+        kms.surfaces[0].dirty = true;
+        kms.composite();
+
+        let channel = |p: u32| (p >> 16) & 0xFF;
+        // Sample the middle row so the ramp's column structure is visible
+        // without a row to influence it.
+        let row = 1080usize;
+        let left = channel(kms.back_buffer[row * 1080]);
+        let mid = channel(kms.back_buffer[row * 1080 + 539]);
+        let right = channel(kms.back_buffer[row * 1080 + 1079]);
+        assert!(left <= 4, "left edge should be near-black, got {left}");
+        assert!(mid > 110 && mid < 145, "midpoint should sit near mid-grey, got {mid}");
+        assert!(right >= 250, "right edge should span the source's full width, got {right}");
+
+        // Every destination pixel must be written by the blit: a collapsed ramp
+        // leaves the untouched residue of the background fill behind.
+        let untouched = kms
+            .back_buffer
+            .iter()
+            .filter(|&&p| p == 0xFF0B0F19)
+            .count();
+        assert_eq!(untouched, 0, "scaled blit left {untouched} pixels unwritten");
+    }
+
+    #[test]
+    fn identity_fast_path_still_fires_for_a_scanout_sized_surface() {
+        // WHY this test exists: with the scanout raised, the launcher's 720x1440
+        // surface no longer matches it and takes the interpolated blit. The
+        // fast path belongs to whichever surface *does* match the scanout, and
+        // dropping it would silently cost a full interpolation per frame for no
+        // gain. This pins that a surface matching the scanout still copies.
+        let mut kms = DrmKmsController::new(1080, 2160);
+        kms.set_display_mode(1080, 2160, 60).expect("mode");
+        assert!(kms.identity_full_cover_will_run() == false);
+
+        let id = kms.create_surface(1080, 2160, 0, 1);
+        assert_ne!(id, 0);
+        // A pixel that no interpolation could produce marks the copy.
+        kms.surfaces[0].pixels[0] = 0xFF123456;
+        kms.surfaces[0].pixels[1080 * 2160 - 1] = 0xFF654321;
+        assert!(kms.identity_full_cover_will_run());
+        kms.composite();
+        assert_eq!(kms.back_buffer[0], 0xFF123456);
+        assert_eq!(kms.back_buffer[1080 * 2160 - 1], 0xFF654321);
+        assert!(kms.destroy_surface(id));
     }
 
     #[test]

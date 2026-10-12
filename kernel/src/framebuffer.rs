@@ -3,8 +3,8 @@
 //! Renders a sleek, modern smartphone device viewport, ambient AI dynamic island,
 //! intent search bar, fluid capability cards (Android MicroVM, .rapp Engine),
 //! system telemetry, and complete native app views directly into the physical
-//! video framebuffer (native 720x1440 portrait scanout, or 1280x720 when the
-//! device is rotated to landscape — see `set_physical_mode`).
+//! video framebuffer (native 1080x2160 FHD-class portrait scanout, or 1280x720
+//! when the device is rotated to landscape — see `set_physical_mode`).
 
 use bootloader_api::info::{FrameBuffer, FrameBufferInfo, PixelFormat};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -1727,8 +1727,8 @@ pub fn set_physical_mode(width: u16, height: u16) -> bool {
 /// Initializes the framebuffer console with the bootloader framebuffer.
 ///
 /// Deliberately does NOT reprogram the DISPI scanout: the bootloader only
-/// mapped `mapped_bytes` (0x2A3000 = 675 pages for the 1280x720 firmware
-/// mode) of the 8 MiB VGA BAR, which is far too small for the 720x1440
+/// mapped `mapped_bytes` of the firmware's startup mode (e.g. 0x2A3000 = 675
+/// pages for the 1280x720x24 mode), which is too small for the 1080x2160
 /// native frame. Reprogramming here — before the kernel page-table mapper
 /// exists — wrote past the mapped pages and page-faulted into a silent
 /// triple-fault reset loop. Engagement is deferred to `engage_native_mode`,
@@ -1763,25 +1763,38 @@ pub fn init(framebuffer: &'static mut FrameBuffer) {
     );
 }
 
-/// Engages the phone's native 720x1440 DISPI scanout once paging is live.
+/// Engages the phone's native 1080x2160 FHD-class DISPI scanout once paging is
+/// live.
 ///
-/// The native 32bpp frame needs 720x1440x4 = 4,147,200 bytes (1013 pages,
-/// 0x3F5000 rounded), but the bootloader only mapped 0x2A3000 (675 pages) of
-/// the firmware's 1280x720x24 frame. This function maps ONLY the unmapped
-/// tail through the kernel page-table mapper, and refuses to reprogram DISPI
-/// unless the coverage check proves every byte the scanout may touch is
-/// mapped. On any failure it leaves the firmware mode untouched and never
-/// writes pixels beyond mapped bytes.
+/// WHY 1080x2160 and not the reference design's 1080x2400: the reference is
+/// authored at 9:20 while this guest's authoring space is 720x1440 (1:2), and a
+/// scale between two different aspect ratios is not uniform — it would stretch
+/// one axis more than the other, so every box on every screen would be subtly
+/// wrong and no single ratio could express it. 1080x2160 is the same 1:2 shape,
+/// so the ratio is exact on both axes (1.5), with FHD-class width and 2.33M
+/// pixels. The ratio itself lives in `design::viewport`; this file is only the
+/// hardware geometry that presents it.
+///
+/// The native 32bpp frame needs 1080x2160x4 = 9,331,200 bytes (0x8E6200). This
+/// exceeds the bootloader's startup-mode mapping *and* exceeds the 8 MiB VRAM of
+/// the `virtio-vga` device, so both the guest mapping and the QEMU device have
+/// to accommodate it: see `FB_COVERED_BYTES` for the guest half, and the
+/// `vgamem_mb` display argument for the device half.
+///
+/// This function maps ONLY the unmapped tail through the kernel page-table
+/// mapper, and refuses to reprogram DISPI unless the coverage check proves every
+/// byte the scanout may touch is mapped. On any failure it leaves the firmware
+/// mode untouched and never writes pixels beyond mapped bytes.
 ///
 /// Must be called after `memory::init_memory` (it needs the mapper and the
 /// direct map) and before displayd's first present.
 pub fn engage_native_mode() {
-    const NATIVE_W: usize = 720;
-    const NATIVE_H: usize = 1440;
+    const NATIVE_W: usize = 1080;
+    const NATIVE_H: usize = 2160;
     const BPP: usize = 4;
 
-    let required_bytes = NATIVE_W * NATIVE_H * BPP; // 4,147,200
-    let required_rounded = align_up_4k(required_bytes as u64) as usize; // 1013 pages = 4,149,376 (0x3F5000)
+    let required_bytes = NATIVE_W * NATIVE_H * BPP; // 9,331,200
+    let required_rounded = align_up_4k(required_bytes as u64) as usize; // 2279 pages = 9,334,784 (0x8E7000)
     let base_va = FB_BASE_VA.load(Ordering::Acquire);
     let mut covered = FB_COVERED_BYTES.load(Ordering::Acquire);
 
@@ -1844,14 +1857,16 @@ pub fn engage_native_mode() {
         return;
     }
 
-    // Both modes the runtime may switch between fit inside `covered`:
-    // 720x1440x32 = 4,147,200 and 1280x720x32 = 3,686,400. set_physical_mode
-    // re-checks coverage itself before touching any hardware register.
+    // Every mode the runtime may switch between fits inside `covered`, which is
+    // now sized for the 1080x2160x32 native frame: 720x1440x32 = 4,147,200 and
+    // 1280x720x32 = 3,686,400 are both smaller than the 9,331,200 the cover
+    // already proves. set_physical_mode re-checks coverage itself before
+    // touching any hardware register.
     *DISPI_BPP.lock() = BPP;
     if set_physical_mode(NATIVE_W as u16, NATIVE_H as u16) {
         crate::serial_println!(
-            "[DISPLAY_HAL] DISPI native scanout 720x1440 engaged (bpp=32, mapped_bytes={})",
-            covered
+            "[DISPLAY_HAL] DISPI native scanout {}x{} engaged (bpp=32, mapped_bytes={})",
+            NATIVE_W, NATIVE_H, covered
         );
     } else {
         crate::serial_println!(

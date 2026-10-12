@@ -170,8 +170,28 @@ class SystemContractTests(unittest.TestCase):
         server = (ROOT / "emulator/server.py").read_text(encoding="utf-8")
         serial = (ROOT / "kernel/src/serial.rs").read_text(encoding="utf-8")
         app = (ROOT / "emulator/app.js").read_text(encoding="utf-8")
-        self.assertEqual(contract["display"]["width"], 720)
-        self.assertEqual(contract["display"]["height"], 1440)
+        # WHY the geometry moved from 720x1440 to 1080x2160: the reference design
+        # system is authored at 1080x2400 and the guest was showing that design at
+        # two thirds of its width, so the reference's type rungs, spacing and
+        # touch targets were all being scaled down. 1080x2160 is FHD-class width
+        # at the SAME 1:2 shape as the shell's authoring space, which keeps the
+        # ratio between them exactly 1.5 on both axes -- the reference's 1080x2400
+        # is 9:20 and a uniform scale to it does not exist.
+        #
+        # WHY the authoring space is still 720x1440 and is asserted separately:
+        # raising the scanout only buys detail if apps paint at that resolution,
+        # and they do not yet. The compositor now interpolates a scaled blit
+        # instead of point-sampling it, so the upscale reads as the same image at
+        # a higher resolution rather than a magnified one. The two numbers are
+        # asserted apart so a change to either is visible on its own.
+        self.assertEqual(contract["display"]["width"], 1080)
+        self.assertEqual(contract["display"]["height"], 2160)
+        self.assertEqual(contract["display"]["authoring_space"]["width"], 720)
+        self.assertEqual(contract["display"]["authoring_space"]["height"], 1440)
+        self.assertEqual(contract["input"]["coordinate_space"], "portrait-logical-pixels")
+        # Input stays in the authoring space: the shell's hit tests and the
+        # compositor both work there, so a touch is clamped to the space the
+        # apps are laid out in rather than to the scanout they are upscaled into.
         self.assertEqual(contract["input"]["coordinate_space"], "portrait-logical-pixels")
         self.assertIn("INPUT_TOUCH", serial)
         self.assertIn("INPUT_KEY", serial)
@@ -187,8 +207,9 @@ class SystemContractTests(unittest.TestCase):
         self.assertIn("/api/touch/event", app)
         self.assertIn("/api/input/key", app)
         self.assertIn("0 <= x < LOGICAL_W and 0 <= y < LOGICAL_H", server)
-        self.assertIn("scanout_width: 720", (ROOT / "kernel/src/drivers/display_kms.rs").read_text(encoding="utf-8"))
-        self.assertIn("scanout_height: 1440", (ROOT / "kernel/src/drivers/display_kms.rs").read_text(encoding="utf-8"))
+        kms = (ROOT / "kernel/src/drivers/display_kms.rs").read_text(encoding="utf-8")
+        self.assertIn("scanout_width: 1080", kms)
+        self.assertIn("scanout_height: 2160", kms)
 
     def test_studio_does_not_fabricate_serial_command_results(self):
         server = (ROOT / "emulator/server.py").read_text(encoding="utf-8")
