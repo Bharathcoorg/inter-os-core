@@ -38,6 +38,8 @@
 #![no_std]
 #![no_main]
 
+mod outline_text;
+
 use core::panic::PanicInfo;
 use interos_std as std;
 
@@ -462,6 +464,34 @@ fn test_text(
     // A run owns exactly `run_rows(scale)` rows; testing only that box keeps a
     // call site from slicing the glyphs with a shorter hand-written window.
     if x < x0 || y < y0 || y >= y0 + run_rows(scale) {
+        return None;
+    }
+    // The outline face, chosen ONCE for the run rather than once per pixel.
+    //
+    // WHY the order matters here: this funnel is called for every pixel of every
+    // label on the surface, so a per-pixel choice would draw the glyph from both
+    // faces at once -- an outline edge with a hard bitmap ghost one pixel off,
+    // on every string. The launcher's first version of this change did exactly
+    // that, and no test caught it; only looking at the capture did.
+    if let Some(run) = outline_text::OutlineRun::place_run(
+        x0,
+        y0 + std::design::font::BASELINE * scale,
+        scale,
+        text,
+        false,
+    ) {
+        // WHY the window is the run's and not the cell's: at the em that matches
+        // this scale the outline's ascent reaches 18px above the cell origin and
+        // its descent 4px past the bottom, so the cell-shaped test above would
+        // clip the top of tall glyphs with nothing looking wrong. The run's own
+        // bounds admit exactly its ink, so widening to them cannot put a pixel
+        // where a glyph is not.
+        let (rx, rtop, rw, rh) = run.bounds();
+        if x >= rx && x - rx < rw && y >= rtop && y - rtop < rh {
+            return run.pixel(x, y, color, bg);
+        }
+        // Inside the cell window but outside the run's ink: the background shows
+        // through, exactly as an uninked bitmap pixel would.
         return None;
     }
     std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, bg, false)

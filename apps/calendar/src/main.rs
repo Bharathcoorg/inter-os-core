@@ -19,6 +19,8 @@
 use interos_std as std;
 use core::panic::PanicInfo;
 
+mod outline_text;
+
 /// Calendar event status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventStatus {
@@ -807,10 +809,38 @@ const TEXT_MUTED: u32 = 0xFF9AA8BC;
 
 /// Rasterises one text run into the pixel at `(x, y)`.
 ///
-/// WHY the line-box clip: the shared bitmap face is `GLYPH_H` (24) rows tall,
-/// so a run at `scale` owns `GLYPH_H * scale` rows. Clipping to that box here
-/// means no call site can silently slice a glyph with a shorter hand-written
-/// `y` window.
+/// WHY the outline face comes first: the header title is scale 3 and the month
+/// pill, the weekday letters, the day numerals, the section title, the
+/// empty-state headline and action, the sheet's title and buttons, the
+/// on-screen keyboard and the steppers' values and signs are scale 2, so on the
+/// bitmap face each of them is a 16x24 cell magnified by an integer -- a soft
+/// ramp where an edge belongs. `outline_text::place_run` rasterises the real outline at the
+/// em that matches the cell's cap height (17 rows at scale 1, so
+/// 17*N*2048/1456 px per em), and answers for the pixel itself. When it declines
+/// -- a run at scale 1, whose cell is already at its native size, a run wider
+/// than the column the caller reserved, a glyph whose ink would leave that
+/// column, or a weight this app draws bold -- the bitmap face below draws the run
+/// exactly as it did before, so a refusal costs the edge quality and never the
+/// text.
+///
+/// WHY the box test comes first, and why it is the UNION box: the run's line box
+/// is not the bitmap cell. At the em that matches a scale-2 cap the outline's
+/// ascent reaches 12 rows above the cell origin and its descent 3 rows past the
+/// cell bottom, so a gate clipped to `GLYPH_H * scale` -- which is all this
+/// function used to test -- would silently slice the glyphs a magnified cell
+/// could not reach. `outline_text::run_box` is the union of both faces' extents,
+/// so the gate admits every pixel either face can ink and no others. Gating
+/// before the placement also means a run is only rasterised on a pixel it can
+/// ink, so the shared coverage buffer is written once per run rather than once
+/// per pixel.
+///
+/// WHY the run answers alone when it is placed: the two faces are alternatives,
+/// not layers. Falling through to the bitmap face after an outline run had
+/// already inked a pixel would double-ink every partially covered edge, which is
+/// exactly what the first attempt at this in the launcher drew: an outline glyph
+/// with a hard-edged bitmap ghost one pixel off, on every string. The face is
+/// chosen from the run's own arguments before `(x, y)` is consulted, so it is the
+/// same choice for every pixel of the run.
 #[inline(always)]
 fn test_text(
     x: usize,
@@ -819,10 +849,15 @@ fn test_text(
     y0: usize,
     scale: usize,
     text: &[u8],
+    max_w: usize,
     color: u32,
 ) -> Option<u32> {
-    if x < x0 || y < y0 || y >= y0 + std::design::font::GLYPH_H * scale {
+    let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, text);
+    if x < bx || x - bx >= bw || y < bt || y - bt >= bh {
         return None;
+    }
+    if let Some(run) = outline_text::place_run(x0, y0, scale, text, Some(max_w), false) {
+        return run.pixel(x, y, color, BG_DARK);
     }
     std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, BG_DARK, false)
 }
@@ -1203,7 +1238,11 @@ fn get_calendar_pixel(
         // the back button and the pill, giving y0 = 48 - 36 = 12 and the box
         // 12..84, which clears the header band (0..94) untouched.
         if y >= 12 && y < 12 + std::design::font::line_height(3) {
-            if let Some(c) = test_text(x, y, 116, 12, 3, b"Calendar", TEXT_PRIMARY) {
+            // WHY the column is 480 - 116: the title is left-aligned and the
+            // month pill begins at x 480, so that is the room the header has
+            // for it. "Calendar" measures 249px on the bitmap face at scale 3
+            // and 247px on the outline face, so both clear it by 117px.
+            if let Some(c) = test_text(x, y, 116, 12, 3, b"Calendar", 480 - 116, TEXT_PRIMARY) {
                 return c;
             }
         }
@@ -1245,9 +1284,13 @@ fn get_calendar_pixel(
             // fabricated month badge must not sit next to the honest
             // "RTC date unavailable" card, so the badge states the absence.
             let pill_text: &[u8] = if app.date_known { &month_str[..] } else { NO_DATE_PILL };
+            // WHY 216 is the column: it is the pill's own inner width (480..696),
+            // which is the box the run is centred in. "OCT 2026" measures 180px
+            // on the bitmap face at scale 2 and 181px on the outline face, so
+            // both fit.
             let pill_x = centered_x(pill_text, 2, 480, 216);
             let pill_y0 = 20 + (56 - std::design::font::line_height(2)) / 2;
-            if let Some(c) = test_text(x, y, pill_x, pill_y0, 2, pill_text, ACCENT_SKY) {
+            if let Some(c) = test_text(x, y, pill_x, pill_y0, 2, pill_text, 216, ACCENT_SKY) {
                 return c;
             }
 
@@ -1277,8 +1320,12 @@ fn get_calendar_pixel(
                 // every header right of its column centre (measured +3.5 for 'S',
                 // +7.5 for 'M', +6.5 for 'W'). This measures the real widths.
                 let text_x = centered_x(HEADERS[c], WEEKDAY_SCALE, col_x, COL_W);
+                // WHY COL_W is the column: the letter is centred in the grid
+                // column it labels, and the widest of them, 'M' and 'W',
+                // measures 32px on the bitmap face at scale 2 and 36px on the
+                // outline face, so both fit an 88px column.
                 if let Some(color) =
-                    test_text(x, y, text_x, WEEKDAY_Y0, WEEKDAY_SCALE, HEADERS[c], TEXT_MUTED)
+                    test_text(x, y, text_x, WEEKDAY_Y0, WEEKDAY_SCALE, HEADERS[c], COL_W, TEXT_MUTED)
                 {
                     return color;
                 }
@@ -1288,7 +1335,10 @@ fn get_calendar_pixel(
             // label. Drawing them would advertise a month grid that is not
             // there, so the header states the absence instead.
             let text_x = centered_x(NO_DATE_HEADLINE, WEEKDAY_SCALE, 0, W);
-            if let Some(c) = test_text(x, y, text_x, WEEKDAY_Y0, WEEKDAY_SCALE, NO_DATE_HEADLINE, TEXT_MUTED) {
+            // WHY W is the column: this headline replaces the seven letters and
+            // is centred across the whole surface. It measures 286px on the
+            // bitmap face at scale 2 and 277px on the outline face.
+            if let Some(c) = test_text(x, y, text_x, WEEKDAY_Y0, WEEKDAY_SCALE, NO_DATE_HEADLINE, W, TEXT_MUTED) {
                 return c;
             }
         }
@@ -1311,6 +1361,7 @@ fn get_calendar_pixel(
                 detail_y,
                 1,
                 NO_DATE_DETAIL,
+                W,
                 TEXT_MUTED,
             ) {
                 return c;
@@ -1365,7 +1416,11 @@ fn get_calendar_pixel(
                         };
                         let n = if d < 10 { 1 } else { 2 };
                         let text_x = centered_x(&text[..n], 2, col_x, COL_W);
-                        if let Some(color) = test_text(x, y, text_x, text_y, 2, &text[..n], text_color) {
+                        // WHY COL_W is the column: the numeral is centred in the
+                        // cell it falls in, and the widest, "31", measures 44px
+                        // on the bitmap face at scale 2 and 46px on the outline
+                        // face, so both fit.
+                        if let Some(color) = test_text(x, y, text_x, text_y, 2, &text[..n], COL_W, text_color) {
                             return color;
                         }
 
@@ -1396,7 +1451,12 @@ fn get_calendar_pixel(
         // the band -- so the whole line box fits and nothing below is touched.
         let mut title_buf = [0u8; 16];
         let section_title = app.agenda_title_into(&mut title_buf);
-        if let Some(c) = test_text(x, y, 28, 480, 2, section_title, TEXT_MUTED) {
+        // WHY 522 is the column: the title is left-aligned at x 28 and the event
+        // count pill begins at x 550, and their bands overlap, so that is the
+        // room the band has for it. The longest title, "NO DAY SELECTED",
+        // measures 362px on the bitmap face at scale 2 and 349px on the outline
+        // face, so both fit.
+        if let Some(c) = test_text(x, y, 28, 480, 2, section_title, 550 - 28, TEXT_MUTED) {
             return c;
         }
 
@@ -1427,7 +1487,8 @@ fn get_calendar_pixel(
             // the pill's 522.
             let badge_x = centered_x(badge_str, 1, 550, 146);
             let badge_y = 492 + (30 - std::design::font::line_height(1)) / 2;
-            if let Some(c) = test_text(x, y, badge_x, badge_y, 1, badge_str, ACCENT_SKY) {
+            // WHY 146 is the column: it is the count pill's own width (550..696).
+            if let Some(c) = test_text(x, y, badge_x, badge_y, 1, badge_str, 146, ACCENT_SKY) {
                 return c;
             }
 
@@ -1515,6 +1576,12 @@ fn get_calendar_pixel(
                     706,
                     2,
                     headline,
+                    // WHY 672 is the column: it is the empty-state card's inner
+                    // width (24..696), the box the headline is centred in. The
+                    // longer of the two headlines, "No Events On This Day",
+                    // measures 430px on the bitmap face at scale 2 and 413px on
+                    // the outline face, so both fit.
+                    672,
                     TEXT_PRIMARY,
                 ) {
                     return c;
@@ -1548,7 +1615,19 @@ fn get_calendar_pixel(
                     } else {
                         b"NO DAY SELECTED"
                     };
-                if let Some(c) = test_text(x, y, 236, 760, 1, detail_str, TEXT_MUTED) {
+                if let Some(c) = test_text(
+                    x,
+                    y,
+                    236,
+                    760,
+                    1,
+                    detail_str,
+                    // WHY 460 is the column: the detail line starts at x 236 and
+                    // the card it sits in ends at x 696, so that is the room the
+                    // card has for it.
+                    696 - 236,
+                    TEXT_MUTED,
+                ) {
                     return c;
                 }
 
@@ -1585,6 +1664,12 @@ fn get_calendar_pixel(
                         label_y,
                         ACTION_BTN_SCALE,
                         ACTION_BTN_LABEL,
+                        // WHY ACTION_BTN_W is the column: the label is centred
+                        // in the button's own rect, which is the label plus a
+                        // 36px margin each side. "+ New Event" measures 236px on
+                        // the bitmap face at scale 2 and 227px on the outline
+                        // face, so both fit the 308px button.
+                        ACTION_BTN_W,
                         ACCENT_SKY,
                     ) {
                         return c;
@@ -1626,17 +1711,17 @@ fn get_calendar_pixel(
                 // date, every one of them read back out of the record.
                 let card_y = 546 + card_idx * 130;
                 let item = &agenda.items[card_idx];
-                if let Some(c) = test_text(x, y, 44, card_y + 12, 1, item.title_bytes(), TEXT_PRIMARY) {
+                if let Some(c) = test_text(x, y, 44, card_y + 12, 1, item.title_bytes(), 696 - 44, TEXT_PRIMARY) {
                     return c;
                 }
                 let mut time_buf = [0u8; 5];
                 let time_n = fmt_time(&mut time_buf, item.hour, item.minute);
-                if let Some(c) = test_text(x, y, 44, card_y + 44, 1, &time_buf[..time_n], ACCENT_SKY) {
+                if let Some(c) = test_text(x, y, 44, card_y + 44, 1, &time_buf[..time_n], 696 - 44, ACCENT_SKY) {
                     return c;
                 }
                 let mut date_buf = [0u8; 12];
                 let date_n = fmt_date(&mut date_buf, item.year, item.month, item.day);
-                if let Some(c) = test_text(x, y, 44, card_y + 76, 1, &date_buf[..date_n], TEXT_MUTED) {
+                if let Some(c) = test_text(x, y, 44, card_y + 76, 1, &date_buf[..date_n], 696 - 44, TEXT_MUTED) {
                     return c;
                 }
 
@@ -1716,6 +1801,10 @@ fn flow_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
         SHEET_TITLE_Y,
         2,
         b"NEW EVENT",
+        // WHY the column is the sheet's inner width: the run is centred in it.
+        // "NEW EVENT" measures 226px on the bitmap face at scale 2 and 223px on
+        // the outline face.
+        SHEET_X1 - SHEET_X0 - 40,
         TEXT_PRIMARY,
     ) {
         return c;
@@ -1727,6 +1816,7 @@ fn flow_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
         SHEET_STEP_Y,
         1,
         step_str,
+        SHEET_X1 - SHEET_X0 - 40,
         TEXT_MUTED,
     ) {
         return c;
@@ -1761,7 +1851,18 @@ fn title_step_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
             &app.title[..app.title_len]
         };
         let color = if app.title_len == 0 { TEXT_MUTED } else { TEXT_PRIMARY };
-        if let Some(c) = test_text(x, y, TITLE_FIELD_X0 + 12, TITLE_TEXT_Y, 1, text, color) {
+        if let Some(c) = test_text(
+            x,
+            y,
+            TITLE_FIELD_X0 + 12,
+            TITLE_TEXT_Y,
+            1,
+            text,
+            // WHY the column is the field's inner width: the run starts 12px
+            // inside the field and the field ends at TITLE_FIELD_X1.
+            TITLE_FIELD_X1 - (TITLE_FIELD_X0 + 12),
+            color,
+        ) {
             return c;
         }
         // Caret block, so the field reads as editable.
@@ -1819,6 +1920,13 @@ fn key_pixel(x: usize, y: usize, row: usize, col: usize) -> u32 {
         y0 + (KB_ROW_H - std::design::font::line_height(2)) / 2,
         2,
         label,
+        // WHY the column is the key's own width: the label is centred in the key
+        // it sits on, so a run wider than the key would be cut by it. The widest
+        // single-letter key, 'M' and 'W', measures 32px on the bitmap face at
+        // scale 2 and 36px on the outline face against a 46px key; "SPACE"
+        // measures 130 against 304px, "DEL" 74 against 176px and "NEXT" 104
+        // against 180px, so every key fits on either face.
+        x1 - x0,
         if accent { ACCENT_SKY } else { TEXT_PRIMARY },
     ) {
         return c;
@@ -1861,6 +1969,8 @@ fn stepper_box_pixel(
         STEP_LABEL_Y,
         1,
         label,
+        // The steppers' labels are scale 1; the column is the box's inner width.
+        x1 - x0,
         TEXT_MUTED,
     ) {
         return Some(c);
@@ -1872,6 +1982,11 @@ fn stepper_box_pixel(
         STEP_VALUE_Y,
         2,
         value,
+        // WHY the column is the box's inner width: the value is centred in the
+        // stepper box it belongs to. The widest, a four-digit year, measures 88px
+        // on the bitmap face at scale 2 and 92px on the outline face against the
+        // date boxes' 192px and the time boxes' 300px.
+        x1 - x0,
         value_color,
     ) {
         return Some(c);
@@ -1898,6 +2013,10 @@ fn stepper_box_pixel(
                 ky0 + (ky1 - ky0 - std::design::font::line_height(2)) / 2,
                 2,
                 glyph,
+                // WHY the column is the button's own width: the sign is centred
+                // in the 72px button, "-" measures 12px on the bitmap face at
+                // scale 2 and 11px on the outline, "+" 24 and 23px.
+                kx1 - kx0,
                 ACCENT_SKY,
             ) {
                 return Some(c);
@@ -1991,6 +2110,7 @@ fn flow_status_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
         FLOW_STATUS_Y,
         1,
         status,
+        SHEET_X1 - SHEET_X0 - 40,
         if ok { SUCCESS_EMERALD } else { TEXT_MUTED },
     ) {
         return c;
@@ -2077,6 +2197,12 @@ fn flow_buttons_pixel(x: usize, y: usize, forward_label: &[u8]) -> Option<u32> {
             FLOW_BTN_Y0 + (FLOW_BTN_Y1 - FLOW_BTN_Y0 - std::design::font::line_height(2)) / 2,
             2,
             label,
+            // WHY the column is the button's own width: the label is centred in
+            // the button it sits on. "SAVE EVENT" measures 242px on the bitmap
+            // face at scale 2 and 235px on the outline face against its 342px
+            // button, and "CANCEL" 160px against 155px against its 252px one, so
+            // every label fits on either face.
+            bx1 - bx0,
             if accent { ACCENT_SKY } else { TEXT_MUTED },
         ) {
             return Some(c);

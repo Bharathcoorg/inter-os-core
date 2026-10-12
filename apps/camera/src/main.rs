@@ -24,6 +24,8 @@ use core::panic::PanicInfo;
 use interos_std as std;
 use std::design::primitives::Rect;
 
+mod outline_text;
+
 const W: usize = 720;
 const H: usize = 1440;
 const CHUNK: usize = 4096;
@@ -393,6 +395,15 @@ const TOP_BAND_Y1: usize = 110;
 const VIEWFINDER_Y0: usize = 120;
 const VIEWFINDER_Y1: usize = 1120;
 
+/// Inner width of the viewfinder canvas, which is inset 20px from each edge of
+/// the surface (`x >= 20 && x < W - 20`).
+///
+/// WHY it is named: it is the column a centred run in the viewfinder is measured
+/// against, so `outline_text::place_run` has the same width the layout used to
+/// centre it. The absence headline measures 472px on the bitmap face at scale 2
+/// and 462px on the outline face, so both clear it.
+const VIEWFINDER_W: usize = W - 40;
+
 const MODE_STRIP_Y0: usize = 1150;
 const MODE_STRIP_Y1: usize = 1200;
 
@@ -488,6 +499,32 @@ fn shutter_hit(dx: isize, dy: isize) -> bool {
 // -----------------------------------------------------------------------------
 // Typography provided by interos_std::design::font
 
+/// Rasterises one text run into the pixel at `(x, y)`.
+///
+/// WHY the outline face comes first: the zoom readout, the mode carousel and the
+/// viewfinder's absence headline run at scale 2, so on the bitmap face each is a
+/// 16x24 cell magnified by an integer -- a soft ramp where an edge belongs.
+/// `outline_text::place_run` rasterises the real outline at the em that matches
+/// the cell's cap height (17 rows at scale 1, so 17*N*2048/1456 px per em), and
+/// answers for the pixel itself. When it declines -- a run at scale 1, whose cell
+/// is already at its native size, a run wider than the column the caller
+/// reserved, a glyph whose ink would leave that column, or a weight this app
+/// draws bold -- the bitmap face below draws the run exactly as it did before, so
+/// a refusal costs the edge quality and never the text.
+///
+/// WHY the box test comes first: rasterising is the expensive part and most
+/// pixels this app asks about are nowhere near a run. Gating on
+/// `outline_text::run_box` -- the union of both faces' extents, not the bitmap
+/// cell's -- means a run is only placed on a pixel it can ink, so the shared
+/// coverage buffer is written once per run rather than once per pixel.
+///
+/// WHY the run answers alone when it is placed: the two faces are alternatives,
+/// not layers. Falling through to the bitmap face after an outline run had
+/// already inked a pixel would double-ink every partially covered edge, which is
+/// exactly what the first attempt at this in the launcher drew: an outline glyph
+/// with a hard-edged bitmap ghost one pixel off, on every string. The face is
+/// chosen from the run's own arguments before `(x, y)` is consulted, so it is the
+/// same choice for every pixel of the run.
 #[inline(always)]
 fn test_text(
     x: usize,
@@ -496,8 +533,16 @@ fn test_text(
     y0: usize,
     scale: usize,
     text: &[u8],
+    max_w: usize,
     color: u32,
 ) -> Option<u32> {
+    let (bx, bt, bw, bh) = outline_text::run_box(x0, y0, scale, text);
+    if x < bx || x - bx >= bw || y < bt || y - bt >= bh {
+        return None;
+    }
+    if let Some(run) = outline_text::place_run(x0, y0, scale, text, Some(max_w), false) {
+        return run.pixel(x, y, color, BG_DARK);
+    }
     std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, BG_DARK, false)
 }
 
@@ -594,7 +639,7 @@ fn top_row_label(
         return None;
     }
     let x0 = rect.x + (rect.w - w) / 2;
-    test_text(x, y, x0, TOP_ROW_TEXT_Y0, 1, label, color)
+    test_text(x, y, x0, TOP_ROW_TEXT_Y0, 1, label, rect.w, color)
 }
 
 /// Draws a scale-1 label right of the flash pictogram.
@@ -605,7 +650,7 @@ fn flash_label(x: usize, y: usize, label: &[u8], color: u32) -> Option<u32> {
         return None;
     }
     let x0 = FLASH_TEXT_X + (FLASH_TEXT_W - w) / 2;
-    test_text(x, y, x0, TOP_ROW_TEXT_Y0, 1, label, color)
+    test_text(x, y, x0, TOP_ROW_TEXT_Y0, 1, label, FLASH_TEXT_W, color)
 }
 
 #[inline(never)]
@@ -761,6 +806,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                 470,
                 2,
                 head,
+                VIEWFINDER_W,
                 TEXT_PRIMARY,
             ) {
                 return c;
@@ -772,6 +818,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
                 530,
                 1,
                 sub,
+                VIEWFINDER_W,
                 TEXT_MUTED,
             ) {
                 return c;
@@ -832,7 +879,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             // the run owns the pill minus 4 rows top and bottom. Hard-coding 998
             // is what let the previous pill's descenders clip.
             let ty0 = ZOOM_PILL.y + (ZOOM_PILL.h - 48) / 2;
-            if let Some(c) = test_text(x, y, tx0, ty0, scale, zoom_str, TEXT_PRIMARY) {
+            if let Some(c) = test_text(x, y, tx0, ty0, scale, zoom_str, ZOOM_PILL.w, TEXT_PRIMARY) {
                 return c;
             }
 
@@ -890,7 +937,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         let doc_color = if is_doc { TEXT_PRIMARY } else { TEXT_MUTED };
         let doc_w = std::design::font::measure(DOC, scale);
         let doc_x = S0_X + (S0_W.saturating_sub(doc_w)) / 2;
-        if let Some(c) = test_text(x, y, doc_x, y0, scale, DOC, doc_color) {
+        if let Some(c) = test_text(x, y, doc_x, y0, scale, DOC, S0_W, doc_color) {
             return c;
         }
 
@@ -899,7 +946,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         let photo_color = if is_photo { TEXT_PRIMARY } else { TEXT_MUTED };
         let pho_w = std::design::font::measure(PHO, scale);
         let pho_x = S1_X + (S1_W.saturating_sub(pho_w)) / 2;
-        if let Some(c) = test_text(x, y, pho_x, y0, scale, PHO, photo_color) {
+        if let Some(c) = test_text(x, y, pho_x, y0, scale, PHO, S1_W, photo_color) {
             return c;
         }
 
@@ -908,7 +955,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         let vid_color = if is_vid { TEXT_PRIMARY } else { TEXT_MUTED };
         let vid_w = std::design::font::measure(VID, scale);
         let vid_x = S2_X + (S2_W.saturating_sub(vid_w)) / 2;
-        if let Some(c) = test_text(x, y, vid_x, y0, scale, VID, vid_color) {
+        if let Some(c) = test_text(x, y, vid_x, y0, scale, VID, S2_W, vid_color) {
             return c;
         }
 
