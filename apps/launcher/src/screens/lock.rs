@@ -91,6 +91,28 @@ const LOCK_STATUS_TIME_SCALE: usize = 1;
 /// row, which is why the same number used to work.
 const LOCK_DATE_Y: usize = 152;
 const LOCK_DATE_SCALE: usize = 2;
+/// Em size of the date line's outline run, in pixels per em.
+///
+/// WHY the date moved to the outline face when the clock did: while the clock was
+/// a bitmap cell at scale 6 (a 102px cap), a scale-2 date read as clearly
+/// subordinate. Once the clock is a 48px em with a 34px cap, a scale-2 date has
+/// the same cap height as the clock, which inverts the hierarchy -- the date
+/// would be the equal or larger of the two, on a surface whose whole point is
+/// that the clock dominates.
+///
+/// WHY 18: measured from `Ui Samples/01_lock_screen.png`, the date's ink is 16
+/// guest px tall (cap plus the comma's descender), and Roboto Condensed inks
+/// about 0.86 of the em over that span, so 16 / 0.86 = 18.6, which rounds to 18.
+const LOCK_DATE_EM: u32 = 18;
+/// Baseline of the date's outline run.
+///
+/// WHY measured rather than wheeled from `LOCK_DATE_Y`: the two are no longer on
+/// the same face, so the old cell offset does not transfer. The reference puts
+/// the date's ink 35 guest px above the clock's cap top; the clock's baseline is
+/// `LOCK_CLOCK_Y + font::BASELINE * LOCK_CLOCK_SCALE` with a 34px cap, so its cap
+/// top is 291, and the date's ink bottom belongs at 256. Roboto Condensed sends a
+/// comma about 5px below the baseline at this em, which puts the baseline at 251.
+const LOCK_DATE_BASELINE: usize = 251;
 /// The clock. Reference cap top y 68, cap height measured at 32 px: the single
 /// largest type element on the surface.
 ///
@@ -102,6 +124,28 @@ const LOCK_DATE_SCALE: usize = 2;
 /// in the shell, and the two do not agree. See the note on `type_scale` below.
 const LOCK_CLOCK_Y: usize = 211;
 const LOCK_CLOCK_SCALE: usize = 6;
+/// Em size of the outline clock, in pixels per em.
+///
+/// WHY a second constant rather than replacing `LOCK_CLOCK_SCALE`: the bitmap
+/// scale stays the fallback for any run the rasteriser refuses, so it has to
+/// keep existing. This one is derived from the outline face instead of from a
+/// cell multiple.
+///
+/// WHY 48: measured from `Ui Samples/01_lock_screen.png`, the reference clock's
+/// digits are a 60px ink height on a 1080-wide canvas, which is a 36px digit in
+/// this guest's 1440-tall space (the reference is 9:20 and this guest is 9:18,
+/// so the two axes scale by different ratios, 0.667 across and 0.6 down).
+/// Roboto Condensed's digits carry overshoot, so they ink 0.745 of the em, and
+/// 36 / 0.745 = 48.
+///
+/// WHY the run is narrower than the reference rather than the same width: the
+/// reference samples were set in the InterOS Sans files under
+/// `Ui Samples/reference/fonts`, which are DejaVu Sans derived, and that face is
+/// much wider than the condensed one this guest ships. The cap height is the
+/// property that can be matched while keeping a repo-owned font, so that is
+/// what this constant pins; the width difference is a consequence of the face
+/// and is not a defect to chase.
+const LOCK_CLOCK_EM: u32 = 48;
 /// Unlock hint. Reference cap top y 341, horizontally centred.
 ///
 /// WHY scale 1: the panel sets the hint at the same size as the status-bar clock,
@@ -497,8 +541,22 @@ struct Frame {
     status_h: usize,
     /// The date line, left-aligned on `LOCK_CONTENT_X`.
     date: Rect,
+    /// The date line as rasterised outlines, when the rasteriser accepts it.
+    ///
+    /// WHY the date and the clock both have one: they are the two large runs on
+    /// this surface, and leaving one on the bitmap face while the other moved
+    /// put them at the same cap height and inverted the hierarchy. Both fall
+    /// back to the bitmap face independently, so a refusal costs one run.
+    date_outline: Option<launcher::outline_text::OutlineRun>,
     /// The clock, left-aligned on `LOCK_CONTENT_X`.
     clock: Rect,
+    /// The clock as rasterised outlines, when the rasteriser accepts the run.
+    ///
+    /// WHY this sits beside the bitmap box rather than replacing it: the
+    /// outline run is refused for a run that does not fit the coverage buffer,
+    /// and the bitmap face is then the only honest way to draw the clock. A
+    /// `None` here is a fallback, not a missing feature.
+    clock_outline: Option<launcher::outline_text::OutlineRun>,
     /// The unlock hint, horizontally centred on the surface.
     hint: Rect,
     /// The PIN pad's prompt, horizontally centred on the surface.
@@ -558,20 +616,54 @@ impl Frame {
         // pixel path's. Fourteen and thirty-odd advance lookups a frame is free;
         // a disagreement between the two is not. See `pin_heading` on `Frame`.
         let (heading, subheading) = pin_messages(state);
+
+        // Both large runs are placed before either box is measured, so the box
+        // that gates the painter is the one the run actually occupies rather
+        // than a cell measured for the bitmap face. WHY this order matters: the
+        // date line's baseline is derived from the reference's own layout, not
+        // from the bitmap cell's origin, so gating on the bitmap box put the
+        // run entirely outside its own gate and it drew nothing at all.
+        let date_outline = launcher::outline_text::OutlineRun::place(
+            LOCK_CONTENT_X,
+            LOCK_DATE_BASELINE,
+            LOCK_DATE_EM,
+            &state.date_line,
+        );
+        let clock_outline = launcher::outline_text::OutlineRun::place(
+            LOCK_CONTENT_X,
+            LOCK_CLOCK_Y + launcher::font::BASELINE * LOCK_CLOCK_SCALE,
+            LOCK_CLOCK_EM,
+            &state.clock_time,
+        );
+
         Frame {
             status_h: text::line_height(LOCK_STATUS_TIME_SCALE),
-            date: Rect::new(
-                LOCK_CONTENT_X,
-                LOCK_DATE_Y,
-                text::measure(&state.date_line, LOCK_DATE_SCALE),
-                text::line_height(LOCK_DATE_SCALE),
-            ),
-            clock: Rect::new(
-                LOCK_CONTENT_X,
-                LOCK_CLOCK_Y,
-                text::measure(&state.clock_time, LOCK_CLOCK_SCALE),
-                text::line_height(LOCK_CLOCK_SCALE),
-            ),
+            date: match &date_outline {
+                Some(run) => {
+                    let (x, y, w, h) = run.bounds();
+                    Rect::new(x, y, w, h)
+                }
+                None => Rect::new(
+                    LOCK_CONTENT_X,
+                    LOCK_DATE_Y,
+                    text::measure(&state.date_line, LOCK_DATE_SCALE),
+                    text::line_height(LOCK_DATE_SCALE),
+                ),
+            },
+            date_outline,
+            clock: match &clock_outline {
+                Some(run) => {
+                    let (x, y, w, h) = run.bounds();
+                    Rect::new(x, y, w, h)
+                }
+                None => Rect::new(
+                    LOCK_CONTENT_X,
+                    LOCK_CLOCK_Y,
+                    text::measure(&state.clock_time, LOCK_CLOCK_SCALE),
+                    text::line_height(LOCK_CLOCK_SCALE),
+                ),
+            },
+            clock_outline,
             hint: Rect::new(
                 text::center_x(LOCK_HINT_TEXT, LOCK_HINT_SCALE, W),
                 LOCK_HINT_Y,
@@ -659,7 +751,9 @@ static FRAME_MEMO: FrameMemo = FrameMemo(UnsafeCell::new(FrameSlot {
     frame: Frame {
         status_h: 0,
         date: Rect::new(0, 0, 0, 0),
+        date_outline: None,
         clock: Rect::new(0, 0, 0, 0),
+        clock_outline: None,
         hint: Rect::new(0, 0, 0, 0),
         pin_heading: Rect::new(0, 0, 0, 0),
         pin_subheading: Rect::new(0, 0, 0, 0),
@@ -1365,6 +1459,14 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     //    render of this surface costs what it does on the emulated build.
     if state.clock_source_ok {
         if f.date.contains(x, y) {
+            if let Some(run) = &f.date_outline {
+                if let Some(c) = run.pixel(x, y, f.ink, color) {
+                    return c;
+                }
+                // Inside the line box but not inked: the scene shows through,
+                // exactly as an uncovered bitmap pixel would.
+                return color;
+            }
             if let Some(c) = test_text_aa(
                 x,
                 y,
@@ -1379,8 +1481,22 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             }
         }
 
-// 4. The clock itself.
+        // 4. The clock itself.
+        //
+        //    WHY the outline run is tried first and the bitmap face second: the
+        //    rasteriser is refused for a run that does not fit its coverage
+        //    buffer, and a clock that cannot be rasterised must still be drawn.
+        //    The bitmap path is therefore the fallback and not the baseline, so
+        //    the two are interchangeable and either alone is correct.
         if f.clock.contains(x, y) {
+            if let Some(run) = &f.clock_outline {
+                if let Some(c) = run.pixel(x, y, f.ink, color) {
+                    return c;
+                }
+                // Covered by the run's line box but not inked: the scene shows
+                // through, exactly as an uncovered bitmap pixel would.
+                return color;
+            }
             if let Some(c) = test_text_aa(
                 x,
                 y,
