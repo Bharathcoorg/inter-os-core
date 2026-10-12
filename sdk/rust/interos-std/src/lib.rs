@@ -1898,6 +1898,11 @@ pub fn fs_fsync(fd: u32) -> Result<(), i64> {
 /// `0..8 inode | 8..12 uid | 12..16 gid | 16..18 mode | 18..20 nlink |
 /// 20..28 atime | 28..36 mtime | 36..44 ctime | 44..48 file type | 48..56 read
 /// only | 56..88 sha256 | 88..96 size`
+///
+/// `file type` and `read only` are written as 4-byte and 8-byte fields because
+/// the kernel's `FileStat` uses those types; the meaningful value is in the first
+/// byte of each, so the accessors below read `buf[44]` and `buf[48]` and a tag
+/// wider than one byte is still consumed correctly.
 pub const FILE_STAT_BYTES: usize = 96;
 
 /// A `FileStat` record as the kernel wrote it, decoded from `fs_stat`'s buffer.
@@ -2787,5 +2792,56 @@ pub fn settings_hardware_status(category: &str) -> Result<i64, i64> {
         Ok(r)
     } else {
         Err(r)
+    }
+}
+
+#[cfg(test)]
+mod abi_tests {
+    use super::*;
+
+    /// Pins the `FsStat` record the kernel writes, byte for byte.
+    ///
+    /// WHY this test lives here and not only in the kernel: both sides describe
+    /// the same 96 bytes independently, and a drift would not fail a compile --
+    /// it would hand a caller a plausible-looking wrong stat. The kernel's own
+    /// `fs_stat_record_layout_is_pinned` writes these offsets; this one decodes
+    /// them.
+    #[test]
+    fn fs_stat_record_is_decoded_at_the_documented_offsets() {
+        let mut buf = [0u8; FILE_STAT_BYTES];
+        buf[0..8].copy_from_slice(&0x0102_0304_0506_0708u64.to_le_bytes());
+        buf[8..12].copy_from_slice(&0x1122_3344u32.to_le_bytes());
+        buf[12..16].copy_from_slice(&0x5566_7788u32.to_le_bytes());
+        buf[16..18].copy_from_slice(&0x99AAu16.to_le_bytes());
+        buf[18..20].copy_from_slice(&0xBBCCu16.to_le_bytes());
+        buf[20..28].copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+        buf[28..36].copy_from_slice(&0x8877_6655_4433_2211u64.to_le_bytes());
+        buf[36..44].copy_from_slice(&0xAABB_CCDD_EEFF_0011u64.to_le_bytes());
+        buf[44..48].copy_from_slice(&2u32.to_le_bytes());
+        buf[48] = 1;
+        buf[56..88].copy_from_slice(&[0xA5u8; 32]);
+        buf[88..96].copy_from_slice(&0x1234_5678_9ABC_DEF0u64.to_le_bytes());
+
+        let parsed = FileStatRecord::parse(&buf).expect("a full record decodes");
+        assert_eq!(parsed.inode, 0x0102_0304_0506_0708);
+        assert_eq!(parsed.uid, 0x1122_3344);
+        assert_eq!(parsed.gid, 0x5566_7788);
+        assert_eq!(parsed.mode, 0x99AA);
+        assert_eq!(parsed.nlink, 0xBBCC);
+        assert_eq!(parsed.atime, 0x1122_3344_5566_7788);
+        assert_eq!(parsed.mtime, 0x8877_6655_4433_2211);
+        assert_eq!(parsed.ctime, 0xAABB_CCDD_EEFF_0011);
+        assert_eq!(parsed.file_type, 2, "ReadOnlySystem is declared second");
+        assert!(parsed.read_only);
+        assert_eq!(parsed.sha256, [0xA5u8; 32]);
+        assert_eq!(parsed.size, 0x1234_5678_9ABC_DEF0);
+    }
+
+    /// A short buffer must be refused, not filled with zeroes: a truncated stat
+    /// would otherwise report a wrong size that looks self-consistent.
+    #[test]
+    fn a_short_stat_record_is_refused() {
+        assert!(FileStatRecord::parse(&[0u8; FILE_STAT_BYTES - 1]).is_none());
+        assert!(FileStatRecord::parse(&[]).is_none());
     }
 }

@@ -670,7 +670,7 @@ impl UserManager {
     /// WHY the path is a parameter rather than the constant at the call sites:
     /// the map lives in the global VFS, which the host test harness shares
     /// between tests running on parallel threads. A per-test path keeps each
-    /// test's bytes its own without putting test-only behaviour on the boot path.
+    /// test's bytes its own, and the boot path still uses the one constant.
     fn write_account_map(path: &str, mgr: &UserManager) {
         let mut buf = [0u8; ACCOUNT_MAP_CAPACITY];
         let len = mgr.encode_account_map(&mut buf);

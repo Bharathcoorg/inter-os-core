@@ -1138,7 +1138,6 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
         // (4) an agreed result encoding for this name, in the SDK, next to the
         // `WasmExecute = 16` variant. Until then the caller is told the verb is
         // disabled rather than allowed to believe it succeeded.
-        let _ = (a1, a2, a3, a4);
         SyscallResult::FeatureDisabled as i64
     }
 
@@ -3584,13 +3583,13 @@ pub fn sys_surface_flip(cap_slot: usize) -> Result<u64, SyscallResult> {
 /// Reprograms the scanout to `width` x `height` at `refresh_hz`.
 ///
 /// WHY the physical mode is programmed as well: the KMS scanout and the
-/// hardware framebuffer would otherwise disagree, and `present_argb8888`
-/// letterboxes or scales the compositor's output to fit, so a mode change the
-/// display never saw would silently be displayed at the wrong scale.
+/// hardware framebuffer would otherwise disagree, and `present_argb8888` fits
+/// the compositor's output into whatever the hardware reports, so a mode change
+/// the display never saw would silently be shown at the wrong scale.
 ///
-/// WHY the KMS guard is dropped first: the COM1 orientation command does the
-/// same, because the display driver and the framebuffer each hold a lock and
-/// nesting them is how a mode change deadlocks the compositor.
+/// The KMS guard is dropped before `set_physical_mode`, exactly as the COM1
+/// orientation command does it, so the display driver's lock and the
+/// framebuffer's are never held at the same time.
 pub fn sys_display_set_mode(cap_slot: usize, width: u32, height: u32, refresh_hz: u16) -> Result<(), SyscallResult> {
     let _owner = require_display_service(cap_slot)?;
     // The DISPI geometry registers are 16-bit. A wider value would truncate and
@@ -5361,4 +5360,56 @@ pub fn sys_window_list(out_buf:&mut [u8])->Result<usize,SyscallResult>{
         }
     }
     Ok(w.n)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the `FsStat` userspace ABI.
+    ///
+    /// WHY this is checked in the kernel as well as in the SDK: the record is the
+    /// one place where both sides describe the same 96 bytes independently, and a
+    /// drift between them would not fail a compile. `interos_std`'s own test
+    /// decodes these offsets; a change to either layout breaks one of the two.
+    #[test]
+    fn fs_stat_record_layout_is_pinned() {
+        let stat = FileStat {
+            inode: crate::fs::InodeId(0x0102_0304_0506_0708),
+            uid: 0x1122_3344,
+            gid: 0x5566_7788,
+            mode: 0x99AA,
+            nlink: 0xBBCC,
+            atime: 0x1122_3344_5566_7788,
+            mtime: 0x8877_6655_4433_2211,
+            ctime: 0xAABB_CCDD_EEFF_0011,
+            file_type: FileType::ReadOnlySystem,
+            size: 0x1234_5678_9ABC_DEF0,
+            read_only: true,
+            sha256_digest: [0xA5; 32],
+        };
+        let mut out = [0u8; FILE_STAT_BYTES];
+        assert_eq!(encode_file_stat(&stat, &mut out), FILE_STAT_BYTES);
+        assert_eq!(&out[0..8], &0x0102_0304_0506_0708u64.to_le_bytes());
+        assert_eq!(&out[8..12], &0x1122_3344u32.to_le_bytes());
+        assert_eq!(&out[12..16], &0x5566_7788u32.to_le_bytes());
+        assert_eq!(&out[16..18], &0x99AAu16.to_le_bytes());
+        assert_eq!(&out[18..20], &0xBBCCu16.to_le_bytes());
+        assert_eq!(&out[20..28], &0x1122_3344_5566_7788u64.to_le_bytes());
+        assert_eq!(&out[28..36], &0x8877_6655_4433_2211u64.to_le_bytes());
+        assert_eq!(&out[36..44], &0xAABB_CCDD_EEFF_0011u64.to_le_bytes());
+        // The tag is a 4-byte field; `ReadOnlySystem` is declared second.
+        assert_eq!(&out[44..48], &2u32.to_le_bytes());
+        assert_eq!(out[48], 1, "read_only is carried in the first byte of its field");
+        assert_eq!(&out[56..88], &[0xA5u8; 32]);
+        assert_eq!(&out[88..96], &0x1234_5678_9ABC_DEF0u64.to_le_bytes());
+    }
+
+    /// The `FileType` tags are part of the ABI, so their order is load-bearing.
+    #[test]
+    fn file_type_tags_follow_the_enum_declaration_order() {
+        assert_eq!(file_type_tag(FileType::RegularFile), 0);
+        assert_eq!(file_type_tag(FileType::Directory), 1);
+        assert_eq!(file_type_tag(FileType::ReadOnlySystem), 2);
+        assert_eq!(file_type_tag(FileType::DeviceNode), 3);
+    }
 }
