@@ -1,31 +1,51 @@
-//! Activity Space: the recents deck (Reference Screen 4).
+//! Activity Space: contextual workspaces plus the honest running deck.
 //!
-//! WHY this is a recents deck and not four workspaces: every card used to name
-//! itself "Work", "Personal", "Research" or "Media" and draw a fixed strip of
-//! tiles beneath it -- Files, Calculator, Browser, Calendar and nine more. None
-//! of those thirteen app identities was ever read from anywhere. `LauncherState`
-//! carries no workspace field, the kernel attributes no task to a workspace, and
-//! the strips were drawn whether or not any of those apps were installed or
-//! running. A screen that names apps the shell never looked at is the same defect
-//! as a clock drawn without an RTC read, so the workspace framing is gone.
+//! WHAT Activity Space IS (INTEROS_UI_DESIGN_SYSTEM.md section 4 and the
+//! `04_activity_space` reference sheet): a defining InterOS concept, a set of
+//! *contextual workspaces* -- Work, Personal, Research, Media -- each showing its
+//! own apps, tasks and context. It "should feel different from a conventional
+//! recent-apps screen". This surface shows both halves of that idea, each only
+//! as true as the platform allows:
 //!
-//! What replaces it is the one per-task fact the shell really has.
-//! `refresh_runtime_recents` copies package ids and kernel task ids out of
-//! `app_runtime_list` into three recent slots; card `i` is slot `i`, its title is
-//! that package id resolved through the registry, its icon is the pictogram that
-//! package id maps to, and its subtitle reports whether the kernel still lists
-//! its task. The count in the status band is the number of cards whose subtitle
-//! reads "Running", so the deck and the count cannot disagree.
+//!   * The Activities block (bottom): the OS's four defined activity *types*.
+//!     These names are fixed by the design system -- the same fixed-category
+//!     pattern the app drawer uses for its Work/Personal/Tools tabs -- so they
+//!     are the OS's structure, not per-user data. Honest limit, stated plainly
+//!     on the surface: this guest has no activity or workspace store, so no
+//!     per-workspace task, file, or membership record exists *anywhere* to read.
+//!     A workspace therefore reports the one derived fact it can source -- the
+//!     number of **installed apps whose package-registry category equals the
+//!     activity name**, from the same `state.app_categories` the app drawer
+//!     filters -- and never a task or file count, because nothing records them.
+//!     Work and Personal resolve to real counts; Research and Media resolve to
+//!     an honest zero because no package declares those categories.
 //!
-//! `std::window_list` was considered as a second source and is not one: it reads
-//! the compositor's surface registry (the launcher's own surface and any app
-//! surface), not the task list, and it is not on `LauncherState`, so a renderer
-//! would have to issue a syscall per frame to read it. `app_runtime_list` is the
-//! real source and the shell already mirrors it into the recent stack.
+//!   * The running deck (top): the recent-apps behaviour a swipe-up opens, kept
+//!     intact. `refresh_runtime_recents` copies package ids and kernel task ids
+//!     out of `app_runtime_list` into three recent slots; card `i` is slot `i`,
+//!     its title is that package id resolved through the registry, its icon is
+//!     the pictogram that id maps to, and its subtitle reports whether the
+//!     kernel still lists its task. The status-band count is the number of cards
+//!     whose subtitle reads "Running", so the deck and the count cannot disagree.
+//!     `std::window_list` was considered and is not a source: it reads the
+//!     compositor's surface registry, not the task list, and is not on state.
 //!
-//! A slot with no package id draws no card at all, rather than an empty outline:
-//! there is a fourth card rectangle that no recent slot can ever back, and a
-//! blank card there would be the deck claiming four things where there are none.
+//! WHY the running deck keeps the top band and the workspaces live below it:
+//! the shell's ActivitySpace input handler (main.rs, which this file cannot
+//! change) hard-codes the three deck cards' tap and swipe bands, and the
+//! lifecycle harness taps (360, 340) / (610, 230) and swipes (200,660)->(550,660)
+//! against them. The Activities block lies entirely outside those bands, so it is
+//! paint-only state, never a control: nothing there answers a touch, because the
+//! only input path for this view is the frozen handler and it reaches none of it.
+//! A "+ New Activity" action is real only where there is a workspace to add to;
+//! with no store and no `settings_set` authority in the launcher's capability
+//! table (kernel grants it FileSystemRead only), it is drawn as an explicitly
+//! unavailable action with that reason rather than a button that writes nothing.
+//!
+//! WHAT is never drawn, and why: no per-app strip, no task count, no file count.
+//! The screen those replaced named four workspaces and drew thirteen app
+//! identities and a "4 apps - 2 tasks" provenance-free subtitle for each, none of
+//! it read from anywhere -- the same defect as a clock drawn without an RTC read.
 //!
 //! WHY `pub`: the shell's ActivitySpace tap handler must ask this screen where
 //! its close controls are ([`activity_close_hit`]) rather than carry a second
@@ -40,7 +60,8 @@ use launcher::icons::{self, IconKind};
 use launcher::layout::Rect;
 use launcher::text;
 use launcher::theme::{
-    space, type_scale, MIN_TOUCH_TARGET, SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT,
+    radius, space, type_scale, Theme, MIN_TOUCH_TARGET, SCREEN_HEIGHT, SCREEN_WIDTH,
+    STATUS_BAR_HEIGHT,
 };
 
 // -----------------------------------------------------------------------------
@@ -393,6 +414,151 @@ fn running_line(buf: &mut [u8; STATUS_CAP], n: usize) -> &[u8] {
 }
 
 // -----------------------------------------------------------------------------
+// Activity Space workspaces (contextual activities)
+//
+// The design system defines Activity Space as contextual workspaces. This part
+// of the screen draws them. Everything below is either a design token or a value
+// derived from one real source, and the source is named on the surface.
+// -----------------------------------------------------------------------------
+
+/// Colours for the workspaces block, taken from the theme the whole surface
+/// already uses rather than retyped as hex -- the same rule the rest of the shell
+/// follows. This surface is the design system's dark treatment.
+const WS_BG: u32 = Theme::DARK.bg;
+const WS_CARD: u32 = Theme::DARK.surface;
+/// Recessed fill of the "+ New Activity" affordance: it is an unavailable action,
+/// so it must not wear the raised fill of a live control.
+const WS_CARD_INERT: u32 = Theme::DARK.surface_sunken;
+const WS_BORDER: u32 = Theme::DARK.border;
+const WS_TEXT: u32 = Theme::DARK.text;
+const WS_MUTED: u32 = Theme::DARK.text_muted;
+
+/// The four contextual activity types, from INTEROS_UI_DESIGN_SYSTEM.md section 4
+/// and the `04_activity_space` reference sheet.
+///
+/// WHY these four names are not fabrication: they are the OS's defined activity
+/// structure -- the same fixed-category pattern as the app drawer's
+/// Work/Personal/Tools tabs (`APP_DRAWER_TAB_NAMES`), named by the system rather
+/// than chosen per user. What *would* be fabrication is inventing each one's
+/// contents; the contents below are derived from the registry and stated as such.
+const ACTIVITY_NAMES: [&[u8]; 4] = [b"Work", b"Personal", b"Research", b"Media"];
+
+/// Top of the "Activities" heading, just below the running deck (which ends at
+/// WORKSPACE_CARDS[2].y = 990). The whole workspaces block lives below the
+/// deck because the shell pins the deck to the top for input.
+const ACTIVITY_HEAD_Y: usize = 1000;
+/// Top of the one-line honesty note that fixes what each per-workspace count means.
+const ACTIVITY_SUB_Y: usize = 1046;
+/// The workspaces rows align with the deck's own content columns, so the two
+/// blocks read as one screen rather than two stitched together.
+const ACTIVITY_ROW_X: usize = CARD_X;
+const ACTIVITY_ROW_W: usize = CARD_W;
+const ACTIVITY_ROW_H: usize = 32;
+const ACTIVITY_ROW_STRIDE: usize = 34;
+const ACTIVITY_ROW_TOP: usize = 1076;
+const ACTIVITY_RADIUS: usize = radius::CHIP;
+
+/// "+ New Activity" availability control, below the home bar with its reason.
+const NEW_ACTION_W: usize = 260;
+const NEW_ACTION_H: usize = 48;
+const NEW_ACTION_X: usize = (SCREEN_WIDTH - NEW_ACTION_W) / 2;
+const NEW_ACTION_Y: usize = 1330;
+const NEW_NOTE_A_Y: usize = 1290;
+const NEW_REASON_Y: usize = 1384;
+
+/// Honest strings. Each one names where a number came from or why a thing is
+/// absent, so the screen never shows a plausible value with no source.
+const ACTIVITY_SUB: &[u8] = b"Installed apps per registry category.";
+const ACTIVITY_NOTE_A: &[u8] = b"No per-workspace task, file or membership is recorded.";
+const ACTIVITY_REASON: &[u8] = b"Unavailable: the shell cannot persist a workspace.";
+
+/// How many installed apps carry the package-registry category equal to
+/// `activity`.
+///
+/// WHY this and not a workspace store: none exists. The app drawer already
+/// filters `state.app_categories` with this exact `cat == b"Work"` comparison
+/// (`apps/launcher/src/screens/app_drawer.rs`), so this is the one per-app
+/// grouping the platform records, and reporting its count for an activity of the
+/// same name is honest *with the source stated* (see [`ACTIVITY_SUB`]). It is not
+/// activity membership, which is why the surface never calls it that. Work and
+/// Personal match real categories; Research and Media match none, so they
+/// honestly read zero -- exactly like the drawer's "No Work Apps" empty state.
+fn activity_app_count(state: &LauncherState, activity: &[u8]) -> usize {
+    let mut n = 0usize;
+    let mut i = 0usize;
+    while i < state.app_count.min(32) {
+        let l = state.app_category_lens[i] as usize;
+        if &state.app_categories[i][..l] == activity {
+            n += 1;
+        }
+        i += 1;
+    }
+    n
+}
+
+/// "N apps" for the count cell. `n` is at most the 32-app catalogue, so a
+/// two-digit decimal is exact and the 16-byte buffer never truncates.
+fn activity_count_text(n: usize) -> ([u8; 16], usize) {
+    let mut buf = [0u8; 16];
+    let mut len = 0usize;
+    if n >= 10 {
+        buf[len] = b'0' + (n / 10) as u8;
+        len += 1;
+    }
+    buf[len] = b'0' + (n % 10) as u8;
+    len += 1;
+    let mut j = 0usize;
+    while j < b" apps".len() {
+        buf[len] = b" apps"[j];
+        len += 1;
+        j += 1;
+    }
+    (buf, len)
+}
+
+/// One activity row: its card box, its name, and its honest registry-derived
+/// count, right-aligned so the counts read as a column.
+#[derive(Clone, Copy)]
+struct WorkspaceRow {
+    rect: Rect,
+    name: LabelRun,
+    count: LabelRun,
+}
+
+/// The whole workspaces block, resolved once per frame.
+struct WorkspacePanel {
+    heading: LabelRun,
+    sub: LabelRun,
+    rows: [WorkspaceRow; 4],
+    new_rect: Rect,
+    new_label: LabelRun,
+    note_a: LabelRun,
+    reason: LabelRun,
+}
+
+/// Resolves activity row `i` from the registry: the design type's name on the
+/// left and, on the right, how many installed apps the registry categorises under
+/// that name. No task or file count is computed, because nothing holds one.
+fn build_activity_row(state: &LauncherState, i: usize, scale: usize) -> WorkspaceRow {
+    let ry = ACTIVITY_ROW_TOP + i * ACTIVITY_ROW_STRIDE;
+    let rect = Rect::new(ACTIVITY_ROW_X, ry, ACTIVITY_ROW_W, ACTIVITY_ROW_H);
+    // WHY the same (h - line)/2 centring the nav label uses: it keeps a change of
+    // type scale from sliding the name off the row box.
+    let text_y = ry + ACTIVITY_ROW_H.saturating_sub(text::line_height(scale)) / 2;
+    let name = LabelRun::new(rect.x + 16, text_y, scale, ACTIVITY_NAMES[i], WS_TEXT);
+    let (cnt, cnt_len) = activity_count_text(activity_app_count(state, ACTIVITY_NAMES[i]));
+    let cnt_w = text::measure(&cnt[..cnt_len], scale);
+    let count = LabelRun::new(
+        rect.x + rect.w - 16 - cnt_w,
+        text_y,
+        scale,
+        &cnt[..cnt_len],
+        WS_MUTED,
+    );
+    WorkspaceRow { rect, name, count }
+}
+
+// -----------------------------------------------------------------------------
 // Rounded Rectangle Helpers
 // -----------------------------------------------------------------------------
 
@@ -708,6 +874,8 @@ struct ActivityFrame {
     /// an empty card outline is a shape that asserts a task the shell does not
     /// have, which is what the deck used to claim four times over.
     cards: [Option<CardPlan>; 4],
+    /// The contextual-activity block below the deck (paint-only; see module doc).
+    workspaces: WorkspacePanel,
     nav_home_btn: Rect,
     nav_home_label: LabelRun,
     home_pill: Rect,
@@ -1039,11 +1207,75 @@ fn build_activity_frame(state: &LauncherState) -> ActivityFrame {
         TEXT_WHITE,
     );
 
+    // 5. Activity workspaces. WHY the counts and not the mock-up's "N apps - M
+    // tasks": a task and file count have no source anywhere on this guest, so
+    // they are never shown; each row reports the one derived number (installed
+    // apps by registry category, matching the app drawer) with the source named
+    // by the subheading. WHY "+ New Activity" is inert and recessed, not the
+    // raised control the reference sheet shows: there is no workspace store to
+    // add to and the launcher holds no `settings_set` authority, so a live
+    // button would be a control that writes nothing.
+    let row_scale = type_scale::CAPTION;
+    let ws_heading =
+        LabelRun::new(ACTIVITY_ROW_X, ACTIVITY_HEAD_Y, type_scale::BODY, b"Activities", WS_TEXT);
+    let ws_sub = LabelRun::fitted(
+        ACTIVITY_ROW_X,
+        ACTIVITY_SUB_Y,
+        row_scale,
+        ACTIVITY_ROW_W,
+        ACTIVITY_SUB,
+        WS_MUTED,
+    );
+    let rows = [
+        build_activity_row(state, 0, row_scale),
+        build_activity_row(state, 1, row_scale),
+        build_activity_row(state, 2, row_scale),
+        build_activity_row(state, 3, row_scale),
+    ];
+    let new_rect = Rect::new(NEW_ACTION_X, NEW_ACTION_Y, NEW_ACTION_W, NEW_ACTION_H);
+    let new_label = LabelRun::centred(
+        new_rect.x,
+        new_rect.y + new_rect.h.saturating_sub(text::line_height(row_scale)) / 2,
+        new_rect.w,
+        row_scale,
+        b"+ New Activity",
+        WS_MUTED,
+    );
+    let note_scale = type_scale::CAPTION;
+    let ws_note_a = LabelRun::fitted_centred(
+        space::XL,
+        NEW_NOTE_A_Y,
+        note_scale,
+        SCREEN_WIDTH - 2 * space::XL,
+        SCREEN_WIDTH,
+        ACTIVITY_NOTE_A,
+        WS_MUTED,
+    );
+    let ws_reason = LabelRun::fitted_centred(
+        space::XL,
+        NEW_REASON_Y,
+        note_scale,
+        SCREEN_WIDTH - 2 * space::XL,
+        SCREEN_WIDTH,
+        ACTIVITY_REASON,
+        WS_MUTED,
+    );
+    let workspaces = WorkspacePanel {
+        heading: ws_heading,
+        sub: ws_sub,
+        rows,
+        new_rect,
+        new_label,
+        note_a: ws_note_a,
+        reason: ws_reason,
+    };
+
     ActivityFrame {
         clock,
         status_head,
         status_body,
         cards,
+        workspaces,
         nav_home_btn: NAV_HOME_BTN,
         nav_home_label,
         home_pill: HOME_PILL,
@@ -1195,6 +1427,33 @@ pub fn get_activity_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         return color;
     }
 
+    // 3b. Activity workspaces (contextual activities, design system section 4).
+    // WHY paint-only: the whole block is below the deck and outside every band
+    // the main.rs ActivitySpace handler owns, so nothing here answers a touch and
+    // none of it may be styled as a live control. The heading and subheading sit
+    // over the page background; each row draws its own card fill, then its ink.
+    if let Some(c) = f.workspaces.heading.pixel_on(x, y, BG_COLOR) {
+        return c;
+    }
+    if let Some(c) = f.workspaces.sub.pixel_on(x, y, BG_COLOR) {
+        return c;
+    }
+    for row in f.workspaces.rows.iter() {
+        if !rounded_contains(row.rect, x, y, ACTIVITY_RADIUS) {
+            continue;
+        }
+        if rounded_outline(row.rect, x, y, ACTIVITY_RADIUS) {
+            return WS_BORDER;
+        }
+        if let Some(c) = row.name.pixel_on(x, y, WS_CARD) {
+            return c;
+        }
+        if let Some(c) = row.count.pixel_on(x, y, WS_CARD) {
+            return c;
+        }
+        return WS_CARD;
+    }
+
     // 4. Nav bar under the deck (covers y in 1220..1264, tap 360, 1240). WHY the
     // shell sends that band home rather than closing anything: see `NAV_HOME_BTN`.
     if f.nav_home_btn.contains(x, y) {
@@ -1210,7 +1469,29 @@ pub fn get_activity_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         }
     }
 
-    // 5. Home Indicator Pill
+    // 5. "+ New Activity" availability control and its reason lines, below the
+    // home bar. WHY recessed and not raised: with no workspace store and no
+    // `settings_set` authority in the launcher's capability table there is nothing
+    // this control could really add, so it is drawn unavailable with that reason
+    // rather than styled like a live action -- a dead control is worse than an
+    // honest absence. It sits in no input band, so a tap does nothing by design.
+    if rounded_contains(f.workspaces.new_rect, x, y, radius::CONTROL) {
+        if rounded_outline(f.workspaces.new_rect, x, y, radius::CONTROL) {
+            return WS_BORDER;
+        }
+        if let Some(c) = f.workspaces.new_label.pixel_on(x, y, WS_CARD_INERT) {
+            return c;
+        }
+        return WS_CARD_INERT;
+    }
+    if let Some(c) = f.workspaces.note_a.pixel_on(x, y, BG_COLOR) {
+        return c;
+    }
+    if let Some(c) = f.workspaces.reason.pixel_on(x, y, BG_COLOR) {
+        return c;
+    }
+
+    // 6. Home Indicator Pill
     if rounded_contains(f.home_pill, x, y, 2) {
         return 0xFF64748B;
     }
