@@ -45,6 +45,7 @@ opt-level = 1
 
 [profile.release]
 panic = "abort"
+lto = true
 # WHY strip, and what it actually buys -- measured, not assumed. The release
 # kernel ELF is 18.2MB unstripped and 3.6MB with debug sections removed, because
 # `libkernel.rlib` is 20MB of them. That is a real saving on the build artifact:

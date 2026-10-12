@@ -42,3 +42,9 @@ docs/UI_DESIGN_SYSTEM.md
 # Internal analysis notes, not deliverables.
 docs/SCANOUT_RESOLUTION.md
 docs/BUILD_EMBEDDING.md
+
+# Packaged guest apps are build artefacts, never sources: a .rapp committed here
+# resurrects an app whose source was removed, on every clone.
+packages/*.rapp
+emulator/data/apps/*.rapp
+emulator/installed_apps/*
