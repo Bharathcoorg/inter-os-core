@@ -22,6 +22,8 @@
 #![no_std]
 #![no_main]
 
+mod outline_text;
+
 use core::panic::PanicInfo;
 use interos_std as std;
 use std::design::font;
@@ -132,6 +134,34 @@ fn text(
     if y < y0 || y >= y0 + font::line_height(scale) {
         return None;
     }
+    // The outline face, chosen ONCE for the run rather than once per pixel.
+    //
+    // WHY the order matters here specifically: this funnel is called for every
+    // pixel of every label, and a per-pixel choice would draw the glyph from
+    // both faces at once -- the outline's edge with a hard bitmap ghost one
+    // pixel off, on every string on the surface. The launcher's first version of
+    // this change did exactly that and it was only visible in the capture.
+    if let Some(run) =
+        outline_text::OutlineRun::place_run(x0, y0 + font::BASELINE * scale, scale, s, false)
+    {
+        // WHY the window is the run's and not the cell's: at the em that matches
+        // this scale the outline's ascent reaches 18px above the cell origin and
+        // its descent 4px past the bottom, so the cell-shaped test above would
+        // clip tall glyphs off the top without anything looking wrong. The run's
+        // own bounds admit exactly its ink and nothing more, so widening to them
+        // cannot put a pixel where a glyph is not.
+        let (rx, rtop, rw, rh) = run.bounds();
+        if x >= rx && x - rx < rw && y >= rtop && y - rtop < rh {
+            return run.pixel(x, y, color, bg);
+        }
+        // Inside the cell window but outside the run's ink: the caller's
+        // background shows through, exactly as an uninked bitmap pixel would.
+        return None;
+    }
+    // The bitmap face is the fallback, not the baseline: a refusal here -- a
+    // bold run, a glyph whose ink leaves the window, a run wider than the
+    // buffer, a baseline too near the top of the surface -- must leave the text
+    // drawn rather than dropped.
     font::test_text_aa(x, y, x0, y0, scale, s, color, bg, false)
 }
 
