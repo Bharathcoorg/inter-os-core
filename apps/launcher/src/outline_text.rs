@@ -81,19 +81,38 @@ static mut LOADED: [Option<Loaded>; SLOTS] = [None, None];
 
 /// Which slot a placement lands in.
 ///
-/// WHY derived from the placement rather than handed out round-robin: a
-/// round-robin slot would move a run between calls, so a cached run could be
-/// answered from a slot another run has since taken. Deriving it from the key
-/// puts the same run in the same slot every time, which is what makes the cache
-/// sound, and collides only when two runs hash alike.
+/// WHY this is a search rather than a hash: a hash spreads two runs across two
+/// slots only by luck, and two runs that collide silently erase each other --
+/// which is exactly what happened when the lock date and clock both landed in
+/// slot 0 and the date's letters vanished, leaving only its comma. A hash
+/// cannot promise what this needs, so it does not get the job.
+///
+/// The rule, in order: a slot already holding this exact key is reused, so a
+/// repeated placement hits the cache; otherwise an empty slot is taken; and
+/// only when every slot holds a different live run is one reused, in which case
+/// the caller has asked for more resident runs than exist and one of them must
+/// give way.
 fn slot_for(em: u32, x: usize, y: usize, text: &[u8]) -> usize {
-    // A cheap mix over the whole key. This is a bucket assignment, not a hash
-    // that has to resist anything: its only job is to spread two runs.
-    let mut acc = em ^ ((x as u32) << 3) ^ ((y as u32) << 11);
-    for (i, &c) in text.iter().enumerate() {
-        acc ^= (c as u32).rotate_left((i % 31) as u32);
+    // SAFETY: the read of the cache array, taken and released inside this
+    // function. The lock surface's painter is the only caller, it is single
+    // threaded, and nothing reached from here re-enters it.
+    let loaded = unsafe { &*core::ptr::addr_of!(LOADED) };
+    let same = |l: &Loaded| {
+        l.em == em && l.x == x && l.y == y && l.len == text.len() && l.key[..text.len()] == *text
+    };
+    let mut first_free = None;
+    for (i, slot) in loaded.iter().enumerate() {
+        match slot {
+            Some(l) if same(l) => return i,
+            Some(_) => {}
+            None => {
+                if first_free.is_none() {
+                    first_free = Some(i);
+                }
+            }
+        }
     }
-    (acc as usize) % SLOTS
+    first_free.unwrap_or(0)
 }
 
 /// One placed run of outline type.
@@ -265,6 +284,31 @@ impl OutlineRun {
 mod tests {
     use super::*;
 
+    /// Serialises the tests that reason about the shared slot pool.
+    ///
+    /// WHY a lock and not just a reset: the harness runs tests on several
+    /// threads, so two tests that both mutate `LOADED` interleave no matter how
+    /// carefully each resets it. That shows up as a failure that appears on one
+    /// run and not the next, which is the definition of untrustworthy. `std` is
+    /// available under `cfg(test)`, so the lock costs nothing in the guest.
+    static POOL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Empties the slot pool and holds the pool lock for the rest of the test.
+    ///
+    /// WHY this is needed: `LOADED` is a process-global and the tests share it,
+    /// so a test that assumes an empty pool fails when another test has already
+    /// filled it -- which is exactly the kind of failure that depends on the
+    /// order the harness happened to pick. Reasoning about a pool that the test
+    /// itself emptied is deterministic; reasoning about one another test left
+    /// behind is not.
+    fn reset_slots() -> std::sync::MutexGuard<'static, ()> {
+        let guard = POOL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for slot in unsafe { &mut *core::ptr::addr_of_mut!(LOADED) }.iter_mut() {
+            *slot = None;
+        }
+        guard
+    }
+
     /// A run that fits, with a known em, so the coverage can be read back.
     fn placed(em: u32, text: &[u8]) -> OutlineRun {
         OutlineRun::place(0, 200, em, text).expect("run placed")
@@ -272,6 +316,7 @@ mod tests {
 
     #[test]
     fn a_placed_run_covers_the_em_box_and_nothing_outside_it() {
+        let _pool = reset_slots();
         let run = placed(56, b"09:20");
         let (ascent, descent) = typeface::line_metrics(56);
         assert_eq!(run.h, (ascent + descent) as usize, "the run is one line box");
@@ -283,6 +328,7 @@ mod tests {
 
     #[test]
     fn ink_appears_where_the_outline_says_it_does() {
+        let _pool = reset_slots();
         // Measured against the same face the host probe rasterises: at a 56px
         // em the reference clock's digits are a 40px cap, so an all-zero
         // coverage buffer means the rasteriser never ran, and a full one means
@@ -308,6 +354,7 @@ mod tests {
 
     #[test]
     fn a_pixel_outside_the_line_box_is_never_inked() {
+        let _pool = reset_slots();
         let run = placed(40, b"Ag");
         let top = run.y - run.ascent;
         // One row above the line box, and one row below it.
@@ -322,6 +369,7 @@ mod tests {
 
     #[test]
     fn coverage_blends_rather_than_replacing_the_backdrop() {
+        let _pool = reset_slots();
         // A partially covered pixel must be between the two colours, not one of
         // them, or the edge would read as a staircase on the scene backdrop.
         let run = placed(56, b"09:20");
@@ -350,6 +398,7 @@ mod tests {
 
     #[test]
     fn an_unencodable_character_refuses_the_whole_run() {
+        let _pool = reset_slots();
         // A character the face cannot encode advances by zero, which would draw
         // every later glyph on top of the previous one.
         assert!(OutlineRun::place(0, 200, 40, b"ok\0no").is_none());
@@ -374,13 +423,19 @@ mod tests {
 
     #[test]
     fn two_runs_resident_together_do_not_erase_each_other() {
+        let _pool = reset_slots();
         // The lock surface places the date and then the clock in one frame, and
         // both are painted afterwards. With one shared buffer the clock's
         // rasterisation erased the date's coverage, and the date then read the
         // clock's glyphs: its letters vanished and only its comma survived.
-        // Pin the pair so the pooling cannot regress.
-        let date = OutlineRun::place(0, 251, 18, b"Mon, 12 Oct").expect("date placed");
-        let clock = OutlineRun::place(0, 325, 48, b"00:02").expect("clock placed");
+        //
+        // WHY the arguments are the real call sites and not round numbers: this
+        // test first used x=0 for both runs and passed while the live lock
+        // screen was broken, because the two placements collided in one slot
+        // only at the x the painter actually uses. A test that does not mirror
+        // the caller's arguments is not guarding the caller.
+        let date = OutlineRun::place(75, 251, 18, b"Mon, 12 Oct").expect("date placed");
+        let clock = OutlineRun::place(75, 325, 48, b"00:02").expect("clock placed");
         assert_ne!(date.slot, clock.slot, "the two runs must not share a slot");
 
         // Both runs must ink pixels after the second placement. Read the date
@@ -389,7 +444,55 @@ mod tests {
         let date_ink = count_ink(&date);
         let clock_ink = count_ink(&clock);
         assert!(date_ink > 200, "date inked only {date_ink} pixels");
-        assert!(clock_ink > 500, "clock inked only {clock_ink} pixels");
+        assert!(
+            clock_ink > 500,
+            "clock inked only {clock_ink} pixels"
+        );
+    }
+
+    #[test]
+    fn a_colliding_second_run_still_lands_in_a_free_slot() {
+        let _pool = reset_slots();
+        // WHY: the slot used to come from a hash, so two runs that hashed alike
+        // erased each other with no way to tell from the outside. Every
+        // additional distinct placement must now take a free slot while one is
+        // left, regardless of what its key looks like.
+        let first = OutlineRun::place(75, 251, 18, b"Mon, 12 Oct").expect("placed");
+        let second = OutlineRun::place(75, 325, 48, b"00:02").expect("placed");
+        assert_ne!(first.slot, second.slot, "no free slot was chosen");
+        assert!(first.slot < SLOTS);
+        assert!(second.slot < SLOTS);
+    }
+
+    #[test]
+    fn a_third_distinct_run_cannot_have_a_private_slot() {
+        let _pool = reset_slots();
+        // Only two slots exist. A third live run reclaims one, and the honest
+        // consequence is that one of the earlier runs is no longer readable --
+        // which the caller must not rely on. Pin the reclaim path so it is
+        // chosen deliberately rather than corrupting silently.
+        let a = OutlineRun::place(75, 251, 18, b"Mon, 12 Oct").expect("placed");
+        let b = OutlineRun::place(75, 325, 48, b"00:02").expect("placed");
+        let c = OutlineRun::place(75, 400, 24, b"Ag").expect("placed");
+        assert!(c.slot < SLOTS);
+        // The third run must be among the two it displaced, never a phantom
+        // third slot.
+        assert!(c.slot == a.slot || c.slot == b.slot);
+        // And it must actually hold its own glyphs.
+        assert!(count_ink(&c) > 0, "the reclaimed slot holds no ink");
+    }
+
+    #[test]
+    fn a_repeated_placement_reuses_the_same_slot() {
+        let _pool = reset_slots();
+        // The cache soundness rests on this: the same run must land where it
+        // was, or a later placement could be answered from another run's slot.
+        let first = OutlineRun::place(75, 251, 18, b"Mon, 12 Oct").expect("placed");
+        // Displace it, then place it again.
+        OutlineRun::place(75, 325, 48, b"00:02").expect("placed");
+        OutlineRun::place(75, 400, 24, b"Ag").expect("placed");
+        let again = OutlineRun::place(75, 251, 18, b"Mon, 12 Oct").expect("placed again");
+        assert_eq!(first.slot, again.slot, "the same run moved slots");
     }
 
     /// Inked pixel count over a run's whole line box.
@@ -408,6 +511,7 @@ mod tests {
 
     #[test]
     fn a_repeat_placement_is_freed_by_the_cache() {
+        let _pool = reset_slots();
         // The lock painter resolves its frame through a memo that re-measures on
         // an unrecognised pixel walk, so placement must be cheap to repeat or a
         // jumping caller would re-rasterise per pixel.
@@ -419,6 +523,7 @@ mod tests {
 
     #[test]
     fn placing_a_different_run_replaces_the_buffer() {
+        let _pool = reset_slots();
         let clock = placed(56, b"09:20");
         let other = OutlineRun::place(0, 200, 40, b"Ag").expect("second run placed");
         assert_ne!(clock.w, other.w);
@@ -430,6 +535,7 @@ mod tests {
 
     #[test]
     fn the_clock_run_is_larger_than_the_date_run() {
+        let _pool = reset_slots();
         // A lock surface is arranged around one large clock. While the clock was
         // a bitmap cell at scale 6, a scale-2 date read as subordinate; at a
         // 48px em they share a cap height, which inverts the hierarchy. Pin the
@@ -451,6 +557,7 @@ mod tests {
 
     #[test]
     fn a_longer_run_is_refused_rather_than_truncated() {
+        let _pool = reset_slots();
         // 24 bytes is the placement key's bound. Refusing is the honest
         // outcome: the caller keeps the bitmap face, which never truncates.
         let long = b"abcdefghijklmnopqrstuvwx";
