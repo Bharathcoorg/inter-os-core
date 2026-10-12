@@ -340,6 +340,25 @@ struct Run {
     scale: usize,
     len: usize,
     ink: u32,
+    /// Pixels per em for this run's outline rendering.
+    ///
+    /// WHY a separate number from `scale`: the bitmap face is a 16x24 cell
+    /// multiplied by `scale`, so its cap height is 17*`scale` pixels. The
+    /// outline face is rasterised at an em, and its cap height is 1456 of 2048
+    /// em, so the em that matches the same cap height is
+    /// `17 * scale * 2048 / 1456`. Carrying it means the two faces can be
+    /// compared instead of guessed at.
+    em: u32,
+    /// Top row of the box that covers BOTH renderers.
+    ///
+    /// WHY the box is a union: the outline run's line box is not the bitmap
+    /// cell. At the em that matches a scale-3 cap, the outline's ascent reaches
+    /// 18px above the cell origin and its descent 4px past the cell bottom, so
+    /// a box measured for the cell alone would reject rows the outline inks and
+    /// the text would be silently clipped.
+    top: usize,
+    /// Height of that union box.
+    box_h: usize,
     bytes: [u8; RUN_CAP],
 }
 
@@ -353,7 +372,10 @@ impl Run {
         scale: 1,
         len: 0,
         ink: 0,
-        bytes: [0u8; RUN_CAP],
+        em: 0,
+        top: 0,
+        box_h: 0,
+        bytes: [0; RUN_CAP],
     };
 
     /// `bytes` at (`x`, `y`), truncated with an ellipsis if wider than `fit`.
@@ -396,22 +418,48 @@ impl Run {
     }
 
     /// A run from an already-resolved buffer.
+    ///
+    /// WHY the width and the box are wider than the bitmap's own: the run now
+    /// has two renderers, and the box has to admit both. The bitmap's measure
+    /// and line height bound one; the outline's advance and its ascent-plus-
+    /// descent bound the other. Taking the union of each costs nothing at this
+    /// point and is the difference between text that renders and text that is
+    /// silently clipped.
     fn placed(x: usize, y: usize, scale: usize, buf: [u8; RUN_CAP], len: usize, ink: u32) -> Run {
+        let text = &buf[..len];
+        // The bitmap face's cap height is 17 rows at scale 1 and the outline
+        // face's cap height is 1456 of 2048 em, so this em reproduces the same
+        // cap height the cell multiple produced.
+        let em = launcher::outline_text::em_for_scale(scale);
+        // The outline's baseline lands where the cell puts its own, so the two
+        // agree on where the text sits rather than merely how tall it is.
+        let baseline = y + launcher::font::BASELINE * scale;
+        let (asc, desc) = interos_std::design::typeface::line_metrics(em);
+        let outline_advance = interos_std::design::typeface::text_advance_px(text, em) as usize;
+        let bitmap_measure = text::measure(text, scale);
+
+        let w = bitmap_measure.max(outline_advance);
+        let top = baseline.saturating_sub(asc as usize);
+        let box_h = (baseline + desc as usize).saturating_sub(top);
+
         Run {
             x,
             y,
-            w: text::measure(&buf[..len], scale),
+            w,
             h: text::line_height(scale),
             scale,
             len,
             ink,
+            em,
+            top,
+            box_h,
             bytes: buf,
         }
     }
 
     /// The colour of (`px`, `py`) if this run inks it.
     fn pixel(&self, px: usize, py: usize) -> Option<u32> {
-        self.pixel_inked(px, py, self.ink)
+        self.pixel_inked(px, py, self.ink, 0)
     }
 
     /// As [`Run::pixel`], with the ink chosen by the caller.
@@ -419,12 +467,24 @@ impl Run {
     /// WHY two of them need this: the greeting and the navigation bar are drawn
     /// straight onto the wallpaper ramp, whose colour is a function of `y`, so their
     /// ink cannot be settled until the pixel's row is known.
-    fn pixel_inked(&self, px: usize, py: usize, ink: u32) -> Option<u32> {
+    fn pixel_inked(&self, px: usize, py: usize, ink: u32, bg: u32) -> Option<u32> {
         if self.len == 0 {
             return None;
         }
-        if px < self.x || px - self.x >= self.w || py < self.y || py - self.y >= self.h {
+        if px < self.x || px - self.x >= self.w || py < self.top || py - self.top >= self.box_h {
             return None;
+        }
+        // Choose the renderer ONCE for the run, not once per pixel -- the same
+        // reason as `pixel_inked_aa`: a per-pixel fallback draws the glyph from
+        // both faces at once.
+        let outline = launcher::outline_text::OutlineRun::place(
+            self.x,
+            self.y + launcher::font::BASELINE * self.scale,
+            self.em,
+            &self.bytes[..self.len],
+        );
+        if let Some(run) = outline {
+            return run.pixel(px, py, ink, bg);
         }
         test_text(px, py, self.x, self.y, self.scale, &self.bytes[..self.len], ink)
     }
@@ -435,14 +495,51 @@ impl Run {
     }
 
     /// Anti-aliased render of this run with caller-chosen ink and background.
+    ///
+    /// WHY the box test comes before the placement: rasterising is the expensive
+    /// part, and the overwhelming majority of pixels this surface asks about are
+    /// nowhere near a run. Testing the box first means a run is only rasterised
+    /// on a pixel it actually inks, so one shared coverage slot is enough no
+    /// matter how many runs the frame holds -- each is placed when it is hit and
+    /// stays cached until a different one is.
     fn pixel_inked_aa(&self, px: usize, py: usize, ink: u32, bg: u32) -> Option<u32> {
         if self.len == 0 {
             return None;
         }
-        if px < self.x || px - self.x >= self.w || py < self.y || py - self.y >= self.h {
+        if px < self.x || px - self.x >= self.w || py < self.top || py - self.top >= self.box_h {
             return None;
         }
-        test_text_aa(px, py, self.x, self.y, self.scale, &self.bytes[..self.len], ink, bg)
+        // Choose the renderer ONCE for the run, not once per pixel.
+        //
+        // WHY: the fallback used to be per-pixel, so a pixel the outline did not
+        // ink fell through to the bitmap face, which drew its own copy of the
+        // glyph at its own advance. The result was the text drawn twice at a
+        // one-pixel offset -- an outline glyph under a hard-edged bitmap ghost,
+        // on every label on the surface. A run is rendered by one face or the
+        // other, never both.
+        let outline = launcher::outline_text::OutlineRun::place(
+            self.x,
+            self.y + launcher::font::BASELINE * self.scale,
+            self.em,
+            &self.bytes[..self.len],
+        );
+        if let Some(run) = outline {
+            return run.pixel(px, py, ink, bg);
+        }
+        // The bitmap face is the fallback, not the baseline: a refusal here --
+        // a run too wide for the coverage buffer, a character outside the
+        // encoded range, a baseline too near the top of the surface -- must
+        // leave the text drawn rather than dropped.
+        test_text_aa(
+            px,
+            py,
+            self.x,
+            self.y,
+            self.scale,
+            &self.bytes[..self.len],
+            ink,
+            bg,
+        )
     }
 }
 
@@ -1258,7 +1355,7 @@ fn greeting_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Op
             return Some(c);
         }
     }
-    if let Some(c) = p.weather.pixel_inked(x, y, ink) {
+    if let Some(c) = p.weather.pixel_inked(x, y, ink, backdrop(p.scene, x, y)) {
         return Some(c);
     }
     None
@@ -1469,7 +1566,7 @@ fn deck_pixel(x: usize, y: usize, f: &Frame, p: &Paint, theme: &Theme) -> Option
         return None;
     }
     if let Some(empty) = deck.empty.as_ref() {
-        return empty.pixel(x, y);
+        return empty.pixel_inked(x, y, empty.ink, backdrop(&p.scene, x, y));
     }
 
     let index = deck.slot_at(x, y)?;

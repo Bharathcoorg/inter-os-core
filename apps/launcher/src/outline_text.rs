@@ -115,6 +115,57 @@ fn slot_for(em: u32, x: usize, y: usize, text: &[u8]) -> usize {
     first_free.unwrap_or(0)
 }
 
+/// Cap height of the bitmap face in cell rows at scale 1.
+///
+/// WHY defined here rather than in the face: the face's module documents it
+/// ("Cap height 17, x-height 12, ascender 16, descender 4") but exports no
+/// constant for it, and the derivation that needs it lives here beside the
+/// rasteriser it is used against. If the face ever names it, use that instead.
+const BITMAP_CAP_ROWS: u64 = 17;
+
+/// Pixels per em that reproduce a bitmap cell's cap height at `scale`.
+///
+/// WHY this exists: a caller migrating a label from the bitmap face to the
+/// outline face must not guess an em, or the text silently changes size. The
+/// bitmap face's cap height is `BITMAP_CAP_ROWS` rows at scale 1, so a cell
+/// drawn at `scale` has a cap height of `BITMAP_CAP_ROWS * scale` pixels. The
+/// outline face's cap height is 1456 of 2048 em. Solving for em gives this.
+///
+/// The two faces share a cap height here, but they do not share a width or a
+/// total height, and callers must not assume otherwise.
+pub fn em_for_scale(scale: usize) -> u32 {
+    if scale == 0 {
+        return 0;
+    }
+    // Rounded to nearest so a scale lands on a whole em rather than drifting a
+    // fraction of a pixel per glyph, which reads as uneven stroke weight.
+    let num = BITMAP_CAP_ROWS * 2048 * scale as u64;
+    let den = 1456u64;
+    ((num + den / 2) / den) as u32
+}
+
+/// The colour of (`px`, `py`) if the run placed at (`x`, `baseline`) with size
+/// `em` inks it, blended over `bg`.
+///
+/// WHY this is a free function taking the whole key rather than a method on a
+/// placed run: the callers hold resolved labels in frame plans that must stay
+/// cheap to copy, and a placed run carrying a buffer is neither. Placing on
+/// demand behind the caller's own box test costs one cached lookup per inked
+/// pixel and nothing at all for the rest of the surface -- which is what lets a
+/// single coverage slot serve a frame full of runs.
+    pub fn pixel(
+        x: usize,
+        baseline: usize,
+        em: u32,
+        text: &[u8],
+        px: usize,
+        py: usize,
+        ink: u32,
+        bg: u32,
+    ) -> Option<u32> {
+        let run = OutlineRun::place(x, baseline, em, text)?;
+        run.pixel(px, py, ink, bg)
+    }
 /// One placed run of outline type.
 ///
 /// The run is a plain value: it records where its ink box is and which slot its
@@ -301,8 +352,7 @@ mod tests {
     /// order the harness happened to pick. Reasoning about a pool that the test
     /// itself emptied is deterministic; reasoning about one another test left
     /// behind is not.
-    fn reset_slots() -> std::sync::MutexGuard<'static, ()> {
-        let guard = POOL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    fn reset_slots() -> std::sync::MutexGuard<'static, ()> {        let guard = POOL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         for slot in unsafe { &mut *core::ptr::addr_of_mut!(LOADED) }.iter_mut() {
             *slot = None;
         }
@@ -316,7 +366,7 @@ mod tests {
 
     #[test]
     fn a_placed_run_covers_the_em_box_and_nothing_outside_it() {
-        let _pool = reset_slots();
+        let _pool: Option<_> = Some(reset_slots());
         let run = placed(56, b"09:20");
         let (ascent, descent) = typeface::line_metrics(56);
         assert_eq!(run.h, (ascent + descent) as usize, "the run is one line box");
@@ -328,7 +378,7 @@ mod tests {
 
     #[test]
     fn ink_appears_where_the_outline_says_it_does() {
-        let _pool = reset_slots();
+        let _pool: Option<_> = Some(reset_slots());
         // Measured against the same face the host probe rasterises: at a 56px
         // em the reference clock's digits are a 40px cap, so an all-zero
         // coverage buffer means the rasteriser never ran, and a full one means
@@ -354,7 +404,7 @@ mod tests {
 
     #[test]
     fn a_pixel_outside_the_line_box_is_never_inked() {
-        let _pool = reset_slots();
+        let _pool: Option<_> = Some(reset_slots());
         let run = placed(40, b"Ag");
         let top = run.y - run.ascent;
         // One row above the line box, and one row below it.
@@ -369,7 +419,7 @@ mod tests {
 
     #[test]
     fn coverage_blends_rather_than_replacing_the_backdrop() {
-        let _pool = reset_slots();
+        let _pool: Option<_> = Some(reset_slots());
         // A partially covered pixel must be between the two colours, not one of
         // them, or the edge would read as a staircase on the scene backdrop.
         let run = placed(56, b"09:20");
@@ -398,7 +448,7 @@ mod tests {
 
     #[test]
     fn an_unencodable_character_refuses_the_whole_run() {
-        let _pool = reset_slots();
+        let _pool: Option<_> = Some(reset_slots());
         // A character the face cannot encode advances by zero, which would draw
         // every later glyph on top of the previous one.
         assert!(OutlineRun::place(0, 200, 40, b"ok\0no").is_none());
@@ -423,7 +473,7 @@ mod tests {
 
     #[test]
     fn two_runs_resident_together_do_not_erase_each_other() {
-        let _pool = reset_slots();
+        let _pool: Option<_> = Some(reset_slots());
         // The lock surface places the date and then the clock in one frame, and
         // both are painted afterwards. With one shared buffer the clock's
         // rasterisation erased the date's coverage, and the date then read the
@@ -452,7 +502,7 @@ mod tests {
 
     #[test]
     fn a_colliding_second_run_still_lands_in_a_free_slot() {
-        let _pool = reset_slots();
+        let _pool: Option<_> = Some(reset_slots());
         // WHY: the slot used to come from a hash, so two runs that hashed alike
         // erased each other with no way to tell from the outside. Every
         // additional distinct placement must now take a free slot while one is
@@ -466,7 +516,7 @@ mod tests {
 
     #[test]
     fn a_third_distinct_run_cannot_have_a_private_slot() {
-        let _pool = reset_slots();
+        let _pool: Option<_> = Some(reset_slots());
         // Only two slots exist. A third live run reclaims one, and the honest
         // consequence is that one of the earlier runs is no longer readable --
         // which the caller must not rely on. Pin the reclaim path so it is
@@ -484,7 +534,7 @@ mod tests {
 
     #[test]
     fn a_repeated_placement_reuses_the_same_slot() {
-        let _pool = reset_slots();
+        let _pool: Option<_> = Some(reset_slots());
         // The cache soundness rests on this: the same run must land where it
         // was, or a later placement could be answered from another run's slot.
         let first = OutlineRun::place(75, 251, 18, b"Mon, 12 Oct").expect("placed");
@@ -511,7 +561,7 @@ mod tests {
 
     #[test]
     fn a_repeat_placement_is_freed_by_the_cache() {
-        let _pool = reset_slots();
+        let _pool: Option<_> = Some(reset_slots());
         // The lock painter resolves its frame through a memo that re-measures on
         // an unrecognised pixel walk, so placement must be cheap to repeat or a
         // jumping caller would re-rasterise per pixel.
@@ -523,7 +573,7 @@ mod tests {
 
     #[test]
     fn placing_a_different_run_replaces_the_buffer() {
-        let _pool = reset_slots();
+        let _pool: Option<_> = Some(reset_slots());
         let clock = placed(56, b"09:20");
         let other = OutlineRun::place(0, 200, 40, b"Ag").expect("second run placed");
         assert_ne!(clock.w, other.w);
@@ -535,7 +585,7 @@ mod tests {
 
     #[test]
     fn the_clock_run_is_larger_than_the_date_run() {
-        let _pool = reset_slots();
+        let _pool: Option<_> = Some(reset_slots());
         // A lock surface is arranged around one large clock. While the clock was
         // a bitmap cell at scale 6, a scale-2 date read as subordinate; at a
         // 48px em they share a cap height, which inverts the hierarchy. Pin the
@@ -557,11 +607,63 @@ mod tests {
 
     #[test]
     fn a_longer_run_is_refused_rather_than_truncated() {
-        let _pool = reset_slots();
+        let _pool: Option<_> = Some(reset_slots());
         // 24 bytes is the placement key's bound. Refusing is the honest
         // outcome: the caller keeps the bitmap face, which never truncates.
         let long = b"abcdefghijklmnopqrstuvwx";
         assert!(OutlineRun::place(0, 200, 12, long).is_some());
         assert!(OutlineRun::place(0, 200, 12, b"abcdefghijklmnopqrstuvwxy").is_none());
+    }
+
+    #[test]
+    fn the_convenience_pixel_agrees_with_a_placed_run() {
+        let _pool: Option<_> = Some(reset_slots());
+        // WHY this test exists: the shell's labels are held in frame plans that
+        // must stay cheap to copy, so they carry the key rather than a placed
+        // run, and `pixel` places on demand. If the two paths ever disagree --
+        // a different baseline convention, a different box -- a label renders
+        // from one and clips through the other, and nothing else would notice.
+        let x = 75usize;
+        let baseline = 188usize;
+        let em = em_for_scale(2);
+        let bytes = b"Today";
+
+        let placed = OutlineRun::place(x, baseline, em, bytes).expect("placed");
+        let (px0, py0, pw, ph) = placed.bounds();
+
+        let mut agreed = 0usize;
+        let mut inked = 0usize;
+        for py in py0..py0 + ph {
+            for px in px0..px0 + pw {
+                let a = placed.pixel(px, py, 0xFF000000, 0xFFFFFFFF);
+                let b = pixel(x, baseline, em, bytes, px, py, 0xFF000000, 0xFFFFFFFF);
+                assert_eq!(a.is_some(), b.is_some(), "disagreement at ({px},{py})");
+                if a.is_some() {
+                    inked += 1;
+                    if a == b {
+                        agreed += 1;
+                    }
+                }
+            }
+        }
+        assert!(inked > 100, "only {inked} inked pixels");
+        assert_eq!(agreed, inked, "the two paths produced different colours");
+    }
+
+    #[test]
+    fn em_for_scale_reproduces_the_bitmap_cap_height() {
+        // The whole point of `em_for_scale`: a label moved from the bitmap face
+        // to the outline face must keep its cap height, or the text silently
+        // changes size on screen. Check the derivation rather than trust it.
+        for scale in 1..=6usize {
+            let em = em_for_scale(scale);
+            let want = BITMAP_CAP_ROWS as u64 * scale as u64;
+            let got = (em as u64 * 1456 + 1024) / 2048;
+            assert_eq!(
+                got, want,
+                "scale {scale} gave em {em}, which is a {got}px cap; wanted {want}px"
+            );
+        }
+        assert_eq!(em_for_scale(0), 0, "a zero scale has no size");
     }
 }
