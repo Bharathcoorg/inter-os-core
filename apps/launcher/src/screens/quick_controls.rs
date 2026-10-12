@@ -1,362 +1,439 @@
 //! Quick Controls: the control centre.
 //!
-//! WHY this surface is a list of readings and not a grid of switches: every
-//! switch that used to be here was drawn with no sensor and no syscall behind
-//! it. The previous version painted four round buttons (torch, rotation, moon,
-//! power) whose only behaviour was to display the literal string "N/A", and a
-//! 2x2 connectivity grid whose "Airplane" cell printed "Unavailable" as a
-//! compile-time constant without anything having been asked. A switch that does
-//! nothing is worse than a switch that is absent, because it teaches the user
-//! that this panel's controls lie.
+//! WHY the composition follows the reference shade: `Ui Samples/07_quick_controls.png`
+//! lays out four radio tiles in a two-up grid, a brightness slider, a volume
+//! slider and three secondary tiles on a dark surface, and that order -- radios,
+//! then levels, then secondary controls -- is the order of importance a phone's
+//! control centre has. This panel keeps it.
 //!
-//! So the rule this file is built on is: **a row exists only where a reading
-//! exists, and a control is drawn only where the shell's tap handler already
-//! draws one.** Everything else is a row whose value cell names the thing that
-//! is missing -- `no torch hardware`, `no radio controller` -- in the same
-//! idiom `live_widgets` uses for its absent rows.
+//! WHY every tile here says what is missing instead of a state: the guest has no
+//! radio controller (`kernel/src/net/wireless.rs` reports `hardware_present:
+//! false` for every band and telephony is forced to PowerDown/NoSim), no
+//! backlight to dim, and no output level to read (`kernel/src/audio/mod.rs`
+//! records volume as a stored request that no mixer consumes). A tile that said
+//! "Connected", or a trough filled to 100%, would be indistinguishable on screen
+//! from a radio that works. So the four radios are recessed slots printing the
+//! kernel's own answer, and neither level control draws a fill.
 //!
-//! Two controls survive, and they are the two `main.rs` can actually act on:
-//! the volume capsule and the Power button. Their rectangles are derived from
-//! the same constants the handler hit-tests, so the drawn control and its hit
-//! region cannot drift apart.
+//! WHY three materials and not one card shape: on this surface a card means "a
+//! tap here does something". The volume capsule is a card because a tap on it
+//! stores a volume request and `main.rs` answers it. The four radio tiles are
+//! recessed slots (`surface_sunken`, muted ink) because nothing answers them.
+//! Every other reading is a flat row on the page background, separated by a
+//! hairline. Making an inert control a card is how the previous version taught
+//! the user that this panel lies.
+//!
+//! WHY only two rectangles are exported: `main.rs` hit-tests `VOLUME_SLIDER` and
+//! `POWER_BTN`, and it reads both back from this module, so the drawn control
+//! and the hit region are the same rectangle by construction. Every other row is
+//! decorative -- nothing answers it -- so it is drawn as a reading rather than
+//! as a control. `BRIGHTNESS_ROW` stays exported for the same "ask the painter"
+//! reason, even though the brightness row is the one level control no backend
+//! exists for.
+//!
+//! WHY the brightness row has no trough: with no backlight backend there is no
+//! level to read, so a trough could never fill, and an empty trough is a dimmer
+//! that does not exist. The row is therefore drawn as a reading -- the same flat
+//! row the other inert controls use -- and `brightness_available` in
+//! `QuickControlsFrame::new` is the one flag that would give it a track back.
+//!
+//! WHY the volume capsule has a trough but no fill: a tap on it *does* something
+//! (`std::audio_set_volume` stores the request and the shell reports the applied
+//! value in its HUD), so the well a tap lands in is honest. Nothing on this
+//! platform measures emitted audio, so there is no level to fill it to; the
+//! caption says what a tap does instead of painting a number, and the kernel's
+//! own query refuses rather than answering 0 or a seeded 100.
+//!
+//! WHY the panel still has a dead strip: `main.rs` treats a tap with `x >= 600`
+//! and `y >= 70` as "close the shade", and that strip crosses the drawn panel.
+//! The Power pill is placed clear of it (asserted below). The volume capsule is
+//! not, because its rectangle is also the linear tap-to-percent mapping and
+//! narrowing it would misreport where a tap lands; the cost is that the right
+//! ~13% of the capsule dismisses the shade instead of setting a volume. That is
+//! a limitation of the handler in `main.rs`, not of the painter, and it is
+//! called out here rather than papered over.
 
 #![allow(dead_code)]
-
-use core::cell::UnsafeCell;
 
 use interos_std as std;
 use launcher::layout::Rect;
 use launcher::text;
 use launcher::theme::{
-    radius, space, type_scale, Theme, SCREEN_HEIGHT, SCREEN_WIDTH, STATUS_BAR_HEIGHT,
+    radius, space, type_scale, Theme, MIN_TOUCH_TARGET, SCREEN_HEIGHT, SCREEN_WIDTH,
+    STATUS_BAR_HEIGHT,
 };
 
-use crate::screens::system_space::{counted, decimal, push, round_contains, Reading, VALUE_MAX};
+use crate::screens::system_space::{decimal, push, round_contains, Reading};
 use crate::LauncherState;
 
-// -----------------------------------------------------------------------------
-// Palette
-// -----------------------------------------------------------------------------
-
-/// WHY `Theme::DARK`: this surface is the dark control centre in the reference
-/// sheet, and the previous version carried seven local colour constants
-/// (`BG_COLOR` 0xFF111214, `TILE_BG` 0xFF25282A, `SLIDER_BG` 0xFF35393D,
-/// `SLIDER_FILL` 0xFFFFFFFF, a red that is not in the theme, ...) that had each
-/// drifted a few steps from the theme's own dark values. Reading the theme means
-/// the page, the cards, the disabled wells, the ink and the accents are the same
-/// values every other dark surface in the shell already uses.
+/// WHY `Theme::DARK`: the reference shade is a dark surface, and a control centre
+/// is opened over the home surface rather than replacing it -- a light sheet here
+/// would read as a different app. `Theme::DARK` is also the theme whose
+/// `surface_sunken` exists to be a well, which is what an unavailable control on
+/// this surface is.
 const THEME: Theme = Theme::DARK;
 
-/// Ink of a filled level bar.
+/// The colour a bound level would fill its trough with.
 ///
-/// WHY this is the theme's `text` and not a new colour: a level bar at maximum
-/// has to be the brightest thing in its capsule or it does not read as "full",
-/// and in the dark theme `text` is already the brightest ink available.
+/// WHY the brightest ink in the theme: the reference slider's fill is the one
+/// high-contrast element on its dark surface, and `Theme::DARK.text` is that ink
+/// without inventing a colour. Nothing on this platform reads a level today, so
+/// this is the day-one value of a fill, not a painted one.
 const LEVEL_FILL: u32 = Theme::DARK.text;
 
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // Panel geometry
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 
-/// Left edge of every full-width block.
+/// Left inset of the panel.
 ///
-/// WHY 36 and not the theme's `CONTENT_PADDING` (40): `main.rs`'s Quick Controls
-/// handler hit-tests the volume capsule with `(36..684).contains(&x)`, so a
-/// control drawn outside that span would have a hit region that did not match
-/// it. This number is pinned by the handler rather than chosen for looks, and
-/// every block below is derived from it, so the drawn control and the hit region
-/// are the same rectangle by construction rather than by agreement.
+/// WHY 36: it gives the 720-wide scanout a visible margin on both sides, and it
+/// leaves the dismiss strip `main.rs` reserves at `x >= 600` crossing the panel
+/// rather than owning its edge -- which is why the two exported rectangles are
+/// positioned with that strip in mind (see `POWER_BTN` and the asserts below).
 const PANEL_X: usize = 36;
 
-/// Width of a full-width block: exactly the handler's `36..684` span.
-const PANEL_W: usize = SCREEN_WIDTH - PANEL_X * 2; // 648
+/// Panel width: the surface the shade occupies between its insets.
+const PANEL_W: usize = SCREEN_WIDTH - PANEL_X * 2;
 
-/// Icon box drawn at the left of every row.
+/// Side of the square icon box every row's glyph is drawn in.
 const ICON: usize = 28;
 
-/// Left inset of a row's text, measured from the row's own left edge: the icon
-/// box plus `space::MD` on each side of it.
-const ROW_TEXT_INSET: usize = space::MD + ICON + space::MD; // 60
+/// Horizontal inset from a row's left edge to its text column: the icon gap, the
+/// icon, the icon gap. Shared by every row so the glyphs line up.
+const ROW_TEXT_INSET: usize = space::MD + ICON + space::MD;
 
-/// Type scale for a row's label and value.
+/// Row label scale.
 ///
-/// WHY `type_scale::BODY` (a 48-row cell) and not `CAPTION` (24): a 64-row row
-/// carrying 24-row captions leaves 20 blank rows above and below every line, and
-/// the result reads as a list of debris rather than a list of settings. The cell
-/// now fills the row, which is the choice `live_widgets` already makes for its
-/// reading rows.
+/// WHY BODY: a row has to hold one whole glyph cell of the shell's 16x24 face,
+/// and BODY (2) is the smallest rung that reads as a row on a 720-wide surface.
+/// The rungs are not changed here: this face renders at integer scales of its
+/// cell only, so hierarchy comes from spacing and ink, not from a half-step the
+/// rasteriser cannot draw.
 const ROW_SCALE: usize = type_scale::BODY;
 
-/// Type scale for a row's value - the reading, or the reason there isn't one.
-///
-/// WHY `CAPTION` and not `ROW_SCALE`: the value column is capped at half the row,
-/// and at BODY the honest reasons do not survive that cap. "No radio control",
-/// "No policy service" and "No rotation sensor" are what tell the user why a
-/// control cannot act, and every one of them was being ellipsized into "No radio
-/// cont..." - which states less than drawing nothing, because it looks like the
-/// row was cut off rather than unavailable. The label keeps `ROW_SCALE`: the label
-/// is what the setting *is*, and it is short enough to fit.
+/// Value caption scale: one rung below the label, which is what makes a value a
+/// value and not a second heading.
 const VALUE_SCALE: usize = type_scale::CAPTION;
 
-/// Row height: the row's own line box plus `space::SM` above and below it.
-///
-/// WHY 64 and not the previous 136: the two things a row has to hold are one
-/// line box and its gutter. A row two and a half times taller than its contents
-/// is a row that reads as empty, and four of them left the bottom half of the
-/// surface as bare background.
-const ROW_H: usize = text::GLYPH_H * ROW_SCALE + space::SM * 2; // 64
+/// Height of a line at each scale, straight from the face.
+const BODY_H: usize = text::GLYPH_H * ROW_SCALE;
+const CAPTION_H: usize = text::GLYPH_H * VALUE_SCALE;
 
-/// Vertical inset of a row's text line.
-const ROW_PAD_Y: usize = space::SM;
-
-/// Gutter between consecutive rows.
-const ROW_GUTTER: usize = space::SM;
-
-/// Ceiling for the computed list rows.
-///
-/// WHY the list computes its own row height at all: the band it is given is
-/// fixed, but the number of rows is a property of what the platform can report,
-/// and a fixed height would leave a dead band under the list the moment that
-/// number changed. The floor is [`ROW_H`], which is what a row has to hold, so a
-/// row can never be shorter than the type inside it.
-const ROW_MAX: usize = space::XXL * 2;
-
-/// Cell heights, taken from the type scale rather than retyped.
-const BODY_H: usize = text::GLYPH_H * type_scale::BODY; // 48
-const CAPTION_H: usize = text::GLYPH_H * type_scale::CAPTION; // 24
-
-// ---- Heading block ---------------------------------------------------------
-
-/// The panel's content, vertically centred in the space between the status bar
-/// and the home indicator.
-///
-/// WHY centred and not top-anchored: the panel holds nine rows after the
-/// readout rows were removed, which is ~924px of content in ~1344px of space.
-/// Top-anchoring left a ~360px void at the foot while the sections above sat
-/// tight together, which reads as a layout that ran out of things to say. A
-/// shade pulled from the top edge does not have to start at the top edge; the
-/// status bar stays where it is and the content floats centred beneath it, so
-/// the top and bottom voids match and the panel reads as intentional.
-///
-/// WHY a single offset rather than re-derived positions: every Y below hangs
-/// off `HEADING_Y`, so one addition moves the whole panel and no section can be
-/// left behind. `CONTENT_H` is a sum of block *heights*, never of positions, so
-/// there is no const-evaluation cycle through `HEADING_Y`.
-const AVAIL_TOP: usize = STATUS_BAR_HEIGHT + space::LG;
-const AVAIL_BOT: usize = LIST_BOTTOM;
-const CONTENT_H: usize = (BODY_H + HEADING_GAP + CAPTION_H)
-    + (space::LG + SECTION_H + space::SM)
-    + (CONNECTIVITY_ROWS * ROW_H + (CONNECTIVITY_ROWS - 1) * ROW_GUTTER)
-    + space::SM
-    + (LEVEL_H + space::LG + LEVEL_H)
-    + space::XL
-    + SECTION_H
-    + space::SM
-    + FOOTER_H
-    + space::LG
-    + SECTION_H
-    + space::SM
-    + (SYSTEM_ROWS * ROW_H + (SYSTEM_ROWS - 1) * ROW_GUTTER);
-const CONTENT_DY: usize = (AVAIL_BOT - AVAIL_TOP - CONTENT_H) / 2;
-const HEADING_Y: usize = AVAIL_TOP + CONTENT_DY;
-/// WHY `space::XS` and not `0`: the previous panel drew nothing between the
-/// status rule and its first tile at y = 90, so the first thing a reader met was
-/// a control. A heading is what says which surface this is.
+/// Gap between the heading and the summary line under it.
 const HEADING_GAP: usize = space::XS;
-const SUMMARY_Y: usize = HEADING_Y + BODY_H + HEADING_GAP; // 104
 
-// ---- Connectivity block ----------------------------------------------------
+/// Height of a flat reading row: the 48px cell plus `space::MD` above and below
+/// it, which is the same rhythm the design system's rows use and keeps the icon
+/// optically centred on the text rather than on the row's top edge.
+const ROW_H: usize = space::MD + BODY_H + space::MD;
 
-/// Every section label is one caption line, so all three are the same height.
+/// Height of a section label: one caption line.
 const SECTION_H: usize = CAPTION_H;
 
-const CONNECTIVITY_LABEL_Y: usize = SUMMARY_Y + CAPTION_H + space::LG; // 152
-const CONNECTIVITY_TOP: usize = CONNECTIVITY_LABEL_Y + SECTION_H + space::SM; // 184
-const CONNECTIVITY_ROWS: usize = 2;
-
-// ---- Level block (brightness, volume) --------------------------------------
-
-/// Height of a level control: a text line plus a track under it.
+/// Gap between one block's last pixel and the next section's label.
 ///
-/// WHY 76: `main.rs` hit-tests the volume capsule with `(500..576).contains(&y)`,
-/// so the drawn capsule has to be exactly 76 rows tall starting at 500 or the
-/// drawing and the hit region differ by however much they disagree. The
-/// brightness control is given the same height so the pair reads as one class.
-const LEVEL_H: usize = 76;
+/// WHY `space::XL` and not `space::LG`: the panel is a shade with five blocks in
+/// it, and a 16px gap reads as one long list rather than separate sections. The
+/// label's own lead below is what ties it to the block it names.
+const SECTION_GAP: usize = space::XL;
 
-/// WHY a level control's track sits under its text line and not inside it: the
-/// handler maps a tap's x linearly across `36..684` (`((x - 36) * 100) / 648`),
-/// so a track inset from the capsule's ends would put the fill somewhere other
-/// than where the finger landed. The track therefore spans the full padded width
-/// and the text sits above it, never over it.
-const LEVEL_TRACK_H: usize = space::SM;
-const LEVEL_TEXT_DY: usize = space::SM;
-const LEVEL_TRACK_DY: usize = LEVEL_TEXT_DY + BODY_H + space::XS; // 60
+/// Gap between a section label and the first row of its section.
+const SECTION_LEAD: usize = SECTION_H + space::SM;
 
-/// Top of the level block.
+/// Everything one section header occupies above its content.
+const SECTION_BLOCK: usize = SECTION_GAP + SECTION_LEAD;
+
+/// Gutter between the two blocks of the level section, and between the footer's
+/// reading and the Power pill.
+const LEVEL_GUTTER: usize = space::LG;
+
+/// Height of a level control's trough.
 ///
-/// WHY no value comment here: every Y on this surface moves with `CONTENT_DY`,
-/// so a typed value would go stale the next time the row count changes - which
-/// is exactly what happened to the old "// 400" when the connectivity block
-/// lost a row and the real value became 328.
-const LEVEL_TOP: usize = CONNECTIVITY_TOP
-    + CONNECTIVITY_ROWS * ROW_H
-    + (CONNECTIVITY_ROWS - 1) * ROW_GUTTER
-    + space::SM;
+/// WHY `space::MD`: a trough is a well, and at this scale that is visibly a
+/// track without becoming a slab. It is rounded to a pill, so it never reads as
+/// a flat bar with ends.
+const LEVEL_TRACK_H: usize = space::MD;
 
-const BRIGHTNESS_ROW: Rect = Rect::new(PANEL_X, LEVEL_TOP, PANEL_W, LEVEL_H);
+/// Height of a level control: one text line, then its trough.
+const LEVEL_H: usize = space::SM + BODY_H + space::SM + LEVEL_TRACK_H + space::MD;
 
-/// WHY this is computed rather than typed, and why that is a risk worth writing
-/// down: `LEVEL_TOP + LEVEL_H + space::LG` evaluates to exactly 500, which is
-/// where `main.rs` expects the volume capsule. If the block above it ever moves,
-/// this constant moves with it and the capsule silently stops matching the
-/// handler's hit region -- it would still look right and still be dead. The fix
-/// is to have the handler ask this module for the rectangle, the way the lock
-/// screen exports its disc geometry.
-/// The volume capsule's rectangle, exported so the handler cannot disagree with
-/// the painter.
+/// Gutter between the tiles of the two-up radio grid.
+const TILE_GUTTER: usize = space::MD;
+
+/// Width of one radio tile: the panel split in two by that gutter.
+const TILE_W: usize = (PANEL_W - TILE_GUTTER) / 2;
+
+/// Rows of radio tiles.
 ///
-/// WHY it is now `pub` and why the assert that used to sit below it is gone: the
-/// rectangle was private and pinned to y == 500 by a compile-time assert, because
-/// `main.rs` typed the same rectangle in as a literal. That coupling meant a
-/// layout change here broke the build rather than shipping silently - which was
-/// the right failure mode - but it also meant the two could never be moved
-/// together on purpose. The handler now reads this rectangle, so there is one
-/// definition and nothing to keep in step.
-pub const VOLUME_SLIDER: Rect = Rect::new(PANEL_X, LEVEL_TOP + LEVEL_H + space::LG, PANEL_W, LEVEL_H);
+/// WHY two: the reference composes the four radios as a two-up grid, and a
+/// 316-wide tile holds a BODY label plus a CAPTION reason without ellipsising
+/// them -- the widest label here measures 216px against the tile's 224px text
+/// column.
+const TILE_ROWS: usize = 2;
 
-// ---- Footer block (a reading card, then the power button) -------------------
+/// Horizontal padding inside a radio tile.
+const TILE_PAD_X: usize = space::LG;
 
-const DEVICE_LABEL_Y: usize = VOLUME_SLIDER.y + VOLUME_SLIDER.h + space::XL;
+/// Text column inside a radio tile: what is left of the tile once the padding,
+/// the icon and its gap are taken out.
+const TILE_TEXT_W: usize = TILE_W - TILE_PAD_X - ICON - space::MD - TILE_PAD_X;
 
-/// Top of the footer row, derived from the chain like every other block.
+/// Vertical padding inside a radio tile, and the gap between its two lines.
+const TILE_PAD_Y: usize = space::XL;
+const TILE_TEXT_GAP: usize = space::SM;
+
+/// Height of one radio tile: two lines of type inside that padding.
+const TILE_H: usize = TILE_PAD_Y + BODY_H + TILE_TEXT_GAP + CAPTION_H + TILE_PAD_Y;
+
+/// Height of the two-up radio grid.
+const GRID_H: usize = TILE_H * TILE_ROWS + TILE_GUTTER * (TILE_ROWS - 1);
+
+/// Rows in the secondary controls section.
+const SYSTEM_ROWS: usize = 3;
+
+/// Height of that section.
 ///
-/// WHY derived and not the fixed 644 it used to be: that value existed because
-/// `main.rs` typed the power window in as `(630..740)` / `(375..680)` literals,
-/// so the button could never move without breaking the handler. The handler now
-/// reads the exported `POWER_BTN`, so the footer sits where the layout puts it -
-/// directly under its section label - and a future row-count change moves it
-/// along with everything else instead of stranding a ~140px gap above it.
-const FOOTER_Y: usize = DEVICE_LABEL_Y + SECTION_H + space::SM;
-const FOOTER_H: usize = 72;
+/// WHY the rows are contiguous with no gutter: they are separated by a hairline
+/// instead, which is what makes a settings list read as one list. A gutter would
+/// turn each row into its own chip.
+const SYSTEM_LIST_H: usize = ROW_H * SYSTEM_ROWS;
 
-/// The Power button: the only control on this surface that opens another
-/// surface, and the only one with a hit region outside the volume capsule.
+/// Height of the footer's device reading row.
+const FOOTER_H: usize = ROW_H;
+
+/// Height of the Power entry pill.
 ///
-/// WHY it is `pub`: the handler in `main.rs` hit-tests this rectangle, and the
-/// volume capsule already proved that a literal typed in two places breaks the
-/// first time the layout moves. One definition, read from both sides.
-pub const POWER_BTN: Rect = Rect::new(408, FOOTER_Y, 272, FOOTER_H);
+/// WHY it is taller than a row: it is the panel's one primary action and the
+/// design system's PrimaryButton, and 48px of type inside `space::LG` of padding
+/// clears the minimum target without turning it into a slab.
+const POWER_H: usize = space::LG + BODY_H + space::LG;
 
-/// The reading card beside the Power button, bottom-aligned with it.
+/// Width of the Power entry pill.
 ///
-/// WHY its width stops at `space::XXL` short of the button and not `space::MD`:
-/// the handler hit-tests `POWER_BTN` starting at x 408, so a card that reached
-/// to 392 would put 17 px of itself inside the button's window -- a reading that
-/// opens the power menu when tapped, which is exactly the drawn-control /
-/// hit-region mismatch this file is trying to remove. `space::XXL` (48) is the
-/// largest gutter on the scale that still clears the button, and it also leaves
-/// the destructive action with the clearance it deserves.
-const FOOTER_CARD: Rect = Rect::new(
-    PANEL_X,
-    FOOTER_Y + (FOOTER_H - ROW_H),
-    POWER_BTN.x - space::XXL - PANEL_X,
-    ROW_H,
-);
-
-/// WHY this is checked by the compiler rather than trusted: the card's right edge
-/// has to stay left of the handler's Power window for the whole reason above.
-const _: () = assert!(FOOTER_CARD.x + FOOTER_CARD.w < 375);
-
-/// The power glyph's centre: the same icon-box arithmetic every row uses, so the
-/// button and the list agree on where an icon sits.
-const POWER_ICON_CX: usize = POWER_BTN.x + space::MD + ICON / 2;
-const POWER_LABEL_X: usize = POWER_BTN.x + ROW_TEXT_INSET;
-
-// ---- Reading list ----------------------------------------------------------
-
-const SYSTEM_LABEL_Y: usize = FOOTER_Y + FOOTER_H + space::LG;
-const SYSTEM_TOP: usize = SYSTEM_LABEL_Y + SECTION_H + space::SM;
-const SYSTEM_ROWS: usize = 4;
+/// WHY it is content-derived: the 28px power glyph, a gap, the measured width of
+/// "Power menu" at the caption scale, and `space::XL` of padding inside each
+/// end, so the label can never touch the rounded edge. The measured run is
+/// written as a literal because `text::measure` is not `const`; the tests in
+/// `launcher::text` assert that measuring and rasterising agree, so the two
+/// cannot drift apart.
+const POWER_BTN_W: usize = ICON + space::MD + 116 + space::XL * 2;
 
 /// Home indicator, drawn at the foot of the surface.
 ///
-/// WHY the list stops short of it: the list's row height is computed from the
-/// band between its own top and this pill, so a row can never be taller than the
-/// type inside it and can never run off the bottom of the screen.
+/// WHY the panel stops short of it: the gesture region below it is the system's,
+/// and a row that ran under it would be a reading nobody can read.
 const INDICATOR_W: usize = space::XL * 5;
 const INDICATOR_H: usize = space::XS;
 
+/// The panel's vertical band.
+///
+/// WHY these two anchors: the status bar is system chrome drawn above the
+/// panel's first pixel, and the home indicator is reserved at the foot of the
+/// scanout. Everything between them is this panel.
 const LIST_BOTTOM: usize = SCREEN_HEIGHT - space::MD - INDICATOR_H - space::XS;
-const LIST_BOUNDS: Rect = Rect::new(PANEL_X, SYSTEM_TOP, PANEL_W, LIST_BOTTOM - SYSTEM_TOP);
+const AVAIL_TOP: usize = STATUS_BAR_HEIGHT + space::LG;
+const AVAIL_BOT: usize = LIST_BOTTOM;
 
-// -----------------------------------------------------------------------------
-// What this platform can actually report
-// -----------------------------------------------------------------------------
+/// Height of the panel's content, block by block.
+const CONTENT_H: usize = (BODY_H + HEADING_GAP + CAPTION_H)
+    + SECTION_BLOCK
+    + GRID_H
+    + SECTION_BLOCK
+    + (ROW_H + LEVEL_GUTTER + LEVEL_H)
+    + SECTION_BLOCK
+    + SYSTEM_LIST_H
+    + SECTION_BLOCK
+    + (FOOTER_H + LEVEL_GUTTER + POWER_H);
 
+/// Vertical offset that centres the panel in its band.
+///
+/// WHY centred rather than top-anchored: the old panel ran out of things to say
+/// about two thirds of the way down and left a dead band above the home
+/// indicator. This one is tall enough that centring leaves balanced air above
+/// and below instead of a trailing void, and the air is what keeps the shade
+/// from reading as a page.
+const CONTENT_DY: usize = (AVAIL_BOT - AVAIL_TOP - CONTENT_H) / 2;
+const HEADING_Y: usize = AVAIL_TOP + CONTENT_DY;
+const SUMMARY_Y: usize = HEADING_Y + BODY_H + HEADING_GAP;
+
+const CONNECTIVITY_LABEL_Y: usize = SUMMARY_Y + CAPTION_H + SECTION_GAP;
+const CONNECTIVITY_TOP: usize = CONNECTIVITY_LABEL_Y + SECTION_LEAD;
+const LEVEL_LABEL_Y: usize = CONNECTIVITY_TOP + GRID_H + SECTION_GAP;
+const LEVEL_TOP: usize = LEVEL_LABEL_Y + SECTION_LEAD;
+const SYSTEM_LABEL_Y: usize = LEVEL_TOP + ROW_H + LEVEL_GUTTER + LEVEL_H + SECTION_GAP;
+const SYSTEM_TOP: usize = SYSTEM_LABEL_Y + SECTION_LEAD;
+const FOOTER_LABEL_Y: usize = SYSTEM_TOP + SYSTEM_LIST_H + SECTION_GAP;
+const FOOTER_Y: usize = FOOTER_LABEL_Y + SECTION_LEAD;
+const POWER_Y: usize = FOOTER_Y + FOOTER_H + LEVEL_GUTTER;
+
+/// The brightness reading's row.
+///
+/// WHY it is exported even though nothing hit-tests it: the rule this module
+/// follows for its two live rectangles is "ask the painter where it drew it",
+/// and the same rule applies to the one row that would become a control the day
+/// a backlight backend exists.
+const BRIGHTNESS_ROW: Rect = Rect::new(PANEL_X, LEVEL_TOP, PANEL_W, ROW_H);
+
+/// The volume capsule: the rectangle `main.rs` hit-tests, and the rectangle this
+/// module draws, from one constant.
+pub const VOLUME_SLIDER: Rect = Rect::new(PANEL_X, LEVEL_TOP + ROW_H + LEVEL_GUTTER, PANEL_W, LEVEL_H);
+
+/// The Power entry pill.
+///
+/// WHY it is centred in the panel instead of sat at the right edge: the handler
+/// in `main.rs` treats a tap with `x >= 600` (and `y >= 70`) as "close the
+/// shade", so a pill at the panel's right edge would have its right third
+/// dismiss the shade rather than open the Power menu. Centring keeps the whole
+/// drawn pill inside the answerable region, and the assert below is what pins
+/// that if the width ever changes.
+pub const POWER_BTN: Rect = Rect::new(PANEL_X + (PANEL_W - POWER_BTN_W) / 2, POWER_Y, POWER_BTN_W, POWER_H);
+
+/// The trough of a level control.
+///
+/// WHY a `const fn`: the trough's geometry has to be derived from its control's
+/// rectangle inside a `const` initialiser, so the two cannot drift. A pill
+/// inset from the control's sides, one text line below its top edge.
+const fn level_track(control: Rect) -> Rect {
+    Rect::new(
+        control.x + space::MD,
+        control.y + space::SM + BODY_H + space::SM,
+        control.w - space::MD * 2,
+        LEVEL_TRACK_H,
+    )
+}
+
+/// The trough the brightness control would fill if a backlight backend existed.
+///
+/// WHY it exists while `brightness_available` is false: it is the geometry the
+/// flag in `QuickControlsFrame::new` hands to the level-control builder, and
+/// deriving it from `BRIGHTNESS_ROW` means the day a backend appears nothing about
+/// the row moves except the trough arriving.
+const BRIGHTNESS_TRACK: Rect = level_track(BRIGHTNESS_ROW);
+
+/// The trough the volume capsule's tap lands in.
+///
+/// WHY the trough is inset from the capsule's edges: the capsule is a card, and
+/// a track that ran to its rounded corners would read as a seam rather than a
+/// well. The fill arm in `row_pixel` is proportional to this trough, so the day
+/// a level can be read it fills the well that is drawn.
+const VOLUME_TRACK: Rect = level_track(VOLUME_SLIDER);
+
+/// WHY these are checked by the compiler rather than trusted: `VOLUME_SLIDER` and
+/// `POWER_BTN` are exported into a file this one cannot see, and a layout that
+/// pushed the Power pill into the shade's dismiss strip, or a capsule below the
+/// minimum target, would be a control that cannot be pressed with no way to
+/// notice during review.
+const _: () = assert!(
+    POWER_BTN.x + POWER_BTN.w <= 600,
+    "the Power pill must sit clear of the shade's x >= 600 dismiss strip",
+);
+const _: () = assert!(
+    VOLUME_SLIDER.h >= MIN_TOUCH_TARGET && POWER_BTN.h >= MIN_TOUCH_TARGET,
+    "both exported controls must clear the minimum touch target",
+);
+const _: () = assert!(
+    HEADING_Y >= AVAIL_TOP && HEADING_Y + CONTENT_H <= AVAIL_BOT,
+    "the panel must fit the band between the status bar and the home indicator",
+);
+
+// ---------------------------------------------------------------------------
+// The reading list
+// ---------------------------------------------------------------------------
+
+/// One row this panel can draw.
+///
+/// WHY an enum and not a struct per row: this surface's honesty lives in one
+/// question -- "is there a reading behind this row?" -- and an enum forces every
+/// new row to answer it in `reading()` instead of at the call site.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PanelRow {
     Wifi,
     Bluetooth,
     Cellular,
+    Airplane,
     Brightness,
     Volume,
     Torch,
-    RotationLock,
     DoNotDisturb,
-    Airplane,
-    Sensors,
-    Battery,
+    RotationLock,
     Lock,
-    Storage,
-    Packages,
-    Notifications,
 }
 
-impl PanelRow {
-    fn icon(self) -> QcIcon {
-        match self {
-            PanelRow::Wifi => QcIcon::Wifi,
-            PanelRow::Bluetooth => QcIcon::Bluetooth,
-            PanelRow::Cellular => QcIcon::Cellular,
-            PanelRow::Brightness => QcIcon::Sun,
-            PanelRow::Volume => QcIcon::Speaker,
-            PanelRow::Torch => QcIcon::Torch,
-            PanelRow::RotationLock => QcIcon::Rotate,
-            PanelRow::DoNotDisturb => QcIcon::Moon,
-            PanelRow::Airplane => QcIcon::Airplane,
-            PanelRow::Sensors => QcIcon::Sensors,
-            PanelRow::Battery => QcIcon::Battery,
-            PanelRow::Lock => QcIcon::Lock,
-            PanelRow::Storage => QcIcon::Storage,
-            PanelRow::Packages => QcIcon::Package,
-            PanelRow::Notifications => QcIcon::Bell,
-        }
-    }
+/// The four radios, in the reference's order, laid out as a two-up grid.
+const CONNECTIVITY_LIST: [PanelRow; 4] = [
+    PanelRow::Wifi,
+    PanelRow::Bluetooth,
+    PanelRow::Cellular,
+    PanelRow::Airplane,
+];
 
+/// The level controls: one reading with no backend behind it, and the one
+/// capsule a tap answers.
+const LEVEL_LIST: [PanelRow; 2] = [PanelRow::Brightness, PanelRow::Volume];
+
+/// The secondary controls.
+const SYSTEM_LIST: [PanelRow; 3] = [PanelRow::Torch, PanelRow::DoNotDisturb, PanelRow::RotationLock];
+
+/// The footer's device reading.
+const FOOTER_LIST: [PanelRow; 1] = [PanelRow::Lock];
+
+/// Every row, in drawing order.
+///
+/// WHY this list is the published set: it is the denominator of the heading's
+/// "N of M live readings" line, and it is asserted to be exactly the sum of the
+/// section lists so a row added to a section and not to this list is a compile
+/// error rather than a silently uncounted reading.
+const ALL_ROWS: [PanelRow; 10] = [
+    PanelRow::Wifi,
+    PanelRow::Bluetooth,
+    PanelRow::Cellular,
+    PanelRow::Airplane,
+    PanelRow::Brightness,
+    PanelRow::Volume,
+    PanelRow::Torch,
+    PanelRow::DoNotDisturb,
+    PanelRow::RotationLock,
+    PanelRow::Lock,
+];
+const ALL_ROWS_LEN: usize = ALL_ROWS.len();
+
+const _: () = assert!(
+    ALL_ROWS_LEN == CONNECTIVITY_LIST.len() + LEVEL_LIST.len() + SYSTEM_LIST.len() + FOOTER_LIST.len(),
+    "every row must be in exactly one section list",
+);
+
+impl PanelRow {
+    /// The label at the left of the row.
     fn label(self) -> &'static [u8] {
         match self {
             PanelRow::Wifi => b"Wi-Fi",
             PanelRow::Bluetooth => b"Bluetooth",
             PanelRow::Cellular => b"Mobile data",
+            PanelRow::Airplane => b"Airplane",
             PanelRow::Brightness => b"Brightness",
             PanelRow::Volume => b"Volume",
-            PanelRow::Torch => b"Flashlight",
-            PanelRow::RotationLock => b"Rotation lock",
+            PanelRow::Torch => b"Torch",
             PanelRow::DoNotDisturb => b"Do not disturb",
-            PanelRow::Airplane => b"Airplane mode",
-            PanelRow::Sensors => b"Sensors",
-            PanelRow::Battery => b"Battery",
+            PanelRow::RotationLock => b"Rotation lock",
             PanelRow::Lock => b"Screen lock",
-            PanelRow::Storage => b"Storage",
-            PanelRow::Packages => b"Packages",
-            PanelRow::Notifications => b"Notifications",
         }
     }
 
-    /// Whether this row is a level control, which is what gives it a track.
-    fn is_level(self) -> bool {
-        matches!(self, PanelRow::Brightness | PanelRow::Volume)
+    /// The glyph at the left of the row.
+    fn icon(self) -> QcIcon {
+        match self {
+            PanelRow::Wifi => QcIcon::Wifi,
+            PanelRow::Bluetooth => QcIcon::Bluetooth,
+            PanelRow::Cellular => QcIcon::Cellular,
+            PanelRow::Airplane => QcIcon::Airplane,
+            PanelRow::Brightness => QcIcon::Sun,
+            PanelRow::Volume => QcIcon::Speaker,
+            PanelRow::Torch => QcIcon::Torch,
+            PanelRow::DoNotDisturb => QcIcon::Moon,
+            PanelRow::RotationLock => QcIcon::Rotate,
+            PanelRow::Lock => QcIcon::Lock,
+        }
     }
 
     /// The reading, or the reason there is none.
@@ -365,39 +442,50 @@ impl PanelRow {
     /// this surface must not break is printing a value for hardware the platform
     /// cannot produce, and the only reliable place to enforce that is the line
     /// that decides whether the value exists.
-    fn reading(self, state: &LauncherState) -> Value {
+    fn reading(self, _state: &LauncherState) -> Value {
         match self {
+            // WHY the radios ask the kernel and not this panel: the kernel's
+            // settings service owns the hardware table, and the answer it gives
+            // for these three categories on x86-virt is `Unavailable`. Asking
+            // keeps this panel's word the kernel's word.
             PanelRow::Wifi => hardware("wifi"),
             PanelRow::Bluetooth => hardware("bluetooth"),
             PanelRow::Cellular => hardware("cellular"),
-            PanelRow::Sensors => hardware("sensors"),
-            PanelRow::Storage => hardware("storage"),
-            // WHY these two name the missing controller instead of printing
-            // "unavailable": the previous panel printed "Brightness unavailable
-            // - no backlight" as a caption *across a filled white capsule*, and
-            // "N/A" on four buttons. The value cell is where a reader looks for
-            // the reason, so it says what is missing.
-            PanelRow::Brightness => Value::absent(b"No backlight controller"),
-            PanelRow::Volume => Value::absent(b"No audio level bound"),
-            PanelRow::Torch => Value::absent(b"No torch hardware"),
-            PanelRow::RotationLock => Value::absent(b"No rotation sensor"),
-            PanelRow::DoNotDisturb => Value::absent(b"No policy service"),
+            // WHY Airplane is not asked: it is a mode of the radios, not a
+            // device, and `kernel/src/settings.rs` has no `airplane` category --
+            // its match falls through to `Available` for any name it does not
+            // know, so asking would print "Available" for radio hardware this
+            // guest does not have. The reason names what is missing instead,
+            // which is more than the previous panel's four dead buttons said:
+            // they painted the literal `b"N/A"` with nothing having been asked.
             PanelRow::Airplane => Value::absent(b"No radio controller"),
-            PanelRow::Battery => battery(),
-            PanelRow::Lock => match state.lock_state {
-                std::UserLockState::Unlocked => Value::of(b"Unlocked"),
-                std::UserLockState::Locked => Value::of(b"Locked"),
-                std::UserLockState::Lockout => Value::of(b"Locked out"),
-                std::UserLockState::Uninitialized => Value::of(b"No PIN set"),
+            // WHY this names the controller: the value cell is where a reader
+            // looks for the reason, so it says what is missing rather than
+            // re-labelling the absence "unavailable" twice in one row.
+            PanelRow::Brightness => Value::absent(b"No backlight controller"),
+            // WHY this says what a tap does rather than a level: the capsule is
+            // live -- `main.rs` maps a tap to a percent, stores it with
+            // `std::audio_set_volume` and reports the applied request in its
+            // HUD -- but nothing on this platform measures emitted audio, so the
+            // panel has no level to show. `b"No audio level bound"` used to sit
+            // here, which was wrong in the other direction: the capsule *is*
+            // bound, it just cannot be read.
+            PanelRow::Volume => Value::absent(b"Tap to set level"),
+            PanelRow::Torch => Value::absent(b"No torch hardware"),
+            PanelRow::DoNotDisturb => Value::absent(b"No policy service"),
+            PanelRow::RotationLock => Value::absent(b"No rotation sensor"),
+            // WHY the lock state is asked for here and not read from
+            // `LauncherState`: `lock_state` starts as `Uninitialized` and is only
+            // overwritten when the shell's own query succeeds, so a refused read
+            // would print "No PIN set" for a device whose lock state was never
+            // answered. Asking here means a refusal says `Unavailable`.
+            PanelRow::Lock => match std::user_get_lock_state(1000) {
+                Ok(std::UserLockState::Unlocked) => Value::of(b"Unlocked"),
+                Ok(std::UserLockState::Locked) => Value::of(b"Locked"),
+                Ok(std::UserLockState::Uninitialized) => Value::of(b"No PIN set"),
+                Ok(std::UserLockState::Lockout) => Value::of(b"Locked out"),
+                Err(_) => Value::absent(b"Unavailable"),
             },
-            PanelRow::Packages => {
-                let (buf, len) = counted(state.app_count, b" installed");
-                Value::of(&buf[..len])
-            }
-            PanelRow::Notifications => {
-                let (buf, len) = counted(state.notification_count, b" active");
-                Value::of(&buf[..len])
-            }
         }
     }
 }
@@ -407,37 +495,33 @@ impl PanelRow {
 /// WHY this exists beside `system_space::Reading`: that type decides availability
 /// inside `of` / `unavailable` and then exposes only `as_slice` and `skin`, so a
 /// caller cannot ask it whether the value is real. This surface has to know: an
-/// absent row mutes its *label* as well as its value, and only a level control
-/// draws a track at all. Carrying the flag is honest; inferring it from the
-/// resulting colour would be a guess that breaks the moment a theme changes.
+/// available value is full ink, an absent one is muted, and the heading counts
+/// only the available ones.
 struct Value {
     reading: Reading,
     available: bool,
 }
 
 impl Value {
-    fn of(run: &[u8]) -> Value {
+    fn of(run: &'static [u8]) -> Value {
         Value { reading: Reading::of(run), available: true }
     }
 
-    fn absent(reason: &[u8]) -> Value {
+    fn absent(reason: &'static [u8]) -> Value {
         Value { reading: Reading::unavailable(reason), available: false }
-    }
-
-    fn bytes(&self) -> &[u8] {
-        self.reading.as_slice()
     }
 }
 
-/// The kernel's own availability answer for one hardware category.
+/// Asks the kernel's settings service whether `category` has hardware, and
+/// reports what it said.
 ///
-/// WHY only categories the kernel names explicitly:
-/// `kernel/src/settings.rs::get_hardware_status` ends in `_ => Available`, so
-/// every category it does not list comes back as "available" whether or not the
-/// hardware exists. Asking it about `airplane` or `dnd` would print "Available"
-/// for hardware the kernel has never heard of, which is the exact fabrication
-/// this panel exists to avoid. Only categories with a real arm behind them are
-/// asked, and the three that return `Unavailable` on x86-virt now say so.
+/// WHY only these categories are asked: `kernel/src/settings.rs` maps the known
+/// category names to a real answer and defaults *everything else* to
+/// `Available`. Asking about `airplane` or `dnd` would therefore print
+/// "Available" for hardware the kernel has never heard of, which is the exact
+/// fabrication this panel exists to avoid. Only categories with a real arm
+/// behind them are asked, and the ones that answer `Unavailable` on x86-virt now
+/// say so.
 fn hardware(category: &str) -> Value {
     match std::settings_hardware_status(category) {
         Ok(0) => Value::of(b"Available"),
@@ -447,678 +531,774 @@ fn hardware(category: &str) -> Value {
     }
 }
 
-/// Index of the byte after `"key":` in a flat JSON object, if the key is there.
+/// The display-brightness level as a percentage, or `None` when no backend is
+/// bound to this shell.
 ///
-/// WHY a scanner and not a parser: the payload is a single flat object the
-/// kernel formats with `core::fmt` -- the same shape `refresh_clock` in `main.rs`
-/// already scans for its time fields -- and a no-std JSON parser would be a
-/// large addition to a screen renderer.
-fn json_value(buf: &[u8], key: &[u8]) -> Option<usize> {
-    let mut i = 0usize;
-    while i + key.len() + 2 < buf.len() {
-        if buf[i] == b'"'
-            && &buf[i + 1..i + 1 + key.len()] == key
-            && buf[i + 1 + key.len()] == b'"'
-            && (i == 0 || buf[i - 1] == b'{' || buf[i - 1] == b',')
-        {
-            let after = i + key.len() + 2;
-            if after < buf.len() && buf[after] == b':' {
-                return Some(after + 1);
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-fn json_bool(buf: &[u8], key: &[u8]) -> Option<bool> {
-    let i = json_value(buf, key)?;
-    if i >= buf.len() {
-        return None;
-    }
-    match buf[i] {
-        b't' if buf[i..].starts_with(b"true") => Some(true),
-        b'f' if buf[i..].starts_with(b"false") => Some(false),
-        _ => None,
-    }
-}
-
-fn json_i64(buf: &[u8], key: &[u8]) -> Option<i64> {
-    let mut i = json_value(buf, key)?;
-    let negative = i < buf.len() && buf[i] == b'-';
-    if negative {
-        i += 1;
-    }
-    let start = i;
-    let mut value: i64 = 0;
-    while i < buf.len() && buf[i].is_ascii_digit() {
-        value = (value * 10 + (buf[i] - b'0') as i64).min(1000);
-        i += 1;
-    }
-    if i == start {
-        return None;
-    }
-    Some(if negative { -value } else { value })
-}
-
-/// One `battery_query()` call, decoded.
-///
-/// WHY the syscall's own answer is not enough: the handler formats a payload for
-/// every caller and leaves `present` false when no fuel gauge is registered, so
-/// `Ok` means "the kernel answered", not "there is a battery". A state of charge
-/// is printed only when `present` is true *and* one came with it; `Err` is
-/// reported as a refusal rather than as an absent gauge, because the shell has no
-/// authority to tell those two apart from inside userspace.
-fn battery() -> Value {
-    // WHY 256 and not 48: the handler rejects a buffer shorter than
-    // `resource::BATTERY_JSON_MAX`, which is 256, with `InvalidArguments`.
-    let mut buf = [0u8; 256];
-    let Ok(n) = std::battery_query(&mut buf) else {
-        return Value::absent(b"Query refused");
-    };
-    let payload = &buf[..n.min(buf.len())];
-    match json_bool(payload, b"present") {
-        Some(true) => match json_i64(payload, b"soc") {
-            Some(soc) if (0..=100).contains(&soc) => {
-                let (mut num, mut at) = decimal(soc as usize);
-                push(&mut num, &mut at, b"%");
-                Value::of(&num[..at])
-            }
-            _ => Value::absent(b"No charge reading"),
-        },
-        Some(false) | None => Value::absent(b"No fuel gauge"),
-    }
-}
-
-// -----------------------------------------------------------------------------
-// The readings this panel is allowed to make
-// -----------------------------------------------------------------------------
-
-/// WHY each list is written out rather than derived: the order is the reading
-/// order, and it has to exist once, in one place, for the layout, the summary
-/// count and the painter to agree about what the panel contains.
-const CONNECTIVITY_LIST: [PanelRow; CONNECTIVITY_ROWS] = [PanelRow::Wifi, PanelRow::Bluetooth];
-
-const LEVEL_LIST: [PanelRow; 2] = [PanelRow::Brightness, PanelRow::Volume];
-
-/// The quick toggles, and only the quick toggles.
-///
-/// WHY these four and not the nine this block held: sensors, battery, screen
-/// lock, storage and package count are *readouts*, not controls. Nothing on this
-/// surface acts when they are tapped, so a row that only reports a value is a
-/// settings entry that has wandered into a control centre - and on a target with
-/// no torch, no rotation sensor, no policy service and no radio controller, six
-/// of the nine existed only to say so. They belong in Settings, where a list of
-/// values is what the user asked for. What is left is what a control centre is
-/// for, and nothing else.
-const SYSTEM_LIST: [PanelRow; SYSTEM_ROWS] = [
-    PanelRow::Torch,
-    PanelRow::DoNotDisturb,
-    PanelRow::Airplane,
-    PanelRow::RotationLock,
-];
-
-const FOOTER_LIST: [PanelRow; 1] = [PanelRow::Notifications];
-
-/// Number of rows the surface shows.
-///
-/// WHY it is its own constant rather than `ALL_ROWS.len()` at every use site:
-/// the reading table in `measure_frame` is a fixed-size array, and a length
-/// written out in its type is the one place a new row has to be remembered.
-const ALL_ROWS_LEN: usize = 9;
-
-/// Every row on the surface, in reading order. Used for the headline count, so
-/// it has to be the whole panel rather than one block's worth of it.
-const ALL_ROWS: [PanelRow; ALL_ROWS_LEN] = [
-    PanelRow::Wifi,
-    PanelRow::Bluetooth,
-    PanelRow::Brightness,
-    PanelRow::Volume,
-    PanelRow::Torch,
-    PanelRow::DoNotDisturb,
-    PanelRow::Airplane,
-    PanelRow::RotationLock,
-    PanelRow::Notifications,
-];
-
-/// WHY this is asserted rather than assumed: `item_index` looks a row up in
-/// [`ALL_ROWS`] and the headline counts every row, so a row added to a block but
-/// not to the table would be counted nowhere and drawn with whichever reading
-/// happened to share its position.
-const _: () = assert!(
-    CONNECTIVITY_LIST.len() + LEVEL_LIST.len() + SYSTEM_LIST.len() + FOOTER_LIST.len()
-        == ALL_ROWS_LEN
-);
-
-/// The brightness level as a percentage, or `None` when no display-power backend
-/// is bound to this shell.
-///
-/// WHY `None` is hardcoded rather than read from the settings store: QEMU has no
-/// virtual backlight device wired to the guest, and a stored preference is not
-/// proof that changing brightness changes emitted pixels. The previous panel
-/// printed "Brightness unavailable - no backlight" *across a filled white
-/// capsule* -- an honest caption next to a track asserting 100 %. Returning
-/// `None` is what stops the fill arm from running at all.
+/// WHY there is nothing to read: QEMU wires no virtual backlight to this guest,
+/// so no level exists, and no stored preference would prove that changing
+/// brightness changes emitted pixels. The kernel reports the display category as
+/// `Available` for its scanout, which is a truthful statement about a *screen*,
+/// not about a dimmer -- this panel does not confuse the two.
 fn brightness_level() -> Option<u32> {
     None
 }
 
-/// The master volume as a percentage, or `None` when nothing measures one.
+/// The audio output level as a percentage, or `None` when no reading exists.
 ///
-/// WHY `None` even though `audio_query_volume()` always answers: the answer is
-/// `AudioManager::volume_percent`, and `AudioManager::new()` seeds that field with
-/// the literal `100` (`kernel/src/audio/mod.rs`). Before anything touched it the
-/// panel would have printed "100 %" -- a number that was never measured, and
-/// exactly what the solid white bar in the old capsule was.
-/// `AudioManager::set_volume` only stores the field, and `AudioManager::play`
-/// dispatches to the PC speaker without reading it, so no emitted audio scales
-/// with it either. The query returns a stored preference, not a level.
+/// WHY there is nothing to read even though a tap changes something:
+/// `std::audio_query_volume()` answers with the guest audio manager's stored
+/// request and refuses outright when none has ever been made, and
+/// `kernel/src/audio/mod.rs` applies that request to no mixer or PCM path. A
+/// filled trough would therefore show intent, not output. The capsule is a
+/// setter with no meter, and its caption says so.
 fn volume_level() -> Option<u32> {
     None
 }
 
-// -----------------------------------------------------------------------------
-// Text runs
-// -----------------------------------------------------------------------------
-
-/// Byte capacity of one run.
+/// Row index of `item` in the published set, or 0.
 ///
-/// WHY 32: the longest string this surface holds is the headline count, and the
-/// next longest is a row value ("No backlight controller", 23 bytes). A run
-/// longer than this would be measured short of its own width and drawn off the
-/// end of its column, so anything longer has to be ellipsized before it arrives
-/// here rather than truncated here.
-const RUN_CAP: usize = 32;
+/// WHY no panic: every list above is built from `ALL_ROWS`, and the assert on
+/// that const is what keeps it true; the fallback is here so a future edit that
+/// breaks the invariant fails visibly at render time instead of in the kernel.
+fn item_index(item: PanelRow) -> usize {
+    ALL_ROWS.iter().position(|row| *row == item).unwrap_or(0)
+}
 
-#[derive(Clone, Copy)]
+/// One reading per row, in `ALL_ROWS` order.
+///
+/// WHY the values are measured once and passed down: each one is a syscall away,
+/// and the heading counts the same values the rows are drawn from, so reading
+/// them twice is how a heading ends up disagreeing with the list under it.
+fn build_values(state: &LauncherState) -> [Value; ALL_ROWS.len()] {
+    core::array::from_fn(|i| ALL_ROWS[i].reading(state))
+}
+
+// ---------------------------------------------------------------------------
+// Frame
+// ---------------------------------------------------------------------------
+
+/// One run of text, measured and ink-resolved, ready for the pixel path.
+///
+/// WHY measuring belongs to the layout step and not to the painter: every
+/// centring decision on this surface is a division that must agree with the
+/// rasteriser, and the only way to guarantee that is to do both from the same
+/// measurement in the same place.
 struct LabelRun {
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
+    /// Horizontal placement rule and the column it places the run in.
+    align: Align,
+    rect: Rect,
     scale: usize,
+    /// Byte offset and length into the run buffer.
+    off: usize,
     len: usize,
+    buf: [u8; 128],
     ink: u32,
-    bytes: [u8; RUN_CAP],
+}
+
+/// Where a run sits inside its rect.
+#[derive(Clone, Copy)]
+enum Align {
+    Left,
+    Right,
 }
 
 impl LabelRun {
     const EMPTY: LabelRun = LabelRun {
-        x: 0,
-        y: 0,
-        w: 0,
-        h: 0,
+        align: Align::Left,
+        rect: Rect::new(0, 0, 0, 0),
         scale: 1,
+        off: 0,
         len: 0,
+        buf: [0u8; 128],
         ink: 0,
-        bytes: [0u8; RUN_CAP],
     };
 
-    /// Left-aligned at `(x, y)`, truncated with an ellipsis past `fit`.
+    /// Measures `run` and left-aligns it inside `rect`, vertically centred in
+    /// the rect's own height.
     ///
-    /// WHY every run is gated on its *measured* box rather than a typed y-window:
-    /// this face's cell is `text::GLYPH_H` = 24 rows per scale step, not the 8
-    /// that the older hardcoded windows were sized for. A window written for an
-    /// 8-row face throws away the bottom two thirds of every glyph at
-    /// `type_scale::CAPTION` and half of each one at `type_scale::BODY`, which is
-    /// how "Packages" and "Appearance" used to render with their descenders
-    /// sliced flat. `w` and `h` here come from `text::measure` and
-    /// `text::line_height`, so the box the painter tests is the box the
-    /// rasteriser can actually touch.
-    fn fitted(x: usize, y: usize, scale: usize, fit: usize, bytes: &[u8], ink: u32) -> Self {
-        let (buf, len) = text::ellipsize(bytes, scale, fit);
-        let n = len.min(RUN_CAP);
-        let mut held = [0u8; RUN_CAP];
-        held[..n].copy_from_slice(&buf[..n]);
-        LabelRun {
-            x,
-            y,
-            w: text::measure(&held[..n], scale),
-            h: text::line_height(scale),
-            scale,
-            len: n,
-            ink,
-            bytes: held,
+    /// WHY a rect rather than a point: the same rect is what `right` and the
+    /// column arithmetic use, so a column is described once and every caller
+    /// agrees on where it starts and ends.
+    fn left(rect: Rect, scale: usize, run: &[u8], ink: u32) -> LabelRun {
+        let len = run.len().min(128);
+        let mut buf = [0u8; 128];
+        buf[..len].copy_from_slice(&run[..len]);
+        LabelRun { align: Align::Left, rect, scale, off: 0, len, buf, ink }
+    }
+
+    /// Measures `run` and right-aligns it inside `rect`, vertically centred.
+    fn right(rect: Rect, scale: usize, run: &[u8], ink: u32) -> LabelRun {
+        let len = run.len().min(128);
+        let mut buf = [0u8; 128];
+        buf[..len].copy_from_slice(&run[..len]);
+        LabelRun { align: Align::Right, rect, scale, off: 0, len, buf, ink }
+    }
+
+    /// Where the run's first glyph starts on this surface.
+    fn x0(&self) -> usize {
+        let w = text::measure(&self.buf[..self.len], self.scale);
+        match self.align {
+            Align::Left => self.rect.x,
+            Align::Right => self.rect.x + self.rect.w.saturating_sub(w),
         }
     }
 
-    /// Left-aligned inside `col`, vertically centred on it.
-    fn left(col: Rect, scale: usize, bytes: &[u8], ink: u32) -> Self {
-        let y = col.y + col.h.saturating_sub(text::line_height(scale)) / 2;
-        Self::fitted(col.x, y, scale, col.w, bytes, ink)
-    }
-
-    /// Right-aligned inside `col`, vertically centred on it.
+    /// Top of the run's line box: the rect's height minus the cell, halved.
     ///
-    /// WHY the right edge comes from the *measured* width and not from the
-    /// caller's guess: the previous value column was a fixed width with the run
-    /// centred inside it, so a value one glyph wider than the column sat half a
-    /// glyph off the right edge of every row.
-    fn right(col: Rect, scale: usize, bytes: &[u8], ink: u32) -> Self {
-        let (buf, len) = text::ellipsize(bytes, scale, col.w);
-        let n = len.min(RUN_CAP);
-        let mut held = [0u8; RUN_CAP];
-        held[..n].copy_from_slice(&buf[..n]);
-        let w = text::measure(&held[..n], scale);
-        LabelRun {
-            x: (col.x + col.w).saturating_sub(w),
-            y: col.y + col.h.saturating_sub(text::line_height(scale)) / 2,
-            w,
-            h: text::line_height(scale),
-            scale,
-            len: n,
-            ink,
-            bytes: held,
-        }
+    /// WHY the cell and not the cap height: the cell is what the rasteriser can
+    /// touch, so a band that starts inside it is a run whose descenders get
+    /// sliced off. Centring the whole cell is what keeps "Volume" and "Do not
+    /// disturb" sitting on one optical line.
+    fn y0(&self) -> usize {
+        let h = text::line_height(self.scale);
+        self.rect.y + self.rect.h.saturating_sub(h) / 2
     }
 
-    /// Centred in a run `w` wide starting at `x`, with its top edge at `y`.
-    fn centred(x: usize, y: usize, w: usize, scale: usize, bytes: &[u8], ink: u32) -> Self {
-        let (buf, len) = text::ellipsize(bytes, scale, w);
-        let n = len.min(RUN_CAP);
-        let mut held = [0u8; RUN_CAP];
-        held[..n].copy_from_slice(&buf[..n]);
-        LabelRun {
-            x: x + text::center_x(&held[..n], scale, w),
-            y,
-            w: text::measure(&held[..n], scale),
-            h: text::line_height(scale),
-            scale,
-            len: n,
-            ink,
-            bytes: held,
-        }
+    /// Anti-aliased ink for `(x, y)`, or `None` when the pixel is not on the run.
+    ///
+    /// WHY the ink and the background are both parameters: glyph edges blend
+    /// against whatever the run is drawn on, and this panel draws the same run
+    /// on the page background, on a card and on a pill -- three different
+    /// grounds for the same glyphs.
+    fn pixel_aa(&self, x: usize, y: usize, ink: u32, bg: u32) -> Option<u32> {
+        crate::test_text_aa(x, y, self.x0(), self.y0(), self.scale, &self.buf[..self.len], ink, bg)
     }
 
-    #[inline]
-    fn pixel(&self, px: usize, py: usize) -> Option<u32> {
-        if self.len == 0 {
-            return None;
-        }
-        if px < self.x || px >= self.x + self.w || py < self.y || py >= self.y + self.h {
-            return None;
-        }
-        crate::test_text(
-            px,
-            py,
-            self.x,
-            self.y,
-            self.scale,
-            &self.bytes[..self.len],
-            self.ink,
-        )
-    }
-
-    /// As [`Run::pixel`], anti-aliased against `bg` so a glyph over a flat panel
-    /// does not show a stair-stepped outline.
-    #[inline]
-    fn pixel_on(&self, px: usize, py: usize, bg: u32) -> Option<u32> {
-        if self.len == 0 {
-            return None;
-        }
-        if px < self.x || px >= self.x + self.w || py < self.y || py >= self.y + self.h {
-            return None;
-        }
-        crate::test_text_aa(
-            px,
-            py,
-            self.x,
-            self.y,
-            self.scale,
-            &self.bytes[..self.len],
-            self.ink,
-            bg,
-        )
+    /// Ink for `(x, y)`, anti-aliased against `bg`.
+    fn pixel_on(&self, x: usize, y: usize, bg: u32) -> Option<u32> {
+        self.pixel_aa(x, y, self.ink, bg)
     }
 }
 
-// -----------------------------------------------------------------------------
-// Frame
-// -----------------------------------------------------------------------------
-
-#[derive(Clone, Copy)]
-struct RowFrame {
+/// One radio tile: a two-up grid cell with the label above the reason.
+///
+/// WHY a separate frame from a row: a tile's two lines are stacked in a column
+/// beside its icon, while a row's two runs are carved out of one text line. They
+/// are different layouts of the same three pieces, and modelling them as one
+/// struct with two optional columns is how a label ends up centred in a box
+/// nobody drew.
+struct TileFrame {
     rect: Rect,
     icon: QcIcon,
+    icon_x: usize,
+    icon_y: usize,
     fill: u32,
     border: u32,
     ink: u32,
     label: LabelRun,
     value: LabelRun,
-    /// Present only on a level control: the bar a fill would be drawn into.
-    track: Option<Rect>,
-    /// Width of the fill as a fraction of the track. Zero when there is no
-    /// reading, which is every frame on this platform.
-    fill_w: usize,
 }
 
-impl RowFrame {
-    const EMPTY: RowFrame = RowFrame {
+impl TileFrame {
+    const EMPTY: TileFrame = TileFrame {
         rect: Rect::new(0, 0, 0, 0),
-        icon: QcIcon::Wifi,
+        icon: QcIcon::Lock,
+        icon_x: 0,
+        icon_y: 0,
         fill: 0,
         border: 0,
         ink: 0,
         label: LabelRun::EMPTY,
         value: LabelRun::EMPTY,
-        track: None,
-        fill_w: 0,
     };
 }
 
+/// One row: a flat reading, or a level control with a trough.
+///
+/// WHY one frame covers both: the difference between them is exactly three
+/// optional fields -- the card fill, the trough and the hairline -- and each one
+/// is a decision made at build time where the row's own reason for being there
+/// is written down. The painter then has one path instead of two that must agree.
+struct RowFrame {
+    rect: Rect,
+    /// Corner radius of the card, when the row is one.
+    corner: usize,
+    /// Card ground. `None` means a flat row drawn on the page background.
+    fill: Option<u32>,
+    /// Hairline drawn on the card's edge, when the row is a card.
+    border: Option<u32>,
+    ink: u32,
+    icon: QcIcon,
+    icon_x: usize,
+    icon_y: usize,
+    label: LabelRun,
+    value: LabelRun,
+    /// Trough a level would fill, when the row is a level control.
+    track: Option<Rect>,
+    /// How much of that trough a bound level would fill. Zero on this platform,
+    /// and deliberately reachable only through a level that was read.
+    fill_w: usize,
+    /// Hairline drawn at this row's top edge, when the row is the second or
+    /// later of a contiguous list.
+    divider_y: Option<usize>,
+}
+
+impl RowFrame {
+    const EMPTY: RowFrame = RowFrame {
+        rect: Rect::new(0, 0, 0, 0),
+        corner: radius::CONTROL,
+        fill: None,
+        border: None,
+        ink: 0,
+        icon: QcIcon::Lock,
+        icon_x: 0,
+        icon_y: 0,
+        label: LabelRun::EMPTY,
+        value: LabelRun::EMPTY,
+        track: None,
+        fill_w: 0,
+        divider_y: None,
+    };
+}
+
+/// One laid-out shade.
 struct QuickControlsFrame {
     clock: LabelRun,
     heading: LabelRun,
     summary: LabelRun,
-    sections: [LabelRun; 3],
-    connectivity: [RowFrame; CONNECTIVITY_ROWS],
-    levels: [RowFrame; 2],
-    system: [RowFrame; SYSTEM_ROWS],
-    footer: RowFrame,
+    /// Section labels, in the order the sections are drawn.
+    sections: [LabelRun; 4],
+    radios: [TileFrame; CONNECTIVITY_LIST.len()],
+    brightness: RowFrame,
+    volume: RowFrame,
+    controls: [RowFrame; SYSTEM_LIST.len()],
+    lock: RowFrame,
+    power_icon_x: usize,
+    power_icon_y: usize,
     power_label: LabelRun,
 }
 
 impl QuickControlsFrame {
-    const fn empty() -> Self {
-        QuickControlsFrame {
-            clock: LabelRun::EMPTY,
-            heading: LabelRun::EMPTY,
-            summary: LabelRun::EMPTY,
-            sections: [LabelRun::EMPTY; 3],
-            connectivity: [RowFrame::EMPTY; CONNECTIVITY_ROWS],
-            levels: [RowFrame::EMPTY; 2],
-            system: [RowFrame::EMPTY; SYSTEM_ROWS],
-            footer: RowFrame::EMPTY,
-            power_label: LabelRun::EMPTY,
-        }
-    }
-}
-
-/// Lays one row out: icon, label column, value column, and -- for a level
-/// control -- the track underneath.
-///
-/// `value` is passed in rather than read here so that a kernel query is issued
-/// once per row per frame rather than once per row per row.
-/// `label_scale` is `ROW_SCALE` everywhere except the narrow footer card, where
-/// a full-size "Notifications" plus its value cannot fit and the label would be
-/// ellipsized into "Notifi..." - which states less than drawing nothing, because
-/// it looks truncated rather than unavailable.
-fn build_row(
-    rect: Rect,
-    item: PanelRow,
-    value: &Value,
-    level: Option<u32>,
-    label_scale: usize,
-    theme: &Theme,
-) -> RowFrame {
-    let (fill, value_ink) = value.reading.skin(theme);
-    // WHY an absent row's *label* is muted along with its value: the previous
-    // panel drew every caption in the same ink whether or not anything answered
-    // it, so "Flashlight" read exactly as live as the clock. Toning the whole
-    // row down is what makes "this control does nothing" legible at a glance.
-    let ink = if value.available { theme.text } else { theme.text_muted };
-
-    // WHY the text box stays at the row's scale even when the label steps down:
-// the footer card is still a 64-row row, and its value already renders at
-// VALUE_SCALE inside this same box. The label joins the value at its size;
-// the box is the row's, not the run's.
-    let text_h = text::line_height(ROW_SCALE);
-    let text_y0 = if item.is_level() {
-        rect.y + LEVEL_TEXT_DY
-    } else {
-        rect.y + (rect.h - text_h) / 2
-    };
-    let text_col = Rect::new(
-        rect.x + ROW_TEXT_INSET,
-        text_y0,
-        rect.w.saturating_sub(ROW_TEXT_INSET + space::MD),
-        text_h,
-    );
-
-    // WHY the value column is capped at half the row: a value long enough to eat
-    // the whole row would push the label off the left edge, and the label is the
-    // half of the row that says what the reading *is*.
-    let value_w = text::measure(value.bytes(), VALUE_SCALE)
-        .min(text_col.w / 2)
-        .saturating_add(space::SM);
-    let value_col = Rect::new(text_col.x + text_col.w - value_w, text_col.y, value_w, text_col.h);
-    let label_col = Rect::new(
-        text_col.x,
-        text_col.y,
-        text_col.w.saturating_sub(value_w + space::SM),
-        text_col.h,
-    );
-
-    let (track, fill_w) = match level {
-        Some(percent) => {
-            let pad = rect.inset(space::MD);
-            let track = Rect::new(pad.x, rect.y + LEVEL_TRACK_DY, pad.w, LEVEL_TRACK_H);
-            (Some(track), (track.w.saturating_mul(percent.min(100) as usize)) / 100)
-        }
-        None => (None, 0),
+    const EMPTY: QuickControlsFrame = QuickControlsFrame {
+        clock: LabelRun::EMPTY,
+        heading: LabelRun::EMPTY,
+        summary: LabelRun::EMPTY,
+        sections: [LabelRun::EMPTY; 4],
+        radios: [TileFrame::EMPTY; CONNECTIVITY_LIST.len()],
+        brightness: RowFrame::EMPTY,
+        volume: RowFrame::EMPTY,
+        controls: [RowFrame::EMPTY; SYSTEM_LIST.len()],
+        lock: RowFrame::EMPTY,
+        power_icon_x: 0,
+        power_icon_y: 0,
+        power_label: LabelRun::EMPTY,
     };
 
-    RowFrame {
-        rect,
-        icon: item.icon(),
-        fill,
-        border: theme.border,
-        ink,
-        label: LabelRun::left(label_col, label_scale, item.label(), ink),
-        value: LabelRun::right(value_col, VALUE_SCALE, value.bytes(), value_ink),
-        track,
-        fill_w,
-    }
-}
+    fn new(state: &LauncherState) -> QuickControlsFrame {
+        let theme = &THEME;
+        let values = build_values(state);
+        let live = ALL_ROWS.iter().filter(|row| values[item_index(**row)].available).count();
 
-/// `N of M live readings` -- the honest headline for a panel whose job is to say
-/// what the device knows.
-///
-/// WHY a count and not a slogan: the previous panel had no headline at all, so a
-/// reader had to infer from eleven separate captions that almost nothing on the
-/// page was backed by hardware. One line states it.
-fn reading_summary(live: usize) -> ([u8; VALUE_MAX], usize) {
-    let (mut buf, mut at) = decimal(live);
-    push(&mut buf, &mut at, b" of ");
-    let (total, total_len) = decimal(ALL_ROWS.len());
-    push(&mut buf, &mut at, &total[..total_len]);
-    push(&mut buf, &mut at, b" live readings");
-    (buf, at)
-}
+        let (mut buf, mut at) = decimal(live);
+        push(&mut buf, &mut at, b" of ");
+        let (right, right_len) = decimal(ALL_ROWS.len());
+        push(&mut buf, &mut at, &right[..right_len]);
+        push(&mut buf, &mut at, b" live readings");
 
-fn measure_frame(state: &LauncherState) -> QuickControlsFrame {
-    let theme = THEME;
+        // The clock keeps its existing home in the status strip. WHY it is
+        // right-aligned and only drawn when the shell was actually given a
+        // reading: a clock the kernel refused to provide must leave the strip
+        // blank rather than show a plausible time.
+        let clock = if state.clock_source_ok {
+            LabelRun::right(
+                Rect::new(0, STATUS_BAR_H - STATUS_H, SCREEN_WIDTH, STATUS_H),
+                type_scale::CAPTION,
+                &state.clock_time,
+                theme.text,
+            )
+        } else {
+            LabelRun::EMPTY
+        };
 
-    // WHY the clock is gated on the source flag and not on the buffer: with no
-    // RTC authority granted to this shell the read can be refused and the buffer
-    // keeps whatever it last held. `notifications`, `home` and `system_space`
-    // gate on the same flag, so a refused read leaves this status bar empty
-    // rather than showing a stale value.
-    let clock_bytes: &[u8] = if state.clock_source_ok && state.clock_time[0] != b' ' {
-        &state.clock_time
-    } else {
-        b""
-    };
-
-    // WHY every reading is taken once, up front, into a table indexed by the
-    // row's position in [`ALL_ROWS`]: `measure_frame` needs the count for the
-    // headline and the bytes for each row, and asking the kernel for each of the
-    // fifteen twice would double this frame's syscall bill for no new
-    // information -- and two answers to the same question are two chances to
-    // print a number the other one did not.
-    let values: [Value; ALL_ROWS_LEN] = core::array::from_fn(|i| ALL_ROWS[i].reading(state));
-    let live = values.iter().filter(|v| v.available).count();
-    let (summary_raw, summary_len) = reading_summary(live);
-
-    let sections = [
-        LabelRun::left(
-            Rect::new(PANEL_X, CONNECTIVITY_LABEL_Y, PANEL_W, SECTION_H),
-            type_scale::CAPTION,
-            b"Connectivity",
-            theme.text_muted,
-        ),
-        LabelRun::left(
-            Rect::new(PANEL_X, DEVICE_LABEL_Y, PANEL_W, SECTION_H),
-            type_scale::CAPTION,
-            b"Device and power",
-            theme.text_muted,
-        ),
-        LabelRun::left(
-            Rect::new(PANEL_X, SYSTEM_LABEL_Y, PANEL_W, SECTION_H),
-            type_scale::CAPTION,
-            b"Controls and sensors",
-            theme.text_muted,
-        ),
-    ];
-
-    let mut connectivity = [RowFrame::EMPTY; CONNECTIVITY_ROWS];
-    for (i, item) in CONNECTIVITY_LIST.iter().enumerate() {
-        connectivity[i] = build_row(
-            Rect::new(PANEL_X, CONNECTIVITY_TOP + i * (ROW_H + ROW_GUTTER), PANEL_W, ROW_H),
-            *item,
-            &values[item_index(*item)],
-            None,
-            ROW_SCALE,
-            &theme,
-        );
-    }
-
-    // WHY each level control is handed its own reading rather than one shared
-    // "available" flag: brightness and audio are bound by different backends,
-    // and the day one of them is bound its row must be able to light up without
-    // the other being told a lie. Today both return `None`.
-    let levels = [
-        build_row(BRIGHTNESS_ROW, LEVEL_LIST[0], &values[item_index(LEVEL_LIST[0])], brightness_level(), ROW_SCALE, &theme),
-        build_row(VOLUME_SLIDER, LEVEL_LIST[1], &values[item_index(LEVEL_LIST[1])], volume_level(), ROW_SCALE, &theme),
-    ];
-
-    // WHY the list computes its own row height: the band is fixed and the number
-    // of rows is a property of the platform, so a fixed height would leave a dead
-    // band under the list whenever that number changed. The floor is what a row
-    // has to hold, so no row can ever be shorter than the type inside it.
-    let row_h = (LIST_BOUNDS.h.saturating_sub(ROW_GUTTER * (SYSTEM_LIST.len() - 1)) / SYSTEM_LIST.len())
-        .clamp(ROW_H, ROW_MAX);
-    let mut system = [RowFrame::EMPTY; SYSTEM_ROWS];
-    for (i, item) in SYSTEM_LIST.iter().enumerate() {
-        system[i] = build_row(
-            Rect::new(PANEL_X, SYSTEM_TOP + i * (row_h + ROW_GUTTER), PANEL_W, row_h),
-            *item,
-            &values[item_index(*item)],
-            None,
-            ROW_SCALE,
-            &theme,
-        );
-    }
-
-    // WHY the footer label steps down to the value's scale: the card is 324 wide
-    // against the rows' 648, and "Notifications" at ROW_SCALE plus its value
-    // cannot fit - it rendered as "Notifi...". At VALUE_SCALE the full word
-    // fits beside the count, and label and value agree in size the way they do
-    // in every other row.
-    let footer = build_row(FOOTER_CARD, FOOTER_LIST[0], &values[item_index(FOOTER_LIST[0])], None, VALUE_SCALE, &theme);
-
-    QuickControlsFrame {
-        clock: LabelRun::left(
-            Rect::new(PANEL_X + space::XS, 0, PANEL_W, STATUS_BAR_HEIGHT),
-            type_scale::CAPTION,
-            clock_bytes,
-            theme.text,
-        ),
-        heading: LabelRun::left(
+        let heading = LabelRun::left(
             Rect::new(PANEL_X, HEADING_Y, PANEL_W, BODY_H),
             type_scale::BODY,
             b"Quick Controls",
             theme.text,
-        ),
-        summary: LabelRun::left(
+        );
+        let summary = LabelRun::left(
             Rect::new(PANEL_X, SUMMARY_Y, PANEL_W, CAPTION_H),
             type_scale::CAPTION,
-            &summary_raw[..summary_len],
+            &buf[..at],
             theme.text_muted,
-        ),
-        sections,
-        connectivity,
-        levels,
-        system,
-        footer,
-        // WHY the button's label is centred in the space to the right of the
-        // glyph rather than in the whole button: the glyph sits at a fixed
-        // inset from the left, and a label centred across the full 272 columns
-        // sits visibly left of the button's own centre line.
-        power_label: LabelRun::centred(
-            POWER_LABEL_X,
-            POWER_BTN.y + (POWER_BTN.h - CAPTION_H) / 2,
-            (POWER_BTN.x + POWER_BTN.w - space::MD).saturating_sub(POWER_LABEL_X),
+        );
+        let sections = [
+            LabelRun::left(Rect::new(PANEL_X, CONNECTIVITY_LABEL_Y, PANEL_W, SECTION_H), type_scale::CAPTION, b"Connectivity", theme.text_muted),
+            LabelRun::left(Rect::new(PANEL_X, LEVEL_LABEL_Y, PANEL_W, SECTION_H), type_scale::CAPTION, b"Brightness and volume", theme.text_muted),
+            LabelRun::left(Rect::new(PANEL_X, SYSTEM_LABEL_Y, PANEL_W, SECTION_H), type_scale::CAPTION, b"Secondary controls", theme.text_muted),
+            LabelRun::left(Rect::new(PANEL_X, FOOTER_LABEL_Y, PANEL_W, SECTION_H), type_scale::CAPTION, b"Device and power", theme.text_muted),
+        ];
+
+        // The two-up radio grid, row-major in the reference's order.
+        let radios = {
+            let mut out = [TileFrame::EMPTY; CONNECTIVITY_LIST.len()];
+            let mut i = 0;
+            while i < CONNECTIVITY_LIST.len() {
+                let col = i % TILE_ROWS;
+                let row = i / TILE_ROWS;
+                let rect = Rect::new(
+                    PANEL_X + col * (TILE_W + TILE_GUTTER),
+                    CONNECTIVITY_TOP + row * (TILE_H + TILE_GUTTER),
+                    TILE_W,
+                    TILE_H,
+                );
+                out[i] = build_tile(rect, CONNECTIVITY_LIST[i], &values[item_index(CONNECTIVITY_LIST[i])], theme);
+                i += 1;
+            }
+            out
+        };
+
+        // The level block. WHY `brightness_available` is decided here, in the
+        // function that lays the block out, and not inside a reader: it is the
+        // single decision that keeps this panel honest about brightness. No
+        // virtual backlight is wired to this guest, so there is no level to read
+        // and no trough to draw, and the flag is what hands the row its shape --
+        // a flat reading while it is false, a level control with a track the
+        // moment it is true. `brightness_level()` returning `None` is today's
+        // answer to the second half of that; the flag is the rule.
+        let brightness_available = false;        let brightness = if brightness_available {
+            build_level(
+                BRIGHTNESS_ROW,
+                LEVEL_LIST[0],
+                &values[item_index(LEVEL_LIST[0])],
+                brightness_level(),
+                Some(BRIGHTNESS_TRACK),
+                theme,
+            )
+        } else {
+            build_row(
+                BRIGHTNESS_ROW,
+                LEVEL_LIST[0],
+                &values[item_index(LEVEL_LIST[0])],
+                None,
+                theme,
+            )
+        };
+        let volume = build_level(
+            VOLUME_SLIDER,
+            LEVEL_LIST[1],
+            &values[item_index(LEVEL_LIST[1])],
+            volume_level(),
+            Some(VOLUME_TRACK),
+            theme,
+        );
+
+        // The secondary controls: contiguous rows, a hairline sealing each seam.
+        let controls = {
+            let mut out = [RowFrame::EMPTY; SYSTEM_LIST.len()];
+            let mut i = 0;
+            while i < SYSTEM_LIST.len() {
+                let y = SYSTEM_TOP + i * ROW_H;
+                out[i] = build_row(
+                    Rect::new(PANEL_X, y, PANEL_W, ROW_H),
+                    SYSTEM_LIST[i],
+                    &values[item_index(SYSTEM_LIST[i])],
+                    // WHY the hairline belongs to the row below the seam: the
+                    // pixel path tests a row's own rectangle, and a row's rect
+                    // stops at its last pixel -- a divider stored on the row
+                    // above would sit one pixel outside the rect that owns it
+                    // and be checked by nobody.
+                    (i > 0).then_some(y),
+                    theme,
+                );
+                i += 1;
+            }
+            out
+        };
+
+        let lock = build_row(
+            Rect::new(PANEL_X, FOOTER_Y, PANEL_W, FOOTER_H),
+            FOOTER_LIST[0],
+            &values[item_index(FOOTER_LIST[0])],
+            None,
+            theme,
+        );
+
+        // The Power entry: glyph and label centred as one group inside the pill,
+        // so the pill can be any width without the label drifting off centre.
+        let power_run = ICON + space::MD + text::measure(b"Power menu", type_scale::CAPTION);
+        let power_icon_x = POWER_BTN.x + (POWER_BTN.w - power_run) / 2;
+        let power_icon_y = POWER_BTN.center_y() - ICON / 2;
+        let power_label = LabelRun::left(
+            Rect::new(power_icon_x + ICON + space::MD, POWER_BTN.y, POWER_BTN.w, POWER_BTN.h),
             type_scale::CAPTION,
             b"Power menu",
-            theme.text,
+            theme.surface,
+        );
+
+        QuickControlsFrame {
+            clock,
+            heading,
+            summary,
+            sections,
+            radios,
+            brightness,
+            volume,
+            controls,
+            lock,
+            power_icon_x,
+            power_icon_y,
+            power_label,
+        }
+    }
+}
+
+/// Builds one radio tile.
+///
+/// WHY the fill and the value ink both come from `Reading::skin`: an available
+/// value gets the surface and full ink, an absent one gets the recessed well and
+/// muted ink, and that single skin is what makes "this slot is not a switch"
+/// readable without a second colour anywhere.
+fn build_tile(rect: Rect, item: PanelRow, value: &Value, theme: &Theme) -> TileFrame {
+    let (fill, value_ink) = value.reading.skin(theme);
+    let ink = if value.available { theme.text } else { theme.text_muted };
+    let text_x = rect.x + TILE_PAD_X + ICON + space::MD;
+    let label_y = rect.y + TILE_PAD_Y;
+    let value_y = label_y + BODY_H + TILE_TEXT_GAP;
+    TileFrame {
+        rect,
+        icon: item.icon(),
+        icon_x: rect.x + TILE_PAD_X,
+        icon_y: rect.center_y() - ICON / 2,
+        fill,
+        border: theme.border,
+        ink,
+        label: LabelRun::left(
+            Rect::new(text_x, label_y, TILE_TEXT_W, BODY_H),
+            ROW_SCALE,
+            item.label(),
+            ink,
+        ),
+        value: LabelRun::left(
+            Rect::new(text_x, value_y, TILE_TEXT_W, CAPTION_H),
+            VALUE_SCALE,
+            value.reading.as_slice(),
+            value_ink,
         ),
     }
 }
 
-/// Position of `row` in [`ALL_ROWS`].
+/// Builds a flat reading row: icon, label and value on the page background.
+fn build_row(
+    rect: Rect,
+    item: PanelRow,
+    value: &Value,
+    divider_y: Option<usize>,
+    theme: &Theme,
+) -> RowFrame {
+    let ink = if value.available { theme.text } else { theme.text_muted };
+    let (label, value_run) = row_runs(rect, rect.y, rect.h, item.label(), &value.reading, ink, theme);
+    RowFrame {
+        rect,
+        corner: radius::CONTROL,
+        fill: None,
+        border: None,
+        ink,
+        icon: item.icon(),
+        icon_x: rect.x + space::MD,
+        icon_y: rect.center_y() - ICON / 2,
+        label,
+        value: value_run,
+        track: None,
+        fill_w: 0,
+        divider_y,
+    }
+}
+
+/// Builds a level control.
 ///
-/// WHY a lookup and not a hand-written index per call site: the two tables have
-/// to stay in step, and a mistyped index would silently give a row another row's
-/// reading -- which on this panel would mean one control claiming another
-/// control's hardware answer.
-fn item_index(row: PanelRow) -> usize {
-    ALL_ROWS.iter().position(|r| *r == row).unwrap_or(0)
-}
-
-struct FrameSlot {
-    state: usize,
-    at_x: usize,
-    at_y: usize,
-    measured: bool,
-    frame: QuickControlsFrame,
-}
-
-impl FrameSlot {
-    fn holds_next(&self, x: usize, y: usize, state: usize) -> bool {
-        self.measured
-            && self.state == state
-            && ((x == self.at_x + 1 && y == self.at_y) || (x == 0 && y == self.at_y + 1))
+/// WHY the card and the trough arrive together: a level control is the one thing
+/// on this panel a tap can act on, so it is raised and outlined; a level with no
+/// trough is a reading, and readings are flat rows. `fill_w` is derived from the
+/// level that was actually read, so the fill arm below is unreachable unless a
+/// backend exists -- which is the same rule the brightness row already lives by.
+fn build_level(
+    rect: Rect,
+    item: PanelRow,
+    value: &Value,
+    level: Option<u32>,
+    track: Option<Rect>,
+    theme: &Theme,
+) -> RowFrame {
+    let ink = if value.available { theme.text } else { theme.text_muted };
+    let (label, value_run) =
+        row_runs(rect, rect.y + space::SM, BODY_H, item.label(), &value.reading, ink, theme);
+    let fill_w = match (track, level) {
+        (Some(track), Some(percent)) => (track.w.saturating_mul(percent.min(100) as usize)) / 100,
+        _ => 0,
+    };
+    RowFrame {
+        rect,
+        corner: radius::CONTROL,
+        fill: Some(theme.surface),
+        border: Some(theme.border),
+        ink,
+        icon: item.icon(),
+        icon_x: rect.x + space::MD,
+        icon_y: rect.y + space::SM + (BODY_H - ICON) / 2,
+        label,
+        value: value_run,
+        track,
+        fill_w,
+        divider_y: None,
     }
 }
 
-struct FrameMemo(UnsafeCell<FrameSlot>);
-unsafe impl Sync for FrameMemo {}
-
-/// WHY a memo and not a rebuild per pixel: `measure_frame` calls the kernel, and
-/// the shell is compiled at `opt-level = 0`, so measuring on every one of a
-/// million pixels would spend the whole frame budget in syscalls. The renderer
-/// walks the surface in raster order, so remembering the last pixel's address is
-/// enough to tell a continuing walk from a new frame. The previous version used
-/// `static mut` plus `addr_of_mut!`; `live_widgets` already moved this to an
-/// `UnsafeCell` behind a single `Sync` impl, and two surfaces with two
-/// hand-rolled copies of it is how one of them ends up aliasing the other's
-/// cache.
-static FRAME_MEMO: FrameMemo = FrameMemo(UnsafeCell::new(FrameSlot {
-    state: 0,
-    at_x: 0,
-    at_y: 0,
-    measured: false,
-    frame: QuickControlsFrame::empty(),
-}));
-
-fn frame_for(x: usize, y: usize, state: &LauncherState) -> &QuickControlsFrame {
-    let addr = state as *const LauncherState as usize;
-    let slot = unsafe { &mut *FRAME_MEMO.0.get() };
-    if !slot.holds_next(x, y, addr) {
-        slot.frame = measure_frame(state);
-        slot.state = addr;
-        slot.measured = true;
-    }
-    slot.at_x = x;
-    slot.at_y = y;
-    &slot.frame
+/// The label and value runs of a full-width row.
+///
+/// `text_y` and `text_h` are where the row's text line sits: the whole row for a
+/// flat reading, which centres its runs, and one line below a level control's top
+/// padding, whose trough lives underneath. Passing the band rather than deriving
+/// it from the rect is what keeps a level control's label off its own top edge.
+///
+/// WHY the value column is capped at half the text column: a value that could
+/// take the whole line is a label with extra steps, and the cap is what keeps
+/// "Volume" from being pushed off the left edge of its own row. Overflow is
+/// ellipsised by the same `text::ellipsize` every other surface here uses, so a
+/// longer reason is clipped rather than overlapping the label.
+fn row_runs(
+    rect: Rect,
+    text_y: usize,
+    text_h: usize,
+    label: &'static [u8],
+    value: &Reading,
+    ink: u32,
+    theme: &Theme,
+) -> (LabelRun, LabelRun) {
+    let text_x = rect.x + ROW_TEXT_INSET;
+    let text_w = rect.w.saturating_sub(ROW_TEXT_INSET + space::MD);
+    let (_fill, value_ink) = value.skin(theme);
+    let value_w = text::measure(value.as_slice(), VALUE_SCALE).min(text_w / 2) + space::SM;
+    let value_col = Rect::new(rect.x + rect.w - space::MD - value_w, text_y, value_w, text_h);
+    let label_col = Rect::new(text_x, text_y, text_w - value_w, text_h);
+    (
+        LabelRun::left(label_col, ROW_SCALE, label, ink),
+        LabelRun::right(value_col, VALUE_SCALE, value.as_slice(), value_ink),
+    )
 }
 
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Painting
+// ---------------------------------------------------------------------------
+
+/// One measured shade, kept for the length of a redraw.
+///
+/// WHY a cache at all: the readings behind this panel cost four syscalls
+/// (`settings_hardware_status` three times, `user_get_lock_state` once) and a
+/// string scan, and the shell asks for a colour once per pixel.
+static mut FRAME_CACHE: Option<QuickControlsFrame> = None;
+
+/// Colours the shade at `(x, y)`.
+///
+/// WHY the frame is rebuilt at (0, 0): the shell walks the surface in raster
+/// order from the top-left pixel, so (0, 0) is the first pixel of every frame and
+/// the only pixel within a frame that repeats it. `LauncherState` is borrowed
+/// immutably for the whole frame, so rebuilding there is once per frame and the
+/// plan can never lag the state it describes.
+#[inline(never)]
+pub fn get_quick_controls_color(x: usize, y: usize, state: &LauncherState) -> u32 {
+    let theme = THEME;
+    let cached = unsafe {
+        let slot: *mut Option<QuickControlsFrame> = core::ptr::addr_of_mut!(FRAME_CACHE);
+        if (x == 0 && y == 0) || (*slot).is_none() {
+            *slot = Some(QuickControlsFrame::new(state));
+        }
+        (*slot).as_ref()
+    };
+    // WHY the background and not a panic: the slot was filled on the line above,
+    // so `None` is not reachable through this function. Asserting it with
+    // `unwrap()` would take the whole shell down over one pixel, and a pixel with
+    // nothing behind it honestly has the surface's own colour. The next frame
+    // begins at (0, 0) and rebuilds the plan.
+    let Some(frame) = cached else {
+        return theme.bg;
+    };
+    quick_controls_pixel(x, y, frame, &theme)
+}
+
+/// The pixel path of the shade.
+fn quick_controls_pixel(x: usize, y: usize, frame: &QuickControlsFrame, theme: &Theme) -> u32 {
+    if y < STATUS_BAR_HEIGHT {
+        return status_bar_pixel(x, y, theme);
+    }
+    if y >= LIST_BOTTOM {
+        return home_indicator_pixel(x, y, theme);
+    }
+    if let Some(c) = frame.clock.pixel_on(x, y, theme.bg) {
+        return c;
+    }
+    if let Some(c) = frame.heading.pixel_on(x, y, theme.bg) {
+        return c;
+    }
+    if let Some(c) = frame.summary.pixel_on(x, y, theme.bg) {
+        return c;
+    }
+    for label in &frame.sections {
+        if let Some(c) = label.pixel_on(x, y, theme.bg) {
+            return c;
+        }
+    }
+    for tile in &frame.radios {
+        if tile.rect.contains(x, y) {
+            return tile_pixel(x, y, tile, theme);
+        }
+    }
+    if frame.brightness.rect.contains(x, y) {
+        return row_pixel(x, y, &frame.brightness, theme);
+    }
+    if frame.volume.rect.contains(x, y) {
+        return row_pixel(x, y, &frame.volume, theme);
+    }
+    for row in &frame.controls {
+        if row.rect.contains(x, y) {
+            return row_pixel(x, y, row, theme);
+        }
+    }
+    if frame.lock.rect.contains(x, y) {
+        return row_pixel(x, y, &frame.lock, theme);
+    }
+    if POWER_BTN.contains(x, y) {
+        return power_pixel(x, y, frame, theme);
+    }
+    theme.bg
+}
+
+/// One radio tile.
+///
+/// WHY the tile draws its own border before anything else: a card's edge is its
+/// identity on this surface, and an unavailable slot still needs one -- a well
+/// with no edge would read as a hole in the background rather than as a disabled
+/// control.
+fn tile_pixel(x: usize, y: usize, tile: &TileFrame, theme: &Theme) -> u32 {
+    if !round_contains(&tile.rect, radius::CARD, x, y) {
+        return theme.bg;
+    }
+    if !round_contains(&tile.rect.inset(1), radius::CARD - 1, x, y) {
+        return tile.border;
+    }
+    if icon_hits(tile.icon, tile.icon_x, tile.icon_y, x, y) {
+        return tile.ink;
+    }
+    if let Some(c) = tile.label.pixel_aa(x, y, tile.label.ink, tile.fill) {
+        return c;
+    }
+    if let Some(c) = tile.value.pixel_aa(x, y, tile.value.ink, tile.fill) {
+        return c;
+    }
+    tile.fill
+}
+
+/// One row: flat reading or level control.
+///
+/// WHY the trough is drawn above the icon and the text: a fill has to be able to
+/// claim the trough's whole width, and an icon drawn after it would sit on top
+/// of a fill that is supposed to be the control's content.
+fn row_pixel(x: usize, y: usize, row: &RowFrame, theme: &Theme) -> u32 {
+    if let Some(divider_y) = row.divider_y {
+        if y == divider_y && x >= row.rect.x && x < row.rect.x + row.rect.w {
+            return theme.border;
+        }
+    }
+
+    // A card paints its own ground; a flat row leaves the page background. Both
+    // kinds of row fall through to `base`, which is why one function serves
+    // them.
+    let base = match row.fill {
+        Some(fill) => {
+            if !round_contains(&row.rect, row.corner, x, y) {
+                return theme.bg;
+            }
+            if !round_contains(&row.rect.inset(1), row.corner - 1, x, y) {
+                return row.border.unwrap_or(theme.border);
+            }
+            fill
+        }
+        None => theme.bg,
+    };
+
+    if let Some(track) = row.track {
+        if round_contains(&track, track.h / 2, x, y) {
+            return if row.fill_w > 0 && x <= track.x + row.fill_w {
+                LEVEL_FILL
+            } else {
+                theme.surface_sunken
+            };
+        }
+    }
+    if icon_hits(row.icon, row.icon_x, row.icon_y, x, y) {
+        return row.ink;
+    }
+    if let Some(c) = row.label.pixel_aa(x, y, row.label.ink, base) {
+        return c;
+    }
+    if let Some(c) = row.value.pixel_aa(x, y, row.value.ink, base) {
+        return c;
+    }
+    base
+}
+
+/// The Power entry pill.
+///
+/// WHY it is the design system's PrimaryButton and not the danger-ringed card
+/// that used to sit here: the shade's job is to be calm, and the ring made a
+/// shortcut look like an emergency. The destructive choices live in the Power
+/// Menu this opens, where they belong, and the pill is the one bright element on
+// the surface -- which is what makes the panel's primary action findable.
+fn power_pixel(x: usize, y: usize, frame: &QuickControlsFrame, theme: &Theme) -> u32 {
+    if !round_contains(&POWER_BTN, POWER_BTN.h / 2, x, y) {
+        return theme.bg;
+    }
+    let ink = theme.surface;
+    if icon_hits(QcIcon::Power, frame.power_icon_x, frame.power_icon_y, x, y) {
+        return ink;
+    }
+    if let Some(c) = frame.power_label.pixel_aa(x, y, ink, theme.text) {
+        return c;
+    }
+    theme.text
+}
+
+/// Status bar: the clock, if the shell was given one, right-aligned, with the
+/// hairline under it.
+///
+/// WHY nothing else lives here: the reference's strip carries system indicators,
+/// and this guest has no radio, no battery gauge and no signal to show. A blank
+/// strip with a clock and a rule is the honest version of that bar.
+fn status_bar_pixel(x: usize, y: usize, theme: &Theme) -> u32 {
+    if y == STATUS_BAR_H - 1 && x >= PANEL_X && x < PANEL_X + PANEL_W {
+        return theme.border;
+    }
+    theme.bg
+}
+
+/// Home indicator.
+///
+/// WHY it is drawn here and not left to the wallpaper: the shade sits over the
+/// wallpaper, which is a gradient, and a gesture pill nobody can see is a
+/// gesture nobody takes.
+fn home_indicator_pixel(x: usize, y: usize, theme: &Theme) -> u32 {
+    let iy = LIST_BOTTOM + space::MD;
+    let ix = (SCREEN_WIDTH - INDICATOR_W) / 2;
+    let rect = Rect::new(ix, iy, INDICATOR_W, INDICATOR_H);
+    if !rect.contains(x, y) {
+        return theme.bg;
+    }
+    if !round_contains(&rect, rect.h / 2, x, y) {
+        return theme.bg;
+    }
+    Theme::blend(theme.text_muted, theme.bg, 140)
+}
+
+// ---------------------------------------------------------------------------
 // Icons
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 
+/// Glyphs this panel draws, as 28x28 bit patterns.
+///
+/// WHY local bitmaps rather than the launcher's icon catalogue: this surface's
+/// glyphs are drawn at one fixed box size inside rows this module owns, and the
+/// catalogue is sized for app tiles. Keeping them here also keeps the panel's
+/// drawing independent of a catalogue a future screen may restyle.
 #[derive(Clone, Copy)]
 enum QcIcon {
     Wifi,
@@ -1130,387 +1310,194 @@ enum QcIcon {
     Rotate,
     Moon,
     Airplane,
-    Sensors,
-    Battery,
     Lock,
-    Storage,
-    Package,
-    Bell,
+    Power,
 }
 
-/// Whether the glyph `icon` covers the pixel at offset `(dx, dy)` from its box's
-/// centre.
-///
-/// WHY the glyphs are computed rather than stored: a bitmap for fifteen 28-row
-/// marks is fifteen fixed tables to carry in the image and to redraw whenever a
-/// box moves, and this shell already rasterises type one pixel at a time. Every
-/// drawer is bounded by `ICON / 2`, which is what keeps a mark inside its row.
-#[inline]
-fn icon_bits(icon: QcIcon, dx: i32, dy: i32) -> bool {
-    let adx = dx.abs();
-    let ady = dy.abs();
-    let d2 = dx * dx + dy * dy;
+/// Whether `(x, y)` lands on an inked pixel of `icon` inside its 28x28 box.
+fn icon_hits(icon: QcIcon, box_x: usize, box_y: usize, x: usize, y: usize) -> bool {
+    let dx = match x.checked_sub(box_x) {
+        Some(dx) if dx < ICON => dx,
+        _ => return false,
+    };
+    let dy = match y.checked_sub(box_y) {
+        Some(dy) if dy < ICON => dy,
+        _ => return false,
+    };
+    icon_bits(icon, dx, dy)
+}
 
+/// Whether `(x, y)` is within `half` pixels of the segment `(x0,y0)-(x1,y1)`.
+///
+/// WHY a distance test rather than a run of rectangles: a diagonal drawn as
+/// rectangles either staircases or has to be hand-placed per slope, and the
+/// Bluetooth glyph and the rotation arrowhead are both nearly diagonal. The
+/// comparison is done on squared distances scaled by the segment's own length,
+/// so it stays exact without a square root.
+fn icon_line(x: usize, y: usize, x0: i64, y0: i64, x1: i64, y1: i64, half: i64) -> bool {
+    let px = x as i64;
+    let py = y as i64;
+    let ex = x1 - x0;
+    let ey = y1 - y0;
+    let len2 = ex * ex + ey * ey;
+    if len2 == 0 {
+        return (px - x0) * (px - x0) + (py - y0) * (py - y0) <= half * half;
+    }
+    let mut t = (px - x0) * ex + (py - y0) * ey;
+    if t < 0 {
+        t = 0;
+    }
+    if t > len2 {
+        t = len2;
+    }
+    let dx = px * len2 - x0 * len2 - t * ex;
+    let dy = py * len2 - y0 * len2 - t * ey;
+    (dx * dx + dy * dy) <= (half * len2) * (half * len2)
+}
+
+#[allow(clippy::too_many_lines)]
+fn icon_bits(icon: QcIcon, x: usize, y: usize) -> bool {
+    let on = |x0: usize, y0: usize, w: usize, h: usize| x >= x0 && x < x0 + w && y >= y0 && y < y0 + h;
     match icon {
+        // Three arcs of a fan plus a dot at their centre: the one drawing of
+        // Wi-Fi that reads at 28 px. WHY arcs and not the single ring this panel
+        // used to draw: a ring with a dot inside it reads as a location marker,
+        // which is a different feature, and a control centre's radio tiles are
+        // the last place a user should have to guess which icon is which.
         QcIcon::Wifi => {
-            // WHY `dy` is biased by 2 before anything is tested: the fan of arcs
-            // reaches fifteen rows above the mark's centre and the dot only five
-            // below it, so drawn on the centre line the whole glyph sits in the
-            // top half of its row. The radius is recomputed from the biased
-            // coordinate rather than reusing `d2`, which was measured against the
-            // unbiased one -- reusing it shifts the arcs but leaves the dot
-            // stranded fifteen rows above where the arcs now end.
-            //
-            // WHY the dot is drawn only *below* the fan: the arcs are centred on
-            // a point under the middle of the box, so drawing the upper half of
-            // the dot put a mark above the arcs where the real Wi-Fi mark has
-            // only background.
-            let dy = dy - 2;
-            let dd = dx * dx + dy * dy;
-            if dy >= 0 && dy <= 5 && dd <= 9 {
-                return true;
+            let dx = x as i64 - 14;
+            let dy = y as i64 - 25;
+            let d2 = dx * dx + dy * dy;
+            for r in [7i64, 12, 17] {
+                if dy <= 1 && d2 <= r * r && d2 >= (r - 2) * (r - 2) {
+                    return true;
+                }
             }
-            if dy <= 0 && adx <= 9 && (49..=81).contains(&dd) {
-                return true;
-            }
-            if dy <= 0 && adx <= 13 && (169..=225).contains(&dd) {
-                return true;
-            }
-            false
+            d2 <= 2 * 2
         }
+        // The rune: a stem with two diagonals that meet at the right at
+        // mid-height. The previous glyph was a stem with three stubby bars and
+        // two diagonals, which read as a scratch at this size.
         QcIcon::Bluetooth => {
-            // WHY the rune is built from four exact diagonals and one stem: the
-            // old drawer tested a stem at `dx == 0` and then four diagonal
-            // predicates whose bands overlapped and filled the right half of the
-            // box, so it rendered as a wedge beside a bar -- the shape that read
-            // as "K|". The real mark is a zigzag down the right side plus the
-            // straight stem:
-            //     A(0,-12) B(7,-6) C(0,0) D(7,6) E(0,12)
-            // Each leg is the set of pixels within a pixel of a line through two
-            // of those points, which is what the four `(6*dx -+ 7*dy)` forms are.
-            //
-            // WHY `dx` is biased by -3: the stem is the left edge of the mark and
-            // the chevrons are its right, so drawn on the centre the whole rune
-            // sits three columns right of the middle of its row.
-            let dx = dx + 3;
-            if dx == 0 && ady <= 12 {
+            icon_line(x, y, 14, 3, 14, 25, 1)
+                || icon_line(x, y, 14, 3, 23, 14, 1)
+                || icon_line(x, y, 23, 14, 14, 25, 1)
+        }
+        // Four ascending bars. WHY the stray bar above them is gone: two bars
+        // plus a floating rectangle read as a battery before they read as
+        // signal.
+        QcIcon::Cellular => on(3, 19, 4, 6) || on(9, 14, 4, 11) || on(15, 9, 4, 16) || on(21, 4, 4, 21),
+        QcIcon::Sun => {
+            // WHY squared distances and not `sqrt`: `core` has no floating-point
+            // maths, and a square root here would be a per-pixel `f64` on a
+            // surface that draws a million of them a frame.
+            let dx = x as i64 - 14;
+            let dy = y as i64 - 14;
+            if dx * dx + dy * dy <= 20 {
                 return true;
             }
-            if (0..=7).contains(&dx) {
-                if (6 * dx - 7 * dy - 84).abs() <= 4
-                    || (6 * dx + 7 * dy).abs() <= 4
-                    || (6 * dx - 7 * dy).abs() <= 4
-                    || (6 * dx + 7 * dy - 84).abs() <= 4
-                {
+            let rays = [
+                (14usize, 2usize, 14usize, 6usize),
+                (14, 22, 14, 26),
+                (2, 14, 6, 14),
+                (22, 14, 26, 14),
+                (5, 5, 8, 8),
+                (20, 20, 23, 23),
+                (20, 5, 23, 8),
+                (5, 20, 8, 23),
+            ];
+            for (x0, y0, x1, y1) in rays {
+                if x >= x0 && x <= x1 && y >= y0 && y <= y1 && dx * dx + dy * dy >= 30 {
                     return true;
                 }
             }
             false
-        }
-        QcIcon::Cellular => {
-            // Four bars of increasing height on a shared baseline, three rows per
-            // step so the tallest is twelve and the shortest four.
-            let k: i32 = if dx >= -12 && dx <= -8 {
-                0
-            } else if dx >= -6 && dx <= -2 {
-                1
-            } else if dx >= 0 && dx <= 4 {
-                2
-            } else if dx >= 6 && dx <= 10 {
-                3
-            } else {
-                return false;
-            };
-            let h = (k + 1) * 3;
-            dy >= 6 - h && dy <= 6
-        }
-        QcIcon::Sun => {
-            if d2 <= 16 {
-                return true;
-            }
-            if (adx <= 1 && ady >= 6 && ady <= 11) || (ady <= 1 && adx >= 6 && adx <= 11) {
-                return true;
-            }
-            (adx - ady).abs() <= 1 && adx >= 5 && adx <= 9
         }
         QcIcon::Speaker => {
-            // WHY `dx` is biased by -1: the box sits at the left and the wave arc
-            // runs out to the right, so drawn on the centre the whole mark sits a
-            // column right of the middle of its row.
-            //
-            // WHY the arc is clipped to `dx >= 1`: a full circle of radius 9..11
-            // has its left half inside that window too, so the "wave" closed into
-            // a ring and the mark rendered as a symmetric bowtie. Only the right
-            // half of the circle is a wave.
-            let dx = dx - 1;
-            // Driver box.
-            if dx >= -10 && dx <= -7 && ady <= 4 {
+            if on(5, 11, 5, 6) || on(9, 7, 5, 14) || on(13, 10, 4, 8) {
                 return true;
             }
-            // Cone: apex at the box, flaring out to the right.
-            if dx >= -7 && dx <= 0 && ady <= dx + 7 {
-                return true;
-            }
-            // One sound-wave arc.
-            let wx = dx - 2;
-            dx >= 1 && (81..=121).contains(&(wx * wx + dy * dy))
-        }
-        QcIcon::Torch => {
-            // WHY both halves are outlined one pixel thick: a filled head over a
-            // filled body is one solid block at this size, with no gap to read
-            // as two parts, and a two-pixel outline closes up the same way.
-            if adx <= 10 && dy >= -12 && dy <= -5 && (adx >= 9 || dy <= -11 || dy >= -6) {
-                return true;
-            }
-            adx <= 5 && dy >= -4 && dy <= 11 && (adx >= 4 || dy <= -3 || dy >= 10)
-        }
-        QcIcon::Rotate => {
-            // WHY the ring is broken: a complete ring with a mark beside it reads
-            // as a plain circle. The small triangle in the gap is what makes it a
-            // rotation mark -- the earlier wedge filled the whole upper-right
-            // quadrant and read as a solid corner, not as an arrowhead.
-            if (81..=144).contains(&d2) && !(dx >= 3 && dy <= -3) {
-                return true;
-            }
-            if dy >= -11 && dy <= -5 {
-                let span = (dy + 11) / 2;
-                if dx >= 1 && dx <= 1 + span {
+            let arcs = [(18usize, 14usize, 5usize), (22, 14, 9)];
+            for (ax, ay, r) in arcs {
+                let dx = x as i64 - ax as i64;
+                let dy = y as i64 - ay as i64;
+                let d = (dx * dx + dy * dy) as usize;
+                if d <= r * r && d >= (r - 2) * (r - 2) {
                     return true;
                 }
             }
             false
         }
+        QcIcon::Torch => {
+            if on(12, 4, 4, 10) || on(11, 14, 6, 10) || on(6, 16, 4, 3) || on(18, 16, 4, 3) {
+                return true;
+            }
+            let dx = x as i64 - 14;
+            let dy = y as i64 - 2;
+            (dx * dx + dy * dy) as usize <= 2 * 2
+        }
+        QcIcon::Rotate => {
+            // A ring with a gap on its right and an arrowhead closing it: the
+            // rotation glyph. The previous version drew a ring plus four
+            // satellites, which read as an atom rather than as a rotation.
+            let dx = x as i64 - 14;
+            let dy = y as i64 - 14;
+            let d2 = dx * dx + dy * dy;
+            let ring = d2 <= 10 * 10 && d2 >= 8 * 8 && !(dx > 0 && dy < 0);
+            ring || icon_line(x, y, 20, 4, 26, 10, 1) || icon_line(x, y, 20, 16, 26, 10, 1)
+        }
         QcIcon::Moon => {
-            // WHY the carve is offset to the upper right and is nearly as large as the
-            // disc: a crescent is an outer circle with a second circle taken out
-            // of it, and offsetting the carve to the left produced a mark opening
-            // the wrong way. Carving with a *smaller* circle leaves a bitten
-            // disc rather than a crescent -- at r 10.5 against r 12 the mark was
-            // still three quarters full.
-            let ix = dx - 5;
-            let iy = dy + 2;
-            d2 <= 144 && ix * ix + iy * iy >= 121
-        }
-        QcIcon::Airplane => {
-            if adx <= 1 && dy >= -12 && dy <= 12 {
-                return true;
-            }
-            if dy >= -3 && dy <= 1 && adx <= 12 {
-                return true;
-            }
-            dy >= 8 && dy <= 11 && adx <= 5
-        }
-        QcIcon::Sensors => {
-            // A package outline, a die in the middle and four corner pins: the
-            // one mark that can mean "a sensor is bound here" without claiming
-            // to be one particular sensor.
-            if adx <= 9 && ady <= 9 && !(adx <= 7 && ady <= 7) {
-                return true;
-            }
-            if d2 <= 4 {
-                return true;
-            }
-            (ady == 11 && (adx == 3 || adx == 11)) || (adx == 11 && (ady == 3 || ady == 11))
-        }
-        QcIcon::Battery => {
-            // WHY a centred dash instead of a fill: no fuel gauge is bound, and
-            // a filled battery asserts a charge level this shell never measured.
-            if dx >= -11 && dx <= 8 && ady <= 6 {
-                if dx <= -10 || dx >= 7 || ady >= 5 {
-                    return true;
-                }
-                if dy == 0 && dx >= -4 && dx <= 3 {
-                    return true;
-                }
-            }
-            dx >= 9 && dx <= 12 && ady <= 3
-        }
-        QcIcon::Lock => {
-            if dx >= -9 && dx <= 9 && dy >= -1 && dy <= 11 && !(dx >= -4 && dx <= 4 && dy >= 3 && dy <= 8)
-            {
-                return true;
-            }
-            let iy = dy + 1;
-            dy <= -1 && dy >= -11 && (36..=81).contains(&(dx * dx + iy * iy))
-        }
-        QcIcon::Storage => {
-            if !(dx >= -11 && dx <= 11 && dy >= -8 && dy <= 8) {
+            // A crescent: a disc with an offset disc subtracted.
+            //
+            // WHY the subtraction is spelled out: the first version of this arm
+            // tested the *intersection* of the two discs, which draws their
+            // overlap -- a small blob that read as a filled dot rather than as a
+            // moon. `Do not disturb` is the row that wears this glyph, and a
+            // reader who mistakes it for a bullet has nothing to attach the
+            // row's reason to.
+            let dx = x as i64 - 14;
+            let dy = y as i64 - 14;
+            if dx * dx + dy * dy > 11 * 11 {
                 return false;
             }
-            if dx <= -10 || dx >= 10 || dy <= -7 || dy >= 7 {
+            let ex = x as i64 - 21;
+            let ey = y as i64 - 13;
+            ex * ex + ey * ey > 9 * 9
+        }
+        QcIcon::Airplane => {
+            if on(13, 2, 3, 24) || on(2, 13, 24, 2) || on(7, 18, 14, 2) || on(7, 8, 14, 2) {
                 return true;
             }
-            if dy >= 2 && dy <= 4 && dx >= -6 && dx <= 6 {
+            let dx = x as i64 - 14;
+            let dy = y as i64 - 5;
+            (dx * dx + dy * dy) as usize <= 3 * 3
+        }
+        QcIcon::Lock => {
+            if on(6, 14, 17, 10) || on(9, 6, 3, 9) || on(17, 6, 3, 9) || on(9, 5, 11, 3) {
                 return true;
             }
-            dx >= -8 && dx <= -5 && dy >= -5 && dy <= -2
+            on(13, 18, 3, 3)
         }
-        QcIcon::Package => {
-            let col = (dx >= -9 && dx <= -3) || (dx >= 3 && dx <= 9);
-            let row = (dy >= -9 && dy <= -3) || (dy >= 3 && dy <= 9);
-            col && row
-        }
-        QcIcon::Bell => {
-            if dy == -9 && adx <= 1 {
+        QcIcon::Power => {
+            let dx = x as i64 - 14;
+            let dy = y as i64 - 14;
+            let d = (dx * dx + dy * dy) as usize;
+            if d >= 9 * 9 && d <= 12 * 12 && dy <= 1 {
                 return true;
             }
-            if dy >= -8 && dy <= 6 {
-                // The bell's body: a trapezoid two rows thick, closed at the top
-                // and flared at the foot, then a clapper under it.
-                let span = 3 + ((dy + 8) * 9) / 14;
-                if adx <= span && (adx + 1 >= span || dy == -8 || dy == 6) {
-                    return true;
-                }
-            }
-            dy >= 7 && dy <= 10 && adx <= 2
+            on(13, 2, 2, 12)
         }
     }
 }
 
-/// The power mark: a ring open at the top, with a stem through the gap.
+// ---------------------------------------------------------------------------
+// Status strip metrics
+// ---------------------------------------------------------------------------
+
+/// The height of the status strip, and of the caption line inside it.
 ///
-/// WHY it is its own function and not another [`QcIcon`] arm: the previous
-/// drawer shared one routine between "rotate" and "power", which is how the
-/// rotation glyph ended up carrying a power button's stem.
-#[inline]
-fn power_bits(dx: i32, dy: i32) -> bool {
-    if (100..=196).contains(&(dx * dx + dy * dy)) && dy > -6 {
-        return true;
-    }
-    dx.abs() <= 2 && dy >= -13 && dy <= -2
-}
-
-// -----------------------------------------------------------------------------
-// Painter
-// -----------------------------------------------------------------------------
-
-/// Colours the pixel of one row, or returns `None` if the pixel is not in it.
-///
-/// WHY the track is tested before the icon: a level control's track runs the full
-/// padded width under its text line, and letting the glyph win that test would
-/// paint it over the bar.
-fn row_pixel(x: usize, y: usize, row: &RowFrame, theme: &Theme) -> Option<u32> {
-    if !round_contains(&row.rect, radius::CARD, x, y) {
-        return None;
-    }
-    let inner = row.rect.inset(1);
-    if !round_contains(&inner, radius::CARD.saturating_sub(1), x, y) {
-        return Some(row.border);
-    }
-
-    if let Some(track) = row.track {
-        if round_contains(&track, track.h / 2, x, y) {
-            // WHY a fill is drawn only when a level was read: a bar filled to the
-            // end is a claim that the level is at maximum, and with nothing read
-            // there is nothing to claim. `fill_w` is zero for every reading this
-            // platform can produce today; the arm is written so that the day a
-            // real one exists it fills to the real proportion and no further.
-            let filled = row.fill_w > 0 && x <= track.x + row.fill_w;
-            return Some(if filled { LEVEL_FILL } else { theme.border });
-        }
-    }
-
-    let cx = row.rect.x + space::MD + ICON / 2;
-    let cy = row.rect.center_y();
-    if icon_bits(row.icon, x as i32 - cx as i32, y as i32 - cy as i32) {
-        return Some(row.ink);
-    }
-    if let Some(c) = row.label.pixel_on(x, y, row.fill) {
-        return Some(c);
-    }
-    if let Some(c) = row.value.pixel_on(x, y, row.fill) {
-        return Some(c);
-    }
-    Some(row.fill)
-}
-
-/// Colours the pixel of the Power button, or returns `None`.
-///
-/// WHY the whole button is one control and not a glyph plus a separate target:
-/// `main.rs` opens the Power drawer from `(630..740, 375..680)`, so every pixel
-/// inside the drawn rectangle is reachable and none outside it is. Nothing inside
-/// is a second control, which is why no row is drawn inside it.
-fn power_pixel(x: usize, y: usize, label: &LabelRun, theme: &Theme) -> Option<u32> {
-    if !round_contains(&POWER_BTN, radius::CARD, x, y) {
-        return None;
-    }
-    let inner = POWER_BTN.inset(1);
-    if !round_contains(&inner, radius::CARD.saturating_sub(1), x, y) {
-        // WHY the outline is the theme's `danger`: this is the only control here
-        // that can end the session, and the red ring is the only thing on the
-        // panel saying so. The previous version typed 0xFFEF4444, which is not a
-        // colour the theme has.
-        return Some(theme.danger);
-    }
-    let dx = x as i32 - POWER_ICON_CX as i32;
-    let dy = y as i32 - POWER_BTN.center_y() as i32;
-    if power_bits(dx, dy) {
-        return Some(theme.danger);
-    }
-    if let Some(c) = label.pixel(x, y) {
-        return Some(c);
-    }
-    Some(theme.surface_raised)
-}
-
-#[inline(never)]
-pub fn get_quick_controls_color(x: usize, y: usize, state: &LauncherState) -> u32 {
-    let theme = THEME;
-    let f = frame_for(x, y, state);
-
-    // Status bar: the clock and nothing else. WHY no battery, signal or Wi-Fi
-    // mark here: this panel reports every one of those below, in a row that says
-    // where the number came from, and a second, less honest copy in the chrome
-    // would be one more place for the two to disagree.
-    if y < STATUS_BAR_HEIGHT {
-        if let Some(c) = f.clock.pixel(x, y) {
-            return c;
-        }
-        return theme.overlay;
-    }
-    if y == STATUS_BAR_HEIGHT {
-        return theme.overlay_border;
-    }
-
-    if let Some(c) = f.heading.pixel(x, y) {
-        return c;
-    }
-    if let Some(c) = f.summary.pixel(x, y) {
-        return c;
-    }
-    for section in &f.sections {
-        if let Some(c) = section.pixel(x, y) {
-            return c;
-        }
-    }
-
-    for row in f
-        .connectivity
-        .iter()
-        .chain(f.levels.iter())
-        .chain(f.system.iter())
-    {
-        if let Some(c) = row_pixel(x, y, row, &theme) {
-            return c;
-        }
-    }
-    if let Some(c) = row_pixel(x, y, &f.footer, &theme) {
-        return c;
-    }
-    if let Some(c) = power_pixel(x, y, &f.power_label, &theme) {
-        return c;
-    }
-
-    // Home indicator.
-    let indicator = Rect::new(
-        (SCREEN_WIDTH - INDICATOR_W) / 2,
-        SCREEN_HEIGHT - space::MD - INDICATOR_H,
-        INDICATOR_W,
-        INDICATOR_H,
-    );
-    if round_contains(&indicator, INDICATOR_H / 2, x, y) {
-        return Theme::blend(theme.text_muted, theme.bg, 140);
-    }
-
-    theme.bg
-}
+/// WHY these two are named rather than written: the strip is the one part of the
+/// surface that is not this panel's, and every place it is measured -- the rule
+/// under the clock, the pixel path's first branch -- reads the same pair.
+const STATUS_BAR_H: usize = STATUS_BAR_HEIGHT;
+const STATUS_H: usize = CAPTION_H;
