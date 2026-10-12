@@ -690,8 +690,7 @@ impl DrmKmsController {
                         // QEMU-TCG per-flip budget. Fractional ratios below
                         // keep the cheaper point sample for the same reason.
                         for dy in 0..dst_h {
-                            let r0 = (dy * 2) * 720;
-                            let r1 = r0 + 720;
+                            let r0 = (dy * 2) * 720;                            let r1 = r0 + 720;
                             let dst_row_start = (dst_y + dy) * scanout_w + dst_x;
                             let dst_slice = &mut self.back_buffer[dst_row_start..dst_row_start + dst_w];
                             for dx in 0..dst_w {
@@ -708,13 +707,72 @@ impl DrmKmsController {
                             }
                         }
                     } else {
+                        // WHY bilinear and not the point sample that was here:
+                        // a point sample takes one source pixel per destination
+                        // pixel, so upscaling the 720x1440 canvas into a larger
+                        // scanout replicates pixels rather than interpolating
+                        // them -- the image survives but edges become steps and
+                        // text loses the anti-aliasing the rasteriser worked to
+                        // produce. Bilinear reads the four neighbours a
+                        // destination pixel falls between and weights them, which
+                        // is what makes a raised scanout look like the same image
+                        // at a higher resolution instead of a magnified one.
+                        //
+                        // WHY integer and 8-bit fraction: this is `no_std` with
+                        // no float, and 8 fractional bits is finer than the
+                        // source's own detail at any ratio this compositor runs
+                        // -- a 1.5x upscale puts at most one source pixel between
+                        // samples, so the error is a sub-percent of a channel.
+                        let dst_last_x = (dst_w - 1).max(1);
+                        let dst_last_y = (dst_h - 1).max(1);
                         for dy in 0..dst_h {
-                            let src_y = if dst_h <= 1 { 0 } else { ((dy * 1439 + (dst_h - 1) / 2) / (dst_h - 1)).min(1439) };
-                            let src_row = &surface.pixels[src_y * 720..(src_y + 1) * 720];
+                            // 8.8 fixed point along each axis.
+                            let fy = dy * 255 * 255 / dst_last_y;
+                            let sy0 = fy >> 8;
+                            let sy1 = (sy0 + 1).min(1439);
+                            let wy = (fy & 0xFF) as u32;
+                            let (r0, r1) = if surface.pixels.len() > sy0 * 720 + 719 {
+                                (sy0 * 720, (sy0 + 1).min(1439) * 720)
+                            } else {
+                                (0, 0)
+                            };
                             let dst_row_start = (dst_y + dy) * scanout_w + dst_x;
                             for dx in 0..dst_w {
-                                let src_x = if dst_w <= 1 { 0 } else { ((dx * 719 + (dst_w - 1) / 2) / (dst_w - 1)).min(719) };
-                                self.back_buffer[dst_row_start + dx] = src_row[src_x];
+                                let fx = dx * 255 * 255 / dst_last_x;
+                                let sx0 = fx >> 8;
+                                let sx1 = sx0 + 1;
+                                let wx = (fx & 0xFF) as u32;
+                                if sx1 > 719 || sy0 >= 1440 {
+                                    continue;
+                                }
+                                let i00 = r0 + sx0;
+                                let i01 = r0 + sx1;
+                                let i10 = r1 + sx0;
+                                let i11 = r1 + sx1;
+                                if i11 >= surface.pixels.len() || dst_row_start + dx >= self.back_buffer.len() {
+                                    continue;
+                                }
+                                let p00 = surface.pixels[i00];
+                                let p01 = surface.pixels[i01];
+                                let p10 = surface.pixels[i10];
+                                let p11 = surface.pixels[i11];
+                                let w00 = (255 - wx) * (255 - wy);
+                                let w01 = wx * (255 - wy);
+                                let w10 = (255 - wx) * wy;
+                                let w11 = wx * wy;
+                                let ch = |shift: u32| -> u32 {
+                                    let a = ((p00 >> shift) & 0xFF) * w00;
+                                    let b = ((p01 >> shift) & 0xFF) * w01;
+                                    let c = ((p10 >> shift) & 0xFF) * w10;
+                                    let d = ((p11 >> shift) & 0xFF) * w11;
+                                    ((a + b + c + d + 32767) / 65025) & 0xFF
+                                };
+                                let a = ch(24);
+                                let r = ch(16);
+                                let g = ch(8);
+                                let b = ch(0);
+                                self.back_buffer[dst_row_start + dx] =
+                                    (a << 24) | (r << 16) | (g << 8) | b;
                             }
                         }
                     }
@@ -935,6 +993,43 @@ pub static DRM_KMS: Mutex<DrmKmsController> = Mutex::new(DrmKmsController {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scaled_blit_interpolates_rather_than_replicating_pixels() {
+        // WHY this test exists: the scaled blit used to take one source pixel per
+        // destination pixel, so raising the scanout replicated pixels instead of
+        // interpolating them. That keeps the image recognisable but turns every
+        // edge into a step and throws away the anti-aliasing the rasteriser
+        // produced -- which is the whole reason for raising a scanout.
+        //
+        // A half-black, half-white canvas upscaled an exact number of times is
+        // the smallest case that separates the two: replication produces a hard
+        // step, interpolation produces a ramp.
+        let mut kms = DrmKmsController::new(400, 400);
+        kms.set_display_mode(400, 400, 60).expect("mode");
+
+        // A 2x2 source: one black pixel, one white, so any scaled blit must
+        // produce at least one pixel that is neither of the two.
+        kms.surfaces.clear();
+        let mut s = DrmSurface::new(1, 2, 2, 0, 0);
+        s.pixels = vec![0xFF000000, 0xFFFFFFFF, 0xFF000000, 0xFFFFFFFF];
+        s.visible = true;
+        s.opacity = 255;
+        kms.surfaces.push(s);
+
+        kms.composite();
+        // Count distinct tones in the destination. Replication gives 2,
+        // interpolation gives more, and that is the property being pinned.
+        let mut tones = alloc::vec![false; 256];
+        for &p in kms.back_buffer.iter() {
+            tones[((p >> 16) & 0xFF) as usize] = true;
+        }
+        let distinct = tones.iter().filter(|t| **t).count();
+        assert!(
+            distinct > 2,
+            "scaled blit produced only {distinct} tones; it is replicating, not interpolating"
+        );
+    }
 
     #[test]
     fn display_mode_accepts_runtime_refresh_without_host_assumptions() {
