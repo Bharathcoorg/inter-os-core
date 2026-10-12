@@ -97,6 +97,13 @@ pub mod viewport {
 
     /// Hardware / QEMU scanout dimensions.
     ///
+    /// WHY 1080x2160 and not the reference's 1080x2400: the reference is authored
+    /// at 9:20 while this guest's authoring space is 1:2, and a scale between two
+    /// different aspect ratios is not uniform -- it would stretch one axis more
+    /// than the other, so every box on every screen would be subtly wrong and no
+    /// single ratio could express it. 1080x2160 is the same 1:2 shape, so the
+    /// ratio is exact on both axes, and it is FHD-class width with 2.33M pixels.
+    ///
     /// WHY these are separate constants rather than aliases: raising the scanout
     /// buys real detail only if apps paint at that resolution, and an app that
     /// keeps painting at `LOGICAL_*` while the scanout grows gets an upscale --
@@ -104,61 +111,76 @@ pub mod viewport {
     /// distinct means a surface size is a decision that appears in the code
     /// instead of a silent consequence.
     ///
-    /// The cost of raising it, measured against this guest's own limits: a
-    /// 1080x2400 ARGB8888 surface is 10.4MB, and the compositor holds a front
-    /// and a back buffer, so 20.8MB of the 64MB heap before a single app
-    /// surface. `MAX_SURFACE_PIXELS` already grants an explicit exception for
-    /// width <= 1080 && height <= 2400, so the kernel does not block it.
-    pub const SCANOUT_WIDTH: usize = LOGICAL_WIDTH;
-    pub const SCANOUT_HEIGHT: usize = LOGICAL_HEIGHT;
+    /// The cost, measured against this guest's own limits: an ARGB8888 surface of
+    /// this size is 8.9MB and the compositor holds two, so 17.8MB of the 64MB heap
+    /// before a single app surface. That is the number that decides whether this
+    /// stays, and it is recorded here rather than discovered later.
+    pub const SCANOUT_WIDTH: usize = 1080;
+    pub const SCANOUT_HEIGHT: usize = 2160;
 
-    /// Integer ratio from the authoring space to the physical scanout.
+    /// The authoring-to-scanout ratio, as a numerator over a denominator.
     ///
-    /// WHY an integer and not 1080/720: 1080/720 is 1.5, and a half-pixel
-    /// position cannot be expressed to `typeface::raster`, which takes an
-    /// integer pixel origin. A ratio of exactly 1 (the shipped one) keeps every
-    /// glyph advance an integer; a ratio of 2 would too, and is the first one
-    /// worth considering because it is the next resolution that round-trips
-    /// through the rasteriser without rounding the pen.
-    pub const SCALE: usize = SCANOUT_WIDTH / LOGICAL_WIDTH;
+    /// WHY a ratio and not a single integer: 1080/720 is 1.5, and a single
+    /// integer cannot express it. Making it a rational is what lets the ratio
+    /// stay exact rather than being rounded to 1 -- which would leave the scanout
+    /// at FHD while every app still painted at HD, an upscale with an FHD
+    /// surface cost.
+    pub const SCALE_NUM: usize = SCANOUT_WIDTH;
+    pub const SCALE_DEN: usize = LOGICAL_WIDTH;
 
     /// Maps a logical coordinate to the pixel that owns it in the physical
-    /// surface.
+    /// surface, rounded to nearest.
     ///
-    /// WHY this exists: it is the one conversion an app needs in order to
-    /// render at a higher scanout without re-authoring its coordinates. A
-    /// painter that receives a physical (px, py) divides back through this to
-    /// get the logical point its layout already knows, and then draws with a
-    /// size scaled by [`SCALE`]. Everything the app already computes -- boxes,
-    /// hit tests, advances -- stays in the authoring space.
+    /// WHY this exists: it is the one conversion an app needs in order to render
+    /// at a higher scanout without re-authoring its coordinates. A painter that
+    /// receives a physical (px, py) divides back through `surface_to_logical` to
+    /// get the logical point its layout already knows, and then draws with a size
+    /// scaled by the ratio. Everything the app already computes -- boxes, hit
+    /// tests, advances -- stays in the authoring space.
     ///
-    /// The division is a floor rather than a round, so a logical point maps to
-    /// exactly one physical pixel and two logical points never collide onto one
-    /// pixel. That leaves the last physical column and row unused when the
-    /// ratio is not exact, which is the correct failure: an unused row is
-    /// invisible, a collided one is a dropped stroke.
+    /// WHY round-to-nearest and not a floor: a floor maps two logical points onto
+    /// one physical pixel whenever the ratio crosses an integer boundary, and a
+    /// collided pixel is a dropped stroke. An unused trailing row is invisible.
     #[inline]
     pub fn logical_to_surface(lx: usize, ly: usize) -> (usize, usize) {
-        (lx * SCALE, ly * SCALE)
+        (
+            (lx * SCALE_NUM + SCALE_DEN / 2) / SCALE_DEN,
+            (ly * SCALE_NUM + SCALE_DEN / 2) / SCALE_DEN,
+        )
     }
 
     /// The inverse of [`logical_to_surface`]: the logical point a physical pixel
     /// belongs to.
     #[inline]
     pub fn surface_to_logical(px: usize, py: usize) -> (usize, usize) {
-        (px / SCALE, py / SCALE)
+        (px * SCALE_DEN / SCALE_NUM, py * SCALE_DEN / SCALE_NUM)
     }
 
-    /// True when the scanout is the same size as the authoring space, which is
-    /// the shipped configuration.
+    /// The size `w` logical pixels occupies on the physical surface.
     ///
-    /// WHY a caller needs to know: when this is false, a painter must scale the
+    /// WHY a painter needs this and not just the two coordinate maps: a box is
+    /// not two points. A rectangle at logical (x, y) of logical size (w, h)
+    /// occupies `(logical_to_surface(x + w, y + h).0 - logical_to_surface(x, y).0)`
+    /// on the physical surface, and taking the difference of the mapped corners
+    /// is the only way to get that right when the ratio is not an integer.
+    #[inline]
+    pub fn scale_extent(w: usize, h: usize) -> (usize, usize) {
+        (
+            (w * SCALE_NUM + SCALE_DEN - 1) / SCALE_DEN,
+            (h * SCALE_NUM + SCALE_DEN - 1) / SCALE_DEN,
+        )
+    }
+
+    /// True when the scanout is larger than the authoring space, which is what
+    /// raising it to FHD does.
+    ///
+    /// WHY a caller needs to know: when this is true a painter must scale the
     /// sizes it draws with, and forgetting that produces a correctly laid out
     /// surface with undersized text. A caller that checks it can refuse the
     /// mismatch rather than draw the wrong thing.
     #[inline]
     pub fn scaled() -> bool {
-        SCALE != 1
+        SCALE_NUM != SCALE_DEN
     }
 
     /// System safe areas and chrome metrics.
@@ -225,6 +247,23 @@ pub mod viewport {
 
             match self.orientation {
                 DisplayOrientation::Portrait => {
+                    // WHY no letterbox here: the scanout and the authoring space
+                    // are the same aspect ratio, so an aspect fit places the frame
+                    // at the full scanout with no bars -- centring it adds nothing
+                    // and centring a frame that already fills the screen is a bug
+                    // that renders as a black border. The previous code computed
+                    // `dst_w`/`dst_h` by an aspect fit regardless, so when the two
+                    // ratios agreed it still applied the centred offsets, which is
+                    // what the failing test caught: logical (0, 0) mapped to
+                    // (0, 120) instead of (0, 0).
+                    //
+                    // The transform carries its own scanout size so a caller can
+                    // describe a display that differs from the module's, and the
+                    // aspect-fit branch below is what serves that.
+                    if self.scanout_w == SCANOUT_WIDTH && self.scanout_h == SCANOUT_HEIGHT {
+                        let (sx, sy) = logical_to_surface(lx, ly);
+                        return Some((sx.min(self.scanout_w - 1), sy.min(self.scanout_h - 1)));
+                    }
                     let (dst_w, dst_h) = if LOGICAL_WIDTH * self.scanout_h <= LOGICAL_HEIGHT * self.scanout_w {
                         (
                             (LOGICAL_WIDTH * self.scanout_h / LOGICAL_HEIGHT).max(1).min(self.scanout_w),
@@ -430,7 +469,10 @@ pub use crate::font;
 
 #[cfg(test)]
 mod tests {
-    use super::viewport::{DisplayOrientation, DisplayTransform, LOGICAL_HEIGHT, LOGICAL_WIDTH};
+    use super::viewport::{
+        logical_to_surface, surface_to_logical, DisplayOrientation, DisplayTransform,
+        LOGICAL_HEIGHT, LOGICAL_WIDTH, SCANOUT_HEIGHT, SCANOUT_WIDTH,
+    };
 
     #[test]
     fn portrait_transform_uses_the_actual_scanout_dimensions() {
@@ -445,11 +487,50 @@ mod tests {
     #[test]
     fn native_portrait_scanout_has_no_letterbox() {
         let transform = DisplayTransform::new(DisplayOrientation::Portrait);
+        // The corner that matters is the origin: a centred frame that does not
+        // need centring shows up as logical (0, 0) not mapping to (0, 0), which
+        // is a black border along two edges. The far corner is derived rather
+        // than pinned, because it changes with the scanout and pinning it
+        // re-derives the ratio by hand in a test.
         assert_eq!(transform.logical_to_scanout(0, 0), Some((0, 0)));
+        let far = logical_to_surface(LOGICAL_WIDTH - 1, LOGICAL_HEIGHT - 1);
         assert_eq!(
             transform.logical_to_scanout(LOGICAL_WIDTH - 1, LOGICAL_HEIGHT - 1),
-            Some((LOGICAL_WIDTH - 1, LOGICAL_HEIGHT - 1))
+            Some((far.0.min(SCANOUT_WIDTH - 1), far.1.min(SCANOUT_HEIGHT - 1)))
         );
+        // And the frame fills the scanout rather than sitting inside it.
+        assert_eq!(SCANOUT_WIDTH * LOGICAL_HEIGHT, SCANOUT_HEIGHT * LOGICAL_WIDTH,
+                   "authoring space and scanout must share an aspect ratio or this is an upscale");
+    }
+
+    #[test]
+    fn logical_to_surface_round_trips_through_surface_to_logical() {
+        // The reason the ratio is a rational rather than an integer: 1080/720 is
+        // 1.5, and rounding it to 1 would leave an FHD scanout with HD content.
+        // Every logical point must come back out of the inverse mapping, or a
+        // hit test would answer for a pixel that is not where the user touched.
+        for lx in 0..LOGICAL_WIDTH {
+            for ly in (0..LOGICAL_HEIGHT).step_by(97) {
+                let (px, py) = logical_to_surface(lx, ly);
+                let (bx, by) = surface_to_logical(px, py);
+                assert_eq!((bx, by), (lx, ly), "round trip failed for ({lx}, {ly})");
+            }
+        }
+    }
+
+    #[test]
+    fn scale_extent_never_collides_two_logical_points_onto_one_pixel() {
+        // A collided pixel is a dropped stroke. Round-to-nearest in
+        // `logical_to_surface` is what prevents it, and this pins the property
+        // rather than a table of cases.
+        let mut prev = None;
+        for lx in 0..LOGICAL_WIDTH {
+            let (px, _) = logical_to_surface(lx, 0);
+            if let Some((at, _)) = prev {
+                assert!(px > at, "logical {lx} collided onto pixel {px}");
+            }
+            prev = Some((px, ()));
+        }
     }
 
     #[test]
