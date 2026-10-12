@@ -83,6 +83,110 @@ PHONE_FRAME_SIZES = frozenset(((720, 1440), (360, 720), (1280, 720)))
 CONFIRMATION_TTL = 10.0
 
 
+# -----------------------------------------------------------------------------
+# Device Profiles (the browser Device Studio's AVD-Manager equivalent)
+# -----------------------------------------------------------------------------
+# Device Studio boots exactly one virtual phone. A device profile names that
+# phone and carries the three things a real device manifest declares: the
+# display geometry Studio asks the guest to render, the panel pixel density,
+# and the chassis presentation size the studio uses to display it. The table is
+# data on purpose — adding or correcting a device is a table edit here, never a
+# new branch in the launch or render path.
+#
+# WHY a profile only ASKS for geometry and never forces it: the guest kernel
+# owns the real scanout. QEMU is handed EDID xres/yres from the active profile
+# (launch_qemu_profile) so the request is explicit, and the frame publisher /
+# capture path compares the live portrait scanout against this same declared
+# geometry. If the guest reports anything else the frame is withheld and the
+# route answers honestly (503 / standby card) rather than cropping to a
+# geometry the profile did not declare. The DEFAULT profile is the reference
+# 720x1440 phone the guest already renders by EDID, so today's behaviour is
+# reproduced exactly; a profile that declares a different geometry makes that
+# choice explicit in this table and fails closed until the guest honours it.
+DEVICE_PROFILES = {
+    "interos_reference": {
+        "id": "interos_reference",
+        "name": "InterOS Reference Phone",
+        "description": (
+            "Native 720x1440 portrait scanout the guest KMS selects by EDID. "
+            "This is the stock phone Device Studio displays; it reproduces the "
+            "boot QEMU is launched with today."
+        ),
+        "guest_geometry": {"width": LOGICAL_SURFACE_W, "height": LOGICAL_SURFACE_H},
+        # The guest presents this landscape desktop during boot (before native
+        # portrait scanout engages) and in landscape orientation. It is a guest
+        # behaviour, not a Studio preference; the reference profile records it
+        # so the frame geometry checks match what QEMU actually reports.
+        "landscape_geometry": {"width": 1280, "height": 720},
+        "density_dpi": 320,
+        "presentation": {
+            "css_max_width_px": 360,
+            "aspect_ratio": "1 / 2",
+            # The chassis is deliberately NOT resized by a profile: presentation
+            # fixes belong to the guest. This documents the current chassis so
+            # the DEFAULT profile reproduces it exactly rather than changing it.
+            "note": "browser nearest-neighbour scales the guest frame to the fixed chassis",
+        },
+    },
+}
+
+DEFAULT_DEVICE_PROFILE = "interos_reference"
+active_device_profile_key = DEFAULT_DEVICE_PROFILE
+
+
+def active_device_profile():
+    """Return the selected device profile, falling back to the reference phone.
+
+    WHY a getter instead of reading the global directly: a stale key (a
+    hand-edited config, an older client) must degrade to the reference phone
+    rather than KeyError, so every consumer always gets a well-formed profile.
+    """
+    return DEVICE_PROFILES.get(active_device_profile_key) or DEVICE_PROFILES[DEFAULT_DEVICE_PROFILE]
+
+
+def device_guest_geometry(profile_key=None):
+    """(width, height) the given/active profile asks the guest to modeset.
+
+    This is the authoritative "expected native portrait scanout" the launch
+    EDID uses and the frame/capture checks compare the live scanout against.
+    For the reference profile it is 720x1440, so every comparison is unchanged.
+    """
+    profile = (DEVICE_PROFILES.get(profile_key or active_device_profile_key)
+               or DEVICE_PROFILES[DEFAULT_DEVICE_PROFILE])
+    geom = profile.get("guest_geometry", {})
+    return int(geom.get("width", LOGICAL_SURFACE_W)), int(geom.get("height", LOGICAL_SURFACE_H))
+
+
+def device_profile_public(profile_key=None):
+    """Public JSON view of a device profile (no internal fields leak out)."""
+    profile = (DEVICE_PROFILES.get(profile_key or active_device_profile_key)
+               or DEVICE_PROFILES[DEFAULT_DEVICE_PROFILE])
+    return {
+        "id": profile.get("id"),
+        "name": profile.get("name"),
+        "description": profile.get("description"),
+        "guest_geometry": profile.get("guest_geometry"),
+        "landscape_geometry": profile.get("landscape_geometry"),
+        "density_dpi": profile.get("density_dpi"),
+        "presentation": profile.get("presentation"),
+    }
+
+
+def select_device_profile(profile_key):
+    """Select the device profile applied on the next cold boot.
+
+    Exact-match against DEVICE_PROFILES so a typo or stale client cannot
+    silently pick a different device than the one it named. Returns (ok, error).
+    Geometry is only requested on the next launch; a running guest keeps the
+    scanout it already modeset, which is why the caller reports this.
+    """
+    global active_device_profile_key
+    if profile_key not in DEVICE_PROFILES:
+        return False, "Unknown device profile"
+    active_device_profile_key = profile_key
+    return True, None
+
+
 def letterbox_box(fb_w, fb_h):
     """Returns the phone-surface rect (left, top, right, bottom) in a fb_w x fb_h scanout.
 
@@ -745,23 +849,98 @@ SUPPORTED_PROFILES = {
 active_profile_key = "x86_64"
 
 
+# Where the last find_qemu_executable() look came up empty, so the launch error
+# can name every place it checked instead of a vague "not found on host".
+_qemu_search_log = []
+
+
 def find_qemu_executable(arch):
-    """Locate QEMU executable for given architecture on the host system."""
+    """Locate the QEMU system binary for `arch` on this host.
+
+    WHY an explicit search rather than only shutil.which: Device Studio is
+    expected to run on Ubuntu and other Linux/macOS hosts (and on other
+    open-source users' own machines), launched from arbitrary working
+    directories, so QEMU may live in a prefix bin dir that is not on PATH. All
+    discovery is cross-platform via os.path/shutil so no Windows-only assumption
+    leaks into the Linux/macOS paths. Search order:
+
+      1. An explicit override — INTEROS_QEMU (absolute path to the binary OR its
+         directory), then QEMU_PATH / QEMU_DIR (the names tools/qemu_env.ps1
+         already honours on Windows). When one is set it is authoritative:
+         Studio runs exactly the QEMU that was pinned, or reports the miss,
+         rather than silently substituting a different build found on PATH.
+      2. PATH via shutil.which (handles Windows PATHEXT / .exe resolution).
+      3. Common per-OS install prefixes.
+
+    Returns an executable path or None; _qemu_search_log records what was tried
+    so the caller can fail honestly and name the locations.
+    """
+    global _qemu_search_log
     bin_name = f"qemu-system-{arch}"
-    p = shutil.which(bin_name)
-    if p:
-        return p
-    common_dirs = [
-        os.path.join(os.path.expanduser("~"), "qemu"),
-        "C:\\Program Files\\qemu",
-        "C:\\qemu",
-        "/usr/bin",
-        "/usr/local/bin"
-    ]
-    for d in common_dirs:
-        cand = os.path.join(d, f"{bin_name}.exe" if sys.platform == "win32" else bin_name)
-        if os.path.exists(cand):
-            return cand
+    is_win = sys.platform == "win32"
+    exe_variants = [bin_name, f"{bin_name}.exe"] if is_win else [bin_name]
+
+    def usable(path):
+        # Only a real executable file counts, so a directory or an unrelated
+        # same-named file is never handed to Popen.
+        if not path or not os.path.isfile(path):
+            return False
+        return True if is_win else os.access(path, os.X_OK)
+
+    _qemu_search_log = [f"{bin_name} in PATH"]
+    # 1. Explicit override (authoritative when set).
+    override_log = []
+    for env_name in ("INTEROS_QEMU", "QEMU_PATH", "QEMU_DIR"):
+        raw = os.environ.get(env_name)
+        if not raw:
+            continue
+        base = os.path.expanduser(os.path.expandvars(raw))
+        # Accept either the binary itself or the directory containing it, with
+        # or without the Windows .exe suffix.
+        candidates = [base] + [os.path.join(base, name) for name in exe_variants]
+        for cand in candidates:
+            if usable(cand):
+                return cand
+        override_log.append(f"{env_name}={base}")
+    if override_log:
+        # An override that points nowhere is an honest failure: do not fall
+        # back to PATH and run a QEMU the operator did not pin.
+        _qemu_search_log = [f"{bin_name} via {entry}" for entry in override_log]
+        return None
+
+    # 2. PATH.
+    on_path = shutil.which(bin_name)
+    if on_path and usable(on_path):
+        return on_path
+
+    # 3. Common per-OS install prefixes (no Windows path is consulted on POSIX).
+    if is_win:
+        prefixes = [
+            os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "qemu"),
+            r"C:\qemu",
+            os.path.join(os.path.expanduser("~"), "qemu"),
+        ]
+    elif sys.platform == "darwin":
+        prefixes = [
+            "/opt/homebrew/bin",       # Apple Silicon Homebrew
+            "/usr/local/bin",           # Intel Homebrew / MacPorts
+            "/usr/bin",
+            os.path.join(os.path.expanduser("~"), "qemu"),
+        ]
+    else:  # Linux and other POSIX hosts
+        prefixes = [
+            "/usr/bin",
+            "/usr/local/bin",
+            "/usr/libexec",            # some distros install helpers here
+            "/opt/qemu/bin",
+            os.path.join(os.path.expanduser("~"), "qemu"),
+        ]
+    for d in prefixes:
+        for name in exe_variants:
+            cand = os.path.join(d, name)
+            if usable(cand):
+                return cand
+            _qemu_search_log.append(cand)
     return None
 
 
@@ -1127,16 +1306,23 @@ class VncScanoutClient:
         # really is 1280x720 for a moment, and a verdict that never expires
         # would keep the stale crop forever. An unknown answer is not a verdict,
         # so a failed probe leaves the existing pixels alone.
-        if not is_landscape and (w, h) != (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H):
+        # The mismatch gate compares the live portrait scanout against the
+        # ACTIVE device profile's declared geometry (720x1440 for the reference
+        # profile) — the same geometry launch_qemu_profile asked EDID for. That
+        # is what makes a non-reference profile fail honestly: if the guest does
+        # not produce the geometry it was asked for, the frame is withheld and
+        # the route answers 503 rather than cropping to a wrong scanout.
+        expected_w, expected_h = device_guest_geometry()
+        if not is_landscape and (w, h) != (expected_w, expected_h):
             confirmed_for = now - self._portrait_mismatch_confirmed_at
             if self._portrait_mismatch_confirmed_at and confirmed_for >= CONFIRMATION_TTL:
                 self._portrait_mismatch_confirmed_at = 0.0
             if not self._portrait_mismatch_confirmed_at:
                 live = self._monitor_scanout_size()
-                if live == (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H):
+                if live == (expected_w, expected_h):
                     self._resync_stale_session(
                         f"session desktop {w}x{h} but live scanout is "
-                        f"{LOGICAL_SURFACE_W}x{LOGICAL_SURFACE_H}")
+                        f"{expected_w}x{expected_h}")
                     return
                 if live is not None:
                     self._portrait_mismatch_confirmed_at = now
@@ -1257,11 +1443,16 @@ def capture_qemu_screen_frame(full_scanout=False, orientation=None, prefer_jpeg=
     """
     global _last_frame_cache, current_device_orientation, _transport_metrics
     now = time.time()
+    # The active device profile declares the portrait geometry Studio expects
+    # the guest to present (720x1440 for the reference profile), matching the
+    # EDID it requested. A live scanout that differs is reported as-is — never
+    # cropped to an expected geometry — so a mis-specified profile fails closed.
+    expected_w, expected_h = device_guest_geometry()
 
     # Fast path: in-memory VNC client (zero disk I/O, zero PPM)
     if vnc_client.connected and vnc_client.latest_raw_rgba is not None:
-        if (vnc_client.latest_raw_w, vnc_client.latest_raw_h) != (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H):
-            return None, f"Non-canonical VNC scanout {vnc_client.latest_raw_w}x{vnc_client.latest_raw_h}; expected {LOGICAL_SURFACE_W}x{LOGICAL_SURFACE_H}"
+        if (vnc_client.latest_raw_w, vnc_client.latest_raw_h) != (expected_w, expected_h):
+            return None, f"Non-canonical VNC scanout {vnc_client.latest_raw_w}x{vnc_client.latest_raw_h}; expected {expected_w}x{expected_h}"
         img_bytes, content_type = vnc_client.get_image_frame(prefer_jpeg=prefer_jpeg)
         if img_bytes:
             return img_bytes, content_type
@@ -1289,8 +1480,8 @@ def capture_qemu_screen_frame(full_scanout=False, orientation=None, prefer_jpeg=
         from PIL import Image
         with Image.open(ppm_path) as img:
             width, height = img.size
-            if (width, height) != (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H):
-                return None, f"Non-canonical guest scanout {width}x{height}; expected {LOGICAL_SURFACE_W}x{LOGICAL_SURFACE_H}"
+            if (width, height) != (expected_w, expected_h):
+                return None, f"Non-canonical guest scanout {width}x{height}; expected {expected_w}x{expected_h}"
             # Native portrait scanout: no Studio crop, scale, or phone-shell substitution.
             buf = io.BytesIO()
             if prefer_jpeg:
@@ -1431,7 +1622,12 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
     arch = prof["arch"]
     exe = find_qemu_executable(arch)
     if not exe:
-        return False, f"QEMU binary 'qemu-system-{arch}' not found on host."
+        # Name every place it looked so a host operator can fix it in one step
+        # (add it to PATH or pin INTEROS_QEMU / QEMU_PATH / QEMU_DIR). Honest
+        # failure: no fallback binary, no guess about which QEMU to run.
+        searched = _qemu_search_log or [f"qemu-system-{arch} in PATH"]
+        return False, (f"QEMU binary 'qemu-system-{arch}' not found on host. "
+                       f"Searched: {'; '.join(searched)}.")
 
     img_path = prof["image"]
     if not os.path.exists(img_path):
@@ -1485,7 +1681,16 @@ def launch_qemu_profile(profile_key="x86_64", ram_mb=None, smp=1):
         # virtio-vga boots to PID1. The bootloader stages ship as binary
         # blobs in crates.io `bootloader` 0.11.17, so this is not patchable
         # here; virtio-vga + EDID keeps the guest KMS 720x1440 scanout.
-        cmd.extend(["-vga", "none", "-device", "virtio-vga,edid=on,xres=720,yres=1440"])
+        # The active device profile decides this EDID geometry: the reference
+        # profile requests the literal native 720x1440 scanout the guest already
+        # selects, and a profile that declares a different geometry requests it
+        # explicitly here. The frame publisher/capture path then withholds frames
+        # and reports honestly if the live scanout is not the geometry asked for.
+        edid_w, edid_h = device_guest_geometry()
+        if (edid_w, edid_h) == (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H):
+            cmd.extend(["-vga", "none", "-device", "virtio-vga,edid=on,xres=720,yres=1440"])
+        else:
+            cmd.extend(["-vga", "none", "-device", f"virtio-vga,edid=on,xres={edid_w},yres={edid_h}"])
         # A dedicated data disk is mandatory. The kernel uses the Primary Master
         # as the read-only boot image and the Primary Slave as persistent storage;
         # with only one disk attached it falls back to formatting the boot image
@@ -2055,6 +2260,33 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json(403, {'success': False, 'error': 'Cross-origin request rejected'})
             return
         parsed_path = urllib.parse.urlparse(self.path)
+
+        # Device profiles (AVD-Manager equivalent). Pure data from DEVICE_PROFILES;
+        # it lists the declarative profiles and the active one. It reports the
+        # geometry a profile ASKS for — Studio never claims a scanout the guest
+        # has not actually presented.
+        if parsed_path.path == '/api/device/profiles':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': True,
+                'active': active_device_profile_key,
+                'profiles': [device_profile_public(pid) for pid in DEVICE_PROFILES],
+            }).encode())
+            return
+
+        if parsed_path.path == '/api/device/profile':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'success': True,
+                'active': active_device_profile_key,
+                'profile': device_profile_public(),
+            }).encode())
+            return
+
         if self.path.startswith('/api/serial'):
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -2107,6 +2339,11 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 'mode': t.get("mode", "standby"),
                 'launcher_ready': bool(launcher_ready and t["qemu_alive"]),
                 'active_profile': active_profile_key,
+                # The selected device profile (AVD-Manager equivalent). It is the
+                # geometry Studio will ASK the guest to modeset on the next cold
+                # boot, not the scanout the guest has already produced; the live
+                # size is only reported once the guest actually presents a frame.
+                'device_profile': active_device_profile_key,
                 # Report the geometry this machine was actually launched with, so
                 # the studio describes the running target rather than a generic
                 # specification.
@@ -2449,6 +2686,35 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         # assignment below would make the name function-local and every touch
         # payload that consults the orientation would raise UnboundLocalError.
         global serial_lines, current_device_orientation
+
+        if self.path == '/api/device/profile':
+            # Select the device profile applied on the next cold boot. Selection
+            # only records a request; it never re-modesets a running guest, so
+            # the answer says plainly that it applies on the next relaunch.
+            content_length = self._bounded_content_length()
+            if content_length is None:
+                return
+            try:
+                body = self.rfile.read(content_length) if content_length > 0 else b'{}'
+                data = json.loads(body.decode('utf-8'))
+            except Exception:
+                data = {}
+            requested = str(data.get('profile') or data.get('id') or data.get('key') or '').strip()
+            ok, err = select_device_profile(requested)
+            if not ok:
+                self._send_json(400, {
+                    'success': False,
+                    'error': err,
+                    'available': sorted(DEVICE_PROFILES)
+                })
+                return
+            self._send_json(200, {
+                'success': True,
+                'active': active_device_profile_key,
+                'applies_on': 'next cold boot / relaunch',
+                'profile': device_profile_public()
+            })
+            return
 
         if self.path == '/api/rapp/trust':
             content_length = self._bounded_content_length()

@@ -231,6 +231,58 @@ html, body.dark-theme {
   letter-spacing: 0.01em;
 }
 
+/* Device profile picker (AVD-Manager equivalent). It sits beside the target
+   specs; it only ever displays server-reported profile data and never resizes
+   the chassis, so it inherits the header's compact dark control styling. */
+.target-device-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  padding-left: 6px;
+  margin-left: 2px;
+  white-space: nowrap;
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+.target-device-picker-label {
+  font-family: var(--font-main), -apple-system, sans-serif;
+  font-size: 0.58rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #A1A1AA;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.target-device-select {
+  font-family: var(--font-main), -apple-system, sans-serif;
+  font-size: 0.67rem;
+  font-weight: 500;
+  color: #E4E4E7;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+  padding: 1.5px 6px;
+  max-width: 220px;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  outline: none;
+}
+
+.target-device-select:hover {
+  border-color: var(--border-glass-hover, rgba(255, 255, 255, 0.22));
+}
+
+.target-device-select option {
+  color: #E4E4E7;
+  background: #111115;
+}
+
 /* Progressive collapse for target device chips on narrower screens */
 @media (max-width: 1680px) {
   .target-specs-list .spec-node:nth-child(4) { display: none; }

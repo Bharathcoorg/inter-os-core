@@ -75,6 +75,17 @@
           <span class="spec-node"><span class="spec-lbl">Display</span><span class="spec-val" id="spec-display">Undetermined</span></span>
           <span class="spec-node"><span class="spec-lbl">Security</span><span class="spec-val" id="spec-security">Undetermined</span></span>
         </div>
+        <!-- Device profile selector: the browser studio's AVD-Manager equivalent.
+             It lists the declarative device profiles (guest display geometry +
+             density + chassis) from the server and chooses the one the next cold
+             boot applies. It is a studio tool control, never a guest-rendered
+             screen, and the options come only from server-reported profile data. -->
+        <div class="target-device-picker">
+          <label class="target-device-picker-label" for="device-profile-select">Device</label>
+          <select id="device-profile-select" class="target-device-select" autocomplete="off">
+            <option value="">Loading&hellip;</option>
+          </select>
+        </div>
       </div>
     </div>
 

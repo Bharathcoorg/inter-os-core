@@ -1234,6 +1234,70 @@ document.addEventListener('DOMContentLoaded', () => {
   // against an already-booted guest, where the boot poll never starts.
   refreshTargetBadges();
 
+  // -------------------------------------------------------------------------
+  // Device profile picker (the browser Device Studio's AVD-Manager equivalent)
+  // -------------------------------------------------------------------------
+  // Lists the declarative device profiles the server exposes and selects the
+  // one the next cold boot applies. WHY it only ever records a request: display
+  // geometry is the guest's EDID choice, so changing the profile re-launches
+  // with a different requested scanout on the next boot; a running guest keeps
+  // the geometry it already modeset. Options come solely from server-reported
+  // profile data, so the picker shows the reference phone's real declared
+  // geometry and never invents a device or a scanout the guest has not produced.
+  async function initDeviceProfilePicker() {
+    const select = document.getElementById('device-profile-select');
+    if (!select) return;
+    try {
+      const resp = await fetch('/api/device/profiles');
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const profiles = (data && data.profiles) || [];
+      // Replace the static "Loading…" placeholder with the real profiles; if
+      // the server exposes none, keep the placeholder rather than invent one.
+      if (profiles.length > 0) select.innerHTML = '';
+      profiles.forEach((profile) => {
+        const geom = profile.guest_geometry || {};
+        const dpi = profile.density_dpi ? ` · ${profile.density_dpi} dpi` : '';
+        const size = (geom.width && geom.height) ? ` · ${geom.width}x${geom.height}${dpi}` : dpi;
+        const opt = document.createElement('option');
+        opt.value = profile.id;
+        opt.textContent = `${profile.name || profile.id}${size}`;
+        select.appendChild(opt);
+      });
+      if (data.active && Array.from(select.options).some((o) => o.value === data.active)) {
+        select.value = data.active;
+      }
+    } catch (_) {
+      /* Leave the placeholder; never fabricate a profile list. */
+    }
+  }
+
+  async function onDeviceProfileChange() {
+    const select = document.getElementById('device-profile-select');
+    if (!select || !select.value) return;
+    try {
+      const resp = await fetch('/api/device/profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile: select.value })
+      });
+      const data = await resp.json();
+      if (data && data.success) {
+        showToast('Device profile set — applies on next cold boot');
+      } else {
+        showToast((data && data.error) || 'Device profile change rejected');
+      }
+    } catch (_) {
+      showToast('Device profile change failed');
+    }
+  }
+
+  const deviceProfileSelect = document.getElementById('device-profile-select');
+  if (deviceProfileSelect) {
+    deviceProfileSelect.addEventListener('change', onDeviceProfileChange);
+  }
+  initDeviceProfilePicker();
+
   async function checkLauncherBootReady() {
     try {
       const resp = await fetch('/api/qemu/status');
