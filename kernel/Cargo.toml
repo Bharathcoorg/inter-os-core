@@ -42,3 +42,22 @@ debug = false
 
 [profile.test]
 opt-level = 1
+
+[profile.release]
+panic = "abort"
+# WHY strip, and what it actually buys -- measured, not assumed. The release
+# kernel ELF is 18.2MB unstripped and 3.6MB with debug sections removed, because
+# `libkernel.rlib` is 20MB of them. That is a real saving on the build artifact:
+# 14.5MB per build, on disk, for every incremental.
+#
+# WHY it must not be claimed as a size win for the guest: measured, the boot
+# image is 5601 KB either way. `boot/Cargo.toml` packages only the kernel's
+# LOAD segments into the BIOS image, so everything stripped here never reached
+# the image in the first place. Anyone reading this as "smaller device" should
+# read the measurement again.
+#
+# WHY `debuginfo` and not `symbols`: `symbols` removes a further 126KB from an
+# already-large artifact and would make the addresses the panic handler prints
+# undecodable, because that handler logs raw addresses rather than names. A full
+# strip trades a trace of size for an undebuggable guest crash.
+strip = "debuginfo"
