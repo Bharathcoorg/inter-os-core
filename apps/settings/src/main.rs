@@ -15,6 +15,10 @@
 //!   box with an explicit ellipsis pass before a pixel is drawn, so no label
 //!   is ever sliced mid-glyph or allowed to collide with a badge or a card
 //!   edge.
+//! - One token layer: every colour is a `design::color` value and every
+//!   measurement is either an SDK token (spacing, radius, touch) or a named
+//!   constant derived from one, so this app and the rest of the system cannot
+//!   drift apart on a value.
 //! - DRM/KMS Client Surface Rendering & Double-Buffered Presentation
 //! - Asynchronous event reactor loop handling touch interactions and lifecycle termination
 
@@ -1192,6 +1196,12 @@ impl SettingsApp {
 // -----------------------------------------------------------------------------
 // Visual Design Tokens (canonical light System Space palette)
 // -----------------------------------------------------------------------------
+// WHY every colour below is a `design::color` token: the design doc's palette and
+// the SDK's token set are the same set of values, so an app that reaches for a
+// literal has already left the system. The two inks this app used to derive for
+// itself — the home-indicator grey and the wallpaper name plate's pair — are now
+// either a token outright or a token with an alpha channel, so the palette is
+// the only source of colour on any surface.
 
 const BG: u32 = std::design::color::BACKGROUND; // #F7F6F2 base
 const SURFACE: u32 = std::design::color::SURFACE; // #FFFFFF card surface
@@ -1202,44 +1212,220 @@ const TEXT_MUTED: u32 = std::design::color::TEXT_MUTED; // #777773 secondary tex
 const ACCENT: u32 = std::design::color::ACCENT; // restrained blue
 const SUCCESS_EMERALD: u32 = std::design::color::SUCCESS; // muted green
 const DANGER: u32 = std::design::color::DANGER; // refused writes and destructive actions
-const GESTURE_BAR: u32 = 0xFFC4C3BD; // home indicator pill on the light base
+
+/// The home-indicator pill.
+///
+/// WHY secondary ink rather than a grey of its own: this used to be `0xFFC4C3BD`,
+/// a value that existed nowhere in the design system. The reference `GestureBar`
+/// component is a neutral dash, so the palette's own secondary ink is the answer
+/// the system already gives.
+const GESTURE_BAR: u32 = TEXT_MUTED;
+
+/// Opacity of the translucent name plate over the wallpaper preview.
+const PLATE_ALPHA: u32 = 0xCC;
+
+/// Replaces a token colour's alpha channel.
+///
+/// WHY this exists: the name plate over a wallpaper has to be translucent, and
+/// the only two inks that work on a plate whose polarity flips with the scene
+/// under it are the palette's own light and dark text. Building them from
+/// `design::color` keeps the plate inside the palette; the alpha belongs to the
+/// plate rather than to the ink, so it is passed in instead of baked into a
+/// literal pair.
+#[inline]
+const fn with_alpha(color: u32, alpha: u32) -> u32 {
+    (color & 0x00FF_FFFF) | (alpha << 24)
+}
 
 // -----------------------------------------------------------------------------
-// Layout constants (8-point grid; margins 24; touch targets >= 48)
+// Typography: the rungs this face can actually draw
+// -----------------------------------------------------------------------------
+// WHY two names instead of the design doc's seven: the guest's bitmap face
+// rasterises a 16x24 cell at INTEGER scales only, so a "size" here is one of
+// 24px (scale 1), 48px (scale 2) or 72px (scale 3). Against the doc's rungs:
+//
+//   Display 48-56 -> TYPE_DISPLAY (48)
+//   H1 36-44      -> NOT EXPRESSIBLE (48 overshoots it, 24 undershoots it)
+//   H2 28-32      -> NOT EXPRESSIBLE
+//   H3 20-24      -> TYPE_H3 (24)
+//   Body 15-18    -> NOT EXPRESSIBLE (24 is the nearest rung and sits above it)
+//   Caption 12-14 -> NOT EXPRESSIBLE (24 is the floor and sits far above it)
+//
+// So the doc's own instruction for this case is followed literally: hierarchy is
+// built from spacing, weight and ink, and the unreachable rungs are recorded
+// here rather than silently approximated. A screen title is Display, a row title
+// is H3 bold in primary ink, and a caption is H3 regular in secondary ink. The
+// launcher's `theme::type_scale` documents the same consequence for its own
+// BADGE and CAPTION rungs, which coincide for exactly this reason.
+
+/// 24px cell: row titles, captions, badges, control labels, buttons.
+const TYPE_H3: usize = 1;
+/// 48px cell: screen titles and keypad digits.
+const TYPE_DISPLAY: usize = 2;
+/// One line box at the H3 rung: the face's own cell height.
+const LINE_H: usize = std::design::font::GLYPH_H * TYPE_H3;
+
+// -----------------------------------------------------------------------------
+// Layout constants (spacing, radius and touch targets from the SDK tokens)
 // -----------------------------------------------------------------------------
 
-/// Header height on the landing screen (back target + big title below).
-const HEADER_BOTTOM: usize = 104;
-/// Back button: 48x48 target, top-left, shared by both screens.
-const BACK_X: usize = 24;
-const BACK_Y: usize = 28;
-const BACK_S: usize = 48;
+/// Screen margin: the design doc's "typical screen margin 20-24 px", taken from
+/// the SDK's own content padding so the app and the system agree on one number.
+const MARGIN: usize = std::design::spacing::GRID_24;
 
-/// Landing grid geometry: 2 columns of 328x136 cards, 16px gutters. The
-/// height reserves two full caption lines so the sample's wrapping subtitles
-/// ("Display, Sound, Gestures") are never sliced mid-phrase.
-const CARD_W: usize = 328;
-const CARD_H: usize = 136;
-const CARD_R: usize = 18;
-const GRID_X: usize = 24;
-const GRID_Y: usize = 200;
-const GRID_GAP: usize = 16;
+/// Gap between stacked cards, and the gutter of a two-up action row.
+const CARD_GAP: usize = std::design::spacing::GRID_16;
+
+/// Standard card radius: the doc's "standard cards 16-20 px" rung, which is the
+/// SDK's `radius::CARD` token. WHY one radius for every card on every surface: a
+/// card is a component, and a component has one shape.
+const CARD_R: usize = std::design::radius::CARD;
+
+/// Control radius: the doc's "controls/keypad 12-14 px" rung. Used by the back
+/// control, every segmented-control segment, every keypad key and the inner rim
+/// of the action pills.
+const CONTROL_R: usize = std::design::radius::CONTROL;
+
+/// Image radius: the doc's "small/image 8 px" rung, used by the gallery
+/// thumbnails and the entry dots.
+const IMAGE_R: usize = std::design::radius::SMALL;
+
+/// The content column, shared by every screen: the landing grid, the detail rows
+/// and both full-screen panels all start 24px in from each edge.
+///
+/// WHY one column: the detail rows, the wallpaper panel and the screen-lock panel
+/// each used to declare their own 24/672 pair, so nothing forced them to agree
+/// and a panel that drifted would misalign against the screen it covers.
+const CONTENT_X: usize = MARGIN;
+const CONTENT_W: usize = W - 2 * MARGIN;
+
+/// Shared header geometry: a 48x48 back control at the top-left of every screen
+/// with the screen's title on the same line to its right.
+const BACK_X: usize = CONTENT_X;
+const BACK_Y: usize = MARGIN;
+const BACK_S: usize = std::design::touch::PREFERRED_TARGET;
+const BACK_R: usize = CONTROL_R;
+/// X of the header's text: one 16px step right of the back control.
+const HEADER_X: usize = BACK_X + BACK_S + std::design::spacing::GRID_16;
+/// Y of the header's title.
+///
+/// WHY 32 rather than the back control's own 24: a 48px cell's cap ink occupies
+/// rows 3..19, so a cell starting at 24 puts that ink eleven pixels above the
+/// chevron's centre and the title reads as drifting away from its own control.
+/// 32 lands the cap-ink centre five pixels above it, the closest optical
+/// centring the 8-point grid allows.
+const HEADER_Y: usize = std::design::spacing::GRID_32;
+/// Y of a panel header's subtitle: one 8px step below the title's line box.
+const HEADER_SUB_Y: usize = HEADER_Y + std::design::font::GLYPH_H * TYPE_DISPLAY + std::design::spacing::GRID_8;
+/// The header rule: a hairline closing the header block, one 16px step below the
+/// title's line box.
+const DIVIDER_Y: usize = HEADER_Y + std::design::font::GLYPH_H * TYPE_DISPLAY + std::design::spacing::GRID_16;
+/// Top of the first content element on any screen: one 32px step below the rule.
+/// Every surface's body begins on this line.
+const DETAIL_TOP: usize = DIVIDER_Y + std::design::spacing::GRID_32;
+
+/// Landing grid geometry: two columns of cards with a 16px gutter.
+const GRID_X: usize = CONTENT_X;
+/// Padding of a landing card, which is also its horizontal padding, so the icon,
+/// the title and the subtitle all sit on the same 24px inset.
+const CARD_PAD: usize = MARGIN;
+/// Centre of a landing card's icon: one 24px line box plus a 20px step in from
+/// the card's left padding.
+const CARD_ICON_CX: usize = CARD_PAD + std::design::spacing::GRID_20;
+/// X of a landing card's text column: half an icon-box and one 24px step right of
+/// the icon's centre.
+const CARD_TEXT_X: usize = CARD_ICON_CX + LINE_H / 2 + std::design::spacing::GRID_24;
+/// Width available to a landing card's text.
+const CARD_TEXT_W: usize = CARD_W - CARD_TEXT_X - CARD_PAD;
+/// Column width of the two-up grid.
+const CARD_W: usize = (CONTENT_W - CARD_GAP) / 2;
+/// Y step between a card's title line and its first caption line.
+const CARD_LINE_GAP: usize = std::design::spacing::GRID_16;
+/// Landing card height: padding, the title's line box, the gap, two caption line
+/// boxes (the sample's subtitles wrap to two) and the matching bottom padding.
+const CARD_H: usize = CARD_PAD + LINE_H + CARD_LINE_GAP + 2 * LINE_H + CARD_PAD;
+/// Y of the landing screen's own title.
+const LANDING_TITLE_Y: usize = 96;
+/// Y of the landing screen's hero line.
+const LANDING_HERO_Y: usize = 152;
+/// Top of the landing grid: one 24px step below the hero line.
+const GRID_Y: usize = LANDING_HERO_Y + LINE_H + CARD_PAD;
+/// Gutter between landing cards.
+const GRID_GAP: usize = CARD_GAP;
 
 /// Detail screen geometry: full-width stacked row cards.
-const DETAIL_X: usize = 24;
-const DETAIL_W: usize = 672;
-const DETAIL_TOP: usize = 128;
-const ROW_H: usize = 112;
-const ROW_TALL: usize = 212; // DVFS row (selector + feedback line)
-const ROW_TALL_ALT: usize = 140; // developer terminal row (two caption lines)
-const ROW_GAP: usize = 16;
-const DIVIDER_Y: usize = 104;
+const DETAIL_X: usize = CONTENT_X;
+const DETAIL_W: usize = CONTENT_W;
+/// Horizontal padding inside a row card.
+const ROW_PAD: usize = MARGIN;
+/// Vertical padding of a row card.
+///
+/// WHY 32 and not the 16 a dense settings list would use: the smallest text rung
+/// this face can draw is a 24px cell, so a 16px pad makes a row read as a text
+/// block with a border drawn round it. The doc asks for whitespace over
+/// decoration, and at a fixed type size vertical padding is the only lever there
+/// is for it.
+const ROW_PAD_V: usize = std::design::spacing::GRID_32;
+/// Gap between a row's title and its caption.
+const ROW_LINE_GAP: usize = std::design::spacing::GRID_8;
+/// Title offset from a row's top edge.
+const ROW_TITLE_DY: usize = ROW_PAD_V;
+/// Caption offset from a row's top edge.
+const ROW_CAP_DY: usize = ROW_TITLE_DY + LINE_H + ROW_LINE_GAP;
+/// A single-line row's height.
+const ROW_H: usize = ROW_CAP_DY + LINE_H + ROW_PAD_V;
+/// Gap between stacked rows.
+const ROW_GAP: usize = CARD_GAP;
+/// Gap between a row's caption and the control below it.
+const ROW_CONTROL_GAP: usize = std::design::spacing::GRID_24;
+/// Second caption line's offset, for the row that names its store key.
+const ROW_CAP2_DY: usize = ROW_CAP_DY + LINE_H + ROW_LINE_GAP;
+/// A two-caption-line row's height.
+const ROW_TALL_ALT: usize = ROW_CAP2_DY + LINE_H + ROW_PAD_V;
+/// The DVFS selector's offset from its row's top edge.
+const SEG_DY: usize = ROW_CAP_DY + LINE_H + ROW_CONTROL_GAP;
+/// One selector segment's height: the preferred touch target.
+const SEG_H: usize = std::design::touch::PREFERRED_TARGET;
+/// Gap between segmented-control segments.
+const SEG_GAP: usize = std::design::spacing::GRID_4;
+/// Segment width, so three of them plus two gaps fill a row's inner width. The
+/// division drops at most two pixels, which land as slack on the right rather
+/// than as an off-grid gap that would make the selector asymmetric.
+const SEG_W: usize = (DETAIL_W - 2 * ROW_PAD - 2 * SEG_GAP) / 3;
+/// The DVFS feedback line's offset: one 16px step below the selector.
+const SEG_FEEDBACK_DY: usize = SEG_DY + SEG_H + CARD_GAP;
+/// The DVFS row's height: it carries the selector and its feedback line.
+const ROW_TALL: usize = SEG_FEEDBACK_DY + LINE_H + ROW_PAD_V;
 
-/// DVFS profile selector inside the Power detail (three 204x48 segments).
-const SEG_X: usize = DETAIL_X + 24;
-const SEG_W: usize = 204;
-const SEG_GAP: usize = 6;
-const SEG_H: usize = 48;
+/// Badge height. WHY 32: a pill has to read as a chip rather than as text, and 32
+/// is the grid step that gives a 24px cell four pixels of air above and below.
+const BADGE_H: usize = std::design::spacing::GRID_32;
+/// Horizontal padding inside a badge.
+const BADGE_PAD: usize = std::design::spacing::GRID_24;
+/// A badge's top edge inside a row: centred on the caption's line box, which it
+/// overhangs by four pixels because it is one grid step taller.
+const BADGE_DY: usize = ROW_CAP_DY - (BADGE_H - LINE_H) / 2;
+/// Gap between a row's caption and its badge.
+const BADGE_GAP: usize = std::design::spacing::GRID_16;
+
+/// Action button height: the reference `PrimaryButton` component's 48px, which is
+/// also the SDK's preferred touch target.
+const BUTTON_H: usize = std::design::touch::PREFERRED_TARGET;
+/// Half of a two-up action row: two buttons and one 16px gutter.
+const BUTTON_HALF: usize = (CONTENT_W - CARD_GAP) / 2;
+/// Inner padding of an action button's label.
+const BUTTON_PAD: usize = ROW_PAD;
+
+/// The home indicator: the reference `GestureBar` component (96x4 dash, pill
+/// radius) centred on the bottom edge. WHY the drawn mark is smaller than the
+/// touch region it sits in: the handler's exit region is unchanged, so making the
+/// mark match the component must not shrink the target.
+const GESTURE_W: usize = 96;
+const GESTURE_H: usize = 4;
+const GESTURE_X: usize = (W - GESTURE_W) / 2;
+/// WHY 22 above the bottom edge: that is where the previous 200x6 bar was drawn,
+/// so the chrome does not move while its shape changes.
+const GESTURE_Y: usize = H - 22;
 
 // -----------------------------------------------------------------------------
 // Typography: measure -> fit -> draw. Nothing is ever clipped by its box.
@@ -1251,33 +1437,58 @@ const RUN_CAP: usize = 96;
 // -----------------------------------------------------------------------------
 // Wallpaper picker layout
 // -----------------------------------------------------------------------------
-// The panel is laid out from the reference wallpaper screen: a full-bleed
-// preview at the top, a target selector, a gallery of the scenes that actually
-// exist, and the two actions at the bottom. Everything the panel draws is either
-// a scene from the catalogue or a string the catalogue provides, so the screen
-// cannot show a wallpaper that does not exist.
+// The panel is laid out from the reference wallpaper screen: a preview at the
+// top, a target selector, a gallery of the scenes that actually exist, and the
+// two actions at the bottom. Everything the panel draws is either a scene from
+// the catalogue or a string the catalogue provides, so the screen cannot show a
+// wallpaper that does not exist.
+//
+// The preview is the panel's hero and takes the whole upper band, so the owner
+// judges a wallpaper by how it fills the screen; each control below is one 32px
+// step from the last.
 
-/// Top of the preview strip, under the header.
-const WP_PREVIEW_Y: usize = 120;
+/// Top of the preview strip: the shared content top, so the panel's body begins
+/// on the same line as every other screen's.
+const WP_PREVIEW_Y: usize = DETAIL_TOP;
 /// Height of the preview strip.
-const WP_PREVIEW_H: usize = 520;
-/// Left edge and width shared by every full-width panel element.
-const WP_X: usize = 24;
-const WP_W: usize = 672;
-/// Top of the target selector.
-const WP_TARGET_Y: usize = 676;
-const WP_TARGET_H: usize = 56;
-/// Top of the gallery.
-const WP_GALLERY_Y: usize = 764;
-/// One gallery cell.
-const WP_CELL_W: usize = 208;
-const WP_CELL_H: usize = 208;
-const WP_CELL_GAP: usize = 24;
-/// Top of the action row.
-const WP_ACTION_Y: usize = 1240;
-const WP_ACTION_H: usize = 64;
-/// Top of the outcome line.
-const WP_STATUS_Y: usize = 1330;
+const WP_PREVIEW_H: usize = 664;
+/// Preview radius: the doc's sheet rung, because the preview is this panel's one
+/// large surface rather than a card in a list.
+const WP_PREVIEW_R: usize = std::design::radius::SHEET;
+
+/// The name plate over the preview's lower edge: the doc's control rung for its
+/// radius, the preferred touch target for its height (it is a label chip that has
+/// to stay legible over a scene, not a control), inset 20px from each side and
+/// sitting 24px above the preview's bottom edge.
+const PLATE_H: usize = std::design::touch::PREFERRED_TARGET;
+const PLATE_INSET: usize = std::design::spacing::GRID_20;
+
+/// Top of the target selector: one 32px step below the preview.
+const WP_TARGET_Y: usize = WP_PREVIEW_Y + WP_PREVIEW_H + std::design::spacing::GRID_32;
+/// Height of one target segment: the SDK's primary-action touch target.
+const WP_TARGET_H: usize = std::design::touch::PRIMARY_ACTION;
+/// Top of the gallery: one 32px step below the selector.
+const WP_GALLERY_Y: usize = WP_TARGET_Y + WP_TARGET_H + std::design::spacing::GRID_32;
+/// Gutter between gallery cells.
+const WP_CELL_GAP: usize = std::design::spacing::GRID_24;
+/// Cell width: three across with 24px gutters, which fills the content column
+/// exactly (3 x 208 + 2 x 24 = 672).
+const WP_CELL_W: usize = (CONTENT_W - 2 * WP_CELL_GAP) / 3;
+/// Padding around a cell's thumbnail.
+const WP_CELL_PAD: usize = std::design::spacing::GRID_8;
+/// Gap between a cell's thumbnail and its name.
+const WP_CELL_LABEL_GAP: usize = std::design::spacing::GRID_8;
+/// Thumbnail height inside a cell.
+const WP_THUMB_H: usize = 144;
+/// Cell height: padding, thumbnail, gap, one name line box, matching padding.
+const WP_CELL_H: usize = WP_CELL_PAD + WP_THUMB_H + WP_CELL_LABEL_GAP + LINE_H + WP_CELL_PAD;
+
+/// Top of the action row: one 32px step below the gallery.
+const WP_ACTION_Y: usize = WP_GALLERY_Y + WP_CELL_H + std::design::spacing::GRID_32;
+/// Height of the action row.
+const WP_ACTION_H: usize = BUTTON_H;
+/// Top of the outcome line: one 16px step below the actions.
+const WP_STATUS_Y: usize = WP_ACTION_Y + WP_ACTION_H + CARD_GAP;
 
 // Screen lock panel layout
 // -----------------------------------------------------------------------------
@@ -1286,25 +1497,42 @@ const WP_STATUS_Y: usize = 1330;
 // card states what the account layer actually reports; the keypad appears only
 // while a step is in progress, so the overview cannot look like a PIN prompt.
 
-/// Left edge and width shared by every panel element.
-const SL_X: usize = 24;
-const SL_W: usize = 672;
 /// The status card: what the account layer says about this account right now.
-const SL_STATUS_Y: usize = 128;
-const SL_STATUS_H: usize = 148;
+/// It uses a detail row card's height because it is one.
+const SL_STATUS_Y: usize = DETAIL_TOP;
+const SL_STATUS_H: usize = ROW_H;
 /// The step prompt and the typed-entry dots, present only mid-flow.
-const SL_PROMPT_Y: usize = 320;
-const SL_DOTS_Y: usize = 372;
+const SL_PROMPT_Y: usize = SL_STATUS_Y + SL_STATUS_H + std::design::spacing::GRID_48;
+/// The complaint line's offset from the prompt.
+const SL_ERROR_DY: usize = std::design::spacing::GRID_40;
+/// The typed-entry dots: one 40px step below the complaint line.
+const SL_DOTS_Y: usize = SL_PROMPT_Y + SL_ERROR_DY + LINE_H + std::design::spacing::GRID_40;
+/// One entry dot.
+const SL_DOT: usize = std::design::spacing::GRID_16;
+/// Gap between dots.
+const SL_DOT_GAP: usize = 20;
+/// Dot radius: the image rung, which for a 16px dot is a full circle.
+const SL_DOT_R: usize = IMAGE_R;
 /// One keypad key; the grid is three across with the last row CLR / 0 / OK.
-const SL_KEY_W: usize = 200;
+/// WHY the width is derived from the gutter: the pad used to be 200px per key,
+/// which left it 24px narrower than the panel it sits in and made the right
+/// margin twice the left.
+const SL_KEY_W: usize = (CONTENT_W - 2 * SL_KEY_GAP) / 3;
 const SL_KEY_H: usize = 112;
-const SL_KEY_GAP: usize = 24;
-const SL_KEYS_Y: usize = 448;
+const SL_KEY_GAP: usize = std::design::spacing::GRID_24;
+/// Key radius: the doc's keypad rung. WHY not the lock screen's own 18: this app
+/// follows the design doc's rung, and the two pads already differ in width, so a
+/// shared radius is the only thing they would otherwise have had in common.
+const SL_KEY_R: usize = CONTROL_R;
+/// Top of the keypad: one 48px step below the dots.
+const SL_KEYS_Y: usize = SL_DOTS_Y + SL_DOT + std::design::spacing::GRID_48;
+/// Bottom of the keypad's four rows.
+const SL_KEYS_BOTTOM: usize = SL_KEYS_Y + 4 * (SL_KEY_H + SL_KEY_GAP) - SL_KEY_GAP;
 /// The action row, whose contents follow the reported lock state.
-const SL_ACTION_Y: usize = 1024;
-const SL_ACTION_H: usize = 96;
+const SL_ACTION_Y: usize = SL_KEYS_BOTTOM + std::design::spacing::GRID_32;
+const SL_ACTION_H: usize = BUTTON_H;
 /// The outcome line under the actions.
-const SL_NOTE_Y: usize = 1176;
+const SL_NOTE_Y: usize = SL_ACTION_Y + SL_ACTION_H + CARD_GAP;
 /// Minimum digits the account layer will accept for a PIN.
 const SL_MIN_DIGITS: usize = 4;
 
@@ -1459,11 +1687,16 @@ fn chevron_ink(x: usize, y: usize, cx: usize, cy: usize, color: u32) -> Option<u
 }
 
 /// 48x48 back control: soft pill with the chevron centred.
+///
+/// WHY the radius is the SDK's control token (12) and not the 14 it used to be:
+/// 14 was off both of the design system's control rungs (12-14 includes it, but
+/// no token expresses it), and the control, the segmented-control segments and
+/// the keypad keys are all the same class of object.
 fn back_button_pixel(x: usize, y: usize) -> Option<u32> {
-    if !in_round_rect(x, y, BACK_X, BACK_Y, BACK_S, BACK_S, 14) {
+    if !in_round_rect(x, y, BACK_X, BACK_Y, BACK_S, BACK_S, BACK_R) {
         return None;
     }
-    if !in_round_rect(x, y, BACK_X + 1, BACK_Y + 1, BACK_S - 2, BACK_S - 2, 13) {
+    if !in_round_rect(x, y, BACK_X + 1, BACK_Y + 1, BACK_S - 2, BACK_S - 2, BACK_R - 1) {
         return Some(BORDER);
     }
     if let Some(c) = chevron_ink(x, y, BACK_X + BACK_S / 2, BACK_Y + BACK_S / 2, TEXT) {
@@ -1741,11 +1974,11 @@ fn push_suffix(buf: &mut [u8], len: usize, suffix: &[u8]) -> usize {
     i
 }
 
-/// Pill badge, right-aligned helper: 28px pill, 1px ink border, label centred.
+/// Pill badge, right-aligned helper: soft fill, 1px ink rim, label centred.
 /// The width is derived from the measured label so the pill always fits its
 /// text and the caller can reserve exactly that much horizontal space.
 fn badge_w(label: &[u8]) -> usize {
-    run_w(label, 1, false) + 24
+    run_w(label, TYPE_H3, false) + BADGE_PAD
 }
 
 fn badge_pixel(
@@ -1758,25 +1991,136 @@ fn badge_pixel(
     bg: u32,
 ) -> Option<u32> {
     let w = badge_w(label);
-    let h = 28usize;
+    let h = BADGE_H;
     if !in_round_rect(x, y, bx0, by0, w, h, h / 2) {
         return None;
     }
     if !in_round_rect(x, y, bx0 + 1, by0 + 1, w - 2, h - 2, h / 2 - 1) {
         return Some(ink);
     }
-    let tw = run_w(label, 1, false);
+    let tw = run_w(label, TYPE_H3, false);
     let tx = bx0 + (w - tw) / 2;
-    let ty = by0 + (h - 24) / 2;
-    if let Some(c) = run_ink(x, y, tx, ty, 1, label, tw + 1, ink, bg, false) {
+    let ty = by0 + (h - LINE_H) / 2;
+    if let Some(c) = run_ink(x, y, tx, ty, TYPE_H3, label, tw + 1, ink, bg, false) {
         return Some(c);
     }
     Some(SOFT)
 }
 
+/// One action button: a pill with a fitted, centred label.
+///
+/// WHY this is a shared helper rather than three copies: the design doc's closing
+/// note asks for reusable components and tokens rather than per-screen
+/// hard-coding, and this app has three action rows (wallpaper Apply/Reset, screen
+/// lock Set/Change/Remove) that must share one shape, one height and one label
+/// treatment or the system stops reading as one system.
+///
+/// WHY a pill: the reference `PrimaryButton` and `SecondaryButton` components are
+/// both 999-radius at 48px tall, which at this button's height is a full pill.
+/// WHY the `rim` is a parameter: a dark primary pill wants no outline at all,
+/// while a soft secondary pill needs a hairline to read against the base.
+#[allow(clippy::too_many_arguments)]
+fn button_pixel(
+    x: usize,
+    y: usize,
+    bx0: usize,
+    by0: usize,
+    bw: usize,
+    bh: usize,
+    label: &[u8],
+    fill: u32,
+    ink: u32,
+    rim: Option<u32>,
+) -> Option<u32> {
+    if !in_round_rect(x, y, bx0, by0, bw, bh, bh / 2) {
+        return None;
+    }
+    if !in_round_rect(x, y, bx0 + 1, by0 + 1, bw - 2, bh - 2, bh / 2 - 1) {
+        return Some(rim.unwrap_or(fill));
+    }
+    let lw = run_w(label, TYPE_H3, true);
+    // WHY the label is fitted before it is centred: `bw - lw` underflows in usize
+    // when a label is wider than its button, and the wrapped origin then puts the
+    // text off the surface with the button drawn only part-way.
+    let lx = if lw + 2 * BUTTON_PAD >= bw {
+        bx0 + BUTTON_PAD
+    } else {
+        bx0 + (bw - lw) / 2
+    };
+    if let Some(c) = run_ink(
+        x,
+        y,
+        lx,
+        by0 + (bh - LINE_H) / 2,
+        TYPE_H3,
+        label,
+        bw - 2 * BUTTON_PAD,
+        ink,
+        fill,
+        true,
+    ) {
+        return Some(c);
+    }
+    Some(fill)
+}
+
+/// One segment of a segmented control: dark fill when selected, soft fill with a
+/// hairline when not.
+///
+/// WHY this is shared by the DVFS selector and the wallpaper target selector:
+/// a segmented control is one component with one selected/unselected treatment,
+/// and two treatments for "the chosen of three" would make the same interaction
+/// mean two things.
+fn segment_pixel(
+    x: usize,
+    y: usize,
+    sx0: usize,
+    sy0: usize,
+    sw: usize,
+    sh: usize,
+    label: &[u8],
+    active: bool,
+) -> Option<u32> {
+    if !in_round_rect(x, y, sx0, sy0, sw, sh, CONTROL_R) {
+        return None;
+    }
+    if !active && !in_round_rect(x, y, sx0 + 1, sy0 + 1, sw - 2, sh - 2, CONTROL_R - 1) {
+        return Some(BORDER);
+    }
+    let fill = if active { TEXT } else { SOFT };
+    let lw = run_w(label, TYPE_H3, true);
+    let lx = if lw + 2 * std::design::spacing::GRID_8 >= sw {
+        sx0 + std::design::spacing::GRID_8
+    } else {
+        sx0 + (sw - lw) / 2
+    };
+    if let Some(c) = run_ink(
+        x,
+        y,
+        lx,
+        sy0 + (sh - LINE_H) / 2,
+        TYPE_H3,
+        label,
+        sw - 2 * std::design::spacing::GRID_8,
+        if active { SURFACE } else { TEXT },
+        fill,
+        true,
+    ) {
+        return Some(c);
+    }
+    Some(fill)
+}
+
 /// Standard row card head: bold title on its own line (never truncated by a
 /// badge, because the title owns the full card width), caption below with the
 /// badge column explicitly reserved, badge right-aligned on the caption line.
+///
+/// WHY the title is the H3 rung rather than the Display rung it used to be: the
+/// doc puts a list label at Body/H3, and at the only two sizes this face can draw
+/// the row title has to sit one rung below the screen title or the screen and its
+/// rows read as one flat rank. The doc's H2 (28-32) is not expressible, so H3 is
+/// the nearest rung that is *below* the screen title rather than a silent
+/// approximation of Body.
 fn row_head(
     x: usize,
     y: usize,
@@ -1788,16 +2132,16 @@ fn row_head(
     badge_ink: u32,
 ) -> Option<u32> {
     let bw = badge_w(badge);
-    let bx0 = DETAIL_X + DETAIL_W - 24 - bw;
-    let cap_fit = DETAIL_W - 48 - bw - 16;
+    let bx0 = DETAIL_X + DETAIL_W - ROW_PAD - bw;
+    let cap_fit = DETAIL_W - 2 * ROW_PAD - bw - BADGE_GAP;
     if let Some(c) = run_ink(
         x,
         y,
-        DETAIL_X + 24,
-        cy + 16,
-        2,
+        DETAIL_X + ROW_PAD,
+        cy + ROW_TITLE_DY,
+        TYPE_H3,
         title,
-        DETAIL_W - 48,
+        DETAIL_W - 2 * ROW_PAD,
         TEXT,
         SURFACE,
         true,
@@ -1807,9 +2151,9 @@ fn row_head(
     if let Some(c) = run_ink(
         x,
         y,
-        DETAIL_X + 24,
-        cy + 72,
-        1,
+        DETAIL_X + ROW_PAD,
+        cy + ROW_CAP_DY,
+        TYPE_H3,
         caption,
         cap_fit,
         cap_ink,
@@ -1818,15 +2162,12 @@ fn row_head(
     ) {
         return Some(c);
     }
-    badge_pixel(x, y, bx0, cy + 70, badge, badge_ink, SURFACE)
+    badge_pixel(x, y, bx0, cy + BADGE_DY, badge, badge_ink, SURFACE)
 }
 
-/// One segment of the DVFS profile selector (204x48, radius 12).
+/// One segment of the DVFS profile selector.
 fn profile_segment_pixel(x: usize, y: usize, cy: usize, app: &SettingsApp, i: usize) -> Option<u32> {
-    let sx = SEG_X + i * (SEG_W + SEG_GAP);
-    if !in_round_rect(x, y, sx, cy + 112, SEG_W, SEG_H, 12) {
-        return None;
-    }
+    let sx = DETAIL_X + ROW_PAD + i * (SEG_W + SEG_GAP);
     let label: &[u8] = match i {
         0 => b"Performance",
         1 => b"Balanced",
@@ -1836,31 +2177,8 @@ fn profile_segment_pixel(x: usize, y: usize, cy: usize, app: &SettingsApp, i: us
     // that has never been read from or applied to the kernel highlights NO
     // segment. Previously this defaulted to a hardcoded Balanced, which drew a
     // committed-looking selection the kernel had never reported.
-let active = app.power_profile.map(|p| p.index()) == Some(i);
-    if !active
-        && !in_round_rect(x, y, sx + 1, cy + 113, SEG_W - 2, SEG_H - 2, 11)
-    {
-        return Some(BORDER);
-    }
-    let fill = if active { TEXT } else { SOFT };
-    let lw = run_w(label, 1, false);
-    let lx = sx + (SEG_W - lw) / 2;
-    let ly = cy + 112 + (SEG_H - 24) / 2;
-    if let Some(c) = run_ink(
-        x,
-        y,
-        lx,
-        ly,
-        1,
-        label,
-        SEG_W - 16,
-        if active { SURFACE } else { TEXT_MUTED },
-        fill,
-        false,
-    ) {
-        return Some(c);
-    }
-    Some(fill)
+    let active = app.power_profile.map(|p| p.index()) == Some(i);
+    segment_pixel(x, y, sx, cy + SEG_DY, SEG_W, SEG_H, label, active)
 }
 
 /// Renders the contents of one detail row for the pixel under test.
@@ -2159,11 +2477,11 @@ fn row_pixel(
                 if let Some(c) = run_ink(
                     x,
                     y,
-                    DETAIL_X + 24,
-                    cy + 172,
-                    1,
+                    DETAIL_X + ROW_PAD,
+                    cy + SEG_FEEDBACK_DY,
+                    TYPE_H3,
                     &fb[..fb_len],
-                    DETAIL_W - 48,
+                    DETAIL_W - 2 * ROW_PAD,
                     fb_ink,
                     SURFACE,
                     false,
@@ -2349,11 +2667,11 @@ fn row_pixel(
                 if let Some(c) = run_ink(
                     x,
                     y,
-                    DETAIL_X + 24,
-                    cy + 98,
-                    1,
+                    DETAIL_X + ROW_PAD,
+                    cy + ROW_CAP2_DY,
+                    TYPE_H3,
                     b"Config key: developer.terminal_enabled",
-                    DETAIL_W - 48 - bw - 16,
+                    DETAIL_W - 2 * ROW_PAD - bw - BADGE_GAP,
                     TEXT_MUTED,
                     SURFACE,
                     false,
@@ -2367,15 +2685,21 @@ fn row_pixel(
 }
 
 /// Detail screen pixel: header (back + title + divider) then the stacked rows.
+///
+/// WHY the title stays on the Display rung: the screen title and the row titles
+/// have to be two different ranks for the hierarchy to read at all, and with a
+/// face that rasterises at 24/48/72 the only two ranks available are H3 (24) and
+/// Display (48). H2 (28-32) is not expressible, so the screen title keeps
+/// Display and the row titles take H3, exactly as the typography constants record.
 fn detail_pixel(x: usize, y: usize, app: &SettingsApp, section: Section) -> u32 {
     if let Some(c) = run_ink(
         x,
         y,
-        BACK_X + BACK_S + 16,
-        BACK_Y,
-        2,
+        HEADER_X,
+        HEADER_Y,
+        TYPE_DISPLAY,
         section.title(),
-        W - (BACK_X + BACK_S + 16) - 24,
+        W - HEADER_X - MARGIN,
         TEXT,
         BG,
         true,
@@ -2387,7 +2711,7 @@ fn detail_pixel(x: usize, y: usize, app: &SettingsApp, section: Section) -> u32 
     }
     for row in 0..row_count(section) {
         let (cy, ch) = detail_row_rect(section, row);
-        if let Some(fill) = card_pixel(x, y, DETAIL_X, cy, DETAIL_W, ch, CARD_R) {
+        if let Some(fill) = card_pixel(x, y, CONTENT_X, cy, CONTENT_W, ch, CARD_R) {
             return row_pixel(x, y, app, section, row, cy, fill);
         }
     }
@@ -2397,22 +2721,28 @@ fn detail_pixel(x: usize, y: usize, app: &SettingsApp, section: Section) -> u32 
 /// One landing category card: icon, bold title, subtitle wrapped to at most
 /// two measured lines (wrapping, not ellipsis, because the phrases are short
 /// word lists that must stay whole).
+///
+/// WHY the icon and the title share one line box: the reference System Space puts
+/// the mark beside the label rather than above it, and centring the icon on the
+/// title's line box is what makes that a column rather than a stack. WHY the
+/// title is the H3 rung: it is a card heading, which the doc sizes at H3, and it
+/// keeps the card one rank below the screen's own Display title.
 fn landing_card_pixel(x: usize, y: usize, i: usize) -> Option<u32> {
     let (cx0, cy0) = card_origin(i);
     if let Some(fill) = card_pixel(x, y, cx0, cy0, CARD_W, CARD_H, CARD_R) {
         let (title, subtitle, icon) = category(i);
-        if let Some(ic) = icon(x, y, cx0 + 44, cy0 + 48, TEXT) {
+        if let Some(ic) = icon(x, y, cx0 + CARD_ICON_CX, cy0 + CARD_PAD + LINE_H / 2, TEXT) {
             return Some(ic);
         }
         // Title owns the full remaining card width; subtitle below it.
         if let Some(c) = run_ink(
             x,
             y,
-            cx0 + 80,
-            cy0 + 22,
-            2,
+            cx0 + CARD_TEXT_X,
+            cy0 + CARD_PAD,
+            TYPE_H3,
             title,
-            CARD_W - 104,
+            CARD_TEXT_W,
             TEXT,
             fill,
             true,
@@ -2420,16 +2750,16 @@ fn landing_card_pixel(x: usize, y: usize, i: usize) -> Option<u32> {
             return Some(c);
         }
         let mut lines: [&[u8]; 2] = [&b""[..], &b""[..]];
-        let n = std::design::font::wrap_text(subtitle, 1, CARD_W - 104, 2, &mut lines);
+        let n = std::design::font::wrap_text(subtitle, 1, CARD_TEXT_W, 2, &mut lines);
         for li in 0..n {
             if let Some(c) = run_ink(
                 x,
                 y,
-                cx0 + 80,
-                cy0 + 78 + li * 24,
-                1,
+                cx0 + CARD_TEXT_X,
+                cy0 + CARD_PAD + LINE_H + CARD_LINE_GAP + li * (LINE_H + CARD_LINE_GAP),
+                TYPE_H3,
                 lines[li],
-                CARD_W - 104,
+                CARD_TEXT_W,
                 TEXT_MUTED,
                 fill,
                 false,
@@ -2444,24 +2774,37 @@ fn landing_card_pixel(x: usize, y: usize, i: usize) -> Option<u32> {
 
 /// Landing screen pixel: header back target, big title, hero line, grid.
 fn landing_pixel(x: usize, y: usize) -> u32 {
-    if y >= HEADER_BOTTOM {
+    // WHY the guard is the grid's own top: no card exists above it, so testing for
+    // cards below the header painted nothing and only cost a loop per pixel.
+    if y >= GRID_Y {
         for i in 0..Section::COUNT {
             if let Some(c) = landing_card_pixel(x, y, i) {
                 return c;
             }
         }
     }
-    if let Some(c) = run_ink(x, y, GRID_X, 96, 2, b"System Space", W - 48, TEXT, BG, true) {
+    if let Some(c) = run_ink(
+        x,
+        y,
+        GRID_X,
+        LANDING_TITLE_Y,
+        TYPE_DISPLAY,
+        b"System Space",
+        W - 2 * MARGIN,
+        TEXT,
+        BG,
+        true,
+    ) {
         return c;
     }
     if let Some(c) = run_ink(
         x,
         y,
         GRID_X,
-        152,
-        1,
+        LANDING_HERO_Y,
+        TYPE_H3,
         b"Everything in one place",
-        W - 48,
+        W - 2 * MARGIN,
         TEXT_MUTED,
         BG,
         false,
@@ -2493,8 +2836,8 @@ fn wp_cell_origin(i: usize) -> (usize, usize) {
     let col = i % 3;
     let row = i / 3;
     (
-        WP_X + col * (WP_CELL_W + WP_CELL_GAP),
-        WP_GALLERY_Y + row * (WP_CELL_H + WP_CELL_GAP + 48),
+        CONTENT_X + col * (WP_CELL_W + WP_CELL_GAP),
+        WP_GALLERY_Y + row * (WP_CELL_H + WP_CELL_GAP),
     )
 }
 
@@ -2502,7 +2845,15 @@ fn wp_cell_origin(i: usize) -> (usize, usize) {
 fn wp_cell_at(px: u32, py: u32) -> Option<usize> {
     for i in 0..std::design::walls::SCENES.len() {
         let (cx0, cy0) = wp_cell_origin(i);
-        if in_round_rect(px as usize, py as usize, cx0, cy0, WP_CELL_W, WP_CELL_H, 24) {
+        if in_round_rect(
+            px as usize,
+            py as usize,
+            cx0,
+            cy0,
+            WP_CELL_W,
+            WP_CELL_H,
+            CARD_R,
+        ) {
             return Some(i);
         }
     }
@@ -2513,20 +2864,26 @@ fn wp_cell_at(px: u32, py: u32) -> Option<usize> {
 ///
 /// WHY the preview shows a horizontal slice of the scene rather than the whole
 /// of it: a wallpaper is chosen by how it fills a 9:20 screen, so showing the
-/// whole surface at once in a 672x520 box would shrink it to a thumbnail and
-/// hide the part that matters -- whether the horizon lands above or behind the
-/// status bar. The slice shown is the upper half, which is where the sky, the
-/// ridge and the status bar all end up.
+/// whole surface at once in this box would shrink it to a thumbnail and hide the
+/// part that matters -- whether the horizon lands above or behind the status bar.
+/// The slice shown is the scene's upper rows, which is where the sky, the ridge
+/// and the status bar all end up.
 fn wp_preview_slice(scene: &std::design::walls::Scene, x: usize, y: usize) -> u32 {
     let sy = WP_PREVIEW_Y + (y * 1440) / (WP_PREVIEW_H * 4).min(1440);
-    let sx = WP_X + (x * 720) / WP_W;
+    let sx = CONTENT_X + (x * 720) / CONTENT_W;
     std::design::walls::scene_pixel(scene, sx.min(719), sy.min(1439), 720, 1440)
 }
 
-/// The target selector's three segments.
+/// The target selector's three segments: a segmented control on the doc's control
+/// rung, with the doc's 4px segment gap so the three read as one control.
 fn wp_segment_rect(i: usize) -> (usize, usize, usize, usize) {
-    let seg_w = (WP_W - 2 * 16) / 3;
-    (WP_X + i * (seg_w + 16), WP_TARGET_Y, seg_w, WP_TARGET_H)
+    let seg_w = (CONTENT_W - 2 * SEG_GAP) / 3;
+    (
+        CONTENT_X + i * (seg_w + SEG_GAP),
+        WP_TARGET_Y,
+        seg_w,
+        WP_TARGET_H,
+    )
 }
 
 /// The wallpaper picker panel.
@@ -2537,18 +2894,19 @@ fn wp_segment_rect(i: usize) -> (usize, usize, usize, usize) {
 /// integer step, not a text metric.
 fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
     // WHY there is no "y < 104 is empty" early return: the header below is drawn
-    // at y 40 and y 84, so this return was erasing the panel's own title and
+    // at y 32 and y 88, so this return was erasing the panel's own title and
     // subtitle. It survives as the last few rows of the subtitle, which is why
     // the header looked clipped rather than missing.
-    // Header.
+    // Header, on the shared header geometry the detail screens use, so the title
+    // of a panel and the title of the screen it was opened from line up.
     if let Some(c) = run_ink(
         x,
         y,
-        WP_X + 72,
-        40,
-        2,
+        HEADER_X,
+        HEADER_Y,
+        TYPE_DISPLAY,
         b"Wallpaper",
-        WP_W - 72,
+        W - HEADER_X - MARGIN,
         TEXT,
         BG,
         true,
@@ -2558,11 +2916,11 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
     if let Some(c) = run_ink(
         x,
         y,
-        WP_X + 72,
-        84,
-        1,
+        HEADER_X,
+        HEADER_SUB_Y,
+        TYPE_H3,
         b"Shown on the lock screen and the home surface",
-        WP_W - 72,
+        W - HEADER_X - MARGIN,
         TEXT_MUTED,
         BG,
         false,
@@ -2574,7 +2932,15 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
     if (WP_PREVIEW_Y..WP_PREVIEW_Y + WP_PREVIEW_H).contains(&y) {
         let preview = app.wallpaper_preview();
         let base = wp_preview_slice(preview, x, y);
-        if !in_round_rect(x, y, WP_X, WP_PREVIEW_Y, WP_W, WP_PREVIEW_H, 24) {
+        if !in_round_rect(
+            x,
+            y,
+            CONTENT_X,
+            WP_PREVIEW_Y,
+            CONTENT_W,
+            WP_PREVIEW_H,
+            WP_PREVIEW_R,
+        ) {
             return BG;
         }
         // Name plate over the lower edge of the preview, so the scene in view is
@@ -2582,34 +2948,40 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
         //
         // WHY the plate's polarity is decided from the wallpaper pixel under it
         // and not from the scene's palette: the plate sits at the bottom of the
-        // strip, which is the scene's foreground half, and a scene whose sky is
-        // light has a dark foreground. Deciding polarity from the sky would put
-        // dark ink on dark rock.
-        if y > WP_PREVIEW_Y + WP_PREVIEW_H - 72
+        // strip, and a scene whose sky is light has a dark foreground. Deciding
+        // polarity from the sky would put dark ink on dark rock.
+        let plate_y = WP_PREVIEW_Y + WP_PREVIEW_H - MARGIN - PLATE_H;
+        if y >= plate_y
             && in_round_rect(
                 x,
                 y,
-                WP_X + 20,
-                WP_PREVIEW_Y + WP_PREVIEW_H - 60,
-                WP_W - 40,
-                44,
-                14,
+                CONTENT_X + PLATE_INSET,
+                plate_y,
+                CONTENT_W - 2 * PLATE_INSET,
+                PLATE_H,
+                CONTROL_R,
             )
         {
             let dark_under = wall_luma(base) < 96;
+            // WHY both inks come from `design::color` with the alpha forced
+            // afterwards: this pair used to be four literals, two of which were
+            // the palette's own text and base in disguise.
             let (ink, plate) = if dark_under {
-                (0xFFF5F6F7u32, 0xCC111214u32)
+                (
+                    std::design::color::DARK_TEXT,
+                    with_alpha(std::design::color::DARK_BACKGROUND, PLATE_ALPHA),
+                )
             } else {
-                (0xFF111214u32, 0xCCF7F6F2u32)
+                (TEXT, with_alpha(BG, PLATE_ALPHA))
             };
             if let Some(c) = run_ink(
                 x,
                 y,
-                WP_X + 36,
-                WP_PREVIEW_Y + WP_PREVIEW_H - 48,
-                1,
+                CONTENT_X + PLATE_INSET + CARD_GAP,
+                plate_y + (PLATE_H - LINE_H) / 2,
+                TYPE_H3,
                 preview.name,
-                WP_W - 72,
+                CONTENT_W - 2 * PLATE_INSET - 2 * CARD_GAP,
                 ink,
                 plate,
                 false,
@@ -2625,47 +2997,34 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
     if (WP_TARGET_Y..WP_TARGET_Y + WP_TARGET_H).contains(&y) {
         for i in 0..WallpaperTarget::COUNT {
             let (sx0, sy0, sw, sh) = wp_segment_rect(i);
-            if !in_round_rect(x, y, sx0, sy0, sw, sh, 14) {
-                continue;
-            }
             let selected = WallpaperTarget::from_index(i) == app.wallpaper_target;
-            let fill = if selected { ACCENT } else { SOFT };
-            if !in_round_rect(x + 1, y + 1, sx0 + 1, sy0 + 1, sw - 2, sh - 2, 13) {
-                return BORDER;
-            }
-            let ink = if selected { SURFACE } else { TEXT };
             let label = WallpaperTarget::from_index(i).label();
-            let lw = run_w(label, 1, true);
-            if let Some(c) = run_ink(
-                x,
-                y,
-                sx0 + (sw - lw) / 2,
-                sy0 + (sh - 16) / 2,
-                1,
-                label,
-                sw,
-                ink,
-                fill,
-                true,
-            ) {
+            if let Some(c) = segment_pixel(x, y, sx0, sy0, sw, sh, label, selected) {
                 return c;
             }
-            return fill;
         }
         return BG;
     }
 
     // Gallery.
-    if y >= WP_GALLERY_Y && y < WP_ACTION_Y - 40 {
+    if y >= WP_GALLERY_Y && y < WP_ACTION_Y {
         for i in 0..std::design::walls::SCENES.len() {
             let (cx0, cy0) = wp_cell_origin(i);
-            if !in_round_rect(x, y, cx0, cy0, WP_CELL_W, WP_CELL_H, 24) {
+            if !in_round_rect(x, y, cx0, cy0, WP_CELL_W, WP_CELL_H, CARD_R) {
                 continue;
             }
             let scene = &std::design::walls::SCENES[i];
             let is_pending = app.wallpaper_pending == Some(scene);
             let ring = if is_pending { ACCENT } else { BORDER };
-            if !in_round_rect(x + 3, y + 3, cx0 + 3, cy0 + 3, WP_CELL_W - 6, WP_CELL_H - 6, 22) {
+            if !in_round_rect(
+                x + 3,
+                y + 3,
+                cx0 + 3,
+                cy0 + 3,
+                WP_CELL_W - 6,
+                WP_CELL_H - 6,
+                CARD_R - 3,
+            ) {
                 return ring;
             }
             // Thumbnail: a band of the scene rather than a swatch, so a gallery
@@ -2677,11 +3036,11 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
             // of it is invisible against the white card it sits on. The full
             // composition reaches the dark foreground, which is what makes an
             // entry recognisable at thumbnail size.
-            let bx = cx0 + 20;
-            let by = cy0 + 16;
-            let bw = WP_CELL_W - 40;
-            let bh = WP_CELL_H - 76;
-            if in_round_rect(x, y, bx, by, bw, bh, 16) {
+            let bx = cx0 + WP_CELL_PAD;
+            let by = cy0 + WP_CELL_PAD;
+            let bw = WP_CELL_W - 2 * WP_CELL_PAD;
+            let bh = WP_THUMB_H;
+            if in_round_rect(x, y, bx, by, bw, bh, IMAGE_R) {
                 let tx = ((x - bx) * 720) / bw;
                 // Sample the scene's top three quarters: the sky, the ridge line
                 // and part of the foreground, which is the range that actually
@@ -2695,15 +3054,20 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                     1440,
                 );
             }
-            let lw = run_w(scene.name, 1, true);
+            let lw = run_w(scene.name, TYPE_H3, true);
+            let lx = if lw + 2 * WP_CELL_PAD >= WP_CELL_W {
+                cx0 + WP_CELL_PAD
+            } else {
+                cx0 + (WP_CELL_W - lw) / 2
+            };
             if let Some(c) = run_ink(
                 x,
                 y,
-                cx0 + (WP_CELL_W - lw.min(WP_CELL_W - 24)) / 2,
-                cy0 + WP_CELL_H - 48,
-                1,
+                lx,
+                cy0 + WP_CELL_H - WP_CELL_PAD - LINE_H,
+                TYPE_H3,
                 scene.name,
-                WP_CELL_W - 24,
+                WP_CELL_W - 2 * WP_CELL_PAD,
                 TEXT,
                 SURFACE,
                 true,
@@ -2717,9 +3081,24 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
 
     // Actions.
     if (WP_ACTION_Y..WP_ACTION_Y + WP_ACTION_H).contains(&y) {
-        let half = (WP_W - 16) / 2;
-        let apply = in_round_rect(x, y, WP_X, WP_ACTION_Y, half, WP_ACTION_H, 16);
-        let reset = in_round_rect(x, y, WP_X + half + 16, WP_ACTION_Y, half, WP_ACTION_H, 16);
+        let apply = in_round_rect(
+            x,
+            y,
+            CONTENT_X,
+            WP_ACTION_Y,
+            BUTTON_HALF,
+            BUTTON_H,
+            BUTTON_H / 2,
+        );
+        let reset = in_round_rect(
+            x,
+            y,
+            CONTENT_X + BUTTON_HALF + CARD_GAP,
+            WP_ACTION_Y,
+            BUTTON_HALF,
+            BUTTON_H,
+            BUTTON_H / 2,
+        );
         if !apply && !reset {
             return BG;
         }
@@ -2727,48 +3106,41 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
         // selection exists: an enabled-looking Apply with nothing to write is the
         // dead control this app's contract forbids.
         let enabled = app.wallpaper_pending.is_some();
-        let fill = if apply {
-            if enabled { ACCENT } else { SOFT }
+        // WHY Apply is the palette's primary ink and Reset the soft fill: the
+        // reference `PrimaryButton` is a dark pill and `SecondaryButton` a soft
+        // one, and this panel has exactly one of each.
+        let (label, bx, fill, ink, rim) = if apply {
+            (
+                b"Apply".as_slice(),
+                CONTENT_X,
+                if enabled { TEXT } else { SOFT },
+                if enabled { SURFACE } else { TEXT_MUTED },
+                if enabled { None } else { Some(BORDER) },
+            )
         } else {
-            SURFACE
+            (
+                b"Reset to default".as_slice(),
+                CONTENT_X + BUTTON_HALF + CARD_GAP,
+                SOFT,
+                TEXT,
+                Some(BORDER),
+            )
         };
-        let ink = if apply && enabled { SURFACE } else { TEXT_MUTED };
-        if (apply
-            && !in_round_rect(x + 1, y + 1, WP_X + 1, WP_ACTION_Y + 1, half - 2, WP_ACTION_H - 2, 15))
-            || (!apply
-                && !in_round_rect(
-                    x + 1,
-                    y + 1,
-                    WP_X + half + 17,
-                    WP_ACTION_Y + 1,
-                    half - 2,
-                    WP_ACTION_H - 2,
-                    15,
-                ))
-        {
-            return BORDER;
-        }
-        let (label, x0) = if apply {
-            (b"Apply".as_slice(), WP_X)
-        } else {
-            (b"Reset to default".as_slice(), WP_X + half + 16)
-        };
-        let lw = run_w(label, 1, true);
-        if let Some(c) = run_ink(
+        if let Some(c) = button_pixel(
             x,
             y,
-            x0 + (half - lw) / 2,
-            WP_ACTION_Y + (WP_ACTION_H - 16) / 2,
-            1,
+            bx,
+            WP_ACTION_Y,
+            BUTTON_HALF,
+            BUTTON_H,
             label,
-            half,
-            ink,
             fill,
-            true,
+            ink,
+            rim,
         ) {
             return c;
         }
-        return fill;
+        return BG;
     }
 
     // Outcome line.
@@ -2794,7 +3166,18 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                 ),
             },
         };
-        if let Some(c) = run_ink(x, y, WP_X, WP_STATUS_Y, 1, line, WP_W, ink, BG, false) {
+        if let Some(c) = run_ink(
+            x,
+            y,
+            CONTENT_X,
+            WP_STATUS_Y,
+            TYPE_H3,
+            line,
+            CONTENT_W,
+            ink,
+            BG,
+            false,
+        ) {
             return c;
         }
     }
@@ -2803,11 +3186,16 @@ fn wallpaper_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
 }
 
 /// Hit-test for the picker's three interactive regions.
+///
+/// WHY every region uses the same radius the painter uses: the drawer and the
+/// hit-test used to disagree (14 drawn, 16 tested), so the corners of a segment
+/// answered taps that landed on the base. One radius per component removes that
+/// class of bug rather than fixing an instance of it.
 fn wallpaper_at(px: u32, py: u32) -> Option<WallpaperHit> {
     if (WP_TARGET_Y..WP_TARGET_Y + WP_TARGET_H).contains(&(py as usize)) {
         for i in 0..WallpaperTarget::COUNT {
             let (sx0, sy0, sw, sh) = wp_segment_rect(i);
-            if in_round_rect(px as usize, py as usize, sx0, sy0, sw, sh, 14) {
+            if in_round_rect(px as usize, py as usize, sx0, sy0, sw, sh, CONTROL_R) {
                 return Some(WallpaperHit::Target(i));
             }
         }
@@ -2816,26 +3204,25 @@ fn wallpaper_at(px: u32, py: u32) -> Option<WallpaperHit> {
         return Some(WallpaperHit::Cell(i));
     }
     if (WP_ACTION_Y..WP_ACTION_Y + WP_ACTION_H).contains(&(py as usize)) {
-        let half = (WP_W - 16) / 2;
         if in_round_rect(
             px as usize,
             py as usize,
-            WP_X,
+            CONTENT_X,
             WP_ACTION_Y,
-            half,
-            WP_ACTION_H,
-            16,
+            BUTTON_HALF,
+            BUTTON_H,
+            BUTTON_H / 2,
         ) {
             return Some(WallpaperHit::Apply);
         }
         if in_round_rect(
             px as usize,
             py as usize,
-            WP_X + half + 16,
+            CONTENT_X + BUTTON_HALF + CARD_GAP,
             WP_ACTION_Y,
-            half,
-            WP_ACTION_H,
-            16,
+            BUTTON_HALF,
+            BUTTON_H,
+            BUTTON_H / 2,
         ) {
             return Some(WallpaperHit::Reset);
         }
@@ -2885,7 +3272,7 @@ fn sl_digit(row: usize, col: usize) -> Option<u8> {
 /// Top-left of keypad key `row`/`col`.
 fn sl_key_origin(row: usize, col: usize) -> (usize, usize) {
     (
-        SL_X + col * (SL_KEY_W + SL_KEY_GAP),
+        CONTENT_X + col * (SL_KEY_W + SL_KEY_GAP),
         SL_KEYS_Y + row * (SL_KEY_H + SL_KEY_GAP),
     )
 }
@@ -2988,17 +3375,19 @@ fn sl_write_line(app: &SettingsApp) -> &'static [u8] {
 /// The screen-lock panel, answering per pixel like every other surface here.
 fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
     // WHY there is no "y < 104 is empty" early return here: the header lives at
-    // y 40 and y 84, so such a return erases the title and the subtitle and left
+    // y 32 and y 88, so such a return erases the title and the subtitle and left
     // only the subtitle's top rows visible above the card. The panel fills its
     // own background at the end of this function instead.
+    // Header on the shared header geometry, so a panel opened from a detail row
+    // keeps that row's title on the same line.
     if let Some(c) = run_ink(
         x,
         y,
-        SL_X + 72,
-        40,
-        2,
+        HEADER_X,
+        HEADER_Y,
+        TYPE_DISPLAY,
         b"Screen lock",
-        SL_W - 72,
+        W - HEADER_X - MARGIN,
         TEXT,
         BG,
         true,
@@ -3008,11 +3397,11 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
     if let Some(c) = run_ink(
         x,
         y,
-        SL_X + 72,
-        84,
-        1,
+        HEADER_X,
+        HEADER_SUB_Y,
+        TYPE_H3,
         b"Set, change or remove the PIN this device asks for",
-        SL_W - 72,
+        W - HEADER_X - MARGIN,
         TEXT_MUTED,
         BG,
         false,
@@ -3020,33 +3409,39 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
         return c;
     }
 
-    // Status card: the account layer's own answer, with its badge.
+    // Status card: the account layer's own answer, with its badge. It is a detail
+    // row card in every respect — same width, radius, padding and type rungs —
+    // because it is the same component playing the same role on another screen.
     if (SL_STATUS_Y..SL_STATUS_Y + SL_STATUS_H).contains(&y) {
         let (_, _, _, badge) = sl_state_line(app);
         let bw = badge_w(badge);
-        let bx0 = SL_X + SL_W - 24 - bw;
-        if in_round_rect(x, y, SL_X, SL_STATUS_Y, SL_W, SL_STATUS_H, 20) {
+        let bx0 = CONTENT_X + CONTENT_W - ROW_PAD - bw;
+        if in_round_rect(x, y, CONTENT_X, SL_STATUS_Y, CONTENT_W, SL_STATUS_H, CARD_R) {
             let inner = in_round_rect(
                 x,
                 y,
-                SL_X + 1,
+                CONTENT_X + 1,
                 SL_STATUS_Y + 1,
-                SL_W - 2,
+                CONTENT_W - 2,
                 SL_STATUS_H - 2,
-                19,
+                CARD_R - 1,
             );
             if !inner {
                 return BORDER;
             }
             let (headline, detail, ink, _) = sl_state_line(app);
+            // WHY the headline is the H3 rung and not the Display rung it used to
+            // be: it is a card's own heading, and the doc sizes a list label at
+            // Body/H3. Leaving it at Display made one card's heading the same rank
+            // as the panel's title.
             if let Some(c) = run_ink(
                 x,
                 y,
-                SL_X + 24,
-                SL_STATUS_Y + 32,
-                2,
+                CONTENT_X + ROW_PAD,
+                SL_STATUS_Y + ROW_TITLE_DY,
+                TYPE_H3,
                 headline,
-                SL_W - 48 - bw - 16,
+                CONTENT_W - 2 * ROW_PAD - bw - BADGE_GAP,
                 ink,
                 SURFACE,
                 true,
@@ -3056,18 +3451,18 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
             if let Some(c) = run_ink(
                 x,
                 y,
-                SL_X + 24,
-                SL_STATUS_Y + 88,
-                1,
+                CONTENT_X + ROW_PAD,
+                SL_STATUS_Y + ROW_CAP_DY,
+                TYPE_H3,
                 detail,
-                SL_W - 48,
+                CONTENT_W - 2 * ROW_PAD,
                 TEXT_MUTED,
                 SURFACE,
                 false,
             ) {
                 return c;
             }
-            if let Some(c) = badge_pixel(x, y, bx0, SL_STATUS_Y + 28, badge, TEXT, SURFACE) {
+            if let Some(c) = badge_pixel(x, y, bx0, SL_STATUS_Y + BADGE_DY, badge, TEXT, SURFACE) {
                 return c;
             }
             return SURFACE;
@@ -3077,29 +3472,54 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
 
     // Step prompt and the typed-entry dots, only while a step is in progress.
     if app.screen_lock_mode != ScreenLockMode::Idle {
-        if let Some(c) = run_ink(x, y, SL_X, SL_PROMPT_Y, 2, sl_prompt(app), SL_W, TEXT, BG, true) {
+        // WHY the prompt is the H3 rung: it is the panel's body text for the step
+        // in progress, one rank below the panel's own title. Display made the
+        // prompt compete with the title it belongs to.
+        if let Some(c) = run_ink(
+            x,
+            y,
+            CONTENT_X,
+            SL_PROMPT_Y,
+            TYPE_H3,
+            sl_prompt(app),
+            CONTENT_W,
+            TEXT,
+            BG,
+            true,
+        ) {
             return c;
         }
         let line = sl_error_line(app);
         if !line.is_empty() {
             let ink = DANGER;
-            if let Some(c) = run_ink(x, y, SL_X, SL_PROMPT_Y + 40, 1, line, SL_W, ink, BG, false) {
+            if let Some(c) = run_ink(
+                x,
+                y,
+                CONTENT_X,
+                SL_PROMPT_Y + SL_ERROR_DY,
+                TYPE_H3,
+                line,
+                CONTENT_W,
+                ink,
+                BG,
+                false,
+            ) {
                 return c;
             }
         }
         // Eight dots, one per digit the account layer accepts, filled to the
         // number typed so far. WHY eight and not four: the account layer accepts
         // 4..=8, and a pad that drew four could not show a longer entry.
-        let dot = 16usize;
-        let gap = 20usize;
+        let dot = SL_DOT;
+        let gap = SL_DOT_GAP;
         let total = 8 * dot + 7 * gap;
-        let dx0 = (SL_W - total) / 2;
+        let dx0 = (CONTENT_W - total) / 2;
         let filled = app.screen_lock_len;
         for i in 0..8usize {
-            let cx0 = SL_X + dx0 + i * (dot + gap);
+            let cx0 = CONTENT_X + dx0 + i * (dot + gap);
             let cy0 = SL_DOTS_Y;
-            if in_round_rect(x, y, cx0, cy0, dot, dot, 8) {
-                let inner = in_round_rect(x, y, cx0 + 2, cy0 + 2, dot - 4, dot - 4, 6);
+            if in_round_rect(x, y, cx0, cy0, dot, dot, SL_DOT_R) {
+                let inner = in_round_rect(x, y, cx0 + 2, cy0 + 2, dot - 4, dot - 4, SL_DOT_R - 2);
                 if !inner {
                     return BORDER;
                 }
@@ -3109,14 +3529,22 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
     }
 
     // Keypad.
-    if y >= SL_KEYS_Y && y < SL_KEYS_Y + 4 * (SL_KEY_H + SL_KEY_GAP) - SL_KEY_GAP {
+    if y >= SL_KEYS_Y && y < SL_KEYS_BOTTOM {
         for row in 0..4usize {
             for col in 0..3usize {
                 let (kx, ky) = sl_key_origin(row, col);
-                if !in_round_rect(x, y, kx, ky, SL_KEY_W, SL_KEY_H, 24) {
+                if !in_round_rect(x, y, kx, ky, SL_KEY_W, SL_KEY_H, SL_KEY_R) {
                     continue;
                 }
-                let inner = in_round_rect(x, y, kx + 2, ky + 2, SL_KEY_W - 4, SL_KEY_H - 4, 22);
+                let inner = in_round_rect(
+                    x,
+                    y,
+                    kx + 2,
+                    ky + 2,
+                    SL_KEY_W - 4,
+                    SL_KEY_H - 4,
+                    SL_KEY_R - 2,
+                );
                 if !inner {
                     return BORDER;
                 }
@@ -3128,15 +3556,23 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
                     None if col == 0 => b"CLR",
                     None => b"OK",
                 };
-                let lw = run_w(label, 1, true);
+                let lw = run_w(label, TYPE_H3, true);
+                // WHY the label is fitted before it is centred: `SL_KEY_W - lw`
+                // underflows in usize when a label is wider than its key, and the
+                // wrapped origin then puts the text off the key altogether.
+                let lx = if lw + 2 * std::design::spacing::GRID_8 >= SL_KEY_W {
+                    kx + std::design::spacing::GRID_8
+                } else {
+                    kx + (SL_KEY_W - lw) / 2
+                };
                 if let Some(c) = run_ink(
                     x,
                     y,
-                    kx + (SL_KEY_W - lw) / 2,
-                    ky + (SL_KEY_H - 16) / 2,
-                    1,
+                    lx,
+                    ky + (SL_KEY_H - LINE_H) / 2,
+                    TYPE_H3,
                     label,
-                    SL_KEY_W,
+                    SL_KEY_W - 2 * std::design::spacing::GRID_8,
                     TEXT,
                     SURFACE,
                     true,
@@ -3151,19 +3587,43 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
 
     // Action row: what the reported state actually allows.
     if (SL_ACTION_Y..SL_ACTION_Y + SL_ACTION_H).contains(&y) {
-        let half = (SL_W - 16) / 2;
+        let half = BUTTON_HALF;
         let has_pin = app.screen_lock_has_pin();
         // WHY the row is tested as ONE full-width button when no PIN exists: the
         // first pass still split it into halves and drew only the left one, which
         // left the right half of a visible full-width button as background and
         // clipped the label against the half it did draw.
-        let left = in_round_rect(x, y, SL_X, SL_ACTION_Y, half, SL_ACTION_H, 16);
+        let left = in_round_rect(
+            x,
+            y,
+            CONTENT_X,
+            SL_ACTION_Y,
+            half,
+            SL_ACTION_H,
+            SL_ACTION_H / 2,
+        );
         let right = has_pin
-            && in_round_rect(x, y, SL_X + half + 16, SL_ACTION_Y, half, SL_ACTION_H, 16);
+            && in_round_rect(
+                x,
+                y,
+                CONTENT_X + half + CARD_GAP,
+                SL_ACTION_Y,
+                half,
+                SL_ACTION_H,
+                SL_ACTION_H / 2,
+            );
         let inside = if has_pin {
             left || right
         } else {
-            in_round_rect(x, y, SL_X, SL_ACTION_Y, SL_W, SL_ACTION_H, 16)
+            in_round_rect(
+                x,
+                y,
+                CONTENT_X,
+                SL_ACTION_Y,
+                CONTENT_W,
+                SL_ACTION_H,
+                SL_ACTION_H / 2,
+            )
         };
         if !inside {
             return BG;
@@ -3173,46 +3633,70 @@ fn screen_lock_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
         // remove, and an account with one has nothing to establish. Drawing both
         // would put a second identical "Set PIN" on the screen -- which is what
         // the first pass of this panel did.
-        let (label, fill, ink): (&[u8], u32, u32) = if !has_pin {
-            (&b"Set a screen lock PIN"[..], ACCENT, SURFACE)
+        //
+        // WHY the fills follow the reference buttons: "Set a screen lock PIN" is
+        // this panel's one primary action and takes the dark pill; the other two
+        // are secondary and take the soft fill, with the destructive one in the
+        // palette's danger ink rather than a filled red block.
+        let (label, bx, bw, fill, ink, rim): (&[u8], usize, usize, u32, u32, Option<u32>) = if !has_pin {
+            (
+                &b"Set a screen lock PIN"[..],
+                CONTENT_X,
+                CONTENT_W,
+                TEXT,
+                SURFACE,
+                None,
+            )
         } else if left {
-            (&b"Change PIN"[..], SURFACE, TEXT)
+            (
+                &b"Change PIN"[..],
+                CONTENT_X,
+                half,
+                SOFT,
+                TEXT,
+                Some(BORDER),
+            )
         } else {
-            (&b"Remove PIN"[..], SURFACE, DANGER)
+            (
+                &b"Remove PIN"[..],
+                CONTENT_X + half + CARD_GAP,
+                half,
+                SOFT,
+                DANGER,
+                Some(BORDER),
+            )
         };
-        let (bx, bw) = if has_pin {
-            (if left { SL_X } else { SL_X + half + 16 }, half)
-        } else {
-            (SL_X, SL_W)
-        };
-        if !in_round_rect(x, y, bx + 1, SL_ACTION_Y + 1, bw - 2, SL_ACTION_H - 2, 15) {
-            return BORDER;
-        }
-        let lw = run_w(label, 1, true);
-        // WHY the label is fitted before it is centred: `bw - lw` underflows in
-        // usize when a label is wider than its button, and the wrapped origin put
-        // the text off the surface with the button drawn only part-way.
-        let origin = if lw >= bw { bx + 16 } else { bx + (bw - lw) / 2 };
-        if let Some(c) = run_ink(
+        if let Some(c) = button_pixel(
             x,
             y,
-            origin,
-            SL_ACTION_Y + (SL_ACTION_H - 16) / 2,
-            1,
+            bx,
+            SL_ACTION_Y,
+            bw,
+            SL_ACTION_H,
             label,
-            bw - 32,
-            ink,
             fill,
-            true,
+            ink,
+            rim,
         ) {
             return c;
         }
-        return fill;
+        return BG;
     }
 
     // Outcome line.
     if y >= SL_NOTE_Y {
-        if let Some(c) = run_ink(x, y, SL_X, SL_NOTE_Y, 1, sl_write_line(app), SL_W, TEXT_MUTED, BG, false) {
+        if let Some(c) = run_ink(
+            x,
+            y,
+            CONTENT_X,
+            SL_NOTE_Y,
+            TYPE_H3,
+            sl_write_line(app),
+            CONTENT_W,
+            TEXT_MUTED,
+            BG,
+            false,
+        ) {
             return c;
         }
     }
@@ -3233,10 +3717,10 @@ fn run_one_digit(
     bg: u32,
 ) -> u32 {
     let adv = std::design::font::advance_of(digit[0], true);
-    let w = adv * 2;
+    let w = adv * TYPE_DISPLAY;
     let ox = kx + (SL_KEY_W - w) / 2;
-    let oy = ky + (SL_KEY_H - std::design::font::line_height(2)) / 2;
-    match run_ink(x, y, ox, oy, 2, digit, SL_KEY_W, ink, bg, true) {
+    let oy = ky + (SL_KEY_H - std::design::font::line_height(TYPE_DISPLAY)) / 2;
+    match run_ink(x, y, ox, oy, TYPE_DISPLAY, digit, SL_KEY_W, ink, bg, true) {
         Some(c) => c,
         None => bg,
     }
@@ -3267,7 +3751,7 @@ fn screen_lock_at(px: u32, py: u32, app: &SettingsApp) -> Option<ScreenLockHit> 
         for row in 0..4usize {
             for col in 0..3usize {
                 let (kx, ky) = sl_key_origin(row, col);
-                if in_round_rect(x, y, kx, ky, SL_KEY_W, SL_KEY_H, 24) {
+                if in_round_rect(x, y, kx, ky, SL_KEY_W, SL_KEY_H, SL_KEY_R) {
                     return Some(match sl_digit(row, col) {
                         Some(d) => ScreenLockHit::Digit(d),
                         None if col == 0 => ScreenLockHit::Clear,
@@ -3278,20 +3762,44 @@ fn screen_lock_at(px: u32, py: u32, app: &SettingsApp) -> Option<ScreenLockHit> 
         }
     }
     if (SL_ACTION_Y..SL_ACTION_Y + SL_ACTION_H).contains(&y) {
-        let half = (SL_W - 16) / 2;
+        let half = BUTTON_HALF;
         let has_pin = app.screen_lock_has_pin();
         // WHY the hit regions mirror the drawn geometry exactly: with no PIN the
         // single button spans the full width, so only testing the left half
         // would leave the right half of a visible button inert.
         if !has_pin {
-            if in_round_rect(x, y, SL_X, SL_ACTION_Y, SL_W, SL_ACTION_H, 16) {
+            if in_round_rect(
+                x,
+                y,
+                CONTENT_X,
+                SL_ACTION_Y,
+                CONTENT_W,
+                SL_ACTION_H,
+                SL_ACTION_H / 2,
+            ) {
                 return Some(ScreenLockHit::Primary);
             }
         } else {
-            if in_round_rect(x, y, SL_X, SL_ACTION_Y, half, SL_ACTION_H, 16) {
+            if in_round_rect(
+                x,
+                y,
+                CONTENT_X,
+                SL_ACTION_Y,
+                half,
+                SL_ACTION_H,
+                SL_ACTION_H / 2,
+            ) {
                 return Some(ScreenLockHit::Primary);
             }
-            if in_round_rect(x, y, SL_X + half + 16, SL_ACTION_Y, half, SL_ACTION_H, 16) {
+            if in_round_rect(
+                x,
+                y,
+                CONTENT_X + half + CARD_GAP,
+                SL_ACTION_Y,
+                half,
+                SL_ACTION_H,
+                SL_ACTION_H / 2,
+            ) {
                 return Some(ScreenLockHit::Remove);
             }
         }
@@ -3302,7 +3810,11 @@ fn screen_lock_at(px: u32, py: u32, app: &SettingsApp) -> Option<ScreenLockHit> 
 #[inline(never)]
 fn get_settings_pixel(x: usize, y: usize, app: &SettingsApp) -> u32 {
     // Home gesture pill (matches the touch handler's exit region).
-    if y >= 1418 && y < 1424 && x >= 260 && x < 460 {
+    if y >= GESTURE_Y
+        && y < GESTURE_Y + GESTURE_H
+        && x >= GESTURE_X
+        && x < GESTURE_X + GESTURE_W
+    {
         return GESTURE_BAR;
     }
     // Shared 48x48 back control, top-left of both screens.
@@ -3369,8 +3881,8 @@ fn render_settings_band(surface: u32, app: &SettingsApp, y0: usize, y1: usize) {
 fn profile_segment_at(px: u32, py: u32) -> Option<usize> {
     let (cy, _) = detail_row_rect(Section::Power, 1);
     for i in 0..3 {
-        let sx = SEG_X + i * (SEG_W + SEG_GAP);
-        if in_round_rect(px as usize, py as usize, sx, cy + 112, SEG_W, SEG_H, 12) {
+        let sx = CONTENT_X + ROW_PAD + i * (SEG_W + SEG_GAP);
+        if in_round_rect(px as usize, py as usize, sx, cy + SEG_DY, SEG_W, SEG_H, CONTROL_R) {
             return Some(i);
         }
     }
@@ -3465,7 +3977,7 @@ pub extern "C" fn _start() -> ! {
                             BACK_Y,
                             BACK_S,
                             BACK_S,
-                            14,
+                            BACK_R,
                         ) {
                             // WHY the panels pop first: Back from one must return to the
                             // detail it was opened from, and a Back that jumped
