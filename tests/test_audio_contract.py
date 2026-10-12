@@ -1,9 +1,9 @@
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
-pcm = (ROOT / "kernel/src/audio/pcm.rs").read_text()
-audio = (ROOT / "kernel/src/audio/mod.rs").read_text()
-syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text()
+pcm = (ROOT / "kernel/src/audio/pcm.rs").read_text(encoding="utf-8")
+audio = (ROOT / "kernel/src/audio/mod.rs").read_text(encoding="utf-8")
+syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
 
 assert "PCM_MAX_FRAMES: usize = 48_000" in pcm
 assert "PCM_MAX_BYTES: usize = PCM_MAX_FRAMES * 2 * 2" in pcm

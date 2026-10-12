@@ -8,14 +8,14 @@ def must(text: str, needle: str, label: str) -> None:
     assert needle in text, f"missing {label}: {needle}"
 
 def main() -> None:
-    drivers = (ROOT / "kernel/src/drivers/display.rs").read_text()
-    driver_mod = (ROOT / "kernel/src/drivers/mod.rs").read_text()
-    kms = (ROOT / "kernel/src/drivers/display_kms.rs").read_text()
-    syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text()
-    sdk = (ROOT / "sdk/rust/interos-std/src/lib.rs").read_text()
-    service = (ROOT / "userspace/system-service/src/lib.rs").read_text()
-    displayd = (ROOT / "userspace/system-service/src/bin/displayd.rs").read_text()
-    user = (ROOT / "kernel/src/task/user.rs").read_text()
+    drivers = (ROOT / "kernel/src/drivers/display.rs").read_text(encoding="utf-8")
+    driver_mod = (ROOT / "kernel/src/drivers/mod.rs").read_text(encoding="utf-8")
+    kms = (ROOT / "kernel/src/drivers/display_kms.rs").read_text(encoding="utf-8")
+    syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
+    sdk = (ROOT / "sdk/rust/interos-std/src/lib.rs").read_text(encoding="utf-8")
+    service = (ROOT / "userspace/system-service/src/lib.rs").read_text(encoding="utf-8")
+    displayd = (ROOT / "userspace/system-service/src/bin/displayd.rs").read_text(encoding="utf-8")
+    user = (ROOT / "kernel/src/task/user.rs").read_text(encoding="utf-8")
 
     must(driver_mod, "pub mod display;", "display driver module")
     must(driver_mod, "pub use display::{DisplayDriver, KmsDisplayDriver};", "display boundary export")
@@ -30,7 +30,7 @@ def main() -> None:
     ):
         must(drivers, marker, f"display boundary {marker}")
     must(kms, "pub fn write_surface_pixels", "KMS pixel write backend")
-    fb=(ROOT/"kernel/src/framebuffer.rs").read_text()
+    fb=(ROOT/"kernel/src/framebuffer.rs").read_text(encoding="utf-8")
     must(fb,"pub fn present_argb8888","hardware framebuffer scanout")
     must(fb,"aspect ratio","hardware scanout scaling")
     must(kms, "pub fn destroy_surface_owned", "KMS owned surface destruction")
@@ -61,7 +61,7 @@ def main() -> None:
     ):
         must(sdk, marker, f"display SDK ABI {marker}")
 
-    services = (ROOT / "kernel/src/services.rs").read_text()
+    services = (ROOT / "kernel/src/services.rs").read_text(encoding="utf-8")
     must(services, "cap_type: CapabilityType::FrameBufferDirect, rights: Rights::WRITE, object_id: 1",
          "displayd-only framebuffer capability")
     must(service, "pub fn run_display() -> !", "dedicated display service loop")

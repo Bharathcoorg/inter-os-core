@@ -10,11 +10,11 @@ def must_absent(text, needle, label):
     assert needle not in text, f"{label} (found {needle!r})"
 
 def main():
-    svc = (ROOT / "userspace/system-service/src/lib.rs").read_text()
-    bin_ = (ROOT / "userspace/system-service/src/bin/netd.rs").read_text()
-    sdk = (ROOT / "sdk/rust/interos-std/src/lib.rs").read_text()
-    syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text()
-    user = (ROOT / "kernel/src/task/user.rs").read_text()
+    svc = (ROOT / "userspace/system-service/src/lib.rs").read_text(encoding="utf-8")
+    bin_ = (ROOT / "userspace/system-service/src/bin/netd.rs").read_text(encoding="utf-8")
+    sdk = (ROOT / "sdk/rust/interos-std/src/lib.rs").read_text(encoding="utf-8")
+    syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
+    user = (ROOT / "kernel/src/task/user.rs").read_text(encoding="utf-8")
 
     for needle in (
         "pub fn run_network() -> !",
@@ -27,9 +27,12 @@ def main():
 
     # A loopback self-send is not network traffic. netd previously transmitted
     # to its own bound socket, read the same datagram back out of the loopback
-    # ring and logged it as an externally received packet. The contract is that
-    # no such self-send exists and no external arrival is claimed while no
-    # network device is attached.
+    # ring and logged it as an externally received packet. The kernel now binds
+    # a real E1000 NIC (ENABLE_E1000_BINDING is enabled after the descriptor DMA
+    # mapping was verified), but that changes only the physical backend, not the
+    # netd honesty contract: the assertions below still require that no such
+    # self-send exists and that netd never claims an external arrival it did not
+    # actually receive from the device.
     must_absent(svc, "net_send_socket(socket, [127, 0, 0, 1], 4242",
                 "netd must not transmit to its own loopback socket")
     must_absent(svc, "External UDP packet",
@@ -81,14 +84,14 @@ def main():
     must(syscall, "if resolver.query(query_id).is_some()", "DNS bounded retry gate")
     must(user, "CapabilityType::NetworkSend", "netd TX capability")
     must(user, "CapabilityType::NetworkReceive", "netd RX capability")
-    tcp = (ROOT / "kernel/src/net/tcp.rs").read_text()
-    dns = (ROOT / "kernel/src/net/dns.rs").read_text()
-    net = (ROOT / "kernel/src/net/mod.rs").read_text()
+    tcp = (ROOT / "kernel/src/net/tcp.rs").read_text(encoding="utf-8")
+    dns = (ROOT / "kernel/src/net/dns.rs").read_text(encoding="utf-8")
+    net = (ROOT / "kernel/src/net/mod.rs").read_text(encoding="utf-8")
     must(tcp, "serialize_with_checksum", "TCP checksum serialization")
     must(tcp, "pub fn seq_lt", "TCP wrapping sequence comparison")
     must(tcp, "pub fn seq_gt", "TCP wrapping ACK comparison")
     must(tcp, "seq_gt(segment.ack, snd_nxt)", "wrap-safe ACK validation")
-    sock = (ROOT / "kernel/src/net/socket.rs").read_text()
+    sock = (ROOT / "kernel/src/net/socket.rs").read_text(encoding="utf-8")
     must(sock, "pub fn accept_rx_segment", "in-order TCP receive validation")
     must(sock, "seq != conn.recv_seq", "TCP sequence enforcement")
     must(net, "valid_syn_ack(&segment, conn.send_seq.wrapping_add(1))", "SYN-ACK acknowledgement validation")
@@ -105,15 +108,15 @@ def main():
     must(net, "entry.valid = false", "ARP request state cleanup")
 
     must(net, "insert_at(arp_pkt.sender_ip, arp_pkt.sender_mac", "bounded ARP cache refresh")
-    must((ROOT / "kernel/src/net/arp.rs").read_text(), "ARP_CACHE_TICKS", "ARP cache aging")
+    must((ROOT / "kernel/src/net/arp.rs").read_text(encoding="utf-8"), "ARP_CACHE_TICKS", "ARP cache aging")
     must(net, "acknowledge_tx", "TCP acknowledgement retirement")
     must(net, "transmit_tcp_payload(", "kernel-internal TCP retransmission path")
     must(net, "transmit_tcp_syn(", "kernel-internal TCP SYN retransmission path")
     must(net, "get_system_ticks()", "TCP retransmission timer source")
-    must((ROOT / "kernel/src/interrupts.rs").read_text(), "PIT_BASE_HZ", "PIT clock source")
-    must((ROOT / "kernel/src/interrupts.rs").read_text(), "SYSTEM_TICK_HZ: u32 = 1_000", "defined system tick frequency")
-    must((ROOT / "kernel/src/interrupts.rs").read_text(), "command.write(0x36u8)", "PIT channel 0 mode configuration")
-    must((ROOT / "kernel/src/main.rs").read_text(), "interrupts::init_pit()", "boot-time PIT initialization")
+    must((ROOT / "kernel/src/interrupts.rs").read_text(encoding="utf-8"), "PIT_BASE_HZ", "PIT clock source")
+    must((ROOT / "kernel/src/interrupts.rs").read_text(encoding="utf-8"), "SYSTEM_TICK_HZ: u32 = 1_000", "defined system tick frequency")
+    must((ROOT / "kernel/src/interrupts.rs").read_text(encoding="utf-8"), "command.write(0x36u8)", "PIT channel 0 mode configuration")
+    must((ROOT / "kernel/src/main.rs").read_text(encoding="utf-8"), "interrupts::init_pit()", "boot-time PIT initialization")
     must(net, "conn.syn_pending = false", "SYN acknowledgement retires retransmission state")
     must(net, "conn.syn_retries = 0", "SYN retry state resets after handshake")
     assert "TCP_TABLE.lock().acknowledge_syn" not in net, "SYN-ACK path must not re-lock TCP_TABLE while its guard is held"

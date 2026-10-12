@@ -39,24 +39,24 @@ def must(text: str, needle: str, label: str) -> None:
 
 
 def main() -> None:
-    system_service = (ROOT / "userspace/system-service/src/lib.rs").read_text()
-    storaged = (ROOT / "userspace/system-service/src/bin/storaged.rs").read_text()
-    user_task = (ROOT / "kernel/src/task/user.rs").read_text()
+    system_service = (ROOT / "userspace/system-service/src/lib.rs").read_text(encoding="utf-8")
+    storaged = (ROOT / "userspace/system-service/src/bin/storaged.rs").read_text(encoding="utf-8")
+    user_task = (ROOT / "kernel/src/task/user.rs").read_text(encoding="utf-8")
     must(system_service, "pub fn run_storage() -> !", "Userspace storage service entry")
     must(system_service, 'std::service_heartbeat(3)', "storaged lifecycle heartbeat")
     must(system_service, 'std::fs_open(4, "/data/audit.log", std::FS_WRITE)', "storaged filesystem capability usage")
     must(system_service, "std::fs_write(4, fd", "storaged userspace filesystem write")
     must(system_service, "std::fs_close(fd)", "storaged descriptor lifecycle")
     must(storaged, "interos_system_service::run_storage()", "storaged uses dedicated storage manager")
-    services = SERVICES.read_text()
+    services = SERVICES.read_text(encoding="utf-8")
     must(services, "ServiceId::Storage => {", "storaged capability policy")
     must(services, "CapabilityType::FileSystemRead", "storaged read capability")
     must(services, "CapabilityType::FileSystemWrite", "storaged write capability")
 
-    syscall = KERNEL_SYSCALL.read_text()
-    sdk = SDK.read_text()
-    pid1 = PID1.read_text()
-    sched = SCHED.read_text()
+    syscall = KERNEL_SYSCALL.read_text(encoding="utf-8")
+    sdk = SDK.read_text(encoding="utf-8")
+    pid1 = PID1.read_text(encoding="utf-8")
+    sched = SCHED.read_text(encoding="utf-8")
 
     # Kernel and SDK lifecycle ABI must stay numerically aligned.
     for name, number in (
@@ -76,7 +76,7 @@ def main() -> None:
     must(services, "PID 1 controls startup.", "kernel startup ownership")
     must(services, "spawn_userspace_service(id as u8, parent_id)",
          "PID1-owned Ring-3 service process spawn")
-    must((ROOT / "kernel/src/task/user.rs").read_text(), "pub fn spawn_userspace_service",
+    must((ROOT / "kernel/src/task/user.rs").read_text(encoding="utf-8"), "pub fn spawn_userspace_service",
          "userspace service process launcher")
     must(pid1, "std::service_start(service_id)", "PID1 service startup ABI")
     must(pid1, "std::service_recover_failed(service_id)", "PID1 recovery ABI")
@@ -86,7 +86,7 @@ def main() -> None:
     # syscall gate must verify that exact object before lifecycle operations.
     must(syscall, "task.cap_table.authorize_object(CapabilityType::SystemControl, Rights::INVOKE, SERVICE_MANAGER_OBJECT)",
          "object-scoped service-manager authorization")
-    user_task = (ROOT / "kernel/src/task/user.rs").read_text()
+    user_task = (ROOT / "kernel/src/task/user.rs").read_text(encoding="utf-8")
     must(user_task, "cap_type: CapabilityType::SystemControl,", "PID1 manager capability type")
     must(user_task, "object_id: crate::syscall::SERVICE_MANAGER_OBJECT,", "PID1 manager object binding")
     must(user_task, 'expect("PID1 SystemControl capability")', "PID1 manager capability installation")
@@ -179,11 +179,11 @@ def main() -> None:
 
     # Process and capability architecture must be userspace-owned and isolated.
     must(services, "heartbeat_for_task", "service heartbeat ownership check")
-    must((ROOT / "kernel/src/task/user.rs").read_text(), "CapabilityType::SystemControl", "PID1-only manager authority remains distinct")
+    must((ROOT / "kernel/src/task/user.rs").read_text(encoding="utf-8"), "CapabilityType::SystemControl", "PID1-only manager authority remains distinct")
     must(CI_WORKFLOW, "userspace/system-service/Cargo.toml", "Ring-3 service build gate")
 
     # Trusted userspace service ABI is explicit, versioned, and bounded.
-    service_abi = (ROOT / "sdk/rust/interos-std/src/service.rs").read_text()
+    service_abi = (ROOT / "sdk/rust/interos-std/src/service.rs").read_text(encoding="utf-8")
     must(service_abi, 'MAGIC: [u8; 4] = *b"ISVC"', "service ABI magic")
     must(service_abi, "VERSION: u16 = 1", "service ABI version")
     must(service_abi, "pub enum Op", "service ABI operation enum")
@@ -219,7 +219,7 @@ def main() -> None:
     must(sdk, "ServicePackageVerify = 89", "userspace signed service package ABI")
     must(sdk, "ServiceHeartbeat = 90", "userspace service heartbeat ABI")
     must(sdk, "pub fn service_heartbeat", "userspace heartbeat SDK")
-    must((ROOT / "userspace/system-service/src/lib.rs").read_text(), "ci-fault-injection", "service crash fault-injection test hook")
+    must((ROOT / "userspace/system-service/src/lib.rs").read_text(encoding="utf-8"), "ci-fault-injection", "service crash fault-injection test hook")
     must(CI_WORKFLOW, "--features ci-fault-injection", "QEMU crash-recovery validation mode")
 
     # Supervisor must inspect scheduler state before mutating the registry

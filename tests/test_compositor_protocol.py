@@ -6,9 +6,9 @@ ROOT=Path(__file__).resolve().parents[1]
 def must(s,n,label): assert n in s, f"missing {label}: {n}"
 
 def main():
-    k=(ROOT/"kernel/src/compositor.rs").read_text()
-    m=(ROOT/"kernel/src/lib.rs").read_text()
-    sdk=(ROOT/"sdk/rust/interos-std/src/lib.rs").read_text()
+    k=(ROOT/"kernel/src/compositor.rs").read_text(encoding="utf-8")
+    m=(ROOT/"kernel/src/lib.rs").read_text(encoding="utf-8")
+    sdk=(ROOT/"sdk/rust/interos-std/src/lib.rs").read_text(encoding="utf-8")
     for n in ("COMPOSITOR_MAGIC","COMPOSITOR_VERSION","CompositorOp","CompositorRequest",
               "CompositorRequest::decode","encode_response","COMPOSITOR_MSG_TYPE"):
         must(k,n,n)
@@ -17,12 +17,12 @@ def main():
     for n in ("MAGIC","VERSION","MSG_TYPE","enum Op","struct Request","fn encode"):
         must(sdk,n,"SDK "+n)
     assert "ICMP" in k and "ICMP" in sdk
-    sys=(ROOT/"kernel/src/syscall/mod.rs").read_text()
-    user=(ROOT/"kernel/src/task/user.rs").read_text()
+    sys=(ROOT/"kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
+    user=(ROOT/"kernel/src/task/user.rs").read_text(encoding="utf-8")
     must(sys,"pub fn sys_window_set_geometry(cap_slot: usize","window geometry capability boundary")
     must(sys,"pub fn sys_window_focus(cap_slot: usize","window focus capability boundary")
     must(sys,"require_display_service(cap_slot)","window operations require display service")
-    services=(ROOT/"kernel/src/services.rs").read_text()
+    services=(ROOT/"kernel/src/services.rs").read_text(encoding="utf-8")
     must(services,"CapabilityType::FrameBufferDirect, rights: Rights::WRITE, object_id: 1","display service framebuffer capability")
     print("compositor/window protocol contract: PASS")
 if __name__=="__main__":

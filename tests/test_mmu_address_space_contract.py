@@ -12,10 +12,10 @@ def must(text, needle, label):
     assert needle in text, f"missing {label}: {needle}"
 
 def main():
-    memory = (ROOT / "kernel/src/memory.rs").read_text()
-    user = (ROOT / "kernel/src/task/user.rs").read_text()
-    process = (ROOT / "kernel/src/task/process.rs").read_text()
-    scheduler = (ROOT / "kernel/src/task/scheduler.rs").read_text()
+    memory = (ROOT / "kernel/src/memory.rs").read_text(encoding="utf-8")
+    user = (ROOT / "kernel/src/task/user.rs").read_text(encoding="utf-8")
+    process = (ROOT / "kernel/src/task/process.rs").read_text(encoding="utf-8")
+    scheduler = (ROOT / "kernel/src/task/scheduler.rs").read_text(encoding="utf-8")
 
     must(memory, "for i in 256..512", "kernel-only PML4 mirroring")
     must(memory, "USER_ACCESSIBLE", "user mapping permission boundary")

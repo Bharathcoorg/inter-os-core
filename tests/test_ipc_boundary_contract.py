@@ -1,8 +1,8 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SECURE = (ROOT / "kernel/src/ipc/secure_channel.rs").read_text()
-SHM = (ROOT / "kernel/src/ipc/shm_pipe.rs").read_text()
+SECURE = (ROOT / "kernel/src/ipc/secure_channel.rs").read_text(encoding="utf-8")
+SHM = (ROOT / "kernel/src/ipc/shm_pipe.rs").read_text(encoding="utf-8")
 
 
 def must(text: str, needle: str, label: str) -> None:
@@ -22,7 +22,7 @@ def main() -> None:
     must(SHM, "if idx >= self.pipes.len() {\n            return None;", "stats pipe index validation")
 
     assert "let idx = (pipe_id as usize) % self.pipes.len();" not in SHM, "pipe APIs must not alias invalid IDs through modulo"
-    IPC = (ROOT / "kernel/src/ipc/mod.rs").read_text()
+    IPC = (ROOT / "kernel/src/ipc/mod.rs").read_text(encoding="utf-8")
     must(IPC, "SECURE_IPC.lock().cleanup_task(task_id);", "secure IPC task cleanup wiring")
     print("IPC boundary contract: PASS")
 

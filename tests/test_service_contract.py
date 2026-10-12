@@ -1,10 +1,10 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SERVICES = (ROOT / "kernel/src/services.rs").read_text()
-SYSCALL = (ROOT / "kernel/src/syscall/mod.rs").read_text()
-STD = (ROOT / "sdk/rust/interos-std/src/lib.rs").read_text()
-INIT = (ROOT / "userspace/init/src/main.rs").read_text()
+SERVICES = (ROOT / "kernel/src/services.rs").read_text(encoding="utf-8")
+SYSCALL = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
+STD = (ROOT / "sdk/rust/interos-std/src/lib.rs").read_text(encoding="utf-8")
+INIT = (ROOT / "userspace/init/src/main.rs").read_text(encoding="utf-8")
 
 def test_service_contract_is_versioned_and_dependency_aware():
     assert "SERVICE_ABI_VERSION" in SERVICES

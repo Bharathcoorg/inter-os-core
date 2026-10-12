@@ -1,8 +1,8 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-EVENT = (ROOT / "kernel/src/event/mod.rs").read_text()
-SCHED = (ROOT / "kernel/src/task/scheduler.rs").read_text()
+EVENT = (ROOT / "kernel/src/event/mod.rs").read_text(encoding="utf-8")
+SCHED = (ROOT / "kernel/src/task/scheduler.rs").read_text(encoding="utf-8")
 
 
 def must(text: str, needle: str, label: str) -> None:

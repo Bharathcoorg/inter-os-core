@@ -12,13 +12,13 @@ def must(text, needle, label):
     assert needle in text, f"missing {label}: {needle}"
 
 def main():
-    queue = (ROOT / "kernel/src/input/queue.rs").read_text()
-    event = (ROOT / "kernel/src/event/mod.rs").read_text()
-    process = (ROOT / "kernel/src/task/process.rs").read_text()
-    scheduler = (ROOT / "kernel/src/task/scheduler.rs").read_text()
-    kms = (ROOT / "kernel/src/drivers/display_kms.rs").read_text()
-    display = (ROOT / "kernel/src/drivers/display.rs").read_text()
-    lifecycle = (ROOT / "tests/test_interactive_lifecycle.py").read_text()
+    queue = (ROOT / "kernel/src/input/queue.rs").read_text(encoding="utf-8")
+    event = (ROOT / "kernel/src/event/mod.rs").read_text(encoding="utf-8")
+    process = (ROOT / "kernel/src/task/process.rs").read_text(encoding="utf-8")
+    scheduler = (ROOT / "kernel/src/task/scheduler.rs").read_text(encoding="utf-8")
+    kms = (ROOT / "kernel/src/drivers/display_kms.rs").read_text(encoding="utf-8")
+    display = (ROOT / "kernel/src/drivers/display.rs").read_text(encoding="utf-8")
+    lifecycle = (ROOT / "tests/test_interactive_lifecycle.py").read_text(encoding="utf-8")
 
     must(queue, "dropped: u64", "input overflow accounting")
     must(queue, "self.dropped = self.dropped.saturating_add(1)", "input overflow increment")

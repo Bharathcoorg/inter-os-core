@@ -12,12 +12,12 @@ def must(text, needle, label):
     assert needle in text, f"missing {label}: {needle}"
 
 def main():
-    kms = (ROOT / "kernel/src/drivers/display_kms.rs").read_text()
-    gui = (ROOT / "kernel/src/gui/window.rs").read_text()
-    guimod = (ROOT / "kernel/src/gui/mod.rs").read_text()
-    inputd = (ROOT / "kernel/src/drivers/input.rs").read_text()
-    syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text()
-    sdk = (ROOT / "sdk/rust/interos-std/src/lib.rs").read_text()
+    kms = (ROOT / "kernel/src/drivers/display_kms.rs").read_text(encoding="utf-8")
+    gui = (ROOT / "kernel/src/gui/window.rs").read_text(encoding="utf-8")
+    guimod = (ROOT / "kernel/src/gui/mod.rs").read_text(encoding="utf-8")
+    inputd = (ROOT / "kernel/src/drivers/input.rs").read_text(encoding="utf-8")
+    syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
+    sdk = (ROOT / "sdk/rust/interos-std/src/lib.rs").read_text(encoding="utf-8")
 
     must(kms, "owner_task: u64", "window ownership")
     must(kms, "input_enabled: bool", "window input participation")

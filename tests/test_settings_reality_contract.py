@@ -138,10 +138,10 @@ class SettingsRealityContractTests(unittest.TestCase):
 
 
     # Keep the developer terminal invariant inside the normal unittest runner.
-    source = (ROOT / "kernel/src/settings.rs").read_text()
-    syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text()
-    launcher = (ROOT / "apps/launcher/src/main.rs").read_text()
-    app = (ROOT / "apps/settings/src/main.rs").read_text()
+    source = (ROOT / "kernel/src/settings.rs").read_text(encoding="utf-8")
+    syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
+    launcher = (ROOT / "apps/launcher/src/main.rs").read_text(encoding="utf-8")
+    app = (ROOT / "apps/settings/src/main.rs").read_text(encoding="utf-8")
     assert "developer.terminal_enabled=false" in source
     assert "developer_terminal_enabled()" in syscall
     assert 'std::settings_get(0, "developer.terminal_enabled"' in launcher

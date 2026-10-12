@@ -8,8 +8,8 @@ def must(text, needle, label):
     assert needle in text, f"missing {label}: {needle}"
 
 def main():
-    tls = (ROOT / "kernel/src/net/tls.rs").read_text()
-    net = (ROOT / "kernel/src/net/mod.rs").read_text()
+    tls = (ROOT / "kernel/src/net/tls.rs").read_text(encoding="utf-8")
+    net = (ROOT / "kernel/src/net/mod.rs").read_text(encoding="utf-8")
     must(net, "pub mod tls;", "TLS module registration")
     must(net, "TlsContentType", "TLS content type export")
     for marker in (

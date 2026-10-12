@@ -1,8 +1,8 @@
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
-cam = (ROOT / "kernel/src/hal/camera.rs").read_text()
-syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text()
+cam = (ROOT / "kernel/src/hal/camera.rs").read_text(encoding="utf-8")
+syscall = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
 
 assert "CAMERA_MAX_WIDTH: u32 = 1920" in cam
 assert "CAMERA_MAX_HEIGHT: u32 = 1080" in cam

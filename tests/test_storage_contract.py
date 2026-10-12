@@ -25,15 +25,15 @@ def must_not(text: str, needle: str, label: str) -> None:
 
 
 def main() -> None:
-    ata = ATA.read_text()
-    sdhci = SDHCI.read_text()
-    storage = STORAGE.read_text()
-    persistent = PERSISTENT.read_text()
-    vfs = VFS.read_text()
-    interfs = INTERFS.read_text()
-    filesystem = FILESYSTEM.read_text()
+    ata = ATA.read_text(encoding="utf-8")
+    sdhci = SDHCI.read_text(encoding="utf-8")
+    storage = STORAGE.read_text(encoding="utf-8")
+    persistent = PERSISTENT.read_text(encoding="utf-8")
+    vfs = VFS.read_text(encoding="utf-8")
+    interfs = INTERFS.read_text(encoding="utf-8")
+    filesystem = FILESYSTEM.read_text(encoding="utf-8")
 
-    block = (ROOT / "kernel/src/storage/block.rs").read_text()
+    block = (ROOT / "kernel/src/storage/block.rs").read_text(encoding="utf-8")
 
     # Hardware implementations share one sector-level abstraction.
     must(block, "pub trait BlockDevice: Send + Sync", "canonical block-device trait")
@@ -54,8 +54,8 @@ def main() -> None:
     # Journal record kinds are globally unique: publisher trust roots use kind 3,
     # while settings use the newly allocated kind 10. A collision here can make
     # one subsystem restore another subsystem's bytes as valid state.
-    settings = (ROOT / "kernel/src/settings.rs").read_text()
-    revocation = (ROOT / "kernel/src/package/revocation.rs").read_text()
+    settings = (ROOT / "kernel/src/settings.rs").read_text(encoding="utf-8")
+    revocation = (ROOT / "kernel/src/package/revocation.rs").read_text(encoding="utf-8")
     must(settings, "const KIND: u8 = 10;", "isolated settings journal kind")
     must(revocation, "commit_kind(&buf[..pos], 3)", "publisher trust-root journal kind")
     must(persistent, "pub const JOURNAL_MAX_KIND: u8 = 10;", "journal kind capacity")
@@ -128,11 +128,11 @@ def main() -> None:
     must(storage, "pub mod encrypted;", "encrypted storage module")
     must(storage, "pub use encrypted::{seal, open, EncryptionError", "encrypted storage API")
     constenc = "ENCRYPTED_MAGIC: [u8; 4] = *b\"ENC1\"";
-    must((ROOT / "kernel/src/storage/encrypted.rs").read_text(), constenc, "encrypted envelope magic")
-    must((ROOT / "kernel/src/storage/encrypted.rs").read_text(), "HmacSha256::compute", "authenticated encryption primitive")
-    must((ROOT / "kernel/src/storage/encrypted.rs").read_text(), "constant_time_eq_32", "constant-time tag verification")
-    must((ROOT / "kernel/src/storage/encrypted.rs").read_text(), "storage-at-rest-v1", "storage key domain separation")
-    keystore = (ROOT / "kernel/src/crypto/keystore.rs").read_text()
+    must((ROOT / "kernel/src/storage/encrypted.rs").read_text(encoding="utf-8"), constenc, "encrypted envelope magic")
+    must((ROOT / "kernel/src/storage/encrypted.rs").read_text(encoding="utf-8"), "HmacSha256::compute", "authenticated encryption primitive")
+    must((ROOT / "kernel/src/storage/encrypted.rs").read_text(encoding="utf-8"), "constant_time_eq_32", "constant-time tag verification")
+    must((ROOT / "kernel/src/storage/encrypted.rs").read_text(encoding="utf-8"), "storage-at-rest-v1", "storage key domain separation")
+    keystore = (ROOT / "kernel/src/crypto/keystore.rs").read_text(encoding="utf-8")
     must(keystore, 'load_latest_kind(&mut seed_record, 6)', "persistent storage key loading")
     must(keystore, 'commit_kind(&record, 6)', "persistent storage key provisioning")
     assert "0x7A, 0x4B, 0x19" not in keystore, "storage root must not be a compiled-in static secret"
@@ -140,8 +140,8 @@ def main() -> None:
     must(vfs, "crate::storage::encrypted::open", "VFS encrypted restoration")
     must(vfs, "32768 + crate::storage::encrypted::ENCRYPTED_OVERHEAD", "encrypted restore buffer capacity")
     must(vfs, "legacy unencrypted plaintext snapshots", "migration fallback for legacy snapshots")
-    must((ROOT / "kernel/src/main.rs").read_text(), "crypto::keystore::init();", "keystore initialized before VFS")
-    assert (ROOT / "kernel/src/main.rs").read_text().index("crypto::keystore::init();") < (ROOT / "kernel/src/main.rs").read_text().index("fs::init();"), "storage key must exist before VFS reconstruction"
+    must((ROOT / "kernel/src/main.rs").read_text(encoding="utf-8"), "crypto::keystore::init();", "keystore initialized before VFS")
+    assert (ROOT / "kernel/src/main.rs").read_text(encoding="utf-8").index("crypto::keystore::init();") < (ROOT / "kernel/src/main.rs").read_text(encoding="utf-8").index("fs::init();"), "storage key must exist before VFS reconstruction"
 
     # Write payload sectors first and publish the generation header last.
     payload_write = persistent.index("drive.write_sector(base + sector, &buf)")

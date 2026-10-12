@@ -4,7 +4,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_kernel_declares_coordinate_spaces():
-    source = (ROOT / "kernel/src/input/coordinate.rs").read_text()
+    source = (ROOT / "kernel/src/input/coordinate.rs").read_text(encoding="utf-8")
     for name in (
         "DevicePhysical",
         "StudioDisplay",
@@ -17,7 +17,7 @@ def test_kernel_declares_coordinate_spaces():
 
 
 def test_studio_declares_every_touch_coordinate_space():
-    source = (ROOT / "emulator/server.py").read_text()
+    source = (ROOT / "emulator/server.py").read_text(encoding="utf-8")
     assert "unknown coordinate space" in source
     assert "logical_portrait" in source
     assert "guest_framebuffer" in source
@@ -25,7 +25,7 @@ def test_studio_declares_every_touch_coordinate_space():
 
 
 def test_studio_post_handler_declares_orientation_global():
-    source = (ROOT / "emulator/server.py").read_text()
+    source = (ROOT / "emulator/server.py").read_text(encoding="utf-8")
     post = source[source.index("def do_POST"):]
     # The rotation endpoint inside do_POST assigns current_device_orientation.
     # Without a global declaration the name became function-local, so the
@@ -38,13 +38,13 @@ def test_studio_post_handler_declares_orientation_global():
 
 
 def test_browser_studio_uses_explicit_spaces():
-    source = (ROOT / "emulator/app.js").read_text()
+    source = (ROOT / "emulator/app.js").read_text(encoding="utf-8")
     assert "coords: 'portrait'" in source
     assert "coords: 'guest_framebuffer'" in source
 
 
 def test_launcher_no_longer_uses_fixed_clock_literal():
-    source = (ROOT / "apps/launcher/src/main.rs").read_text()
+    source = (ROOT / "apps/launcher/src/main.rs").read_text(encoding="utf-8")
     assert "CLOCK_TIME" not in source
     assert "std::rtc_get_time" in source
     assert 'b"Meeting with team (11:00)"' not in source
@@ -52,34 +52,34 @@ def test_launcher_no_longer_uses_fixed_clock_literal():
     assert 'b"Mostly Sunny"' not in source
 
 def test_studio_exposes_only_stock_theme():
-    source = (ROOT / "emulator/server.py").read_text()
+    source = (ROOT / "emulator/server.py").read_text(encoding="utf-8")
     assert "'themes': [active]" in source
     assert "Theme switching is disabled" in source
     assert "Custom themes are disabled" in source
 
 
 def test_launcher_clock_reads_named_rtc_fields():
-    source = (ROOT / "apps/launcher/src/main.rs").read_text()
+    source = (ROOT / "apps/launcher/src/main.rs").read_text(encoding="utf-8")
     assert 'field(data, b"\\\"hour\\\"")' in source
     assert 'field(data, b"\\\"minute\\\"")' in source
     assert 'for &b in data' not in source[source.index("fn refresh_clock"):source.index("fn refresh_notifications")]
 
 
 def test_serial_touch_protocol_matches_studio_transport():
-    source = (ROOT / "kernel/src/serial.rs").read_text()
+    source = (ROOT / "kernel/src/serial.rs").read_text(encoding="utf-8")
     assert 'INPUT_TOUCH' in source
     assert 'let Some(slot) = parts.next().and_then(|v| v.parse::<u8>().ok())' in source
     assert 'post_touch_event(slot, px, py' in source
 
 
 def test_launcher_contains_no_removed_demo_workload_labels():
-    source = (ROOT / "apps/launcher/src/main.rs").read_text()
+    source = (ROOT / "apps/launcher/src/main.rs").read_text(encoding="utf-8")
     for label in ("Meeting with team (11:00)", "2 unread messages", "Mostly Sunny", "Finish design work"):
         assert label not in source
 
 
 def test_touch_path_uses_canonical_router():
-    source = (ROOT / "kernel/src/input/mod.rs").read_text()
+    source = (ROOT / "kernel/src/input/mod.rs").read_text(encoding="utf-8")
     assert "pub static INPUT_ROUTER: Mutex<InputRouter>" in source
     assert "dispatch_pointer_at(pointer, 720, 24, ticks)" in source
     assert "TOUCH_ENGINE.lock()" not in source
@@ -87,7 +87,7 @@ def test_touch_path_uses_canonical_router():
 
 
 def test_canonical_gesture_kinds_have_wire_codes():
-    source = (ROOT / "kernel/src/drivers/input.rs").read_text()
+    source = (ROOT / "kernel/src/drivers/input.rs").read_text(encoding="utf-8")
     assert "Back = 6" in source
     assert "Home = 7" in source
     assert "Recents = 8" in source
@@ -96,7 +96,7 @@ def test_canonical_gesture_kinds_have_wire_codes():
 
 
 def test_launcher_has_no_runtime_wallpaper_switcher():
-    source = (ROOT / "apps/launcher/src/main.rs").read_text()
+    source = (ROOT / "apps/launcher/src/main.rs").read_text(encoding="utf-8")
     assert "wallpaper_id" not in source
     assert "get_wallpaper_pixel" not in source
     assert "Wallpapers & Procedural Themes" not in source
@@ -105,7 +105,7 @@ def test_launcher_has_no_runtime_wallpaper_switcher():
 
 
 def test_launcher_uses_live_system_state_not_fake_home_state():
-    source = (ROOT / "apps/launcher/src/main.rs").read_text()
+    source = (ROOT / "apps/launcher/src/main.rs").read_text(encoding="utf-8")
     for field in ("task_done", "wallpaper_id", "wifi_on", "bt_on", "dark_mode", "media_playing", "notif_tab"):
         assert field not in source
     assert "notification_count" in source
@@ -116,15 +116,15 @@ def test_launcher_uses_live_system_state_not_fake_home_state():
 
 
 def test_input_event_poll_does_not_reactivate_legacy_touch_gesture_engine():
-    source = (ROOT / "kernel/src/syscall/mod.rs").read_text()
+    source = (ROOT / "kernel/src/syscall/mod.rs").read_text(encoding="utf-8")
     start = source.index("pub fn sys_input_event_poll")
     end = source.index("pub fn sys_touch_poll", start)
     assert "pump_touch_events()" not in source[start:end]
 
 
 def test_studio_keyboard_contract_supports_text_and_navigation_keys():
-    server = (ROOT / "emulator/server.py").read_text()
-    app = (ROOT / "emulator/app.js").read_text()
+    server = (ROOT / "emulator/server.py").read_text(encoding="utf-8")
+    app = (ROOT / "emulator/app.js").read_text(encoding="utf-8")
     assert "INPUT_KEYCODE" in server
     assert "'ArrowUp'" in server and "'Escape'" in server
     assert "JSON.stringify({ key: e.key })" in app
@@ -132,22 +132,22 @@ def test_studio_keyboard_contract_supports_text_and_navigation_keys():
 
 
 def test_kernel_keyboard_contract_encodes_canonical_keys():
-    input_source = (ROOT / "kernel/src/input/mod.rs").read_text()
-    driver = (ROOT / "kernel/src/drivers/input.rs").read_text()
-    serial = (ROOT / "kernel/src/serial.rs").read_text()
+    input_source = (ROOT / "kernel/src/input/mod.rs").read_text(encoding="utf-8")
+    driver = (ROOT / "kernel/src/drivers/input.rs").read_text(encoding="utf-8")
+    serial = (ROOT / "kernel/src/serial.rs").read_text(encoding="utf-8")
     assert "pub fn post_key_event" in input_source
     assert "InputEventKind::Key" in driver
     assert "INPUT_KEYCODE" in serial
 
 
 def test_studio_keyboard_uses_server_key_contract():
-    source = (ROOT / "emulator/app.js").read_text()
+    source = (ROOT / "emulator/app.js").read_text(encoding="utf-8")
     assert "body: JSON.stringify({ key: e.key })" in source
     assert "body: JSON.stringify({ code:" not in source
 
 
 def test_system_gesture_directions_are_explicit():
-    source = (ROOT / "kernel/src/input/router.rs").read_text()
+    source = (ROOT / "kernel/src/input/router.rs").read_text(encoding="utf-8")
     # The bounds were consolidated into one named constant when the edge
     # classifier was extracted (same value, same three directions), so assert
     # both the constant and each explicit arm against it.
@@ -158,7 +158,7 @@ def test_system_gesture_directions_are_explicit():
 
 
 def test_launcher_uses_real_registry_for_drawer_and_recent_surfaces():
-    source = (ROOT / "apps/launcher/src/main.rs").read_text()
+    source = (ROOT / "apps/launcher/src/main.rs").read_text(encoding="utf-8")
     assert "fn package_id_at" in source
     assert "fn recent_label" in source
     assert "let app_idx = state.app_drawer_page * 12 + r_idx * 3 + c_idx;" in source
@@ -170,17 +170,17 @@ def test_launcher_uses_real_registry_for_drawer_and_recent_surfaces():
 
 
 def test_launcher_drawer_pagination_is_registry_backed():
-    source = (ROOT / "apps/launcher/src/main.rs").read_text()
+    source = (ROOT / "apps/launcher/src/main.rs").read_text(encoding="utf-8")
     assert "let pages = (state.app_count + 11) / 12" in source
     assert "state.app_drawer_page += 1" in source
     assert "let app_idx = state.app_drawer_page * 12" in source
 
 
 def test_first_party_media_and_browser_surfaces_do_not_bundle_demo_content():
-    browser = (ROOT / "apps/browser/src/main.rs").read_text()
-    gallery = (ROOT / "apps/gallery/src/main.rs").read_text()
-    messages = (ROOT / "apps/messages/src/main.rs").read_text()
-    music = (ROOT / "apps/music/src/main.rs").read_text()
+    browser = (ROOT / "apps/browser/src/main.rs").read_text(encoding="utf-8")
+    gallery = (ROOT / "apps/gallery/src/main.rs").read_text(encoding="utf-8")
+    messages = (ROOT / "apps/messages/src/main.rs").read_text(encoding="utf-8")
+    music = (ROOT / "apps/music/src/main.rs").read_text(encoding="utf-8")
     assert "pub static BOOKMARKS: [Bookmark; 0] = [];" in browser
     # WHY this form: the responsive rewrite (f7f2b64) initializes the address
     # buffer with `let start = b"about:blank"` copied into `current_url`
@@ -199,7 +199,7 @@ def test_first_party_media_and_browser_surfaces_do_not_bundle_demo_content():
 
 
 def test_studio_touch_endpoint_routes_live_uart_input():
-    source = (ROOT / "emulator/server.py").read_text()
+    source = (ROOT / "emulator/server.py").read_text(encoding="utf-8")
     assert "if self.path == '/api/touch/event':" in source
     assert "INPUT_TOUCH CANCEL" in source
     assert "SWIPE {gx} {gy} {gx2} {gy2} {steps}" in source
@@ -207,7 +207,7 @@ def test_studio_touch_endpoint_routes_live_uart_input():
 
 
 def test_studio_bootloader_branding_is_not_synthetic():
-    source = (ROOT / "emulator/server.py").read_text()
+    source = (ROOT / "emulator/server.py").read_text(encoding="utf-8")
     start = source.index("if self.path == '/api/themes/bootloader':")
     end = source.index("self.send_response(404)", start)
     block = source[start:end]
@@ -216,9 +216,9 @@ def test_studio_bootloader_branding_is_not_synthetic():
 
 
 def test_first_party_apps_do_not_ship_synthetic_user_content():
-    browser = (ROOT / "apps/browser/src/main.rs").read_text()
-    messages = (ROOT / "apps/messages/src/main.rs").read_text()
-    music = (ROOT / "apps/music/src/main.rs").read_text()
+    browser = (ROOT / "apps/browser/src/main.rs").read_text(encoding="utf-8")
+    messages = (ROOT / "apps/messages/src/main.rs").read_text(encoding="utf-8")
+    music = (ROOT / "apps/music/src/main.rs").read_text(encoding="utf-8")
     assert 'interlayer://sovereign.mesh/catalog' not in browser
     assert '127.0.0.1:4200/telemetry' not in browser
     assert 'Meeting at 11:00 AM' not in messages
