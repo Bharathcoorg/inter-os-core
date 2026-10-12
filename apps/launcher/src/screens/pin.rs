@@ -60,6 +60,55 @@ pub fn entry_band() -> (usize, usize) {
     (PROMPT_Y, STATUS_Y + launcher::text::line_height(1))
 }
 
+/// The colour of (`x`, `y`) when the run at (`x0`, `y0`) on `scale` inks it,
+/// drawn by the outline rasteriser when it can place the run and by the bitmap
+/// face when it cannot.
+///
+/// WHY the vertical band is a union of both renderers: the outline run's line
+/// box is not the bitmap cell. At the em matching a scale-3 cap the outline's
+/// ascent reaches 75 rows above the run's baseline and its descent 19 rows
+/// below, against the bitmap's 4-rows-above and 4-rows-below (rows 3..23 of a
+/// 24-row cell); measured, the heading's cap ink stops 52 rows above its
+/// baseline and its lowest glyph ends at the baseline. At a scale-1 caption the
+/// figures are 25 and 6, against an ink extent of 18 above and 5 below. A band
+/// measured for the cell alone clips both faces silently, and this surface's
+/// geometry contains the union everywhere it is used: the prompt band is
+/// `y0-15 .. y0+79` against the 294-row gap above the dots, a key's digit band
+/// is `rect.y+26 .. rect.y+89` against a 104-row key, and the status band is
+/// `y0-5 .. y0+26` with the keypad rows 134 below it.
+///
+/// WHY the caller's own control test still comes first: the keys, the discs and
+/// the status bar keep the hit tests and borders they had, so the wider band can
+/// only add rows the control already covers.
+fn text_pixel(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    bytes: &[u8],
+    ink: u32,
+    bg: u32,
+) -> Option<u32> {
+    let em = launcher::outline_text::em_for_scale(scale);
+    let (asc, desc) = interos_std::design::typeface::line_metrics(em);
+    let baseline = y0 + launcher::font::BASELINE * scale;
+    let top = baseline.saturating_sub(asc as usize);
+    if x < x0 || y < top || y >= baseline + desc as usize {
+        return None;
+    }
+    // Choose the renderer ONCE for the run, not once per pixel. The placement is
+    // a pure function of the run's origin, em and bytes, so every pixel of this
+    // run reaches the same face. A per-pixel fallback would draw the glyph from
+    // both faces at once -- an outline glyph under a hard-edged bitmap ghost.
+    if let Some(run) = launcher::outline_text::OutlineRun::place(x0, baseline, em, bytes) {
+        return run.pixel(x, y, ink, bg);
+    }
+    // The bitmap face is the refusal path, not the baseline: a run the rasteriser
+    // declines still has to draw as text.
+    test_text_aa(x, y, x0, y0, scale, bytes, ink, bg)
+}
+
 #[inline]
 fn round_contains(rect: &Rect, radius: usize, x: usize, y: usize) -> bool {
     if !rect.contains(x, y) { return false; }

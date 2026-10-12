@@ -436,6 +436,25 @@ fn rounded_outline(r: Rect, x: usize, y: usize, rad: usize) -> bool {
 /// and would silently shorten a fitted label after measuring the whole thing.
 const RUN_CAP: usize = 96;
 
+/// The three numbers a run needs before it can be gated on both faces' extents:
+/// the em to rasterise it at, and the top row and height of the union box.
+///
+/// WHY one function and not arithmetic at each constructor: the box a run is
+/// tested against has to be the union of the bitmap cell and the outline line
+/// box, and the two are not the same shape -- at a scale-1 caption the outline's
+/// descent reaches 6 rows below the run's baseline while the bitmap's own
+/// descender stops at row 23 of a 24-row cell, so a box measured for the cell
+/// alone clips a descender off the bottom of the text. This is the same
+/// derivation `home.rs` uses, and it is why the box is derived rather than
+/// inherited from `text::line_height`.
+fn activity_run_metrics(y: usize, scale: usize) -> (u32, usize, usize) {
+    let em = launcher::outline_text::em_for_scale(scale);
+    let (asc, desc) = interos_std::design::typeface::line_metrics(em);
+    let baseline = y + launcher::font::BASELINE * scale;
+    let top = baseline.saturating_sub(asc as usize);
+    (em, top, (baseline + desc as usize).saturating_sub(top))
+}
+
 #[derive(Clone, Copy)]
 struct LabelRun {
     x: usize,
@@ -445,6 +464,12 @@ struct LabelRun {
     scale: usize,
     len: usize,
     ink: u32,
+    /// Pixels per em for this run's outline rendering.
+    em: u32,
+    /// Top row of the box covering BOTH renderers, not the bitmap cell's.
+    top: usize,
+    /// Height of that union box.
+    box_h: usize,
     bytes: [u8; RUN_CAP],
 }
 
@@ -457,6 +482,9 @@ impl LabelRun {
         scale: 1,
         len: 0,
         ink: 0,
+        em: 0,
+        top: 0,
+        box_h: 0,
         bytes: [0u8; RUN_CAP],
     };
 
@@ -464,16 +492,26 @@ impl LabelRun {
         let mut buf = [0u8; RUN_CAP];
         let len = bytes.len().min(RUN_CAP);
         buf[..len].copy_from_slice(&bytes[..len]);
-        let w = text::measure(&buf[..len], scale);
-        let h = text::line_height(scale);
+        let (em, top, box_h) = activity_run_metrics(y, scale);
+        // WHY the width is the wider of the two measures: the outline face is
+        // condensed but is not always the narrower of the two -- "No running
+        // apps" measures 146 bitmap advances at scale 1 and a 146px outline
+        // advance here, while "3 running - X closes an app" is 240 at scale 1
+        // against a 240px outline advance; the union is taken because the other
+        // direction also happens on this surface's vocabulary.
+        let w = text::measure(&buf[..len], scale)
+            .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize);
         LabelRun {
             x,
             y,
             w,
-            h,
+            h: text::line_height(scale),
             scale,
             len,
             ink,
+            em,
+            top,
+            box_h,
             bytes: buf,
         }
     }
@@ -488,14 +526,19 @@ impl LabelRun {
     fn fitted(x: usize, y: usize, scale: usize, fit: usize, bytes: &[u8], ink: u32) -> Self {
         let (buf, len) = text::ellipsize(bytes, scale, fit);
         let len = len.min(RUN_CAP);
+        let (em, top, box_h) = activity_run_metrics(y, scale);
         LabelRun {
             x,
             y,
-            w: text::measure(&buf[..len], scale),
+            w: text::measure(&buf[..len], scale)
+                .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize),
             h: text::line_height(scale),
             scale,
             len,
             ink,
+            em,
+            top,
+            box_h,
             bytes: buf,
         }
     }
@@ -506,14 +549,19 @@ impl LabelRun {
         buf[..len].copy_from_slice(&bytes[..len]);
         let measured = text::measure(&buf[..len], scale);
         let inset = text::center_x(&buf[..len], scale, w);
+        let (em, top, box_h) = activity_run_metrics(y, scale);
         LabelRun {
             x: x + inset,
             y,
-            w: measured,
+            w: measured
+                .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize),
             h: text::line_height(scale),
             scale,
             len,
             ink,
+            em,
+            top,
+            box_h,
             bytes: buf,
         }
     }
@@ -535,14 +583,19 @@ impl LabelRun {
         let (buf, len) = text::ellipsize(bytes, scale, fit);
         let len = len.min(RUN_CAP);
         let inset = text::center_x(&buf[..len], scale, centre);
+        let (em, top, box_h) = activity_run_metrics(y, scale);
         LabelRun {
             x: x + inset,
             y,
-            w: text::measure(&buf[..len], scale),
+            w: text::measure(&buf[..len], scale)
+                .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize),
             h: text::line_height(scale),
             scale,
             len,
             ink,
+            em,
+            top,
+            box_h,
             bytes: buf,
         }
     }
@@ -552,9 +605,24 @@ impl LabelRun {
         if self.len == 0 {
             return None;
         }
-        if px < self.x || px >= self.x + self.w || py < self.y || py >= self.y + self.h {
+        if px < self.x || px >= self.x + self.w || py < self.top || py - self.top >= self.box_h {
             return None;
         }
+        // Choose the renderer ONCE for the run, not once per pixel. The placement
+        // is a pure function of the run's origin, em and bytes, so every pixel of
+        // this run reaches the same face. A per-pixel fallback would draw the
+        // glyph from both faces at once -- an outline glyph under a hard-edged
+        // bitmap ghost.
+        if let Some(run) = launcher::outline_text::OutlineRun::place(
+            self.x,
+            self.y + launcher::font::BASELINE * self.scale,
+            self.em,
+            &self.bytes[..self.len],
+        ) {
+            return run.pixel(px, py, self.ink, 0);
+        }
+        // The bitmap face is the refusal path, not the baseline: a run the
+        // rasteriser declines still has to draw as text.
         test_text(
             px,
             py,
@@ -573,8 +641,17 @@ impl LabelRun {
         if self.len == 0 {
             return None;
         }
-        if px < self.x || px >= self.x + self.w || py < self.y || py >= self.y + self.h {
+        if px < self.x || px >= self.x + self.w || py < self.top || py - self.top >= self.box_h {
             return None;
+        }
+        // Choose the renderer ONCE for the run, not once per pixel.
+        if let Some(run) = launcher::outline_text::OutlineRun::place(
+            self.x,
+            self.y + launcher::font::BASELINE * self.scale,
+            self.em,
+            &self.bytes[..self.len],
+        ) {
+            return run.pixel(px, py, self.ink, bg);
         }
         test_text_aa(
             px,
@@ -663,6 +740,15 @@ const SUB_CAP: usize = 32;
 /// WHY the separator byte `\xb7`: it has no glyph in this face, so it renders as
 /// the gap the old "4 apps <dot> 2 tasks" literals showed, without borrowing a
 /// punctuation glyph the rest of the shell does not use.
+///
+/// WHY these two runs stay on the bitmap face: the byte is outside the outline
+/// face's encoded range (32..=126, and 0xb7 is 183), so
+/// `interos_std::design::typeface::advance_px` returns 0 for it and
+/// `OutlineRun::place` refuses the whole run rather than render a glyphless
+/// byte as a space. Measured, "Running \xb7 task 12" refuses for exactly this
+/// reason, so a running card's subtitle keeps the bitmap face and the same ink
+/// it had before; `SUB_NOT_RUNNING` ("Not running") has no such byte and does
+/// take the outline face.
 const SUB_RUNNING: &[u8] = b"Running \xb7 task ";
 const SUB_ACTIVE: &[u8] = b"Running \xb7 active";
 /// Subtitle of a recent whose task is gone.

@@ -432,10 +432,30 @@ struct Run {
     x: usize,
     y: usize,
     w: usize,
-    h: usize,
     scale: usize,
     len: usize,
     ink: u32,
+    /// Pixels per em for this run's outline rendering.
+    ///
+    /// WHY a separate number from `scale`: the bitmap face is a 16x24 cell
+    /// multiplied by `scale`, so its cap height is 17*`scale` pixels. The
+    /// outline face is rasterised at an em, and its cap height is 1456 of 2048
+    /// em, so the em that matches the same cap height is
+    /// `17 * scale * 2048 / 1456`. `outline_text::em_for_scale` is that
+    /// derivation, kept in one place so every screen that migrates a run
+    /// derives it the same way.
+    em: u32,
+    /// Top row of the box that covers BOTH renderers.
+    ///
+    /// WHY the box is a union: the outline run's line box is not the bitmap
+    /// cell. At the em matching a scale-2 cap the outline's ascent reaches 50
+    /// rows above the run's baseline while the bitmap's own ascender reaches 4
+    /// rows into its cell, so a box measured for the cell alone rejects rows
+    /// the outline inks and the text is silently clipped. `home.rs` hit exactly
+    /// this and the lesson is carried here.
+    top: usize,
+    /// Height of that union box.
+    box_h: usize,
     bytes: [u8; RUN_CAP],
 }
 
@@ -445,10 +465,12 @@ impl Run {
         x: 0,
         y: 0,
         w: 0,
-        h: 0,
         scale: 1,
         len: 0,
         ink: 0,
+        em: 0,
+        top: 0,
+        box_h: 0,
         bytes: [0u8; RUN_CAP],
     };
 
@@ -508,15 +530,38 @@ impl Run {
     }
 
     /// A run from an already-resolved buffer.
+    ///
+    /// WHY the width and the box are wider than the bitmap's own: the run now
+    /// has two renderers, and the box has to admit both. The bitmap's measure
+    /// and line height bound one; the outline's advance and its ascent-plus-
+    /// descent bound the other. Taking the union of each costs nothing at this
+    /// point -- it runs once per frame per run -- and is the difference between
+    /// text that renders and text that is silently clipped.
+    ///
+    /// WHY the union width is measured rather than assumed: the outline face is
+    /// condensed and is not always the narrower of the two. "System" measures
+    /// 67 bitmap advances at scale 3 (a 201px measure) and a 206px outline
+    /// advance, so the outline is the wider face on this very surface's
+    /// vocabulary and a bitmap-only box would clip it.
     fn placed(x: usize, y: usize, scale: usize, buf: [u8; RUN_CAP], len: usize, ink: u32) -> Run {
+        let text = &buf[..len];
+        // The outline's baseline lands where the cell puts its own, so the two
+        // faces agree on where the text sits rather than merely how tall it is.
+        let em = launcher::outline_text::em_for_scale(scale);
+        let baseline = y + launcher::font::BASELINE * scale;
+        let (asc, desc) = interos_std::design::typeface::line_metrics(em);
+        let outline_advance = interos_std::design::typeface::text_advance_px(text, em) as usize;
+        let top = baseline.saturating_sub(asc as usize);
         Run {
             x,
             y,
-            w: text::measure(&buf[..len], scale),
-            h: text::line_height(scale),
+            w: text::measure(text, scale).max(outline_advance),
             scale,
             len,
             ink,
+            em,
+            top,
+            box_h: (baseline + desc as usize).saturating_sub(top),
             bytes: buf,
         }
     }
@@ -531,9 +576,29 @@ impl Run {
         if self.len == 0 {
             return None;
         }
-        if px < self.x || px - self.x >= self.w || py < self.y || py - self.y >= self.h {
+        if px < self.x || px - self.x >= self.w || py < self.top || py - self.top >= self.box_h {
             return None;
         }
+        // Choose the renderer ONCE for the run, not once per pixel.
+        //
+        // WHY: a per-pixel fallback draws the glyph from both faces at once --
+        // an outline glyph under a hard-edged bitmap ghost, offset by a pixel,
+        // on every string. The placement is a pure function of the run's own
+        // origin, em and bytes, so every pixel of this run reaches the same
+        // answer: one face or the other, never both.
+        let outline = launcher::outline_text::OutlineRun::place(
+            self.x,
+            self.y + launcher::font::BASELINE * self.scale,
+            self.em,
+            &self.bytes[..self.len],
+        );
+        if let Some(run) = outline {
+            return run.pixel(px, py, self.ink, bg);
+        }
+        // The bitmap face is the fallback, not the baseline: a refusal here -- a
+        // run too wide for the coverage buffer, a character outside the encoded
+        // range, a baseline too near the top of the surface -- must leave the
+        // text drawn rather than dropped.
         test_text_aa(px, py, self.x, self.y, self.scale, &self.bytes[..self.len], self.ink, bg)
     }
 }

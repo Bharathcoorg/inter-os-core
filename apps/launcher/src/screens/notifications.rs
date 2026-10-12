@@ -98,6 +98,26 @@ fn rounded_outline(r: Rect, x: usize, y: usize, rad: usize) -> bool {
 
 const RUN_CAP: usize = 64;
 
+/// The three numbers a run needs before it can be gated on both faces' extents:
+/// the em to rasterise it at, and the top row and height of the box that covers
+/// both renderers.
+///
+/// WHY one function and not arithmetic at each constructor: the box a run is
+/// tested against has to be the union of the bitmap cell and the outline line
+/// box, and the two are not the same shape -- at a scale-2 cap the outline's
+/// ascent reaches 50 rows above the run's baseline against the bitmap
+/// ascender's 8 rows into its cell, so a box measured for the cell alone rejects
+/// rows the outline inks and clips the text silently. Deriving the three numbers
+/// in one place is what keeps every run on this surface on one box, and it is
+/// the same derivation `home.rs` and `app_drawer.rs` use.
+fn run_metrics(y: usize, scale: usize) -> (u32, usize, usize) {
+    let em = launcher::outline_text::em_for_scale(scale);
+    let (asc, desc) = interos_std::design::typeface::line_metrics(em);
+    let baseline = y + launcher::font::BASELINE * scale;
+    let top = baseline.saturating_sub(asc as usize);
+    (em, top, (baseline + desc as usize).saturating_sub(top))
+}
+
 #[derive(Clone, Copy)]
 struct LabelRun {
     x: usize,
@@ -107,6 +127,12 @@ struct LabelRun {
     scale: usize,
     len: usize,
     ink: u32,
+    /// Pixels per em for this run's outline rendering; see [`run_metrics`].
+    em: u32,
+    /// Top row of the box covering BOTH renderers, not the bitmap cell's.
+    top: usize,
+    /// Height of that union box.
+    box_h: usize,
     bytes: [u8; RUN_CAP],
 }
 
@@ -119,6 +145,9 @@ impl LabelRun {
         scale: 1,
         len: 0,
         ink: 0,
+        em: 0,
+        top: 0,
+        box_h: 0,
         bytes: [0u8; RUN_CAP],
     };
 
@@ -126,16 +155,25 @@ impl LabelRun {
         let mut buf = [0u8; RUN_CAP];
         let len = bytes.len().min(RUN_CAP);
         buf[..len].copy_from_slice(&bytes[..len]);
-        let w = text::measure(&buf[..len], scale);
-        let h = text::line_height(scale);
+        let (em, top, box_h) = run_metrics(y, scale);
+        // WHY the width is the wider of the two measures: the outline face is
+        // condensed but is not always the narrower of the two. "Events" measures
+        // 67 bitmap advances at scale 2 (a 134px measure) and a 123px outline
+        // advance, so here the cell is the wider face and the union has to take
+        // it rather than assume which way it goes.
+        let w = text::measure(&buf[..len], scale)
+            .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize);
         LabelRun {
             x,
             y,
             w,
-            h,
+            h: text::line_height(scale),
             scale,
             len,
             ink,
+            em,
+            top,
+            box_h,
             bytes: buf,
         }
     }
@@ -146,14 +184,19 @@ impl LabelRun {
         buf[..len].copy_from_slice(&bytes[..len]);
         let measured = text::measure(&buf[..len], scale);
         let inset = text::center_x(&buf[..len], scale, w);
+        let (em, top, box_h) = run_metrics(y, scale);
         LabelRun {
             x: x + inset,
             y,
-            w: measured,
+            w: measured
+                .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize),
             h: text::line_height(scale),
             scale,
             len,
             ink,
+            em,
+            top,
+            box_h,
             bytes: buf,
         }
     }
@@ -171,14 +214,19 @@ impl LabelRun {
         let n = len.min(RUN_CAP);
         let mut held = [0u8; RUN_CAP];
         held[..n].copy_from_slice(&buf[..n]);
+        let (em, top, box_h) = run_metrics(y, scale);
         LabelRun {
             x,
             y,
-            w: text::measure(&held[..n], scale),
+            w: text::measure(&held[..n], scale)
+                .max(interos_std::design::typeface::text_advance_px(&held[..n], em) as usize),
             h: text::line_height(scale),
             scale,
             len: n,
             ink,
+            em,
+            top,
+            box_h,
             bytes: held,
         }
     }
@@ -188,9 +236,26 @@ impl LabelRun {
         if self.len == 0 {
             return None;
         }
-        if px < self.x || px >= self.x + self.w || py < self.y || py >= self.y + self.h {
+        if px < self.x || px >= self.x + self.w || py < self.top || py - self.top >= self.box_h {
             return None;
         }
+        // Choose the renderer ONCE for the run, not once per pixel. The placement
+        // is a pure function of the run's origin, em and bytes, so every pixel of
+        // this run reaches the same face. A per-pixel fallback draws the glyph
+        // from both faces at once -- an outline glyph under a hard-edged bitmap
+        // ghost.
+        if let Some(run) = launcher::outline_text::OutlineRun::place(
+            self.x,
+            self.y + launcher::font::BASELINE * self.scale,
+            self.em,
+            &self.bytes[..self.len],
+        ) {
+            return run.pixel(px, py, self.ink, 0);
+        }
+        // The bitmap face is the refusal path, not the baseline: a run the
+        // rasteriser declines -- too wide for the coverage buffer, a byte outside
+        // its encoded range, a baseline too near the top of the surface -- still
+        // has to draw as text.
         test_text(
             px,
             py,
@@ -208,8 +273,17 @@ impl LabelRun {
         if self.len == 0 {
             return None;
         }
-        if px < self.x || px >= self.x + self.w || py < self.y || py >= self.y + self.h {
+        if px < self.x || px >= self.x + self.w || py < self.top || py - self.top >= self.box_h {
             return None;
+        }
+        // Choose the renderer ONCE for the run, not once per pixel.
+        if let Some(run) = launcher::outline_text::OutlineRun::place(
+            self.x,
+            self.y + launcher::font::BASELINE * self.scale,
+            self.em,
+            &self.bytes[..self.len],
+        ) {
+            return run.pixel(px, py, self.ink, bg);
         }
         test_text_aa(
             px,

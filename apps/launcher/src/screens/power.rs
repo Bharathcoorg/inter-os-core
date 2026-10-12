@@ -50,6 +50,53 @@ const CARD3_RECT: Rect = Rect::new(CARD_X, 380, CARD_W, CARD_H);
 const CARD4_RECT: Rect = Rect::new(CARD_X, 475, CARD_W, CARD_H);
 const CANCEL_RECT: Rect = Rect::new(240, 580, 240, 55);
 
+/// The colour of (`x`, `y`) when the run at (`x0`, `y0`) on `scale` inks it,
+/// drawn by the outline rasteriser when it can place the run and by the bitmap
+/// face when it cannot.
+///
+/// WHY the vertical band is a union of both renderers: the outline run's line
+/// box is not the bitmap cell. At a scale-1 caption the outline's ascent reaches
+/// 25 rows above the run's baseline and its descent 6 rows below (measured: its
+/// cap ink stops 18 rows above the baseline, and "Emergency"'s y descender runs
+/// 5 rows below it), while the bitmap reaches 4 rows above its baseline and
+/// stops at row 23 of a 24-row cell. A band measured for the cell alone clips
+/// both faces' descenders silently. The union is `baseline - 25 .. baseline + 6`
+/// for a caption, and this panel's geometry contains it: the label band for a
+/// caption run at `y0` is `y0-5 .. y0+26`, against a card 75 rows tall and the
+/// cancel pill 55 rows tall, with the ink itself starting at `y0+2`.
+///
+/// WHY the caller's own control test still comes first: the cards and the pill
+/// keep the hit tests and the borders they had, so the wider band can only add
+/// rows the control already covers.
+fn text_pixel(
+    x: usize,
+    y: usize,
+    x0: usize,
+    y0: usize,
+    scale: usize,
+    bytes: &[u8],
+    ink: u32,
+    bg: u32,
+) -> Option<u32> {
+    let em = launcher::outline_text::em_for_scale(scale);
+    let (asc, desc) = interos_std::design::typeface::line_metrics(em);
+    let baseline = y0 + launcher::font::BASELINE * scale;
+    let top = baseline.saturating_sub(asc as usize);
+    if x < x0 || y < top || y >= baseline + desc as usize {
+        return None;
+    }
+    // Choose the renderer ONCE for the run, not once per pixel. The placement is
+    // a pure function of the run's origin, em and bytes, so every pixel of this
+    // run reaches the same face. A per-pixel fallback would draw the glyph from
+    // both faces at once -- an outline glyph under a hard-edged bitmap ghost.
+    if let Some(run) = launcher::outline_text::OutlineRun::place(x0, baseline, em, bytes) {
+        return run.pixel(x, y, ink, bg);
+    }
+    // The bitmap face is the refusal path, not the baseline: a run the rasteriser
+    // declines still has to draw as text.
+    test_text_aa(x, y, x0, y0, scale, bytes, ink, bg)
+}
+
 #[inline]
 fn draw_lock_icon(x: usize, y: usize, cx: usize, cy: usize, tint: u32) -> Option<u32> {
     let dx = (x as i32) - (cx as i32);
@@ -153,7 +200,7 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     // 1. Top status bar (y < 48)
     if y < 48 {
         if state.clock_source_ok {
-            if let Some(c) = test_text_aa(x, y, 48, 14, 1, &state.clock_time, 0xFFCBD5E1, 0xFF111214) {
+            if let Some(c) = text_pixel(x, y, 48, 14, 1, &state.clock_time, 0xFFCBD5E1, 0xFF111214) {
                 return c;
             }
         }
@@ -190,7 +237,7 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return c;
         }
         // Single centered title text "Lock device" (scale 1, 24px height centered vertically at 190 + 25 = 215)
-        if let Some(c) = test_text_aa(x, y, LABEL_ZONE_X + text::center_x(b"Lock device", 1, LABEL_ZONE_W), 215, 1, b"Lock device", COLOR_CARD_TEXT, 0xFF111214) {
+        if let Some(c) = text_pixel(x, y, LABEL_ZONE_X + text::center_x(b"Lock device", 1, LABEL_ZONE_W), 215, 1, b"Lock device", COLOR_CARD_TEXT, 0xFF111214) {
             return c;
         }
         return COLOR_CARD_FILL;
@@ -207,7 +254,7 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return c;
         }
         // Single centered title text "Restart"
-        if let Some(c) = test_text_aa(x, y, LABEL_ZONE_X + text::center_x(b"Restart", 1, LABEL_ZONE_W), 310, 1, b"Restart", COLOR_CARD_TEXT, 0xFF111214) {
+        if let Some(c) = text_pixel(x, y, LABEL_ZONE_X + text::center_x(b"Restart", 1, LABEL_ZONE_W), 310, 1, b"Restart", COLOR_CARD_TEXT, 0xFF111214) {
             return c;
         }
         return COLOR_CARD_FILL;
@@ -224,7 +271,7 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return c;
         }
         // Single centered title text "Power off"
-        if let Some(c) = test_text_aa(x, y, LABEL_ZONE_X + text::center_x(b"Power off", 1, LABEL_ZONE_W), 405, 1, b"Power off", COLOR_CARD_TEXT, 0xFF111214) {
+        if let Some(c) = text_pixel(x, y, LABEL_ZONE_X + text::center_x(b"Power off", 1, LABEL_ZONE_W), 405, 1, b"Power off", COLOR_CARD_TEXT, 0xFF111214) {
             return c;
         }
         return COLOR_CARD_FILL;
@@ -241,7 +288,7 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return c;
         }
         // Single centered title text "Emergency"
-        if let Some(c) = test_text_aa(x, y, LABEL_ZONE_X + text::center_x(b"Emergency", 1, LABEL_ZONE_W), 500, 1, b"Emergency", COLOR_EMERGENCY_TEXT, 0xFF111214) {
+        if let Some(c) = text_pixel(x, y, LABEL_ZONE_X + text::center_x(b"Emergency", 1, LABEL_ZONE_W), 500, 1, b"Emergency", COLOR_EMERGENCY_TEXT, 0xFF111214) {
             return c;
         }
         return COLOR_EMERGENCY_FILL;
@@ -253,7 +300,7 @@ pub fn get_power_menu_color(x: usize, y: usize, state: &LauncherState) -> u32 {
         if !round_contains(&inner, 26, x, y) {
             return COLOR_CANCEL_BORDER;
         }
-        if let Some(c) = test_text_aa(x, y, CANCEL_RECT.x + text::center_x(b"Cancel", 1, CANCEL_RECT.w), 595, 1, b"Cancel", COLOR_CANCEL_TEXT, 0xFF111214) {
+        if let Some(c) = text_pixel(x, y, CANCEL_RECT.x + text::center_x(b"Cancel", 1, CANCEL_RECT.w), 595, 1, b"Cancel", COLOR_CANCEL_TEXT, 0xFF111214) {
             return c;
         }
         return COLOR_CANCEL_FILL;

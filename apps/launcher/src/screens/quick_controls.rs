@@ -593,6 +593,29 @@ struct LabelRun {
     len: usize,
     buf: [u8; 128],
     ink: u32,
+    /// Pixels per em for this run's outline rendering.
+    ///
+    /// WHY a separate number from `scale`: the bitmap face is a 16x24 cell
+    /// multiplied by `scale`, so its cap height is 17*`scale` pixels, while the
+    /// outline face's cap height is 1456 of 2048 em. The em that matches the same
+    /// cap height is `17 * scale * 2048 / 1456`, and `outline_text::em_for_scale`
+    /// is that derivation kept in one place so every screen that migrates a run
+    /// derives it the same way.
+    em: u32,
+    /// Width of the box covering BOTH renderers, measured at construction.
+    w: usize,
+    /// Top row of the box covering BOTH renderers, not the bitmap cell's.
+    ///
+    /// WHY the box is a union: the outline run's line box is not the bitmap cell.
+    /// At a scale-2 caption the outline's ascent reaches 50 rows above the run's
+    /// baseline while the bitmap's own ascender reaches 8 rows into its cell, and
+    /// its descent reaches 13 rows past the baseline where the bitmap's descender
+    /// stops at row 4 of 4 below it, so a box measured for the cell alone clips a
+    /// descender off the bottom. `home.rs` hit exactly this and carried the
+    /// lesson here.
+    top: usize,
+    /// Height of that union box.
+    box_h: usize,
 }
 
 /// Where a run sits inside its rect.
@@ -611,6 +634,10 @@ impl LabelRun {
         len: 0,
         buf: [0u8; 128],
         ink: 0,
+        em: 0,
+        w: 0,
+        top: 0,
+        box_h: 0,
     };
 
     /// Measures `run` and left-aligns it inside `rect`, vertically centred in
@@ -623,7 +650,31 @@ impl LabelRun {
         let len = run.len().min(128);
         let mut buf = [0u8; 128];
         buf[..len].copy_from_slice(&run[..len]);
-        LabelRun { align: Align::Left, rect, scale, off: 0, len, buf, ink }
+        let em = launcher::outline_text::em_for_scale(scale);
+        let baseline = rect.y + (rect.h.saturating_sub(text::line_height(scale))) / 2
+            + launcher::font::BASELINE * scale;
+        let (asc, desc) = interos_std::design::typeface::line_metrics(em);
+        let top = baseline.saturating_sub(asc as usize);
+        // WHY the width is the wider of the two measures: the outline face is
+        // condensed but is not always the narrower one. "Do not disturb"
+        // measures 135 bitmap advances at scale 2 (a 270px measure) and a 260px
+        // outline advance, so the cell is the wider face for that run; the union
+        // is taken rather than assuming which way it goes.
+        let w = text::measure(&buf[..len], scale)
+            .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize);
+        LabelRun {
+            align: Align::Left,
+            rect,
+            scale,
+            off: 0,
+            len,
+            buf,
+            ink,
+            em,
+            w,
+            top,
+            box_h: (baseline + desc as usize).saturating_sub(top),
+        }
     }
 
     /// Measures `run` and right-aligns it inside `rect`, vertically centred.
@@ -631,7 +682,26 @@ impl LabelRun {
         let len = run.len().min(128);
         let mut buf = [0u8; 128];
         buf[..len].copy_from_slice(&run[..len]);
-        LabelRun { align: Align::Right, rect, scale, off: 0, len, buf, ink }
+        let em = launcher::outline_text::em_for_scale(scale);
+        let baseline = rect.y + (rect.h.saturating_sub(text::line_height(scale))) / 2
+            + launcher::font::BASELINE * scale;
+        let (asc, desc) = interos_std::design::typeface::line_metrics(em);
+        let top = baseline.saturating_sub(asc as usize);
+        let w = text::measure(&buf[..len], scale)
+            .max(interos_std::design::typeface::text_advance_px(&buf[..len], em) as usize);
+        LabelRun {
+            align: Align::Right,
+            rect,
+            scale,
+            off: 0,
+            len,
+            buf,
+            ink,
+            em,
+            w,
+            top,
+            box_h: (baseline + desc as usize).saturating_sub(top),
+        }
     }
 
     /// Where the run's first glyph starts on this surface.
@@ -661,7 +731,26 @@ impl LabelRun {
     /// on the page background, on a card and on a pill -- three different
     /// grounds for the same glyphs.
     fn pixel_aa(&self, x: usize, y: usize, ink: u32, bg: u32) -> Option<u32> {
-        crate::test_text_aa(x, y, self.x0(), self.y0(), self.scale, &self.buf[..self.len], ink, bg)
+        let y0 = self.y0();
+        if x < self.x0() || x - self.x0() >= self.w || y < self.top || y - self.top >= self.box_h {
+            return None;
+        }
+        // Choose the renderer ONCE for the run, not once per pixel. The placement
+        // is a pure function of the run's origin, em and bytes, so every pixel of
+        // this run reaches the same face. A per-pixel fallback draws the glyph
+        // from both faces at once -- an outline glyph under a hard-edged bitmap
+        // ghost -- on every string in the shade.
+        if let Some(run) = launcher::outline_text::OutlineRun::place(
+            self.x0(),
+            y0 + launcher::font::BASELINE * self.scale,
+            self.em,
+            &self.buf[..self.len],
+        ) {
+            return run.pixel(x, y, ink, bg);
+        }
+        // The bitmap face is the refusal path, not the baseline: a run the
+        // rasteriser declines still has to draw as text.
+        crate::test_text_aa(x, y, self.x0(), y0, self.scale, &self.buf[..self.len], ink, bg)
     }
 
     /// Ink for `(x, y)`, anti-aliased against `bg`.
