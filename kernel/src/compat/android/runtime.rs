@@ -267,8 +267,8 @@ impl DalvikVmState {
                     if v_dest >= 32 {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
-                    let text = dex.strings.get(str_idx).ok_or(DalvikVmError::InvalidBytecode)?;
-                    self.string_registers[v_dest] = Some(text.clone());
+                    let text = dex.get_string_slice(str_idx as u32).map_err(|_| DalvikVmError::InvalidBytecode)?;
+                    self.string_registers[v_dest] = Some(alloc::string::String::from(text));
                     self.registers[v_dest] = str_idx as u32;
                     pc += 4;
                 }
@@ -286,8 +286,8 @@ impl DalvikVmState {
                     if v_dest >= 32 {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
-                    let text = dex.strings.get(str_idx).ok_or(DalvikVmError::InvalidBytecode)?;
-                    self.string_registers[v_dest] = Some(text.clone());
+                    let text = dex.get_string_slice(str_idx as u32).map_err(|_| DalvikVmError::InvalidBytecode)?;
+                    self.string_registers[v_dest] = Some(alloc::string::String::from(text));
                     self.registers[v_dest] = str_idx as u32;
                     pc += 6;
                 }
@@ -300,7 +300,7 @@ impl DalvikVmState {
                     if v_dest >= 32 {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
-                    if dex.types.get(type_idx).is_none() {
+                    if dex.get_type_slice(type_idx as u32).is_err() {
                         return Err(DalvikVmError::InvalidBytecode);
                     }
                     self.registers[v_dest] = type_idx as u32;
@@ -316,7 +316,7 @@ impl DalvikVmState {
                     if v_dest >= 32 {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
-                    let class_descriptor = dex.types.get(type_idx).ok_or(DalvikVmError::InvalidBytecode)?;
+                    let class_descriptor = dex.get_type_slice(type_idx as u32).map_err(|_| DalvikVmError::InvalidBytecode)?;
                     let object_id = self.allocate_object(class_descriptor)?;
                     self.registers[v_dest] = object_id;
                     self.string_registers[v_dest] = None;

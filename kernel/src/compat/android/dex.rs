@@ -388,7 +388,9 @@ impl<'a> DexPackage<'a> {
         }
 
         // 2. Verify string pool does not contain forbidden ambient capabilities
-        for s in &self.strings {
+        let string_count = u32::from_le(self.header.string_ids_size);
+        for i in 0..string_count {
+            let s = self.get_string_slice(i)?;
             if s.contains("java/lang/ProcessBuilder")
                 || s.contains("java/lang/Runtime")
                 || s.contains("android/os/ExecutableCreator")
