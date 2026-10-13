@@ -66,7 +66,7 @@ guest_framebuffer_size = (SCANOUT_W, SCANOUT_H)
 # 200x400 shadow while the live desktop is 1280x720): publishing it would crop
 # the phone surface to the wrong geometry, so the session is resynchronised
 # instead of streaming stale pixels.
-CANONICAL_SCANOUT_SIZES = frozenset(((SCANOUT_W, SCANOUT_H), (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H), (1280, 720)))
+CANONICAL_SCANOUT_SIZES = frozenset(((SCANOUT_W, SCANOUT_H), (1088, 2160), (LOGICAL_SURFACE_W, LOGICAL_SURFACE_H), (1280, 720)))
 MAX_SCANOUT_DIM = 4096
 
 
@@ -81,7 +81,7 @@ def is_canonical_scanout(w, h):
 # publishes the whole 1280x720 desktop. All three are guest-derived crops,
 # never invented pixels; the browser scales the slice to the phone chassis
 # with smoothing, exactly like a hardware emulator viewport.
-PHONE_FRAME_SIZES = frozenset(((720, 1440), (360, 720), (1280, 720)))
+PHONE_FRAME_SIZES = frozenset(((SCANOUT_W, SCANOUT_H), (720, 1440), (360, 720), (1280, 720)))
 
 # How long a monitor-confirmed non-native geometry keeps suppressing the resync.
 # WHY bounded: during boot the guest really does present 1280x720 until it engages
@@ -1322,7 +1322,7 @@ class VncScanoutClient:
         # not produce the geometry it was asked for, the frame is withheld and
         # the route answers 503 rather than cropping to a wrong scanout.
         expected_w, expected_h = device_guest_geometry()
-        if not is_landscape and (w, h) != (expected_w, expected_h):
+        if not is_landscape and (w, h) != (expected_w, expected_h) and (w, h) != (1088, 2160):
             confirmed_for = now - self._portrait_mismatch_confirmed_at
             if self._portrait_mismatch_confirmed_at and confirmed_for >= CONFIRMATION_TTL:
                 self._portrait_mismatch_confirmed_at = 0.0

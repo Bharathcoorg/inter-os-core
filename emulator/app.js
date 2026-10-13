@@ -636,7 +636,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Never resize the phone surface to a wrong geometry: only guest-derived
     // frames are displayed (native portrait 720x1440, the 360x720 phone slice
     // of a landscape desktop, or full landscape 1280x720).
-    if (!((width === 720 && height === 1440) || (width === 360 && height === 720) || (width === 1280 && height === 720))) return false;
+    if (!((width === 1080 && height === 2160) || (width === 720 && height === 1440) || (width === 360 && height === 720) || (width === 1280 && height === 720))) return false;
     if (!pixels || pixels.byteLength < width * height * 4) return false;
     if (scanoutCtx && liveScanoutCanvas) {
       if (liveScanoutCanvas.width !== width || liveScanoutCanvas.height !== height) {
