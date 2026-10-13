@@ -1400,6 +1400,12 @@ pub fn spawn_app_calendar(id_security: TaskId) -> TaskId {
         rights: Rights::READ.union(Rights::INVOKE),
         object_id: 0,
     }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2509),
+        cap_type: CapabilityType::RealtimeClockRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
 
     let id = spawn_user_process_with_parent(
         "app_calendar",

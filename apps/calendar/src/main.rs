@@ -508,6 +508,9 @@ pub struct CalendarApp {
     current_year: u32,
     current_month: u8,
     current_day: u8,
+    current_hour: u8,
+    current_minute: u8,
+    notified_mask: u16,
     total_events: u32,
     rtc_synchronized: bool,
     sector_encrypted: bool,
@@ -548,6 +551,9 @@ impl CalendarApp {
             current_year: 0,
             current_month: 0,
             current_day: 0,
+            current_hour: 0,
+            current_minute: 0,
+            notified_mask: 0,
             total_events: 0,
             rtc_synchronized: false,
             sector_encrypted: false,
@@ -649,6 +655,8 @@ impl CalendarApp {
                 let y = json_field(payload, b"\"year\":");
                 let m = json_field(payload, b"\"month\":");
                 let d = json_field(payload, b"\"day\":");
+                let h = json_field(payload, b"\"hour\":");
+                let min = json_field(payload, b"\"minute\":");
                 match (y, m, d) {
                     (Some(y), Some(m), Some(d))
                         if y >= 1970 && (1..=12).contains(&m) && (1..=31).contains(&d) =>
@@ -656,6 +664,12 @@ impl CalendarApp {
                         self.current_year = y;
                         self.current_month = m as u8;
                         self.current_day = d as u8;
+                        if let Some(h) = h {
+                            self.current_hour = (h & 0xFF) as u8;
+                        }
+                        if let Some(min) = min {
+                            self.current_minute = (min & 0xFF) as u8;
+                        }
                         self.date_known = true;
                         self.rtc_synchronized = true;
                         std::log(
@@ -712,6 +726,31 @@ impl CalendarApp {
             self.current_month = m;
             self.current_day = day;
             self.date_known = true;
+        }
+    }
+
+    /// Checks loaded events against current RTC date and time, posting a system
+    /// notification when a scheduled event time is reached.
+    pub fn check_due_notifications(&mut self) {
+        if !self.date_known {
+            return;
+        }
+        for i in 0..self.store.len() {
+            if i >= 16 {
+                break;
+            }
+            let rec = &self.store.records[i];
+            if (self.notified_mask & (1 << i)) == 0
+                && rec.year == self.current_year as u16
+                && rec.month == self.current_month
+                && rec.day == self.current_day
+                && rec.hour == self.current_hour
+                && rec.minute <= self.current_minute
+            {
+                self.notified_mask |= 1 << i;
+                let _ = std::notification_post("app_calendar", "calendar|Calendar Alert|Scheduled event reached");
+                std::log(0, "[CALENDAR APP] Triggered notification for scheduled event.").ok();
+            }
         }
     }
 
@@ -2850,6 +2889,9 @@ pub extern "C" fn _start() {
                 }
                 if events & std::EVENT_TIMER_TICK != 0 {
                     // Periodic alarm & reminder monitor
+                    if calendar.sync_rtc() {
+                        calendar.check_due_notifications();
+                    }
                     std::yield_now();
                 }
             }

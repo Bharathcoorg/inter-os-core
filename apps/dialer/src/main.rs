@@ -272,16 +272,13 @@ const STORE_VERSION: u8 = 1;
 /// Settings key the whole contact store is written under.
 const STORE_KEY: &str = "dialer.contacts.v1";
 
-/// WHY slot 3 for both directions: it is the only filesystem capability the
-/// dialer task is given. `spawn_app_dialer` in `kernel/src/task/user.rs` grants
-/// `FileSystemRead` with `Rights::READ` as its fourth insert, which lands in
-/// slot 3 (0=SerialOutput, 1=IpcSend, 2=TimerTickRead, 3=FileSystemRead,
-/// 4=EventPoll, 5=IpcReceive, 6=FrameBufferDirect). Reads are authorised by it.
-/// Writes go through the same slot, so the kernel answers from its own table
-/// rather than from anything the app can claim: a write is either acknowledged
-/// or refused with a specific error the store reports verbatim.
+/// WHY slot 3 for read and slot 7 for write: `spawn_app_dialer` in
+/// `kernel/src/task/user.rs` grants `FileSystemRead` with `Rights::READ` in slot 3,
+/// and `FileSystemWrite` with `Rights::WRITE` in slot 7. `sys_settings_get` is
+/// authorized by slot 3 (or 7), while `sys_settings_set` strictly requires a
+/// `FileSystemWrite` capability, which is slot 7.
 const STORE_CAP_READ: usize = 3;
-const STORE_CAP_WRITE: usize = 3;
+const STORE_CAP_WRITE: usize = 7;
 
 /// Byte cost of the whole feature, stated once so it can be re-checked:
 /// 8 contacts x 36 bytes = 288 bytes of RAM for the records, plus a 290-byte

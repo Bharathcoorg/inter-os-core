@@ -259,6 +259,27 @@ const ITEMS_ALL: [VfsItem; 0] = [];
 const PROBE_DEFAULT: [u8; 40] =
     *b"not queried\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 
+pub const MAX_PARSED_ENTRIES: usize = 8;
+pub const MAX_ENTRY_NAME_LEN: usize = 32;
+
+/// A bounded, zero-heap directory entry parsed from kernel VFS `fs_list`.
+#[derive(Clone, Copy)]
+pub struct RuntimeFileEntry {
+    pub name: [u8; MAX_ENTRY_NAME_LEN],
+    pub name_len: usize,
+    pub size: u64,
+    pub is_dir: bool,
+}
+
+impl RuntimeFileEntry {
+    pub const EMPTY: Self = Self {
+        name: [0u8; MAX_ENTRY_NAME_LEN],
+        name_len: 0,
+        size: 0,
+        is_dir: false,
+    };
+}
+
 pub struct FileManagerApp {
     pub selected_shortcut: usize,
     pub storage_capacity_bytes: u64,
@@ -271,6 +292,8 @@ pub struct FileManagerApp {
     /// returns, and only read afterwards.
     pub probe_label: [u8; 40],
     pub probe_label_len: usize,
+    pub entries: [RuntimeFileEntry; MAX_PARSED_ENTRIES],
+    pub entry_count: usize,
 }
 
 impl FileManagerApp {
@@ -281,6 +304,44 @@ impl FileManagerApp {
             current_path: "/data",
             probe_label: PROBE_DEFAULT,
             probe_label_len: 10,
+            entries: [RuntimeFileEntry::EMPTY; MAX_PARSED_ENTRIES],
+            entry_count: 0,
+        }
+    }
+
+    /// Parses newline-delimited VFS entries in `<name>|<size>|<dir|dev|file>` format.
+    pub fn parse_entries(&mut self, data: &[u8]) {
+        self.entry_count = 0;
+        let mut start = 0;
+        while start < data.len() && self.entry_count < MAX_PARSED_ENTRIES {
+            let end = data[start..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map(|p| start + p)
+                .unwrap_or(data.len());
+            let line = &data[start..end];
+            if !line.is_empty() {
+                let mut parts = line.split(|&b| b == b'|');
+                if let (Some(name_bytes), Some(size_bytes), Some(type_bytes)) =
+                    (parts.next(), parts.next(), parts.next())
+                {
+                    let mut entry = RuntimeFileEntry::EMPTY;
+                    let n = name_bytes.len().min(MAX_ENTRY_NAME_LEN);
+                    entry.name[..n].copy_from_slice(&name_bytes[..n]);
+                    entry.name_len = n;
+                    let mut size: u64 = 0;
+                    for &b in size_bytes {
+                        if b.is_ascii_digit() {
+                            size = size.saturating_mul(10).saturating_add((b - b'0') as u64);
+                        }
+                    }
+                    entry.size = size;
+                    entry.is_dir = type_bytes == b"dir";
+                    self.entries[self.entry_count] = entry;
+                    self.entry_count += 1;
+                }
+            }
+            start = end.saturating_add(1);
         }
     }
 
@@ -718,10 +779,16 @@ pub extern "C" fn _start() -> ! {
     app.record_probe(probe);
     match probe {
         Ok(n) => {
+            app.parse_entries(&entries[..n]);
             log_counted(
                 "[FILE_MANAGER] fs_list('/data'): ",
                 n as u64,
-                " bytes of directory entries received; not parsed or rendered.",
+                " bytes of directory entries received and parsed.",
+            );
+            log_counted(
+                "[FILE_MANAGER] Parsed VFS directory entries: ",
+                app.entry_count as u64,
+                " items.",
             );
         }
         Err(code) => {

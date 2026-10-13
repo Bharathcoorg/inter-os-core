@@ -397,10 +397,10 @@ impl TerminalApp {
         match cmd_line {
             "help" => {
                 self.push_line("interos@sovereign:~$ help", SUCCESS_EMERALD);
-                self.push_line("Commands: help, status, ps, mem, caps, share, dma, ping", TEXT_PRIMARY);
+                self.push_line("Commands: help, status, ps, mem, caps, share, dma, ping, ls, services", TEXT_PRIMARY);
                 std::log(
                     0,
-                    "[TERMINAL] Commands: help, status, ps, mem, caps, share, dma, ping",
+                    "[TERMINAL] Commands: help, status, ps, mem, caps, share, dma, ping, ls, services",
                 )
                 .ok();
                 self.record_history("help", 0);
@@ -538,6 +538,49 @@ impl TerminalApp {
                 self.push_line("ping: unavailable; no ICMP/network probe is implemented.", TEXT_MUTED);
                 std::log(0, "[TERMINAL APP] ping unavailable: no network probe was executed.").ok();
                 self.record_history("ping", 0);
+            }
+            "services" => {
+                self.push_line("interos@sovereign:~$ services", SUCCESS_EMERALD);
+                let mut buf = [0u8; 512];
+                match std::service_list(&mut buf) {
+                    Ok(n) => {
+                        self.push_counted("services: snapshot returned ", n as u64, " bytes.", TEXT_PRIMARY);
+                        std::log(0, "[TERMINAL APP] services command executed.").ok();
+                        self.record_history("services", 0);
+                    }
+                    Err(code) => {
+                        self.push_line("services: query refused or unavailable.", TEXT_MUTED);
+                        self.record_history("services", code);
+                    }
+                }
+            }
+            "ls" | "vfs" => {
+                self.push_line("interos@sovereign:~$ ls", SUCCESS_EMERALD);
+                let mut buf = [0u8; 512];
+                match std::fs_list(3, "/data", &mut buf) {
+                    Ok(n) if n > 0 => {
+                        self.push_counted("vfs(/data): ", n as u64, " bytes listed.", SUCCESS_EMERALD);
+                        let mut start = 0;
+                        while start < n {
+                            let end = buf[start..n].iter().position(|&b| b == b'\n').map(|p| start + p).unwrap_or(n);
+                            if let Ok(entry_str) = core::str::from_utf8(&buf[start..end]) {
+                                if !entry_str.is_empty() {
+                                    self.push_line(entry_str, TEXT_PRIMARY);
+                                }
+                            }
+                            start = end.saturating_add(1);
+                        }
+                        self.record_history("ls", 0);
+                    }
+                    Ok(_) => {
+                        self.push_line("vfs(/data): directory empty.", TEXT_MUTED);
+                        self.record_history("ls", 0);
+                    }
+                    Err(code) => {
+                        self.push_line("vfs: fs_list(/data) query refused or unavailable.", TEXT_MUTED);
+                        self.record_history("ls", code);
+                    }
+                }
             }
             _ => {}
         }

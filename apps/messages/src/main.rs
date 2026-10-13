@@ -36,6 +36,8 @@ use interos_std as std;
 mod store;
 use store::ThreadStore;
 
+pub mod gsm;
+
 /// Status of a messaging conversation thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadStatus {
