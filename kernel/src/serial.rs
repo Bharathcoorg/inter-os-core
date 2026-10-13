@@ -35,33 +35,30 @@ pub fn init() {
 
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
+    let _ = _print_internal(args);
+}
+
+/// Internal helper for printing formatted text to COM1.
+///
+/// Uses bounded `try_lock` attempts so panic handlers and interrupt paths
+/// never deadlock if `SERIAL1` was held when a fault occurred.
+/// Inside the locked region, `write_fmt` errors are safely discarded instead
+/// of panicking via `.expect(...)`.
+pub fn _print_internal(args: fmt::Arguments) -> bool {
     use core::fmt::Write;
 
-    // WHY: `without_interrupts` emits `cli`/`sti`, which are privileged. A host
-    // unit-test binary runs in ring 3, so taking that path raised
-    // STATUS_PRIVILEGED_INSTRUCTION and killed the test process before any
-    // assertion ran. The masking exists solely to stop an interrupt handler
-    // deadlocking against this lock; a test build has no COM1 and no timer
-    // interrupt, so there is nothing to mask against.
-    #[cfg(not(test))]
-    {
-        use x86_64::instructions::interrupts;
-
-        // Print without interrupts to avoid deadlock if an interrupt handler also logs.
-        interrupts::without_interrupts(|| {
-            if let Some(ref mut serial) = *SERIAL1.lock() {
-                serial.write_fmt(args).expect("Printing to serial port failed");
+    crate::arch::with_interrupts_disabled(|| {
+        for _ in 0..10_000 {
+            if let Some(mut guard) = SERIAL1.try_lock() {
+                if let Some(ref mut serial) = *guard {
+                    let _ = serial.write_fmt(args);
+                }
+                return true;
             }
-        });
-    }
-
-    // WHY: no COM1 exists in a host test process. Output is deliberately dropped
-    // instead of executing privileged port I/O, so `cfg(test)` builds can assert
-    // on behaviour without pretending a console is attached.
-    #[cfg(test)]
-    {
-        let _ = args;
-    }
+            core::hint::spin_loop();
+        }
+        false
+    })
 }
 
 /// Prints formatted text to the COM1 serial interface.
@@ -1013,3 +1010,30 @@ fn handle_serial_command(cmd: &[u8]) {
         crate::input::post_char_event(c);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_serial_print_try_lock_does_not_deadlock_when_locked() {
+        let guard = SERIAL1.lock();
+        // With SERIAL1 held, _print_internal must attempt try_lock, exhaust budget,
+        // and return false without deadlocking or panicking.
+        let acquired = _print_internal(format_args!("panic path test: {}\n", "deadlock avoided"));
+        assert!(!acquired, "Expected _print_internal to return false when SERIAL1 is held");
+
+        // Calling _print directly while locked must also return safely without hanging
+        _print(format_args!("direct _print call under lock: {}\n", 1));
+
+        drop(guard);
+
+        // When unlocked, _print_internal acquires the lock and succeeds without panic
+        let acquired_unlocked = _print_internal(format_args!("normal print test: {}\n", 42));
+        assert!(acquired_unlocked, "Expected _print_internal to succeed when SERIAL1 is unlocked");
+
+        // Macro invocation in unlocked state must succeed without panic
+        serial_println!("Macro invocation test {}", 100);
+    }
+}
+
