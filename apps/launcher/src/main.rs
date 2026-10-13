@@ -2203,6 +2203,66 @@ pub extern "C" fn _start() -> ! {
                             if input.kind == 1 {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
+                                // WHY the Activities block is answerable here: it
+                                // was paint-only, because this arm reached only
+                                // the deck's three pinned bands and the home bar.
+                                // The rows sit at `ACTIVITY_ROW_TOP` (1076) with a
+                                // stride of 34, which is below the last card
+                                // (WORKSPACE_CARDS[2] ends at 990) and above the
+                                // home bar, so the band is free of everything the
+                                // lifecycle harness pins.
+                                //
+                                // WHAT a tap does and why that is honest: a
+                                // workspace's only sourced fact is the count of
+                                // installed apps in that registry category, so
+                                // the useful action is to open the drawer filtered
+                                // to it -- the drawer already has that filter and
+                                // the tab names already agree for Work and
+                                // Personal. Research and Media have no tab because
+                                // no package declares them, and on this guest their
+                                // count is zero, so a tap there opens the drawer on
+                                // All rather than pretending a filter applied. The
+                                // log says which, so the difference is visible in
+                                // the serial record rather than hidden.
+                                if let Some(ws) = screens::activity::activity_row_at(x, y) {
+                                    let tab = match screens::activity::ACTIVITY_NAMES[ws] {
+                                        b"Work" => Some(1),
+                                        b"Personal" => Some(2),
+                                        _ => None,
+                                    };
+                                    match tab {
+                                        Some(t) => {
+                                            state.app_drawer_tab = t;
+                                            state.app_drawer_page = 0;
+                                            state.current_view = ViewMode::AppDrawer;
+                                            render_view(surface, &state);
+                                            let _ = std::surface_flip(4);
+                                            std::log(
+                                                0,
+                                                "[LAUNCHER] Workspace opened the app drawer filtered.",
+                                            )
+                                            .ok();
+                                        }
+                                        None => {
+                                            // WHY All and not the workspace's own
+                                            // index: the drawer has four tabs and
+                                            // none of them is Research or Media, so
+                                            // selecting one would filter on a
+                                            // category the drawer cannot express.
+                                            state.app_drawer_tab = 0;
+                                            state.app_drawer_page = 0;
+                                            state.current_view = ViewMode::AppDrawer;
+                                            render_view(surface, &state);
+                                            let _ = std::surface_flip(4);
+                                            std::log(
+                                                0,
+                                                "[LAUNCHER] Workspace has no drawer category; opened unfiltered.",
+                                            )
+                                            .ok();
+                                        }
+                                    }
+                                    break;
+                                }
                                 // WHY the corner close control is tested before
                                 // everything else: it sits inside the card body at
                                 // x 624..672, while the legacy dismiss badges are a
@@ -2562,11 +2622,11 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
                                 // WHY gated to the drawn System card (x 40..680, y
-                                // 790..900 -- CARD_R4 in screens/system_space.rs):
+                                // 770..890 -- CARD_R4 in screens/system_space.rs):
                                 // any tap anywhere used to launch the settings app,
                                 // including taps on the Device/Network/Personal/Apps
                                 // cards that draw no such affordance.
-                                if !(790..900).contains(&y) || !(40..680).contains(&x) {
+                                if !(770..890).contains(&y) || !(40..680).contains(&x) {
                                     break;
                                 }
                                 if let Ok(task_id) = std::app_launch("org.interos.settings") {

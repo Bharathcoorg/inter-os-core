@@ -6,7 +6,11 @@
 
 use crate::{test_text_aa, LauncherState};
 use launcher::layout::Rect;
-use launcher::theme::Theme;
+use launcher::theme::{Theme, SCREEN_WIDTH};
+
+/// How many entry dots the pad draws: the longest PIN this surface accepts, which
+/// is the `pin_buffer`'s own length in `main.rs`.
+const DOT_COUNT: u8 = 8;
 
 const BG: u32 = 0xFF111214;
 const PANEL: u32 = 0xFF25282A;
@@ -180,9 +184,16 @@ pub fn get_pin_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     }
 
     let dot_y = DOT_Y;
-    let dot_start = 286usize;
-    for i in 0..8 {
-        let cx = dot_start + i * 22;
+    // WHY derived and not a literal: `286` was a typed start, and it put the row's
+    // centre (between the fourth and fifth dot) at 363 rather than on the surface's
+    // own middle, 360 -- the eight dots were drawn three pixels right of centre on
+    // every entry attempt. The pitch and the count are both still literals because
+    // they are this keypad's own spacing, but the start is now solved for the
+    // centre, so a change to either only moves the row, never off-centres it.
+    let dot_pitch = 22usize;
+    let dot_start = SCREEN_WIDTH / 2 - (DOT_COUNT as usize - 1) * dot_pitch / 2;
+    for i in 0..DOT_COUNT as usize {
+        let cx = dot_start + i * dot_pitch;
         let active = i < state.pin_len as usize;
         let dx = x as i32 - cx as i32;
         let dy = y as i32 - dot_y as i32;

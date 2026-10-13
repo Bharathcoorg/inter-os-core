@@ -672,14 +672,49 @@ fn draw_orb(x: usize, y: usize, cx: usize, cy: usize, base_r: usize, ticks: u64)
 // cards  row 1             370..490
 //        row 2             510..630
 //        row 3             650..770
-//        full width        790..900
-const CARD_R1_L: Rect = Rect::new(40, 370, 305, 120);
-const CARD_R1_R: Rect = Rect::new(375, 370, 305, 120);
-const CARD_R2_L: Rect = Rect::new(40, 510, 305, 120);
-const CARD_R2_R: Rect = Rect::new(375, 510, 305, 120);
-const CARD_R3_L: Rect = Rect::new(40, 650, 305, 120); // POWER_ENTRY
-const CARD_R3_R: Rect = Rect::new(375, 650, 305, 120);
-const CARD_R4: Rect = Rect::new(40, 790, 640, 110);
+//        full width        770..890
+//
+// WHY row 4 is 770 and not 790: it is the one full-width card, and it holds the
+// same three parts the 120px rows hold -- a 22px icon, a 48px title box and a
+// 24px caption box. Typed as a 110px card at y 790, both ends of that stack fell
+// outside its own rectangle: the gear icon's centre was placed 16 rows above the
+// card's top edge, and the caption's line box ran to row 906, six rows past the
+// bottom. A per-pixel painter cannot clip itself, so the card's own gate threw
+// those rows away -- the capture shows the gear sliced flat at the top border and
+// the caption's descenders missing. Making row 4 the same height as rows 1-3 and
+// moving it up one row-3 card height puts all three parts back inside the card,
+// which is all the fix this surface can have: 890 leaves 546 rows of air below,
+// and the home indicator at 1416 is nowhere near.
+//
+// WHY one rhythm for all four rows: each row's icon centre, title box and caption
+// box used to be typed by hand per card, and they drifted -- row 1's title was
+// placed 48 rows ABOVE its card so it never drew at all, row 2 sat 15 rows higher
+// in the card than row 3, and row 4 clipped both ends. A painter cannot omit a
+// run because its box is outside its parent, so every one of those was a silent
+// "this text does not exist". Deriving all three from the card's own origin makes
+// the relationship the code and not a number a reader has to trust.
+//
+// The rhythm, measured against the two rows that did render correctly (rows 2 and
+// 3) and kept because it fits a 120px card with air to spare:
+//   icon   +26..+48   (a 22px-tall pictogram centred on +37)
+//   title  +42..+90   (the 48px line box a scale-2 run needs)
+//   caption+92..+116  (the 24px line box a scale-1 run needs)
+const CARD_H: usize = 120;
+
+/// Rows from a card's top edge to its pictogram's centre.
+const CARD_ICON_DY: usize = 37;
+/// Rows from a card's top edge to its title's line box.
+const CARD_TITLE_DY: usize = 42;
+/// Rows from a card's top edge to its caption's line box.
+const CARD_CAPTION_DY: usize = 92;
+
+const CARD_R1_L: Rect = Rect::new(40, 370, 305, CARD_H);
+const CARD_R1_R: Rect = Rect::new(375, 370, 305, CARD_H);
+const CARD_R2_L: Rect = Rect::new(40, 510, 305, CARD_H);
+const CARD_R2_R: Rect = Rect::new(375, 510, 305, CARD_H);
+const CARD_R3_L: Rect = Rect::new(40, 650, 305, CARD_H); // POWER_ENTRY
+const CARD_R3_R: Rect = Rect::new(375, 650, 305, CARD_H);
+const CARD_R4: Rect = Rect::new(40, 770, 640, CARD_H);
 
 /// Rows the orb occupies, and so the band its driver repaints.
 const ORB_BAND_Y0: usize = 200;
@@ -787,105 +822,136 @@ pub fn get_system_space_color(x: usize, y: usize, state: &LauncherState) -> u32 
         }
     }
 
-    // 4. Row 1 Cards (y: 295..415)
+    // 4. Row 1 Cards
     // Left: Device
     if let Some(bg) = card_pixel(&CARD_R1_L, x, y) {
-        if let Some(ic) = draw_device_icon(x, y, 75, 407, TEXT_DARK) {
+        if let Some(ic) = draw_device_icon(x, y, 75, CARD_R1_L.y + CARD_ICON_DY, TEXT_DARK) {
             return ic;
         }
-        if let Some(c) = test_text_aa(x, y, 105, 322, 2, b"Device", TEXT_DARK, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(
+            x, y, 105, CARD_R1_L.y + CARD_TITLE_DY, 2, b"Device", TEXT_DARK, 0xFFFFFFFF,
+        ) {
             return c;
         }
-        if let Some(c) = test_text_aa(x, y, 65, 447, 1, b"Display, Sound, Gestures", TEXT_MUTED, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(
+            x, y, 65, CARD_R1_L.y + CARD_CAPTION_DY, 1, b"Display, Sound, Gestures", TEXT_MUTED,
+            0xFFFFFFFF,
+        ) {
             return c;
         }
         return bg;
     }
     // Right: Network
     if let Some(bg) = card_pixel(&CARD_R1_R, x, y) {
-        if let Some(ic) = draw_network_icon(x, y, 410, 407, TEXT_DARK) {
+        if let Some(ic) = draw_network_icon(x, y, 410, CARD_R1_R.y + CARD_ICON_DY, TEXT_DARK) {
             return ic;
         }
-        if let Some(c) = test_text_aa(x, y, 440, 322, 2, b"Network", TEXT_DARK, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(
+            x, y, 440, CARD_R1_R.y + CARD_TITLE_DY, 2, b"Network", TEXT_DARK, 0xFFFFFFFF,
+        ) {
             return c;
         }
-        if let Some(c) = test_text_aa(x, y, 400, 447, 1, b"Wi-Fi, Mobile, Bluetooth", TEXT_MUTED, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(
+            x, y, 400, CARD_R1_R.y + CARD_CAPTION_DY, 1, b"Wi-Fi, Mobile, Bluetooth", TEXT_MUTED,
+            0xFFFFFFFF,
+        ) {
             return c;
         }
         return bg;
     }
 
-    // 5. Row 2 Cards (y: 435..555)
+    // 5. Row 2 Cards
     // Left: Personal
     if let Some(bg) = card_pixel(&CARD_R2_L, x, y) {
-        if let Some(ic) = draw_personal_icon(x, y, 75, 547, TEXT_DARK) {
+        if let Some(ic) = draw_personal_icon(x, y, 75, CARD_R2_L.y + CARD_ICON_DY, TEXT_DARK) {
             return ic;
         }
-        if let Some(c) = test_text_aa(x, y, 105, 537, 2, b"Personal", TEXT_DARK, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(
+            x, y, 105, CARD_R2_L.y + CARD_TITLE_DY, 2, b"Personal", TEXT_DARK, 0xFFFFFFFF,
+        ) {
             return c;
         }
-        if let Some(c) = test_text_aa(x, y, 65, 587, 1, b"Accounts, Language, Time", TEXT_MUTED, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(
+            x, y, 65, CARD_R2_L.y + CARD_CAPTION_DY, 1, b"Accounts, Language, Time", TEXT_MUTED,
+            0xFFFFFFFF,
+        ) {
             return c;
         }
         return bg;
     }
     // Right: Apps
     if let Some(bg) = card_pixel(&CARD_R2_R, x, y) {
-        if let Some(ic) = draw_apps_icon(x, y, 410, 547, TEXT_DARK) {
+        if let Some(ic) = draw_apps_icon(x, y, 410, CARD_R2_R.y + CARD_ICON_DY, TEXT_DARK) {
             return ic;
         }
-        if let Some(c) = test_text_aa(x, y, 440, 537, 2, b"Apps", TEXT_DARK, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(
+            x, y, 440, CARD_R2_R.y + CARD_TITLE_DY, 2, b"Apps", TEXT_DARK, 0xFFFFFFFF,
+        ) {
             return c;
         }
-        if let Some(c) = test_text_aa(x, y, 400, 587, 1, b"Permissions, Storage", TEXT_MUTED, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(
+            x, y, 400, CARD_R2_R.y + CARD_CAPTION_DY, 1, b"Permissions, Storage", TEXT_MUTED,
+            0xFFFFFFFF,
+        ) {
             return c;
         }
         return bg;
     }
 
-    // 6. Row 3 Cards (y: 590..710)
+    // 6. Row 3 Cards
     // Left: Power (POWER_ENTRY)
     if let Some(bg) = card_pixel(&CARD_R3_L, x, y) {
-        if let Some(ic) = draw_battery_icon(x, y, 75, 702, TEXT_DARK) {
+        if let Some(ic) = draw_battery_icon(x, y, 75, CARD_R3_L.y + CARD_ICON_DY, TEXT_DARK) {
             return ic;
         }
-        if let Some(c) = test_text_aa(x, y, 105, 692, 2, b"Power", TEXT_DARK, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(
+            x, y, 105, CARD_R3_L.y + CARD_TITLE_DY, 2, b"Power", TEXT_DARK, 0xFFFFFFFF,
+        ) {
             return c;
         }
         // WHY "Power options" and not "Charging": the subtitle names the section,
         // and "Charging" would claim a live charge state this shell never measured.
-        if let Some(c) = test_text_aa(x, y, 65, 742, 1, b"Battery, Power options", TEXT_MUTED, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(
+            x, y, 65, CARD_R3_L.y + CARD_CAPTION_DY, 1, b"Battery, Power options", TEXT_MUTED,
+            0xFFFFFFFF,
+        ) {
             return c;
         }
         return bg;
     }
     // Right: Security
     if let Some(bg) = card_pixel(&CARD_R3_R, x, y) {
-        if let Some(ic) = draw_security_icon(x, y, 410, 702, TEXT_DARK) {
+        if let Some(ic) = draw_security_icon(x, y, 410, CARD_R3_R.y + CARD_ICON_DY, TEXT_DARK) {
             return ic;
         }
-        if let Some(c) = test_text_aa(x, y, 440, 692, 2, b"Security", TEXT_DARK, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(
+            x, y, 440, CARD_R3_R.y + CARD_TITLE_DY, 2, b"Security", TEXT_DARK, 0xFFFFFFFF,
+        ) {
             return c;
         }
-        if let Some(c) = test_text_aa(x, y, 400, 742, 1, b"Lock, Encryption", TEXT_MUTED, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(
+            x, y, 400, CARD_R3_R.y + CARD_CAPTION_DY, 1, b"Lock, Encryption", TEXT_MUTED,
+            0xFFFFFFFF,
+        ) {
             return c;
         }
         return bg;
     }
 
-    // 7. Row 4 Card: System (Full width 40..680, y: 730..840)
+    // 7. Row 4 Card: System (Full width)
     if let Some(bg) = card_pixel(&CARD_R4, x, y) {
-        if let Some(ic) = draw_gear_icon(x, y, 75, 785, TEXT_DARK) {
+        if let Some(ic) = draw_gear_icon(x, y, 75, CARD_R4.y + CARD_ICON_DY, TEXT_DARK) {
             return ic;
         }
-        if let Some(c) = test_text_aa(x, y, 105, 832, 2, b"System", TEXT_DARK, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(
+            x, y, 105, CARD_R4.y + CARD_TITLE_DY, 2, b"System", TEXT_DARK, 0xFFFFFFFF,
+        ) {
             return c;
         }
-        // WHY y0 = 815: rows 1-3 place the caption at title_y0 + GLYPH_H*2 + 2,
-        // which clears the title's 48px line box. Row 4 used a hand-typed 800,
-        // which is 15px too high - the caption's cap top landed at 803, exactly
-        // the title's baseline, so the two lines overprinted each other.
-        if let Some(c) = test_text_aa(x, y, 105, 882, 1, b"Updates, About, Tools", TEXT_MUTED, 0xFFFFFFFF) {
+        if let Some(c) = test_text_aa(
+            x, y, 105, CARD_R4.y + CARD_CAPTION_DY, 1, b"Updates, About, Tools", TEXT_MUTED,
+            0xFFFFFFFF,
+        ) {
             return c;
         }
         return bg;

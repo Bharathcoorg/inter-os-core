@@ -726,6 +726,16 @@ fn row_plan(rec: &NotificationRecord, y: usize, cat: Category, now: Option<u64>,
     // whatever is left of them.
     let title_fit = (ROW_X + ROW_W - TIME_COL_W - space::MD - space::SM).saturating_sub(ROW_TEXT_X);
 
+    // WHY the body is fitted to the time column too, and not to the card's own
+    // inner edge: the time/source runs are right-aligned, so the widest place a
+    // body can reach is the leftmost column their longest run occupies. Fitted to
+    // the card instead, a body longer than that ran its ink into the source run's
+    // rows -- the two line boxes already share rows 59..68 of their row, so a long
+    // body drew its tail across the package id. The title has always cleared the
+    // same column; the body now does the arithmetic the title does.
+    let right_col = ROW_X + ROW_W - TIME_COL_W;
+    let body_fit = (right_col - space::SM).saturating_sub(ROW_TEXT_X);
+
     RowPlan {
         rect,
         dot_c: (ROW_X + space::XL - space::XS, y + ROW_H / 2),
@@ -743,7 +753,7 @@ fn row_plan(rec: &NotificationRecord, y: usize, cat: Category, now: Option<u64>,
             ROW_TEXT_X,
             y + space::XS + text::line_height(type_scale::BODY) + space::XS,
             type_scale::CAPTION,
-            ROW_X + ROW_W - space::MD - ROW_TEXT_X,
+            body_fit,
             body_bytes,
             theme.text_muted,
         ),

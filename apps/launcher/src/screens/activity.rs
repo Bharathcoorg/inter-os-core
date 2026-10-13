@@ -441,7 +441,7 @@ const WS_MUTED: u32 = Theme::DARK.text_muted;
 /// Work/Personal/Tools tabs (`APP_DRAWER_TAB_NAMES`), named by the system rather
 /// than chosen per user. What *would* be fabrication is inventing each one's
 /// contents; the contents below are derived from the registry and stated as such.
-const ACTIVITY_NAMES: [&[u8]; 4] = [b"Work", b"Personal", b"Research", b"Media"];
+pub const ACTIVITY_NAMES: [&[u8]; 4] = [b"Work", b"Personal", b"Research", b"Media"];
 
 /// Top of the "Activities" heading, just below the running deck (which ends at
 /// WORKSPACE_CARDS[2].y = 990). The whole workspaces block lives below the
@@ -451,7 +451,39 @@ const ACTIVITY_HEAD_Y: usize = 1000;
 const ACTIVITY_SUB_Y: usize = 1046;
 /// The workspaces rows align with the deck's own content columns, so the two
 /// blocks read as one screen rather than two stitched together.
-const ACTIVITY_ROW_X: usize = CARD_X;
+/// Which workspace row a tap at (`x`, `y`) falls in, if any.
+///
+/// WHY this exists: the Activities block was paint-only — `main.rs`'s
+/// `ViewMode::ActivitySpace` arm reached only the recents deck's three pinned
+/// bands and the home bar, so nothing below the deck answered to a touch. This
+/// is the hit test that makes it answer.
+///
+/// The band is `ACTIVITY_ROW_TOP .. + 4*ACTIVITY_ROW_STRIDE` across the full
+/// card column, which is below the last recents card (`WORKSPACE_CARDS[2]` ends
+/// at row 990) and above the home bar. That is what keeps it clear of every band
+/// the layout harness pins, so adding it cannot steal a tap the harness expects
+/// elsewhere.
+///
+/// A row is `ACTIVITY_ROW_H` tall inside a `ACTIVITY_ROW_STRIDE` pitch, so a tap
+/// in the gap between two rows is not a tap on either — that is what the modulo
+/// below is for, and it is why a gap tap falls through to the deck rather than
+/// opening a row the user did not aim at.
+pub fn activity_row_at(x: usize, y: usize) -> Option<usize> {
+    let top = ACTIVITY_ROW_TOP;
+    if y < top || y >= top + ACTIVITY_NAMES.len() * ACTIVITY_ROW_STRIDE {
+        return None;
+    }
+    let offset = y - top;
+    if offset % ACTIVITY_ROW_STRIDE >= ACTIVITY_ROW_H {
+        return None;
+    }
+    if x < ACTIVITY_ROW_X || x - ACTIVITY_ROW_X >= ACTIVITY_ROW_W {
+        return None;
+    }
+    Some(offset / ACTIVITY_ROW_STRIDE)
+}
+
+pub const ACTIVITY_ROW_X: usize = CARD_X;
 const ACTIVITY_ROW_W: usize = CARD_W;
 const ACTIVITY_ROW_H: usize = 32;
 const ACTIVITY_ROW_STRIDE: usize = 34;
