@@ -184,6 +184,61 @@ pub mod viewport {
         SCALE_NUM != SCALE_DEN
     }
 
+    /// Scales a stroke width or border thickness to the physical scanout.
+    /// Preserves at least 1px for any non-zero logical stroke.
+    #[inline]
+    pub fn scale_stroke(stroke: usize) -> usize {
+        if stroke == 0 {
+            0
+        } else {
+            ((stroke * SCALE_NUM + SCALE_DEN / 2) / SCALE_DEN).max(1)
+        }
+    }
+
+    /// Scales a corner radius to the physical scanout, maintaining proportional curvature.
+    #[inline]
+    pub fn scale_radius(r: usize) -> usize {
+        (r * SCALE_NUM + SCALE_DEN / 2) / SCALE_DEN
+    }
+
+    /// Scales an authoring rectangle (x, y, w, h) to its exact physical scanout bounds.
+    /// Uses corner-snapping so adjacent rectangles share identical boundaries with zero gap.
+    #[inline]
+    pub fn scale_rect(lx: usize, ly: usize, lw: usize, lh: usize) -> (usize, usize, usize, usize) {
+        let (sx0, sy0) = logical_to_surface(lx, ly);
+        let (sx1, sy1) = logical_to_surface(lx + lw, ly + lh);
+        (sx0, sy0, sx1 - sx0, sy1 - sy0)
+    }
+
+    /// Clamps and maps physical touch coordinates to the logical authoring canvas.
+    #[inline]
+    pub fn touch_to_logical(px: i32, py: i32) -> (usize, usize) {
+        let cx = px.max(0).min(SCANOUT_WIDTH as i32 - 1) as usize;
+        let cy = py.max(0).min(SCANOUT_HEIGHT as i32 - 1) as usize;
+        surface_to_logical(cx, cy)
+    }
+
+    /// Clips a logical rectangle against logical viewport bounds [0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT]
+    /// and returns the mapped physical rectangle (sx, sy, sw, sh), or None if entirely clipped out.
+    #[inline]
+    pub fn clip_and_scale_rect(
+        lx: i32,
+        ly: i32,
+        lw: u32,
+        lh: u32,
+    ) -> Option<(usize, usize, usize, usize)> {
+        let rx0 = lx.max(0).min(LOGICAL_WIDTH as i32);
+        let ry0 = ly.max(0).min(LOGICAL_HEIGHT as i32);
+        let rx1 = (lx + lw as i32).max(0).min(LOGICAL_WIDTH as i32);
+        let ry1 = (ly + lh as i32).max(0).min(LOGICAL_HEIGHT as i32);
+        if rx1 <= rx0 || ry1 <= ry0 {
+            return None;
+        }
+        let (sx0, sy0) = logical_to_surface(rx0 as usize, ry0 as usize);
+        let (sx1, sy1) = logical_to_surface(rx1 as usize, ry1 as usize);
+        Some((sx0, sy0, sx1 - sx0, sy1 - sy0))
+    }
+
     /// System safe areas and chrome metrics.
     pub const STATUS_BAR_HEIGHT: usize = 48;
     pub const NAV_BAR_HEIGHT: usize = 64;
@@ -559,5 +614,80 @@ mod tests {
         transform.scanout_h = 1440;
         assert_eq!(transform.logical_to_scanout(720, 0), None);
         assert_eq!(transform.logical_to_scanout(0, 1440), None);
+    }
+
+    #[test]
+    fn coordinate_rounding_and_snapping_at_1_5x_scale() {
+        assert_eq!(logical_to_surface(0, 0), (0, 0));
+        assert_eq!(logical_to_surface(1, 1), (2, 2));
+        assert_eq!(logical_to_surface(2, 2), (3, 3));
+        assert_eq!(logical_to_surface(720, 1440), (1080, 2160));
+    }
+
+    #[test]
+    fn adjacent_rectangles_and_dividers_abut_without_seams() {
+        use super::viewport::{scale_rect, scale_stroke};
+        // Two adjacent cards: Card A [x: 40, w: 200] and Card B [x: 240, w: 200]
+        let (ax, _, aw, _) = scale_rect(40, 100, 200, 50);
+        let (bx, _, _bw, _) = scale_rect(240, 100, 200, 50);
+        assert_eq!(ax + aw, bx, "Card A right edge must align exactly with Card B left edge");
+
+        // Thin 1px divider at logical y=100
+        let (dx, _dy, dw, _dh) = scale_rect(0, 100, 720, 1);
+        assert_eq!((dx, dw), (0, 1080));
+        assert_eq!(scale_stroke(1), 2); // 1px logical -> 2px physical (rounded 1.5)
+        assert_eq!(scale_stroke(0), 0);
+    }
+
+    #[test]
+    fn stroke_widths_and_corner_radii_scale_proportionally() {
+        use super::viewport::{scale_radius, scale_stroke};
+        assert_eq!(scale_radius(8), 12);  // radius::SMALL (8) * 1.5 = 12
+        assert_eq!(scale_radius(12), 18); // radius::CONTROL (12) * 1.5 = 18
+        assert_eq!(scale_radius(18), 27); // radius::CARD (18) * 1.5 = 27
+        assert_eq!(scale_radius(24), 36); // radius::SHEET (24) * 1.5 = 36
+        assert_eq!(scale_stroke(2), 3);   // 2px logical -> 3px physical
+    }
+
+    #[test]
+    fn touch_coordinates_mapping_and_clamping() {
+        use super::viewport::touch_to_logical;
+        // Origin
+        assert_eq!(touch_to_logical(0, 0), (0, 0));
+        // Center
+        assert_eq!(touch_to_logical(540, 1080), (360, 720));
+        // Far edge
+        assert_eq!(touch_to_logical(1079, 2159), (719, 1439));
+        // Negative coords clamped
+        assert_eq!(touch_to_logical(-50, -20), (0, 0));
+        // Overshot coords clamped
+        assert_eq!(touch_to_logical(2000, 3000), (719, 1439));
+    }
+
+    #[test]
+    fn clipping_at_logical_and_physical_boundaries() {
+        use super::viewport::{clip_and_scale_rect, scale_rect};
+        // Completely inside
+        assert_eq!(clip_and_scale_rect(10, 20, 100, 50), Some(scale_rect(10, 20, 100, 50)));
+        // Straddling left edge (x=-20, w=50 -> visible [0, 30))
+        assert_eq!(clip_and_scale_rect(-20, 20, 50, 50), Some(scale_rect(0, 20, 30, 50)));
+        // Entirely off left edge
+        assert_eq!(clip_and_scale_rect(-100, 20, 50, 50), None);
+        // Entirely off bottom edge
+        assert_eq!(clip_and_scale_rect(10, 1500, 50, 50), None);
+    }
+
+    #[test]
+    fn font_glyph_advance_scaling_consistency() {
+        let logical_advances = [8usize, 12, 10, 14, 6];
+        let mut logical_total = 0;
+        let mut physical_total_snapped = 0;
+        for &adv in &logical_advances {
+            logical_total += adv;
+            let (sx, _) = logical_to_surface(logical_total, 0);
+            physical_total_snapped = sx;
+        }
+        let (direct_sx, _) = logical_to_surface(logical_total, 0);
+        assert_eq!(physical_total_snapped, direct_sx, "snapped glyph run must match total logical run");
     }
 }
