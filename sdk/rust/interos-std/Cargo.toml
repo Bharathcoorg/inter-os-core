@@ -5,3 +5,4 @@ edition = "2021"
 description = "Inter OS Userspace Standard Library and System Call ABI"
 
 [dependencies]
+embedded-graphics-core = "0.4"

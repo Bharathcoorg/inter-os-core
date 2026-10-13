@@ -7,6 +7,7 @@
 pub mod walls;
 pub mod face;
 pub mod typeface;
+pub mod draw_target;
 
 pub mod color {
     // Canonical light system
