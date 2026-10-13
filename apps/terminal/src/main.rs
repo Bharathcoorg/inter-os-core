@@ -96,8 +96,8 @@ const fn run_rows(scale: usize) -> usize {
 const HEADER_H: usize = 94;
 /// Scale of the header title run; it needs run_rows(3) = 72 rows.
 const TITLE_SCALE: usize = 3;
-/// First console line box top. The tallest console buffer (18 lines) ends at
-/// CONSOLE_TOP + 18 * CONSOLE_LINE_ROWS = 978, clear of the pill dock at 1210.
+/// First console line box top. The tallest console buffer (22 lines) ends at
+/// CONSOLE_TOP + 22 * CONSOLE_LINE_ROWS = 1170, clear of the pill dock at 1210.
 const CONSOLE_TOP: usize = 114;
 /// Console line pitch == the line box height, so full-height runs stack without
 /// overlapping.
@@ -108,7 +108,23 @@ const CONSOLE_LINE_ROWS: usize = 48;
 /// code: the console band below is derived from it, and a band that drifted
 /// from the buffer it repaints would either miss a line or repaint rows that
 /// hold no text.
-const CONSOLE_LINES: usize = 18;
+///
+/// WHY 22 and not 18: a wrapped line occupies one row per piece, so the buffer
+/// has to hold more logical lines than an unwrapped console did. 114 + 22*48 =
+/// 1170 still clears the pill dock at 1210.
+const CONSOLE_LINES: usize = 22;
+
+/// Left edge of a console run. WHY 24 and not 28: it is the same left margin the
+/// two pill dock rows use, so the console's text column lines up with them, and
+/// every extra pixel here is a pixel the wrapped pieces may use.
+const CONSOLE_X0: usize = 24;
+/// Right edge of a console run: the surface edge. WHY W and not a named inner
+/// edge: a console has no card to sit inside, so the text column runs to the
+/// edge of the surface, and a run that reaches it is wrapped, never clipped.
+const CONSOLE_X1: usize = W;
+/// Console body scale. WHY named: the wrap width and the draw gate below both
+/// scale by it, so a change here cannot leave one of them behind.
+const CONSOLE_SCALE: usize = 2;
 
 /// System CPL badge box. Grown from the old 176x40 so the scale-2
 /// "CPL=3 RING" run (228 x 48) fits inside it with padding instead of being
@@ -269,28 +285,39 @@ pub struct TerminalApp {
 impl TerminalApp {
     pub const fn new() -> Self {
         let mut lines = [None; CONSOLE_LINES];
+        // WHY these are pre-wrapped by hand: `new` is a `const fn`, so it cannot
+        // call the wrapping `push_line` (the wrapper takes &mut self). The four
+        // banner strings are the only lines the app can open with, so wrapping
+        // them here instead keeps the boot screen as wrapped as every later
+        // line. "InterOS Sovereign Shell [Ring 3 CPL=3]" is 722px at scale 2 and
+        // breaks after "Ring 3"; "Isolated memory, token capabilities enforced."
+        // is 850px and breaks after "capabilities"; "Tap quick commands below for
+        // diagnostics." is 830px and breaks after "for".
         lines[0] = Some(ConsoleLine::from_static(
-            "InterOS Sovereign Shell [Ring 3 CPL=3]",
+            "InterOS Sovereign Shell [Ring 3",
             TEXT_MUTED,
         ));
-        lines[1] = Some(ConsoleLine::from_static(
-            "Isolated memory, token capabilities enforced.",
+        lines[1] = Some(ConsoleLine::from_static("CPL=3]", TEXT_MUTED));
+        lines[2] = Some(ConsoleLine::from_static(
+            "Isolated memory, token capabilities",
             ACCENT_SKY,
         ));
-        lines[2] = Some(ConsoleLine::from_static(
-            "Tap quick commands below for diagnostics.",
+        lines[3] = Some(ConsoleLine::from_static("enforced.", ACCENT_SKY));
+        lines[4] = Some(ConsoleLine::from_static(
+            "Tap quick commands below for",
             TEXT_MUTED,
         ));
-        lines[3] = Some(ConsoleLine::from_static(
+        lines[5] = Some(ConsoleLine::from_static("diagnostics.", TEXT_MUTED));
+        lines[6] = Some(ConsoleLine::from_static(
             "interos@sovereign:~$ _",
             SUCCESS_EMERALD,
         ));
         Self {
-            history: [None; 8],
+            history: [None::<HistoryEntry>; 8],
             history_count: 0,
             total_commands_executed: 0,
             lines,
-            line_count: 4,
+            line_count: 7,
         }
     }
 
@@ -299,6 +326,32 @@ impl TerminalApp {
     }
 
     pub fn push_line_bytes(&mut self, text: &[u8], color: u32) {
+        // WHY wrap here rather than draw fitted: the console is a per-pixel
+        // painter whose type helper applies no right-edge clip, so a run wider
+        // than the console column is not cut at the column - it runs to the edge
+        // of the surface and is severed there, which is what every long line of
+        // this app's own output used to do ("...token capabilities e"). Fitting
+        // each line with an ellipsis would hide the tail instead of showing it,
+        // so the text is wrapped onto as many rows as it needs, the way a shell
+        // does, and no piece is ever wider than the column.
+        let mut rest = text;
+        while !rest.is_empty() {
+            let mut piece: [&[u8]; 1] = [&[]];
+            let n = std::design::font::wrap_text(rest, CONSOLE_SCALE, CONSOLE_X1 - CONSOLE_X0, 1, &mut piece);
+            // WHY the guard: wrap_text returns 0 only for empty input, and a
+            // non-empty piece is what advances the cursor, so a zero here would
+            // spin the loop forever.
+            if n == 0 || piece[0].is_empty() {
+                break;
+            }
+            self.push_console_line(piece[0], color);
+            rest = &rest[piece[0].len()..];
+        }
+    }
+
+    /// Appends one already-wrapped piece as the newest console row, scrolling the
+    /// oldest one off the top when the buffer is full.
+    fn push_console_line(&mut self, text: &[u8], color: u32) {
         let mut line = ConsoleLine {
             text: [0; LINE_CAP],
             len: 0,
@@ -573,13 +626,26 @@ fn get_terminal_pixel(x: usize, y: usize, term: &TerminalApp) -> u32 {
         // rows. The old gate admitted 16 of those rows (a third of the glyphs)
         // while the old 32px pitch would have overlapped full boxes, so the
         // pitch and the gate are now the same row count: runs stack without
-        // intersecting. 18 lines end at 114 + 18 * 48 = 978, clear of the
+        // intersecting. 22 lines end at 114 + 22 * 48 = 1170, clear of the
         // quick-command dock that starts at y = 1210.
+        //
+        // WHY no right-edge test on the run: the buffer only holds pieces that
+        // `push_line_bytes` already wrapped to CONSOLE_X1 - CONSOLE_X0, so every
+        // run fits the column by construction and a clip here would only hide a
+        // bug rather than fix one.
         for line_idx in 0..term.line_count {
             let line_y0 = CONSOLE_TOP + line_idx * CONSOLE_LINE_ROWS;
             if y >= line_y0 && y < line_y0 + CONSOLE_LINE_ROWS {
                 if let Some(line) = term.lines[line_idx] {
-                    if let Some(c) = test_text(x, y, 28, line_y0, 2, line.as_bytes(), line.color) {
+                    if let Some(c) = test_text(
+                        x,
+                        y,
+                        CONSOLE_X0,
+                        line_y0,
+                        CONSOLE_SCALE,
+                        line.as_bytes(),
+                        line.color,
+                    ) {
                         return c;
                     }
                 }
@@ -709,7 +775,7 @@ fn render_terminal_ui(surface: u32, term: &TerminalApp) {
 // -----------------------------------------------------------------------------
 
 /// Rows the console owns: the first line box through the last of the buffer,
-/// `CONSOLE_TOP + CONSOLE_LINES * CONSOLE_LINE_ROWS` = 978.
+/// `CONSOLE_TOP + CONSOLE_LINES * CONSOLE_LINE_ROWS` = 1170.
 ///
 /// WHY the buffer's extent and not the 96..1200 canvas the renderer gates on:
 /// the rows below the last line box only ever hold the background and the CRT
