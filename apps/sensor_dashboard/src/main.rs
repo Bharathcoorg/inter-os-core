@@ -598,13 +598,26 @@ const SC: usize = 1;
 /// Heading scale (card captions and the app title).
 const HSC: usize = 2;
 
-/// Row pitch: one 24px line box plus a 10px gutter.
-const ROW_PITCH: usize = 34;
+/// Row pitch: one 24px line box plus an 8px gutter.
+///
+/// WHY 32 and not 34: the base grid is 8px, so a 24px line box plus a 10px
+/// gutter is two-and-a-tenth rows - the gaps between rows were the only spacing
+/// on this screen that was not a multiple of the design system's base. Thirty-two
+/// also gives the tallest cards back room: the inventory card's ten rows now end
+/// 20px higher, and the power card's worst branch (three thermal rows, two
+/// battery rows and the settings inventory row) ends at 1152 inside a card that
+/// closes at 1192.
+const ROW_PITCH: usize = 32;
 
 /// Left edge of every card row and standalone line.
-const ROW_X0: usize = 44;
+///
+/// WHY 40 and not 44: the card's corner radius is 10, so a 44px inset kept 34px
+/// of unused space between the rim and the rows. Ten is the smallest inset that
+/// still clears the radius, it is on the 8-point grid, and those 4px are given
+/// to the middle column, which is the column this screen is short of.
+const ROW_X0: usize = 40;
 /// Right edge of every card row and standalone line (the card's inner edge).
-const ROW_X1: usize = 676;
+const ROW_X1: usize = 680;
 /// Gutter between a row's label, provenance and verdict columns.
 const COL_GAP: usize = 14;
 /// Column ceiling for a row label (the widest one is "Screen orientation").
@@ -657,12 +670,22 @@ const PILL_X1: usize = 690;
 const PILL_Y1: usize = 62;
 const PILL_R: usize = 6;
 
-/// Status band card: drawn at (30, 96, 690, 134) and read from `app.status`,
+/// Status band card: drawn at (30, 96, 690, 136) and read from `app.status`,
 /// which every re-read rewrites.
+///
+/// WHY 40 rows and not 38: a 38-row card is two rows off the 8-point grid the
+/// rest of this screen is laid out on, and its text could only be centred by an
+/// odd 7px inset. Forty rows puts the card on the grid and lets the status line
+/// sit 8 rows below the rim, centred.
+///
+/// WHY this card's height can move when the pill's cannot: the pill is the
+/// re-probe hit target (`PILL_Y0..PILL_Y1` inside `handle_touch_point`), so its
+/// geometry is part of the app's input contract; this card is drawn from state
+/// only and no tap lands on it.
 const STATUS_X0: usize = 30;
 const STATUS_Y0: usize = 96;
 const STATUS_X1: usize = 690;
-const STATUS_Y1: usize = 134;
+const STATUS_Y1: usize = 136;
 const STATUS_R: usize = 6;
 
 // -----------------------------------------------------------------------------
@@ -845,14 +868,20 @@ fn pixel(x: usize, y: usize, app: &Dashboard) -> u32 {
             return EDGE;
         }
         if in_rounded_rect(x, y, STATUS_X0, STATUS_Y0, STATUS_X1, STATUS_Y1, STATUS_R) {
-            let (dx, dy) = (x as isize - 46, y as isize - 115);
+            // WHY STATUS_Y0 + 20: with the card 40 rows tall its centre row is
+            // 20 below the rim, so the dot sits on the card's centre line rather
+            // than 19 rows down inside a 38-row card.
+            let (dx, dy) = (x as isize - 46, y as isize - (STATUS_Y0 + 20) as isize);
             if dx * dx + dy * dy <= 3 * 3 {
                 return app.status_color;
             }
             // WHY scale 1: the longest status line is 523px at scale 1 and
             // 1046px at scale 2; only the measured run fits the 626px left of
             // the card's inner rim, so the run is fitted into that box.
-            if font::ink(x, y, 58, 103, SC, &app.status[..app.status_len], 626, app.status_color, CARD_INNER) {
+            // WHY y 104: an 8px inset from the rim puts the 24-row line box
+            // 104..128 inside a 96..136 card, which centres it on the 8-point
+            // grid the rest of this screen is laid out on.
+            if font::ink(x, y, 58, 104, SC, &app.status[..app.status_len], 626, app.status_color, CARD_INNER) {
                 return app.status_color;
             }
             return CARD_INNER;
@@ -961,8 +990,14 @@ fn sensor_bus_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
     }
     // Slot 0 is the sensor-read verdict; the branch below owns the slots after
     // it and `slot` carries the live-service row to the first free one.
+    //
+    // WHY the provenance is the bare call: the verdict of a refused read names
+    // the error, and that verdict plus the label leaves 215px of middle column.
+    // "sensor_read() -> kernel sensor manager" is 373px wide, so the fitted run
+    // lost its tail to an ellipsis. The call alone names the source of the claim
+    // and fits every branch this card can draw.
     let top = card_rows_y(0);
-    if let Some(c) = row(x, y, top, b"Sensor read", &word[..wn], color, b"sensor_read() -> kernel sensor manager") {
+    if let Some(c) = row(x, y, top, b"Sensor read", &word[..wn], color, b"sensor_read()") {
         return Some(c);
     }
 
@@ -1087,19 +1122,19 @@ fn inventory_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
             channel!(3, b"Proximity", b"measured", OK, b"sensor_read() -> near, present:true");
         }
         _ => {
+            // WHY these are the app's own reasons and not the kernel's verbatim
+            // error string this row used to borrow: the middle column of an
+            // inventory row is 373px wide at its widest, and the kernel's
+            // "No physical IMU or ambient sensor detected" is 414px (the
+            // is_hardware_present fallback was 442px). Both were silently
+            // ellipsised by the fitted run. The sensor bus card above prints
+            // that string in full - wrapped to the card's whole inner width -
+            // so the kernel's own words stay on screen; this row says the same
+            // thing in a form that fits the column it is measured against.
             let reason: &[u8] = match &app.telemetry {
-                Telemetry::Absent { error, error_len, .. } => &error[..*error_len],
-                _ => b"is_hardware_present() is false for this platform",
+                Telemetry::Absent { .. } => b"no physical IMU or ambient sensor".as_slice(),
+                _ => b"hardware_present is false here".as_slice(),
             };
-            let reason = if reason.is_empty() {
-                b"is_hardware_present() is false for this platform".as_slice()
-            } else {
-                reason
-            };
-            // The reason is handed to `row` whole. `row` measures it and fits it
-            // into the middle column on a character boundary, so it is never cut
-            // mid-word and never leaves the card; the same string is also printed
-            // in full, at full card width, by the sensor bus card above.
             channel!(0, b"Accelerometer", b"unavailable", WARN, reason);
             channel!(1, b"Gyroscope", b"unavailable", WARN, b"not in sys_sensor_read payload");
             channel!(2, b"Ambient light", b"unavailable", WARN, reason);
@@ -1107,9 +1142,13 @@ fn inventory_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
         }
     }
 
-    channel!(4, b"Screen orientation", b"unavailable", WARN, b"derived from accel; no accel to derive");
+    channel!(4, b"Screen orientation", b"unavailable", WARN, b"derived from accel; none present");
     channel!(5, b"Heart rate", b"unavailable", WARN, b"no PPG backend in the sensor manager");
-    channel!(6, b"Barometer", b"unavailable", WARN, b"no pressure backend in the sensor manager");
+    // WHY "in the manager" here and not "in the sensor manager" as the row
+    // above: the barometer label is 2px wider than the heart-rate label and its
+    // reason is 42px wider than the PPG one, so the longer form is 1px past the
+    // middle column and would be ellipsised.
+    channel!(6, b"Barometer", b"unavailable", WARN, b"no pressure backend in the manager");
     channel!(7, b"Compass", b"unavailable", WARN, b"no magnetometer in the sensor manager");
 
     let (word, color, wn) = match app.inv_sensors {
@@ -1128,7 +1167,13 @@ fn inventory_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
         x,
         y,
         top + 8 * ROW_PITCH,
-        b"Settings inventory",
+        // WHY "Settings" and not "Settings inventory": the label is the widest
+        // thing in this row's left column, and at 169px it left only 338px of
+        // middle column - 11px too few for the call that names the source. The
+        // row's verdict ("unavailable") and its provenance
+        // (`settings_hardware_status("sensors")`) both stay, so the row still
+        // says exactly which subsystem and which call it is quoting.
+        b"Settings",
         &word[..wn],
         color,
         b"settings_hardware_status(\"sensors\")",
@@ -1187,7 +1232,7 @@ fn power_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
     // exactly the number of rows it drew, so the rows of one branch can never
     // overprint the rows of the next, and the inventory row always follows the
     // battery rows. The worst branch (zones + fuel gauge + settings) uses slots
-    // 0..=5, and 968 + 5 * 34 + 24 = 1162 stays inside the card (y1 = 1192).
+    // 0..=5, and 968 + 5 * 32 + 24 = 1152 stays inside the card (y1 = 1192).
     let top = card_rows_y(2);
     let at = |slot: usize| top + slot * ROW_PITCH;
     let mut slot = 0usize;
@@ -1205,7 +1250,7 @@ fn power_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
             n = n + fmt_i64(*modem, &mut w[n..]);
             let color = if *present { OK } else { WARN };
             let label: &[u8] = b"Thermal zones";
-            if let Some(c) = row(x, y, at(slot), label, &w[..n], color, b"thermal_query() -> cpu/gpu/battery/modem") {
+            if let Some(c) = row(x, y, at(slot), label, &w[..n], color, b"thermal_query()") {
                 return Some(c);
             }
             slot += 1;
@@ -1230,7 +1275,11 @@ fn power_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
             let n = n + fmt_i64(*e, &mut w[n..]);
             let n = n + write_lit(b" ", &mut w[n..]);
             let n = n + write_lit(status_name(*e), &mut w[n..]);
-            if let Some(c) = row(x, y, at(slot), b"Thermal zones", &w[..n], WARN, b"thermal_query() -> DeviceError when unbound") {
+            // WHY the bare call: a refused thermal read names the error in its
+            // verdict, and that verdict ("no sensor (-12 DeviceError)") leaves
+            // only 218px of middle column. The 430px form this row used to
+            // carry lost more than half of itself to the ellipsis.
+            if let Some(c) = row(x, y, at(slot), b"Thermal zones", &w[..n], WARN, b"thermal_query()") {
                 return Some(c);
             }
             slot += 1;
@@ -1254,7 +1303,7 @@ fn power_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
             n = n + write_lit(b" mV ", &mut w[n..]);
             n = n + fmt_i64(*temp, &mut w[n..]);
             n = n + write_lit(b" C", &mut w[n..]);
-            if let Some(c) = row(x, y, at(slot), b"Fuel gauge", &w[..n], OK, b"battery_query() -> present:true") {
+            if let Some(c) = row(x, y, at(slot), b"Fuel gauge", &w[..n], OK, b"battery_query()") {
                 return Some(c);
             }
             slot += 1;
@@ -1276,7 +1325,7 @@ fn power_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
             n = n + write_lit(b" ", &mut w[n..]);
             n = n + fmt_i64(*mhz, &mut w[n..]);
             n = n + write_lit(b" MHz", &mut w[n..]);
-            if let Some(c) = row(x, y, at(slot), b"DVFS governor", &w[..n], MUTED, b"battery_query() -> governor, mhz") {
+            if let Some(c) = row(x, y, at(slot), b"DVFS governor", &w[..n], MUTED, b"battery_query() -> governor") {
                 return Some(c);
             }
         }
@@ -1286,14 +1335,16 @@ fn power_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
             n = n + fmt_i64(*e, &mut w[n..]);
             let n = n + write_lit(b" ", &mut w[n..]);
             let n = n + write_lit(status_name(*e), &mut w[n..]);
-            if let Some(c) = row(x, y, 1152, b"Battery", &w[..n], WARN, b"battery_query() needs SystemControl") {
+            if let Some(c) = row(x, y, at(slot), b"Battery", &w[..n], WARN, b"battery_query()") {
                 return Some(c);
             }
+            slot += 1;
         }
         Battery::Malformed => {
-            if let Some(c) = row(x, y, 1152, b"Battery", b"no data", WARN, b"battery_query() payload lacked fields") {
+            if let Some(c) = row(x, y, at(slot), b"Battery", b"no data", WARN, b"battery_query()") {
                 return Some(c);
             }
+            slot += 1;
         }
     }
 
@@ -1308,11 +1359,23 @@ fn power_card(x: usize, y: usize, app: &Dashboard) -> Option<u32> {
             (WARN, n)
         }
     };
+    // WHY the slot and not a hard-coded row: this row used to be drawn at a
+    // literal y = 1216, which is 24px past the bottom of this card (y1 = 1192)
+    // and inside the next one. `pixel` dispatches a row to the card whose y-range
+    // contains it, so the row was handed to the runtime card, which draws
+    // nothing at that y - the settings-inventory row simply never appeared, and
+    // the card ended 130px short with no clue why. The slot counter puts it on
+    // the same 32px grid as every other row: the worst branch (three thermal
+    // rows, two battery rows, this row) ends at 1152, inside the card.
+    //
+    // WHY the label is "Settings" and not "Inventory, battery": the label is the
+    // widest item in this row's left column, and at 163px it left 344px of
+    // middle column - too few for the call that names the source of the claim.
     if let Some(c) = row(
         x,
         y,
-        1216,
-        b"Inventory, battery",
+        at(slot),
+        b"Settings",
         &w[..wn],
         color,
         b"settings_hardware_status(\"battery\")",
