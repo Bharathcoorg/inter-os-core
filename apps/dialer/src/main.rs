@@ -1,4 +1,4 @@
-﻿//! Inter OS Native Sovereign Telephony & Dialer App
+//! Inter OS Native Sovereign Telephony & Dialer App
 //!
 //! Native telephony dialer executing in Ring 3 (User Mode):
 //! - Dual-Tone Multi-Frequency (DTMF) acoustic tone synthesis for keypad keys (0-9, *, #)
