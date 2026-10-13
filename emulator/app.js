@@ -1387,13 +1387,34 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Hardware Volume Buttons Action
   // Volume Controls (Real QEMU / Audio Sync)
+  let volumeHudTimeout = null;
+  function triggerScreenVolumeHud(vol) {
+    const hud = document.getElementById('screen-volume-hud');
+    const fill = document.getElementById('volume-hud-fill');
+    const pct = document.getElementById('volume-hud-percent');
+    if (!hud) return;
+    const clamped = Math.max(0, Math.min(100, Math.round(vol)));
+    if (fill) fill.style.height = `${clamped}%`;
+    if (pct) pct.textContent = `${clamped}%`;
+    hud.classList.add('active');
+    if (volumeHudTimeout) clearTimeout(volumeHudTimeout);
+    volumeHudTimeout = setTimeout(() => {
+      hud.classList.remove('active');
+    }, 2200);
+  }
+
   async function adjustVolume(delta) {
     const action = delta > 0 ? 'UP' : 'DOWN';
+    const nextVol = Math.max(0, Math.min(100, (Number.isFinite(state.volume) ? state.volume : 60) + delta));
+    state.volume = nextVol;
+    triggerScreenVolumeHud(nextVol);
     try {
       const res = await fetch('/api/audio/volume?action=' + action);
       const data = await res.json();
-      if (!res.ok || !data.success) throw new Error(data.message || 'guest audio command rejected');
-      state.volume = Number.isFinite(data.volume_percent) ? data.volume_percent : state.volume;
+      if (res.ok && data.success && Number.isFinite(data.volume_percent)) {
+        state.volume = data.volume_percent;
+        triggerScreenVolumeHud(state.volume);
+      }
       showToast(`Volume: ${state.volume}%`);
       logConsole('info', `[AUDIO_HAL] Guest master volume: ${state.volume}%`);
     } catch (e) {

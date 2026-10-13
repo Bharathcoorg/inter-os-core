@@ -2883,6 +2883,148 @@ body[data-theme="cyberdeck_hud"] .device-screen {
   margin-top: 4px;
 }
 
+/* =========================================================================
+   In-Screen Modern Smartphone Volume HUD Overlay (Pixel / iOS Style)
+   ========================================================================= */
+.screen-volume-hud {
+  position: absolute;
+  top: 90px;
+  right: 14px;
+  z-index: 100;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateX(18px) scale(0.96);
+  transition: opacity 0.22s cubic-bezier(0.16, 1, 0.3, 1), transform 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
 
+.screen-volume-hud.active {
+  opacity: 1;
+  transform: translateX(0) scale(1);
+}
 
+.volume-hud-pill {
+  width: 44px;
+  height: 148px;
+  background: rgba(15, 23, 42, 0.90);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 22px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.55), 0 0 16px rgba(56, 132, 255, 0.25);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 0 8px;
+  box-sizing: border-box;
+}
 
+.volume-hud-icon {
+  color: #F8FAFC;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.4));
+}
+
+.volume-hud-bar-track {
+  width: 8px;
+  flex: 1;
+  margin: 8px 0;
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+.volume-hud-bar-fill {
+  width: 100%;
+  height: 60%;
+  background: linear-gradient(180deg, #00E5FF, #3884FF);
+  border-radius: 4px;
+  box-shadow: 0 0 8px rgba(0, 229, 255, 0.6);
+  transition: height 0.14s ease-out;
+}
+
+.volume-hud-percent {
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  font-weight: 700;
+  color: #94A3B8;
+  letter-spacing: -0.5px;
+}
+
+/* =========================================================================
+   Device Studio Mobile Viewport Responsiveness (< 1024px & < 640px)
+   ========================================================================= */
+@media (max-width: 1024px) {
+  .studio-header {
+    flex-wrap: wrap;
+    height: auto;
+    padding: 10px 14px;
+    gap: 10px;
+  }
+  .brand-group {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .ide-target-device {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .target-specs-list {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .studio-workspace.ide-split-screen {
+    flex-direction: column;
+    overflow-y: auto;
+  }
+  .ide-device-pane {
+    max-width: 100% !important;
+    flex: 0 0 auto !important;
+    width: 100% !important;
+    padding: 16px 0;
+  }
+  .ide-split-resizer {
+    display: none !important;
+  }
+  .ide-right-pane {
+    width: 100% !important;
+    max-width: 100% !important;
+    flex: 1 1 auto !important;
+  }
+}
+
+@media (max-width: 640px) {
+  .studio-header {
+    flex-direction: column;
+    align-items: stretch;
+    padding: 8px 10px;
+  }
+  .brand-group {
+    justify-content: space-between;
+  }
+  .studio-controls {
+    justify-content: space-between;
+    width: 100%;
+  }
+  .device-chassis {
+    transform: scale(0.85);
+    transform-origin: top center;
+    margin-bottom: -100px;
+  }
+  .emulator-side-toolbar {
+    margin-left: 6px;
+    padding: 4px;
+    gap: 4px;
+  }
+  .emu-btn {
+    width: 32px;
+    height: 32px;
+  }
+}

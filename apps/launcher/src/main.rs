@@ -3992,6 +3992,7 @@ pub extern "C" fn _start() -> ! {
     }
 }
 
+#[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     let mut line = LineBuf::<256>::new();
