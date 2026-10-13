@@ -328,6 +328,54 @@ impl<'a> DexPackage<'a> {
         })
     }
 
+    /// Zero-allocation string lookup directly over raw byte slice.
+    pub fn get_string_slice(&self, idx: u32) -> Result<&'a str, DexError> {
+        let string_ids_size = u32::from_le(self.header.string_ids_size);
+        if idx >= string_ids_size {
+            return Err(DexError::StringIndexOutOfBounds);
+        }
+        let string_ids_off = u32::from_le(self.header.string_ids_off) as usize;
+        let offset_pos = string_ids_off + (idx as usize) * 4;
+        if offset_pos + 4 > self.raw.len() {
+            return Err(DexError::UnexpectedEof);
+        }
+        let str_data_off = u32::from_le_bytes(
+            self.raw[offset_pos..offset_pos + 4]
+                .try_into()
+                .map_err(|_| DexError::UnexpectedEof)?,
+        ) as usize;
+        if str_data_off >= self.raw.len() {
+            return Err(DexError::StringIndexOutOfBounds);
+        }
+
+        let mut cur = str_data_off;
+        let _utf16_size = read_uleb128(self.raw, &mut cur)?;
+        let str_start = cur;
+        while cur < self.raw.len() && self.raw[cur] != 0 {
+            cur += 1;
+        }
+        core::str::from_utf8(&self.raw[str_start..cur]).map_err(|_| DexError::StringIndexOutOfBounds)
+    }
+
+    /// Zero-allocation type descriptor lookup directly over raw byte slice.
+    pub fn get_type_slice(&self, idx: u32) -> Result<&'a str, DexError> {
+        let type_ids_size = u32::from_le(self.header.type_ids_size);
+        if idx >= type_ids_size {
+            return Err(DexError::TypeIndexOutOfBounds);
+        }
+        let type_ids_off = u32::from_le(self.header.type_ids_off) as usize;
+        let offset_pos = type_ids_off + (idx as usize) * 4;
+        if offset_pos + 4 > self.raw.len() {
+            return Err(DexError::UnexpectedEof);
+        }
+        let descriptor_idx = u32::from_le_bytes(
+            self.raw[offset_pos..offset_pos + 4]
+                .try_into()
+                .map_err(|_| DexError::UnexpectedEof)?,
+        );
+        self.get_string_slice(descriptor_idx)
+    }
+
     /// Performs capability verification over all bytecode instructions.
     /// Rejects forbidden reflection, ambient process execution, out-of-bound branches,
     /// excessive register usage (>32), and unbounded array allocations.
@@ -641,3 +689,26 @@ pub fn create_test_dex(class_name: &str, method_name: &str, log_message: &str) -
 
     dex
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_zero_copy_dex_slices() {
+        let raw = create_test_dex("Lorg/interos/TestActivity;", "onCreate", "ZeroCopyWorks");
+        let pkg = DexPackage::parse(&raw).expect("parse DEX");
+        assert_eq!(pkg.get_string_slice(0).unwrap(), "V");
+        assert_eq!(pkg.get_string_slice(1).unwrap(), "Ljava/lang/Object;");
+        assert_eq!(pkg.get_string_slice(2).unwrap(), "Lorg/interos/TestActivity;");
+        assert_eq!(pkg.get_string_slice(3).unwrap(), "onCreate");
+        assert_eq!(pkg.get_string_slice(7).unwrap(), "ZeroCopyWorks");
+        assert_eq!(pkg.get_string_slice(99), Err(DexError::StringIndexOutOfBounds));
+
+        assert_eq!(pkg.get_type_slice(0).unwrap(), "V");
+        assert_eq!(pkg.get_type_slice(1).unwrap(), "Ljava/lang/Object;");
+        assert_eq!(pkg.get_type_slice(2).unwrap(), "Lorg/interos/TestActivity;");
+        assert_eq!(pkg.get_type_slice(10), Err(DexError::TypeIndexOutOfBounds));
+    }
+}
+

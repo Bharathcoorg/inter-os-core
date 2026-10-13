@@ -77,7 +77,18 @@ impl CalculatorState {
                     }
                 }
                 '^' => {
-                    self.accumulator = self.accumulator.saturating_mul(self.current_operand);
+                    if self.current_operand >= 0 {
+                        let exp = (self.current_operand as u64).min(63) as u32;
+                        self.accumulator = self.accumulator.saturating_pow(exp);
+                    } else {
+                        // Integer division for negative exponents: 1 / (acc ^ |op|)
+                        self.accumulator = match self.accumulator {
+                            0 => 0,
+                            1 => 1,
+                            -1 => if self.current_operand % 2 != 0 { -1 } else { 1 },
+                            _ => 0,
+                        };
+                    }
                 }
                 _ => {}
             }

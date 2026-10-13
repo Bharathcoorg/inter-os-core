@@ -5,6 +5,7 @@
 //! Provides safe, ergonomic Rust bindings for Inter OS hardware fast system calls
 //! (`syscall` instruction) executing in Ring 3 User Mode.
 
+pub mod ai;
 pub mod app;
 pub mod design;
 pub mod font;

@@ -63,9 +63,12 @@ pub fn kernel_pml4() -> PhysFrame<Size4KiB> {
 
 /// Switches CPU CR3 back to the clean kernel PML4.
 pub fn switch_to_kernel_page_table() {
-    let (_, flags) = Cr3::read();
-    unsafe {
-        Cr3::write(kernel_pml4(), flags);
+    let (current_frame, flags) = Cr3::read();
+    let kpml4 = kernel_pml4();
+    if current_frame != kpml4 {
+        unsafe {
+            Cr3::write(kpml4, flags);
+        }
     }
 }
 
@@ -590,9 +593,11 @@ pub fn create_user_page_table() -> Result<TaskPageTable, &'static str> {
 
 /// Switches CPU virtual translation to the specified task page table frame.
 pub fn switch_to_task_page_table(pml4_frame: PhysFrame<Size4KiB>) {
-    let (_, flags) = Cr3::read();
-    unsafe {
-        Cr3::write(pml4_frame, flags);
+    let (current_frame, flags) = Cr3::read();
+    if current_frame != pml4_frame {
+        unsafe {
+            Cr3::write(pml4_frame, flags);
+        }
     }
 }
 

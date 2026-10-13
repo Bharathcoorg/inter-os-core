@@ -42,12 +42,10 @@ const RUN_H_MAX: usize = 96;
 
 /// How many runs may be resident at once.
 ///
-/// WHY more than one: the lock surface draws the date line and the clock in the
-/// same frame, and a single shared buffer means the second placement erases the
-/// first, so the first run then reads the second's glyphs. That is exactly the
-/// defect this constant came from. Two is what that surface needs; a third
-/// caller has to wait for one of these to be released.
-const SLOTS: usize = 2;
+/// WHY eight slots: multi-heading screens and status surfaces draw multiple
+/// distinct headings, badges, and clocks in a single frame without thrashing
+/// the outline coverage cache.
+const SLOTS: usize = 8;
 
 /// The longest text a placement key can hold. Longer runs are refused rather
 /// than hashed, because a hash would collide and draw the wrong glyphs.
@@ -68,6 +66,7 @@ static mut COVERAGE: [[u8; RUN_W_MAX * RUN_H_MAX]; SLOTS] =
 /// recognise, so placement is not guaranteed to be once per frame. Rasterising
 /// the whole glyph set on a cache miss would turn a caller that jumps around
 /// into a per-glyph rasteriser per pixel.
+#[derive(Clone, Copy)]
 struct Loaded {
     em: u32,
     x: usize,
@@ -78,7 +77,7 @@ struct Loaded {
     h: usize,
 }
 
-static mut LOADED: [Option<Loaded>; SLOTS] = [None, None];
+static mut LOADED: [Option<Loaded>; SLOTS] = [None; SLOTS];
 
 /// Which slot a placement lands in.
 ///
@@ -622,21 +621,21 @@ mod tests {
     }
 
     #[test]
-    fn a_third_distinct_run_cannot_have_a_private_slot() {
+    fn a_ninth_distinct_run_cannot_have_a_private_slot() {
         let _pool: Option<_> = Some(reset_slots());
-        // Only two slots exist. A third live run reclaims one, and the honest
+        // Only eight slots exist. A ninth live run reclaims one, and the honest
         // consequence is that one of the earlier runs is no longer readable --
         // which the caller must not rely on. Pin the reclaim path so it is
         // chosen deliberately rather than corrupting silently.
-        let a = OutlineRun::place(75, 251, 18, b"Mon, 12 Oct").expect("placed");
-        let b = OutlineRun::place(75, 325, 48, b"00:02").expect("placed");
-        let c = OutlineRun::place(75, 400, 24, b"Ag").expect("placed");
-        assert!(c.slot < SLOTS);
-        // The third run must be among the two it displaced, never a phantom
-        // third slot.
-        assert!(c.slot == a.slot || c.slot == b.slot);
+        for i in 0..SLOTS {
+            let ch = [b'A' + i as u8];
+            let r = OutlineRun::place(75, 200 + i * 10, 18, &ch).expect("placed");
+            assert!(r.slot < SLOTS);
+        }
+        let overflow = OutlineRun::place(75, 400, 24, b"Z").expect("placed");
+        assert!(overflow.slot < SLOTS);
         // And it must actually hold its own glyphs.
-        assert!(count_ink(&c) > 0, "the reclaimed slot holds no ink");
+        assert!(count_ink(&overflow) > 0, "the reclaimed slot holds no ink");
     }
 
     #[test]

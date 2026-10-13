@@ -9,6 +9,7 @@
 
 use alloc::vec::Vec;
 use core::fmt;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Unique capability identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -179,18 +180,52 @@ impl CapHandle {
 }
 
 /// A guarded slot inside a process's capability table.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct CapSlot {
     pub cap: Option<Capability>,
     pub generation: u32,
+    pub access_count: AtomicU64,
+    pub last_access_ticks: AtomicU64,
 }
+
+impl Clone for CapSlot {
+    fn clone(&self) -> Self {
+        Self {
+            cap: self.cap.clone(),
+            generation: self.generation,
+            access_count: AtomicU64::new(self.access_count.load(Ordering::Relaxed)),
+            last_access_ticks: AtomicU64::new(self.last_access_ticks.load(Ordering::Relaxed)),
+        }
+    }
+}
+
+impl PartialEq for CapSlot {
+    fn eq(&self, other: &Self) -> bool {
+        self.cap == other.cap
+            && self.generation == other.generation
+            && self.access_count.load(Ordering::Relaxed)
+                == other.access_count.load(Ordering::Relaxed)
+            && self.last_access_ticks.load(Ordering::Relaxed)
+                == other.last_access_ticks.load(Ordering::Relaxed)
+    }
+}
+
+impl Eq for CapSlot {}
 
 impl CapSlot {
     pub fn new() -> Self {
         Self {
             cap: None,
             generation: 1,
+            access_count: AtomicU64::new(0),
+            last_access_ticks: AtomicU64::new(0),
         }
+    }
+
+    #[inline]
+    pub fn record_access(&self) {
+        self.access_count.fetch_add(1, Ordering::Relaxed);
+        self.last_access_ticks.store(crate::interrupts::get_system_ticks(), Ordering::Relaxed);
     }
 }
 
@@ -288,6 +323,16 @@ impl CapabilityTable {
         self.max_slots
     }
 
+    /// Returns capability access telemetry (access_count, last_access_ticks) for a slot.
+    pub fn access_stats(&self, slot_idx: usize) -> Option<(u64, u64)> {
+        self.slots.get(slot_idx).map(|s| {
+            (
+                s.access_count.load(Ordering::Relaxed),
+                s.last_access_ticks.load(Ordering::Relaxed),
+            )
+        })
+    }
+
     /// Inserts a new capability into the first available slot, returning the generation-counted handle.
     pub fn insert(&mut self, cap: Capability) -> Result<usize, CapError> {
         for (idx, slot) in self.slots.iter_mut().enumerate() {
@@ -317,14 +362,15 @@ impl CapabilityTable {
     /// the single point where a capability leaves the table is what keeps a new
     /// check shape from accidentally consulting only the caller's copy.
     pub fn get(&self, slot_idx: usize) -> Result<&Capability, CapError> {
-        let cap = self
+        let slot = self
             .slots
             .get(slot_idx)
-            .and_then(|slot| slot.cap.as_ref())
             .ok_or(CapError::InvalidSlot)?;
+        let cap = slot.cap.as_ref().ok_or(CapError::InvalidSlot)?;
         if revocation::is_revoked(cap.id) {
             return Err(CapError::RevokedHandle);
         }
+        slot.record_access();
         Ok(cap)
     }
 
@@ -342,6 +388,7 @@ impl CapabilityTable {
         if revocation::is_revoked(cap.id) {
             return Err(CapError::RevokedHandle);
         }
+        slot.record_access();
         Ok(cap)
     }
 
@@ -439,6 +486,7 @@ impl CapabilityTable {
                     continue;
                 }
             }
+            slot.record_access();
             return true;
         }
         false
@@ -473,6 +521,7 @@ impl CapabilityTable {
                     continue;
                 }
             }
+            slot.record_access();
             return true;
         }
         false
@@ -981,6 +1030,32 @@ pub fn run_adversarial_tests() {
         assert!(!exiting_table.authorize_object(CapabilityType::StorageRawBlock, Rights::INVOKE, 0));
     }
     crate::serial_println!("[TEST] Capability Adversarial: Task Exit Releases All Authority [PASSED]");
+
+    // 15. Adversarial Test 14: Per-Capability Access Accounting Telemetry
+    {
+        let audit_task = crate::task::TaskId(127);
+        let mut audit_table = CapabilityTable::new_for_task(audit_task, 2);
+        let slot = audit_table
+            .insert(Capability {
+                id: CapabilityId(0x00C0_FFEE_0004),
+                cap_type: CapabilityType::RealtimeClockRead,
+                rights: Rights::READ,
+                object_id: 0,
+            })
+            .expect("insert capability");
+
+        let stats0 = audit_table.access_stats(slot).expect("stats slot 0");
+        assert_eq!(stats0.0, 0, "Initial access_count must be 0");
+
+        let _ = audit_table.get(slot);
+        let stats1 = audit_table.access_stats(slot).expect("stats slot 0");
+        assert_eq!(stats1.0, 1, "access_count must increment after get()");
+
+        let _ = audit_table.verify(slot, CapabilityType::RealtimeClockRead, Rights::READ);
+        let stats2 = audit_table.access_stats(slot).expect("stats slot 0");
+        assert_eq!(stats2.0, 2, "access_count must increment after verify()");
+    }
+    crate::serial_println!("[TEST] Capability Adversarial: Per-Capability Access Accounting Verified [PASSED]");
 
     crate::serial_println!("[TEST] Zero-Trust Capability Invariants: 100% Attested & Enforced.");
 }

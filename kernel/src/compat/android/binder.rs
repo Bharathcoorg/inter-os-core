@@ -21,6 +21,12 @@ pub const fn binder_service_object(handle: u32) -> u64 {
     BINDER_SERVICE_OBJECT_BASE | handle as u64
 }
 
+/// Sovereign native microG / GMS Compatibility Binder Handles.
+pub const HANDLE_MICROG_GMS_BROKER: u32 = 0x1001;
+pub const HANDLE_MICROG_LOCATION: u32 = 0x1002;
+pub const HANDLE_MICROG_GCM_PUSH: u32 = 0x1003;
+pub const HANDLE_MICROG_ADS_ID: u32 = 0x1004;
+
 /// Android Binder transaction command codes written to `/dev/binder`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]

@@ -13,18 +13,33 @@ use spin::Mutex;
 /// Standard IEEE 802.3 CRC-32 polynomial (Ethernet / ZIP / PNG).
 const CRC32_POLYNOMIAL: u32 = 0xEDB8_8320;
 
-/// Computes an authentic IEEE 802.3 32-bit Cyclic Redundancy Check.
-pub fn compute_crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
+/// Compile-time precomputed 256-entry IEEE 802.3 CRC-32 table.
+const CRC32_TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut crc = i as u32;
+        let mut j = 0;
+        while j < 8 {
             if (crc & 1) != 0 {
                 crc = (crc >> 1) ^ CRC32_POLYNOMIAL;
             } else {
                 crc >>= 1;
             }
+            j += 1;
         }
+        table[i] = crc;
+        i += 1;
+    }
+    table
+};
+
+/// Computes an authentic IEEE 802.3 32-bit Cyclic Redundancy Check.
+pub fn compute_crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in data {
+        let idx = ((crc ^ (b as u32)) & 0xFF) as usize;
+        crc = (crc >> 8) ^ CRC32_TABLE[idx];
     }
     !crc
 }
@@ -412,3 +427,16 @@ pub static SHM_PIPE_MANAGER: Mutex<ShmPipeManager> = Mutex::new(ShmPipeManager::
 pub fn init() {
     SHM_PIPE_MANAGER.lock().self_test();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crc32_standard_vectors_match_ieee8023() {
+        assert_eq!(compute_crc32(b""), 0);
+        assert_eq!(compute_crc32(b"123456789"), 0xCBF4_3926);
+        assert_eq!(compute_crc32(b"The quick brown fox jumps over the lazy dog"), 0x414F_A339);
+    }
+}
+

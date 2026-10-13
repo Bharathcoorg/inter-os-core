@@ -57,6 +57,15 @@ pub fn dispatch(
             logs.push(line);
             Ok(AndroidFrameworkResult::Return(0))
         }
+        // Sovereign microG / Google Play Services Stubs
+        // Returns 0 (SUCCESS) for isGooglePlayServicesAvailable so apps don't crash on boot
+        "com/google/android/gms/common/GoogleApiAvailability" if method_name == "isGooglePlayServicesAvailable" => {
+            Ok(AndroidFrameworkResult::Return(0))
+        }
+        // AdvertisingIdClient$Info: strictly enforces zero ad-tracking (isLimitAdTrackingEnabled = true)
+        "com/google/android/gms/ads/identifier/AdvertisingIdClient$Info" if method_name == "isLimitAdTrackingEnabled" => {
+            Ok(AndroidFrameworkResult::Return(1))
+        }
         // Only APIs with an implemented effect are acknowledged. Lifecycle callbacks,
         // widget mutations, handlers, notifications and service lookups require real
         // guest objects/services; returning plausible values here would fabricate success.
@@ -129,6 +138,23 @@ mod tests {
         let mut logs = Vec::new();
         assert_eq!(
             dispatch("Landroid/os/Runtime;", "exec", &[], &mut logs),
+            Err(AndroidFrameworkError::UnsupportedApi)
+        );
+    }
+
+    #[test]
+    fn microg_shims_succeed_and_enforce_zero_tracking() {
+        let mut logs = Vec::new();
+        assert_eq!(
+            dispatch("Lcom/google/android/gms/common/GoogleApiAvailability;", "isGooglePlayServicesAvailable", &[], &mut logs),
+            Ok(AndroidFrameworkResult::Return(0))
+        );
+        assert_eq!(
+            dispatch("Lcom/google/android/gms/ads/identifier/AdvertisingIdClient$Info;", "isLimitAdTrackingEnabled", &[], &mut logs),
+            Ok(AndroidFrameworkResult::Return(1))
+        );
+        assert_eq!(
+            dispatch("Lcom/google/android/gms/ads/identifier/AdvertisingIdClient$Info;", "getId", &[], &mut logs),
             Err(AndroidFrameworkError::UnsupportedApi)
         );
     }
