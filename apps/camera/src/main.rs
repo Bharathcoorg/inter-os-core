@@ -546,6 +546,23 @@ fn test_text(
     std::design::font::test_text_aa(x, y, x0, y0, scale, text, color, BG_DARK, false)
 }
 
+/// Left x that centres `text` at `scale` inside `[x0, x0 + available)`, measured
+/// for the face that will actually ink it.
+///
+/// WHY the measured width and not `font::measure`: the run is placed through
+/// `test_text`, which prefers the outline face, and the outline face advances
+/// by its own table rather than the bitmap cell's. Both widths are decided by
+/// `outline_text::drawn_advance`, which mirrors `place_run`'s own refusals, so
+/// the centring uses the width of the run that is drawn instead of the width of
+/// a run that is not. On the bitmap fallback the answer is `font::measure`,
+/// which is what the bitmap rasteriser steps by.
+#[inline(always)]
+fn centred_x(text: &[u8], scale: usize, x0: usize, available: usize) -> usize {
+    let w = outline_text::drawn_advance(text, scale, Some(available))
+        .unwrap_or_else(|| std::design::font::measure(text, scale));
+    x0 + available.saturating_sub(w) / 2
+}
+
 /// Vector lightning bolt pictogram for flash pill
 fn test_lightning(x: usize, y: usize, cx: usize, cy: usize) -> bool {
     let dx = x as isize - cx as isize;
@@ -797,12 +814,15 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             // Centred by measured width, not a hand-typed offset.
             let head = b"No camera sensor bound";
             let sub = b"Viewfinder inactive - no frames from the camera HAL";
-            let h_w = std::design::font::measure(head, 2);
-            let s_w = std::design::font::measure(sub, 1);
+            // WHY `centred_x` and not `360 - measure/2`: the headline is drawn on
+            // the outline face, whose advance table is not the bitmap cell's, so
+            // a box measured with the latter put the run 5px left of the
+            // viewfinder's centre. Measured in a capture before this fix: ink
+            // x 164..547 for an intended centre of 360.
             if let Some(c) = test_text(
                 x,
                 y,
-                360usize.saturating_sub(h_w / 2),
+                centred_x(head, 2, 20, VIEWFINDER_W),
                 470,
                 2,
                 head,
@@ -814,7 +834,9 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             if let Some(c) = test_text(
                 x,
                 y,
-                360usize.saturating_sub(s_w / 2),
+                // WHY `centred_x` for this one too: it is also an outline run, so
+                // `font::measure` is the wrong table for it as well.
+                centred_x(sub, 1, 20, VIEWFINDER_W),
                 530,
                 1,
                 sub,
@@ -873,8 +895,7 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
             };
 
             let scale = 2usize;
-            let tw = std::design::font::measure(zoom_str, scale);
-            let tx0 = ZOOM_PILL.x + (ZOOM_PILL.w.saturating_sub(tw)) / 2;
+            let tx0 = centred_x(zoom_str, scale, ZOOM_PILL.x, ZOOM_PILL.w);
             // WHY derived: a scale-2 run is 48 rows tall and the pill is 56, so
             // the run owns the pill minus 4 rows top and bottom. Hard-coding 998
             // is what let the previous pill's descenders clip.

@@ -231,6 +231,17 @@ fn text_bold(
 
 /// Horizontally centred text inside `[x0, x0 + max_w)`, measured with the real
 /// font metrics so it can never run past its container.
+///
+/// WHY the measured width is the DRAWN face's and not `font::measure`'s: the run
+/// is drawn through `text`, which prefers the outline face at scale 2 and above,
+/// and that face advances by its own table rather than the bitmap cell's. Both
+/// widths are decided by `outline_text::drawn_advance`, which mirrors
+/// `place_run`'s refusals, so a label is centred on the width of the run that is
+/// actually inked. On the bitmap fallback the answer is `font::measure`, which
+/// is what the bitmap rasteriser steps by. The ledger's title was 3px left of
+/// the surface's centre on the bitmap width (measured in capture
+/// `g2_gal_wall.ppm`: ink x 264..451 for a centre of 360), and every line under
+/// it is scale 1, so it was the only one on this screen that moved.
 #[inline(always)]
 fn text_centered(
     x: usize,
@@ -247,7 +258,8 @@ fn text_centered(
     if w > max_w {
         return None;
     }
-    text(x, y, x0 + (max_w - w) / 2, y0, scale, s, color, bg)
+    let drawn = outline_text::drawn_advance(s, scale).unwrap_or(w);
+    text(x, y, x0 + (max_w.saturating_sub(drawn)) / 2, y0, scale, s, color, bg)
 }
 
 // -----------------------------------------------------------------------------
@@ -1029,7 +1041,12 @@ fn pill_pixel(x: usize, y: usize, app: &GalleryApp) -> Option<u32> {
         if shape != fill {
             return Some(shape);
         }
-        let lw = font::measure(label, 2);
+        // WHY `drawn_advance` here too: the label is drawn by the same
+        // `text` funnel the ledger title uses, so at scale 2 it lands on the
+        // outline face and centring on the bitmap measure would leave it off
+        // the pill's centre by the same 1-4% of its width. On the bitmap
+        // fallback the answer is the measure the rasteriser steps by.
+        let lw = outline_text::drawn_advance(label, 2).unwrap_or_else(|| font::measure(label, 2));
         let lx = rect.x + rect.w.saturating_sub(lw) / 2;
         if let Some(c) = text(x, y, lx, PILL_Y, 2, label, ink, fill) {
             return Some(c);
@@ -1378,7 +1395,11 @@ fn detail_pixel(x: usize, y: usize, app: &GalleryApp, media: Media) -> u32 {
             return c;
         }
         let label = b"Close";
-        let lw = font::measure(label, 2);
+        // WHY `drawn_advance` and not the measure: the label is a scale-2 run on
+        // the outline face, whose advance table is not the bitmap cell's, so the
+        // bitmap measure put "Close" 1px left of this pill's centre. On the
+        // bitmap fallback the measure is what the rasteriser steps by.
+        let lw = outline_text::drawn_advance(label, 2).unwrap_or_else(|| font::measure(label, 2));
         let lx = CLOSE.x + (CLOSE.w.saturating_sub(lw)) / 2;
         // WHY the measured centring, kept: a 48px glyph cell inside a 56px pill
         // is 4px of slack top and bottom; anything less and the descenders of

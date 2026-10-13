@@ -409,6 +409,57 @@ pub fn run_box(x0: usize, y0: usize, scale: usize, text: &[u8]) -> (usize, usize
     (x0, top, w, h)
 }
 
+/// The advance, in pixels, of the face that will actually ink this run, or
+/// `None` when the bitmap face will draw it instead.
+///
+/// WHY this exists: every centred label in this app measures its box with
+/// `font::measure` -- the sum of the BITMAP cell's advances -- and then draws
+/// the run through `place_run`, whose outline face advances by its own table.
+/// The two disagree by 1-4% of a run ("No Scheduled Events" is 400px on the
+/// bitmap against 388px on the outline at scale 2), so a run centred on the
+/// bitmap width lands 6px left of the centre of the card it is centred in.
+/// Measured in a guest screendump of `k2_cal.ppm`: the headline's ink spans
+/// x 164..547 for an intended centre of 360, a 4.5px leftward offset.
+///
+/// WHY it mirrors `place_run`'s own refusals condition for condition: a helper
+/// that disagreed with `place_run` about which face draws a run would put the
+/// centring back on a width the rasteriser never uses, which is the bug this
+/// replaces.
+pub fn drawn_advance(text: &[u8], scale: usize, max_w: Option<usize>) -> Option<usize> {
+    if scale < 2 {
+        return None;
+    }
+    let em = em_for_scale(scale);
+    if text.is_empty() || text.len() > KEY_MAX {
+        return None;
+    }
+    // A glyph the outline cannot encode advances by zero and the whole run is
+    // refused; a glyph whose ink would leave the caller's window is refused for
+    // the same reason.
+    if text.iter().any(|&c| typeface::advance_px(c, em) == 0) {
+        return None;
+    }
+    if text.iter().any(|&c| WINDOW_OVERFLOW.contains(&c)) {
+        return None;
+    }
+    let w = typeface::text_advance_px(text, em) as usize;
+    if w == 0 || w > RUN_W_MAX {
+        return None;
+    }
+    let (ascent, descent) = typeface::line_metrics(em);
+    if (ascent + descent) as usize > RUN_H_MAX {
+        return None;
+    }
+    // The same column bound `place_run` applies, so a run that keeps the outline
+    // face reports the width the rasteriser will step by.
+    if let Some(mw) = max_w {
+        if w > mw {
+            return None;
+        }
+    }
+    Some(w)
+}
+
 /// Places `text` on the outline face when it can be drawn WHOLE inside the box
 /// the caller reserved for it.
 ///

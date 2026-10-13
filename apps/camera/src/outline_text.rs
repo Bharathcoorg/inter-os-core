@@ -354,6 +354,60 @@ fn baseline_row(y0: usize, scale: usize, ascent: u32) -> usize {
     (y0 + font::BASELINE * scale).max(ascent as usize)
 }
 
+/// The advance, in pixels, of the face that will actually ink this run, or
+/// `None` when the bitmap face will draw it instead.
+///
+/// WHY this exists: this app's centred labels measured their box with
+/// `font::measure` -- the sum of the BITMAP cell's advances -- and then drew the
+/// run through `place_run`, whose outline face advances by its own table. The
+/// two disagree by 1-4% of a run ("No camera sensor bound" is 472px on the
+/// bitmap against 462px on the outline at scale 2), so a run centred on the
+/// bitmap width lands 5px left of the viewfinder's centre on the advance box,
+/// and 4.5px left on the ink a capture resolves: a guest screendump of
+/// `a1_cam.ppm` showed the headline's ink spanning
+/// x 164..547 for an intended centre of 360, a 4.5px leftward offset that the
+/// capture resolves and the source formula does not.
+///
+/// WHY it mirrors `place_run`'s own refusals condition for condition: a helper
+/// that disagreed with `place_run` about which face draws a run would put the
+/// centring back on a width the rasteriser never uses, which is the bug this
+/// replaces. Every test below is a test `place_run` makes too, so the answer is
+/// the width of the run that will be drawn.
+pub fn drawn_advance(text: &[u8], scale: usize, max_w: Option<usize>) -> Option<usize> {
+    if scale < 2 {
+        return None;
+    }
+    let em = em_for_scale(scale);
+    if text.is_empty() || text.len() > KEY_MAX {
+        return None;
+    }
+    // A glyph the outline cannot encode advances by zero and the whole run is
+    // refused; a glyph whose ink would leave the caller's window is refused for
+    // the same reason.
+    if text.iter().any(|&c| typeface::advance_px(c, em) == 0) {
+        return None;
+    }
+    if text.iter().any(|&c| WINDOW_OVERFLOW.contains(&c)) {
+        return None;
+    }
+    let w = typeface::text_advance_px(text, em) as usize;
+    if w == 0 || w > RUN_W_MAX {
+        return None;
+    }
+    let (ascent, descent) = typeface::line_metrics(em);
+    if (ascent + descent) as usize > RUN_H_MAX {
+        return None;
+    }
+    // The same column bound `place_run` applies, so a run that keeps the
+    // outline face reports the width the rasteriser will step by.
+    if let Some(mw) = max_w {
+        if w > mw {
+            return None;
+        }
+    }
+    Some(w)
+}
+
 /// The box that covers BOTH renderers of the run at (`x0`, `y0`, `scale`).
 ///
 /// Returns `(x, top, width, height)` in surface coordinates, or a zero width and

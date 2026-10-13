@@ -866,9 +866,24 @@ fn test_text(
 /// WHY: the face is proportional (digits advance 11px at scale 1, letters 5-16),
 /// so a fixed 8px character cell mis-centres every run that is not exactly that
 /// wide. This measures the real advance widths instead.
+///
+/// WHY the measured width is the DRAWN face's and not `font::measure`'s: the run
+/// is placed through `test_text`, which prefers the outline face at scale 2 and
+/// above, and the outline face advances by its own table rather than the bitmap
+/// cell's. Both widths are decided by `outline_text::drawn_advance`, which
+/// mirrors `place_run`'s refusals, so a label is centred on the width of the run
+/// that is actually inked. On the bitmap fallback the answer is
+/// `font::measure`, which is what the bitmap rasteriser steps by. The empty
+/// state's headline sits 6px left on the advance box, and 4.5px left on the
+/// ink a capture resolves: `k2_cal.ppm` showed ink x 164..547 against a card
+/// centre of 360.
 #[inline(always)]
 fn centered_x(text: &[u8], scale: usize, x0: usize, available: usize) -> usize {
-    x0 + std::design::font::center_x(text, scale, available)
+    let w = outline_text::drawn_advance(text, scale, Some(available))
+        .unwrap_or_else(|| std::design::font::measure(text, scale));
+    // 0 rather than an underflow when the run is at least as wide as its box,
+    // which is what `font::center_x` does for the same situation.
+    x0 + if w >= available { 0 } else { (available - w) / 2 }
 }
 
 fn get_month_abbr(month: u8) -> &'static [u8] {

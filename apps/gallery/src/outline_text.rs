@@ -311,3 +311,51 @@ impl OutlineRun {
         Some(interos_std::design::font::blend(ink, bg, c))
     }
 }
+
+/// The advance, in pixels, of the face that will actually ink this run, or
+/// `None` when the bitmap face will draw it instead.
+///
+/// WHY this exists: every centred label in this app measures its box with
+/// `font::measure` -- the sum of the BITMAP cell's advances -- and then draws
+/// the run through `place_run`, whose outline face advances by its own table.
+/// The two disagree by 1-4% of a run ("No photos" is 198px on the bitmap
+/// against 192px on the outline at scale 2), so a run centred on the bitmap
+/// width lands 3px left of the centre of the surface it is centred in.
+/// Measured in a guest screendump of `g2_gal_wall.ppm`: the ledger title's ink
+/// spans x 264..451 for an intended centre of 360.
+///
+/// WHY it answers for the regular weight only: `place_run` refuses `bold`
+/// outright, and this app's one funnel (`text`) passes `false`. A bold run is a
+/// bitmap run, and its width is `font::measure`, which is what a caller falls
+/// back to when this returns `None`.
+///
+/// WHY it mirrors `place_run`'s own refusals condition for condition: a helper
+/// that disagreed with `place_run` about which face draws a run would put the
+/// centring back on a width the rasteriser never uses, which is the bug this
+/// replaces.
+pub fn drawn_advance(text: &[u8], scale: usize) -> Option<usize> {
+    if scale < 2 {
+        return None;
+    }
+    let em = em_for_scale(scale);
+    if text.is_empty() || text.len() > KEY_MAX {
+        return None;
+    }
+    // A glyph the outline cannot encode advances by zero, so later glyphs would
+    // land on earlier ones.
+    if text.iter().any(|&c| c < face::FIRST_CHAR || c > face::LAST_CHAR) {
+        return None;
+    }
+    if text.iter().any(|&c| WINDOW_OVERFLOW.contains(&c)) {
+        return None;
+    }
+    let w = typeface::text_advance_px(text, em) as usize;
+    if w == 0 || w > RUN_W_MAX {
+        return None;
+    }
+    let (ascent, descent) = typeface::line_metrics(em);
+    if (ascent + descent) as usize > RUN_H_MAX {
+        return None;
+    }
+    Some(w)
+}
