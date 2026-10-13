@@ -1618,14 +1618,20 @@ fn get_calendar_pixel(
                 if let Some(c) = test_text(
                     x,
                     y,
-                    236,
+                    // WHY the measured column: the detail line sits under a
+                    // headline that is centred in the card, so it must be centred
+                    // in the same card or the two lines disagree about the middle.
+                    // It was drawn from a literal `236`, which put it 25px left of
+                    // the headline's centre (capture: headline centre 354.7,
+                    // detail centre 303.3) and read as ragged.
+                    centered_x(detail_str, 1, 24, 672),
                     760,
                     1,
                     detail_str,
-                    // WHY 460 is the column: the detail line starts at x 236 and
-                    // the card it sits in ends at x 696, so that is the room the
-                    // card has for it.
-                    696 - 236,
+                    // WHY 672 is the column: it is the empty-state card's inner
+                    // width (24..696), the same box the headline above it is
+                    // centred in.
+                    672,
                     TEXT_MUTED,
                 ) {
                     return c;
