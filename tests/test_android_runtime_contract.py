@@ -43,3 +43,18 @@ def test_android_vm_rejects_oversized_register_files_and_unbounded_recursion():
     assert "method.registers_size as usize > self.registers.len()" in runtime
     assert "self.call_depth >= 32" in runtime
     assert "STEP_LIMIT: usize = 4096" in runtime
+
+
+def test_android_runtime_has_bounded_validated_drawing_runtime():
+    draw = read("kernel/src/compat/android/draw.rs")
+    mod = read("kernel/src/compat/android/mod.rs")
+    assert "pub enum DrawOp" in draw
+    assert "pub struct DrawList" in draw
+    assert "pub enum DrawError" in draw
+    assert "pub const MAX_DRAW_OPS_PER_LIST: usize = 256" in draw
+    assert "pub const MAX_FRAME_AREA_PIXELS: u64" in draw
+    assert "pub fn render_draw_list" in draw
+    assert "pub fn clip_rect" in draw
+    assert "write_surface_pixels" in draw
+    assert "pub mod draw;" in mod
+    assert "pub use draw::{" in mod
