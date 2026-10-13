@@ -181,7 +181,7 @@ InterOS Core features a native smartphone UI pipeline engineered for `#![no_std]
 - **Typography Engine (`interos-std::design::font`)**:
   - Proportional 16×24 condensed typeface (`FONT`, `FONT_BOLD`).
   - Tabular digits (11px fixed advance) ensuring clock text never jitters horizontally.
-  - Subpixel edge anti-aliasing (`test_text_aa`) with analytical corner feathering and early-exit fast paths.
+  - 4-bit grayscale coverage anti-aliasing (`test_text_aa`) with analytical corner feathering and early-exit fast paths.
   - Text measurement (`measure`), optical centering (`center_x`), wrapping, and ellipsization (`ellipsize`).
 - **Reusable Primitives (`interos-std::design::primitives`)**:
   - Squircle cards (`draw_rounded_rect`), capsules/pills (`draw_pill`), circles (`draw_circle`), and dividers (`draw_divider`).

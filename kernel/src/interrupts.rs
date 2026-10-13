@@ -84,6 +84,7 @@ pub const FAULT_HALT_LINE: &[u8] = b"HALT\r\n";
 /// Trailing line of a user fault that terminates the faulting task.
 pub const FAULT_TASK_TERMINATED_LINE: &[u8] = b"Terminating user task.\r\n";
 
+#[cfg(not(target_os = "windows"))]
 static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     let mut idt = InterruptDescriptorTable::new();
 
@@ -119,6 +120,7 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
 });
 
 /// Initializes the Interrupt Descriptor Table and loads it into the CPU.
+#[cfg(not(target_os = "windows"))]
 pub fn init_idt() {
     IDT.load();
 
@@ -130,7 +132,11 @@ pub fn init_idt() {
     ));
 }
 
+#[cfg(target_os = "windows")]
+pub fn init_idt() {}
+
 /// Initializes and unmasks the 8259 PIC controllers.
+#[cfg(not(target_os = "windows"))]
 pub fn init_pit() {
     let divisor = PIT_DIVISOR;
     unsafe {
@@ -143,11 +149,18 @@ pub fn init_pit() {
     }
 }
 
+#[cfg(target_os = "windows")]
+pub fn init_pit() {}
+
+#[cfg(not(target_os = "windows"))]
 pub fn init_pics() {
     unsafe {
         PICS.lock().initialize();
     }
 }
+
+#[cfg(target_os = "windows")]
+pub fn init_pics() {}
 
 /// Returns the current total system timer ticks since kernel boot.
 #[allow(dead_code)]
@@ -159,11 +172,13 @@ pub fn get_system_ticks() -> u64 {
 // CPU Exception Handlers
 // -----------------------------------------------------------------------------
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
     serial_println!("[CPU EXCEPTION: BREAKPOINT]");
     serial_println!("{:#?}", stack_frame);
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
@@ -299,6 +314,7 @@ fn halt_after_fault_report_failure() -> ! {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
@@ -365,6 +381,7 @@ extern "x86-interrupt" fn page_fault_handler(
     halt_after_fault_report_failure()
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
@@ -408,6 +425,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 // Hardware Interrupt Handlers
 // -----------------------------------------------------------------------------
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
     let ticks = SYSTEM_TICKS.fetch_add(1, Ordering::Relaxed);
     // Periodically log heartbeat every 1000 ticks to avoid serial flood
@@ -434,6 +452,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     crate::task::on_timer_tick();
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     let mut port = Port::new(0x60);
     let scancode: u8 = unsafe { port.read() };
@@ -460,6 +479,7 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq4_com1_handler(_stack_frame: InterruptStackFrame) {
     crate::serial::poll_serial_rx();
     unsafe {
@@ -467,6 +487,7 @@ extern "x86-interrupt" fn irq4_com1_handler(_stack_frame: InterruptStackFrame) {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq12_touch_digitizer_handler(_stack_frame: InterruptStackFrame) {
     crate::drivers::ps2_mouse::handle_irq_byte();
     unsafe {
@@ -474,6 +495,7 @@ extern "x86-interrupt" fn irq12_touch_digitizer_handler(_stack_frame: InterruptS
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 macro_rules! define_pic_eoi_handler {
     ($fn_name:ident, $irq:expr) => {
         extern "x86-interrupt" fn $fn_name(_stack_frame: InterruptStackFrame) {
@@ -484,17 +506,29 @@ macro_rules! define_pic_eoi_handler {
     };
 }
 
+#[cfg(not(target_os = "windows"))]
 define_pic_eoi_handler!(irq2_handler, 34);
+#[cfg(not(target_os = "windows"))]
 define_pic_eoi_handler!(irq3_handler, 35);
+#[cfg(not(target_os = "windows"))]
 define_pic_eoi_handler!(irq5_handler, 37);
+#[cfg(not(target_os = "windows"))]
 define_pic_eoi_handler!(irq6_handler, 38);
+#[cfg(not(target_os = "windows"))]
 define_pic_eoi_handler!(irq7_spurious_handler, 39);
+#[cfg(not(target_os = "windows"))]
 define_pic_eoi_handler!(irq8_rtc_handler, 40);
+#[cfg(not(target_os = "windows"))]
 define_pic_eoi_handler!(irq9_handler, 41);
+#[cfg(not(target_os = "windows"))]
 define_pic_eoi_handler!(irq10_handler, 42);
+#[cfg(not(target_os = "windows"))]
 define_pic_eoi_handler!(irq11_handler, 43);
+#[cfg(not(target_os = "windows"))]
 define_pic_eoi_handler!(irq13_coproc_handler, 45);
+#[cfg(not(target_os = "windows"))]
 define_pic_eoi_handler!(irq14_ata_primary_handler, 46);
+#[cfg(not(target_os = "windows"))]
 define_pic_eoi_handler!(irq15_ata_secondary_handler, 47);
 
 // -----------------------------------------------------------------------------

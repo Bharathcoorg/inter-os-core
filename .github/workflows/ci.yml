@@ -28,6 +28,9 @@ jobs:
       - name: Run SDK Tests
         run: cargo test -p interos-std
 
+      - name: Run Microkernel Unit Tests
+        run: cargo test --manifest-path kernel/Cargo.toml
+
   microkernel-targets:
     name: Multi-Architecture Microkernel Build Checks
     runs-on: ubuntu-latest

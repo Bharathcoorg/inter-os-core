@@ -674,7 +674,7 @@ def emit_font_fhd_rs(face_fhd):
         "//!",
         "//! Provides the native 24x36 condensed sans-serif face for Full HD mobile display scanout:",
         "//! - 1.5x crisp rendering without bilinear scaling artifacts",
-        "//! - True 4-bit subpixel coverage anti-aliasing (16-step alpha ramp)",
+        "//! - True 4-bit grayscale coverage anti-aliasing (16-step alpha ramp)",
         "//! - Tabular digits and proportional letterforms rasterized directly from Roboto Condensed",
         "//! - Bare-metal `#![no_std]` execution with zero heap allocation",
         "//!",

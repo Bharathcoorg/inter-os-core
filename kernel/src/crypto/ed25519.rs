@@ -40,8 +40,8 @@ pub fn verify_rapp_signature(data: &[u8], publisher_id: &str, signature_bytes: &
     let signature = Signature::from_bytes(signature_bytes);
     let mut signed = alloc::vec::Vec::with_capacity(data.len());
     signed.extend_from_slice(data);
-    if signed.len() < 0xA0 { return false; }
-    signed[0x60..0xA0].fill(0);
+    if signed.len() < 0xB4 { return false; }
+    signed[0x70..0xB0].fill(0);
     public_key.verify_strict(&signed, &signature).is_ok()
 }
 

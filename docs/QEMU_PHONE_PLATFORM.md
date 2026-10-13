@@ -78,8 +78,8 @@ The canonical QEMU input and display coordinate mapping is defined as:
 
 The QEMU developer transport supports live application deployment over the COM1 serial interface:
 
-1. **Trust Provisioning**: `interos trust <package.rapp>` provisions the package's Ed25519 public key into the guest trust registry.
-2. **Installation**: `interos install <package.rapp>` validates the package on the host, streams the signed bytes over COM1, verifies the SHA-256 digest and Ed25519 signature inside Ring 0, and stores the verified blob in persistent storage (up to 60 KiB per package).
+1. **Trust Provisioning**: Publisher trust roots are anchored in guest firmware / persistent keystore. Unauthenticated COM1 serial commands cannot inject arbitrary publisher keys (`RAPP_TRUST` is rejected by design).
+2. **Installation**: `interos install <package.rapp>` validates the package on the host, streams the signed bytes over COM1, verifies the SHA-256 digest and Ed25519 signature inside Ring 0 against the trust store, and stores the verified blob in persistent storage (up to 60 KiB per package).
 3. **Execution**: `interos run <package_id>` instructs the guest launcher to spawn a Ring-3 process with dedicated page tables.
 4. **Uninstallation**: `interos uninstall <package_id>` removes the package blob and deactivates its registry entry.
 

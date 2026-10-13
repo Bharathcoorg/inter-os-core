@@ -125,7 +125,7 @@ python tools/interos.py run my_app
 ```
 
 ### `interos trust`
-Explicitly provisions a publisher's Ed25519 public key into the running guest trust store:
+Requests provisioning of a publisher's Ed25519 public key via the Device Studio API (note: unauthenticated raw serial injection is blocked by the kernel security policy; keys must be authorized via authenticated provisioning or pre-seeded trust roots):
 ```bash
 python tools/interos.py trust dist/my_app.rapp [--publisher developer]
 ```

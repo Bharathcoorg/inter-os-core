@@ -85,6 +85,6 @@ Declared capability IDs map into per-process capability token table rights:
 
 1. **Scaffolding & Packaging**: Developers scaffold projects via `interos new` and bundle binaries via `interos package <name>`.
 2. **Signing**: Packages are signed with the publisher's Ed25519 private key via `interos sign <package> --key <key_file>`.
-3. **Trust Provisioning**: `interos trust <package>` provisions the publisher's public key into the guest trust store.
-4. **Installation & Storage**: `interos install <package>` transfers the signed bytes to the guest over QEMU COM1, verifies integrity inside Ring 0, and commits the package blob into persistent storage.
+3. **Trust Provisioning**: Trust roots are established via firmware-anchored keys or authenticated provisioning. Unauthenticated serial interfaces (COM1) explicitly reject dynamic root-of-trust injection (`RAPP_TRUST`) to prevent unauthorized UART privilege escalation.
+4. **Installation & Storage**: `interos install <package>` transfers the signed bytes to the guest over QEMU COM1, verifies integrity and signatures inside Ring 0 against the active trust store, and commits the package blob into persistent storage.
 5. **Execution**: The launcher or PID 1 spawns an isolated Ring-3 child process with dedicated page tables (`W^X` enforced) and passes minted capability tokens.

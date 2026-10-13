@@ -134,7 +134,7 @@ InterOS Core features a native smartphone UI architecture designed for bare-meta
 - Proportional 16×24 master typeface (`FONT`, `FONT_BOLD`) with 17-row cap height, 12-row x-height, and 4-row descender depth.
 - Tabular figures (11px fixed advance at 1×) ensuring clock digits never jitter sideways.
 - Proportional character metrics (e.g. `i` at 6px advance, `W` at 16px advance).
-- Subpixel edge anti-aliasing (`test_text_aa`) blending fractional edge alpha into background pixels with fast-path early exits.
+- 4-bit grayscale coverage anti-aliasing (`test_text_aa`) blending fractional edge alpha into background pixels with fast-path early exits.
 - Text measurement (`measure`), optical centering (`center_x`), line wrapping (`wrap_text`), and ellipsization (`ellipsize`).
 
 ### Frame-Plan Architecture

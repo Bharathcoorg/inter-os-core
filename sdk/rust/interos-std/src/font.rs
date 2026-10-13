@@ -4,7 +4,7 @@
 //! - Real proportional glyph advances and tabular figures
 //! - High-contrast metrics (Cap height 17, x-height 12, ascender 16, descender 4)
 //! - Regular and bold weights
-//! - Subpixel coverage anti-aliasing (SSAA edge smoothing) for modern smartphone displays
+//! - 4-bit grayscale coverage anti-aliasing (16-level alpha ramp edge smoothing) for modern smartphone displays
 //!
 //! The letterforms are rasterised from Roboto Condensed (Apache License 2.0,
 //! see `tools/fonts/Apache-2.0.txt`) into the fixed 16x24 cell by

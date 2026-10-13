@@ -4,7 +4,7 @@
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use crate::crypto::{Sha256, SHA256_DIGEST_LENGTH};
 use crate::package::revocation::REVOCATION_REGISTRY;
 use crate::package::dependency::{Dependency, PackagePolicy, PackageVersion, VersionRequirement};
@@ -66,7 +66,7 @@ pub fn verify_rapp_signature(data:&[u8], publisher_key:&[u8;32], signature:&[u8;
     let key=VerifyingKey::from_bytes(publisher_key).map_err(|_|RappError::InvalidPublisherKey)?;
     let sig=Signature::from_bytes(signature);
     let msg=signed_message(data,payload_offset,payload_len);
-    key.verify(&msg,&sig).map_err(|_|RappError::SignatureInvalid)
+    key.verify_strict(&msg,&sig).map_err(|_|RappError::SignatureInvalid)
 }
 
 pub fn parse_rapp(data:&[u8])->Result<RappManifest,RappError>{
