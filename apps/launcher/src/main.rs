@@ -2514,9 +2514,39 @@ pub extern "C" fn _start() -> ! {
                             }
                         }
                         ViewMode::QuickControls => {
-                            if (is_drag(input.kind) && input.dy <= -60)
-                                || (input.kind == 1
-                                    && (input.y >= 1350 || (input.y >= 70 && input.x >= 600)))
+                            // The volume capsule is answered BEFORE the dismiss
+                            // band, not after.
+                            //
+                            // WHY the order matters: the shade's dismiss band is
+                            // `y >= 70 && x >= 600`, and the capsule runs to the
+                            // right edge of the surface, so its right-hand strip
+                            // fell inside the dismiss rectangle. A tap there
+                            // dismissed the shade instead of setting a level, so
+                            // roughly an eighth of a control that genuinely drives
+                            // the guest's audio manager did nothing. Testing the
+                            // control first is what makes the drawn rectangle and
+                            // the answerable one the same.
+                            //
+                            // WHY this does not make the shade undismissable: the
+                            // capsule is 96 rows tall inside a 1440-row surface,
+                            // so everything below it and everything above y 70
+                            // still dismisses, and the swipe-up path is untouched.
+                            let mut answered_by_capsule = false;
+                            if input.kind == 1 {
+                                let x = input.x as usize;
+                                let y = input.y as usize;
+                                let vol = screens::quick_controls::VOLUME_SLIDER;
+                                if (vol.y..vol.y + vol.h).contains(&y)
+                                    && (vol.x..vol.x + vol.w).contains(&x)
+                                {
+                                    answered_by_capsule = true;
+                                }
+                            }
+                            if !answered_by_capsule
+                                && ((is_drag(input.kind) && input.dy <= -60)
+                                    || (input.kind == 1
+                                        && (input.y >= 1350
+                                            || (input.y >= 70 && input.x >= 600))))
                             {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
