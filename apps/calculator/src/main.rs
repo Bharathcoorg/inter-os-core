@@ -147,6 +147,18 @@ const HEADER_H: usize = 110;
 /// Top of the operation badge's scale-3 line box inside the display card.
 const OP_BADGE_Y0: usize = 140;
 
+/// Display card box (x: 24..696, y: 110..410).
+const DISPLAY_X0: usize = 24;
+const DISPLAY_X1: usize = 696;
+/// Inset from the card's edge to the displayed value's right-hand column. WHY a
+/// named inset: the value is right-aligned to it, so the number's right edge is
+/// the same distance from the card rim as the card's left edge is.
+const DISPLAY_PAD: usize = 24;
+/// Top of the displayed value's line box. At scale 4 that box is 96 rows, so
+/// 280..376 sits between the operation badge (which ends at 212) and the card's
+/// bottom rim.
+const VALUE_Y0: usize = 280;
+
 // Button layout constants
 const BTN_W: usize = 144;
 const BTN_H: usize = 140;
@@ -205,7 +217,7 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
     }
 
     // 2. Numerical Display Area (y: 110..410, x: 24..696)
-    if (110..410).contains(&y) && x >= 24 && x < 696 {
+    if (110..410).contains(&y) && x >= DISPLAY_X0 && x < DISPLAY_X1 {
         // Active operation badge at top-left
         if let Some(op) = calc.active_operation {
             let op_sym: &[u8] = match op {
@@ -254,8 +266,15 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
 
         let scale: usize = if count <= 7 { 4 } else if count <= 10 { 3 } else { 2 };
         let total_w: usize = std::design::font::measure_bold(&digits[..count], scale);
-        let x0: usize = 660usize.saturating_sub(total_w);
-        let y0: usize = 280;
+        // WHY the card's inner edge and not the literal 660 this used to be: the
+        // display card spans x 24..696, so 660 left a 36px gap on the right of
+        // the number that matched no other edge on the surface - not the card's
+        // right rim and not the keypad's last column (which ends at 670). The
+        // value now ends where the card's own inset puts it, and the widest run
+        // this branch can build (20 characters at scale 2 = 440px) still starts
+        // at x 232, clear of the card's left inset.
+        let x0: usize = (DISPLAY_X1 - DISPLAY_PAD).saturating_sub(total_w);
+        let y0: usize = VALUE_Y0;
 
         if let Some(c) = std::design::font::test_text_aa(x, y, x0, y0, scale, &digits[..count], TEXT_PRIMARY, BG_DARK, true) {
             return c;
