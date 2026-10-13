@@ -172,20 +172,23 @@ impl<'a> DrawTarget for Surface<'a> {
     where
         I: IntoIterator<Item = Self::Color>,
     {
-        let rx = rectangle.top_left.x;
-        let ry = rectangle.top_left.y;
-        let rw = rectangle.size.width as i32;
-        let rh = rectangle.size.height as i32;
-        if rw <= 0 || rh <= 0 {
+        let rw = rectangle.size.width as u64;
+        let rh = rectangle.size.height as u64;
+        if rw == 0 || rh == 0 {
             return Ok(());
         }
+        let rx = rectangle.top_left.x as i64;
+        let ry = rectangle.top_left.y as i64;
+        let w = self.width as i64;
+        let h = self.height as i64;
+
         let mut iter = colors.into_iter();
-        for dy in 0..rh {
-            let y = ry + dy;
-            for dx in 0..rw {
+        for dy in 0..rh as i64 {
+            let y = ry.saturating_add(dy);
+            for dx in 0..rw as i64 {
                 let Some(color) = iter.next() else { return Ok(()); };
-                let x = rx + dx;
-                if x >= 0 && x < self.width as i32 && y >= 0 && y < self.height as i32 {
+                let x = rx.saturating_add(dx);
+                if x >= 0 && x < w && y >= 0 && y < h {
                     self.pixels[y as usize * self.width + x as usize] = color.to_argb();
                 }
             }
@@ -195,30 +198,36 @@ impl<'a> DrawTarget for Surface<'a> {
 
     /// Fills a whole rectangle.
     fn fill_solid(&mut self, rectangle: &Rectangle, color: Self::Color) -> Result<(), Self::Error> {
-        let x0 = rectangle.top_left.x.max(0) as usize;
-        let y0 = rectangle.top_left.y.max(0) as usize;
-        let x1 = (rectangle.top_left.x + rectangle.size.width as i32)
-            .max(0)
-            .min(self.width as i32) as usize;
-        let y1 = (rectangle.top_left.y + rectangle.size.height as i32)
-            .max(0)
-            .min(self.height as i32) as usize;
+        let w = self.width as i64;
+        let h = self.height as i64;
+
+        let rx = rectangle.top_left.x as i64;
+        let ry = rectangle.top_left.y as i64;
+        let rw = rectangle.size.width as i64;
+        let rh = rectangle.size.height as i64;
+
+        let x0 = rx.clamp(0, w) as usize;
+        let y0 = ry.clamp(0, h) as usize;
+        let x1 = rx.saturating_add(rw).clamp(0, w) as usize;
+        let y1 = ry.saturating_add(rh).clamp(0, h) as usize;
+
         if x1 <= x0 || y1 <= y0 {
             return Ok(());
         }
         for y in y0..y1 {
             let row = y * self.width;
-            for p in self.pixels[row + x0..row + x1].iter_mut() {
-                *p = color.to_argb();
-            }
+            self.pixels[row + x0..row + x1].fill(color.to_argb());
         }
         Ok(())
     }
 
     /// Clears the whole surface.
     fn clear(&mut self, color: Self::Color) -> Result<(), Self::Error> {
-        let bbox = self.bounding_box();
-        self.fill_solid(&bbox, color)
+        let len = self.width * self.height;
+        if len <= self.pixels.len() {
+            self.pixels[..len].fill(color.to_argb());
+        }
+        Ok(())
     }
 }
 
@@ -348,5 +357,70 @@ mod tests {
         assert_eq!(c.to_argb(), 0xFF12_3456);
         assert_eq!(SurfaceColor::argb(0x8012_3456).to_argb(), 0x8012_3456);
         assert_eq!(SurfaceColor::TRANSPARENT.to_argb(), 0);
+    }
+
+    #[test]
+    fn fill_contiguous_advances_iterator_correctly_across_negative_boundaries() {
+        // 3x3 rectangle starting at (-1, -1) on a 10x10 surface.
+        // The iterator supplies 9 distinct colors:
+        // C0(-1,-1) C1(0,-1) C2(1,-1)
+        // C3(-1, 0) C4(0, 0) C5(1, 0)
+        // C6(-1, 1) C7(0, 1) C8(1, 1)
+        // Visible on surface:
+        // (0,0) -> C4, (1,0) -> C5
+        // (0,1) -> C7, (1,1) -> C8
+        let mut buf = [0u32; 10 * 10];
+        let mut surface = Surface::new(&mut buf, 10, 10).expect("surface");
+        let colors = [
+            SurfaceColor(0xFF00_0001), SurfaceColor(0xFF00_0002), SurfaceColor(0xFF00_0003),
+            SurfaceColor(0xFF00_0004), SurfaceColor(0xFF00_0005), SurfaceColor(0xFF00_0006),
+            SurfaceColor(0xFF00_0007), SurfaceColor(0xFF00_0008), SurfaceColor(0xFF00_0009),
+        ];
+        let rect = Rectangle::new(Point::new(-1, -1), Size::new(3, 3));
+        surface.fill_contiguous(&rect, colors).unwrap();
+
+        assert_eq!(surface.get(0, 0), Some(0xFF00_0005)); // C4 at index 4
+        assert_eq!(surface.get(1, 0), Some(0xFF00_0006)); // C5 at index 5
+        assert_eq!(surface.get(0, 1), Some(0xFF00_0008)); // C7 at index 7
+        assert_eq!(surface.get(1, 1), Some(0xFF00_0009)); // C8 at index 8
+
+        // Verify that no other pixels were modified
+        let written_count = buf.iter().filter(|p| **p != 0).count();
+        assert_eq!(written_count, 4);
+    }
+
+    #[test]
+    fn fill_solid_and_contiguous_handle_extreme_overflow_gracefully() {
+        // 1. Extreme positive coordinates outside surface bounds
+        {
+            let mut buf = [0u32; 10 * 10];
+            let mut surface = Surface::new(&mut buf, 10, 10).expect("surface");
+            let rect_overflow = Rectangle::new(Point::new(i32::MAX - 2, i32::MAX - 2), Size::new(u32::MAX, u32::MAX));
+            assert!(surface.fill_solid(&rect_overflow, WHITE).is_ok());
+            assert!(surface.fill_contiguous(&rect_overflow, core::iter::empty()).is_ok());
+            drop(surface);
+            assert_eq!(buf.iter().filter(|p| **p != 0).count(), 0);
+        }
+
+        // 2. Extreme negative coordinates completely off-screen
+        {
+            let mut buf = [0u32; 10 * 10];
+            let mut surface = Surface::new(&mut buf, 10, 10).expect("surface");
+            let rect_neg_offscreen = Rectangle::new(Point::new(i32::MIN + 2, i32::MIN + 2), Size::new(1000, 1000));
+            assert!(surface.fill_solid(&rect_neg_offscreen, WHITE).is_ok());
+            assert!(surface.fill_contiguous(&rect_neg_offscreen, core::iter::empty()).is_ok());
+            drop(surface);
+            assert_eq!(buf.iter().filter(|p| **p != 0).count(), 0);
+        }
+
+        // 3. Huge straddling rectangle across negative and positive bounds
+        {
+            let mut buf = [0u32; 10 * 10];
+            let mut surface = Surface::new(&mut buf, 10, 10).expect("surface");
+            let rect_huge = Rectangle::new(Point::new(-1000, -1000), Size::new(u32::MAX, u32::MAX));
+            assert!(surface.fill_solid(&rect_huge, WHITE).is_ok());
+            drop(surface);
+            assert_eq!(buf.iter().filter(|p| **p == WHITE.to_argb()).count(), 100);
+        }
     }
 }
