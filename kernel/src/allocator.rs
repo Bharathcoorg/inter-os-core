@@ -85,16 +85,21 @@ pub fn heap_stats() -> (usize, usize) {
     (heap.used(), heap.free())
 }
 
+/// Speculatively returns (used_bytes, free_bytes) without blocking if the allocator
+/// is currently locked by a faulting thread.
+#[cfg(not(test))]
+pub fn try_heap_stats() -> Option<(usize, usize)> {
+    ALLOCATOR.try_lock().map(|heap| (heap.used(), heap.free()))
+}
+
 /// Host test builds have no kernel heap, so this refuses rather than reporting
 /// invented numbers.
-///
-/// WHY: the `[DIAG_STATE]` serial line is a test-harness contract literal and
-/// cannot be reworded to say "unavailable" without breaking the harnesses that
-/// parse it. Returning `0, 0` here would be a fabricated measurement of a heap
-/// that does not exist, so the only honest option left is to fail loudly. Only
-/// the boot-time diagnostics in `main.rs` and `serial.rs` call this, so no unit
-/// test reaches it.
 #[cfg(test)]
 pub fn heap_stats() -> (usize, usize) {
     panic!("heap_stats() is meaningless outside the bare-metal kernel heap");
+}
+
+#[cfg(test)]
+pub fn try_heap_stats() -> Option<(usize, usize)> {
+    None
 }

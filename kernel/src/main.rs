@@ -474,7 +474,10 @@ fn panic(info: &PanicInfo) -> ! {
 
     // Diagnostic state capture. Locks are only attempted speculatively: a panic
     // must never deadlock behind a subsystem that was already faulting.
-    let (heap_used, heap_free) = kernel::allocator::heap_stats();
+    let (heap_used, heap_free) = match kernel::allocator::try_heap_stats() {
+        Some((used, free)) => (used, free),
+        None => (0, 0),
+    };
     let tasks = match kernel::task::SCHEDULER.try_lock() {
         Some(sched) => sched.task_count(),
         None => 0,

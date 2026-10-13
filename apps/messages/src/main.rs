@@ -215,7 +215,10 @@ impl MessagesApp {
         let mut sector_buf = [0u8; 512];
         let copy_len = body.len().min(sector_buf.len().saturating_sub(16));
         sector_buf[..copy_len].copy_from_slice(&body[..copy_len]);
-        let iv = [0x42u8; 16];
+        let mut iv = [0u8; 16];
+        if std::get_random(&mut iv).is_err() {
+            iv.copy_from_slice(b"INTEROS_SEC_MSG_");
+        }
         // WHY: report the vault outcome. Previously a refused write left
         // `sector_encrypted` false but the send counter had already advanced.
         match std::vault_encrypt_sector(202, &mut sector_buf, &iv) {

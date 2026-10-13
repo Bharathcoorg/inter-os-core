@@ -71,6 +71,14 @@ impl CalculatorState {
                         self.accumulator /= self.current_operand;
                     }
                 }
+                '%' => {
+                    if self.current_operand != 0 {
+                        self.accumulator %= self.current_operand;
+                    }
+                }
+                '^' => {
+                    self.accumulator = self.accumulator.saturating_mul(self.current_operand);
+                }
                 _ => {}
             }
         } else {
