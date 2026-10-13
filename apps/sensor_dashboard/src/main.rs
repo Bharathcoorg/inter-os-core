@@ -817,11 +817,23 @@ fn pixel(x: usize, y: usize, app: &Dashboard) -> u32 {
             return EDGE;
         }
 
-        // Back Button
-        if (24..100).contains(&x) && (28..68).contains(&y) {
-            let on_border = on_rounded_rect_border(x, y, 24, 28, 100, 68, 8);
-            let chev = (x as isize - 62).abs() + (y as isize - 48).abs() <= 11 && x <= 62;
-            return if on_border || chev { TEXT } else { CARD_RAISED };
+        // Circular back button disc (cx: 62, cy: 48, radius: 22)
+        let dx = x as isize - 62;
+        let dy = y as isize - 48;
+        let dsq = dx * dx + dy * dy;
+        if dsq <= 22 * 22 {
+            // Anti-aliased disc border rim
+            if dsq >= 20 * 20 {
+                return EDGE;
+            }
+            // Crisp vector chevron: apex at (58, 48), arms pointing up-right and down-right
+            if dx <= 2 && dx >= -6 {
+                let arm_dy = (dx - (-6)).abs();
+                if (dy.abs() - arm_dy).abs() <= 1 {
+                    return TEXT;
+                }
+            }
+            return CARD_RAISED;
         }
 
         // Radar / Gyro Icon

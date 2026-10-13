@@ -826,7 +826,7 @@ fn get_music_pixel(x: usize, y: usize, app: &MusicApp, f: &Frame) -> u32 {
             if c != RECESSED {
                 return c;
             }
-            if chevron_down(x, y, 60, 50, 12) {
+            if chevron_down(x, y, 60, 54, 12) {
                 return TEXT;
             }
             return RECESSED;
