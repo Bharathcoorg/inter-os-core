@@ -1425,10 +1425,9 @@ const SURFACE_RAISED: u32 = 0xFFEFEEE9;
 const BORDER_SUBTLE: u32 = 0xFFE1E0DB;
 const TEXT_PRIMARY: u32 = 0xFF111214;
 const TEXT_MUTED: u32 = 0xFF777773;
-/// One step below `SURFACE_RAISED`, so a control that cannot act reads as
-/// pushed in rather than merely tinted.
+#[allow(dead_code)]
 const DISABLED_FILL: u32 = 0xFFE6E5E0;
-/// The disabled ink, one step below `TEXT_MUTED`.
+#[allow(dead_code)]
 const DISABLED_INK: u32 = 0xFFA9A8A3;
 const ACCENT_SKY: u32 = 0xFF2563EB;
 const SUCCESS_EMERALD: u32 = 0xFF2E8B57;
@@ -1509,19 +1508,18 @@ const fn run_rows(scale: usize) -> usize {
 const HEADER_H: usize = 94;
 const TITLE_SCALE: usize = 3;
 
-// Segmented navigation tabs (y: 105..155). Each capsule is sized to its own
-// label plus 2 * TAB_PAD, because the shared face is proportional: a fixed
-// 150px window truncated "Recents" (152px) and "Contacts" (170px).
+// Segmented navigation tabs (y: 104..156). Symmetrically balanced 200px pills
+// across the 720px viewport (48px margins, 12px gaps).
 const TAB_SCALE: usize = 2;
-const TAB_PAD: usize = 16;
-const TAB_BAND_Y0: usize = 105;
-const TAB_BAND_H: usize = 50;
+const TAB_BAND_Y0: usize = 104;
+const TAB_BAND_H: usize = 52;
+const TAB_W: usize = 200;
 const TAB1_X0: usize = 48;
-const TAB1_X1: usize = TAB1_X0 + 70 + 2 * TAB_PAD; // "Dial" measures 70px at scale 2
-const TAB2_X0: usize = TAB1_X1 + 18;
-const TAB2_X1: usize = TAB2_X0 + 152 + 2 * TAB_PAD; // "Recents" measures 152px
-const TAB3_X0: usize = TAB2_X1 + 18;
-const TAB3_X1: usize = TAB3_X0 + 170 + 2 * TAB_PAD; // "Contacts" measures 170px
+const TAB1_X1: usize = TAB1_X0 + TAB_W; // 248
+const TAB2_X0: usize = 260;
+const TAB2_X1: usize = TAB2_X0 + TAB_W; // 460
+const TAB3_X0: usize = 472;
+const TAB3_X1: usize = TAB3_X0 + TAB_W; // 672
 const TAB_ACTIVE_FILL: u32 = 0xFF111214;
 const TAB_LABELS: [&[u8]; 3] = [b"Dial", b"Recents", b"Contacts"];
 
@@ -1534,9 +1532,9 @@ const DISPLAY_W: usize = DISPLAY_X1 - DISPLAY_X0;
 const PLACEHOLDER_SCALE: usize = 2;
 const PLACEHOLDER_Y0: usize = 250;
 /// Real call-outcome caption under the dialed number. A scale-1 run owns
-/// run_rows(1) = 24 rows, so 344..368 clears the 96-row scale-4 digit box at
-/// 240..336 and stays inside the card's 380-row bottom edge.
-const OUTCOME_Y0: usize = 344;
+/// run_rows(1) = 24 rows, so 340..364 clears the 96-row scale-4 digit box at
+/// 236..332 and stays inside the card's 380-row bottom edge.
+const OUTCOME_Y0: usize = 340;
 
 // Backspace control in the display card. Hit-tested against exactly the disc
 // that is drawn (the old hit box was a 75x70 rectangle around a 48 px circle).
@@ -1544,9 +1542,10 @@ const BACKSPACE_CX: usize = 627;
 const BACKSPACE_CY: usize = 260;
 const BACKSPACE_R: i32 = 24;
 
-// Keypad digit scale: scale 2 against the reference's ~34px caps.
+// Keypad layout metrics: scale 2 digit, scale 1 sublabel, 48px radius circular discs.
 const KEY_DIGIT_SCALE: usize = 2;
 const KEY_SUB_SCALE: usize = 1;
+const KEY_RADIUS: usize = 48;
 
 // SOS emergency disc.
 const SOS_CX: usize = 134;
@@ -1714,16 +1713,23 @@ fn header_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         return BORDER_SUBTLE;
     }
 
-    // Back button (<) at (x: 24..100, y: 28..68)
-    if x >= 24 && x < 100 && y >= 28 && y < 68 {
-        let center_x = 62;
-        let center_y = 48;
-        let dx = (x as isize - center_x as isize).abs();
-        let dy = (y as isize - center_y as isize).abs();
-        if (dx + dy <= 12 && x <= center_x)
-            || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
-        {
-            return TEXT_PRIMARY;
+    // Circular back button (cx: 62, cy: 48, radius: 22)
+    let back_cx = 62i32;
+    let back_cy = 48i32;
+    let b_dx = x as i32 - back_cx;
+    let b_dy = y as i32 - back_cy;
+    let b_d2 = b_dx * b_dx + b_dy * b_dy;
+    if b_d2 <= 22 * 22 {
+        if b_d2 >= 20 * 20 {
+            return BORDER_SUBTLE;
+        }
+        // Left-pointing chevron: tip at (58, 48), wings to (64, 42) and (64, 54)
+        if y >= 42 && y <= 54 {
+            let arm = (y as i32 - 48).abs();
+            let target_x = 58 + arm;
+            if x as i32 >= target_x && x as i32 <= target_x + 2 {
+                return TEXT_PRIMARY;
+            }
         }
         return SURFACE_RAISED;
     }
@@ -1793,7 +1799,7 @@ fn tabs_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if !(TAB_BAND_Y0..TAB_BAND_Y0 + TAB_BAND_H).contains(&y) {
         return BG_DARK;
     }
-    let label_y0 = TAB_BAND_Y0 + (TAB_BAND_H - run_rows(TAB_SCALE)) / 2;
+    let label_y0 = TAB_BAND_Y0 + (TAB_BAND_H.saturating_sub(run_rows(TAB_SCALE))) / 2;
     let ranges = [(TAB1_X0, TAB1_X1), (TAB2_X0, TAB2_X1), (TAB3_X0, TAB3_X1)];
     for (i, (x0, x1)) in ranges.iter().enumerate() {
         if x < *x0 || x >= *x1 {
@@ -1805,16 +1811,16 @@ fn tabs_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             DialerSection::Recents => i == 1,
             DialerSection::Contacts => i == 2,
         };
-        let (fill, ink) = if active {
-            (TAB_ACTIVE_FILL, 0xFFFFFFFF)
+        let (fill, border, ink) = if active {
+            (TAB_ACTIVE_FILL, None, 0xFFFFFFFF)
         } else {
-            (SURFACE_RAISED, TEXT_MUTED)
+            (SURFACE_RAISED, Some(BORDER_SUBTLE), TEXT_MUTED)
         };
         // WHY a pill and not the old square fill: the design draws segmented
         // tabs as capsules. The text is only asked inside the pill so a glyph
         // near the label's ends cannot ink the curved cut-outs.
         let pill = std::design::primitives::Rect::new(*x0, TAB_BAND_Y0, w, TAB_BAND_H);
-        if std::design::primitives::draw_pill(x, y, pill, fill, None).is_none() {
+        if std::design::primitives::draw_pill(x, y, pill, fill, border).is_none() {
             continue;
         }
         let label_x0 = *x0 + std::design::font::center_x(TAB_LABELS[i], TAB_SCALE, w);
@@ -1833,17 +1839,27 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         return BG_DARK;
     }
 
+    let card_rect = std::design::primitives::Rect::new(
+        DISPLAY_X0,
+        DISPLAY_Y0,
+        DISPLAY_W,
+        DISPLAY_Y1 - DISPLAY_Y0,
+    );
+    let card_fill = match std::design::primitives::draw_rounded_rect(
+        x,
+        y,
+        card_rect,
+        20,
+        SURFACE_DARK,
+        Some(BORDER_SUBTLE),
+        1,
+    ) {
+        Some(c) => c,
+        None => return BG_DARK,
+    };
+
     if dialer.active_len > 0 {
-        // The contact behind the digits typed so far.
-        //
-        // WHY this is how the keypad dials a contact by name: the digits the user
-        // typed are matched against the stored numbers, and the name of the
-        // contact that owns them is shown. Pressing the call control then dials
-        // the entered number through the same real `telephony_dial` request a
-        // typed number uses, so what is dialled is exactly what is on screen.
-        //
-        // Nothing is drawn when nothing matches: there is no "unknown contact"
-        // placeholder, because the store holds only contacts the user created.
+        // Matched contact name
         if let Some(index) = dialer
             .contacts
             .match_by_number_prefix(&dialer.active_number[..dialer.active_len])
@@ -1854,7 +1870,7 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 if n > 0 {
                     let w = std::design::font::measure(&buf[..n], 1);
                     let cx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(w)) / 2;
-                    if let Some(c) = test_text(x, y, cx, 190, 1, &buf[..n], ACCENT_SKY, BG_DARK) {
+                    if let Some(c) = test_text(x, y, cx, 190, 1, &buf[..n], ACCENT_SKY, SURFACE_DARK) {
                         return c;
                     }
                 }
@@ -1862,24 +1878,18 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         }
 
         let scale = if dialer.active_len <= 10 { 4 } else { 3 };
-        let y0 = 240;
-        // Real proportional advances; digits are tabular but a fixed
-        // 8px-per-character cell is not the face's advance.
+        let y0 = 236;
         if y >= y0 && y < y0 + run_rows(scale) {
             let digits = &dialer.active_number[..dialer.active_len];
             let mut buf = [0u8; 32];
-            let n = std::design::font::ellipsize(digits, scale, DISPLAY_W - 64, &mut buf);
+            let n = std::design::font::ellipsize(digits, scale, DISPLAY_W - 120, &mut buf);
             let total_w = std::design::font::measure(&buf[..n], scale);
             let x0 = DISPLAY_X0 + (DISPLAY_W.saturating_sub(total_w)) / 2;
-            if let Some(c) = test_text(x, y, x0, y0, scale, &buf[..n], TEXT_PRIMARY, BG_DARK) {
+            if let Some(c) = test_text(x, y, x0, y0, scale, &buf[..n], TEXT_PRIMARY, SURFACE_DARK) {
                 return c;
             }
         }
     } else if y >= PLACEHOLDER_Y0 && y < PLACEHOLDER_Y0 + run_rows(PLACEHOLDER_SCALE) {
-        // Placeholder: scale 2 needs run_rows(2) = 48 rows, not the 16 the
-        // old gate admitted, and the card centres the label on its measured
-        // width instead of a hand-typed x0 that parked it ~95px right of
-        // centre.
         let x0 = DISPLAY_X0
             + std::design::font::center_x(
                 b"Enter a phone number",
@@ -1894,7 +1904,7 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
             PLACEHOLDER_SCALE,
             b"Enter a phone number",
             TEXT_MUTED,
-            BG_DARK,
+            SURFACE_DARK,
         ) {
             return c;
         }
@@ -1908,48 +1918,43 @@ fn display_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         if n > 0 {
             let w = std::design::font::measure(&buf[..n], 1);
             let cx = DISPLAY_X0 + (DISPLAY_W.saturating_sub(w)) / 2;
-            if let Some(c) = test_text(x, y, cx, OUTCOME_Y0, 1, &buf[..n], TEXT_MUTED, BG_DARK) {
+            let ink = match dialer.outcome {
+                CallOutcome::Refused | CallOutcome::EmergencyRefused => DANGER_CRIMSON,
+                _ => TEXT_MUTED,
+            };
+            if let Some(c) = test_text(x, y, cx, OUTCOME_Y0, 1, &buf[..n], ink, SURFACE_DARK) {
                 return c;
             }
         }
     }
 
-    // Backspace disc, drawn only when there is something to delete.
+    // Backspace circular disc
     if dialer.active_len > 0 {
         let dx = (x as i32) - BACKSPACE_CX as i32;
         let dy = (y as i32) - BACKSPACE_CY as i32;
         let d2 = dx * dx + dy * dy;
-        if d2 <= BACKSPACE_R * BACKSPACE_R {
-            if d2 >= (BACKSPACE_R - 3) * (BACKSPACE_R - 3) {
-                return DANGER_CRIMSON;
+        let r = 22i32;
+        if d2 <= r * r {
+            if d2 >= (r - 2) * (r - 2) {
+                return 0xFFFCA5A5;
             }
             // Backspace icon 'X' inside
-            if dx.abs() <= 7 && dy.abs() <= 7 && (dx == dy || dx == -dy) {
+            if dx.abs() <= 6 && dy.abs() <= 6 && (dx == dy || dx == -dy) {
                 return DANGER_CRIMSON;
             }
             return 0xFFFEE2E2;
         }
     }
 
-    BG_DARK
+    card_fill
 }
 
 /// The 3x4 dial pad. Only drawn in the Keypad section.
 ///
-/// WHY it takes no state: the keys are identical whether or not a digit is
-/// already in the entry, so typing never changes a pixel in this region. That is
-/// exactly why the display band is the only band a keystroke repaints.
-///
-/// WHY bare digits and no discs: the design draws the pad as unadorned type.
-/// The digit is scale 2 against the reference's ~34px caps; the sublabel stays
-/// scale 1, the smallest legible step. Hit-testing still uses the 180x124
-/// cells below, so the targets do not move with the chrome.
-/// Draws the dial pad.
-///
-/// WHY `editing` is a parameter: the contact editor draws the same pad with the
-/// multi-tap cycle made visible, so the user can see what the next press types.
-/// The geometry, the hit test and the cell boundaries are identical in both uses,
-/// which is why there is one function instead of two that can drift.
+/// Each keypad cell renders a 48px radius circular button disc with subtle
+/// border rim, raised pure-white surface, and depth elevation.
+/// Cells with sublabels stack the digit and sublabel; cells without (1, *, #)
+/// center the digit vertically in the disc.
 fn keypad_pixel_at(x: usize, y: usize, editing: Option<&DialerApp>) -> u32 {
     for row in 0..4 {
         let by = ROW_Y[row];
@@ -1960,34 +1965,35 @@ fn keypad_pixel_at(x: usize, y: usize, editing: Option<&DialerApp>) -> u32 {
                     let cx = (bx + BTN_W / 2) as i32;
                     let cy = (by + BTN_H / 2) as i32;
 
-                    // Whether the pad is being typed into as text. Computed once
-                    // per cell because both the big character and the sublabel
-                    // depend on it.
+                    let dx = x as i32 - cx;
+                    let dy = y as i32 - cy;
+                    let dist_sq = dx * dx + dy * dy;
+                    let r = KEY_RADIUS as i32;
+
+                    if dist_sq > r * r {
+                        return BG_DARK;
+                    }
+
+                    // Disc border
+                    if dist_sq >= (r - 2) * (r - 2) {
+                        return BORDER_SUBTLE;
+                    }
+
+                    // Bottom lip elevation depth
+                    if dy >= r - 4 && dist_sq < (r - 2) * (r - 2) {
+                        return 0xFFF0EFEB;
+                    }
+
+                    let disc_fill = SURFACE_DARK;
+
                     let editing_name = matches!(
                         editing,
                         Some(d) if d.contact_edit.is_some_and(|e| e.field == ContactField::Name)
                     );
 
-                    // The two runs are stacked, not intersecting: the scale-2
-                    // digit box (48 rows) sits on top and the scale-1 sublabel
-                    // box (24 rows) directly beneath it, the 72-row stack
-                    // centred on the cell. The old boxes were cy-24..cy+48
-                    // and cy+12..cy+36, which put the whole sublabel ink
-                    // band inside the digit's.
                     let digit_rows = run_rows(KEY_DIGIT_SCALE);
                     let sub_rows = run_rows(KEY_SUB_SCALE);
-                    let stack_y0 =
-                        (cy as usize).saturating_sub((digit_rows + sub_rows) / 2);
 
-                    // What this cell shows at scale 2, and what it shows under it.
-                    //
-                    // Browsing, or typing a number: the cell's own digit, exactly
-                    // as the keypad section has always drawn it.
-                    //
-                    // Typing a name: the character the next press on this cell
-                    // would produce. That is the cycle character after the one
-                    // currently under the caret when this cell produced it, and
-                    // the first cycle character otherwise.
                     let digit_buf: [u8; 1] = if editing_name {
                         let cycle = DialerApp::t9_cycle(row, col);
                         [match editing.and_then(|d| d.editor_last_cell) {
@@ -2016,6 +2022,17 @@ fn keypad_pixel_at(x: usize, y: usize, editing: Option<&DialerApp>) -> u32 {
                         get_keypad_sublabel(row, col)
                     };
 
+                    let has_sub = !sub_buf.is_empty();
+
+                    let (digit_y0, sub_y0) = if has_sub {
+                        let stack_y0 = (cy as usize).saturating_sub((digit_rows + sub_rows) / 2);
+                        (stack_y0, stack_y0 + digit_rows - 4)
+                    } else {
+                        let offset = if digit_bytes == b"*" { 4 } else { 0 };
+                        let center_y0 = (cy as usize).saturating_sub(digit_rows / 2) + offset;
+                        (center_y0, 0)
+                    };
+
                     // Digit text
                     if !digit_bytes.is_empty() {
                         let digit_x0 = (cx as usize).saturating_sub(
@@ -2025,35 +2042,35 @@ fn keypad_pixel_at(x: usize, y: usize, editing: Option<&DialerApp>) -> u32 {
                             x,
                             y,
                             digit_x0,
-                            stack_y0,
+                            digit_y0,
                             KEY_DIGIT_SCALE,
                             digit_bytes,
                             TEXT_PRIMARY,
-                            BG_DARK,
+                            disc_fill,
                         ) {
                             return c;
                         }
                     }
 
                     // Sublabel text
-                    if !sub_buf.is_empty() {
+                    if has_sub {
                         let sub_w = std::design::font::measure(sub_buf, KEY_SUB_SCALE);
                         let sub_x = (cx as usize).saturating_sub(sub_w / 2);
                         if let Some(c) = test_text(
                             x,
                             y,
                             sub_x,
-                            stack_y0 + digit_rows,
+                            sub_y0,
                             KEY_SUB_SCALE,
                             sub_buf,
                             TEXT_MUTED,
-                            BG_DARK,
+                            disc_fill,
                         ) {
                             return c;
                         }
                     }
 
-                    return BG_DARK;
+                    return disc_fill;
                 }
             }
         }
@@ -2653,20 +2670,23 @@ fn action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     // Call / Hangup Central Button (centre 360, 1065, r 52)
     let c_dx = (x as i32) - CALL_CX as i32;
     let c_dy = (y as i32) - CALL_CY as i32;
-    if c_dx * c_dx + c_dy * c_dy <= CALL_R * CALL_R {
+    let c_d2 = c_dx * c_dx + c_dy * c_dy;
+    if c_d2 <= CALL_R * CALL_R {
         let in_call = dialer.state != CallState::Idle;
-        // WHY the recessed treatment: with an empty number field there is
-        // nothing to dial, so `dial("")` returned -22 and the control did
-        // nothing at all while still looking live.
         let can_call = in_call || dialer.active_len > 0;
-        let bg_color = if in_call {
-            DANGER_CRIMSON
+
+        let (bg_color, border_color, glyph) = if in_call {
+            (DANGER_CRIMSON, 0xFFB91C1C, 0xFFFFFFFF)
         } else if can_call {
-            SUCCESS_EMERALD
+            (SUCCESS_EMERALD, 0xFF15803D, 0xFFFFFFFF)
         } else {
-            DISABLED_FILL
+            // Fresh soft mint circle with emerald icon when idle
+            (0xFFD1FAE5, 0xFFA7F3D0, 0xFF059669)
         };
-        let glyph = if can_call { 0xFFFFFFFF } else { DISABLED_INK };
+
+        if c_d2 >= (CALL_R - 2) * (CALL_R - 2) {
+            return border_color;
+        }
 
         // Vector Phone Handset
         if !in_call {
@@ -2696,23 +2716,21 @@ fn action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     }
 
     // Contacts shortcut (centre 586, 1065, r 40)
-    //
-    // WHY recessed: no contact store is exposed, so there is nothing behind this
-    // control. It used to look live, emit a haptic click and do nothing at all.
     let ct_dx = (x as i32) - CONTACTS_CX as i32;
     let ct_dy = (y as i32) - CONTACTS_CY as i32;
-    if ct_dx * ct_dx + ct_dy * ct_dy <= CONTACTS_R * CONTACTS_R {
-        if ct_dx * ct_dx + ct_dy * ct_dy >= 1444 {
+    let ct_d2 = ct_dx * ct_dx + ct_dy * ct_dy;
+    if ct_d2 <= CONTACTS_R * CONTACTS_R {
+        if ct_d2 >= (CONTACTS_R - 2) * (CONTACTS_R - 2) {
             return BORDER_SUBTLE;
         }
         // Person silhouette
         if ct_dx * ct_dx + (ct_dy + 8) * (ct_dy + 8) <= 49 {
-            return DISABLED_INK;
+            return TEXT_PRIMARY;
         }
         if ct_dy >= 2 && ct_dy <= 14 && ct_dx.abs() <= (ct_dy - 2) + 6 {
-            return DISABLED_INK;
+            return TEXT_PRIMARY;
         }
-        return DISABLED_FILL;
+        return SURFACE_DARK;
     }
 
     BG_DARK
@@ -2722,17 +2740,14 @@ fn action_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
 /// list filtered to the contacts the user starred, and the other three select a
 /// section.
 fn dock_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
-    if !(DOCK_Y0..DOCK_Y1).contains(&y) || x < 24 || x >= 696 {
+    if !(DOCK_Y0..DOCK_Y1).contains(&y) {
         return BG_DARK;
     }
-    if y == DOCK_Y0 || y == DOCK_Y1 - 1 || x == 24 || x == 695 {
+    // Top hairline divider
+    if y == DOCK_Y0 {
         return BORDER_SUBTLE;
     }
 
-    // WHY this mapping: every slot now has a real destination. Slots 0 (Favorites)
-    // and 3 (Contacts) both open the Contacts section -- slot 0 with the
-    // favourites filter on, which is exactly what a favourites list is, and slot 3
-    // without it.
     let mut slot = 4usize;
     for (i, x0) in DOCK_ITEM_X0.iter().enumerate() {
         if x >= *x0 && x < *x0 + DOCK_ITEM_W {
@@ -2743,6 +2758,7 @@ fn dock_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
     if slot == 4 {
         return SURFACE_DARK;
     }
+
     let active = match (slot, dialer.section) {
         (1, DialerSection::Recents) | (2, DialerSection::Keypad) => true,
         (0, DialerSection::Contacts) | (3, DialerSection::Contacts) => {
@@ -2755,45 +2771,14 @@ fn dock_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
         _ => false,
     };
 
-    if active && y >= 1275 && y < 1365 {
-        if y == 1275 || y == 1364 || x == DOCK_ITEM_X0[slot] || x == DOCK_ITEM_X0[slot] + DOCK_ITEM_W - 1
-        {
-            return ACCENT_SKY;
-        }
-    }
+    let cx = DOCK_ITEM_X0[slot] + DOCK_ITEM_W / 2;
+    let cy = DOCK_ICON_Y0 + DOCK_ICON_H / 2;
 
     let ink = if active { ACCENT_SKY } else { TEXT_MUTED };
-    // WHY the plate never changes tone: in this light theme the dock plate is
-    // already a step below the page, and the selection is carried by the ink and
-    // the accent outline above. A filled slot would fight the label legibility
-    // the earlier dark-surface version relied on.
     let plate = SURFACE_DARK;
 
-    // Icon band. A scale-1 label needs run_rows(1) = 24 rows; the dock plate runs
-    // to y = 1379, so a box starting at 1340 ends at 1364 and clears both the
-    // icon band above and the plate border below. The old 8-row gate left
-    // 5-row slivers of every label.
-    let label_x = DOCK_ITEM_X0[slot]
-        + std::design::font::center_x(DOCK_LABELS[slot], DOCK_LABEL_SCALE, DOCK_ITEM_W);
-    if y >= DOCK_LABEL_Y0 && y < DOCK_LABEL_Y0 + run_rows(DOCK_LABEL_SCALE) {
-        if let Some(c) = test_text(
-            x,
-            y,
-            label_x,
-            DOCK_LABEL_Y0,
-            DOCK_LABEL_SCALE,
-            DOCK_LABELS[slot],
-            ink,
-            plate,
-        ) {
-            return c;
-        }
-    }
-
-    // Every slot draws an icon now, because every slot has something behind it.
+    // Icon band
     if y >= DOCK_ICON_Y0 && y < DOCK_ICON_Y0 + DOCK_ICON_H {
-        let cx = DOCK_ITEM_X0[slot] + DOCK_ITEM_W / 2;
-        let cy = DOCK_ICON_Y0 + DOCK_ICON_H / 2;
         match slot {
             2 => {
                 // Keypad icon: a 3x3 dot grid.
@@ -2819,9 +2804,7 @@ fn dock_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                 }
             }
             0 => {
-                // Favorites icon: a five-point star. It is filled whenever the
-                // store holds at least one starred contact, so the slot says
-                // what it will actually show instead of always looking empty.
+                // Favorites icon: a five-point star.
                 let sdx = x as i32 - cx as i32;
                 let sdy = y as i32 - cy as i32;
                 let on = sdy <= 0 && sdx.abs() as i32 <= 12 + sdy.abs() / 2
@@ -2845,6 +2828,32 @@ fn dock_pixel(x: usize, y: usize, dialer: &DialerApp) -> u32 {
                     return ink;
                 }
             }
+        }
+    }
+
+    // Label band
+    let label_x = DOCK_ITEM_X0[slot]
+        + std::design::font::center_x(DOCK_LABELS[slot], DOCK_LABEL_SCALE, DOCK_ITEM_W);
+    if y >= DOCK_LABEL_Y0 && y < DOCK_LABEL_Y0 + run_rows(DOCK_LABEL_SCALE) {
+        if let Some(c) = test_text(
+            x,
+            y,
+            label_x,
+            DOCK_LABEL_Y0,
+            DOCK_LABEL_SCALE,
+            DOCK_LABELS[slot],
+            ink,
+            plate,
+        ) {
+            return c;
+        }
+    }
+
+    // Active pill background under icon
+    if active {
+        let pill_rect = std::design::primitives::Rect::new(cx - 32, cy - 16, 64, 32);
+        if let Some(p_color) = std::design::primitives::draw_pill(x, y, pill_rect, 0xFFDBEAFE, None) {
+            return p_color;
         }
     }
 
@@ -3100,7 +3109,7 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
     // 4. Backspace disc: hit-tested against exactly the drawn circle.
     if dialer.active_len > 0 && in_circle(x, y, BACKSPACE_CX, BACKSPACE_CY, BACKSPACE_R) {
         dialer.backspace();
-        return Tap::Redraw(Dirty::Display);
+        return Tap::Redraw(if dialer.active_len == 0 { Dirty::All } else { Dirty::Display });
     }
 
     // 5. Section content: the keypad and action row in the Keypad section, the
@@ -3121,7 +3130,7 @@ fn handle_tap(dialer: &mut DialerApp, px: u32, py: u32) -> Tap<'static> {
                             dialer.input_digit(digit);
                             std::log(0, "[DIALER APP] Keypad digit entered.").ok();
                         }
-                        return Tap::Redraw(Dirty::Display);
+                        return Tap::Redraw(if dialer.active_len == 1 { Dirty::All } else { Dirty::Display });
                     }
                 }
             }
