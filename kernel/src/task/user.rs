@@ -1615,3 +1615,54 @@ pub fn spawn_app_gallery(id_security: TaskId) -> TaskId {
     serial_println!("[OK] Spawned Task 28: app_gallery (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
     id
 }
+
+/// Spawns the DrawTarget proof application (Ring 3).
+pub fn spawn_app_card_demo(id_security: TaskId) -> TaskId {
+    let mut caps = CapabilityTable::new(10);
+    caps.insert(Capability {
+        id: CapabilityId(2901),
+        cap_type: CapabilityType::SerialOutput,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2902),
+        cap_type: CapabilityType::IpcSend,
+        rights: Rights::WRITE,
+        object_id: id_security.0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2903),
+        cap_type: CapabilityType::TimerTickRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2905),
+        cap_type: CapabilityType::EventPoll,
+        rights: Rights::READ.union(Rights::INVOKE),
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2906),
+        cap_type: CapabilityType::IpcReceive,
+        rights: Rights::READ,
+        object_id: 0,
+    }).ok();
+    caps.insert(Capability {
+        id: CapabilityId(2907),
+        cap_type: CapabilityType::FrameBufferDirect,
+        rights: Rights::WRITE,
+        object_id: 1,
+    }).ok();
+
+    let id = spawn_user_process_with_parent(
+        "app_card_demo",
+        APP_CARD_DEMO_ELF,
+        caps,
+        6,
+        id_security,
+    ).expect("Failed to spawn Card Demo app");
+    serial_println!("[OK] Spawned app_card_demo (Ring 3 User Mode, Isolated CR3, ID: {:?})", id);
+    id
+}

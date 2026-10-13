@@ -124,6 +124,11 @@
       "name": "gallery",
       "kind": "application",
       "manifest": "apps/gallery/Cargo.toml"
+    },
+    {
+      "name": "card_demo",
+      "kind": "application",
+      "manifest": "apps/card_demo/Cargo.toml"
     }
   ],
   "kernel": {

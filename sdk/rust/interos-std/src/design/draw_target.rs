@@ -26,10 +26,11 @@
 //! texture store, a widget toolkit, layout, dirty regions, or animation. It is a
 //! drawing interface. The thing it replaces is the per-pixel painter.
 
-use embedded_graphics_core::draw_target::DrawTarget;
-use embedded_graphics_core::geometry::{Dimensions, OriginDimensions, Point, Size};
-use embedded_graphics_core::primitives::Rectangle;
-use embedded_graphics_core::pixelcolor::PixelColor;
+pub use embedded_graphics_core::draw_target::DrawTarget;
+pub use embedded_graphics_core::geometry::{Dimensions, OriginDimensions, Point, Size};
+pub use embedded_graphics_core::primitives::Rectangle;
+pub use embedded_graphics_core::pixelcolor::PixelColor;
+pub use embedded_graphics_core::Pixel;
 
 /// The colour type the guest's surfaces carry.
 ///
@@ -171,16 +172,22 @@ impl<'a> DrawTarget for Surface<'a> {
     where
         I: IntoIterator<Item = Self::Color>,
     {
-        let x0 = rectangle.top_left.x.max(0) as usize;
-        let y0 = rectangle.top_left.y.max(0) as usize;
-        let x1 = (rectangle.top_left.x + rectangle.size.width as i32)
-            .min(self.width as i32) as usize;
-        let y1 = (rectangle.top_left.y + rectangle.size.height as i32)
-            .min(self.height as i32) as usize;
-        for (y, color) in (y0..y1).zip(colors) {
-            let row = y * self.width;
-            for p in self.pixels[row + x0..row + x1].iter_mut() {
-                *p = color.to_argb();
+        let rx = rectangle.top_left.x;
+        let ry = rectangle.top_left.y;
+        let rw = rectangle.size.width as i32;
+        let rh = rectangle.size.height as i32;
+        if rw <= 0 || rh <= 0 {
+            return Ok(());
+        }
+        let mut iter = colors.into_iter();
+        for dy in 0..rh {
+            let y = ry + dy;
+            for dx in 0..rw {
+                let Some(color) = iter.next() else { return Ok(()); };
+                let x = rx + dx;
+                if x >= 0 && x < self.width as i32 && y >= 0 && y < self.height as i32 {
+                    self.pixels[y as usize * self.width + x as usize] = color.to_argb();
+                }
             }
         }
         Ok(())
@@ -191,8 +198,10 @@ impl<'a> DrawTarget for Surface<'a> {
         let x0 = rectangle.top_left.x.max(0) as usize;
         let y0 = rectangle.top_left.y.max(0) as usize;
         let x1 = (rectangle.top_left.x + rectangle.size.width as i32)
+            .max(0)
             .min(self.width as i32) as usize;
         let y1 = (rectangle.top_left.y + rectangle.size.height as i32)
+            .max(0)
             .min(self.height as i32) as usize;
         if x1 <= x0 || y1 <= y0 {
             return Ok(());
@@ -224,8 +233,8 @@ mod tests {
         // WHY this is the first test: a caller that hands over a short buffer
         // would get silent truncation, and a surface that truncates is a screen
         // with a stripe down it.
-        let mut buf = [0u32; 10];
-        assert!(Surface::new(&mut buf, 10, 10).is_err());
+        let mut buf = [0u32; 100];
+        assert!(Surface::new(&mut buf, 10, 11).is_err());
         assert!(Surface::new(&mut [0u32; 0], 10, 10).is_err());
         assert!(Surface::new(&mut [0u32; 0], 0, 10).is_err());
     }
@@ -258,6 +267,28 @@ mod tests {
     }
 
     #[test]
+    fn a_rect_past_negative_bounds_is_clipped_safely() {
+        {
+            let mut buf = [0u32; 100 * 100];
+            let mut surface = Surface::new(&mut buf, 100, 100).expect("surface");
+            // Entirely off left edge: x=-50, w=20
+            let rect_off = Rectangle::new(Point::new(-50, 10), Size::new(20, 5));
+            surface.fill_solid(&rect_off, WHITE).unwrap();
+            assert_eq!(buf.iter().filter(|p| **p != 0).count(), 0);
+        }
+
+        {
+            let mut buf = [0u32; 100 * 100];
+            let mut surface = Surface::new(&mut buf, 100, 100).expect("surface");
+            // Straddling left edge: x=-10, w=20 (so x in [0, 10) is visible)
+            let rect_straddle = Rectangle::new(Point::new(-10, 10), Size::new(20, 5));
+            surface.fill_solid(&rect_straddle, WHITE).unwrap();
+            let inked = buf.iter().filter(|p| **p == WHITE.to_argb()).count();
+            assert_eq!(inked, 50, "10 visible columns * 5 rows");
+        }
+    }
+
+    #[test]
     fn a_rect_entirely_off_surface_writes_nothing() {
         let mut buf = [0u32; 100 * 100];
         let mut surface = Surface::new(&mut buf, 100, 100).expect("surface");
@@ -267,18 +298,15 @@ mod tests {
     }
 
     #[test]
-    fn fill_contiguous_writes_row_at_a_time_and_stops_when_colors_run_out() {
+    fn fill_contiguous_writes_row_major_and_stops_when_colors_run_out() {
         let mut buf = [0u32; 100 * 100];
         let mut surface = Surface::new(&mut buf, 100, 100).expect("surface");
         let rect = Rectangle::new(Point::new(0, 0), Size::new(3, 3));
-        // Two colours for a three-row rect: the third row is left alone, because
-        // the color iterator is exhausted and inventing one would be a draw the
-        // caller did not ask for.
         surface.fill_contiguous(&rect, [WHITE, WHITE]).unwrap();
         assert_eq!(buf[0], WHITE.to_argb());
         assert_eq!(buf[1], WHITE.to_argb());
-        assert_eq!(buf[2], WHITE.to_argb());
-        assert_eq!(buf[2 * 100], 0, "row three, no color supplied");
+        assert_eq!(buf[2], 0, "third pixel in row 0 untouched");
+        assert_eq!(buf[100], 0, "row 1 untouched");
     }
 
     #[test]

@@ -5071,6 +5071,7 @@ pub fn dev_launch_app(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         "org.interos.file_manager" | "file_manager" | "files" | "app_file_manager" => crate::task::user::spawn_app_file_manager(parent),
         "org.interos.gallery" | "gallery" | "photos" | "app_gallery" => crate::task::user::spawn_app_gallery(parent),
         "org.interos.sensor_dashboard" | "sensor_dashboard" => spawn_app_sensor_dashboard(parent),
+        "org.interos.card_demo" | "card_demo" | "app_card_demo" => crate::task::user::spawn_app_card_demo(parent),
         "org.interos.compositor" | "compositor" | "org.interos.launcher" | "launcher" => {
             return Err(SyscallResult::PermissionDenied);
         }
@@ -5309,6 +5310,9 @@ pub fn sys_app_launch(app_id: &str) -> Result<crate::task::TaskId, SyscallResult
         }
         "org.interos.sensor_dashboard" | "sensor_dashboard" => {
             spawn_app_sensor_dashboard(parent_id)
+        }
+        "org.interos.card_demo" | "card_demo" => {
+            crate::task::user::spawn_app_card_demo(parent_id)
         }
         _ => {
             crate::serial_println!("[APP_LAUNCH DEBUG] unknown app_id: '{}'", app_id);

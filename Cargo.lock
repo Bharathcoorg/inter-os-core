@@ -43,6 +43,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "card_demo"
+version = "0.1.0"
+dependencies = [
+ "interos-std",
+]
+
+[[package]]
 name = "compositor"
 version = "0.1.0"
 dependencies = [
