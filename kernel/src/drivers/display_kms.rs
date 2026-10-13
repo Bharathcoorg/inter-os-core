@@ -521,6 +521,36 @@ impl DrmKmsController {
         })
     }
 
+    /// Returns whether an opaque surface will completely cover the scanout,
+    /// overwriting every single pixel of the back buffer.
+    ///
+    /// When true, clearing the back buffer to the background color writes millions
+    /// of pixels that are immediately replaced pixel-for-pixel by the surface blit.
+    /// Dropping the fill removes that redundant full-screen write pass.
+    fn opaque_full_cover_will_run(&self) -> bool {
+        if self.identity_full_cover_will_run() {
+            return true;
+        }
+        let landscape = matches!(
+            self.orientation,
+            DisplayOrientation::LandscapeRight | DisplayOrientation::LandscapeLeft
+        );
+        if landscape || self.scanout_width == 0 || self.scanout_height == 0 {
+            return false;
+        }
+        let sw = self.scanout_width as i64;
+        let sh = self.scanout_height as i64;
+        self.surfaces.iter().any(|s| {
+            s.visible
+                && s.opacity == 255
+                && s.width == 720
+                && s.height == 1440
+                && s.x == 0
+                && s.y == 0
+                && 720i64 * sh == 1440i64 * sw
+        })
+    }
+
     /// Composites all visible surfaces onto the back buffer in z-order.
     pub fn composite(&mut self) {
         self.ensure_buffers();
@@ -556,7 +586,7 @@ impl DrmKmsController {
         // When no identity cover exists the fill runs exactly as before, so a
         // pixel no surface reaches still lands on the base colour.
         let bg_color = 0xFF0B0F19u32;
-        if !self.identity_full_cover_will_run() {
+        if !self.opaque_full_cover_will_run() {
             self.back_buffer.fill(bg_color);
         }
 
@@ -684,7 +714,25 @@ impl DrmKmsController {
                 // covers: still bounded by this surface, and never wider than
                 // the pre-banding code ever presented.
                 if surface.dirty_rows.1 > surface.dirty_rows.0 {
-                    union_rows(&mut present_band, dst_y, dst_y + dst_h);
+                    if landscape {
+                        // Rotation swaps horizontal/vertical axes; changes span destination height.
+                        union_rows(&mut present_band, dst_y, dst_y + dst_h);
+                    } else if dst_w * 2 == 720 && dst_h * 2 == 1440 {
+                        // Integer 2x shrink: source row r maps to destination row r / 2
+                        let r0 = dst_y + surface.dirty_rows.0 / 2;
+                        let r1 = (dst_y + (surface.dirty_rows.1 + 1) / 2).min(dst_y + dst_h);
+                        if r1 > r0 {
+                            union_rows(&mut present_band, r0, r1);
+                        }
+                    } else {
+                        // Bilinear scaling: source row r maps to destination row r * dst_h / s_h
+                        // Margin of 1 row accounts for bilinear neighbor interpolation.
+                        let r0 = dst_y + (surface.dirty_rows.0.saturating_sub(1) * dst_h / s_h as usize);
+                        let r1 = (dst_y + ((surface.dirty_rows.1 + 1) * dst_h + s_h as usize - 1) / s_h as usize).min(dst_y + dst_h);
+                        if r1 > r0 {
+                            union_rows(&mut present_band, r0, r1);
+                        }
+                    }
                 }
 
                 if landscape {
@@ -1208,6 +1256,28 @@ mod tests {
         assert_eq!(kms.back_buffer[1279], 0xFF112233);
         assert_eq!(kms.back_buffer[719 * 1280], 0xFF445566);
 
+        assert!(kms.destroy_surface(id));
+    }
+
+    #[test]
+    fn scaled_blit_narrows_present_band_to_dirty_rows() {
+        let mut kms = DrmKmsController::new(1080, 2160);
+        kms.set_display_mode(1080, 2160, 60).expect("mode");
+        let id = kms.create_surface(720, 1440, 0, 1);
+        // Initial composite and flip presents the newly created surface
+        kms.composite();
+        let _ = kms.take_present_dirty_rows();
+        kms.page_flip();
+
+        // Steady-state update: modify only rows 100..200
+        kms.surfaces[0].dirty = true;
+        kms.surfaces[0].dirty_rows = (100, 200);
+        kms.surfaces[0].pixels[100 * 720] = 0xFFFFFFFF;
+        kms.composite();
+        let (r0, r1) = kms.take_present_dirty_rows();
+        assert!(r0 >= 140 && r0 <= 155, "r0 should map to ~150, got {r0}");
+        assert!(r1 >= 295 && r1 <= 305, "r1 should map to ~300, got {r1}");
+        assert!(r1 - r0 < 200, "present band should be narrow, got {r0}..{r1}");
         assert!(kms.destroy_surface(id));
     }
 }
