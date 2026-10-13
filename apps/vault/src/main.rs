@@ -679,7 +679,12 @@ fn action_pixel(x: usize, y: usize, label: &[u8]) -> Option<u32> {
     if !in_round(x, y, x0 + 1, y0 + 1, w - 2, h - 2, h / 2 - 1) {
         return Some(BORDER);
     }
-    if font::ink_center(x, y, x0, y0 + (h - 24) / 2, 1, label, w - 16, TEXT, SOFT, true) {
+    // WHY the centring box is the control's full width and not `w - 16`: the pill
+    // is exactly the label plus 32px of padding (`action_w` adds it), so
+    // subtracting another 16 centred the text in a box inset 16 from the right
+    // alone and sat the run 8px left of the pill's true centre. Measured on the
+    // guest: label ink 570..669 against a 560..696 pill, centre 619.5 vs 628.
+    if font::ink_center(x, y, x0, y0 + (h - 24) / 2, 1, label, w, TEXT, SOFT, true) {
         return Some(TEXT);
     }
     Some(SOFT)
@@ -781,7 +786,13 @@ fn button_pixel(
     }
     let fill = if primary { ACCENT } else { SOFT };
     let ink_c = if primary { SURFACE } else { TEXT };
-    if font::ink_center(x, y, bx, by + (bh - 24) / 2, 1, label, bw - 32, ink_c, fill, true) {
+    // WHY the centring box is the control's full width and not `bw - 32`:
+    // `ink_center` centres inside `[x0, x0 + max_w)`, so a narrower box measures
+    // from the left edge and pushes the run left of the button's true centre.
+    // Measured on the guest before this fix: "Verify all sectors" ink 85..255
+    // against a 24..352 button - centre 170 vs 188, i.e. 18px off. Both labels
+    // now centre on the button they are drawn in.
+    if font::ink_center(x, y, bx, by + (bh - 24) / 2, 1, label, bw, ink_c, fill, true) {
         return Some(ink_c);
     }
     Some(fill)

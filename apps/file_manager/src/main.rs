@@ -457,6 +457,19 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         let idy = (y as i32) - icon_cy;
         let idist2 = idx * idx + idy * idy;
 
+        // WHY the line box is centred on `center_y` and not inset from it: the
+        // six single-line rows below laid their scale-2 runs out with
+        // `center_y - 8`, which puts the run's own 48-row box 16px below the
+        // icon's centre, so the label's ink sat visibly low against its icon.
+        // Measured on the guest: row 0's icon ink centred on 194.5 while
+        // "Recent" centred on 207 - a 12.5px step. Row 5, the two-line stack,
+        // already used the centred form (`row_start_y + 16` is exactly
+        // `center_y - line_height(2) / 2` at its own `center_y`), so these six
+        // were the inconsistent site. The reference mockup (Ui Samples/11_files)
+        // centres the label's ink on its icon in every row, and the arithmetic
+        // below reproduces that: `line_height(2) / 2` is half the run's own box,
+        // so the box straddles `center_y` exactly.
+        let label_y0 = center_y - std::design::font::line_height(2) / 2;
         // Render Icons
         match row_idx {
             0 => {
@@ -464,7 +477,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 if (idist2 >= 100 && idist2 <= 196) || (idx == 0 && idy >= -10 && idy <= 0) || (idy == 0 && idx >= 0 && idx <= 8) {
                     return TEXT_PRIMARY;
                 }
-                if let Some(c) = test_text(x, y, 108, center_y - 8, 2, b"Recent", TEXT_PRIMARY, row_bg) {
+                if let Some(c) = test_text(x, y, 108, label_y0, 2, b"Recent", TEXT_PRIMARY, row_bg) {
                     return c;
                 }
             }
@@ -473,7 +486,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 if (idx.abs() <= 14 && idy.abs() <= 10) && (idx.abs() >= 12 || idy.abs() >= 8 || ((idx - 5).abs() <= 2 && (idy + 3).abs() <= 2) || (idy >= 2 && idx.abs() <= (10 - idy))) {
                     return TEXT_PRIMARY;
                 }
-                if let Some(c) = test_text(x, y, 108, center_y - 8, 2, b"Images", TEXT_PRIMARY, row_bg) {
+                if let Some(c) = test_text(x, y, 108, label_y0, 2, b"Images", TEXT_PRIMARY, row_bg) {
                     return c;
                 }
             }
@@ -482,7 +495,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 if ((idx >= -14 && idx <= 4 && idy.abs() <= 10) && (idx == -14 || idx == 4 || idy.abs() >= 8)) || (idx >= 6 && idx <= 14 && idy.abs() <= (idx - 5)) {
                     return TEXT_PRIMARY;
                 }
-                if let Some(c) = test_text(x, y, 108, center_y - 8, 2, b"Videos", TEXT_PRIMARY, row_bg) {
+                if let Some(c) = test_text(x, y, 108, label_y0, 2, b"Videos", TEXT_PRIMARY, row_bg) {
                     return c;
                 }
             }
@@ -491,7 +504,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 if (idx.abs() <= 10 && idy.abs() <= 14) && (idx.abs() >= 8 || idy == 12 || (idy == -12 && idx <= 2) || (idy == -2 || idy == 3 || idy == 8)) {
                     return TEXT_PRIMARY;
                 }
-                if let Some(c) = test_text(x, y, 108, center_y - 8, 2, b"Documents", TEXT_PRIMARY, row_bg) {
+                if let Some(c) = test_text(x, y, 108, label_y0, 2, b"Documents", TEXT_PRIMARY, row_bg) {
                     return c;
                 }
             }
@@ -500,7 +513,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 if (idx == 0 && idy >= -12 && idy <= 4) || (idy >= 0 && idy <= 6 && idx.abs() <= (6 - idy)) || (idy == 10 && idx.abs() <= 12) || (idx.abs() == 12 && idy >= 6 && idy <= 10) {
                     return TEXT_PRIMARY;
                 }
-                if let Some(c) = test_text(x, y, 108, center_y - 8, 2, b"Downloads", TEXT_PRIMARY, row_bg) {
+                if let Some(c) = test_text(x, y, 108, label_y0, 2, b"Downloads", TEXT_PRIMARY, row_bg) {
                     return c;
                 }
             }
@@ -517,7 +530,12 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 // in the 576px budget (x 108..684). y0 delta (56) >=
                 // line_height(2) (48), so the bands never share a pixel.
                 // Old y0s (row_start+24 / +56, delta 32) overlapped by 16px.
-                let label_y0 = row_start_y + 16;
+                //
+                // WHY `label_y0` is not rebound here: the row's own `center_y`
+                // is `row_start_y + 40` (this row is the taller of the two
+                // shapes), so the shared `label_y0` computed above is exactly
+                // the `row_start_y + 16` this branch used to spell out. Rebinding
+                // it to the same number was redundant; only the caption moves.
                 let caption_y0 =
                     label_y0 + std::design::font::line_height(2) + 8;
                 if let Some(c) =
@@ -539,7 +557,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 if (idy >= 2 && idy <= 8 && idx.abs() <= 14) || ((idx + 6) * (idx + 6) + idy * idy <= 49) || ((idx - 6) * (idx - 6) + (idy + 2) * (idy + 2) <= 36) {
                     return TEXT_PRIMARY;
                 }
-                if let Some(c) = test_text(x, y, 108, center_y - 8, 2, b"Cloud (Optional)", TEXT_PRIMARY, row_bg) {
+                if let Some(c) = test_text(x, y, 108, label_y0, 2, b"Cloud (Optional)", TEXT_PRIMARY, row_bg) {
                     return c;
                 }
             }
