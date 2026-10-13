@@ -241,6 +241,8 @@ fn post_pointer_contact(source: InputSource, slot: u8, x: u32, y: u32, pressure:
         core::hint::spin_loop();
     }
 
+    crate::serial_println!("[INPUT CONTACT] phase={:?} slot={} pos=({}, {})", pointer_phase, slot, x, y);
+
     let gesture = {
         let mut g = None;
         for _ in 0..10_000 {
@@ -254,6 +256,7 @@ fn post_pointer_contact(source: InputSource, slot: u8, x: u32, y: u32, pressure:
     };
 
     if let Some(gesture) = gesture {
+        crate::serial_println!("[INPUT GESTURE] emitted kind={:?} pos=({}, {}) dx={} dy={}", gesture.kind, gesture.position.x, gesture.position.y, gesture.delta_x, gesture.delta_y);
         let event = crate::drivers::input::InputEvent::from_canonical(gesture);
         for _ in 0..10_000 {
             if let Some(mut pipe) = crate::drivers::input::INPUT_PIPELINE.try_lock() {

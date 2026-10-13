@@ -198,6 +198,9 @@ impl InputRouter {
         match event.phase {
             PointerPhase::Down => {
                 let owner = self.classify_owner(event.position, screen_width, 1440, edge);
+                let edge_code = Self::classify_edge(event.position, screen_width, 1440, edge);
+                #[cfg(not(test))]
+                crate::serial_println!("[ROUTER] Down pos=({}, {}) owner={:?} edge={}", event.position.x, event.position.y, owner, edge_code);
                 self.pointers[index] = PointerState {
                     active: true,
                     source: event.source,
@@ -205,7 +208,7 @@ impl InputRouter {
                     start: event.position,
                     current: event.position,
                     owner,
-                    edge: Self::classify_edge(event.position, screen_width, 1440, edge),
+                    edge: edge_code,
                     down_tick: now_tick,
                 };
                 None
@@ -305,6 +308,8 @@ impl InputRouter {
                     // release point would classify every real edge swipe as
                     // Cancel and hand it to the app instead of the system.
                     let kind = Self::classify_edge_gesture(state.edge, dx, dy);
+                    #[cfg(not(test))]
+                    crate::serial_println!("[ROUTER] Up System-owned edge={} -> gesture={:?}", state.edge, kind);
                     return Some(GestureEvent {
                         kind,
                         position: state.current,
@@ -323,13 +328,15 @@ impl InputRouter {
                 } else {
                     GestureKind::Scroll
                 };
+                #[cfg(not(test))]
+                crate::serial_println!("[ROUTER] Up App-owned held={} dist={} -> gesture={:?}", held, distance, kind);
                 Some(GestureEvent {
                     kind,
                     position: state.current,
                     delta_x: dx,
                     delta_y: dy,
                     pointer_id: event.pointer_id,
-                        scale_milli: 1000,
+                    scale_milli: 1000,
                 })
             }
             PointerPhase::Cancel => {

@@ -1868,7 +1868,13 @@ pub extern "C" fn _start() -> ! {
             while (state.active_child.is_none() || state.current_view == ViewMode::LockScreen)
                 && std::input_event_poll(&mut input).is_ok()
             {
-                    std::log(0, "[LAUNCHER] Got input event!").ok();
+                    let mut log_line = LineBuf::<128>::new();
+                    {
+                        use core::fmt::Write;
+                        let _ = write!(log_line, "[LAUNCHER] Got input event: kind={} pos=({}, {}) d=({}, {}) view={:?}",
+                            input.kind, input.x, input.y, input.dx, input.dy, state.current_view);
+                    }
+                    std::log(0, log_line.as_str()).ok();
                     if input.kind == 7 {
                         match state.current_view {
                             ViewMode::BootScreen | ViewMode::PowerTransition => {}
@@ -3677,6 +3683,15 @@ pub extern "C" fn _start() -> ! {
                             // left/right choice stable: the finger cannot slide across
                             // the midline mid-pull and land in the other shade.
                             let (press_x, press_y) = press_point(&input);
+                            if is_drag(input.kind) {
+                                let mut dbg = LineBuf::<128>::new();
+                                {
+                                    use core::fmt::Write;
+                                    let _ = write!(dbg, "[LAUNCHER] Drag in HomeScreen: dy={} press=({}, {}) pull_zone={} pull_min={}",
+                                        input.dy, press_x, press_y, EDGE_PULL_ZONE, EDGE_PULL_MIN);
+                                }
+                                std::log(0, dbg.as_str()).ok();
+                            }
                             if is_drag(input.kind)
                                 && input.dy as i64 >= EDGE_PULL_MIN
                                 && press_y <= EDGE_PULL_ZONE
