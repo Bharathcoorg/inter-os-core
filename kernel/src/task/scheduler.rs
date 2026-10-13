@@ -357,6 +357,21 @@ impl Scheduler {
         // registry and drops its consent records; without this a dead task kept
         // live delegated authority and `has_permission` kept answering for it.
         crate::capability::cleanup_task(task_id);
+
+        // Audit capability telemetry before table revocation
+        let total_cap_invocations: u64 = (0..self.tasks[current_idx].cap_table.capacity())
+            .filter_map(|slot| self.tasks[current_idx].cap_table.access_stats(slot))
+            .map(|(count, _)| count)
+            .sum();
+        if total_cap_invocations > 0 {
+            crate::serial_println!(
+                "[CAP AUDIT] task={} ({}) completed with {} capability invocations",
+                task_id.0,
+                self.tasks[current_idx].name,
+                total_cap_invocations
+            );
+        }
+
         self.tasks[current_idx].cap_table.revoke_all();
         // Surface ownership follows task lifetime. Reclaim all app surfaces at
         // the common exit path so normal std::exit() cannot leave stale windows.
