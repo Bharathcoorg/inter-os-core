@@ -653,19 +653,19 @@ impl DrmKmsController {
                 continue;
             }
 
-            // The launcher surface has a stable 720x1440 logical portrait
-            // canvas, but the physical scanout is negotiated per platform. Fit
-            // that canvas to the actual scanout instead of baking in 1280x720.
-            if s_w == 720 && s_h == 1440 && sx == 0 && sy == 0 {
-                let (mut dst_w, mut dst_h) = if 720i64 * sh as i64 <= 1440i64 * sw as i64 {
+            // The canonical mobile portrait canvas has a stable 1:2 aspect ratio
+            // (720x1440 logical, or 1080x2160 Full HD). Fit that canvas to the
+            // actual scanout preserving geometry.
+            if ((s_w == 720 && s_h == 1440) || (s_w == 1080 && s_h == 2160)) && sx == 0 && sy == 0 {
+                let (mut dst_w, mut dst_h) = if (s_w as i64) * sh as i64 <= (s_h as i64) * sw as i64 {
                     (
-                        (720u32.saturating_mul(sh as u32) / 1440).max(1).min(self.scanout_width),
+                        ((s_w as u32).saturating_mul(sh as u32) / (s_h as u32)).max(1).min(self.scanout_width),
                         self.scanout_height,
                     )
                 } else {
                     (
                         self.scanout_width,
-                        (1440u32.saturating_mul(sw as u32) / 720).max(1).min(self.scanout_height),
+                        ((s_h as u32).saturating_mul(sw as u32) / (s_w as u32)).max(1).min(self.scanout_height),
                     )
                 };
                 let landscape = matches!(
@@ -689,8 +689,9 @@ impl DrmKmsController {
                 let is_right = self.orientation == DisplayOrientation::LandscapeRight;
 
                 // Direct identity blit when destination matches canonical canvas
-                if dst_w == 720 && dst_h == 1440 && dst_x == 0 && dst_y == 0
-                    && self.scanout_width == 720 && self.scanout_height == 1440 && !landscape
+                if ((dst_w == 720 && dst_h == 1440) || (dst_w == s_w as usize && dst_h == s_h as usize))
+                    && dst_x == 0 && dst_y == 0
+                    && self.scanout_width as usize == dst_w && self.scanout_height as usize == dst_h && !landscape
                 {
                     self.back_buffer.copy_from_slice(&surface.pixels);
                     // WHY the mapping is the identity here: this branch requires

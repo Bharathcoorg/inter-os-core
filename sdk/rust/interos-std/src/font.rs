@@ -20,6 +20,7 @@ pub const ASCENDER: usize = 4;
 pub const DESCENDER: usize = 23;
 pub const FIRST_CHAR: u8 = 32;
 pub const LAST_CHAR: u8 = 126;
+pub use crate::font_fhd as fhd;
 
 /// Glyph bitmaps, regular weight: 95 * 24 words, glyph-major.
 pub const FONT: [u16; 2280] = [

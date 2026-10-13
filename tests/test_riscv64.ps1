@@ -24,7 +24,7 @@ $requiredSignals = @(
     "Traps: stvec vector table online",
     "RISC-V Security Invariant: Kernel address pointer rejected",
     "RISC-V Userspace Syscall: SYS_GET_TASK_ID returned valid Task ID",
-    "System state: Userspace Ready",
+    "System state: U-mode isolation smoke path ready",
     "Dropping CPU execution privilege from S-mode to U-mode via sret",
     "Hello from InterOS RISC-V Userspace!",
     "Task exited with code 0"

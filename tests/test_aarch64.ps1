@@ -18,7 +18,7 @@ Write-Host "=== Output Preview (Last 50 lines) ===" -ForegroundColor Cyan
 $content | Select-Object -Last 50
 
 $requiredSignals = @(
-    "SimpleFB: 720x1440 RGB565 mobile display splash rasterized",
+    "SimpleFB rasteriser: 720x1440 RGB565 surface rendered",
     "SDHCI / eMMC 5.1",
     "Goodix GT911",
     "AArch64 Context Switch",

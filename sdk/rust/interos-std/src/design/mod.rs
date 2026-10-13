@@ -118,6 +118,8 @@ pub mod viewport {
     /// stays, and it is recorded here rather than discovered later.
     pub const SCANOUT_WIDTH: usize = 1080;
     pub const SCANOUT_HEIGHT: usize = 2160;
+    pub const FHD_WIDTH: usize = 1080;
+    pub const FHD_HEIGHT: usize = 2160;
 
     /// The authoring-to-scanout ratio, as a numerator over a denominator.
     ///
