@@ -93,7 +93,13 @@ const TICKS_PER_SEC: u64 = 1000;
 /// row removed from this file. Keeping the switch in the code (see
 /// [`in_category`]) means the day `main.rs` grows an input band that reaches
 /// this surface, the only edit needed is this constant's source.
-const ACTIVE_FILTER: usize = 0;
+/// Which filter pill is active when the surface opens.
+///
+/// WHY a const remains at all: the painter needs a defined starting filter, and
+/// the state's own default. It is read once when the frame is built, so the
+/// painter and the hit-test agree on where the active pill is without the two
+/// ever disagreeing about what the current filter is.
+const DEFAULT_FILTER: usize = 0;
 
 /// The reference's four category filters. Index 0 is All.
 const FILTER_NAMES: [&[u8]; 4] = [b"All", b"Messages", b"System", b"Apps"];
@@ -834,7 +840,7 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
         36,
         272,
         type_scale::CAPTION,
-        b"Filter reads All: no tap reaches these pills.",
+        b"Filter the feed by its real source.",
         theme.text_muted,
     );
 
@@ -863,6 +869,16 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
         }
     }
     let mut pills = [PillPlan::EMPTY; 4];
+    // WHY the filter is validated once here rather than at each use: the pills
+    // and the layout walk read it, and an out-of-range value would draw a pill
+    // that matches nothing and filter nothing out -- which reads as a broken
+    // surface rather than as a state the user got into. The default is this
+    // surface's own.
+    let filter = if state.feed_filter < FILTER_NAMES.len() {
+        state.feed_filter
+    } else {
+        DEFAULT_FILTER
+    };
     let mut pill_x = ROW_X;
     for i in 0..4 {
         let mut label = [0u8; 24];
@@ -887,9 +903,9 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
                 rect.w,
                 type_scale::CAPTION,
                 &label[..n],
-                if ACTIVE_FILTER == i { theme.bg } else { theme.text_muted },
+                if filter == i { theme.bg } else { theme.text_muted },
             ),
-            active: ACTIVE_FILTER == i,
+            active: filter == i,
         };
         pill_x += w + PILL_GAP;
     }
@@ -901,7 +917,7 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
     let mut matched = 0usize;
     for k in 0..total {
         let cat = category_of(&state.notifications[order[k]], state);
-        if in_category(cat, ACTIVE_FILTER) {
+        if in_category(cat, filter) {
             matched += 1;
         }
     }
@@ -920,7 +936,7 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
     for k in 0..total {
         let rec = state.notifications[order[k]];
         let cat = category_of(&rec, state);
-        if !in_category(cat, ACTIVE_FILTER) {
+        if !in_category(cat, filter) {
             continue;
         }
         let bucket = bucket_of(rec.timestamp_ticks, now);
@@ -1034,6 +1050,32 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
 static mut FRAME_CACHE: Option<EventsFrame> = None;
 
 #[inline(never)]
+/// Which filter pill a tap at (`x`, `y`) falls in, if any.
+///
+/// WHY this exists: the pills were a legend with real counts that no tap could
+/// reach, so the surface printed "Filter reads All" while drawing no way to
+/// change it. The rows are rebuilt from the state and cached, so the hit test
+/// walks the same rects rather than re-deriving them — a second derivation
+/// would be a second thing to keep in step.
+///
+/// The pills' row sits at `PILLS_Y` (210) with `PILL_H`, which is above the feed
+/// body and below the header — clear of the `CLEAR_BTN` the layout harness pins
+/// at (360, 720) and of the bottom home band. A tap on the already-active pill
+/// returns its index all the same, because which pill it is is the caller's
+/// question and what to do about it is the caller's decision.
+pub fn filter_pill_at(x: usize, y: usize, state: &LauncherState) -> Option<usize> {
+    if y < PILLS_Y || y >= PILLS_Y + PILL_H {
+        return None;
+    }
+    // The frame is only built on demand and is rebuilt here, so a caller that
+    // already holds a frame pays nothing: this is the same walk the painter
+    // does, on the same source.
+    let f = build_events_frame(state);
+    f.pills
+        .iter()
+        .position(|pill| pill.rect.contains(x, y))
+}
+
 pub fn get_notifications_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     let f = unsafe {
         let slot: *mut Option<EventsFrame> = core::ptr::addr_of_mut!(FRAME_CACHE);

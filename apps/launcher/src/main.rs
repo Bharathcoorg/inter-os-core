@@ -182,6 +182,14 @@ pub struct LauncherState {
     pub date_line: [u8; LOCK_DATE_TEXT_LEN],
     pub notifications: [NotificationRecord; 8],
     pub notification_count: usize,
+    /// Which Events filter pill is active: 0 All, 1 Messages, 2 System, 3 Apps.
+    ///
+    /// WHY this lives on the state rather than in the painter: the Events feed's
+    /// pills were a legend with real counts but no tap reached them, so the
+    /// surface reported "Filter reads All" while drawing no way to change it.
+    /// A filter is a choice the user made, and a choice has to outlive the frame
+    /// it was made in.
+    pub feed_filter: usize,
     pub app_drawer_tab: usize,
     pub recent_apps: [[u8; 32]; 3],
     pub recent_app_lens: [u8; 3],
@@ -244,6 +252,7 @@ impl LauncherState {
             date_line: [b' '; LOCK_DATE_TEXT_LEN],
             notifications: [NotificationRecord::EMPTY; 8],
             notification_count: 0,
+        feed_filter: 0,
             app_drawer_tab: 0,
             recent_apps: [[0u8; 32]; 3],
             recent_app_lens: [0; 3],
@@ -3381,6 +3390,31 @@ pub extern "C" fn _start() -> ! {
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
                                     std::log(0, "[LAUNCHER] Notifications cleared.").ok();
+                                    break;
+                                }
+                                // WHY the filter pills are answerable here: they
+                                // were a legend with real counts that no tap
+                                // reached, so the surface printed "Filter reads
+                                // All" while drawing no way to change it. The
+                                // pill row sits at PILLS_Y (210) with PILL_H,
+                                // above the feed body, below the header, and
+                                // clear of the CLEAR_BTN the layout harness pins.
+                                //
+                                // WHAT a tap does: it selects that filter and
+                                // repaints the pill row and the feed, so the
+                                // surface shows the subset it now holds rather
+                                // than the whole list with a pill lit. Tapping
+                                // the already-active pill is a no-op rather than
+                                // a repaint.
+                                if let Some(pill) =
+                                    screens::notifications::filter_pill_at(x, y, &state)
+                                {
+                                    if pill != state.feed_filter {
+                                        state.feed_filter = pill;
+                                        render_view(surface, &state);
+                                        let _ = std::surface_flip(4);
+                                        std::log(0, "[LAUNCHER] Events filter changed.").ok();
+                                    }
                                     break;
                                 }
                             }
