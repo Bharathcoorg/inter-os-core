@@ -438,6 +438,20 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
             return BORDER_SUBTLE;
         }
 
+        // Group container card outer border and rounded corners
+        let rx = (x - 36).min(683 - x);
+        let ry = (y - 150).min(799 - y);
+        if (y < 170 || y >= 780) && rx < 16 && ry < 16 {
+            let cdx = (16 - rx) as isize;
+            let cdy = (16 - ry) as isize;
+            if cdx * cdx + cdy * cdy >= 256 {
+                return BG_DARK;
+            }
+        }
+        if rx < 2 || y < 152 || y >= 798 {
+            return BORDER_SUBTLE;
+        }
+
         // WHY: this highlight is what makes the tap handler's selection visible —
         // the selected row gets a raised background and a left accent bar, so the
         // control reports a real state change instead of an invisible one.
@@ -448,7 +462,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
         if row_selected && x < 44 {
             return ACCENT_SKY;
         }
-        let row_bg = if row_selected { SURFACE_RAISED } else { BG_DARK };
+        let row_bg = if row_selected { 0xFFEFF6FF } else { SURFACE_DARK };
 
         let center_y = row_start_y + (if row_idx == 5 { 40 } else { 45 });
         let icon_cx = 64i32;
@@ -550,6 +564,14 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                 };
                 if let Some(c) = test_text(x, y, 108, caption_y0, 1, capacity_status, TEXT_MUTED, row_bg) {
                     return c;
+                }
+
+                // Tactile capacity track bar (x: 108..640, y: 700..706)
+                if y >= 700 && y < 706 && x >= 108 && x < 640 {
+                    if app.storage_capacity_bytes > 0 && x < 108 + 160 {
+                        return ACCENT_SKY;
+                    }
+                    return BORDER_SUBTLE;
                 }
             }
             _ => {
