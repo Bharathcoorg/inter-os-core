@@ -1196,6 +1196,13 @@ pub enum Dirty {
     PinEntryDots,
     /// PinEntry: the status line under the dots -- the error line, or the hint.
     PinEntryStatus,
+    /// Notifications: the filter pills and the feed rows they admit.
+    ///
+    /// WHY this is one band and not two: choosing a filter changes which rows
+    /// are laid out below the pills, so the pill row and the feed body move
+    /// together. Marking only the pills would leave the old subset on screen
+    /// under a new active pill.
+    EventsFilter,
     /// The union of two regions, as row extents.
     ///
     /// WHY this variant exists at all: `widen` has to be able to answer "these
@@ -1229,6 +1236,7 @@ impl Dirty {
             Dirty::PinEntry => Some(screens::pin::entry_band()),
             Dirty::PinEntryDots => Some(screens::pin::dots_band()),
             Dirty::PinEntryStatus => Some(screens::pin::status_band()),
+            Dirty::EventsFilter => Some(screens::notifications::filter_band()),
             Dirty::Band(y0, y1) => Some((y0, y1)),
             Dirty::All => None,
         }
@@ -3251,8 +3259,15 @@ pub extern "C" fn _start() -> ! {
                             if is_drag(input.kind) && input.dx >= 60 {
                                 if state.app_drawer_page > 0 {
                                     state.app_drawer_page -= 1;
-                                    render_view(surface, &state);
-                                    let _ = std::surface_flip(4);
+                                    // WHY the page band and not the whole surface:
+                                    // a page turn inside the drawer changes the
+                                    // grid and the pagination dots, not the
+                                    // status bar, the search field, or the nav
+                                    // bar above and below them. `pages_band`
+                                    // is derived from the drawn frame, so it is
+                                    // the same extent the painter already gates
+                                    // the grid on.
+                                    present_dirty(surface, &state, Dirty::DrawerPages);
                                 } else {
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
@@ -3411,8 +3426,12 @@ pub extern "C" fn _start() -> ! {
                                 {
                                     if pill != state.feed_filter {
                                         state.feed_filter = pill;
-                                        render_view(surface, &state);
-                                        let _ = std::surface_flip(4);
+                                        // WHY the filter band and not the whole
+                                        // surface: the pills and the feed below
+                                        // them are what a filter changes. The
+                                        // status bar, header and derivation lines
+                                        // are the same either way.
+                                        present_dirty(surface, &state, Dirty::EventsFilter);
                                         std::log(0, "[LAUNCHER] Events filter changed.").ok();
                                     }
                                     break;

@@ -1050,8 +1050,20 @@ fn build_events_frame(state: &LauncherState) -> EventsFrame {
 static mut FRAME_CACHE: Option<EventsFrame> = None;
 
 #[inline(never)]
-/// Which filter pill a tap at (`x`, `y`) falls in, if any.
+/// Rows the filter-pill row and the feed below it occupy.
 ///
+/// WHY this is a function and not a constant: the pills and the rows they admit
+/// are laid out from the state, and a caller marking a repaint dirty has to
+/// cover exactly what the painter draws -- no more, or a full repaint. The same
+/// derivation the painter uses is the one place both can agree.
+pub fn filter_band() -> (usize, usize) {
+    (
+        PILLS_Y,
+        PILLS_Y.saturating_add(PILL_H).max(FEED_BOTTOM),
+    )
+}
+
+/// Which filter pill a tap at (`x`, `y`) falls in, if any.///
 /// WHY this exists: the pills were a legend with real counts that no tap could
 /// reach, so the surface printed "Filter reads All" while drawing no way to
 /// change it. The rows are rebuilt from the state and cached, so the hit test
