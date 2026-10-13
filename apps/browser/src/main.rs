@@ -1731,11 +1731,21 @@ fn viewport_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
     }
 
     // --- Bookmark store status line ---------------------------------------
-    if (f.store_y..f.store_y + GLYPH_H).contains(&y) && f.store_len > 0 {
-        if let Some(px) =
-            text_px(x, y, 24, f.store_y, 1, &f.store[..f.store_len], f.store_ink, BASE, false)
-        {
-            return px;
+    let banner_h = 36;
+    if (f.store_y..f.store_y + banner_h).contains(&y) && f.store_len > 0 {
+        let (banner_bg, banner_border) = if f.store_ink == WARNING {
+            (0xFFFFFBEB, 0xFFFDE68A) // soft warm amber banner
+        } else {
+            (SURFACE, BORDER)
+        };
+        let banner_rect = Rect::new(24, f.store_y, W - 48, banner_h);
+        if let Some(c) = draw_rounded_rect(x, y, banner_rect, 10, banner_bg, Some(banner_border), 1) {
+            let tx = 24 + 14;
+            let ty = f.store_y + (banner_h - GLYPH_H) / 2;
+            if let Some(px) = text_px(x, y, tx, ty, 1, &f.store[..f.store_len], f.store_ink, banner_bg, false) {
+                return px;
+            }
+            return c;
         }
     }
 

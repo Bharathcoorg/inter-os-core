@@ -145,6 +145,7 @@ const fn run_rows(scale: usize) -> usize {
 /// display card, so a header run must be centred inside 0..HEADER_H.
 const HEADER_H: usize = 110;
 /// Top of the operation badge's scale-3 line box inside the display card.
+#[allow(dead_code)]
 const OP_BADGE_Y0: usize = 140;
 
 /// Display card box (x: 24..696, y: 110..410).
@@ -196,19 +197,34 @@ fn get_button_action(row: usize, col: usize) -> Option<char> {
 // -----------------------------------------------------------------------------
 #[inline(never)]
 fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
-    // 1. Status Bar & Header Title (y: 0..110)
+    // 1. Status Bar & Header Title with Back Chevron Disc (y: 0..110)
     if y < HEADER_H {
-        // Time, radio and battery values come from system services; none is
-        // currently bound to this app. Leave the status band truthful.
-        //
-        // Canonical App Title: "Calculator" (display weight at x: 48).
-        // The run is scale 3, so it needs run_rows(3) = 72 rows; the header band
-        // is 110 rows tall, so the full line box is centred in it rather than
-        // gated to a hand-written window that would cut the glyphs in half.
+        // Circular back button at center (62, 55), radius 22
+        let back_cx = 62i32;
+        let back_cy = 55i32;
+        let b_dx = x as i32 - back_cx;
+        let b_dy = y as i32 - back_cy;
+        let b_d2 = b_dx * b_dx + b_dy * b_dy;
+        if b_d2 <= 22 * 22 {
+            if b_d2 >= 20 * 20 {
+                return BORDER_SUBTLE;
+            }
+            // Crisp left-pointing chevron: tip at (58, 55), wings to (64, 49) and (64, 61)
+            if y >= 49 && y <= 61 {
+                let arm = (y as i32 - 55).abs();
+                let target_x = 58 + arm;
+                if x as i32 >= target_x && x as i32 <= target_x + 2 {
+                    return TEXT_PRIMARY;
+                }
+            }
+            return 0xFFFFFFFF;
+        }
+
+        // Canonical App Title: "Calculator" at display weight
         let title_rows = run_rows(3);
         let title_y0 = (HEADER_H - title_rows) / 2;
         if y >= title_y0 && y < title_y0 + title_rows {
-            if let Some(c) = test_text(x, y, 48, title_y0, 3, b"Calculator", TEXT_PRIMARY) {
+            if let Some(c) = test_text(x, y, 116, title_y0, 3, b"Calculator", TEXT_PRIMARY) {
                 return c;
             }
         }
@@ -216,8 +232,19 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
         return BG_DARK;
     }
 
-    // 2. Numerical Display Area (y: 110..410, x: 24..696)
+    // 2. Numerical Display Area Container Card (y: 110..410, x: 24..696)
     if (110..410).contains(&y) && x >= DISPLAY_X0 && x < DISPLAY_X1 {
+        // Display card squircle corner test (radius: 24)
+        let rx = (x - DISPLAY_X0).min(DISPLAY_X1 - 1 - x);
+        let ry = (y - 110).min(409 - y);
+        if rx < 24 && ry < 24 {
+            let cdx = (24 - rx) as isize;
+            let cdy = (24 - ry) as isize;
+            if cdx * cdx + cdy * cdy > 576 {
+                return BG_DARK;
+            }
+        }
+
         // Active operation badge at top-left
         if let Some(op) = calc.active_operation {
             let op_sym: &[u8] = match op {
@@ -227,12 +254,31 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                 '+' => b"+",
                 _ => b"?",
             };
-            // Scale-3 badge: the run needs run_rows(3) = 72 rows, not the 24
-            // rows the old gate allowed. OP_BADGE_Y0 + 72 = 212 still clears
-            // the displayed value, whose scale-4 box starts at y = 280.
-            if y >= OP_BADGE_Y0 && y < OP_BADGE_Y0 + run_rows(3) {
-                if let Some(c) = test_text(x, y, 48, OP_BADGE_Y0, 3, op_sym, ACCENT_SKY) {
-                    return c;
+            // Badge pill: x: 48..104, y: 136..184 (radius 14)
+            if (136..184).contains(&y) && (48..104).contains(&x) {
+                let prx = (x - 48).min(103 - x);
+                let pry = (y - 136).min(183 - y);
+                if prx < 14 && pry < 14 {
+                    let cdx = (14 - prx) as isize;
+                    let cdy = (14 - pry) as isize;
+                    if cdx * cdx + cdy * cdy > 196 {
+                        // outside badge pill, fallback to card surface
+                    } else if prx < 2 || pry < 2 {
+                        return 0xFFBFDBFE; // badge border
+                    } else {
+                        // badge text
+                        if let Some(c) = std::design::font::test_text_aa(x, y, 68, 146, 2, op_sym, ACCENT_SKY, 0xFFEFF6FF, true) {
+                            return c;
+                        }
+                        return 0xFFEFF6FF; // soft blue fill
+                    }
+                } else if prx < 2 || pry < 2 {
+                    return 0xFFBFDBFE;
+                } else {
+                    if let Some(c) = std::design::font::test_text_aa(x, y, 68, 146, 2, op_sym, ACCENT_SKY, 0xFFEFF6FF, true) {
+                        return c;
+                    }
+                    return 0xFFEFF6FF;
                 }
             }
         }
@@ -266,21 +312,20 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
 
         let scale: usize = if count <= 7 { 4 } else if count <= 10 { 3 } else { 2 };
         let total_w: usize = std::design::font::measure_bold(&digits[..count], scale);
-        // WHY the card's inner edge and not the literal 660 this used to be: the
-        // display card spans x 24..696, so 660 left a 36px gap on the right of
-        // the number that matched no other edge on the surface - not the card's
-        // right rim and not the keypad's last column (which ends at 670). The
-        // value now ends where the card's own inset puts it, and the widest run
-        // this branch can build (20 characters at scale 2 = 440px) still starts
-        // at x 232, clear of the card's left inset.
         let x0: usize = (DISPLAY_X1 - DISPLAY_PAD).saturating_sub(total_w);
         let y0: usize = VALUE_Y0;
 
-        if let Some(c) = std::design::font::test_text_aa(x, y, x0, y0, scale, &digits[..count], TEXT_PRIMARY, BG_DARK, true) {
+        if let Some(c) = std::design::font::test_text_aa(x, y, x0, y0, scale, &digits[..count], TEXT_PRIMARY, 0xFFFFFFFF, true) {
             return c;
         }
 
-        return BG_DARK;
+        // Subtle card border
+        if rx < 2 || ry < 2 {
+            return BORDER_SUBTLE;
+        }
+
+        // Clean white card background
+        return 0xFFFFFFFF;
     }
 
     // 3. Keypad Matrix (5 rows, 4 cols)
@@ -290,29 +335,57 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
             for col in 0..4 {
                 let bx = COL_X[col];
                 if x >= bx && x < bx + BTN_W {
-                    // Rounded squircle corner test (radius: 28)
-                    let rx = (x - bx).min(bx + BTN_W - 1 - x);
-                    let ry = (y - by).min(by + BTN_H - 1 - y);
-                    if rx < 28 && ry < 28 {
-                        let cdx = (28 - rx) as isize;
-                        let cdy = (28 - ry) as isize;
-                        if cdx * cdx + cdy * cdy > 784 {
+                    // Tactile keycap squircle inset (4px padding for clean visual breathing room)
+                    let kx0 = bx + 4;
+                    let kx1 = bx + BTN_W - 4;
+                    let ky0 = by + 4;
+                    let ky1 = by + BTN_H - 4;
+
+                    if x < kx0 || x >= kx1 || y < ky0 || y >= ky1 {
+                        return BG_DARK;
+                    }
+
+                    // Keycap squircle corner test (radius: 34)
+                    let rx = (x - kx0).min(kx1 - 1 - x);
+                    let ry = (y - ky0).min(ky1 - 1 - y);
+                    if rx < 34 && ry < 34 {
+                        let cdx = (34 - rx) as isize;
+                        let cdy = (34 - ry) as isize;
+                        if cdx * cdx + cdy * cdy > 1156 {
                             return BG_DARK;
                         }
                     }
 
-                    // Canonical InterOS Calculator button styling:
-                    // Equals is solid dark (#111214) with white text (#FFFFFF);
-                    // all other keys use soft neutral surface (#EFEEE9) with subtle border (#E1E0DB).
-                    let is_equals = row == 4 && col == 3;
-                    let (btn_bg, btn_border, text_color) = if is_equals {
-                        (0xFF111214, 0xFF111214, 0xFFFFFFFF)
+                    let action = get_button_action(row, col);
+                    let is_active_op = action.is_some() && action == calc.active_operation;
+                    let is_op = matches!(action, Some('/') | Some('*') | Some('-') | Some('+'));
+                    let is_equals = action == Some('=');
+                    let is_clear = action == Some('C');
+                    let is_fn = matches!(action, Some('B') | Some('%') | Some('~') | Some('^'));
+
+                    // Elevated Semantic Design Palette:
+                    let (btn_bg, btn_border, text_color) = if is_active_op {
+                        // Active operator glows in white surface with primary accent border & text
+                        (0xFFFFFFFF, ACCENT_SKY, ACCENT_SKY)
+                    } else if is_op {
+                        // Arithmetic operators: Royal Blue tactile surface with white text
+                        (ACCENT_SKY, 0xFF1D4ED8, 0xFFFFFFFF)
+                    } else if is_equals {
+                        // Equals: Emerald Accent with high-contrast white text
+                        (0xFF10B981, 0xFF059669, 0xFFFFFFFF)
+                    } else if is_clear {
+                        // Clear: soft slate surface with semantic crimson accent text
+                        (0xFFF0EFEB, 0xFFDBD9D3, 0xFFDC2626)
+                    } else if is_fn {
+                        // Functions: soft slate surface with dark slate text
+                        (0xFFF0EFEB, 0xFFDBD9D3, 0xFF374151)
                     } else {
-                        (0xFFEFEEE9, 0xFFE1E0DB, 0xFF111214)
+                        // Digits 0..9: tactile white surface with deep dark text
+                        (0xFFFFFFFF, 0xFFE2E1DC, TEXT_PRIMARY)
                     };
 
-                    // Subtle border rim for light buttons
-                    if !is_equals && (rx < 1 || ry < 1) {
+                    // Tactile 2px border outline
+                    if rx < 2 || ry < 2 {
                         return btn_border;
                     }
 
@@ -320,8 +393,8 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                     let center_x = bx + BTN_W / 2;
                     let center_y = by + BTN_H / 2;
 
-                    if let Some(action) = get_button_action(row, col) {
-                        if action == '~' {
+                    if let Some(act) = action {
+                        if act == '~' {
                             let sym = b"+/-";
                             let w = std::design::font::measure_bold(sym, 1);
                             let x0 = center_x.saturating_sub(w / 2);
@@ -329,8 +402,16 @@ fn get_calculator_pixel(x: usize, y: usize, calc: &CalculatorState) -> u32 {
                             if let Some(c) = std::design::font::test_text_aa(x, y, x0, y0, 1, sym, text_color, btn_bg, true) {
                                 return c;
                             }
+                        } else if act == '^' {
+                            let sym = b"x^2";
+                            let w = std::design::font::measure_bold(sym, 1);
+                            let x0 = center_x.saturating_sub(w / 2);
+                            let y0 = center_y.saturating_sub(12);
+                            if let Some(c) = std::design::font::test_text_aa(x, y, x0, y0, 1, sym, text_color, btn_bg, true) {
+                                return c;
+                            }
                         } else {
-                            let act_byte = [action as u8];
+                            let act_byte = [act as u8];
                             let w = std::design::font::measure_bold(&act_byte, 2);
                             let x0 = center_x.saturating_sub(w / 2);
                             let y0 = center_y.saturating_sub(24);
@@ -509,11 +590,14 @@ fn handle_keyboard_key(calc: &mut CalculatorState, code: u32) -> bool {
 /// touch that lands on no key at all changes nothing and reports `Tap::None`,
 /// which is what stops an inert tap from costing a full repaint.
 fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
+    // Back button circular touch disc (center: 62, 55, radius: 24)
+    let dx = x as i32 - 62;
+    let dy = y as i32 - 55;
+    if dx * dx + dy * dy <= 24 * 24 {
+        return Tap::Leave("[CALCULATOR] Back button tapped. Returning to launcher.");
+    }
+
     // Home gesture bar exits to the launcher.
-    // WHY: a back-button clause (x 24..100, y 28..68) used to live here, but
-    // this app never draws a back button — the header is empty there — so a
-    // tap on blank header space silently killed the calculator. Navigation
-    // gestures (Back/Home/Recents/Pan/Fling) still exit through the event loop.
     if x >= 240 && x <= 480 && y >= 1400 {
         return Tap::Leave("[CALCULATOR] Home gesture tapped. Returning to launcher.");
     }
