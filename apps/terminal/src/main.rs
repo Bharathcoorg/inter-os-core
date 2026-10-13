@@ -553,16 +553,21 @@ fn get_terminal_pixel(x: usize, y: usize, term: &TerminalApp) -> u32 {
             return BORDER_SUBTLE;
         }
 
-        // Back button (<) at (x: 24..100, y: 28..68)
-        if x >= 24 && x < 100 && y >= 28 && y < 68 {
-            let center_x = 62;
-            let center_y = 48;
-            let dx = (x as isize - center_x as isize).abs();
-            let dy = (y as isize - center_y as isize).abs();
-            if (dx + dy <= 12 && x <= center_x)
-                || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
-            {
-                return TEXT_PRIMARY;
+        // Circular back button disc (cx: 62, cy: 48, radius: 22)
+        let dx = x as isize - 62;
+        let dy = y as isize - 48;
+        let dsq = dx * dx + dy * dy;
+        if dsq <= 22 * 22 {
+            // Anti-aliased disc border rim
+            if dsq >= 20 * 20 {
+                return BORDER_SUBTLE;
+            }
+            // Crisp vector chevron: apex at (58, 48), arms pointing up-right and down-right
+            if dx <= 2 && dx >= -6 {
+                let arm_dy = (dx - (-6)).abs();
+                if (dy.abs() - arm_dy).abs() <= 1 {
+                    return TEXT_PRIMARY;
+                }
             }
             return SURFACE_RAISED;
         }

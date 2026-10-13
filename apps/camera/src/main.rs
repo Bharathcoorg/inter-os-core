@@ -683,21 +683,26 @@ fn get_camera_pixel(x: usize, y: usize, camera: &CameraApp) -> u32 {
         // 22px right of the button's centre, so the glyph was not centred in the
         // thing it labelled. The chevron is now centred on `BACK_RECT`, and the
         // box is inset by one pixel so it is never clipped by `contains`.
+        // Back control circular disc (cx: 50, cy: 48, radius: 20)
         if BACK_RECT.contains(x, y) {
-            let l = (x - BACK_RECT.x) as isize;
-            let r = (BACK_RECT.x + BACK_RECT.w - 1 - x) as isize;
-            let t = (y - BACK_RECT.y) as isize;
-            let b = (BACK_RECT.y + BACK_RECT.h - 1 - y) as isize;
-            let outline = l == 1 || r == 1 || t == 1 || b == 1;
             let cx = BACK_RECT.x + BACK_RECT.w / 2;
             let cy = BACK_RECT.y + BACK_RECT.h / 2;
-            let ddx = (x as isize - cx as isize).abs();
-            let ddy = (y as isize - cy as isize).abs();
-            let chevron = (x as isize) <= cx as isize && ddx + ddy <= 9;
-            if outline || chevron {
-                return TEXT_PRIMARY;
+            let dx = x as isize - cx as isize;
+            let dy = y as isize - cy as isize;
+            let dsq = dx * dx + dy * dy;
+            if dsq <= 20 * 20 {
+                if dsq >= 18 * 18 {
+                    return BORDER_SUBTLE;
+                }
+                if dx <= 2 && dx >= -5 {
+                    let arm_dy = (dx - (-5)).abs();
+                    if (dy.abs() - arm_dy).abs() <= 1 {
+                        return TEXT_PRIMARY;
+                    }
+                }
+                return SURFACE_RAISED;
             }
-            return SURFACE_RAISED;
+            return BG_DARK;
         }
 
         // Flash / torch pill. This is a real control: it issues

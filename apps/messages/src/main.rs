@@ -695,16 +695,21 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
             return BORDER_SUBTLE;
         }
 
-        // Back button (<) at (x: 24..100, y: 28..68)
-        if x >= 24 && x < 100 && y >= 28 && y < 68 {
-            let center_x = 62;
-            let center_y = 48;
-            let dx = (x as isize - center_x as isize).abs();
-            let dy = (y as isize - center_y as isize).abs();
-            if (dx + dy <= 12 && x <= center_x)
-                || (x >= 24 && x < 100 && (y == 28 || y == 67 || x == 24 || x == 99))
-            {
-                return TEXT_PRIMARY;
+        // Circular back button disc (cx: 62, cy: 48, radius: 22)
+        let dx = x as isize - 62;
+        let dy = y as isize - 48;
+        let dsq = dx * dx + dy * dy;
+        if dsq <= 22 * 22 {
+            // Anti-aliased disc border rim
+            if dsq >= 20 * 20 {
+                return BORDER_SUBTLE;
+            }
+            // Crisp vector chevron: apex at (58, 48), arms pointing up-right and down-right
+            if dx <= 2 && dx >= -6 {
+                let arm_dy = (dx - (-6)).abs();
+                if (dy.abs() - arm_dy).abs() <= 1 {
+                    return TEXT_PRIMARY;
+                }
             }
             return SURFACE_RAISED;
         }
@@ -810,6 +815,16 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
         // outcome has to be visible.
         if f.filtered.is_none() {
             if in_rect(EMPTY_CARD, x, y) {
+                let rx = (x - EMPTY_CARD.0).min(EMPTY_CARD.0 + EMPTY_CARD.2 - 1 - x);
+                let ry = (y - EMPTY_CARD.1).min(EMPTY_CARD.1 + EMPTY_CARD.3 - 1 - y);
+                if rx < 24 && ry < 24 {
+                    let cdx = (24 - rx) as isize;
+                    let cdy = (24 - ry) as isize;
+                    if cdx * cdx + cdy * cdy >= 576 {
+                        return BG_DARK;
+                    }
+                }
+
                 // WHY no pictogram here: the card's icon is drawn only for the
                 // "no conversations at all" state. When a query is present and
                 // matches nothing, the honest content is the query itself, not a
@@ -835,7 +850,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     2,
                     line,
                     TEXT_PRIMARY,
-                    BG_DARK,
+                    SURFACE_DARK,
                 ) {
                     return c;
                 }
@@ -847,7 +862,7 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     1,
                     sub_line,
                     TEXT_MUTED,
-                    BG_DARK,
+                    SURFACE_DARK,
                 ) {
                     return c;
                 }
@@ -859,14 +874,14 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     1,
                     q_line,
                     TEXT_MUTED,
-                    BG_DARK,
+                    SURFACE_DARK,
                 ) {
                     return c;
                 }
-                // WHY BG_DARK here: the empty-state card has never had a fill -
-                // only its corner cuts, pictogram and runs are drawn - so the
-                // page colour is what the anti-aliased edges blend toward.
-                return BG_DARK;
+                if rx < 2 || ry < 2 {
+                    return BORDER_SUBTLE;
+                }
+                return SURFACE_DARK;
             }
             return BG_DARK;
         }
@@ -940,10 +955,6 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                 // box (24*scale rows) and centred on the card's 672 px width, so
                 // no headline is sliced and none runs past the card edge.
                 //
-                // WHY BG_DARK is the blend target and not SURFACE_RAISED: the
-                // empty-state card has never had a fill - only its corner cuts,
-                // its pictogram and these runs are drawn - so the page colour is
-                // what the anti-aliased edges actually sit on.
                 if let Some(c) = test_text(
                     x,
                     y,
@@ -952,17 +963,10 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     2,
                     b"No Conversations Yet",
                     TEXT_PRIMARY,
-                    BG_DARK,
+                    SURFACE_DARK,
                 ) {
                     return c;
                 }
-                // WHY one line and not three: the empty state listed the transport,
-                // the keystore and the missing destination as three separate
-                // diagnostics, which reads as debug output rather than a phone.
-                // Without a transport nothing else matters - the key state still
-                // surfaces in the header pill and in the send outcome, and "no
-                // conversations" already implies no destination. One line states
-                // the user-facing truth; nothing shown is false.
                 if let Some(c) = test_text(
                     x,
                     y,
@@ -972,10 +976,18 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                     1,
                     b"Messaging unavailable: no transport",
                     TEXT_MUTED,
-                    BG_DARK,
+                    SURFACE_DARK,
                 ) {
                     return c;
                 }
+
+                // Subtle card border
+                if rx < 2 || ry < 2 {
+                    return BORDER_SUBTLE;
+                }
+
+                // Solid white container card
+                return SURFACE_DARK;
             }
         } else {
             // Render real conversation threads from the persisted store, filtered
