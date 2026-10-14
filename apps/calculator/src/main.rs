@@ -502,6 +502,7 @@ fn handle_keyboard_key(calc: &mut CalculatorState, code: u32) -> bool {
             calc.result_mode = false;
         }
         94 => calc.set_operation('^'),
+        95 | 126 => calc.toggle_sign(),
         _ => return false,
     }
     true
@@ -559,6 +560,7 @@ fn handle_touch_point(calc: &mut CalculatorState, x: u32, y: u32) -> Tap {
                             }
                             '~' => {
                                 calc.toggle_sign();
+                                std::log(0, "[CALCULATOR] Sign toggled.").ok();
                             }
                             'B' => {
                                 calc.current_operand /= 10;

@@ -246,6 +246,7 @@ const PROBE_DEFAULT: [u8; 40] =
 
 pub struct FileManagerApp {
     pub selected_shortcut: usize,
+    pub selected_entry: Option<usize>,
     pub storage_capacity_bytes: u64,
     pub current_path: &'static str,
     /// What `fs_list` actually answered, pre-rendered.
@@ -264,6 +265,7 @@ impl FileManagerApp {
     pub const fn new() -> Self {
         Self {
             selected_shortcut: 0,
+            selected_entry: None,
             storage_capacity_bytes: 0,
             current_path: "/data",
             probe_label: PROBE_DEFAULT,
@@ -652,6 +654,12 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                         return BORDER_SUBTLE;
                     }
 
+                    let is_selected = app.selected_entry == Some(entry_idx);
+                    if is_selected && x < 44 {
+                        return ACCENT_SKY;
+                    }
+                    let entry_bg = if is_selected { 0xFFEFF6FF } else { SURFACE_DARK };
+
                     // Icon glyph / indicator at x: 56..80
                     let icon_cx = 64isize;
                     let icon_cy = (card_y0 + entry_idx * 56 + 28) as isize;
@@ -682,7 +690,7 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                         1,
                         &entry.name[..entry.name_len],
                         TEXT_PRIMARY,
-                        SURFACE_DARK,
+                        entry_bg,
                     ) {
                         return c;
                     }
@@ -698,12 +706,12 @@ fn get_file_manager_color(x: usize, y: usize, app: &FileManagerApp) -> u32 {
                         1,
                         &entry.size_label[..entry.size_label_len],
                         if entry.is_dir { ACCENT_SKY } else { TEXT_MUTED },
-                        SURFACE_DARK,
+                        entry_bg,
                     ) {
                         return c;
                     }
 
-                    return SURFACE_DARK;
+                    return entry_bg;
                 }
             }
         }
@@ -985,6 +993,23 @@ fn handle_tap(app: &mut FileManagerApp, x: usize, y: usize) -> Tap {
         // no navigation happens, so no new path is claimed.
         std::log(0, "[FILE_MANAGER] Category filter shortcut switched.").ok();
         return Tap::Redraw(Dirty::Rows);
+    }
+
+    // Directory Explorer entries card hit-test: x: 36..684, y: 880..
+    let container_h = if app.entry_count == 0 { 72 } else { app.entry_count * 56 };
+    let card_y0 = 880;
+    let card_y1 = card_y0 + container_h;
+    if (card_y0..card_y1).contains(&y) && (36..684).contains(&x) && app.entry_count > 0 {
+        let entry_idx = (y - card_y0) / 56;
+        if entry_idx < app.entry_count {
+            if app.selected_entry == Some(entry_idx) {
+                app.selected_entry = None;
+            } else {
+                app.selected_entry = Some(entry_idx);
+            }
+            std::log(0, "[FILE_MANAGER] Directory entry selected.").ok();
+            return Tap::Redraw(Dirty::All);
+        }
     }
 
     Tap::None
