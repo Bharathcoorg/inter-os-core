@@ -39,7 +39,7 @@
 //! corner radius measures 41 logical px, larger than any `radius` token, so the
 //! theme's radius scale would need a step near 40 to match it.
 
-use crate::{test_text, test_text_aa, LauncherState};
+use crate::{test_text_aa, LauncherState};
 use launcher::layout::{self, Rect};
 use launcher::text;
 use launcher::theme::{
@@ -147,8 +147,8 @@ const CARD_ROW_DETAIL: usize = type_scale::CAPTION;
 /// registry; none of them is a stand-in for a sensor.
 const CARD_ROWS: usize = 3;
 
-/// Type scale for a deck tile's name.
-const LABEL_SCALE: usize = type_scale::CAPTION;
+/// Type scale for a deck tile's name: scale 2 (BODY) with outline anti-aliasing for readability.
+const LABEL_SCALE: usize = type_scale::BODY;
 
 /// Largest and smallest icon scale a deck tile will draw its badge word at.
 ///
@@ -332,6 +332,7 @@ const RUN_CAP: usize = 96;
 /// `y .. y + line_height(scale)` by `x .. x + measure(run)`, which is precisely the
 /// region `test_text` can return `Some` for, so rejecting against it first changes
 /// no pixel and skips the walk for the overwhelming majority of them.
+#[allow(dead_code)]
 struct Run {
     x: usize,
     y: usize,
@@ -482,13 +483,16 @@ impl Run {
         if self.len == 0 {
             return None;
         }
-        if px < self.x || px - self.x >= self.w || py < self.top || py - self.top >= self.box_h {
-            return None;
-        }
-        if let Some(ref run) = self.outline {
-            return run.pixel(px, py, ink, bg);
-        }
-        test_text(px, py, self.x, self.y, self.scale, &self.bytes[..self.len], ink)
+        test_text_aa(
+            px,
+            py,
+            self.x,
+            self.y,
+            self.scale,
+            &self.bytes[..self.len],
+            ink,
+            bg,
+        )
     }
 
     /// Anti-aliased render of this run with caller-chosen ink and background.
@@ -496,28 +500,10 @@ impl Run {
         self.pixel_inked_aa(px, py, ink, bg)
     }
 
-    /// Anti-aliased render of this run with caller-chosen ink and background.
-    ///
-    /// WHY the box test comes before the placement: rasterising is the expensive
-    /// part, and the overwhelming majority of pixels this surface asks about are
-    /// nowhere near a run. Testing the box first means a run is only rasterised
-    /// on a pixel it actually inks, so one shared coverage slot is enough no
-    /// matter how many runs the frame holds -- each is placed when it is hit and
-    /// stays cached until a different one is.
     fn pixel_inked_aa(&self, px: usize, py: usize, ink: u32, bg: u32) -> Option<u32> {
         if self.len == 0 {
             return None;
         }
-        if px < self.x || px - self.x >= self.w || py < self.top || py - self.top >= self.box_h {
-            return None;
-        }
-        if let Some(ref run) = self.outline {
-            return run.pixel(px, py, ink, bg);
-        }
-        // The bitmap face is the fallback, not the baseline: a refusal here --
-        // a run too wide for the coverage buffer, a character outside the
-        // encoded range, a baseline too near the top of the surface -- must
-        // leave the text drawn rather than dropped.
         test_text_aa(
             px,
             py,
@@ -878,24 +864,8 @@ pub const DOCK_TILES: [Rect; 6] = [
     Rect::new(490, 1020, 200, 280),
 ];
 
-/// Half-size of a deck tile's pictogram, in pixels: a 33x33 box.
-///
-/// WHY 16 and not the 24 this was raised to: the pictogram is a geometric
-/// drawing authored in a 33px box, and `rasterize_icon_pixel_scaled` reaches a
-/// larger box by OR-ing a `step x step` neighbourhood of source pixels. At
-/// extent 24 that is step 3, so every one of the 33 source pixels was stamped as
-/// a 3x3 block and the curved pictograms - the handset arc especially - read as
-/// blobs with stair-stepped edges, which is the coarsest thing left on the home
-/// surface. At 16 the step is 1: the glyph is drawn once per pixel, at its own
-/// resolution, so its curves are exact. The reference measures a 28px AppTile
-/// icon (`components.json`), so the native 33px box is also closer to the
-/// design than the 48px box it replaces.
-///
-/// WHY it is a home constant and not a change to `icons::rasterize_icon_pixel`:
-/// every other surface - the drawer, activity cards, notification rows - has
-/// geometry that was measured around the 33px glyph, so the size is asked for
-/// where it is needed instead of imposed everywhere.
-pub const DOCK_ICON_EXTENT: i32 = 16;
+/// Half-size of a deck tile's pictogram, in pixels: a 52x52 box for high legibility.
+pub const DOCK_ICON_EXTENT: i32 = 26;
 
 pub fn find_package_index(state: &LauncherState, suffix: &[u8]) -> Option<usize> {
     for i in 0..state.app_count {

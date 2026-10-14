@@ -2255,72 +2255,7 @@ pub extern "C" fn _start() -> ! {
                                 // All rather than pretending a filter applied. The
                                 // log says which, so the difference is visible in
                                 // the serial record rather than hidden.
-                                if let Some(ws) = screens::activity::activity_row_at(x, y) {
-                                    let tab = match screens::activity::ACTIVITY_NAMES[ws] {
-                                        b"Work" => Some(1),
-                                        b"Personal" => Some(2),
-                                        _ => None,
-                                    };
-                                    match tab {
-                                        Some(t) => {
-                                            state.app_drawer_tab = t;
-                                            state.app_drawer_page = 0;
-                                            state.current_view = ViewMode::AppDrawer;
-                                            render_view(surface, &state);
-                                            let _ = std::surface_flip(4);
-                                            std::log(
-                                                0,
-                                                "[LAUNCHER] Workspace opened the app drawer filtered.",
-                                            )
-                                            .ok();
-                                        }
-                                        None => {
-                                            // WHY All and not the workspace's own
-                                            // index: the drawer has four tabs and
-                                            // none of them is Research or Media, so
-                                            // selecting one would filter on a
-                                            // category the drawer cannot express.
-                                            state.app_drawer_tab = 0;
-                                            state.app_drawer_page = 0;
-                                            state.current_view = ViewMode::AppDrawer;
-                                            render_view(surface, &state);
-                                            let _ = std::surface_flip(4);
-                                            std::log(
-                                                0,
-                                                "[LAUNCHER] Workspace has no drawer category; opened unfiltered.",
-                                            )
-                                            .ok();
-                                        }
-                                    }
-                                    break;
-                                }
-                                // WHY the corner close control is tested before
-                                // everything else: it sits inside the card body at
-                                // x 624..672, while the legacy dismiss badges are a
-                                // separate column at x 586..634, so the two cannot
-                                // claim the same tap and the ordering is not what
-                                // makes it correct. It is first because it is the
-                                // affordance a user actually aims at - a visible X
-                                // in the corner - and a tap anywhere else on the
-                                // card must still fall through to the launch and
-                                // switch behaviour below.
-                                if let Some(task) =
-                                    screens::activity::activity_close_at(&mut state, x, y)
-                                {
-                                    // `activity_close_at` answers `Some` only when
-                                    // it actually stopped a task and dropped the
-                                    // slot, so this is a real change to the
-                                    // recents deck -- the same rows a swipe
-                                    // dismissal moves.
-                                    present_dirty(surface, &state, Dirty::ActivityCards);
-                                    std::log(
-                                        0,
-                                        "[LAUNCHER] App closed from overview card close control.",
-                                    )
-                                    .ok();
-                                    let _ = task;
-                                    continue;
-                                }
+                                // Dismiss badges & card bodies
                                 // WHY badge-first, badge-exact: the drawn dismiss badges
                                 // are 48x48 at x 586..634, y 206..254 / 526..574 /
                                 // 846..894 (see CARD*_DISMISS in screens/activity.rs),
@@ -2506,9 +2441,20 @@ pub extern "C" fn _start() -> ! {
                                         break;
                                     }
                                 }
-                                // Close pill (drawn CLOSE_BTN: x 260..460, y 1220..1264)
+                                // Close All pill (drawn CLOSE_ALL_BTN: x 250..470, y 1220..1268)
                                 // or the home indicator bar.
-                                else if ((1220..1264).contains(&y) && (260..460).contains(&x)) || y >= 1400 {
+                                else if ((1220..1270).contains(&y) && (230..490).contains(&x)) || y >= 1400 {
+                                    if (1220..1270).contains(&y) && (230..490).contains(&x) {
+                                        for task in state.recent_task_ids.iter().copied() {
+                                            if task > 0 {
+                                                let _ = std::app_stop(task);
+                                            }
+                                        }
+                                        state.recent_apps = [[0u8; 32]; 3];
+                                        state.recent_app_lens = [0; 3];
+                                        state.recent_task_ids = [0; 3];
+                                        state.active_child = None;
+                                    }
                                     state.current_view = ViewMode::HomeScreen;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
@@ -3875,18 +3821,12 @@ pub extern "C" fn _start() -> ! {
                                     }
                                 }
 
-                                // Universal search bar tap: opens System Space. WHY one
-                                // band: the old second band (840..915) sat inside the
-                                // drawn deck tiles, so taps on real tiles opened
-                                // System Space instead of launching. The drawn search
-                                // bar is x 40..680, y 1320..1384 (see frame() in
-                                // screens/home.rs) and it is the only tap that opens
-                                // System Space.
+                                // Universal search bar tap: opens System Space
                                 if (1320..1384).contains(&y) && (40..680).contains(&x) {
                                     state.current_view = ViewMode::SystemSpace;
                                     render_view(surface, &state);
                                     let _ = std::surface_flip(4);
-                                    std::log(0, "[LAUNCHER] System Space opened via universal search bar tap.").ok();
+                                    std::log(0, "[LAUNCHER] System space opened via universal search bar tap.").ok();
                                     let mut drain = std::InputEvent {
                                         kind: 0,
                                         x: 0,

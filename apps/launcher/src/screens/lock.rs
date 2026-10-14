@@ -445,39 +445,84 @@ fn lock_padlock_pixel(theme: &Theme, backdrop: u32, x: usize, y: usize) -> Optio
     None
 }
 
-/// Torch pictogram: the panel's torch is a wide tapered head over a narrow
-/// handle with a small dark vent in the head. Returns `true` for a pixel of the
-/// glyph; the caller supplies the ink, which for this control is the dimmed one.
+/// Torch pictogram: sleek modern smartphone flashlight with flared bezel,
+/// tapered reflector neck, grip grooves, and tactile power toggle.
 fn lock_torch_glyph_pixel(x: usize, y: usize) -> bool {
     let dx = (x as i32) - LOCK_BTN_L_CX;
-    let dy = (y as i32) - (LOCK_BTN_CY - 2);
-    let body = (dx >= -9 && dx <= 9 && dy >= -26 && dy < -14)
-        || (dx >= -6 && dx <= 6 && dy >= -14 && dy < -5)
-        || (dx >= -4 && dx <= 4 && dy >= -5 && dy < 22);
-    if !body {
+    let dy = (y as i32) - LOCK_BTN_CY;
+
+    // Head top lens rim
+    let head_rim = dy >= -26 && dy <= -22 && dx.abs() <= 13;
+    // Head cone tapering from 11 down to 8
+    let head_cone = dy > -22 && dy <= -10 && dx.abs() <= 11 - (dy + 22) * 3 / 12;
+    // Neck collar
+    let neck = dy > -10 && dy <= -6 && dx.abs() <= 7;
+    // Main cylindrical handle
+    let barrel = dy > -6 && dy <= 19 && dx.abs() <= 6;
+    // Tail cap rounded base
+    let tail = dy > 19 && dy <= 23 && dx.abs() <= 5 && !(dy == 23 && dx.abs() > 3);
+
+    let solid = head_rim || head_cone || neck || barrel || tail;
+    if !solid {
         return false;
     }
-    // the vent in the head is a hole, so the disc shows through it
-    !(dx >= -2 && dx <= 2 && dy >= -19 && dy < -15)
+    // Inner reflector cutout so wallpaper/disc shows through
+    let head_cutout = dy >= -20 && dy <= -13 && dx.abs() <= 5;
+    // Center power switch slot
+    let switch_cutout = dy >= 2 && dy <= 9 && dx.abs() <= 2;
+    // Fine tactile grip lines on barrel
+    let grip_groove = (dy == 13 || dy == 16) && dx.abs() <= 4;
+
+    !(head_cutout || switch_cutout || grip_groove)
 }
 
-/// Camera pictogram. Returns `true` for a pixel of the glyph; the caller supplies
-/// the ink, which differs between the two controls.
+/// Camera pictogram: sleek modern smartphone camera with rounded-corner body,
+/// top pentaprism/shutter accents, multi-tier circular lens with catchlight glint,
+/// and upper-right flash dot.
 fn lock_camera_glyph_pixel(x: usize, y: usize) -> bool {
     let dx = (x as i32) - LOCK_BTN_R_CX;
     let dy = (y as i32) - LOCK_BTN_CY;
-    // body outline
-    if dx.abs() <= 25 && (-12..=15).contains(&dy) {
-        let rim = dx.abs() >= 22 || dy <= -9 || dy >= 12;
-        if rim {
-            return true;
-        }
-        // lens ring
-        let l2 = dx * dx + dy * dy;
-        return (81..=144).contains(&l2);
+
+    // 1. Shutter button accent on top-left
+    if dy >= -12 && dy < -6 && dx >= -18 && dx <= -12 {
+        return true;
     }
-    // viewfinder hump on the top edge
-    (-19..=-13).contains(&dy) && (-8..=8).contains(&dx)
+    // 2. Viewfinder / prism hump centered on top
+    if dy >= -15 && dy < -6 && dx.abs() <= 8 && (dy >= -11 || dx.abs() <= 6) {
+        return true;
+    }
+    // 3. Main camera body with rounded corners
+    if dx.abs() <= 23 && dy >= -6 && dy <= 22 {
+        // Corner radius 5px
+        if dx.abs() > 18 {
+            let cdx = dx.abs() - 18;
+            let cdy = if dy < -1 { -1 - dy } else if dy > 17 { dy - 17 } else { 0 };
+            if cdx * cdx + cdy * cdy > 25 {
+                return false;
+            }
+        }
+        // Small flash dot on upper-right
+        let fx = dx - 15;
+        let fy = dy - 1;
+        if fx * fx + fy * fy <= 4 {
+            return false;
+        }
+        // Central lens system centered at (0, 8)
+        let lx = dx;
+        let ly = dy - 8;
+        let lr2 = lx * lx + ly * ly;
+        if lr2 <= 121 {
+            // Outer bezel ring: radius 8..=11
+            let bezel = lr2 >= 64;
+            // Inner aperture glass / pupil: radius <= 4
+            let pupil = lr2 <= 16;
+            // Catchlight glint reflection
+            let glint = (lx == -2 || lx == -1) && (ly == -2 || ly == -1);
+            return bezel || pupil || glint;
+        }
+        return true;
+    }
+    false
 }
 
 /// One circular control: a translucent veil over the wallpaper, with a slightly
@@ -1522,7 +1567,7 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             && y >= LOCK_STATUS_TIME_Y
             && y < LOCK_STATUS_TIME_Y + f.status_h
         {
-            if let Some(c) = test_text(
+            if let Some(c) = test_text_aa(
                 x,
                 y,
                 LOCK_STATUS_TIME_X,
@@ -1530,6 +1575,7 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
                 LOCK_STATUS_TIME_SCALE,
                 &state.clock_time,
                 f.ink,
+                color,
             ) {
                 return c;
             }
@@ -1620,7 +1666,7 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     // WHY the origin is derived from the measured string: the panel centres the
     // hint on the surface, so the x origin must follow the measured text.
     if f.hint.contains(x, y) {
-        if let Some(c) = test_text(
+        if let Some(c) = test_text_aa(
             x,
             y,
             f.hint.x,
@@ -1628,6 +1674,7 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             LOCK_HINT_SCALE,
             LOCK_HINT_TEXT,
             lock_paper(&theme, color),
+            color,
         ) {
             return c;
         }
@@ -1656,7 +1703,7 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     //    in the frame, so the ~99% of the surface that is nowhere near it is
     //    turned away by four comparisons instead of a call and a pen walk.
     if f.na.contains(x, y) {
-        if let Some(c) = test_text(
+        if let Some(c) = test_text_aa(
             x,
             y,
             f.na.x,
@@ -1664,6 +1711,7 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             type_scale::CAPTION,
             LOCK_NA_TEXT,
             lock_paper(&theme, color),
+            color,
         ) {
             return c;
         }
@@ -1675,7 +1723,7 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
     //     stated it was not. Neither hardware is bound here - the camera app
     //     reports no sensor - so both state it, symmetrically.
     if f.na_r.contains(x, y) {
-        if let Some(c) = test_text(
+        if let Some(c) = test_text_aa(
             x,
             y,
             f.na_r.x,
@@ -1683,6 +1731,7 @@ pub fn get_lock_screen_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             type_scale::CAPTION,
             LOCK_NA_TEXT,
             lock_paper(&theme, color),
+            color,
         ) {
             return c;
         }

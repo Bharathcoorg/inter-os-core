@@ -428,6 +428,7 @@ const RUN_CAP: usize = 96;
 /// walk per label. The stored box is exactly
 /// `y .. y + line_height(scale)` by `x .. x + measure(run)`, which is the region
 /// `test_text` can return `Some` for.
+#[allow(dead_code)]
 struct Run {
     x: usize,
     y: usize,
@@ -581,16 +582,6 @@ impl Run {
         if self.len == 0 {
             return None;
         }
-        if px < self.x || px - self.x >= self.w || py < self.top || py - self.top >= self.box_h {
-            return None;
-        }
-        if let Some(ref run) = self.outline {
-            return run.pixel(px, py, self.ink, bg);
-        }
-        // The bitmap face is the fallback, not the baseline: a refusal here -- a
-        // run too wide for the coverage buffer, a character outside the encoded
-        // range, a baseline too near the top of the surface -- must leave the
-        // text drawn rather than dropped.
         test_text_aa(px, py, self.x, self.y, self.scale, &self.bytes[..self.len], self.ink, bg)
     }
 }
@@ -1121,20 +1112,20 @@ fn empty_catalogue(x: usize, y: usize, theme: &Theme, p: &EmptyPlan) -> u32 {
 /// is. A long name used to be drawn at its full width straight through the tile
 /// beside it.
 fn app_tile(x: usize, y: usize, theme: &Theme, t: &TilePlan) -> u32 {
-    // 1. Icon squircle: white rounded rectangle with 18px corner radius and border
+    // 1. Icon squircle: vibrant authentic colored squircle with 18px corner radius
     if inside_rounded(t.disc, x, y, t.disc_r as usize) {
         if !inside_rounded(t.disc.inset(1), x, y, (t.disc_r as usize).saturating_sub(1)) {
             return theme.border;
         }
         if let Some(kind) = t.icon {
-            let ink = theme.text;
+            let ink = 0xFFFFFFFF; // Pure crisp white icon on vibrant colored squircle
             if let Some(c) = launcher::icons::rasterize_icon_pixel(kind, x, y, t.disc.center_x(), t.disc.center_y(), ink) {
                 return c;
             }
-        } else if let Some(c) = t.badge.pixel_on(x, y, theme.surface) {
+        } else if let Some(c) = t.badge.pixel_on(x, y, t.hue) {
             return c;
         }
-        return theme.surface;
+        return t.hue;
     }
 
     // 2. App name label
