@@ -221,6 +221,14 @@ impl MessagesApp {
         if std::get_random(&mut iv).is_err() {
             iv.copy_from_slice(b"INTEROS_SEC_MSG_");
         }
+        let badge = crate::gsm::inspect_message_heuristics(body);
+        if badge != crate::gsm::SecurityBadge::VerifiedSafe {
+            std::log(
+                0,
+                "[MESSAGES APP] Heuristic privacy shield: flagged potential urgency/phishing payload.",
+            )
+            .ok();
+        }
         // WHY: report the vault outcome. Previously a refused write left
         // `sector_encrypted` false but the send counter had already advanced.
         match std::vault_encrypt_sector(202, &mut sector_buf, &iv) {
@@ -1030,6 +1038,15 @@ fn get_messages_pixel(x: usize, y: usize, messages: &MessagesApp, f: &Frame) -> 
                         }
                         // Last stored message, ellipsised to the card's text column.
                         let snippet = rec.last_snippet();
+                        let badge = crate::gsm::inspect_message_heuristics(snippet);
+
+                        // Security indicator badge dot (radius 4) reflecting threat heuristic inspection
+                        let s_dx = x as isize - (CARD_X0 + 16) as isize;
+                        let s_dy = y as isize - (card_offset_y + 24) as isize;
+                        if s_dx * s_dx + s_dy * s_dy <= 16 {
+                            return badge.color();
+                        }
+
                         let mut buf = [0u8; 48];
                         let n = std::design::font::ellipsize(
                             snippet,

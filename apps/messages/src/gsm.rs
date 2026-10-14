@@ -1,6 +1,8 @@
 //! Deterministic 3GPP TS 23.038 GSM 7-bit Default Alphabet PDU packer
 //! and on-device privacy/phishing heuristic analyzer for InterOS Messages.
 
+use interos_std::ai::{cosine_similarity_q7, MatryoshkaDim};
+
 /// Result of on-device heuristic inspection for unsolicited or urgent messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecurityBadge {
@@ -53,15 +55,12 @@ pub fn pack_gsm7_septets(septets: &[u8], out: &mut [u8]) -> usize {
                 out[out_idx] = octet;
                 out_idx += 1;
             }
-            carry = val >> shift;
-            shift += 1;
-            if shift == 8 {
-                if out_idx < out.len() {
-                    out[out_idx] = carry;
-                    out_idx += 1;
-                }
+            if shift == 7 {
                 shift = 0;
                 carry = 0;
+            } else {
+                carry = val >> shift;
+                shift += 1;
             }
         }
     }
@@ -86,6 +85,7 @@ pub fn unpack_gsm7_septets(octets: &[u8], num_septets: usize, out: &mut [u8]) ->
             out[out_idx] = prev;
             out_idx += 1;
             shift = 0;
+            prev = 0;
             continue;
         }
         if octet_idx >= octets.len() {
@@ -168,7 +168,98 @@ pub fn inspect_message_heuristics(msg: &[u8]) -> SecurityBadge {
         }
     }
 
-    SecurityBadge::VerifiedSafe
+    // Secondary semantic layer: evaluate text embedding projection against threat centroids
+    evaluate_embedding_threat(msg, MatryoshkaDim::Dim128)
+}
+
+/// Projects a text message into a Q7 fixed-point embedding vector of dimension `dim`.
+///
+/// Deterministic hash-based projection mapping tokens into a bounded unit-normalized
+/// vector representation for fast on-device threat classification without heap allocations.
+pub fn project_text_embedding_q7(msg: &[u8], dim: MatryoshkaDim, out: &mut [i8]) -> usize {
+    let d = dim.as_usize();
+    let target_len = if out.len() < d { out.len() } else { d };
+    if target_len == 0 || msg.is_empty() {
+        return 0;
+    }
+    out[..target_len].fill(0);
+
+    let mut token_start = None;
+    for i in 0..=msg.len() {
+        let is_sep = i == msg.len()
+            || msg[i] == b' '
+            || msg[i] == b'\t'
+            || msg[i] == b'\n'
+            || msg[i] == b','
+            || msg[i] == b'.'
+            || msg[i] == b'!'
+            || msg[i] == b'?'
+            || msg[i] == b':'
+            || msg[i] == b';';
+        if is_sep {
+            if let Some(start) = token_start {
+                let token = &msg[start..i];
+                if !token.is_empty() {
+                    let mut hash: u32 = 0x811c9dc5;
+                    for &b in token {
+                        hash ^= b.to_ascii_lowercase() as u32;
+                        hash = hash.wrapping_mul(0x01000193);
+                    }
+                    let bin = (hash as usize) % target_len;
+                    let sign = if (hash & 0x80) != 0 { 1i8 } else { -1i8 };
+                    out[bin] = out[bin].saturating_add(sign.saturating_mul(24));
+                }
+                token_start = None;
+            }
+        } else if token_start.is_none() {
+            token_start = Some(i);
+        }
+    }
+
+    target_len
+}
+
+/// Evaluates an input message embedding vector against canonical threat centroids using
+/// `MatryoshkaDim` dimensionality truncation and `cosine_similarity_q7`.
+pub fn evaluate_embedding_threat(msg: &[u8], dim: MatryoshkaDim) -> SecurityBadge {
+    if msg.is_empty() {
+        return SecurityBadge::VerifiedSafe;
+    }
+
+    let d = dim.as_usize().min(128);
+    let effective_dim = match MatryoshkaDim::from_u32(d as u32) {
+        Some(m) => m,
+        None => MatryoshkaDim::Dim128,
+    };
+
+    let mut msg_vec = [0i8; 128];
+    project_text_embedding_q7(msg, effective_dim, &mut msg_vec);
+
+    let mut phishing_ref = [0i8; 128];
+    project_text_embedding_q7(
+        b"verify password pin otp bank account transfer security credential login",
+        effective_dim,
+        &mut phishing_ref,
+    );
+
+    let mut urgency_ref = [0i8; 128];
+    project_text_embedding_q7(
+        b"urgent immediately action required suspend block notice alert terminate",
+        effective_dim,
+        &mut urgency_ref,
+    );
+
+    let sim_phish = cosine_similarity_q7(&msg_vec[..d], &phishing_ref[..d]);
+    let sim_urgency = cosine_similarity_q7(&msg_vec[..d], &urgency_ref[..d]);
+
+    // Q15 fixed-point threshold: 12000 is ~0.366 cosine similarity
+    if sim_phish >= 12000 {
+        SecurityBadge::PotentialPhishing
+    } else if sim_urgency >= 12000 {
+        SecurityBadge::SuspiciousUrgency
+    } else {
+        SecurityBadge::VerifiedSafe
+    }
 }
 
 #[cfg(test)]
@@ -217,6 +308,31 @@ mod tests {
         );
         assert_eq!(
             inspect_message_heuristics(b"Meeting at 3pm in room B"),
+            SecurityBadge::VerifiedSafe
+        );
+    }
+
+    #[test]
+    fn test_embedding_threat_evaluation() {
+        assert_eq!(
+            evaluate_embedding_threat(
+                b"Please verify your login and password credential immediately",
+                MatryoshkaDim::Dim128
+            ),
+            SecurityBadge::PotentialPhishing
+        );
+        assert_eq!(
+            evaluate_embedding_threat(
+                b"Action required: account alert suspend immediately",
+                MatryoshkaDim::Dim128
+            ),
+            SecurityBadge::SuspiciousUrgency
+        );
+        assert_eq!(
+            evaluate_embedding_threat(
+                b"Hey are we still meeting for lunch tomorrow",
+                MatryoshkaDim::Dim128
+            ),
             SecurityBadge::VerifiedSafe
         );
     }

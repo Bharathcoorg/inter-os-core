@@ -6,6 +6,10 @@ edition = "2021"
 [dependencies]
 interos-std = { path = "../../sdk/rust/interos-std" }
 
+[lib]
+name = "messages"
+path = "src/lib.rs"
+
 [[bin]]
 name = "messages"
 path = "src/main.rs"
